@@ -548,6 +548,7 @@ fn empty_executor_context(base: &PathBuf) -> ExecutorContext {
         pool: test_pool(base),
         txns: std::sync::Arc::new(parking_lot::RwLock::new(txns)),
         txn_waiter: None,
+        datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
         interrupts: std::sync::Arc::new(
             crate::backend::utils::misc::interrupts::InterruptState::new(),
         ),
@@ -572,6 +573,7 @@ fn run_plan(
         pool,
         txns: txns_arc,
         txn_waiter: None,
+        datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
         interrupts: std::sync::Arc::new(
             crate::backend::utils::misc::interrupts::InterruptState::new(),
         ),
@@ -634,6 +636,7 @@ fn run_sql_with_catalog(
             pool,
             txns: txns_arc,
             txn_waiter: None,
+            datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
             interrupts: std::sync::Arc::new(
                 crate::backend::utils::misc::interrupts::InterruptState::new(),
             ),
@@ -4529,6 +4532,7 @@ fn prepared_insert_uses_defaults_for_omitted_columns() {
         pool,
         txns: txns_arc,
         txn_waiter: None,
+        datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
         interrupts: std::sync::Arc::new(
             crate::backend::utils::misc::interrupts::InterruptState::new(),
         ),

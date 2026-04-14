@@ -125,6 +125,10 @@ impl Session {
         }
     }
 
+    pub fn datetime_config(&self) -> &DateTimeConfig {
+        &self.datetime_config
+    }
+
     pub fn standard_conforming_strings(&self) -> bool {
         !matches!(
             self.gucs
@@ -741,6 +745,7 @@ impl Session {
                     pool: Arc::clone(&db.pool),
                     txns: db.txns.clone(),
                     txn_waiter: Some(db.txn_waiter.clone()),
+                    datetime_config: self.datetime_config.clone(),
                     interrupts: self.interrupts(),
                     snapshot,
                     client_id,
@@ -762,6 +767,7 @@ impl Session {
                     pool: Arc::clone(&db.pool),
                     txns: db.txns.clone(),
                     txn_waiter: Some(db.txn_waiter.clone()),
+                    datetime_config: self.datetime_config.clone(),
                     interrupts,
                     snapshot,
                     client_id,
@@ -783,6 +789,7 @@ impl Session {
                     pool: Arc::clone(&db.pool),
                     txns: db.txns.clone(),
                     txn_waiter: Some(db.txn_waiter.clone()),
+                    datetime_config: self.datetime_config.clone(),
                     interrupts: Arc::clone(&interrupts),
                     snapshot,
                     client_id,
@@ -811,6 +818,7 @@ impl Session {
                     pool: Arc::clone(&db.pool),
                     txns: db.txns.clone(),
                     txn_waiter: Some(db.txn_waiter.clone()),
+                    datetime_config: self.datetime_config.clone(),
                     interrupts: Arc::clone(&interrupts),
                     snapshot,
                     client_id,
@@ -929,6 +937,7 @@ impl Session {
                     pool: Arc::clone(&db.pool),
                     txns: db.txns.clone(),
                     txn_waiter: Some(db.txn_waiter.clone()),
+                    datetime_config: self.datetime_config.clone(),
                     interrupts: self.interrupts(),
                     snapshot,
                     client_id,
@@ -1111,6 +1120,7 @@ impl Session {
             pool: Arc::clone(&db.pool),
             txns: db.txns.clone(),
             txn_waiter: Some(db.txn_waiter.clone()),
+            datetime_config: self.datetime_config.clone(),
             interrupts,
             snapshot,
             client_id,
@@ -1324,6 +1334,7 @@ impl Session {
                 pool: Arc::clone(&db.pool),
                 txns: db.txns.clone(),
                 txn_waiter: Some(db.txn_waiter.clone()),
+                datetime_config: self.datetime_config.clone(),
                 interrupts,
                 snapshot,
                 client_id: self.client_id,

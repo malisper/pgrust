@@ -562,6 +562,8 @@ fn run_statement(
                 pool: std::sync::Arc::clone(pool),
                 txns: txns.clone(),
                 txn_waiter: None,
+                datetime_config:
+                    pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                 interrupts: Arc::clone(&interrupts),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
@@ -577,6 +579,8 @@ fn run_statement(
                 pool: std::sync::Arc::clone(pool),
                 txns: txns.clone(),
                 txn_waiter: None,
+                datetime_config:
+                    pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                 interrupts: Arc::clone(&interrupts),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
@@ -592,6 +596,8 @@ fn run_statement(
                 pool: std::sync::Arc::clone(pool),
                 txns: txns.clone(),
                 txn_waiter: None,
+                datetime_config:
+                    pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                 interrupts: Arc::clone(&interrupts),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
@@ -607,6 +613,8 @@ fn run_statement(
                 pool: std::sync::Arc::clone(pool),
                 txns: txns.clone(),
                 txn_waiter: None,
+                datetime_config:
+                    pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                 interrupts: Arc::clone(&interrupts),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
@@ -676,6 +684,8 @@ fn run_statement(
                 pool: std::sync::Arc::clone(pool),
                 txns: txns.clone(),
                 txn_waiter: None,
+                datetime_config:
+                    pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                 interrupts: Arc::clone(&interrupts),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
@@ -691,6 +701,8 @@ fn run_statement(
                 pool: std::sync::Arc::clone(pool),
                 txns: txns.clone(),
                 txn_waiter: None,
+                datetime_config:
+                    pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                 interrupts: Arc::clone(&interrupts),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
@@ -709,6 +721,8 @@ fn run_statement(
                     pool: std::sync::Arc::clone(pool),
                     txns: txns.clone(),
                     txn_waiter: None,
+                    datetime_config:
+                        pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                     interrupts: Arc::clone(&interrupts),
                     snapshot: txns.read().snapshot(xid)?,
                     client_id: 21,
@@ -738,6 +752,8 @@ fn run_statement(
                     pool: std::sync::Arc::clone(pool),
                     txns: txns.clone(),
                     txn_waiter: None,
+                    datetime_config:
+                        pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                     interrupts: Arc::clone(&interrupts),
                     snapshot: txns.read().snapshot(xid)?,
                     client_id: 21,
@@ -767,6 +783,8 @@ fn run_statement(
                     pool: std::sync::Arc::clone(pool),
                     txns: txns.clone(),
                     txn_waiter: None,
+                    datetime_config:
+                        pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                     interrupts: Arc::clone(&interrupts),
                     snapshot: txns.read().snapshot(xid)?,
                     client_id: 21,
