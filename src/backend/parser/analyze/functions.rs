@@ -2,7 +2,7 @@ use super::*;
 use crate::include::catalog::{
     ANYARRAYOID, ANYOID, TEXT_TYPE_OID, bootstrap_pg_proc_rows, builtin_type_rows,
 };
-use crate::include::nodes::plannodes::RegexTableFunction;
+use crate::include::nodes::primnodes::RegexTableFunction;
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 

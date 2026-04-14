@@ -872,12 +872,12 @@ impl PlannerOrderByEntry {
 }
 
 impl PlannerProjectSetTarget {
-    fn from_project_set_target(target: crate::include::nodes::plannodes::ProjectSetTarget) -> Self {
+    fn from_project_set_target(target: crate::include::nodes::primnodes::ProjectSetTarget) -> Self {
         match target {
-            crate::include::nodes::plannodes::ProjectSetTarget::Scalar(entry) => {
+            crate::include::nodes::primnodes::ProjectSetTarget::Scalar(entry) => {
                 Self::Scalar(PlannerTargetEntry::from_target_entry(entry))
             }
-            crate::include::nodes::plannodes::ProjectSetTarget::Set {
+            crate::include::nodes::primnodes::ProjectSetTarget::Set {
                 name,
                 call,
                 sql_type,
@@ -892,14 +892,14 @@ impl PlannerProjectSetTarget {
     }
 
     fn from_project_set_target_with_layout(
-        target: crate::include::nodes::plannodes::ProjectSetTarget,
+        target: crate::include::nodes::primnodes::ProjectSetTarget,
         layout: &[PlannerJoinExpr],
     ) -> Self {
         match target {
-            crate::include::nodes::plannodes::ProjectSetTarget::Scalar(entry) => Self::Scalar(
+            crate::include::nodes::primnodes::ProjectSetTarget::Scalar(entry) => Self::Scalar(
                 PlannerTargetEntry::from_target_entry_with_layout(entry, layout),
             ),
-            crate::include::nodes::plannodes::ProjectSetTarget::Set {
+            crate::include::nodes::primnodes::ProjectSetTarget::Set {
                 name,
                 call,
                 sql_type,
@@ -913,9 +913,9 @@ impl PlannerProjectSetTarget {
         }
     }
 
-    fn into_project_set_target(self) -> crate::include::nodes::plannodes::ProjectSetTarget {
+    fn into_project_set_target(self) -> crate::include::nodes::primnodes::ProjectSetTarget {
         match self {
-            Self::Scalar(entry) => crate::include::nodes::plannodes::ProjectSetTarget::Scalar(
+            Self::Scalar(entry) => crate::include::nodes::primnodes::ProjectSetTarget::Scalar(
                 entry.into_target_entry(),
             ),
             Self::Set {
@@ -923,7 +923,7 @@ impl PlannerProjectSetTarget {
                 call,
                 sql_type,
                 column_index,
-            } => crate::include::nodes::plannodes::ProjectSetTarget::Set {
+            } => crate::include::nodes::primnodes::ProjectSetTarget::Set {
                 name,
                 call,
                 sql_type,
@@ -935,9 +935,9 @@ impl PlannerProjectSetTarget {
     fn into_project_set_target_with_layout(
         self,
         layout: &[PlannerJoinExpr],
-    ) -> crate::include::nodes::plannodes::ProjectSetTarget {
+    ) -> crate::include::nodes::primnodes::ProjectSetTarget {
         match self {
-            Self::Scalar(entry) => crate::include::nodes::plannodes::ProjectSetTarget::Scalar(
+            Self::Scalar(entry) => crate::include::nodes::primnodes::ProjectSetTarget::Scalar(
                 entry.into_target_entry_with_layout(layout),
             ),
             Self::Set {
@@ -945,7 +945,7 @@ impl PlannerProjectSetTarget {
                 call,
                 sql_type,
                 column_index,
-            } => crate::include::nodes::plannodes::ProjectSetTarget::Set {
+            } => crate::include::nodes::primnodes::ProjectSetTarget::Set {
                 name,
                 call,
                 sql_type,

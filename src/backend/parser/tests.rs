@@ -2401,7 +2401,7 @@ fn build_plan_for_unnest_uses_array_element_types() {
     let plan = build_plan(&stmt, &catalog()).unwrap();
     match plan {
         Plan::FunctionScan {
-            call: crate::include::nodes::plannodes::SetReturningCall::Unnest { output_columns, .. },
+            call: crate::include::nodes::primnodes::SetReturningCall::Unnest { output_columns, .. },
             ..
         } => {
             assert_eq!(output_columns.len(), 2);
@@ -2425,8 +2425,8 @@ fn build_plan_for_select_list_generate_series_uses_project_set() {
                 assert_eq!(targets.len(), 1);
                 assert!(matches!(
                     &targets[0],
-                    crate::include::nodes::plannodes::ProjectSetTarget::Set {
-                        call: crate::include::nodes::plannodes::SetReturningCall::GenerateSeries { .. },
+                    crate::include::nodes::primnodes::ProjectSetTarget::Set {
+                        call: crate::include::nodes::primnodes::SetReturningCall::GenerateSeries { .. },
                         ..
                     }
                 ));

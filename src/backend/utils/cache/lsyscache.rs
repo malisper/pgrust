@@ -556,12 +556,12 @@ fn toast_relation_from_entry(
     client_id: ClientId,
     txn_ctx: Option<(TransactionId, CommandId)>,
     entry: &RelCacheEntry,
-) -> Option<crate::include::nodes::plannodes::ToastRelationRef> {
+) -> Option<crate::include::nodes::primnodes::ToastRelationRef> {
     let toast_oid = entry.reltoastrelid;
     (toast_oid != 0)
         .then(|| relation_entry_by_oid(db, client_id, txn_ctx, toast_oid))
         .flatten()
-        .map(|toast| crate::include::nodes::plannodes::ToastRelationRef {
+        .map(|toast| crate::include::nodes::primnodes::ToastRelationRef {
             rel: toast.rel,
             relation_oid: toast.relation_oid,
         })

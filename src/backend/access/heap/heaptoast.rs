@@ -10,7 +10,7 @@ use crate::backend::executor::{ExecError, ExecutorContext, RelationDesc, Value};
 use crate::backend::parser::BoundIndexRelation;
 use crate::include::access::detoast::decode_ondisk_toast_pointer;
 use crate::include::access::htup::{HeapTuple, ItemPointerData};
-use crate::include::nodes::plannodes::ToastRelationRef;
+use crate::include::nodes::primnodes::ToastRelationRef;
 use crate::include::varatt::{
     VARHDRSZ, VarattExternal, encode_ondisk_toast_pointer,
     varatt_external_set_size_and_compression_method,

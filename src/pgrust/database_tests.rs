@@ -1,7 +1,7 @@
 use super::*;
 use crate::backend::executor::{ExecError, Value};
 use crate::backend::parser::{CatalogLookup, ParseError, SqlType, SqlTypeKind};
-use crate::include::nodes::plannodes::QueryColumn;
+use crate::include::nodes::primnodes::QueryColumn;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;

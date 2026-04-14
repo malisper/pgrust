@@ -3,7 +3,7 @@ use super::{compare_order_values, parse_numeric_text, render_datetime_value_text
 use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue, NumericValue, Value};
-use crate::include::nodes::plannodes::AggFunc;
+use crate::include::nodes::primnodes::AggFunc;
 use crate::pgrust::session::ByteaOutputFormat;
 
 use num_traits::Zero;

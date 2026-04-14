@@ -617,13 +617,13 @@ fn bind_select_list_srf_call(
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 let output_columns = match kind {
-                    crate::include::nodes::plannodes::RegexTableFunction::Matches => {
+                    crate::include::nodes::primnodes::RegexTableFunction::Matches => {
                         vec![QueryColumn {
                             name: "regexp_matches".into(),
                             sql_type: SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
                         }]
                     }
-                    crate::include::nodes::plannodes::RegexTableFunction::SplitToTable => {
+                    crate::include::nodes::primnodes::RegexTableFunction::SplitToTable => {
                         vec![QueryColumn::text("regexp_split_to_table")]
                     }
                 };

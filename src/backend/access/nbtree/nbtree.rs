@@ -34,7 +34,7 @@ use crate::include::access::relscan::{
 };
 use crate::include::access::scankey::ScanKeyData;
 use crate::include::nodes::datum::Value;
-use crate::include::nodes::plannodes::{ColumnDesc, RelationDesc};
+use crate::include::nodes::primnodes::{ColumnDesc, RelationDesc};
 use crate::{BufferPool, ClientId, OwnedBufferPin, PinnedBuffer, SmgrStorageBackend};
 
 type WriteLockMap = parking_lot::Mutex<HashMap<RelFileLocator, Arc<parking_lot::Mutex<()>>>>;
@@ -147,7 +147,7 @@ fn encode_key_payload(desc: &RelationDesc, values: &[Value]) -> Result<Vec<u8>, 
             }
             _ => {
                 payload.push(0);
-                let bytes = encode_index_value(column.sql_type, value)?;
+                let bytes = encode_index_value(column.sql_type, &value)?;
                 payload.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
                 payload.extend_from_slice(&bytes);
             }
