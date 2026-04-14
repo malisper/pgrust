@@ -142,6 +142,9 @@ fn build_scanjoin_target(
     if let Some(where_qual) = parse.where_qual.as_ref() {
         collect_supporting_inputs(where_qual, &mut exprs);
     }
+    if let Some(jointree) = parse.jointree.as_ref() {
+        collect_jointree_supporting_inputs(jointree, &mut exprs);
+    }
     PathTarget::new(exprs)
 }
 
@@ -381,6 +384,17 @@ fn collect_query_outer_refs(query: &Query, levelsup: usize, exprs: &mut Vec<Expr
             | RangeTblEntryKind::Relation { .. }
             | RangeTblEntryKind::Join { .. } => {}
         }
+    }
+}
+
+fn collect_jointree_supporting_inputs(node: &JoinTreeNode, exprs: &mut Vec<Expr>) {
+    if let JoinTreeNode::JoinExpr {
+        left, right, quals, ..
+    } = node
+    {
+        collect_jointree_supporting_inputs(left, exprs);
+        collect_jointree_supporting_inputs(right, exprs);
+        collect_supporting_inputs(quals, exprs);
     }
 }
 

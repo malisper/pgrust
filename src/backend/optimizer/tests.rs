@@ -11,6 +11,10 @@ fn int4() -> SqlType {
     SqlType::new(SqlTypeKind::Int4)
 }
 
+fn bool_ty() -> SqlType {
+    SqlType::new(SqlTypeKind::Bool)
+}
+
 fn var(varno: usize, attno: usize) -> crate::include::nodes::primnodes::Expr {
     crate::include::nodes::primnodes::Expr::Var(Var {
         varno,
@@ -168,7 +172,7 @@ fn join_input_rewrite_maps_whole_composite_expr_to_join_alias_slot() {
     join_layout.extend(right.output_vars());
 
     let rewritten =
-        super::rewrite_semantic_expr_for_join_inputs(merged, &left, &right, &join_layout);
+        super::rewrite_semantic_expr_for_join_inputs(None, merged, &left, &right, &join_layout);
 
     assert_eq!(rewritten, var(30, 1));
 }
@@ -191,4 +195,65 @@ fn projection_rewrite_does_not_chase_plain_var_through_subquery_boundary() {
     let rewritten = super::rewrite_semantic_expr_for_path(var(1, 1), &outer, &outer.output_vars());
 
     assert_eq!(rewritten, var(1, 1));
+}
+
+#[test]
+fn join_input_rewrite_maps_var_through_projected_join_output_slot() {
+    let right = Path::Projection {
+        plan_info: PlanEstimate::new(1.0, 1.5, 10.0, 5),
+        slot_id: 3,
+        input: Box::new(values_path(4, 1.0, 1.0)),
+        targets: vec![
+            TargetEntry::new("a1", var(1, 1), int4(), 1),
+            TargetEntry::new("a2", var(1, 2), int4(), 2),
+            TargetEntry::new("b1", var(2, 1), int4(), 3),
+            TargetEntry::new("b2", var(2, 2), int4(), 4),
+            TargetEntry::new("c1", var(4, 1), int4(), 5),
+        ],
+    };
+    let left = Path::Projection {
+        plan_info: PlanEstimate::new(1.0, 1.5, 10.0, 1),
+        slot_id: 6,
+        input: Box::new(values_path(6, 1.0, 1.0)),
+        targets: vec![TargetEntry::new("left", var(6, 1), int4(), 1)],
+    };
+    let expr = Expr::Op(Box::new(OpExpr {
+        opno: 0,
+        opfuncid: 0,
+        op: OpExprKind::Eq,
+        opresulttype: bool_ty(),
+        args: vec![
+            Expr::Coalesce(
+                Box::new(var(4, 1)),
+                Box::new(crate::include::nodes::primnodes::Expr::Const(Value::Int32(
+                    1,
+                ))),
+            ),
+            var(6, 1),
+        ],
+    }));
+    let mut join_layout = left.output_vars();
+    join_layout.extend(right.output_vars());
+
+    let rewritten =
+        super::rewrite_semantic_expr_for_join_inputs(None, expr, &left, &right, &join_layout);
+
+    assert_eq!(
+        rewritten,
+        Expr::Op(Box::new(OpExpr {
+            opno: 0,
+            opfuncid: 0,
+            op: OpExprKind::Eq,
+            opresulttype: bool_ty(),
+            args: vec![
+                Expr::Coalesce(
+                    Box::new(var(3, 5)),
+                    Box::new(crate::include::nodes::primnodes::Expr::Const(Value::Int32(
+                        1
+                    ))),
+                ),
+                var(6, 1),
+            ],
+        }))
+    );
 }
