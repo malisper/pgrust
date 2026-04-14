@@ -768,6 +768,19 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         )
     }
 
+    fn lookup_relation_by_oid(&self, relation_oid: u32) -> Option<BoundRelation> {
+        let entry = relation_entry_by_oid(self.db, self.client_id, self.txn_ctx, relation_oid)?;
+        Some(BoundRelation {
+            rel: entry.rel,
+            relation_oid: entry.relation_oid,
+            toast: toast_relation_from_entry(self.db, self.client_id, self.txn_ctx, &entry),
+            namespace_oid: entry.namespace_oid,
+            relpersistence: entry.relpersistence,
+            relkind: entry.relkind,
+            desc: entry.desc,
+        })
+    }
+
     fn type_rows(&self) -> Vec<PgTypeRow> {
         let mut rows = ensure_type_rows(self.db, self.client_id, self.txn_ctx);
         rows.extend(self.db.domain_type_rows_for_search_path(&self.search_path));

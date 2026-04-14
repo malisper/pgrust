@@ -321,7 +321,11 @@ pub enum Value {
 
 #[derive(Debug, Clone)]
 pub enum NumericValue {
-    Finite { coeff: BigInt, scale: u32, dscale: u32 },
+    Finite {
+        coeff: BigInt,
+        scale: u32,
+        dscale: u32,
+    },
     PosInf,
     NegInf,
     NaN,
@@ -423,7 +427,11 @@ impl NumericValue {
             Self::PosInf => Self::NegInf,
             Self::NegInf => Self::PosInf,
             Self::NaN => Self::NaN,
-            Self::Finite { coeff, scale, dscale } => Self::Finite {
+            Self::Finite {
+                coeff,
+                scale,
+                dscale,
+            } => Self::Finite {
                 coeff: -coeff.clone(),
                 scale: *scale,
                 dscale: *dscale,
@@ -435,7 +443,11 @@ impl NumericValue {
         match self {
             Self::PosInf | Self::NegInf => Self::PosInf,
             Self::NaN => Self::NaN,
-            Self::Finite { coeff, scale, dscale } => Self::Finite {
+            Self::Finite {
+                coeff,
+                scale,
+                dscale,
+            } => Self::Finite {
                 coeff: coeff.abs(),
                 scale: *scale,
                 dscale: *dscale,
@@ -448,7 +460,11 @@ impl NumericValue {
             Self::PosInf => "Infinity".to_string(),
             Self::NegInf => "-Infinity".to_string(),
             Self::NaN => "NaN".to_string(),
-            Self::Finite { coeff, scale, dscale } => {
+            Self::Finite {
+                coeff,
+                scale,
+                dscale,
+            } => {
                 let negative = coeff.is_negative();
                 let digits = coeff.abs().to_str_radix(10);
                 if *scale == 0 {

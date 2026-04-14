@@ -1,12 +1,12 @@
 use crate::backend::catalog::pg_constraint::derived_pg_constraint_rows;
-use crate::backend::parser::{BoundRelation, CatalogLookup};
+use crate::backend::parser::{BoundRelation, CatalogLookup, SqlType};
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::relcache::RelCache;
 use crate::backend::utils::cache::system_views::{build_pg_stats_rows, build_pg_views_rows};
 use crate::include::catalog::{
-    PgCastRow, PgClassRow, PgConstraintRow, PgOperatorRow, PgProcRow, PgRewriteRow, PgStatisticRow,
-    PgTypeRow, bootstrap_pg_cast_rows, bootstrap_pg_operator_rows, bootstrap_pg_proc_rows,
-    builtin_type_rows,
+    BOOTSTRAP_SUPERUSER_OID, PgCastRow, PgClassRow, PgConstraintRow, PgOperatorRow, PgProcRow,
+    PgRewriteRow, PgStatisticRow, PgTypeRow, bootstrap_pg_cast_rows, bootstrap_pg_operator_rows,
+    bootstrap_pg_proc_rows, builtin_type_rows,
 };
 
 #[derive(Debug, Clone)]
@@ -71,21 +71,15 @@ impl VisibleCatalog {
 
 impl CatalogLookup for VisibleCatalog {
     fn lookup_any_relation(&self, name: &str) -> Option<BoundRelation> {
-        self.relcache.get_by_name(name).map(|entry| BoundRelation {
-            rel: entry.rel,
-            relation_oid: entry.relation_oid,
-            toast: (entry.reltoastrelid != 0)
-                .then(|| self.relcache.get_by_oid(entry.reltoastrelid))
-                .flatten()
-                .map(|toast| crate::include::nodes::primnodes::ToastRelationRef {
-                    rel: toast.rel,
-                    relation_oid: toast.relation_oid,
-                }),
-            namespace_oid: entry.namespace_oid,
-            relpersistence: entry.relpersistence,
-            relkind: entry.relkind,
-            desc: entry.desc.clone(),
-        })
+        self.relcache
+            .get_by_name(name)
+            .map(|entry| bound_relation_from_relcache_entry(&self.relcache, entry))
+    }
+
+    fn lookup_relation_by_oid(&self, relation_oid: u32) -> Option<BoundRelation> {
+        self.relcache
+            .get_by_oid(relation_oid)
+            .map(|entry| bound_relation_from_relcache_entry(&self.relcache, entry))
     }
 
     fn proc_rows_by_name(&self, name: &str) -> Vec<PgProcRow> {
@@ -142,10 +136,17 @@ impl CatalogLookup for VisibleCatalog {
     }
 
     fn type_rows(&self) -> Vec<PgTypeRow> {
-        self.catcache
+        let mut rows = self
+            .catcache
             .as_ref()
             .map(CatCache::type_rows)
-            .unwrap_or_else(builtin_type_rows)
+            .unwrap_or_else(builtin_type_rows);
+        for composite in composite_type_rows_from_relcache(&self.relcache) {
+            if rows.iter().all(|existing| existing.oid != composite.oid) {
+                rows.push(composite);
+            }
+        }
+        rows
     }
 
     fn rewrite_rows_for_relation(&self, relation_oid: u32) -> Vec<PgRewriteRow> {
@@ -200,6 +201,46 @@ impl CatalogLookup for VisibleCatalog {
 
 fn normalize_name(name: &str) -> &str {
     name.strip_prefix("pg_catalog.").unwrap_or(name)
+}
+
+fn bound_relation_from_relcache_entry(
+    relcache: &RelCache,
+    entry: &crate::backend::utils::cache::relcache::RelCacheEntry,
+) -> BoundRelation {
+    BoundRelation {
+        rel: entry.rel,
+        relation_oid: entry.relation_oid,
+        toast: (entry.reltoastrelid != 0)
+            .then(|| relcache.get_by_oid(entry.reltoastrelid))
+            .flatten()
+            .map(|toast| crate::include::nodes::primnodes::ToastRelationRef {
+                rel: toast.rel,
+                relation_oid: toast.relation_oid,
+            }),
+        namespace_oid: entry.namespace_oid,
+        relpersistence: entry.relpersistence,
+        relkind: entry.relkind,
+        desc: entry.desc.clone(),
+    }
+}
+
+fn composite_type_rows_from_relcache(relcache: &RelCache) -> Vec<PgTypeRow> {
+    relcache
+        .entries()
+        .filter_map(|(name, entry)| {
+            (entry.row_type_oid != 0).then(|| PgTypeRow {
+                oid: entry.row_type_oid,
+                typname: name.rsplit('.').next().unwrap_or(name).to_string(),
+                typnamespace: entry.namespace_oid,
+                typowner: BOOTSTRAP_SUPERUSER_OID,
+                typlen: -1,
+                typalign: crate::include::access::htup::AttributeAlign::Double,
+                typstorage: crate::include::access::htup::AttributeStorage::Extended,
+                typrelid: entry.relation_oid,
+                sql_type: SqlType::named_composite(entry.row_type_oid, entry.relation_oid),
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]

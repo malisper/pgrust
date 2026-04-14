@@ -53,38 +53,22 @@ pub(super) fn build_special_join_info(query: &Query) -> Vec<SpecialJoinInfo> {
                 } else {
                     Some(expand_join_rte_vars_query(query, quals.clone()))
                 };
-                let clause_relids = expanded_quals
-                    .as_ref()
-                    .map(expr_relids)
-                    .unwrap_or_default();
+                let clause_relids = expanded_quals.as_ref().map(expr_relids).unwrap_or_default();
                 let strict_relids = expanded_quals
                     .as_ref()
                     .map(strict_relids)
                     .unwrap_or_default();
                 let lhs_strict = relids_overlap(&strict_relids, &left_relids);
-                let left_ancestors = extend_ancestors(
-                    ancestors,
-                    *kind,
-                    *rtindex,
-                    AncestorSide::Left,
-                    lhs_strict,
-                );
-                let right_ancestors = extend_ancestors(
-                    ancestors,
-                    *kind,
-                    *rtindex,
-                    AncestorSide::Right,
-                    lhs_strict,
-                );
+                let left_ancestors =
+                    extend_ancestors(ancestors, *kind, *rtindex, AncestorSide::Left, lhs_strict);
+                let right_ancestors =
+                    extend_ancestors(ancestors, *kind, *rtindex, AncestorSide::Right, lhs_strict);
                 let left_info = walk(query, left, joins, &left_ancestors);
                 let right_info = walk(query, right, joins, &right_ancestors);
                 let relids = relids_union(&left_relids, &right_relids);
                 let inner_join_relids = if matches!(kind, JoinType::Inner | JoinType::Cross) {
                     relids_union(
-                        &relids_union(
-                            &left_info.inner_join_relids,
-                            &right_info.inner_join_relids,
-                        ),
+                        &relids_union(&left_info.inner_join_relids, &right_info.inner_join_relids),
                         &relids,
                     )
                 } else {
@@ -122,8 +106,7 @@ pub(super) fn build_special_join_info(query: &Query) -> Vec<SpecialJoinInfo> {
                                     || !other.lhs_strict)
                             {
                                 min_righthand = relids_union(&min_righthand, &other.syn_lefthand);
-                                min_righthand =
-                                    relids_union(&min_righthand, &other.syn_righthand);
+                                min_righthand = relids_union(&min_righthand, &other.syn_righthand);
                             }
                         }
                     }
@@ -483,8 +466,9 @@ pub(super) fn strict_relids(expr: &Expr) -> Vec<usize> {
 }
 
 fn strict_relids_union(args: &[Expr]) -> Vec<usize> {
-    args.iter()
-        .fold(Vec::new(), |acc, arg| relids_union(&acc, &strict_relids(arg)))
+    args.iter().fold(Vec::new(), |acc, arg| {
+        relids_union(&acc, &strict_relids(arg))
+    })
 }
 
 pub(super) fn expr_relids(expr: &Expr) -> Vec<usize> {
@@ -594,8 +578,12 @@ mod tests {
     use crate::backend::parser::SqlType;
     use crate::backend::parser::SqlTypeKind;
     use crate::include::executor::execdesc::CommandType;
-    use crate::include::nodes::parsenodes::{JoinTreeNode, Query, RangeTblEntry, RangeTblEntryKind};
-    use crate::include::nodes::primnodes::{Expr, JoinType, OpExpr, OpExprKind, RelationDesc, TargetEntry, Var};
+    use crate::include::nodes::parsenodes::{
+        JoinTreeNode, Query, RangeTblEntry, RangeTblEntryKind,
+    };
+    use crate::include::nodes::primnodes::{
+        Expr, JoinType, OpExpr, OpExprKind, RelationDesc, TargetEntry, Var,
+    };
 
     fn query_for_jointree(jointree: JoinTreeNode, rtable: Vec<RangeTblEntry>) -> Query {
         Query {
@@ -627,7 +615,9 @@ mod tests {
     fn base_rte() -> RangeTblEntry {
         RangeTblEntry {
             alias: None,
-            desc: RelationDesc { columns: Vec::new() },
+            desc: RelationDesc {
+                columns: Vec::new(),
+            },
             kind: RangeTblEntryKind::Result,
         }
     }

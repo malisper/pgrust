@@ -3,7 +3,9 @@ use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::pathnodes::{Path, PathKey, PathTarget, RelOptInfo, RelOptKind};
 use crate::include::nodes::plannodes::PlanEstimate;
-use crate::include::nodes::primnodes::{Expr, OpExpr, OpExprKind, OrderByEntry, QueryColumn, TargetEntry, Var};
+use crate::include::nodes::primnodes::{
+    Expr, OpExpr, OpExprKind, OrderByEntry, QueryColumn, TargetEntry, Var,
+};
 
 fn int4() -> SqlType {
     SqlType::new(SqlTypeKind::Int4)
@@ -119,8 +121,7 @@ fn choose_final_path_falls_back_to_cheapest_total_without_match() {
     rel.add_path(values_path(2, 1.0, 5.0));
     bestpath::set_cheapest(&mut rel);
 
-    let chosen =
-        bestpath::choose_final_path(&rel, &[pathkey(var(1_000, 1))]).expect("final path");
+    let chosen = bestpath::choose_final_path(&rel, &[pathkey(var(1_000, 1))]).expect("final path");
 
     assert_eq!(chosen.plan_info().total_cost.as_f64(), 2.0);
 }
@@ -187,8 +188,7 @@ fn projection_rewrite_does_not_chase_plain_var_through_subquery_boundary() {
         targets: vec![TargetEntry::new("name", var(1_000_100, 1), int4(), 1)],
     };
 
-    let rewritten =
-        super::rewrite_semantic_expr_for_path(var(1, 1), &outer, &outer.output_vars());
+    let rewritten = super::rewrite_semantic_expr_for_path(var(1, 1), &outer, &outer.output_vars());
 
     assert_eq!(rewritten, var(1, 1));
 }

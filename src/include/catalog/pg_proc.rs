@@ -4255,14 +4255,8 @@ fn record_out_proc_row(
     pronargs: i16,
     out_args: &[(&str, u32)],
 ) -> PgProcRow {
-    let mut row = set_returning_proc_row(
-        oid,
-        proname,
-        RECORD_TYPE_OID,
-        proargtypes,
-        prosrc,
-        pronargs,
-    );
+    let mut row =
+        set_returning_proc_row(oid, proname, RECORD_TYPE_OID, proargtypes, prosrc, pronargs);
     row.proallargtypes = Some(
         parse_proc_argtype_oids(proargtypes)
             .unwrap_or_default()
@@ -4348,7 +4342,9 @@ mod tests {
     fn bootstrap_record_returning_rows_expose_out_metadata() {
         let row = bootstrap_pg_proc_rows()
             .into_iter()
-            .find(|row| row.proname == "json_each" && row.proargtypes == oid_argtypes(&[JSON_TYPE_OID]))
+            .find(|row| {
+                row.proname == "json_each" && row.proargtypes == oid_argtypes(&[JSON_TYPE_OID])
+            })
             .expect("json_each row");
         assert_eq!(row.prorettype, RECORD_TYPE_OID);
         assert_eq!(
