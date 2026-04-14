@@ -902,7 +902,11 @@ impl NumericValue {
                 let scale = (*lscale).max(*rscale);
                 let left = align_coeff(lcoeff.clone(), *lscale, scale);
                 let right = align_coeff(rcoeff.clone(), *rscale, scale);
-                Some(Self::finite(left % right, scale).with_dscale(scale).normalize())
+                Some(
+                    Self::finite(left % right, scale)
+                        .with_dscale(scale)
+                        .normalize(),
+                )
             }
         }
     }

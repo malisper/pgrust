@@ -387,12 +387,7 @@ impl Database {
         };
 
         let interrupts = self.interrupt_state(client_id);
-        lock_relations_interruptible(
-            &self.table_locks,
-            client_id,
-            &rels,
-            interrupts.as_ref(),
-        )?;
+        lock_relations_interruptible(&self.table_locks, client_id, &rels, interrupts.as_ref())?;
 
         let (snapshot, command_id) = match txn_ctx {
             Some((xid, cid)) => (self.txns.read().snapshot_for_command(xid, cid)?, cid),

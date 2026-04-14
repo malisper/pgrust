@@ -216,7 +216,10 @@ fn collect_inner_join_clauses(root: &PlannerInfo) -> Vec<RestrictInfo> {
             walk(root, left, clauses);
             walk(root, right, clauses);
             if matches!(kind, JoinType::Inner | JoinType::Cross) {
-                clauses.push(joininfo::make_restrict_info(expand_join_rte_vars(root, quals.clone())));
+                clauses.push(joininfo::make_restrict_info(expand_join_rte_vars(
+                    root,
+                    quals.clone(),
+                )));
             }
         }
     }
@@ -423,7 +426,8 @@ fn lower_targets_for_path(
             .cloned()
             .map(|target| {
                 let original_expr = target.expr.clone();
-                let rewritten = rewrite_semantic_expr_for_path(original_expr.clone(), path, &layout);
+                let rewritten =
+                    rewrite_semantic_expr_for_path(original_expr.clone(), path, &layout);
                 let expr = if rewritten == original_expr && !layout.contains(&rewritten) {
                     let expanded = expand_join_rte_vars(root, original_expr.clone());
                     if expanded != original_expr {
@@ -461,7 +465,8 @@ fn lower_pathkeys_for_path(root: &PlannerInfo, path: &Path, pathkeys: &[PathKey]
             .cloned()
             .map(|key| {
                 let original_expr = key.expr.clone();
-                let rewritten = rewrite_semantic_expr_for_path(original_expr.clone(), path, &layout);
+                let rewritten =
+                    rewrite_semantic_expr_for_path(original_expr.clone(), path, &layout);
                 let expr = if rewritten == original_expr && !layout.contains(&rewritten) {
                     let expanded = expand_join_rte_vars(root, original_expr.clone());
                     if expanded != original_expr {
@@ -482,7 +487,11 @@ fn lower_pathkeys_for_path(root: &PlannerInfo, path: &Path, pathkeys: &[PathKey]
     }
 }
 
-fn lower_pathkeys_for_rel(root: &PlannerInfo, rel: &RelOptInfo, pathkeys: &[PathKey]) -> Vec<PathKey> {
+fn lower_pathkeys_for_rel(
+    root: &PlannerInfo,
+    rel: &RelOptInfo,
+    pathkeys: &[PathKey],
+) -> Vec<PathKey> {
     rel.pathlist
         .first()
         .map(|path| lower_pathkeys_for_path(root, path, pathkeys))
@@ -1062,10 +1071,7 @@ fn join_reltarget(
     PathTarget::new(exprs)
 }
 
-fn join_spec_for_special_join(
-    sjinfo: &SpecialJoinInfo,
-    reversed: bool,
-) -> JoinBuildSpec {
+fn join_spec_for_special_join(sjinfo: &SpecialJoinInfo, reversed: bool) -> JoinBuildSpec {
     JoinBuildSpec {
         kind: if reversed {
             reverse_join_type(sjinfo.jointype)
@@ -1104,9 +1110,9 @@ fn rel_matches_special_join(
 }
 
 fn relids_match_ojrelid(root: &PlannerInfo, relids: &[usize], ojrelid: usize) -> bool {
-    root.join_info_list.iter().any(|sjinfo| {
-        sjinfo.ojrelid == Some(ojrelid) && special_join_relids(sjinfo) == relids
-    })
+    root.join_info_list
+        .iter()
+        .any(|sjinfo| sjinfo.ojrelid == Some(ojrelid) && special_join_relids(sjinfo) == relids)
 }
 
 fn input_crosses_rhs_boundary(input_relids: &[usize], sjinfo: &SpecialJoinInfo) -> bool {
@@ -1183,7 +1189,9 @@ fn join_is_legal(
             continue;
         }
 
-        if let Some(reversed) = rel_matches_special_join(sjinfo, &left_rel.relids, &right_rel.relids) {
+        if let Some(reversed) =
+            rel_matches_special_join(sjinfo, &left_rel.relids, &right_rel.relids)
+        {
             if matched_sj.is_some() {
                 return None;
             }
@@ -1276,8 +1284,14 @@ fn make_join_rel(
         .join_rel_list
         .get_mut(join_rel_index)
         .expect("join rel just inserted or found");
-    if !join_rel.joininfo.iter().any(|info| info.clause == join_qual) {
-        join_rel.joininfo.push(joininfo::make_restrict_info(join_qual.clone()));
+    if !join_rel
+        .joininfo
+        .iter()
+        .any(|info| info.clause == join_qual)
+    {
+        join_rel
+            .joininfo
+            .push(joininfo::make_restrict_info(join_qual.clone()));
     }
     for path in candidate_paths {
         join_rel.add_path(path);
@@ -1472,10 +1486,7 @@ fn make_aggregate_rel(
                 group_by: group_by.clone(),
                 accumulators: accumulators.clone(),
                 having,
-                output_columns: build_aggregate_output_columns(
-                    &group_by,
-                    &accumulators,
-                ),
+                output_columns: build_aggregate_output_columns(&group_by, &accumulators),
             },
             catalog,
         ));
@@ -1527,7 +1538,11 @@ fn make_project_set_rel(
     rel
 }
 
-fn make_ordered_rel(root: &mut PlannerInfo, input_rel: RelOptInfo, catalog: &dyn CatalogLookup) -> RelOptInfo {
+fn make_ordered_rel(
+    root: &mut PlannerInfo,
+    input_rel: RelOptInfo,
+    catalog: &dyn CatalogLookup,
+) -> RelOptInfo {
     let upper_rel_index = upperrels::ensure_upper_rel_index(
         root,
         UpperRelKind::Ordered,
@@ -1614,11 +1629,7 @@ fn make_projection_rel(
         return root.upper_rels[upper_rel_index].rel.clone();
     }
     let slot_id = next_synthetic_slot_id();
-    let mut rel = RelOptInfo::new(
-        input_rel.relids.clone(),
-        RelOptKind::UpperRel,
-        reltarget,
-    );
+    let mut rel = RelOptInfo::new(input_rel.relids.clone(), RelOptKind::UpperRel, reltarget);
     for path in input_rel.pathlist {
         let lowered_targets = lower_targets_for_path(root, &path, targets);
         if allow_identity_elision && projection_is_identity(&path, &lowered_targets) {
@@ -1657,13 +1668,7 @@ fn grouping_planner(
         current_rel = make_aggregate_rel(root, current_rel, catalog);
     } else if let Some(project_set) = root.parse.project_set.clone() {
         current_rel = make_project_set_rel(root, current_rel, &project_set, catalog);
-        current_rel = make_projection_rel(
-            root,
-            current_rel,
-            &final_targets,
-            catalog,
-            false,
-        );
+        current_rel = make_projection_rel(root, current_rel, &final_targets, catalog, false);
         projection_done = true;
     }
 
@@ -3179,7 +3184,10 @@ fn rewrite_semantic_expr_for_join_inputs(
     join_layout: &[Expr],
 ) -> Expr {
     let original = expr;
-    if let Some(index) = join_layout.iter().position(|candidate| *candidate == original) {
+    if let Some(index) = join_layout
+        .iter()
+        .position(|candidate| *candidate == original)
+    {
         return join_layout[index].clone();
     }
     let left_layout = left.output_vars();
@@ -3424,7 +3432,10 @@ fn rewrite_semantic_expr_for_join_inputs(
         },
         other => other,
     };
-    if let Some(index) = join_layout.iter().position(|candidate| *candidate == rebuilt) {
+    if let Some(index) = join_layout
+        .iter()
+        .position(|candidate| *candidate == rebuilt)
+    {
         return join_layout[index].clone();
     }
     let rewritten_left = rewrite_semantic_expr_for_path(rebuilt.clone(), left, &left_layout);

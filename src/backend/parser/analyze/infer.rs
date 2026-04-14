@@ -525,23 +525,25 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                     BuiltinScalarFunction::Sqrt
                     | BuiltinScalarFunction::Exp
                     | BuiltinScalarFunction::Ln,
-                ) => args.first().map_or(SqlType::new(SqlTypeKind::Float8), |arg| {
-                    let ty = infer_sql_expr_type_with_ctes(
-                        &arg.value,
-                        scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer,
-                        ctes,
-                    );
-                    match ty.element_type().kind {
-                        SqlTypeKind::Float4 | SqlTypeKind::Float8 => {
-                            SqlType::new(SqlTypeKind::Float8)
+                ) => args
+                    .first()
+                    .map_or(SqlType::new(SqlTypeKind::Float8), |arg| {
+                        let ty = infer_sql_expr_type_with_ctes(
+                            &arg.value,
+                            scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer,
+                            ctes,
+                        );
+                        match ty.element_type().kind {
+                            SqlTypeKind::Float4 | SqlTypeKind::Float8 => {
+                                SqlType::new(SqlTypeKind::Float8)
+                            }
+                            _ if is_numeric_family(ty) => SqlType::new(SqlTypeKind::Numeric),
+                            _ => SqlType::new(SqlTypeKind::Float8),
                         }
-                        _ if is_numeric_family(ty) => SqlType::new(SqlTypeKind::Numeric),
-                        _ => SqlType::new(SqlTypeKind::Float8),
-                    }
-                }),
+                    }),
                 Some(BuiltinScalarFunction::Power) => {
                     let left = args.first().map(|arg| {
                         infer_sql_expr_type_with_ctes(

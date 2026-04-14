@@ -901,8 +901,12 @@ fn pg_proc_row_values(row: PgProcRow) -> Vec<Value> {
         Value::Int32(row.prorettype as i32),
         Value::Text(row.proargtypes.into()),
         nullable_array_value(row.proallargtypes.map(|oids| {
-            ArrayValue::from_1d(oids.into_iter().map(|oid| Value::Int32(oid as i32)).collect())
-                .with_element_type_oid(crate::include::catalog::OID_TYPE_OID)
+            ArrayValue::from_1d(
+                oids.into_iter()
+                    .map(|oid| Value::Int32(oid as i32))
+                    .collect(),
+            )
+            .with_element_type_oid(crate::include::catalog::OID_TYPE_OID)
         })),
         nullable_array_value(row.proargmodes.map(|modes| {
             ArrayValue::from_1d(

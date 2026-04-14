@@ -873,9 +873,11 @@ fn decode_pg_numeric(bytes: &[u8]) -> Result<NumericValue, ExecError> {
         coeff / divisor
     };
 
-    Ok(NumericValue::finite(if sign == NUMERIC_NEG { -coeff } else { coeff }, dscale)
-        .with_dscale(dscale)
-        .normalize())
+    Ok(
+        NumericValue::finite(if sign == NUMERIC_NEG { -coeff } else { coeff }, dscale)
+            .with_dscale(dscale)
+            .normalize(),
+    )
 }
 
 fn decimal_to_pg_digits(coeff: &BigInt, scale: u32) -> (u16, Vec<u16>, i32) {

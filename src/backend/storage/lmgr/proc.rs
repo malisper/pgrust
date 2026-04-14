@@ -2,7 +2,9 @@ use parking_lot::Mutex;
 use parking_lot::{Condvar, RwLock};
 
 use crate::backend::access::transam::xact::{TransactionId, TransactionManager, TransactionStatus};
-use crate::backend::utils::misc::interrupts::{InterruptReason, InterruptState, check_for_interrupts};
+use crate::backend::utils::misc::interrupts::{
+    InterruptReason, InterruptState, check_for_interrupts,
+};
 
 pub enum WaitOutcome {
     Completed,

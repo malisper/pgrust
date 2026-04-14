@@ -24,10 +24,9 @@ use super::expr_math::{
 use super::expr_numeric::{
     eval_ceil_function, eval_div_function, eval_exp_function, eval_factorial_function,
     eval_floor_function, eval_ln_function, eval_log_function, eval_log10_function,
-    eval_min_scale_function, eval_numeric_inc_function, eval_pg_lsn_function,
-    eval_power_function, eval_round_function, eval_scale_function, eval_sign_function,
-    eval_sqrt_function, eval_trim_scale_function, eval_trunc_function,
-    eval_width_bucket_function,
+    eval_min_scale_function, eval_numeric_inc_function, eval_pg_lsn_function, eval_power_function,
+    eval_round_function, eval_scale_function, eval_sign_function, eval_sqrt_function,
+    eval_trim_scale_function, eval_trunc_function, eval_width_bucket_function,
 };
 use super::expr_ops::compare_order_values;
 use super::expr_ops::{

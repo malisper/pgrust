@@ -28,9 +28,7 @@ use crate::backend::utils::misc::guc_datetime::{
     DateTimeConfig, default_datestyle, default_timezone, format_datestyle, parse_datestyle,
     parse_timezone,
 };
-use crate::backend::utils::misc::interrupts::{
-    InterruptState, StatementInterruptGuard,
-};
+use crate::backend::utils::misc::interrupts::{InterruptState, StatementInterruptGuard};
 use crate::include::nodes::execnodes::ScalarType;
 use crate::pgrust::database::{Database, TempMutationEffect};
 use crate::pl::plpgsql::execute_do;
@@ -506,13 +504,21 @@ impl Session {
         mode: TableLockMode,
     ) -> Result<(), ExecError> {
         let Some(txn) = self.active_txn.as_mut() else {
-            db.table_locks
-                .lock_table_interruptible(rel, mode, self.client_id, self.interrupts.as_ref())?;
+            db.table_locks.lock_table_interruptible(
+                rel,
+                mode,
+                self.client_id,
+                self.interrupts.as_ref(),
+            )?;
             return Ok(());
         };
         if !txn.held_table_locks.contains(&rel) {
-            db.table_locks
-                .lock_table_interruptible(rel, mode, self.client_id, self.interrupts.as_ref())?;
+            db.table_locks.lock_table_interruptible(
+                rel,
+                mode,
+                self.client_id,
+                self.interrupts.as_ref(),
+            )?;
             txn.held_table_locks.push(rel);
         }
         Ok(())
@@ -592,11 +598,7 @@ impl Session {
                             rename_stmt.table_name.clone(),
                         ))
                     })?;
-                self.lock_table_if_needed(
-                    db,
-                    relation.rel,
-                    TableLockMode::AccessExclusive,
-                )?;
+                self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
                 let search_path = self.configured_search_path();
                 let txn = self.active_txn.as_mut().unwrap();
                 db.execute_alter_table_rename_stmt_in_transaction_with_search_path(
@@ -640,11 +642,7 @@ impl Session {
                                 alter_stmt.table_name.clone(),
                             ))
                         })?;
-                self.lock_table_if_needed(
-                    db,
-                    relation.rel,
-                    TableLockMode::AccessExclusive,
-                )?;
+                self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
                 let search_path = self.configured_search_path();
                 let txn = self.active_txn.as_mut().unwrap();
                 db.execute_alter_table_add_column_stmt_in_transaction_with_search_path(
@@ -701,11 +699,7 @@ impl Session {
                             comment_stmt.table_name.clone(),
                         ))
                     })?;
-                self.lock_table_if_needed(
-                    db,
-                    relation.rel,
-                    TableLockMode::AccessExclusive,
-                )?;
+                self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
                 let search_path = self.configured_search_path();
                 let txn = self.active_txn.as_mut().unwrap();
                 db.execute_comment_on_table_stmt_in_transaction_with_search_path(
@@ -1317,7 +1311,7 @@ impl Session {
                     Ok(values)
                 })
                 .collect::<Result<Vec<_>, ExecError>>()?;
- 
+
             let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
             let interrupts = self.interrupts();
             let mut ctx = ExecutorContext {
@@ -1436,9 +1430,9 @@ fn parse_statement_timeout(value: &str) -> Result<Option<Duration>, ExecError> {
             value.to_string(),
         )));
     }
-    let amount = number.parse::<f64>().map_err(|_| {
-        ExecError::Parse(ParseError::UnrecognizedParameter(value.to_string()))
-    })?;
+    let amount = number
+        .parse::<f64>()
+        .map_err(|_| ExecError::Parse(ParseError::UnrecognizedParameter(value.to_string())))?;
     if !amount.is_finite() || amount < 0.0 {
         return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
             value.to_string(),

@@ -1094,11 +1094,13 @@ fn psql_describe_columns_query(
                 row.push(Value::Text("".into()));
             }
             if include_attstorage {
-                row.push(Value::InternalChar(column.storage.attstorage.as_char() as u8));
+                row.push(Value::InternalChar(
+                    column.storage.attstorage.as_char() as u8
+                ));
             }
             if include_attcompression {
                 row.push(Value::InternalChar(
-                    column.storage.attcompression.as_char() as u8,
+                    column.storage.attcompression.as_char() as u8
                 ));
             }
             if include_attstattarget {
@@ -1970,8 +1972,12 @@ mod tests {
     fn psql_describe_constraint_query_matches_r_alias_shape() {
         let db = Database::open(temp_dir("describe_constraints_r_alias"), 16).unwrap();
         let session = Session::new(1);
-        db.execute(1, "create table widgets (id int4 not null)").unwrap();
-        let entry = session.catalog_lookup(&db).lookup_any_relation("widgets").unwrap();
+        db.execute(1, "create table widgets (id int4 not null)")
+            .unwrap();
+        let entry = session
+            .catalog_lookup(&db)
+            .lookup_any_relation("widgets")
+            .unwrap();
 
         let sql = format!(
             "SELECT true as sametable, conname, \
@@ -2032,7 +2038,10 @@ mod tests {
         let session = Session::new(1);
         db.execute(1, "create table widgets (id int4, note text)")
             .unwrap();
-        let entry = session.catalog_lookup(&db).lookup_any_relation("widgets").unwrap();
+        let entry = session
+            .catalog_lookup(&db)
+            .lookup_any_relation("widgets")
+            .unwrap();
 
         let sql = format!(
             "SELECT a.attname, \
