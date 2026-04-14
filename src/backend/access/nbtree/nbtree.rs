@@ -1164,14 +1164,6 @@ fn write_split_pages(
         ctx.client_id,
         ctx.snapshot.current_xid,
         ctx.index_relation,
-        block,
-        &left_page,
-    )?;
-    write_buffered_btree_page(
-        &ctx.pool,
-        ctx.client_id,
-        ctx.snapshot.current_xid,
-        ctx.index_relation,
         new_block,
         &right_page,
     )?;
@@ -1191,6 +1183,16 @@ fn write_split_pages(
             &next_page,
         )?;
     }
+    // Publish the new sibling only after its page image is initialized and any
+    // existing right neighbor already links back to it.
+    write_buffered_btree_page(
+        &ctx.pool,
+        ctx.client_id,
+        ctx.snapshot.current_xid,
+        ctx.index_relation,
+        block,
+        &left_page,
+    )?;
 
     Ok(PageSplitResult {
         left_block: block,
