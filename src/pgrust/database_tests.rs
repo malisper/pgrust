@@ -2031,6 +2031,38 @@ fn explain_three_way_inner_join_can_build_smaller_join_first() {
 }
 
 #[test]
+fn cross_join_chain_with_aliases_executes_without_rebinding_panic() {
+    let base = temp_dir("cross_join_chain_aliases");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table j1_tbl (i int4 not null, j int4 not null, t text)")
+        .unwrap();
+    db.execute(1, "create table j2_tbl (i int4 not null, k int4 not null)")
+        .unwrap();
+    db.execute(1, "insert into j1_tbl values (1, 4, 'one')")
+        .unwrap();
+    db.execute(1, "insert into j2_tbl values (1, -1)")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select * from j1_tbl cross join j2_tbl a cross join j2_tbl b",
+        ),
+        vec![vec![
+            Value::Int32(1),
+            Value::Int32(4),
+            Value::Text("one".into()),
+            Value::Int32(1),
+            Value::Int32(-1),
+            Value::Int32(1),
+            Value::Int32(-1),
+        ]]
+    );
+}
+
+#[test]
 fn explain_join_order_by_can_reuse_ordered_outer_path() {
     let base = temp_dir("explain_join_ordered_outer_path");
     let db = Database::open(&base, 16).unwrap();
