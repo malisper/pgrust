@@ -28,6 +28,7 @@ use crate::include::nodes::primnodes::{
 use pathnodes::{
     aggregate_output_vars, expr_sql_type, lower_agg_output_expr, next_synthetic_slot_id,
     rewrite_expr_against_layout, rewrite_project_set_target_against_layout,
+    rewrite_semantic_expr_for_input_path,
 };
 
 const DEFAULT_EQ_SEL: f64 = 0.005;
@@ -365,7 +366,7 @@ fn project_to_slot_layout(
                 .unwrap_or_else(|| Expr::Column(index));
             TargetEntry::new(
                 column.name.clone(),
-                rewrite_semantic_expr_for_path(expr, &input, &layout),
+                rewrite_semantic_expr_for_input_path(expr, &input, &layout),
                 column.sql_type,
                 index + 1,
             )
@@ -433,18 +434,12 @@ fn lower_targets_for_path(
             .iter()
             .cloned()
             .map(|target| {
-                let original_expr = target.expr.clone();
-                let rewritten = rewrite_semantic_expr_for_path(original_expr.clone(), path, &layout);
-                let expr = if rewritten == original_expr && !layout.contains(&rewritten) {
-                    let expanded = expand_join_rte_vars(root, original_expr.clone());
-                    if expanded != original_expr {
-                        rewrite_semantic_expr_for_path(expanded, path, &layout)
-                    } else {
-                        rewritten
-                    }
-                } else {
-                    rewritten
-                };
+                let expr = rewrite_semantic_expr_for_path_or_expand_join_vars(
+                    root,
+                    target.expr.clone(),
+                    path,
+                    &layout,
+                );
                 TargetEntry { expr, ..target }
             })
             .collect(),
@@ -471,18 +466,12 @@ fn lower_pathkeys_for_path(root: &PlannerInfo, path: &Path, pathkeys: &[PathKey]
             .iter()
             .cloned()
             .map(|key| {
-                let original_expr = key.expr.clone();
-                let rewritten = rewrite_semantic_expr_for_path(original_expr.clone(), path, &layout);
-                let expr = if rewritten == original_expr && !layout.contains(&rewritten) {
-                    let expanded = expand_join_rte_vars(root, original_expr.clone());
-                    if expanded != original_expr {
-                        rewrite_semantic_expr_for_path(expanded, path, &layout)
-                    } else {
-                        rewritten
-                    }
-                } else {
-                    rewritten
-                };
+                let expr = rewrite_semantic_expr_for_path_or_expand_join_vars(
+                    root,
+                    key.expr.clone(),
+                    path,
+                    &layout,
+                );
                 PathKey {
                     expr,
                     descending: key.descending,
@@ -535,6 +524,15 @@ fn rewrite_expr_for_path(expr: Expr, path: &Path, layout: &[Expr]) -> Expr {
             targets,
             ..
         } => {
+            // :HACK: Passthrough projections can mark a query boundary, such as subquery
+            // normalization from an inner synthetic slot onto an outer rtindex. Do not chase
+            // plain Vars through those opaque boundaries until slot identity is separated
+            // cleanly from parse-time Var identity.
+            if matches!(expr, Expr::Var(_) | Expr::Column(_))
+                && projection_is_passthrough_boundary(input, targets)
+            {
+                return rewrite_expr_against_layout(expr, layout);
+            }
             if let Some((index, target)) = targets
                 .iter()
                 .enumerate()
@@ -542,15 +540,6 @@ fn rewrite_expr_for_path(expr: Expr, path: &Path, layout: &[Expr]) -> Expr {
             {
                 projection_slot_var(*slot_id, index + 1, target.sql_type)
             } else {
-                // :HACK: Passthrough projections can mark a query boundary, such as subquery
-                // normalization from an inner synthetic slot onto an outer rtindex. Do not chase
-                // plain Vars through those opaque boundaries until slot identity is separated
-                // cleanly from parse-time Var identity.
-                if matches!(expr, Expr::Var(_) | Expr::Column(_))
-                    && projection_is_passthrough_boundary(input, targets)
-                {
-                    return rewrite_expr_against_layout(expr, layout);
-                }
                 let rewritten_input_expr =
                     rewrite_expr_for_path(expr.clone(), input, &input.output_vars());
                 if let Some((index, target)) = targets
@@ -727,6 +716,41 @@ fn rewrite_semantic_expr_for_path(expr: Expr, path: &Path, layout: &[Expr]) -> E
     } else {
         rebuilt
     }
+}
+
+fn rewrite_semantic_expr_for_path_or_expand_join_vars(
+    root: &PlannerInfo,
+    expr: Expr,
+    path: &Path,
+    layout: &[Expr],
+) -> Expr {
+    let rewritten = rewrite_semantic_expr_for_input_path(expr.clone(), path, layout);
+    if rewritten != expr || layout.contains(&rewritten) {
+        return rewritten;
+    }
+    if let Some(candidate) = layout_candidate_for_expr(root, &expr, layout) {
+        return candidate;
+    }
+    let expanded = expand_join_rte_vars(root, expr.clone());
+    if expanded != expr {
+        if let Some(candidate) = layout_candidate_for_expr(root, &expanded, layout) {
+            return candidate;
+        }
+        rewrite_semantic_expr_for_input_path(expanded, path, layout)
+    } else {
+        rewritten
+    }
+}
+
+fn layout_candidate_for_expr(root: &PlannerInfo, expr: &Expr, layout: &[Expr]) -> Option<Expr> {
+    let expanded_expr = expand_join_rte_vars(root, expr.clone());
+    layout.iter().find_map(|candidate| {
+        if candidate == expr {
+            return Some(candidate.clone());
+        }
+        let expanded_candidate = expand_join_rte_vars(root, candidate.clone());
+        (expanded_candidate == *expr || expanded_candidate == expanded_expr).then(|| candidate.clone())
+    })
 }
 
 fn aggregate_group_by(path: &Path) -> Option<&[Expr]> {
@@ -981,9 +1005,9 @@ fn maybe_project_join_alias(
     let target_exprs = joinaliasvars
         .iter()
         .cloned()
-        .map(|expr| rewrite_semantic_expr_for_path(expr, &input, &layout))
+        .map(|expr| rewrite_semantic_expr_for_path_or_expand_join_vars(root, expr, &input, &layout))
         .collect::<Vec<_>>();
-    if layout == desired_layout {
+    if layout == desired_layout || target_exprs == layout {
         return input;
     }
     project_to_slot_layout(rtindex, &rte.desc, input, target_exprs, catalog)
