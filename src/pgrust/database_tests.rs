@@ -2966,6 +2966,34 @@ fn index_matrix_order_only_uses_forward_index_scan() {
 }
 
 #[test]
+fn index_matrix_projection_over_ordered_index_keeps_order_without_sort() {
+    let db = setup_index_matrix_db("index_matrix_order_projection");
+    let lines = explain_lines(&db, 1, "select a + 1 from items order by a");
+    let relfilenode = relfilenode_for(&db, 1, "items_a_idx");
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains(&format!("Index Scan using rel {relfilenode} "))),
+        "expected ordered index scan, got {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains("Sort")),
+        "expected final projection to preserve ordering without a sort, got {lines:?}"
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select a + 1 from items order by a"),
+        vec![
+            vec![Value::Int32(2)],
+            vec![Value::Int32(2)],
+            vec![Value::Int32(3)],
+            vec![Value::Int32(3)],
+            vec![Value::Int32(3)],
+            vec![Value::Int32(4)],
+        ]
+    );
+}
+
+#[test]
 fn index_matrix_order_only_uses_backward_index_scan() {
     let db = setup_index_matrix_db("index_matrix_order_backward");
     assert_explain_uses_index(&db, 1, "select a from items order by a desc", "items_a_idx");
