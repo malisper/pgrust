@@ -1,10 +1,10 @@
-use crate::include::nodes::datum::Value;
 use crate::include::executor::execdesc::CommandType;
+use crate::include::nodes::datum::Value;
+use crate::include::nodes::plannodes::AggFunc;
 use crate::include::nodes::primnodes::{
     AggAccum, Expr, JoinType, ProjectSetTarget, QueryColumn, RelationDesc, SetReturningCall,
     SortGroupClause, TargetEntry, ToastRelationRef,
 };
-use crate::include::nodes::plannodes::AggFunc;
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -243,7 +243,10 @@ impl Query {
     }
 
     pub fn column_names(&self) -> Vec<String> {
-        self.columns().into_iter().map(|column| column.name).collect()
+        self.columns()
+            .into_iter()
+            .map(|column| column.name)
+            .collect()
     }
 }
 

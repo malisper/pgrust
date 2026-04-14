@@ -1,10 +1,9 @@
 use super::{
     Catalog, ExecError, ExecutorContext, ParseError, Plan, PlannedStmt, QueryDesc, Statement,
     StatementResult, TransactionId, Value, bind_delete, bind_insert, bind_update,
-    create_query_desc, execute_analyze, execute_create_index, execute_create_table,
-    execute_delete, execute_drop_table, execute_explain, execute_insert,
-    execute_truncate_table, execute_update, execute_vacuum, executor_start, parse_statement,
-    pg_plan_query, pg_plan_values_query,
+    create_query_desc, execute_analyze, execute_create_index, execute_create_table, execute_delete,
+    execute_drop_table, execute_explain, execute_insert, execute_truncate_table, execute_update,
+    execute_vacuum, executor_start, parse_statement, pg_plan_query, pg_plan_values_query,
 };
 use crate::backend::parser::CatalogLookup;
 use crate::pl::plpgsql::execute_do;
@@ -154,9 +153,7 @@ pub fn execute_readonly_statement(
         Statement::Do(stmt) => execute_do(&stmt),
         Statement::Explain(stmt) => execute_explain(stmt, catalog, ctx),
         Statement::Select(stmt) => execute_planned_stmt(pg_plan_query(&stmt, catalog)?, ctx),
-        Statement::Values(stmt) => {
-            execute_planned_stmt(pg_plan_values_query(&stmt, catalog)?, ctx)
-        }
+        Statement::Values(stmt) => execute_planned_stmt(pg_plan_values_query(&stmt, catalog)?, ctx),
         Statement::Analyze(stmt) => execute_analyze(stmt, catalog),
         Statement::Show(_)
         | Statement::Set(_)

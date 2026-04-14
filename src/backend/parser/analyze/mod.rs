@@ -16,6 +16,7 @@ mod views;
 
 use crate::RelFileLocator;
 use crate::backend::catalog::catalog::column_desc;
+use crate::backend::executor::{Value, cast_value};
 use crate::backend::optimizer::planner;
 use crate::include::catalog::{
     PgCastRow, PgClassRow, PgOperatorRow, PgProcRow, PgRewriteRow, PgStatisticRow, PgTypeRow,
@@ -26,7 +27,6 @@ use crate::include::nodes::primnodes::{
     AggAccum, AggFunc, BuiltinScalarFunction, Expr, JsonTableFunction, OrderByEntry,
     ProjectSetTarget, QueryColumn, RelationDesc, SetReturningCall, TargetEntry, ToastRelationRef,
 };
-use crate::backend::executor::{Value, cast_value};
 
 use super::parsenodes::*;
 pub use crate::backend::catalog::catalog::{Catalog, CatalogEntry};
@@ -646,7 +646,12 @@ fn bind_values_query_with_outer(
         .iter()
         .enumerate()
         .map(|(index, column)| {
-            TargetEntry::new(column.name.clone(), Expr::Column(index), column.sql_type, index + 1)
+            TargetEntry::new(
+                column.name.clone(),
+                Expr::Column(index),
+                column.sql_type,
+                index + 1,
+            )
         })
         .collect::<Vec<_>>();
 

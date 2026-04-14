@@ -85,6 +85,9 @@ pub fn eval_expr(
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
     match expr {
+        Expr::Op(_) | Expr::Bool(_) | Expr::Func(_) | Expr::SubLink(_) | Expr::ScalarArrayOp(_) => {
+            eval_expr(&expr.clone().into_legacy_shape(), slot, ctx)
+        }
         Expr::Var(var) => {
             if var.varlevelsup > 0 {
                 let depth = var.varlevelsup - 1;
@@ -328,6 +331,9 @@ pub fn eval_expr(
 
 pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, ExecError> {
     match expr {
+        Expr::Op(_) | Expr::Bool(_) | Expr::Func(_) | Expr::SubLink(_) | Expr::ScalarArrayOp(_) => {
+            eval_plpgsql_expr(&expr.clone().into_legacy_shape(), slot)
+        }
         Expr::Var(var) => {
             if var.varlevelsup == 0 {
                 Ok(slot.get_attr(var.varattno.saturating_sub(1))?.clone())

@@ -68,24 +68,24 @@ pub(super) fn query_from_bound_select_plan(plan: BoundSelectPlan) -> Query {
         || !decomposed.accumulators.is_empty()
         || decomposed.having_qual.is_some();
     let has_project_set = decomposed.project_set.is_some();
-    let target_list = normalize_target_list(
-        decomposed.target_list.map_or_else(
-            || identity_target_list(&output_columns, &output_exprs),
-            |targets| {
-                if has_agg || has_project_set {
-                    targets
-                } else {
-                    rewrite_target_entries(targets, &output_exprs)
-                }
-            },
-        ),
-    );
+    let target_list = normalize_target_list(decomposed.target_list.map_or_else(
+        || identity_target_list(&output_columns, &output_exprs),
+        |targets| {
+            if has_agg || has_project_set {
+                targets
+            } else {
+                rewrite_target_entries(targets, &output_exprs)
+            }
+        },
+    ));
     let sort_inputs = if has_agg || has_project_set {
         decomposed.sort_clause
     } else {
         rewrite_order_by_entries(decomposed.sort_clause, &output_exprs)
     };
-    let sort_clause = sort_inputs.into_iter().enumerate()
+    let sort_clause = sort_inputs
+        .into_iter()
+        .enumerate()
         .map(|(index, item)| SortGroupClause {
             expr: item.expr,
             tle_sort_group_ref: index + 1,
@@ -213,7 +213,11 @@ impl QueryRteBuilder {
                     },
                 });
                 let output_exprs = rte_output_exprs(rtindex, &columns);
-                (Some(JoinTreeNode::RangeTblRef(rtindex)), columns, output_exprs)
+                (
+                    Some(JoinTreeNode::RangeTblRef(rtindex)),
+                    columns,
+                    output_exprs,
+                )
             }
             BoundFromPlan::Values {
                 rows,
@@ -266,7 +270,8 @@ impl QueryRteBuilder {
                 kind,
                 on,
             } => {
-                let (left_tree, mut left_columns, mut left_exprs) = self.from_bound_from_plan(*left);
+                let (left_tree, mut left_columns, mut left_exprs) =
+                    self.from_bound_from_plan(*left);
                 let (right_tree, right_columns, right_exprs) = self.from_bound_from_plan(*right);
                 left_columns.extend(right_columns);
                 left_exprs.extend(right_exprs);
@@ -423,12 +428,10 @@ fn rewrite_project_set_targets(
     targets
         .into_iter()
         .map(|target| match target {
-            ProjectSetTarget::Scalar(entry) => {
-                ProjectSetTarget::Scalar(TargetEntry {
-                    expr: rewrite_expr_columns(entry.expr, output_exprs),
-                    ..entry
-                })
-            }
+            ProjectSetTarget::Scalar(entry) => ProjectSetTarget::Scalar(TargetEntry {
+                expr: rewrite_expr_columns(entry.expr, output_exprs),
+                ..entry
+            }),
             ProjectSetTarget::Set {
                 name,
                 call,
@@ -537,7 +540,8 @@ fn rewrite_agg_accums(accumulators: Vec<AggAccum>, output_exprs: &[Expr]) -> Vec
 }
 
 fn rewrite_expr_columns(expr: Expr, output_exprs: &[Expr]) -> Expr {
-    match expr {
+    let expr = expr.into_legacy_shape();
+    let rewritten = match expr {
         Expr::Column(index) => output_exprs
             .get(index)
             .cloned()
@@ -587,10 +591,14 @@ fn rewrite_expr_columns(expr: Expr, output_exprs: &[Expr]) -> Expr {
             Box::new(rewrite_expr_columns(*left, output_exprs)),
             Box::new(rewrite_expr_columns(*right, output_exprs)),
         ),
-        Expr::UnaryPlus(inner) => Expr::UnaryPlus(Box::new(rewrite_expr_columns(*inner, output_exprs))),
+        Expr::UnaryPlus(inner) => {
+            Expr::UnaryPlus(Box::new(rewrite_expr_columns(*inner, output_exprs)))
+        }
         Expr::Negate(inner) => Expr::Negate(Box::new(rewrite_expr_columns(*inner, output_exprs))),
         Expr::BitNot(inner) => Expr::BitNot(Box::new(rewrite_expr_columns(*inner, output_exprs))),
-        Expr::Cast(inner, ty) => Expr::Cast(Box::new(rewrite_expr_columns(*inner, output_exprs)), ty),
+        Expr::Cast(inner, ty) => {
+            Expr::Cast(Box::new(rewrite_expr_columns(*inner, output_exprs)), ty)
+        }
         Expr::Eq(left, right) => Expr::Eq(
             Box::new(rewrite_expr_columns(*left, output_exprs)),
             Box::new(rewrite_expr_columns(*right, output_exprs)),
@@ -781,5 +789,9 @@ fn rewrite_expr_columns(expr: Expr, output_exprs: &[Expr]) -> Expr {
         | Expr::CurrentTimestamp { .. }
         | Expr::LocalTime { .. }
         | Expr::LocalTimestamp { .. } => expr,
-    }
+        Expr::Op(_) | Expr::Bool(_) | Expr::Func(_) | Expr::SubLink(_) | Expr::ScalarArrayOp(_) => {
+            unreachable!("legacy rewrite should not see PG-shaped Expr")
+        }
+    };
+    rewritten.into_pg_semantic_shape()
 }

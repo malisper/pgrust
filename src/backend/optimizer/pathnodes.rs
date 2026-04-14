@@ -5,12 +5,8 @@ use crate::include::nodes::pathnodes::{
     PlannerJoinArraySubscript, PlannerJoinExpr, PlannerOrderByEntry, PlannerPath,
     PlannerProjectSetTarget, PlannerTargetEntry,
 };
-use crate::include::nodes::plannodes::{
-    BoundFromPlan, BoundSelectPlan, Plan, PlanEstimate,
-};
-use crate::include::nodes::primnodes::{
-    Expr, ExprArraySubscript, QueryColumn,
-};
+use crate::include::nodes::plannodes::{BoundFromPlan, BoundSelectPlan, Plan, PlanEstimate};
+use crate::include::nodes::primnodes::{Expr, ExprArraySubscript, QueryColumn};
 
 struct PlannerPathBuilder {
     next_slot_id: usize,
@@ -430,7 +426,9 @@ impl PlannerPathBuilder {
                 targets: targets
                     .into_iter()
                     .map(|target| {
-                        PlannerProjectSetTarget::from_project_set_target_with_layout(target, &layout)
+                        PlannerProjectSetTarget::from_project_set_target_with_layout(
+                            target, &layout,
+                        )
                     })
                     .collect(),
             };
@@ -500,8 +498,7 @@ impl PlannerPathBuilder {
         let layout = input.output_vars();
         let is_identity = targets.len() == input_columns.len()
             && targets.iter().enumerate().all(|(index, target)| {
-                PlannerJoinExpr::from_input_expr_with_layout(&target.expr, &layout)
-                    == layout[index]
+                PlannerJoinExpr::from_input_expr_with_layout(&target.expr, &layout) == layout[index]
                     && target.name == input_columns[index].name
             });
         if is_identity {
@@ -511,7 +508,11 @@ impl PlannerPathBuilder {
         }
     }
 
-    fn from_jointree(&mut self, jointree: JoinTreeNode, rtable: Vec<crate::include::nodes::parsenodes::RangeTblEntry>) -> PlannerPath {
+    fn from_jointree(
+        &mut self,
+        jointree: JoinTreeNode,
+        rtable: Vec<crate::include::nodes::parsenodes::RangeTblEntry>,
+    ) -> PlannerPath {
         match jointree {
             JoinTreeNode::RangeTblRef(rtindex) => {
                 let rte = rtable
@@ -894,9 +895,9 @@ impl PlannerProjectSetTarget {
         layout: &[PlannerJoinExpr],
     ) -> Self {
         match target {
-            crate::include::nodes::plannodes::ProjectSetTarget::Scalar(entry) => {
-                Self::Scalar(PlannerTargetEntry::from_target_entry_with_layout(entry, layout))
-            }
+            crate::include::nodes::plannodes::ProjectSetTarget::Scalar(entry) => Self::Scalar(
+                PlannerTargetEntry::from_target_entry_with_layout(entry, layout),
+            ),
             crate::include::nodes::plannodes::ProjectSetTarget::Set {
                 name,
                 call,
@@ -958,7 +959,10 @@ impl PlannerJoinExpr {
         layout.iter().position(|candidate| candidate == needle)
     }
 
-    fn from_var_with_layout(var: &crate::include::nodes::primnodes::Var, layout: &[PlannerJoinExpr]) -> Self {
+    fn from_var_with_layout(
+        var: &crate::include::nodes::primnodes::Var,
+        layout: &[PlannerJoinExpr],
+    ) -> Self {
         if var.varlevelsup > 0 {
             return Self::OuterColumn {
                 depth: var.varlevelsup - 1,
@@ -995,6 +999,13 @@ impl PlannerJoinExpr {
 
     pub fn from_input_expr_with_layout(expr: &Expr, layout: &[PlannerJoinExpr]) -> Self {
         match expr {
+            Expr::Op(_)
+            | Expr::Bool(_)
+            | Expr::Func(_)
+            | Expr::SubLink(_)
+            | Expr::ScalarArrayOp(_) => {
+                Self::from_input_expr_with_layout(&expr.clone().into_legacy_shape(), layout)
+            }
             Expr::Var(var) => Self::from_var_with_layout(var, layout),
             Expr::Column(index) => layout
                 .get(*index)
@@ -1277,6 +1288,11 @@ impl PlannerJoinExpr {
 
     pub fn from_input_expr(expr: &Expr) -> Self {
         match expr {
+            Expr::Op(_)
+            | Expr::Bool(_)
+            | Expr::Func(_)
+            | Expr::SubLink(_)
+            | Expr::ScalarArrayOp(_) => Self::from_input_expr(&expr.clone().into_legacy_shape()),
             Expr::Var(var) => Self::from_var(var),
             Expr::Column(index) => Self::InputColumn(*index),
             Expr::OuterColumn { depth, index } => Self::OuterColumn {
@@ -1586,11 +1602,16 @@ impl PlannerJoinExpr {
             Self::UnaryPlus(inner) => {
                 Expr::UnaryPlus(Box::new(inner.into_input_expr_with_layout(layout)))
             }
-            Self::Negate(inner) => Expr::Negate(Box::new(inner.into_input_expr_with_layout(layout))),
-            Self::BitNot(inner) => Expr::BitNot(Box::new(inner.into_input_expr_with_layout(layout))),
-            Self::Cast(inner, sql_type) => {
-                Expr::Cast(Box::new(inner.into_input_expr_with_layout(layout)), sql_type)
+            Self::Negate(inner) => {
+                Expr::Negate(Box::new(inner.into_input_expr_with_layout(layout)))
             }
+            Self::BitNot(inner) => {
+                Expr::BitNot(Box::new(inner.into_input_expr_with_layout(layout)))
+            }
+            Self::Cast(inner, sql_type) => Expr::Cast(
+                Box::new(inner.into_input_expr_with_layout(layout)),
+                sql_type,
+            ),
             Self::Eq(left, right) => Expr::Eq(
                 Box::new(left.into_input_expr_with_layout(layout)),
                 Box::new(right.into_input_expr_with_layout(layout)),
@@ -1652,7 +1673,9 @@ impl PlannerJoinExpr {
                 Box::new(right.into_input_expr_with_layout(layout)),
             ),
             Self::Not(inner) => Expr::Not(Box::new(inner.into_input_expr_with_layout(layout))),
-            Self::IsNull(inner) => Expr::IsNull(Box::new(inner.into_input_expr_with_layout(layout))),
+            Self::IsNull(inner) => {
+                Expr::IsNull(Box::new(inner.into_input_expr_with_layout(layout)))
+            }
             Self::IsNotNull(inner) => {
                 Expr::IsNotNull(Box::new(inner.into_input_expr_with_layout(layout)))
             }
@@ -1788,6 +1811,13 @@ impl PlannerJoinExpr {
 
     pub fn from_base_input_expr(expr: &Expr, relation_oid: u32) -> Self {
         match expr {
+            Expr::Op(_)
+            | Expr::Bool(_)
+            | Expr::Func(_)
+            | Expr::SubLink(_)
+            | Expr::ScalarArrayOp(_) => {
+                Self::from_base_input_expr(&expr.clone().into_legacy_shape(), relation_oid)
+            }
             Expr::Var(var) if var.varlevelsup > 0 => Self::OuterColumn {
                 depth: var.varlevelsup - 1,
                 index: var.varattno.saturating_sub(1),
@@ -2322,6 +2352,13 @@ impl PlannerJoinExpr {
 
     pub fn from_expr(expr: &Expr, left_width: usize) -> Self {
         match expr {
+            Expr::Op(_)
+            | Expr::Bool(_)
+            | Expr::Func(_)
+            | Expr::SubLink(_)
+            | Expr::ScalarArrayOp(_) => {
+                Self::from_expr(&expr.clone().into_legacy_shape(), left_width)
+            }
             Expr::Var(var) if var.varlevelsup > 0 => Self::OuterColumn {
                 depth: var.varlevelsup - 1,
                 index: var.varattno.saturating_sub(1),
