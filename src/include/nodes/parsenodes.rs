@@ -538,6 +538,7 @@ pub enum TableConstraint {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SqlTypeKind {
+    AnyArray,
     Int2,
     Int2Vector,
     Int4,

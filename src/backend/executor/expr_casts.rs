@@ -30,6 +30,15 @@ pub(crate) struct InputErrorInfo {
     pub(crate) sqlstate: &'static str,
 }
 
+fn unsupported_anyarray_input() -> ExecError {
+    ExecError::DetailedError {
+        message: "cannot accept a value of type anyarray".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "0A000",
+    }
+}
+
 fn parse_pg_integer_text(text: &str, ty: &'static str) -> Result<i128, ExecError> {
     let trimmed = text.trim_matches(|ch: char| ch.is_ascii_whitespace());
     if trimmed.is_empty() {
@@ -965,6 +974,10 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                 left: Value::Int16(v),
                 right: Value::Bytea(Vec::new()),
             }),
+            SqlType {
+                kind: SqlTypeKind::AnyArray,
+                ..
+            } => Err(unsupported_anyarray_input()),
         },
         Value::Int32(v) => match ty {
             SqlType {
@@ -1044,6 +1057,10 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                 left: Value::Int32(v),
                 right: Value::Bytea(Vec::new()),
             }),
+            SqlType {
+                kind: SqlTypeKind::AnyArray,
+                ..
+            } => Err(unsupported_anyarray_input()),
         },
         Value::Bool(v) => match ty {
             SqlType {
@@ -1099,6 +1116,10 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                 left: Value::Bool(v),
                 right: Value::Int32(0),
             }),
+            SqlType {
+                kind: SqlTypeKind::AnyArray,
+                ..
+            } => Err(unsupported_anyarray_input()),
         },
         Value::Date(v) => match ty.kind {
             SqlTypeKind::Date => Ok(Value::Date(v)),
@@ -1414,6 +1435,10 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                 left: Value::Int64(v),
                 right: Value::Bytea(Vec::new()),
             }),
+            SqlType {
+                kind: SqlTypeKind::AnyArray,
+                ..
+            } => Err(unsupported_anyarray_input()),
         },
         Value::Float64(v) => match ty {
             SqlType {
@@ -1496,6 +1521,10 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                 left: Value::Float64(v),
                 right: Value::Bytea(Vec::new()),
             }),
+            SqlType {
+                kind: SqlTypeKind::AnyArray,
+                ..
+            } => Err(unsupported_anyarray_input()),
         },
         Value::Numeric(numeric) => cast_numeric_value(numeric, ty, true),
         Value::Bit(bits) => match ty.kind {
@@ -1531,6 +1560,7 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
 
 pub(super) fn cast_text_value(text: &str, ty: SqlType, explicit: bool) -> Result<Value, ExecError> {
     match ty.kind {
+        SqlTypeKind::AnyArray => Err(unsupported_anyarray_input()),
         SqlTypeKind::Text
         | SqlTypeKind::Int2Vector
         | SqlTypeKind::OidVector
@@ -1625,6 +1655,7 @@ pub(super) fn cast_numeric_value(
     explicit: bool,
 ) -> Result<Value, ExecError> {
     match ty.kind {
+        SqlTypeKind::AnyArray => Err(unsupported_anyarray_input()),
         SqlTypeKind::Numeric => Ok(Value::Numeric(coerce_numeric_value(value, ty)?)),
         SqlTypeKind::Text
         | SqlTypeKind::Int2Vector

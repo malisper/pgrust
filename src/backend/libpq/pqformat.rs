@@ -272,10 +272,12 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
             | SqlTypeKind::PgNodeTree => 1009,
             SqlTypeKind::Bool => 1000,
             SqlTypeKind::Varchar => 1015,
+            SqlTypeKind::AnyArray => unreachable!("anyarray is not a concrete SQL array type"),
         };
         return (oid, -1, -1);
     }
     match col.sql_type.kind {
+        SqlTypeKind::AnyArray => (2277, -1, -1),
         SqlTypeKind::Int2 => (21, 2, -1),
         SqlTypeKind::Int4 => (23, 4, -1),
         SqlTypeKind::Int8 => (20, 8, -1),

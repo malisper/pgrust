@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;
+use crate::backend::parser::SqlTypeKind;
 
 use super::{CreateTableStatement, ParseError, TableConstraint};
 
@@ -109,6 +110,9 @@ pub fn lower_create_table(stmt: &CreateTableStatement) -> Result<LoweredCreateTa
         columns: columns
             .iter()
             .map(|column| {
+                if column.ty.kind == SqlTypeKind::AnyArray {
+                    return Err(ParseError::UnsupportedType("anyarray".into()));
+                }
                 let nullable = column.nullable && !primary_columns.contains(&column.name.to_ascii_lowercase());
                 let mut desc = column_desc(column.name.clone(), column.ty, nullable);
                 desc.default_expr = column.default_expr.clone();
@@ -116,9 +120,9 @@ pub fn lower_create_table(stmt: &CreateTableStatement) -> Result<LoweredCreateTa
                     .default_expr
                     .as_deref()
                     .and_then(|sql| super::derive_literal_default_value(sql, column.ty).ok());
-                desc
+                Ok(desc)
             })
-            .collect(),
+            .collect::<Result<Vec<_>, _>>()?,
     };
 
     Ok(LoweredCreateTable {
@@ -151,4 +155,36 @@ fn validate_constraint_columns(
         resolved.push(columns[*index].name.clone());
     }
     Ok(resolved)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::parser::{
+        ColumnDef, CreateTableElement, OnCommitAction, SqlType, TablePersistence,
+    };
+
+    #[test]
+    fn lower_create_table_rejects_anyarray_columns() {
+        let stmt = CreateTableStatement {
+            schema_name: None,
+            table_name: "bad_anyarray".into(),
+            persistence: TablePersistence::Permanent,
+            on_commit: OnCommitAction::PreserveRows,
+            elements: vec![CreateTableElement::Column(ColumnDef {
+                name: "a".into(),
+                ty: SqlType::new(SqlTypeKind::AnyArray),
+                default_expr: None,
+                nullable: true,
+                primary_key: false,
+                unique: false,
+            })],
+            if_not_exists: false,
+        };
+
+        assert_eq!(
+            lower_create_table(&stmt),
+            Err(ParseError::UnsupportedType("anyarray".into()))
+        );
+    }
 }

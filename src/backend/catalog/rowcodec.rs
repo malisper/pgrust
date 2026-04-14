@@ -1251,3 +1251,63 @@ fn expect_char(value: &Value, label: &'static str) -> Result<char, CatalogError>
         })),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::executor::value_io::tuple_from_values;
+    use crate::include::catalog::{BootstrapCatalogKind, bootstrap_relation_desc};
+
+    #[test]
+    fn pg_statistic_anyarray_catalog_tuple_roundtrips() {
+        let row = PgStatisticRow {
+            starelid: 42,
+            staattnum: 1,
+            stainherit: false,
+            stanullfrac: 0.2,
+            stawidth: 4,
+            stadistinct: 3.0,
+            stakind: [1, 2, 3, 0, 0],
+            staop: [96, 97, 98, 0, 0],
+            stacoll: [0; 5],
+            stanumbers: [
+                Some(ArrayValue::from_1d(vec![Value::Float64(0.5)])),
+                None,
+                Some(ArrayValue::from_1d(vec![Value::Float64(1.0)])),
+                None,
+                None,
+            ],
+            stavalues: [
+                Some(
+                    ArrayValue::from_1d(vec![Value::Int32(1), Value::Int32(2)])
+                        .with_element_type_oid(crate::include::catalog::INT4_TYPE_OID),
+                ),
+                Some(
+                    ArrayValue::from_1d(vec![Value::Int32(1), Value::Int32(2), Value::Int32(3)])
+                        .with_element_type_oid(crate::include::catalog::INT4_TYPE_OID),
+                ),
+                None,
+                None,
+                None,
+            ],
+        };
+
+        let values = pg_statistic_row_values(row.clone());
+        let desc = bootstrap_relation_desc(BootstrapCatalogKind::PgStatistic);
+        let tuple = tuple_from_values(&desc, &values).unwrap();
+        let decoded = decode_catalog_tuple_values(&desc, &tuple).unwrap();
+        let roundtrip = pg_statistic_row_from_values(decoded).unwrap();
+
+        assert_eq!(roundtrip.starelid, row.starelid);
+        assert_eq!(roundtrip.staattnum, row.staattnum);
+        assert_eq!(roundtrip.stainherit, row.stainherit);
+        assert!((roundtrip.stanullfrac - row.stanullfrac).abs() < 1e-6);
+        assert_eq!(roundtrip.stawidth, row.stawidth);
+        assert_eq!(roundtrip.stadistinct, row.stadistinct);
+        assert_eq!(roundtrip.stakind, row.stakind);
+        assert_eq!(roundtrip.staop, row.staop);
+        assert_eq!(roundtrip.stacoll, row.stacoll);
+        assert_eq!(roundtrip.stanumbers, row.stanumbers);
+        assert_eq!(roundtrip.stavalues, row.stavalues);
+    }
+}

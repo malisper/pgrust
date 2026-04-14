@@ -14,6 +14,7 @@ use super::node_types::*;
 use crate::backend::executor::expr_json::{canonicalize_jsonpath_text, validate_json_text};
 use crate::backend::executor::jsonb::{decode_jsonb, render_jsonb_bytes};
 use crate::backend::parser::{SqlType, SqlTypeKind};
+use crate::include::catalog::builtin_type_rows;
 use crate::include::access::htup::{HeapTuple, TupleValue};
 use crate::include::nodes::execnodes::ToastFetchContext;
 use crate::pgrust::compact_string::CompactString;
@@ -147,6 +148,12 @@ pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<TupleVa
             value.as_text().unwrap().as_bytes().to_vec(),
         )),
         (ScalarType::Bool, Value::Bool(v)) => Ok(TupleValue::Bytes(vec![u8::from(v)])),
+        (ScalarType::Array(_), Value::Array(items)) if column.sql_type.kind == SqlTypeKind::AnyArray => {
+            Ok(TupleValue::Bytes(encode_anyarray_bytes(&ArrayValue::from_1d(items))?))
+        }
+        (ScalarType::Array(_), Value::PgArray(array)) if column.sql_type.kind == SqlTypeKind::AnyArray => {
+            Ok(TupleValue::Bytes(encode_anyarray_bytes(&array)?))
+        }
         (ScalarType::Array(_), Value::Array(items)) => Ok(TupleValue::Bytes(encode_array_bytes(
             column.sql_type.element_type(),
             &ArrayValue::from_1d(items),
@@ -164,6 +171,21 @@ pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<TupleVa
 }
 
 pub(crate) fn coerce_assignment_value(value: &Value, target: SqlType) -> Result<Value, ExecError> {
+    if target.kind == SqlTypeKind::AnyArray {
+        return match value {
+            Value::Null => Ok(Value::Null),
+            Value::Array(items) => Ok(Value::PgArray(ArrayValue::from_1d(
+                items.iter().map(Value::to_owned_value).collect(),
+            ))),
+            Value::PgArray(array) => Ok(Value::PgArray(array.to_owned_value())),
+            other => Err(ExecError::TypeMismatch {
+                op: "assignment",
+                left: Value::Null,
+                right: other.clone(),
+            }),
+        };
+    }
+
     if target.is_array {
         return match value {
             Value::Null => Ok(Value::Null),
@@ -683,7 +705,11 @@ pub(crate) fn decode_value_with_toast(
                     attlen: column.storage.attlen,
                 });
             }
-            decode_array_bytes(column.sql_type.element_type(), bytes)
+            if column.sql_type.kind == SqlTypeKind::AnyArray {
+                decode_anyarray_bytes(bytes)
+            } else {
+                decode_array_bytes(column.sql_type.element_type(), bytes)
+            }
         }
     }
 }
@@ -718,6 +744,20 @@ fn encode_array_bytes(element_type: SqlType, array: &ArrayValue) -> Result<Vec<u
             }
         };
     }
+    Ok(bytes)
+}
+
+fn encode_anyarray_bytes(array: &ArrayValue) -> Result<Vec<u8>, ExecError> {
+    let element_type = anyarray_element_type(array)?;
+    let element_oid = builtin_type_oid_for_sql_type(element_type).ok_or_else(|| {
+        ExecError::InvalidStorageValue {
+            column: "<anyarray>".into(),
+            details: format!("unsupported anyarray element type {:?}", element_type),
+        }
+    })?;
+    let mut bytes = Vec::with_capacity(4);
+    bytes.extend_from_slice(&element_oid.to_le_bytes());
+    bytes.extend_from_slice(&encode_array_bytes(element_type, array)?);
     Ok(bytes)
 }
 
@@ -817,7 +857,7 @@ fn encode_array_element(element_type: SqlType, value: &Value) -> Result<Vec<u8>,
     }
 }
 
-fn decode_array_bytes(element_type: SqlType, bytes: &[u8]) -> Result<Value, ExecError> {
+pub(crate) fn decode_array_bytes(element_type: SqlType, bytes: &[u8]) -> Result<Value, ExecError> {
     if bytes.len() < 4 {
         return Err(ExecError::InvalidStorageValue {
             column: "<array>".into(),
@@ -883,8 +923,97 @@ fn decode_array_bytes(element_type: SqlType, bytes: &[u8]) -> Result<Value, Exec
     )))
 }
 
+pub(crate) fn decode_anyarray_bytes(bytes: &[u8]) -> Result<Value, ExecError> {
+    if bytes.len() < 4 {
+        return Err(ExecError::InvalidStorageValue {
+            column: "<anyarray>".into(),
+            details: "anyarray payload too short".into(),
+        });
+    }
+    let element_oid = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
+    let element_type = sql_type_for_builtin_oid(element_oid).ok_or_else(|| {
+        ExecError::InvalidStorageValue {
+            column: "<anyarray>".into(),
+            details: format!("unknown anyarray element oid {}", element_oid),
+        }
+    })?;
+    let Value::PgArray(array) = decode_array_bytes(element_type, &bytes[4..])? else {
+        unreachable!("array decoder always yields PgArray");
+    };
+    Ok(Value::PgArray(array.with_element_type_oid(element_oid)))
+}
+
+fn anyarray_element_type(array: &ArrayValue) -> Result<SqlType, ExecError> {
+    if let Some(element_oid) = array.element_type_oid {
+        return sql_type_for_builtin_oid(element_oid).ok_or_else(|| ExecError::InvalidStorageValue {
+            column: "<anyarray>".into(),
+            details: format!("unknown anyarray element oid {}", element_oid),
+        });
+    }
+    array
+        .elements
+        .iter()
+        .find(|value| !matches!(value, Value::Null))
+        .and_then(infer_sql_type_from_value)
+        .ok_or_else(|| ExecError::InvalidStorageValue {
+            column: "<anyarray>".into(),
+            details: "cannot infer element type for anyarray".into(),
+        })
+}
+
+fn builtin_type_oid_for_sql_type(sql_type: SqlType) -> Option<u32> {
+    builtin_type_rows().into_iter().find_map(|row| {
+        (row.sql_type == sql_type).then_some(row.oid)
+    })
+}
+
+fn sql_type_for_builtin_oid(oid: u32) -> Option<SqlType> {
+    builtin_type_rows()
+        .into_iter()
+        .find_map(|row| (row.oid == oid).then_some(row.sql_type))
+}
+
+fn infer_sql_type_from_value(value: &Value) -> Option<SqlType> {
+    match value {
+        Value::Null => None,
+        Value::Int16(_) => Some(SqlType::new(SqlTypeKind::Int2)),
+        Value::Int32(_) => Some(SqlType::new(SqlTypeKind::Int4)),
+        Value::Int64(_) => Some(SqlType::new(SqlTypeKind::Int8)),
+        Value::Float64(_) => Some(SqlType::new(SqlTypeKind::Float8)),
+        Value::Bool(_) => Some(SqlType::new(SqlTypeKind::Bool)),
+        Value::Text(_) | Value::TextRef(_, _) => Some(SqlType::new(SqlTypeKind::Text)),
+        Value::Numeric(_) => Some(SqlType::new(SqlTypeKind::Numeric)),
+        Value::Date(_) => Some(SqlType::new(SqlTypeKind::Date)),
+        Value::Time(_) => Some(SqlType::new(SqlTypeKind::Time)),
+        Value::TimeTz(_) => Some(SqlType::new(SqlTypeKind::TimeTz)),
+        Value::Timestamp(_) => Some(SqlType::new(SqlTypeKind::Timestamp)),
+        Value::TimestampTz(_) => Some(SqlType::new(SqlTypeKind::TimestampTz)),
+        Value::Bytea(_) => Some(SqlType::new(SqlTypeKind::Bytea)),
+        Value::Bit(_) => Some(SqlType::new(SqlTypeKind::VarBit)),
+        Value::PgArray(array) => anyarray_element_type(array).ok().map(SqlType::array_of),
+        Value::Array(_) => Some(SqlType::array_of(SqlType::new(SqlTypeKind::Text))),
+        Value::TsVector(_) => Some(SqlType::new(SqlTypeKind::TsVector)),
+        Value::TsQuery(_) => Some(SqlType::new(SqlTypeKind::TsQuery)),
+        Value::InternalChar(_) => Some(SqlType::new(SqlTypeKind::InternalChar)),
+        Value::Json(_) => Some(SqlType::new(SqlTypeKind::Json)),
+        Value::Jsonb(_) => Some(SqlType::new(SqlTypeKind::Jsonb)),
+        Value::JsonPath(_) => Some(SqlType::new(SqlTypeKind::JsonPath)),
+        Value::Point(_) => Some(SqlType::new(SqlTypeKind::Point)),
+        Value::Line(_) => Some(SqlType::new(SqlTypeKind::Line)),
+        Value::Lseg(_) => Some(SqlType::new(SqlTypeKind::Lseg)),
+        Value::Path(_) => Some(SqlType::new(SqlTypeKind::Path)),
+        Value::Box(_) => Some(SqlType::new(SqlTypeKind::Box)),
+        Value::Polygon(_) => Some(SqlType::new(SqlTypeKind::Polygon)),
+        Value::Circle(_) => Some(SqlType::new(SqlTypeKind::Circle)),
+    }
+}
+
 fn decode_array_element(element_type: SqlType, bytes: &[u8]) -> Result<Value, ExecError> {
     match element_type.kind {
+        SqlTypeKind::AnyArray => Err(ExecError::InvalidStorageValue {
+            column: "<array>".into(),
+            details: "anyarray cannot be used as a concrete array element type".into(),
+        }),
         SqlTypeKind::Int2 => {
             if bytes.len() != 2 {
                 return Err(ExecError::InvalidStorageValue {
@@ -1335,4 +1464,37 @@ fn array_text_needs_quotes(text: &str) -> bool {
         || text.chars().any(|ch| {
             ch.is_whitespace() || matches!(ch, '"' | '\\' | '{' | '}' | ',' | '\n' | '\r' | '\t')
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::catalog::catalog::column_desc;
+
+    #[test]
+    fn anyarray_value_roundtrips_through_tuple_storage() {
+        let desc = RelationDesc {
+            columns: vec![column_desc("v", SqlType::new(SqlTypeKind::AnyArray), true)],
+        };
+        let value = Value::PgArray(
+            ArrayValue::from_1d(vec![Value::Int32(1), Value::Int32(2)])
+                .with_element_type_oid(crate::include::catalog::INT4_TYPE_OID),
+        );
+
+        let tuple = tuple_from_values(&desc, std::slice::from_ref(&value)).unwrap();
+        let raw = tuple.deform(&desc.attribute_descs()).unwrap();
+        let decoded = decode_value(&desc.columns[0], raw[0]).unwrap();
+
+        assert_eq!(decoded, value);
+    }
+
+    #[test]
+    fn anyarray_payload_roundtrips_directly() {
+        let array = ArrayValue::from_1d(vec![Value::Text("a".into()), Value::Text("b".into())])
+            .with_element_type_oid(crate::include::catalog::TEXT_TYPE_OID);
+        let bytes = encode_anyarray_bytes(&array).unwrap();
+        let decoded = decode_anyarray_bytes(&bytes).unwrap();
+
+        assert_eq!(decoded, Value::PgArray(array));
+    }
 }

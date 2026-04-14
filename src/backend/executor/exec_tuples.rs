@@ -3,15 +3,13 @@
 
 use super::ExecError;
 use super::exec_expr::parse_numeric_text;
-use super::expr_casts::parse_text_array_literal_with_op;
 use super::expr_geometry::{decode_path_bytes, decode_polygon_bytes};
+use super::value_io::{decode_anyarray_bytes, decode_array_bytes};
 use super::value_io::missing_column_value;
 use crate::backend::executor::{decode_tsquery_bytes, decode_tsvector_bytes};
 use crate::include::access::htup::HEAP_NATTS_MASK;
 use crate::include::access::htup::{AttributeDesc, HEAP_HASNULL, SIZEOF_HEAP_TUPLE_HEADER};
-use crate::include::nodes::datum::{
-    ArrayDimension, ArrayValue, GeoBox, GeoCircle, GeoLine, GeoLseg, GeoPoint,
-};
+use crate::include::nodes::datum::{GeoBox, GeoCircle, GeoLine, GeoLseg, GeoPoint};
 use crate::include::nodes::execnodes::{RelationDesc, ScalarType, Value};
 
 /// A precomputed decode step for one column, eliminating per-tuple type
@@ -500,10 +498,13 @@ impl CompiledTupleDecoder {
                             }
                             ScalarType::Array(elem_ty) => {
                                 let _ = elem_ty;
-                                values.push(decode_array_value(
-                                    sql_type.element_type(),
-                                    bytes_slice,
-                                )?);
+                                values.push(if sql_type.kind
+                                    == crate::backend::parser::SqlTypeKind::AnyArray
+                                {
+                                    decode_anyarray_bytes(bytes_slice)?
+                                } else {
+                                    decode_array_bytes(sql_type.element_type(), bytes_slice)?
+                                });
                             }
                             _ => values.push(Value::Null),
                         }
@@ -582,7 +583,13 @@ impl CompiledTupleDecoder {
                             }
                             ScalarType::Array(elem_ty) => {
                                 let _ = elem_ty;
-                                values.push(decode_array_value(sql_type.element_type(), bytes)?);
+                                values.push(if sql_type.kind
+                                    == crate::backend::parser::SqlTypeKind::AnyArray
+                                {
+                                    decode_anyarray_bytes(bytes)?
+                                } else {
+                                    decode_array_bytes(sql_type.element_type(), bytes)?
+                                });
                             }
                             _ => values.push(Value::Null),
                         }
@@ -601,365 +608,5 @@ impl CompiledTupleDecoder {
             .get(index)
             .and_then(|value| value.clone())
             .unwrap_or(Value::Null)
-    }
-}
-
-fn decode_array_value(
-    element_type: crate::backend::parser::SqlType,
-    bytes: &[u8],
-) -> Result<Value, ExecError> {
-    if bytes.len() < 4 {
-        return Err(ExecError::InvalidStorageValue {
-            column: "<array>".into(),
-            details: "array payload too short".into(),
-        });
-    }
-    let ndim = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
-    let mut offset = 4usize;
-    let mut dimensions = Vec::with_capacity(ndim);
-    for _ in 0..ndim {
-        if offset + 8 > bytes.len() {
-            return Err(ExecError::InvalidStorageValue {
-                column: "<array>".into(),
-                details: "array dimension header truncated".into(),
-            });
-        }
-        let length = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
-        offset += 4;
-        let lower_bound = i32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
-        offset += 4;
-        dimensions.push(ArrayDimension {
-            lower_bound,
-            length,
-        });
-    }
-    if offset + 4 > bytes.len() {
-        return Err(ExecError::InvalidStorageValue {
-            column: "<array>".into(),
-            details: "array element count header truncated".into(),
-        });
-    }
-    let count = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
-    offset += 4;
-    let mut items = Vec::with_capacity(count);
-    for _ in 0..count {
-        if offset + 4 > bytes.len() {
-            return Err(ExecError::InvalidStorageValue {
-                column: "<array>".into(),
-                details: "array length header truncated".into(),
-            });
-        }
-        let len = i32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
-        offset += 4;
-        if len == -1 {
-            items.push(Value::Null);
-            continue;
-        }
-        let len = len as usize;
-        if offset + len > bytes.len() {
-            return Err(ExecError::InvalidStorageValue {
-                column: "<array>".into(),
-                details: "array element payload truncated".into(),
-            });
-        }
-        let text = unsafe { std::str::from_utf8_unchecked(&bytes[offset..offset + len]) };
-        items.push(
-            parse_text_array_literal_with_op(text, element_type, "array decode").unwrap_or_else(
-                |_| {
-                    decode_scalar_array_element(element_type, &bytes[offset..offset + len])
-                        .unwrap_or(Value::Null)
-                },
-            ),
-        );
-        offset += len;
-    }
-    Ok(Value::PgArray(ArrayValue::from_dimensions(
-        dimensions, items,
-    )))
-}
-
-fn decode_scalar_array_element(
-    element_type: crate::backend::parser::SqlType,
-    bytes: &[u8],
-) -> Result<Value, ExecError> {
-    match scalar_type_for_sql_type(element_type) {
-        ScalarType::Int16 => {
-            if bytes.len() != 2 {
-                return Err(ExecError::InvalidStorageValue {
-                    column: "<array>".into(),
-                    details: "int2 array element must be 2 bytes".into(),
-                });
-            }
-            Ok(Value::Int16(i16::from_le_bytes(bytes.try_into().unwrap())))
-        }
-        ScalarType::Int32 => {
-            if bytes.len() != 4 {
-                return Err(ExecError::InvalidStorageValue {
-                    column: "<array>".into(),
-                    details: "int4 array element must be 4 bytes".into(),
-                });
-            }
-            Ok(Value::Int32(i32::from_le_bytes(bytes.try_into().unwrap())))
-        }
-        ScalarType::Int64 => {
-            if bytes.len() != 8 {
-                return Err(ExecError::InvalidStorageValue {
-                    column: "<array>".into(),
-                    details: "int8 array element must be 8 bytes".into(),
-                });
-            }
-            Ok(Value::Int64(i64::from_le_bytes(bytes.try_into().unwrap())))
-        }
-        ScalarType::Date => {
-            if bytes.len() != 4 {
-                return Err(ExecError::InvalidStorageValue {
-                    column: "<array>".into(),
-                    details: "date array element must be 4 bytes".into(),
-                });
-            }
-            Ok(Value::Date(crate::include::nodes::datetime::DateADT(
-                i32::from_le_bytes(bytes.try_into().unwrap()),
-            )))
-        }
-        ScalarType::Time => {
-            if bytes.len() != 8 {
-                return Err(ExecError::InvalidStorageValue {
-                    column: "<array>".into(),
-                    details: "time array element must be 8 bytes".into(),
-                });
-            }
-            Ok(Value::Time(crate::include::nodes::datetime::TimeADT(
-                i64::from_le_bytes(bytes.try_into().unwrap()),
-            )))
-        }
-        ScalarType::TimeTz => {
-            if bytes.len() != 12 {
-                return Err(ExecError::InvalidStorageValue {
-                    column: "<array>".into(),
-                    details: "timetz array element must be 12 bytes".into(),
-                });
-            }
-            Ok(Value::TimeTz(crate::include::nodes::datetime::TimeTzADT {
-                time: crate::include::nodes::datetime::TimeADT(i64::from_le_bytes(
-                    bytes[0..8].try_into().unwrap(),
-                )),
-                offset_seconds: i32::from_le_bytes(bytes[8..12].try_into().unwrap()),
-            }))
-        }
-        ScalarType::Timestamp => {
-            if bytes.len() != 8 {
-                return Err(ExecError::InvalidStorageValue {
-                    column: "<array>".into(),
-                    details: "timestamp array element must be 8 bytes".into(),
-                });
-            }
-            Ok(Value::Timestamp(crate::include::nodes::datetime::TimestampADT(
-                i64::from_le_bytes(bytes.try_into().unwrap()),
-            )))
-        }
-        ScalarType::TimestampTz => {
-            if bytes.len() != 8 {
-                return Err(ExecError::InvalidStorageValue {
-                    column: "<array>".into(),
-                    details: "timestamptz array element must be 8 bytes".into(),
-                });
-            }
-            Ok(Value::TimestampTz(crate::include::nodes::datetime::TimestampTzADT(
-                i64::from_le_bytes(bytes.try_into().unwrap()),
-            )))
-        }
-        ScalarType::Float32 => {
-            if bytes.len() != 4 {
-                return Err(ExecError::InvalidStorageValue {
-                    column: "<array>".into(),
-                    details: "float4 array element must be 4 bytes".into(),
-                });
-            }
-            Ok(Value::Float64(
-                f32::from_le_bytes(bytes.try_into().unwrap()) as f64,
-            ))
-        }
-        ScalarType::Float64 => {
-            if bytes.len() != 8 {
-                return Err(ExecError::InvalidStorageValue {
-                    column: "<array>".into(),
-                    details: "float8 array element must be 8 bytes".into(),
-                });
-            }
-            Ok(Value::Float64(f64::from_le_bytes(
-                bytes.try_into().unwrap(),
-            )))
-        }
-        ScalarType::Point => {
-            if bytes.len() != 16 {
-                return Err(ExecError::InvalidStorageValue {
-                    column: "<array>".into(),
-                    details: "point array element must be 16 bytes".into(),
-                });
-            }
-            Ok(Value::Point(GeoPoint {
-                x: f64::from_le_bytes(bytes[0..8].try_into().unwrap()),
-                y: f64::from_le_bytes(bytes[8..16].try_into().unwrap()),
-            }))
-        }
-        ScalarType::Line => {
-            if bytes.len() != 24 {
-                return Err(ExecError::InvalidStorageValue {
-                    column: "<array>".into(),
-                    details: "line array element must be 24 bytes".into(),
-                });
-            }
-            Ok(Value::Line(GeoLine {
-                a: f64::from_le_bytes(bytes[0..8].try_into().unwrap()),
-                b: f64::from_le_bytes(bytes[8..16].try_into().unwrap()),
-                c: f64::from_le_bytes(bytes[16..24].try_into().unwrap()),
-            }))
-        }
-        ScalarType::Lseg => {
-            if bytes.len() != 32 {
-                return Err(ExecError::InvalidStorageValue {
-                    column: "<array>".into(),
-                    details: "lseg array element must be 32 bytes".into(),
-                });
-            }
-            Ok(Value::Lseg(GeoLseg {
-                p: [
-                    GeoPoint {
-                        x: f64::from_le_bytes(bytes[0..8].try_into().unwrap()),
-                        y: f64::from_le_bytes(bytes[8..16].try_into().unwrap()),
-                    },
-                    GeoPoint {
-                        x: f64::from_le_bytes(bytes[16..24].try_into().unwrap()),
-                        y: f64::from_le_bytes(bytes[24..32].try_into().unwrap()),
-                    },
-                ],
-            }))
-        }
-        ScalarType::Box => {
-            if bytes.len() != 32 {
-                return Err(ExecError::InvalidStorageValue {
-                    column: "<array>".into(),
-                    details: "box array element must be 32 bytes".into(),
-                });
-            }
-            Ok(Value::Box(GeoBox {
-                high: GeoPoint {
-                    x: f64::from_le_bytes(bytes[0..8].try_into().unwrap()),
-                    y: f64::from_le_bytes(bytes[8..16].try_into().unwrap()),
-                },
-                low: GeoPoint {
-                    x: f64::from_le_bytes(bytes[16..24].try_into().unwrap()),
-                    y: f64::from_le_bytes(bytes[24..32].try_into().unwrap()),
-                },
-            }))
-        }
-        ScalarType::Circle => {
-            if bytes.len() != 24 {
-                return Err(ExecError::InvalidStorageValue {
-                    column: "<array>".into(),
-                    details: "circle array element must be 24 bytes".into(),
-                });
-            }
-            Ok(Value::Circle(GeoCircle {
-                center: GeoPoint {
-                    x: f64::from_le_bytes(bytes[0..8].try_into().unwrap()),
-                    y: f64::from_le_bytes(bytes[8..16].try_into().unwrap()),
-                },
-                radius: f64::from_le_bytes(bytes[16..24].try_into().unwrap()),
-            }))
-        }
-        ScalarType::Numeric => Ok(Value::Numeric(
-            unsafe { std::str::from_utf8_unchecked(bytes) }.into(),
-        )),
-        ScalarType::BitString => {
-            if bytes.len() < 4 {
-                return Err(ExecError::InvalidStorageValue {
-                    column: "<array>".into(),
-                    details: "bit array element payload too short".into(),
-                });
-            }
-            let bit_len = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as i32;
-            Ok(Value::Bit(crate::include::nodes::datum::BitString::new(
-                bit_len,
-                bytes[4..].to_vec(),
-            )))
-        }
-        ScalarType::Bytea => Ok(Value::Bytea(bytes.to_vec())),
-        ScalarType::Json => Ok(Value::Json(
-            crate::pgrust::compact_string::CompactString::new(unsafe {
-                std::str::from_utf8_unchecked(bytes)
-            }),
-        )),
-        ScalarType::Jsonb => Ok(Value::Jsonb(bytes.to_vec())),
-        ScalarType::JsonPath => Ok(Value::JsonPath(
-            crate::pgrust::compact_string::CompactString::new(unsafe {
-                std::str::from_utf8_unchecked(bytes)
-            }),
-        )),
-        ScalarType::TsVector => Ok(Value::TsVector(decode_tsvector_bytes(bytes)?)),
-        ScalarType::TsQuery => Ok(Value::TsQuery(decode_tsquery_bytes(bytes)?)),
-        ScalarType::Bool => {
-            if bytes.len() != 1 {
-                return Err(ExecError::InvalidStorageValue {
-                    column: "<array>".into(),
-                    details: "bool array element must be 1 byte".into(),
-                });
-            }
-            Ok(Value::Bool(bytes[0] != 0))
-        }
-        ScalarType::Text => Ok(Value::Text(
-            crate::pgrust::compact_string::CompactString::new(unsafe {
-                std::str::from_utf8_unchecked(bytes)
-            }),
-        )),
-        ScalarType::Path => Ok(Value::Path(decode_path_bytes(bytes)?)),
-        ScalarType::Polygon => Ok(Value::Polygon(decode_polygon_bytes(bytes)?)),
-        ScalarType::Array(_) => unreachable!("array elements use the nested array sentinel"),
-    }
-}
-
-fn scalar_type_for_sql_type(sql_type: crate::backend::parser::SqlType) -> ScalarType {
-    use crate::backend::parser::SqlTypeKind;
-
-    if sql_type.is_array {
-        return ScalarType::Array(Box::new(scalar_type_for_sql_type(sql_type.element_type())));
-    }
-
-    match sql_type.kind {
-        SqlTypeKind::Bool => ScalarType::Bool,
-        SqlTypeKind::Bit | SqlTypeKind::VarBit => ScalarType::BitString,
-        SqlTypeKind::Bytea => ScalarType::Bytea,
-        SqlTypeKind::Point => ScalarType::Point,
-        SqlTypeKind::Lseg => ScalarType::Lseg,
-        SqlTypeKind::Path => ScalarType::Path,
-        SqlTypeKind::Line => ScalarType::Line,
-        SqlTypeKind::Box => ScalarType::Box,
-        SqlTypeKind::Polygon => ScalarType::Polygon,
-        SqlTypeKind::Circle => ScalarType::Circle,
-        SqlTypeKind::InternalChar
-        | SqlTypeKind::Char
-        | SqlTypeKind::Varchar
-        | SqlTypeKind::Name
-        | SqlTypeKind::Text => ScalarType::Text,
-        SqlTypeKind::Int2 => ScalarType::Int16,
-        SqlTypeKind::Int2Vector => ScalarType::Text,
-        SqlTypeKind::Int4 | SqlTypeKind::Oid => ScalarType::Int32,
-        SqlTypeKind::Int8 => ScalarType::Int64,
-        SqlTypeKind::OidVector => ScalarType::Text,
-        SqlTypeKind::Float4 => ScalarType::Float32,
-        SqlTypeKind::Float8 => ScalarType::Float64,
-        SqlTypeKind::Numeric => ScalarType::Numeric,
-        SqlTypeKind::Json => ScalarType::Json,
-        SqlTypeKind::Jsonb => ScalarType::Jsonb,
-        SqlTypeKind::JsonPath => ScalarType::JsonPath,
-        SqlTypeKind::TsVector => ScalarType::TsVector,
-        SqlTypeKind::TsQuery => ScalarType::TsQuery,
-        SqlTypeKind::RegConfig | SqlTypeKind::RegDictionary => ScalarType::Int32,
-        SqlTypeKind::Date => ScalarType::Date,
-        SqlTypeKind::Time => ScalarType::Time,
-        SqlTypeKind::TimeTz => ScalarType::TimeTz,
-        SqlTypeKind::Timestamp => ScalarType::Timestamp,
-        SqlTypeKind::TimestampTz => ScalarType::TimestampTz,
-        SqlTypeKind::PgNodeTree => ScalarType::Text,
     }
 }

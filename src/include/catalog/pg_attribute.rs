@@ -11,7 +11,7 @@ use crate::backend::parser::SqlType;
 use crate::backend::parser::SqlTypeKind;
 use crate::include::access::htup::{AttributeAlign, AttributeCompression, AttributeStorage};
 use crate::include::catalog::{
-    BIT_ARRAY_TYPE_OID, BIT_TYPE_OID, BOOL_ARRAY_TYPE_OID, BOOL_TYPE_OID, BOX_TYPE_OID,
+    ANYARRAYOID, BIT_ARRAY_TYPE_OID, BIT_TYPE_OID, BOOL_ARRAY_TYPE_OID, BOOL_TYPE_OID, BOX_TYPE_OID,
     BPCHAR_ARRAY_TYPE_OID, BPCHAR_TYPE_OID, BYTEA_ARRAY_TYPE_OID, BYTEA_TYPE_OID, CIRCLE_TYPE_OID,
     DATE_ARRAY_TYPE_OID, DATE_TYPE_OID,
     FLOAT4_ARRAY_TYPE_OID, FLOAT4_TYPE_OID, FLOAT8_ARRAY_TYPE_OID, FLOAT8_TYPE_OID,
@@ -187,6 +187,8 @@ fn attribute_rows_for_desc(relid: u32, desc: &RelationDesc) -> Vec<PgAttributeRo
 
 fn sql_type_oid(sql_type: SqlType) -> u32 {
     match (sql_type.kind, sql_type.is_array) {
+        (SqlTypeKind::AnyArray, false) => ANYARRAYOID,
+        (SqlTypeKind::AnyArray, true) => unreachable!("anyarray arrays are unsupported"),
         (SqlTypeKind::Bool, false) => BOOL_TYPE_OID,
         (SqlTypeKind::Bool, true) => BOOL_ARRAY_TYPE_OID,
         (SqlTypeKind::Bit, false) => BIT_TYPE_OID,
