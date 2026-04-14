@@ -782,7 +782,8 @@ pub(super) fn bind_from_item_with_ctes(
             }
         }
         FromItem::DerivedTable(select) => {
-            let (plan, _) = bind_select_query_with_outer(select, catalog, &[], None, ctes, expanded_views)?;
+            let (plan, _) =
+                bind_select_query_with_outer(select, catalog, &[], None, ctes, expanded_views)?;
             let bound = BoundFromPlan::Subquery(Box::new(plan));
             let desc = synthetic_desc_from_bound_from_plan(&bound);
             Ok((bound, scope_for_relation(None, &desc)))

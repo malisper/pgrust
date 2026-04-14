@@ -38,7 +38,9 @@ fn validate_view_shape(
             actual: format!("stale view definition for {display_name}"),
         });
     }
-    for (actual_column, stored_column) in actual_columns.into_iter().zip(relation.desc.columns.iter()) {
+    for (actual_column, stored_column) in
+        actual_columns.into_iter().zip(relation.desc.columns.iter())
+    {
         if !actual_column.name.eq_ignore_ascii_case(&stored_column.name)
             || actual_column.sql_type != stored_column.sql_type
         {
