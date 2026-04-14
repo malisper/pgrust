@@ -319,14 +319,16 @@ impl Database {
         use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
         use crate::backend::executor::executor_start;
 
-        let (plan, rels) = {
+        let (query_desc, rels) = {
             let visible_catalog =
                 self.lazy_catalog_lookup(client_id, txn_ctx, configured_search_path);
-            let plan = crate::backend::parser::pg_plan_query(select_stmt, &visible_catalog)?
-                .plan_tree;
+            let query_desc = crate::backend::executor::create_query_desc(
+                crate::backend::parser::pg_plan_query(select_stmt, &visible_catalog)?,
+                None,
+            );
             let mut rels = std::collections::BTreeSet::new();
-            collect_rels_from_plan(&plan, &mut rels);
-            (plan, rels.into_iter().collect::<Vec<_>>())
+            collect_rels_from_plan(&query_desc.planned_stmt.plan_tree, &mut rels);
+            (query_desc, rels.into_iter().collect::<Vec<_>>())
         };
 
         lock_relations(&self.table_locks, client_id, &rels);
@@ -335,9 +337,9 @@ impl Database {
             Some((xid, cid)) => (self.txns.read().snapshot_for_command(xid, cid)?, cid),
             None => (self.txns.read().snapshot(INVALID_TRANSACTION_ID)?, 0),
         };
-        let columns = plan.columns();
-        let column_names = plan.column_names();
-        let state = executor_start(plan);
+        let columns = query_desc.columns();
+        let column_names = query_desc.column_names();
+        let state = executor_start(query_desc.planned_stmt.plan_tree);
         let ctx = ExecutorContext {
             pool: std::sync::Arc::clone(&self.pool),
             txns: self.txns.clone(),

@@ -1,9 +1,10 @@
 use super::{
-    Catalog, ExecError, ExecutorContext, ParseError, Plan, PlannedStmt, Statement,
-    StatementResult, TransactionId, Value, bind_delete, bind_insert, bind_update, execute_analyze,
-    execute_create_index, execute_create_table, execute_delete, execute_drop_table,
-    execute_explain, execute_insert, execute_truncate_table, execute_update, execute_vacuum,
-    executor_start, parse_statement, pg_plan_query, pg_plan_values_query,
+    Catalog, ExecError, ExecutorContext, ParseError, Plan, PlannedStmt, QueryDesc, Statement,
+    StatementResult, TransactionId, Value, bind_delete, bind_insert, bind_update,
+    create_query_desc, execute_analyze, execute_create_index, execute_create_table,
+    execute_delete, execute_drop_table, execute_explain, execute_insert,
+    execute_truncate_table, execute_update, execute_vacuum, executor_start, parse_statement,
+    pg_plan_query, pg_plan_values_query,
 };
 use crate::backend::parser::CatalogLookup;
 use crate::pl::plpgsql::execute_do;
@@ -12,13 +13,16 @@ pub fn execute_planned_stmt(
     planned_stmt: PlannedStmt,
     ctx: &mut ExecutorContext,
 ) -> Result<StatementResult, ExecError> {
-    execute_plan(planned_stmt.plan_tree, ctx)
+    execute_query_desc(create_query_desc(planned_stmt, None), ctx)
 }
 
-pub fn execute_plan(plan: Plan, ctx: &mut ExecutorContext) -> Result<StatementResult, ExecError> {
-    let columns = plan.columns();
-    let column_names = plan.column_names();
-    let mut state = executor_start(plan);
+pub fn execute_query_desc(
+    query_desc: QueryDesc,
+    ctx: &mut ExecutorContext,
+) -> Result<StatementResult, ExecError> {
+    let columns = query_desc.columns();
+    let column_names = query_desc.column_names();
+    let mut state = executor_start(query_desc.planned_stmt.plan_tree);
     let mut rows = Vec::new();
     while let Some(slot) = state.exec_proc_node(ctx)? {
         let mut values = slot.values()?.iter().cloned().collect::<Vec<_>>();
@@ -32,6 +36,19 @@ pub fn execute_plan(plan: Plan, ctx: &mut ExecutorContext) -> Result<StatementRe
     })
 }
 
+pub fn execute_plan(plan: Plan, ctx: &mut ExecutorContext) -> Result<StatementResult, ExecError> {
+    execute_query_desc(
+        create_query_desc(
+            PlannedStmt {
+                command_type: crate::include::executor::execdesc::CommandType::Select,
+                plan_tree: plan,
+            },
+            None,
+        ),
+        ctx,
+    )
+}
+
 pub fn execute_sql(
     sql: &str,
     catalog: &mut Catalog,
@@ -39,11 +56,21 @@ pub fn execute_sql(
     xid: TransactionId,
 ) -> Result<StatementResult, ExecError> {
     let stmt = parse_statement(sql)?;
-    execute_statement(stmt, catalog, ctx, xid)
+    execute_statement_with_source(stmt, Some(sql), catalog, ctx, xid)
 }
 
 pub fn execute_statement(
     stmt: Statement,
+    catalog: &mut Catalog,
+    ctx: &mut ExecutorContext,
+    xid: TransactionId,
+) -> Result<StatementResult, ExecError> {
+    execute_statement_with_source(stmt, None, catalog, ctx, xid)
+}
+
+fn execute_statement_with_source(
+    stmt: Statement,
+    source_text: Option<&str>,
     catalog: &mut Catalog,
     ctx: &mut ExecutorContext,
     xid: TransactionId,
@@ -53,8 +80,17 @@ pub fn execute_statement(
     let result = match stmt {
         Statement::Do(stmt) => execute_do(&stmt),
         Statement::Explain(stmt) => execute_explain(stmt, catalog, ctx),
-        Statement::Select(stmt) => execute_planned_stmt(pg_plan_query(&stmt, catalog)?, ctx),
-        Statement::Values(stmt) => execute_planned_stmt(pg_plan_values_query(&stmt, catalog)?, ctx),
+        Statement::Select(stmt) => execute_query_desc(
+            create_query_desc(pg_plan_query(&stmt, catalog)?, source_text.map(str::to_string)),
+            ctx,
+        ),
+        Statement::Values(stmt) => execute_query_desc(
+            create_query_desc(
+                pg_plan_values_query(&stmt, catalog)?,
+                source_text.map(str::to_string),
+            ),
+            ctx,
+        ),
         Statement::Analyze(stmt) => execute_analyze(stmt, catalog),
         Statement::Show(_)
         | Statement::Set(_)

@@ -8,6 +8,7 @@ use crate::backend::parser::analyze::BoundSelectPlan;
 use crate::backend::parser::{BoundIndexRelation, CatalogLookup, SqlType, SqlTypeKind};
 use crate::include::catalog::{BTREE_AM_OID, PgStatisticRow};
 use crate::include::nodes::datum::ArrayValue;
+use crate::include::executor::execdesc::CommandType;
 use crate::include::nodes::pathnodes::{
     PlannerJoinExpr, PlannerOrderByEntry, PlannerPath, PlannerProjectSetTarget,
     PlannerTargetEntry,
@@ -76,6 +77,7 @@ pub(crate) fn standard_planner(
     catalog: &dyn CatalogLookup,
 ) -> PlannedStmt {
     PlannedStmt {
+        command_type: CommandType::Select,
         plan_tree: finalize_plan_subqueries(
             create_plan(optimize_path(PlannerPath::from_bound_select_plan(plan), catalog)),
             catalog,
