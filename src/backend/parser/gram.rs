@@ -53,6 +53,9 @@ fn parse_statement_with_options_inner(
     let sql = strip_sql_comments_preserving_layout(&sql);
     validate_unicode_string_literals(&sql, options)?;
     let sql = normalize_position_syntax_preserving_layout(&sql);
+    if let Some(stmt) = try_parse_domain_statement(&sql)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_unsupported_statement(&sql) {
         if matches!(stmt, Statement::Unsupported(UnsupportedStatement { feature: "ROLE management", .. })) {
             return Ok(stmt);
@@ -179,6 +182,121 @@ fn try_parse_unsupported_statement(sql: &str) -> Option<Statement> {
         sql: trimmed.into(),
         feature,
     }))
+}
+
+fn try_parse_domain_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if lowered.starts_with("create domain ") {
+        return build_create_domain_statement(trimmed).map(|stmt| Some(Statement::CreateDomain(stmt)));
+    }
+    if lowered.starts_with("drop domain ") {
+        return build_drop_domain_statement(trimmed).map(|stmt| Some(Statement::DropDomain(stmt)));
+    }
+    if lowered.starts_with("comment on domain ") {
+        return build_comment_on_domain_statement(trimmed)
+            .map(|stmt| Some(Statement::CommentOnDomain(stmt)));
+    }
+    Ok(None)
+}
+
+fn build_create_domain_statement(sql: &str) -> Result<CreateDomainStatement, ParseError> {
+    let tokens = sql.split_whitespace().collect::<Vec<_>>();
+    if tokens.len() < 4 {
+        return Err(ParseError::UnexpectedToken {
+            expected: "CREATE DOMAIN name [AS] type",
+            actual: sql.into(),
+        });
+    }
+    let domain_name = tokens[2];
+    let type_index = if tokens[3].eq_ignore_ascii_case("as") { 4 } else { 3 };
+    if type_index >= tokens.len() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "domain base type",
+            actual: sql.into(),
+        });
+    }
+    if type_index + 1 != tokens.len() {
+        return Err(ParseError::FeatureNotSupported(
+            "CREATE DOMAIN constraints/defaults are not supported yet".into(),
+        ));
+    }
+    Ok(CreateDomainStatement {
+        domain_name: domain_name.to_string(),
+        ty: parse_type_name(tokens[type_index])?,
+    })
+}
+
+fn build_drop_domain_statement(sql: &str) -> Result<DropDomainStatement, ParseError> {
+    let tokens = sql.split_whitespace().collect::<Vec<_>>();
+    let mut index = 2usize;
+    let mut if_exists = false;
+    if tokens.get(index).is_some_and(|tok| tok.eq_ignore_ascii_case("if")) {
+        if !tokens
+            .get(index + 1)
+            .zip(tokens.get(index + 2))
+            .is_some_and(|(a, b)| a.eq_ignore_ascii_case("exists") && !b.is_empty())
+        {
+            return Err(ParseError::UnexpectedToken {
+                expected: "DROP DOMAIN [IF EXISTS] name",
+                actual: sql.into(),
+            });
+        }
+        if_exists = true;
+        index += 2;
+    }
+    let Some(name) = tokens.get(index) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "domain name",
+            actual: sql.into(),
+        });
+    };
+    let cascade = tokens
+        .get(index + 1)
+        .is_some_and(|tok| tok.eq_ignore_ascii_case("cascade"));
+    if tokens.len() > index + 1 && !cascade && !tokens[index + 1].eq_ignore_ascii_case("restrict") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "CASCADE, RESTRICT, or end of statement",
+            actual: tokens[index + 1].into(),
+        });
+    }
+    if tokens.len() > index + 2 {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of statement",
+            actual: sql.into(),
+        });
+    }
+    Ok(DropDomainStatement {
+        if_exists,
+        domain_name: (*name).to_string(),
+        cascade,
+    })
+}
+
+fn build_comment_on_domain_statement(sql: &str) -> Result<CommentOnDomainStatement, ParseError> {
+    let lower = sql.to_ascii_lowercase();
+    let Some(is_offset) = lower.find(" is ") else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "COMMENT ON DOMAIN name IS ...",
+            actual: sql.into(),
+        });
+    };
+    let object = sql["comment on domain ".len()..is_offset].trim();
+    let value = sql[is_offset + 4..].trim();
+    let comment = if value.eq_ignore_ascii_case("null") {
+        None
+    } else if value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2 {
+        Some(value[1..value.len() - 1].replace("''", "'"))
+    } else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "quoted string or NULL",
+            actual: value.into(),
+        });
+    };
+    Ok(CommentOnDomainStatement {
+        domain_name: object.to_string(),
+        comment,
+    })
 }
 
 #[cfg(test)]

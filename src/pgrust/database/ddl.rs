@@ -6,6 +6,7 @@ use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::{ExecError, RelationDesc};
 use crate::backend::parser::{
     BoundRelation, CatalogLookup, ColumnDef, ParseError, derive_literal_default_value,
+    resolve_raw_type_name,
 };
 use crate::backend::utils::cache::syscache::{
     ensure_class_rows, ensure_depend_rows, ensure_namespace_rows, ensure_rewrite_rows,
@@ -114,6 +115,7 @@ pub(super) fn reject_relation_with_dependent_views(
 pub(super) fn validate_alter_table_add_column(
     desc: &RelationDesc,
     column: &ColumnDef,
+    catalog: &dyn CatalogLookup,
 ) -> Result<crate::backend::executor::ColumnDesc, ExecError> {
     if !column.nullable {
         return Err(ExecError::Parse(ParseError::UnexpectedToken {
@@ -150,15 +152,7 @@ pub(super) fn validate_alter_table_add_column(
         }));
     }
 
-    let sql_type = match &column.ty {
-        crate::backend::parser::RawTypeName::Builtin(sql_type) => *sql_type,
-        crate::backend::parser::RawTypeName::Record => {
-            return Err(ExecError::Parse(ParseError::UnsupportedType("record".into())));
-        }
-        crate::backend::parser::RawTypeName::Named { name } => {
-            return Err(ExecError::Parse(ParseError::UnsupportedType(name.clone())));
-        }
-    };
+    let sql_type = resolve_raw_type_name(&column.ty, catalog).map_err(ExecError::Parse)?;
     let mut desc = column_desc(column.name.clone(), sql_type, true);
     desc.default_expr = column.default_expr.clone();
     if let Some(sql) = desc.default_expr.as_deref() {

@@ -4,7 +4,7 @@ use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::SqlTypeKind;
 
-use super::{CreateTableStatement, ParseError, TableConstraint};
+use super::{CatalogLookup, CreateTableStatement, ParseError, TableConstraint, resolve_raw_type_name};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexBackedConstraintAction {
@@ -19,11 +19,17 @@ pub struct LoweredCreateTable {
     pub constraint_actions: Vec<IndexBackedConstraintAction>,
 }
 
-pub fn create_relation_desc(stmt: &CreateTableStatement) -> Result<RelationDesc, ParseError> {
-    Ok(lower_create_table(stmt)?.relation_desc)
+pub fn create_relation_desc(
+    stmt: &CreateTableStatement,
+    catalog: &dyn CatalogLookup,
+) -> Result<RelationDesc, ParseError> {
+    Ok(lower_create_table(stmt, catalog)?.relation_desc)
 }
 
-pub fn lower_create_table(stmt: &CreateTableStatement) -> Result<LoweredCreateTable, ParseError> {
+pub fn lower_create_table(
+    stmt: &CreateTableStatement,
+    catalog: &dyn CatalogLookup,
+) -> Result<LoweredCreateTable, ParseError> {
     let columns = stmt.columns().cloned().collect::<Vec<_>>();
     let column_lookup = columns
         .iter()
@@ -118,15 +124,7 @@ pub fn lower_create_table(stmt: &CreateTableStatement) -> Result<LoweredCreateTa
         columns: columns
             .iter()
             .map(|column| {
-                let sql_type = match &column.ty {
-                    crate::backend::parser::RawTypeName::Builtin(sql_type) => *sql_type,
-                    crate::backend::parser::RawTypeName::Record => {
-                        return Err(ParseError::UnsupportedType("record".into()));
-                    }
-                    crate::backend::parser::RawTypeName::Named { name } => {
-                        return Err(ParseError::UnsupportedType(name.clone()));
-                    }
-                };
+                let sql_type = resolve_raw_type_name(&column.ty, catalog)?;
                 if sql_type.kind == SqlTypeKind::AnyArray {
                     return Err(ParseError::UnsupportedType("anyarray".into()));
                 }
@@ -201,7 +199,7 @@ mod tests {
         };
 
         assert_eq!(
-            lower_create_table(&stmt),
+            lower_create_table(&stmt, &crate::backend::parser::analyze::LiteralDefaultCatalog),
             Err(ParseError::UnsupportedType("anyarray".into()))
         );
     }
