@@ -1,6 +1,6 @@
 use crate::RelFileLocator;
 use crate::backend::executor::{
-    Expr, Plan, PlanEstimate, ProjectSetTarget, QueryColumn, RelationDesc, ToastRelationRef,
+    Expr, Plan, PlanEstimate, QueryColumn, RelationDesc, ToastRelationRef,
 };
 use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
 use crate::include::access::relscan::ScanDirection;
@@ -147,6 +147,17 @@ pub struct PlannerOrderByEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlannerProjectSetTarget {
+    Scalar(PlannerTargetEntry),
+    Set {
+        name: String,
+        call: SetReturningCall,
+        sql_type: crate::backend::parser::SqlType,
+        column_index: usize,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlannerPath {
     Result {
         plan_info: PlanEstimate,
@@ -207,7 +218,7 @@ pub enum PlannerPath {
     },
     Values {
         plan_info: PlanEstimate,
-        rows: Vec<Vec<Expr>>,
+        rows: Vec<Vec<PlannerJoinExpr>>,
         output_columns: Vec<QueryColumn>,
     },
     FunctionScan {
@@ -217,7 +228,7 @@ pub enum PlannerPath {
     ProjectSet {
         plan_info: PlanEstimate,
         input: Box<PlannerPath>,
-        targets: Vec<ProjectSetTarget>,
+        targets: Vec<PlannerProjectSetTarget>,
     },
 }
 
@@ -345,7 +356,10 @@ impl PlannerPath {
                 output_columns,
             } => Self::Values {
                 plan_info,
-                rows,
+                rows: rows
+                    .iter()
+                    .map(|row| row.iter().map(PlannerJoinExpr::from_input_expr).collect())
+                    .collect(),
                 output_columns,
             },
             Plan::FunctionScan { plan_info, call } => Self::FunctionScan { plan_info, call },
@@ -356,7 +370,10 @@ impl PlannerPath {
             } => Self::ProjectSet {
                 plan_info,
                 input: Box::new(Self::from_plan(*input)),
-                targets,
+                targets: targets
+                    .into_iter()
+                    .map(PlannerProjectSetTarget::from_project_set_target)
+                    .collect(),
             },
         }
     }
@@ -482,7 +499,10 @@ impl PlannerPath {
                 output_columns,
             } => Plan::Values {
                 plan_info,
-                rows,
+                rows: rows
+                    .into_iter()
+                    .map(|row| row.into_iter().map(PlannerJoinExpr::into_input_expr).collect())
+                    .collect(),
                 output_columns,
             },
             Self::FunctionScan { plan_info, call } => Plan::FunctionScan { plan_info, call },
@@ -493,7 +513,10 @@ impl PlannerPath {
             } => Plan::ProjectSet {
                 plan_info,
                 input: Box::new(input.into_plan()),
-                targets,
+                targets: targets
+                    .into_iter()
+                    .map(PlannerProjectSetTarget::into_project_set_target)
+                    .collect(),
             },
         }
     }
@@ -547,11 +570,11 @@ impl PlannerPath {
             Self::ProjectSet { targets, .. } => targets
                 .iter()
                 .map(|target| match target {
-                    ProjectSetTarget::Scalar(entry) => QueryColumn {
+                    PlannerProjectSetTarget::Scalar(entry) => QueryColumn {
                         name: entry.name.clone(),
                         sql_type: entry.sql_type,
                     },
-                    ProjectSetTarget::Set { name, sql_type, .. } => QueryColumn {
+                    PlannerProjectSetTarget::Set { name, sql_type, .. } => QueryColumn {
                         name: name.clone(),
                         sql_type: *sql_type,
                     },
@@ -593,6 +616,48 @@ impl PlannerOrderByEntry {
             expr: self.expr.into_input_expr(),
             descending: self.descending,
             nulls_first: self.nulls_first,
+        }
+    }
+}
+
+impl PlannerProjectSetTarget {
+    fn from_project_set_target(target: crate::include::nodes::plannodes::ProjectSetTarget) -> Self {
+        match target {
+            crate::include::nodes::plannodes::ProjectSetTarget::Scalar(entry) => {
+                Self::Scalar(PlannerTargetEntry::from_target_entry(entry))
+            }
+            crate::include::nodes::plannodes::ProjectSetTarget::Set {
+                name,
+                call,
+                sql_type,
+                column_index,
+            } => Self::Set {
+                name,
+                call,
+                sql_type,
+                column_index,
+            },
+        }
+    }
+
+    fn into_project_set_target(self) -> crate::include::nodes::plannodes::ProjectSetTarget {
+        match self {
+            Self::Scalar(entry) => {
+                crate::include::nodes::plannodes::ProjectSetTarget::Scalar(
+                    entry.into_target_entry(),
+                )
+            }
+            Self::Set {
+                name,
+                call,
+                sql_type,
+                column_index,
+            } => crate::include::nodes::plannodes::ProjectSetTarget::Set {
+                name,
+                call,
+                sql_type,
+                column_index,
+            },
         }
     }
 }
