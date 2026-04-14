@@ -4,6 +4,7 @@ mod agg_output_special;
 mod coerce;
 mod create_table;
 mod expr;
+mod from_ir;
 mod functions;
 mod geometry;
 mod infer;
@@ -35,6 +36,7 @@ use agg_output::*;
 use coerce::*;
 pub use create_table::*;
 use expr::*;
+use from_ir::*;
 use functions::*;
 use geometry::*;
 use infer::*;
@@ -608,7 +610,7 @@ fn build_values_plan_with_outer(
     )?;
     let mut visible_ctes = local_ctes;
     visible_ctes.extend_from_slice(outer_ctes);
-    let (mut plan, scope) = bind_values_rows(
+    let (base, scope) = bind_values_rows(
         &stmt.rows,
         None,
         catalog,
@@ -616,15 +618,8 @@ fn build_values_plan_with_outer(
         grouped_outer.as_ref(),
         &visible_ctes,
     )?;
-    let output_columns = match &plan {
-        Plan::Values { output_columns, .. } => output_columns.clone(),
-        other => {
-            return Err(ParseError::UnexpectedToken {
-                expected: "VALUES plan",
-                actual: format!("{other:?}"),
-            });
-        }
-    };
+    let output_columns = base.columns();
+    let mut plan = base.into_plan();
     let targets = output_columns
         .iter()
         .enumerate()
@@ -697,13 +692,9 @@ fn build_plan_with_outer(
             expanded_views,
         )?
     } else {
-        (
-            Plan::Result {
-                plan_info: crate::backend::executor::PlanEstimate::default(),
-            },
-            empty_scope(),
-        )
+        (BoundFromPlan::Result, empty_scope())
     };
+    let base = base.into_plan();
 
     if let Some(predicate) = &stmt.where_clause {
         if expr_contains_agg(predicate) {

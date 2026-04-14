@@ -33,7 +33,9 @@ fn validate_view_shape(
 ) -> Result<(), ParseError> {
     let actual_columns = plan.columns();
     let actual_names = plan.column_names();
-    if actual_columns.len() != relation.desc.columns.len() || actual_names.len() != relation.desc.columns.len() {
+    if actual_columns.len() != relation.desc.columns.len()
+        || actual_names.len() != relation.desc.columns.len()
+    {
         return Err(ParseError::UnexpectedToken {
             expected: "view query width matching stored view columns",
             actual: format!("stale view definition for {display_name}"),
@@ -64,7 +66,7 @@ pub(super) fn bind_view_reference(
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
     expanded_views: &[u32],
-) -> Result<(Plan, BoundScope), ParseError> {
+) -> Result<(BoundFromPlan, BoundScope), ParseError> {
     let display_name = view_display_name(relation_name);
     if expanded_views.contains(&relation.relation_oid) {
         return Err(ParseError::RecursiveView(display_name));
@@ -88,5 +90,8 @@ pub(super) fn bind_view_reference(
         &next_views,
     )?;
     validate_view_shape(&plan, relation, &display_name)?;
-    Ok((plan, scope_for_relation(Some(relation_name), &relation.desc)))
+    Ok((
+        BoundFromPlan::Preplanned(Box::new(plan)),
+        scope_for_relation(Some(relation_name), &relation.desc),
+    ))
 }
