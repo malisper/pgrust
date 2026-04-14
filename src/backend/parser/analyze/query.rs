@@ -1,5 +1,5 @@
 use super::*;
-use crate::include::nodes::primnodes::SubLink;
+use crate::include::nodes::primnodes::{BoolExpr, FuncExpr, OpExpr, ScalarArrayOpExpr, SubLink};
 use crate::include::executor::execdesc::CommandType;
 use crate::include::nodes::parsenodes::{JoinTreeNode, Query, RangeTblEntry, RangeTblEntryKind};
 use crate::include::nodes::primnodes::{ExprArraySubscript, JoinType, Var};
@@ -347,8 +347,39 @@ fn shift_rte_rtindexes(entry: RangeTblEntry, offset: usize) -> RangeTblEntry {
 }
 
 fn shift_expr_rtindexes(expr: Expr, offset: usize) -> Expr {
-    let expr = expr.into_legacy_shape();
-    let shifted = match expr {
+    match expr {
+        Expr::Op(op) => Expr::Op(Box::new(OpExpr {
+            args: op
+                .args
+                .into_iter()
+                .map(|arg| shift_expr_rtindexes(arg, offset))
+                .collect(),
+            ..*op
+        })),
+        Expr::Bool(bool_expr) => Expr::Bool(Box::new(BoolExpr {
+            args: bool_expr
+                .args
+                .into_iter()
+                .map(|arg| shift_expr_rtindexes(arg, offset))
+                .collect(),
+            ..*bool_expr
+        })),
+        Expr::Func(func) => Expr::Func(Box::new(FuncExpr {
+            args: func
+                .args
+                .into_iter()
+                .map(|arg| shift_expr_rtindexes(arg, offset))
+                .collect(),
+            ..*func
+        })),
+        Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(ScalarArrayOpExpr {
+            left: Box::new(shift_expr_rtindexes(*saop.left, offset)),
+            right: Box::new(shift_expr_rtindexes(*saop.right, offset)),
+            ..*saop
+        })),
+        other => {
+            let expr = other.into_legacy_shape();
+            let shifted = match expr {
         Expr::Var(mut var) => {
             if var.varlevelsup == 0 {
                 var.varno += offset;
@@ -588,12 +619,14 @@ fn shift_expr_rtindexes(expr: Expr, offset: usize) -> Expr {
                 .collect(),
             func_variadic,
         },
-        Expr::Op(_)
-        | Expr::Bool(_)
-        | Expr::Func(_)
-        | Expr::ScalarArrayOp(_) => unreachable!("semantic nodes normalized above"),
-    };
-    shifted.into_pg_semantic_shape()
+                Expr::Op(_)
+                | Expr::Bool(_)
+                | Expr::Func(_)
+                | Expr::ScalarArrayOp(_) => unreachable!("semantic nodes normalized above"),
+            };
+            shifted.into_pg_semantic_shape()
+        }
+    }
 }
 
 pub(super) fn identity_target_list(columns: &[QueryColumn], output_exprs: &[Expr]) -> Vec<TargetEntry> {
@@ -785,8 +818,39 @@ pub(super) fn rewrite_agg_accums(
 }
 
 pub(super) fn rewrite_expr_columns(expr: Expr, output_exprs: &[Expr]) -> Expr {
-    let expr = expr.into_legacy_shape();
-    let rewritten = match expr {
+    match expr {
+        Expr::Op(op) => Expr::Op(Box::new(OpExpr {
+            args: op
+                .args
+                .into_iter()
+                .map(|arg| rewrite_expr_columns(arg, output_exprs))
+                .collect(),
+            ..*op
+        })),
+        Expr::Bool(bool_expr) => Expr::Bool(Box::new(BoolExpr {
+            args: bool_expr
+                .args
+                .into_iter()
+                .map(|arg| rewrite_expr_columns(arg, output_exprs))
+                .collect(),
+            ..*bool_expr
+        })),
+        Expr::Func(func) => Expr::Func(Box::new(FuncExpr {
+            args: func
+                .args
+                .into_iter()
+                .map(|arg| rewrite_expr_columns(arg, output_exprs))
+                .collect(),
+            ..*func
+        })),
+        Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(ScalarArrayOpExpr {
+            left: Box::new(rewrite_expr_columns(*saop.left, output_exprs)),
+            right: Box::new(rewrite_expr_columns(*saop.right, output_exprs)),
+            ..*saop
+        })),
+        other => {
+            let expr = other.into_legacy_shape();
+            let rewritten = match expr {
         Expr::Column(index) => output_exprs
             .get(index)
             .cloned()
@@ -1032,9 +1096,11 @@ pub(super) fn rewrite_expr_columns(expr: Expr, output_exprs: &[Expr]) -> Expr {
         | Expr::CurrentTimestamp { .. }
         | Expr::LocalTime { .. }
         | Expr::LocalTimestamp { .. } => expr,
-        Expr::Op(_) | Expr::Bool(_) | Expr::Func(_) | Expr::ScalarArrayOp(_) => {
-            unreachable!("legacy rewrite should not see PG-shaped Expr")
+                Expr::Op(_) | Expr::Bool(_) | Expr::Func(_) | Expr::ScalarArrayOp(_) => {
+                    unreachable!("legacy rewrite should not see PG-shaped Expr")
+                }
+            };
+            rewritten.into_pg_semantic_shape()
         }
-    };
-    rewritten.into_pg_semantic_shape()
+    }
 }

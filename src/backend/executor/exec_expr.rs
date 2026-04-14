@@ -61,9 +61,12 @@ use super::{ExecError, ExecutorContext, exec_next, executor_start};
 use crate::backend::executor::jsonb::{
     JsonbValue, jsonb_contains, jsonb_exists, jsonb_exists_all, jsonb_exists_any, jsonb_from_value,
 };
+use crate::include::catalog::builtin_scalar_function_for_proc_oid;
 use crate::backend::parser::{ParseError, SqlType, SqlTypeKind, SubqueryComparisonOp};
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue};
-use crate::include::nodes::primnodes::SubLinkType;
+use crate::include::nodes::primnodes::{
+    BoolExpr, BoolExprType, FuncExpr, OpExpr, OpExprKind, ScalarArrayOpExpr, SubLinkType,
+};
 
 mod arrays;
 mod subquery;
@@ -80,15 +83,193 @@ use subquery::{eval_exists_subquery, eval_quantified_subquery, eval_scalar_subqu
 
 extern crate rand;
 
+fn malformed_expr_error(kind: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("malformed {kind} expression").into(),
+        detail: None,
+        hint: None,
+        sqlstate: "XX000",
+    }
+}
+
+fn builtin_function_for_expr(funcid: u32) -> Result<BuiltinScalarFunction, ExecError> {
+    builtin_scalar_function_for_proc_oid(funcid).ok_or_else(|| ExecError::DetailedError {
+        message: format!("no builtin implementation for function oid {funcid}").into(),
+        detail: None,
+        hint: None,
+        sqlstate: "XX000",
+    })
+}
+
+fn eval_op_expr(
+    op: &OpExpr,
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    match (op.op, op.args.as_slice()) {
+        (OpExprKind::UnaryPlus, [inner]) => eval_expr(inner, slot, ctx),
+        (OpExprKind::Negate, [inner]) => negate_value(eval_expr(inner, slot, ctx)?),
+        (OpExprKind::BitNot, [inner]) => bitwise_not_value(eval_expr(inner, slot, ctx)?),
+        (OpExprKind::Add, [left, right]) => {
+            add_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
+        }
+        (OpExprKind::Sub, [left, right]) => {
+            sub_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
+        }
+        (OpExprKind::BitAnd, [left, right]) => {
+            bitwise_and_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
+        }
+        (OpExprKind::BitOr, [left, right]) => {
+            bitwise_or_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
+        }
+        (OpExprKind::BitXor, [left, right]) => {
+            bitwise_xor_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
+        }
+        (OpExprKind::Shl, [left, right]) => {
+            shift_left_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
+        }
+        (OpExprKind::Shr, [left, right]) => {
+            shift_right_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
+        }
+        (OpExprKind::Mul, [left, right]) => {
+            mul_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
+        }
+        (OpExprKind::Div, [left, right]) => {
+            div_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
+        }
+        (OpExprKind::Mod, [left, right]) => {
+            mod_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
+        }
+        (OpExprKind::Concat, [left, right]) => {
+            concat_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
+        }
+        (OpExprKind::Eq, [left, right]) => compare_values(
+            "=",
+            eval_expr(left, slot, ctx)?,
+            eval_expr(right, slot, ctx)?,
+        ),
+        (OpExprKind::NotEq, [left, right]) => {
+            not_equal_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
+        }
+        (OpExprKind::Lt, [left, right]) => order_values(
+            "<",
+            eval_expr(left, slot, ctx)?,
+            eval_expr(right, slot, ctx)?,
+        ),
+        (OpExprKind::LtEq, [left, right]) => order_values(
+            "<=",
+            eval_expr(left, slot, ctx)?,
+            eval_expr(right, slot, ctx)?,
+        ),
+        (OpExprKind::Gt, [left, right]) => order_values(
+            ">",
+            eval_expr(left, slot, ctx)?,
+            eval_expr(right, slot, ctx)?,
+        ),
+        (OpExprKind::GtEq, [left, right]) => order_values(
+            ">=",
+            eval_expr(left, slot, ctx)?,
+            eval_expr(right, slot, ctx)?,
+        ),
+        (OpExprKind::RegexMatch, [left, right]) => {
+            let text = eval_expr(left, slot, ctx)?;
+            let pattern = eval_expr(right, slot, ctx)?;
+            eval_regex_match_operator(&text, &pattern)
+        }
+        (OpExprKind::ArrayOverlap, [left, right]) => {
+            eval_array_overlap(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
+        }
+        (OpExprKind::JsonbContains, [left, right]) => {
+            eval_jsonb_contains(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
+        }
+        (OpExprKind::JsonbContained, [left, right]) => {
+            eval_jsonb_contained(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
+        }
+        (OpExprKind::JsonbExists, [left, right]) => {
+            eval_jsonb_exists(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
+        }
+        (OpExprKind::JsonbExistsAny, [left, right]) => {
+            eval_jsonb_exists_any(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
+        }
+        (OpExprKind::JsonbExistsAll, [left, right]) => {
+            eval_jsonb_exists_all(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
+        }
+        (OpExprKind::JsonbPathExists, [left, right]) => {
+            eval_jsonpath_operator(left, right, false, slot, ctx)
+        }
+        (OpExprKind::JsonbPathMatch, [left, right]) => {
+            eval_jsonpath_operator(left, right, true, slot, ctx)
+        }
+        (OpExprKind::JsonGet, [left, right]) => eval_json_get(left, right, false, slot, ctx),
+        (OpExprKind::JsonGetText, [left, right]) => eval_json_get(left, right, true, slot, ctx),
+        (OpExprKind::JsonPath, [left, right]) => eval_json_path(left, right, false, slot, ctx),
+        (OpExprKind::JsonPathText, [left, right]) => {
+            eval_json_path(left, right, true, slot, ctx)
+        }
+        _ => Err(malformed_expr_error("operator")),
+    }
+}
+
+fn eval_bool_expr(
+    bool_expr: &BoolExpr,
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    match bool_expr.boolop {
+        BoolExprType::And => {
+            let mut result = Value::Bool(true);
+            for arg in &bool_expr.args {
+                result = eval_and(result, eval_expr(arg, slot, ctx)?)?;
+            }
+            Ok(result)
+        }
+        BoolExprType::Or => {
+            let mut result = Value::Bool(false);
+            for arg in &bool_expr.args {
+                result = eval_or(result, eval_expr(arg, slot, ctx)?)?;
+            }
+            Ok(result)
+        }
+        BoolExprType::Not => match bool_expr.args.as_slice() {
+            [inner] => match eval_expr(inner, slot, ctx)? {
+                Value::Bool(value) => Ok(Value::Bool(!value)),
+                Value::Null => Ok(Value::Null),
+                other => Err(ExecError::NonBoolQual(other)),
+            },
+            _ => Err(malformed_expr_error("boolean")),
+        },
+    }
+}
+
+fn eval_func_expr(
+    func: &FuncExpr,
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    let builtin = builtin_function_for_expr(func.funcid)?;
+    eval_builtin_function(builtin, &func.args, func.funcvariadic, slot, ctx)
+}
+
+fn eval_scalar_array_op_expr(
+    saop: &ScalarArrayOpExpr,
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    let left_value = eval_expr(&saop.left, slot, ctx)?;
+    let right_value = eval_expr(&saop.right, slot, ctx)?;
+    eval_quantified_array(&left_value, saop.op, !saop.use_or, &right_value)
+}
+
 pub fn eval_expr(
     expr: &Expr,
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
     match expr {
-        Expr::Op(_) | Expr::Bool(_) | Expr::Func(_) | Expr::ScalarArrayOp(_) => {
-            eval_expr(&expr.clone().into_legacy_shape(), slot, ctx)
-        }
+        Expr::Op(op) => eval_op_expr(op, slot, ctx),
+        Expr::Bool(bool_expr) => eval_bool_expr(bool_expr, slot, ctx),
+        Expr::Func(func) => eval_func_expr(func, slot, ctx),
+        Expr::ScalarArrayOp(saop) => eval_scalar_array_op_expr(saop, slot, ctx),
         Expr::SubLink(_) => Err(ExecError::DetailedError {
             message: "unplanned subquery reached executor".into(),
             detail: Some("the planner should have lowered SubLink nodes before execution".into()),
@@ -352,8 +533,125 @@ pub fn eval_expr(
 
 pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, ExecError> {
     match expr {
-        Expr::Op(_) | Expr::Bool(_) | Expr::Func(_) | Expr::ScalarArrayOp(_) => {
-            eval_plpgsql_expr(&expr.clone().into_legacy_shape(), slot)
+        Expr::Op(op) => match (op.op, op.args.as_slice()) {
+            (OpExprKind::UnaryPlus, [inner]) => eval_plpgsql_expr(inner, slot),
+            (OpExprKind::Negate, [inner]) => negate_value(eval_plpgsql_expr(inner, slot)?),
+            (OpExprKind::BitNot, [inner]) => bitwise_not_value(eval_plpgsql_expr(inner, slot)?),
+            (OpExprKind::Add, [left, right]) => add_values(
+                eval_plpgsql_expr(left, slot)?,
+                eval_plpgsql_expr(right, slot)?,
+            ),
+            (OpExprKind::Sub, [left, right]) => sub_values(
+                eval_plpgsql_expr(left, slot)?,
+                eval_plpgsql_expr(right, slot)?,
+            ),
+            (OpExprKind::BitAnd, [left, right]) => bitwise_and_values(
+                eval_plpgsql_expr(left, slot)?,
+                eval_plpgsql_expr(right, slot)?,
+            ),
+            (OpExprKind::BitOr, [left, right]) => bitwise_or_values(
+                eval_plpgsql_expr(left, slot)?,
+                eval_plpgsql_expr(right, slot)?,
+            ),
+            (OpExprKind::BitXor, [left, right]) => bitwise_xor_values(
+                eval_plpgsql_expr(left, slot)?,
+                eval_plpgsql_expr(right, slot)?,
+            ),
+            (OpExprKind::Shl, [left, right]) => shift_left_values(
+                eval_plpgsql_expr(left, slot)?,
+                eval_plpgsql_expr(right, slot)?,
+            ),
+            (OpExprKind::Shr, [left, right]) => shift_right_values(
+                eval_plpgsql_expr(left, slot)?,
+                eval_plpgsql_expr(right, slot)?,
+            ),
+            (OpExprKind::Mul, [left, right]) => mul_values(
+                eval_plpgsql_expr(left, slot)?,
+                eval_plpgsql_expr(right, slot)?,
+            ),
+            (OpExprKind::Div, [left, right]) => div_values(
+                eval_plpgsql_expr(left, slot)?,
+                eval_plpgsql_expr(right, slot)?,
+            ),
+            (OpExprKind::Mod, [left, right]) => mod_values(
+                eval_plpgsql_expr(left, slot)?,
+                eval_plpgsql_expr(right, slot)?,
+            ),
+            (OpExprKind::Concat, [left, right]) => concat_values(
+                eval_plpgsql_expr(left, slot)?,
+                eval_plpgsql_expr(right, slot)?,
+            ),
+            (OpExprKind::Eq, [left, right]) => compare_values(
+                "=",
+                eval_plpgsql_expr(left, slot)?,
+                eval_plpgsql_expr(right, slot)?,
+            ),
+            (OpExprKind::NotEq, [left, right]) => not_equal_values(
+                eval_plpgsql_expr(left, slot)?,
+                eval_plpgsql_expr(right, slot)?,
+            ),
+            (OpExprKind::Lt, [left, right]) => order_values(
+                "<",
+                eval_plpgsql_expr(left, slot)?,
+                eval_plpgsql_expr(right, slot)?,
+            ),
+            (OpExprKind::LtEq, [left, right]) => order_values(
+                "<=",
+                eval_plpgsql_expr(left, slot)?,
+                eval_plpgsql_expr(right, slot)?,
+            ),
+            (OpExprKind::Gt, [left, right]) => order_values(
+                ">",
+                eval_plpgsql_expr(left, slot)?,
+                eval_plpgsql_expr(right, slot)?,
+            ),
+            (OpExprKind::GtEq, [left, right]) => order_values(
+                ">=",
+                eval_plpgsql_expr(left, slot)?,
+                eval_plpgsql_expr(right, slot)?,
+            ),
+            (OpExprKind::RegexMatch, [left, right]) => {
+                let text = eval_plpgsql_expr(left, slot)?;
+                let pattern = eval_plpgsql_expr(right, slot)?;
+                eval_regex_match_operator(&text, &pattern)
+            }
+            _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "plpgsql expression without subqueries or SQL statements",
+                actual: format!("{expr:?}"),
+            })),
+        },
+        Expr::Bool(bool_expr) => match bool_expr.boolop {
+            BoolExprType::And => {
+                let mut result = Value::Bool(true);
+                for arg in &bool_expr.args {
+                    result = eval_and(result, eval_plpgsql_expr(arg, slot)?)?;
+                }
+                Ok(result)
+            }
+            BoolExprType::Or => {
+                let mut result = Value::Bool(false);
+                for arg in &bool_expr.args {
+                    result = eval_or(result, eval_plpgsql_expr(arg, slot)?)?;
+                }
+                Ok(result)
+            }
+            BoolExprType::Not => match bool_expr.args.as_slice() {
+                [inner] => match eval_plpgsql_expr(inner, slot)? {
+                    Value::Bool(value) => Ok(Value::Bool(!value)),
+                    Value::Null => Ok(Value::Null),
+                    other => Err(ExecError::NonBoolQual(other)),
+                },
+                _ => Err(malformed_expr_error("boolean")),
+            },
+        },
+        Expr::Func(func) => {
+            let builtin = builtin_function_for_expr(func.funcid)?;
+            eval_plpgsql_builtin_function(builtin, &func.args, func.funcvariadic, slot)
+        }
+        Expr::ScalarArrayOp(saop) => {
+            let left_value = eval_plpgsql_expr(&saop.left, slot)?;
+            let right_value = eval_plpgsql_expr(&saop.right, slot)?;
+            eval_quantified_array(&left_value, saop.op, !saop.use_or, &right_value)
         }
         Expr::SubLink(_) | Expr::SubPlan(_) => Err(ExecError::DetailedError {
             message: "subqueries are not supported in PL/pgSQL expression evaluation".into(),

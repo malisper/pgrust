@@ -49,7 +49,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
 ) -> Result<Expr, ParseError> {
-    Ok(match expr {
+    Ok((match expr {
         SqlExpr::Column(name) => {
             match resolve_column_with_outer(scope, outer_scopes, name, grouped_outer)? {
                 ResolvedColumn::Local(index) => Expr::Column(index),
@@ -1235,6 +1235,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             precision: *precision,
         },
     })
+    .into_pg_semantic_shape())
 }
 
 fn bind_coalesce_call(

@@ -22,6 +22,7 @@ pub(super) fn bind_agg_output_expr(
         agg_list,
         n_keys,
     )
+    .map(Expr::into_pg_semantic_shape)
 }
 
 pub(super) fn bind_agg_output_expr_in_clause(

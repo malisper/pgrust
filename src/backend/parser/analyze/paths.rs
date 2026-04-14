@@ -177,6 +177,18 @@ fn flatten_and_conjuncts(expr: &Expr) -> Vec<Expr> {
             out.extend(flatten_and_conjuncts(right));
             out
         }
+        Expr::Bool(bool_expr)
+            if matches!(
+                bool_expr.boolop,
+                crate::include::nodes::primnodes::BoolExprType::And
+            ) =>
+        {
+            let mut out = Vec::new();
+            for arg in &bool_expr.args {
+                out.extend(flatten_and_conjuncts(arg));
+            }
+            out
+        }
         other => vec![other.clone()],
     }
 }
@@ -191,6 +203,36 @@ fn indexable_qual(expr: &Expr) -> Option<IndexableQual> {
     }
 
     match expr {
+        Expr::Op(op) => match op.op {
+            crate::include::nodes::primnodes::OpExprKind::Eq => {
+                match op.args.as_slice() {
+                    [Expr::Column(column), Expr::Const(value)] => mk(*column, 3, value),
+                    [Expr::Const(value), Expr::Column(column)] => mk(*column, 3, value),
+                    _ => None,
+                }
+            }
+            crate::include::nodes::primnodes::OpExprKind::Lt => match op.args.as_slice() {
+                [Expr::Column(column), Expr::Const(value)] => mk(*column, 1, value),
+                [Expr::Const(value), Expr::Column(column)] => mk(*column, 5, value),
+                _ => None,
+            },
+            crate::include::nodes::primnodes::OpExprKind::LtEq => match op.args.as_slice() {
+                [Expr::Column(column), Expr::Const(value)] => mk(*column, 2, value),
+                [Expr::Const(value), Expr::Column(column)] => mk(*column, 4, value),
+                _ => None,
+            },
+            crate::include::nodes::primnodes::OpExprKind::Gt => match op.args.as_slice() {
+                [Expr::Column(column), Expr::Const(value)] => mk(*column, 5, value),
+                [Expr::Const(value), Expr::Column(column)] => mk(*column, 1, value),
+                _ => None,
+            },
+            crate::include::nodes::primnodes::OpExprKind::GtEq => match op.args.as_slice() {
+                [Expr::Column(column), Expr::Const(value)] => mk(*column, 4, value),
+                [Expr::Const(value), Expr::Column(column)] => mk(*column, 2, value),
+                _ => None,
+            },
+            _ => None,
+        },
         Expr::Eq(left, right) => match (&**left, &**right) {
             (Expr::Column(column), Expr::Const(value)) => mk(*column, 3, value),
             (Expr::Const(value), Expr::Column(column)) => mk(*column, 3, value),
