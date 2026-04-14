@@ -651,12 +651,13 @@ fn expand_star_targets(
         .iter()
         .enumerate()
         .filter(|(_, column)| {
-            relation.is_none_or(|relation_name| {
-                column
-                    .relation_names
-                    .iter()
-                    .any(|visible| visible.eq_ignore_ascii_case(relation_name))
-            })
+            !column.hidden
+                && relation.is_none_or(|relation_name| {
+                    column
+                        .relation_names
+                        .iter()
+                        .any(|visible| visible.eq_ignore_ascii_case(relation_name))
+                })
         })
         .map(|(index, column)| {
             TargetEntry::new(
@@ -668,7 +669,16 @@ fn expand_star_targets(
         })
         .collect::<Vec<_>>();
 
-    if entries.is_empty() {
+    let relation_exists = relation.is_some_and(|relation_name| {
+        scope.columns.iter().any(|column| {
+            column
+                .relation_names
+                .iter()
+                .any(|visible| visible.eq_ignore_ascii_case(relation_name))
+        })
+    });
+
+    if entries.is_empty() && relation.is_some() && !relation_exists {
         return Err(ParseError::UnknownColumn(
             relation
                 .map(|name| format!("{name}.*"))

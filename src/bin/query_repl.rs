@@ -467,6 +467,12 @@ fn run_statement(
                 stmt.table_name, stmt.new_table_name
             ),
         ))),
+        Statement::AlterTableDropColumn(stmt) => Err(ExecError::Parse(
+            ParseError::FeatureNotSupported(format!(
+                "ALTER TABLE DROP COLUMN in query_repl: {}.{}",
+                stmt.table_name, stmt.column_name
+            )),
+        )),
         Statement::Unsupported(stmt) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
             format!("{}: {}", stmt.feature, stmt.sql),
         ))),

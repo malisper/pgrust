@@ -123,6 +123,10 @@ fn execute_statement_with_source(
             expected: "ALTER TABLE ADD COLUMN handled by database/session layer",
             actual: "ALTER TABLE ADD COLUMN".into(),
         })),
+        Statement::AlterTableDropColumn(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "ALTER TABLE DROP COLUMN handled by database/session layer",
+            actual: "ALTER TABLE DROP COLUMN".into(),
+        })),
         Statement::CommentOnTable(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "COMMENT ON TABLE handled by database/session layer",
             actual: "COMMENT ON TABLE".into(),
@@ -178,7 +182,8 @@ pub fn execute_readonly_statement(
         | Statement::Set(_)
         | Statement::Reset(_)
         | Statement::AlterTableSet(_)
-        | Statement::AlterTableAddColumn(_) => Ok(StatementResult::AffectedRows(0)),
+        | Statement::AlterTableAddColumn(_)
+        | Statement::AlterTableDropColumn(_) => Ok(StatementResult::AffectedRows(0)),
         Statement::AlterTableRename(_) => Ok(StatementResult::AffectedRows(0)),
         Statement::Unsupported(stmt) => Err(unsupported_statement_error(&stmt)),
         Statement::CommentOnTable(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {

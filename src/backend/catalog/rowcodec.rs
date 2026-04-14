@@ -512,9 +512,9 @@ pub(crate) fn pg_tablespace_row_from_values(
 pub(crate) fn pg_attribute_row_from_values(
     values: Vec<Value>,
 ) -> Result<PgAttributeRow, CatalogError> {
-    let attalign = expect_char(&values[7], "attalign")?;
-    let attstorage = expect_char(&values[8], "attstorage")?;
-    let attcompression = match &values[9] {
+    let attalign = expect_char(&values[8], "attalign")?;
+    let attstorage = expect_char(&values[9], "attstorage")?;
+    let attcompression = match &values[10] {
         Value::Text(text) if text.is_empty() => '\0',
         other => expect_char(other, "attcompression")?,
     };
@@ -525,14 +525,15 @@ pub(crate) fn pg_attribute_row_from_values(
         attlen: expect_int16(&values[3])?,
         attnum: expect_int16(&values[4])?,
         attnotnull: expect_bool(&values[5])?,
-        atttypmod: expect_int32(&values[6])?,
+        attisdropped: expect_bool(&values[6])?,
+        atttypmod: expect_int32(&values[7])?,
         attalign: AttributeAlign::from_char(attalign)
             .ok_or(CatalogError::Corrupt("unknown attalign"))?,
         attstorage: AttributeStorage::from_char(attstorage)
             .ok_or(CatalogError::Corrupt("unknown attstorage"))?,
         attcompression: AttributeCompression::from_char(attcompression)
             .ok_or(CatalogError::Corrupt("unknown attcompression"))?,
-        attstattarget: expect_int16(&values[10])?,
+        attstattarget: expect_int16(&values[11])?,
         sql_type: SqlType::new(SqlTypeKind::Text),
     })
 }
@@ -1008,6 +1009,7 @@ fn pg_attribute_row_values(row: PgAttributeRow) -> Vec<Value> {
         Value::Int16(row.attlen),
         Value::Int16(row.attnum),
         Value::Bool(row.attnotnull),
+        Value::Bool(row.attisdropped),
         Value::Int32(row.atttypmod),
         Value::InternalChar(row.attalign.as_char() as u8),
         Value::InternalChar(row.attstorage.as_char() as u8),

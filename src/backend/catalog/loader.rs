@@ -187,6 +187,7 @@ pub(crate) fn catalog_from_physical_rows(
                 desc.storage.attstorage = attr.attstorage;
                 desc.storage.attcompression = attr.attcompression;
                 desc.attstattarget = attr.attstattarget;
+                desc.dropped = attr.attisdropped;
                 if let Some(attrdef) = attrdefs_by_key.get(&(row.oid, attr.attnum)) {
                     desc.attrdef_oid = Some(attrdef.oid);
                     desc.default_expr = Some(attrdef.adbin.clone());

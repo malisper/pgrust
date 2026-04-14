@@ -99,6 +99,7 @@ impl RelCache {
                     desc.storage.attalign = attr.attalign;
                     desc.storage.attstorage = attr.attstorage;
                     desc.storage.attcompression = attr.attcompression;
+                    desc.dropped = attr.attisdropped;
                     if let Some(attrdef) = catcache.attrdef_by_relid_attnum(class.oid, attr.attnum)
                     {
                         desc.attrdef_oid = Some(attrdef.oid);

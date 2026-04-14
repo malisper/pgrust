@@ -15,6 +15,13 @@ use crate::include::catalog::{
     PUBLIC_NAMESPACE_OID,
 };
 
+pub(super) fn is_system_column_name(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "tableoid" | "ctid" | "xmin" | "xmax" | "cmin" | "cmax"
+    )
+}
+
 pub(super) fn lookup_heap_relation_for_ddl(
     catalog: &dyn CatalogLookup,
     name: &str,
@@ -126,10 +133,7 @@ pub(super) fn validate_alter_table_add_column(
             actual: "UNIQUE".into(),
         }));
     }
-    if matches!(
-        column.name.to_ascii_lowercase().as_str(),
-        "tableoid" | "ctid" | "xmin" | "xmax" | "cmin" | "cmax"
-    ) {
+    if is_system_column_name(&column.name) {
         return Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "non-system column name",
             actual: column.name.clone(),

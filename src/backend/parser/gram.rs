@@ -348,6 +348,9 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::alter_table_add_column_stmt => Ok(Statement::AlterTableAddColumn(
             build_alter_table_add_column(inner)?,
         )),
+        Rule::alter_table_drop_column_stmt => Ok(Statement::AlterTableDropColumn(
+            build_alter_table_drop_column(inner)?,
+        )),
         Rule::alter_table_rename_stmt => {
             Ok(Statement::AlterTableRename(build_alter_table_rename(inner)?))
         }
@@ -1877,6 +1880,19 @@ fn build_alter_table_add_column(
     Ok(AlterTableAddColumnStatement {
         table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
         column: column.ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
+fn build_alter_table_drop_column(
+    pair: Pair<'_, Rule>,
+) -> Result<AlterTableDropColumnStatement, ParseError> {
+    let mut parts = pair
+        .into_inner()
+        .filter(|part| part.as_rule() == Rule::identifier)
+        .map(build_identifier);
+    Ok(AlterTableDropColumnStatement {
+        table_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
+        column_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
     })
 }
 
