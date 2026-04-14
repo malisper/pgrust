@@ -25,7 +25,7 @@ pub(crate) struct GroupedOuterScope {
 #[derive(Debug, Clone)]
 pub(crate) struct BoundCte {
     pub(crate) name: String,
-    pub(crate) plan: Plan,
+    pub(crate) plan: BoundSelectPlan,
     pub(crate) desc: RelationDesc,
 }
 
@@ -327,7 +327,7 @@ pub(super) fn bind_from_item_with_ctes(
         FromItem::Table { name } => {
             if let Some(cte) = ctes.iter().find(|cte| cte.name.eq_ignore_ascii_case(name)) {
                 return Ok((
-                    BoundFromPlan::Preplanned(Box::new(cte.plan.clone())),
+                    BoundFromPlan::Subquery(Box::new(cte.plan.clone())),
                     scope_for_relation(Some(name), &cte.desc),
                 ));
             }
@@ -782,8 +782,8 @@ pub(super) fn bind_from_item_with_ctes(
             }
         }
         FromItem::DerivedTable(select) => {
-            let plan = build_plan_with_outer(select, catalog, &[], None, ctes, expanded_views)?;
-            let bound = BoundFromPlan::Preplanned(Box::new(plan));
+            let (plan, _) = bind_select_query_with_outer(select, catalog, &[], None, ctes, expanded_views)?;
+            let bound = BoundFromPlan::Subquery(Box::new(plan));
             let desc = synthetic_desc_from_bound_from_plan(&bound);
             Ok((bound, scope_for_relation(None, &desc)))
         }

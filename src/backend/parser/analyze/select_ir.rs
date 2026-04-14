@@ -86,4 +86,34 @@ impl BoundSelectPlan {
             },
         }
     }
+
+    pub(super) fn columns(&self) -> Vec<QueryColumn> {
+        match self {
+            Self::From(plan) => plan.columns(),
+            Self::Filter { input, .. }
+            | Self::OrderBy { input, .. }
+            | Self::Limit { input, .. } => input.columns(),
+            Self::Aggregate { output_columns, .. } => output_columns.clone(),
+            Self::Projection { targets, .. } => targets
+                .iter()
+                .map(|target| QueryColumn {
+                    name: target.name.clone(),
+                    sql_type: target.sql_type,
+                })
+                .collect(),
+            Self::ProjectSet { targets, .. } => targets
+                .iter()
+                .map(|target| match target {
+                    ProjectSetTarget::Scalar(entry) => QueryColumn {
+                        name: entry.name.clone(),
+                        sql_type: entry.sql_type,
+                    },
+                    ProjectSetTarget::Set { name, sql_type, .. } => QueryColumn {
+                        name: name.clone(),
+                        sql_type: *sql_type,
+                    },
+                })
+                .collect(),
+        }
+    }
 }
