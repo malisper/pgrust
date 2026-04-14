@@ -162,6 +162,19 @@ impl RelOptInfo {
             .and_then(|index| self.pathlist.get(index))
     }
 
+    pub fn cheapest_path_satisfying<F>(&self, predicate: F) -> Option<&Path>
+    where
+        F: Fn(&Path) -> bool,
+    {
+        self.pathlist.iter().filter(|path| predicate(path)).min_by(|left, right| {
+            left.plan_info()
+                .total_cost
+                .as_f64()
+                .partial_cmp(&right.plan_info().total_cost.as_f64())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+    }
+
     pub fn from_rte(rtindex: usize, rte: &RangeTblEntry) -> Self {
         Self::new(
             vec![rtindex],
