@@ -1776,6 +1776,70 @@ fn explain_three_way_inner_join_can_build_smaller_join_first() {
 }
 
 #[test]
+fn explain_join_order_by_can_reuse_ordered_outer_path() {
+    let base = temp_dir("explain_join_ordered_outer_path");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table big_items (id int4 not null, note text)")
+        .unwrap();
+    db.execute(1, "create table small_items (id int4 not null)")
+        .unwrap();
+
+    for id in 0..400 {
+        db.execute(
+            1,
+            &format!("insert into big_items values ({}, 'big{id}')", id % 4),
+        )
+        .unwrap();
+    }
+    for id in 0..4 {
+        db.execute(1, &format!("insert into small_items values ({id})"))
+            .unwrap();
+    }
+
+    db.execute(1, "analyze big_items").unwrap();
+    db.execute(1, "analyze small_items").unwrap();
+
+    let lines = explain_lines(
+        &db,
+        1,
+        "select small_items.id \
+         from big_items join small_items on big_items.id = small_items.id \
+         order by small_items.id limit 5",
+    );
+    let nested_loop_pos = lines
+        .iter()
+        .position(|line| line.trim_start().starts_with("Nested Loop  "))
+        .unwrap();
+    let sort_positions = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| line.trim_start().starts_with("Sort  ").then_some(index))
+        .collect::<Vec<_>>();
+    assert!(
+        sort_positions.len() == 1 && sort_positions[0] > nested_loop_pos,
+        "expected planner to avoid a final sort above the join by reusing ordered outer path, got {lines:?}"
+    );
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select small_items.id \
+             from big_items join small_items on big_items.id = small_items.id \
+             order by small_items.id limit 5",
+        ),
+        vec![
+            vec![Value::Int32(0)],
+            vec![Value::Int32(0)],
+            vec![Value::Int32(0)],
+            vec![Value::Int32(0)],
+            vec![Value::Int32(0)],
+        ]
+    );
+}
+
+#[test]
 fn left_join_rhs_boundary_stays_legal() {
     let base = temp_dir("left_join_rhs_boundary");
     let db = Database::open(&base, 16).unwrap();
