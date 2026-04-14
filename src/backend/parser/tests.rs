@@ -478,13 +478,13 @@ fn parse_alter_table_set_statement() {
 }
 
 #[test]
-fn parse_unsupported_alter_table_statement_into_placeholder() {
+fn parse_alter_table_rename_statement() {
     let stmt = parse_statement("alter table items rename to items_new").unwrap();
     assert_eq!(
         stmt,
-        Statement::Unsupported(UnsupportedStatement {
-            sql: "alter table items rename to items_new".into(),
-            feature: "ALTER TABLE form",
+        Statement::AlterTableRename(AlterTableRenameStatement {
+            table_name: "items".into(),
+            new_table_name: "items_new".into(),
         })
     );
 }

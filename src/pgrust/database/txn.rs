@@ -111,6 +111,14 @@ impl Database {
                         namespace.generation = namespace.generation.saturating_add(1);
                     }
                 }
+                TempMutationEffect::Rename { old_name, new_name } => {
+                    if let Some(namespace) = namespaces.get_mut(&client_id)
+                        && let Some(entry) = namespace.tables.remove(new_name)
+                    {
+                        namespace.tables.insert(old_name.clone(), entry);
+                        namespace.generation = namespace.generation.saturating_add(1);
+                    }
+                }
             }
         }
         drop(namespaces);

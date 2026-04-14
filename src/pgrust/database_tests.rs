@@ -1542,6 +1542,120 @@ fn alter_table_add_column_rejects_unsupported_forms() {
 }
 
 #[test]
+fn alter_table_rename_updates_name_and_rolls_back() {
+    let base = temp_dir("alter_table_rename_txn");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table items (id int4 not null)")
+        .unwrap();
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "alter table items rename to renamed_items")
+        .unwrap();
+
+    match session.execute(&db, "select count(*) from renamed_items").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(0)]]);
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+    match session.execute(&db, "select count(*) from items") {
+        Err(ExecError::Parse(ParseError::UnknownTable(name))) if name == "items" => {}
+        other => panic!("expected renamed table to hide old name, got {other:?}"),
+    }
+
+    session.execute(&db, "rollback").unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from items"),
+        vec![vec![Value::Int64(0)]]
+    );
+    match db.execute(1, "select count(*) from renamed_items") {
+        Err(ExecError::Parse(ParseError::UnknownTable(name))) if name == "renamed_items" => {}
+        other => panic!("expected rollback to restore old name, got {other:?}"),
+    }
+}
+
+#[test]
+fn alter_table_rename_unmasks_permanent_table_after_temp_rename() {
+    let base = temp_dir("alter_table_rename_temp_shadow");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table items (regtable int4)")
+        .unwrap();
+    session
+        .execute(&db, "create temp table items (attmptable int4)")
+        .unwrap();
+
+    session
+        .execute(&db, "alter table items rename to items_temp")
+        .unwrap();
+    match session.execute(&db, "select count(*) from items").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(0)]]);
+        }
+        other => panic!("expected permanent table after temp rename, got {other:?}"),
+    }
+    match session.execute(&db, "select count(*) from items_temp").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(0)]]);
+        }
+        other => panic!("expected renamed temp table lookup, got {other:?}"),
+    }
+
+    session
+        .execute(&db, "alter table items rename to items_perm")
+        .unwrap();
+    match session.execute(&db, "select count(*) from items") {
+        Err(ExecError::Parse(ParseError::UnknownTable(name))) if name == "items" => {}
+        other => panic!("expected old permanent name to disappear, got {other:?}"),
+    }
+    match session.execute(&db, "select count(*) from items_perm").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(0)]]);
+        }
+        other => panic!("expected renamed permanent table lookup, got {other:?}"),
+    }
+}
+
+#[test]
+fn alter_table_rename_temp_table_rolls_back() {
+    let base = temp_dir("alter_table_rename_temp_txn");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create temp table items (id int4 not null)")
+        .unwrap();
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "alter table items rename to renamed_items")
+        .unwrap();
+    match session.execute(&db, "select count(*) from renamed_items").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(0)]]);
+        }
+        other => panic!("expected renamed temp table lookup, got {other:?}"),
+    }
+    session.execute(&db, "rollback").unwrap();
+
+    match session.execute(&db, "select count(*) from items").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(0)]]);
+        }
+        other => panic!("expected temp rename rollback to restore old name, got {other:?}"),
+    }
+    match session.execute(&db, "select count(*) from renamed_items") {
+        Err(ExecError::Parse(ParseError::UnknownTable(name))) if name == "renamed_items" => {}
+        other => panic!("expected rolled-back temp rename to hide new name, got {other:?}"),
+    }
+}
+
+#[test]
 fn create_index_builds_ready_valid_btree_and_explain_uses_it() {
     let base = temp_dir("btree_index_scan_explain");
     let db = Database::open(&base, 16).unwrap();
