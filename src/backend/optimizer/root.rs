@@ -1,6 +1,8 @@
 use crate::include::nodes::parsenodes::{JoinTreeNode, Query, RangeTblEntry, RangeTblEntryKind};
 use crate::include::nodes::pathnodes::{PathTarget, PlannerInfo, RelOptInfo};
-use crate::include::nodes::primnodes::{Aggref, Expr, ProjectSetTarget, SetReturningCall, TargetEntry, Var};
+use crate::include::nodes::primnodes::{
+    Aggref, Expr, ProjectSetTarget, SetReturningCall, TargetEntry, Var,
+};
 
 use super::joininfo::build_special_join_info;
 use super::pathnodes::expr_sql_type;
@@ -65,10 +67,15 @@ pub(super) fn build_projection_targets_for_pathtarget(target: &PathTarget) -> Ve
 
 pub(super) fn build_simple_rel_array(rtable: &[RangeTblEntry]) -> Vec<Option<RelOptInfo>> {
     let mut simple_rel_array = vec![None];
-    simple_rel_array.extend(rtable.iter().enumerate().map(|(index, rte)| match &rte.kind {
-        RangeTblEntryKind::Join { .. } => None,
-        _ => Some(RelOptInfo::from_rte(index + 1, rte)),
-    }));
+    simple_rel_array.extend(
+        rtable
+            .iter()
+            .enumerate()
+            .map(|(index, rte)| match &rte.kind {
+                RangeTblEntryKind::Join { .. } => None,
+                _ => Some(RelOptInfo::from_rte(index + 1, rte)),
+            }),
+    );
     simple_rel_array
 }
 
@@ -364,9 +371,15 @@ fn collect_query_outer_refs(query: &Query, levelsup: usize, exprs: &mut Vec<Expr
                     }
                 }
             }
-            RangeTblEntryKind::Function { call } => collect_set_returning_call_outer_refs(call, levelsup, exprs),
-            RangeTblEntryKind::Subquery { query } => collect_query_outer_refs(query, levelsup + 1, exprs),
-            RangeTblEntryKind::Result | RangeTblEntryKind::Relation { .. } | RangeTblEntryKind::Join { .. } => {}
+            RangeTblEntryKind::Function { call } => {
+                collect_set_returning_call_outer_refs(call, levelsup, exprs)
+            }
+            RangeTblEntryKind::Subquery { query } => {
+                collect_query_outer_refs(query, levelsup + 1, exprs)
+            }
+            RangeTblEntryKind::Result
+            | RangeTblEntryKind::Relation { .. }
+            | RangeTblEntryKind::Join { .. } => {}
         }
     }
 }
@@ -374,7 +387,9 @@ fn collect_query_outer_refs(query: &Query, levelsup: usize, exprs: &mut Vec<Expr
 fn collect_jointree_outer_refs(node: &JoinTreeNode, levelsup: usize, exprs: &mut Vec<Expr>) {
     match node {
         JoinTreeNode::RangeTblRef(_) => {}
-        JoinTreeNode::JoinExpr { left, right, quals, .. } => {
+        JoinTreeNode::JoinExpr {
+            left, right, quals, ..
+        } => {
             collect_jointree_outer_refs(left, levelsup, exprs);
             collect_jointree_outer_refs(right, levelsup, exprs);
             collect_query_outer_refs_expr(quals, levelsup, exprs);
@@ -382,10 +397,18 @@ fn collect_jointree_outer_refs(node: &JoinTreeNode, levelsup: usize, exprs: &mut
     }
 }
 
-fn collect_project_set_outer_refs(target: &ProjectSetTarget, levelsup: usize, exprs: &mut Vec<Expr>) {
+fn collect_project_set_outer_refs(
+    target: &ProjectSetTarget,
+    levelsup: usize,
+    exprs: &mut Vec<Expr>,
+) {
     match target {
-        ProjectSetTarget::Scalar(entry) => collect_query_outer_refs_expr(&entry.expr, levelsup, exprs),
-        ProjectSetTarget::Set { call, .. } => collect_set_returning_call_outer_refs(call, levelsup, exprs),
+        ProjectSetTarget::Scalar(entry) => {
+            collect_query_outer_refs_expr(&entry.expr, levelsup, exprs)
+        }
+        ProjectSetTarget::Set { call, .. } => {
+            collect_set_returning_call_outer_refs(call, levelsup, exprs)
+        }
     }
 }
 
@@ -395,7 +418,9 @@ fn collect_set_returning_call_outer_refs(
     exprs: &mut Vec<Expr>,
 ) {
     match call {
-        SetReturningCall::GenerateSeries { start, stop, step, .. } => {
+        SetReturningCall::GenerateSeries {
+            start, stop, step, ..
+        } => {
             collect_query_outer_refs_expr(start, levelsup, exprs);
             collect_query_outer_refs_expr(stop, levelsup, exprs);
             collect_query_outer_refs_expr(step, levelsup, exprs);
@@ -420,7 +445,11 @@ fn collect_query_outer_refs_expr(expr: &Expr, levelsup: usize, exprs: &mut Vec<E
                 ..*var
             }),
         ),
-        Expr::Var(_) | Expr::OuterColumn { .. } | Expr::Column(_) | Expr::Const(_) | Expr::Random => {}
+        Expr::Var(_)
+        | Expr::OuterColumn { .. }
+        | Expr::Column(_)
+        | Expr::Const(_)
+        | Expr::Random => {}
         Expr::CurrentDate
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }

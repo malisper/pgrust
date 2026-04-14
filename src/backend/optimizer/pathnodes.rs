@@ -5,9 +5,9 @@ use crate::include::nodes::datum::Value;
 use crate::include::nodes::pathnodes::{Path, PathKey};
 use crate::include::nodes::plannodes::{Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
-    AggAccum, Aggref, BoolExpr, Expr, ExprArraySubscript, FuncExpr, JoinType, OpExpr,
-    OrderByEntry, ProjectSetTarget, QueryColumn, ScalarArrayOpExpr, SetReturningCall,
-    SubLinkType, TargetEntry, Var,
+    AggAccum, Aggref, BoolExpr, Expr, ExprArraySubscript, FuncExpr, JoinType, OpExpr, OrderByEntry,
+    ProjectSetTarget, QueryColumn, ScalarArrayOpExpr, SetReturningCall, SubLinkType, TargetEntry,
+    Var,
 };
 
 // :HACK: Planner-generated slot Vars still share the same Var identity space as parse-time
@@ -381,7 +381,11 @@ fn slot_var(slot_id: usize, attno: usize, vartype: SqlType) -> Expr {
     })
 }
 
-fn project_pathkeys(slot_id: usize, targets: &[TargetEntry], input_pathkeys: &[PathKey]) -> Vec<PathKey> {
+fn project_pathkeys(
+    slot_id: usize,
+    targets: &[TargetEntry],
+    input_pathkeys: &[PathKey],
+) -> Vec<PathKey> {
     input_pathkeys
         .iter()
         .map(|key| {
@@ -751,21 +755,31 @@ fn rewrite_semantic_expr_for_input_path(expr: Expr, path: &Path, layout: &[Expr]
                 .collect(),
             ..*func
         })),
-        Expr::SubLink(sublink) => Expr::SubLink(Box::new(crate::include::nodes::primnodes::SubLink {
-            testexpr: sublink.testexpr.map(|expr| {
-                Box::new(rewrite_semantic_expr_for_input_path(*expr, path, layout))
-            }),
-            ..*sublink
-        })),
-        Expr::SubPlan(subplan) => Expr::SubPlan(Box::new(crate::include::nodes::primnodes::SubPlan {
-            testexpr: subplan.testexpr.map(|expr| {
-                Box::new(rewrite_semantic_expr_for_input_path(*expr, path, layout))
-            }),
-            ..*subplan
-        })),
+        Expr::SubLink(sublink) => {
+            Expr::SubLink(Box::new(crate::include::nodes::primnodes::SubLink {
+                testexpr: sublink.testexpr.map(|expr| {
+                    Box::new(rewrite_semantic_expr_for_input_path(*expr, path, layout))
+                }),
+                ..*sublink
+            }))
+        }
+        Expr::SubPlan(subplan) => {
+            Expr::SubPlan(Box::new(crate::include::nodes::primnodes::SubPlan {
+                testexpr: subplan.testexpr.map(|expr| {
+                    Box::new(rewrite_semantic_expr_for_input_path(*expr, path, layout))
+                }),
+                ..*subplan
+            }))
+        }
         Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(ScalarArrayOpExpr {
-            left: Box::new(rewrite_semantic_expr_for_input_path(*saop.left, path, layout)),
-            right: Box::new(rewrite_semantic_expr_for_input_path(*saop.right, path, layout)),
+            left: Box::new(rewrite_semantic_expr_for_input_path(
+                *saop.left, path, layout,
+            )),
+            right: Box::new(rewrite_semantic_expr_for_input_path(
+                *saop.right,
+                path,
+                layout,
+            )),
             ..*saop
         })),
         Expr::Cast(inner, ty) => Expr::Cast(
@@ -801,9 +815,9 @@ fn rewrite_semantic_expr_for_input_path(expr: Expr, path: &Path, layout: &[Expr]
         Expr::IsNull(inner) => Expr::IsNull(Box::new(rewrite_semantic_expr_for_input_path(
             *inner, path, layout,
         ))),
-        Expr::IsNotNull(inner) => Expr::IsNotNull(Box::new(
-            rewrite_semantic_expr_for_input_path(*inner, path, layout),
-        )),
+        Expr::IsNotNull(inner) => Expr::IsNotNull(Box::new(rewrite_semantic_expr_for_input_path(
+            *inner, path, layout,
+        ))),
         Expr::IsDistinctFrom(left, right) => Expr::IsDistinctFrom(
             Box::new(rewrite_semantic_expr_for_input_path(*left, path, layout)),
             Box::new(rewrite_semantic_expr_for_input_path(*right, path, layout)),

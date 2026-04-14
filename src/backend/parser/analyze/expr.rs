@@ -3084,9 +3084,7 @@ fn bind_scalar_function_call(
                 )],
             ))
         }
-        BuiltinScalarFunction::Sqrt
-        | BuiltinScalarFunction::Exp
-        | BuiltinScalarFunction::Ln => {
+        BuiltinScalarFunction::Sqrt | BuiltinScalarFunction::Exp | BuiltinScalarFunction::Ln => {
             let raw_arg_type = infer_sql_expr_type_with_ctes(
                 &args[0],
                 scope,

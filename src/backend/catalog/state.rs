@@ -645,7 +645,9 @@ impl Catalog {
                 && !column.name.eq_ignore_ascii_case(column_name)
                 && column.name.eq_ignore_ascii_case(new_column_name)
         }) {
-            return Err(CatalogError::TableAlreadyExists(new_column_name.to_string()));
+            return Err(CatalogError::TableAlreadyExists(
+                new_column_name.to_string(),
+            ));
         }
         let column_index = old_entry
             .desc
@@ -705,7 +707,8 @@ impl Catalog {
             .tables
             .remove(&old_name)
             .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
-        self.tables.insert(qualified_new_name.clone(), entry.clone());
+        self.tables
+            .insert(qualified_new_name.clone(), entry.clone());
         self.replace_constraint_rows_for_entry(&qualified_new_name, &entry);
         self.replace_depend_rows_for_entry(&entry);
         Ok((old_name, old_entry, qualified_new_name, entry))

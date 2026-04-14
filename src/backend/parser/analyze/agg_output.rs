@@ -508,10 +508,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                     n_keys,
                 )?
             };
-            Ok(Expr::Cast(
-                Box::new(bound_inner),
-                raw_type_name_hint(ty),
-            ))
+            Ok(Expr::Cast(Box::new(bound_inner), raw_type_name_hint(ty)))
         }
         SqlExpr::Eq(l, r) => Ok(Expr::op_auto(
             OpExprKind::Eq,

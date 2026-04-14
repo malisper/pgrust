@@ -39,9 +39,9 @@ use crate::backend::executor::RelationDesc;
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
 use crate::backend::storage::lmgr::TransactionWaiter;
 use crate::backend::storage::smgr::{MdStorageManager, RelFileLocator};
-use crate::backend::utils::misc::interrupts::{InterruptState, check_for_interrupts};
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::relcache::{RelCache, RelCacheEntry};
+use crate::backend::utils::misc::interrupts::{InterruptState, check_for_interrupts};
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, BootstrapCatalogKind, PG_CLASS_RELATION_OID, PgDependRow,
     PgDescriptionRow, PgNamespaceRow, PgRewriteRow, PgStatisticRow, bootstrap_catalog_kinds,
@@ -1238,10 +1238,7 @@ fn load_catalog_from_visible_physical_startup(base_dir: &Path) -> Result<Catalog
     let snapshot = txns
         .snapshot(INVALID_TRANSACTION_ID)
         .map_err(|e| CatalogError::Io(format!("startup catalog snapshot failed: {e:?}")))?;
-    let pool = BufferPool::new(
-        SmgrStorageBackend::new(MdStorageManager::new(base_dir)),
-        64,
-    );
+    let pool = BufferPool::new(SmgrStorageBackend::new(MdStorageManager::new(base_dir)), 64);
     load_catalog_from_visible_physical(base_dir, &pool, &txns, &snapshot, 0)
 }
 
