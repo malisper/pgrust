@@ -12,13 +12,14 @@ pub struct BoundInsertStatement {
     pub column_defaults: Vec<Expr>,
     pub target_columns: Vec<BoundAssignmentTarget>,
     pub source: BoundInsertSource,
+    pub subplans: Vec<Plan>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BoundInsertSource {
     Values(Vec<Vec<Expr>>),
     DefaultValues(Vec<Expr>),
-    Select(Box<DeferredSelectPlan>),
+    Select(Box<Query>),
 }
 
 /// A pre-bound insert plan that can be executed repeatedly with different
@@ -47,6 +48,7 @@ pub struct BoundUpdateStatement {
     pub indexes: Vec<BoundIndexRelation>,
     pub assignments: Vec<BoundAssignment>,
     pub predicate: Option<Expr>,
+    pub subplans: Vec<Plan>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,6 +59,7 @@ pub struct BoundDeleteStatement {
     pub desc: RelationDesc,
     pub row_source: BoundModifyRowSource,
     pub predicate: Option<Expr>,
+    pub subplans: Vec<Plan>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -263,7 +266,7 @@ pub fn bind_insert(
             }
             (
                 target_columns,
-                BoundInsertSource::Select(Box::new(DeferredSelectPlan::Bound(Box::new(query)))),
+                BoundInsertSource::Select(Box::new(query)),
             )
         }
     };
@@ -279,6 +282,7 @@ pub fn bind_insert(
         column_defaults,
         target_columns,
         source,
+        subplans: Vec::new(),
     })
 }
 
@@ -328,6 +332,7 @@ pub fn bind_update(
             })
             .collect::<Result<Vec<_>, ParseError>>()?,
         predicate,
+        subplans: Vec::new(),
     })
 }
 
@@ -394,5 +399,6 @@ pub fn bind_delete(
         desc: entry.desc.clone(),
         row_source: choose_modify_row_source(predicate.as_ref(), &indexes),
         predicate,
+        subplans: Vec::new(),
     })
 }

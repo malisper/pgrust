@@ -70,7 +70,7 @@ impl Database {
                         Statement::Select(select) => {
                             let planned_stmt =
                                 crate::backend::parser::pg_plan_query(select, &visible_catalog)?;
-                            collect_rels_from_plan(&planned_stmt.plan_tree, &mut rels);
+                            collect_rels_from_planned_stmt(&planned_stmt, &mut rels);
                         }
                         Statement::Values(_) => {}
                         Statement::Explain(explain) => {
@@ -79,7 +79,7 @@ impl Database {
                                     select,
                                     &visible_catalog,
                                 )?;
-                                collect_rels_from_plan(&planned_stmt.plan_tree, &mut rels);
+                                collect_rels_from_planned_stmt(&planned_stmt, &mut rels);
                             }
                         }
                         _ => unreachable!(),
@@ -98,6 +98,7 @@ impl Database {
                     client_id,
                     next_command_id: 0,
                     outer_rows: Vec::new(),
+                    subplans: Vec::new(),
                     timed: false,
                 };
                 let result = execute_readonly_statement(plan_or_stmt, &visible_catalog, &mut ctx);
@@ -124,6 +125,7 @@ impl Database {
                     client_id,
                     next_command_id: 0,
                     outer_rows: Vec::new(),
+                    subplans: Vec::new(),
                     timed: false,
                 };
                 let result = execute_insert(bound, &catalog, &mut ctx, xid, 0);
@@ -151,6 +153,7 @@ impl Database {
                     client_id,
                     next_command_id: 0,
                     outer_rows: Vec::new(),
+                    subplans: Vec::new(),
                     timed: false,
                 };
                 let result = execute_update_with_waiter(
@@ -185,6 +188,7 @@ impl Database {
                     client_id,
                     next_command_id: 0,
                     outer_rows: Vec::new(),
+                    subplans: Vec::new(),
                     timed: false,
                 };
                 let result = execute_delete_with_waiter(
@@ -276,6 +280,7 @@ impl Database {
                     client_id,
                     next_command_id: 0,
                     outer_rows: Vec::new(),
+                    subplans: Vec::new(),
                     timed: false,
                 };
                 let result = execute_truncate_table(
@@ -327,7 +332,7 @@ impl Database {
                 None,
             );
             let mut rels = std::collections::BTreeSet::new();
-            collect_rels_from_plan(&query_desc.planned_stmt.plan_tree, &mut rels);
+            collect_rels_from_planned_stmt(&query_desc.planned_stmt, &mut rels);
             (query_desc, rels.into_iter().collect::<Vec<_>>())
         };
 
@@ -348,6 +353,7 @@ impl Database {
             client_id,
             next_command_id: command_id,
             outer_rows: Vec::new(),
+            subplans: query_desc.planned_stmt.subplans,
             timed: false,
         };
 

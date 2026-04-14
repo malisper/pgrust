@@ -63,7 +63,7 @@ use ddl::{
     lookup_heap_relation_for_ddl, map_catalog_error, namespace_oid_for_relation_name,
     reject_relation_with_dependent_views, validate_alter_table_add_column,
 };
-use relation_refs::{collect_direct_relation_oids_from_select, collect_rels_from_plan};
+use relation_refs::{collect_direct_relation_oids_from_select, collect_rels_from_planned_stmt};
 use toast::{toast_bindings_from_create_result, toast_bindings_from_temp_relation};
 use txn::AutoCommitGuard;
 

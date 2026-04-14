@@ -2,6 +2,7 @@ use super::agg_output::bind_agg_output_expr;
 use super::functions::{resolve_scalar_function, validate_scalar_function_arity};
 use super::infer::{infer_array_literal_type, infer_sql_expr_type};
 use super::*;
+use crate::include::nodes::primnodes::{SubLink, SubLinkType};
 
 pub(super) fn bind_grouped_concat_expr(
     left: &SqlExpr,
@@ -46,10 +47,14 @@ pub(super) fn bind_grouped_scalar_subquery(
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
 ) -> Result<Expr, ParseError> {
-    let plan =
+    let query =
         build_grouped_subquery_plan(select, group_by_exprs, input_scope, catalog, outer_scopes)?;
-    ensure_single_column_subquery(plan.columns().len())?;
-    Ok(Expr::ScalarSubquery(Box::new(plan)))
+    ensure_single_column_subquery(query.columns().len())?;
+    Ok(Expr::SubLink(Box::new(SubLink {
+        sublink_type: SubLinkType::ExprSubLink,
+        testexpr: None,
+        subselect: Box::new(query),
+    })))
 }
 
 pub(super) fn bind_grouped_exists_subquery(
@@ -59,13 +64,17 @@ pub(super) fn bind_grouped_exists_subquery(
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
 ) -> Result<Expr, ParseError> {
-    Ok(Expr::ExistsSubquery(Box::new(build_grouped_subquery_plan(
-        select,
-        group_by_exprs,
-        input_scope,
-        catalog,
-        outer_scopes,
-    )?)))
+    Ok(Expr::SubLink(Box::new(SubLink {
+        sublink_type: SubLinkType::ExistsSubLink,
+        testexpr: None,
+        subselect: Box::new(build_grouped_subquery_plan(
+            select,
+            group_by_exprs,
+            input_scope,
+            catalog,
+            outer_scopes,
+        )?),
+    })))
 }
 
 pub(super) fn bind_grouped_in_subquery(
@@ -80,11 +89,12 @@ pub(super) fn bind_grouped_in_subquery(
     agg_list: &[(AggFunc, Vec<SqlFunctionArg>, bool, bool)],
     n_keys: usize,
 ) -> Result<Expr, ParseError> {
-    let subquery_plan =
+    let subquery =
         build_grouped_subquery_plan(subquery, group_by_exprs, input_scope, catalog, outer_scopes)?;
-    ensure_single_column_subquery(subquery_plan.columns().len())?;
-    let any = Expr::AnySubquery {
-        left: Box::new(bind_agg_output_expr(
+    ensure_single_column_subquery(subquery.columns().len())?;
+    let any = Expr::SubLink(Box::new(SubLink {
+        sublink_type: SubLinkType::AnySubLink(SubqueryComparisonOp::Eq),
+        testexpr: Some(Box::new(bind_agg_output_expr(
             expr,
             group_by_exprs,
             input_scope,
@@ -93,10 +103,9 @@ pub(super) fn bind_grouped_in_subquery(
             grouped_outer,
             agg_list,
             n_keys,
-        )?),
-        op: SubqueryComparisonOp::Eq,
-        subquery: Box::new(subquery_plan),
-    };
+        )?)),
+        subselect: Box::new(subquery),
+    }));
     if negated {
         Ok(Expr::Not(Box::new(any)))
     } else {
@@ -117,9 +126,9 @@ pub(super) fn bind_grouped_quantified_subquery(
     agg_list: &[(AggFunc, Vec<SqlFunctionArg>, bool, bool)],
     n_keys: usize,
 ) -> Result<Expr, ParseError> {
-    let subquery_plan =
+    let subquery =
         build_grouped_subquery_plan(subquery, group_by_exprs, input_scope, catalog, outer_scopes)?;
-    ensure_single_column_subquery(subquery_plan.columns().len())?;
+    ensure_single_column_subquery(subquery.columns().len())?;
     let left = Box::new(bind_agg_output_expr(
         left,
         group_by_exprs,
@@ -130,19 +139,15 @@ pub(super) fn bind_grouped_quantified_subquery(
         agg_list,
         n_keys,
     )?);
-    if is_all {
-        Ok(Expr::AllSubquery {
-            left,
-            op,
-            subquery: Box::new(subquery_plan),
-        })
-    } else {
-        Ok(Expr::AnySubquery {
-            left,
-            op,
-            subquery: Box::new(subquery_plan),
-        })
-    }
+    Ok(Expr::SubLink(Box::new(SubLink {
+        sublink_type: if is_all {
+            SubLinkType::AllSubLink(op)
+        } else {
+            SubLinkType::AnySubLink(op)
+        },
+        testexpr: Some(left),
+        subselect: Box::new(subquery),
+    })))
 }
 
 pub(super) fn bind_grouped_quantified_array(
@@ -425,7 +430,7 @@ fn build_grouped_subquery_plan(
     input_scope: &BoundScope,
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
-) -> Result<DeferredSelectPlan, ParseError> {
+) -> Result<Query, ParseError> {
     let mut child_outer = Vec::with_capacity(outer_scopes.len() + 1);
     child_outer.push(input_scope.clone());
     child_outer.extend_from_slice(outer_scopes);
@@ -440,5 +445,5 @@ fn build_grouped_subquery_plan(
         &[],
         &[],
     )?;
-    Ok(DeferredSelectPlan::Bound(Box::new(query)))
+    Ok(query)
 }

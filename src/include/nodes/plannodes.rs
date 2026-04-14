@@ -55,6 +55,7 @@ impl PlanEstimate {
 pub struct PlannedStmt {
     pub command_type: CommandType,
     pub plan_tree: Plan,
+    pub subplans: Vec<Plan>,
 }
 
 impl PlannedStmt {
@@ -140,16 +141,6 @@ pub enum Plan {
         input: Box<Plan>,
         targets: Vec<ProjectSetTarget>,
     },
-}
-
-// :HACK: Transitional wrapper while pgrust still lets subqueries move around as
-// either semantic Query trees or executable Plan trees. PostgreSQL does not use
-// a single enum like this: expression subqueries stay as semantic SubLink/Query
-// until planning, then become SubPlan references into PlannedStmt.subplans.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DeferredSelectPlan {
-    Bound(Box<Query>),
-    Planned(Box<Plan>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -304,15 +295,6 @@ impl Plan {
 
     pub fn column_names(&self) -> Vec<String> {
         self.columns().into_iter().map(|c| c.name).collect()
-    }
-}
-
-impl DeferredSelectPlan {
-    pub fn columns(&self) -> Vec<QueryColumn> {
-        match self {
-            Self::Bound(plan) => plan.columns(),
-            Self::Planned(plan) => plan.columns(),
-        }
     }
 }
 

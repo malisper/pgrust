@@ -115,6 +115,7 @@ impl Database {
             next_command_id: cid,
             timed: false,
             outer_rows: Vec::new(),
+        subplans: Vec::new(),
         };
         let analyzed = collect_analyze_stats(&analyze_stmt.targets, &catalog, &mut ctx)?;
         drop(ctx);

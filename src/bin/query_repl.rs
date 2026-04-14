@@ -542,6 +542,7 @@ fn run_statement(
                 client_id: 21,
                 next_command_id: 0,
                 outer_rows: Vec::new(),
+                subplans: Vec::new(),
                 timed: false,
             };
             execute_readonly_statement(Statement::Explain(stmt), &relcache, &mut ctx)
@@ -555,6 +556,7 @@ fn run_statement(
                 client_id: 21,
                 next_command_id: 0,
                 outer_rows: Vec::new(),
+                subplans: Vec::new(),
                 timed: false,
             };
             execute_readonly_statement(Statement::Select(stmt), &relcache, &mut ctx)
@@ -568,6 +570,7 @@ fn run_statement(
                 client_id: 21,
                 next_command_id: 0,
                 outer_rows: Vec::new(),
+                subplans: Vec::new(),
                 timed: false,
             };
             execute_readonly_statement(Statement::Values(stmt), &relcache, &mut ctx)
@@ -581,6 +584,7 @@ fn run_statement(
                 client_id: 21,
                 next_command_id: 0,
                 outer_rows: Vec::new(),
+                subplans: Vec::new(),
                 timed: false,
             };
             execute_readonly_statement(Statement::Analyze(stmt), &relcache, &mut ctx)
@@ -648,6 +652,7 @@ fn run_statement(
                 client_id: 21,
                 next_command_id: 0,
                 outer_rows: Vec::new(),
+                subplans: Vec::new(),
                 timed: false,
             };
             execute_truncate_table(stmt, &relcache, &mut ctx, INVALID_TRANSACTION_ID)
@@ -661,6 +666,7 @@ fn run_statement(
                 client_id: 21,
                 next_command_id: 0,
                 outer_rows: Vec::new(),
+                subplans: Vec::new(),
                 timed: false,
             };
             execute_readonly_statement(Statement::Vacuum(stmt), &relcache, &mut ctx)
@@ -677,6 +683,7 @@ fn run_statement(
                     client_id: 21,
                     next_command_id: 0,
                     outer_rows: Vec::new(),
+                    subplans: Vec::new(),
                     timed: false,
                 };
                 execute_insert(bound, &relcache, &mut ctx, xid, 0)
@@ -704,6 +711,7 @@ fn run_statement(
                     client_id: 21,
                     next_command_id: 0,
                     outer_rows: Vec::new(),
+                    subplans: Vec::new(),
                     timed: false,
                 };
                 execute_update_with_waiter(bound, &relcache, &mut ctx, xid, 0, None)
@@ -731,6 +739,7 @@ fn run_statement(
                     client_id: 21,
                     next_command_id: 0,
                     outer_rows: Vec::new(),
+                    subplans: Vec::new(),
                     timed: false,
                 };
                 execute_delete_with_waiter(bound, &relcache, &mut ctx, xid, None)

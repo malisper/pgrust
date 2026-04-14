@@ -249,9 +249,9 @@ impl Database {
         let (table_name, persistence) = self
             .normalize_create_table_as_stmt_with_search_path(create_stmt, configured_search_path)?;
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let plan = crate::backend::parser::pg_plan_query(&create_stmt.query, &catalog)?.plan_tree;
+        let planned_stmt = crate::backend::parser::pg_plan_query(&create_stmt.query, &catalog)?;
         let mut rels = std::collections::BTreeSet::new();
-        collect_rels_from_plan(&plan, &mut rels);
+        collect_rels_from_planned_stmt(&planned_stmt, &mut rels);
 
         let snapshot = self.txns.read().snapshot_for_command(xid, cid)?;
         let mut ctx = ExecutorContext {
@@ -262,6 +262,7 @@ impl Database {
             client_id,
             next_command_id: cid,
             outer_rows: Vec::new(),
+            subplans: Vec::new(),
             timed: false,
         };
         let query_result = execute_readonly_statement(
@@ -364,6 +365,7 @@ impl Database {
             client_id,
             next_command_id: cid,
             outer_rows: Vec::new(),
+            subplans: Vec::new(),
             timed: false,
         };
         let inserted = crate::backend::commands::tablecmds::execute_insert_values(

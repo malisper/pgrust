@@ -21,18 +21,23 @@ pub fn execute_query_desc(
 ) -> Result<StatementResult, ExecError> {
     let columns = query_desc.columns();
     let column_names = query_desc.column_names();
-    let mut state = executor_start(query_desc.planned_stmt.plan_tree);
-    let mut rows = Vec::new();
-    while let Some(slot) = state.exec_proc_node(ctx)? {
-        let mut values = slot.values()?.iter().cloned().collect::<Vec<_>>();
-        Value::materialize_all(&mut values);
-        rows.push(values);
-    }
-    Ok(StatementResult::Query {
-        columns,
-        column_names,
-        rows,
-    })
+    let saved_subplans = std::mem::replace(&mut ctx.subplans, query_desc.planned_stmt.subplans);
+    let result = (|| {
+        let mut state = executor_start(query_desc.planned_stmt.plan_tree);
+        let mut rows = Vec::new();
+        while let Some(slot) = state.exec_proc_node(ctx)? {
+            let mut values = slot.values()?.iter().cloned().collect::<Vec<_>>();
+            Value::materialize_all(&mut values);
+            rows.push(values);
+        }
+        Ok(StatementResult::Query {
+            columns,
+            column_names,
+            rows,
+        })
+    })();
+    ctx.subplans = saved_subplans;
+    result
 }
 
 pub fn execute_plan(plan: Plan, ctx: &mut ExecutorContext) -> Result<StatementResult, ExecError> {
@@ -41,6 +46,7 @@ pub fn execute_plan(plan: Plan, ctx: &mut ExecutorContext) -> Result<StatementRe
             PlannedStmt {
                 command_type: crate::include::executor::execdesc::CommandType::Select,
                 plan_tree: plan,
+                subplans: Vec::new(),
             },
             None,
         ),
