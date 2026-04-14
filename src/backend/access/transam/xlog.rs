@@ -33,8 +33,6 @@ pub mod replay {
     pub use crate::backend::access::transam::xlogrecovery::*;
 }
 
-pub use crate::backend::access::transam::xlogreader::WAL_RECORD_LEN;
-
 /// WAL buffer size — accumulate this many bytes before flushing to the kernel.
 const WAL_BUF_SIZE: usize = 64 * 1024;
 /// Threshold of buffered WAL data that wakes the background writer.
@@ -1211,10 +1209,10 @@ mod tests {
 
         let mut reader = WalReader::open(&dir).unwrap();
         let record_start = reader.next_record_start(0).unwrap().unwrap();
-        let (raw, _) = reader
-            .read_record_bytes(record_start, WAL_RECORD_LEN)
+        let (header, _) = reader
+            .read_record_bytes(record_start, XLOG_RECORD_HEADER)
             .unwrap();
-        let total_len = u32::from_le_bytes(raw[0..4].try_into().unwrap()) as usize;
+        let total_len = u32::from_le_bytes(header[0..4].try_into().unwrap()) as usize;
         let mut check = reader.read_record_bytes(record_start, total_len).unwrap().0;
         let crc = u32::from_le_bytes(check[CRC_OFFSET..CRC_OFFSET + 4].try_into().unwrap());
         check[CRC_OFFSET..CRC_OFFSET + 4].copy_from_slice(&[0, 0, 0, 0]);
