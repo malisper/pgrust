@@ -3,7 +3,7 @@ use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::pathnodes::{Path, PathKey, PathTarget, RelOptInfo, RelOptKind};
 use crate::include::nodes::plannodes::PlanEstimate;
-use crate::include::nodes::primnodes::{OpExpr, OpExprKind, OrderByEntry, QueryColumn, TargetEntry, Var};
+use crate::include::nodes::primnodes::{Expr, OpExpr, OpExprKind, OrderByEntry, QueryColumn, TargetEntry, Var};
 
 fn int4() -> SqlType {
     SqlType::new(SqlTypeKind::Int4)
@@ -151,4 +151,44 @@ fn projection_keeps_hidden_order_pathkeys() {
     };
 
     assert_eq!(projection.pathkeys(), vec![pathkey(order_expr)]);
+}
+
+#[test]
+fn join_input_rewrite_maps_whole_composite_expr_to_join_alias_slot() {
+    let merged = Expr::Coalesce(Box::new(var(1, 1)), Box::new(var(1, 2)));
+    let right = Path::Projection {
+        plan_info: PlanEstimate::new(1.0, 1.5, 10.0, 1),
+        slot_id: 30,
+        input: Box::new(values_path(1, 1.0, 1.0)),
+        targets: vec![TargetEntry::new("merged", merged.clone(), int4(), 1)],
+    };
+    let left = values_path(2, 1.0, 1.0);
+    let mut join_layout = left.output_vars();
+    join_layout.extend(right.output_vars());
+
+    let rewritten =
+        super::rewrite_semantic_expr_for_join_inputs(merged, &left, &right, &join_layout);
+
+    assert_eq!(rewritten, var(30, 1));
+}
+
+#[test]
+fn projection_rewrite_does_not_chase_plain_var_through_subquery_boundary() {
+    let inner = Path::Projection {
+        plan_info: PlanEstimate::new(1.0, 1.5, 10.0, 1),
+        slot_id: 1_000_100,
+        input: Box::new(values_path(1, 1.0, 1.0)),
+        targets: vec![TargetEntry::new("name", var(1, 1), int4(), 1)],
+    };
+    let outer = Path::Projection {
+        plan_info: PlanEstimate::new(1.5, 2.0, 10.0, 1),
+        slot_id: 4,
+        input: Box::new(inner),
+        targets: vec![TargetEntry::new("name", var(1_000_100, 1), int4(), 1)],
+    };
+
+    let rewritten =
+        super::rewrite_semantic_expr_for_path(var(1, 1), &outer, &outer.output_vars());
+
+    assert_eq!(rewritten, var(1, 1));
 }
