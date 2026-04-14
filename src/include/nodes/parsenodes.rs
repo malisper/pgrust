@@ -210,7 +210,10 @@ pub enum Statement {
     AlterTableRename(AlterTableRenameStatement),
     AlterTableSet(AlterTableSetStatement),
     CommentOnTable(CommentOnTableStatement),
+    CommentOnDomain(CommentOnDomainStatement),
+    CreateDomain(CreateDomainStatement),
     DropTable(DropTableStatement),
+    DropDomain(DropDomainStatement),
     DropView(DropViewStatement),
     TruncateTable(TruncateTableStatement),
     Vacuum(VacuumStatement),
@@ -652,6 +655,12 @@ pub struct CommentOnTableStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentOnDomainStatement {
+    pub domain_name: String,
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelOption {
     pub name: String,
     pub value: String,
@@ -661,6 +670,13 @@ pub struct RelOption {
 pub struct DropTableStatement {
     pub if_exists: bool,
     pub table_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropDomainStatement {
+    pub if_exists: bool,
+    pub domain_name: String,
+    pub cascade: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -692,6 +708,12 @@ pub struct ColumnDef {
     pub nullable: bool,
     pub primary_key: bool,
     pub unique: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateDomainStatement {
+    pub domain_name: String,
+    pub ty: RawTypeName,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -272,6 +272,14 @@ impl Session {
             Statement::Set(ref set_stmt) => self.apply_set(set_stmt),
             Statement::Reset(ref reset_stmt) => self.apply_reset(reset_stmt),
             Statement::CopyFrom(ref copy_stmt) => self.execute_copy_from_file(db, copy_stmt),
+            Statement::CreateDomain(ref create_stmt) => {
+                let search_path = self.configured_search_path();
+                db.execute_create_domain_stmt_with_search_path(
+                    self.client_id,
+                    create_stmt,
+                    search_path.as_deref(),
+                )
+            }
             Statement::CreateIndex(ref create_stmt) => {
                 let search_path = self.configured_search_path();
                 db.execute_create_index_stmt_with_search_path(
@@ -568,7 +576,23 @@ impl Session {
             Statement::Show(ref show_stmt) => self.apply_show(show_stmt),
             Statement::Set(ref set_stmt) => self.apply_set(set_stmt),
             Statement::Reset(ref reset_stmt) => self.apply_reset(reset_stmt),
+            Statement::CommentOnDomain(ref comment_stmt) => {
+                let search_path = self.configured_search_path();
+                db.execute_comment_on_domain_stmt_with_search_path(
+                    client_id,
+                    comment_stmt,
+                    search_path.as_deref(),
+                )
+            }
             Statement::CopyFrom(ref copy_stmt) => self.execute_copy_from_file(db, copy_stmt),
+            Statement::CreateDomain(ref create_stmt) => {
+                let search_path = self.configured_search_path();
+                db.execute_create_domain_stmt_with_search_path(
+                    client_id,
+                    create_stmt,
+                    search_path.as_deref(),
+                )
+            }
             Statement::CreateIndex(ref create_stmt) => {
                 let search_path = self.configured_search_path();
                 let maintenance_work_mem_kb = self.maintenance_work_mem_kb()?;
@@ -838,6 +862,14 @@ impl Session {
                     search_path.as_deref(),
                     &mut txn.catalog_effects,
                     &mut txn.temp_effects,
+                )
+            }
+            Statement::DropDomain(ref drop_stmt) => {
+                let search_path = self.configured_search_path();
+                db.execute_drop_domain_stmt_with_search_path(
+                    client_id,
+                    drop_stmt,
+                    search_path.as_deref(),
                 )
             }
             Statement::CreateView(ref create_stmt) => {

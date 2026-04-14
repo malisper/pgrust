@@ -1,6 +1,27 @@
 use super::super::*;
 
 impl Database {
+    pub(crate) fn execute_drop_domain_stmt_with_search_path(
+        &self,
+        _client_id: ClientId,
+        drop_stmt: &DropDomainStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let (normalized, _, _) = self
+            .normalize_domain_name_for_create(&drop_stmt.domain_name, configured_search_path)?;
+        let mut domains = self.domains.write();
+        if domains.remove(&normalized).is_none() {
+            if drop_stmt.if_exists {
+                return Ok(StatementResult::AffectedRows(0));
+            }
+            return Err(ExecError::Parse(ParseError::UnsupportedType(
+                drop_stmt.domain_name.clone(),
+            )));
+        }
+        self.plan_cache.invalidate_all();
+        Ok(StatementResult::AffectedRows(0))
+    }
+
     pub(crate) fn execute_drop_table_stmt_in_transaction_with_search_path(
         &self,
         client_id: ClientId,

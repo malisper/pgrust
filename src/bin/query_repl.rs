@@ -617,10 +617,18 @@ fn run_statement(
             };
             execute_readonly_statement(Statement::Analyze(stmt), &relcache, &mut ctx)
         }
+        Statement::CommentOnDomain(_) | Statement::CreateDomain(_) | Statement::DropDomain(_) => {
+            Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                "domain statements are not supported in query_repl".into(),
+            )))
+        }
         Statement::CreateTable(stmt) => {
             let (table_name, _) = normalize_create_table_name(&stmt)?;
             let entry = catalog_store
-                .create_table(table_name, create_relation_desc(&stmt)?)
+                .create_table(
+                    table_name,
+                    create_relation_desc(&stmt, &relcache)?,
+                )
                 .map_err(|err| {
                     ExecError::Parse(ParseError::UnexpectedToken {
                         expected: "catalog table creation",

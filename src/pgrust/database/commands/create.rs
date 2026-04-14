@@ -1,6 +1,48 @@
 use super::super::*;
 
 impl Database {
+    pub(crate) fn execute_create_domain_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        create_stmt: &CreateDomainStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+        let sql_type = crate::backend::parser::resolve_raw_type_name(&create_stmt.ty, &catalog)
+            .map_err(ExecError::Parse)?;
+        let (normalized, object_name, namespace_oid) = self
+            .normalize_domain_name_for_create(&create_stmt.domain_name, configured_search_path)?;
+        let mut domains = self.domains.write();
+        if domains.contains_key(&normalized) {
+            return Err(ExecError::Parse(ParseError::UnsupportedType(
+                create_stmt.domain_name.clone(),
+            )));
+        }
+        let oid = {
+            let catalog = self.catalog.write();
+            let snapshot = catalog.catalog_snapshot().map_err(map_catalog_error)?;
+            let next_catalog_oid = snapshot.next_oid();
+            domains
+                .values()
+                .map(|domain| domain.oid.saturating_add(1))
+                .max()
+                .unwrap_or(next_catalog_oid)
+                .max(next_catalog_oid)
+        };
+        domains.insert(
+            normalized,
+            DomainEntry {
+                oid,
+                name: object_name,
+                namespace_oid,
+                sql_type,
+                comment: None,
+            },
+        );
+        self.plan_cache.invalidate_all();
+        Ok(StatementResult::AffectedRows(0))
+    }
+
     pub(crate) fn execute_create_table_stmt_with_search_path(
         &self,
         client_id: ClientId,
@@ -60,7 +102,8 @@ impl Database {
         let interrupts = self.interrupt_state(client_id);
         let (table_name, persistence) =
             self.normalize_create_table_stmt_with_search_path(create_stmt, configured_search_path)?;
-        let lowered = lower_create_table(create_stmt)?;
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let lowered = lower_create_table(create_stmt, &catalog)?;
         let desc = lowered.relation_desc;
         match persistence {
             TablePersistence::Permanent => {
@@ -339,7 +382,11 @@ impl Database {
                     interrupts: Arc::clone(&interrupts),
                 };
                 let (created, effect) = catalog_guard
-                    .create_table_mvcc(table_name.clone(), create_relation_desc(&stmt)?, &write_ctx)
+                    .create_table_mvcc(
+                        table_name.clone(),
+                        create_relation_desc(&stmt, &catalog)?,
+                        &write_ctx,
+                    )
                     .map_err(map_catalog_error)?;
                 drop(catalog_guard);
                 self.apply_catalog_mutation_effect_immediate(&effect)?;
