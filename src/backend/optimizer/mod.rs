@@ -12,7 +12,10 @@ use crate::backend::parser::{BoundIndexRelation, CatalogLookup, SqlType, SqlType
 use crate::include::catalog::{BTREE_AM_OID, PgStatisticRow};
 use crate::include::nodes::datum::ArrayValue;
 use crate::include::nodes::plannodes::JoinType;
-use pathnodes::{PlannerJoinExpr, PlannerOrderByEntry, PlannerPath, PlannerTargetEntry};
+use pathnodes::{
+    PlannerJoinExpr, PlannerOrderByEntry, PlannerPath, PlannerProjectSetTarget,
+    PlannerTargetEntry,
+};
 
 const DEFAULT_EQ_SEL: f64 = 0.005;
 const DEFAULT_INEQ_SEL: f64 = 1.0 / 3.0;
@@ -291,10 +294,10 @@ pub(super) fn optimize_path(plan: PlannerPath, catalog: &dyn CatalogLookup) -> P
                 let width = targets
                     .iter()
                     .map(|target| match target {
-                        crate::backend::executor::ProjectSetTarget::Scalar(entry) => {
+                        PlannerProjectSetTarget::Scalar(entry) => {
                             estimate_sql_type_width(entry.sql_type)
                         }
-                        crate::backend::executor::ProjectSetTarget::Set { sql_type, .. } => {
+                        PlannerProjectSetTarget::Set { sql_type, .. } => {
                             estimate_sql_type_width(*sql_type)
                         }
                     })
