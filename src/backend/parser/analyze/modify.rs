@@ -121,6 +121,16 @@ fn bind_insert_column_defaults(
         .collect()
 }
 
+fn visible_assignment_targets(desc: &RelationDesc) -> Vec<BoundAssignmentTarget> {
+    desc.visible_column_indexes()
+        .into_iter()
+        .map(|column_index| BoundAssignmentTarget {
+            column_index,
+            subscripts: Vec::new(),
+        })
+        .collect()
+}
+
 pub fn bind_insert_prepared(
     table_name: &str,
     columns: Option<&[String]>,
@@ -137,13 +147,14 @@ pub fn bind_insert_prepared(
             .map(|column| resolve_column(&scope, column))
             .collect::<Result<Vec<_>, _>>()?
     } else {
-        if num_params > entry.desc.columns.len() {
+        let visible_indexes = entry.desc.visible_column_indexes();
+        if num_params > visible_indexes.len() {
             return Err(ParseError::InvalidInsertTargetCount {
-                expected: entry.desc.columns.len(),
+                expected: visible_indexes.len(),
                 actual: num_params,
             });
         }
-        (0..num_params).collect()
+        visible_indexes.into_iter().take(num_params).collect()
     };
 
     if target_columns.len() != num_params {
@@ -183,19 +194,15 @@ pub fn bind_insert(
                     .map(|column| bind_assignment_target(column, &scope, catalog, &local_ctes))
                     .collect::<Result<Vec<_>, _>>()?
             } else {
+                let visible_targets = visible_assignment_targets(&entry.desc);
                 let width = rows.first().map(Vec::len).unwrap_or(0);
-                if width > entry.desc.columns.len() {
+                if width > visible_targets.len() {
                     return Err(ParseError::InvalidInsertTargetCount {
-                        expected: entry.desc.columns.len(),
+                        expected: visible_targets.len(),
                         actual: width,
                     });
                 }
-                (0..width)
-                    .map(|column_index| BoundAssignmentTarget {
-                        column_index,
-                        subscripts: Vec::new(),
-                    })
-                    .collect()
+                visible_targets.into_iter().take(width).collect()
             };
             for row in rows {
                 if target_columns.len() != row.len() {
@@ -227,13 +234,15 @@ pub fn bind_insert(
             (target_columns, BoundInsertSource::Values(bound_rows))
         }
         InsertSource::DefaultValues => (
-            (0..entry.desc.columns.len())
-                .map(|column_index| BoundAssignmentTarget {
-                    column_index,
-                    subscripts: Vec::new(),
-                })
-                .collect(),
-            BoundInsertSource::DefaultValues(column_defaults.clone()),
+            visible_assignment_targets(&entry.desc),
+            BoundInsertSource::DefaultValues(
+                entry
+                    .desc
+                    .visible_column_indexes()
+                    .into_iter()
+                    .map(|column_index| column_defaults[column_index].clone())
+                    .collect(),
+            ),
         ),
         InsertSource::Select(select) => {
             let (query, _) =
@@ -245,18 +254,14 @@ pub fn bind_insert(
                     .map(|column| bind_assignment_target(column, &scope, catalog, &local_ctes))
                     .collect::<Result<Vec<_>, _>>()?
             } else {
-                if actual > entry.desc.columns.len() {
+                let visible_targets = visible_assignment_targets(&entry.desc);
+                if actual > visible_targets.len() {
                     return Err(ParseError::InvalidInsertTargetCount {
-                        expected: entry.desc.columns.len(),
+                        expected: visible_targets.len(),
                         actual,
                     });
                 }
-                (0..actual)
-                    .map(|column_index| BoundAssignmentTarget {
-                        column_index,
-                        subscripts: Vec::new(),
-                    })
-                    .collect()
+                visible_targets.into_iter().take(actual).collect()
             };
             if target_columns.len() != actual {
                 return Err(ParseError::InvalidInsertTargetCount {

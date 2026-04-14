@@ -303,6 +303,24 @@ impl Session {
                     )
                 }
             }
+            Statement::AlterTableDropColumn(ref drop_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_alter_table_drop_column_stmt_with_search_path(
+                        self.client_id,
+                        drop_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
             Statement::AlterTableSet(_) => Ok(StatementResult::AffectedRows(0)),
             Statement::CommentOnTable(ref comment_stmt) => {
                 if self.active_txn.is_some() {
@@ -547,6 +565,35 @@ impl Session {
                 db.execute_alter_table_add_column_stmt_in_transaction_with_search_path(
                     client_id,
                     alter_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
+            Statement::AlterTableDropColumn(ref drop_stmt) => {
+                let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                let relation = catalog
+                    .lookup_any_relation(&drop_stmt.table_name)
+                    .ok_or_else(|| {
+                        ExecError::Parse(ParseError::TableDoesNotExist(
+                            drop_stmt.table_name.clone(),
+                        ))
+                    })?;
+                let txn = self.active_txn.as_mut().unwrap();
+                if !txn.held_table_locks.contains(&relation.rel) {
+                    db.table_locks.lock_table(
+                        relation.rel,
+                        TableLockMode::AccessExclusive,
+                        client_id,
+                    );
+                    txn.held_table_locks.push(relation.rel);
+                }
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_alter_table_drop_column_stmt_in_transaction_with_search_path(
+                    client_id,
+                    drop_stmt,
                     xid,
                     cid,
                     search_path.as_deref(),

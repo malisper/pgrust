@@ -490,6 +490,18 @@ fn parse_alter_table_rename_statement() {
 }
 
 #[test]
+fn parse_alter_table_drop_column_statement() {
+    let stmt = parse_statement("alter table items drop column note").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableDropColumn(AlterTableDropColumnStatement {
+            table_name: "items".into(),
+            column_name: "note".into(),
+        })
+    );
+}
+
+#[test]
 fn parse_unsupported_role_statement_into_placeholder() {
     let stmt = parse_statement("drop role if exists regress_alter_table_user1").unwrap();
     assert_eq!(

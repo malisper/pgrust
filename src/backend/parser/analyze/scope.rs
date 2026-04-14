@@ -12,6 +12,7 @@ pub(crate) struct BoundScope {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ScopeColumn {
     pub(crate) output_name: String,
+    pub(crate) hidden: bool,
     pub(crate) relation_names: Vec<String>,
     pub(crate) hidden_invalid_relation_names: Vec<String>,
     pub(crate) hidden_missing_relation_names: Vec<String>,
@@ -196,10 +197,11 @@ pub(super) fn resolve_column(scope: &BoundScope, name: &str) -> Result<usize, Pa
     }
     if let Some((relation, column_name)) = name.rsplit_once('.') {
         let mut matches = scope.columns.iter().enumerate().filter(|(_, column)| {
-            column
-                .relation_names
-                .iter()
-                .any(|visible_relation| visible_relation.eq_ignore_ascii_case(relation))
+            !column.hidden
+                && column
+                    .relation_names
+                    .iter()
+                    .any(|visible_relation| visible_relation.eq_ignore_ascii_case(relation))
                 && column.output_name.eq_ignore_ascii_case(column_name)
         });
         if let Some(first) = matches.next() {
@@ -244,7 +246,7 @@ pub(super) fn resolve_column(scope: &BoundScope, name: &str) -> Result<usize, Pa
         .columns
         .iter()
         .enumerate()
-        .filter(|(_, column)| column.output_name.eq_ignore_ascii_case(name));
+        .filter(|(_, column)| !column.hidden && column.output_name.eq_ignore_ascii_case(name));
     let first = matches
         .next()
         .ok_or_else(|| ParseError::UnknownColumn(name.to_string()))?;
@@ -856,6 +858,7 @@ pub(super) fn scope_for_relation(relation_name: Option<&str>, desc: &RelationDes
             .iter()
             .map(|column| ScopeColumn {
                 output_name: column.name.clone(),
+                hidden: column.dropped,
                 relation_names: relation_name.into_iter().map(str::to_string).collect(),
                 hidden_invalid_relation_names: vec![],
                 hidden_missing_relation_names: vec![],
@@ -931,10 +934,13 @@ fn bind_join_constraint_with_ctes(
 fn natural_join_columns(left_scope: &BoundScope, right_scope: &BoundScope) -> Vec<String> {
     let mut out = Vec::new();
     for left in &left_scope.columns {
+        if left.hidden {
+            continue;
+        }
         if right_scope
             .columns
             .iter()
-            .any(|right| right.output_name.eq_ignore_ascii_case(&left.output_name))
+            .any(|right| !right.hidden && right.output_name.eq_ignore_ascii_case(&left.output_name))
             && !out
                 .iter()
                 .any(|name: &String| name.eq_ignore_ascii_case(&left.output_name))
@@ -999,6 +1005,7 @@ fn bind_join_using_projection(
         desc_columns.push(column_desc(name.clone(), left_ty, true));
         scope_columns.push(ScopeColumn {
             output_name: name.clone(),
+            hidden: false,
             relation_names: vec![],
             hidden_invalid_relation_names: vec![],
             hidden_missing_relation_names: vec![],
@@ -1006,7 +1013,7 @@ fn bind_join_using_projection(
     }
 
     for (index, column) in left_scope.columns.iter().enumerate() {
-        if used_left[index] {
+        if used_left[index] || column.hidden {
             continue;
         }
         alias_exprs.push(Expr::Column(index));
@@ -1020,7 +1027,7 @@ fn bind_join_using_projection(
     }
 
     for (index, column) in right_scope.columns.iter().enumerate() {
-        if used_right[index] {
+        if used_right[index] || column.hidden {
             continue;
         }
         let raw_index = left_scope.columns.len() + index;
@@ -1065,12 +1072,18 @@ fn apply_relation_alias(
     preserve_source_names: bool,
     source_is_alias: bool,
 ) -> Result<(AnalyzedFrom, BoundScope), ParseError> {
-    if column_aliases.len() > scope.columns.len() {
+    let visible_positions = scope
+        .columns
+        .iter()
+        .enumerate()
+        .filter_map(|(index, column)| (!column.hidden).then_some(index))
+        .collect::<Vec<_>>();
+    if column_aliases.len() > visible_positions.len() {
         return Err(ParseError::UnexpectedToken {
             expected: "table alias column count to match source columns",
             actual: format!(
                 "table \"{alias}\" has {} columns available but {} columns specified",
-                scope.columns.len(),
+                visible_positions.len(),
                 column_aliases.len(),
             ),
         });
@@ -1089,12 +1102,13 @@ fn apply_relation_alias(
         return Err(ParseError::DuplicateTableName(alias.to_string()));
     }
 
-    for (index, column) in columns.iter_mut().enumerate() {
-        if let Some(new_name) = column_aliases.get(index) {
+    for (alias_index, column_index) in visible_positions.iter().copied().enumerate() {
+        if let Some(new_name) = column_aliases.get(alias_index) {
+            let column = &mut columns[column_index];
             renamed |= column.output_name != *new_name;
             column.output_name = new_name.clone();
-            desc.columns[index].name = new_name.clone();
-            desc.columns[index].storage.name = new_name.clone();
+            desc.columns[column_index].name = new_name.clone();
+            desc.columns[column_index].storage.name = new_name.clone();
         }
     }
 

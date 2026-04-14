@@ -53,6 +53,12 @@ impl Database {
                     alter_stmt,
                     configured_search_path,
                 ),
+            Statement::AlterTableDropColumn(ref drop_stmt) => self
+                .execute_alter_table_drop_column_stmt_with_search_path(
+                    client_id,
+                    drop_stmt,
+                    configured_search_path,
+                ),
             Statement::Show(_)
             | Statement::Set(_)
             | Statement::Reset(_)
