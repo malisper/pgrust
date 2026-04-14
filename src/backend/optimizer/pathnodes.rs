@@ -1,99 +1,15 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::RelFileLocator;
-use crate::backend::executor::{
-    Expr, Plan, PlanEstimate, QueryColumn, RelationDesc, ToastRelationRef,
+use crate::include::nodes::pathnodes::{
+    PlannerJoinArraySubscript, PlannerJoinExpr, PlannerOrderByEntry, PlannerPath,
+    PlannerProjectSetTarget, PlannerTargetEntry,
 };
-use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
-use crate::include::access::relscan::ScanDirection;
-use crate::include::access::scankey::ScanKeyData;
 use crate::include::nodes::plannodes::{
-    AggAccum, BoundFromPlan, BoundSelectPlan, ExprArraySubscript, JoinType,
-    PlannerJoinArraySubscript, PlannerJoinExpr, PlannerOrderByEntry,
-    PlannerProjectSetTarget, PlannerTargetEntry, SetReturningCall,
+    BoundFromPlan, BoundSelectPlan, Plan, PlanEstimate,
 };
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PlannerPath {
-    Result {
-        plan_info: PlanEstimate,
-    },
-    SeqScan {
-        plan_info: PlanEstimate,
-        source_id: usize,
-        rel: RelFileLocator,
-        relation_oid: u32,
-        toast: Option<ToastRelationRef>,
-        desc: RelationDesc,
-    },
-    IndexScan {
-        plan_info: PlanEstimate,
-        source_id: usize,
-        rel: RelFileLocator,
-        index_rel: RelFileLocator,
-        am_oid: u32,
-        toast: Option<ToastRelationRef>,
-        desc: RelationDesc,
-        index_meta: IndexRelCacheEntry,
-        keys: Vec<ScanKeyData>,
-        direction: ScanDirection,
-    },
-    Filter {
-        plan_info: PlanEstimate,
-        input: Box<PlannerPath>,
-        predicate: PlannerJoinExpr,
-    },
-    NestedLoopJoin {
-        plan_info: PlanEstimate,
-        left: Box<PlannerPath>,
-        right: Box<PlannerPath>,
-        kind: JoinType,
-        on: PlannerJoinExpr,
-    },
-    Projection {
-        plan_info: PlanEstimate,
-        slot_id: usize,
-        input: Box<PlannerPath>,
-        targets: Vec<PlannerTargetEntry>,
-    },
-    OrderBy {
-        plan_info: PlanEstimate,
-        input: Box<PlannerPath>,
-        items: Vec<PlannerOrderByEntry>,
-    },
-    Limit {
-        plan_info: PlanEstimate,
-        input: Box<PlannerPath>,
-        limit: Option<usize>,
-        offset: usize,
-    },
-    Aggregate {
-        plan_info: PlanEstimate,
-        slot_id: usize,
-        input: Box<PlannerPath>,
-        group_by: Vec<PlannerJoinExpr>,
-        accumulators: Vec<AggAccum>,
-        having: Option<PlannerJoinExpr>,
-        output_columns: Vec<QueryColumn>,
-    },
-    Values {
-        plan_info: PlanEstimate,
-        slot_id: usize,
-        rows: Vec<Vec<PlannerJoinExpr>>,
-        output_columns: Vec<QueryColumn>,
-    },
-    FunctionScan {
-        plan_info: PlanEstimate,
-        slot_id: usize,
-        call: SetReturningCall,
-    },
-    ProjectSet {
-        plan_info: PlanEstimate,
-        slot_id: usize,
-        input: Box<PlannerPath>,
-        targets: Vec<PlannerProjectSetTarget>,
-    },
-}
+use crate::include::nodes::primnodes::{
+    Expr, ExprArraySubscript, QueryColumn,
+};
 
 struct PlannerPathBuilder {
     next_slot_id: usize,

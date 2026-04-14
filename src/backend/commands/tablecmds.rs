@@ -21,7 +21,7 @@ use crate::backend::parser::{
     BoundDeleteStatement, BoundIndexRelation, BoundInsertSource, BoundInsertStatement,
     BoundModifyRowSource, BoundUpdateStatement, Catalog, CatalogLookup, DropTableStatement,
     ExplainStatement, MaintenanceTarget, ParseError, Statement, TruncateTableStatement,
-    VacuumStatement, bind_create_table, build_plan,
+    VacuumStatement, bind_create_table,
 };
 use crate::backend::storage::smgr::ForkNumber;
 use crate::backend::storage::smgr::StorageManager;
@@ -128,7 +128,8 @@ pub(crate) fn execute_explain(
     };
 
     let plan_start = std::time::Instant::now();
-    let plan = build_plan(&select, catalog)?;
+    let planned_stmt = crate::backend::parser::pg_plan_query(&select, catalog)?;
+    let plan = planned_stmt.plan_tree;
     let mut lines = Vec::new();
     if stmt.analyze {
         ctx.pool.reset_usage_stats();

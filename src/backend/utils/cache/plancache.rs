@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use parking_lot::RwLock;
 
 use crate::backend::executor::ExecError;
-use crate::backend::parser::{CatalogLookup, Statement, build_plan, parse_statement};
-use crate::include::nodes::execnodes::Plan;
+use crate::backend::parser::{CatalogLookup, Statement, parse_statement, pg_plan_query};
+use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 
 /// Query plan cache — caches parsed statements and can optionally retain
 /// built plans for repeated execution of the same SQL.
@@ -16,7 +16,7 @@ pub struct PlanCache {
 
 struct CachedEntry {
     statement: Statement,
-    plan: Option<Plan>,
+    plan: Option<PlannedStmt>,
 }
 
 impl PlanCache {
@@ -42,7 +42,11 @@ impl PlanCache {
         Ok(stmt)
     }
 
-    pub fn get_plan(&self, sql: &str, catalog: &dyn CatalogLookup) -> Result<Plan, ExecError> {
+    pub fn get_planned_stmt(
+        &self,
+        sql: &str,
+        catalog: &dyn CatalogLookup,
+    ) -> Result<PlannedStmt, ExecError> {
         {
             let cache = self.cache.read();
             if let Some(entry) = cache.get(sql) {
@@ -53,10 +57,10 @@ impl PlanCache {
         }
         let stmt = parse_statement(sql)?;
         let plan = match &stmt {
-            Statement::Select(select) => Some(build_plan(select, catalog)?),
+            Statement::Select(select) => Some(pg_plan_query(select, catalog)?),
             Statement::Explain(explain) => {
                 if let Statement::Select(select) = &*explain.statement {
-                    Some(build_plan(select, catalog)?)
+                    Some(pg_plan_query(select, catalog)?)
                 } else {
                     None
                 }
@@ -71,7 +75,11 @@ impl PlanCache {
         if plan.is_some() && entry.plan.is_none() {
             entry.plan = plan.clone();
         }
-        Ok(plan.unwrap_or_else(|| unreachable!("get_plan called for non-SELECT")))
+        Ok(plan.unwrap_or_else(|| unreachable!("get_planned_stmt called for non-SELECT")))
+    }
+
+    pub fn get_plan(&self, sql: &str, catalog: &dyn CatalogLookup) -> Result<Plan, ExecError> {
+        Ok(self.get_planned_stmt(sql, catalog)?.plan_tree)
     }
 
     pub fn invalidate_all(&self) {

@@ -39,7 +39,8 @@ pub use crate::include::nodes::execnodes::*;
 pub use crate::include::nodes::plannodes::*;
 pub(crate) use agg::{AccumState, AggGroup};
 pub use driver::{
-    exec_next, execute_plan, execute_readonly_statement, execute_sql, execute_statement,
+    exec_next, execute_plan, execute_planned_stmt, execute_readonly_statement, execute_sql,
+    execute_statement,
 };
 pub use exec_expr::{eval_expr, eval_plpgsql_expr};
 pub(crate) use expr_bit::render_bit_text;
@@ -68,8 +69,8 @@ use crate::backend::catalog::CatalogError;
 use crate::backend::catalog::catalog::Catalog;
 use crate::backend::commands::tablecmds::*;
 use crate::backend::parser::{
-    ParseError, Statement, bind_delete, bind_insert, bind_update, build_plan, build_values_plan,
-    parse_statement,
+    ParseError, Statement, bind_delete, bind_insert, bind_update, parse_statement, pg_plan_query,
+    pg_plan_values_query,
 };
 use crate::include::access::htup::TupleError;
 use crate::pgrust::database::TransactionWaiter;

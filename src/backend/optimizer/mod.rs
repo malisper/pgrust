@@ -4,19 +4,21 @@ use std::collections::HashMap;
 mod pathnodes;
 
 use crate::RelFileLocator;
-use crate::backend::executor::{
-    Expr, Plan, PlanEstimate, QueryColumn, RelationDesc, ToastRelationRef, Value,
-    compare_order_values,
-};
 use crate::backend::parser::analyze::BoundSelectPlan;
 use crate::backend::parser::{BoundIndexRelation, CatalogLookup, SqlType, SqlTypeKind};
 use crate::include::catalog::{BTREE_AM_OID, PgStatisticRow};
 use crate::include::nodes::datum::ArrayValue;
-use crate::include::nodes::plannodes::{
-    AggAccum, DeferredSelectPlan, ExprArraySubscript, JoinType, ProjectSetTarget, SetReturningCall,
-    PlannerJoinExpr, PlannerOrderByEntry, PlannerProjectSetTarget, PlannerTargetEntry,
+use crate::include::nodes::pathnodes::{
+    PlannerJoinExpr, PlannerOrderByEntry, PlannerPath, PlannerProjectSetTarget,
+    PlannerTargetEntry,
 };
-use pathnodes::{PlannerPath, next_synthetic_slot_id};
+use crate::include::nodes::plannodes::{DeferredSelectPlan, Plan, PlanEstimate, PlannedStmt};
+use crate::include::nodes::primnodes::{
+    AggAccum, Expr, ExprArraySubscript, JoinType, ProjectSetTarget, QueryColumn, RelationDesc,
+    SetReturningCall, ToastRelationRef,
+};
+use crate::backend::executor::{Value, compare_order_values};
+use pathnodes::next_synthetic_slot_id;
 
 const DEFAULT_EQ_SEL: f64 = 0.005;
 const DEFAULT_INEQ_SEL: f64 = 1.0 / 3.0;
@@ -65,11 +67,24 @@ struct AccessCandidate {
     plan: PlannerPath,
 }
 
-pub(crate) fn optimize_bound_query(plan: BoundSelectPlan, catalog: &dyn CatalogLookup) -> Plan {
-    finalize_plan_subqueries(
-        optimize_path(PlannerPath::from_bound_select_plan(plan), catalog).into_plan(),
-        catalog,
-    )
+fn create_plan(path: PlannerPath) -> Plan {
+    path.into_plan()
+}
+
+pub(crate) fn standard_planner(
+    plan: BoundSelectPlan,
+    catalog: &dyn CatalogLookup,
+) -> PlannedStmt {
+    PlannedStmt {
+        plan_tree: finalize_plan_subqueries(
+            create_plan(optimize_path(PlannerPath::from_bound_select_plan(plan), catalog)),
+            catalog,
+        ),
+    }
+}
+
+pub(crate) fn planner(plan: BoundSelectPlan, catalog: &dyn CatalogLookup) -> PlannedStmt {
+    standard_planner(plan, catalog)
 }
 
 pub(crate) fn finalize_deferred_select_plan(
@@ -78,7 +93,7 @@ pub(crate) fn finalize_deferred_select_plan(
 ) -> DeferredSelectPlan {
     match plan {
         DeferredSelectPlan::Bound(plan) => {
-            DeferredSelectPlan::Planned(Box::new(optimize_bound_query(*plan, catalog)))
+            DeferredSelectPlan::Planned(Box::new(planner(*plan, catalog).plan_tree))
         }
         DeferredSelectPlan::Planned(plan) => DeferredSelectPlan::Planned(plan),
     }
