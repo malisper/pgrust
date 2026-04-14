@@ -931,13 +931,37 @@ fn bind_select_query_with_outer(
         let targets: Vec<TargetEntry> = if stmt.targets.len() == 1
             && matches!(stmt.targets[0].expr, SqlExpr::Column(ref name) if name == "*")
         {
-            output_columns
-                .iter()
-                .enumerate()
-                .map(|(i, name)| {
-                    TargetEntry::new(name.name.clone(), Expr::Column(i), name.sql_type, i + 1)
-                })
-                .collect()
+            let mut targets = Vec::with_capacity(output_columns.len());
+            for (i, name) in output_columns.iter().enumerate().take(n_keys) {
+                targets.push(TargetEntry::new(
+                    name.name.clone(),
+                    Expr::Column(i),
+                    name.sql_type,
+                    i + 1,
+                ));
+            }
+            for (i, accum) in accumulators.iter().enumerate() {
+                let target_index = n_keys + i;
+                let name = output_columns
+                    .get(target_index)
+                    .expect("aggregate output column")
+                    .name
+                    .clone();
+                targets.push(TargetEntry::new(
+                    name,
+                    Expr::aggref(
+                        accum.aggfnoid,
+                        accum.sql_type,
+                        accum.agg_variadic,
+                        accum.distinct,
+                        accum.args.clone(),
+                        i,
+                    ),
+                    accum.sql_type,
+                    target_index + 1,
+                ));
+            }
+            targets
         } else {
             stmt.targets
                 .iter()

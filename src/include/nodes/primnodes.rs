@@ -487,6 +487,17 @@ pub struct AggAccum {
     pub sql_type: SqlType,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Aggref {
+    pub aggfnoid: u32,
+    pub aggtype: SqlType,
+    pub aggvariadic: bool,
+    pub aggdistinct: bool,
+    pub args: Vec<Expr>,
+    pub agglevelsup: usize,
+    pub aggno: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JoinType {
     Inner,
@@ -611,6 +622,7 @@ pub enum Expr {
         index: usize,
     },
     Const(Value),
+    Aggref(Box<Aggref>),
     Op(Box<OpExpr>),
     Bool(Box<BoolExpr>),
     Func(Box<FuncExpr>),
@@ -743,6 +755,25 @@ impl Expr {
         }))
     }
 
+    pub fn aggref(
+        aggfnoid: u32,
+        aggtype: SqlType,
+        aggvariadic: bool,
+        aggdistinct: bool,
+        args: Vec<Expr>,
+        aggno: usize,
+    ) -> Self {
+        Expr::Aggref(Box::new(Aggref {
+            aggfnoid,
+            aggtype,
+            aggvariadic,
+            aggdistinct,
+            args,
+            agglevelsup: 0,
+            aggno,
+        }))
+    }
+
     pub fn builtin_func(
         func: BuiltinScalarFunction,
         funcresulttype: Option<SqlType>,
@@ -802,6 +833,7 @@ fn expr_sql_type_hint(expr: &Expr) -> Option<SqlType> {
     match expr {
         Expr::Var(var) => Some(var.vartype),
         Expr::Const(value) => value_sql_type_hint(value),
+        Expr::Aggref(aggref) => Some(aggref.aggtype),
         Expr::Cast(_, ty) => Some(*ty),
         Expr::ArrayLiteral { array_type, .. } => Some(*array_type),
         Expr::Coalesce(left, right) => {

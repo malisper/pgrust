@@ -328,6 +328,14 @@ fn rewrite_semantic_expr(
                 .collect::<Result<Vec<_>, _>>()?,
             ..*func
         })),
+        Expr::Aggref(aggref) => Expr::Aggref(Box::new(crate::include::nodes::primnodes::Aggref {
+            args: aggref
+                .args
+                .into_iter()
+                .map(|arg| rewrite_semantic_expr(arg, catalog, expanded_views))
+                .collect::<Result<Vec<_>, _>>()?,
+            ..*aggref
+        })),
         Expr::SubLink(sublink) => Expr::SubLink(Box::new(SubLink {
             testexpr: sublink
                 .testexpr

@@ -8,8 +8,8 @@ use crate::include::nodes::pathnodes::{
 use crate::include::nodes::plannodes::{Plan, PlanEstimate};
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::primnodes::{
-    BoolExpr, BoolExprType, Expr, ExprArraySubscript, FuncExpr, OpExpr, OpExprKind,
-    QueryColumn, ScalarArrayOpExpr,
+    BoolExpr, BoolExprType, Expr, ExprArraySubscript, FuncExpr, OpExpr, OpExprKind, QueryColumn,
+    ScalarArrayOpExpr,
 };
 
 struct PlannerPathBuilder {
@@ -148,6 +148,111 @@ where
             op: saop.op,
             right: Box::new(recurse(&saop.right)),
         }
+    }
+}
+
+fn lower_aggref_expr(expr: Expr, group_by: &[Expr]) -> Expr {
+    if let Some(index) = group_by.iter().position(|group_expr| *group_expr == expr) {
+        return Expr::Column(index);
+    }
+    match expr {
+        Expr::Aggref(aggref) => Expr::Column(group_by.len() + aggref.aggno),
+        Expr::Op(op) => Expr::Op(Box::new(OpExpr {
+            args: op
+                .args
+                .into_iter()
+                .map(|arg| lower_aggref_expr(arg, group_by))
+                .collect(),
+            ..*op
+        })),
+        Expr::Bool(bool_expr) => Expr::Bool(Box::new(BoolExpr {
+            args: bool_expr
+                .args
+                .into_iter()
+                .map(|arg| lower_aggref_expr(arg, group_by))
+                .collect(),
+            ..*bool_expr
+        })),
+        Expr::Func(func) => Expr::Func(Box::new(FuncExpr {
+            args: func
+                .args
+                .into_iter()
+                .map(|arg| lower_aggref_expr(arg, group_by))
+                .collect(),
+            ..*func
+        })),
+        Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(ScalarArrayOpExpr {
+            left: Box::new(lower_aggref_expr(*saop.left, group_by)),
+            right: Box::new(lower_aggref_expr(*saop.right, group_by)),
+            ..*saop
+        })),
+        Expr::Cast(inner, ty) => Expr::Cast(Box::new(lower_aggref_expr(*inner, group_by)), ty),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            case_insensitive,
+            negated,
+        } => Expr::Like {
+            expr: Box::new(lower_aggref_expr(*expr, group_by)),
+            pattern: Box::new(lower_aggref_expr(*pattern, group_by)),
+            escape: escape.map(|expr| Box::new(lower_aggref_expr(*expr, group_by))),
+            case_insensitive,
+            negated,
+        },
+        Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            negated,
+        } => Expr::Similar {
+            expr: Box::new(lower_aggref_expr(*expr, group_by)),
+            pattern: Box::new(lower_aggref_expr(*pattern, group_by)),
+            escape: escape.map(|expr| Box::new(lower_aggref_expr(*expr, group_by))),
+            negated,
+        },
+        Expr::IsNull(inner) => Expr::IsNull(Box::new(lower_aggref_expr(*inner, group_by))),
+        Expr::IsNotNull(inner) => Expr::IsNotNull(Box::new(lower_aggref_expr(*inner, group_by))),
+        Expr::IsDistinctFrom(left, right) => Expr::IsDistinctFrom(
+            Box::new(lower_aggref_expr(*left, group_by)),
+            Box::new(lower_aggref_expr(*right, group_by)),
+        ),
+        Expr::IsNotDistinctFrom(left, right) => Expr::IsNotDistinctFrom(
+            Box::new(lower_aggref_expr(*left, group_by)),
+            Box::new(lower_aggref_expr(*right, group_by)),
+        ),
+        Expr::ArrayLiteral {
+            elements,
+            array_type,
+        } => Expr::ArrayLiteral {
+            elements: elements
+                .into_iter()
+                .map(|element| lower_aggref_expr(element, group_by))
+                .collect(),
+            array_type,
+        },
+        Expr::SubLink(sublink) => Expr::SubLink(sublink),
+        Expr::SubPlan(subplan) => Expr::SubPlan(subplan),
+        Expr::Coalesce(left, right) => Expr::Coalesce(
+            Box::new(lower_aggref_expr(*left, group_by)),
+            Box::new(lower_aggref_expr(*right, group_by)),
+        ),
+        Expr::ArraySubscript { array, subscripts } => Expr::ArraySubscript {
+            array: Box::new(lower_aggref_expr(*array, group_by)),
+            subscripts: subscripts
+                .into_iter()
+                .map(|subscript| ExprArraySubscript {
+                    is_slice: subscript.is_slice,
+                    lower: subscript
+                        .lower
+                        .map(|expr| lower_aggref_expr(expr, group_by)),
+                    upper: subscript
+                        .upper
+                        .map(|expr| lower_aggref_expr(expr, group_by)),
+                })
+                .collect(),
+        },
+        other => other,
     }
 }
 
@@ -516,6 +621,29 @@ impl PlannerPathBuilder {
             || !query.accumulators.is_empty()
             || query.having_qual.is_some();
         if has_agg {
+            let lowered_targets = query
+                .target_list
+                .iter()
+                .cloned()
+                .map(|target| crate::backend::executor::TargetEntry {
+                    expr: lower_aggref_expr(target.expr, &query.group_by),
+                    ..target
+                })
+                .collect::<Vec<_>>();
+            let lowered_sort_clause = query
+                .sort_clause
+                .iter()
+                .cloned()
+                .map(|item| crate::backend::executor::OrderByEntry {
+                    expr: lower_aggref_expr(item.expr, &query.group_by),
+                    descending: item.descending,
+                    nulls_first: item.nulls_first,
+                })
+                .collect::<Vec<_>>();
+            let lowered_having = query
+                .having_qual
+                .clone()
+                .map(|expr| lower_aggref_expr(expr, &query.group_by));
             let layout = plan.output_vars();
             plan = PlannerPath::Aggregate {
                 plan_info: PlanEstimate::default(),
@@ -527,8 +655,7 @@ impl PlannerPathBuilder {
                     .map(|expr| PlannerJoinExpr::from_input_expr_with_layout(expr, &layout))
                     .collect(),
                 accumulators: query.accumulators,
-                having: query
-                    .having_qual
+                having: lowered_having
                     .as_ref()
                     .map(|expr| PlannerJoinExpr::from_input_expr_with_layout(expr, &layout)),
                 output_columns: query
@@ -540,6 +667,29 @@ impl PlannerPathBuilder {
                     })
                     .collect(),
             };
+            if !lowered_sort_clause.is_empty() {
+                plan = PlannerPath::OrderBy {
+                    plan_info: PlanEstimate::default(),
+                    input: Box::new(plan),
+                    items: lowered_sort_clause
+                        .into_iter()
+                        .map(|item| PlannerOrderByEntry {
+                            expr: PlannerJoinExpr::from_input_expr(&item.expr),
+                            descending: item.descending,
+                            nulls_first: item.nulls_first,
+                        })
+                        .collect(),
+                };
+            }
+            if query.limit_count.is_some() || query.limit_offset != 0 {
+                plan = PlannerPath::Limit {
+                    plan_info: PlanEstimate::default(),
+                    input: Box::new(plan),
+                    limit: query.limit_count,
+                    offset: query.limit_offset,
+                };
+            }
+            return self.add_projection(plan, lowered_targets);
         }
 
         let project_set_targets = query.project_set;
@@ -1009,6 +1159,9 @@ impl PlannerJoinExpr {
             Expr::Func(func) => planner_join_from_func(func, |expr| {
                 Self::from_input_expr_with_layout(expr, layout)
             }),
+            Expr::Aggref(_) => {
+                panic!("Aggref should be lowered to aggregate output slots before planner bridging")
+            }
             Expr::ScalarArrayOp(saop) => planner_join_from_scalar_array(saop, |expr| {
                 Self::from_input_expr_with_layout(expr, layout)
             }),
@@ -1123,6 +1276,9 @@ impl PlannerJoinExpr {
             Expr::Op(op) => planner_join_from_op(op, Self::from_input_expr),
             Expr::Bool(bool_expr) => planner_join_from_bool(bool_expr, Self::from_input_expr),
             Expr::Func(func) => planner_join_from_func(func, Self::from_input_expr),
+            Expr::Aggref(_) => {
+                panic!("Aggref should be lowered to aggregate output slots before planner bridging")
+            }
             Expr::ScalarArrayOp(saop) => {
                 planner_join_from_scalar_array(saop, Self::from_input_expr)
             }
@@ -1583,6 +1739,9 @@ impl PlannerJoinExpr {
             Expr::Func(func) => planner_join_from_func(func, |expr| {
                 Self::from_base_input_expr(expr, relation_oid)
             }),
+            Expr::Aggref(_) => {
+                panic!("Aggref should not appear in base-relation planner quals")
+            }
             Expr::ScalarArrayOp(saop) => planner_join_from_scalar_array(saop, |expr| {
                 Self::from_base_input_expr(expr, relation_oid)
             }),
@@ -1937,6 +2096,9 @@ impl PlannerJoinExpr {
                 planner_join_from_bool(bool_expr, |expr| Self::from_expr(expr, left_width))
             }
             Expr::Func(func) => planner_join_from_func(func, |expr| Self::from_expr(expr, left_width)),
+            Expr::Aggref(_) => {
+                panic!("Aggref should be lowered before join expression planning")
+            }
             Expr::ScalarArrayOp(saop) => {
                 planner_join_from_scalar_array(saop, |expr| Self::from_expr(expr, left_width))
             }
