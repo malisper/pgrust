@@ -405,6 +405,49 @@ impl Session {
                     )
                 }
             }
+            Statement::CreateRole(ref create_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    db.execute_create_role_stmt(
+                        self.client_id,
+                        create_stmt,
+                        self.gucs.get("createrole_self_grant").map(String::as_str),
+                    )
+                }
+            }
+            Statement::AlterRole(ref alter_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    db.execute_alter_role_stmt(self.client_id, alter_stmt)
+                }
+            }
+            Statement::DropRole(ref drop_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    db.execute_drop_role_stmt(self.client_id, drop_stmt)
+                }
+            }
             Statement::AlterTableSet(_) => Ok(StatementResult::AffectedRows(0)),
             Statement::CommentOnTable(ref comment_stmt) => {
                 if self.active_txn.is_some() {
@@ -775,7 +818,11 @@ impl Session {
                 )
             }
             Statement::AlterTableSet(_) => Ok(StatementResult::AffectedRows(0)),
-            Statement::CreateRole(ref create_stmt) => db.execute_create_role_stmt(client_id, create_stmt),
+            Statement::CreateRole(ref create_stmt) => db.execute_create_role_stmt(
+                client_id,
+                create_stmt,
+                self.gucs.get("createrole_self_grant").map(String::as_str),
+            ),
             Statement::AlterRole(ref alter_stmt) => db.execute_alter_role_stmt(client_id, alter_stmt),
             Statement::DropRole(ref drop_stmt) => db.execute_drop_role_stmt(client_id, drop_stmt),
             Statement::CommentOnRole(_)

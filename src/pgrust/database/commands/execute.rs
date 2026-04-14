@@ -77,7 +77,7 @@ impl Database {
             | Statement::Reset(_)
             | Statement::AlterTableSet(_) => Ok(StatementResult::AffectedRows(0)),
             Statement::CreateRole(ref create_stmt) => {
-                self.execute_create_role_stmt(client_id, create_stmt)
+                self.execute_create_role_stmt(client_id, create_stmt, None)
             }
             Statement::AlterRole(ref alter_stmt) => {
                 self.execute_alter_role_stmt(client_id, alter_stmt)
