@@ -28,6 +28,17 @@ pub(super) enum ResolvedSrfImpl {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ResolvedFunctionRowShape {
+    None,
+    AnonymousRecord,
+    OutParameters(Vec<QueryColumn>),
+    NamedComposite {
+        relation_oid: u32,
+        columns: Vec<QueryColumn>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ResolvedFunctionCall {
     pub proc_oid: u32,
     pub prokind: char,
@@ -40,6 +51,7 @@ pub(super) struct ResolvedFunctionCall {
     pub scalar_impl: Option<BuiltinScalarFunction>,
     pub srf_impl: Option<ResolvedSrfImpl>,
     pub agg_impl: Option<AggFunc>,
+    pub row_shape: ResolvedFunctionRowShape,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,7 +83,10 @@ pub(super) fn resolve_function_call(
         else {
             continue;
         };
-        let Some(result_type) = resolve_proc_result_type(&row, &candidate) else {
+        let Some(result_type) = resolve_proc_result_type(catalog, &row, &candidate) else {
+            continue;
+        };
+        let Some(row_shape) = resolve_function_row_shape(catalog, &row, result_type) else {
             continue;
         };
 
@@ -88,6 +103,7 @@ pub(super) fn resolve_function_call(
             scalar_impl,
             srf_impl,
             agg_impl,
+            row_shape,
         };
 
         let is_variadic = row.provariadic != 0;
@@ -299,13 +315,76 @@ fn match_proc_arg_type(
 }
 
 fn resolve_proc_result_type(
+    catalog: &dyn CatalogLookup,
     row: &crate::include::catalog::PgProcRow,
     candidate: &CandidateMatch,
 ) -> Option<SqlType> {
     match row.prorettype {
         ANYOID => resolve_anyelement_result_type(row, candidate),
         ANYARRAYOID => resolve_anyarray_result_type(row, candidate),
-        _ => builtin_sql_type_for_oid(row.prorettype),
+        _ => catalog.type_by_oid(row.prorettype).map(|row| row.sql_type),
+    }
+}
+
+fn resolve_function_row_shape(
+    catalog: &dyn CatalogLookup,
+    row: &crate::include::catalog::PgProcRow,
+    result_type: SqlType,
+) -> Option<ResolvedFunctionRowShape> {
+    match result_type.kind {
+        SqlTypeKind::Record => resolve_record_row_shape(catalog, row),
+        SqlTypeKind::Composite => {
+            let relation_oid = result_type.typrelid;
+            let relation = catalog.lookup_relation_by_oid(relation_oid)?;
+            let columns = relation
+                .desc
+                .columns
+                .into_iter()
+                .filter(|column| !column.dropped)
+                .map(|column| QueryColumn {
+                    name: column.name,
+                    sql_type: column.sql_type,
+                })
+                .collect();
+            Some(ResolvedFunctionRowShape::NamedComposite {
+                relation_oid,
+                columns,
+            })
+        }
+        _ => Some(ResolvedFunctionRowShape::None),
+    }
+}
+
+fn resolve_record_row_shape(
+    catalog: &dyn CatalogLookup,
+    row: &crate::include::catalog::PgProcRow,
+) -> Option<ResolvedFunctionRowShape> {
+    let (Some(arg_types), Some(arg_modes)) = (&row.proallargtypes, &row.proargmodes) else {
+        return Some(ResolvedFunctionRowShape::AnonymousRecord);
+    };
+    if arg_types.len() != arg_modes.len() {
+        return None;
+    }
+
+    let arg_names = row.proargnames.as_deref().unwrap_or(&[]);
+    let mut output_columns = Vec::new();
+    for (index, (type_oid, mode)) in arg_types.iter().zip(arg_modes.iter()).enumerate() {
+        if !matches!(*mode, b'o' | b'b' | b't') {
+            continue;
+        }
+        let sql_type = catalog.type_by_oid(*type_oid)?.sql_type;
+        let name = arg_names
+            .get(index)
+            .filter(|name| !name.is_empty())
+            .cloned()
+            .unwrap_or_else(|| format!("column{}", output_columns.len() + 1));
+        output_columns.push(QueryColumn { name, sql_type });
+    }
+
+    if output_columns.is_empty() {
+        Some(ResolvedFunctionRowShape::AnonymousRecord)
+    } else {
+        Some(ResolvedFunctionRowShape::OutParameters(output_columns))
     }
 }
 
