@@ -2,6 +2,7 @@ use crate::backend::catalog::pg_constraint::derived_pg_constraint_rows;
 use crate::backend::parser::{BoundRelation, CatalogLookup};
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::relcache::RelCache;
+use crate::backend::utils::cache::system_views::{build_pg_stats_rows, build_pg_views_rows};
 use crate::include::catalog::{
     PgCastRow, PgConstraintRow, PgOperatorRow, PgProcRow, PgRewriteRow, PgTypeRow,
     bootstrap_pg_cast_rows, bootstrap_pg_operator_rows, bootstrap_pg_proc_rows, builtin_type_rows,
@@ -157,28 +158,23 @@ impl CatalogLookup for VisibleCatalog {
         let Some(catcache) = &self.catcache else {
             return Vec::new();
         };
-        catcache
-            .class_rows()
-            .into_iter()
-            .filter(|class| class.relkind == 'v')
-            .filter_map(|class| {
-                let definition = catcache
-                    .rewrite_rows_for_relation(class.oid)
-                    .into_iter()
-                    .find(|row| row.rulename == "_RETURN")?
-                    .ev_action;
-                let schemaname = catcache
-                    .namespace_by_oid(class.relnamespace)
-                    .map(|ns| ns.nspname.clone())
-                    .unwrap_or_else(|| "public".to_string());
-                Some(vec![
-                    crate::backend::executor::Value::Text(schemaname.into()),
-                    crate::backend::executor::Value::Text(class.relname.into()),
-                    crate::backend::executor::Value::Text("postgres".into()),
-                    crate::backend::executor::Value::Text(definition.into()),
-                ])
-            })
-            .collect()
+        build_pg_views_rows(
+            catcache.namespace_rows(),
+            catcache.class_rows(),
+            catcache.rewrite_rows(),
+        )
+    }
+
+    fn pg_stats_rows(&self) -> Vec<Vec<crate::backend::executor::Value>> {
+        let Some(catcache) = &self.catcache else {
+            return Vec::new();
+        };
+        build_pg_stats_rows(
+            catcache.namespace_rows(),
+            catcache.class_rows(),
+            catcache.attribute_rows(),
+            catcache.statistic_rows(),
+        )
     }
 }
 

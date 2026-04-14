@@ -26,6 +26,7 @@ use crate::include::catalog::{
 use super::parsenodes::*;
 pub use crate::backend::catalog::catalog::{Catalog, CatalogEntry};
 use crate::backend::utils::cache::relcache::RelCache;
+use crate::backend::utils::cache::system_views::{build_pg_stats_rows, build_pg_views_rows};
 use agg::*;
 use agg_output::*;
 use coerce::*;
@@ -130,6 +131,10 @@ pub trait CatalogLookup {
     fn pg_views_rows(&self) -> Vec<Vec<Value>> {
         Vec::new()
     }
+
+    fn pg_stats_rows(&self) -> Vec<Vec<Value>> {
+        Vec::new()
+    }
 }
 
 impl CatalogLookup for Catalog {
@@ -168,29 +173,22 @@ impl CatalogLookup for Catalog {
     }
 
     fn pg_views_rows(&self) -> Vec<Vec<Value>> {
-        self.entries()
-            .filter(|(_, entry)| entry.relkind == 'v')
-            .filter_map(|(name, entry)| {
-                let definition = self
-                    .rewrite_rows_for_relation(entry.relation_oid)
-                    .iter()
-                    .find(|row| row.rulename == "_RETURN")?
-                    .ev_action
-                    .clone();
-                let viewname = name.rsplit('.').next().unwrap_or(name).to_string();
-                let schemaname = match entry.namespace_oid {
-                    crate::include::catalog::PG_CATALOG_NAMESPACE_OID => "pg_catalog".to_string(),
-                    crate::include::catalog::PUBLIC_NAMESPACE_OID => "public".to_string(),
-                    _ => "public".to_string(),
-                };
-                Some(vec![
-                    Value::Text(schemaname.into()),
-                    Value::Text(viewname.into()),
-                    Value::Text("postgres".into()),
-                    Value::Text(definition.into()),
-                ])
-            })
-            .collect()
+        let catcache = crate::backend::utils::cache::catcache::CatCache::from_catalog(self);
+        build_pg_views_rows(
+            catcache.namespace_rows(),
+            catcache.class_rows(),
+            catcache.rewrite_rows(),
+        )
+    }
+
+    fn pg_stats_rows(&self) -> Vec<Vec<Value>> {
+        let catcache = crate::backend::utils::cache::catcache::CatCache::from_catalog(self);
+        build_pg_stats_rows(
+            catcache.namespace_rows(),
+            catcache.class_rows(),
+            catcache.attribute_rows(),
+            catcache.statistic_rows(),
+        )
     }
 }
 

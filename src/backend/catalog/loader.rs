@@ -1539,6 +1539,26 @@ pub(crate) fn load_visible_rewrite_rows(
     .collect()
 }
 
+pub(crate) fn load_visible_statistic_rows(
+    base_dir: &Path,
+    pool: &BufferPool<SmgrStorageBackend>,
+    txns: &TransactionManager,
+    snapshot: &Snapshot,
+    client_id: crate::ClientId,
+) -> Result<Vec<crate::include::catalog::PgStatisticRow>, CatalogError> {
+    load_visible_catalog_kind(
+        base_dir,
+        pool,
+        txns,
+        snapshot,
+        client_id,
+        BootstrapCatalogKind::PgStatistic,
+    )?
+    .into_iter()
+    .map(pg_statistic_row_from_values)
+    .collect()
+}
+
 pub(crate) fn load_visible_am_rows(
     base_dir: &Path,
     pool: &BufferPool<SmgrStorageBackend>,

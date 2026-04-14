@@ -349,6 +349,92 @@ fn analyze_column_list_replaces_existing_pg_statistic_rows() {
 }
 
 #[test]
+fn analyze_populates_pg_stats_view_and_anyarray_columns() {
+    use crate::include::catalog::{FLOAT4_TYPE_OID, INT4_TYPE_OID, TEXT_TYPE_OID};
+    use crate::include::nodes::datum::ArrayValue;
+
+    let dir = temp_dir("analyze_populates_pg_stats_view");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create table stats_view_t(a int4, b text)").unwrap();
+    session
+        .execute(
+            &db,
+            "insert into stats_view_t values
+               (1, 'one'),
+               (1, 'one'),
+               (2, 'two'),
+               (null, null),
+               (3, 'three')",
+        )
+        .unwrap();
+    session.execute(&db, "analyze stats_view_t").unwrap();
+
+    let rows = query_rows(
+        &db,
+        1,
+        "select attname, inherited, null_frac, avg_width, n_distinct,
+                most_common_vals, most_common_freqs, histogram_bounds, correlation
+         from pg_stats
+         where tablename = 'stats_view_t'
+         order by attname",
+    );
+    assert_eq!(rows.len(), 2);
+
+    assert_eq!(rows[0][0], Value::Text("a".into()));
+    assert_eq!(rows[0][1], Value::Bool(false));
+    assert!(float_value(&rows[0][2]) > 0.0);
+    assert!(int_value(&rows[0][3]) > 0);
+    assert!(float_value(&rows[0][4]).abs() > 0.0);
+    assert_eq!(
+        rows[0][5],
+        Value::PgArray(
+            ArrayValue::from_1d(vec![Value::Int32(1)]).with_element_type_oid(INT4_TYPE_OID),
+        )
+    );
+    match &rows[0][6] {
+        Value::PgArray(array) => {
+            assert_eq!(array.element_type_oid, Some(FLOAT4_TYPE_OID));
+            assert_eq!(array.elements.len(), 1);
+            assert!((float_value(&array.elements[0]) - 0.4).abs() < 0.01);
+        }
+        other => panic!("expected float4 frequency array, got {other:?}"),
+    }
+    match &rows[0][7] {
+        Value::PgArray(array) => {
+            assert_eq!(array.element_type_oid, Some(INT4_TYPE_OID));
+            assert_eq!(array.ndim(), 1);
+            assert!(!array.elements.is_empty());
+        }
+        other => panic!("expected int4 histogram array, got {other:?}"),
+    }
+    assert!(float_value(&rows[0][8]).abs() > 0.0);
+
+    assert_eq!(rows[1][0], Value::Text("b".into()));
+    match &rows[1][5] {
+        Value::PgArray(array) => {
+            assert_eq!(array.element_type_oid, Some(TEXT_TYPE_OID));
+            assert_eq!(array.elements, vec![Value::Text("one".into())]);
+        }
+        other => panic!("expected text mcv array, got {other:?}"),
+    }
+
+    let histogram_dims = query_rows(
+        &db,
+        1,
+        "select array_ndims(histogram_bounds)
+         from pg_catalog.pg_stats
+         where tablename = 'stats_view_t' and histogram_bounds is not null
+         order by 1",
+    );
+    assert!(!histogram_dims.is_empty());
+    assert!(histogram_dims
+        .iter()
+        .all(|row| row.as_slice() == [Value::Int32(1)]));
+}
+
+#[test]
 fn create_view_selects_and_persists_rewrite_rule() {
     let dir = temp_dir("create_view_selects");
     let db = Database::open(&dir, 128).unwrap();
