@@ -1,6 +1,8 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
+mod pathnodes;
+
 use crate::RelFileLocator;
 use crate::backend::executor::{
     Expr, OrderByEntry, Plan, PlanEstimate, QueryColumn, RelationDesc, TargetEntry,
@@ -8,8 +10,9 @@ use crate::backend::executor::{
 };
 use crate::backend::parser::{BoundIndexRelation, CatalogLookup, SqlType, SqlTypeKind};
 use crate::include::catalog::{BTREE_AM_OID, PgStatisticRow};
-use crate::include::nodes::plannodes::JoinType;
 use crate::include::nodes::datum::ArrayValue;
+use crate::include::nodes::plannodes::JoinType;
+use pathnodes::PlannerPath;
 
 const DEFAULT_EQ_SEL: f64 = 0.005;
 const DEFAULT_INEQ_SEL: f64 = 1.0 / 3.0;
@@ -55,17 +58,21 @@ struct IndexPathSpec {
 #[derive(Debug, Clone)]
 struct AccessCandidate {
     total_cost: f64,
-    plan: Plan,
+    plan: PlannerPath,
 }
 
 pub fn optimize_plan(plan: Plan, catalog: &dyn CatalogLookup) -> Plan {
+    optimize_path(PlannerPath::from_plan(plan), catalog).into_plan()
+}
+
+pub(super) fn optimize_path(plan: PlannerPath, catalog: &dyn CatalogLookup) -> PlannerPath {
     match try_optimize_access_subtree(plan, catalog) {
         Ok(plan) => plan,
         Err(plan) => match plan {
-            Plan::Result { .. } => Plan::Result {
+            PlannerPath::Result { .. } => PlannerPath::Result {
                 plan_info: PlanEstimate::new(0.0, 0.0, 1.0, 0),
             },
-            Plan::SeqScan {
+            PlannerPath::SeqScan {
                 rel,
                 relation_oid,
                 toast,
@@ -74,7 +81,7 @@ pub fn optimize_plan(plan: Plan, catalog: &dyn CatalogLookup) -> Plan {
             } => {
                 let stats = relation_stats(catalog, relation_oid, &desc);
                 let base = seq_scan_estimate(&stats);
-                Plan::SeqScan {
+                PlannerPath::SeqScan {
                     plan_info: base,
                     rel,
                     relation_oid,
@@ -82,7 +89,7 @@ pub fn optimize_plan(plan: Plan, catalog: &dyn CatalogLookup) -> Plan {
                     desc,
                 }
             }
-            Plan::IndexScan {
+            PlannerPath::IndexScan {
                 rel,
                 index_rel,
                 am_oid,
@@ -105,7 +112,7 @@ pub fn optimize_plan(plan: Plan, catalog: &dyn CatalogLookup) -> Plan {
                     rows,
                     stats.width,
                 );
-                Plan::IndexScan {
+                PlannerPath::IndexScan {
                     plan_info,
                     rel,
                     index_rel,
@@ -117,16 +124,16 @@ pub fn optimize_plan(plan: Plan, catalog: &dyn CatalogLookup) -> Plan {
                     direction,
                 }
             }
-            Plan::Filter {
+            PlannerPath::Filter {
                 input, predicate, ..
             } => {
-                let input = optimize_plan(*input, catalog);
+                let input = optimize_path(*input, catalog);
                 let input_info = input.plan_info();
                 let input_rows = input_info.plan_rows.as_f64();
                 let selectivity = clause_selectivity(&predicate, None, input_rows);
                 let rows = clamp_rows(input_rows * selectivity);
                 let qual_cost = predicate_cost(&predicate) * input_rows * CPU_OPERATOR_COST;
-                Plan::Filter {
+                PlannerPath::Filter {
                     plan_info: PlanEstimate::new(
                         input_info.startup_cost.as_f64(),
                         input_info.total_cost.as_f64() + qual_cost,
@@ -137,11 +144,11 @@ pub fn optimize_plan(plan: Plan, catalog: &dyn CatalogLookup) -> Plan {
                     predicate,
                 }
             }
-            Plan::OrderBy { input, items, .. } => {
-                let input = optimize_plan(*input, catalog);
+            PlannerPath::OrderBy { input, items, .. } => {
+                let input = optimize_path(*input, catalog);
                 let input_info = input.plan_info();
                 let sort_cost = estimate_sort_cost(input_info.plan_rows.as_f64(), items.len());
-                Plan::OrderBy {
+                PlannerPath::OrderBy {
                     plan_info: PlanEstimate::new(
                         input_info.total_cost.as_f64(),
                         input_info.total_cost.as_f64() + sort_cost,
@@ -152,13 +159,13 @@ pub fn optimize_plan(plan: Plan, catalog: &dyn CatalogLookup) -> Plan {
                     items,
                 }
             }
-            Plan::Limit {
+            PlannerPath::Limit {
                 input,
                 limit,
                 offset,
                 ..
             } => {
-                let input = optimize_plan(*input, catalog);
+                let input = optimize_path(*input, catalog);
                 let input_info = input.plan_info();
                 let input_rows = input_info.plan_rows.as_f64();
                 let requested = limit
@@ -175,7 +182,7 @@ pub fn optimize_plan(plan: Plan, catalog: &dyn CatalogLookup) -> Plan {
                 let total = input_info.startup_cost.as_f64()
                     + (input_info.total_cost.as_f64() - input_info.startup_cost.as_f64())
                         * fraction;
-                Plan::Limit {
+                PlannerPath::Limit {
                     plan_info: PlanEstimate::new(
                         input_info.startup_cost.as_f64(),
                         total,
@@ -187,14 +194,14 @@ pub fn optimize_plan(plan: Plan, catalog: &dyn CatalogLookup) -> Plan {
                     offset,
                 }
             }
-            Plan::Projection { input, targets, .. } => {
-                let input = optimize_plan(*input, catalog);
+            PlannerPath::Projection { input, targets, .. } => {
+                let input = optimize_path(*input, catalog);
                 let input_info = input.plan_info();
                 let width = targets
                     .iter()
                     .map(|target| estimate_sql_type_width(target.sql_type))
                     .sum();
-                Plan::Projection {
+                PlannerPath::Projection {
                     plan_info: PlanEstimate::new(
                         input_info.startup_cost.as_f64(),
                         input_info.total_cost.as_f64()
@@ -206,7 +213,7 @@ pub fn optimize_plan(plan: Plan, catalog: &dyn CatalogLookup) -> Plan {
                     targets,
                 }
             }
-            Plan::Aggregate {
+            PlannerPath::Aggregate {
                 input,
                 group_by,
                 accumulators,
@@ -214,7 +221,7 @@ pub fn optimize_plan(plan: Plan, catalog: &dyn CatalogLookup) -> Plan {
                 output_columns,
                 ..
             } => {
-                let input = optimize_plan(*input, catalog);
+                let input = optimize_path(*input, catalog);
                 let input_info = input.plan_info();
                 let rows = if group_by.is_empty() {
                     1.0
@@ -229,7 +236,7 @@ pub fn optimize_plan(plan: Plan, catalog: &dyn CatalogLookup) -> Plan {
                     + input_info.plan_rows.as_f64()
                         * (accumulators.len().max(1) as f64)
                         * CPU_OPERATOR_COST;
-                Plan::Aggregate {
+                PlannerPath::Aggregate {
                     plan_info: PlanEstimate::new(total, total, rows, width),
                     input: Box::new(input),
                     group_by,
@@ -238,29 +245,29 @@ pub fn optimize_plan(plan: Plan, catalog: &dyn CatalogLookup) -> Plan {
                     output_columns,
                 }
             }
-            Plan::NestedLoopJoin {
+            PlannerPath::NestedLoopJoin {
                 left,
                 right,
                 kind,
                 on,
                 ..
             } => {
-                let left = optimize_plan(*left, catalog);
-                let right = optimize_plan(*right, catalog);
+                let left = optimize_path(*left, catalog);
+                let right = optimize_path(*right, catalog);
                 choose_join_plan(left, right, kind, on)
             }
-            Plan::FunctionScan { call, .. } => {
+            PlannerPath::FunctionScan { call, .. } => {
                 let output_columns = call.output_columns();
                 let width = output_columns
                     .iter()
                     .map(|col| estimate_sql_type_width(col.sql_type))
                     .sum();
-                Plan::FunctionScan {
+                PlannerPath::FunctionScan {
                     plan_info: PlanEstimate::new(0.0, 10.0, 1000.0, width),
                     call,
                 }
             }
-            Plan::Values {
+            PlannerPath::Values {
                 rows,
                 output_columns,
                 ..
@@ -270,14 +277,14 @@ pub fn optimize_plan(plan: Plan, catalog: &dyn CatalogLookup) -> Plan {
                     .map(|col| estimate_sql_type_width(col.sql_type))
                     .sum();
                 let row_count = rows.len().max(1) as f64;
-                Plan::Values {
+                PlannerPath::Values {
                     plan_info: PlanEstimate::new(0.0, row_count * CPU_TUPLE_COST, row_count, width),
                     rows,
                     output_columns,
                 }
             }
-            Plan::ProjectSet { input, targets, .. } => {
-                let input = optimize_plan(*input, catalog);
+            PlannerPath::ProjectSet { input, targets, .. } => {
+                let input = optimize_path(*input, catalog);
                 let input_info = input.plan_info();
                 let rows = clamp_rows(input_info.plan_rows.as_f64() * 10.0);
                 let width = targets
@@ -291,7 +298,7 @@ pub fn optimize_plan(plan: Plan, catalog: &dyn CatalogLookup) -> Plan {
                         }
                     })
                     .sum();
-                Plan::ProjectSet {
+                PlannerPath::ProjectSet {
                     plan_info: PlanEstimate::new(
                         input_info.startup_cost.as_f64(),
                         input_info.total_cost.as_f64()
@@ -308,21 +315,21 @@ pub fn optimize_plan(plan: Plan, catalog: &dyn CatalogLookup) -> Plan {
 }
 
 fn try_optimize_access_subtree(
-    plan: Plan,
+    plan: PlannerPath,
     catalog: &dyn CatalogLookup,
-) -> Result<Plan, Plan> {
+) -> Result<PlannerPath, PlannerPath> {
     let (rel, relation_oid, toast, desc, filter, order_items) = match plan {
-        Plan::SeqScan {
+        PlannerPath::SeqScan {
             rel,
             relation_oid,
             toast,
             desc,
             ..
         } => (rel, relation_oid, toast, desc, None, None),
-        Plan::Filter {
+        PlannerPath::Filter {
             input, predicate, ..
         } => match *input {
-            Plan::SeqScan {
+            PlannerPath::SeqScan {
                 rel,
                 relation_oid,
                 toast,
@@ -330,25 +337,25 @@ fn try_optimize_access_subtree(
                 ..
             } => (rel, relation_oid, toast, desc, Some(predicate), None),
             other => {
-                return Err(Plan::Filter {
+                return Err(PlannerPath::Filter {
                     plan_info: PlanEstimate::default(),
                     input: Box::new(other),
                     predicate,
                 });
             }
         },
-        Plan::OrderBy { input, items, .. } => match *input {
-            Plan::SeqScan {
+        PlannerPath::OrderBy { input, items, .. } => match *input {
+            PlannerPath::SeqScan {
                 rel,
                 relation_oid,
                 toast,
                 desc,
                 ..
             } => (rel, relation_oid, toast, desc, None, Some(items)),
-            Plan::Filter {
+            PlannerPath::Filter {
                 input, predicate, ..
             } => match *input {
-                Plan::SeqScan {
+                PlannerPath::SeqScan {
                     rel,
                     relation_oid,
                     toast,
@@ -356,9 +363,9 @@ fn try_optimize_access_subtree(
                     ..
                 } => (rel, relation_oid, toast, desc, Some(predicate), Some(items)),
                 other => {
-                    return Err(Plan::OrderBy {
+                    return Err(PlannerPath::OrderBy {
                         plan_info: PlanEstimate::default(),
-                        input: Box::new(Plan::Filter {
+                        input: Box::new(PlannerPath::Filter {
                             plan_info: PlanEstimate::default(),
                             input: Box::new(other),
                             predicate,
@@ -368,7 +375,7 @@ fn try_optimize_access_subtree(
                 }
             },
             other => {
-                return Err(Plan::OrderBy {
+                return Err(PlannerPath::OrderBy {
                     plan_info: PlanEstimate::default(),
                     input: Box::new(other),
                     items,
@@ -440,7 +447,7 @@ fn estimate_seqscan_candidate(
 ) -> AccessCandidate {
     let scan_info = seq_scan_estimate(stats);
     let mut total_cost = scan_info.total_cost.as_f64();
-    let mut plan = Plan::SeqScan {
+    let mut plan = PlannerPath::SeqScan {
         plan_info: scan_info,
         rel,
         relation_oid,
@@ -454,7 +461,7 @@ fn estimate_seqscan_candidate(
         let selectivity = clause_selectivity(&predicate, Some(stats), stats.reltuples);
         current_rows = clamp_rows(stats.reltuples * selectivity);
         total_cost += stats.reltuples * predicate_cost(&predicate) * CPU_OPERATOR_COST;
-        plan = Plan::Filter {
+        plan = PlannerPath::Filter {
             plan_info: PlanEstimate::new(
                 scan_info.startup_cost.as_f64(),
                 total_cost,
@@ -468,7 +475,7 @@ fn estimate_seqscan_candidate(
 
     if let Some(items) = order_items {
         total_cost += estimate_sort_cost(current_rows, items.len());
-        plan = Plan::OrderBy {
+        plan = PlannerPath::OrderBy {
             plan_info: PlanEstimate::new(total_cost - estimate_sort_cost(current_rows, items.len()), total_cost, current_rows, width),
             input: Box::new(plan),
             items,
@@ -506,7 +513,7 @@ fn estimate_index_candidate(
     let scan_info = PlanEstimate::new(CPU_OPERATOR_COST, base_cost, index_rows, stats.width);
     let mut total_cost = scan_info.total_cost.as_f64();
     let mut current_rows = scan_info.plan_rows.as_f64();
-    let mut plan = Plan::IndexScan {
+    let mut plan = PlannerPath::IndexScan {
         plan_info: scan_info,
         rel,
         index_rel: spec.index.rel,
@@ -522,7 +529,7 @@ fn estimate_index_candidate(
         let selectivity = clause_selectivity(&predicate, Some(stats), stats.reltuples);
         current_rows = clamp_rows(current_rows * selectivity);
         total_cost += current_rows * predicate_cost(&predicate) * CPU_OPERATOR_COST;
-        plan = Plan::Filter {
+        plan = PlannerPath::Filter {
             plan_info: PlanEstimate::new(
                 scan_info.startup_cost.as_f64(),
                 total_cost,
@@ -539,7 +546,7 @@ fn estimate_index_candidate(
     {
         let sort_cost = estimate_sort_cost(current_rows, items.len());
         total_cost += sort_cost;
-        plan = Plan::OrderBy {
+        plan = PlannerPath::OrderBy {
             plan_info: PlanEstimate::new(total_cost - sort_cost, total_cost, current_rows, stats.width),
             input: Box::new(plan),
             items,
@@ -554,7 +561,12 @@ fn seq_scan_estimate(stats: &RelationStats) -> PlanEstimate {
     PlanEstimate::new(0.0, total_cost, clamp_rows(stats.reltuples), stats.width)
 }
 
-fn choose_join_plan(left: Plan, right: Plan, kind: JoinType, on: Expr) -> Plan {
+fn choose_join_plan(
+    left: PlannerPath,
+    right: PlannerPath,
+    kind: JoinType,
+    on: Expr,
+) -> PlannerPath {
     let original = estimate_nested_loop_join(left.clone(), right.clone(), kind, on.clone());
     if !matches!(kind, JoinType::Inner | JoinType::Cross) {
         return original;
@@ -578,7 +590,12 @@ fn choose_join_plan(left: Plan, right: Plan, kind: JoinType, on: Expr) -> Plan {
     }
 }
 
-fn estimate_nested_loop_join(left: Plan, right: Plan, kind: JoinType, on: Expr) -> Plan {
+fn estimate_nested_loop_join(
+    left: PlannerPath,
+    right: PlannerPath,
+    kind: JoinType,
+    on: Expr,
+) -> PlannerPath {
     let left_info = left.plan_info();
     let right_info = right.plan_info();
     let join_sel = clause_selectivity(&on, None, left_info.plan_rows.as_f64());
@@ -590,7 +607,7 @@ fn estimate_nested_loop_join(left: Plan, right: Plan, kind: JoinType, on: Expr) 
             * right_info.plan_rows.as_f64()
             * predicate_cost(&on)
             * CPU_OPERATOR_COST;
-    Plan::NestedLoopJoin {
+    PlannerPath::NestedLoopJoin {
         plan_info: PlanEstimate::new(
             left_info.startup_cost.as_f64() + right_info.startup_cost.as_f64(),
             total,
@@ -604,7 +621,11 @@ fn estimate_nested_loop_join(left: Plan, right: Plan, kind: JoinType, on: Expr) 
     }
 }
 
-fn restore_join_output_order(join: Plan, left_columns: &[QueryColumn], right_columns: &[QueryColumn]) -> Plan {
+fn restore_join_output_order(
+    join: PlannerPath,
+    left_columns: &[QueryColumn],
+    right_columns: &[QueryColumn],
+) -> PlannerPath {
     let join_info = join.plan_info();
     let right_width = right_columns.len();
     let mut targets = Vec::with_capacity(left_columns.len() + right_columns.len());
@@ -626,7 +647,7 @@ fn restore_join_output_order(join: Plan, left_columns: &[QueryColumn], right_col
         .iter()
         .map(|target| estimate_sql_type_width(target.sql_type))
         .sum();
-    Plan::Projection {
+    PlannerPath::Projection {
         plan_info: PlanEstimate::new(
             join_info.startup_cost.as_f64(),
             join_info.total_cost.as_f64() + join_info.plan_rows.as_f64() * CPU_OPERATOR_COST,
