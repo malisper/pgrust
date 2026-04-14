@@ -7,6 +7,7 @@ use crate::backend::parser::{Catalog, CatalogEntry};
 use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, StorageManager};
 use crate::include::access::htup::TupleValue;
 use crate::include::access::htup::{AttributeDesc, HeapTuple};
+use crate::include::nodes::datetime::DateADT;
 use crate::pgrust::database::{Database, Session};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -2564,6 +2565,53 @@ fn select_extract_uses_date_part_runtime() {
         )
         .unwrap(),
         vec![vec![Value::Float64(33.0), Value::Float64(7.0)]],
+    );
+}
+
+#[test]
+fn select_date_trunc_on_date_values() {
+    let base = temp_dir("select_date_trunc_date");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select date_trunc('century', date '2004-08-10'), date_trunc('decade', date '0002-12-31 BC')",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Date(DateADT(
+                crate::backend::utils::time::datetime::days_from_ymd(2001, 1, 1).unwrap(),
+            )),
+            Value::Date(DateADT(
+                crate::backend::utils::time::datetime::days_from_ymd(-10, 1, 1).unwrap(),
+            )),
+        ]],
+    );
+}
+
+#[test]
+fn select_isfinite_and_make_date_for_date() {
+    let base = temp_dir("select_isfinite_make_date");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select isfinite(date 'infinity'), isfinite(date 'today'), make_date(-44, 3, 15)",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Bool(false),
+            Value::Bool(true),
+            Value::Date(DateADT(
+                crate::backend::utils::time::datetime::days_from_ymd(-43, 3, 15).unwrap(),
+            )),
+        ]],
     );
 }
 
