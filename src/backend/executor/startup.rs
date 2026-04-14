@@ -1,10 +1,11 @@
 use super::agg::AccumState;
 use super::{Plan, PlanState, TupleSlot, expr, tuple_decoder};
+use crate::backend::executor::hashjoin::HashJoinPhase;
 use crate::include::catalog::bootstrap_catalog_kinds;
 use crate::include::catalog::builtin_aggregate_function_for_proc_oid;
 use crate::include::nodes::execnodes::{
-    AggregateState, FilterState, FunctionScanState, IndexScanState, LimitState,
-    NestedLoopJoinState, NodeExecStats, OrderByState, ProjectSetState, ProjectionState,
+    AggregateState, FilterState, FunctionScanState, HashJoinState, HashState, IndexScanState,
+    LimitState, NestedLoopJoinState, NodeExecStats, OrderByState, ProjectSetState, ProjectionState,
     ResultState, SeqScanState, ValuesState,
 };
 
@@ -88,6 +89,11 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 stats: NodeExecStats::default(),
             })
         }
+        Plan::Hash {
+            plan_info,
+            input,
+            hash_keys,
+        } => Box::new(build_hash_state(plan_info, *input, hash_keys)),
         Plan::NestedLoopJoin {
             plan_info,
             left,
@@ -131,6 +137,62 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 right_width,
                 unmatched_right_index: 0,
                 slot: TupleSlot::empty(ncols),
+                plan_info,
+                stats: NodeExecStats::default(),
+            })
+        }
+        Plan::HashJoin {
+            plan_info,
+            left,
+            right,
+            kind,
+            hash_clauses,
+            hash_keys,
+            join_qual,
+        } => {
+            assert!(
+                !matches!(kind, crate::include::nodes::primnodes::JoinType::Cross),
+                "hash join does not support cross joins",
+            );
+
+            let Plan::Hash {
+                plan_info: hash_plan_info,
+                input: hash_input,
+                hash_keys: inner_hash_keys,
+            } = *right
+            else {
+                panic!("HashJoin right child must be Plan::Hash");
+            };
+
+            let left_width = left.column_names().len();
+            let right_width = hash_input.column_names().len();
+            let combined_names: Vec<String> = left
+                .column_names()
+                .into_iter()
+                .chain(hash_input.column_names())
+                .collect();
+
+            Box::new(HashJoinState {
+                left: executor_start(*left),
+                right: Box::new(build_hash_state(
+                    hash_plan_info,
+                    *hash_input,
+                    inner_hash_keys,
+                )),
+                kind,
+                hash_clauses,
+                hash_keys,
+                join_qual,
+                combined_names,
+                left_width,
+                right_width,
+                phase: HashJoinPhase::BuildHashTable,
+                current_outer: None,
+                current_bucket_entries: Vec::new(),
+                current_bucket_index: 0,
+                matched_outer: false,
+                unmatched_inner_index: 0,
+                slot: TupleSlot::empty(left_width + right_width),
                 plan_info,
                 stats: NodeExecStats::default(),
             })
@@ -322,6 +384,23 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 stats: NodeExecStats::default(),
             })
         }
+    }
+}
+
+fn build_hash_state(
+    plan_info: crate::include::nodes::plannodes::PlanEstimate,
+    input: Plan,
+    hash_keys: Vec<crate::include::nodes::primnodes::Expr>,
+) -> HashState {
+    let column_names = input.column_names();
+    HashState {
+        input: executor_start(input),
+        hash_keys,
+        column_names,
+        table: None,
+        built: false,
+        plan_info,
+        stats: NodeExecStats::default(),
     }
 }
 
