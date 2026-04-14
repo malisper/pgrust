@@ -34,6 +34,41 @@ pub(super) fn bind_arithmetic_expr(
         )?;
         return bind_money_arithmetic_expr(op, make, left, raw_left_type, left_type, right, raw_right_type, right_type);
     }
+    if !left_type.is_array
+        && !right_type.is_array
+        && op == "-"
+        && matches!(left_type.kind, SqlTypeKind::Date)
+        && matches!(right_type.kind, SqlTypeKind::Date)
+    {
+        return Ok(Expr::binary_op(
+            make,
+            SqlType::new(SqlTypeKind::Int4),
+            coerce_bound_expr(
+                bind_expr_with_outer_and_ctes(
+                    left,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?,
+                raw_left_type,
+                left_type,
+            ),
+            coerce_bound_expr(
+                bind_expr_with_outer_and_ctes(
+                    right,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?,
+                raw_right_type,
+                right_type,
+            ),
+        ));
+    }
     let common = resolve_numeric_binary_type(op, left_type, right_type)?;
     let left = coerce_bound_expr(
         bind_expr_with_outer_and_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes)?,

@@ -294,6 +294,7 @@ pub(crate) fn sub_values(left: Value, right: Value) -> Result<Value, ExecError> 
         (Value::Int64(l), Value::Int16(r)) => Ok(Value::Int64(checked_sub_i64(*l, *r as i64)?)),
         (Value::Int64(l), Value::Int32(r)) => Ok(Value::Int64(checked_sub_i64(*l, *r as i64)?)),
         (Value::Int64(l), Value::Int64(r)) => Ok(Value::Int64(checked_sub_i64(*l, *r)?)),
+        (Value::Date(l), Value::Date(r)) => Ok(Value::Int32(l.0 - r.0)),
         (Value::Money(l), Value::Money(r)) => Ok(Value::Money(money_sub(*l, *r)?)),
         (Value::Float64(l), Value::Float64(r)) => Ok(Value::Float64(l - r)),
         (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
