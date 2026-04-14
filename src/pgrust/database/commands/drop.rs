@@ -7,8 +7,8 @@ impl Database {
         drop_stmt: &DropDomainStatement,
         configured_search_path: Option<&[String]>,
     ) -> Result<StatementResult, ExecError> {
-        let (normalized, _, _) = self
-            .normalize_domain_name_for_create(&drop_stmt.domain_name, configured_search_path)?;
+        let (normalized, _, _) =
+            self.normalize_domain_name_for_create(&drop_stmt.domain_name, configured_search_path)?;
         let mut domains = self.domains.write();
         if domains.remove(&normalized).is_none() {
             if drop_stmt.if_exists {
