@@ -503,6 +503,19 @@ fn parse_alter_table_rename_statement() {
 }
 
 #[test]
+fn parse_alter_table_rename_column_statement() {
+    let stmt = parse_statement("alter table items rename column note to body").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableRenameColumn(AlterTableRenameColumnStatement {
+            table_name: "items".into(),
+            column_name: "note".into(),
+            new_column_name: "body".into(),
+        })
+    );
+}
+
+#[test]
 fn parse_alter_table_drop_column_statement() {
     let stmt = parse_statement("alter table items drop column note").unwrap();
     assert_eq!(

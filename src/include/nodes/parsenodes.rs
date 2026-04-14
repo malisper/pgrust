@@ -206,6 +206,7 @@ pub enum Statement {
     CreateIndex(CreateIndexStatement),
     AlterTableAddColumn(AlterTableAddColumnStatement),
     AlterTableDropColumn(AlterTableDropColumnStatement),
+    AlterTableRenameColumn(AlterTableRenameColumnStatement),
     AlterTableRename(AlterTableRenameStatement),
     AlterTableSet(AlterTableSetStatement),
     CommentOnTable(CommentOnTableStatement),
@@ -629,6 +630,13 @@ pub struct AlterTableAddColumnStatement {
 pub struct AlterTableDropColumnStatement {
     pub table_name: String,
     pub column_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableRenameColumnStatement {
+    pub table_name: String,
+    pub column_name: String,
+    pub new_column_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
