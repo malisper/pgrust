@@ -1,0 +1,44 @@
+# syntax=docker/dockerfile:1.7
+
+FROM rust:1.86-bookworm AS builder
+
+WORKDIR /usr/src/pgrust
+
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+
+RUN cargo build --release --bin pgrust_server
+
+FROM debian:bookworm-slim
+
+RUN set -eux; \
+    groupadd -r postgres --gid=999; \
+    useradd -r -g postgres --uid=999 --home-dir=/var/lib/postgresql --shell=/bin/bash postgres; \
+    install --verbose --directory --owner postgres --group postgres --mode 1777 /var/lib/postgresql; \
+    install --verbose --directory --owner postgres --group postgres --mode 3777 /var/run/postgresql
+
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        ca-certificates \
+        gosu \
+    ; \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /usr/src/pgrust/target/release/pgrust_server /usr/local/bin/
+COPY docker-entrypoint.sh /usr/local/bin/
+
+ENV PGDATA=/var/lib/postgresql/data
+ENV PGRUST_PORT=5432
+ENV PGRUST_BUFFER_POOL_SIZE=16384
+
+RUN set -eux; \
+    install --verbose --directory --owner postgres --group postgres --mode 1777 "$PGDATA"; \
+    chmod +x /usr/local/bin/docker-entrypoint.sh
+
+VOLUME /var/lib/postgresql/data
+
+ENTRYPOINT ["docker-entrypoint.sh"]
+STOPSIGNAL SIGINT
+EXPOSE 5432
+CMD ["pgrust_server"]
