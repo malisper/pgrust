@@ -925,7 +925,6 @@ fn bind_select_query_with_outer(
                     &aggs,
                     n_keys,
                 )
-                .map(Expr::into_pg_semantic_shape)
             })
             .transpose()?;
 
@@ -956,8 +955,7 @@ fn bind_select_query_with_outer(
                             grouped_outer.as_ref(),
                             &aggs,
                             n_keys,
-                        )?
-                        .into_pg_semantic_shape(),
+                        )?,
                         infer_sql_expr_type_with_ctes(
                             &item.expr,
                             &scope,
@@ -987,7 +985,6 @@ fn bind_select_query_with_outer(
                     &aggs,
                     n_keys,
                 )
-                .map(Expr::into_pg_semantic_shape)
             })?
         };
 

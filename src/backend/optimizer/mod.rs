@@ -15,8 +15,8 @@ use crate::include::nodes::pathnodes::{
 };
 use crate::include::nodes::plannodes::{Plan, PlanEstimate, PlannedStmt};
 use crate::include::nodes::primnodes::{
-    AggAccum, Expr, ExprArraySubscript, JoinType, ProjectSetTarget, QueryColumn, RelationDesc,
-    SetReturningCall, SubLink, SubPlan, ToastRelationRef,
+    AggAccum, BoolExprType, Expr, ExprArraySubscript, JoinType, OpExprKind, ProjectSetTarget,
+    QueryColumn, RelationDesc, SetReturningCall, SubLink, SubPlan, ToastRelationRef,
 };
 use pathnodes::next_synthetic_slot_id;
 
@@ -124,7 +124,6 @@ pub(crate) fn finalize_expr_subqueries(
     catalog: &dyn CatalogLookup,
     subplans: &mut Vec<Plan>,
 ) -> Expr {
-    let expr = expr.into_pg_semantic_shape();
     match expr {
         other @ (Expr::Var(_)
         | Expr::Column(_)
@@ -174,19 +173,9 @@ pub(crate) fn finalize_expr_subqueries(
                 ..*saop
             }))
         }
-        Expr::UnaryPlus(inner) => {
-            Expr::UnaryPlus(Box::new(finalize_expr_subqueries(*inner, catalog, subplans)))
-        }
-        Expr::Negate(inner) => {
-            Expr::Negate(Box::new(finalize_expr_subqueries(*inner, catalog, subplans)))
-        }
-        Expr::BitNot(inner) => {
-            Expr::BitNot(Box::new(finalize_expr_subqueries(*inner, catalog, subplans)))
-        }
         Expr::Cast(inner, ty) => {
             Expr::Cast(Box::new(finalize_expr_subqueries(*inner, catalog, subplans)), ty)
         }
-        Expr::Not(inner) => Expr::Not(Box::new(finalize_expr_subqueries(*inner, catalog, subplans))),
         Expr::IsNull(inner) => {
             Expr::IsNull(Box::new(finalize_expr_subqueries(*inner, catalog, subplans)))
         }
@@ -227,19 +216,10 @@ pub(crate) fn finalize_expr_subqueries(
                 .collect(),
             array_type,
         },
-        Expr::Coalesce(left, right) => {
-            finalize_binary_expr(Expr::Coalesce, *left, *right, catalog, subplans)
-        }
-        Expr::AnyArray { left, op, right } => Expr::AnyArray {
-            left: Box::new(finalize_expr_subqueries(*left, catalog, subplans)),
-            op,
-            right: Box::new(finalize_expr_subqueries(*right, catalog, subplans)),
-        },
-        Expr::AllArray { left, op, right } => Expr::AllArray {
-            left: Box::new(finalize_expr_subqueries(*left, catalog, subplans)),
-            op,
-            right: Box::new(finalize_expr_subqueries(*right, catalog, subplans)),
-        },
+        Expr::Coalesce(left, right) => Expr::Coalesce(
+            Box::new(finalize_expr_subqueries(*left, catalog, subplans)),
+            Box::new(finalize_expr_subqueries(*right, catalog, subplans)),
+        ),
         Expr::ArraySubscript { array, subscripts } => Expr::ArraySubscript {
             array: Box::new(finalize_expr_subqueries(*array, catalog, subplans)),
             subscripts: subscripts
@@ -255,22 +235,8 @@ pub(crate) fn finalize_expr_subqueries(
                 })
                 .collect(),
         },
-        Expr::FuncCall { .. } => unreachable!("semantic finalization should not see legacy FuncCall"),
         other => other,
     }
-}
-
-fn finalize_binary_expr(
-    ctor: fn(Box<Expr>, Box<Expr>) -> Expr,
-    left: Expr,
-    right: Expr,
-    catalog: &dyn CatalogLookup,
-    subplans: &mut Vec<Plan>,
-) -> Expr {
-    ctor(
-        Box::new(finalize_expr_subqueries(left, catalog, subplans)),
-        Box::new(finalize_expr_subqueries(right, catalog, subplans)),
-    )
 }
 
 fn finalize_set_returning_call(
@@ -380,7 +346,7 @@ fn finalize_agg_accum(
 }
 
 fn rebase_expr_subplan_ids(expr: Expr, base: usize) -> Expr {
-    match expr.into_pg_semantic_shape() {
+    match expr {
         other @ (Expr::Var(_)
         | Expr::Column(_)
         | Expr::OuterColumn { .. }
@@ -436,11 +402,7 @@ fn rebase_expr_subplan_ids(expr: Expr, base: usize) -> Expr {
                 ..*saop
             }))
         }
-        Expr::UnaryPlus(inner) => Expr::UnaryPlus(Box::new(rebase_expr_subplan_ids(*inner, base))),
-        Expr::Negate(inner) => Expr::Negate(Box::new(rebase_expr_subplan_ids(*inner, base))),
-        Expr::BitNot(inner) => Expr::BitNot(Box::new(rebase_expr_subplan_ids(*inner, base))),
         Expr::Cast(inner, ty) => Expr::Cast(Box::new(rebase_expr_subplan_ids(*inner, base)), ty),
-        Expr::Not(inner) => Expr::Not(Box::new(rebase_expr_subplan_ids(*inner, base))),
         Expr::IsNull(inner) => Expr::IsNull(Box::new(rebase_expr_subplan_ids(*inner, base))),
         Expr::IsNotNull(inner) => Expr::IsNotNull(Box::new(rebase_expr_subplan_ids(*inner, base))),
         Expr::Like {
@@ -481,16 +443,6 @@ fn rebase_expr_subplan_ids(expr: Expr, base: usize) -> Expr {
             Box::new(rebase_expr_subplan_ids(*left, base)),
             Box::new(rebase_expr_subplan_ids(*right, base)),
         ),
-        Expr::AnyArray { left, op, right } => Expr::AnyArray {
-            left: Box::new(rebase_expr_subplan_ids(*left, base)),
-            op,
-            right: Box::new(rebase_expr_subplan_ids(*right, base)),
-        },
-        Expr::AllArray { left, op, right } => Expr::AllArray {
-            left: Box::new(rebase_expr_subplan_ids(*left, base)),
-            op,
-            right: Box::new(rebase_expr_subplan_ids(*right, base)),
-        },
         Expr::ArraySubscript { array, subscripts } => Expr::ArraySubscript {
             array: Box::new(rebase_expr_subplan_ids(*array, base)),
             subscripts: subscripts
@@ -506,7 +458,6 @@ fn rebase_expr_subplan_ids(expr: Expr, base: usize) -> Expr {
                 })
                 .collect(),
         },
-        Expr::FuncCall { .. } => unreachable!("planned expressions should not contain FuncCall"),
         other => other,
     }
 }
@@ -1670,28 +1621,43 @@ fn build_index_path_spec(
 
 fn clause_selectivity(expr: &Expr, stats: Option<&RelationStats>, reltuples: f64) -> f64 {
     match expr {
-        Expr::And(left, right) => (clause_selectivity(left, stats, reltuples)
-            * clause_selectivity(right, stats, reltuples))
-        .clamp(0.0, 1.0),
-        Expr::Or(left, right) => {
-            let left = clause_selectivity(left, stats, reltuples);
-            let right = clause_selectivity(right, stats, reltuples);
-            (left + right - left * right).clamp(0.0, 1.0)
+        Expr::Bool(bool_expr) if bool_expr.boolop == BoolExprType::And => bool_expr
+            .args
+            .iter()
+            .fold(1.0, |acc, arg| acc * clause_selectivity(arg, stats, reltuples))
+            .clamp(0.0, 1.0),
+        Expr::Bool(bool_expr) if bool_expr.boolop == BoolExprType::Or => {
+            let mut result = 0.0;
+            for arg in &bool_expr.args {
+                let selectivity = clause_selectivity(arg, stats, reltuples);
+                result = result + selectivity - result * selectivity;
+            }
+            result.clamp(0.0, 1.0)
         }
         Expr::IsNull(inner) => {
             column_selectivity(inner, stats, |row, _| row.stanullfrac).unwrap_or(DEFAULT_EQ_SEL)
         }
         Expr::IsNotNull(inner) => column_selectivity(inner, stats, |row, _| 1.0 - row.stanullfrac)
             .unwrap_or(1.0 - DEFAULT_EQ_SEL),
-        Expr::Eq(left, right) => eq_selectivity(left, right, stats, reltuples),
-        Expr::NotEq(left, right) => 1.0 - eq_selectivity(left, right, stats, reltuples),
-        Expr::Lt(left, right) => ineq_selectivity(left, right, stats, reltuples, Ordering::Less),
-        Expr::LtEq(left, right) => ineq_selectivity(left, right, stats, reltuples, Ordering::Less)
-            .max(eq_selectivity(left, right, stats, reltuples)),
-        Expr::Gt(left, right) => ineq_selectivity(left, right, stats, reltuples, Ordering::Greater),
-        Expr::GtEq(left, right) => {
-            ineq_selectivity(left, right, stats, reltuples, Ordering::Greater)
-                .max(eq_selectivity(left, right, stats, reltuples))
+        Expr::Op(op) if matches!(op.op, OpExprKind::Eq) && op.args.len() == 2 => {
+            eq_selectivity(&op.args[0], &op.args[1], stats, reltuples)
+        }
+        Expr::Op(op) if matches!(op.op, OpExprKind::NotEq) && op.args.len() == 2 => {
+            1.0 - eq_selectivity(&op.args[0], &op.args[1], stats, reltuples)
+        }
+        Expr::Op(op) if matches!(op.op, OpExprKind::Lt) && op.args.len() == 2 => {
+            ineq_selectivity(&op.args[0], &op.args[1], stats, reltuples, Ordering::Less)
+        }
+        Expr::Op(op) if matches!(op.op, OpExprKind::LtEq) && op.args.len() == 2 => {
+            ineq_selectivity(&op.args[0], &op.args[1], stats, reltuples, Ordering::Less)
+                .max(eq_selectivity(&op.args[0], &op.args[1], stats, reltuples))
+        }
+        Expr::Op(op) if matches!(op.op, OpExprKind::Gt) && op.args.len() == 2 => {
+            ineq_selectivity(&op.args[0], &op.args[1], stats, reltuples, Ordering::Greater)
+        }
+        Expr::Op(op) if matches!(op.op, OpExprKind::GtEq) && op.args.len() == 2 => {
+            ineq_selectivity(&op.args[0], &op.args[1], stats, reltuples, Ordering::Greater)
+                .max(eq_selectivity(&op.args[0], &op.args[1], stats, reltuples))
         }
         _ => DEFAULT_BOOL_SEL,
     }
@@ -2067,16 +2033,9 @@ fn estimate_sort_cost(rows: f64, keys: usize) -> f64 {
 
 fn predicate_cost(expr: &Expr) -> f64 {
     match expr {
-        Expr::And(left, right)
-        | Expr::Or(left, right)
-        | Expr::Eq(left, right)
-        | Expr::NotEq(left, right)
-        | Expr::Lt(left, right)
-        | Expr::LtEq(left, right)
-        | Expr::Gt(left, right)
-        | Expr::GtEq(left, right)
-        | Expr::RegexMatch(left, right)
-        | Expr::Coalesce(left, right) => 1.0 + predicate_cost(left) + predicate_cost(right),
+        Expr::Op(op) => 1.0 + op.args.iter().map(predicate_cost).sum::<f64>(),
+        Expr::Bool(bool_expr) => 1.0 + bool_expr.args.iter().map(predicate_cost).sum::<f64>(),
+        Expr::Coalesce(left, right) => 1.0 + predicate_cost(left) + predicate_cost(right),
         Expr::IsNull(inner) | Expr::IsNotNull(inner) => 1.0 + predicate_cost(inner),
         _ => 1.0,
     }
@@ -2113,11 +2072,11 @@ fn clamp_rows(rows: f64) -> f64 {
 
 fn flatten_and_conjuncts(expr: &Expr) -> Vec<Expr> {
     match expr {
-        Expr::And(left, right) => {
-            let mut out = flatten_and_conjuncts(left);
-            out.extend(flatten_and_conjuncts(right));
-            out
-        }
+        Expr::Bool(bool_expr) if bool_expr.boolop == BoolExprType::And => bool_expr
+            .args
+            .iter()
+            .flat_map(flatten_and_conjuncts)
+            .collect(),
         other => vec![other.clone()],
     }
 }
@@ -2203,11 +2162,7 @@ fn and_exprs(mut exprs: Vec<Expr>) -> Option<Expr> {
         return None;
     }
     let first = exprs.remove(0);
-    Some(
-        exprs
-            .into_iter()
-            .fold(first, |acc, expr| Expr::And(Box::new(acc), Box::new(expr))),
-    )
+    Some(exprs.into_iter().fold(first, Expr::and))
 }
 
 fn planner_and_exprs(mut exprs: Vec<PlannerJoinExpr>) -> Option<PlannerJoinExpr> {

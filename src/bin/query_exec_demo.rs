@@ -145,9 +145,9 @@ fn main() -> Result<(), ExecError> {
                 toast: None,
                 desc: desc(),
             }),
-            predicate: Expr::Gt(
-                Box::new(Expr::Column(0)),
-                Box::new(Expr::Const(Value::Int32(1))),
+            predicate: Expr::op_auto(
+                pgrust::include::nodes::primnodes::OpExprKind::Gt,
+                vec![Expr::Column(0), Expr::Const(Value::Int32(1))],
             ),
         }),
         targets: vec![

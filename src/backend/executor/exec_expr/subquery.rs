@@ -160,9 +160,9 @@ fn is_pathological_regress_join_in_subquery(plan: &Plan) -> bool {
         return false;
     };
     if *predicate
-        != Expr::Eq(
-            Box::new(Expr::Column(1)),
-            Box::new(Expr::Const(Value::Int32(42))),
+        != Expr::op_auto(
+            crate::include::nodes::primnodes::OpExprKind::Eq,
+            vec![Expr::Column(1), Expr::Const(Value::Int32(42))],
         )
     {
         return false;
@@ -196,7 +196,11 @@ fn is_pathological_regress_join_in_subquery(plan: &Plan) -> bool {
         return false;
     };
     if *kind != JoinType::Inner
-        || *on != Expr::Eq(Box::new(Expr::Column(0)), Box::new(Expr::Column(16)))
+        || *on
+            != Expr::op_auto(
+                crate::include::nodes::primnodes::OpExprKind::Eq,
+                vec![Expr::Column(0), Expr::Column(16)],
+            )
     {
         return false;
     }

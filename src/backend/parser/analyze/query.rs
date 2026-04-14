@@ -377,90 +377,16 @@ fn shift_expr_rtindexes(expr: Expr, offset: usize) -> Expr {
             right: Box::new(shift_expr_rtindexes(*saop.right, offset)),
             ..*saop
         })),
-        other => match other {
         Expr::Var(mut var) => {
             if var.varlevelsup == 0 {
                 var.varno += offset;
             }
             Expr::Var(var)
         }
-        expr @ (Expr::OuterColumn { .. } | Expr::Column(_) | Expr::Const(_) | Expr::Random) => expr,
-        Expr::Add(left, right) => Expr::Add(
-            Box::new(shift_expr_rtindexes(*left, offset)),
-            Box::new(shift_expr_rtindexes(*right, offset)),
-        ),
-        Expr::Sub(left, right) => Expr::Sub(
-            Box::new(shift_expr_rtindexes(*left, offset)),
-            Box::new(shift_expr_rtindexes(*right, offset)),
-        ),
-        Expr::BitAnd(left, right) => Expr::BitAnd(
-            Box::new(shift_expr_rtindexes(*left, offset)),
-            Box::new(shift_expr_rtindexes(*right, offset)),
-        ),
-        Expr::BitOr(left, right) => Expr::BitOr(
-            Box::new(shift_expr_rtindexes(*left, offset)),
-            Box::new(shift_expr_rtindexes(*right, offset)),
-        ),
-        Expr::BitXor(left, right) => Expr::BitXor(
-            Box::new(shift_expr_rtindexes(*left, offset)),
-            Box::new(shift_expr_rtindexes(*right, offset)),
-        ),
-        Expr::Shl(left, right) => Expr::Shl(
-            Box::new(shift_expr_rtindexes(*left, offset)),
-            Box::new(shift_expr_rtindexes(*right, offset)),
-        ),
-        Expr::Shr(left, right) => Expr::Shr(
-            Box::new(shift_expr_rtindexes(*left, offset)),
-            Box::new(shift_expr_rtindexes(*right, offset)),
-        ),
-        Expr::Mul(left, right) => Expr::Mul(
-            Box::new(shift_expr_rtindexes(*left, offset)),
-            Box::new(shift_expr_rtindexes(*right, offset)),
-        ),
-        Expr::Div(left, right) => Expr::Div(
-            Box::new(shift_expr_rtindexes(*left, offset)),
-            Box::new(shift_expr_rtindexes(*right, offset)),
-        ),
-        Expr::Mod(left, right) => Expr::Mod(
-            Box::new(shift_expr_rtindexes(*left, offset)),
-            Box::new(shift_expr_rtindexes(*right, offset)),
-        ),
-        Expr::Concat(left, right) => Expr::Concat(
-            Box::new(shift_expr_rtindexes(*left, offset)),
-            Box::new(shift_expr_rtindexes(*right, offset)),
-        ),
-        Expr::UnaryPlus(inner) => Expr::UnaryPlus(Box::new(shift_expr_rtindexes(*inner, offset))),
-        Expr::Negate(inner) => Expr::Negate(Box::new(shift_expr_rtindexes(*inner, offset))),
-        Expr::BitNot(inner) => Expr::BitNot(Box::new(shift_expr_rtindexes(*inner, offset))),
+        expr @ (Expr::OuterColumn { .. } | Expr::Column(_) | Expr::Const(_) | Expr::Random) => {
+            expr
+        }
         Expr::Cast(inner, ty) => Expr::Cast(Box::new(shift_expr_rtindexes(*inner, offset)), ty),
-        Expr::Eq(left, right) => Expr::Eq(
-            Box::new(shift_expr_rtindexes(*left, offset)),
-            Box::new(shift_expr_rtindexes(*right, offset)),
-        ),
-        Expr::NotEq(left, right) => Expr::NotEq(
-            Box::new(shift_expr_rtindexes(*left, offset)),
-            Box::new(shift_expr_rtindexes(*right, offset)),
-        ),
-        Expr::Lt(left, right) => Expr::Lt(
-            Box::new(shift_expr_rtindexes(*left, offset)),
-            Box::new(shift_expr_rtindexes(*right, offset)),
-        ),
-        Expr::LtEq(left, right) => Expr::LtEq(
-            Box::new(shift_expr_rtindexes(*left, offset)),
-            Box::new(shift_expr_rtindexes(*right, offset)),
-        ),
-        Expr::Gt(left, right) => Expr::Gt(
-            Box::new(shift_expr_rtindexes(*left, offset)),
-            Box::new(shift_expr_rtindexes(*right, offset)),
-        ),
-        Expr::GtEq(left, right) => Expr::GtEq(
-            Box::new(shift_expr_rtindexes(*left, offset)),
-            Box::new(shift_expr_rtindexes(*right, offset)),
-        ),
-        Expr::RegexMatch(left, right) => Expr::RegexMatch(
-            Box::new(shift_expr_rtindexes(*left, offset)),
-            Box::new(shift_expr_rtindexes(*right, offset)),
-        ),
         Expr::Like {
             expr,
             pattern,
@@ -485,15 +411,6 @@ fn shift_expr_rtindexes(expr: Expr, offset: usize) -> Expr {
             escape: escape.map(|expr| Box::new(shift_expr_rtindexes(*expr, offset))),
             negated,
         },
-        Expr::And(left, right) => Expr::And(
-            Box::new(shift_expr_rtindexes(*left, offset)),
-            Box::new(shift_expr_rtindexes(*right, offset)),
-        ),
-        Expr::Or(left, right) => Expr::Or(
-            Box::new(shift_expr_rtindexes(*left, offset)),
-            Box::new(shift_expr_rtindexes(*right, offset)),
-        ),
-        Expr::Not(inner) => Expr::Not(Box::new(shift_expr_rtindexes(*inner, offset))),
         Expr::IsNull(inner) => Expr::IsNull(Box::new(shift_expr_rtindexes(*inner, offset))),
         Expr::IsNotNull(inner) => Expr::IsNotNull(Box::new(shift_expr_rtindexes(*inner, offset))),
         Expr::IsDistinctFrom(left, right) => Expr::IsDistinctFrom(
@@ -514,38 +431,6 @@ fn shift_expr_rtindexes(expr: Expr, offset: usize) -> Expr {
                 .collect(),
             array_type,
         },
-        Expr::ArrayOverlap(left, right) => Expr::ArrayOverlap(
-            Box::new(shift_expr_rtindexes(*left, offset)),
-            Box::new(shift_expr_rtindexes(*right, offset)),
-        ),
-        Expr::JsonbContains(left, right) => Expr::JsonbContains(
-            Box::new(shift_expr_rtindexes(*left, offset)),
-            Box::new(shift_expr_rtindexes(*right, offset)),
-        ),
-        Expr::JsonbContained(left, right) => Expr::JsonbContained(
-            Box::new(shift_expr_rtindexes(*left, offset)),
-            Box::new(shift_expr_rtindexes(*right, offset)),
-        ),
-        Expr::JsonbExists(left, right) => Expr::JsonbExists(
-            Box::new(shift_expr_rtindexes(*left, offset)),
-            Box::new(shift_expr_rtindexes(*right, offset)),
-        ),
-        Expr::JsonbExistsAny(left, right) => Expr::JsonbExistsAny(
-            Box::new(shift_expr_rtindexes(*left, offset)),
-            Box::new(shift_expr_rtindexes(*right, offset)),
-        ),
-        Expr::JsonbExistsAll(left, right) => Expr::JsonbExistsAll(
-            Box::new(shift_expr_rtindexes(*left, offset)),
-            Box::new(shift_expr_rtindexes(*right, offset)),
-        ),
-        Expr::JsonbPathExists(left, right) => Expr::JsonbPathExists(
-            Box::new(shift_expr_rtindexes(*left, offset)),
-            Box::new(shift_expr_rtindexes(*right, offset)),
-        ),
-        Expr::JsonbPathMatch(left, right) => Expr::JsonbPathMatch(
-            Box::new(shift_expr_rtindexes(*left, offset)),
-            Box::new(shift_expr_rtindexes(*right, offset)),
-        ),
         Expr::SubLink(sublink) => Expr::SubLink(Box::new(SubLink {
             testexpr: sublink
                 .testexpr
@@ -557,16 +442,6 @@ fn shift_expr_rtindexes(expr: Expr, offset: usize) -> Expr {
             Box::new(shift_expr_rtindexes(*left, offset)),
             Box::new(shift_expr_rtindexes(*right, offset)),
         ),
-        Expr::AnyArray { left, op, right } => Expr::AnyArray {
-            left: Box::new(shift_expr_rtindexes(*left, offset)),
-            op,
-            right: Box::new(shift_expr_rtindexes(*right, offset)),
-        },
-        Expr::AllArray { left, op, right } => Expr::AllArray {
-            left: Box::new(shift_expr_rtindexes(*left, offset)),
-            op,
-            right: Box::new(shift_expr_rtindexes(*right, offset)),
-        },
         Expr::ArraySubscript { array, subscripts } => Expr::ArraySubscript {
             array: Box::new(shift_expr_rtindexes(*array, offset)),
             subscripts: subscripts
@@ -579,48 +454,14 @@ fn shift_expr_rtindexes(expr: Expr, offset: usize) -> Expr {
                     upper: subscript
                         .upper
                         .map(|expr| shift_expr_rtindexes(expr, offset)),
-                })
-                .collect(),
+                    })
+                    .collect(),
         },
-        Expr::JsonGet(left, right) => Expr::JsonGet(
-            Box::new(shift_expr_rtindexes(*left, offset)),
-            Box::new(shift_expr_rtindexes(*right, offset)),
-        ),
-        Expr::JsonGetText(left, right) => Expr::JsonGetText(
-            Box::new(shift_expr_rtindexes(*left, offset)),
-            Box::new(shift_expr_rtindexes(*right, offset)),
-        ),
-        Expr::JsonPath(left, right) => Expr::JsonPath(
-            Box::new(shift_expr_rtindexes(*left, offset)),
-            Box::new(shift_expr_rtindexes(*right, offset)),
-        ),
-        Expr::JsonPathText(left, right) => Expr::JsonPathText(
-            Box::new(shift_expr_rtindexes(*left, offset)),
-            Box::new(shift_expr_rtindexes(*right, offset)),
-        ),
         expr @ (Expr::CurrentDate
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
         | Expr::LocalTime { .. }
         | Expr::LocalTimestamp { .. }) => expr,
-        Expr::FuncCall {
-            func_oid,
-            func,
-            args,
-            func_variadic,
-        } => Expr::FuncCall {
-            func_oid,
-            func,
-            args: args
-                .into_iter()
-                .map(|expr| shift_expr_rtindexes(expr, offset))
-                .collect(),
-            func_variadic,
-        },
-        Expr::Op(_) | Expr::Bool(_) | Expr::Func(_) | Expr::ScalarArrayOp(_) => {
-            unreachable!("semantic nodes normalized above")
-        }
-        }
     }
 }
 
@@ -843,92 +684,14 @@ pub(super) fn rewrite_expr_columns(expr: Expr, output_exprs: &[Expr]) -> Expr {
             right: Box::new(rewrite_expr_columns(*saop.right, output_exprs)),
             ..*saop
         })),
-        other => match other {
         Expr::Column(index) => output_exprs
             .get(index)
             .cloned()
             .unwrap_or(Expr::Column(index)),
         expr @ (Expr::OuterColumn { .. } | Expr::Var(_) | Expr::Const(_) | Expr::Random) => expr,
-        Expr::Add(left, right) => Expr::Add(
-            Box::new(rewrite_expr_columns(*left, output_exprs)),
-            Box::new(rewrite_expr_columns(*right, output_exprs)),
-        ),
-        Expr::Sub(left, right) => Expr::Sub(
-            Box::new(rewrite_expr_columns(*left, output_exprs)),
-            Box::new(rewrite_expr_columns(*right, output_exprs)),
-        ),
-        Expr::BitAnd(left, right) => Expr::BitAnd(
-            Box::new(rewrite_expr_columns(*left, output_exprs)),
-            Box::new(rewrite_expr_columns(*right, output_exprs)),
-        ),
-        Expr::BitOr(left, right) => Expr::BitOr(
-            Box::new(rewrite_expr_columns(*left, output_exprs)),
-            Box::new(rewrite_expr_columns(*right, output_exprs)),
-        ),
-        Expr::BitXor(left, right) => Expr::BitXor(
-            Box::new(rewrite_expr_columns(*left, output_exprs)),
-            Box::new(rewrite_expr_columns(*right, output_exprs)),
-        ),
-        Expr::Shl(left, right) => Expr::Shl(
-            Box::new(rewrite_expr_columns(*left, output_exprs)),
-            Box::new(rewrite_expr_columns(*right, output_exprs)),
-        ),
-        Expr::Shr(left, right) => Expr::Shr(
-            Box::new(rewrite_expr_columns(*left, output_exprs)),
-            Box::new(rewrite_expr_columns(*right, output_exprs)),
-        ),
-        Expr::Mul(left, right) => Expr::Mul(
-            Box::new(rewrite_expr_columns(*left, output_exprs)),
-            Box::new(rewrite_expr_columns(*right, output_exprs)),
-        ),
-        Expr::Div(left, right) => Expr::Div(
-            Box::new(rewrite_expr_columns(*left, output_exprs)),
-            Box::new(rewrite_expr_columns(*right, output_exprs)),
-        ),
-        Expr::Mod(left, right) => Expr::Mod(
-            Box::new(rewrite_expr_columns(*left, output_exprs)),
-            Box::new(rewrite_expr_columns(*right, output_exprs)),
-        ),
-        Expr::Concat(left, right) => Expr::Concat(
-            Box::new(rewrite_expr_columns(*left, output_exprs)),
-            Box::new(rewrite_expr_columns(*right, output_exprs)),
-        ),
-        Expr::UnaryPlus(inner) => {
-            Expr::UnaryPlus(Box::new(rewrite_expr_columns(*inner, output_exprs)))
-        }
-        Expr::Negate(inner) => Expr::Negate(Box::new(rewrite_expr_columns(*inner, output_exprs))),
-        Expr::BitNot(inner) => Expr::BitNot(Box::new(rewrite_expr_columns(*inner, output_exprs))),
         Expr::Cast(inner, ty) => {
             Expr::Cast(Box::new(rewrite_expr_columns(*inner, output_exprs)), ty)
         }
-        Expr::Eq(left, right) => Expr::Eq(
-            Box::new(rewrite_expr_columns(*left, output_exprs)),
-            Box::new(rewrite_expr_columns(*right, output_exprs)),
-        ),
-        Expr::NotEq(left, right) => Expr::NotEq(
-            Box::new(rewrite_expr_columns(*left, output_exprs)),
-            Box::new(rewrite_expr_columns(*right, output_exprs)),
-        ),
-        Expr::Lt(left, right) => Expr::Lt(
-            Box::new(rewrite_expr_columns(*left, output_exprs)),
-            Box::new(rewrite_expr_columns(*right, output_exprs)),
-        ),
-        Expr::LtEq(left, right) => Expr::LtEq(
-            Box::new(rewrite_expr_columns(*left, output_exprs)),
-            Box::new(rewrite_expr_columns(*right, output_exprs)),
-        ),
-        Expr::Gt(left, right) => Expr::Gt(
-            Box::new(rewrite_expr_columns(*left, output_exprs)),
-            Box::new(rewrite_expr_columns(*right, output_exprs)),
-        ),
-        Expr::GtEq(left, right) => Expr::GtEq(
-            Box::new(rewrite_expr_columns(*left, output_exprs)),
-            Box::new(rewrite_expr_columns(*right, output_exprs)),
-        ),
-        Expr::RegexMatch(left, right) => Expr::RegexMatch(
-            Box::new(rewrite_expr_columns(*left, output_exprs)),
-            Box::new(rewrite_expr_columns(*right, output_exprs)),
-        ),
         Expr::Like {
             expr,
             pattern,
@@ -953,15 +716,6 @@ pub(super) fn rewrite_expr_columns(expr: Expr, output_exprs: &[Expr]) -> Expr {
             escape: escape.map(|expr| Box::new(rewrite_expr_columns(*expr, output_exprs))),
             negated,
         },
-        Expr::And(left, right) => Expr::And(
-            Box::new(rewrite_expr_columns(*left, output_exprs)),
-            Box::new(rewrite_expr_columns(*right, output_exprs)),
-        ),
-        Expr::Or(left, right) => Expr::Or(
-            Box::new(rewrite_expr_columns(*left, output_exprs)),
-            Box::new(rewrite_expr_columns(*right, output_exprs)),
-        ),
-        Expr::Not(inner) => Expr::Not(Box::new(rewrite_expr_columns(*inner, output_exprs))),
         Expr::IsNull(inner) => Expr::IsNull(Box::new(rewrite_expr_columns(*inner, output_exprs))),
         Expr::IsNotNull(inner) => {
             Expr::IsNotNull(Box::new(rewrite_expr_columns(*inner, output_exprs)))
@@ -984,38 +738,6 @@ pub(super) fn rewrite_expr_columns(expr: Expr, output_exprs: &[Expr]) -> Expr {
                 .collect(),
             array_type,
         },
-        Expr::ArrayOverlap(left, right) => Expr::ArrayOverlap(
-            Box::new(rewrite_expr_columns(*left, output_exprs)),
-            Box::new(rewrite_expr_columns(*right, output_exprs)),
-        ),
-        Expr::JsonbContains(left, right) => Expr::JsonbContains(
-            Box::new(rewrite_expr_columns(*left, output_exprs)),
-            Box::new(rewrite_expr_columns(*right, output_exprs)),
-        ),
-        Expr::JsonbContained(left, right) => Expr::JsonbContained(
-            Box::new(rewrite_expr_columns(*left, output_exprs)),
-            Box::new(rewrite_expr_columns(*right, output_exprs)),
-        ),
-        Expr::JsonbExists(left, right) => Expr::JsonbExists(
-            Box::new(rewrite_expr_columns(*left, output_exprs)),
-            Box::new(rewrite_expr_columns(*right, output_exprs)),
-        ),
-        Expr::JsonbExistsAny(left, right) => Expr::JsonbExistsAny(
-            Box::new(rewrite_expr_columns(*left, output_exprs)),
-            Box::new(rewrite_expr_columns(*right, output_exprs)),
-        ),
-        Expr::JsonbExistsAll(left, right) => Expr::JsonbExistsAll(
-            Box::new(rewrite_expr_columns(*left, output_exprs)),
-            Box::new(rewrite_expr_columns(*right, output_exprs)),
-        ),
-        Expr::JsonbPathExists(left, right) => Expr::JsonbPathExists(
-            Box::new(rewrite_expr_columns(*left, output_exprs)),
-            Box::new(rewrite_expr_columns(*right, output_exprs)),
-        ),
-        Expr::JsonbPathMatch(left, right) => Expr::JsonbPathMatch(
-            Box::new(rewrite_expr_columns(*left, output_exprs)),
-            Box::new(rewrite_expr_columns(*right, output_exprs)),
-        ),
         Expr::SubLink(sublink) => Expr::SubLink(Box::new(SubLink {
             testexpr: sublink
                 .testexpr
@@ -1029,16 +751,6 @@ pub(super) fn rewrite_expr_columns(expr: Expr, output_exprs: &[Expr]) -> Expr {
             Box::new(rewrite_expr_columns(*left, output_exprs)),
             Box::new(rewrite_expr_columns(*right, output_exprs)),
         ),
-        Expr::AnyArray { left, op, right } => Expr::AnyArray {
-            left: Box::new(rewrite_expr_columns(*left, output_exprs)),
-            op,
-            right: Box::new(rewrite_expr_columns(*right, output_exprs)),
-        },
-        Expr::AllArray { left, op, right } => Expr::AllArray {
-            left: Box::new(rewrite_expr_columns(*left, output_exprs)),
-            op,
-            right: Box::new(rewrite_expr_columns(*right, output_exprs)),
-        },
         Expr::ArraySubscript { array, subscripts } => Expr::ArraySubscript {
             array: Box::new(rewrite_expr_columns(*array, output_exprs)),
             subscripts: subscripts
@@ -1051,47 +763,13 @@ pub(super) fn rewrite_expr_columns(expr: Expr, output_exprs: &[Expr]) -> Expr {
                     upper: subscript
                         .upper
                         .map(|expr| rewrite_expr_columns(expr, output_exprs)),
-                })
-                .collect(),
-        },
-        Expr::JsonGet(left, right) => Expr::JsonGet(
-            Box::new(rewrite_expr_columns(*left, output_exprs)),
-            Box::new(rewrite_expr_columns(*right, output_exprs)),
-        ),
-        Expr::JsonGetText(left, right) => Expr::JsonGetText(
-            Box::new(rewrite_expr_columns(*left, output_exprs)),
-            Box::new(rewrite_expr_columns(*right, output_exprs)),
-        ),
-        Expr::JsonPath(left, right) => Expr::JsonPath(
-            Box::new(rewrite_expr_columns(*left, output_exprs)),
-            Box::new(rewrite_expr_columns(*right, output_exprs)),
-        ),
-        Expr::JsonPathText(left, right) => Expr::JsonPathText(
-            Box::new(rewrite_expr_columns(*left, output_exprs)),
-            Box::new(rewrite_expr_columns(*right, output_exprs)),
-        ),
-        Expr::FuncCall {
-            func_oid,
-            func,
-            args,
-            func_variadic,
-        } => Expr::FuncCall {
-            func_oid,
-            func,
-            args: args
-                .into_iter()
-                .map(|expr| rewrite_expr_columns(expr, output_exprs))
-                .collect(),
-            func_variadic,
+                    })
+                    .collect(),
         },
         expr @ (Expr::CurrentDate
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
         | Expr::LocalTime { .. }
         | Expr::LocalTimestamp { .. }) => expr,
-        Expr::Op(_) | Expr::Bool(_) | Expr::Func(_) | Expr::ScalarArrayOp(_) => {
-            unreachable!("legacy rewrite should not see PG-shaped Expr")
-        }
-        }
     }
 }

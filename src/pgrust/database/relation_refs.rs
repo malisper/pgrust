@@ -48,47 +48,12 @@ pub(super) fn collect_rels_from_expr(expr: &Expr, rels: &mut BTreeSet<RelFileLoc
         | Expr::CurrentTimestamp { .. }
         | Expr::LocalTime { .. }
         | Expr::LocalTimestamp { .. } => {}
-        Expr::UnaryPlus(inner)
-        | Expr::Negate(inner)
-        | Expr::BitNot(inner)
-        | Expr::Cast(inner, _)
-        | Expr::Not(inner)
+        Expr::Cast(inner, _)
         | Expr::IsNull(inner)
         | Expr::IsNotNull(inner) => collect_rels_from_expr(inner, rels),
-        Expr::Add(left, right)
-        | Expr::Coalesce(left, right)
-        | Expr::Sub(left, right)
-        | Expr::BitAnd(left, right)
-        | Expr::BitOr(left, right)
-        | Expr::BitXor(left, right)
-        | Expr::Shl(left, right)
-        | Expr::Shr(left, right)
-        | Expr::Mul(left, right)
-        | Expr::Div(left, right)
-        | Expr::Mod(left, right)
-        | Expr::Concat(left, right)
-        | Expr::Eq(left, right)
-        | Expr::NotEq(left, right)
-        | Expr::Lt(left, right)
-        | Expr::LtEq(left, right)
-        | Expr::Gt(left, right)
-        | Expr::GtEq(left, right)
-        | Expr::RegexMatch(left, right)
-        | Expr::And(left, right)
-        | Expr::Or(left, right)
+        Expr::Coalesce(left, right)
         | Expr::IsDistinctFrom(left, right)
-        | Expr::IsNotDistinctFrom(left, right)
-        | Expr::JsonGet(left, right)
-        | Expr::JsonGetText(left, right)
-        | Expr::JsonPath(left, right)
-        | Expr::JsonPathText(left, right)
-        | Expr::JsonbContains(left, right)
-        | Expr::JsonbContained(left, right)
-        | Expr::JsonbExists(left, right)
-        | Expr::JsonbExistsAny(left, right)
-        | Expr::JsonbExistsAll(left, right)
-        | Expr::JsonbPathExists(left, right)
-        | Expr::JsonbPathMatch(left, right) => {
+        | Expr::IsNotDistinctFrom(left, right) => {
             collect_rels_from_expr(left, rels);
             collect_rels_from_expr(right, rels);
         }
@@ -116,23 +81,10 @@ pub(super) fn collect_rels_from_expr(expr: &Expr, rels: &mut BTreeSet<RelFileLoc
                 collect_rels_from_expr(escape, rels);
             }
         }
-        Expr::FuncCall { args, .. } => {
-            for arg in args {
-                collect_rels_from_expr(arg, rels);
-            }
-        }
         Expr::ArrayLiteral { elements, .. } => {
             for element in elements {
                 collect_rels_from_expr(element, rels);
             }
-        }
-        Expr::ArrayOverlap(left, right) => {
-            collect_rels_from_expr(left, rels);
-            collect_rels_from_expr(right, rels);
-        }
-        Expr::AnyArray { left, right, .. } | Expr::AllArray { left, right, .. } => {
-            collect_rels_from_expr(left, rels);
-            collect_rels_from_expr(right, rels);
         }
         Expr::ArraySubscript { array, subscripts } => {
             collect_rels_from_expr(array, rels);

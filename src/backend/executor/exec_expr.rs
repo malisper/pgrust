@@ -305,42 +305,6 @@ pub fn eval_expr(
                 index: *index,
             }),
         Expr::Const(value) => Ok(value.clone()),
-        Expr::Add(left, right) => {
-            add_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
-        }
-        Expr::Sub(left, right) => {
-            sub_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
-        }
-        Expr::BitAnd(left, right) => {
-            bitwise_and_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
-        }
-        Expr::BitOr(left, right) => {
-            bitwise_or_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
-        }
-        Expr::BitXor(left, right) => {
-            bitwise_xor_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
-        }
-        Expr::Shl(left, right) => {
-            shift_left_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
-        }
-        Expr::Shr(left, right) => {
-            shift_right_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
-        }
-        Expr::Mul(left, right) => {
-            mul_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
-        }
-        Expr::Div(left, right) => {
-            div_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
-        }
-        Expr::Mod(left, right) => {
-            mod_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
-        }
-        Expr::Concat(left, right) => {
-            concat_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
-        }
-        Expr::UnaryPlus(inner) => eval_expr(inner, slot, ctx),
-        Expr::Negate(inner) => negate_value(eval_expr(inner, slot, ctx)?),
-        Expr::BitNot(inner) => bitwise_not_value(eval_expr(inner, slot, ctx)?),
         Expr::Cast(inner, ty) => cast_value(eval_expr(inner, slot, ctx)?, *ty),
         Expr::Coalesce(left, right) => {
             let left = eval_expr(left, slot, ctx)?;
@@ -349,39 +313,6 @@ pub fn eval_expr(
             } else {
                 eval_expr(right, slot, ctx)
             }
-        }
-        Expr::Eq(left, right) => compare_values(
-            "=",
-            eval_expr(left, slot, ctx)?,
-            eval_expr(right, slot, ctx)?,
-        ),
-        Expr::NotEq(left, right) => {
-            not_equal_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
-        }
-        Expr::Lt(left, right) => order_values(
-            "<",
-            eval_expr(left, slot, ctx)?,
-            eval_expr(right, slot, ctx)?,
-        ),
-        Expr::LtEq(left, right) => order_values(
-            "<=",
-            eval_expr(left, slot, ctx)?,
-            eval_expr(right, slot, ctx)?,
-        ),
-        Expr::Gt(left, right) => order_values(
-            ">",
-            eval_expr(left, slot, ctx)?,
-            eval_expr(right, slot, ctx)?,
-        ),
-        Expr::GtEq(left, right) => order_values(
-            ">=",
-            eval_expr(left, slot, ctx)?,
-            eval_expr(right, slot, ctx)?,
-        ),
-        Expr::RegexMatch(left, right) => {
-            let text = eval_expr(left, slot, ctx)?;
-            let pattern = eval_expr(right, slot, ctx)?;
-            eval_regex_match_operator(&text, &pattern)
         }
         Expr::Like {
             expr,
@@ -418,15 +349,6 @@ pub fn eval_expr(
             };
             eval_similar(&left, &pattern, escape.as_ref(), *negated)
         }
-        Expr::And(left, right) => {
-            eval_and(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
-        }
-        Expr::Or(left, right) => eval_or(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?),
-        Expr::Not(inner) => match eval_expr(inner, slot, ctx)? {
-            Value::Bool(value) => Ok(Value::Bool(!value)),
-            Value::Null => Ok(Value::Null),
-            other => Err(ExecError::NonBoolQual(other)),
-        },
         Expr::IsNull(inner) => Ok(Value::Bool(matches!(
             eval_expr(inner, slot, ctx)?,
             Value::Null
@@ -454,26 +376,6 @@ pub fn eval_expr(
             }
             Ok(Value::PgArray(ArrayValue::from_1d(values)))
         }
-        Expr::ArrayOverlap(left, right) => {
-            eval_array_overlap(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
-        }
-        Expr::JsonbContains(left, right) => {
-            eval_jsonb_contains(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
-        }
-        Expr::JsonbContained(left, right) => {
-            eval_jsonb_contained(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
-        }
-        Expr::JsonbExists(left, right) => {
-            eval_jsonb_exists(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
-        }
-        Expr::JsonbExistsAny(left, right) => {
-            eval_jsonb_exists_any(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
-        }
-        Expr::JsonbExistsAll(left, right) => {
-            eval_jsonb_exists_all(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
-        }
-        Expr::JsonbPathExists(left, right) => eval_jsonpath_operator(left, right, false, slot, ctx),
-        Expr::JsonbPathMatch(left, right) => eval_jsonpath_operator(left, right, true, slot, ctx),
         Expr::SubPlan(subplan) => match subplan.sublink_type {
             SubLinkType::ExprSubLink => eval_scalar_subquery(subplan, slot, ctx),
             SubLinkType::ExistsSubLink => eval_exists_subquery(subplan, slot, ctx),
@@ -498,31 +400,11 @@ pub fn eval_expr(
                 eval_quantified_subquery(&left_value, op, true, subplan, slot, ctx)
             }
         },
-        Expr::AnyArray { left, op, right } => {
-            let left_value = eval_expr(left, slot, ctx)?;
-            let right_value = eval_expr(right, slot, ctx)?;
-            eval_quantified_array(&left_value, *op, false, &right_value)
-        }
-        Expr::AllArray { left, op, right } => {
-            let left_value = eval_expr(left, slot, ctx)?;
-            let right_value = eval_expr(right, slot, ctx)?;
-            eval_quantified_array(&left_value, *op, true, &right_value)
-        }
         Expr::ArraySubscript { array, subscripts } => {
             let value = eval_expr(array, slot, ctx)?;
             eval_array_subscript(value, subscripts, slot, ctx)
         }
         Expr::Random => Ok(Value::Float64(rand::random::<f64>())),
-        Expr::JsonGet(left, right) => eval_json_get(left, right, false, slot, ctx),
-        Expr::JsonGetText(left, right) => eval_json_get(left, right, true, slot, ctx),
-        Expr::JsonPath(left, right) => eval_json_path(left, right, false, slot, ctx),
-        Expr::JsonPathText(left, right) => eval_json_path(left, right, true, slot, ctx),
-        Expr::FuncCall {
-            func,
-            args,
-            func_variadic,
-            ..
-        } => eval_builtin_function(*func, args, *func_variadic, slot, ctx),
         Expr::CurrentDate => Ok(current_date_value()),
         Expr::CurrentTime { precision } => Ok(current_time_value(*precision, true)),
         Expr::CurrentTimestamp { precision } => Ok(current_timestamp_value(*precision, true)),
@@ -671,53 +553,6 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
         }
         Expr::Column(index) => Ok(slot.get_attr(*index)?.clone()),
         Expr::Const(value) => Ok(value.clone()),
-        Expr::Add(left, right) => add_values(
-            eval_plpgsql_expr(left, slot)?,
-            eval_plpgsql_expr(right, slot)?,
-        ),
-        Expr::Sub(left, right) => sub_values(
-            eval_plpgsql_expr(left, slot)?,
-            eval_plpgsql_expr(right, slot)?,
-        ),
-        Expr::BitAnd(left, right) => bitwise_and_values(
-            eval_plpgsql_expr(left, slot)?,
-            eval_plpgsql_expr(right, slot)?,
-        ),
-        Expr::BitOr(left, right) => bitwise_or_values(
-            eval_plpgsql_expr(left, slot)?,
-            eval_plpgsql_expr(right, slot)?,
-        ),
-        Expr::BitXor(left, right) => bitwise_xor_values(
-            eval_plpgsql_expr(left, slot)?,
-            eval_plpgsql_expr(right, slot)?,
-        ),
-        Expr::Shl(left, right) => shift_left_values(
-            eval_plpgsql_expr(left, slot)?,
-            eval_plpgsql_expr(right, slot)?,
-        ),
-        Expr::Shr(left, right) => shift_right_values(
-            eval_plpgsql_expr(left, slot)?,
-            eval_plpgsql_expr(right, slot)?,
-        ),
-        Expr::Mul(left, right) => mul_values(
-            eval_plpgsql_expr(left, slot)?,
-            eval_plpgsql_expr(right, slot)?,
-        ),
-        Expr::Div(left, right) => div_values(
-            eval_plpgsql_expr(left, slot)?,
-            eval_plpgsql_expr(right, slot)?,
-        ),
-        Expr::Mod(left, right) => mod_values(
-            eval_plpgsql_expr(left, slot)?,
-            eval_plpgsql_expr(right, slot)?,
-        ),
-        Expr::Concat(left, right) => concat_values(
-            eval_plpgsql_expr(left, slot)?,
-            eval_plpgsql_expr(right, slot)?,
-        ),
-        Expr::UnaryPlus(inner) => eval_plpgsql_expr(inner, slot),
-        Expr::Negate(inner) => negate_value(eval_plpgsql_expr(inner, slot)?),
-        Expr::BitNot(inner) => bitwise_not_value(eval_plpgsql_expr(inner, slot)?),
         Expr::Cast(inner, ty) => cast_value(eval_plpgsql_expr(inner, slot)?, *ty),
         Expr::Coalesce(left, right) => {
             let left = eval_plpgsql_expr(left, slot)?;
@@ -726,40 +561,6 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
             } else {
                 eval_plpgsql_expr(right, slot)
             }
-        }
-        Expr::Eq(left, right) => compare_values(
-            "=",
-            eval_plpgsql_expr(left, slot)?,
-            eval_plpgsql_expr(right, slot)?,
-        ),
-        Expr::NotEq(left, right) => not_equal_values(
-            eval_plpgsql_expr(left, slot)?,
-            eval_plpgsql_expr(right, slot)?,
-        ),
-        Expr::Lt(left, right) => order_values(
-            "<",
-            eval_plpgsql_expr(left, slot)?,
-            eval_plpgsql_expr(right, slot)?,
-        ),
-        Expr::LtEq(left, right) => order_values(
-            "<=",
-            eval_plpgsql_expr(left, slot)?,
-            eval_plpgsql_expr(right, slot)?,
-        ),
-        Expr::Gt(left, right) => order_values(
-            ">",
-            eval_plpgsql_expr(left, slot)?,
-            eval_plpgsql_expr(right, slot)?,
-        ),
-        Expr::GtEq(left, right) => order_values(
-            ">=",
-            eval_plpgsql_expr(left, slot)?,
-            eval_plpgsql_expr(right, slot)?,
-        ),
-        Expr::RegexMatch(left, right) => {
-            let text = eval_plpgsql_expr(left, slot)?;
-            let pattern = eval_plpgsql_expr(right, slot)?;
-            eval_regex_match_operator(&text, &pattern)
         }
         Expr::Like {
             expr,
@@ -796,19 +597,6 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
             };
             eval_similar(&left, &pattern, escape.as_ref(), *negated)
         }
-        Expr::And(left, right) => eval_and(
-            eval_plpgsql_expr(left, slot)?,
-            eval_plpgsql_expr(right, slot)?,
-        ),
-        Expr::Or(left, right) => eval_or(
-            eval_plpgsql_expr(left, slot)?,
-            eval_plpgsql_expr(right, slot)?,
-        ),
-        Expr::Not(inner) => match eval_plpgsql_expr(inner, slot)? {
-            Value::Bool(value) => Ok(Value::Bool(!value)),
-            Value::Null => Ok(Value::Null),
-            other => Err(ExecError::NonBoolQual(other)),
-        },
         Expr::IsNull(inner) => Ok(Value::Bool(matches!(
             eval_plpgsql_expr(inner, slot)?,
             Value::Null
@@ -836,12 +624,6 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
             }
             Ok(Value::PgArray(ArrayValue::from_1d(values)))
         }
-        Expr::FuncCall {
-            func,
-            args,
-            func_variadic,
-            ..
-        } => eval_plpgsql_builtin_function(*func, args, *func_variadic, slot),
         Expr::ArraySubscript { array, subscripts } => {
             let value = eval_plpgsql_expr(array, slot)?;
             eval_array_subscript_plpgsql(value, subscripts, slot)
