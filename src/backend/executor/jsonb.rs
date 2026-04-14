@@ -747,7 +747,11 @@ fn encode_pg_numeric(value: &NumericValue) -> Vec<u8> {
             push_u16(&mut out, NUMERIC_NINF);
             out
         }
-        NumericValue::Finite { coeff, scale } => {
+        NumericValue::Finite {
+            coeff,
+            scale,
+            dscale,
+        } => {
             let (sign, mut digits, weight) = decimal_to_pg_digits(coeff, *scale);
             debug_assert!(*scale <= NUMERIC_DSCALE_MASK as u32);
             debug_assert!((i16::MIN as i32..=i16::MAX as i32).contains(&weight));
@@ -758,7 +762,7 @@ fn encode_pg_numeric(value: &NumericValue) -> Vec<u8> {
                 digits.pop();
             }
             let weight = if digits.is_empty() { 0 } else { weight };
-            let can_be_short = *scale <= NUMERIC_SHORT_DSCALE_MAX as u32
+            let can_be_short = *dscale <= NUMERIC_SHORT_DSCALE_MAX as u32
                 && weight >= NUMERIC_SHORT_WEIGHT_MIN as i32
                 && weight <= NUMERIC_SHORT_WEIGHT_MAX as i32;
 
@@ -772,7 +776,7 @@ fn encode_pg_numeric(value: &NumericValue) -> Vec<u8> {
                     short |= NUMERIC_SHORT_SIGN_MASK;
                 }
                 short |=
-                    ((*scale as u16) << NUMERIC_SHORT_DSCALE_SHIFT) & NUMERIC_SHORT_DSCALE_MASK;
+                    ((*dscale as u16) << NUMERIC_SHORT_DSCALE_SHIFT) & NUMERIC_SHORT_DSCALE_MASK;
                 if weight < 0 {
                     short |= NUMERIC_SHORT_WEIGHT_SIGN_MASK;
                 }
@@ -780,7 +784,7 @@ fn encode_pg_numeric(value: &NumericValue) -> Vec<u8> {
                 push_u16(&mut out, short);
             } else {
                 let sign_dscale = (if sign == NUMERIC_NEG { NUMERIC_NEG } else { 0 })
-                    | ((*scale as u16) & NUMERIC_DSCALE_MASK);
+                    | ((*dscale as u16) & NUMERIC_DSCALE_MASK);
                 push_u16(&mut out, sign_dscale);
                 push_i16(&mut out, weight as i16);
             }
@@ -838,10 +842,7 @@ fn decode_pg_numeric(bytes: &[u8]) -> Result<NumericValue, ExecError> {
     }
     let ndigits = (bytes.len() - digits_start) / 2;
     if ndigits == 0 {
-        return Ok(NumericValue::Finite {
-            coeff: BigInt::zero(),
-            scale: dscale,
-        });
+        return Ok(NumericValue::finite(BigInt::zero(), dscale).with_dscale(dscale));
     }
 
     let mut coeff = BigInt::zero();
@@ -872,11 +873,9 @@ fn decode_pg_numeric(bytes: &[u8]) -> Result<NumericValue, ExecError> {
         coeff / divisor
     };
 
-    Ok(NumericValue::Finite {
-        coeff: if sign == NUMERIC_NEG { -coeff } else { coeff },
-        scale: dscale,
-    }
-    .normalize())
+    Ok(NumericValue::finite(if sign == NUMERIC_NEG { -coeff } else { coeff }, dscale)
+        .with_dscale(dscale)
+        .normalize())
 }
 
 fn decimal_to_pg_digits(coeff: &BigInt, scale: u32) -> (u16, Vec<u16>, i32) {
@@ -937,7 +936,7 @@ fn decimal_to_pg_digits(coeff: &BigInt, scale: u32) -> (u16, Vec<u16>, i32) {
 }
 
 fn validate_jsonb_numeric_value(value: &NumericValue) -> Result<(), ExecError> {
-    let NumericValue::Finite { coeff, scale } = value else {
+    let NumericValue::Finite { coeff, scale, .. } = value else {
         return Ok(());
     };
     if *scale > NUMERIC_DSCALE_MASK as u32 {
@@ -1222,10 +1221,7 @@ mod tests {
 
     #[test]
     fn numeric_payload_round_trips_pg_numeric_bytes() {
-        let value = JsonbValue::Numeric(NumericValue::Finite {
-            coeff: BigInt::from(12345u32),
-            scale: 2,
-        });
+        let value = JsonbValue::Numeric(NumericValue::finite(BigInt::from(12345u32), 2));
         let encoded = encode_jsonb(&value);
         let decoded = decode_jsonb(&encoded).unwrap();
         assert_eq!(decoded, value);

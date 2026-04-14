@@ -7,6 +7,7 @@ use crate::backend::parser::{Catalog, CatalogEntry};
 use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, StorageManager};
 use crate::include::access::htup::TupleValue;
 use crate::include::access::htup::{AttributeDesc, HeapTuple};
+use crate::pgrust::database::{Database, Session};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::PathBuf;
@@ -4590,6 +4591,130 @@ fn numeric_negative_scale_typmods_round_on_insert() {
                 vec![vec![
                     Value::Numeric("123000".into()),
                     Value::Numeric("123000000".into())
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn numeric_typmod_table_insert_rounds_values() {
+    let db = Database::open(temp_dir("numeric_typmod_table_insert"), 16).unwrap();
+    let mut session = Session::new(1);
+    db.execute(
+        1,
+        "create table t (millions numeric(3, -6), thousands numeric(3, -3), units numeric(3, 0), thousandths numeric(3, 3), millionths numeric(3, 6))",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into t values (123456789, 123456, 123.456, 0.123456, 0.000123456)",
+    )
+    .unwrap();
+    match session
+        .execute(
+            &db,
+            "select millions, thousands, units, thousandths, millionths from t",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Numeric("123000000".into()),
+                    Value::Numeric("123000".into()),
+                    Value::Numeric("123".into()),
+                    Value::Numeric("0.123".into()),
+                    Value::Numeric("0.000123".into()),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn cte_self_join_aliases_keep_distinct_columns() {
+    let base = temp_dir("cte_self_join_aliases");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "with v(x) as (values (1::numeric), (2::numeric), (3::numeric)) select x1, x2 from v as v1(x1), v as v2(x2) order by x1, x2",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Numeric("1".into()), Value::Numeric("1".into())],
+                    vec![Value::Numeric("1".into()), Value::Numeric("2".into())],
+                    vec![Value::Numeric("1".into()), Value::Numeric("3".into())],
+                    vec![Value::Numeric("2".into()), Value::Numeric("1".into())],
+                    vec![Value::Numeric("2".into()), Value::Numeric("2".into())],
+                    vec![Value::Numeric("2".into()), Value::Numeric("3".into())],
+                    vec![Value::Numeric("3".into()), Value::Numeric("1".into())],
+                    vec![Value::Numeric("3".into()), Value::Numeric("2".into())],
+                    vec![Value::Numeric("3".into()), Value::Numeric("3".into())],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn cte_filtered_self_join_aliases_keep_distinct_columns() {
+    let base = temp_dir("cte_filtered_self_join_aliases");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "with v(x) as (values (0::numeric), (1::numeric), (2::numeric)) select x1, x2 from v as v1(x1), v as v2(x2) where x2 != 0 order by x1, x2",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Numeric("0".into()), Value::Numeric("1".into())],
+                    vec![Value::Numeric("0".into()), Value::Numeric("2".into())],
+                    vec![Value::Numeric("1".into()), Value::Numeric("1".into())],
+                    vec![Value::Numeric("1".into()), Value::Numeric("2".into())],
+                    vec![Value::Numeric("2".into()), Value::Numeric("1".into())],
+                    vec![Value::Numeric("2".into()), Value::Numeric("2".into())],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn numeric_nan_division_by_zero_returns_nan() {
+    let base = temp_dir("numeric_nan_division_by_zero");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select 'nan'::numeric / 0::numeric, 'nan'::numeric % 0::numeric, div('nan'::numeric, 0::numeric)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Numeric("NaN".into()),
+                    Value::Numeric("NaN".into()),
+                    Value::Numeric("NaN".into()),
                 ]]
             );
         }
