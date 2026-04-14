@@ -2,7 +2,7 @@ use super::functions::*;
 use super::infer::*;
 use super::*;
 use crate::include::catalog::ANYOID;
-use crate::include::nodes::primnodes::OpExprKind;
+use crate::include::nodes::primnodes::{BoolExprType, OpExprKind};
 
 mod json;
 mod ops;
@@ -328,14 +328,17 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             grouped_outer,
             ctes,
         )?,
-        SqlExpr::UnaryPlus(inner) => Expr::UnaryPlus(Box::new(bind_expr_with_outer_and_ctes(
-            inner,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        )?)),
+        SqlExpr::UnaryPlus(inner) => Expr::op_auto(
+            OpExprKind::UnaryPlus,
+            vec![bind_expr_with_outer_and_ctes(
+                inner,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?],
+        ),
         SqlExpr::PrefixOperator { op, expr } => bind_prefix_operator_expr(
             op.as_str(),
             expr,
@@ -345,14 +348,17 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             grouped_outer,
             ctes,
         )?,
-        SqlExpr::Negate(inner) => Expr::Negate(Box::new(bind_expr_with_outer_and_ctes(
-            inner,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        )?)),
+        SqlExpr::Negate(inner) => Expr::op_auto(
+            OpExprKind::Negate,
+            vec![bind_expr_with_outer_and_ctes(
+                inner,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?],
+        ),
         SqlExpr::BitNot(inner) => {
             let inner_type = infer_sql_expr_type_with_ctes(
                 inner,
@@ -369,14 +375,17 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     right_type: "unknown".to_string(),
                 });
             }
-            Expr::BitNot(Box::new(bind_expr_with_outer_and_ctes(
-                inner,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?))
+            Expr::op_auto(
+                OpExprKind::BitNot,
+                vec![bind_expr_with_outer_and_ctes(
+                    inner,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?],
+            )
         }
         SqlExpr::Cast(inner, ty) => {
             let source_type = infer_sql_expr_type_with_ctes(
@@ -573,23 +582,26 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 )?
             }
         }
-        SqlExpr::RegexMatch(left, right) => Expr::RegexMatch(
-            Box::new(bind_expr_with_outer_and_ctes(
-                left,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?),
-            Box::new(bind_expr_with_outer_and_ctes(
-                right,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?),
+        SqlExpr::RegexMatch(left, right) => Expr::op_auto(
+            OpExprKind::RegexMatch,
+            vec![
+                bind_expr_with_outer_and_ctes(
+                    left,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?,
+                bind_expr_with_outer_and_ctes(
+                    right,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?,
+            ],
         ),
         SqlExpr::Like {
             expr,
@@ -663,50 +675,59 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             },
             negated: *negated,
         },
-        SqlExpr::And(left, right) => Expr::And(
-            Box::new(bind_expr_with_outer_and_ctes(
-                left,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?),
-            Box::new(bind_expr_with_outer_and_ctes(
-                right,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?),
+        SqlExpr::And(left, right) => Expr::bool_expr(
+            BoolExprType::And,
+            vec![
+                bind_expr_with_outer_and_ctes(
+                    left,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?,
+                bind_expr_with_outer_and_ctes(
+                    right,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?,
+            ],
         ),
-        SqlExpr::Or(left, right) => Expr::Or(
-            Box::new(bind_expr_with_outer_and_ctes(
-                left,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?),
-            Box::new(bind_expr_with_outer_and_ctes(
-                right,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?),
+        SqlExpr::Or(left, right) => Expr::bool_expr(
+            BoolExprType::Or,
+            vec![
+                bind_expr_with_outer_and_ctes(
+                    left,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?,
+                bind_expr_with_outer_and_ctes(
+                    right,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?,
+            ],
         ),
-        SqlExpr::Not(inner) => Expr::Not(Box::new(bind_expr_with_outer_and_ctes(
-            inner,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        )?)),
+        SqlExpr::Not(inner) => Expr::bool_expr(
+            BoolExprType::Not,
+            vec![bind_expr_with_outer_and_ctes(
+                inner,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?],
+        ),
         SqlExpr::IsNull(inner) => Expr::IsNull(Box::new(bind_expr_with_outer_and_ctes(
             inner,
             scope,
@@ -984,7 +1005,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
         )?,
         SqlExpr::Random => Expr::Random,
         SqlExpr::JsonGet(left, right) => bind_json_binary_expr(
-            Expr::JsonGet,
+            OpExprKind::JsonGet,
             left,
             right,
             scope,
@@ -994,7 +1015,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             ctes,
         )?,
         SqlExpr::JsonGetText(left, right) => bind_json_binary_expr(
-            Expr::JsonGetText,
+            OpExprKind::JsonGetText,
             left,
             right,
             scope,
@@ -1004,7 +1025,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             ctes,
         )?,
         SqlExpr::JsonPath(left, right) => bind_json_binary_expr(
-            Expr::JsonPath,
+            OpExprKind::JsonPath,
             left,
             right,
             scope,
@@ -1014,7 +1035,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             ctes,
         )?,
         SqlExpr::JsonPathText(left, right) => bind_json_binary_expr(
-            Expr::JsonPathText,
+            OpExprKind::JsonPathText,
             left,
             right,
             scope,
@@ -1069,7 +1090,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             ctes,
         )?,
         SqlExpr::JsonbPathExists(left, right) => bind_jsonb_path_binary_expr(
-            Expr::JsonbPathExists,
+            OpExprKind::JsonbPathExists,
             left,
             right,
             scope,
@@ -1079,7 +1100,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             ctes,
         )?,
         SqlExpr::JsonbPathMatch(left, right) => bind_jsonb_path_binary_expr(
-            Expr::JsonbPathMatch,
+            OpExprKind::JsonbPathMatch,
             left,
             right,
             scope,

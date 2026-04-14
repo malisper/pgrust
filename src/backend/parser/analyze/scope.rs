@@ -587,45 +587,45 @@ pub(super) fn bind_from_item_with_ctes(
                         AnalyzedFrom::result().with_projection(vec![
                                 TargetEntry::new(
                                     "message",
-                                    Expr::FuncCall {
-                                        func_oid: 0,
-                                        func: BuiltinScalarFunction::PgInputErrorMessage,
-                                        args: vec![left.clone(), right.clone()],
-                                        func_variadic: false,
-                                    },
+                                    Expr::builtin_func(
+                                        BuiltinScalarFunction::PgInputErrorMessage,
+                                        Some(text_type),
+                                        false,
+                                        vec![left.clone(), right.clone()],
+                                    ),
                                     text_type,
                                     1,
                                 ),
                                 TargetEntry::new(
                                     "detail",
-                                    Expr::FuncCall {
-                                        func_oid: 0,
-                                        func: BuiltinScalarFunction::PgInputErrorDetail,
-                                        args: vec![left.clone(), right.clone()],
-                                        func_variadic: false,
-                                    },
+                                    Expr::builtin_func(
+                                        BuiltinScalarFunction::PgInputErrorDetail,
+                                        Some(text_type),
+                                        false,
+                                        vec![left.clone(), right.clone()],
+                                    ),
                                     text_type,
                                     2,
                                 ),
                                 TargetEntry::new(
                                     "hint",
-                                    Expr::FuncCall {
-                                        func_oid: 0,
-                                        func: BuiltinScalarFunction::PgInputErrorHint,
-                                        args: vec![left.clone(), right.clone()],
-                                        func_variadic: false,
-                                    },
+                                    Expr::builtin_func(
+                                        BuiltinScalarFunction::PgInputErrorHint,
+                                        Some(text_type),
+                                        false,
+                                        vec![left.clone(), right.clone()],
+                                    ),
                                     text_type,
                                     3,
                                 ),
                                 TargetEntry::new(
                                     "sql_error_code",
-                                    Expr::FuncCall {
-                                        func_oid: 0,
-                                        func: BuiltinScalarFunction::PgInputErrorSqlState,
-                                        args: vec![left, right],
-                                        func_variadic: false,
-                                    },
+                                    Expr::builtin_func(
+                                        BuiltinScalarFunction::PgInputErrorSqlState,
+                                        Some(text_type),
+                                        false,
+                                        vec![left, right],
+                                    ),
                                     text_type,
                                     4,
                                 ),
@@ -958,13 +958,16 @@ fn bind_join_using_projection(
         .iter()
         .fold(Expr::Const(Value::Bool(true)), |expr, (_, left, right)| {
             let right_index = left_scope.columns.len() + *right;
-            let predicate = Expr::Eq(
-                Box::new(Expr::Column(*left)),
-                Box::new(Expr::Column(right_index)),
+            let predicate = Expr::op_auto(
+                crate::include::nodes::primnodes::OpExprKind::Eq,
+                vec![Expr::Column(*left), Expr::Column(right_index)],
             );
             match expr {
                 Expr::Const(Value::Bool(true)) => predicate,
-                other => Expr::And(Box::new(other), Box::new(predicate)),
+                other => Expr::bool_expr(
+                    crate::include::nodes::primnodes::BoolExprType::And,
+                    vec![other, predicate],
+                ),
             }
         });
 

@@ -35,11 +35,11 @@ fn bind_geometry_call(
     } else {
         None
     };
-    Ok(Expr::FuncCall {
-        func_oid: 0,
+    Ok(Expr::builtin_func(
         func,
-        args: args
-            .iter()
+        None,
+        false,
+        args.iter()
             .enumerate()
             .map(|(idx, arg)| {
                 let bound = bind_expr_with_outer_and_ctes(
@@ -60,8 +60,7 @@ fn bind_geometry_call(
                 })
             })
             .collect::<Result<Vec<_>, _>>()?,
-        func_variadic: false,
-    })
+    ))
 }
 
 fn infer_arg_type(

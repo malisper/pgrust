@@ -82,7 +82,10 @@ pub(super) fn bind_in_subquery_expr(
         subselect: Box::new(subquery),
     }));
     if negated {
-        Ok(Expr::Not(Box::new(any_expr)))
+        Ok(Expr::bool_expr(
+            crate::include::nodes::primnodes::BoolExprType::Not,
+            vec![any_expr],
+        ))
     } else {
         Ok(any_expr)
     }
@@ -151,19 +154,15 @@ pub(super) fn bind_quantified_array_expr(
     };
     let bound_array =
         bind_expr_with_outer_and_ctes(array, scope, catalog, outer_scopes, grouped_outer, ctes)?;
-    let left = Box::new(coerce_bound_expr(
+    let left = coerce_bound_expr(
         bind_expr_with_outer_and_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes)?,
         raw_left_type,
         left_type,
-    ));
-    let right = Box::new(coerce_bound_expr(
+    );
+    let right = coerce_bound_expr(
         bound_array,
         raw_array_type,
         target_array_type,
-    ));
-    Ok(if is_all {
-        Expr::AllArray { left, op, right }
-    } else {
-        Expr::AnyArray { left, op, right }
-    })
+    );
+    Ok(Expr::scalar_array_op(op, !is_all, left, right))
 }
