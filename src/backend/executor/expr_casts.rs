@@ -18,7 +18,7 @@ use crate::backend::utils::time::timestamp::{parse_timestamp_text, parse_timesta
 use crate::include::catalog::{TEXT_TYPE_OID, bootstrap_pg_cast_rows, builtin_type_rows};
 use crate::pgrust::compact_string::CompactString;
 use num_integer::Integer;
-use num_traits::Signed;
+use num_traits::{Signed, Zero};
 use serde_json::Value as SerdeJsonValue;
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
@@ -1483,10 +1483,11 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
             SqlType {
                 kind: SqlTypeKind::Numeric,
                 ..
-            } => Ok(Value::Numeric(
+            } => Ok(Value::Numeric(coerce_numeric_value(
                 parse_numeric_text(&v.to_string())
                     .ok_or_else(|| ExecError::InvalidNumericInput(v.to_string()))?,
-            )),
+                ty,
+            )?)),
             SqlType {
                 kind:
                     SqlTypeKind::Text
@@ -1885,14 +1886,10 @@ fn coerce_numeric_value(parsed: NumericValue, ty: SqlType) -> Result<NumericValu
     match rounded {
         NumericValue::NaN => Ok(NumericValue::NaN),
         NumericValue::PosInf | NumericValue::NegInf => Err(ExecError::NumericFieldOverflow),
-        NumericValue::Finite { .. } => {
-            let max_digits_before_decimal = precision - scale;
-            let digits_before_decimal = numeric_digits_before_decimal(&rounded);
-            if digits_before_decimal > max_digits_before_decimal {
-                return Err(ExecError::NumericFieldOverflow);
-            }
+        NumericValue::Finite { .. } if numeric_fits_precision_scale(&rounded, precision, scale) => {
             Ok(rounded)
         }
+        NumericValue::Finite { .. } => Err(ExecError::NumericFieldOverflow),
     }
 }
 
@@ -1905,6 +1902,7 @@ fn coerce_numeric_negative_scale(
         NumericValue::Finite {
             coeff,
             scale: current_scale,
+            ..
         } => {
             let integer = coeff;
             let factor = pow10_bigint(current_scale.saturating_add(shift));
@@ -1915,28 +1913,25 @@ fn coerce_numeric_negative_scale(
             } else {
                 quotient
             };
-            Ok(NumericValue::Finite {
-                coeff: rounded * pow10_bigint(shift),
-                scale: 0,
-            }
-            .normalize())
+            Ok(NumericValue::finite(rounded * pow10_bigint(shift), 0).normalize())
         }
         other => Ok(other),
     }
 }
 
-fn numeric_digits_before_decimal(value: &NumericValue) -> i32 {
+fn numeric_fits_precision_scale(value: &NumericValue, precision: i32, target_scale: i32) -> bool {
     match value {
-        NumericValue::Finite { coeff, scale } => {
-            let digits = coeff
-                .to_str_radix(10)
-                .trim_start_matches('-')
-                .trim_start_matches('0')
-                .len()
-                .max(1) as i32;
-            (digits - *scale as i32).max(0)
+        NumericValue::Finite { coeff, scale, .. } => {
+            if coeff.is_zero() {
+                return true;
+            }
+            let limit_exp = precision - target_scale + (*scale as i32);
+            if limit_exp <= 0 {
+                return false;
+            }
+            coeff.abs() < pow10_bigint(limit_exp as u32)
         }
-        _ => 0,
+        _ => true,
     }
 }
 

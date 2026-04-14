@@ -447,7 +447,7 @@ fn resolve_subscript_expr(expr: SubscriptExpr, array_len: usize) -> Result<i32, 
 
 fn truncate_numeric_to_i32(value: &NumericValue) -> Result<i32, ExecError> {
     match value {
-        NumericValue::Finite { coeff, scale } => {
+        NumericValue::Finite { coeff, scale, .. } => {
             let truncated = if *scale == 0 {
                 coeff.clone()
             } else {
@@ -471,22 +471,18 @@ fn numeric_remainder(left: &NumericValue, right: &NumericValue) -> Option<Numeri
             NumericValue::Finite {
                 coeff: lcoeff,
                 scale: lscale,
+                ..
             },
             NumericValue::Finite {
                 coeff: rcoeff,
                 scale: rscale,
+                ..
             },
         ) => {
             let scale = (*lscale).max(*rscale);
             let left = align_numeric_coeff(lcoeff.clone(), *lscale, scale);
             let right = align_numeric_coeff(rcoeff.clone(), *rscale, scale);
-            Some(
-                NumericValue::Finite {
-                    coeff: left % right,
-                    scale,
-                }
-                .normalize(),
-            )
+            Some(NumericValue::finite(left % right, scale).normalize())
         }
     }
 }

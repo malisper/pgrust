@@ -18,15 +18,16 @@ use super::expr_json::{
 use super::expr_math::{
     cosd, cotd, eval_abs_function, eval_acosd, eval_acosh, eval_asind, eval_atanh,
     eval_binary_float_function, eval_bitcast_bigint_to_float8, eval_bitcast_integer_to_float4,
-    eval_erf, eval_erfc, eval_exp, eval_float_send_function, eval_gamma, eval_gcd_function,
-    eval_lcm_function, eval_lgamma, eval_ln, eval_power, eval_sqrt, eval_unary_float_function,
-    sind, snap_degree, tand,
+    eval_erf, eval_erfc, eval_float_send_function, eval_gamma, eval_gcd_function,
+    eval_lcm_function, eval_lgamma, eval_unary_float_function, sind, snap_degree, tand,
 };
 use super::expr_numeric::{
-    eval_ceil_function, eval_div_function, eval_factorial_function, eval_floor_function,
-    eval_log_function, eval_log10_function, eval_min_scale_function, eval_numeric_inc_function,
-    eval_pg_lsn_function, eval_round_function, eval_scale_function, eval_sign_function,
-    eval_trim_scale_function, eval_trunc_function, eval_width_bucket_function,
+    eval_ceil_function, eval_div_function, eval_exp_function, eval_factorial_function,
+    eval_floor_function, eval_ln_function, eval_log_function, eval_log10_function,
+    eval_min_scale_function, eval_numeric_inc_function, eval_pg_lsn_function,
+    eval_power_function, eval_round_function, eval_scale_function, eval_sign_function,
+    eval_sqrt_function, eval_trim_scale_function, eval_trunc_function,
+    eval_width_bucket_function,
 };
 use super::expr_ops::compare_order_values;
 use super::expr_ops::{
@@ -1202,11 +1203,11 @@ fn eval_builtin_function(
         BuiltinScalarFunction::Ceil | BuiltinScalarFunction::Ceiling => eval_ceil_function(&values),
         BuiltinScalarFunction::Floor => eval_floor_function(&values),
         BuiltinScalarFunction::Sign => eval_sign_function(&values),
-        BuiltinScalarFunction::Sqrt => eval_unary_float_function("sqrt", &values, eval_sqrt),
+        BuiltinScalarFunction::Sqrt => eval_sqrt_function(&values),
         BuiltinScalarFunction::Cbrt => eval_unary_float_function("cbrt", &values, |v| Ok(v.cbrt())),
-        BuiltinScalarFunction::Power => eval_binary_float_function("power", &values, eval_power),
-        BuiltinScalarFunction::Exp => eval_unary_float_function("exp", &values, eval_exp),
-        BuiltinScalarFunction::Ln => eval_unary_float_function("ln", &values, eval_ln),
+        BuiltinScalarFunction::Power => eval_power_function(&values),
+        BuiltinScalarFunction::Exp => eval_exp_function(&values),
+        BuiltinScalarFunction::Ln => eval_ln_function(&values),
         BuiltinScalarFunction::Sinh => eval_unary_float_function("sinh", &values, |v| Ok(v.sinh())),
         BuiltinScalarFunction::Cosh => eval_unary_float_function("cosh", &values, |v| Ok(v.cosh())),
         BuiltinScalarFunction::Tanh => eval_unary_float_function("tanh", &values, |v| Ok(v.tanh())),

@@ -429,6 +429,7 @@ pub enum FromItem {
         args: Vec<SqlFunctionArg>,
         func_variadic: bool,
     },
+    Lateral(Box<FromItem>),
     DerivedTable(Box<SelectStatement>),
     Join {
         left: Box<FromItem>,

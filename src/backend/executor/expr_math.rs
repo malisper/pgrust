@@ -426,10 +426,12 @@ fn numeric_gcd(
             NumericValue::Finite {
                 coeff: lcoeff,
                 scale: lscale,
+                ..
             },
             NumericValue::Finite {
                 coeff: rcoeff,
                 scale: rscale,
+                ..
             },
         ) => {
             // Align scales, compute GCD of integer coefficients, then rescale
@@ -437,11 +439,7 @@ fn numeric_gcd(
             let la = lcoeff * pow10_bigint(max_scale - lscale);
             let ra = rcoeff * pow10_bigint(max_scale - rscale);
             let g = bigint_gcd(&la, &ra);
-            NumericValue::Finite {
-                coeff: g,
-                scale: max_scale,
-            }
-            .normalize()
+            NumericValue::finite(g, max_scale).normalize()
         }
         _ => NumericValue::NaN,
     }
@@ -460,30 +458,24 @@ fn numeric_lcm(
             NumericValue::Finite {
                 coeff: lcoeff,
                 scale: lscale,
+                ..
             },
             NumericValue::Finite {
                 coeff: rcoeff,
                 scale: rscale,
+                ..
             },
         ) => {
             let max_scale = (*lscale).max(*rscale);
             let la = lcoeff * pow10_bigint(max_scale - lscale);
             let ra = rcoeff * pow10_bigint(max_scale - rscale);
             if la.is_zero() || ra.is_zero() {
-                return NumericValue::Finite {
-                    coeff: BigInt::from(0),
-                    scale: max_scale,
-                }
-                .normalize();
+                return NumericValue::finite(BigInt::from(0), max_scale).normalize();
             }
             let g = bigint_gcd(&la, &ra);
             let lcm = (&la / &g) * &ra;
             let lcm = if lcm < BigInt::from(0) { -lcm } else { lcm };
-            NumericValue::Finite {
-                coeff: lcm,
-                scale: max_scale,
-            }
-            .normalize()
+            NumericValue::finite(lcm, max_scale).normalize()
         }
         _ => NumericValue::NaN,
     }

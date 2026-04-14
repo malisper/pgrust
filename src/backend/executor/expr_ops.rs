@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 
 use num_bigint::BigInt;
 use num_integer::Integer;
-use num_traits::{Signed, Zero};
+use num_traits::{Signed, ToPrimitive, Zero};
 
 use super::ExecError;
 use super::expr_bit::{
@@ -430,12 +430,28 @@ pub(crate) fn div_values(left: Value, right: Value) -> Result<Value, ExecError> 
             return Ok(Value::Float64(f64::NAN));
         }
     }
+    if matches!(
+        (&left, &right),
+        (Value::Numeric(_) | Value::Text(_) | Value::TextRef(_, _), _)
+            | (_, Value::Numeric(_) | Value::Text(_) | Value::TextRef(_, _))
+    ) && let (Some(left_num), Some(right_num)) =
+        (parsed_numeric_value(&left), parsed_numeric_value(&right))
+    {
+        if right_num == NumericValue::zero() {
+            return if matches!(left_num, NumericValue::NaN) {
+                Ok(Value::Numeric(NumericValue::NaN))
+            } else {
+                Err(ExecError::DivisionByZero("/"))
+            };
+        }
+        let out_scale = select_div_scale_numeric(&left_num, &right_num);
+        return exact_numeric_binary(&left, &right, |lv, rv| lv.div(rv, out_scale), "/");
+    }
     let zero = match &right {
         Value::Int16(v) => *v == 0,
         Value::Int32(v) => *v == 0,
         Value::Int64(v) => *v == 0,
         Value::Float64(v) => *v == 0.0,
-        Value::Numeric(v) => *v == NumericValue::zero(),
         _ => false,
     };
     if zero {
@@ -452,9 +468,6 @@ pub(crate) fn div_values(left: Value, right: Value) -> Result<Value, ExecError> 
         (Value::Int64(l), Value::Int32(r)) => Ok(Value::Int64(checked_div_i64(*l, *r as i64)?)),
         (Value::Int64(l), Value::Int64(r)) => Ok(Value::Int64(checked_div_i64(*l, *r)?)),
         (Value::Float64(l), Value::Float64(r)) => Ok(Value::Float64(l / r)),
-        (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
-            exact_numeric_binary(l, r, |lv, rv| lv.div(rv, 16), "/")
-        }
         _ => Err(ExecError::TypeMismatch {
             op: "/",
             left,
@@ -467,11 +480,26 @@ pub(crate) fn mod_values(left: Value, right: Value) -> Result<Value, ExecError> 
     if matches!(left, Value::Null) || matches!(right, Value::Null) {
         return Ok(Value::Null);
     }
+    if matches!(
+        (&left, &right),
+        (Value::Numeric(_) | Value::Text(_) | Value::TextRef(_, _), _)
+            | (_, Value::Numeric(_) | Value::Text(_) | Value::TextRef(_, _))
+    ) && let (Some(left_num), Some(right_num)) =
+        (parsed_numeric_value(&left), parsed_numeric_value(&right))
+    {
+        if right_num == NumericValue::zero() {
+            return if matches!(left_num, NumericValue::NaN) {
+                Ok(Value::Numeric(NumericValue::NaN))
+            } else {
+                Err(ExecError::DivisionByZero("%"))
+            };
+        }
+        return exact_numeric_binary(&left, &right, |lv, rv| lv.rem(rv), "%");
+    }
     let zero = match &right {
         Value::Int16(v) => *v == 0,
         Value::Int32(v) => *v == 0,
         Value::Int64(v) => *v == 0,
-        Value::Numeric(v) => *v == NumericValue::zero(),
         _ => false,
     };
     if zero {
@@ -487,9 +515,6 @@ pub(crate) fn mod_values(left: Value, right: Value) -> Result<Value, ExecError> 
         (Value::Int64(l), Value::Int16(r)) => Ok(Value::Int64(checked_rem_i64(*l, *r as i64)?)),
         (Value::Int64(l), Value::Int32(r)) => Ok(Value::Int64(checked_rem_i64(*l, *r as i64)?)),
         (Value::Int64(l), Value::Int64(r)) => Ok(Value::Int64(checked_rem_i64(*l, *r)?)),
-        (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
-            exact_numeric_binary(l, r, |lv, rv| lv.rem(rv), "%")
-        }
         _ => Err(ExecError::TypeMismatch {
             op: "%",
             left,
@@ -761,13 +786,12 @@ impl NumericValue {
             Self::PosInf => Some(Self::PosInf),
             Self::NegInf => Some(Self::NegInf),
             Self::NaN => Some(Self::NaN),
-            Self::Finite { coeff, scale } => {
+            Self::Finite { coeff, scale, .. } => {
                 if *scale <= target_scale {
                     let factor = pow10_bigint(target_scale - *scale);
-                    return Some(Self::Finite {
-                        coeff: coeff * factor,
-                        scale: target_scale,
-                    });
+                    return Some(
+                        Self::finite(coeff * factor, target_scale).with_dscale(target_scale),
+                    );
                 }
                 let diff = *scale - target_scale;
                 let factor = pow10_bigint(diff);
@@ -778,10 +802,7 @@ impl NumericValue {
                 } else {
                     quotient
                 };
-                Some(Self::Finite {
-                    coeff: rounded,
-                    scale: target_scale,
-                })
+                Some(Self::finite(rounded, target_scale).with_dscale(target_scale))
             }
         }
     }
@@ -796,20 +817,20 @@ impl NumericValue {
                 Self::Finite {
                     coeff: lcoeff,
                     scale: lscale,
+                    ..
                 },
                 Self::Finite {
                     coeff: rcoeff,
                     scale: rscale,
+                    ..
                 },
             ) => {
                 let scale = (*lscale).max(*rscale);
                 let left = align_coeff(lcoeff.clone(), *lscale, scale);
                 let right = align_coeff(rcoeff.clone(), *rscale, scale);
-                Self::Finite {
-                    coeff: left + right,
-                    scale,
-                }
-                .normalize()
+                Self::finite(left + right, scale)
+                    .with_dscale(scale)
+                    .normalize()
             }
         }
     }
@@ -849,16 +870,14 @@ impl NumericValue {
                 Self::Finite {
                     coeff: lcoeff,
                     scale: lscale,
+                    ..
                 },
                 Self::Finite {
                     coeff: rcoeff,
                     scale: rscale,
+                    ..
                 },
-            ) => Self::Finite {
-                coeff: lcoeff * rcoeff,
-                scale: lscale.saturating_add(*rscale),
-            }
-            .normalize(),
+            ) => Self::finite(lcoeff * rcoeff, lscale.saturating_add(*rscale)).normalize(),
         }
     }
 
@@ -872,22 +891,18 @@ impl NumericValue {
                 Self::Finite {
                     coeff: lcoeff,
                     scale: lscale,
+                    ..
                 },
                 Self::Finite {
                     coeff: rcoeff,
                     scale: rscale,
+                    ..
                 },
             ) => {
                 let scale = (*lscale).max(*rscale);
                 let left = align_coeff(lcoeff.clone(), *lscale, scale);
                 let right = align_coeff(rcoeff.clone(), *rscale, scale);
-                Some(
-                    Self::Finite {
-                        coeff: left % right,
-                        scale,
-                    }
-                    .normalize(),
-                )
+                Some(Self::finite(left % right, scale).with_dscale(scale).normalize())
             }
         }
     }
@@ -912,10 +927,12 @@ impl NumericValue {
                 Self::Finite {
                     coeff: lcoeff,
                     scale: lscale,
+                    ..
                 },
                 Self::Finite {
                     coeff: rcoeff,
                     scale: rscale,
+                    ..
                 },
             ) => {
                 let exp = (out_scale as i64) + (*rscale as i64) - (*lscale as i64);
@@ -932,11 +949,9 @@ impl NumericValue {
                     quotient
                 };
                 Some(
-                    Self::Finite {
-                        coeff: rounded,
-                        scale: out_scale,
-                    }
-                    .normalize(),
+                    Self::finite(rounded, out_scale)
+                        .with_dscale(out_scale)
+                        .normalize(),
                 )
             }
         }
@@ -956,10 +971,12 @@ impl NumericValue {
                 Self::Finite {
                     coeff: lcoeff,
                     scale: lscale,
+                    ..
                 },
                 Self::Finite {
                     coeff: rcoeff,
                     scale: rscale,
+                    ..
                 },
             ) => {
                 let scale = (*lscale).max(*rscale);
@@ -969,6 +986,45 @@ impl NumericValue {
             }
         }
     }
+}
+
+fn numeric_pg_weight_and_first_digit(value: &NumericValue) -> Option<(i32, i32)> {
+    let NumericValue::Finite { coeff, scale, .. } = value else {
+        return None;
+    };
+    if coeff.is_zero() {
+        return Some((0, 0));
+    }
+
+    let digits = coeff.abs().to_str_radix(10);
+    let decimal_pos = digits.len() as i32 - *scale as i32;
+    let weight = (decimal_pos - 1).div_euclid(4);
+    let first_group_exp = weight * 4;
+    let shift = *scale as i32 + first_group_exp;
+    let first_digit = if shift >= 0 {
+        (coeff.abs() / pow10_bigint(shift as u32)).to_i32()?
+    } else {
+        (coeff.abs() * pow10_bigint((-shift) as u32)).to_i32()?
+    };
+    Some((weight, first_digit))
+}
+
+fn select_div_scale_numeric(left: &NumericValue, right: &NumericValue) -> u32 {
+    let (weight1, first1) = numeric_pg_weight_and_first_digit(left).unwrap_or((0, 0));
+    let (weight2, first2) = numeric_pg_weight_and_first_digit(right).unwrap_or((0, 0));
+    let mut qweight = weight1 - weight2;
+    if first1 <= first2 {
+        qweight -= 1;
+    }
+
+    let mut rscale = 16 - qweight * 4;
+    if let NumericValue::Finite { dscale, .. } = left {
+        rscale = rscale.max(*dscale as i32);
+    }
+    if let NumericValue::Finite { dscale, .. } = right {
+        rscale = rscale.max(*dscale as i32);
+    }
+    rscale.clamp(0, 1000) as u32
 }
 
 fn checked_div_i16(left: i16, right: i16) -> Result<i16, ExecError> {
@@ -1098,7 +1154,7 @@ pub(crate) fn parse_numeric_text(text: &str) -> Option<NumericValue> {
         if negative {
             coeff = -coeff;
         }
-        return Some(NumericValue::Finite { coeff, scale: 0 }.normalize());
+        return Some(NumericValue::finite(coeff, 0).normalize());
     }
     if let Some(rest) = unsigned
         .strip_prefix("0o")
@@ -1109,7 +1165,7 @@ pub(crate) fn parse_numeric_text(text: &str) -> Option<NumericValue> {
         if negative {
             coeff = -coeff;
         }
-        return Some(NumericValue::Finite { coeff, scale: 0 }.normalize());
+        return Some(NumericValue::finite(coeff, 0).normalize());
     }
     if let Some(rest) = unsigned
         .strip_prefix("0b")
@@ -1120,7 +1176,7 @@ pub(crate) fn parse_numeric_text(text: &str) -> Option<NumericValue> {
         if negative {
             coeff = -coeff;
         }
-        return Some(NumericValue::Finite { coeff, scale: 0 }.normalize());
+        return Some(NumericValue::finite(coeff, 0).normalize());
     }
 
     let (mantissa, exponent) = match trimmed.find(['e', 'E']) {
@@ -1155,13 +1211,7 @@ pub(crate) fn parse_numeric_text(text: &str) -> Option<NumericValue> {
     if negative {
         coeff = -coeff;
     }
-    Some(
-        NumericValue::Finite {
-            coeff,
-            scale: scale as u32,
-        }
-        .normalize(),
-    )
+    Some(NumericValue::finite(coeff, scale as u32).normalize())
 }
 
 fn normalize_numeric_decimal_component(component: &str, allow_empty: bool) -> Option<String> {
