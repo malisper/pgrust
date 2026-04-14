@@ -2195,14 +2195,16 @@ fn cross_join_chain_with_aliases_executes_without_rebinding_panic() {
     let base = temp_dir("cross_join_chain_aliases");
     let db = Database::open(&base, 16).unwrap();
 
-    db.execute(1, "create table j1_tbl (i int4 not null, j int4 not null, t text)")
-        .unwrap();
+    db.execute(
+        1,
+        "create table j1_tbl (i int4 not null, j int4 not null, t text)",
+    )
+    .unwrap();
     db.execute(1, "create table j2_tbl (i int4 not null, k int4 not null)")
         .unwrap();
     db.execute(1, "insert into j1_tbl values (1, 4, 'one')")
         .unwrap();
-    db.execute(1, "insert into j2_tbl values (1, -1)")
-        .unwrap();
+    db.execute(1, "insert into j2_tbl values (1, -1)").unwrap();
 
     assert_eq!(
         query_rows(
@@ -2220,6 +2222,129 @@ fn cross_join_chain_with_aliases_executes_without_rebinding_panic() {
             Value::Int32(-1),
         ]]
     );
+}
+
+fn setup_join_regress_crash_tables(db: &Database) {
+    for sql in [
+        "create temp table x (x1 int4, x2 int4)",
+        "create temp table y (y1 int4, y2 int4)",
+        "insert into x values (1,11), (2,22), (3,null), (4,44), (5,null)",
+        "insert into y values (1,111), (2,222), (3,333), (4,null)",
+        "create temp table xx (pkxx int4)",
+        "create temp table yy (pkyy int4, pkxx int4)",
+        "insert into xx values (1), (2), (3)",
+        "insert into yy values (101,1), (201,2), (301,null)",
+        "create temp table onek (unique1 int4, unique2 int4, hundred int4, ten int4)",
+        "insert into onek values (1,1,1,1)",
+        "create temp table tenk1 (unique1 int4, unique2 int4, thousand int4, tenthous int4)",
+        "insert into tenk1 values (1,1,1,1), (42,1,1,1)",
+        "create temp table int4_tbl (f1 int4)",
+        "insert into int4_tbl values (1), (42)",
+        "create temp table int8_tbl (q1 int8, q2 int8)",
+        "insert into int8_tbl values (1,456)",
+        "create temp table text_tbl (f1 text)",
+        "insert into text_tbl values ('doh!'), ('x')",
+    ] {
+        db.execute(1, sql).unwrap();
+    }
+}
+
+#[test]
+fn join_regress_outer_join_filter_executes_without_var_rewrite_panic() {
+    let base = temp_dir("join_regress_outer_join_filter");
+    let db = Database::open(&base, 16).unwrap();
+
+    setup_join_regress_crash_tables(&db);
+
+    let _ = query_rows(
+        &db,
+        1,
+        "select * from (x left join y on (x1 = y1)) left join x xx(xx1,xx2) \
+         on (x1 = xx1) where (x2 is not null)",
+    );
+}
+
+#[test]
+fn join_regress_outer_join_subquery_alias_executes_without_var_rewrite_panic() {
+    let base = temp_dir("join_regress_outer_join_subquery_alias");
+    let db = Database::open(&base, 16).unwrap();
+
+    setup_join_regress_crash_tables(&db);
+
+    let _ = query_rows(
+        &db,
+        1,
+        "select yy.pkyy as yy_pkyy, yy.pkxx as yy_pkxx, yya.pkyy as yya_pkyy, \
+         xxa.pkxx as xxa_pkxx, xxb.pkxx as xxb_pkxx \
+         from yy \
+         left join (select * from yy where pkyy = 101) as yya on yy.pkyy = yya.pkyy \
+         left join xx xxa on yya.pkxx = xxa.pkxx \
+         left join xx xxb on coalesce (xxa.pkxx, 1) = xxb.pkxx",
+    );
+}
+
+#[test]
+fn join_regress_remaining_outer_join_crash_queries_do_not_panic() {
+    let base = temp_dir("join_regress_remaining_crash_queries");
+    let db = Database::open(&base, 16).unwrap();
+
+    setup_join_regress_crash_tables(&db);
+
+    for sql in [
+        "explain (costs off) select * from onek t1 \
+         left join onek t2 on t1.unique1 = t2.unique1 \
+         left join onek t3 on t2.unique1 != t3.unique1 \
+         left join onek t4 on t3.unique1 = t4.unique1",
+        "explain (costs off) select * from int4_tbl t1 \
+         left join int4_tbl t2 on true \
+         left join int4_tbl t3 on t2.f1 = t3.f1 \
+         left join int4_tbl t4 on t3.f1 != t4.f1",
+        "explain (costs off) select * from int4_tbl t1 \
+         left join ((select t2.f1 from int4_tbl t2 left join int4_tbl t3 on t2.f1 > 0 where t3.f1 is null) s \
+                    left join tenk1 t4 on s.f1 > 1) \
+         on s.f1 = t1.f1",
+        "explain (costs off) select * from int4_tbl t1 \
+         left join ((select t2.f1 from int4_tbl t2 left join int4_tbl t3 on t2.f1 > 0 where t2.f1 <> coalesce(t3.f1, -1)) s \
+                    left join tenk1 t4 on s.f1 > 1) \
+         on s.f1 = t1.f1",
+        "select * from (select 1 as key1) sub1 \
+         left join (select sub3.key3, sub4.value2, coalesce(sub4.value2, 66) as value3 \
+                    from (select 1 as key3) sub3 \
+                    left join (select sub5.key5, coalesce(sub6.value1, 1) as value2 \
+                               from (select 1 as key5) sub5 \
+                               left join (select 2 as key6, 42 as value1) sub6 \
+                               on sub5.key5 = sub6.key6) sub4 \
+                    on sub4.key5 = sub3.key3) sub2 \
+         on sub1.key1 = sub2.key3",
+        "select * from (select 1 as key1) sub1 \
+         left join (select sub3.key3, value2, coalesce(value2, 66) as value3 \
+                    from (select 1 as key3) sub3 \
+                    left join (select sub5.key5, coalesce(sub6.value1, 1) as value2 \
+                               from (select 1 as key5) sub5 \
+                               left join (select 2 as key6, 42 as value1) sub6 \
+                               on sub5.key5 = sub6.key6) sub4 \
+                    on sub4.key5 = sub3.key3) sub2 \
+         on sub1.key1 = sub2.key3",
+        "explain (costs off) select b.unique1 from \
+         tenk1 a join tenk1 b on a.unique1 = b.unique2 \
+         left join tenk1 c on b.unique1 = 42 and c.thousand = a.thousand \
+         join int4_tbl i1 on b.thousand = f1 \
+         right join int4_tbl i2 on i2.f1 = b.tenthous \
+         order by 1",
+        "select b.unique1 from \
+         tenk1 a join tenk1 b on a.unique1 = b.unique2 \
+         left join tenk1 c on b.unique1 = 42 and c.thousand = a.thousand \
+         join int4_tbl i1 on b.thousand = f1 \
+         right join int4_tbl i2 on i2.f1 = b.tenthous \
+         order by 1",
+        "explain (verbose, costs off) select * from \
+         text_tbl t1 \
+         inner join int8_tbl i8 on i8.q2 = 456 \
+         right join text_tbl t2 on t1.f1 = 'doh!' \
+         left join int4_tbl i4 on i8.q1 = i4.f1",
+    ] {
+        db.execute(1, sql).unwrap();
+    }
 }
 
 #[test]
