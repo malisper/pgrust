@@ -156,6 +156,7 @@ impl Database {
             snapshot,
             client_id,
             next_command_id: cid,
+            datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
             outer_rows: Vec::new(),
             subplans: Vec::new(),
             timed: false,

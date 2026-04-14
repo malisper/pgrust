@@ -65,6 +65,7 @@ use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, PUBLIC_NAMESPACE_OID, PgConstraintRow, PgTypeRow,
 };
+use crate::pgrust::auth::{AuthCatalog, AuthState};
 use crate::pl::plpgsql::execute_do;
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
 use ddl::{
@@ -108,6 +109,7 @@ pub struct Database {
     pub plan_cache: Arc<PlanCache>,
     pub(crate) session_catalog_states: Arc<RwLock<HashMap<ClientId, SessionCatalogState>>>,
     pub(crate) session_interrupt_states: Arc<RwLock<HashMap<ClientId, Arc<InterruptState>>>>,
+    pub(crate) session_auth_states: Arc<RwLock<HashMap<ClientId, AuthState>>>,
     pub(crate) temp_relations: Arc<RwLock<HashMap<ClientId, TempNamespace>>>,
     pub(crate) domains: Arc<RwLock<BTreeMap<String, DomainEntry>>>,
     _wal_bg_writer: Arc<WalBgWriter>,
@@ -240,6 +242,7 @@ impl Database {
             plan_cache: Arc::new(PlanCache::new()),
             session_catalog_states: Arc::new(RwLock::new(HashMap::new())),
             session_interrupt_states: Arc::new(RwLock::new(HashMap::new())),
+            session_auth_states: Arc::new(RwLock::new(HashMap::new())),
             temp_relations: Arc::new(RwLock::new(HashMap::new())),
             domains: Arc::new(RwLock::new(BTreeMap::new())),
             _wal_bg_writer: Arc::new(wal_bg_writer),
@@ -262,6 +265,50 @@ impl Database {
             .get(&client_id)
             .cloned()
             .unwrap_or_else(|| Arc::new(InterruptState::new()))
+    }
+
+    pub(crate) fn install_auth_state(&self, client_id: ClientId, auth: AuthState) {
+        self.session_auth_states.write().insert(client_id, auth);
+    }
+
+    pub(crate) fn auth_state(&self, client_id: ClientId) -> AuthState {
+        self.session_auth_states
+            .read()
+            .get(&client_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn clear_auth_state(&self, client_id: ClientId) {
+        self.session_auth_states.write().remove(&client_id);
+    }
+
+    pub(crate) fn auth_catalog(
+        &self,
+        client_id: ClientId,
+        txn_ctx: CatalogTxnContext,
+    ) -> Result<AuthCatalog, CatalogError> {
+        let store = self.catalog.read();
+        let cache = if let Some((xid, cid)) = txn_ctx {
+            let snapshot = self
+                .txns
+                .read()
+                .snapshot_for_command(xid, cid)
+                .map_err(DatabaseError::from)
+                .map_err(|err| match err {
+                    DatabaseError::Catalog(catalog) => catalog,
+                    DatabaseError::Mvcc(mvcc) => CatalogError::Io(format!("{mvcc:?}")),
+                    DatabaseError::Wal(wal) => CatalogError::Io(format!("{wal:?}")),
+                })?;
+            let txns = self.txns.read();
+            store.catcache_with_snapshot(&self.pool, &txns, &snapshot, client_id)?
+        } else {
+            store.catcache()?
+        };
+        Ok(AuthCatalog::new(
+            cache.authid_rows(),
+            cache.auth_members_rows(),
+        ))
     }
 
     pub(crate) fn normalize_domain_name_for_create(
@@ -327,6 +374,7 @@ impl Database {
 
     pub(crate) fn clear_interrupt_state(&self, client_id: ClientId) {
         self.session_interrupt_states.write().remove(&client_id);
+        self.clear_auth_state(client_id);
     }
 }
 
