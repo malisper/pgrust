@@ -976,47 +976,145 @@ fn psql_describe_columns_query(
 ) -> Option<(Vec<QueryColumn>, Vec<Vec<Value>>)> {
     let oid = extract_quoted_oid(sql)?;
     let entry = db.describe_relation_by_oid(session.client_id, session.catalog_txn_ctx(), oid)?;
+    let lower = sql.to_ascii_lowercase();
+    let include_attrdef = lower.contains("pg_catalog.pg_get_expr(d.adbin");
+    let include_attnotnull = lower.contains("a.attnotnull");
+    let include_attcollation = lower.contains("as attcollation");
+    let include_attidentity = lower.contains("attidentity");
+    let include_attgenerated = lower.contains("attgenerated");
+    let include_is_key = lower.contains("as is_key");
+    let include_indexdef = lower.contains("as indexdef");
+    let include_attfdwoptions = lower.contains("as attfdwoptions");
+    let include_attstorage = lower.contains("a.attstorage");
+    let include_attcompression = lower.contains("attcompression");
+    let include_attstattarget = lower.contains("attstattarget");
+    let include_attdescr = lower.contains("pg_catalog.col_description(");
+
+    let mut columns = vec![
+        QueryColumn::text("attname"),
+        QueryColumn::text("format_type"),
+    ];
+    if include_attrdef {
+        columns.push(QueryColumn::text("pg_get_expr"));
+    }
+    if include_attnotnull {
+        columns.push(QueryColumn {
+            name: "attnotnull".into(),
+            sql_type: SqlType::new(SqlTypeKind::Bool),
+        });
+    }
+    if include_attcollation {
+        columns.push(QueryColumn::text("attcollation"));
+    }
+    if include_attidentity {
+        columns.push(QueryColumn {
+            name: "attidentity".into(),
+            sql_type: SqlType::new(SqlTypeKind::InternalChar),
+        });
+    }
+    if include_attgenerated {
+        columns.push(QueryColumn {
+            name: "attgenerated".into(),
+            sql_type: SqlType::new(SqlTypeKind::InternalChar),
+        });
+    }
+    if include_is_key {
+        columns.push(QueryColumn::text("is_key"));
+    }
+    if include_indexdef {
+        columns.push(QueryColumn::text("indexdef"));
+    }
+    if include_attfdwoptions {
+        columns.push(QueryColumn::text("attfdwoptions"));
+    }
+    if include_attstorage {
+        columns.push(QueryColumn {
+            name: "attstorage".into(),
+            sql_type: SqlType::new(SqlTypeKind::InternalChar),
+        });
+    }
+    if include_attcompression {
+        columns.push(QueryColumn {
+            name: "attcompression".into(),
+            sql_type: SqlType::new(SqlTypeKind::InternalChar),
+        });
+    }
+    if include_attstattarget {
+        columns.push(QueryColumn {
+            name: "attstattarget".into(),
+            sql_type: SqlType::new(SqlTypeKind::Int2),
+        });
+    }
+    if include_attdescr {
+        columns.push(QueryColumn::text("col_description"));
+    }
+
     let rows = entry
         .desc
         .columns
         .iter()
-        .map(|column| {
-            vec![
+        .enumerate()
+        .map(|(index, column)| {
+            let mut row = vec![
                 Value::Text(column.name.clone().into()),
                 Value::Text(format_psql_type(column.sql_type).into()),
-                column
-                    .default_expr
+            ];
+            if include_attrdef {
+                row.push(
+                    column
+                        .default_expr
+                        .as_ref()
+                        .map(|expr| Value::Text(format_psql_default(column.sql_type, expr).into()))
+                        .unwrap_or(Value::Null),
+                );
+            }
+            if include_attnotnull {
+                row.push(Value::Bool(!column.storage.nullable));
+            }
+            if include_attcollation {
+                row.push(Value::Null);
+            }
+            if include_attidentity {
+                row.push(Value::InternalChar(0));
+            }
+            if include_attgenerated {
+                row.push(Value::InternalChar(0));
+            }
+            if include_is_key {
+                let is_key = entry
+                    .index
                     .as_ref()
-                    .map(|expr| Value::Text(format_psql_default(column.sql_type, expr).into()))
-                    .unwrap_or(Value::Null),
-                Value::Bool(!column.storage.nullable),
-                Value::Null,
-                Value::InternalChar(0),
-                Value::InternalChar(0),
-            ]
+                    .is_some_and(|index_meta| index < index_meta.indnkeyatts as usize);
+                row.push(Value::Text(if is_key { "yes" } else { "no" }.into()));
+            }
+            if include_indexdef {
+                row.push(Value::Text(column.name.clone().into()));
+            }
+            if include_attfdwoptions {
+                row.push(Value::Text("".into()));
+            }
+            if include_attstorage {
+                row.push(Value::InternalChar(column.storage.attstorage.as_char() as u8));
+            }
+            if include_attcompression {
+                row.push(Value::InternalChar(
+                    column.storage.attcompression.as_char() as u8,
+                ));
+            }
+            if include_attstattarget {
+                row.push(if column.attstattarget < 0 {
+                    Value::Null
+                } else {
+                    Value::Int16(column.attstattarget)
+                });
+            }
+            if include_attdescr {
+                row.push(Value::Null);
+            }
+            row
         })
         .collect::<Vec<_>>();
-    Some((
-        vec![
-            QueryColumn::text("attname"),
-            QueryColumn::text("format_type"),
-            QueryColumn::text("pg_get_expr"),
-            QueryColumn {
-                name: "attnotnull".into(),
-                sql_type: SqlType::new(SqlTypeKind::Bool),
-            },
-            QueryColumn::text("attcollation"),
-            QueryColumn {
-                name: "attidentity".into(),
-                sql_type: SqlType::new(SqlTypeKind::InternalChar),
-            },
-            QueryColumn {
-                name: "attgenerated".into(),
-                sql_type: SqlType::new(SqlTypeKind::InternalChar),
-            },
-        ],
-        rows,
-    ))
+    Some((columns, rows))
 }
 
 fn psql_describe_constraints_query(
@@ -1886,6 +1984,83 @@ mod tests {
         );
         let (_, rows) = execute_psql_describe_query(&db, &session, &sql).unwrap();
         assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn psql_describe_columns_query_matches_verbose_view_shape() {
+        let db = Database::open(temp_dir("describe_columns_view_verbose"), 16).unwrap();
+        let session = Session::new(1);
+        db.execute(1, "create table widgets (id int4, note text)")
+            .unwrap();
+        db.execute(1, "create view widget_view as select * from widgets")
+            .unwrap();
+        let entry = session
+            .catalog_lookup(&db)
+            .lookup_any_relation("widget_view")
+            .unwrap();
+
+        let sql = format!(
+            "SELECT a.attname, \
+                 pg_catalog.format_type(a.atttypid, a.atttypmod), \
+                 (SELECT pg_catalog.pg_get_expr(d.adbin, d.adrelid, true) \
+                    FROM pg_catalog.pg_attrdef d \
+                   WHERE d.adrelid = a.attrelid AND d.adnum = a.attnum AND a.atthasdef), \
+                 a.attnotnull, \
+                 (SELECT c.collname FROM pg_catalog.pg_collation c, pg_catalog.pg_type t \
+                   WHERE c.oid = a.attcollation AND t.oid = a.atttypid AND a.attcollation <> t.typcollation) AS attcollation, \
+                 a.attidentity, \
+                 a.attgenerated, \
+                 a.attstorage, \
+                 pg_catalog.col_description(a.attrelid, a.attnum) \
+             FROM pg_catalog.pg_attribute a \
+             WHERE a.attrelid = '{}' AND a.attnum > 0 AND NOT a.attisdropped \
+             ORDER BY a.attnum",
+            entry.relation_oid
+        );
+        let (columns, rows) = execute_psql_describe_query(&db, &session, &sql).unwrap();
+        assert_eq!(columns.len(), 9);
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| row.len() == 9));
+        assert_eq!(rows[0][7], Value::InternalChar(b'p'));
+        assert_eq!(rows[1][7], Value::InternalChar(b'x'));
+        assert_eq!(rows[0][8], Value::Null);
+    }
+
+    #[test]
+    fn psql_describe_columns_query_matches_verbose_table_shape() {
+        let db = Database::open(temp_dir("describe_columns_table_verbose"), 16).unwrap();
+        let session = Session::new(1);
+        db.execute(1, "create table widgets (id int4, note text)")
+            .unwrap();
+        let entry = session.catalog_lookup(&db).lookup_any_relation("widgets").unwrap();
+
+        let sql = format!(
+            "SELECT a.attname, \
+                 pg_catalog.format_type(a.atttypid, a.atttypmod), \
+                 (SELECT pg_catalog.pg_get_expr(d.adbin, d.adrelid, true) \
+                    FROM pg_catalog.pg_attrdef d \
+                   WHERE d.adrelid = a.attrelid AND d.adnum = a.attnum AND a.atthasdef), \
+                 a.attnotnull, \
+                 (SELECT c.collname FROM pg_catalog.pg_collation c, pg_catalog.pg_type t \
+                   WHERE c.oid = a.attcollation AND t.oid = a.atttypid AND a.attcollation <> t.typcollation) AS attcollation, \
+                 a.attidentity, \
+                 a.attgenerated, \
+                 a.attstorage, \
+                 a.attcompression AS attcompression, \
+                 CASE WHEN a.attstattarget=-1 THEN NULL ELSE a.attstattarget END AS attstattarget, \
+                 pg_catalog.col_description(a.attrelid, a.attnum) \
+             FROM pg_catalog.pg_attribute a \
+             WHERE a.attrelid = '{}' AND a.attnum > 0 AND NOT a.attisdropped \
+             ORDER BY a.attnum",
+            entry.relation_oid
+        );
+        let (columns, rows) = execute_psql_describe_query(&db, &session, &sql).unwrap();
+        assert_eq!(columns.len(), 11);
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| row.len() == 11));
+        assert_eq!(rows[0][7], Value::InternalChar(b'p'));
+        assert_eq!(rows[0][8], Value::InternalChar(0));
+        assert_eq!(rows[0][9], Value::Null);
     }
 
     #[test]
