@@ -291,7 +291,6 @@ fn rewrite_semantic_expr(
     catalog: &dyn CatalogLookup,
     expanded_views: &[u32],
 ) -> Result<Expr, ParseError> {
-    let expr = expr.into_pg_semantic_shape();
     Ok(match expr {
         other @ (Expr::Var(_)
         | Expr::Column(_)
@@ -351,22 +350,10 @@ fn rewrite_semantic_expr(
                 ..*saop
             }))
         }
-        Expr::UnaryPlus(inner) => {
-            Expr::UnaryPlus(Box::new(rewrite_semantic_expr(*inner, catalog, expanded_views)?))
-        }
-        Expr::Negate(inner) => {
-            Expr::Negate(Box::new(rewrite_semantic_expr(*inner, catalog, expanded_views)?))
-        }
-        Expr::BitNot(inner) => {
-            Expr::BitNot(Box::new(rewrite_semantic_expr(*inner, catalog, expanded_views)?))
-        }
         Expr::Cast(inner, ty) => Expr::Cast(
             Box::new(rewrite_semantic_expr(*inner, catalog, expanded_views)?),
             ty,
         ),
-        Expr::Not(inner) => {
-            Expr::Not(Box::new(rewrite_semantic_expr(*inner, catalog, expanded_views)?))
-        }
         Expr::IsNull(inner) => {
             Expr::IsNull(Box::new(rewrite_semantic_expr(*inner, catalog, expanded_views)?))
         }
@@ -425,16 +412,6 @@ fn rewrite_semantic_expr(
             Box::new(rewrite_semantic_expr(*left, catalog, expanded_views)?),
             Box::new(rewrite_semantic_expr(*right, catalog, expanded_views)?),
         ),
-        Expr::AnyArray { left, op, right } => Expr::AnyArray {
-            left: Box::new(rewrite_semantic_expr(*left, catalog, expanded_views)?),
-            op,
-            right: Box::new(rewrite_semantic_expr(*right, catalog, expanded_views)?),
-        },
-        Expr::AllArray { left, op, right } => Expr::AllArray {
-            left: Box::new(rewrite_semantic_expr(*left, catalog, expanded_views)?),
-            op,
-            right: Box::new(rewrite_semantic_expr(*right, catalog, expanded_views)?),
-        },
         Expr::ArraySubscript { array, subscripts } => Expr::ArraySubscript {
             array: Box::new(rewrite_semantic_expr(*array, catalog, expanded_views)?),
             subscripts: subscripts
@@ -454,36 +431,5 @@ fn rewrite_semantic_expr(
                 })
                 .collect::<Result<Vec<_>, ParseError>>()?,
         },
-        Expr::JsonGet(left, right) => Expr::JsonGet(
-            Box::new(rewrite_semantic_expr(*left, catalog, expanded_views)?),
-            Box::new(rewrite_semantic_expr(*right, catalog, expanded_views)?),
-        ),
-        Expr::JsonGetText(left, right) => Expr::JsonGetText(
-            Box::new(rewrite_semantic_expr(*left, catalog, expanded_views)?),
-            Box::new(rewrite_semantic_expr(*right, catalog, expanded_views)?),
-        ),
-        Expr::JsonPath(left, right) => Expr::JsonPath(
-            Box::new(rewrite_semantic_expr(*left, catalog, expanded_views)?),
-            Box::new(rewrite_semantic_expr(*right, catalog, expanded_views)?),
-        ),
-        Expr::JsonPathText(left, right) => Expr::JsonPathText(
-            Box::new(rewrite_semantic_expr(*left, catalog, expanded_views)?),
-            Box::new(rewrite_semantic_expr(*right, catalog, expanded_views)?),
-        ),
-        Expr::FuncCall {
-            func_oid,
-            func,
-            args,
-            func_variadic,
-        } => Expr::FuncCall {
-            func_oid,
-            func,
-            args: args
-                .into_iter()
-                .map(|arg| rewrite_semantic_expr(arg, catalog, expanded_views))
-                .collect::<Result<Vec<_>, _>>()?,
-            func_variadic,
-        },
-        other => unreachable!("unexpected semantic expression shape during rewrite: {other:?}"),
     })
 }

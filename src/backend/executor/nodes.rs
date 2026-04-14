@@ -355,53 +355,8 @@ fn render_explain_expr_inner(expr: &Expr, column_names: &[String]) -> String {
                 format!("NOT {}", render_explain_expr_inner(inner, column_names))
             }
         },
-        Expr::RegexMatch(left, right) => format!(
-            "{} ~ {}",
-            render_explain_expr_inner(left, column_names),
-            render_explain_expr_inner(right, column_names)
-        ),
         Expr::Coalesce(left, right) => format!(
             "COALESCE({}, {})",
-            render_explain_expr_inner(left, column_names),
-            render_explain_expr_inner(right, column_names)
-        ),
-        Expr::Eq(left, right) => format!(
-            "{} = {}",
-            render_explain_expr_inner(left, column_names),
-            render_explain_expr_inner(right, column_names)
-        ),
-        Expr::NotEq(left, right) => format!(
-            "{} <> {}",
-            render_explain_expr_inner(left, column_names),
-            render_explain_expr_inner(right, column_names)
-        ),
-        Expr::Lt(left, right) => format!(
-            "{} < {}",
-            render_explain_expr_inner(left, column_names),
-            render_explain_expr_inner(right, column_names)
-        ),
-        Expr::LtEq(left, right) => format!(
-            "{} <= {}",
-            render_explain_expr_inner(left, column_names),
-            render_explain_expr_inner(right, column_names)
-        ),
-        Expr::Gt(left, right) => format!(
-            "{} > {}",
-            render_explain_expr_inner(left, column_names),
-            render_explain_expr_inner(right, column_names)
-        ),
-        Expr::GtEq(left, right) => format!(
-            "{} >= {}",
-            render_explain_expr_inner(left, column_names),
-            render_explain_expr_inner(right, column_names)
-        ),
-        Expr::And(left, right) => format!(
-            "({} AND {})",
-            render_explain_expr_inner(left, column_names),
-            render_explain_expr_inner(right, column_names)
-        ),
-        Expr::Or(left, right) => format!(
-            "({} OR {})",
             render_explain_expr_inner(left, column_names),
             render_explain_expr_inner(right, column_names)
         ),

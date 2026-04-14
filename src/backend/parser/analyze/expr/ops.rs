@@ -542,7 +542,7 @@ pub(crate) fn bind_concat_operands(
             .unwrap_or(SqlType::new(SqlTypeKind::VarBit));
         let left_expr = coerce_bound_expr(left_bound, left_type, common);
         let right_expr = coerce_bound_expr(right_bound, right_type, common);
-        return Ok(Expr::Concat(Box::new(left_expr), Box::new(right_expr)));
+        return Ok(Expr::op_auto(OpExprKind::Concat, vec![left_expr, right_expr]));
     }
 
     if matches!(left_type.kind, SqlTypeKind::TsVector)

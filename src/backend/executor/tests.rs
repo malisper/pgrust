@@ -582,9 +582,9 @@ fn expr_eval_obeys_null_semantics() {
     ]);
     assert_eq!(
         eval_expr(
-            &Expr::Eq(
-                Box::new(Expr::Column(0)),
-                Box::new(Expr::Const(Value::Int32(7)))
+            &Expr::op_auto(
+                crate::include::nodes::primnodes::OpExprKind::Eq,
+                vec![Expr::Column(0), Expr::Const(Value::Int32(7))]
             ),
             &mut slot,
             &mut ctx
@@ -594,9 +594,9 @@ fn expr_eval_obeys_null_semantics() {
     );
     assert_eq!(
         eval_expr(
-            &Expr::Eq(
-                Box::new(Expr::Column(2)),
-                Box::new(Expr::Const(Value::Text("x".into())))
+            &Expr::op_auto(
+                crate::include::nodes::primnodes::OpExprKind::Eq,
+                vec![Expr::Column(2), Expr::Const(Value::Text("x".into()))]
             ),
             &mut slot,
             &mut ctx
@@ -606,10 +606,7 @@ fn expr_eval_obeys_null_semantics() {
     );
     assert_eq!(
         eval_expr(
-            &Expr::And(
-                Box::new(Expr::Const(Value::Bool(true))),
-                Box::new(Expr::Const(Value::Null))
-            ),
+            &Expr::and(Expr::Const(Value::Bool(true)), Expr::Const(Value::Null)),
             &mut slot,
             &mut ctx
         )
@@ -721,9 +718,9 @@ fn seqscan_filter_projection_returns_expected_rows() {
                 toast: None,
                 desc: relation_desc(),
             }),
-            predicate: Expr::Gt(
-                Box::new(Expr::Column(0)),
-                Box::new(Expr::Const(Value::Int32(1))),
+            predicate: Expr::op_auto(
+                crate::include::nodes::primnodes::OpExprKind::Gt,
+                vec![Expr::Column(0), Expr::Const(Value::Int32(1))],
             ),
         }),
         targets: vec![
@@ -6149,9 +6146,9 @@ fn regex_null_text_returns_null() {
     let mut slot = TupleSlot::virtual_row(vec![Value::Null]);
     assert_eq!(
         eval_expr(
-            &Expr::RegexMatch(
-                Box::new(Expr::Column(0)),
-                Box::new(Expr::Const(Value::Text("foo".into())))
+            &Expr::op_auto(
+                crate::include::nodes::primnodes::OpExprKind::RegexMatch,
+                vec![Expr::Column(0), Expr::Const(Value::Text("foo".into()))]
             ),
             &mut slot,
             &mut ctx
@@ -6167,9 +6164,9 @@ fn regex_null_pattern_returns_null() {
     let mut slot = TupleSlot::virtual_row(vec![Value::Text("foobar".into())]);
     assert_eq!(
         eval_expr(
-            &Expr::RegexMatch(
-                Box::new(Expr::Column(0)),
-                Box::new(Expr::Const(Value::Null))
+            &Expr::op_auto(
+                crate::include::nodes::primnodes::OpExprKind::RegexMatch,
+                vec![Expr::Column(0), Expr::Const(Value::Null)]
             ),
             &mut slot,
             &mut ctx

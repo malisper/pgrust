@@ -172,11 +172,6 @@ fn index_order_match(
 
 fn flatten_and_conjuncts(expr: &Expr) -> Vec<Expr> {
     match expr {
-        Expr::And(left, right) => {
-            let mut out = flatten_and_conjuncts(left);
-            out.extend(flatten_and_conjuncts(right));
-            out
-        }
         Expr::Bool(bool_expr)
             if matches!(
                 bool_expr.boolop,
@@ -231,31 +226,6 @@ fn indexable_qual(expr: &Expr) -> Option<IndexableQual> {
                 [Expr::Const(value), Expr::Column(column)] => mk(*column, 2, value),
                 _ => None,
             },
-            _ => None,
-        },
-        Expr::Eq(left, right) => match (&**left, &**right) {
-            (Expr::Column(column), Expr::Const(value)) => mk(*column, 3, value),
-            (Expr::Const(value), Expr::Column(column)) => mk(*column, 3, value),
-            _ => None,
-        },
-        Expr::Lt(left, right) => match (&**left, &**right) {
-            (Expr::Column(column), Expr::Const(value)) => mk(*column, 1, value),
-            (Expr::Const(value), Expr::Column(column)) => mk(*column, 5, value),
-            _ => None,
-        },
-        Expr::LtEq(left, right) => match (&**left, &**right) {
-            (Expr::Column(column), Expr::Const(value)) => mk(*column, 2, value),
-            (Expr::Const(value), Expr::Column(column)) => mk(*column, 4, value),
-            _ => None,
-        },
-        Expr::Gt(left, right) => match (&**left, &**right) {
-            (Expr::Column(column), Expr::Const(value)) => mk(*column, 5, value),
-            (Expr::Const(value), Expr::Column(column)) => mk(*column, 1, value),
-            _ => None,
-        },
-        Expr::GtEq(left, right) => match (&**left, &**right) {
-            (Expr::Column(column), Expr::Const(value)) => mk(*column, 4, value),
-            (Expr::Const(value), Expr::Column(column)) => mk(*column, 2, value),
             _ => None,
         },
         _ => None,
