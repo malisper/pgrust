@@ -282,6 +282,7 @@ pub enum BuiltinScalarFunction {
     StatementTimestamp,
     ClockTimestamp,
     TimeOfDay,
+    DatePart,
     Abs,
     Log,
     Log10,

@@ -1397,6 +1397,17 @@ fn bind_scalar_function_call(
                 SqlType::new(SqlTypeKind::Money),
             )],
         )),
+        BuiltinScalarFunction::DatePart => Ok(build_func(
+            false,
+            vec![
+                coerce_bound_expr(
+                    bound_args[0].clone(),
+                    arg_types[0],
+                    SqlType::new(SqlTypeKind::Text),
+                ),
+                bound_args[1].clone(),
+            ],
+        )),
         BuiltinScalarFunction::ToTsVector
         | BuiltinScalarFunction::ToTsQuery
         | BuiltinScalarFunction::PlainToTsQuery

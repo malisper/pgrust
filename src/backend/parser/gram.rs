@@ -3233,6 +3233,41 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                 }),
             }
         }
+        Rule::extract_expr => {
+            let mut field = None;
+            let mut value = None;
+            for part in pair.into_inner() {
+                match part.as_rule() {
+                    Rule::extract_field => {
+                        let inner = part.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+                        field = Some(match inner.as_rule() {
+                            Rule::identifier => {
+                                SqlExpr::Const(Value::Text(build_identifier(inner).into()))
+                            }
+                            Rule::quoted_string_literal => SqlExpr::Const(Value::Text(
+                                decode_string_literal_pair(inner)?.into(),
+                            )),
+                            _ => {
+                                return Err(ParseError::UnexpectedToken {
+                                    expected: "extract field",
+                                    actual: inner.as_str().into(),
+                                });
+                            }
+                        });
+                    }
+                    Rule::expr => value = Some(build_expr(part)?),
+                    _ => {}
+                }
+            }
+            Ok(SqlExpr::FuncCall {
+                name: "date_part".into(),
+                args: vec![
+                    SqlFunctionArg::positional(field.ok_or(ParseError::UnexpectedEof)?),
+                    SqlFunctionArg::positional(value.ok_or(ParseError::UnexpectedEof)?),
+                ],
+                func_variadic: false,
+            })
+        }
         Rule::overlay_expr => {
             let mut inner = pair.into_inner().filter(|part| {
                 !matches!(

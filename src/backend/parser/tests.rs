@@ -1007,6 +1007,18 @@ fn parse_position_in_syntax_as_builtin_call() {
 }
 
 #[test]
+fn parse_extract_in_syntax_as_date_part_call() {
+    let stmt = parse_select("select extract(week from date '2020-08-11')").unwrap();
+    assert!(matches!(
+        stmt.targets[0].expr,
+        SqlExpr::FuncCall { ref name, ref args, .. }
+            if name == "date_part"
+                && args.len() == 2
+                && matches!(args[0].value, SqlExpr::Const(Value::Text(ref field)) if &field[..] == "week")
+    ));
+}
+
+#[test]
 fn parse_variadic_function_call_marks_call_level_flag() {
     std::thread::Builder::new()
         .name("parse_variadic_function_call_marks_call_level_flag".into())

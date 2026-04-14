@@ -521,6 +521,7 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::StatementTimestamp
             | BuiltinScalarFunction::ClockTimestamp
             | BuiltinScalarFunction::TimeOfDay => args.is_empty(),
+            BuiltinScalarFunction::DatePart => args.len() == 2,
             BuiltinScalarFunction::GetDatabaseEncoding => args.is_empty(),
             BuiltinScalarFunction::ToJson | BuiltinScalarFunction::ToJsonb => args.len() == 1,
             BuiltinScalarFunction::ArrayLength
@@ -1077,6 +1078,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ),
         ("clock_timestamp", BuiltinScalarFunction::ClockTimestamp),
         ("timeofday", BuiltinScalarFunction::TimeOfDay),
+        ("date_part", BuiltinScalarFunction::DatePart),
         (
             "getdatabaseencoding",
             BuiltinScalarFunction::GetDatabaseEncoding,
