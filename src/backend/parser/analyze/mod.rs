@@ -440,22 +440,21 @@ pub fn normalize_create_view_name(stmt: &CreateViewStatement) -> Result<String, 
     .map(|(name, _)| name)
 }
 
-fn relation_desc_from_plan(plan: &Plan) -> RelationDesc {
+fn relation_desc_from_bound_select_plan(plan: &BoundSelectPlan) -> RelationDesc {
     RelationDesc {
         columns: plan
-            .column_names()
+            .columns()
             .into_iter()
-            .zip(plan.columns())
-            .map(|(name, col)| column_desc(name, col.sql_type, true))
+            .map(|col| column_desc(col.name, col.sql_type, true))
             .collect(),
     }
 }
 
 fn apply_cte_column_names(
-    plan: Plan,
+    plan: BoundSelectPlan,
     desc: RelationDesc,
     column_names: &[String],
-) -> Result<(Plan, RelationDesc), ParseError> {
+) -> Result<(BoundSelectPlan, RelationDesc), ParseError> {
     if column_names.is_empty() {
         return Ok((plan, desc));
     }
@@ -482,8 +481,7 @@ fn apply_cte_column_names(
             })
             .collect(),
     };
-    let projection = Plan::Projection {
-        plan_info: crate::backend::executor::PlanEstimate::default(),
+    let projection = BoundSelectPlan::Projection {
         input: Box::new(plan),
         targets: renamed_desc
             .columns
@@ -513,7 +511,7 @@ fn bind_ctes(
         visible.extend_from_slice(outer_ctes);
         let (plan, desc) = match &cte.body {
             CteBody::Select(select) => {
-                let plan = build_plan_with_outer(
+                let (plan, _) = bind_select_query_with_outer(
                     select,
                     catalog,
                     outer_scopes,
@@ -521,11 +519,11 @@ fn bind_ctes(
                     &visible,
                     expanded_views,
                 )?;
-                let desc = relation_desc_from_plan(&plan);
+                let desc = relation_desc_from_bound_select_plan(&plan);
                 apply_cte_column_names(plan, desc, &cte.column_names)?
             }
             CteBody::Values(values) => {
-                let plan = build_values_plan_with_outer(
+                let (plan, _) = bind_values_query_with_outer(
                     values,
                     catalog,
                     outer_scopes,
@@ -533,7 +531,7 @@ fn bind_ctes(
                     &visible,
                     expanded_views,
                 )?;
-                let desc = relation_desc_from_plan(&plan);
+                let desc = relation_desc_from_bound_select_plan(&plan);
                 apply_cte_column_names(plan, desc, &cte.column_names)?
             }
         };
@@ -594,14 +592,14 @@ pub fn build_values_plan(
     build_values_plan_with_outer(stmt, catalog, &[], None, &[], &[])
 }
 
-fn build_values_plan_with_outer(
+fn bind_values_query_with_outer(
     stmt: &ValuesStatement,
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<GroupedOuterScope>,
     outer_ctes: &[BoundCte],
     expanded_views: &[u32],
-) -> Result<Plan, ParseError> {
+) -> Result<(BoundSelectPlan, BoundScope), ParseError> {
     let local_ctes = bind_ctes(
         &stmt.with,
         catalog,
@@ -656,17 +654,36 @@ fn build_values_plan_with_outer(
         };
     }
 
-    Ok(optimize_plan(plan.into_plan(), catalog))
+    Ok((plan, scope))
 }
 
-fn build_plan_with_outer(
-    stmt: &SelectStatement,
+fn build_values_plan_with_outer(
+    stmt: &ValuesStatement,
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<GroupedOuterScope>,
     outer_ctes: &[BoundCte],
     expanded_views: &[u32],
 ) -> Result<Plan, ParseError> {
+    let (plan, _) = bind_values_query_with_outer(
+        stmt,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        outer_ctes,
+        expanded_views,
+    )?;
+    Ok(optimize_plan(plan.into_plan(), catalog))
+}
+
+fn bind_select_query_with_outer(
+    stmt: &SelectStatement,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<GroupedOuterScope>,
+    outer_ctes: &[BoundCte],
+    expanded_views: &[u32],
+) -> Result<(BoundSelectPlan, BoundScope), ParseError> {
     let local_ctes = bind_ctes(
         &stmt.with,
         catalog,
@@ -948,10 +965,10 @@ fn build_plan_with_outer(
             };
         }
 
-        Ok(optimize_plan(BoundSelectPlan::Projection {
+        Ok((BoundSelectPlan::Projection {
             input: Box::new(plan),
             targets,
-        }.into_plan(), catalog))
+        }, scope))
     } else {
         let bound_targets = bind_select_targets(
             &stmt.targets,
@@ -995,12 +1012,12 @@ fn build_plan_with_outer(
                     });
 
                 if is_identity {
-                    Ok(optimize_plan(plan.into_plan(), catalog))
+                    Ok((plan, scope))
                 } else {
-                    Ok(optimize_plan(BoundSelectPlan::Projection {
+                    Ok((BoundSelectPlan::Projection {
                         input: Box::new(plan),
                         targets,
-                    }.into_plan(), catalog))
+                    }, scope))
                 }
             }
             BoundSelectTargets::WithProjectSet {
@@ -1037,8 +1054,27 @@ fn build_plan_with_outer(
                         offset: stmt.offset.unwrap_or(0),
                     };
                 }
-                Ok(optimize_plan(plan.into_plan(), catalog))
+                Ok((plan, scope))
             }
         }
     }
+}
+
+fn build_plan_with_outer(
+    stmt: &SelectStatement,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<GroupedOuterScope>,
+    outer_ctes: &[BoundCte],
+    expanded_views: &[u32],
+) -> Result<Plan, ParseError> {
+    let (plan, _) = bind_select_query_with_outer(
+        stmt,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        outer_ctes,
+        expanded_views,
+    )?;
+    Ok(optimize_plan(plan.into_plan(), catalog))
 }

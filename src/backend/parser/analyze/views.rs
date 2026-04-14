@@ -27,26 +27,19 @@ fn return_rule_sql(
 }
 
 fn validate_view_shape(
-    plan: &Plan,
+    plan: &BoundSelectPlan,
     relation: &BoundRelation,
     display_name: &str,
 ) -> Result<(), ParseError> {
     let actual_columns = plan.columns();
-    let actual_names = plan.column_names();
-    if actual_columns.len() != relation.desc.columns.len()
-        || actual_names.len() != relation.desc.columns.len()
-    {
+    if actual_columns.len() != relation.desc.columns.len() {
         return Err(ParseError::UnexpectedToken {
             expected: "view query width matching stored view columns",
             actual: format!("stale view definition for {display_name}"),
         });
     }
-    for ((actual_name, actual_column), stored_column) in actual_names
-        .into_iter()
-        .zip(actual_columns.into_iter())
-        .zip(relation.desc.columns.iter())
-    {
-        if !actual_name.eq_ignore_ascii_case(&stored_column.name)
+    for (actual_column, stored_column) in actual_columns.into_iter().zip(relation.desc.columns.iter()) {
+        if !actual_column.name.eq_ignore_ascii_case(&stored_column.name)
             || actual_column.sql_type != stored_column.sql_type
         {
             return Err(ParseError::UnexpectedToken {
@@ -81,7 +74,7 @@ pub(super) fn bind_view_reference(
     };
     let mut next_views = expanded_views.to_vec();
     next_views.push(relation.relation_oid);
-    let plan = build_plan_with_outer(
+    let (plan, _) = bind_select_query_with_outer(
         &select,
         catalog,
         outer_scopes,
@@ -91,7 +84,7 @@ pub(super) fn bind_view_reference(
     )?;
     validate_view_shape(&plan, relation, &display_name)?;
     Ok((
-        BoundFromPlan::Preplanned(Box::new(plan)),
+        BoundFromPlan::Subquery(Box::new(plan)),
         scope_for_relation(Some(relation_name), &relation.desc),
     ))
 }

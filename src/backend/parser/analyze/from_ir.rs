@@ -1,3 +1,4 @@
+use super::select_ir::BoundSelectPlan;
 use crate::backend::executor::{
     Expr, Plan, PlanEstimate, QueryColumn, RelationDesc, SetReturningCall, TargetEntry,
     ToastRelationRef,
@@ -31,7 +32,7 @@ pub(super) enum BoundFromPlan {
         input: Box<BoundFromPlan>,
         targets: Vec<TargetEntry>,
     },
-    Preplanned(Box<Plan>),
+    Subquery(Box<BoundSelectPlan>),
 }
 
 impl BoundFromPlan {
@@ -81,7 +82,7 @@ impl BoundFromPlan {
                 input: Box::new(input.into_plan()),
                 targets,
             },
-            Self::Preplanned(plan) => *plan,
+            Self::Subquery(plan) => plan.into_plan(),
         }
     }
 
@@ -110,7 +111,7 @@ impl BoundFromPlan {
                     sql_type: target.sql_type,
                 })
                 .collect(),
-            Self::Preplanned(plan) => plan.columns(),
+            Self::Subquery(plan) => plan.columns(),
         }
     }
 }
