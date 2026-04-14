@@ -49,8 +49,8 @@ use crate::include::catalog::{
     TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID, TSQUERY_ARRAY_TYPE_OID, TSQUERY_TYPE_OID,
     TSVECTOR_ARRAY_TYPE_OID, TSVECTOR_TYPE_OID, VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID,
     VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID, bootstrap_composite_type_rows, bootstrap_pg_am_rows,
-    bootstrap_pg_amop_rows, bootstrap_pg_amproc_rows, bootstrap_pg_auth_members_rows,
-    bootstrap_pg_authid_rows, bootstrap_pg_cast_rows, bootstrap_pg_collation_rows,
+    bootstrap_pg_amop_rows, bootstrap_pg_amproc_rows, bootstrap_pg_cast_rows,
+    bootstrap_pg_collation_rows,
     bootstrap_pg_constraint_rows, bootstrap_pg_database_rows, bootstrap_pg_language_rows,
     bootstrap_pg_namespace_rows, bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows,
     bootstrap_pg_opfamily_rows, bootstrap_pg_proc_rows, bootstrap_pg_tablespace_rows,
@@ -125,11 +125,11 @@ impl CatCache {
         sort_pg_amop_rows(&mut cache.amop_rows);
         cache.amproc_rows.extend(bootstrap_pg_amproc_rows());
         sort_pg_amproc_rows(&mut cache.amproc_rows);
-        cache.authid_rows.extend(bootstrap_pg_authid_rows());
+        cache.authid_rows.extend(catalog.authid_rows().iter().cloned());
         sort_pg_authid_rows(&mut cache.authid_rows);
         cache
             .auth_members_rows
-            .extend(bootstrap_pg_auth_members_rows());
+            .extend(catalog.auth_members_rows().iter().cloned());
         sort_pg_auth_members_rows(&mut cache.auth_members_rows);
         cache.language_rows.extend(bootstrap_pg_language_rows());
         sort_pg_language_rows(&mut cache.language_rows);
