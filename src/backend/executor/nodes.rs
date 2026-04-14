@@ -301,6 +301,60 @@ fn render_explain_expr_inner(expr: &Expr, column_names: &[String]) -> String {
             .cloned()
             .unwrap_or_else(|| format!("column{}", index + 1)),
         Expr::Const(value) => render_explain_const(value),
+        Expr::Op(op) => match op.op {
+            crate::include::nodes::primnodes::OpExprKind::Eq
+            | crate::include::nodes::primnodes::OpExprKind::NotEq
+            | crate::include::nodes::primnodes::OpExprKind::Lt
+            | crate::include::nodes::primnodes::OpExprKind::LtEq
+            | crate::include::nodes::primnodes::OpExprKind::Gt
+            | crate::include::nodes::primnodes::OpExprKind::GtEq
+            | crate::include::nodes::primnodes::OpExprKind::RegexMatch => {
+                let [left, right] = op.args.as_slice() else {
+                    return format!("{expr:?}");
+                };
+                let op_text = match op.op {
+                    crate::include::nodes::primnodes::OpExprKind::Eq => "=",
+                    crate::include::nodes::primnodes::OpExprKind::NotEq => "<>",
+                    crate::include::nodes::primnodes::OpExprKind::Lt => "<",
+                    crate::include::nodes::primnodes::OpExprKind::LtEq => "<=",
+                    crate::include::nodes::primnodes::OpExprKind::Gt => ">",
+                    crate::include::nodes::primnodes::OpExprKind::GtEq => ">=",
+                    crate::include::nodes::primnodes::OpExprKind::RegexMatch => "~",
+                    _ => unreachable!(),
+                };
+                format!(
+                    "{} {} {}",
+                    render_explain_expr_inner(left, column_names),
+                    op_text,
+                    render_explain_expr_inner(right, column_names)
+                )
+            }
+            _ => format!("{expr:?}"),
+        },
+        Expr::Bool(bool_expr) => match bool_expr.boolop {
+            crate::include::nodes::primnodes::BoolExprType::And => {
+                let rendered = bool_expr
+                    .args
+                    .iter()
+                    .map(|arg| render_explain_expr_inner(arg, column_names))
+                    .collect::<Vec<_>>();
+                format!("({})", rendered.join(" AND "))
+            }
+            crate::include::nodes::primnodes::BoolExprType::Or => {
+                let rendered = bool_expr
+                    .args
+                    .iter()
+                    .map(|arg| render_explain_expr_inner(arg, column_names))
+                    .collect::<Vec<_>>();
+                format!("({})", rendered.join(" OR "))
+            }
+            crate::include::nodes::primnodes::BoolExprType::Not => {
+                let Some(inner) = bool_expr.args.first() else {
+                    return format!("{expr:?}");
+                };
+                format!("NOT {}", render_explain_expr_inner(inner, column_names))
+            }
+        },
         Expr::RegexMatch(left, right) => format!(
             "{} ~ {}",
             render_explain_expr_inner(left, column_names),

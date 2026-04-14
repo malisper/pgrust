@@ -1527,26 +1527,31 @@ fn build_plan_coerces_unknown_string_literals_for_array_ops() {
     };
     assert!(matches!(
         &targets[0].expr,
-        Expr::Eq(left, right)
-            if matches!(left.as_ref(), Expr::ArrayLiteral { array_type, .. }
+        Expr::Op(op)
+            if op.op == crate::include::nodes::primnodes::OpExprKind::Eq
+                && matches!(op.args.as_slice(), [left, right]
+                    if matches!(left, Expr::ArrayLiteral { array_type, .. }
                 if *array_type == SqlType::array_of(SqlType::new(SqlTypeKind::Int4)))
-                && matches!(right.as_ref(), Expr::Cast(inner, ty)
+                && matches!(right, Expr::Cast(inner, ty)
                     if *ty == SqlType::array_of(SqlType::new(SqlTypeKind::Int4))
-                        && matches!(inner.as_ref(), Expr::Const(Value::Text(_)) | Expr::Const(Value::TextRef(_, _))))
+                        && matches!(inner.as_ref(), Expr::Const(Value::Text(_)) | Expr::Const(Value::TextRef(_, _)))))
     ));
     assert!(matches!(
         &targets[1].expr,
-        Expr::ArrayOverlap(left, right)
-            if matches!(left.as_ref(), Expr::ArrayLiteral { array_type, .. }
+        Expr::Op(op)
+            if op.op == crate::include::nodes::primnodes::OpExprKind::ArrayOverlap
+                && matches!(op.args.as_slice(), [left, right]
+                    if matches!(left, Expr::ArrayLiteral { array_type, .. }
                 if *array_type == SqlType::array_of(SqlType::new(SqlTypeKind::Int4)))
-                && matches!(right.as_ref(), Expr::Cast(inner, ty)
+                && matches!(right, Expr::Cast(inner, ty)
                     if *ty == SqlType::array_of(SqlType::new(SqlTypeKind::Int4))
-                        && matches!(inner.as_ref(), Expr::Const(Value::Text(_)) | Expr::Const(Value::TextRef(_, _))))
+                        && matches!(inner.as_ref(), Expr::Const(Value::Text(_)) | Expr::Const(Value::TextRef(_, _)))))
     ));
     assert!(matches!(
         &targets[2].expr,
-        Expr::AnyArray { right, .. }
-            if matches!(right.as_ref(), Expr::Cast(inner, ty)
+        Expr::ScalarArrayOp(saop)
+            if saop.use_or
+                && matches!(saop.right.as_ref(), Expr::Cast(inner, ty)
                 if *ty == SqlType::array_of(SqlType::new(SqlTypeKind::Int4))
                     && matches!(inner.as_ref(), Expr::Const(Value::Text(_)) | Expr::Const(Value::TextRef(_, _))))
     ));
@@ -1626,7 +1631,10 @@ fn build_plan_resolves_columns() {
                 Plan::Filter {
                     input, predicate, ..
                 } => {
-                    assert!(matches!(predicate, Expr::Gt(_, _)));
+                    assert!(matches!(
+                        predicate,
+                        Expr::Op(op) if op.op == crate::include::nodes::primnodes::OpExprKind::Gt
+                    ));
                     assert!(matches!(*input, Plan::SeqScan { .. }));
                 }
                 other => panic!("expected filter, got {:?}", other),
@@ -1646,7 +1654,10 @@ fn build_plan_resolves_aliased_columns() {
             assert_eq!(targets[0].name, "name");
             match *input {
                 Plan::Filter { predicate, .. } => {
-                    assert!(matches!(predicate, Expr::Gt(_, _)));
+                    assert!(matches!(
+                        predicate,
+                        Expr::Op(op) if op.op == crate::include::nodes::primnodes::OpExprKind::Gt
+                    ));
                 }
                 other => panic!("expected filter, got {:?}", other),
             }
@@ -1668,7 +1679,10 @@ fn build_join_plan_resolves_qualified_columns() {
         Plan::Projection { input, targets, .. } => {
             assert_eq!(targets.len(), 2);
             match *input {
-                Plan::NestedLoopJoin { on, .. } => assert!(matches!(on, Expr::Eq(_, _))),
+                Plan::NestedLoopJoin { on, .. } => assert!(matches!(
+                    on,
+                    Expr::Op(op) if op.op == crate::include::nodes::primnodes::OpExprKind::Eq
+                )),
                 other => panic!("expected join, got {:?}", other),
             }
         }

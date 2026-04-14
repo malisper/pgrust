@@ -6,7 +6,11 @@ use crate::include::nodes::pathnodes::{
     PlannerProjectSetTarget, PlannerTargetEntry,
 };
 use crate::include::nodes::plannodes::{Plan, PlanEstimate};
-use crate::include::nodes::primnodes::{Expr, ExprArraySubscript, QueryColumn};
+use crate::include::nodes::datum::Value;
+use crate::include::nodes::primnodes::{
+    BoolExpr, BoolExprType, Expr, ExprArraySubscript, FuncExpr, OpExpr, OpExprKind,
+    QueryColumn, ScalarArrayOpExpr,
+};
 
 struct PlannerPathBuilder {
     next_slot_id: usize,
@@ -16,6 +20,135 @@ static NEXT_SYNTHETIC_SLOT_ID: AtomicUsize = AtomicUsize::new(1);
 
 pub(crate) fn next_synthetic_slot_id() -> usize {
     NEXT_SYNTHETIC_SLOT_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+fn planner_join_from_op<F>(op: &OpExpr, recurse: F) -> PlannerJoinExpr
+where
+    F: Fn(&Expr) -> PlannerJoinExpr + Copy,
+{
+    let unary = |arg: &Expr, ctor: fn(Box<PlannerJoinExpr>) -> PlannerJoinExpr| {
+        ctor(Box::new(recurse(arg)))
+    };
+    let binary =
+        |args: &[Expr], ctor: fn(Box<PlannerJoinExpr>, Box<PlannerJoinExpr>) -> PlannerJoinExpr| {
+            let [left, right] = args else {
+                panic!("malformed OpExpr {:?}: expected binary args", op.op);
+            };
+            ctor(Box::new(recurse(left)), Box::new(recurse(right)))
+        };
+    match op.op {
+        OpExprKind::UnaryPlus => {
+            let [arg] = op.args.as_slice() else {
+                panic!("malformed unary plus OpExpr");
+            };
+            unary(arg, PlannerJoinExpr::UnaryPlus)
+        }
+        OpExprKind::Negate => {
+            let [arg] = op.args.as_slice() else {
+                panic!("malformed negate OpExpr");
+            };
+            unary(arg, PlannerJoinExpr::Negate)
+        }
+        OpExprKind::BitNot => {
+            let [arg] = op.args.as_slice() else {
+                panic!("malformed bit-not OpExpr");
+            };
+            unary(arg, PlannerJoinExpr::BitNot)
+        }
+        OpExprKind::Add => binary(&op.args, PlannerJoinExpr::Add),
+        OpExprKind::Sub => binary(&op.args, PlannerJoinExpr::Sub),
+        OpExprKind::BitAnd => binary(&op.args, PlannerJoinExpr::BitAnd),
+        OpExprKind::BitOr => binary(&op.args, PlannerJoinExpr::BitOr),
+        OpExprKind::BitXor => binary(&op.args, PlannerJoinExpr::BitXor),
+        OpExprKind::Shl => binary(&op.args, PlannerJoinExpr::Shl),
+        OpExprKind::Shr => binary(&op.args, PlannerJoinExpr::Shr),
+        OpExprKind::Mul => binary(&op.args, PlannerJoinExpr::Mul),
+        OpExprKind::Div => binary(&op.args, PlannerJoinExpr::Div),
+        OpExprKind::Mod => binary(&op.args, PlannerJoinExpr::Mod),
+        OpExprKind::Concat => binary(&op.args, PlannerJoinExpr::Concat),
+        OpExprKind::Eq => binary(&op.args, PlannerJoinExpr::Eq),
+        OpExprKind::NotEq => binary(&op.args, PlannerJoinExpr::NotEq),
+        OpExprKind::Lt => binary(&op.args, PlannerJoinExpr::Lt),
+        OpExprKind::LtEq => binary(&op.args, PlannerJoinExpr::LtEq),
+        OpExprKind::Gt => binary(&op.args, PlannerJoinExpr::Gt),
+        OpExprKind::GtEq => binary(&op.args, PlannerJoinExpr::GtEq),
+        OpExprKind::RegexMatch => binary(&op.args, PlannerJoinExpr::RegexMatch),
+        OpExprKind::ArrayOverlap => binary(&op.args, PlannerJoinExpr::ArrayOverlap),
+        OpExprKind::JsonbContains => binary(&op.args, PlannerJoinExpr::JsonbContains),
+        OpExprKind::JsonbContained => binary(&op.args, PlannerJoinExpr::JsonbContained),
+        OpExprKind::JsonbExists => binary(&op.args, PlannerJoinExpr::JsonbExists),
+        OpExprKind::JsonbExistsAny => binary(&op.args, PlannerJoinExpr::JsonbExistsAny),
+        OpExprKind::JsonbExistsAll => binary(&op.args, PlannerJoinExpr::JsonbExistsAll),
+        OpExprKind::JsonbPathExists => binary(&op.args, PlannerJoinExpr::JsonbPathExists),
+        OpExprKind::JsonbPathMatch => binary(&op.args, PlannerJoinExpr::JsonbPathMatch),
+        OpExprKind::JsonGet => binary(&op.args, PlannerJoinExpr::JsonGet),
+        OpExprKind::JsonGetText => binary(&op.args, PlannerJoinExpr::JsonGetText),
+        OpExprKind::JsonPath => binary(&op.args, PlannerJoinExpr::JsonPath),
+        OpExprKind::JsonPathText => binary(&op.args, PlannerJoinExpr::JsonPathText),
+    }
+}
+
+fn planner_join_from_bool<F>(bool_expr: &BoolExpr, recurse: F) -> PlannerJoinExpr
+where
+    F: Fn(&Expr) -> PlannerJoinExpr + Copy,
+{
+    match bool_expr.boolop {
+        BoolExprType::And => {
+            let mut args = bool_expr.args.iter();
+            let first = args.next().map(recurse).unwrap_or(PlannerJoinExpr::Const(Value::Bool(true)));
+            args.fold(first, |left, right| {
+                PlannerJoinExpr::And(Box::new(left), Box::new(recurse(right)))
+            })
+        }
+        BoolExprType::Or => {
+            let mut args = bool_expr.args.iter();
+            let first =
+                args.next().map(recurse).unwrap_or(PlannerJoinExpr::Const(Value::Bool(false)));
+            args.fold(first, |left, right| {
+                PlannerJoinExpr::Or(Box::new(left), Box::new(recurse(right)))
+            })
+        }
+        BoolExprType::Not => {
+            let inner = bool_expr
+                .args
+                .first()
+                .map(recurse)
+                .unwrap_or(PlannerJoinExpr::Const(Value::Bool(false)));
+            PlannerJoinExpr::Not(Box::new(inner))
+        }
+    }
+}
+
+fn planner_join_from_func<F>(func: &FuncExpr, recurse: F) -> PlannerJoinExpr
+where
+    F: Fn(&Expr) -> PlannerJoinExpr + Copy,
+{
+    PlannerJoinExpr::FuncCall {
+        func_oid: func.funcid,
+        func: crate::include::catalog::builtin_scalar_function_for_proc_oid(func.funcid)
+            .unwrap_or_else(|| panic!("planner function {:?} lacks builtin mapping", func.funcid)),
+        args: func.args.iter().map(recurse).collect(),
+        func_variadic: func.funcvariadic,
+    }
+}
+
+fn planner_join_from_scalar_array<F>(saop: &ScalarArrayOpExpr, recurse: F) -> PlannerJoinExpr
+where
+    F: Fn(&Expr) -> PlannerJoinExpr + Copy,
+{
+    if saop.use_or {
+        PlannerJoinExpr::AnyArray {
+            left: Box::new(recurse(&saop.left)),
+            op: saop.op,
+            right: Box::new(recurse(&saop.right)),
+        }
+    } else {
+        PlannerJoinExpr::AllArray {
+            left: Box::new(recurse(&saop.left)),
+            op: saop.op,
+            right: Box::new(recurse(&saop.right)),
+        }
+    }
 }
 
 impl PlannerPath {
@@ -867,12 +1000,18 @@ impl PlannerJoinExpr {
 
     pub fn from_input_expr_with_layout(expr: &Expr, layout: &[PlannerJoinExpr]) -> Self {
         match expr {
-            Expr::Op(_)
-            | Expr::Bool(_)
-            | Expr::Func(_)
-            | Expr::ScalarArrayOp(_) => {
-                Self::from_input_expr_with_layout(&expr.clone().into_legacy_shape(), layout)
-            }
+            Expr::Op(op) => planner_join_from_op(op, |expr| {
+                Self::from_input_expr_with_layout(expr, layout)
+            }),
+            Expr::Bool(bool_expr) => planner_join_from_bool(bool_expr, |expr| {
+                Self::from_input_expr_with_layout(expr, layout)
+            }),
+            Expr::Func(func) => planner_join_from_func(func, |expr| {
+                Self::from_input_expr_with_layout(expr, layout)
+            }),
+            Expr::ScalarArrayOp(saop) => planner_join_from_scalar_array(saop, |expr| {
+                Self::from_input_expr_with_layout(expr, layout)
+            }),
             Expr::Var(var) => Self::from_var_with_layout(var, layout),
             Expr::Column(index) => layout
                 .get(*index)
@@ -1145,10 +1284,12 @@ impl PlannerJoinExpr {
 
     pub fn from_input_expr(expr: &Expr) -> Self {
         match expr {
-            Expr::Op(_)
-            | Expr::Bool(_)
-            | Expr::Func(_)
-            | Expr::ScalarArrayOp(_) => Self::from_input_expr(&expr.clone().into_legacy_shape()),
+            Expr::Op(op) => planner_join_from_op(op, Self::from_input_expr),
+            Expr::Bool(bool_expr) => planner_join_from_bool(bool_expr, Self::from_input_expr),
+            Expr::Func(func) => planner_join_from_func(func, Self::from_input_expr),
+            Expr::ScalarArrayOp(saop) => {
+                planner_join_from_scalar_array(saop, Self::from_input_expr)
+            }
             Expr::Var(var) => Self::from_var(var),
             Expr::Column(index) => Self::InputColumn(*index),
             Expr::OuterColumn { depth, index } => Self::OuterColumn {
@@ -1401,90 +1542,147 @@ impl PlannerJoinExpr {
             Self::RightColumn(index) => Expr::Column(index),
             Self::OuterColumn { depth, index } => Expr::OuterColumn { depth, index },
             Self::Const(value) => Expr::Const(value),
-            Self::Add(left, right) => Expr::Add(
-                Box::new(left.into_input_expr_with_layout(layout)),
-                Box::new(right.into_input_expr_with_layout(layout)),
+            Self::Add(left, right) => Expr::op_auto(
+                OpExprKind::Add,
+                vec![
+                    left.into_input_expr_with_layout(layout),
+                    right.into_input_expr_with_layout(layout),
+                ],
             ),
-            Self::Sub(left, right) => Expr::Sub(
-                Box::new(left.into_input_expr_with_layout(layout)),
-                Box::new(right.into_input_expr_with_layout(layout)),
+            Self::Sub(left, right) => Expr::op_auto(
+                OpExprKind::Sub,
+                vec![
+                    left.into_input_expr_with_layout(layout),
+                    right.into_input_expr_with_layout(layout),
+                ],
             ),
-            Self::BitAnd(left, right) => Expr::BitAnd(
-                Box::new(left.into_input_expr_with_layout(layout)),
-                Box::new(right.into_input_expr_with_layout(layout)),
+            Self::BitAnd(left, right) => Expr::op_auto(
+                OpExprKind::BitAnd,
+                vec![
+                    left.into_input_expr_with_layout(layout),
+                    right.into_input_expr_with_layout(layout),
+                ],
             ),
-            Self::BitOr(left, right) => Expr::BitOr(
-                Box::new(left.into_input_expr_with_layout(layout)),
-                Box::new(right.into_input_expr_with_layout(layout)),
+            Self::BitOr(left, right) => Expr::op_auto(
+                OpExprKind::BitOr,
+                vec![
+                    left.into_input_expr_with_layout(layout),
+                    right.into_input_expr_with_layout(layout),
+                ],
             ),
-            Self::BitXor(left, right) => Expr::BitXor(
-                Box::new(left.into_input_expr_with_layout(layout)),
-                Box::new(right.into_input_expr_with_layout(layout)),
+            Self::BitXor(left, right) => Expr::op_auto(
+                OpExprKind::BitXor,
+                vec![
+                    left.into_input_expr_with_layout(layout),
+                    right.into_input_expr_with_layout(layout),
+                ],
             ),
-            Self::Shl(left, right) => Expr::Shl(
-                Box::new(left.into_input_expr_with_layout(layout)),
-                Box::new(right.into_input_expr_with_layout(layout)),
+            Self::Shl(left, right) => Expr::op_auto(
+                OpExprKind::Shl,
+                vec![
+                    left.into_input_expr_with_layout(layout),
+                    right.into_input_expr_with_layout(layout),
+                ],
             ),
-            Self::Shr(left, right) => Expr::Shr(
-                Box::new(left.into_input_expr_with_layout(layout)),
-                Box::new(right.into_input_expr_with_layout(layout)),
+            Self::Shr(left, right) => Expr::op_auto(
+                OpExprKind::Shr,
+                vec![
+                    left.into_input_expr_with_layout(layout),
+                    right.into_input_expr_with_layout(layout),
+                ],
             ),
-            Self::Mul(left, right) => Expr::Mul(
-                Box::new(left.into_input_expr_with_layout(layout)),
-                Box::new(right.into_input_expr_with_layout(layout)),
+            Self::Mul(left, right) => Expr::op_auto(
+                OpExprKind::Mul,
+                vec![
+                    left.into_input_expr_with_layout(layout),
+                    right.into_input_expr_with_layout(layout),
+                ],
             ),
-            Self::Div(left, right) => Expr::Div(
-                Box::new(left.into_input_expr_with_layout(layout)),
-                Box::new(right.into_input_expr_with_layout(layout)),
+            Self::Div(left, right) => Expr::op_auto(
+                OpExprKind::Div,
+                vec![
+                    left.into_input_expr_with_layout(layout),
+                    right.into_input_expr_with_layout(layout),
+                ],
             ),
-            Self::Mod(left, right) => Expr::Mod(
-                Box::new(left.into_input_expr_with_layout(layout)),
-                Box::new(right.into_input_expr_with_layout(layout)),
+            Self::Mod(left, right) => Expr::op_auto(
+                OpExprKind::Mod,
+                vec![
+                    left.into_input_expr_with_layout(layout),
+                    right.into_input_expr_with_layout(layout),
+                ],
             ),
-            Self::Concat(left, right) => Expr::Concat(
-                Box::new(left.into_input_expr_with_layout(layout)),
-                Box::new(right.into_input_expr_with_layout(layout)),
+            Self::Concat(left, right) => Expr::op_auto(
+                OpExprKind::Concat,
+                vec![
+                    left.into_input_expr_with_layout(layout),
+                    right.into_input_expr_with_layout(layout),
+                ],
             ),
-            Self::UnaryPlus(inner) => {
-                Expr::UnaryPlus(Box::new(inner.into_input_expr_with_layout(layout)))
-            }
-            Self::Negate(inner) => {
-                Expr::Negate(Box::new(inner.into_input_expr_with_layout(layout)))
-            }
-            Self::BitNot(inner) => {
-                Expr::BitNot(Box::new(inner.into_input_expr_with_layout(layout)))
-            }
+            Self::UnaryPlus(inner) => Expr::op_auto(
+                OpExprKind::UnaryPlus,
+                vec![inner.into_input_expr_with_layout(layout)],
+            ),
+            Self::Negate(inner) => Expr::op_auto(
+                OpExprKind::Negate,
+                vec![inner.into_input_expr_with_layout(layout)],
+            ),
+            Self::BitNot(inner) => Expr::op_auto(
+                OpExprKind::BitNot,
+                vec![inner.into_input_expr_with_layout(layout)],
+            ),
             Self::Cast(inner, sql_type) => Expr::Cast(
                 Box::new(inner.into_input_expr_with_layout(layout)),
                 sql_type,
             ),
-            Self::Eq(left, right) => Expr::Eq(
-                Box::new(left.into_input_expr_with_layout(layout)),
-                Box::new(right.into_input_expr_with_layout(layout)),
+            Self::Eq(left, right) => Expr::op_auto(
+                OpExprKind::Eq,
+                vec![
+                    left.into_input_expr_with_layout(layout),
+                    right.into_input_expr_with_layout(layout),
+                ],
             ),
-            Self::NotEq(left, right) => Expr::NotEq(
-                Box::new(left.into_input_expr_with_layout(layout)),
-                Box::new(right.into_input_expr_with_layout(layout)),
+            Self::NotEq(left, right) => Expr::op_auto(
+                OpExprKind::NotEq,
+                vec![
+                    left.into_input_expr_with_layout(layout),
+                    right.into_input_expr_with_layout(layout),
+                ],
             ),
-            Self::Lt(left, right) => Expr::Lt(
-                Box::new(left.into_input_expr_with_layout(layout)),
-                Box::new(right.into_input_expr_with_layout(layout)),
+            Self::Lt(left, right) => Expr::op_auto(
+                OpExprKind::Lt,
+                vec![
+                    left.into_input_expr_with_layout(layout),
+                    right.into_input_expr_with_layout(layout),
+                ],
             ),
-            Self::LtEq(left, right) => Expr::LtEq(
-                Box::new(left.into_input_expr_with_layout(layout)),
-                Box::new(right.into_input_expr_with_layout(layout)),
+            Self::LtEq(left, right) => Expr::op_auto(
+                OpExprKind::LtEq,
+                vec![
+                    left.into_input_expr_with_layout(layout),
+                    right.into_input_expr_with_layout(layout),
+                ],
             ),
-            Self::Gt(left, right) => Expr::Gt(
-                Box::new(left.into_input_expr_with_layout(layout)),
-                Box::new(right.into_input_expr_with_layout(layout)),
+            Self::Gt(left, right) => Expr::op_auto(
+                OpExprKind::Gt,
+                vec![
+                    left.into_input_expr_with_layout(layout),
+                    right.into_input_expr_with_layout(layout),
+                ],
             ),
-            Self::GtEq(left, right) => Expr::GtEq(
-                Box::new(left.into_input_expr_with_layout(layout)),
-                Box::new(right.into_input_expr_with_layout(layout)),
+            Self::GtEq(left, right) => Expr::op_auto(
+                OpExprKind::GtEq,
+                vec![
+                    left.into_input_expr_with_layout(layout),
+                    right.into_input_expr_with_layout(layout),
+                ],
             ),
-            Self::RegexMatch(left, right) => Expr::RegexMatch(
-                Box::new(left.into_input_expr_with_layout(layout)),
-                Box::new(right.into_input_expr_with_layout(layout)),
+            Self::RegexMatch(left, right) => Expr::op_auto(
+                OpExprKind::RegexMatch,
+                vec![
+                    left.into_input_expr_with_layout(layout),
+                    right.into_input_expr_with_layout(layout),
+                ],
             ),
             Self::Like {
                 expr,
@@ -1510,15 +1708,24 @@ impl PlannerJoinExpr {
                 escape: escape.map(|inner| Box::new(inner.into_input_expr_with_layout(layout))),
                 negated,
             },
-            Self::And(left, right) => Expr::And(
-                Box::new(left.into_input_expr_with_layout(layout)),
-                Box::new(right.into_input_expr_with_layout(layout)),
+            Self::And(left, right) => Expr::bool_expr(
+                BoolExprType::And,
+                vec![
+                    left.into_input_expr_with_layout(layout),
+                    right.into_input_expr_with_layout(layout),
+                ],
             ),
-            Self::Or(left, right) => Expr::Or(
-                Box::new(left.into_input_expr_with_layout(layout)),
-                Box::new(right.into_input_expr_with_layout(layout)),
+            Self::Or(left, right) => Expr::bool_expr(
+                BoolExprType::Or,
+                vec![
+                    left.into_input_expr_with_layout(layout),
+                    right.into_input_expr_with_layout(layout),
+                ],
             ),
-            Self::Not(inner) => Expr::Not(Box::new(inner.into_input_expr_with_layout(layout))),
+            Self::Not(inner) => Expr::bool_expr(
+                BoolExprType::Not,
+                vec![inner.into_input_expr_with_layout(layout)],
+            ),
             Self::IsNull(inner) => {
                 Expr::IsNull(Box::new(inner.into_input_expr_with_layout(layout)))
             }
@@ -1543,37 +1750,61 @@ impl PlannerJoinExpr {
                     .collect(),
                 array_type,
             },
-            Self::ArrayOverlap(left, right) => Expr::ArrayOverlap(
-                Box::new(left.into_input_expr_with_layout(layout)),
-                Box::new(right.into_input_expr_with_layout(layout)),
+            Self::ArrayOverlap(left, right) => Expr::op_auto(
+                OpExprKind::ArrayOverlap,
+                vec![
+                    left.into_input_expr_with_layout(layout),
+                    right.into_input_expr_with_layout(layout),
+                ],
             ),
-            Self::JsonbContains(left, right) => Expr::JsonbContains(
-                Box::new(left.into_input_expr_with_layout(layout)),
-                Box::new(right.into_input_expr_with_layout(layout)),
+            Self::JsonbContains(left, right) => Expr::op_auto(
+                OpExprKind::JsonbContains,
+                vec![
+                    left.into_input_expr_with_layout(layout),
+                    right.into_input_expr_with_layout(layout),
+                ],
             ),
-            Self::JsonbContained(left, right) => Expr::JsonbContained(
-                Box::new(left.into_input_expr_with_layout(layout)),
-                Box::new(right.into_input_expr_with_layout(layout)),
+            Self::JsonbContained(left, right) => Expr::op_auto(
+                OpExprKind::JsonbContained,
+                vec![
+                    left.into_input_expr_with_layout(layout),
+                    right.into_input_expr_with_layout(layout),
+                ],
             ),
-            Self::JsonbExists(left, right) => Expr::JsonbExists(
-                Box::new(left.into_input_expr_with_layout(layout)),
-                Box::new(right.into_input_expr_with_layout(layout)),
+            Self::JsonbExists(left, right) => Expr::op_auto(
+                OpExprKind::JsonbExists,
+                vec![
+                    left.into_input_expr_with_layout(layout),
+                    right.into_input_expr_with_layout(layout),
+                ],
             ),
-            Self::JsonbExistsAny(left, right) => Expr::JsonbExistsAny(
-                Box::new(left.into_input_expr_with_layout(layout)),
-                Box::new(right.into_input_expr_with_layout(layout)),
+            Self::JsonbExistsAny(left, right) => Expr::op_auto(
+                OpExprKind::JsonbExistsAny,
+                vec![
+                    left.into_input_expr_with_layout(layout),
+                    right.into_input_expr_with_layout(layout),
+                ],
             ),
-            Self::JsonbExistsAll(left, right) => Expr::JsonbExistsAll(
-                Box::new(left.into_input_expr_with_layout(layout)),
-                Box::new(right.into_input_expr_with_layout(layout)),
+            Self::JsonbExistsAll(left, right) => Expr::op_auto(
+                OpExprKind::JsonbExistsAll,
+                vec![
+                    left.into_input_expr_with_layout(layout),
+                    right.into_input_expr_with_layout(layout),
+                ],
             ),
-            Self::JsonbPathExists(left, right) => Expr::JsonbPathExists(
-                Box::new(left.into_input_expr_with_layout(layout)),
-                Box::new(right.into_input_expr_with_layout(layout)),
+            Self::JsonbPathExists(left, right) => Expr::op_auto(
+                OpExprKind::JsonbPathExists,
+                vec![
+                    left.into_input_expr_with_layout(layout),
+                    right.into_input_expr_with_layout(layout),
+                ],
             ),
-            Self::JsonbPathMatch(left, right) => Expr::JsonbPathMatch(
-                Box::new(left.into_input_expr_with_layout(layout)),
-                Box::new(right.into_input_expr_with_layout(layout)),
+            Self::JsonbPathMatch(left, right) => Expr::op_auto(
+                OpExprKind::JsonbPathMatch,
+                vec![
+                    left.into_input_expr_with_layout(layout),
+                    right.into_input_expr_with_layout(layout),
+                ],
             ),
             Self::SubLink(sublink) => Expr::SubLink(sublink),
             Self::SubPlan(subplan) => Expr::SubPlan(subplan),
@@ -1581,16 +1812,18 @@ impl PlannerJoinExpr {
                 Box::new(left.into_input_expr_with_layout(layout)),
                 Box::new(right.into_input_expr_with_layout(layout)),
             ),
-            Self::AnyArray { left, op, right } => Expr::AnyArray {
-                left: Box::new(left.into_input_expr_with_layout(layout)),
+            Self::AnyArray { left, op, right } => Expr::scalar_array_op(
                 op,
-                right: Box::new(right.into_input_expr_with_layout(layout)),
-            },
-            Self::AllArray { left, op, right } => Expr::AllArray {
-                left: Box::new(left.into_input_expr_with_layout(layout)),
+                true,
+                left.into_input_expr_with_layout(layout),
+                right.into_input_expr_with_layout(layout),
+            ),
+            Self::AllArray { left, op, right } => Expr::scalar_array_op(
                 op,
-                right: Box::new(right.into_input_expr_with_layout(layout)),
-            },
+                false,
+                left.into_input_expr_with_layout(layout),
+                right.into_input_expr_with_layout(layout),
+            ),
             Self::ArraySubscript { array, subscripts } => Expr::ArraySubscript {
                 array: Box::new(array.into_input_expr_with_layout(layout)),
                 subscripts: subscripts
@@ -1607,36 +1840,47 @@ impl PlannerJoinExpr {
                     .collect(),
             },
             Self::Random => Expr::Random,
-            Self::JsonGet(left, right) => Expr::JsonGet(
-                Box::new(left.into_input_expr_with_layout(layout)),
-                Box::new(right.into_input_expr_with_layout(layout)),
+            Self::JsonGet(left, right) => Expr::op_auto(
+                OpExprKind::JsonGet,
+                vec![
+                    left.into_input_expr_with_layout(layout),
+                    right.into_input_expr_with_layout(layout),
+                ],
             ),
-            Self::JsonGetText(left, right) => Expr::JsonGetText(
-                Box::new(left.into_input_expr_with_layout(layout)),
-                Box::new(right.into_input_expr_with_layout(layout)),
+            Self::JsonGetText(left, right) => Expr::op_auto(
+                OpExprKind::JsonGetText,
+                vec![
+                    left.into_input_expr_with_layout(layout),
+                    right.into_input_expr_with_layout(layout),
+                ],
             ),
-            Self::JsonPath(left, right) => Expr::JsonPath(
-                Box::new(left.into_input_expr_with_layout(layout)),
-                Box::new(right.into_input_expr_with_layout(layout)),
+            Self::JsonPath(left, right) => Expr::op_auto(
+                OpExprKind::JsonPath,
+                vec![
+                    left.into_input_expr_with_layout(layout),
+                    right.into_input_expr_with_layout(layout),
+                ],
             ),
-            Self::JsonPathText(left, right) => Expr::JsonPathText(
-                Box::new(left.into_input_expr_with_layout(layout)),
-                Box::new(right.into_input_expr_with_layout(layout)),
+            Self::JsonPathText(left, right) => Expr::op_auto(
+                OpExprKind::JsonPathText,
+                vec![
+                    left.into_input_expr_with_layout(layout),
+                    right.into_input_expr_with_layout(layout),
+                ],
             ),
             Self::FuncCall {
                 func_oid,
-                func,
                 args,
                 func_variadic,
-            } => Expr::FuncCall {
+                ..
+            } => Expr::func(
                 func_oid,
-                func,
-                args: args
-                    .into_iter()
+                None,
+                func_variadic,
+                args.into_iter()
                     .map(|arg| arg.into_input_expr_with_layout(layout))
                     .collect(),
-                func_variadic,
-            },
+            ),
             Self::CurrentDate => Expr::CurrentDate,
             Self::CurrentTime { precision } => Expr::CurrentTime { precision },
             Self::CurrentTimestamp { precision } => Expr::CurrentTimestamp { precision },
@@ -1647,12 +1891,18 @@ impl PlannerJoinExpr {
 
     pub fn from_base_input_expr(expr: &Expr, relation_oid: u32) -> Self {
         match expr {
-            Expr::Op(_)
-            | Expr::Bool(_)
-            | Expr::Func(_)
-            | Expr::ScalarArrayOp(_) => {
-                Self::from_base_input_expr(&expr.clone().into_legacy_shape(), relation_oid)
-            }
+            Expr::Op(op) => planner_join_from_op(op, |expr| {
+                Self::from_base_input_expr(expr, relation_oid)
+            }),
+            Expr::Bool(bool_expr) => planner_join_from_bool(bool_expr, |expr| {
+                Self::from_base_input_expr(expr, relation_oid)
+            }),
+            Expr::Func(func) => planner_join_from_func(func, |expr| {
+                Self::from_base_input_expr(expr, relation_oid)
+            }),
+            Expr::ScalarArrayOp(saop) => planner_join_from_scalar_array(saop, |expr| {
+                Self::from_base_input_expr(expr, relation_oid)
+            }),
             Expr::Var(var) if var.varlevelsup > 0 => Self::OuterColumn {
                 depth: var.varlevelsup - 1,
                 index: var.varattno.saturating_sub(1),
@@ -1941,81 +2191,81 @@ impl PlannerJoinExpr {
             Self::RightColumn(index) => Expr::Column(index),
             Self::OuterColumn { depth, index } => Expr::OuterColumn { depth, index },
             Self::Const(value) => Expr::Const(value),
-            Self::Add(left, right) => Expr::Add(
-                Box::new(left.into_input_expr()),
-                Box::new(right.into_input_expr()),
+            Self::Add(left, right) => Expr::op_auto(
+                OpExprKind::Add,
+                vec![left.into_input_expr(), right.into_input_expr()],
             ),
-            Self::Sub(left, right) => Expr::Sub(
-                Box::new(left.into_input_expr()),
-                Box::new(right.into_input_expr()),
+            Self::Sub(left, right) => Expr::op_auto(
+                OpExprKind::Sub,
+                vec![left.into_input_expr(), right.into_input_expr()],
             ),
-            Self::BitAnd(left, right) => Expr::BitAnd(
-                Box::new(left.into_input_expr()),
-                Box::new(right.into_input_expr()),
+            Self::BitAnd(left, right) => Expr::op_auto(
+                OpExprKind::BitAnd,
+                vec![left.into_input_expr(), right.into_input_expr()],
             ),
-            Self::BitOr(left, right) => Expr::BitOr(
-                Box::new(left.into_input_expr()),
-                Box::new(right.into_input_expr()),
+            Self::BitOr(left, right) => Expr::op_auto(
+                OpExprKind::BitOr,
+                vec![left.into_input_expr(), right.into_input_expr()],
             ),
-            Self::BitXor(left, right) => Expr::BitXor(
-                Box::new(left.into_input_expr()),
-                Box::new(right.into_input_expr()),
+            Self::BitXor(left, right) => Expr::op_auto(
+                OpExprKind::BitXor,
+                vec![left.into_input_expr(), right.into_input_expr()],
             ),
-            Self::Shl(left, right) => Expr::Shl(
-                Box::new(left.into_input_expr()),
-                Box::new(right.into_input_expr()),
+            Self::Shl(left, right) => Expr::op_auto(
+                OpExprKind::Shl,
+                vec![left.into_input_expr(), right.into_input_expr()],
             ),
-            Self::Shr(left, right) => Expr::Shr(
-                Box::new(left.into_input_expr()),
-                Box::new(right.into_input_expr()),
+            Self::Shr(left, right) => Expr::op_auto(
+                OpExprKind::Shr,
+                vec![left.into_input_expr(), right.into_input_expr()],
             ),
-            Self::Mul(left, right) => Expr::Mul(
-                Box::new(left.into_input_expr()),
-                Box::new(right.into_input_expr()),
+            Self::Mul(left, right) => Expr::op_auto(
+                OpExprKind::Mul,
+                vec![left.into_input_expr(), right.into_input_expr()],
             ),
-            Self::Div(left, right) => Expr::Div(
-                Box::new(left.into_input_expr()),
-                Box::new(right.into_input_expr()),
+            Self::Div(left, right) => Expr::op_auto(
+                OpExprKind::Div,
+                vec![left.into_input_expr(), right.into_input_expr()],
             ),
-            Self::Mod(left, right) => Expr::Mod(
-                Box::new(left.into_input_expr()),
-                Box::new(right.into_input_expr()),
+            Self::Mod(left, right) => Expr::op_auto(
+                OpExprKind::Mod,
+                vec![left.into_input_expr(), right.into_input_expr()],
             ),
-            Self::Concat(left, right) => Expr::Concat(
-                Box::new(left.into_input_expr()),
-                Box::new(right.into_input_expr()),
+            Self::Concat(left, right) => Expr::op_auto(
+                OpExprKind::Concat,
+                vec![left.into_input_expr(), right.into_input_expr()],
             ),
-            Self::UnaryPlus(inner) => Expr::UnaryPlus(Box::new(inner.into_input_expr())),
-            Self::Negate(inner) => Expr::Negate(Box::new(inner.into_input_expr())),
-            Self::BitNot(inner) => Expr::BitNot(Box::new(inner.into_input_expr())),
+            Self::UnaryPlus(inner) => Expr::op_auto(OpExprKind::UnaryPlus, vec![inner.into_input_expr()]),
+            Self::Negate(inner) => Expr::op_auto(OpExprKind::Negate, vec![inner.into_input_expr()]),
+            Self::BitNot(inner) => Expr::op_auto(OpExprKind::BitNot, vec![inner.into_input_expr()]),
             Self::Cast(inner, sql_type) => Expr::Cast(Box::new(inner.into_input_expr()), sql_type),
-            Self::Eq(left, right) => Expr::Eq(
-                Box::new(left.into_input_expr()),
-                Box::new(right.into_input_expr()),
+            Self::Eq(left, right) => Expr::op_auto(
+                OpExprKind::Eq,
+                vec![left.into_input_expr(), right.into_input_expr()],
             ),
-            Self::NotEq(left, right) => Expr::NotEq(
-                Box::new(left.into_input_expr()),
-                Box::new(right.into_input_expr()),
+            Self::NotEq(left, right) => Expr::op_auto(
+                OpExprKind::NotEq,
+                vec![left.into_input_expr(), right.into_input_expr()],
             ),
-            Self::Lt(left, right) => Expr::Lt(
-                Box::new(left.into_input_expr()),
-                Box::new(right.into_input_expr()),
+            Self::Lt(left, right) => Expr::op_auto(
+                OpExprKind::Lt,
+                vec![left.into_input_expr(), right.into_input_expr()],
             ),
-            Self::LtEq(left, right) => Expr::LtEq(
-                Box::new(left.into_input_expr()),
-                Box::new(right.into_input_expr()),
+            Self::LtEq(left, right) => Expr::op_auto(
+                OpExprKind::LtEq,
+                vec![left.into_input_expr(), right.into_input_expr()],
             ),
-            Self::Gt(left, right) => Expr::Gt(
-                Box::new(left.into_input_expr()),
-                Box::new(right.into_input_expr()),
+            Self::Gt(left, right) => Expr::op_auto(
+                OpExprKind::Gt,
+                vec![left.into_input_expr(), right.into_input_expr()],
             ),
-            Self::GtEq(left, right) => Expr::GtEq(
-                Box::new(left.into_input_expr()),
-                Box::new(right.into_input_expr()),
+            Self::GtEq(left, right) => Expr::op_auto(
+                OpExprKind::GtEq,
+                vec![left.into_input_expr(), right.into_input_expr()],
             ),
-            Self::RegexMatch(left, right) => Expr::RegexMatch(
-                Box::new(left.into_input_expr()),
-                Box::new(right.into_input_expr()),
+            Self::RegexMatch(left, right) => Expr::op_auto(
+                OpExprKind::RegexMatch,
+                vec![left.into_input_expr(), right.into_input_expr()],
             ),
             Self::Like {
                 expr,
@@ -2041,15 +2291,15 @@ impl PlannerJoinExpr {
                 escape: escape.map(|inner| Box::new(inner.into_input_expr())),
                 negated,
             },
-            Self::And(left, right) => Expr::And(
-                Box::new(left.into_input_expr()),
-                Box::new(right.into_input_expr()),
+            Self::And(left, right) => Expr::bool_expr(
+                BoolExprType::And,
+                vec![left.into_input_expr(), right.into_input_expr()],
             ),
-            Self::Or(left, right) => Expr::Or(
-                Box::new(left.into_input_expr()),
-                Box::new(right.into_input_expr()),
+            Self::Or(left, right) => Expr::bool_expr(
+                BoolExprType::Or,
+                vec![left.into_input_expr(), right.into_input_expr()],
             ),
-            Self::Not(inner) => Expr::Not(Box::new(inner.into_input_expr())),
+            Self::Not(inner) => Expr::bool_expr(BoolExprType::Not, vec![inner.into_input_expr()]),
             Self::IsNull(inner) => Expr::IsNull(Box::new(inner.into_input_expr())),
             Self::IsNotNull(inner) => Expr::IsNotNull(Box::new(inner.into_input_expr())),
             Self::IsDistinctFrom(left, right) => Expr::IsDistinctFrom(
@@ -2070,37 +2320,37 @@ impl PlannerJoinExpr {
                     .collect(),
                 array_type,
             },
-            Self::ArrayOverlap(left, right) => Expr::ArrayOverlap(
-                Box::new(left.into_input_expr()),
-                Box::new(right.into_input_expr()),
+            Self::ArrayOverlap(left, right) => Expr::op_auto(
+                OpExprKind::ArrayOverlap,
+                vec![left.into_input_expr(), right.into_input_expr()],
             ),
-            Self::JsonbContains(left, right) => Expr::JsonbContains(
-                Box::new(left.into_input_expr()),
-                Box::new(right.into_input_expr()),
+            Self::JsonbContains(left, right) => Expr::op_auto(
+                OpExprKind::JsonbContains,
+                vec![left.into_input_expr(), right.into_input_expr()],
             ),
-            Self::JsonbContained(left, right) => Expr::JsonbContained(
-                Box::new(left.into_input_expr()),
-                Box::new(right.into_input_expr()),
+            Self::JsonbContained(left, right) => Expr::op_auto(
+                OpExprKind::JsonbContained,
+                vec![left.into_input_expr(), right.into_input_expr()],
             ),
-            Self::JsonbExists(left, right) => Expr::JsonbExists(
-                Box::new(left.into_input_expr()),
-                Box::new(right.into_input_expr()),
+            Self::JsonbExists(left, right) => Expr::op_auto(
+                OpExprKind::JsonbExists,
+                vec![left.into_input_expr(), right.into_input_expr()],
             ),
-            Self::JsonbExistsAny(left, right) => Expr::JsonbExistsAny(
-                Box::new(left.into_input_expr()),
-                Box::new(right.into_input_expr()),
+            Self::JsonbExistsAny(left, right) => Expr::op_auto(
+                OpExprKind::JsonbExistsAny,
+                vec![left.into_input_expr(), right.into_input_expr()],
             ),
-            Self::JsonbExistsAll(left, right) => Expr::JsonbExistsAll(
-                Box::new(left.into_input_expr()),
-                Box::new(right.into_input_expr()),
+            Self::JsonbExistsAll(left, right) => Expr::op_auto(
+                OpExprKind::JsonbExistsAll,
+                vec![left.into_input_expr(), right.into_input_expr()],
             ),
-            Self::JsonbPathExists(left, right) => Expr::JsonbPathExists(
-                Box::new(left.into_input_expr()),
-                Box::new(right.into_input_expr()),
+            Self::JsonbPathExists(left, right) => Expr::op_auto(
+                OpExprKind::JsonbPathExists,
+                vec![left.into_input_expr(), right.into_input_expr()],
             ),
-            Self::JsonbPathMatch(left, right) => Expr::JsonbPathMatch(
-                Box::new(left.into_input_expr()),
-                Box::new(right.into_input_expr()),
+            Self::JsonbPathMatch(left, right) => Expr::op_auto(
+                OpExprKind::JsonbPathMatch,
+                vec![left.into_input_expr(), right.into_input_expr()],
             ),
             Self::SubLink(sublink) => Expr::SubLink(sublink),
             Self::SubPlan(subplan) => Expr::SubPlan(subplan),
@@ -2108,16 +2358,12 @@ impl PlannerJoinExpr {
                 Box::new(left.into_input_expr()),
                 Box::new(right.into_input_expr()),
             ),
-            Self::AnyArray { left, op, right } => Expr::AnyArray {
-                left: Box::new(left.into_input_expr()),
-                op,
-                right: Box::new(right.into_input_expr()),
-            },
-            Self::AllArray { left, op, right } => Expr::AllArray {
-                left: Box::new(left.into_input_expr()),
-                op,
-                right: Box::new(right.into_input_expr()),
-            },
+            Self::AnyArray { left, op, right } => {
+                Expr::scalar_array_op(op, true, left.into_input_expr(), right.into_input_expr())
+            }
+            Self::AllArray { left, op, right } => {
+                Expr::scalar_array_op(op, false, left.into_input_expr(), right.into_input_expr())
+            }
             Self::ArraySubscript { array, subscripts } => Expr::ArraySubscript {
                 array: Box::new(array.into_input_expr()),
                 subscripts: subscripts
@@ -2130,33 +2376,33 @@ impl PlannerJoinExpr {
                     .collect(),
             },
             Self::Random => Expr::Random,
-            Self::JsonGet(left, right) => Expr::JsonGet(
-                Box::new(left.into_input_expr()),
-                Box::new(right.into_input_expr()),
+            Self::JsonGet(left, right) => Expr::op_auto(
+                OpExprKind::JsonGet,
+                vec![left.into_input_expr(), right.into_input_expr()],
             ),
-            Self::JsonGetText(left, right) => Expr::JsonGetText(
-                Box::new(left.into_input_expr()),
-                Box::new(right.into_input_expr()),
+            Self::JsonGetText(left, right) => Expr::op_auto(
+                OpExprKind::JsonGetText,
+                vec![left.into_input_expr(), right.into_input_expr()],
             ),
-            Self::JsonPath(left, right) => Expr::JsonPath(
-                Box::new(left.into_input_expr()),
-                Box::new(right.into_input_expr()),
+            Self::JsonPath(left, right) => Expr::op_auto(
+                OpExprKind::JsonPath,
+                vec![left.into_input_expr(), right.into_input_expr()],
             ),
-            Self::JsonPathText(left, right) => Expr::JsonPathText(
-                Box::new(left.into_input_expr()),
-                Box::new(right.into_input_expr()),
+            Self::JsonPathText(left, right) => Expr::op_auto(
+                OpExprKind::JsonPathText,
+                vec![left.into_input_expr(), right.into_input_expr()],
             ),
             Self::FuncCall {
                 func_oid,
-                func,
                 args,
                 func_variadic,
-            } => Expr::FuncCall {
+                ..
+            } => Expr::func(
                 func_oid,
-                func,
-                args: args.into_iter().map(|arg| arg.into_input_expr()).collect(),
+                None,
                 func_variadic,
-            },
+                args.into_iter().map(|arg| arg.into_input_expr()).collect(),
+            ),
             Self::CurrentDate => Expr::CurrentDate,
             Self::CurrentTime { precision } => Expr::CurrentTime { precision },
             Self::CurrentTimestamp { precision } => Expr::CurrentTimestamp { precision },
@@ -2167,11 +2413,13 @@ impl PlannerJoinExpr {
 
     pub fn from_expr(expr: &Expr, left_width: usize) -> Self {
         match expr {
-            Expr::Op(_)
-            | Expr::Bool(_)
-            | Expr::Func(_)
-            | Expr::ScalarArrayOp(_) => {
-                Self::from_expr(&expr.clone().into_legacy_shape(), left_width)
+            Expr::Op(op) => planner_join_from_op(op, |expr| Self::from_expr(expr, left_width)),
+            Expr::Bool(bool_expr) => {
+                planner_join_from_bool(bool_expr, |expr| Self::from_expr(expr, left_width))
+            }
+            Expr::Func(func) => planner_join_from_func(func, |expr| Self::from_expr(expr, left_width)),
+            Expr::ScalarArrayOp(saop) => {
+                planner_join_from_scalar_array(saop, |expr| Self::from_expr(expr, left_width))
             }
             Expr::Var(var) if var.varlevelsup > 0 => Self::OuterColumn {
                 depth: var.varlevelsup - 1,
