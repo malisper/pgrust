@@ -4,8 +4,8 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use crate::backend::access::nbtree::nbtxlog::btree_redo;
 use crate::BLCKSZ;
+use crate::backend::access::nbtree::nbtxlog::btree_redo;
 use crate::backend::access::transam::xact::TransactionManager;
 use crate::backend::storage::page::bufpage::page_add_item;
 use crate::backend::storage::smgr::md::MdStorageManager;
@@ -851,8 +851,8 @@ mod tests {
         let page1 = make_page_with_tuples(&[&[0x11; 20]]);
         let page2 = make_page_with_tuples(&[&[0x22; 20]]);
         wal.write_record(1, test_tag(1000, 0), &page1).unwrap();
-        wal.write_commit(1).unwrap();
-        wal.write_record(2, test_tag(1000, 1), &page2).unwrap();
+        let first_commit_end = wal.write_commit(1).unwrap();
+        let second_fpi_end = wal.write_record(2, test_tag(1000, 1), &page2).unwrap();
         wal.write_commit(2).unwrap();
         wal.flush().unwrap();
         drop(wal);
@@ -860,8 +860,8 @@ mod tests {
         // Truncate the file to lose the second FPI + commit.
         let path = wal_dir.join("wal.log");
         let data = fs::read(&path).unwrap();
-        // Keep less than half the file so the tail record is truncated.
-        let truncate_at = data.len() / 2;
+        let truncate_at =
+            first_commit_end as usize + ((second_fpi_end - first_commit_end) as usize / 2);
         fs::write(&path, &data[..truncate_at]).unwrap();
 
         let mut smgr = MdStorageManager::new_in_recovery(&dir);

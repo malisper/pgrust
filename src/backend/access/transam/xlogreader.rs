@@ -1,5 +1,6 @@
 use crate::backend::storage::buffer::{BufferTag, PAGE_SIZE};
 
+pub const WAL_PAGE_SIZE: usize = PAGE_SIZE;
 pub const XLOG_RECORD_HEADER: usize = 24;
 pub const XLOG_BLOCK_HEADER: usize = 4;
 pub const XLOG_BLOCK_IMAGE_HEADER: usize = 5;
@@ -7,10 +8,17 @@ pub const XLOG_RECORD_DATA_HEADER_SHORT: usize = 2;
 pub const XLOG_RECORD_DATA_HEADER_LONG: usize = 5;
 pub const CRC_OFFSET: usize = 20;
 pub const WAL_RECORD_LEN: usize = XLOG_RECORD_HEADER + XLOG_BLOCK_HEADER + PAGE_SIZE;
+pub const XLOG_PAGE_MAGIC: u16 = 0xD118;
+pub const XLP_FIRST_IS_CONTRECORD: u16 = 0x0001;
+pub const XLP_LONG_HEADER: u16 = 0x0002;
+pub const XLOG_SHORT_PHD: usize = 24;
+pub const XLOG_LONG_PHD: usize = 40;
 
 pub const XLR_MAX_BLOCK_ID: u8 = 32;
 pub const XLR_BLOCK_ID_DATA_SHORT: u8 = 255;
 pub const XLR_BLOCK_ID_DATA_LONG: u8 = 254;
+pub const XLR_BLOCK_ID_ORIGIN: u8 = 253;
+pub const XLR_BLOCK_ID_TOPLEVEL_XID: u8 = 252;
 
 pub const BKPBLOCK_FORK_MASK: u8 = 0x0F;
 pub const BKPBLOCK_FLAG_MASK: u8 = 0xF0;
@@ -53,6 +61,8 @@ pub struct DecodedXLogRecord {
     pub prev: u64,
     pub rmid: u8,
     pub info: u8,
+    pub origin: Option<u32>,
+    pub top_level_xid: Option<u32>,
     pub blocks: Vec<DecodedBkpBlock>,
     pub main_data: Vec<u8>,
 }

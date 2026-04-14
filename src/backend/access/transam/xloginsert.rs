@@ -17,6 +17,8 @@ pub struct RegisteredBuffer {
 pub struct RegisteredXLogRecord {
     pub blocks: BTreeMap<u8, RegisteredBuffer>,
     pub main_data: Vec<u8>,
+    pub origin: Option<u32>,
+    pub top_level_xid: Option<u32>,
 }
 
 thread_local! {
@@ -71,6 +73,18 @@ pub fn xlog_register_buf_data(block_id: u8, data: &[u8]) {
             .get_mut(&block_id)
             .expect("xlog_register_buf_data requires prior xlog_register_buffer");
         buffer.data.extend_from_slice(data);
+    });
+}
+
+pub fn xlog_register_origin(origin: u32) {
+    INSERT_STATE.with(|state| {
+        state.borrow_mut().origin = Some(origin);
+    });
+}
+
+pub fn xlog_register_top_level_xid(xid: u32) {
+    INSERT_STATE.with(|state| {
+        state.borrow_mut().top_level_xid = Some(xid);
     });
 }
 
