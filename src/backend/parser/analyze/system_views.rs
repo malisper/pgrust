@@ -11,7 +11,7 @@ fn is_pg_stats_name(name: &str) -> bool {
 pub(super) fn bind_builtin_system_view(
     name: &str,
     catalog: &dyn CatalogLookup,
-) -> Option<(Plan, BoundScope)> {
+) -> Option<(BoundFromPlan, BoundScope)> {
     if is_pg_views_name(name) {
         let output_columns = vec![
             QueryColumn::text("schemaname"),
@@ -32,8 +32,7 @@ pub(super) fn bind_builtin_system_view(
             .collect();
 
         return Some((
-            Plan::Values {
-                plan_info: crate::backend::executor::PlanEstimate::default(),
+            BoundFromPlan::Values {
                 rows,
                 output_columns,
             },
@@ -119,8 +118,7 @@ pub(super) fn bind_builtin_system_view(
         .collect();
 
     Some((
-        Plan::Values {
-            plan_info: crate::backend::executor::PlanEstimate::default(),
+        BoundFromPlan::Values {
             rows,
             output_columns,
         },
