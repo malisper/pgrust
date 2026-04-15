@@ -3,11 +3,13 @@ use super::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundInsertStatement {
+    pub relation_name: String,
     pub rel: RelFileLocator,
     pub relation_oid: u32,
     pub toast: Option<ToastRelationRef>,
     pub toast_index: Option<BoundIndexRelation>,
     pub desc: RelationDesc,
+    pub relation_constraints: BoundRelationConstraints,
     pub indexes: Vec<BoundIndexRelation>,
     pub column_defaults: Vec<Expr>,
     pub target_columns: Vec<BoundAssignmentTarget>,
@@ -26,11 +28,13 @@ pub enum BoundInsertSource {
 /// parameter values, avoiding re-parsing and re-binding on each call.
 #[derive(Debug, Clone)]
 pub struct PreparedInsert {
+    pub relation_name: String,
     pub rel: RelFileLocator,
     pub relation_oid: u32,
     pub toast: Option<ToastRelationRef>,
     pub toast_index: Option<BoundIndexRelation>,
     pub desc: RelationDesc,
+    pub relation_constraints: BoundRelationConstraints,
     pub indexes: Vec<BoundIndexRelation>,
     pub column_defaults: Vec<Expr>,
     pub target_columns: Vec<usize>,
@@ -39,11 +43,13 @@ pub struct PreparedInsert {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundUpdateStatement {
+    pub relation_name: String,
     pub rel: RelFileLocator,
     pub relation_oid: u32,
     pub toast: Option<ToastRelationRef>,
     pub toast_index: Option<BoundIndexRelation>,
     pub desc: RelationDesc,
+    pub relation_constraints: BoundRelationConstraints,
     pub row_source: BoundModifyRowSource,
     pub indexes: Vec<BoundIndexRelation>,
     pub assignments: Vec<BoundAssignment>,
@@ -165,11 +171,18 @@ pub fn bind_insert_prepared(
     }
 
     Ok(PreparedInsert {
+        relation_name: table_name.to_string(),
         rel: entry.rel,
         relation_oid: entry.relation_oid,
         toast: entry.toast,
         toast_index: first_toast_index(catalog, entry.toast),
         desc: entry.desc.clone(),
+        relation_constraints: bind_relation_constraints(
+            Some(table_name),
+            entry.relation_oid,
+            &entry.desc,
+            catalog,
+        )?,
         indexes: catalog.index_relations_for_heap(entry.relation_oid),
         column_defaults,
         target_columns,
@@ -275,11 +288,18 @@ pub fn bind_insert(
     let (target_columns, source) = source;
 
     Ok(BoundInsertStatement {
+        relation_name: stmt.table_name.clone(),
         rel: entry.rel,
         relation_oid: entry.relation_oid,
         toast: entry.toast,
         toast_index: first_toast_index(catalog, entry.toast),
         desc: entry.desc.clone(),
+        relation_constraints: bind_relation_constraints(
+            Some(&stmt.table_name),
+            entry.relation_oid,
+            &entry.desc,
+            catalog,
+        )?,
         indexes: catalog.index_relations_for_heap(entry.relation_oid),
         column_defaults,
         target_columns,
@@ -303,11 +323,18 @@ pub fn bind_update(
         .transpose()?;
 
     Ok(BoundUpdateStatement {
+        relation_name: stmt.table_name.clone(),
         rel: entry.rel,
         relation_oid: entry.relation_oid,
         toast: entry.toast,
         toast_index: first_toast_index(catalog, entry.toast),
         desc: entry.desc.clone(),
+        relation_constraints: bind_relation_constraints(
+            Some(&stmt.table_name),
+            entry.relation_oid,
+            &entry.desc,
+            catalog,
+        )?,
         row_source: choose_modify_row_source(predicate.as_ref(), &indexes),
         indexes,
         assignments: stmt

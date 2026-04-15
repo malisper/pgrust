@@ -1,8 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::backend::executor::RelationDesc;
+use crate::backend::parser::{SqlExpr, SqlType, SqlTypeKind, parse_expr};
 use crate::include::nodes::parsenodes::{
     ColumnConstraint, ConstraintAttributes, CreateTableStatement, TableConstraint,
 };
+use crate::include::nodes::primnodes::Expr;
 
 use super::ParseError;
 
@@ -26,6 +29,24 @@ pub struct CheckConstraintAction {
     pub constraint_name: String,
     pub expr_sql: String,
     pub not_valid: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BoundRelationConstraints {
+    pub not_nulls: Vec<BoundNotNullConstraint>,
+    pub checks: Vec<BoundCheckConstraint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundNotNullConstraint {
+    pub column_index: usize,
+    pub constraint_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundCheckConstraint {
+    pub constraint_name: String,
+    pub expr: Expr,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -176,14 +197,22 @@ pub fn normalize_create_table_constraints(
         }
     }
 
-    if index_constraints.iter().filter(|constraint| constraint.primary).count() > 1 {
+    if index_constraints
+        .iter()
+        .filter(|constraint| constraint.primary)
+        .count()
+        > 1
+    {
         return Err(ParseError::UnexpectedToken {
             expected: "at most one PRIMARY KEY",
             actual: "multiple PRIMARY KEY constraints".into(),
         });
     }
 
-    for primary in index_constraints.iter().filter(|constraint| constraint.primary) {
+    for primary in index_constraints
+        .iter()
+        .filter(|constraint| constraint.primary)
+    {
         for column in &primary.columns {
             merge_not_null_constraint(
                 &mut not_nulls,
@@ -259,6 +288,71 @@ pub fn normalize_create_table_constraints(
     })
 }
 
+pub fn bind_relation_constraints(
+    relation_name: Option<&str>,
+    relation_oid: u32,
+    desc: &RelationDesc,
+    catalog: &dyn super::CatalogLookup,
+) -> Result<BoundRelationConstraints, ParseError> {
+    let rows = catalog.constraint_rows_for_relation(relation_oid);
+    let not_nulls = rows
+        .iter()
+        .filter(|row| row.contype == crate::include::catalog::CONSTRAINT_NOTNULL)
+        .filter_map(|row| {
+            let attnum = *row.conkey.as_ref()?.first()?;
+            Some(BoundNotNullConstraint {
+                column_index: attnum.saturating_sub(1) as usize,
+                constraint_name: row.conname.clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let checks = rows
+        .into_iter()
+        .filter(|row| row.contype == crate::include::catalog::CONSTRAINT_CHECK)
+        .map(|row| {
+            let expr_sql = row.conbin.ok_or(ParseError::UnexpectedToken {
+                expected: "stored CHECK constraint expression",
+                actual: format!("missing expression for constraint {}", row.conname),
+            })?;
+            Ok(BoundCheckConstraint {
+                constraint_name: row.conname,
+                expr: bind_check_constraint_expr(&expr_sql, relation_name, desc, catalog)?,
+            })
+        })
+        .collect::<Result<Vec<_>, ParseError>>()?;
+    Ok(BoundRelationConstraints { not_nulls, checks })
+}
+
+pub fn bind_check_constraint_expr(
+    expr_sql: &str,
+    relation_name: Option<&str>,
+    desc: &RelationDesc,
+    catalog: &dyn super::CatalogLookup,
+) -> Result<Expr, ParseError> {
+    let parsed = parse_expr(expr_sql)?;
+    bind_check_constraint_sql_expr(&parsed, relation_name, desc, catalog)
+}
+
+pub fn bind_check_constraint_sql_expr(
+    expr: &SqlExpr,
+    relation_name: Option<&str>,
+    desc: &RelationDesc,
+    catalog: &dyn super::CatalogLookup,
+) -> Result<Expr, ParseError> {
+    let scope = super::scope_for_relation(relation_name, desc);
+    let inferred = super::infer_sql_expr_type_with_ctes(expr, &scope, catalog, &[], None, &[]);
+    if inferred != SqlType::new(SqlTypeKind::Bool) {
+        return Err(ParseError::UnexpectedToken {
+            expected: "boolean CHECK constraint expression",
+            actual: "CHECK constraint expression must return boolean".into(),
+        });
+    }
+
+    let bound = super::bind_expr_with_outer_and_ctes(expr, &scope, catalog, &[], None, &[])?;
+    reject_unsupported_check_expr(&bound)?;
+    Ok(bound)
+}
+
 fn validate_not_null_or_check_attributes(
     attributes: &ConstraintAttributes,
     constraint_kind: &'static str,
@@ -317,10 +411,9 @@ fn merge_not_null_constraint(
             column_index,
         });
 
-    if let (Some(existing), Some(incoming)) = (
-        entry.explicit_name.as_deref(),
-        attributes.name.as_deref(),
-    ) && !existing.eq_ignore_ascii_case(incoming)
+    if let (Some(existing), Some(incoming)) =
+        (entry.explicit_name.as_deref(), attributes.name.as_deref())
+        && !existing.eq_ignore_ascii_case(incoming)
     {
         return Err(ParseError::UnexpectedToken {
             expected: "matching NOT NULL constraint names",
@@ -388,4 +481,95 @@ fn choose_generated_constraint_name(base: &str, used_names: &mut BTreeSet<String
     }
 
     unreachable!("constraint name suffix space exhausted")
+}
+
+fn reject_unsupported_check_expr(expr: &Expr) -> Result<(), ParseError> {
+    match expr {
+        Expr::Aggref(_) => Err(ParseError::FeatureNotSupported(
+            "aggregate functions in CHECK constraints".into(),
+        )),
+        Expr::SubLink(_) | Expr::SubPlan(_) => Err(ParseError::FeatureNotSupported(
+            "subqueries in CHECK constraints".into(),
+        )),
+        Expr::OuterColumn { .. } => Err(ParseError::FeatureNotSupported(
+            "outer references in CHECK constraints".into(),
+        )),
+        Expr::Op(op) => {
+            for arg in &op.args {
+                reject_unsupported_check_expr(arg)?;
+            }
+            Ok(())
+        }
+        Expr::Bool(expr) => {
+            for arg in &expr.args {
+                reject_unsupported_check_expr(arg)?;
+            }
+            Ok(())
+        }
+        Expr::Func(func) => {
+            for arg in &func.args {
+                reject_unsupported_check_expr(arg)?;
+            }
+            Ok(())
+        }
+        Expr::ScalarArrayOp(expr) => {
+            reject_unsupported_check_expr(&expr.left)?;
+            reject_unsupported_check_expr(&expr.right)
+        }
+        Expr::Cast(inner, _) | Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
+            reject_unsupported_check_expr(inner)
+        }
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            reject_unsupported_check_expr(expr)?;
+            reject_unsupported_check_expr(pattern)?;
+            if let Some(escape) = escape {
+                reject_unsupported_check_expr(escape)?;
+            }
+            Ok(())
+        }
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            reject_unsupported_check_expr(left)?;
+            reject_unsupported_check_expr(right)
+        }
+        Expr::ArrayLiteral { elements, .. } => {
+            for element in elements {
+                reject_unsupported_check_expr(element)?;
+            }
+            Ok(())
+        }
+        Expr::ArraySubscript { array, subscripts } => {
+            reject_unsupported_check_expr(array)?;
+            for subscript in subscripts {
+                if let Some(lower) = &subscript.lower {
+                    reject_unsupported_check_expr(lower)?;
+                }
+                if let Some(upper) = &subscript.upper {
+                    reject_unsupported_check_expr(upper)?;
+                }
+            }
+            Ok(())
+        }
+        Expr::Var(_)
+        | Expr::Column(_)
+        | Expr::Const(_)
+        | Expr::Random
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => Ok(()),
+    }
 }

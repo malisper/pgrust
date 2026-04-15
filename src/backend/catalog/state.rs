@@ -5,7 +5,8 @@ use crate::backend::catalog::catalog::allocate_relation_object_oids;
 use crate::backend::catalog::indexing::insert_bootstrap_system_indexes;
 use crate::backend::catalog::pg_constraint::{derived_pg_constraint_rows, sort_pg_constraint_rows};
 use crate::backend::catalog::pg_depend::{
-    derived_pg_depend_rows, index_backed_constraint_depend_rows, sort_pg_depend_rows,
+    derived_pg_depend_rows, index_backed_constraint_depend_rows, relation_constraint_depend_rows,
+    sort_pg_depend_rows,
 };
 use crate::backend::catalog::store::{DEFAULT_FIRST_REL_NUMBER, DEFAULT_FIRST_USER_OID};
 use crate::backend::executor::RelationDesc;
@@ -506,6 +507,68 @@ impl Catalog {
             relation_oid,
             index_oid,
         ));
+        sort_pg_depend_rows(&mut self.depends);
+        Ok(row)
+    }
+
+    pub fn create_check_constraint(
+        &mut self,
+        relation_oid: u32,
+        conname: impl Into<String>,
+        convalidated: bool,
+        conbin: impl Into<String>,
+    ) -> Result<PgConstraintRow, CatalogError> {
+        let table = self
+            .get_by_oid(relation_oid)
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        if table.relkind != 'r' {
+            return Err(CatalogError::UnknownTable(relation_oid.to_string()));
+        }
+
+        let conname = conname.into();
+        if self
+            .constraints
+            .iter()
+            .any(|row| row.conrelid == relation_oid && row.conname.eq_ignore_ascii_case(&conname))
+        {
+            return Err(CatalogError::TableAlreadyExists(conname));
+        }
+
+        let row = PgConstraintRow {
+            oid: self.next_oid,
+            conname,
+            connamespace: table.namespace_oid,
+            contype: crate::include::catalog::CONSTRAINT_CHECK,
+            condeferrable: false,
+            condeferred: false,
+            conenforced: true,
+            convalidated,
+            conrelid: relation_oid,
+            contypid: 0,
+            conindid: 0,
+            conparentid: 0,
+            confrelid: 0,
+            confupdtype: ' ',
+            confdeltype: ' ',
+            confmatchtype: ' ',
+            conkey: None,
+            confkey: None,
+            conpfeqop: None,
+            conppeqop: None,
+            conffeqop: None,
+            confdelsetcols: None,
+            conexclop: None,
+            conbin: Some(conbin.into()),
+            conislocal: true,
+            coninhcount: 0,
+            connoinherit: false,
+            conperiod: false,
+        };
+        self.next_oid = self.next_oid.saturating_add(1);
+        self.constraints.push(row.clone());
+        sort_pg_constraint_rows(&mut self.constraints);
+        self.depends
+            .extend(relation_constraint_depend_rows(row.oid, relation_oid));
         sort_pg_depend_rows(&mut self.depends);
         Ok(row)
     }
