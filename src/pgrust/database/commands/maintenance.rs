@@ -206,6 +206,7 @@ impl Database {
                 actual: "temporary table".into(),
             }));
         }
+        ensure_relation_owner(self, client_id, &relation, &comment_stmt.table_name)?;
 
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
@@ -243,6 +244,7 @@ impl Database {
                 actual: "temporary table".into(),
             }));
         }
+        ensure_relation_owner(self, client_id, &relation, &alter_stmt.table_name)?;
         reject_relation_with_dependent_views(
             self,
             client_id,
@@ -250,8 +252,7 @@ impl Database {
             relation.relation_oid,
             "ALTER TABLE on relation without dependent views",
         )?;
-        let column =
-            validate_alter_table_add_column(&relation.desc, &alter_stmt.column, &catalog)?;
+        let column = validate_alter_table_add_column(&relation.desc, &alter_stmt.column, &catalog)?;
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
             txns: self.txns.clone(),

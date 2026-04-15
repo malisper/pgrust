@@ -1,8 +1,9 @@
 use crate::backend::catalog::catalog::CatalogEntry;
 use crate::backend::storage::smgr::RelFileLocator;
 use crate::include::catalog::{
-    BootstrapCatalogKind, bootstrap_catalog_kinds as shared_bootstrap_catalog_kinds,
-    bootstrap_namespace_oid, bootstrap_relation_desc,
+    BOOTSTRAP_SUPERUSER_OID, BootstrapCatalogKind,
+    bootstrap_catalog_kinds as shared_bootstrap_catalog_kinds, bootstrap_namespace_oid,
+    bootstrap_relation_desc,
 };
 
 pub fn bootstrap_catalog_kinds() -> [BootstrapCatalogKind; 30] {
@@ -18,6 +19,7 @@ pub fn bootstrap_catalog_entry(kind: BootstrapCatalogKind) -> CatalogEntry {
         },
         relation_oid: kind.relation_oid(),
         namespace_oid: bootstrap_namespace_oid(),
+        owner_oid: BOOTSTRAP_SUPERUSER_OID,
         row_type_oid: kind.row_type_oid(),
         reltoastrelid: 0,
         relpersistence: 'p',

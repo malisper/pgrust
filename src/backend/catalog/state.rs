@@ -13,9 +13,9 @@ use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::misc::interrupts::InterruptReason;
 use crate::include::catalog::{
-    CONSTRAINT_NOTNULL, PUBLIC_NAMESPACE_OID, PgAuthIdRow, PgAuthMembersRow, PgConstraintRow,
-    PgDependRow, PgRewriteRow, bootstrap_pg_auth_members_rows, bootstrap_pg_authid_rows,
-    builtin_type_rows, sort_pg_rewrite_rows,
+    BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_NOTNULL, PUBLIC_NAMESPACE_OID, PgAuthIdRow,
+    PgAuthMembersRow, PgConstraintRow, PgDependRow, PgRewriteRow, bootstrap_pg_auth_members_rows,
+    bootstrap_pg_authid_rows, builtin_type_rows, sort_pg_rewrite_rows,
 };
 
 const DEFAULT_SPC_OID: u32 = 0;
@@ -54,6 +54,7 @@ pub struct CatalogEntry {
     pub rel: RelFileLocator,
     pub relation_oid: u32,
     pub namespace_oid: u32,
+    pub owner_oid: u32,
     pub row_type_oid: u32,
     pub reltoastrelid: u32,
     pub relpersistence: char,
@@ -204,7 +205,14 @@ impl Catalog {
         name: impl Into<String>,
         desc: RelationDesc,
     ) -> Result<CatalogEntry, CatalogError> {
-        self.create_table_with_options(name, desc, PUBLIC_NAMESPACE_OID, DEFAULT_DB_OID, 'p')
+        self.create_table_with_options(
+            name,
+            desc,
+            PUBLIC_NAMESPACE_OID,
+            DEFAULT_DB_OID,
+            'p',
+            BOOTSTRAP_SUPERUSER_OID,
+        )
     }
 
     pub fn create_table_with_options(
@@ -214,8 +222,17 @@ impl Catalog {
         namespace_oid: u32,
         db_oid: u32,
         relpersistence: char,
+        owner_oid: u32,
     ) -> Result<CatalogEntry, CatalogError> {
-        self.create_table_with_relkind(name, desc, namespace_oid, db_oid, relpersistence, 'r')
+        self.create_table_with_relkind(
+            name,
+            desc,
+            namespace_oid,
+            db_oid,
+            relpersistence,
+            'r',
+            owner_oid,
+        )
     }
 
     pub(crate) fn create_table_with_relkind(
@@ -226,6 +243,7 @@ impl Catalog {
         db_oid: u32,
         relpersistence: char,
         relkind: char,
+        owner_oid: u32,
     ) -> Result<CatalogEntry, CatalogError> {
         let name = name.into().to_ascii_lowercase();
         if self.tables.contains_key(&name) {
@@ -253,6 +271,7 @@ impl Catalog {
             },
             relation_oid,
             namespace_oid,
+            owner_oid,
             row_type_oid,
             reltoastrelid: 0,
             relpersistence,
@@ -385,6 +404,7 @@ impl Catalog {
             },
             relation_oid: self.next_oid,
             namespace_oid: table.namespace_oid,
+            owner_oid: table.owner_oid,
             row_type_oid: 0,
             reltoastrelid: 0,
             relpersistence: table.relpersistence,
@@ -768,6 +788,38 @@ impl Catalog {
         self.replace_constraint_rows_for_entry(&qualified_new_name, &entry);
         self.replace_depend_rows_for_entry(&entry);
         Ok((old_name, old_entry, qualified_new_name, entry))
+    }
+
+    pub fn alter_relation_owner(
+        &mut self,
+        relation_oid: u32,
+        new_owner_oid: u32,
+    ) -> Result<(String, CatalogEntry, CatalogEntry), CatalogError> {
+        let name = self
+            .tables
+            .iter()
+            .find(|(_, entry)| entry.relation_oid == relation_oid)
+            .map(|(name, _)| name.clone())
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        let old_entry = self
+            .tables
+            .get(&name)
+            .cloned()
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        let entry = self
+            .tables
+            .get_mut(&name)
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        entry.owner_oid = new_owner_oid;
+        let new_entry = entry.clone();
+        Ok((name, old_entry, new_entry))
+    }
+
+    pub fn relation_owner_oid(&self, relation_oid: u32) -> Option<u32> {
+        self.tables
+            .values()
+            .find(|entry| entry.relation_oid == relation_oid)
+            .map(|entry| entry.owner_oid)
     }
 
     pub fn set_index_ready_valid(

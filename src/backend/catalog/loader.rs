@@ -35,7 +35,8 @@ use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, RelFileLocator
 use crate::include::catalog::{
     BootstrapCatalogKind, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow,
     PgClassRow, PgCollationRow, PgConstraintRow, PgIndexRow, PgNamespaceRow, PgOpclassRow,
-    PgOpfamilyRow, PgTypeRow, bootstrap_catalog_kinds, bootstrap_relation_desc,
+    PgOpfamilyRow, PgTypeRow, bootstrap_catalog_kinds, bootstrap_pg_auth_members_rows,
+    bootstrap_pg_authid_rows, bootstrap_relation_desc,
 };
 use crate::include::nodes::datum::Value;
 
@@ -248,6 +249,7 @@ pub(crate) fn catalog_from_physical_rows(
                 },
                 relation_oid: row.oid,
                 namespace_oid: row.relnamespace,
+                owner_oid: row.relowner,
                 row_type_oid: row.reltype,
                 reltoastrelid: row.reltoastrelid,
                 relpersistence: row.relpersistence,
@@ -533,7 +535,7 @@ pub(crate) fn load_physical_catalog_rows(
         .collect::<Result<Vec<_>, _>>()?
     };
     let authid_rows = if missing_authid {
-        Vec::new()
+        bootstrap_pg_authid_rows().to_vec()
     } else {
         scan_catalog_relation(
             &pool,
@@ -545,7 +547,7 @@ pub(crate) fn load_physical_catalog_rows(
         .collect::<Result<Vec<_>, _>>()?
     };
     let auth_members_rows = if missing_auth_members {
-        Vec::new()
+        bootstrap_pg_auth_members_rows().into()
     } else {
         scan_catalog_relation(
             &pool,
@@ -1019,7 +1021,7 @@ pub(crate) fn load_physical_catalog_rows_visible(
         .collect::<Result<Vec<_>, _>>()?
     };
     let authid_rows = if missing_authid {
-        Vec::new()
+        bootstrap_pg_authid_rows().to_vec()
     } else {
         scan_catalog_relation_visible(
             pool,
@@ -1034,7 +1036,7 @@ pub(crate) fn load_physical_catalog_rows_visible(
         .collect::<Result<Vec<_>, _>>()?
     };
     let auth_members_rows = if missing_auth_members {
-        Vec::new()
+        bootstrap_pg_auth_members_rows().into()
     } else {
         scan_catalog_relation_visible(
             pool,

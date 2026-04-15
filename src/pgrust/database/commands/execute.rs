@@ -42,10 +42,22 @@ impl Database {
                     configured_search_path,
                     65_536,
                 ),
+            Statement::AlterTableOwner(ref alter_stmt) => self
+                .execute_alter_table_owner_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
             Statement::AlterTableRename(ref rename_stmt) => self
                 .execute_alter_table_rename_stmt_with_search_path(
                     client_id,
                     rename_stmt,
+                    configured_search_path,
+                ),
+            Statement::AlterViewOwner(ref alter_stmt) => self
+                .execute_alter_view_owner_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
                     configured_search_path,
                 ),
             Statement::AlterTableRenameColumn(ref rename_stmt) => self
@@ -83,10 +95,12 @@ impl Database {
                 self.execute_alter_role_stmt(client_id, alter_stmt)
             }
             Statement::DropRole(ref drop_stmt) => self.execute_drop_role_stmt(client_id, drop_stmt),
-            Statement::CommentOnRole(_)
-            | Statement::ReassignOwned(_) => Err(ExecError::Parse(
-                ParseError::FeatureNotSupported("role management".into()),
-            )),
+            Statement::ReassignOwned(ref reassign_stmt) => {
+                self.execute_reassign_owned_stmt(client_id, reassign_stmt)
+            }
+            Statement::CommentOnRole(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                "role management".into(),
+            ))),
             Statement::SetSessionAuthorization(ref set_stmt) => {
                 self.execute_set_session_authorization_stmt(client_id, set_stmt)?;
                 Ok(StatementResult::AffectedRows(0))
@@ -334,12 +348,11 @@ impl Database {
                 guard.disarm();
                 result
             }
-            Statement::DropDomain(ref drop_stmt) => self
-                .execute_drop_domain_stmt_with_search_path(
-                    client_id,
-                    drop_stmt,
-                    configured_search_path,
-                ),
+            Statement::DropDomain(ref drop_stmt) => self.execute_drop_domain_stmt_with_search_path(
+                client_id,
+                drop_stmt,
+                configured_search_path,
+            ),
             Statement::DropView(ref drop_stmt) => {
                 let xid = self.txns.write().begin();
                 let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
@@ -403,7 +416,11 @@ impl Database {
                 let rels = vacuum_stmt
                     .targets
                     .iter()
-                    .filter_map(|target| catalog.lookup_relation(&target.table_name).map(|entry| entry.rel))
+                    .filter_map(|target| {
+                        catalog
+                            .lookup_relation(&target.table_name)
+                            .map(|entry| entry.rel)
+                    })
                     .collect::<Vec<_>>();
                 lock_tables_interruptible(
                     &self.table_locks,
