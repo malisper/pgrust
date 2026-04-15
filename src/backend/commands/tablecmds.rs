@@ -557,19 +557,20 @@ pub fn execute_vacuum(
                 index_meta: index.index_meta.clone(),
             };
             let stats = indexam::index_bulk_delete(&vacuum_ctx, index.index_meta.am_oid, None)
-                .map_err(|err| ExecError::Parse(ParseError::UnexpectedToken {
-                    expected: "VACUUM bulk delete",
-                    actual: format!("{err:?}"),
-                }))?;
-            let _ = indexam::index_vacuum_cleanup(
-                &vacuum_ctx,
-                index.index_meta.am_oid,
-                Some(stats),
-            )
-            .map_err(|err| ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "VACUUM cleanup",
-                actual: format!("{err:?}"),
-            }))?;
+                .map_err(|err| {
+                    ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "VACUUM bulk delete",
+                        actual: format!("{err:?}"),
+                    })
+                })?;
+            let _ =
+                indexam::index_vacuum_cleanup(&vacuum_ctx, index.index_meta.am_oid, Some(stats))
+                    .map_err(|err| {
+                        ExecError::Parse(ParseError::UnexpectedToken {
+                            expected: "VACUUM cleanup",
+                            actual: format!("{err:?}"),
+                        })
+                    })?;
         }
         processed += 1;
     }

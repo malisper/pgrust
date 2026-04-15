@@ -291,11 +291,7 @@ mod tests {
             },
             &catalog
         ));
-        assert!(auth.can_alter_role_attrs(
-            target.oid,
-            &RoleAttributes::default(),
-            &catalog
-        ));
+        assert!(auth.can_alter_role_attrs(target.oid, &RoleAttributes::default(), &catalog));
         assert!(auth.can_drop_role(target.oid, &catalog));
         assert!(!auth.can_drop_role(creator.oid, &catalog));
     }

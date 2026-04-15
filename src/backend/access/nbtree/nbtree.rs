@@ -8,8 +8,8 @@ use crate::backend::access::index::indexam;
 use crate::backend::access::nbtree::nbtcompare::{compare_bt_keyspace, compare_bt_values};
 use crate::backend::access::nbtree::nbtpreprocesskeys::preprocess_scan_keys;
 use crate::backend::access::nbtree::nbtsplitloc::choose_split_index;
-use crate::backend::access::nbtree::nbtxlog::log_btree_record;
 use crate::backend::access::nbtree::nbtutils::BtSortTuple;
+use crate::backend::access::nbtree::nbtxlog::log_btree_record;
 use crate::backend::access::transam::xact::{
     INVALID_TRANSACTION_ID, TransactionId, TransactionStatus,
 };
@@ -424,7 +424,7 @@ fn truncate_relation(
         let _ = storage.smgr.truncate(rel, ForkNumber::Fsm, 0);
         Ok::<(), crate::backend::storage::smgr::SmgrError>(())
     })
-        .map_err(|err| CatalogError::Io(err.to_string()))
+    .map_err(|err| CatalogError::Io(err.to_string()))
 }
 
 fn read_page(
@@ -962,7 +962,10 @@ fn find_parent_block_for_insert(
         }
         let items = bt_page_data_items(&page)
             .map_err(|err| CatalogError::Io(format!("btree parent parse failed: {err:?}")))?;
-        if items.iter().any(|item| item.t_tid.block_number == child_block) {
+        if items
+            .iter()
+            .any(|item| item.t_tid.block_number == child_block)
+        {
             return Ok(Some(block));
         }
     }
@@ -977,7 +980,9 @@ fn parent_contains_child(
     let page = read_page(&ctx.pool, ctx.index_relation, parent_block)?;
     let items = bt_page_data_items(&page)
         .map_err(|err| CatalogError::Io(format!("btree parent parse failed: {err:?}")))?;
-    Ok(items.iter().any(|item| item.t_tid.block_number == child_block))
+    Ok(items
+        .iter()
+        .any(|item| item.t_tid.block_number == child_block))
 }
 
 fn find_leaf_for_insert(
@@ -1324,10 +1329,15 @@ fn write_split_pages(
         )
         .map_err(|err| CatalogError::Io(format!("btree left split rebuild failed: {err:?}")))?;
         if let Some(high_key) = inherited_high_key {
-            bt_page_set_high_key(&mut right_page, &high_key, right_items.to_vec(), right_opaque)
-                .map_err(|err| {
-                    CatalogError::Io(format!("btree right split rebuild failed: {err:?}"))
-                })?;
+            bt_page_set_high_key(
+                &mut right_page,
+                &high_key,
+                right_items.to_vec(),
+                right_opaque,
+            )
+            .map_err(|err| {
+                CatalogError::Io(format!("btree right split rebuild failed: {err:?}"))
+            })?;
         } else {
             for tuple in right_items {
                 bt_page_append_tuple(&mut right_page, tuple)
@@ -1587,11 +1597,8 @@ fn propagate_split_upwards(
     mut split: PageSplitResult,
 ) -> Result<(), CatalogError> {
     loop {
-        let right_pivot = pivot_tuple(
-            &ctx.index_desc,
-            split.right_block,
-            &split.right_lower_bound,
-        )?;
+        let right_pivot =
+            pivot_tuple(&ctx.index_desc, split.right_block, &split.right_lower_bound)?;
         let parent_block = find_parent_block_for_insert(ctx, split.left_block)?;
         if let Some(parent_block) = parent_block {
             if parent_contains_child(ctx, parent_block, split.right_block)? {
@@ -1636,8 +1643,12 @@ fn finish_incomplete_split(ctx: &IndexInsertContext, left_block: u32) -> Result<
     {
         return clear_incomplete_split(ctx, left_block);
     }
-    let right_lower_bound =
-        page_lower_bound(&ctx.index_desc, &ctx.pool, ctx.index_relation, opaque.btpo_next)?;
+    let right_lower_bound = page_lower_bound(
+        &ctx.index_desc,
+        &ctx.pool,
+        ctx.index_relation,
+        opaque.btpo_next,
+    )?;
     propagate_split_upwards(
         ctx,
         PageSplitResult {

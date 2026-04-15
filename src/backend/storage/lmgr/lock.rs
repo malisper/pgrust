@@ -22,9 +22,18 @@ impl TableLockMode {
             (self, other),
             (TableLockMode::AccessExclusive, _)
                 | (_, TableLockMode::AccessExclusive)
-                | (TableLockMode::ShareUpdateExclusive, TableLockMode::ShareUpdateExclusive)
-                | (TableLockMode::ShareUpdateExclusive, TableLockMode::RowExclusive)
-                | (TableLockMode::RowExclusive, TableLockMode::ShareUpdateExclusive)
+                | (
+                    TableLockMode::ShareUpdateExclusive,
+                    TableLockMode::ShareUpdateExclusive
+                )
+                | (
+                    TableLockMode::ShareUpdateExclusive,
+                    TableLockMode::RowExclusive
+                )
+                | (
+                    TableLockMode::RowExclusive,
+                    TableLockMode::ShareUpdateExclusive
+                )
         )
     }
 }

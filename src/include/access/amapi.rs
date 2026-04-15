@@ -112,10 +112,14 @@ pub type AmRescanFn =
     fn(&mut IndexScanDesc, &[ScanKeyData], ScanDirection) -> Result<(), CatalogError>;
 pub type AmGetTupleFn = fn(&mut IndexScanDesc) -> Result<bool, CatalogError>;
 pub type AmEndScanFn = fn(IndexScanDesc) -> Result<(), CatalogError>;
-pub type AmBulkDeleteFn =
-    fn(&IndexVacuumContext, Option<IndexBulkDeleteResult>) -> Result<IndexBulkDeleteResult, CatalogError>;
-pub type AmVacuumCleanupFn =
-    fn(&IndexVacuumContext, Option<IndexBulkDeleteResult>) -> Result<IndexBulkDeleteResult, CatalogError>;
+pub type AmBulkDeleteFn = fn(
+    &IndexVacuumContext,
+    Option<IndexBulkDeleteResult>,
+) -> Result<IndexBulkDeleteResult, CatalogError>;
+pub type AmVacuumCleanupFn = fn(
+    &IndexVacuumContext,
+    Option<IndexBulkDeleteResult>,
+) -> Result<IndexBulkDeleteResult, CatalogError>;
 
 #[derive(Debug, Clone)]
 pub struct IndexAmRoutine {

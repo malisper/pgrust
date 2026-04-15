@@ -31,9 +31,9 @@ fn expr_uses_outer_columns(expr: &Expr) -> bool {
         Expr::ScalarArrayOp(saop) => {
             expr_uses_outer_columns(&saop.left) || expr_uses_outer_columns(&saop.right)
         }
-        Expr::Cast(inner, _)
-        | Expr::IsNull(inner)
-        | Expr::IsNotNull(inner) => expr_uses_outer_columns(inner),
+        Expr::Cast(inner, _) | Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
+            expr_uses_outer_columns(inner)
+        }
         Expr::Like {
             expr,
             pattern,
@@ -48,9 +48,7 @@ fn expr_uses_outer_columns(expr: &Expr) -> bool {
         } => {
             expr_uses_outer_columns(expr)
                 || expr_uses_outer_columns(pattern)
-                || escape
-                    .as_deref()
-                    .is_some_and(expr_uses_outer_columns)
+                || escape.as_deref().is_some_and(expr_uses_outer_columns)
         }
         Expr::IsDistinctFrom(left, right)
         | Expr::IsNotDistinctFrom(left, right)
@@ -154,7 +152,9 @@ fn plan_uses_outer_columns(plan: &Plan) -> bool {
         Plan::Limit { input, .. } => plan_uses_outer_columns(input),
         Plan::Projection { input, targets, .. } => {
             plan_uses_outer_columns(input)
-                || targets.iter().any(|target| expr_uses_outer_columns(&target.expr))
+                || targets
+                    .iter()
+                    .any(|target| expr_uses_outer_columns(&target.expr))
         }
         Plan::Aggregate {
             input,
@@ -169,10 +169,7 @@ fn plan_uses_outer_columns(plan: &Plan) -> bool {
                 || having.as_ref().is_some_and(expr_uses_outer_columns)
         }
         Plan::FunctionScan { call, .. } => set_returning_call_uses_outer_columns(call),
-        Plan::Values { rows, .. } => rows
-            .iter()
-            .flatten()
-            .any(expr_uses_outer_columns),
+        Plan::Values { rows, .. } => rows.iter().flatten().any(expr_uses_outer_columns),
         Plan::ProjectSet { input, targets, .. } => {
             plan_uses_outer_columns(input)
                 || targets.iter().any(project_set_target_uses_outer_columns)

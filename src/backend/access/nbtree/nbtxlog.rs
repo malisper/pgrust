@@ -1,9 +1,10 @@
+use crate::BLCKSZ;
 use crate::backend::access::transam::xlog::{
     REGBUF_FORCE_IMAGE, REGBUF_STANDARD, REGBUF_WILL_INIT, RM_BTREE_ID, WalError,
     XLOG_BTREE_DELETE, XLOG_BTREE_INSERT_LEAF, XLOG_BTREE_INSERT_META, XLOG_BTREE_INSERT_UPPER,
-    XLOG_BTREE_MARK_PAGE_HALFDEAD, XLOG_BTREE_NEWROOT, XLOG_BTREE_REUSE_PAGE,
-    XLOG_BTREE_SPLIT_L, XLOG_BTREE_SPLIT_R, XLOG_BTREE_UNLINK_PAGE,
-    XLOG_BTREE_UNLINK_PAGE_META, XLOG_BTREE_VACUUM, XLOG_FPI,
+    XLOG_BTREE_MARK_PAGE_HALFDEAD, XLOG_BTREE_NEWROOT, XLOG_BTREE_REUSE_PAGE, XLOG_BTREE_SPLIT_L,
+    XLOG_BTREE_SPLIT_R, XLOG_BTREE_UNLINK_PAGE, XLOG_BTREE_UNLINK_PAGE_META, XLOG_BTREE_VACUUM,
+    XLOG_FPI,
 };
 use crate::backend::access::transam::xloginsert::{
     xlog_begin_insert, xlog_insert, xlog_register_buf_data, xlog_register_buffer,
@@ -13,7 +14,6 @@ use crate::backend::access::transam::xlogreader::{DecodedBkpBlock, DecodedXLogRe
 use crate::backend::storage::buffer::{BufferTag, PAGE_SIZE};
 use crate::backend::storage::smgr::md::MdStorageManager;
 use crate::backend::storage::smgr::{ForkNumber, StorageManager};
-use crate::BLCKSZ;
 
 pub struct LoggedBtreeBlock<'a> {
     pub block_id: u8,

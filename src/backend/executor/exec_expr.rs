@@ -12,8 +12,8 @@ pub(crate) use super::expr_compile::{
 };
 use super::expr_datetime::{
     current_date_value, current_date_value_with_config, current_time_value,
-    current_time_value_with_config, current_timestamp_value,
-    current_timestamp_value_with_config, render_datetime_value_text_with_config,
+    current_time_value_with_config, current_timestamp_value, current_timestamp_value_with_config,
+    render_datetime_value_text_with_config,
 };
 use super::expr_geometry::eval_geometry_function;
 use super::expr_json::{
@@ -1188,9 +1188,11 @@ fn eval_builtin_function(
         BuiltinScalarFunction::Now
         | BuiltinScalarFunction::TransactionTimestamp
         | BuiltinScalarFunction::StatementTimestamp
-        | BuiltinScalarFunction::ClockTimestamp => {
-            Ok(current_timestamp_value_with_config(&ctx.datetime_config, None, true))
-        }
+        | BuiltinScalarFunction::ClockTimestamp => Ok(current_timestamp_value_with_config(
+            &ctx.datetime_config,
+            None,
+            true,
+        )),
         BuiltinScalarFunction::TimeOfDay => {
             let value = current_timestamp_value_with_config(&ctx.datetime_config, None, true);
             Ok(Value::Text(
