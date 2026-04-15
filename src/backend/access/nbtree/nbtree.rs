@@ -1427,9 +1427,12 @@ fn allocate_btree_block(ctx: &IndexInsertContext) -> Result<u32, CatalogError> {
     }
 }
 
-fn write_split_pages(
+fn write_split_pages_locked(
     ctx: &IndexInsertContext,
     block: u32,
+    pin: PinnedBuffer<'_, SmgrStorageBackend>,
+    mut guard: RwLockWriteGuard<'_, Page>,
+    existing_high_key: Option<IndexTupleData>,
     left_items: &[IndexTupleData],
     right_items: &[IndexTupleData],
     old_opaque: crate::include::access::nbtree::BTPageOpaqueData,
@@ -1441,9 +1444,7 @@ fn write_split_pages(
     let level = old_opaque.btpo_level;
     let flags = if is_leaf { BTP_LEAF } else { 0 };
     let inherited_high_key = if is_leaf {
-        if let Some(high_key) = bt_page_high_key(&read_page(&ctx.pool, ctx.index_relation, block)?)
-            .map_err(|err| CatalogError::Io(format!("btree high-key read failed: {err:?}")))?
-        {
+        if let Some(high_key) = existing_high_key {
             Some(high_key)
         } else if old_opaque.btpo_next != P_NONE {
             let next_page = read_page(&ctx.pool, ctx.index_relation, old_opaque.btpo_next)?;
@@ -1545,15 +1546,33 @@ fn write_split_pages(
     }
     // Publish the new sibling only after its page image is initialized and any
     // existing right neighbor already links back to it.
-    write_buffered_btree_page(
-        &ctx.pool,
-        ctx.client_id,
-        ctx.snapshot.current_xid,
-        ctx.index_relation,
-        block,
-        &left_page,
-        XLOG_BTREE_SPLIT_L,
-    )?;
+    let lsn = if let Some(wal) = ctx.pool.wal_writer() {
+        log_btree_record(
+            &wal,
+            ctx.snapshot.current_xid,
+            XLOG_BTREE_SPLIT_L,
+            &[crate::backend::access::nbtree::nbtxlog::LoggedBtreeBlock {
+                block_id: 0,
+                tag: crate::backend::storage::buffer::BufferTag {
+                    rel: ctx.index_relation,
+                    fork: ForkNumber::Main,
+                    block,
+                },
+                page: &left_page,
+                will_init: false,
+                data: &[],
+            }],
+            &[],
+        )
+        .map_err(|err| CatalogError::Io(format!("btree WAL log failed: {err}")))?
+    } else {
+        INVALID_LSN
+    };
+    ctx.pool
+        .install_page_image_locked(pin.buffer_id(), &left_page, lsn, &mut guard)
+        .map_err(|err| CatalogError::Io(format!("btree buffered write failed: {err:?}")))?;
+    drop(guard);
+    drop(pin);
 
     Ok(PageSplitResult {
         left_block: block,
@@ -1669,13 +1688,21 @@ fn insert_tuple_into_locked_page(
         }
     };
     if append_result.is_err() {
-        drop(guard);
-        drop(pin);
         let split = choose_split_index(&items, None);
         let right_items = items.split_off(split);
         let left_items = items;
-        return write_split_pages(ctx, block, &left_items, &right_items, old_opaque, is_leaf)
-            .map(Some);
+        return write_split_pages_locked(
+            ctx,
+            block,
+            pin,
+            guard,
+            existing_high_key.clone(),
+            &left_items,
+            &right_items,
+            old_opaque,
+            is_leaf,
+        )
+        .map(Some);
     }
     let wal_info = if is_leaf {
         XLOG_BTREE_INSERT_LEAF
