@@ -24,23 +24,31 @@ The script:
 - builds `Dockerfile.early-access` for `linux/arm64`
 - tags the image as `pgrust-early-access:<version>` and `pgrust-early-access:latest`
 - smoke-tests container startup
-- writes a compressed tarball and SHA-256 checksum under `target/early-access/`
+- writes a sendable folder under `target/early-access/<version>/`
 
 ## Send to the evaluator
 
-Share these files:
+Share the whole folder:
 
-- `target/early-access/pgrust-early-access-<version>-linux-arm64.tar.gz`
-- `target/early-access/pgrust-early-access-<version>-linux-arm64.tar.gz.sha256`
+- `target/early-access/<version>/`
+
+That folder contains:
+
+- the compressed image tarball
+- the SHA-256 checksum
+- `load-image.sh`
+- `run-container.sh`
+- `README.txt`
 
 ## Evaluator install and run
 
 On an Apple Silicon Mac with Docker Desktop:
 
 ```bash
+cd <version>
 shasum -a 256 -c pgrust-early-access-<version>-linux-arm64.tar.gz.sha256
-gunzip -c pgrust-early-access-<version>-linux-arm64.tar.gz | docker load
-docker run --rm -p 5432:5432 pgrust-early-access:<version>
+./load-image.sh
+./run-container.sh
 ```
 
 If you want persistent data instead of a disposable container:
