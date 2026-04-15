@@ -105,6 +105,56 @@ fn temp_dir(label: &str) -> PathBuf {
     p
 }
 
+#[test]
+fn ephemeral_database_executes_basic_sql() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table items (id int, name text)")
+        .expect("create table");
+    session
+        .execute(&db, "insert into items values (1, 'a'), (2, 'b')")
+        .expect("insert rows");
+
+    let result = session
+        .execute(&db, "select id, name from items order by id")
+        .expect("select rows");
+    let StatementResult::Query { rows, .. } = result else {
+        panic!("expected query result");
+    };
+    assert_eq!(
+        rows,
+        vec![
+            vec![Value::Int32(1), Value::Text("a".into())],
+            vec![Value::Int32(2), Value::Text("b".into())],
+        ]
+    );
+}
+
+#[test]
+fn ephemeral_database_rolls_back_aborted_transaction() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table items (id int)")
+        .expect("create table");
+    session.execute(&db, "begin").expect("begin");
+    session
+        .execute(&db, "insert into items values (1)")
+        .expect("insert row");
+    session.execute(&db, "rollback").expect("rollback");
+
+    let result = session
+        .execute(&db, "select id from items")
+        .expect("select after rollback");
+    let StatementResult::Query { rows, .. } = result else {
+        panic!("expected query result");
+    };
+    assert!(rows.is_empty(), "rolled back row should not be visible");
+}
+
 fn query_rows(db: &Database, client_id: u32, sql: &str) -> Vec<Vec<Value>> {
     match db.execute(client_id, sql).unwrap() {
         StatementResult::Query { rows, .. } => rows,

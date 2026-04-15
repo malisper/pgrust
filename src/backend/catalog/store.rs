@@ -18,7 +18,7 @@ use crate::backend::catalog::indexing::{
     rebuild_system_catalog_indexes,
 };
 use crate::backend::catalog::loader::{
-    load_catalog_from_physical, load_catalog_from_visible_physical,
+    load_catalog_from_physical, load_catalog_from_visible_physical, load_catalog_from_visible_pool,
     load_physical_catalog_rows_visible,
 };
 use crate::backend::catalog::persistence::{
@@ -62,9 +62,19 @@ pub(crate) const DEFAULT_FIRST_REL_NUMBER: u32 = 16000;
 pub(crate) const DEFAULT_FIRST_USER_OID: u32 = 16_384;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+enum CatalogStoreMode {
+    Durable {
+        base_dir: PathBuf,
+        control_path: PathBuf,
+    },
+    Ephemeral,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct CatalogStore {
-    base_dir: PathBuf,
-    control_path: PathBuf,
+    mode: CatalogStoreMode,
+    catalog: Catalog,
+    control: CatalogControl,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -151,9 +161,27 @@ impl CatalogStore {
         sync_physical_catalogs(&base_dir, &catalog)?;
 
         Ok(Self {
-            base_dir,
-            control_path,
+            mode: CatalogStoreMode::Durable {
+                base_dir,
+                control_path,
+            },
+            catalog,
+            control: control.clone(),
         })
+    }
+
+    pub fn new_ephemeral() -> Self {
+        let catalog = Catalog::default();
+        let control = CatalogControl {
+            next_oid: catalog.next_oid,
+            next_rel_number: catalog.next_rel_number,
+            bootstrap_complete: true,
+        };
+        Self {
+            mode: CatalogStoreMode::Ephemeral,
+            catalog,
+            control,
+        }
     }
 
     pub fn catalog_snapshot(&self) -> Result<Catalog, CatalogError> {
@@ -161,11 +189,11 @@ impl CatalogStore {
     }
 
     pub fn relcache(&self) -> Result<RelCache, CatalogError> {
-        RelCache::from_physical(&self.base_dir)
+        Ok(RelCache::from_catalog(&self.catalog))
     }
 
     pub fn catcache(&self) -> Result<CatCache, CatalogError> {
-        CatCache::from_physical(&self.base_dir)
+        Ok(CatCache::from_catalog(&self.catalog))
     }
 
     pub fn catcache_with_snapshot(
@@ -175,8 +203,16 @@ impl CatalogStore {
         snapshot: &Snapshot,
         client_id: crate::ClientId,
     ) -> Result<CatCache, CatalogError> {
-        let rows =
-            load_physical_catalog_rows_visible(&self.base_dir, pool, txns, snapshot, client_id)?;
+        let rows = match &self.mode {
+            CatalogStoreMode::Durable { base_dir, .. } => {
+                load_physical_catalog_rows_visible(base_dir, pool, txns, snapshot, client_id)?
+            }
+            CatalogStoreMode::Ephemeral => {
+                crate::backend::catalog::loader::load_physical_catalog_rows_visible_in_pool(
+                    pool, txns, snapshot, client_id,
+                )?
+            }
+        };
         Ok(CatCache::from_rows(
             rows.namespaces,
             rows.classes,
@@ -257,22 +293,24 @@ impl CatalogStore {
             .unwrap_or(entry);
         let kinds = create_table_sync_kinds(&entry);
         self.persist_control_state(&catalog)?;
-        append_catalog_entry_rows(&self.base_dir, &catalog, &name, &entry, &kinds)?;
-        if let Some(toast) = toast {
-            append_catalog_entry_rows(
-                &self.base_dir,
-                &catalog,
-                &toast.toast_name,
-                &toast.toast_entry,
-                &create_table_sync_kinds(&toast.toast_entry),
-            )?;
-            append_catalog_entry_rows(
-                &self.base_dir,
-                &catalog,
-                &toast.index_name,
-                &toast.index_entry,
-                &create_index_sync_kinds(),
-            )?;
+        if let CatalogStoreMode::Durable { base_dir, .. } = &self.mode {
+            append_catalog_entry_rows(base_dir, &catalog, &name, &entry, &kinds)?;
+            if let Some(toast) = toast {
+                append_catalog_entry_rows(
+                    base_dir,
+                    &catalog,
+                    &toast.toast_name,
+                    &toast.toast_entry,
+                    &create_table_sync_kinds(&toast.toast_entry),
+                )?;
+                append_catalog_entry_rows(
+                    base_dir,
+                    &catalog,
+                    &toast.index_name,
+                    &toast.index_entry,
+                    &create_index_sync_kinds(),
+                )?;
+            }
         }
         Ok(entry)
     }
@@ -313,7 +351,9 @@ impl CatalogStore {
         };
         let kinds = create_index_sync_kinds();
         self.persist_control_state(&catalog)?;
-        append_catalog_entry_rows(&self.base_dir, &catalog, &index_name, &entry, &kinds)?;
+        if let CatalogStoreMode::Durable { base_dir, .. } = &self.mode {
+            append_catalog_entry_rows(base_dir, &catalog, &index_name, &entry, &kinds)?;
+        }
         Ok(entry)
     }
 
@@ -385,7 +425,9 @@ impl CatalogStore {
         };
         let kinds = create_index_sync_kinds();
         self.persist_control_state(&catalog)?;
-        append_catalog_entry_rows(&self.base_dir, &catalog, &index_name, &entry, &kinds)?;
+        if let CatalogStoreMode::Durable { base_dir, .. } = &self.mode {
+            append_catalog_entry_rows(base_dir, &catalog, &index_name, &entry, &kinds)?;
+        }
         Ok(entry)
     }
 
@@ -1555,19 +1597,27 @@ impl CatalogStore {
         catalog: &Catalog,
         kinds: &[BootstrapCatalogKind],
     ) -> Result<(), CatalogError> {
-        self.persist_control_state(catalog)?;
-        sync_physical_catalogs_kinds(&self.base_dir, catalog, kinds)
+        match &self.mode {
+            CatalogStoreMode::Durable { base_dir, .. } => {
+                self.persist_control_state(catalog)?;
+                sync_physical_catalogs_kinds(base_dir, catalog, kinds)
+            }
+            CatalogStoreMode::Ephemeral => Ok(()),
+        }
     }
 
     fn persist_control_state(&self, catalog: &Catalog) -> Result<(), CatalogError> {
-        persist_control_file(
-            &self.control_path,
-            &CatalogControl {
-                next_oid: catalog.next_oid,
-                next_rel_number: catalog.next_rel_number,
-                bootstrap_complete: true,
-            },
-        )
+        match &self.mode {
+            CatalogStoreMode::Durable { control_path, .. } => persist_control_file(
+                control_path,
+                &CatalogControl {
+                    next_oid: catalog.next_oid,
+                    next_rel_number: catalog.next_rel_number,
+                    bootstrap_complete: true,
+                },
+            ),
+            CatalogStoreMode::Ephemeral => Ok(()),
+        }
     }
 }
 
@@ -1633,13 +1683,18 @@ fn collect_relation_drop_oids(
 
 impl CatalogStore {
     fn catalog_snapshot_with_control(&self) -> Result<Catalog, CatalogError> {
-        let mut catalog = load_catalog_from_physical(&self.base_dir)?;
-        if self.control_path.exists() {
-            let control = load_control_file(&self.control_path)?;
-            catalog.next_oid = catalog.next_oid.max(control.next_oid);
-            catalog.next_rel_number = catalog.next_rel_number.max(control.next_rel_number);
+        match &self.mode {
+            CatalogStoreMode::Durable { base_dir, control_path } => {
+                let mut catalog = load_catalog_from_physical(base_dir)?;
+                if control_path.exists() {
+                    let control = load_control_file(control_path)?;
+                    catalog.next_oid = catalog.next_oid.max(control.next_oid);
+                    catalog.next_rel_number = catalog.next_rel_number.max(control.next_rel_number);
+                }
+                Ok(catalog)
+            }
+            CatalogStoreMode::Ephemeral => Ok(self.catalog.clone()),
         }
-        Ok(catalog)
     }
 
     fn catalog_snapshot_with_control_for_snapshot(
@@ -1652,17 +1707,34 @@ impl CatalogStore {
             .snapshot_for_command(ctx.xid, ctx.cid)
             .map_err(|e| CatalogError::Io(format!("catalog snapshot failed: {e:?}")))?;
         let txns = ctx.txns.read();
-        let mut catalog = load_catalog_from_visible_physical(
-            &self.base_dir,
-            &ctx.pool,
-            &txns,
-            &snapshot,
-            ctx.client_id,
-        )?;
-        if self.control_path.exists() {
-            let control = load_control_file(&self.control_path)?;
-            catalog.next_oid = catalog.next_oid.max(control.next_oid);
-            catalog.next_rel_number = catalog.next_rel_number.max(control.next_rel_number);
+        let mut catalog = match &self.mode {
+            CatalogStoreMode::Durable { base_dir, control_path } => {
+                let mut catalog = load_catalog_from_visible_physical(
+                    base_dir,
+                    &ctx.pool,
+                    &txns,
+                    &snapshot,
+                    ctx.client_id,
+                )?;
+                if control_path.exists() {
+                    let control = load_control_file(control_path)?;
+                    catalog.next_oid = catalog.next_oid.max(control.next_oid);
+                    catalog.next_rel_number = catalog.next_rel_number.max(control.next_rel_number);
+                }
+                catalog
+            }
+            CatalogStoreMode::Ephemeral => {
+                let mut catalog =
+                    load_catalog_from_visible_pool(&ctx.pool, &txns, &snapshot, ctx.client_id)?;
+                catalog.next_oid = catalog.next_oid.max(self.control.next_oid);
+                catalog.next_rel_number =
+                    catalog.next_rel_number.max(self.control.next_rel_number);
+                catalog
+            }
+        };
+        if matches!(self.mode, CatalogStoreMode::Ephemeral) {
+            catalog.next_oid = catalog.next_oid.max(self.control.next_oid);
+            catalog.next_rel_number = catalog.next_rel_number.max(self.control.next_rel_number);
         }
         Ok(catalog)
     }
@@ -1680,7 +1752,10 @@ pub(crate) fn sync_catalog_heaps_for_tests(
 
 impl CatalogStore {
     pub fn base_dir(&self) -> &Path {
-        &self.base_dir
+        match &self.mode {
+            CatalogStoreMode::Durable { base_dir, .. } => base_dir,
+            CatalogStoreMode::Ephemeral => Path::new(""),
+        }
     }
 }
 

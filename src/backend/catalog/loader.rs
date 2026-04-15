@@ -57,6 +57,16 @@ pub(crate) fn load_catalog_from_visible_physical(
     catalog_from_physical_rows(base_dir, rows)
 }
 
+pub(crate) fn load_catalog_from_visible_pool(
+    pool: &BufferPool<SmgrStorageBackend>,
+    txns: &TransactionManager,
+    snapshot: &Snapshot,
+    client_id: crate::ClientId,
+) -> Result<Catalog, CatalogError> {
+    let rows = load_physical_catalog_rows_visible_in_pool(pool, txns, snapshot, client_id)?;
+    catalog_from_physical_rows(Path::new(""), rows)
+}
+
 pub(crate) fn catalog_from_physical_rows(
     base_dir: &Path,
     rows: PhysicalCatalogRows,
@@ -859,7 +869,6 @@ pub(crate) fn load_physical_catalog_rows_visible(
     snapshot: &Snapshot,
     client_id: crate::ClientId,
 ) -> Result<PhysicalCatalogRows, CatalogError> {
-    let mut smgr = MdStorageManager::new(base_dir);
     let mut rels = BTreeMap::new();
     let mut missing_attrdef = false;
     let mut missing_depend = false;
@@ -889,7 +898,8 @@ pub(crate) fn load_physical_catalog_rows_visible(
             db_oid: 1,
             rel_number: kind.relation_oid(),
         };
-        if !smgr.exists(rel, ForkNumber::Main) {
+        let exists = pool.with_storage_mut(|storage| storage.smgr.exists(rel, ForkNumber::Main));
+        if !exists {
             if kind == BootstrapCatalogKind::PgAttrdef {
                 missing_attrdef = true;
                 continue;
@@ -980,7 +990,7 @@ pub(crate) fn load_physical_catalog_rows_visible(
             }
             return Err(CatalogError::Corrupt("missing physical bootstrap catalog"));
         }
-        smgr.open(rel)
+        pool.with_storage_mut(|storage| storage.smgr.open(rel))
             .map_err(|e| CatalogError::Io(e.to_string()))?;
         rels.insert(kind, rel);
     }
@@ -1401,6 +1411,15 @@ pub(crate) fn load_physical_catalog_rows_visible(
     Ok(rows)
 }
 
+pub(crate) fn load_physical_catalog_rows_visible_in_pool(
+    pool: &BufferPool<SmgrStorageBackend>,
+    txns: &TransactionManager,
+    snapshot: &Snapshot,
+    client_id: crate::ClientId,
+) -> Result<PhysicalCatalogRows, CatalogError> {
+    load_physical_catalog_rows_visible(Path::new(""), pool, txns, snapshot, client_id)
+}
+
 pub(crate) fn load_visible_namespace_rows(
     base_dir: &Path,
     pool: &BufferPool<SmgrStorageBackend>,
@@ -1408,14 +1427,8 @@ pub(crate) fn load_visible_namespace_rows(
     snapshot: &Snapshot,
     client_id: crate::ClientId,
 ) -> Result<Vec<PgNamespaceRow>, CatalogError> {
-    load_visible_catalog_kind(
-        base_dir,
-        pool,
-        txns,
-        snapshot,
-        client_id,
-        BootstrapCatalogKind::PgNamespace,
-    )?
+    let _ = base_dir;
+    load_visible_catalog_kind_in_pool(pool, txns, snapshot, client_id, BootstrapCatalogKind::PgNamespace)?
     .into_iter()
     .map(namespace_row_from_values)
     .collect()
@@ -1428,14 +1441,8 @@ pub(crate) fn load_visible_type_rows(
     snapshot: &Snapshot,
     client_id: crate::ClientId,
 ) -> Result<Vec<PgTypeRow>, CatalogError> {
-    load_visible_catalog_kind(
-        base_dir,
-        pool,
-        txns,
-        snapshot,
-        client_id,
-        BootstrapCatalogKind::PgType,
-    )?
+    let _ = base_dir;
+    load_visible_catalog_kind_in_pool(pool, txns, snapshot, client_id, BootstrapCatalogKind::PgType)?
     .into_iter()
     .map(pg_type_row_from_values)
     .collect()
@@ -1448,14 +1455,8 @@ pub(crate) fn load_visible_class_rows(
     snapshot: &Snapshot,
     client_id: crate::ClientId,
 ) -> Result<Vec<PgClassRow>, CatalogError> {
-    load_visible_catalog_kind(
-        base_dir,
-        pool,
-        txns,
-        snapshot,
-        client_id,
-        BootstrapCatalogKind::PgClass,
-    )?
+    let _ = base_dir;
+    load_visible_catalog_kind_in_pool(pool, txns, snapshot, client_id, BootstrapCatalogKind::PgClass)?
     .into_iter()
     .map(pg_class_row_from_values)
     .collect()
@@ -1468,8 +1469,8 @@ pub(crate) fn load_visible_attribute_rows(
     snapshot: &Snapshot,
     client_id: crate::ClientId,
 ) -> Result<Vec<PgAttributeRow>, CatalogError> {
-    load_visible_catalog_kind(
-        base_dir,
+    let _ = base_dir;
+    load_visible_catalog_kind_in_pool(
         pool,
         txns,
         snapshot,
@@ -1488,14 +1489,8 @@ pub(crate) fn load_visible_attrdef_rows(
     snapshot: &Snapshot,
     client_id: crate::ClientId,
 ) -> Result<Vec<PgAttrdefRow>, CatalogError> {
-    load_visible_catalog_kind(
-        base_dir,
-        pool,
-        txns,
-        snapshot,
-        client_id,
-        BootstrapCatalogKind::PgAttrdef,
-    )?
+    let _ = base_dir;
+    load_visible_catalog_kind_in_pool(pool, txns, snapshot, client_id, BootstrapCatalogKind::PgAttrdef)?
     .into_iter()
     .map(pg_attrdef_row_from_values)
     .collect()
@@ -1508,14 +1503,8 @@ pub(crate) fn load_visible_index_rows(
     snapshot: &Snapshot,
     client_id: crate::ClientId,
 ) -> Result<Vec<PgIndexRow>, CatalogError> {
-    load_visible_catalog_kind(
-        base_dir,
-        pool,
-        txns,
-        snapshot,
-        client_id,
-        BootstrapCatalogKind::PgIndex,
-    )?
+    let _ = base_dir;
+    load_visible_catalog_kind_in_pool(pool, txns, snapshot, client_id, BootstrapCatalogKind::PgIndex)?
     .into_iter()
     .map(pg_index_row_from_values)
     .collect()
@@ -1528,8 +1517,8 @@ pub(crate) fn load_visible_constraint_rows(
     snapshot: &Snapshot,
     client_id: crate::ClientId,
 ) -> Result<Vec<PgConstraintRow>, CatalogError> {
-    load_visible_catalog_kind(
-        base_dir,
+    let _ = base_dir;
+    load_visible_catalog_kind_in_pool(
         pool,
         txns,
         snapshot,
@@ -1548,14 +1537,8 @@ pub(crate) fn load_visible_depend_rows(
     snapshot: &Snapshot,
     client_id: crate::ClientId,
 ) -> Result<Vec<crate::include::catalog::PgDependRow>, CatalogError> {
-    load_visible_catalog_kind(
-        base_dir,
-        pool,
-        txns,
-        snapshot,
-        client_id,
-        BootstrapCatalogKind::PgDepend,
-    )?
+    let _ = base_dir;
+    load_visible_catalog_kind_in_pool(pool, txns, snapshot, client_id, BootstrapCatalogKind::PgDepend)?
     .into_iter()
     .map(pg_depend_row_from_values)
     .collect()
@@ -1568,14 +1551,8 @@ pub(crate) fn load_visible_rewrite_rows(
     snapshot: &Snapshot,
     client_id: crate::ClientId,
 ) -> Result<Vec<crate::include::catalog::PgRewriteRow>, CatalogError> {
-    load_visible_catalog_kind(
-        base_dir,
-        pool,
-        txns,
-        snapshot,
-        client_id,
-        BootstrapCatalogKind::PgRewrite,
-    )?
+    let _ = base_dir;
+    load_visible_catalog_kind_in_pool(pool, txns, snapshot, client_id, BootstrapCatalogKind::PgRewrite)?
     .into_iter()
     .map(pg_rewrite_row_from_values)
     .collect()
@@ -1588,8 +1565,8 @@ pub(crate) fn load_visible_statistic_rows(
     snapshot: &Snapshot,
     client_id: crate::ClientId,
 ) -> Result<Vec<crate::include::catalog::PgStatisticRow>, CatalogError> {
-    load_visible_catalog_kind(
-        base_dir,
+    let _ = base_dir;
+    load_visible_catalog_kind_in_pool(
         pool,
         txns,
         snapshot,
@@ -1608,14 +1585,8 @@ pub(crate) fn load_visible_am_rows(
     snapshot: &Snapshot,
     client_id: crate::ClientId,
 ) -> Result<Vec<PgAmRow>, CatalogError> {
-    load_visible_catalog_kind(
-        base_dir,
-        pool,
-        txns,
-        snapshot,
-        client_id,
-        BootstrapCatalogKind::PgAm,
-    )?
+    let _ = base_dir;
+    load_visible_catalog_kind_in_pool(pool, txns, snapshot, client_id, BootstrapCatalogKind::PgAm)?
     .into_iter()
     .map(pg_am_row_from_values)
     .collect()
@@ -1628,14 +1599,8 @@ pub(crate) fn load_visible_amop_rows(
     snapshot: &Snapshot,
     client_id: crate::ClientId,
 ) -> Result<Vec<PgAmopRow>, CatalogError> {
-    load_visible_catalog_kind(
-        base_dir,
-        pool,
-        txns,
-        snapshot,
-        client_id,
-        BootstrapCatalogKind::PgAmop,
-    )?
+    let _ = base_dir;
+    load_visible_catalog_kind_in_pool(pool, txns, snapshot, client_id, BootstrapCatalogKind::PgAmop)?
     .into_iter()
     .map(pg_amop_row_from_values)
     .collect()
@@ -1648,8 +1613,8 @@ pub(crate) fn load_visible_amproc_rows(
     snapshot: &Snapshot,
     client_id: crate::ClientId,
 ) -> Result<Vec<PgAmprocRow>, CatalogError> {
-    load_visible_catalog_kind(
-        base_dir,
+    let _ = base_dir;
+    load_visible_catalog_kind_in_pool(
         pool,
         txns,
         snapshot,
@@ -1668,8 +1633,8 @@ pub(crate) fn load_visible_opclass_rows(
     snapshot: &Snapshot,
     client_id: crate::ClientId,
 ) -> Result<Vec<PgOpclassRow>, CatalogError> {
-    load_visible_catalog_kind(
-        base_dir,
+    let _ = base_dir;
+    load_visible_catalog_kind_in_pool(
         pool,
         txns,
         snapshot,
@@ -1688,8 +1653,8 @@ pub(crate) fn load_visible_opfamily_rows(
     snapshot: &Snapshot,
     client_id: crate::ClientId,
 ) -> Result<Vec<PgOpfamilyRow>, CatalogError> {
-    load_visible_catalog_kind(
-        base_dir,
+    let _ = base_dir;
+    load_visible_catalog_kind_in_pool(
         pool,
         txns,
         snapshot,
@@ -1708,8 +1673,8 @@ pub(crate) fn load_visible_collation_rows(
     snapshot: &Snapshot,
     client_id: crate::ClientId,
 ) -> Result<Vec<PgCollationRow>, CatalogError> {
-    load_visible_catalog_kind(
-        base_dir,
+    let _ = base_dir;
+    load_visible_catalog_kind_in_pool(
         pool,
         txns,
         snapshot,
@@ -1729,13 +1694,24 @@ fn load_visible_catalog_kind(
     client_id: crate::ClientId,
     kind: BootstrapCatalogKind,
 ) -> Result<Vec<Vec<Value>>, CatalogError> {
+    let _ = base_dir;
+    load_visible_catalog_kind_in_pool(pool, txns, snapshot, client_id, kind)
+}
+
+fn load_visible_catalog_kind_in_pool(
+    pool: &BufferPool<SmgrStorageBackend>,
+    txns: &TransactionManager,
+    snapshot: &Snapshot,
+    client_id: crate::ClientId,
+    kind: BootstrapCatalogKind,
+) -> Result<Vec<Vec<Value>>, CatalogError> {
     let rel = RelFileLocator {
         spc_oid: 0,
         db_oid: 1,
         rel_number: kind.relation_oid(),
     };
-    let mut smgr = MdStorageManager::new(base_dir);
-    if !smgr.exists(rel, ForkNumber::Main) {
+    let exists = pool.with_storage_mut(|storage| storage.smgr.exists(rel, ForkNumber::Main));
+    if !exists {
         return Ok(Vec::new());
     }
     scan_catalog_relation_visible(

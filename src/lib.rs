@@ -2,6 +2,8 @@ pub mod backend;
 pub mod include;
 pub mod pgrust;
 pub mod pl;
+#[cfg(target_arch = "wasm32")]
+pub mod wasm;
 
 pub use backend::executor;
 pub use backend::parser;

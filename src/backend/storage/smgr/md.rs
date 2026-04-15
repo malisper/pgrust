@@ -295,6 +295,29 @@ impl MdStorageManager {
     }
 }
 
+#[cfg(unix)]
+fn file_read_at(file: &mut File, buf: &mut [u8], byte_offset: u64) -> io::Result<usize> {
+    file.read_at(buf, byte_offset)
+}
+
+#[cfg(not(unix))]
+fn file_read_at(file: &mut File, buf: &mut [u8], byte_offset: u64) -> io::Result<usize> {
+    use std::io::Read as _;
+    file.seek(SeekFrom::Start(byte_offset))?;
+    file.read(buf)
+}
+
+#[cfg(unix)]
+fn file_write_at(file: &mut File, data: &[u8], byte_offset: u64) -> io::Result<usize> {
+    file.write_at(data, byte_offset)
+}
+
+#[cfg(not(unix))]
+fn file_write_at(file: &mut File, data: &[u8], byte_offset: u64) -> io::Result<usize> {
+    file.seek(SeekFrom::Start(byte_offset))?;
+    file.write(data)
+}
+
 impl StorageManager for MdStorageManager {
     fn open(&mut self, rel: RelFileLocator) -> Result<(), SmgrError> {
         if self.opened_rels.contains(&rel) {
@@ -407,7 +430,7 @@ impl StorageManager for MdStorageManager {
         let byte_offset = seg_offset as u64 * BLCKSZ as u64;
 
         let seg = self.get_seg(rel, fork, segno)?;
-        let n = seg.file.read_at(buf, byte_offset)?;
+        let n = file_read_at(&mut seg.file, buf, byte_offset)?;
         if n != BLCKSZ {
             return Err(SmgrError::BlockOutOfRange { rel, fork, block });
         }
@@ -431,7 +454,7 @@ impl StorageManager for MdStorageManager {
         let byte_offset = seg_offset as u64 * BLCKSZ as u64;
 
         let seg = self.get_seg(rel, fork, segno)?;
-        let n = seg.file.write_at(data, byte_offset)?;
+        let n = file_write_at(&mut seg.file, data, byte_offset)?;
         if n != BLCKSZ {
             return Err(SmgrError::ShortIo {
                 expected: BLCKSZ,
