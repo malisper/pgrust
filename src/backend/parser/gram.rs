@@ -1065,7 +1065,7 @@ fn build_table_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, ParseErro
         .ok_or(ParseError::UnexpectedEof)?;
     Ok(SelectStatement {
         with: Vec::new(),
-        from: Some(FromItem::Table { name }),
+        from: Some(FromItem::Table { name, only: false }),
         targets: vec![SelectItem {
             expr: SqlExpr::Column("*".into()),
             output_name: "*".into(),
@@ -1782,7 +1782,8 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
             let mut column_aliases = AliasColumnSpec::None;
             for part in pair.into_inner() {
                 match part.as_rule() {
-                    Rule::table_from_item
+                    Rule::only_table_from_item
+                    | Rule::table_from_item
                     | Rule::lateral_from_item
                     | Rule::values_from_item
                     | Rule::parenthesized_table_from_item
@@ -1810,12 +1811,21 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
                 Ok(item)
             }
         }
+        Rule::only_table_from_item => Ok(FromItem::Table {
+            name: build_identifier(
+                pair.into_inner()
+                    .find(|part| part.as_rule() == Rule::identifier)
+                    .ok_or(ParseError::UnexpectedEof)?,
+            ),
+            only: true,
+        }),
         Rule::table_from_item | Rule::parenthesized_table_from_item => Ok(FromItem::Table {
             name: build_identifier(
                 pair.into_inner()
                     .find(|part| part.as_rule() == Rule::identifier)
                     .ok_or(ParseError::UnexpectedEof)?,
             ),
+            only: false,
         }),
         Rule::values_from_item => Ok(FromItem::Values {
             rows: pair
@@ -2021,6 +2031,7 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
     let mut persistence = TablePersistence::Permanent;
     let mut on_commit = OnCommitAction::PreserveRows;
     let mut elements = Vec::new();
+    let mut inherits = Vec::new();
     let mut ctas_columns = Vec::new();
     let mut query = None;
     let mut is_ctas = false;
@@ -2065,11 +2076,23 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
                     }
                 }
             }
+            Rule::inherits_clause => {
+                inherits = part
+                    .into_inner()
+                    .find(|inner| inner.as_rule() == Rule::ident_list)
+                    .map(|inner| inner.into_inner().map(build_identifier).collect())
+                    .unwrap_or_default();
+            }
             Rule::table_storage_clause => validate_table_storage_clause(part)?,
             _ => {}
         }
     }
     let (schema_name, table_name) = relation_name.ok_or(ParseError::UnexpectedEof)?;
+    if is_ctas && !inherits.is_empty() {
+        return Err(ParseError::FeatureNotSupported(
+            "CREATE TABLE AS ... INHERITS".into(),
+        ));
+    }
     if is_ctas {
         Ok(Statement::CreateTableAs(CreateTableAsStatement {
             schema_name,
@@ -2087,6 +2110,7 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
             persistence,
             on_commit,
             elements,
+            inherits,
             if_not_exists,
         }))
     }

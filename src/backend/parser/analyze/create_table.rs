@@ -15,6 +15,7 @@ pub struct LoweredCreateTable {
     pub not_null_actions: Vec<NotNullConstraintAction>,
     pub check_actions: Vec<CheckConstraintAction>,
     pub constraint_actions: Vec<IndexBackedConstraintAction>,
+    pub parent_oids: Vec<u32>,
 }
 
 pub fn create_relation_desc(
@@ -87,6 +88,7 @@ pub fn lower_create_table(
         not_null_actions: normalized.not_nulls,
         check_actions: normalized.checks,
         constraint_actions,
+        parent_oids: Vec::new(),
     })
 }
 
@@ -111,6 +113,7 @@ mod tests {
                 default_expr: None,
                 constraints: vec![],
             })],
+            inherits: Vec::new(),
             if_not_exists: false,
         };
 
@@ -152,6 +155,7 @@ mod tests {
                     }],
                 }),
             ],
+            inherits: Vec::new(),
             if_not_exists: false,
         };
 

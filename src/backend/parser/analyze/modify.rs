@@ -314,6 +314,11 @@ pub fn bind_update(
 ) -> Result<BoundUpdateStatement, ParseError> {
     let local_ctes = bind_ctes(&stmt.with, catalog, &[], None, &[], &[])?;
     let entry = lookup_relation(catalog, &stmt.table_name)?;
+    if catalog.has_subclass(entry.relation_oid) {
+        return Err(ParseError::FeatureNotSupported(
+            "UPDATE on inherited parents is not supported yet".into(),
+        ));
+    }
     let scope = scope_for_relation(Some(&stmt.table_name), &entry.desc);
     let indexes = catalog.index_relations_for_heap(entry.relation_oid);
     let predicate = stmt
@@ -413,6 +418,11 @@ pub fn bind_delete(
 ) -> Result<BoundDeleteStatement, ParseError> {
     let local_ctes = bind_ctes(&stmt.with, catalog, &[], None, &[], &[])?;
     let entry = lookup_relation(catalog, &stmt.table_name)?;
+    if catalog.has_subclass(entry.relation_oid) {
+        return Err(ParseError::FeatureNotSupported(
+            "DELETE on inherited parents is not supported yet".into(),
+        ));
+    }
     let scope = scope_for_relation(Some(&stmt.table_name), &entry.desc);
     let predicate = stmt
         .where_clause

@@ -2,6 +2,7 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 
 mod bestpath;
+mod inherit;
 mod joininfo;
 mod pathnodes;
 mod root;
@@ -28,8 +29,9 @@ use crate::include::nodes::primnodes::{
 use pathnodes::{
     aggregate_output_vars, expr_sql_type, lower_agg_output_expr, next_synthetic_slot_id,
     rewrite_expr_against_layout, rewrite_project_set_target_against_layout,
-    rewrite_semantic_expr_for_input_path,
+    rewrite_semantic_expr_for_input_path, is_synthetic_slot_id,
 };
+use inherit::{append_child_rtindexes, append_translation, expand_inherited_rtentries};
 
 const DEFAULT_EQ_SEL: f64 = 0.005;
 const DEFAULT_INEQ_SEL: f64 = 1.0 / 3.0;
@@ -430,6 +432,7 @@ fn expr_relids(expr: &Expr) -> Vec<usize> {
 #[derive(Debug, Clone)]
 struct JoinBuildSpec {
     kind: JoinType,
+    reversed: bool,
     rtindex: Option<usize>,
     explicit_qual: Option<Expr>,
 }
@@ -801,6 +804,15 @@ fn projection_slot_var(slot_id: usize, attno: usize, vartype: SqlType) -> Expr {
     })
 }
 
+fn projection_is_passthrough_boundary(input: &Path, targets: &[TargetEntry]) -> bool {
+    let input_layout = input.output_vars();
+    targets.len() == input_layout.len()
+        && targets
+            .iter()
+            .zip(input_layout.iter())
+            .all(|(target, expr)| target.expr == *expr)
+}
+
 fn projection_target_semantic_expr(target: &TargetEntry, input_layout: &[Expr]) -> Expr {
     rewrite_expr_against_layout(target.expr.clone(), input_layout)
 }
@@ -815,7 +827,20 @@ fn projection_target_index_for_semantic_expr(
     })
 }
 
+fn projection_target_matches_expr(target_expr: &Expr, candidate: &Expr) -> bool {
+    if target_expr == candidate {
+        return true;
+    }
+    matches!(
+        target_expr,
+        Expr::Coalesce(left, right) if left.as_ref() == candidate || right.as_ref() == candidate
+    )
+}
+
 fn rewrite_expr_for_path(expr: Expr, path: &Path, layout: &[Expr]) -> Expr {
+    if layout.contains(&expr) {
+        return expr;
+    }
     match path {
         Path::Projection {
             slot_id,
@@ -824,14 +849,28 @@ fn rewrite_expr_for_path(expr: Expr, path: &Path, layout: &[Expr]) -> Expr {
             ..
         } => {
             let input_layout = input.output_vars();
+            let passthrough_boundary = projection_is_passthrough_boundary(input, targets);
             if let Some(index) =
                 projection_target_index_for_semantic_expr(targets, &input_layout, &expr)
             {
                 let target = &targets[index];
                 projection_slot_var(*slot_id, index + 1, target.sql_type)
             } else {
-                let rewritten_input_expr =
-                    rewrite_expr_for_path(expr.clone(), input, &input_layout);
+                // :HACK: Identity projections on synthetic slots are planner-only boundaries.
+                // Map semantic input Vars onto the synthetic output slot by ordinal there, but
+                // do not chase real parse-time rtindex Vars back through normalization layers.
+                let rewritten_input_expr = rewrite_expr_for_path(expr.clone(), input, &input_layout);
+                if passthrough_boundary
+                    && is_synthetic_slot_id(*slot_id)
+                    && let Some(index) = input_layout
+                        .iter()
+                        .position(|candidate| *candidate == rewritten_input_expr)
+                {
+                    return projection_slot_var(*slot_id, index + 1, targets[index].sql_type);
+                }
+                if matches!(expr, Expr::Column(_)) && passthrough_boundary {
+                    return rewrite_expr_against_layout(expr, layout);
+                }
                 if let Some(index) = projection_target_index_for_semantic_expr(
                     targets,
                     &input_layout,
@@ -849,13 +888,19 @@ fn rewrite_expr_for_path(expr: Expr, path: &Path, layout: &[Expr]) -> Expr {
         }
         Path::NestedLoopJoin { left, right, .. } => {
             let left_layout = left.output_vars();
-            let rewritten_left = rewrite_expr_for_path(expr.clone(), left, &left_layout);
-            if rewritten_left != expr || left_layout.contains(&expr) {
-                return rewritten_left;
+            if left_layout.contains(&expr) {
+                return rewrite_expr_for_path(expr, left, &left_layout);
             }
             let right_layout = right.output_vars();
+            if right_layout.contains(&expr) {
+                return rewrite_expr_for_path(expr, right, &right_layout);
+            }
+            let rewritten_left = rewrite_expr_for_path(expr.clone(), left, &left_layout);
+            if rewritten_left != expr {
+                return rewritten_left;
+            }
             let rewritten_right = rewrite_expr_for_path(expr.clone(), right, &right_layout);
-            if rewritten_right != expr || right_layout.contains(&expr) {
+            if rewritten_right != expr {
                 return rewritten_right;
             }
             rewrite_expr_against_layout(expr, layout)
@@ -1055,10 +1100,206 @@ fn aggregate_group_by(path: &Path) -> Option<&[Expr]> {
     }
 }
 
+fn collect_relation_access_paths(
+    rtindex: usize,
+    heap_rel: RelFileLocator,
+    relation_oid: u32,
+    toast: Option<ToastRelationRef>,
+    desc: RelationDesc,
+    filter: Option<Expr>,
+    query_order_items: Option<Vec<OrderByEntry>>,
+    catalog: &dyn CatalogLookup,
+) -> Vec<Path> {
+    let stats = relation_stats(catalog, relation_oid, &desc);
+    let mut paths = vec![
+        estimate_seqscan_candidate(
+            rtindex,
+            heap_rel,
+            relation_oid,
+            toast,
+            desc.clone(),
+            &stats,
+            filter.clone(),
+            None,
+        )
+        .plan,
+    ];
+    if let Some(order_items) = query_order_items.clone() {
+        paths.push(
+            estimate_seqscan_candidate(
+                rtindex,
+                heap_rel,
+                relation_oid,
+                toast,
+                desc.clone(),
+                &stats,
+                filter.clone(),
+                Some(order_items),
+            )
+            .plan,
+        );
+    }
+    for index in catalog
+        .index_relations_for_heap(relation_oid)
+        .iter()
+        .filter(|index| {
+            index.index_meta.indisvalid
+                && index.index_meta.indisready
+                && !index.index_meta.indkey.is_empty()
+                && index.index_meta.am_oid == BTREE_AM_OID
+        })
+    {
+        let Some(spec) = build_index_path_spec(filter.as_ref(), None, index) else {
+            continue;
+        };
+        paths.push(
+            estimate_index_candidate(
+                rtindex,
+                heap_rel,
+                toast,
+                desc.clone(),
+                &stats,
+                spec,
+                None,
+                catalog,
+            )
+            .plan,
+        );
+        if let Some(order_items) = query_order_items.as_ref()
+            && let Some(spec) = build_index_path_spec(filter.as_ref(), Some(order_items), index)
+        {
+            paths.push(
+                estimate_index_candidate(
+                    rtindex,
+                    heap_rel,
+                    toast,
+                    desc.clone(),
+                    &stats,
+                    spec,
+                    Some(order_items.clone()),
+                    catalog,
+                )
+                .plan,
+            );
+        }
+    }
+    paths
+}
+
+fn cheapest_relation_access_path(
+    rtindex: usize,
+    heap_rel: RelFileLocator,
+    relation_oid: u32,
+    toast: Option<ToastRelationRef>,
+    desc: RelationDesc,
+    filter: Option<Expr>,
+    catalog: &dyn CatalogLookup,
+) -> Path {
+    collect_relation_access_paths(
+        rtindex,
+        heap_rel,
+        relation_oid,
+        toast,
+        desc,
+        filter,
+        None,
+        catalog,
+    )
+    .into_iter()
+    .min_by(|left, right| {
+        left.plan_info()
+            .total_cost
+            .as_f64()
+            .partial_cmp(&right.plan_info().total_cost.as_f64())
+            .unwrap_or(Ordering::Equal)
+    })
+    .unwrap_or(Path::Result {
+        plan_info: PlanEstimate::default(),
+    })
+}
+
 fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn CatalogLookup) {
     let Some(rte) = root.parse.rtable.get(rtindex.saturating_sub(1)).cloned() else {
         return;
     };
+    if root
+        .simple_rel_array
+        .get(rtindex)
+        .and_then(Option::as_ref)
+        .is_some_and(|rel| !rel.pathlist.is_empty())
+    {
+        return;
+    }
+    let child_rtindexes = append_child_rtindexes(root, rtindex);
+    if !child_rtindexes.is_empty()
+        && let RangeTblEntryKind::Relation {
+            rel: heap_rel,
+            relation_oid,
+            relkind: _,
+            toast,
+        } = rte.kind.clone()
+    {
+        let filter = root
+            .simple_rel_array
+            .get(rtindex)
+            .and_then(Option::as_ref)
+            .and_then(base_filter_expr);
+        let mut children = vec![normalize_rte_path(
+            rtindex,
+            &rte.desc,
+            cheapest_relation_access_path(
+                rtindex,
+                heap_rel,
+                relation_oid,
+                toast,
+                rte.desc.clone(),
+                filter,
+                catalog,
+            ),
+            catalog,
+        )];
+        for child_rtindex in child_rtindexes {
+            set_base_rel_pathlist(root, child_rtindex, catalog);
+            let Some(child_path) = root
+                .simple_rel_array
+                .get(child_rtindex)
+                .and_then(Option::as_ref)
+                .and_then(|rel| rel.cheapest_total_path())
+                .cloned()
+            else {
+                continue;
+            };
+            let translated_vars = append_translation(root, child_rtindex)
+                .map(|info| info.translated_vars.clone())
+                .unwrap_or_default();
+            children.push(project_to_slot_layout(
+                rtindex,
+                &rte.desc,
+                child_path,
+                translated_vars,
+                catalog,
+            ));
+        }
+        let append = optimize_path(
+            Path::Append {
+                plan_info: PlanEstimate::default(),
+                source_id: rtindex,
+                desc: rte.desc.clone(),
+                children,
+            },
+            catalog,
+        );
+        let Some(rel) = root
+            .simple_rel_array
+            .get_mut(rtindex)
+            .and_then(Option::as_mut)
+        else {
+            return;
+        };
+        rel.add_path(append);
+        bestpath::set_cheapest(rel);
+        return;
+    }
     let query_order_items = query_order_items_for_base_rel(root, rtindex);
     let Some(rel) = root
         .simple_rel_array
@@ -1067,9 +1308,6 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
     else {
         return;
     };
-    if !rel.pathlist.is_empty() {
-        return;
-    }
 
     match rte.kind {
         RangeTblEntryKind::Result => rel.add_path(optimize_path(
@@ -1083,83 +1321,16 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
             relation_oid,
             relkind: _,
             toast,
-        } => {
-            let filter = base_filter_expr(rel);
-            let stats = relation_stats(catalog, relation_oid, &rte.desc);
-            rel.add_path(
-                estimate_seqscan_candidate(
-                    rtindex,
-                    heap_rel,
-                    relation_oid,
-                    toast,
-                    rte.desc.clone(),
-                    &stats,
-                    filter.clone(),
-                    None,
-                )
-                .plan,
-            );
-            if let Some(order_items) = query_order_items.clone() {
-                rel.add_path(
-                    estimate_seqscan_candidate(
-                        rtindex,
-                        heap_rel,
-                        relation_oid,
-                        toast,
-                        rte.desc.clone(),
-                        &stats,
-                        filter.clone(),
-                        Some(order_items),
-                    )
-                    .plan,
-                );
-            }
-            for index in catalog
-                .index_relations_for_heap(relation_oid)
-                .iter()
-                .filter(|index| {
-                    index.index_meta.indisvalid
-                        && index.index_meta.indisready
-                        && !index.index_meta.indkey.is_empty()
-                        && index.index_meta.am_oid == BTREE_AM_OID
-                })
-            {
-                let Some(spec) = build_index_path_spec(filter.as_ref(), None, index) else {
-                    continue;
-                };
-                rel.add_path(
-                    estimate_index_candidate(
-                        rtindex,
-                        heap_rel,
-                        toast,
-                        rte.desc.clone(),
-                        &stats,
-                        spec,
-                        None,
-                        catalog,
-                    )
-                    .plan,
-                );
-                if let Some(order_items) = query_order_items.as_ref()
-                    && let Some(spec) =
-                        build_index_path_spec(filter.as_ref(), Some(order_items), index)
-                {
-                    rel.add_path(
-                        estimate_index_candidate(
-                            rtindex,
-                            heap_rel,
-                            toast,
-                            rte.desc.clone(),
-                            &stats,
-                            spec,
-                            Some(order_items.clone()),
-                            catalog,
-                        )
-                        .plan,
-                    );
-                }
-            }
-        }
+        } => rel.pathlist.extend(collect_relation_access_paths(
+            rtindex,
+            heap_rel,
+            relation_oid,
+            toast,
+            rte.desc.clone(),
+            base_filter_expr(rel),
+            query_order_items,
+            catalog,
+        )),
         RangeTblEntryKind::Values {
             rows,
             output_columns,
@@ -1298,7 +1469,20 @@ fn maybe_project_join_alias(
     let alias_target_exprs = joinaliasvars
         .iter()
         .cloned()
-        .map(|expr| rewrite_semantic_expr_for_path_or_expand_join_vars(root, expr, &input, &layout))
+        .map(|expr| {
+            let original_expr = expr.clone();
+            let rewritten = rewrite_semantic_expr_for_path(original_expr.clone(), &input, &layout);
+            if rewritten == original_expr && !layout.contains(&rewritten) {
+                let expanded = expand_join_rte_vars(root, original_expr.clone());
+                if expanded != original_expr {
+                    rewrite_semantic_expr_for_path(expanded, &input, &layout)
+                } else {
+                    rewritten
+                }
+            } else {
+                rewritten
+            }
+        })
         .collect::<Vec<_>>();
     let extra_exprs = reltarget
         .exprs
@@ -1397,7 +1581,10 @@ fn base_rels_at_level(root: &PlannerInfo, level: usize) -> Vec<RelOptInfo> {
         root.simple_rel_array
             .iter()
             .skip(1)
-            .filter_map(|rel| rel.clone())
+            .filter_map(|rel| {
+                rel.clone()
+                    .filter(|rel| rel.reloptkind != RelOptKind::OtherMemberRel)
+            })
             .collect()
     } else {
         root.join_rel_list
@@ -1432,6 +1619,7 @@ fn join_spec_for_special_join(sjinfo: &SpecialJoinInfo, reversed: bool) -> JoinB
         } else {
             sjinfo.jointype
         },
+        reversed,
         rtindex: Some(sjinfo.rtindex),
         explicit_qual: Some(sjinfo.join_quals.clone()),
     }
@@ -1582,6 +1770,7 @@ fn join_is_legal(
 
     Some(JoinBuildSpec {
         kind: JoinType::Inner,
+        reversed: false,
         rtindex: None,
         explicit_qual: None,
     })
@@ -1618,6 +1807,7 @@ fn make_join_rel(
         }
     };
     let mut candidate_paths = Vec::new();
+    let output_rtindex = spec.rtindex.or_else(|| exact_join_rtindex(root, &relids));
     for left_path in &left_rel.pathlist {
         for right_path in &right_rel.pathlist {
             let path = choose_join_plan_with_root(
@@ -1627,6 +1817,21 @@ fn make_join_rel(
                 spec.kind,
                 join_qual.clone(),
             );
+            let path = if spec.reversed {
+                restore_join_output_order(
+                    path,
+                    &right_path.columns(),
+                    &left_path.columns(),
+                    &right_path.output_vars(),
+                    &left_path.output_vars(),
+                )
+            } else {
+                path
+            };
+            let path = match output_rtindex {
+                Some(rtindex) => maybe_project_join_alias(rtindex, path, root, &reltarget, catalog),
+                None => path,
+            };
             candidate_paths.push(path);
         }
     }
@@ -1671,6 +1876,7 @@ fn join_search_one_level(root: &mut PlannerInfo, level: usize, catalog: &dyn Cat
 
 fn make_one_rel(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) -> RelOptInfo {
     assign_base_restrictinfo(root);
+    expand_inherited_rtentries(root, catalog);
     root.inner_join_clauses = collect_inner_join_clauses(root);
     set_base_rel_pathlists(root, catalog);
     let query_relids = root.all_query_relids();
@@ -2580,6 +2786,18 @@ fn rebase_agg_accum_subplan_ids(accum: AggAccum, base: usize) -> AggAccum {
 fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
     match plan {
         Plan::Result { .. } | Plan::SeqScan { .. } | Plan::IndexScan { .. } => plan,
+        Plan::Append {
+            plan_info,
+            desc,
+            children,
+        } => Plan::Append {
+            plan_info,
+            desc,
+            children: children
+                .into_iter()
+                .map(|child| rebase_plan_subplan_ids(child, base))
+                .collect(),
+        },
         Plan::Hash {
             plan_info,
             input,
@@ -2760,6 +2978,18 @@ pub(crate) fn finalize_plan_subqueries(
 ) -> Plan {
     match plan {
         Plan::Result { .. } | Plan::SeqScan { .. } | Plan::IndexScan { .. } => plan,
+        Plan::Append {
+            plan_info,
+            desc,
+            children,
+        } => Plan::Append {
+            plan_info,
+            desc,
+            children: children
+                .into_iter()
+                .map(|child| finalize_plan_subqueries(child, catalog, subplans))
+                .collect(),
+        },
         Plan::Hash {
             plan_info,
             input,
@@ -2951,6 +3181,42 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
             Path::Result { .. } => Path::Result {
                 plan_info: PlanEstimate::new(0.0, 0.0, 1.0, 0),
             },
+            Path::Append {
+                source_id,
+                desc,
+                children,
+                ..
+            } => {
+                let children = children
+                    .into_iter()
+                    .map(|child| optimize_path(child, catalog))
+                    .collect::<Vec<_>>();
+                let startup_cost = children
+                    .iter()
+                    .map(|child| child.plan_info().startup_cost.as_f64())
+                    .fold(0.0, f64::max);
+                let total_cost = children
+                    .iter()
+                    .map(|child| child.plan_info().total_cost.as_f64())
+                    .sum::<f64>();
+                let rows = clamp_rows(
+                    children
+                        .iter()
+                        .map(|child| child.plan_info().plan_rows.as_f64())
+                        .sum::<f64>(),
+                );
+                let width = desc
+                    .columns
+                    .iter()
+                    .map(|column| estimate_sql_type_width(column.sql_type))
+                    .sum();
+                Path::Append {
+                    plan_info: PlanEstimate::new(startup_cost, total_cost, rows, width),
+                    source_id,
+                    desc,
+                    children,
+                }
+            }
             Path::SeqScan {
                 source_id,
                 rel,
@@ -3369,6 +3635,7 @@ fn relation_stats(
     let stats = catalog
         .statistic_rows_for_relation(relation_oid)
         .into_iter()
+        .filter(|row| !row.stainherit)
         .map(|row| (row.staattnum, row))
         .collect::<HashMap<_, _>>();
     RelationStats {
@@ -3639,6 +3906,12 @@ fn rewrite_semantic_expr_for_join_inputs(
     }
     let left_layout = left.output_vars();
     let right_layout = right.output_vars();
+    if left_layout.contains(&original) {
+        return rewrite_expr_for_path(original, left, &left_layout);
+    }
+    if right_layout.contains(&original) {
+        return rewrite_expr_for_path(original, right, &right_layout);
+    }
     if matches!(original, Expr::Var(_) | Expr::Column(_)) {
         let rewritten_left = rewrite_join_input_expr(root, original.clone(), left, &left_layout);
         if rewritten_left != original || left_layout.contains(&original) {
@@ -3911,6 +4184,12 @@ fn rewrite_semantic_expr_for_join_inputs(
     };
     if let Some(candidate) = layout_candidate_for_join_expr(root, &rebuilt, join_layout) {
         return candidate;
+    }
+    if left_layout.contains(&rebuilt) {
+        return rewrite_expr_for_path(rebuilt, left, &left_layout);
+    }
+    if right_layout.contains(&rebuilt) {
+        return rewrite_expr_for_path(rebuilt, right, &right_layout);
     }
     if matches!(rebuilt, Expr::Var(_) | Expr::Column(_)) {
         let rewritten_left = rewrite_join_input_expr(root, rebuilt.clone(), left, &left_layout);

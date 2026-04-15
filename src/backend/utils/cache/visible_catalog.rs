@@ -8,6 +8,7 @@ use crate::include::catalog::{
     PgRewriteRow, PgStatisticRow, PgTypeRow, PgLanguageRow, bootstrap_pg_cast_rows,
     bootstrap_pg_language_rows, bootstrap_pg_operator_rows, bootstrap_pg_proc_rows,
     builtin_type_rows,
+    PgInheritsRow,
 };
 
 #[derive(Debug, Clone)]
@@ -85,6 +86,12 @@ impl CatalogLookup for VisibleCatalog {
 
     fn constraint_rows_for_relation(&self, relation_oid: u32) -> Vec<PgConstraintRow> {
         VisibleCatalog::constraint_rows_for_relation(self, relation_oid)
+    }
+
+    fn relation_by_oid(&self, relation_oid: u32) -> Option<BoundRelation> {
+        self.relcache
+            .get_by_oid(relation_oid)
+            .map(|entry| bound_relation_from_relcache_entry(&self.relcache, entry))
     }
 
     fn proc_rows_by_name(&self, name: &str) -> Vec<PgProcRow> {
@@ -192,6 +199,32 @@ impl CatalogLookup for VisibleCatalog {
             .and_then(|catcache| catcache.class_by_oid(relation_oid).cloned())
     }
 
+    fn inheritance_parents(&self, relation_oid: u32) -> Vec<PgInheritsRow> {
+        self.catcache
+            .as_ref()
+            .map(|catcache| {
+                catcache
+                    .inherit_rows()
+                    .into_iter()
+                    .filter(|row| row.inhrelid == relation_oid)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn inheritance_children(&self, relation_oid: u32) -> Vec<PgInheritsRow> {
+        self.catcache
+            .as_ref()
+            .map(|catcache| {
+                catcache
+                    .inherit_rows()
+                    .into_iter()
+                    .filter(|row| row.inhparent == relation_oid)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     fn statistic_rows_for_relation(&self, relation_oid: u32) -> Vec<PgStatisticRow> {
         self.catcache
             .as_ref()
@@ -297,6 +330,7 @@ mod tests {
             base.attribute_rows(),
             base.attrdef_rows(),
             base.depend_rows(),
+            base.inherit_rows(),
             base.index_rows(),
             base.rewrite_rows(),
             base.am_rows(),

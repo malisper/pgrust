@@ -2,7 +2,8 @@ use super::{
     pg_am_desc, pg_amop_desc, pg_amproc_desc, pg_attrdef_desc, pg_auth_members_desc,
     pg_authid_desc, pg_cast_desc, pg_class_desc, pg_collation_desc, pg_constraint_desc,
     pg_database_desc, pg_depend_desc, pg_index_desc, pg_language_desc, pg_namespace_desc,
-    pg_opclass_desc, pg_operator_desc, pg_opfamily_desc, pg_proc_desc, pg_rewrite_desc,
+    pg_inherits_desc, pg_opclass_desc, pg_operator_desc, pg_opfamily_desc, pg_proc_desc,
+    pg_rewrite_desc,
     pg_tablespace_desc, pg_type_desc,
 };
 use crate::backend::catalog::catalog::column_desc;
@@ -34,7 +35,7 @@ use crate::include::catalog::{
     TIMESTAMP_TYPE_OID, TIMESTAMPTZ_ARRAY_TYPE_OID, TIMESTAMPTZ_TYPE_OID, TIMETZ_ARRAY_TYPE_OID,
     TIMETZ_TYPE_OID, TSQUERY_ARRAY_TYPE_OID, TSQUERY_TYPE_OID, TSVECTOR_ARRAY_TYPE_OID,
     TSVECTOR_TYPE_OID, VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID,
-    VARCHAR_TYPE_OID,
+    VARCHAR_TYPE_OID, PG_INHERITS_RELATION_OID,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +52,8 @@ pub struct PgAttributeRow {
     pub attstorage: AttributeStorage,
     pub attcompression: AttributeCompression,
     pub attstattarget: i16,
+    pub attinhcount: i16,
+    pub attislocal: bool,
     pub sql_type: SqlType,
 }
 
@@ -73,6 +76,8 @@ pub fn pg_attribute_desc() -> RelationDesc {
                 false,
             ),
             column_desc("attstattarget", SqlType::new(SqlTypeKind::Int2), false),
+            column_desc("attinhcount", SqlType::new(SqlTypeKind::Int2), false),
+            column_desc("attislocal", SqlType::new(SqlTypeKind::Bool), false),
         ],
     }
 }
@@ -157,6 +162,10 @@ pub fn bootstrap_pg_attribute_rows() -> Vec<PgAttributeRow> {
         &pg_index_desc(),
     ));
     rows.extend(attribute_rows_for_desc(
+        PG_INHERITS_RELATION_OID,
+        &pg_inherits_desc(),
+    ));
+    rows.extend(attribute_rows_for_desc(
         PG_REWRITE_RELATION_OID,
         &pg_rewrite_desc(),
     ));
@@ -188,6 +197,8 @@ fn attribute_rows_for_desc(relid: u32, desc: &RelationDesc) -> Vec<PgAttributeRo
             attstorage: column.storage.attstorage,
             attcompression: column.storage.attcompression,
             attstattarget: column.attstattarget,
+            attinhcount: column.attinhcount,
+            attislocal: column.attislocal,
             sql_type: column.sql_type,
         })
         .collect()
@@ -314,6 +325,7 @@ mod tests {
             pg_constraint_desc().columns.len(),
             pg_depend_desc().columns.len(),
             pg_index_desc().columns.len(),
+            pg_inherits_desc().columns.len(),
             pg_rewrite_desc().columns.len(),
             pg_opclass_desc().columns.len(),
             pg_opfamily_desc().columns.len(),

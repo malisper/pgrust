@@ -50,6 +50,8 @@ fn ddl_executor_context(
         outer_rows: Vec::new(),
         subplans: Vec::new(),
         timed: false,
+        catalog: None,
+        compiled_functions: std::collections::HashMap::new(),
     })
 }
 
