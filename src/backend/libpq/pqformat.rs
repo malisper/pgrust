@@ -48,6 +48,19 @@ pub(crate) fn format_exec_error(e: &ExecError) -> String {
         ExecError::UniqueViolation { constraint } => {
             format!("duplicate key value violates unique constraint \"{constraint}\"")
         }
+        ExecError::NotNullViolation {
+            relation,
+            column,
+            constraint,
+        } => format!(
+            "null value in column \"{column}\" of relation \"{relation}\" violates not-null constraint \"{constraint}\""
+        ),
+        ExecError::CheckViolation {
+            relation,
+            constraint,
+        } => format!(
+            "new row for relation \"{relation}\" violates check constraint \"{constraint}\""
+        ),
         ExecError::StringDataRightTruncation { ty } => format!("value too long for type {ty}"),
         ExecError::ArrayInput { message, .. } => message.clone(),
         ExecError::InvalidIntegerInput { ty, value } => {

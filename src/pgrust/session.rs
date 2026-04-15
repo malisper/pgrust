@@ -1465,7 +1465,7 @@ impl Session {
             };
 
             let catalog = self.catalog_lookup_for_command(db, xid, cid);
-            let (rel, toast, toast_index, desc, indexes) = {
+            let (relation_oid, rel, toast, toast_index, desc, indexes) = {
                 let entry = catalog.lookup_any_relation(table_name).ok_or_else(|| {
                     ExecError::Parse(ParseError::UnknownTable(table_name.to_string()))
                 })?;
@@ -1476,6 +1476,7 @@ impl Session {
                         .next()
                 });
                 (
+                    entry.relation_oid,
                     entry.rel,
                     entry.toast,
                     toast_index,
@@ -1624,11 +1625,19 @@ impl Session {
                 outer_rows: Vec::new(),
                 subplans: Vec::new(),
             };
+            let relation_constraints = crate::backend::parser::bind_relation_constraints(
+                None,
+                relation_oid,
+                &desc,
+                &self.catalog_lookup(db),
+            )?;
             crate::backend::commands::tablecmds::execute_insert_values(
+                table_name,
                 rel,
                 toast,
                 toast_index.as_ref(),
                 &desc,
+                &relation_constraints,
                 &indexes,
                 &parsed_rows,
                 &mut ctx,
