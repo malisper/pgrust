@@ -463,7 +463,12 @@ fn run_statement(
         | Statement::Reset(_)
         | Statement::CopyFrom(_)
         | Statement::AlterTableSet(_)
-        | Statement::AlterTableAddColumn(_) => Ok(StatementResult::AffectedRows(0)),
+        | Statement::AlterTableAddColumn(_)
+        | Statement::AlterTableAddConstraint(_)
+        | Statement::AlterTableDropConstraint(_)
+        | Statement::AlterTableSetNotNull(_)
+        | Statement::AlterTableDropNotNull(_)
+        | Statement::AlterTableValidateConstraint(_) => Ok(StatementResult::AffectedRows(0)),
         Statement::CommentOnRole(_)
         | Statement::CreateRole(_)
         | Statement::AlterRole(_)

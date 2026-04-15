@@ -43,7 +43,7 @@ pub fn lower_create_table(
     let mut primary_declared = false;
 
     for column in &columns {
-        if column.primary_key {
+        if column.primary_key() {
             if primary_declared {
                 return Err(ParseError::UnexpectedToken {
                     expected: "at most one PRIMARY KEY",
@@ -57,7 +57,7 @@ pub fn lower_create_table(
                 primary: true,
             });
         }
-        if column.unique {
+        if column.unique() {
             constraint_actions.push(IndexBackedConstraintAction {
                 constraint_name: None,
                 columns: vec![column.name.clone()],
@@ -89,6 +89,11 @@ pub fn lower_create_table(
                     columns,
                     primary: false,
                 });
+            }
+            TableConstraint::NotNull { .. } | TableConstraint::Check { .. } => {
+                return Err(ParseError::FeatureNotSupported(
+                    "CHECK and table-level NOT NULL constraints".into(),
+                ));
             }
         }
     }
@@ -130,8 +135,8 @@ pub fn lower_create_table(
                 if sql_type.kind == SqlTypeKind::AnyArray {
                     return Err(ParseError::UnsupportedType("anyarray".into()));
                 }
-                let nullable =
-                    column.nullable && !primary_columns.contains(&column.name.to_ascii_lowercase());
+                let nullable = column.nullable()
+                    && !primary_columns.contains(&column.name.to_ascii_lowercase());
                 let mut desc = column_desc(column.name.clone(), sql_type, nullable);
                 desc.default_expr = column.default_expr.clone();
                 desc.missing_default_value = column
@@ -155,7 +160,14 @@ fn validate_constraint_columns(
     column_lookup: &BTreeMap<String, usize>,
 ) -> Result<Vec<String>, ParseError> {
     let referenced = match constraint {
-        TableConstraint::PrimaryKey { columns } | TableConstraint::Unique { columns } => columns,
+        TableConstraint::PrimaryKey { columns, .. } | TableConstraint::Unique { columns, .. } => {
+            columns
+        }
+        TableConstraint::NotNull { .. } | TableConstraint::Check { .. } => {
+            return Err(ParseError::FeatureNotSupported(
+                "CHECK and table-level NOT NULL constraints".into(),
+            ));
+        }
     };
     let mut seen = BTreeSet::new();
     let mut resolved = Vec::with_capacity(referenced.len());
@@ -193,9 +205,7 @@ mod tests {
                 name: "a".into(),
                 ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::AnyArray)),
                 default_expr: None,
-                nullable: true,
-                primary_key: false,
-                unique: false,
+                constraints: vec![],
             })],
             if_not_exists: false,
         };

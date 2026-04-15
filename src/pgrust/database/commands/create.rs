@@ -362,10 +362,8 @@ impl Database {
                                     ty: crate::backend::parser::RawTypeName::Builtin(
                                         column.sql_type,
                                     ),
-                                    nullable: true,
                                     default_expr: None,
-                                    primary_key: false,
-                                    unique: false,
+                                    constraints: vec![],
                                 },
                             )
                         })
