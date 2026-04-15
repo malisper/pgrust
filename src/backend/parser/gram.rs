@@ -326,9 +326,7 @@ fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement,
     })
 }
 
-fn parse_create_function_name(
-    input: &str,
-) -> Result<((Option<String>, String), &str), ParseError> {
+fn parse_create_function_name(input: &str) -> Result<((Option<String>, String), &str), ParseError> {
     let (first, mut rest) = parse_sql_identifier(input)?;
     rest = rest.trim_start();
     if let Some(after_dot) = rest.strip_prefix('.') {
@@ -412,8 +410,8 @@ fn parse_create_function_returns(
     } else {
         rest
     };
-    let boundary = find_next_top_level_keyword(type_rest, &["language", "as"])
-        .unwrap_or(type_rest.len());
+    let boundary =
+        find_next_top_level_keyword(type_rest, &["language", "as"]).unwrap_or(type_rest.len());
     let type_sql = type_rest[..boundary].trim();
     if type_sql.is_empty() {
         return Err(ParseError::UnexpectedToken {
@@ -465,7 +463,10 @@ fn parse_create_function_body(input: &str) -> Result<(String, &str), ParseError>
         expected: "function body string literal",
         actual: rest.into(),
     })?;
-    Ok((decode_string_literal(&rest[..token_len])?, &rest[token_len..]))
+    Ok((
+        decode_string_literal(&rest[..token_len])?,
+        &rest[token_len..],
+    ))
 }
 
 fn parse_sql_identifier(input: &str) -> Result<(String, &str), ParseError> {
@@ -607,7 +608,10 @@ fn find_next_top_level_keyword(input: &str, keywords: &[&str]) -> Option<usize> 
             b'(' | b'[' => depth += 1,
             b')' | b']' => depth = depth.saturating_sub(1),
             _ if depth == 0 => {
-                if keywords.iter().any(|keyword| keyword_at_boundary(input, i, keyword)) {
+                if keywords
+                    .iter()
+                    .any(|keyword| keyword_at_boundary(input, i, keyword))
+                {
                     return Some(i);
                 }
             }
@@ -622,7 +626,9 @@ fn scan_string_literal_token_len(input: &str) -> Option<usize> {
     let bytes = input.as_bytes();
     match bytes.first().copied()? {
         b'\'' => Some(parse_delimited_token_end(bytes, 0, b'\'')),
-        b'e' | b'E' if bytes.get(1) == Some(&b'\'') => Some(parse_delimited_token_end(bytes, 1, b'\'')),
+        b'e' | b'E' if bytes.get(1) == Some(&b'\'') => {
+            Some(parse_delimited_token_end(bytes, 1, b'\''))
+        }
         b'$' => scan_dollar_string_token_end(input, 0),
         _ => None,
     }

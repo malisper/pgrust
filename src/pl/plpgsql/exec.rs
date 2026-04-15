@@ -128,11 +128,7 @@ fn compiled_function_for_proc(
             )
         })?;
         let row = catalog.proc_row_by_oid(proc_oid).ok_or_else(|| {
-            function_runtime_error(
-                &format!("unknown function oid {proc_oid}"),
-                None,
-                "42883",
-            )
+            function_runtime_error(&format!("unknown function oid {proc_oid}"), None, "42883")
         })?;
         if row.prokind != 'f' {
             return Err(function_runtime_error(
@@ -190,7 +186,13 @@ fn execute_compiled_function(
         state.values[slot_def.slot] = cast_value(arg_value.clone(), slot_def.ty)?;
     }
 
-    let _ = exec_function_block(&compiled.body, compiled, expected_record_shape, &mut state, ctx)?;
+    let _ = exec_function_block(
+        &compiled.body,
+        compiled,
+        expected_record_shape,
+        &mut state,
+        ctx,
+    )?;
 
     match &compiled.return_contract {
         FunctionReturnContract::Scalar {
@@ -315,11 +317,11 @@ fn exec_do_stmt(stmt: &CompiledStmt, values: &mut [Value]) -> Result<(), ExecErr
         }
         CompiledStmt::Return { .. }
         | CompiledStmt::ReturnNext { .. }
-        | CompiledStmt::ReturnQuery { .. } => Err(ExecError::Parse(
-            ParseError::FeatureNotSupported(
+        | CompiledStmt::ReturnQuery { .. } => {
+            Err(ExecError::Parse(ParseError::FeatureNotSupported(
                 "RETURN statements are only supported inside CREATE FUNCTION".into(),
-            ),
-        )),
+            )))
+        }
     }
 }
 
@@ -512,9 +514,7 @@ fn exec_function_return_next(
 ) -> Result<(), ExecError> {
     match &compiled.return_contract {
         FunctionReturnContract::Scalar {
-            ty,
-            setof: true,
-            ..
+            ty, setof: true, ..
         } => {
             let expr = expr.ok_or_else(|| {
                 function_runtime_error(
@@ -591,7 +591,10 @@ fn coerce_function_result_row(
 ) -> Result<TupleSlot, ExecError> {
     match contract {
         FunctionReturnContract::Scalar { ty, .. } => match row.as_slice() {
-            [value] => Ok(TupleSlot::virtual_row(vec![cast_value(value.clone(), *ty)?])),
+            [value] => Ok(TupleSlot::virtual_row(vec![cast_value(
+                value.clone(),
+                *ty,
+            )?])),
             _ => Err(function_runtime_error(
                 "structure of query does not match function result type",
                 Some(format!("expected 1 column, got {}", row.len())),
@@ -612,10 +615,7 @@ fn coerce_function_result_row(
     }
 }
 
-fn coerce_row_to_columns(
-    row: Vec<Value>,
-    columns: &[QueryColumn],
-) -> Result<TupleSlot, ExecError> {
+fn coerce_row_to_columns(row: Vec<Value>, columns: &[QueryColumn]) -> Result<TupleSlot, ExecError> {
     if row.len() != columns.len() {
         return Err(function_runtime_error(
             "structure of query does not match function result type",
@@ -649,11 +649,7 @@ fn eval_function_expr(
     eval_expr(&expr.expr, &mut slot, ctx)
 }
 
-fn finish_raise(
-    level: &RaiseLevel,
-    message: &str,
-    params: &[Value],
-) -> Result<(), ExecError> {
+fn finish_raise(level: &RaiseLevel, message: &str, params: &[Value]) -> Result<(), ExecError> {
     let rendered = render_raise_message(message, params)?;
     match level {
         RaiseLevel::Exception => Err(ExecError::RaiseException(rendered)),

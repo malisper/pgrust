@@ -5,9 +5,8 @@ use crate::backend::catalog::catalog::allocate_relation_object_oids;
 use crate::backend::catalog::indexing::insert_bootstrap_system_indexes;
 use crate::backend::catalog::pg_constraint::{derived_pg_constraint_rows, sort_pg_constraint_rows};
 use crate::backend::catalog::pg_depend::{
-    derived_pg_depend_rows, index_backed_constraint_depend_rows,
-    inheritance_depend_rows, primary_key_owned_not_null_depend_rows,
-    relation_constraint_depend_rows, sort_pg_depend_rows,
+    derived_pg_depend_rows, index_backed_constraint_depend_rows, inheritance_depend_rows,
+    primary_key_owned_not_null_depend_rows, relation_constraint_depend_rows, sort_pg_depend_rows,
 };
 use crate::backend::catalog::pg_inherits::sort_pg_inherits_rows;
 use crate::backend::catalog::store::{DEFAULT_FIRST_REL_NUMBER, DEFAULT_FIRST_USER_OID};
@@ -17,8 +16,9 @@ use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::misc::interrupts::InterruptReason;
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_NOTNULL, PUBLIC_NAMESPACE_OID, PgAuthIdRow,
-    PgAuthMembersRow, PgConstraintRow, PgDependRow, PgRewriteRow, bootstrap_pg_auth_members_rows,
-    bootstrap_pg_authid_rows, builtin_type_rows, sort_pg_rewrite_rows, PgInheritsRow,
+    PgAuthMembersRow, PgConstraintRow, PgDependRow, PgInheritsRow, PgRewriteRow,
+    bootstrap_pg_auth_members_rows, bootstrap_pg_authid_rows, builtin_type_rows,
+    sort_pg_rewrite_rows,
 };
 
 const DEFAULT_SPC_OID: u32 = 0;
@@ -1306,10 +1306,8 @@ impl Catalog {
             if let Some(parent_name) = self.relation_name_by_oid(*parent_oid).map(str::to_string)
                 && let Some(parent) = self.tables.get_mut(&parent_name)
             {
-                parent.relhassubclass = self
-                    .inherits
-                    .iter()
-                    .any(|row| row.inhparent == *parent_oid);
+                parent.relhassubclass =
+                    self.inherits.iter().any(|row| row.inhparent == *parent_oid);
             }
         }
         if let Some(child_name) = self.relation_name_by_oid(relation_oid).map(str::to_string)

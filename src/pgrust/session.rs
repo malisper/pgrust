@@ -273,6 +273,9 @@ impl Session {
 
     fn execute_internal(&mut self, db: &Database, sql: &str) -> Result<StatementResult, ExecError> {
         db.install_interrupt_state(self.client_id, self.interrupts());
+        if self.active_txn.is_none() {
+            db.accept_invalidation_messages(self.client_id);
+        }
         // :HACK: Support simple file-backed COPY FROM on the normal SQL path
         // until COPY is modeled as a real parsed/bound statement.
         if let Some((table_name, columns, file_path)) = parse_copy_from_file(sql) {

@@ -615,7 +615,9 @@ mod tests {
     fn base_rte() -> RangeTblEntry {
         RangeTblEntry {
             alias: None,
-            desc: RelationDesc { columns: Vec::new() },
+            desc: RelationDesc {
+                columns: Vec::new(),
+            },
             inh: false,
             kind: RangeTblEntryKind::Result,
         }

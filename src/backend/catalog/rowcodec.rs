@@ -556,7 +556,9 @@ pub(crate) fn pg_attribute_row_from_values(
     })
 }
 
-pub(crate) fn pg_inherits_row_from_values(values: Vec<Value>) -> Result<PgInheritsRow, CatalogError> {
+pub(crate) fn pg_inherits_row_from_values(
+    values: Vec<Value>,
+) -> Result<PgInheritsRow, CatalogError> {
     Ok(PgInheritsRow {
         inhrelid: expect_oid(&values[0])?,
         inhparent: expect_oid(&values[1])?,

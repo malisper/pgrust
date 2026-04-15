@@ -223,13 +223,24 @@ fn classify_select_target_srf(
             outer_scopes,
             grouped_outer,
             ctes,
-        ) => TargetSrfInfo {
-            top_level: Some((name.clone(), args.clone(), *func_variadic)),
-            has_nested: false,
-        },
+        ) =>
+        {
+            TargetSrfInfo {
+                top_level: Some((name.clone(), args.clone(), *func_variadic)),
+                has_nested: false,
+            }
+        }
         _ => {
             let mut info = TargetSrfInfo::default();
-            visit_nested_srfs(expr, &mut info, scope, catalog, outer_scopes, grouped_outer, ctes);
+            visit_nested_srfs(
+                expr,
+                &mut info,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
             info
         }
     }
@@ -257,7 +268,8 @@ fn top_level_set_returning_call(
             outer_scopes,
             grouped_outer,
             ctes,
-        ) => {
+        ) =>
+        {
             Some((name.clone(), args.clone(), *func_variadic))
         }
         _ => None,
@@ -337,12 +349,44 @@ fn visit_nested_srfs(
         | SqlExpr::JsonGetText(left, right)
         | SqlExpr::JsonPath(left, right)
         | SqlExpr::JsonPathText(left, right) => {
-            visit_nested_srfs(left, info, scope, catalog, outer_scopes, grouped_outer, ctes);
-            visit_nested_srfs(right, info, scope, catalog, outer_scopes, grouped_outer, ctes);
+            visit_nested_srfs(
+                left,
+                info,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            visit_nested_srfs(
+                right,
+                info,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
         }
         SqlExpr::BinaryOperator { left, right, .. } => {
-            visit_nested_srfs(left, info, scope, catalog, outer_scopes, grouped_outer, ctes);
-            visit_nested_srfs(right, info, scope, catalog, outer_scopes, grouped_outer, ctes);
+            visit_nested_srfs(
+                left,
+                info,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            visit_nested_srfs(
+                right,
+                info,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
         }
         SqlExpr::Like {
             expr,
@@ -350,8 +394,24 @@ fn visit_nested_srfs(
             escape,
             ..
         } => {
-            visit_nested_srfs(expr, info, scope, catalog, outer_scopes, grouped_outer, ctes);
-            visit_nested_srfs(pattern, info, scope, catalog, outer_scopes, grouped_outer, ctes);
+            visit_nested_srfs(
+                expr,
+                info,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            visit_nested_srfs(
+                pattern,
+                info,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
             if let Some(escape) = escape {
                 visit_nested_srfs(
                     escape,
@@ -370,8 +430,24 @@ fn visit_nested_srfs(
             escape,
             ..
         } => {
-            visit_nested_srfs(expr, info, scope, catalog, outer_scopes, grouped_outer, ctes);
-            visit_nested_srfs(pattern, info, scope, catalog, outer_scopes, grouped_outer, ctes);
+            visit_nested_srfs(
+                expr,
+                info,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            visit_nested_srfs(
+                pattern,
+                info,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
             if let Some(escape) = escape {
                 visit_nested_srfs(
                     escape,
@@ -393,14 +469,34 @@ fn visit_nested_srfs(
         | SqlExpr::Cast(inner, _)
         | SqlExpr::GeometryUnaryOp { expr: inner, .. }
         | SqlExpr::PrefixOperator { expr: inner, .. }
-        | SqlExpr::FieldSelect { expr: inner, .. } => {
-            visit_nested_srfs(inner, info, scope, catalog, outer_scopes, grouped_outer, ctes)
-        }
-        SqlExpr::Subscript { expr: inner, .. } => {
-            visit_nested_srfs(inner, info, scope, catalog, outer_scopes, grouped_outer, ctes)
-        }
+        | SqlExpr::FieldSelect { expr: inner, .. } => visit_nested_srfs(
+            inner,
+            info,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        ),
+        SqlExpr::Subscript { expr: inner, .. } => visit_nested_srfs(
+            inner,
+            info,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        ),
         SqlExpr::ArraySubscript { array, subscripts } => {
-            visit_nested_srfs(array, info, scope, catalog, outer_scopes, grouped_outer, ctes);
+            visit_nested_srfs(
+                array,
+                info,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
             for subscript in subscripts {
                 if let Some(lower) = &subscript.lower {
                     visit_nested_srfs(
@@ -427,12 +523,36 @@ fn visit_nested_srfs(
             }
         }
         SqlExpr::GeometryBinaryOp { left, right, .. } => {
-            visit_nested_srfs(left, info, scope, catalog, outer_scopes, grouped_outer, ctes);
-            visit_nested_srfs(right, info, scope, catalog, outer_scopes, grouped_outer, ctes);
+            visit_nested_srfs(
+                left,
+                info,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            visit_nested_srfs(
+                right,
+                info,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
         }
         SqlExpr::ArrayLiteral(items) | SqlExpr::Row(items) => {
             for item in items {
-                visit_nested_srfs(item, info, scope, catalog, outer_scopes, grouped_outer, ctes);
+                visit_nested_srfs(
+                    item,
+                    info,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                );
             }
         }
         SqlExpr::AggCall { args, .. } => {
@@ -448,15 +568,45 @@ fn visit_nested_srfs(
                 );
             }
         }
-        SqlExpr::InSubquery { expr, .. } => {
-            visit_nested_srfs(expr, info, scope, catalog, outer_scopes, grouped_outer, ctes)
-        }
+        SqlExpr::InSubquery { expr, .. } => visit_nested_srfs(
+            expr,
+            info,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        ),
         SqlExpr::QuantifiedSubquery { left, .. } => {
-            visit_nested_srfs(left, info, scope, catalog, outer_scopes, grouped_outer, ctes);
+            visit_nested_srfs(
+                left,
+                info,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
         }
         SqlExpr::QuantifiedArray { left, array, .. } => {
-            visit_nested_srfs(left, info, scope, catalog, outer_scopes, grouped_outer, ctes);
-            visit_nested_srfs(array, info, scope, catalog, outer_scopes, grouped_outer, ctes);
+            visit_nested_srfs(
+                left,
+                info,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            visit_nested_srfs(
+                array,
+                info,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
         }
         SqlExpr::Column(_)
         | SqlExpr::Default
@@ -843,14 +993,7 @@ fn bind_user_defined_srf_args(
     let bound_args = args
         .iter()
         .map(|arg| {
-            bind_expr_with_outer_and_ctes(
-                arg,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )
+            bind_expr_with_outer_and_ctes(arg, scope, catalog, outer_scopes, grouped_outer, ctes)
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(bound_args

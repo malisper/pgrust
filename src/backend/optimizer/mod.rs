@@ -27,12 +27,12 @@ use crate::include::nodes::primnodes::{
     ProjectSetTarget, QueryColumn, RelationDesc, SetReturningCall, SubLink, SubPlan, TargetEntry,
     ToastRelationRef, Var,
 };
-use pathnodes::{
-    aggregate_output_vars, expr_sql_type, lower_agg_output_expr, next_synthetic_slot_id,
-    rewrite_expr_against_layout, rewrite_project_set_target_against_layout,
-    rewrite_semantic_expr_for_input_path, is_synthetic_slot_id,
-};
 use inherit::{append_child_rtindexes, append_translation, expand_inherited_rtentries};
+use pathnodes::{
+    aggregate_output_vars, expr_sql_type, is_synthetic_slot_id, lower_agg_output_expr,
+    next_synthetic_slot_id, rewrite_expr_against_layout, rewrite_project_set_target_against_layout,
+    rewrite_semantic_expr_for_input_path,
+};
 
 const DEFAULT_EQ_SEL: f64 = 0.005;
 const DEFAULT_INEQ_SEL: f64 = 1.0 / 3.0;
@@ -611,7 +611,8 @@ fn rewrite_expr_for_path(expr: Expr, path: &Path, layout: &[Expr]) -> Expr {
                 // :HACK: Identity projections on synthetic slots are planner-only boundaries.
                 // Map semantic input Vars onto the synthetic output slot by ordinal there, but
                 // do not chase real parse-time rtindex Vars back through normalization layers.
-                let rewritten_input_expr = rewrite_expr_for_path(expr.clone(), input, &input_layout);
+                let rewritten_input_expr =
+                    rewrite_expr_for_path(expr.clone(), input, &input_layout);
                 if passthrough_boundary
                     && is_synthetic_slot_id(*slot_id)
                     && let Some(index) = input_layout
@@ -3718,7 +3719,8 @@ fn build_join_paths_internal(
 }
 
 fn select_best_join_path(paths: Vec<Path>) -> Path {
-    paths.into_iter()
+    paths
+        .into_iter()
         .reduce(|best, candidate| {
             if better_join_path(&candidate, &best) {
                 candidate
@@ -3746,8 +3748,7 @@ fn better_join_path(candidate: &Path, current: &Path) -> bool {
         .partial_cmp(&current_info.startup_cost.as_f64())
         .unwrap_or(Ordering::Equal);
     startup_cmp == Ordering::Less
-        || (startup_cmp == Ordering::Equal
-            && candidate.pathkeys().len() > current.pathkeys().len())
+        || (startup_cmp == Ordering::Equal && candidate.pathkeys().len() > current.pathkeys().len())
 }
 
 fn extract_hash_join_clauses(
@@ -3908,13 +3909,7 @@ fn hash_join_inputs_rewrite_cleanly(
 
     clauses.hash_clauses.iter().all(|clause| {
         expr_uses_only_layout_vars(
-            &rewrite_semantic_expr_for_join_inputs(
-                root,
-                clause.clone(),
-                left,
-                right,
-                &join_layout,
-            ),
+            &rewrite_semantic_expr_for_join_inputs(root, clause.clone(), left, right, &join_layout),
             &join_layout,
         )
     }) && clauses.outer_hash_keys.iter().all(|expr| {
@@ -3929,13 +3924,7 @@ fn hash_join_inputs_rewrite_cleanly(
         )
     }) && clauses.join_qual.as_ref().is_none_or(|expr| {
         expr_uses_only_layout_vars(
-            &rewrite_semantic_expr_for_join_inputs(
-                root,
-                expr.clone(),
-                left,
-                right,
-                &join_layout,
-            ),
+            &rewrite_semantic_expr_for_join_inputs(root, expr.clone(), left, right, &join_layout),
             &join_layout,
         )
     })
@@ -4407,9 +4396,8 @@ fn estimate_hash_join_internal(
         .into_iter()
         .map(|expr| rewrite_join_input_expr(root, expr, &right, &right_layout))
         .collect::<Vec<_>>();
-    let rewritten_join_qual = join_qual.map(|expr| {
-        rewrite_semantic_expr_for_join_inputs(root, expr, &left, &right, &join_layout)
-    });
+    let rewritten_join_qual = join_qual
+        .map(|expr| rewrite_semantic_expr_for_join_inputs(root, expr, &left, &right, &join_layout));
     let canonical_hash_clauses = rewritten_outer_hash_keys
         .iter()
         .cloned()

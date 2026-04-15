@@ -27,7 +27,11 @@ fn normalize_create_function_name_for_search_path(
         ))),
         None => {
             let search_path = configured_search_path
-                .map(|path| path.iter().map(|s| s.trim().to_ascii_lowercase()).collect::<Vec<_>>())
+                .map(|path| {
+                    path.iter()
+                        .map(|s| s.trim().to_ascii_lowercase())
+                        .collect::<Vec<_>>()
+                })
                 .unwrap_or_else(|| vec!["public".into()]);
             for schema in search_path {
                 match schema.as_str() {
@@ -270,7 +274,9 @@ impl Database {
                     prorettype = catalog
                         .type_oid_for_sql_type(output_args[0].sql_type)
                         .ok_or_else(|| {
-                            ExecError::Parse(ParseError::UnsupportedType(output_args[0].name.clone()))
+                            ExecError::Parse(ParseError::UnsupportedType(
+                                output_args[0].name.clone(),
+                            ))
                         })?;
                 } else {
                     return Err(ExecError::Parse(ParseError::FeatureNotSupported(

@@ -808,6 +808,38 @@ pub(crate) fn load_physical_catalog_rows(
         .map(pg_am_row_from_values)
         .collect::<Result<Vec<_>, _>>()?
     };
+    let amop_rows = scan_catalog_relation(
+        &pool,
+        rels[&BootstrapCatalogKind::PgAmop],
+        &bootstrap_relation_desc(BootstrapCatalogKind::PgAmop),
+    )?
+    .into_iter()
+    .map(pg_amop_row_from_values)
+    .collect::<Result<Vec<_>, _>>()?;
+    let amproc_rows = scan_catalog_relation(
+        &pool,
+        rels[&BootstrapCatalogKind::PgAmproc],
+        &bootstrap_relation_desc(BootstrapCatalogKind::PgAmproc),
+    )?
+    .into_iter()
+    .map(pg_amproc_row_from_values)
+    .collect::<Result<Vec<_>, _>>()?;
+    let opclass_rows = scan_catalog_relation(
+        &pool,
+        rels[&BootstrapCatalogKind::PgOpclass],
+        &bootstrap_relation_desc(BootstrapCatalogKind::PgOpclass),
+    )?
+    .into_iter()
+    .map(pg_opclass_row_from_values)
+    .collect::<Result<Vec<_>, _>>()?;
+    let opfamily_rows = scan_catalog_relation(
+        &pool,
+        rels[&BootstrapCatalogKind::PgOpfamily],
+        &bootstrap_relation_desc(BootstrapCatalogKind::PgOpfamily),
+    )?
+    .into_iter()
+    .map(pg_opfamily_row_from_values)
+    .collect::<Result<Vec<_>, _>>()?;
     let tablespace_rows = if missing_tablespace {
         Vec::new()
     } else {
@@ -856,8 +888,8 @@ pub(crate) fn load_physical_catalog_rows(
         indexes: index_rows,
         rewrites: rewrite_rows,
         ams: am_rows,
-        amops: Vec::new(),
-        amprocs: Vec::new(),
+        amops: amop_rows,
+        amprocs: amproc_rows,
         authids: authid_rows,
         auth_members: auth_members_rows,
         languages: language_rows,
@@ -868,8 +900,8 @@ pub(crate) fn load_physical_catalog_rows(
         ts_config_maps: ts_config_map_rows,
         constraints: constraint_rows,
         operators: operator_rows,
-        opclasses: Vec::new(),
-        opfamilies: Vec::new(),
+        opclasses: opclass_rows,
+        opfamilies: opfamily_rows,
         procs: proc_rows,
         casts: cast_rows,
         collations: collation_rows,
@@ -1369,6 +1401,50 @@ pub(crate) fn load_physical_catalog_rows_visible(
         .map(pg_am_row_from_values)
         .collect::<Result<Vec<_>, _>>()?
     };
+    let amop_rows = scan_catalog_relation_visible(
+        pool,
+        txns,
+        snapshot,
+        client_id,
+        rels[&BootstrapCatalogKind::PgAmop],
+        &bootstrap_relation_desc(BootstrapCatalogKind::PgAmop),
+    )?
+    .into_iter()
+    .map(pg_amop_row_from_values)
+    .collect::<Result<Vec<_>, _>>()?;
+    let amproc_rows = scan_catalog_relation_visible(
+        pool,
+        txns,
+        snapshot,
+        client_id,
+        rels[&BootstrapCatalogKind::PgAmproc],
+        &bootstrap_relation_desc(BootstrapCatalogKind::PgAmproc),
+    )?
+    .into_iter()
+    .map(pg_amproc_row_from_values)
+    .collect::<Result<Vec<_>, _>>()?;
+    let opclass_rows = scan_catalog_relation_visible(
+        pool,
+        txns,
+        snapshot,
+        client_id,
+        rels[&BootstrapCatalogKind::PgOpclass],
+        &bootstrap_relation_desc(BootstrapCatalogKind::PgOpclass),
+    )?
+    .into_iter()
+    .map(pg_opclass_row_from_values)
+    .collect::<Result<Vec<_>, _>>()?;
+    let opfamily_rows = scan_catalog_relation_visible(
+        pool,
+        txns,
+        snapshot,
+        client_id,
+        rels[&BootstrapCatalogKind::PgOpfamily],
+        &bootstrap_relation_desc(BootstrapCatalogKind::PgOpfamily),
+    )?
+    .into_iter()
+    .map(pg_opfamily_row_from_values)
+    .collect::<Result<Vec<_>, _>>()?;
     let tablespace_rows = if missing_tablespace {
         Vec::new()
     } else {
@@ -1426,8 +1502,8 @@ pub(crate) fn load_physical_catalog_rows_visible(
         indexes: index_rows,
         rewrites: rewrite_rows,
         ams: am_rows,
-        amops: Vec::new(),
-        amprocs: Vec::new(),
+        amops: amop_rows,
+        amprocs: amproc_rows,
         authids: authid_rows,
         auth_members: auth_members_rows,
         languages: language_rows,
@@ -1438,8 +1514,8 @@ pub(crate) fn load_physical_catalog_rows_visible(
         ts_config_maps: ts_config_map_rows,
         constraints: constraint_rows,
         operators: operator_rows,
-        opclasses: Vec::new(),
-        opfamilies: Vec::new(),
+        opclasses: opclass_rows,
+        opfamilies: opfamily_rows,
         procs: proc_rows,
         casts: cast_rows,
         collations: collation_rows,
@@ -1474,7 +1550,13 @@ pub(crate) fn load_visible_namespace_rows(
     client_id: crate::ClientId,
 ) -> Result<Vec<PgNamespaceRow>, CatalogError> {
     let _ = base_dir;
-    load_visible_catalog_kind_in_pool(pool, txns, snapshot, client_id, BootstrapCatalogKind::PgNamespace)?
+    load_visible_catalog_kind_in_pool(
+        pool,
+        txns,
+        snapshot,
+        client_id,
+        BootstrapCatalogKind::PgNamespace,
+    )?
     .into_iter()
     .map(namespace_row_from_values)
     .collect()
@@ -1488,7 +1570,13 @@ pub(crate) fn load_visible_type_rows(
     client_id: crate::ClientId,
 ) -> Result<Vec<PgTypeRow>, CatalogError> {
     let _ = base_dir;
-    load_visible_catalog_kind_in_pool(pool, txns, snapshot, client_id, BootstrapCatalogKind::PgType)?
+    load_visible_catalog_kind_in_pool(
+        pool,
+        txns,
+        snapshot,
+        client_id,
+        BootstrapCatalogKind::PgType,
+    )?
     .into_iter()
     .map(pg_type_row_from_values)
     .collect()
@@ -1502,7 +1590,13 @@ pub(crate) fn load_visible_class_rows(
     client_id: crate::ClientId,
 ) -> Result<Vec<PgClassRow>, CatalogError> {
     let _ = base_dir;
-    load_visible_catalog_kind_in_pool(pool, txns, snapshot, client_id, BootstrapCatalogKind::PgClass)?
+    load_visible_catalog_kind_in_pool(
+        pool,
+        txns,
+        snapshot,
+        client_id,
+        BootstrapCatalogKind::PgClass,
+    )?
     .into_iter()
     .map(pg_class_row_from_values)
     .collect()
@@ -1536,7 +1630,13 @@ pub(crate) fn load_visible_attrdef_rows(
     client_id: crate::ClientId,
 ) -> Result<Vec<PgAttrdefRow>, CatalogError> {
     let _ = base_dir;
-    load_visible_catalog_kind_in_pool(pool, txns, snapshot, client_id, BootstrapCatalogKind::PgAttrdef)?
+    load_visible_catalog_kind_in_pool(
+        pool,
+        txns,
+        snapshot,
+        client_id,
+        BootstrapCatalogKind::PgAttrdef,
+    )?
     .into_iter()
     .map(pg_attrdef_row_from_values)
     .collect()
@@ -1550,7 +1650,13 @@ pub(crate) fn load_visible_index_rows(
     client_id: crate::ClientId,
 ) -> Result<Vec<PgIndexRow>, CatalogError> {
     let _ = base_dir;
-    load_visible_catalog_kind_in_pool(pool, txns, snapshot, client_id, BootstrapCatalogKind::PgIndex)?
+    load_visible_catalog_kind_in_pool(
+        pool,
+        txns,
+        snapshot,
+        client_id,
+        BootstrapCatalogKind::PgIndex,
+    )?
     .into_iter()
     .map(pg_index_row_from_values)
     .collect()
@@ -1584,7 +1690,13 @@ pub(crate) fn load_visible_depend_rows(
     client_id: crate::ClientId,
 ) -> Result<Vec<crate::include::catalog::PgDependRow>, CatalogError> {
     let _ = base_dir;
-    load_visible_catalog_kind_in_pool(pool, txns, snapshot, client_id, BootstrapCatalogKind::PgDepend)?
+    load_visible_catalog_kind_in_pool(
+        pool,
+        txns,
+        snapshot,
+        client_id,
+        BootstrapCatalogKind::PgDepend,
+    )?
     .into_iter()
     .map(pg_depend_row_from_values)
     .collect()
@@ -1618,7 +1730,13 @@ pub(crate) fn load_visible_rewrite_rows(
     client_id: crate::ClientId,
 ) -> Result<Vec<crate::include::catalog::PgRewriteRow>, CatalogError> {
     let _ = base_dir;
-    load_visible_catalog_kind_in_pool(pool, txns, snapshot, client_id, BootstrapCatalogKind::PgRewrite)?
+    load_visible_catalog_kind_in_pool(
+        pool,
+        txns,
+        snapshot,
+        client_id,
+        BootstrapCatalogKind::PgRewrite,
+    )?
     .into_iter()
     .map(pg_rewrite_row_from_values)
     .collect()
@@ -1653,9 +1771,9 @@ pub(crate) fn load_visible_am_rows(
 ) -> Result<Vec<PgAmRow>, CatalogError> {
     let _ = base_dir;
     load_visible_catalog_kind_in_pool(pool, txns, snapshot, client_id, BootstrapCatalogKind::PgAm)?
-    .into_iter()
-    .map(pg_am_row_from_values)
-    .collect()
+        .into_iter()
+        .map(pg_am_row_from_values)
+        .collect()
 }
 
 pub(crate) fn load_visible_amop_rows(
@@ -1666,7 +1784,13 @@ pub(crate) fn load_visible_amop_rows(
     client_id: crate::ClientId,
 ) -> Result<Vec<PgAmopRow>, CatalogError> {
     let _ = base_dir;
-    load_visible_catalog_kind_in_pool(pool, txns, snapshot, client_id, BootstrapCatalogKind::PgAmop)?
+    load_visible_catalog_kind_in_pool(
+        pool,
+        txns,
+        snapshot,
+        client_id,
+        BootstrapCatalogKind::PgAmop,
+    )?
     .into_iter()
     .map(pg_amop_row_from_values)
     .collect()

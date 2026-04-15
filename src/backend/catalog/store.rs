@@ -223,6 +223,8 @@ impl CatalogStore {
             rows.indexes,
             rows.rewrites,
             rows.ams,
+            rows.amops,
+            rows.amprocs,
             rows.authids,
             rows.auth_members,
             rows.languages,
@@ -233,6 +235,8 @@ impl CatalogStore {
             rows.ts_config_maps,
             rows.constraints,
             rows.operators,
+            rows.opclasses,
+            rows.opfamilies,
             rows.procs,
             rows.casts,
             rows.collations,
@@ -1817,30 +1821,12 @@ fn collect_relation_drop_oids(
 }
 
 impl CatalogStore {
-    pub fn refresh_committed_state(
-        &mut self,
-        pool: &BufferPool<SmgrStorageBackend>,
-        txns: &TransactionManager,
-        client_id: crate::ClientId,
-    ) -> Result<(), CatalogError> {
-        let mut catalog = match &self.mode {
-            CatalogStoreMode::Durable { .. } => self.catalog_snapshot_with_control()?,
-            CatalogStoreMode::Ephemeral => {
-                let snapshot = txns
-                    .snapshot(INVALID_TRANSACTION_ID)
-                    .map_err(|e| CatalogError::Io(format!("catalog snapshot failed: {e:?}")))?;
-                load_catalog_from_visible_pool(pool, txns, &snapshot, client_id)?
-            }
-        };
-        catalog.next_oid = catalog.next_oid.max(self.control.next_oid);
-        catalog.next_rel_number = catalog.next_rel_number.max(self.control.next_rel_number);
-        self.catalog = catalog;
-        Ok(())
-    }
-
     fn catalog_snapshot_with_control(&self) -> Result<Catalog, CatalogError> {
         match &self.mode {
-            CatalogStoreMode::Durable { base_dir, control_path } => {
+            CatalogStoreMode::Durable {
+                base_dir,
+                control_path,
+            } => {
                 let mut catalog = load_catalog_from_physical(base_dir)?;
                 if control_path.exists() {
                     let control = load_control_file(control_path)?;
@@ -1864,7 +1850,10 @@ impl CatalogStore {
             .map_err(|e| CatalogError::Io(format!("catalog snapshot failed: {e:?}")))?;
         let txns = ctx.txns.read();
         let mut catalog = match &self.mode {
-            CatalogStoreMode::Durable { base_dir, control_path } => {
+            CatalogStoreMode::Durable {
+                base_dir,
+                control_path,
+            } => {
                 let mut catalog = load_catalog_from_visible_physical(
                     base_dir,
                     &ctx.pool,
@@ -1883,8 +1872,7 @@ impl CatalogStore {
                 let mut catalog =
                     load_catalog_from_visible_pool(&ctx.pool, &txns, &snapshot, ctx.client_id)?;
                 catalog.next_oid = catalog.next_oid.max(self.control.next_oid);
-                catalog.next_rel_number =
-                    catalog.next_rel_number.max(self.control.next_rel_number);
+                catalog.next_rel_number = catalog.next_rel_number.max(self.control.next_rel_number);
                 catalog
             }
         };

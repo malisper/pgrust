@@ -36,7 +36,9 @@ pub(crate) fn eval_set_returning_call(
             args,
             output_columns,
             ..
-        } => execute_user_defined_set_returning_function(*proc_oid, args, output_columns, slot, ctx),
+        } => {
+            execute_user_defined_set_returning_function(*proc_oid, args, output_columns, slot, ctx)
+        }
     }
 }
 
