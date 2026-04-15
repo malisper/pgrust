@@ -424,11 +424,13 @@ function executeScript(script, emptyMessage) {
       execution.statements.push({
         sql: trackedText(statement),
         ok: false,
+        error: trackedText(formatted),
         output: trackedText(formatted),
       });
       captureAnalytics("wasm_demo_query_ran", {
         ...execution,
         status: "error",
+        error: trackedText(formatted),
       });
       return;
     }

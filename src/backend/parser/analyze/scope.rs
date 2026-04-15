@@ -369,6 +369,7 @@ pub(super) fn bind_from_item_with_ctes(
             let desc = entry.desc.clone();
             Ok((
                 AnalyzedFrom::relation(
+                    name.clone(),
                     entry.rel,
                     entry.relation_oid,
                     entry.relkind,

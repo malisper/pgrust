@@ -1008,13 +1008,12 @@ fn assert_explain_uses_index(db: &Database, client_id: u32, sql: &str, index_nam
 }
 
 fn assert_explain_uses_seqscan(db: &Database, client_id: u32, sql: &str, heap_name: &str) {
-    let relfilenode = relfilenode_for(db, client_id, heap_name);
     let lines = explain_lines(db, client_id, sql);
     assert!(
         lines
             .iter()
-            .any(|line| line.contains(&format!("Seq Scan on rel {relfilenode}"))),
-        "expected EXPLAIN to use seq scan on {heap_name} (relfilenode {relfilenode}), got {lines:?}"
+            .any(|line| line.contains(&format!("Seq Scan on {heap_name}"))),
+        "expected EXPLAIN to use seq scan on {heap_name}, got {lines:?}"
     );
     assert!(
         !lines.iter().any(|line| line.contains("Index Scan")),
@@ -2291,6 +2290,23 @@ fn explain_bootstrap_seqscan_shows_relation_name_and_filter() {
 }
 
 #[test]
+fn explain_heap_seqscan_shows_relation_name() {
+    let base = temp_dir("explain_heap_seqscan_relation_name");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4 not null, note text)")
+        .unwrap();
+
+    let lines = explain_lines(&db, 1, "select * from items where id = 1");
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.starts_with("Seq Scan on items  (cost=")),
+        "expected heap relation name in EXPLAIN, got {lines:?}"
+    );
+}
+
+#[test]
 fn explain_inner_join_can_reorder_commutative_inputs() {
     let base = temp_dir("explain_inner_join_reorder");
     let db = Database::open(&base, 16).unwrap();
@@ -2323,15 +2339,13 @@ fn explain_inner_join_can_reorder_commutative_inputs() {
         1,
         "select * from big_items join small_items on big_items.id = small_items.id",
     );
-    let big_rel = relfilenode_for(&db, 1, "big_items");
-    let small_rel = relfilenode_for(&db, 1, "small_items");
     let big_pos = lines
         .iter()
-        .position(|line| line.contains(&format!("Seq Scan on rel {big_rel}")))
+        .position(|line| line.contains("Seq Scan on big_items"))
         .unwrap();
     let small_pos = lines
         .iter()
-        .position(|line| line.contains(&format!("Seq Scan on rel {small_rel}")))
+        .position(|line| line.contains("Seq Scan on small_items"))
         .unwrap();
     let hash_pos = lines
         .iter()
@@ -2420,20 +2434,17 @@ fn explain_three_way_inner_join_can_build_smaller_join_first() {
         1,
         "select * from big_items join medium_items on big_items.id = medium_items.id join small_items on medium_items.id = small_items.id",
     );
-    let big_rel = relfilenode_for(&db, 1, "big_items");
-    let medium_rel = relfilenode_for(&db, 1, "medium_items");
-    let small_rel = relfilenode_for(&db, 1, "small_items");
     let big_pos = lines
         .iter()
-        .position(|line| line.contains(&format!("Seq Scan on rel {big_rel}")))
+        .position(|line| line.contains("Seq Scan on big_items"))
         .unwrap();
     let medium_pos = lines
         .iter()
-        .position(|line| line.contains(&format!("Seq Scan on rel {medium_rel}")))
+        .position(|line| line.contains("Seq Scan on medium_items"))
         .unwrap();
     let small_pos = lines
         .iter()
-        .position(|line| line.contains(&format!("Seq Scan on rel {small_rel}")))
+        .position(|line| line.contains("Seq Scan on small_items"))
         .unwrap();
     let join_positions = lines
         .iter()
@@ -2766,20 +2777,17 @@ fn explain_left_join_can_reassociate_strict_rhs() {
         "select a.id, b.id, c.id \
          from a left join (b left join c on b.id = c.id) on a.id = b.id",
     );
-    let a_rel = relfilenode_for(&db, 1, "a");
-    let b_rel = relfilenode_for(&db, 1, "b");
-    let c_rel = relfilenode_for(&db, 1, "c");
     let a_pos = lines
         .iter()
-        .position(|line| line.contains(&format!("Seq Scan on rel {a_rel}")))
+        .position(|line| line.contains("Seq Scan on a"))
         .unwrap();
     let b_pos = lines
         .iter()
-        .position(|line| line.contains(&format!("Seq Scan on rel {b_rel}")))
+        .position(|line| line.contains("Seq Scan on b"))
         .unwrap();
     let c_pos = lines
         .iter()
-        .position(|line| line.contains(&format!("Seq Scan on rel {c_rel}")))
+        .position(|line| line.contains("Seq Scan on c"))
         .unwrap();
     let ab_join_pos = lines.iter().position(|line| {
         let trimmed = line.trim_start();

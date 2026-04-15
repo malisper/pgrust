@@ -66,6 +66,7 @@ pub(super) fn relation_stats(
 pub(super) fn estimate_seqscan_candidate(
     source_id: usize,
     rel: RelFileLocator,
+    relation_name: String,
     relation_oid: u32,
     toast: Option<ToastRelationRef>,
     desc: RelationDesc,
@@ -76,6 +77,7 @@ pub(super) fn estimate_seqscan_candidate(
     costsize::estimate_seqscan_candidate(
         source_id,
         rel,
+        relation_name,
         relation_oid,
         toast,
         desc,

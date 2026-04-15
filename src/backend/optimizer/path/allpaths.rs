@@ -155,6 +155,7 @@ fn query_order_items_for_base_rel(root: &PlannerInfo, rtindex: usize) -> Option<
 fn collect_relation_access_paths(
     rtindex: usize,
     heap_rel: RelFileLocator,
+    relation_name: String,
     relation_oid: u32,
     toast: Option<ToastRelationRef>,
     desc: RelationDesc,
@@ -167,6 +168,7 @@ fn collect_relation_access_paths(
         estimate_seqscan_candidate(
             rtindex,
             heap_rel,
+            relation_name.clone(),
             relation_oid,
             toast,
             desc.clone(),
@@ -181,6 +183,7 @@ fn collect_relation_access_paths(
             estimate_seqscan_candidate(
                 rtindex,
                 heap_rel,
+                relation_name.clone(),
                 relation_oid,
                 toast,
                 desc.clone(),
@@ -241,6 +244,7 @@ fn collect_relation_access_paths(
 fn cheapest_relation_access_path(
     rtindex: usize,
     heap_rel: RelFileLocator,
+    relation_name: String,
     relation_oid: u32,
     toast: Option<ToastRelationRef>,
     desc: RelationDesc,
@@ -250,6 +254,7 @@ fn cheapest_relation_access_path(
     collect_relation_access_paths(
         rtindex,
         heap_rel,
+        relation_name,
         relation_oid,
         toast,
         desc,
@@ -302,6 +307,9 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
             cheapest_relation_access_path(
                 rtindex,
                 heap_rel,
+                rte.alias
+                    .clone()
+                    .unwrap_or_else(|| format!("rel {}", heap_rel.rel_number)),
                 relation_oid,
                 toast,
                 rte.desc.clone(),
@@ -376,6 +384,9 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
         } => rel.pathlist.extend(collect_relation_access_paths(
             rtindex,
             heap_rel,
+            rte.alias
+                .clone()
+                .unwrap_or_else(|| format!("rel {}", heap_rel.rel_number)),
             relation_oid,
             toast,
             rte.desc.clone(),

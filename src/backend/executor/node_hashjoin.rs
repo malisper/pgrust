@@ -240,7 +240,7 @@ impl PlanNode for HashJoinState {
                 render_explain_expr(&format_qual_list(&self.qual), &self.combined_names)
             ));
         }
-        format_explain_lines(&*self.left, indent, analyze, lines);
-        format_explain_lines(self.right.as_ref(), indent, analyze, lines);
+        format_explain_lines(&*self.left, indent + 1, analyze, lines);
+        format_explain_lines(self.right.as_ref(), indent + 1, analyze, lines);
     }
 }

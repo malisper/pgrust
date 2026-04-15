@@ -2,6 +2,7 @@ use crate::backend::access::heap::heapam::VisibleHeapScan;
 use crate::backend::access::transam::xact::{Snapshot, TransactionManager};
 use crate::backend::executor::hashjoin::{HashJoinPhase, HashJoinTable};
 use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
+use crate::include::storage::buf_internals::BufferUsageStats;
 use crate::include::access::htup::{AttributeDesc, HeapTuple, ItemPointerData};
 use crate::include::access::relscan::IndexScanDesc;
 use crate::include::access::relscan::ScanDirection;
@@ -164,6 +165,10 @@ pub struct NodeExecStats {
     pub loops: u64,
     pub rows: u64,
     pub total_time: Duration,
+    pub first_tuple_time: Option<Duration>,
+    pub rows_removed_by_filter: u64,
+    pub buffer_usage: BufferUsageStats,
+    pub buffer_usage_start: Option<BufferUsageStats>,
 }
 
 /// Trait for executor plan nodes, like PostgreSQL's ExecProcNode vtable.
@@ -190,6 +195,7 @@ pub trait PlanNode: std::fmt::Debug {
     fn node_stats_mut(&mut self) -> &mut NodeExecStats;
     fn plan_info(&self) -> PlanEstimate;
     fn node_label(&self) -> String;
+    fn explain_details(&self, _indent: usize, _analyze: bool, _lines: &mut Vec<String>) {}
 
     /// Format children for EXPLAIN output. The node itself is formatted by
     /// the caller; this method handles child nodes.

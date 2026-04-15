@@ -86,6 +86,6 @@ impl PlanNode for HashState {
     }
 
     fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
-        format_explain_lines(&*self.input, indent, analyze, lines);
+        format_explain_lines(&*self.input, indent + 1, analyze, lines);
     }
 }

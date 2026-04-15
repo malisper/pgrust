@@ -13,14 +13,20 @@ pub(crate) fn format_explain_lines(
     if analyze {
         let stats = state.node_stats();
         lines.push(format!(
-            "{prefix}{label}  (cost={:.2}..{:.2} rows={} width={}) (actual rows={} loops={} time={:.3} ms)",
+            "{prefix}{label}  (cost={:.2}..{:.2} rows={} width={}) (actual time={:.3}..{:.3} rows={:.2} loops={})",
             plan_info.startup_cost.as_f64(),
             plan_info.total_cost.as_f64(),
             plan_info.plan_rows.as_f64().round() as u64,
             plan_info.plan_width,
-            stats.rows,
-            stats.loops,
+            stats
+                .first_tuple_time
+                .unwrap_or_default()
+                .as_secs_f64()
+                * 1000.0,
             stats.total_time.as_secs_f64() * 1000.0
+            ,
+            stats.rows as f64,
+            stats.loops,
         ));
     } else {
         lines.push(format!(
@@ -32,6 +38,7 @@ pub(crate) fn format_explain_lines(
         ));
     }
 
+    state.explain_details(indent, analyze, lines);
     state.explain_children(indent, analyze, lines);
 }
 
