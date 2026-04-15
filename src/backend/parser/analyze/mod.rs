@@ -17,14 +17,16 @@ mod views;
 
 use crate::RelFileLocator;
 use crate::backend::catalog::catalog::column_desc;
+use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::executor::{Value, cast_value};
 use crate::backend::optimizer::planner;
 use crate::backend::rewrite::pg_rewrite_query;
+use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, PgCastRow, PgClassRow, PgConstraintRow, PgOperatorRow, PgProcRow,
-    PgRewriteRow, PgStatisticRow, PgTypeRow, RECORD_TYPE_OID, bootstrap_pg_cast_rows,
-    bootstrap_pg_operator_rows, bootstrap_pg_proc_rows, builtin_type_rows,
-    proc_oid_for_builtin_aggregate_function,
+    BOOTSTRAP_SUPERUSER_OID, PgCastRow, PgClassRow, PgLanguageRow, PgOperatorRow, PgProcRow,
+    PgConstraintRow, PgRewriteRow, PgStatisticRow, PgTypeRow, RECORD_TYPE_OID,
+    bootstrap_pg_cast_rows, bootstrap_pg_language_rows, bootstrap_pg_operator_rows,
+    bootstrap_pg_proc_rows, builtin_type_rows, proc_oid_for_builtin_aggregate_function,
 };
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{
@@ -76,6 +78,10 @@ pub struct BoundIndexRelation {
 pub trait CatalogLookup {
     fn lookup_any_relation(&self, name: &str) -> Option<BoundRelation>;
 
+    fn materialize_visible_catalog(&self) -> Option<VisibleCatalog> {
+        None
+    }
+
     fn index_relations_for_heap(&self, _relation_oid: u32) -> Vec<BoundIndexRelation> {
         Vec::new()
     }
@@ -95,6 +101,10 @@ pub trait CatalogLookup {
             .into_iter()
             .filter(|row| row.proname.eq_ignore_ascii_case(normalized))
             .collect()
+    }
+
+    fn proc_row_by_oid(&self, oid: u32) -> Option<PgProcRow> {
+        bootstrap_pg_proc_rows().into_iter().find(|row| row.oid == oid)
     }
 
     fn operator_by_name_left_right(
@@ -130,6 +140,9 @@ pub trait CatalogLookup {
     }
 
     fn type_oid_for_sql_type(&self, sql_type: SqlType) -> Option<u32> {
+        if sql_type.type_oid != 0 {
+            return Some(sql_type.type_oid);
+        }
         let mut fallback = None;
         for row in self.type_rows() {
             if row.sql_type.kind != sql_type.kind || row.sql_type.is_array != sql_type.is_array {
@@ -141,6 +154,21 @@ pub trait CatalogLookup {
             fallback.get_or_insert(row.oid);
         }
         fallback
+    }
+
+    fn language_rows(&self) -> Vec<PgLanguageRow> {
+        bootstrap_pg_language_rows().to_vec()
+    }
+
+    fn language_row_by_oid(&self, oid: u32) -> Option<PgLanguageRow> {
+        self.language_rows().into_iter().find(|row| row.oid == oid)
+    }
+
+    fn language_row_by_name(&self, name: &str) -> Option<PgLanguageRow> {
+        let normalized = normalize_catalog_lookup_name(name);
+        self.language_rows()
+            .into_iter()
+            .find(|row| row.lanname.eq_ignore_ascii_case(normalized))
     }
 
     fn rewrite_rows_for_relation(&self, _relation_oid: u32) -> Vec<PgRewriteRow> {
@@ -200,11 +228,42 @@ impl CatalogLookup for Catalog {
             .collect()
     }
 
+    fn proc_rows_by_name(&self, name: &str) -> Vec<PgProcRow> {
+        CatCache::from_catalog(self)
+            .proc_rows_by_name(name)
+            .into_iter()
+            .cloned()
+            .collect()
+    }
+
+    fn proc_row_by_oid(&self, oid: u32) -> Option<PgProcRow> {
+        CatCache::from_catalog(self).proc_by_oid(oid).cloned()
+    }
+
     fn type_rows(&self) -> Vec<PgTypeRow> {
         let relcache = RelCache::from_catalog(self);
         let mut rows = builtin_type_rows();
         rows.extend(composite_type_rows_from_relcache(&relcache));
         rows
+    }
+
+    fn language_rows(&self) -> Vec<PgLanguageRow> {
+        CatCache::from_catalog(self).language_rows()
+    }
+
+    fn language_row_by_oid(&self, oid: u32) -> Option<PgLanguageRow> {
+        CatCache::from_catalog(self)
+            .language_rows()
+            .into_iter()
+            .find(|row| row.oid == oid)
+    }
+
+    fn language_row_by_name(&self, name: &str) -> Option<PgLanguageRow> {
+        let normalized = normalize_catalog_lookup_name(name);
+        CatCache::from_catalog(self)
+            .language_rows()
+            .into_iter()
+            .find(|row| row.lanname.eq_ignore_ascii_case(normalized))
     }
 
     fn rewrite_rows_for_relation(&self, relation_oid: u32) -> Vec<PgRewriteRow> {
@@ -248,6 +307,13 @@ impl CatalogLookup for Catalog {
             catcache.attribute_rows(),
             catcache.statistic_rows(),
         )
+    }
+
+    fn materialize_visible_catalog(&self) -> Option<VisibleCatalog> {
+        Some(VisibleCatalog::new(
+            RelCache::from_catalog(self),
+            Some(CatCache::from_catalog(self)),
+        ))
     }
 }
 
@@ -296,6 +362,14 @@ impl CatalogLookup for RelCache {
         let mut rows = builtin_type_rows();
         rows.extend(composite_type_rows_from_relcache(self));
         rows
+    }
+
+    fn language_rows(&self) -> Vec<PgLanguageRow> {
+        bootstrap_pg_language_rows().to_vec()
+    }
+
+    fn materialize_visible_catalog(&self) -> Option<VisibleCatalog> {
+        Some(VisibleCatalog::new(self.clone(), None))
     }
 }
 
@@ -358,6 +432,14 @@ pub(crate) struct LiteralDefaultCatalog;
 impl CatalogLookup for LiteralDefaultCatalog {
     fn lookup_any_relation(&self, _name: &str) -> Option<BoundRelation> {
         None
+    }
+
+    fn language_rows(&self) -> Vec<PgLanguageRow> {
+        bootstrap_pg_language_rows().to_vec()
+    }
+
+    fn materialize_visible_catalog(&self) -> Option<VisibleCatalog> {
+        Some(VisibleCatalog::new(RelCache::default(), None))
     }
 }
 
@@ -719,6 +801,32 @@ pub fn pg_plan_query(
     build_plan_with_outer(stmt, catalog, &[], None, &[], &[])
 }
 
+pub fn pg_plan_query_with_outer(
+    stmt: &SelectStatement,
+    catalog: &dyn CatalogLookup,
+    outer_columns: &[(String, SqlType)],
+) -> Result<PlannedStmt, ParseError> {
+    let outer_scope = BoundScope {
+        desc: RelationDesc {
+            columns: outer_columns
+                .iter()
+                .map(|(name, sql_type)| column_desc(name.clone(), *sql_type, true))
+                .collect(),
+        },
+        columns: outer_columns
+            .iter()
+            .map(|(name, _)| ScopeColumn {
+                output_name: name.clone(),
+                hidden: false,
+                relation_names: vec![],
+                hidden_invalid_relation_names: vec![],
+                hidden_missing_relation_names: vec![],
+            })
+            .collect(),
+    };
+    build_plan_with_outer(stmt, catalog, &[outer_scope], None, &[], &[])
+}
+
 pub fn build_plan(stmt: &SelectStatement, catalog: &dyn CatalogLookup) -> Result<Plan, ParseError> {
     Ok(pg_plan_query(stmt, catalog)?.plan_tree)
 }
@@ -728,6 +836,32 @@ pub fn pg_plan_values_query(
     catalog: &dyn CatalogLookup,
 ) -> Result<PlannedStmt, ParseError> {
     build_values_plan_with_outer(stmt, catalog, &[], None, &[], &[])
+}
+
+pub fn pg_plan_values_query_with_outer(
+    stmt: &ValuesStatement,
+    catalog: &dyn CatalogLookup,
+    outer_columns: &[(String, SqlType)],
+) -> Result<PlannedStmt, ParseError> {
+    let outer_scope = BoundScope {
+        desc: RelationDesc {
+            columns: outer_columns
+                .iter()
+                .map(|(name, sql_type)| column_desc(name.clone(), *sql_type, true))
+                .collect(),
+        },
+        columns: outer_columns
+            .iter()
+            .map(|(name, _)| ScopeColumn {
+                output_name: name.clone(),
+                hidden: false,
+                relation_names: vec![],
+                hidden_invalid_relation_names: vec![],
+                hidden_missing_relation_names: vec![],
+            })
+            .collect(),
+    };
+    build_values_plan_with_outer(stmt, catalog, &[outer_scope], None, &[], &[])
 }
 
 pub fn build_values_plan(
@@ -897,7 +1031,16 @@ fn bind_select_query_with_outer(
     let needs_agg =
         !stmt.group_by.is_empty() || targets_contain_agg(&stmt.targets) || stmt.having.is_some();
 
-    if needs_agg && select_targets_contain_set_returning_call(&stmt.targets) {
+    if needs_agg
+        && select_targets_contain_set_returning_call(
+            &stmt.targets,
+            &scope,
+            catalog,
+            outer_scopes,
+            grouped_outer.as_ref(),
+            &visible_ctes,
+        )
+    {
         return Err(ParseError::UnexpectedToken {
             expected: "select-list set-returning function in a non-aggregate query",
             actual: "set-returning function in aggregate query".into(),

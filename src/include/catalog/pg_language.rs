@@ -6,6 +6,7 @@ use crate::include::catalog::BOOTSTRAP_SUPERUSER_OID;
 pub const PG_LANGUAGE_INTERNAL_OID: u32 = 12;
 pub const PG_LANGUAGE_C_OID: u32 = 13;
 pub const PG_LANGUAGE_SQL_OID: u32 = 14;
+pub const PG_LANGUAGE_PLPGSQL_OID: u32 = 15;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PgLanguageRow {
@@ -34,7 +35,7 @@ pub fn pg_language_desc() -> RelationDesc {
     }
 }
 
-pub fn bootstrap_pg_language_rows() -> [PgLanguageRow; 3] {
+pub fn bootstrap_pg_language_rows() -> [PgLanguageRow; 4] {
     // :HACK: Keep handler and validator links at zero until pgrust exposes the
     // backing pg_proc rows for language support functions.
     [
@@ -63,6 +64,16 @@ pub fn bootstrap_pg_language_rows() -> [PgLanguageRow; 3] {
             lanname: "sql".into(),
             lanowner: BOOTSTRAP_SUPERUSER_OID,
             lanispl: false,
+            lanpltrusted: true,
+            lanplcallfoid: 0,
+            laninline: 0,
+            lanvalidator: 0,
+        },
+        PgLanguageRow {
+            oid: PG_LANGUAGE_PLPGSQL_OID,
+            lanname: "plpgsql".into(),
+            lanowner: BOOTSTRAP_SUPERUSER_OID,
+            lanispl: true,
             lanpltrusted: true,
             lanplcallfoid: 0,
             laninline: 0,

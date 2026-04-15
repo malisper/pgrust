@@ -5,8 +5,9 @@ use crate::backend::utils::cache::relcache::RelCache;
 use crate::backend::utils::cache::system_views::{build_pg_stats_rows, build_pg_views_rows};
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, PgCastRow, PgClassRow, PgConstraintRow, PgOperatorRow, PgProcRow,
-    PgRewriteRow, PgStatisticRow, PgTypeRow, bootstrap_pg_cast_rows, bootstrap_pg_operator_rows,
-    bootstrap_pg_proc_rows, builtin_type_rows,
+    PgRewriteRow, PgStatisticRow, PgTypeRow, PgLanguageRow, bootstrap_pg_cast_rows,
+    bootstrap_pg_language_rows, bootstrap_pg_operator_rows, bootstrap_pg_proc_rows,
+    builtin_type_rows,
 };
 
 #[derive(Debug, Clone)]
@@ -105,6 +106,13 @@ impl CatalogLookup for VisibleCatalog {
             })
     }
 
+    fn proc_row_by_oid(&self, oid: u32) -> Option<PgProcRow> {
+        self.catcache
+            .as_ref()
+            .and_then(|catcache| catcache.proc_by_oid(oid).cloned())
+            .or_else(|| bootstrap_pg_proc_rows().into_iter().find(|row| row.oid == oid))
+    }
+
     fn operator_by_name_left_right(
         &self,
         name: &str,
@@ -151,6 +159,24 @@ impl CatalogLookup for VisibleCatalog {
             }
         }
         rows
+    }
+
+    fn language_rows(&self) -> Vec<PgLanguageRow> {
+        self.catcache
+            .as_ref()
+            .map(CatCache::language_rows)
+            .unwrap_or_else(|| bootstrap_pg_language_rows().to_vec())
+    }
+
+    fn language_row_by_oid(&self, oid: u32) -> Option<PgLanguageRow> {
+        self.language_rows().into_iter().find(|row| row.oid == oid)
+    }
+
+    fn language_row_by_name(&self, name: &str) -> Option<PgLanguageRow> {
+        let normalized = normalize_name(name);
+        self.language_rows()
+            .into_iter()
+            .find(|row| row.lanname.eq_ignore_ascii_case(normalized))
     }
 
     fn rewrite_rows_for_relation(&self, relation_oid: u32) -> Vec<PgRewriteRow> {
@@ -201,6 +227,10 @@ impl CatalogLookup for VisibleCatalog {
             catcache.attribute_rows(),
             catcache.statistic_rows(),
         )
+    }
+
+    fn materialize_visible_catalog(&self) -> Option<VisibleCatalog> {
+        Some(self.clone())
     }
 }
 
@@ -253,8 +283,10 @@ fn composite_type_rows_from_relcache(relcache: &RelCache) -> Vec<PgTypeRow> {
 mod tests {
     use super::*;
     use crate::backend::catalog::Catalog;
+    use crate::backend::catalog::catalog::column_desc;
     use crate::backend::parser::{CatalogLookup, SqlType, SqlTypeKind};
     use crate::include::catalog::TEXT_TYPE_OID;
+    use crate::include::nodes::primnodes::RelationDesc;
 
     #[test]
     fn visible_catalog_prefers_supplied_catcache_metadata() {
@@ -304,6 +336,34 @@ mod tests {
         assert_eq!(
             visible.type_oid_for_sql_type(SqlType::new(SqlTypeKind::Text)),
             Some(TEXT_TYPE_OID)
+        );
+    }
+
+    #[test]
+    fn visible_catalog_type_oid_preserves_named_composite_identity() {
+        let mut catalog = Catalog::default();
+        let entry = catalog
+            .create_table(
+                "widgets",
+                RelationDesc {
+                    columns: vec![
+                        column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
+                        column_desc("label", SqlType::new(SqlTypeKind::Text), false),
+                    ],
+                },
+            )
+            .unwrap();
+        let visible = VisibleCatalog::new(
+            RelCache::from_catalog(&catalog),
+            Some(CatCache::from_catalog(&catalog)),
+        );
+
+        assert_eq!(
+            visible.type_oid_for_sql_type(SqlType::named_composite(
+                entry.row_type_oid,
+                entry.relation_oid,
+            )),
+            Some(entry.row_type_oid)
         );
     }
 }

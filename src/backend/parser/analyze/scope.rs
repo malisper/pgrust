@@ -886,11 +886,71 @@ fn bind_function_from_item_with_ctes(
                     }),
                     scope,
                 ))
+            } else if let Some(resolved) = resolved.as_ref() {
+                if resolved.prokind != 'f' || !resolved.proretset {
+                    return Err(ParseError::UnknownTable(other.to_string()));
+                }
+                let bound_args = bind_user_defined_table_function_args(
+                    &args,
+                    &call_scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    &resolved.declared_arg_types,
+                )?;
+                let output_columns = resolved_row_columns.unwrap_or_else(|| {
+                    vec![QueryColumn {
+                        name: other.to_string(),
+                        sql_type: resolved.result_type,
+                    }]
+                });
+                let desc = RelationDesc {
+                    columns: output_columns
+                        .iter()
+                        .map(|col| column_desc(col.name.clone(), col.sql_type, true))
+                        .collect(),
+                };
+                let scope = scope_for_relation(Some(name), &desc);
+                Ok((
+                    AnalyzedFrom::function(SetReturningCall::UserDefined {
+                        proc_oid: resolved.proc_oid,
+                        func_variadic: resolved.func_variadic,
+                        args: bound_args,
+                        output_columns,
+                    }),
+                    scope,
+                ))
             } else {
                 Err(ParseError::UnknownTable(other.to_string()))
             }
         }
     }
+}
+
+fn bind_user_defined_table_function_args(
+    args: &[SqlExpr],
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    declared_arg_types: &[SqlType],
+) -> Result<Vec<Expr>, ParseError> {
+    let arg_types = args
+        .iter()
+        .map(|arg| infer_sql_expr_type(arg, scope, catalog, outer_scopes, grouped_outer))
+        .collect::<Vec<_>>();
+    let bound_args = args
+        .iter()
+        .map(|arg| bind_expr_with_outer(arg, scope, catalog, outer_scopes, grouped_outer))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(bound_args
+        .into_iter()
+        .zip(arg_types)
+        .zip(declared_arg_types.iter().copied())
+        .map(|((arg, actual_type), declared_type)| {
+            coerce_bound_expr(arg, actual_type, declared_type)
+        })
+        .collect())
 }
 
 fn resolve_function_row_columns(

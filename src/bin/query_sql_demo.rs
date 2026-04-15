@@ -15,7 +15,7 @@ use pgrust::executor::{
     ExecError, ExecutorContext, RelationDesc, StatementResult, Value, execute_readonly_statement,
 };
 use pgrust::include::access::htup::{HeapTuple, TupleValue};
-use pgrust::parser::{SqlType, SqlTypeKind, Statement, parse_statement};
+use pgrust::parser::{CatalogLookup, SqlType, SqlTypeKind, Statement, parse_statement};
 use pgrust::pl::plpgsql::{RaiseLevel, clear_notices, take_notices};
 use pgrust::{BufferPool, RelFileLocator, SmgrStorageBackend};
 use std::fs;
@@ -168,6 +168,8 @@ fn main() -> Result<(), ExecError> {
         outer_rows: Vec::new(),
         subplans: Vec::new(),
         timed: false,
+        catalog: relcache.materialize_visible_catalog(),
+        compiled_functions: std::collections::HashMap::new(),
     };
 
     let stmt = parse_statement(&sql)?;

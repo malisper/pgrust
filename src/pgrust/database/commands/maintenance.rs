@@ -152,6 +152,8 @@ impl Database {
             timed: false,
             outer_rows: Vec::new(),
             subplans: Vec::new(),
+            catalog: catalog.materialize_visible_catalog(),
+            compiled_functions: std::collections::HashMap::new(),
         };
         let analyzed = collect_analyze_stats(&analyze_stmt.targets, &catalog, &mut ctx)?;
         drop(ctx);

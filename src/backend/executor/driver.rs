@@ -175,6 +175,10 @@ fn execute_statement_with_source(
             "role management".into(),
         ))),
         Statement::CreateIndex(stmt) => execute_create_index(stmt, catalog, ctx),
+        Statement::CreateFunction(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "CREATE FUNCTION handled by database/session layer",
+            actual: "CREATE FUNCTION".into(),
+        })),
         Statement::CreateDomain(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "CREATE DOMAIN handled by database/session layer",
             actual: "CREATE DOMAIN".into(),
@@ -250,6 +254,10 @@ pub fn execute_readonly_statement(
         Statement::CreateIndex(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "CREATE INDEX".into(),
+        })),
+        Statement::CreateFunction(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "CREATE FUNCTION".into(),
         })),
         Statement::CreateDomain(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",

@@ -2,17 +2,44 @@ use std::collections::HashMap;
 
 use crate::backend::executor::Expr;
 use crate::backend::parser::{
-    CatalogLookup, ParseError, SqlType, SqlTypeKind, bind_scalar_expr_in_scope, parse_expr,
-    parse_type_name,
+    CatalogLookup, ParseError, SqlType, SqlTypeKind, Statement, bind_scalar_expr_in_scope,
+    parse_expr, parse_statement, parse_type_name, pg_plan_query_with_outer,
+    pg_plan_values_query_with_outer,
 };
+use crate::include::catalog::{PgProcRow, RECORD_TYPE_OID};
+use crate::include::nodes::plannodes::PlannedStmt;
+use crate::include::nodes::primnodes::QueryColumn;
 
-use super::ast::{Block, RaiseLevel, Stmt, VarDecl};
+use super::ast::{Block, RaiseLevel, ReturnQueryKind, Stmt, VarDecl};
+use super::gram::parse_block;
 
 #[derive(Debug, Clone)]
 pub(crate) struct CompiledBlock {
     pub(crate) local_slots: Vec<CompiledVar>,
     pub(crate) statements: Vec<CompiledStmt>,
     pub(crate) total_slots: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompiledFunction {
+    pub(crate) parameter_slots: Vec<CompiledFunctionSlot>,
+    pub(crate) output_slots: Vec<CompiledOutputSlot>,
+    pub(crate) body: CompiledBlock,
+    pub(crate) return_contract: FunctionReturnContract,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CompiledFunctionSlot {
+    pub(crate) name: String,
+    pub(crate) slot: usize,
+    pub(crate) ty: SqlType,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CompiledOutputSlot {
+    pub(crate) name: String,
+    pub(crate) slot: usize,
+    pub(crate) column: QueryColumn,
 }
 
 #[derive(Debug, Clone)]
@@ -25,6 +52,23 @@ pub(crate) struct CompiledVar {
 #[derive(Debug, Clone)]
 pub(crate) struct CompiledExpr {
     pub(crate) expr: Expr,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum FunctionReturnContract {
+    Scalar {
+        ty: SqlType,
+        setof: bool,
+        output_slot: Option<usize>,
+    },
+    FixedRow {
+        columns: Vec<QueryColumn>,
+        setof: bool,
+        uses_output_vars: bool,
+    },
+    AnonymousRecord {
+        setof: bool,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -50,6 +94,16 @@ pub(crate) enum CompiledStmt {
         level: RaiseLevel,
         message: String,
         params: Vec<CompiledExpr>,
+    },
+    Return {
+        expr: Option<CompiledExpr>,
+    },
+    ReturnNext {
+        expr: Option<CompiledExpr>,
+    },
+    ReturnQuery {
+        plan: PlannedStmt,
+        kind: ReturnQueryKind,
     },
 }
 
@@ -101,13 +155,172 @@ pub(crate) fn compile_do_block(
     catalog: &dyn CatalogLookup,
 ) -> Result<CompiledBlock, ParseError> {
     let mut env = CompileEnv::default();
-    compile_block(block, catalog, &mut env)
+    compile_block(block, catalog, &mut env, None)
+}
+
+pub(crate) fn compile_function_from_proc(
+    row: &PgProcRow,
+    catalog: &dyn CatalogLookup,
+) -> Result<CompiledFunction, ParseError> {
+    let block = parse_block(&row.prosrc)?;
+    let mut env = CompileEnv::default();
+    let mut parameter_slots = Vec::new();
+    let mut output_slots = Vec::new();
+
+    let input_type_oids = parse_proc_argtype_oids(&row.proargtypes).ok_or_else(|| {
+        ParseError::UnexpectedToken {
+            expected: "valid pg_proc.proargtypes",
+            actual: row.proargtypes.clone(),
+        }
+    })?;
+    let input_types = input_type_oids
+        .iter()
+        .map(|oid| {
+            catalog
+                .type_by_oid(*oid)
+                .map(|ty| ty.sql_type)
+                .ok_or_else(|| ParseError::UnsupportedType(oid.to_string()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    if let (Some(all_arg_types), Some(arg_modes)) = (&row.proallargtypes, &row.proargmodes) {
+        let arg_names = row.proargnames.clone().unwrap_or_default();
+        for (index, (type_oid, mode)) in all_arg_types.iter().zip(arg_modes.iter()).enumerate() {
+            let sql_type = catalog
+                .type_by_oid(*type_oid)
+                .map(|ty| ty.sql_type)
+                .ok_or_else(|| ParseError::UnsupportedType(type_oid.to_string()))?;
+            let name = arg_names
+                .get(index)
+                .cloned()
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| format!("column{}", index + 1));
+            match *mode {
+                b'i' => {
+                    let slot = env.define_var(&name, sql_type);
+                    parameter_slots.push(CompiledFunctionSlot {
+                        name,
+                        slot,
+                        ty: sql_type,
+                    });
+                }
+                b'b' => {
+                    let slot = env.define_var(&name, sql_type);
+                    parameter_slots.push(CompiledFunctionSlot {
+                        name: name.clone(),
+                        slot,
+                        ty: sql_type,
+                    });
+                    output_slots.push(CompiledOutputSlot {
+                        name: name.clone(),
+                        slot,
+                        column: QueryColumn { name, sql_type },
+                    });
+                }
+                b'o' | b't' => {
+                    let slot = env.define_var(&name, sql_type);
+                    output_slots.push(CompiledOutputSlot {
+                        name: name.clone(),
+                        slot,
+                        column: QueryColumn { name, sql_type },
+                    });
+                }
+                _ => {}
+            }
+        }
+    } else {
+        let arg_names = row.proargnames.clone().unwrap_or_default();
+        for (index, sql_type) in input_types.into_iter().enumerate() {
+            let name = arg_names
+                .get(index)
+                .cloned()
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| format!("arg{}", index + 1));
+            let slot = env.define_var(&name, sql_type);
+            parameter_slots.push(CompiledFunctionSlot {
+                name,
+                slot,
+                ty: sql_type,
+            });
+        }
+    }
+
+    let return_contract = function_return_contract(row, catalog, &output_slots)?;
+    let body = compile_block(&block, catalog, &mut env, Some(&return_contract))?;
+    Ok(CompiledFunction {
+        parameter_slots,
+        output_slots,
+        body,
+        return_contract,
+    })
+}
+
+fn function_return_contract(
+    row: &PgProcRow,
+    catalog: &dyn CatalogLookup,
+    output_slots: &[CompiledOutputSlot],
+) -> Result<FunctionReturnContract, ParseError> {
+    let result_type = catalog
+        .type_by_oid(row.prorettype)
+        .map(|ty| ty.sql_type)
+        .unwrap_or_else(|| SqlType::record(RECORD_TYPE_OID));
+    if row.proretset {
+        return Ok(match result_type.kind {
+            SqlTypeKind::Record => {
+                if output_slots.is_empty() {
+                    FunctionReturnContract::AnonymousRecord { setof: true }
+                } else {
+                    FunctionReturnContract::FixedRow {
+                        columns: output_slots.iter().map(|slot| slot.column.clone()).collect(),
+                        setof: true,
+                        uses_output_vars: true,
+                    }
+                }
+            }
+            SqlTypeKind::Composite => {
+                let relation = catalog.lookup_relation_by_oid(result_type.typrelid).ok_or_else(|| {
+                    ParseError::UnsupportedType(result_type.typrelid.to_string())
+                })?;
+                FunctionReturnContract::FixedRow {
+                    columns: relation
+                        .desc
+                        .columns
+                        .into_iter()
+                        .filter(|column| !column.dropped)
+                        .map(|column| QueryColumn {
+                            name: column.name,
+                            sql_type: column.sql_type,
+                        })
+                        .collect(),
+                    setof: true,
+                    uses_output_vars: false,
+                }
+            }
+            _ => FunctionReturnContract::Scalar {
+                ty: result_type,
+                setof: true,
+                output_slot: None,
+            },
+        });
+    }
+
+    match result_type.kind {
+        SqlTypeKind::Record | SqlTypeKind::Composite => Err(ParseError::FeatureNotSupported(
+            "non-set record/composite returns are not supported yet".into(),
+        )),
+        _ => Ok(FunctionReturnContract::Scalar {
+            ty: result_type,
+            setof: false,
+            output_slot: output_slots.first().map(|slot| slot.slot),
+        }),
+    }
 }
 
 fn compile_block(
     block: &Block,
     catalog: &dyn CatalogLookup,
     outer: &mut CompileEnv,
+    return_contract: Option<&FunctionReturnContract>,
 ) -> Result<CompiledBlock, ParseError> {
     let mut env = outer.child();
     let mut local_slots = Vec::with_capacity(block.declarations.len());
@@ -117,7 +330,7 @@ fn compile_block(
     let statements = block
         .statements
         .iter()
-        .map(|stmt| compile_stmt(stmt, catalog, &mut env))
+        .map(|stmt| compile_stmt(stmt, catalog, &mut env, return_contract))
         .collect::<Result<Vec<_>, _>>()?;
     outer.next_slot = outer.next_slot.max(env.next_slot);
     Ok(CompiledBlock {
@@ -149,9 +362,12 @@ fn compile_stmt(
     stmt: &Stmt,
     catalog: &dyn CatalogLookup,
     env: &mut CompileEnv,
+    return_contract: Option<&FunctionReturnContract>,
 ) -> Result<CompiledStmt, ParseError> {
     Ok(match stmt {
-        Stmt::Block(block) => CompiledStmt::Block(compile_block(block, catalog, env)?),
+        Stmt::Block(block) => {
+            CompiledStmt::Block(compile_block(block, catalog, env, return_contract)?)
+        }
         Stmt::Assign { name, expr } => {
             let var = env
                 .get_var(name)
@@ -172,11 +388,11 @@ fn compile_stmt(
                 .map(|(condition, body)| {
                     Ok((
                         compile_expr_text(condition, catalog, env)?,
-                        compile_stmt_list(body, catalog, env)?,
+                        compile_stmt_list(body, catalog, env, return_contract)?,
                     ))
                 })
                 .collect::<Result<_, ParseError>>()?,
-            else_branch: compile_stmt_list(else_branch, catalog, env)?,
+            else_branch: compile_stmt_list(else_branch, catalog, env, return_contract)?,
         },
         Stmt::ForInt {
             var_name,
@@ -186,7 +402,7 @@ fn compile_stmt(
         } => {
             let mut loop_env = env.child();
             let slot = loop_env.define_var(var_name, SqlType::new(SqlTypeKind::Int4));
-            let body = compile_stmt_list(body, catalog, &mut loop_env)?;
+            let body = compile_stmt_list(body, catalog, &mut loop_env, return_contract)?;
             env.next_slot = env.next_slot.max(loop_env.next_slot);
             CompiledStmt::ForInt {
                 slot,
@@ -219,17 +435,129 @@ fn compile_stmt(
                     .collect::<Result<_, _>>()?,
             }
         }
+        Stmt::Return { expr } => compile_return_stmt(expr.as_deref(), catalog, env, return_contract)?,
+        Stmt::ReturnNext { expr } => {
+            compile_return_next_stmt(expr.as_deref(), catalog, env, return_contract)?
+        }
+        Stmt::ReturnQuery { sql, kind } => {
+            compile_return_query_stmt(sql, *kind, catalog, env, return_contract)?
+        }
     })
+}
+
+fn compile_return_stmt(
+    expr: Option<&str>,
+    catalog: &dyn CatalogLookup,
+    env: &CompileEnv,
+    return_contract: Option<&FunctionReturnContract>,
+) -> Result<CompiledStmt, ParseError> {
+    let Some(contract) = return_contract else {
+        return Err(ParseError::FeatureNotSupported(
+            "RETURN is only supported inside CREATE FUNCTION".into(),
+        ));
+    };
+    match (contract, expr) {
+        (
+            FunctionReturnContract::Scalar {
+                setof: false, ..
+            },
+            Some(expr),
+        ) => Ok(CompiledStmt::Return {
+            expr: Some(compile_expr_text(expr, catalog, env)?),
+        }),
+        (FunctionReturnContract::Scalar { output_slot, setof, .. }, None)
+            if output_slot.is_some() || *setof =>
+        {
+            Ok(CompiledStmt::Return { expr: None })
+        }
+        (FunctionReturnContract::FixedRow { .. }, None)
+        | (FunctionReturnContract::AnonymousRecord { .. }, None) => {
+            Ok(CompiledStmt::Return { expr: None })
+        }
+        _ => Err(ParseError::FeatureNotSupported(
+            "RETURN expr is only supported for scalar function returns".into(),
+        )),
+    }
+}
+
+fn compile_return_next_stmt(
+    expr: Option<&str>,
+    catalog: &dyn CatalogLookup,
+    env: &CompileEnv,
+    return_contract: Option<&FunctionReturnContract>,
+) -> Result<CompiledStmt, ParseError> {
+    let Some(contract) = return_contract else {
+        return Err(ParseError::FeatureNotSupported(
+            "RETURN NEXT is only supported inside CREATE FUNCTION".into(),
+        ));
+    };
+    match (contract, expr) {
+        (FunctionReturnContract::Scalar { setof: true, .. }, Some(expr)) => {
+            Ok(CompiledStmt::ReturnNext {
+                expr: Some(compile_expr_text(expr, catalog, env)?),
+            })
+        }
+        (
+            FunctionReturnContract::FixedRow {
+                setof: true,
+                uses_output_vars: true,
+                ..
+            },
+            None,
+        ) => Ok(CompiledStmt::ReturnNext { expr: None }),
+        _ => Err(ParseError::FeatureNotSupported(
+            "RETURN NEXT is not valid for this function return contract".into(),
+        )),
+    }
+}
+
+fn compile_return_query_stmt(
+    sql: &str,
+    kind: ReturnQueryKind,
+    catalog: &dyn CatalogLookup,
+    env: &CompileEnv,
+    return_contract: Option<&FunctionReturnContract>,
+) -> Result<CompiledStmt, ParseError> {
+    let Some(contract) = return_contract else {
+        return Err(ParseError::FeatureNotSupported(
+            "RETURN QUERY is only supported inside CREATE FUNCTION".into(),
+        ));
+    };
+    let is_setof = match contract {
+        FunctionReturnContract::Scalar { setof, .. }
+        | FunctionReturnContract::FixedRow { setof, .. }
+        | FunctionReturnContract::AnonymousRecord { setof } => *setof,
+    };
+    if !is_setof {
+        return Err(ParseError::FeatureNotSupported(
+            "RETURN QUERY requires a set-returning function".into(),
+        ));
+    }
+
+    let planned = match parse_statement(sql)? {
+        Statement::Select(stmt) => pg_plan_query_with_outer(&stmt, catalog, &env.visible_columns())?,
+        Statement::Values(stmt) => {
+            pg_plan_values_query_with_outer(&stmt, catalog, &env.visible_columns())?
+        }
+        other => {
+            return Err(ParseError::UnexpectedToken {
+                expected: "RETURN QUERY SELECT ... or RETURN QUERY VALUES (...)",
+                actual: format!("{other:?}"),
+            });
+        }
+    };
+    Ok(CompiledStmt::ReturnQuery { plan: planned, kind })
 }
 
 fn compile_stmt_list(
     statements: &[Stmt],
     catalog: &dyn CatalogLookup,
     env: &mut CompileEnv,
+    return_contract: Option<&FunctionReturnContract>,
 ) -> Result<Vec<CompiledStmt>, ParseError> {
     statements
         .iter()
-        .map(|stmt| compile_stmt(stmt, catalog, env))
+        .map(|stmt| compile_stmt(stmt, catalog, env, return_contract))
         .collect()
 }
 
@@ -242,6 +570,16 @@ fn compile_expr_text(
     let (expr, sql_type) = bind_scalar_expr_in_scope(&parsed, &env.visible_columns(), catalog)?;
     let _ = sql_type;
     Ok(CompiledExpr { expr })
+}
+
+fn parse_proc_argtype_oids(argtypes: &str) -> Option<Vec<u32>> {
+    if argtypes.trim().is_empty() {
+        return Some(Vec::new());
+    }
+    argtypes
+        .split_whitespace()
+        .map(|part| part.parse::<u32>().ok())
+        .collect()
 }
 
 #[allow(dead_code)]
