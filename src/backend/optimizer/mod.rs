@@ -1997,6 +1997,20 @@ fn finalize_set_returning_call(
                 .collect(),
             output_columns,
         },
+        SetReturningCall::UserDefined {
+            proc_oid,
+            func_variadic,
+            args,
+            output_columns,
+        } => SetReturningCall::UserDefined {
+            proc_oid,
+            func_variadic,
+            args: args
+                .into_iter()
+                .map(|arg| finalize_expr_subqueries(arg, catalog, subplans))
+                .collect(),
+            output_columns,
+        },
     }
 }
 
@@ -2210,6 +2224,20 @@ fn rebase_set_returning_call_subplan_ids(call: SetReturningCall, base: usize) ->
             output_columns,
         } => SetReturningCall::TextSearchTableFunction {
             kind,
+            args: args
+                .into_iter()
+                .map(|arg| rebase_expr_subplan_ids(arg, base))
+                .collect(),
+            output_columns,
+        },
+        SetReturningCall::UserDefined {
+            proc_oid,
+            func_variadic,
+            args,
+            output_columns,
+        } => SetReturningCall::UserDefined {
+            proc_oid,
+            func_variadic,
             args: args
                 .into_iter()
                 .map(|arg| rebase_expr_subplan_ids(arg, base))

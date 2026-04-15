@@ -673,7 +673,7 @@ mod tests {
         send_startup(&mut stream);
         let _ = read_until_ready(&mut stream, "startup");
 
-        send_query(&mut stream, "set statement_timeout = '5ms'");
+        send_query(&mut stream, "set statement_timeout = '50ms'");
         let _ = read_until_ready(&mut stream, "set_timeout");
 
         send_query(&mut stream, "select * from generate_series(1, 1000000000)");
@@ -713,7 +713,7 @@ mod tests {
         send_startup(&mut stream);
         let _ = read_until_ready(&mut stream, "startup");
 
-        send_query(&mut stream, "set statement_timeout = '5ms'");
+        send_query(&mut stream, "set statement_timeout = '50ms'");
         let _ = read_until_ready(&mut stream, "set_timeout");
 
         send_parse(

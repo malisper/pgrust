@@ -508,6 +508,29 @@ impl CatalogStore {
         Ok(effect)
     }
 
+    pub fn create_proc_mvcc(
+        &mut self,
+        mut row: crate::include::catalog::PgProcRow,
+        ctx: &CatalogWriteContext,
+    ) -> Result<(u32, CatalogMutationEffect), CatalogError> {
+        let mut catalog = self.catalog_snapshot_with_control_for_snapshot(ctx)?;
+        if row.oid == 0 {
+            row.oid = catalog.next_oid();
+        }
+        catalog.next_oid = catalog.next_oid.max(row.oid.saturating_add(1));
+        self.persist_control_state(&catalog)?;
+
+        let rows = PhysicalCatalogRows {
+            procs: vec![row.clone()],
+            ..PhysicalCatalogRows::default()
+        };
+        insert_catalog_rows_subset_mvcc(ctx, &rows, 1, &[BootstrapCatalogKind::PgProc])?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &[BootstrapCatalogKind::PgProc]);
+        Ok((row.oid, effect))
+    }
+
     pub fn drop_namespace_mvcc(
         &mut self,
         namespace_oid: u32,

@@ -75,9 +75,6 @@ pub(super) fn resolve_function_call(
         let scalar_impl = builtin_scalar_function_for_proc_row(&row);
         let srf_impl = builtin_srf_impl_for_proc_row(&row);
         let agg_impl = aggregate_func_for_proname(&row.proname);
-        if scalar_impl.is_none() && srf_impl.is_none() && agg_impl.is_none() {
-            continue;
-        }
 
         let Some(candidate) = match_proc_signature(catalog, &row, actual_types, func_variadic)
         else {
@@ -128,14 +125,14 @@ pub(super) fn resolve_function_call(
 
     if ambiguous {
         return Err(ParseError::UnexpectedToken {
-            expected: "unambiguous builtin function call",
+            expected: "unambiguous function call",
             actual: format!("{name}({} args)", actual_types.len()),
         });
     }
 
     best.map(|(resolved, _, _, _)| resolved)
         .ok_or_else(|| ParseError::UnexpectedToken {
-            expected: "supported builtin function",
+            expected: "supported function",
             actual: name.to_string(),
         })
 }
@@ -1840,7 +1837,7 @@ mod tests {
         assert!(matches!(
             error,
             ParseError::UnexpectedToken { expected, actual }
-                if expected == "supported builtin function" && actual == "unnest"
+                if expected == "supported function" && actual == "unnest"
         ));
     }
 

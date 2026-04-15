@@ -20,6 +20,12 @@ pub enum RaiseLevel {
     Exception,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReturnQueryKind {
+    Select,
+    Values,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stmt {
     Block(Block),
@@ -42,5 +48,15 @@ pub enum Stmt {
         level: RaiseLevel,
         message: String,
         params: Vec<String>,
+    },
+    Return {
+        expr: Option<String>,
+    },
+    ReturnNext {
+        expr: Option<String>,
+    },
+    ReturnQuery {
+        sql: String,
+        kind: ReturnQueryKind,
     },
 }

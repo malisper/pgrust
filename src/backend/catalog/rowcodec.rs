@@ -630,6 +630,7 @@ pub(crate) fn pg_index_row_from_values(values: Vec<Value>) -> Result<PgIndexRow,
 
 pub(crate) fn pg_type_row_from_values(values: Vec<Value>) -> Result<PgTypeRow, CatalogError> {
     let oid = expect_oid(&values[0])?;
+    let typrelid = expect_oid(&values[7])?;
     Ok(PgTypeRow {
         oid,
         typname: expect_text(&values[1])?,
@@ -640,8 +641,14 @@ pub(crate) fn pg_type_row_from_values(values: Vec<Value>) -> Result<PgTypeRow, C
             .ok_or(CatalogError::Corrupt("invalid typalign"))?,
         typstorage: AttributeStorage::from_char(expect_char(&values[6], "typstorage")?)
             .ok_or(CatalogError::Corrupt("invalid typstorage"))?,
-        typrelid: expect_oid(&values[7])?,
-        sql_type: decode_builtin_sql_type(oid).unwrap_or(SqlType::new(SqlTypeKind::Text)),
+        typrelid,
+        sql_type: decode_builtin_sql_type(oid).unwrap_or_else(|| {
+            if typrelid != 0 {
+                SqlType::named_composite(oid, typrelid)
+            } else {
+                SqlType::new(SqlTypeKind::Text)
+            }
+        }),
     })
 }
 

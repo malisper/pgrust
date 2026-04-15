@@ -66,8 +66,10 @@ use crate::backend::parser::{ParseError, SqlType, SqlTypeKind, SubqueryCompariso
 use crate::include::catalog::builtin_scalar_function_for_proc_oid;
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue};
 use crate::include::nodes::primnodes::{
-    BoolExpr, BoolExprType, FuncExpr, OpExpr, OpExprKind, ScalarArrayOpExpr, SubLinkType,
+    BoolExpr, BoolExprType, FuncExpr, OpExpr, OpExprKind, ScalarArrayOpExpr, ScalarFunctionImpl,
+    SubLinkType,
 };
+use crate::pl::plpgsql::execute_user_defined_scalar_function;
 
 mod arrays;
 mod subquery;
@@ -245,8 +247,14 @@ fn eval_func_expr(
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
-    let builtin = builtin_function_for_expr(func.funcid)?;
-    eval_builtin_function(builtin, &func.args, func.funcvariadic, slot, ctx)
+    match func.implementation {
+        ScalarFunctionImpl::Builtin(builtin) => {
+            eval_builtin_function(builtin, &func.args, func.funcvariadic, slot, ctx)
+        }
+        ScalarFunctionImpl::UserDefined { proc_oid } => {
+            execute_user_defined_scalar_function(proc_oid, &func.args, slot, ctx)
+        }
+    }
 }
 
 fn eval_scalar_array_op_expr(

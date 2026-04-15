@@ -3,6 +3,7 @@ use super::pg_regex::{eval_regexp_matches_rows, eval_regexp_split_to_table_rows}
 use super::{ExecError, ExecutorContext, Expr, SetReturningCall, TupleSlot, Value, eval_expr};
 use crate::backend::parser::SqlTypeKind;
 use crate::include::nodes::datum::NumericValue;
+use crate::pl::plpgsql::execute_user_defined_set_returning_function;
 
 pub(crate) fn eval_set_returning_call(
     call: &SetReturningCall,
@@ -30,6 +31,12 @@ pub(crate) fn eval_set_returning_call(
                 actual: "text search table function".into(),
             },
         )),
+        SetReturningCall::UserDefined {
+            proc_oid,
+            args,
+            output_columns,
+            ..
+        } => execute_user_defined_set_returning_function(*proc_oid, args, output_columns, slot, ctx),
     }
 }
 
@@ -93,6 +100,7 @@ pub(crate) fn set_returning_call_label(call: &SetReturningCall) -> &'static str 
             crate::include::nodes::primnodes::TextSearchTableFunction::Parse => "ts_parse",
             crate::include::nodes::primnodes::TextSearchTableFunction::Debug => "ts_debug",
         },
+        SetReturningCall::UserDefined { .. } => "user_defined_srf",
     }
 }
 

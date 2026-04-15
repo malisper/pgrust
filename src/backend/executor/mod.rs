@@ -80,12 +80,16 @@ use crate::backend::parser::{
     pg_plan_values_query,
 };
 use crate::backend::storage::lmgr::TableLockError;
+use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::backend::utils::misc::interrupts::{
     InterruptReason, InterruptState, check_for_interrupts,
 };
 use crate::include::access::htup::TupleError;
 use crate::pgrust::database::TransactionWaiter;
+use crate::pl::plpgsql::CompiledFunction;
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
+use std::collections::HashMap;
+use std::sync::Arc;
 
 pub(crate) use expr_ops::compare_order_values;
 use expr_ops::parse_numeric_text;
@@ -102,6 +106,8 @@ pub struct ExecutorContext {
     pub subplans: Vec<Plan>,
     /// When true, each node records per-node timing stats (for EXPLAIN ANALYZE).
     pub timed: bool,
+    pub catalog: Option<VisibleCatalog>,
+    pub compiled_functions: HashMap<u32, Arc<CompiledFunction>>,
 }
 
 impl ExecutorContext {

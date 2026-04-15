@@ -569,6 +569,20 @@ pub(super) fn rewrite_set_returning_call_against_layout(
                 .collect(),
             output_columns,
         },
+        SetReturningCall::UserDefined {
+            proc_oid,
+            func_variadic,
+            args,
+            output_columns,
+        } => SetReturningCall::UserDefined {
+            proc_oid,
+            func_variadic,
+            args: args
+                .into_iter()
+                .map(|arg| rewrite_expr_against_layout(arg, layout))
+                .collect(),
+            output_columns,
+        },
     }
 }
 
@@ -644,6 +658,20 @@ fn lower_set_returning_call_to_plan_layout(
             output_columns,
         } => SetReturningCall::TextSearchTableFunction {
             kind,
+            args: args
+                .into_iter()
+                .map(|arg| lower_expr_to_plan_layout(arg, layout))
+                .collect(),
+            output_columns,
+        },
+        SetReturningCall::UserDefined {
+            proc_oid,
+            func_variadic,
+            args,
+            output_columns,
+        } => SetReturningCall::UserDefined {
+            proc_oid,
+            func_variadic,
             args: args
                 .into_iter()
                 .map(|arg| lower_expr_to_plan_layout(arg, layout))

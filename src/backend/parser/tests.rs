@@ -1,10 +1,6 @@
 use super::*;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::{AggFunc, Expr, Plan, RelationDesc, Value};
-use crate::include::catalog::{
-    JSON_TYPE_OID, PgProcRow, PgRewriteRow, PgTypeRow, RECORD_TYPE_OID, bootstrap_pg_proc_rows,
-    sort_pg_rewrite_rows,
-};
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, PUBLIC_NAMESPACE_OID, JSON_TYPE_OID, PgProcRow, PgRewriteRow,
@@ -694,6 +690,38 @@ fn parse_do_statement_with_explicit_language() {
         Statement::Do(DoStatement {
             language: Some("plpgsql".into()),
             code: " begin null; end ".into(),
+        })
+    );
+}
+
+#[test]
+fn parse_create_function_statement_with_returns_table() {
+    let stmt = parse_statement(
+        "create function public.pair_rows(x int4) returns table(a int4, b text) language plpgsql as $$ begin return next; end $$",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateFunction(CreateFunctionStatement {
+            schema_name: Some("public".into()),
+            function_name: "pair_rows".into(),
+            args: vec![CreateFunctionArg {
+                mode: FunctionArgMode::In,
+                name: "x".into(),
+                ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
+            }],
+            return_spec: CreateFunctionReturnSpec::Table(vec![
+                CreateFunctionTableColumn {
+                    name: "a".into(),
+                    ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
+                },
+                CreateFunctionTableColumn {
+                    name: "b".into(),
+                    ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Text)),
+                },
+            ]),
+            language: "plpgsql".into(),
+            body: " begin return next; end ".into(),
         })
     );
 }
