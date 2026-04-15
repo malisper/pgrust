@@ -736,9 +736,7 @@ fn read_relation_fork_block(
 ) -> [u8; crate::backend::storage::smgr::BLCKSZ] {
     let mut page = [0u8; crate::backend::storage::smgr::BLCKSZ];
     db.pool
-        .with_storage_mut(|storage| {
-            storage.smgr.read_block(rel, fork, block, &mut page)
-        })
+        .with_storage_mut(|storage| storage.smgr.read_block(rel, fork, block, &mut page))
         .unwrap();
     page
 }

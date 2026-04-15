@@ -191,7 +191,8 @@ fn try_parse_domain_statement(sql: &str) -> Result<Option<Statement>, ParseError
     let trimmed = sql.trim().trim_end_matches(';').trim();
     let lowered = trimmed.to_ascii_lowercase();
     if lowered.starts_with("create domain ") {
-        return build_create_domain_statement(trimmed).map(|stmt| Some(Statement::CreateDomain(stmt)));
+        return build_create_domain_statement(trimmed)
+            .map(|stmt| Some(Statement::CreateDomain(stmt)));
     }
     if lowered.starts_with("drop domain ") {
         return build_drop_domain_statement(trimmed).map(|stmt| Some(Statement::DropDomain(stmt)));
@@ -212,15 +213,17 @@ fn build_create_domain_statement(sql: &str) -> Result<CreateDomainStatement, Par
         });
     };
     let rest = rest.trim_start();
-    let domain_name_end = rest
-        .find(char::is_whitespace)
-        .ok_or_else(|| ParseError::UnexpectedToken {
-            expected: "domain base type",
-            actual: sql.into(),
-        })?;
+    let domain_name_end =
+        rest.find(char::is_whitespace)
+            .ok_or_else(|| ParseError::UnexpectedToken {
+                expected: "domain base type",
+                actual: sql.into(),
+            })?;
     let domain_name = &rest[..domain_name_end];
     let mut type_sql = rest[domain_name_end..].trim_start();
-    if type_sql.get(..2).is_some_and(|s| s.eq_ignore_ascii_case("as"))
+    if type_sql
+        .get(..2)
+        .is_some_and(|s| s.eq_ignore_ascii_case("as"))
         && type_sql
             .get(2..3)
             .is_none_or(|s| s.chars().all(char::is_whitespace))
@@ -234,9 +237,8 @@ fn build_create_domain_statement(sql: &str) -> Result<CreateDomainStatement, Par
         });
     }
     let normalized_type_sql = normalize_domain_type_sql(type_sql);
-    if normalized_type_sql
-        .split_whitespace()
-        .any(|tok| matches!(
+    if normalized_type_sql.split_whitespace().any(|tok| {
+        matches!(
             tok.to_ascii_lowercase().as_str(),
             "constraint"
                 | "default"
@@ -250,8 +252,8 @@ fn build_create_domain_statement(sql: &str) -> Result<CreateDomainStatement, Par
                 | "generated"
                 | "deferrable"
                 | "no"
-        ))
-    {
+        )
+    }) {
         return Err(ParseError::FeatureNotSupported(
             "CREATE DOMAIN constraints/defaults are not supported yet".into(),
         ));
@@ -295,7 +297,10 @@ fn build_drop_domain_statement(sql: &str) -> Result<DropDomainStatement, ParseEr
     let tokens = sql.split_whitespace().collect::<Vec<_>>();
     let mut index = 2usize;
     let mut if_exists = false;
-    if tokens.get(index).is_some_and(|tok| tok.eq_ignore_ascii_case("if")) {
+    if tokens
+        .get(index)
+        .is_some_and(|tok| tok.eq_ignore_ascii_case("if"))
+    {
         if !tokens
             .get(index + 1)
             .zip(tokens.get(index + 2))
@@ -544,10 +549,16 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::alter_table_alter_column_type_stmt => Ok(Statement::AlterTableAlterColumnType(
             build_alter_table_alter_column_type(inner)?,
         )),
+        Rule::alter_table_owner_stmt => Ok(Statement::AlterTableOwner(build_alter_relation_owner(
+            inner,
+        )?)),
         Rule::alter_table_rename_column_stmt => Ok(Statement::AlterTableRenameColumn(
             build_alter_table_rename_column(inner)?,
         )),
         Rule::alter_table_rename_stmt => Ok(Statement::AlterTableRename(build_alter_table_rename(
+            inner,
+        )?)),
+        Rule::alter_view_owner_stmt => Ok(Statement::AlterViewOwner(build_alter_relation_owner(
             inner,
         )?)),
         Rule::alter_table_set_stmt => Ok(Statement::AlterTableSet(build_alter_table_set(inner)?)),
@@ -776,7 +787,10 @@ fn build_reset(pair: Pair<'_, Rule>) -> Result<ResetStatement, ParseError> {
 }
 
 fn build_create_role(pair: Pair<'_, Rule>) -> Result<CreateRoleStatement, ParseError> {
-    let is_user = pair.as_str().to_ascii_lowercase().starts_with("create user ");
+    let is_user = pair
+        .as_str()
+        .to_ascii_lowercase()
+        .starts_with("create user ");
     let mut role_name = None;
     let mut options = Vec::new();
 
@@ -866,7 +880,9 @@ fn build_role_option_from_rule(pair: Pair<'_, Rule>) -> Result<RoleOption, Parse
                     _ => {}
                 }
             }
-            Ok(RoleOption::Password(value.ok_or(ParseError::UnexpectedEof)?))
+            Ok(RoleOption::Password(
+                value.ok_or(ParseError::UnexpectedEof)?,
+            ))
         }
         Rule::role_encrypted_password_option => {
             let value = pair
@@ -2418,6 +2434,19 @@ fn build_alter_table_alter_column_type(
         column_name: column_name.ok_or(ParseError::UnexpectedEof)?,
         ty: ty.ok_or(ParseError::UnexpectedEof)?,
         using_expr,
+    })
+}
+
+fn build_alter_relation_owner(
+    pair: Pair<'_, Rule>,
+) -> Result<AlterRelationOwnerStatement, ParseError> {
+    let mut parts = pair
+        .into_inner()
+        .filter(|part| part.as_rule() == Rule::identifier)
+        .map(build_identifier);
+    Ok(AlterRelationOwnerStatement {
+        relation_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
+        new_owner: parts.next().ok_or(ParseError::UnexpectedEof)?,
     })
 }
 

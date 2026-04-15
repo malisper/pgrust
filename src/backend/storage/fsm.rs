@@ -1,8 +1,8 @@
 use std::collections::BTreeSet;
 
+use crate::SmgrStorageBackend;
 use crate::backend::storage::buffer::{BufferPool, PAGE_SIZE};
 use crate::backend::storage::smgr::{ForkNumber, RelFileLocator, StorageManager};
-use crate::SmgrStorageBackend;
 
 fn load_free_pages(
     pool: &BufferPool<SmgrStorageBackend>,
@@ -30,7 +30,9 @@ fn load_free_pages(
             if start + 4 > PAGE_SIZE {
                 break;
             }
-            free.insert(u32::from_le_bytes(buf[start..start + 4].try_into().unwrap()));
+            free.insert(u32::from_le_bytes(
+                buf[start..start + 4].try_into().unwrap(),
+            ));
         }
         Ok(free)
     })

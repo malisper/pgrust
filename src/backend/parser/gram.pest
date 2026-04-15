@@ -1,7 +1,7 @@
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 
 statement = { SOI ~ stmt ~ EOI }
-stmt = _{ do_stmt | explain_stmt | table_stmt | select_stmt | values_stmt | copy_stmt | analyze_stmt | show_stmt | set_session_authorization_stmt | reset_session_authorization_stmt | set_stmt | reset_stmt | create_role_stmt | alter_role_stmt | create_index_stmt | alter_table_add_column_stmt | alter_table_drop_column_stmt | alter_table_alter_column_type_stmt | alter_table_rename_column_stmt | alter_table_rename_stmt | alter_table_set_stmt | comment_on_role_stmt | comment_on_table_stmt | create_table_stmt | create_view_stmt | drop_role_stmt | drop_table_stmt | drop_view_stmt | reassign_owned_stmt | truncate_table_stmt | vacuum_stmt | insert_stmt | update_stmt | delete_stmt | begin_stmt | commit_stmt | rollback_stmt }
+stmt = _{ do_stmt | explain_stmt | table_stmt | select_stmt | values_stmt | copy_stmt | analyze_stmt | show_stmt | set_session_authorization_stmt | reset_session_authorization_stmt | set_stmt | reset_stmt | create_role_stmt | alter_role_stmt | create_index_stmt | alter_table_add_column_stmt | alter_table_drop_column_stmt | alter_table_alter_column_type_stmt | alter_table_owner_stmt | alter_table_rename_column_stmt | alter_table_rename_stmt | alter_view_owner_stmt | alter_table_set_stmt | comment_on_role_stmt | comment_on_table_stmt | create_table_stmt | create_view_stmt | drop_role_stmt | drop_table_stmt | drop_view_stmt | reassign_owned_stmt | truncate_table_stmt | vacuum_stmt | insert_stmt | update_stmt | delete_stmt | begin_stmt | commit_stmt | rollback_stmt }
 
 do_stmt = { kw_do ~ do_body ~ do_language_clause? | kw_do ~ do_language_clause ~ do_body }
 do_body = { quoted_string_literal }
@@ -54,10 +54,12 @@ create_index_with_clause = { kw_with ~ "(" ~ reloption ~ ("," ~ reloption)* ~ ")
 alter_table_add_column_stmt = { kw_alter ~ kw_table ~ identifier ~ kw_add ~ kw_column? ~ column_def }
 alter_table_drop_column_stmt = { kw_alter ~ kw_table ~ identifier ~ kw_drop ~ kw_column? ~ identifier }
 alter_table_alter_column_type_stmt = { kw_alter ~ kw_table ~ identifier ~ kw_alter ~ kw_column? ~ identifier ~ alter_table_column_type_action }
+alter_table_owner_stmt = { kw_alter ~ kw_table ~ identifier ~ kw_owner ~ kw_to ~ identifier }
 alter_table_column_type_action = { (kw_type | (kw_set ~ kw_data ~ kw_type)) ~ type_name ~ alter_table_using_clause? }
 alter_table_using_clause = { kw_using ~ expr }
 alter_table_rename_column_stmt = { kw_alter ~ kw_table ~ identifier ~ kw_rename ~ kw_column ~ identifier ~ kw_to ~ identifier }
 alter_table_rename_stmt = { kw_alter ~ kw_table ~ identifier ~ kw_rename ~ kw_to ~ identifier }
+alter_view_owner_stmt = { kw_alter ~ kw_view ~ identifier ~ kw_owner ~ kw_to ~ identifier }
 alter_table_set_stmt = { kw_alter ~ kw_table ~ identifier ~ kw_set ~ "(" ~ reloption ~ ("," ~ reloption)* ~ ")" }
 drop_role_stmt = { kw_drop ~ kw_role ~ if_exists_clause? ~ ident_list }
 comment_on_role_stmt = { kw_comment ~ kw_on ~ kw_role ~ identifier ~ kw_is ~ (quoted_string_literal | kw_null) }
@@ -351,6 +353,7 @@ kw_as = _{ kw_as_atom }
 kw_from = _{ kw_from_atom }
 kw_join = _{ kw_join_atom }
 kw_on = _{ kw_on_atom }
+kw_owner = _{ kw_owner_atom }
 kw_where = _{ kw_where_atom }
 kw_insert = _{ kw_insert_atom }
 kw_into = _{ kw_into_atom }
@@ -556,6 +559,7 @@ kw_as_atom = @{ ^"as" ~ keyword_end }
 kw_from_atom = @{ ^"from" ~ keyword_end }
 kw_join_atom = @{ ^"join" ~ keyword_end }
 kw_on_atom = @{ ^"on" ~ keyword_end }
+kw_owner_atom = @{ ^"owner" ~ keyword_end }
 kw_where_atom = @{ ^"where" ~ keyword_end }
 kw_insert_atom = @{ ^"insert" ~ keyword_end }
 kw_into_atom = @{ ^"into" ~ keyword_end }

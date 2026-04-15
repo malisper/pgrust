@@ -4,8 +4,8 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use crate::backend::access::nbtree::nbtxlog::btree_redo;
 use crate::BLCKSZ;
+use crate::backend::access::nbtree::nbtxlog::btree_redo;
 use crate::backend::access::transam::xact::TransactionManager;
 use crate::backend::storage::page::bufpage::page_add_item;
 use crate::backend::storage::smgr::md::MdStorageManager;

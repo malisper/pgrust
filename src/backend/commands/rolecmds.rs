@@ -4,9 +4,7 @@ use crate::backend::parser::{
     AlterRoleAction, AlterRoleStatement, CreateRoleStatement, DropRoleStatement, ParseError,
     RoleOption,
 };
-use crate::include::catalog::{
-    PG_DATABASE_OWNER_OID, PgAuthIdRow,
-};
+use crate::include::catalog::{PG_DATABASE_OWNER_OID, PgAuthIdRow};
 use crate::pgrust::auth::{AuthCatalog, AuthState};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -277,7 +275,11 @@ mod tests {
         creator.rolcreaterole = true;
         let target = role(BOOTSTRAP_SUPERUSER_OID + 2, "tenant");
         let catalog = AuthCatalog::new(
-            vec![role(BOOTSTRAP_SUPERUSER_OID, "postgres"), creator.clone(), target.clone()],
+            vec![
+                role(BOOTSTRAP_SUPERUSER_OID, "postgres"),
+                creator.clone(),
+                target.clone(),
+            ],
             vec![PgAuthMembersRow {
                 oid: 1,
                 roleid: target.oid,

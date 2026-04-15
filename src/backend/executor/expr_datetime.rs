@@ -61,7 +61,9 @@ pub(crate) fn apply_time_precision(value: Value, precision: Option<i32>) -> Valu
 }
 
 pub(crate) fn current_date_value_with_config(config: &DateTimeConfig) -> Value {
-    Value::Date(crate::include::nodes::datetime::DateADT(today_pg_days(config)))
+    Value::Date(crate::include::nodes::datetime::DateADT(today_pg_days(
+        config,
+    )))
 }
 
 pub(crate) fn current_date_value() -> Value {

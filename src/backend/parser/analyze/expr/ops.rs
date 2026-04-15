@@ -32,7 +32,16 @@ pub(super) fn bind_arithmetic_expr(
             grouped_outer,
             ctes,
         )?;
-        return bind_money_arithmetic_expr(op, make, left, raw_left_type, left_type, right, raw_right_type, right_type);
+        return bind_money_arithmetic_expr(
+            op,
+            make,
+            left,
+            raw_left_type,
+            left_type,
+            right,
+            raw_right_type,
+            right_type,
+        );
     }
     if !left_type.is_array
         && !right_type.is_array

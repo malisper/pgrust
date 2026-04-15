@@ -207,8 +207,10 @@ pub enum Statement {
     AlterTableAddColumn(AlterTableAddColumnStatement),
     AlterTableDropColumn(AlterTableDropColumnStatement),
     AlterTableAlterColumnType(AlterTableAlterColumnTypeStatement),
+    AlterTableOwner(AlterRelationOwnerStatement),
     AlterTableRenameColumn(AlterTableRenameColumnStatement),
     AlterTableRename(AlterTableRenameStatement),
+    AlterViewOwner(AlterRelationOwnerStatement),
     AlterTableSet(AlterTableSetStatement),
     CommentOnTable(CommentOnTableStatement),
     CommentOnDomain(CommentOnDomainStatement),
@@ -649,6 +651,12 @@ pub struct AlterTableAlterColumnTypeStatement {
     pub column_name: String,
     pub ty: RawTypeName,
     pub using_expr: Option<SqlExpr>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterRelationOwnerStatement {
+    pub relation_name: String,
+    pub new_owner: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

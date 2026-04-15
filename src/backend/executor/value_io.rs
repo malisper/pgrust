@@ -242,7 +242,11 @@ pub(crate) fn coerce_assignment_value(value: &Value, target: SqlType) -> Result<
         Value::Int16(v) => cast_text_value(&v.to_string(), target, false),
         Value::Int32(v) => cast_text_value(&v.to_string(), target, false),
         Value::Int64(v) => cast_text_value(&v.to_string(), target, false),
-        Value::Money(v) => cast_text_value(&crate::backend::executor::money_format_text(*v), target, false),
+        Value::Money(v) => cast_text_value(
+            &crate::backend::executor::money_format_text(*v),
+            target,
+            false,
+        ),
         Value::Date(v) => cast_value(Value::Date(*v), target),
         Value::Time(v) => cast_value(Value::Time(*v), target),
         Value::TimeTz(v) => cast_value(Value::TimeTz(*v), target),

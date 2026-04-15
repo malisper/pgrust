@@ -1,12 +1,12 @@
 use crate::backend::utils::misc::guc_datetime::{DateOrder, DateStyleFormat, DateTimeConfig};
 use crate::backend::utils::time::datetime::{
     DateTimeKeyword, DateTimeParseError, days_from_ymd, format_offset, format_time_usecs,
-    month_number, parse_date_token_with_config, parse_keyword,
-    parse_offset_seconds, parse_time_components, split_time_and_offset, time_usecs_from_hms,
-    timezone_offset_seconds, today_pg_days, ymd_from_days,
+    month_number, parse_date_token_with_config, parse_keyword, parse_offset_seconds,
+    parse_time_components, split_time_and_offset, time_usecs_from_hms, timezone_offset_seconds,
+    today_pg_days, ymd_from_days,
 };
 use crate::include::nodes::datetime::{
-    DATEVAL_NOBEGIN, DATEVAL_NOEND, POSTGRES_EPOCH_JDATE, DateADT, TimeADT, TimeTzADT,
+    DATEVAL_NOBEGIN, DATEVAL_NOEND, DateADT, POSTGRES_EPOCH_JDATE, TimeADT, TimeTzADT,
 };
 use std::sync::OnceLock;
 
@@ -57,8 +57,15 @@ fn build_date(
     Ok(DateADT(days))
 }
 
-fn parse_numeric_tokens(tokens: &[&str], config: &DateTimeConfig) -> Result<DateADT, DateParseError> {
-    if tokens.len() != 3 || !tokens.iter().all(|token| token.chars().all(|ch| ch.is_ascii_digit())) {
+fn parse_numeric_tokens(
+    tokens: &[&str],
+    config: &DateTimeConfig,
+) -> Result<DateADT, DateParseError> {
+    if tokens.len() != 3
+        || !tokens
+            .iter()
+            .all(|token| token.chars().all(|ch| ch.is_ascii_digit()))
+    {
         return Err(DateParseError::Invalid);
     }
     let datestyle_hint = true;
@@ -145,7 +152,9 @@ fn parse_named_month_tokens(
         (Some(month), None, None) => build_date(
             parse_year_number(tokens[2], allow_two_digit_year)?,
             month,
-            tokens[1].parse::<u32>().map_err(|_| DateParseError::Invalid)?,
+            tokens[1]
+                .parse::<u32>()
+                .map_err(|_| DateParseError::Invalid)?,
             false,
         ),
         (None, Some(month), None) => {
@@ -172,7 +181,9 @@ fn parse_named_month_tokens(
         (None, None, Some(month)) => build_date(
             parse_year_number(tokens[0], allow_two_digit_year)?,
             month,
-            tokens[1].parse::<u32>().map_err(|_| DateParseError::Invalid)?,
+            tokens[1]
+                .parse::<u32>()
+                .map_err(|_| DateParseError::Invalid)?,
             false,
         ),
         _ => Err(DateParseError::Invalid),
@@ -183,7 +194,10 @@ fn map_single_token_parse_error(text: &str, err: DateTimeParseError) -> DatePars
     match err {
         DateTimeParseError::Invalid => DateParseError::Invalid,
         DateTimeParseError::FieldOutOfRange => DateParseError::FieldOutOfRange {
-            datestyle_hint: text.contains('/') || text.split('-').all(|part| part.chars().all(|ch| ch.is_ascii_digit())),
+            datestyle_hint: text.contains('/')
+                || text
+                    .split('-')
+                    .all(|part| part.chars().all(|ch| ch.is_ascii_digit())),
         },
         DateTimeParseError::UnknownTimeZone(_) => DateParseError::Invalid,
     }
@@ -215,7 +229,9 @@ pub fn parse_date_text(text: &str, config: &DateTimeConfig) -> Result<DateADT, D
             DateTimeKeyword::Tomorrow => Ok(DateADT(today_pg_days(config) + 1)),
             DateTimeKeyword::Yesterday => Ok(DateADT(today_pg_days(config) - 1)),
             DateTimeKeyword::Epoch => build_date(1970, 1, 1, false),
-            DateTimeKeyword::Infinity => Ok(DateADT(crate::include::nodes::datetime::DATEVAL_NOEND)),
+            DateTimeKeyword::Infinity => {
+                Ok(DateADT(crate::include::nodes::datetime::DATEVAL_NOEND))
+            }
             DateTimeKeyword::NegInfinity => {
                 Ok(DateADT(crate::include::nodes::datetime::DATEVAL_NOBEGIN))
             }
@@ -300,7 +316,9 @@ pub fn parse_date_text(text: &str, config: &DateTimeConfig) -> Result<DateADT, D
     if bc {
         let (year, month, day) = ymd_from_days(value.0);
         if year <= 0 {
-            return Err(DateParseError::FieldOutOfRange { datestyle_hint: false });
+            return Err(DateParseError::FieldOutOfRange {
+                datestyle_hint: false,
+            });
         }
         value = build_date(1 - year, month, day, false)?;
     }

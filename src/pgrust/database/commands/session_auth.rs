@@ -1,7 +1,9 @@
 use super::super::*;
-use crate::backend::commands::rolecmds::role_management_error;
 use crate::backend::catalog::roles::find_role_by_name;
-use crate::backend::parser::{ResetSessionAuthorizationStatement, SetSessionAuthorizationStatement};
+use crate::backend::commands::rolecmds::role_management_error;
+use crate::backend::parser::{
+    ResetSessionAuthorizationStatement, SetSessionAuthorizationStatement,
+};
 use crate::pgrust::auth::AuthState;
 
 impl Database {
@@ -95,7 +97,10 @@ mod tests {
         let mut session = Session::new(1);
         session.execute(&db, "create role tenant login").unwrap();
 
-        assert_eq!(session.current_user_oid(), crate::include::catalog::BOOTSTRAP_SUPERUSER_OID);
+        assert_eq!(
+            session.current_user_oid(),
+            crate::include::catalog::BOOTSTRAP_SUPERUSER_OID
+        );
         assert_eq!(
             session
                 .execute(&db, "set session authorization tenant")
@@ -106,9 +111,7 @@ mod tests {
         assert_eq!(session.session_user_oid(), role_oid(&db, "tenant"));
 
         assert_eq!(
-            session
-                .execute(&db, "reset session authorization")
-                .unwrap(),
+            session.execute(&db, "reset session authorization").unwrap(),
             StatementResult::AffectedRows(0)
         );
         assert_eq!(session.current_user_oid(), role_oid(&db, "tenant"));
@@ -120,7 +123,9 @@ mod tests {
         let base = temp_dir("denied");
         let db = Database::open(&base, 16).unwrap();
         let mut superuser = Session::new(1);
-        superuser.execute(&db, "create role limited createrole").unwrap();
+        superuser
+            .execute(&db, "create role limited createrole")
+            .unwrap();
         superuser.execute(&db, "create role tenant login").unwrap();
 
         let mut session = Session::new(2);

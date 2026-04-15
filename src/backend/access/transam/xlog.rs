@@ -18,11 +18,11 @@ use std::time::Duration;
 
 use crate::backend::access::transam::xloginsert::RegisteredXLogRecord;
 use crate::backend::access::transam::xlogreader::{
-    BKPIMAGE_APPLY, BKPIMAGE_HAS_HOLE, BKPBLOCK_FORK_MASK, BKPBLOCK_HAS_DATA,
-    BKPBLOCK_HAS_IMAGE, BKPBLOCK_SAME_REL, BKPBLOCK_WILL_INIT, CRC_OFFSET,
-    DecodedBkpBlock, DecodedXLogRecord, XLOG_BLOCK_HEADER, XLOG_BLOCK_IMAGE_HEADER,
-    XLOG_RECORD_DATA_HEADER_LONG, XLOG_RECORD_DATA_HEADER_SHORT, XLR_BLOCK_ID_DATA_LONG,
-    XLR_BLOCK_ID_DATA_SHORT, XLR_MAX_BLOCK_ID,
+    BKPBLOCK_FORK_MASK, BKPBLOCK_HAS_DATA, BKPBLOCK_HAS_IMAGE, BKPBLOCK_SAME_REL,
+    BKPBLOCK_WILL_INIT, BKPIMAGE_APPLY, BKPIMAGE_HAS_HOLE, CRC_OFFSET, DecodedBkpBlock,
+    DecodedXLogRecord, XLOG_BLOCK_HEADER, XLOG_BLOCK_IMAGE_HEADER, XLOG_RECORD_DATA_HEADER_LONG,
+    XLOG_RECORD_DATA_HEADER_SHORT, XLR_BLOCK_ID_DATA_LONG, XLR_BLOCK_ID_DATA_SHORT,
+    XLR_MAX_BLOCK_ID,
 };
 use crate::backend::storage::buffer::{BufferTag, PAGE_SIZE};
 use crate::backend::storage::smgr::{ForkNumber, RelFileLocator};
@@ -227,7 +227,8 @@ impl WalReader {
                     let mut flags = fork_flags & !BKPBLOCK_FORK_MASK;
                     let fork = ForkNumber::from_u8(fork_flags & BKPBLOCK_FORK_MASK);
                     let data_len =
-                        u16::from_le_bytes(raw[offset + 1..offset + 3].try_into().unwrap()) as usize;
+                        u16::from_le_bytes(raw[offset + 1..offset + 3].try_into().unwrap())
+                            as usize;
                     offset += XLOG_BLOCK_HEADER - 1;
                     data_total += data_len;
 
@@ -236,10 +237,12 @@ impl WalReader {
                     let mut hole_length = 0u16;
                     if flags & BKPBLOCK_HAS_IMAGE != 0 {
                         if offset + XLOG_BLOCK_IMAGE_HEADER > raw.len() {
-                            return Err(WalError::Corrupt("truncated WAL block image header".into()));
+                            return Err(WalError::Corrupt(
+                                "truncated WAL block image header".into(),
+                            ));
                         }
-                        image_len =
-                            u16::from_le_bytes(raw[offset..offset + 2].try_into().unwrap()) as usize;
+                        image_len = u16::from_le_bytes(raw[offset..offset + 2].try_into().unwrap())
+                            as usize;
                         hole_offset =
                             u16::from_le_bytes(raw[offset + 2..offset + 4].try_into().unwrap());
                         let bimg_info = raw[offset + 4];
@@ -247,7 +250,9 @@ impl WalReader {
                         data_total += image_len;
                         if bimg_info & BKPIMAGE_HAS_HOLE != 0 {
                             if hole_offset as usize > PAGE_SIZE || image_len >= PAGE_SIZE {
-                                return Err(WalError::Corrupt("invalid WAL hole-compressed image".into()));
+                                return Err(WalError::Corrupt(
+                                    "invalid WAL hole-compressed image".into(),
+                                ));
                             }
                             hole_length = (PAGE_SIZE - image_len) as u16;
                         }
@@ -265,7 +270,9 @@ impl WalReader {
                             return Err(WalError::Corrupt("truncated WAL rel locator".into()));
                         }
                         let rel = RelFileLocator {
-                            spc_oid: u32::from_le_bytes(raw[offset..offset + 4].try_into().unwrap()),
+                            spc_oid: u32::from_le_bytes(
+                                raw[offset..offset + 4].try_into().unwrap(),
+                            ),
                             db_oid: u32::from_le_bytes(
                                 raw[offset + 4..offset + 8].try_into().unwrap(),
                             ),
@@ -320,7 +327,9 @@ impl WalReader {
                     if hole_start + hole_size > PAGE_SIZE
                         || compressed.len() + hole_size != PAGE_SIZE
                     {
-                        return Err(WalError::Corrupt("invalid WAL hole-compressed image".into()));
+                        return Err(WalError::Corrupt(
+                            "invalid WAL hole-compressed image".into(),
+                        ));
                     }
                     page[..hole_start].copy_from_slice(&compressed[..hole_start]);
                     page[hole_start + hole_size..].copy_from_slice(&compressed[hole_start..]);
@@ -555,9 +564,8 @@ impl WalWriter {
             REGBUF_FORCE_IMAGE | REGBUF_STANDARD,
         );
         crate::backend::access::transam::xloginsert::xlog_register_buffer_image(0, page);
-        let lsn = crate::backend::access::transam::xloginsert::xlog_insert(
-            self, xid, rmid, XLOG_FPI,
-        )?;
+        let lsn =
+            crate::backend::access::transam::xloginsert::xlog_insert(self, xid, rmid, XLOG_FPI)?;
         self.inner.lock().pages_with_image.insert(tag);
         Ok(lsn)
     }
@@ -629,8 +637,7 @@ impl WalWriter {
             if block.data.len() > u16::MAX as usize {
                 return Err(WalError::Corrupt("WAL block data too large".into()));
             }
-            let mut encoded =
-                EncodedBlock::new(block.tag, block.block_id, block.flags, block.data);
+            let mut encoded = EncodedBlock::new(block.tag, block.block_id, block.flags, block.data);
             if let Some(image) = block.page_image {
                 let (hole_offset, hole_length, compressed_image) = compress_page_image(&image);
                 encoded.hole_offset = hole_offset;
@@ -736,7 +743,9 @@ impl WalWriter {
         Self::flush_inner(&mut guard)
     }
 
-    fn flush_inner(guard: &mut parking_lot::MutexGuard<'_, WalWriterInner>) -> Result<Lsn, WalError> {
+    fn flush_inner(
+        guard: &mut parking_lot::MutexGuard<'_, WalWriterInner>,
+    ) -> Result<Lsn, WalError> {
         if guard.flushed_lsn < guard.insert_lsn {
             if guard.written_lsn < guard.insert_lsn {
                 guard.file.flush()?;
@@ -811,11 +820,7 @@ fn compress_page_image(page: &[u8; PAGE_SIZE]) -> (u16, u16, Vec<u8>) {
         let mut compressed = Vec::with_capacity(PAGE_SIZE - (pd_upper - pd_lower));
         compressed.extend_from_slice(&page[..pd_lower]);
         compressed.extend_from_slice(&page[pd_upper..]);
-        (
-            pd_lower as u16,
-            (pd_upper - pd_lower) as u16,
-            compressed,
-        )
+        (pd_lower as u16, (pd_upper - pd_lower) as u16, compressed)
     } else {
         (0, 0, page.to_vec())
     }
@@ -910,7 +915,10 @@ mod tests {
         assert_eq!(record.blocks.len(), 1);
         assert_eq!(record.blocks[0].data, vec![1, 2, 3, 4]);
         assert_eq!(record.blocks[0].image.as_ref().unwrap()[100], 0xaa);
-        assert_eq!(record.blocks[0].image.as_ref().unwrap()[PAGE_SIZE - 1], 0xbb);
+        assert_eq!(
+            record.blocks[0].image.as_ref().unwrap()[PAGE_SIZE - 1],
+            0xbb
+        );
     }
 
     #[test]
@@ -919,7 +927,8 @@ mod tests {
         let wal = WalWriter::new(&dir).unwrap();
         let page = [0u8; PAGE_SIZE];
         wal.write_record(1, test_tag(0), &page).unwrap();
-        wal.write_insert(1, test_tag(0), &page, 3, &[4, 5, 6]).unwrap();
+        wal.write_insert(1, test_tag(0), &page, 3, &[4, 5, 6])
+            .unwrap();
         wal.flush().unwrap();
 
         let mut reader = WalReader::open(&dir).unwrap();

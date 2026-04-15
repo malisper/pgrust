@@ -464,15 +464,27 @@ fn run_statement(
         | Statement::CopyFrom(_)
         | Statement::AlterTableSet(_)
         | Statement::AlterTableAddColumn(_) => Ok(StatementResult::AffectedRows(0)),
+        Statement::AlterTableOwner(stmt) => {
+            Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
+                "ALTER TABLE OWNER in query_repl: {} -> {}",
+                stmt.relation_name, stmt.new_owner
+            ))))
+        }
         Statement::CommentOnRole(_)
         | Statement::CreateRole(_)
         | Statement::AlterRole(_)
         | Statement::DropRole(_)
         | Statement::SetSessionAuthorization(_)
         | Statement::ResetSessionAuthorization(_)
-        | Statement::ReassignOwned(_) => Err(ExecError::Parse(
-            ParseError::FeatureNotSupported("role management".into()),
-        )),
+        | Statement::ReassignOwned(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
+            "role management".into(),
+        ))),
+        Statement::AlterViewOwner(stmt) => {
+            Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
+                "ALTER VIEW OWNER in query_repl: {} -> {}",
+                stmt.relation_name, stmt.new_owner
+            ))))
+        }
         Statement::AlterTableRenameColumn(stmt) => {
             Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
                 "ALTER TABLE RENAME COLUMN in query_repl: {}.{} -> {}",
@@ -649,10 +661,7 @@ fn run_statement(
         Statement::CreateTable(stmt) => {
             let (table_name, _) = normalize_create_table_name(&stmt)?;
             let entry = catalog_store
-                .create_table(
-                    table_name,
-                    create_relation_desc(&stmt, &relcache)?,
-                )
+                .create_table(table_name, create_relation_desc(&stmt, &relcache)?)
                 .map_err(|err| {
                     ExecError::Parse(ParseError::UnexpectedToken {
                         expected: "catalog table creation",

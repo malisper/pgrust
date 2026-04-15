@@ -3,19 +3,21 @@ use super::exec_expr::parse_numeric_text;
 use super::expr_bit::{coerce_bit_string, parse_bit_text, render_bit_text};
 use super::expr_bool::cast_integer_to_bool;
 use super::expr_bool::parse_pg_bool_text;
-use super::expr_datetime::{
-    apply_time_precision, render_datetime_value_text_with_config,
-};
+use super::expr_datetime::{apply_time_precision, render_datetime_value_text_with_config};
 use super::expr_geometry::{
     cast_geometry_value, geometry_input_error_message, parse_geometry_text,
 };
 use super::expr_json::{canonicalize_jsonpath_text, validate_json_text};
-use super::expr_money::{money_format_text, money_from_float, money_numeric_text, money_parse_text};
+use super::expr_money::{
+    money_format_text, money_from_float, money_numeric_text, money_parse_text,
+};
 use super::node_types::*;
 use crate::backend::executor::jsonb::{parse_jsonb_text, render_jsonb_bytes};
 use crate::backend::parser::{SqlType, SqlTypeKind, parse_type_name};
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
-use crate::backend::utils::time::date::{DateParseError, parse_date_text, parse_time_text, parse_timetz_text};
+use crate::backend::utils::time::date::{
+    DateParseError, parse_date_text, parse_time_text, parse_timetz_text,
+};
 use crate::backend::utils::time::datetime::DateTimeParseError;
 use crate::backend::utils::time::timestamp::{parse_timestamp_text, parse_timestamptz_text};
 use crate::include::catalog::{TEXT_TYPE_OID, bootstrap_pg_cast_rows, builtin_type_rows};
@@ -788,9 +790,8 @@ fn date_parse_error(text: &str, err: DateParseError) -> ExecError {
         DateParseError::FieldOutOfRange { datestyle_hint } => ExecError::DetailedError {
             message: format!("date/time field value out of range: \"{text}\""),
             detail: None,
-            hint: datestyle_hint.then_some(
-                "Perhaps you need a different \"DateStyle\" setting.".into(),
-            ),
+            hint: datestyle_hint
+                .then_some("Perhaps you need a different \"DateStyle\" setting.".into()),
             sqlstate: "22008",
         },
         DateParseError::OutOfRange => ExecError::DetailedError {
@@ -1647,8 +1648,12 @@ pub(crate) fn cast_value_with_config(
             SqlTypeKind::Money => Ok(Value::Money(v)),
             SqlTypeKind::Numeric => Ok(Value::Numeric(NumericValue::from(money_numeric_text(v)))),
             SqlTypeKind::Int8 => Ok(Value::Int64(v / 100)),
-            SqlTypeKind::Int4 => i32::try_from(v / 100).map(Value::Int32).map_err(|_| ExecError::Int4OutOfRange),
-            SqlTypeKind::Int2 => i16::try_from(v / 100).map(Value::Int16).map_err(|_| ExecError::Int2OutOfRange),
+            SqlTypeKind::Int4 => i32::try_from(v / 100)
+                .map(Value::Int32)
+                .map_err(|_| ExecError::Int4OutOfRange),
+            SqlTypeKind::Int2 => i16::try_from(v / 100)
+                .map(Value::Int16)
+                .map_err(|_| ExecError::Int2OutOfRange),
             SqlTypeKind::Float4 | SqlTypeKind::Float8 => Ok(Value::Float64(v as f64 / 100.0)),
             _ => cast_text_value(&money_format_text(v), ty, true),
         },
