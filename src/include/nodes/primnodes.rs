@@ -49,6 +49,8 @@ pub struct ColumnDesc {
     pub sql_type: SqlType,
     pub dropped: bool,
     pub attstattarget: i16,
+    pub attinhcount: i16,
+    pub attislocal: bool,
     pub not_null_constraint_oid: Option<u32>,
     pub not_null_constraint_name: Option<String>,
     pub not_null_constraint_validated: bool,

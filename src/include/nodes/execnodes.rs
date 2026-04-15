@@ -207,6 +207,16 @@ pub struct ResultState {
     pub(crate) stats: NodeExecStats,
 }
 
+#[derive(Debug)]
+pub struct AppendState {
+    pub(crate) children: Vec<PlanState>,
+    pub(crate) current_child: usize,
+    pub(crate) column_names: Vec<String>,
+    pub(crate) slot: TupleSlot,
+    pub(crate) plan_info: PlanEstimate,
+    pub(crate) stats: NodeExecStats,
+}
+
 pub struct SeqScanState {
     pub(crate) rel: RelFileLocator,
     pub(crate) relation_name: String,

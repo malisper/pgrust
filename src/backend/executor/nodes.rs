@@ -13,7 +13,7 @@ use crate::backend::executor::value_io::{decode_value_with_toast, missing_column
 use crate::include::catalog::builtin_aggregate_function_for_proc_oid;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::{
-    AggregateState, FilterState, FunctionScanState, IndexScanState, LimitState,
+    AggregateState, AppendState, FilterState, FunctionScanState, IndexScanState, LimitState,
     NestedLoopJoinState, NodeExecStats, OrderByState, PlanNode, ProjectSetState, ProjectionState,
     ResultState, SeqScanState, SlotKind, ToastRelationRef, TupleSlot, ValuesState,
 };
@@ -70,6 +70,64 @@ impl PlanNode for ResultState {
         "Result".into()
     }
     fn explain_children(&self, _indent: usize, _analyze: bool, _lines: &mut Vec<String>) {}
+}
+
+impl PlanNode for AppendState {
+    fn exec_proc_node<'a>(
+        &'a mut self,
+        ctx: &mut ExecutorContext,
+    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        let start = if ctx.timed {
+            Some(Instant::now())
+        } else {
+            None
+        };
+        while self.current_child < self.children.len() {
+            if let Some(slot) = self.children[self.current_child].exec_proc_node(ctx)? {
+                let mut values = slot.values()?.to_vec();
+                Value::materialize_all(&mut values);
+                self.slot.kind = SlotKind::Virtual;
+                self.slot.tts_nvalid = values.len();
+                self.slot.tts_values = values;
+                self.slot.decode_offset = 0;
+                if let Some(start) = start {
+                    self.stats.loops += 1;
+                    self.stats.rows += 1;
+                    self.stats.total_time += start.elapsed();
+                }
+                return Ok(Some(&mut self.slot));
+            }
+            self.current_child += 1;
+        }
+        if let Some(start) = start {
+            self.stats.loops += 1;
+            self.stats.total_time += start.elapsed();
+        }
+        Ok(None)
+    }
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
+        Some(&mut self.slot)
+    }
+    fn column_names(&self) -> &[String] {
+        &self.column_names
+    }
+    fn node_stats(&self) -> &NodeExecStats {
+        &self.stats
+    }
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
+        &mut self.stats
+    }
+    fn plan_info(&self) -> crate::include::nodes::plannodes::PlanEstimate {
+        self.plan_info
+    }
+    fn node_label(&self) -> String {
+        "Append".into()
+    }
+    fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
+        for child in &self.children {
+            format_explain_lines(child.as_ref(), indent + 1, analyze, lines);
+        }
+    }
 }
 
 impl PlanNode for SeqScanState {

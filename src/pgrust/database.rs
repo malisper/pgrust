@@ -39,7 +39,7 @@ use crate::backend::parser::{
     CommentOnTableStatement, CreateDomainStatement, CreateIndexStatement, CreateTableAsStatement,
     CreateTableStatement, CreateViewStatement, DropDomainStatement, DropViewStatement,
     OnCommitAction, ParseError, SqlType, TablePersistence, bind_delete, bind_insert, bind_update,
-    create_relation_desc, lower_create_table,
+    create_relation_desc, lower_create_table_with_catalog,
 };
 use crate::backend::storage::lmgr::{
     TableLockManager, TableLockMode, lock_relations_interruptible, lock_tables_interruptible,
@@ -74,7 +74,8 @@ use crate::pl::plpgsql::execute_do;
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
 use ddl::{
     ensure_can_set_role, ensure_relation_owner, lookup_heap_relation_for_ddl, map_catalog_error,
-    namespace_oid_for_relation_name, reject_relation_with_dependent_views,
+    namespace_oid_for_relation_name, reject_inheritance_tree_ddl,
+    reject_relation_with_dependent_views,
     validate_alter_table_add_column,
 };
 use relation_refs::{collect_direct_relation_oids_from_select, collect_rels_from_planned_stmt};
@@ -250,7 +251,6 @@ impl Database {
             session_interrupt_states: Arc::new(RwLock::new(HashMap::new())),
             session_auth_states: Arc::new(RwLock::new(HashMap::new())),
             temp_relations: Arc::new(RwLock::new(HashMap::new())),
-            domains: Arc::new(RwLock::new(BTreeMap::new())),
             domains: Arc::new(RwLock::new(BTreeMap::new())),
             _wal_bg_writer: Some(Arc::new(wal_bg_writer)),
         })

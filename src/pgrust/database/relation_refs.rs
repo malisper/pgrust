@@ -211,6 +211,11 @@ fn collect_rels_from_set_returning_call(
 pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLocator>) {
     match plan {
         Plan::Result { .. } => {}
+        Plan::Append { children, .. } => {
+            for child in children {
+                collect_rels_from_plan(child, rels);
+            }
+        }
         Plan::SeqScan { rel, .. } | Plan::IndexScan { rel, .. } => {
             rels.insert(*rel);
         }
@@ -459,7 +464,7 @@ fn collect_direct_relation_oids_from_from_item(
     rels: &mut BTreeSet<u32>,
 ) {
     match from {
-        FromItem::Table { name } => {
+        FromItem::Table { name, .. } => {
             if !name.contains('.')
                 && visible_ctes
                     .iter()

@@ -17,6 +17,7 @@ use crate::backend::catalog::pg_constraint::sort_pg_constraint_rows;
 use crate::backend::catalog::pg_database::sort_pg_database_rows;
 use crate::backend::catalog::pg_depend::sort_pg_depend_rows;
 use crate::backend::catalog::pg_index::sort_pg_index_rows;
+use crate::backend::catalog::pg_inherits::sort_pg_inherits_rows;
 use crate::backend::catalog::pg_language::sort_pg_language_rows;
 use crate::backend::catalog::pg_opclass::sort_pg_opclass_rows;
 use crate::backend::catalog::pg_operator::sort_pg_operator_rows;
@@ -43,12 +44,14 @@ use crate::include::catalog::{
     PgConstraintRow, PgDatabaseRow, PgDependRow, PgIndexRow, PgLanguageRow, PgNamespaceRow,
     PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow, PgRewriteRow, PgStatisticRow,
     PgTablespaceRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow,
-    PgTypeRow, REGCONFIG_ARRAY_TYPE_OID, REGCONFIG_TYPE_OID, REGDICTIONARY_ARRAY_TYPE_OID,
-    REGDICTIONARY_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID,
-    TIMESTAMP_TYPE_OID, TSQUERY_ARRAY_TYPE_OID, TSQUERY_TYPE_OID, TSVECTOR_ARRAY_TYPE_OID,
-    TSVECTOR_TYPE_OID, VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID,
-    VARCHAR_TYPE_OID, bootstrap_composite_type_rows, bootstrap_pg_am_rows, bootstrap_pg_amop_rows,
-    bootstrap_pg_amproc_rows, bootstrap_pg_cast_rows, bootstrap_pg_collation_rows,
+    PgTypeRow, PgInheritsRow, REGCONFIG_ARRAY_TYPE_OID, REGCONFIG_TYPE_OID,
+    REGDICTIONARY_ARRAY_TYPE_OID, REGDICTIONARY_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID,
+    TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID, TSQUERY_ARRAY_TYPE_OID, TSQUERY_TYPE_OID,
+    TSVECTOR_ARRAY_TYPE_OID, TSVECTOR_TYPE_OID, VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID,
+    VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID, BOOTSTRAP_SUPERUSER_OID,
+    bootstrap_composite_type_rows, bootstrap_pg_am_rows, bootstrap_pg_amop_rows,
+    bootstrap_pg_amproc_rows, bootstrap_pg_auth_members_rows, bootstrap_pg_authid_rows,
+    bootstrap_pg_cast_rows, bootstrap_pg_collation_rows,
     bootstrap_pg_constraint_rows, bootstrap_pg_database_rows, bootstrap_pg_language_rows,
     bootstrap_pg_namespace_rows, bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows,
     bootstrap_pg_opfamily_rows, bootstrap_pg_proc_rows, bootstrap_pg_tablespace_rows,
@@ -66,6 +69,7 @@ pub struct CatCache {
     attributes_by_relid: BTreeMap<u32, Vec<PgAttributeRow>>,
     attrdefs_by_key: BTreeMap<(u32, i16), PgAttrdefRow>,
     depend_rows: Vec<PgDependRow>,
+    inherit_rows: Vec<PgInheritsRow>,
     index_rows: Vec<PgIndexRow>,
     rewrite_rows: Vec<PgRewriteRow>,
     am_rows: Vec<PgAmRow>,
@@ -197,6 +201,8 @@ impl CatCache {
                 reltoastrelid: entry.reltoastrelid,
                 relpersistence: entry.relpersistence,
                 relkind: entry.relkind,
+                relhassubclass: entry.relhassubclass,
+                relispartition: entry.relispartition,
                 relnatts: entry.desc.columns.len() as i16,
                 relpages: entry.relpages,
                 reltuples: entry.reltuples,
@@ -245,6 +251,8 @@ impl CatCache {
                     attstorage: column.storage.attstorage,
                     attcompression: column.storage.attcompression,
                     attstattarget: column.attstattarget,
+                    attinhcount: column.attinhcount,
+                    attislocal: column.attislocal,
                     sql_type: column.sql_type,
                 })
                 .collect::<Vec<_>>();
@@ -304,10 +312,14 @@ impl CatCache {
             .depend_rows
             .extend(catalog.depend_rows().iter().cloned());
         cache
+            .inherit_rows
+            .extend(catalog.inherit_rows().iter().cloned());
+        cache
             .rewrite_rows
             .extend(catalog.rewrite_rows().iter().cloned());
         sort_pg_constraint_rows(&mut cache.constraint_rows);
         sort_pg_depend_rows(&mut cache.depend_rows);
+        sort_pg_inherits_rows(&mut cache.inherit_rows);
         sort_pg_rewrite_rows(&mut cache.rewrite_rows);
         sort_pg_index_rows(&mut cache.index_rows);
 
@@ -322,6 +334,7 @@ impl CatCache {
             rows.attributes,
             rows.attrdefs,
             rows.depends,
+            rows.inherits,
             rows.indexes,
             rows.rewrites,
             rows.ams,
@@ -351,6 +364,7 @@ impl CatCache {
         attribute_rows: Vec<PgAttributeRow>,
         attrdef_rows: Vec<PgAttrdefRow>,
         depend_rows: Vec<PgDependRow>,
+        inherit_rows: Vec<PgInheritsRow>,
         index_rows: Vec<PgIndexRow>,
         rewrite_rows: Vec<PgRewriteRow>,
         am_rows: Vec<PgAmRow>,
@@ -406,6 +420,8 @@ impl CatCache {
         }
         cache.depend_rows = depend_rows;
         sort_pg_depend_rows(&mut cache.depend_rows);
+        cache.inherit_rows = inherit_rows;
+        sort_pg_inherits_rows(&mut cache.inherit_rows);
         cache.index_rows = index_rows;
         sort_pg_index_rows(&mut cache.index_rows);
         cache.rewrite_rows = rewrite_rows;
@@ -510,6 +526,10 @@ impl CatCache {
 
     pub fn depend_rows(&self) -> Vec<PgDependRow> {
         self.depend_rows.clone()
+    }
+
+    pub fn inherit_rows(&self) -> Vec<PgInheritsRow> {
+        self.inherit_rows.clone()
     }
 
     pub fn index_rows(&self) -> Vec<PgIndexRow> {

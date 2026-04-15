@@ -9,7 +9,7 @@ use crate::include::catalog::{
     PgDatabaseRow, PgDependRow, PgDescriptionRow, PgIndexRow, PgLanguageRow, PgNamespaceRow,
     PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow, PgRewriteRow, PgStatisticRow,
     PgTablespaceRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow,
-    PgTypeRow,
+    PgTypeRow, PgInheritsRow,
 };
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -19,6 +19,7 @@ pub(crate) struct PhysicalCatalogRows {
     pub attributes: Vec<PgAttributeRow>,
     pub attrdefs: Vec<PgAttrdefRow>,
     pub depends: Vec<PgDependRow>,
+    pub inherits: Vec<PgInheritsRow>,
     pub descriptions: Vec<PgDescriptionRow>,
     pub indexes: Vec<PgIndexRow>,
     pub rewrites: Vec<PgRewriteRow>,
@@ -52,6 +53,7 @@ pub(crate) fn create_table_sync_kinds(entry: &CatalogEntry) -> Vec<BootstrapCata
         BootstrapCatalogKind::PgType,
         BootstrapCatalogKind::PgAttribute,
         BootstrapCatalogKind::PgDepend,
+        BootstrapCatalogKind::PgInherits,
     ];
     if entry
         .desc
@@ -99,6 +101,7 @@ pub(crate) fn drop_relation_sync_kinds() -> Vec<BootstrapCatalogKind> {
         BootstrapCatalogKind::PgAttrdef,
         BootstrapCatalogKind::PgConstraint,
         BootstrapCatalogKind::PgDepend,
+        BootstrapCatalogKind::PgInherits,
         BootstrapCatalogKind::PgDescription,
         BootstrapCatalogKind::PgIndex,
         BootstrapCatalogKind::PgRewrite,
@@ -114,6 +117,7 @@ pub(crate) fn drop_relation_delete_kinds() -> Vec<BootstrapCatalogKind> {
         BootstrapCatalogKind::PgAttribute,
         BootstrapCatalogKind::PgClass,
         BootstrapCatalogKind::PgDepend,
+        BootstrapCatalogKind::PgInherits,
         BootstrapCatalogKind::PgDescription,
         BootstrapCatalogKind::PgRewrite,
     ]
@@ -128,6 +132,7 @@ pub(crate) fn extend_physical_catalog_rows(
     target.attributes.extend(source.attributes);
     target.attrdefs.extend(source.attrdefs);
     target.depends.extend(source.depends);
+    target.inherits.extend(source.inherits);
     target.descriptions.extend(source.descriptions);
     target.indexes.extend(source.indexes);
     target.rewrites.extend(source.rewrites);
@@ -162,6 +167,7 @@ pub(crate) fn physical_catalog_rows_from_catcache(catcache: &CatCache) -> Physic
         attributes: catcache.attribute_rows(),
         attrdefs: catcache.attrdef_rows(),
         depends: catcache.depend_rows(),
+        inherits: catcache.inherit_rows(),
         descriptions: Vec::new(),
         indexes: catcache.index_rows(),
         rewrites: catcache.rewrite_rows(),
@@ -213,6 +219,8 @@ pub(crate) fn physical_catalog_rows_for_catalog_entry(
         reltoastrelid: entry.reltoastrelid,
         relpersistence: entry.relpersistence,
         relkind: entry.relkind,
+        relhassubclass: entry.relhassubclass,
+        relispartition: entry.relispartition,
         relnatts: entry.desc.columns.len() as i16,
         relpages: entry.relpages,
         reltuples: entry.reltuples,
@@ -252,6 +260,8 @@ pub(crate) fn physical_catalog_rows_for_catalog_entry(
                     attstorage: column.storage.attstorage,
                     attcompression: column.storage.attcompression,
                     attstattarget: column.attstattarget,
+                    attinhcount: column.attinhcount,
+                    attislocal: column.attislocal,
                     sql_type: column.sql_type,
                 }),
         );
@@ -276,6 +286,13 @@ pub(crate) fn physical_catalog_rows_for_catalog_entry(
         catalog
             .rewrite_rows_for_relation(entry.relation_oid)
             .iter()
+            .cloned(),
+    );
+    rows.inherits.extend(
+        catalog
+            .inherit_rows()
+            .iter()
+            .filter(|row| row.inhrelid == entry.relation_oid)
             .cloned(),
     );
     object_oids.extend(rows.rewrites.iter().map(|row| row.oid));

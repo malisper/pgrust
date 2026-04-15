@@ -53,6 +53,8 @@ pub fn system_catalog_index_entry(
         reltoastrelid: 0,
         relpersistence: 'p',
         relkind: 'i',
+        relhassubclass: false,
+        relispartition: false,
         relpages: 0,
         reltuples: 0.0,
         desc: system_catalog_index_desc(descriptor),

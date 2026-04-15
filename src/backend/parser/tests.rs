@@ -67,6 +67,8 @@ fn test_catalog_entry(rel_number: u32, desc: RelationDesc) -> CatalogEntry {
         reltoastrelid: 0,
         relpersistence: 'p',
         relkind: 'r',
+        relhassubclass: false,
+        relispartition: false,
         relpages: 0,
         reltuples: 0.0,
         desc,
@@ -100,6 +102,8 @@ fn people_view_entry() -> CatalogEntry {
         reltoastrelid: 0,
         relpersistence: 'p',
         relkind: 'v',
+        relhassubclass: false,
+        relispartition: false,
         relpages: 0,
         reltuples: 0.0,
         desc: RelationDesc {
@@ -194,6 +198,8 @@ fn catalog_with_people_id_index() -> Catalog {
             reltoastrelid: 0,
             relpersistence: 'p',
             relkind: 'i',
+            relhassubclass: false,
+            relispartition: false,
             relpages: 0,
             reltuples: 0.0,
             desc: RelationDesc {
@@ -230,6 +236,7 @@ fn visible_catalog_without_text_input_cast(
         base.attribute_rows(),
         base.attrdef_rows(),
         base.depend_rows(),
+        base.inherit_rows(),
         base.index_rows(),
         base.rewrite_rows(),
         base.am_rows(),
@@ -275,6 +282,7 @@ fn visible_catalog_without_operator(
         base.attribute_rows(),
         base.attrdef_rows(),
         base.depend_rows(),
+        base.inherit_rows(),
         base.index_rows(),
         base.rewrite_rows(),
         base.am_rows(),
@@ -415,7 +423,8 @@ fn pest_matches_minimal_select_statement() {
             assert_eq!(
                 stmt.from,
                 Some(FromItem::Table {
-                    name: "people".into()
+                    name: "people".into(),
+                    only: false,
                 })
             );
             assert_eq!(stmt.targets.len(), 1);
@@ -1245,7 +1254,8 @@ fn parse_select_with_where() {
     assert_eq!(
         stmt.from,
         Some(FromItem::Table {
-            name: "people".into()
+            name: "people".into(),
+            only: false,
         })
     );
     assert_eq!(stmt.targets.len(), 2);
@@ -1279,9 +1289,11 @@ fn parse_join_select() {
         Some(FromItem::Join {
             left: Box::new(FromItem::Table {
                 name: "people".into(),
+                only: false,
             }),
             right: Box::new(FromItem::Table {
                 name: "pets".into(),
+                only: false,
             }),
             kind: JoinKind::Inner,
             constraint: JoinConstraint::On(SqlExpr::Eq(
@@ -1300,9 +1312,11 @@ fn parse_cross_join_select() {
         Some(FromItem::Join {
             left: Box::new(FromItem::Table {
                 name: "people".into(),
+                only: false,
             }),
             right: Box::new(FromItem::Table {
                 name: "pets".into(),
+                only: false,
             }),
             kind: JoinKind::Cross,
             constraint: JoinConstraint::None,
@@ -1319,6 +1333,7 @@ fn parse_table_alias() {
         Some(FromItem::Alias {
             source: Box::new(FromItem::Table {
                 name: "people".into(),
+                only: false,
             }),
             alias: "s".into(),
             column_aliases: AliasColumnSpec::None,
@@ -1336,6 +1351,7 @@ fn parse_table_alias_with_as() {
         Some(FromItem::Alias {
             source: Box::new(FromItem::Table {
                 name: "people".into(),
+                only: false,
             }),
             alias: "s".into(),
             column_aliases: AliasColumnSpec::None,
@@ -1358,6 +1374,7 @@ fn parse_select_star_with_table_alias() {
         Some(FromItem::Alias {
             source: Box::new(FromItem::Table {
                 name: "people".into(),
+                only: false,
             }),
             alias: "p".into(),
             column_aliases: AliasColumnSpec::None,
@@ -1786,6 +1803,7 @@ fn parse_cross_join_with_aliases() {
             left: Box::new(FromItem::Alias {
                 source: Box::new(FromItem::Table {
                     name: "people".into(),
+                    only: false,
                 }),
                 alias: "p".into(),
                 column_aliases: AliasColumnSpec::None,
@@ -1794,6 +1812,7 @@ fn parse_cross_join_with_aliases() {
             right: Box::new(FromItem::Alias {
                 source: Box::new(FromItem::Table {
                     name: "pets".into(),
+                    only: false,
                 }),
                 alias: "q".into(),
                 column_aliases: AliasColumnSpec::None,
@@ -1818,7 +1837,8 @@ fn parse_select_without_targets_but_with_from() {
     assert_eq!(
         stmt.from,
         Some(FromItem::Table {
-            name: "people".into()
+            name: "people".into(),
+            only: false,
         })
     );
     assert!(stmt.targets.is_empty());
@@ -2467,6 +2487,7 @@ fn create_table_temp_name_validation() {
             persistence: TablePersistence::Permanent,
             on_commit: OnCommitAction::PreserveRows,
             elements: vec![],
+            inherits: Vec::new(),
             if_not_exists: false,
         })
         .unwrap();
@@ -2479,6 +2500,7 @@ fn create_table_temp_name_validation() {
         persistence: TablePersistence::Temporary,
         on_commit: OnCommitAction::PreserveRows,
         elements: vec![],
+        inherits: Vec::new(),
         if_not_exists: false,
     })
     .unwrap_err();
@@ -2490,6 +2512,7 @@ fn create_table_temp_name_validation() {
         persistence: TablePersistence::Permanent,
         on_commit: OnCommitAction::DeleteRows,
         elements: vec![],
+        inherits: Vec::new(),
         if_not_exists: false,
     })
     .unwrap_err();
@@ -2512,6 +2535,35 @@ fn parse_create_table_if_not_exists() {
             assert!(!ct.if_not_exists);
         }
         other => panic!("expected CreateTable, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_create_table_inherits_clause() {
+    match parse_statement("create table child (id int4) inherits (parent1, parent2)").unwrap() {
+        Statement::CreateTable(ct) => {
+            assert_eq!(ct.table_name, "child");
+            assert_eq!(ct.inherits, vec!["parent1", "parent2"]);
+        }
+        other => panic!("expected CreateTable, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_select_from_only_table() {
+    match parse_statement("select * from only parent").unwrap() {
+        Statement::Select(SelectStatement {
+            from:
+                Some(FromItem::Table {
+                    name,
+                    only,
+                }),
+            ..
+        }) => {
+            assert_eq!(name, "parent");
+            assert!(only);
+        }
+        other => panic!("expected Select with ONLY table, got {:?}", other),
     }
 }
 
@@ -3496,7 +3548,8 @@ fn parse_parenthesized_table_keyword_from_item() {
         stmt.from,
         Some(FromItem::Alias {
             source: Box::new(FromItem::Table {
-                name: "people".into()
+                name: "people".into(),
+                only: false,
             }),
             alias: "p".into(),
             column_aliases: AliasColumnSpec::None,
@@ -3556,7 +3609,7 @@ fn parse_join_precedence_binds_tighter_than_comma() {
             kind: JoinKind::Cross,
             constraint: JoinConstraint::None,
         }) => {
-            assert!(matches!(*left, FromItem::Table { name } if name == "a"));
+            assert!(matches!(*left, FromItem::Table { name, .. } if name == "a"));
             match *right {
                 FromItem::Join {
                     left,
@@ -3564,8 +3617,8 @@ fn parse_join_precedence_binds_tighter_than_comma() {
                     kind: JoinKind::Inner,
                     constraint: JoinConstraint::On(_),
                 } => {
-                    assert!(matches!(*left, FromItem::Table { name } if name == "b"));
-                    assert!(matches!(*right, FromItem::Table { name } if name == "c"));
+                    assert!(matches!(*left, FromItem::Table { name, .. } if name == "b"));
+                    assert!(matches!(*right, FromItem::Table { name, .. } if name == "c"));
                 }
                 other => panic!("expected inner join on right side, got {:?}", other),
             }
@@ -3972,7 +4025,7 @@ fn parse_insert_select_default_values_and_table_stmt() {
     let stmt = parse_statement("table people").unwrap();
     assert!(matches!(
         stmt,
-        Statement::Select(SelectStatement { from: Some(FromItem::Table { name }), .. })
+        Statement::Select(SelectStatement { from: Some(FromItem::Table { name, .. }), .. })
             if name == "people"
     ));
 }

@@ -149,17 +149,21 @@ pub(crate) fn collect_analyze_stats(
     let mut out = Vec::with_capacity(targets.len());
     for target in targets {
         ctx.check_for_interrupts()?;
-        if target.only {
-            return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "ANALYZE without ONLY",
-                actual: format!("ONLY {}", target.table_name),
-            }));
-        }
         let relation = catalog
             .lookup_relation(&target.table_name)
             .ok_or_else(|| ExecError::Parse(ParseError::UnknownTable(target.table_name.clone())))?;
         let selected = selected_columns(&relation, target)?;
-        out.push(sample_relation(&relation, &selected, catalog, ctx)?);
+        let root_stats = sample_relation(&relation, &selected, catalog, ctx)?;
+        let mut statistics = root_stats.statistics;
+        if !target.only && catalog.has_subclass(relation.relation_oid) {
+            statistics.extend(sample_inheritance_tree(&relation, &selected, catalog, ctx)?);
+        }
+        out.push(AnalyzeRelationStats {
+            relation_oid: relation.relation_oid,
+            relpages: root_stats.relpages,
+            reltuples: root_stats.reltuples,
+            statistics,
+        });
     }
     Ok(out)
 }
@@ -292,7 +296,15 @@ fn sample_relation(
         (visible_rows_on_sampled_blocks as f64 / sampled_block_count as f64) * nblocks as f64
     };
     let rows = reservoir.into_inner();
-    let statistics = build_statistics_rows(relation, selected_columns, &rows, reltuples, catalog)?;
+    let statistics = build_statistics_rows(
+        relation.relation_oid,
+        &relation.desc,
+        selected_columns,
+        &rows,
+        reltuples,
+        catalog,
+        false,
+    )?;
 
     Ok(AnalyzeRelationStats {
         relation_oid: relation.relation_oid,
@@ -302,17 +314,156 @@ fn sample_relation(
     })
 }
 
-fn build_statistics_rows(
+fn sample_inheritance_tree(
     relation: &BoundRelation,
+    selected_columns: &[usize],
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<PgStatisticRow>, ExecError> {
+    let stats_target = selected_columns
+        .iter()
+        .map(|index| relation.desc.columns[*index].attstattarget)
+        .filter(|target| *target > 0)
+        .max()
+        .unwrap_or(DEFAULT_STATISTICS_TARGET);
+    let sample_rows_target = target_sample_rows(stats_target);
+    let mut rng =
+        AnalyzeRng::new((relation.relation_oid as u64) << 32 | (ctx.next_command_id as u64) ^ 1);
+    let mut reservoir = ReservoirSampler::new(sample_rows_target);
+    let mut visible_rows = 0usize;
+
+    for member_oid in catalog.find_all_inheritors(relation.relation_oid) {
+        let Some(member) = catalog.relation_by_oid(member_oid) else {
+            continue;
+        };
+        let mapping = inherited_selected_column_mapping(relation, &member, selected_columns)?;
+        let toast_ctx = member.toast.map(|toast| ToastFetchContext {
+            relation: toast,
+            pool: ctx.pool.clone(),
+            txns: ctx.txns.clone(),
+            snapshot: ctx.snapshot.clone(),
+            client_id: ctx.client_id,
+        });
+        let nblocks = ctx
+            .pool
+            .with_storage_mut(|s| s.smgr.nblocks(member.rel, ForkNumber::Main))
+            .map_err(crate::backend::access::heap::heapam::HeapError::Storage)?;
+        for block in 0..nblocks {
+            ctx.check_for_interrupts()?;
+            let pin = ctx
+                .pool
+                .pin_existing_block(ctx.client_id, member.rel, ForkNumber::Main, block)
+                .map_err(crate::backend::access::heap::heapam::HeapError::Buffer)?;
+            let buffer_id = pin.buffer_id();
+            let guard = ctx
+                .pool
+                .lock_buffer_shared(buffer_id)
+                .map_err(crate::backend::access::heap::heapam::HeapError::Buffer)?;
+            let page = &*guard;
+            let max_offset = page_get_max_offset_number(page)
+                .map_err(crate::include::access::htup::TupleError::from)?;
+            for off in 1..=max_offset {
+                ctx.check_for_interrupts()?;
+                let item_id = page_get_item_id_unchecked(page, off);
+                if item_id.lp_flags != ItemIdFlags::Normal || !item_id.has_storage() {
+                    continue;
+                }
+                let tuple_bytes = page_get_item_unchecked(page, off);
+                let visible = if let Some(visible) =
+                    ctx.snapshot.tuple_bytes_try_visible_from_hints(tuple_bytes)
+                {
+                    visible
+                } else {
+                    let txns = ctx.txns.read();
+                    ctx.snapshot
+                        .tuple_bytes_visible_with_hints(&txns, tuple_bytes)
+                        .0
+                };
+                if !visible {
+                    continue;
+                }
+                let tuple = HeapTuple::parse(tuple_bytes)?;
+                let raw = tuple.deform(&member.desc.attribute_descs())?;
+                let mut values = Vec::with_capacity(selected_columns.len());
+                let mut widths = Vec::with_capacity(selected_columns.len());
+                for mapped_index in &mapping {
+                    if let Some(index) = mapped_index {
+                        let value = decode_value_with_toast(
+                            &member.desc.columns[*index],
+                            raw.get(*index).copied().flatten(),
+                            toast_ctx.as_ref(),
+                        )?;
+                        widths.push(
+                            raw.get(*index)
+                                .and_then(|bytes| *bytes)
+                                .map(|bytes| bytes.len())
+                                .unwrap_or(0),
+                        );
+                        values.push(value);
+                    } else {
+                        values.push(Value::Null);
+                        widths.push(0);
+                    }
+                }
+                reservoir.push(
+                    SampledRow {
+                        physical_ordinal: visible_rows,
+                        values,
+                        widths,
+                    },
+                    &mut rng,
+                );
+                visible_rows += 1;
+            }
+        }
+    }
+
+    build_statistics_rows(
+        relation.relation_oid,
+        &relation.desc,
+        selected_columns,
+        &reservoir.into_inner(),
+        visible_rows as f64,
+        catalog,
+        true,
+    )
+}
+
+fn inherited_selected_column_mapping(
+    parent: &BoundRelation,
+    member: &BoundRelation,
+    selected_columns: &[usize],
+) -> Result<Vec<Option<usize>>, ExecError> {
+    selected_columns
+        .iter()
+        .map(|index| {
+            let parent_column = &parent.desc.columns[*index];
+            Ok(member
+                .desc
+                .columns
+                .iter()
+                .position(|child_column| {
+                    !child_column.dropped
+                        && child_column.name.eq_ignore_ascii_case(&parent_column.name)
+                        && child_column.sql_type == parent_column.sql_type
+                }))
+        })
+        .collect()
+}
+
+fn build_statistics_rows(
+    relation_oid: u32,
+    relation_desc: &crate::backend::executor::RelationDesc,
     selected_columns: &[usize],
     sample_rows: &[SampledRow],
     reltuples: f64,
     catalog: &dyn CatalogLookup,
+    stainherit: bool,
 ) -> Result<Vec<PgStatisticRow>, ExecError> {
     let mut out = Vec::with_capacity(selected_columns.len());
     let sample_total = sample_rows.len().max(1) as f64;
     for (sample_index, column_index) in selected_columns.iter().enumerate() {
-        let column = &relation.desc.columns[*column_index];
+        let column = &relation_desc.columns[*column_index];
         let nonnull_rows = sample_rows
             .iter()
             .filter(|row| !matches!(row.values[sample_index], Value::Null))
@@ -426,9 +577,9 @@ fn build_statistics_rows(
         }
 
         out.push(PgStatisticRow {
-            starelid: relation.relation_oid,
+            starelid: relation_oid,
             staattnum: (*column_index + 1) as i16,
-            stainherit: false,
+            stainherit,
             stanullfrac,
             stawidth,
             stadistinct,
