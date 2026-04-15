@@ -249,12 +249,7 @@ function resizeLivePrompt() {
 }
 
 function renderBootMessage(message) {
-  return [
-    "psql (browser wasm)",
-    'Type "help" for help.',
-    "",
-    message,
-  ].join("\n");
+  return message;
 }
 
 function splitStatements(script) {
@@ -458,7 +453,7 @@ async function boot() {
   await init();
   engine = new WasmEngine(64);
   loadSelectedExample();
-  writeTranscript(renderBootMessage("pgrust=#"));
+  writeTranscript("");
   setStatus("ready");
   captureAnalytics("wasm_demo_loaded", {
     example_id: selectedExample().id,
@@ -470,7 +465,7 @@ runLive.addEventListener("click", runLivePrompt);
 reset.addEventListener("click", () => {
   try {
     engine.reset(64);
-    writeTranscript(renderBootMessage("pgrust=#"));
+    writeTranscript("");
     setStatus("reset");
     captureAnalytics("wasm_demo_reset", {
       example_id: selectedExample().id,
@@ -486,7 +481,7 @@ reset.addEventListener("click", () => {
 });
 
 clear.addEventListener("click", () => {
-  writeTranscript(renderBootMessage("pgrust=#"));
+  writeTranscript("");
   resizeLivePrompt();
   liveSql.focus();
 });
