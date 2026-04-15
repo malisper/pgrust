@@ -201,6 +201,7 @@ fn people_scan_plan() -> Plan {
     Plan::SeqScan {
         plan_info: PlanEstimate::default(),
         rel: rel(),
+        relation_name: "people".into(),
         relation_oid: 0,
         toast: None,
         desc: relation_desc(),
@@ -211,6 +212,7 @@ fn pets_scan_plan() -> Plan {
     Plan::SeqScan {
         plan_info: PlanEstimate::default(),
         rel: pets_rel(),
+        relation_name: "pets".into(),
         relation_oid: 0,
         toast: None,
         desc: pets_relation_desc(),
@@ -833,6 +835,7 @@ fn seqscan_filter_projection_returns_expected_rows() {
             input: Box::new(Plan::SeqScan {
                 plan_info: crate::backend::executor::PlanEstimate::default(),
                 rel: rel(),
+                relation_name: "people".into(),
                 relation_oid: 0,
                 toast: None,
                 desc: relation_desc(),
@@ -908,6 +911,7 @@ fn seqscan_skips_superseded_versions() {
     let plan = Plan::SeqScan {
         plan_info: crate::backend::executor::PlanEstimate::default(),
         rel: rel(),
+        relation_name: "people".into(),
         relation_oid: 0,
         toast: None,
         desc: relation_desc(),
@@ -1928,7 +1932,7 @@ fn explain_analyze_buffers_reports_runtime_and_buffers() {
                     other => panic!("expected text explain line, got {:?}", other),
                 })
                 .collect::<Vec<_>>();
-            assert!(rendered.iter().any(|line| line.contains("actual rows=")));
+            assert!(rendered.iter().any(|line| line.contains("actual time=")));
             assert!(rendered.iter().any(|line| line.contains("Execution Time:")));
             assert!(rendered.iter().any(|line| line.contains("Buffers: shared")));
         }
@@ -1967,11 +1971,11 @@ fn explain_analyze_timing_off_still_reports_nonzero_actual_rows() {
                 .collect::<Vec<_>>();
             let plan_lines = rendered
                 .iter()
-                .filter(|line| line.contains("actual rows="))
+                .filter(|line| line.contains("actual time="))
                 .collect::<Vec<_>>();
             assert!(!plan_lines.is_empty(), "expected explain analyze plan lines");
             assert!(
-                plan_lines.iter().all(|line| !line.contains("actual rows=0")),
+                plan_lines.iter().all(|line| !line.contains("rows=0.00")),
                 "expected nonzero actual rows for populated plan nodes, got {plan_lines:?}"
             );
         }
@@ -2013,7 +2017,7 @@ fn explain_analyze_reports_single_loop_for_simple_scan_and_sort() {
                 .collect::<Vec<_>>();
             let plan_lines = rendered
                 .iter()
-                .filter(|line| line.contains("actual rows="))
+                .filter(|line| line.contains("actual time="))
                 .collect::<Vec<_>>();
             assert!(
                 plan_lines.iter().any(|line| line.contains("Sort") && line.contains("loops=1")),
@@ -2074,6 +2078,52 @@ fn explain_hash_join_conditions_render_readably() {
             assert!(
                 rendered.iter().all(|line| !line.contains("Op(OpExpr")),
                 "expected explain output without debug op expression formatting, got {rendered:?}"
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn explain_indents_child_plan_nodes() {
+    let base = temp_dir("explain_indent_children");
+    let db = Database::open(&base, 16).unwrap();
+    db.execute(1, "create table people_indent (id int4, name text)").unwrap();
+    db.execute(
+        1,
+        "insert into people_indent values (2, 'bob'), (1, 'alice'), (3, 'carol')",
+    )
+    .unwrap();
+
+    match db
+        .execute(
+            1,
+            "explain (analyze, buffers)
+             select name
+             from people_indent
+             order by name",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            let rendered = rows
+                .into_iter()
+                .map(|row| match &row[0] {
+                    Value::Text(text) => text.clone(),
+                    other => panic!("expected text explain line, got {:?}", other),
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                rendered.iter().any(|line| line.starts_with("Projection  ")),
+                "expected top-level projection line, got {rendered:?}"
+            );
+            assert!(
+                rendered.iter().any(|line| line.starts_with("  Sort")),
+                "expected indented sort child line, got {rendered:?}"
+            );
+            assert!(
+                rendered.iter().any(|line| line.starts_with("    Seq Scan")),
+                "expected doubly indented seq scan child line, got {rendered:?}"
             );
         }
         other => panic!("expected query result, got {:?}", other),

@@ -262,6 +262,7 @@ pub enum Path {
         plan_info: PlanEstimate,
         source_id: usize,
         rel: RelFileLocator,
+        relation_name: String,
         relation_oid: u32,
         toast: Option<ToastRelationRef>,
         desc: RelationDesc,

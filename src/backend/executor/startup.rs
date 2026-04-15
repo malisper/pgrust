@@ -1,7 +1,6 @@
 use super::agg::AccumState;
 use super::{Plan, PlanState, TupleSlot, expr, tuple_decoder};
 use crate::backend::executor::hashjoin::HashJoinPhase;
-use crate::include::catalog::bootstrap_catalog_kinds;
 use crate::include::catalog::builtin_aggregate_function_for_proc_oid;
 use crate::include::nodes::execnodes::{
     AggregateState, AppendState, FilterState, FunctionScanState, HashJoinState, HashState,
@@ -207,7 +206,8 @@ pub fn executor_start(plan: Plan) -> PlanState {
         Plan::SeqScan {
             plan_info,
             rel,
-            relation_oid,
+            relation_name,
+            relation_oid: _,
             toast,
             desc,
         } => {
@@ -223,7 +223,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
             slot.decoder = Some(decoder);
             Box::new(SeqScanState {
                 rel,
-                relation_name: explain_relation_name(relation_oid, rel.rel_number),
+                relation_name,
                 toast_relation: toast,
                 column_names,
                 desc,
@@ -398,7 +398,8 @@ pub fn executor_start(plan: Plan) -> PlanState {
             let Plan::SeqScan {
                 plan_info: _,
                 rel,
-                relation_oid,
+                relation_name,
+                relation_oid: _,
                 toast,
                 desc,
             } = *input
@@ -418,7 +419,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
             slot.decoder = Some(decoder);
             Box::new(SeqScanState {
                 rel,
-                relation_name: explain_relation_name(relation_oid, rel.rel_number),
+                relation_name,
                 toast_relation: toast,
                 column_names,
                 desc,
@@ -595,12 +596,4 @@ fn build_hash_state(
         plan_info,
         stats: NodeExecStats::default(),
     }
-}
-
-fn explain_relation_name(relation_oid: u32, relfilenode: u32) -> String {
-    bootstrap_catalog_kinds()
-        .into_iter()
-        .find(|kind| kind.relation_oid() == relation_oid)
-        .map(|kind| kind.relation_name().to_string())
-        .unwrap_or_else(|| format!("rel {relfilenode}"))
 }

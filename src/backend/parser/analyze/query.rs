@@ -70,6 +70,7 @@ impl AnalyzedFrom {
     }
 
     pub(super) fn relation(
+        relation_name: String,
         rel: crate::RelFileLocator,
         relation_oid: u32,
         relkind: char,
@@ -87,7 +88,7 @@ impl AnalyzedFrom {
             .collect::<Vec<_>>();
         Self {
             rtable: vec![RangeTblEntry {
-                alias: None,
+                alias: Some(relation_name),
                 desc,
                 inh,
                 kind: RangeTblEntryKind::Relation {

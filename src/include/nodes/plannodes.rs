@@ -74,6 +74,7 @@ pub enum Plan {
     SeqScan {
         plan_info: PlanEstimate,
         rel: RelFileLocator,
+        relation_name: String,
         relation_oid: u32,
         toast: Option<ToastRelationRef>,
         desc: RelationDesc,

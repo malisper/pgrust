@@ -73,6 +73,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
             Path::SeqScan {
                 source_id,
                 rel,
+                relation_name,
                 relation_oid,
                 toast,
                 desc,
@@ -84,6 +85,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                     plan_info: base,
                     source_id,
                     rel,
+                    relation_name,
                     relation_oid,
                     toast,
                     desc,
@@ -368,21 +370,33 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
 }
 
 fn try_optimize_access_subtree(plan: Path, catalog: &dyn CatalogLookup) -> Result<Path, Path> {
-    let (source_id, rel, relation_oid, toast, desc, filter, order_items) = match plan {
+    let (source_id, rel, relation_name, relation_oid, toast, desc, filter, order_items) =
+        match plan {
         Path::SeqScan {
             source_id,
             rel,
+            relation_name,
             relation_oid,
             toast,
             desc,
             ..
-        } => (source_id, rel, relation_oid, toast, desc, None, None),
+        } => (
+            source_id,
+            rel,
+            relation_name,
+            relation_oid,
+            toast,
+            desc,
+            None,
+            None,
+        ),
         Path::Filter {
             input, predicate, ..
         } => match *input {
             Path::SeqScan {
                 source_id,
                 rel,
+                relation_name,
                 relation_oid,
                 toast,
                 desc,
@@ -390,6 +404,7 @@ fn try_optimize_access_subtree(plan: Path, catalog: &dyn CatalogLookup) -> Resul
             } => (
                 source_id,
                 rel,
+                relation_name,
                 relation_oid,
                 toast,
                 desc,
@@ -408,17 +423,28 @@ fn try_optimize_access_subtree(plan: Path, catalog: &dyn CatalogLookup) -> Resul
             Path::SeqScan {
                 source_id,
                 rel,
+                relation_name,
                 relation_oid,
                 toast,
                 desc,
                 ..
-            } => (source_id, rel, relation_oid, toast, desc, None, Some(items)),
+            } => (
+                source_id,
+                rel,
+                relation_name,
+                relation_oid,
+                toast,
+                desc,
+                None,
+                Some(items),
+            ),
             Path::Filter {
                 input, predicate, ..
             } => match *input {
                 Path::SeqScan {
                     source_id,
                     rel,
+                    relation_name,
                     relation_oid,
                     toast,
                     desc,
@@ -426,6 +452,7 @@ fn try_optimize_access_subtree(plan: Path, catalog: &dyn CatalogLookup) -> Resul
                 } => (
                     source_id,
                     rel,
+                    relation_name,
                     relation_oid,
                     toast,
                     desc,
@@ -462,6 +489,7 @@ fn try_optimize_access_subtree(plan: Path, catalog: &dyn CatalogLookup) -> Resul
     let mut best = estimate_seqscan_candidate(
         source_id,
         rel,
+        relation_name,
         relation_oid,
         toast,
         desc.clone(),
@@ -534,6 +562,7 @@ pub(super) fn relation_stats(
 pub(super) fn estimate_seqscan_candidate(
     source_id: usize,
     rel: RelFileLocator,
+    relation_name: String,
     relation_oid: u32,
     toast: Option<ToastRelationRef>,
     desc: RelationDesc,
@@ -547,6 +576,7 @@ pub(super) fn estimate_seqscan_candidate(
         plan_info: scan_info,
         source_id,
         rel,
+        relation_name,
         relation_oid,
         toast,
         desc,

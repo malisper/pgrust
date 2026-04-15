@@ -133,42 +133,51 @@ pub(crate) fn execute_explain(
         }));
     };
 
+    ctx.pool.reset_usage_stats();
     let plan_start = Instant::now();
     let query_desc = create_query_desc(
         crate::backend::parser::pg_plan_query(&select, catalog)?,
         None,
     );
+    let planning_elapsed = plan_start.elapsed();
+    let planning_buffer_stats = ctx.pool.usage_stats();
     let mut lines = Vec::new();
     if stmt.analyze {
         ctx.pool.reset_usage_stats();
         ctx.timed = stmt.timing;
         let saved_subplans =
             std::mem::replace(&mut ctx.subplans, query_desc.planned_stmt.subplans.clone());
-        let exec_result: Result<(_, _, _, _), ExecError> = (|| {
+        let exec_result: Result<(_, _, _), ExecError> = (|| {
             let mut state = executor_start(query_desc.planned_stmt.plan_tree.clone());
-            let plan_elapsed = plan_start.elapsed();
             let mut row_count: u64 = 0;
             let started_at = Instant::now();
             while let Some(_slot) = state.exec_proc_node(ctx)? {
                 row_count += 1;
             }
-            Ok((state, plan_elapsed, row_count, started_at.elapsed()))
+            Ok((state, row_count, started_at.elapsed()))
         })();
         ctx.subplans = saved_subplans;
         ctx.timed = false;
-        let (state, plan_elapsed, row_count, elapsed) = exec_result?;
+        let execution_buffer_stats = ctx.pool.usage_stats();
+        let (state, row_count, elapsed) = exec_result?;
         format_explain_lines(state.as_ref(), 0, true, &mut lines);
+        if stmt.buffers {
+            lines.push("Planning:".into());
+            lines.push(format!(
+                "  {}",
+                format_buffer_usage(planning_buffer_stats)
+            ));
+        }
         lines.push(format!(
             "Planning Time: {:.3} ms",
-            plan_elapsed.as_secs_f64() * 1000.0
+            planning_elapsed.as_secs_f64() * 1000.0
         ));
         lines.push(format!(
             "Execution Time: {:.3} ms",
             elapsed.as_secs_f64() * 1000.0
         ));
         if stmt.buffers {
-            let stats = ctx.pool.usage_stats();
-            lines.push(format_buffer_usage(stats));
+            lines.push(format_buffer_usage(execution_buffer_stats));
         }
         lines.push(format!("Result Rows: {}", row_count));
     } else {

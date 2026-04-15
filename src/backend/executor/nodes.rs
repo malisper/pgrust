@@ -69,17 +69,39 @@ fn format_qual_list(quals: &[Expr]) -> Expr {
 }
 
 fn finish_row(stats: &mut NodeExecStats, start: Option<Instant>) {
+    if stats.first_tuple_time.is_none() {
+        stats.first_tuple_time = Some(start.map(|start| start.elapsed()).unwrap_or_default());
+    }
     stats.rows += 1;
     if let Some(start) = start {
         stats.total_time += start.elapsed();
     }
 }
 
-fn finish_eof(stats: &mut NodeExecStats, start: Option<Instant>) {
+fn finish_eof(stats: &mut NodeExecStats, start: Option<Instant>, ctx: &ExecutorContext) {
     stats.loops += 1;
     if let Some(start) = start {
         stats.total_time += start.elapsed();
     }
+    if let Some(start_usage) = stats.buffer_usage_start.take() {
+        let end_usage = ctx.pool.usage_stats();
+        stats.buffer_usage.shared_hit = end_usage.shared_hit.saturating_sub(start_usage.shared_hit);
+        stats.buffer_usage.shared_read =
+            end_usage.shared_read.saturating_sub(start_usage.shared_read);
+        stats.buffer_usage.shared_written = end_usage
+            .shared_written
+            .saturating_sub(start_usage.shared_written);
+    }
+}
+
+fn begin_node(stats: &mut NodeExecStats, ctx: &ExecutorContext) {
+    if stats.buffer_usage_start.is_none() {
+        stats.buffer_usage_start = Some(ctx.pool.usage_stats());
+    }
+}
+
+fn note_filtered_row(stats: &mut NodeExecStats) {
+    stats.rows_removed_by_filter += 1;
 }
 
 impl PlanNode for ResultState {
@@ -92,8 +114,10 @@ impl PlanNode for ResultState {
         } else {
             None
         };
+        begin_node(&mut self.stats, ctx);
+        begin_node(&mut self.stats, ctx);
         if self.emitted {
-            finish_eof(&mut self.stats, start);
+            finish_eof(&mut self.stats, start, ctx);
             Ok(None)
         } else {
             self.emitted = true;
@@ -135,6 +159,7 @@ impl PlanNode for AppendState {
         } else {
             None
         };
+        begin_node(&mut self.stats, ctx);
         while self.current_child < self.children.len() {
             if let Some(slot) = self.children[self.current_child].exec_proc_node(ctx)? {
                 let mut values = slot.values()?.to_vec();
@@ -148,7 +173,7 @@ impl PlanNode for AppendState {
             }
             self.current_child += 1;
         }
-        finish_eof(&mut self.stats, start);
+        finish_eof(&mut self.stats, start, ctx);
         Ok(None)
     }
     fn current_slot(&mut self) -> Option<&mut TupleSlot> {
@@ -195,6 +220,7 @@ impl PlanNode for SeqScanState {
         } else {
             None
         };
+        begin_node(&mut self.stats, ctx);
 
         loop {
             ctx.check_for_interrupts()?;
@@ -223,6 +249,7 @@ impl PlanNode for SeqScanState {
 
                     if let Some(qual) = &self.qual {
                         if !qual(&mut self.slot, ctx)? {
+                            note_filtered_row(&mut self.stats);
                             continue;
                         }
                     }
@@ -236,7 +263,7 @@ impl PlanNode for SeqScanState {
                 heap_scan_prepare_next_page(&*ctx.pool, ctx.client_id, &ctx.txns, scan);
             if next?.is_none() {
                 heap_scan_end::<ExecError>(&*ctx.pool, ctx.client_id, scan)?;
-                finish_eof(&mut self.stats, start);
+                finish_eof(&mut self.stats, start, ctx);
                 return Ok(None);
             }
         }
@@ -259,7 +286,7 @@ impl PlanNode for SeqScanState {
     fn node_label(&self) -> String {
         format!("Seq Scan on {}", self.relation_name)
     }
-    fn explain_children(&self, indent: usize, _analyze: bool, lines: &mut Vec<String>) {
+    fn explain_details(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
         if let Some(qual_expr) = &self.qual_expr {
             let prefix = "  ".repeat(indent + 1);
             lines.push(format!(
@@ -267,7 +294,25 @@ impl PlanNode for SeqScanState {
                 render_explain_expr(qual_expr, &self.column_names)
             ));
         }
+        let prefix = "  ".repeat(indent + 1);
+        if analyze && self.stats.rows_removed_by_filter > 0 {
+            lines.push(format!(
+                "{prefix}Rows Removed by Filter: {}",
+                self.stats.rows_removed_by_filter
+            ));
+        }
+        if analyze
+            && (self.stats.buffer_usage.shared_hit > 0
+                || self.stats.buffer_usage.shared_read > 0
+                || self.stats.buffer_usage.shared_written > 0)
+        {
+            lines.push(format!(
+                "{prefix}{}",
+                crate::backend::commands::explain::format_buffer_usage(self.stats.buffer_usage)
+            ));
+        }
     }
+    fn explain_children(&self, _indent: usize, _analyze: bool, _lines: &mut Vec<String>) {}
 }
 
 impl PlanNode for IndexScanState {
@@ -323,7 +368,7 @@ impl PlanNode for IndexScanState {
                         })
                     })?;
                 }
-                finish_eof(&mut self.stats, start);
+                finish_eof(&mut self.stats, start, ctx);
                 return Ok(None);
             }
 
@@ -489,12 +534,13 @@ impl PlanNode for FilterState {
         } else {
             None
         };
+        begin_node(&mut self.stats, ctx);
         loop {
             ctx.check_for_interrupts()?;
             let slot = match self.input.exec_proc_node(ctx)? {
                 Some(s) => s,
                 None => {
-                    finish_eof(&mut self.stats, start);
+                    finish_eof(&mut self.stats, start, ctx);
                     return Ok(None);
                 }
             };
@@ -503,6 +549,7 @@ impl PlanNode for FilterState {
                 finish_row(&mut self.stats, start);
                 return Ok(self.input.current_slot());
             }
+            note_filtered_row(&mut self.stats);
         }
     }
     fn current_slot(&mut self) -> Option<&mut TupleSlot> {
@@ -523,8 +570,21 @@ impl PlanNode for FilterState {
     fn node_label(&self) -> String {
         "Filter".into()
     }
+    fn explain_details(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
+        let prefix = "  ".repeat(indent + 1);
+        lines.push(format!(
+            "{prefix}Filter: {}",
+            render_explain_expr(&self.predicate, self.column_names())
+        ));
+        if analyze && self.stats.rows_removed_by_filter > 0 {
+            lines.push(format!(
+                "{prefix}Rows Removed by Filter: {}",
+                self.stats.rows_removed_by_filter
+            ));
+        }
+    }
     fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
-        format_explain_lines(&*self.input, indent, analyze, lines);
+        format_explain_lines(&*self.input, indent + 1, analyze, lines);
     }
 }
 
@@ -588,7 +648,7 @@ impl PlanNode for NestedLoopJoinState {
                                 return Ok(Some(&mut self.slot));
                             }
                         }
-                        finish_eof(&mut self.stats, start);
+                        finish_eof(&mut self.stats, start, ctx);
                         return Ok(None);
                     }
                 }
@@ -675,8 +735,8 @@ impl PlanNode for NestedLoopJoinState {
                 render_explain_expr(&format_qual_list(&self.qual), &self.combined_names)
             ));
         }
-        format_explain_lines(&*self.left, indent, analyze, lines);
-        format_explain_lines(&*self.right, indent, analyze, lines);
+        format_explain_lines(&*self.left, indent + 1, analyze, lines);
+        format_explain_lines(&*self.right, indent + 1, analyze, lines);
     }
 }
 
@@ -715,7 +775,7 @@ fn exec_lateral_join<'a>(
                     );
                 }
                 None => {
-                    finish_eof(&mut state.stats, start);
+                    finish_eof(&mut state.stats, start, ctx);
                     return Ok(None);
                 }
             }
@@ -788,7 +848,7 @@ fn exec_cross_join<'a>(
                     state.left_index = 0;
                 }
                 None => {
-                    finish_eof(&mut state.stats, start);
+                    finish_eof(&mut state.stats, start, ctx);
                     return Ok(None);
                 }
             }
@@ -831,6 +891,7 @@ impl PlanNode for OrderByState {
         } else {
             None
         };
+        begin_node(&mut self.stats, ctx);
         if self.rows.is_none() {
             let mut rows = Vec::new();
             while let Some(slot) = self.input.exec_proc_node(ctx)? {
@@ -858,7 +919,7 @@ impl PlanNode for OrderByState {
 
         let rows = self.rows.as_mut().unwrap();
         if self.next_index >= rows.len() {
-            finish_eof(&mut self.stats, start);
+            finish_eof(&mut self.stats, start, ctx);
             return Ok(None);
         }
 
@@ -887,8 +948,40 @@ impl PlanNode for OrderByState {
     fn node_label(&self) -> String {
         "Sort".into()
     }
+    fn explain_details(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
+        let prefix = "  ".repeat(indent + 1);
+        let sort_keys = self
+            .items
+            .iter()
+            .map(|item| render_explain_expr(&item.expr, self.column_names()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        lines.push(format!("{prefix}Sort Key: {sort_keys}"));
+        if analyze {
+            let memory_kb = self
+                .rows
+                .as_ref()
+                .map(|rows| {
+                    let bytes = rows.len().saturating_mul(self.plan_info.plan_width.max(1));
+                    bytes.max(1024).div_ceil(1024)
+                })
+                .unwrap_or(1);
+            lines.push(format!(
+                "{prefix}Sort Method: quicksort  Memory: {memory_kb}kB"
+            ));
+            if self.stats.buffer_usage.shared_hit > 0
+                || self.stats.buffer_usage.shared_read > 0
+                || self.stats.buffer_usage.shared_written > 0
+            {
+                lines.push(format!(
+                    "{prefix}{}",
+                    crate::backend::commands::explain::format_buffer_usage(self.stats.buffer_usage)
+                ));
+            }
+        }
+    }
     fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
-        format_explain_lines(&*self.input, indent, analyze, lines);
+        format_explain_lines(&*self.input, indent + 1, analyze, lines);
     }
 }
 
@@ -904,7 +997,7 @@ impl PlanNode for LimitState {
         };
         if let Some(limit) = self.limit {
             if self.returned >= limit {
-                finish_eof(&mut self.stats, start);
+                finish_eof(&mut self.stats, start, ctx);
                 return Ok(None);
             }
         }
@@ -912,7 +1005,7 @@ impl PlanNode for LimitState {
         while self.skipped < self.offset {
             ctx.check_for_interrupts()?;
             if self.input.exec_proc_node(ctx)?.is_none() {
-                finish_eof(&mut self.stats, start);
+                finish_eof(&mut self.stats, start, ctx);
                 return Ok(None);
             }
             self.skipped += 1;
@@ -923,7 +1016,7 @@ impl PlanNode for LimitState {
             self.returned += 1;
             finish_row(&mut self.stats, start);
         } else {
-            finish_eof(&mut self.stats, start);
+            finish_eof(&mut self.stats, start, ctx);
         }
         Ok(slot)
     }
@@ -946,7 +1039,7 @@ impl PlanNode for LimitState {
         "Limit".into()
     }
     fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
-        format_explain_lines(&*self.input, indent, analyze, lines);
+        format_explain_lines(&*self.input, indent + 1, analyze, lines);
     }
 }
 
@@ -963,7 +1056,7 @@ impl PlanNode for ProjectionState {
         let input_slot = match self.input.exec_proc_node(ctx)? {
             Some(s) => s,
             None => {
-                finish_eof(&mut self.stats, start);
+                finish_eof(&mut self.stats, start, ctx);
                 return Ok(None);
             }
         };
@@ -1000,7 +1093,7 @@ impl PlanNode for ProjectionState {
         "Projection".into()
     }
     fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
-        format_explain_lines(&*self.input, indent, analyze, lines);
+        format_explain_lines(&*self.input, indent + 1, analyze, lines);
     }
 }
 
@@ -1106,7 +1199,7 @@ impl PlanNode for AggregateState {
 
         let rows = self.result_rows.as_mut().unwrap();
         if self.next_index >= rows.len() {
-            finish_eof(&mut self.stats, start);
+            finish_eof(&mut self.stats, start, ctx);
             return Ok(None);
         }
 
@@ -1136,7 +1229,7 @@ impl PlanNode for AggregateState {
         "Aggregate".into()
     }
     fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
-        format_explain_lines(&*self.input, indent, analyze, lines);
+        format_explain_lines(&*self.input, indent + 1, analyze, lines);
     }
 }
 
@@ -1157,7 +1250,7 @@ impl PlanNode for FunctionScanState {
 
         let rows = self.rows.as_mut().unwrap();
         if self.next_index >= rows.len() {
-            finish_eof(&mut self.stats, start);
+            finish_eof(&mut self.stats, start, ctx);
             return Ok(None);
         }
 
@@ -1216,7 +1309,7 @@ impl PlanNode for ValuesState {
 
         let rows = self.result_rows.as_mut().unwrap();
         if self.next_index >= rows.len() {
-            finish_eof(&mut self.stats, start);
+            finish_eof(&mut self.stats, start, ctx);
             return Ok(None);
         }
         let idx = self.next_index;
@@ -1263,7 +1356,7 @@ impl PlanNode for ProjectSetState {
             ctx.check_for_interrupts()?;
             if self.current_input.is_none() || self.next_index >= self.current_row_count {
                 let Some(input_slot) = self.input.exec_proc_node(ctx)? else {
-                    finish_eof(&mut self.stats, start);
+                    finish_eof(&mut self.stats, start, ctx);
                     return Ok(None);
                 };
                 let mut values = input_slot.values()?.to_vec();
@@ -1356,7 +1449,7 @@ impl PlanNode for ProjectSetState {
         "ProjectSet".into()
     }
     fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
-        format_explain_lines(&*self.input, indent, analyze, lines);
+        format_explain_lines(&*self.input, indent + 1, analyze, lines);
     }
 }
 
