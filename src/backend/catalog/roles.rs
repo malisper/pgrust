@@ -99,10 +99,9 @@ pub fn rename_role(
     role_name: &str,
     new_name: &str,
 ) -> Result<PgAuthIdRow, CatalogError> {
-    if rows
-        .iter()
-        .any(|row| row.rolname.eq_ignore_ascii_case(new_name) && !row.rolname.eq_ignore_ascii_case(role_name))
-    {
+    if rows.iter().any(|row| {
+        row.rolname.eq_ignore_ascii_case(new_name) && !row.rolname.eq_ignore_ascii_case(role_name)
+    }) {
         return Err(CatalogError::UniqueViolation(format!(
             "duplicate role name: {new_name}"
         )));
@@ -152,7 +151,10 @@ mod tests {
         .unwrap();
         assert_eq!(created.oid, 100);
         assert!(created.rolcanlogin);
-        assert_eq!(find_role_by_name(&rows, "app_user").map(|row| row.oid), Some(100));
+        assert_eq!(
+            find_role_by_name(&rows, "app_user").map(|row| row.oid),
+            Some(100)
+        );
 
         let renamed = rename_role(&mut rows, "app_user", "app_owner").unwrap();
         assert_eq!(renamed.rolname, "app_owner");
@@ -164,9 +166,20 @@ mod tests {
     fn duplicate_role_names_are_rejected() {
         let mut rows = Vec::new();
         let mut next_oid = 100;
-        create_role(&mut rows, &mut next_oid, "app_user", &RoleAttributes::default()).unwrap();
-        let err = create_role(&mut rows, &mut next_oid, "app_user", &RoleAttributes::default())
-            .unwrap_err();
+        create_role(
+            &mut rows,
+            &mut next_oid,
+            "app_user",
+            &RoleAttributes::default(),
+        )
+        .unwrap();
+        let err = create_role(
+            &mut rows,
+            &mut next_oid,
+            "app_user",
+            &RoleAttributes::default(),
+        )
+        .unwrap_err();
         assert!(matches!(err, CatalogError::UniqueViolation(_)));
     }
 }

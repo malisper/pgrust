@@ -122,7 +122,10 @@ mod tests {
     #[test]
     fn bootstrap_pg_authid_rows_include_predefined_roles() {
         let rows = bootstrap_pg_authid_rows();
-        assert!(rows.iter().any(|row| row.rolname == BOOTSTRAP_SUPERUSER_NAME));
+        assert!(
+            rows.iter()
+                .any(|row| row.rolname == BOOTSTRAP_SUPERUSER_NAME)
+        );
         assert!(rows.iter().any(|row| row.rolname == "pg_database_owner"));
         assert!(rows.iter().any(|row| row.rolname == "pg_monitor"));
     }

@@ -521,9 +521,7 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::StatementTimestamp
             | BuiltinScalarFunction::ClockTimestamp
             | BuiltinScalarFunction::TimeOfDay => args.is_empty(),
-            BuiltinScalarFunction::DatePart | BuiltinScalarFunction::DateTrunc => {
-                args.len() == 2
-            }
+            BuiltinScalarFunction::DatePart | BuiltinScalarFunction::DateTrunc => args.len() == 2,
             BuiltinScalarFunction::IsFinite => args.len() == 1,
             BuiltinScalarFunction::MakeDate => args.len() == 3,
             BuiltinScalarFunction::GetDatabaseEncoding => args.is_empty(),

@@ -562,10 +562,9 @@ fn parse_alter_table_add_column_statement() {
 
 #[test]
 fn parse_alter_table_constraint_statements() {
-    let stmt = parse_statement(
-        "alter table items add constraint items_id_check check (id > 0) not valid",
-    )
-    .unwrap();
+    let stmt =
+        parse_statement("alter table items add constraint items_id_check check (id > 0) not valid")
+            .unwrap();
     assert_eq!(
         stmt,
         Statement::AlterTableAddConstraint(AlterTableAddConstraintStatement {
@@ -2611,7 +2610,6 @@ fn lower_create_table_rejects_invalid_key_constraints() {
             if expected == "distinct PRIMARY KEY/UNIQUE definitions"
                 && actual == "duplicate key definition on (id)"
     ));
-
 }
 
 #[test]

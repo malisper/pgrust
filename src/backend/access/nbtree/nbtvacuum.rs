@@ -10,10 +10,10 @@ use crate::backend::storage::fsm::{finalize_pending_index_pages, record_free_ind
 use crate::backend::storage::smgr::{ForkNumber, StorageManager};
 use crate::include::access::amapi::{IndexBulkDeleteResult, IndexVacuumContext};
 use crate::include::access::nbtree::{
-    BTP_DELETED, BTP_HALF_DEAD, BTREE_METAPAGE, bt_page_data_items, bt_page_get_meta,
+    BTP_DELETED, BTP_HALF_DEAD, BTREE_METAPAGE, P_NONE, bt_page_data_items, bt_page_get_meta,
     bt_page_get_opaque, bt_page_high_key, bt_page_init, bt_page_is_recyclable, bt_page_items,
     bt_page_replace_items, bt_page_set_deleted, bt_page_set_high_key, bt_page_set_meta,
-    bt_page_set_opaque, P_NONE,
+    bt_page_set_opaque,
 };
 use crate::{BufferPool, ClientId, PinnedBuffer, SmgrStorageBackend};
 
@@ -35,10 +35,7 @@ fn relation_nblocks(
         .map_err(|err| CatalogError::Io(err.to_string()))
 }
 
-fn write_cleanup_info(
-    ctx: &IndexVacuumContext,
-    deleted_pages: u32,
-) -> Result<(), CatalogError> {
+fn write_cleanup_info(ctx: &IndexVacuumContext, deleted_pages: u32) -> Result<(), CatalogError> {
     let pin = pin_btree_block(&ctx.pool, ctx.client_id, ctx.index_relation, BTREE_METAPAGE)?;
     let mut guard = ctx
         .pool
@@ -95,7 +92,10 @@ fn index_tuple_dead(
     ) && tuple.header.xmax < oldest_active_xid)
 }
 
-fn find_parent_block(ctx: &IndexVacuumContext, child_block: u32) -> Result<Option<u32>, CatalogError> {
+fn find_parent_block(
+    ctx: &IndexVacuumContext,
+    child_block: u32,
+) -> Result<Option<u32>, CatalogError> {
     let nblocks = relation_nblocks(&ctx.pool, ctx.index_relation)?;
     for block in 1..nblocks {
         if block == child_block {
@@ -113,7 +113,10 @@ fn find_parent_block(ctx: &IndexVacuumContext, child_block: u32) -> Result<Optio
         }
         let items = bt_page_data_items(&guard)
             .map_err(|err| CatalogError::Io(format!("btree page parse failed: {err:?}")))?;
-        if items.iter().any(|item| item.t_tid.block_number == child_block) {
+        if items
+            .iter()
+            .any(|item| item.t_tid.block_number == child_block)
+        {
             return Ok(Some(block));
         }
     }
@@ -310,12 +313,8 @@ fn delete_empty_leaf(
     let mut deleted = [0u8; crate::backend::storage::smgr::BLCKSZ];
     bt_page_init(&mut deleted, opaque.btpo_flags, opaque.btpo_level)
         .map_err(|err| CatalogError::Io(format!("btree deleted page init failed: {err:?}")))?;
-    bt_page_set_deleted(
-        &mut deleted,
-        opaque,
-        oldest_active_xid.saturating_sub(1),
-    )
-    .map_err(|err| CatalogError::Io(format!("btree deleted page write failed: {err:?}")))?;
+    bt_page_set_deleted(&mut deleted, opaque, oldest_active_xid.saturating_sub(1))
+        .map_err(|err| CatalogError::Io(format!("btree deleted page write failed: {err:?}")))?;
     let lsn = if let Some(wal) = ctx.pool.wal_writer() {
         log_btree_record(
             &wal,
@@ -341,8 +340,7 @@ fn delete_empty_leaf(
     ctx.pool
         .install_page_image_locked(pin.buffer_id(), &deleted, lsn, &mut guard)
         .map_err(|err| CatalogError::Io(format!("btree buffered write failed: {err:?}")))?;
-    record_free_index_page(&ctx.pool, ctx.index_relation, block)
-        .map_err(CatalogError::Io)?;
+    record_free_index_page(&ctx.pool, ctx.index_relation, block).map_err(CatalogError::Io)?;
     Ok(true)
 }
 

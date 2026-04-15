@@ -1,7 +1,7 @@
 use super::{ExecError, Value};
 use crate::backend::utils::time::datetime::{
-    day_of_week_from_julian_day, day_of_year, iso_day_of_week_from_julian_day, iso_week_and_year,
-    days_from_ymd, julian_day_from_postgres_date, unix_days_from_postgres_date, ymd_from_days,
+    day_of_week_from_julian_day, day_of_year, days_from_ymd, iso_day_of_week_from_julian_day,
+    iso_week_and_year, julian_day_from_postgres_date, unix_days_from_postgres_date, ymd_from_days,
 };
 
 fn extract_year_number(astronomical_year: i32) -> i32 {
@@ -83,11 +83,13 @@ pub(crate) fn eval_date_part_function(values: &[Value]) -> Result<Value, ExecErr
     if matches!(field_value, Value::Null) || matches!(date_value, Value::Null) {
         return Ok(Value::Null);
     }
-    let field = field_value.as_text().ok_or_else(|| ExecError::TypeMismatch {
-        op: "date_part",
-        left: field_value.clone(),
-        right: Value::Text("".into()),
-    })?;
+    let field = field_value
+        .as_text()
+        .ok_or_else(|| ExecError::TypeMismatch {
+            op: "date_part",
+            left: field_value.clone(),
+            right: Value::Text("".into()),
+        })?;
     let date = match date_value {
         Value::Date(date) => *date,
         other => {
@@ -207,11 +209,13 @@ pub(crate) fn eval_date_trunc_function(values: &[Value]) -> Result<Value, ExecEr
     if matches!(field_value, Value::Null) || matches!(date_value, Value::Null) {
         return Ok(Value::Null);
     }
-    let field = field_value.as_text().ok_or_else(|| ExecError::TypeMismatch {
-        op: "date_trunc",
-        left: field_value.clone(),
-        right: Value::Text("".into()),
-    })?;
+    let field = field_value
+        .as_text()
+        .ok_or_else(|| ExecError::TypeMismatch {
+            op: "date_trunc",
+            left: field_value.clone(),
+            right: Value::Text("".into()),
+        })?;
     let date = match date_value {
         Value::Date(date) => *date,
         other => {
@@ -284,8 +288,8 @@ pub(crate) fn eval_make_date_function(values: &[Value]) -> Result<Value, ExecErr
     let astronomical_year = if year < 0 { year + 1 } else { year };
     let month_u32 = u32::try_from(month).map_err(|_| invalid_make_date(year, month, day))?;
     let day_u32 = u32::try_from(day).map_err(|_| invalid_make_date(year, month, day))?;
-    let days =
-        days_from_ymd(astronomical_year, month_u32, day_u32).ok_or_else(|| invalid_make_date(year, month, day))?;
+    let days = days_from_ymd(astronomical_year, month_u32, day_u32)
+        .ok_or_else(|| invalid_make_date(year, month, day))?;
     Ok(Value::Date(crate::include::nodes::datetime::DateADT(days)))
 }
 
@@ -299,10 +303,9 @@ mod tests {
         assert_eq!(
             eval_date_part_function(&[
                 Value::Text("year".into()),
-                Value::Date(DateADT(crate::backend::utils::time::datetime::days_from_ymd(
-                    -2019, 8, 11,
-                )
-                .unwrap())),
+                Value::Date(DateADT(
+                    crate::backend::utils::time::datetime::days_from_ymd(-2019, 8, 11,).unwrap()
+                )),
             ])
             .unwrap(),
             Value::Float64(-2020.0)
@@ -310,10 +313,9 @@ mod tests {
         assert_eq!(
             eval_date_part_function(&[
                 Value::Text("dow".into()),
-                Value::Date(DateADT(crate::backend::utils::time::datetime::days_from_ymd(
-                    2020, 8, 16,
-                )
-                .unwrap())),
+                Value::Date(DateADT(
+                    crate::backend::utils::time::datetime::days_from_ymd(2020, 8, 16,).unwrap()
+                )),
             ])
             .unwrap(),
             Value::Float64(0.0)
@@ -321,10 +323,9 @@ mod tests {
         assert_eq!(
             eval_date_part_function(&[
                 Value::Text("isodow".into()),
-                Value::Date(DateADT(crate::backend::utils::time::datetime::days_from_ymd(
-                    2020, 8, 16,
-                )
-                .unwrap())),
+                Value::Date(DateADT(
+                    crate::backend::utils::time::datetime::days_from_ymd(2020, 8, 16,).unwrap()
+                )),
             ])
             .unwrap(),
             Value::Float64(7.0)
