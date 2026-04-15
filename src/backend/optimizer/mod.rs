@@ -5,6 +5,7 @@ mod bestpath;
 mod joininfo;
 mod pathnodes;
 mod root;
+mod setrefs;
 #[cfg(test)]
 mod tests;
 mod upperrels;
@@ -79,332 +80,7 @@ struct AccessCandidate {
 }
 
 fn create_plan(root: &PlannerInfo, path: Path) -> Plan {
-    set_path_references(root, path).into_plan()
-}
-
-fn set_path_references(root: &PlannerInfo, path: Path) -> Path {
-    match path {
-        Path::Filter {
-            plan_info,
-            input,
-            predicate,
-        } => {
-            let input = set_path_references(root, *input);
-            let layout = input.output_vars();
-            Path::Filter {
-                plan_info,
-                input: Box::new(input.clone()),
-                predicate: rewrite_semantic_expr_for_path_or_expand_join_vars(
-                    root, predicate, &input, &layout,
-                ),
-            }
-        }
-        Path::NestedLoopJoin {
-            plan_info,
-            left,
-            right,
-            kind,
-            on,
-        } => {
-            let left = set_path_references(root, *left);
-            let right = set_path_references(root, *right);
-            let mut join_layout = left.output_vars();
-            join_layout.extend(right.output_vars());
-            let on =
-                rewrite_semantic_expr_for_join_inputs(Some(root), on, &left, &right, &join_layout);
-            Path::NestedLoopJoin {
-                plan_info,
-                left: Box::new(left),
-                right: Box::new(right),
-                kind,
-                on,
-            }
-        }
-        Path::HashJoin {
-            plan_info,
-            left,
-            right,
-            kind,
-            hash_clauses,
-            outer_hash_keys,
-            inner_hash_keys,
-            join_qual,
-        } => {
-            let left = set_path_references(root, *left);
-            let right = set_path_references(root, *right);
-            let left_layout = left.output_vars();
-            let right_layout = right.output_vars();
-            let mut join_layout = left_layout.clone();
-            join_layout.extend(right_layout.clone());
-            let hash_clauses = hash_clauses
-                .into_iter()
-                .map(|expr| {
-                    rewrite_semantic_expr_for_join_inputs(
-                        Some(root),
-                        expr,
-                        &left,
-                        &right,
-                        &join_layout,
-                    )
-                })
-                .collect();
-            let outer_hash_keys = outer_hash_keys
-                .into_iter()
-                .map(|expr| rewrite_join_input_expr(Some(root), expr, &left, &left_layout))
-                .collect();
-            let inner_hash_keys = inner_hash_keys
-                .into_iter()
-                .map(|expr| rewrite_join_input_expr(Some(root), expr, &right, &right_layout))
-                .collect();
-            let join_qual = join_qual.map(|expr| {
-                rewrite_semantic_expr_for_join_inputs(Some(root), expr, &left, &right, &join_layout)
-            });
-            Path::HashJoin {
-                plan_info,
-                left: Box::new(left),
-                right: Box::new(right),
-                kind,
-                hash_clauses,
-                outer_hash_keys,
-                inner_hash_keys,
-                join_qual,
-            }
-        }
-        Path::Projection {
-            plan_info,
-            slot_id,
-            input,
-            targets,
-        } => {
-            let input = set_path_references(root, *input);
-            let targets = lower_targets_for_path(root, &input, &targets);
-            Path::Projection {
-                plan_info,
-                slot_id,
-                input: Box::new(input),
-                targets,
-            }
-        }
-        Path::OrderBy {
-            plan_info,
-            input,
-            items,
-        } => {
-            let input = set_path_references(root, *input);
-            let layout = input.output_vars();
-            let items = match aggregate_group_by(&input) {
-                Some(group_by) => items
-                    .into_iter()
-                    .map(|item| OrderByEntry {
-                        expr: lower_agg_output_expr(
-                            expand_join_rte_vars(root, item.expr),
-                            group_by,
-                            &layout,
-                        ),
-                        ..item
-                    })
-                    .collect(),
-                None => items
-                    .into_iter()
-                    .map(|item| OrderByEntry {
-                        expr: rewrite_semantic_expr_for_path_or_expand_join_vars(
-                            root, item.expr, &input, &layout,
-                        ),
-                        ..item
-                    })
-                    .collect(),
-            };
-            Path::OrderBy {
-                plan_info,
-                input: Box::new(input),
-                items,
-            }
-        }
-        Path::Limit {
-            plan_info,
-            input,
-            limit,
-            offset,
-        } => Path::Limit {
-            plan_info,
-            input: Box::new(set_path_references(root, *input)),
-            limit,
-            offset,
-        },
-        Path::Aggregate {
-            plan_info,
-            slot_id,
-            input,
-            group_by,
-            accumulators,
-            having,
-            output_columns,
-        } => {
-            let input = set_path_references(root, *input);
-            let layout = input.output_vars();
-            let group_by = group_by
-                .into_iter()
-                .map(|expr| {
-                    rewrite_semantic_expr_for_path_or_expand_join_vars(root, expr, &input, &layout)
-                })
-                .collect();
-            let accumulators = accumulators
-                .into_iter()
-                .map(|mut accum| {
-                    accum.args = accum
-                        .args
-                        .into_iter()
-                        .map(|arg| {
-                            rewrite_semantic_expr_for_path_or_expand_join_vars(
-                                root, arg, &input, &layout,
-                            )
-                        })
-                        .collect();
-                    accum
-                })
-                .collect();
-            Path::Aggregate {
-                plan_info,
-                slot_id,
-                input: Box::new(input),
-                group_by,
-                accumulators,
-                having,
-                output_columns,
-            }
-        }
-        Path::ProjectSet {
-            plan_info,
-            slot_id,
-            input,
-            targets,
-        } => {
-            let input = set_path_references(root, *input);
-            let layout = input.output_vars();
-            let targets = targets
-                .into_iter()
-                .map(|target| rewrite_project_set_target_for_path(root, target, &input, &layout))
-                .collect();
-            Path::ProjectSet {
-                plan_info,
-                slot_id,
-                input: Box::new(input),
-                targets,
-            }
-        }
-        other => other,
-    }
-}
-
-fn rewrite_project_set_target_for_path(
-    root: &PlannerInfo,
-    target: ProjectSetTarget,
-    path: &Path,
-    layout: &[Expr],
-) -> ProjectSetTarget {
-    match target {
-        ProjectSetTarget::Scalar(entry) => ProjectSetTarget::Scalar(TargetEntry {
-            expr: rewrite_semantic_expr_for_path_or_expand_join_vars(
-                root, entry.expr, path, layout,
-            ),
-            ..entry
-        }),
-        ProjectSetTarget::Set {
-            name,
-            call,
-            sql_type,
-            column_index,
-        } => ProjectSetTarget::Set {
-            name,
-            call: rewrite_set_returning_call_for_path(root, call, path, layout),
-            sql_type,
-            column_index,
-        },
-    }
-}
-
-fn rewrite_set_returning_call_for_path(
-    root: &PlannerInfo,
-    call: SetReturningCall,
-    path: &Path,
-    layout: &[Expr],
-) -> SetReturningCall {
-    let rewrite =
-        |expr| rewrite_semantic_expr_for_path_or_expand_join_vars(root, expr, path, layout);
-    match call {
-        SetReturningCall::GenerateSeries {
-            func_oid,
-            func_variadic,
-            start,
-            stop,
-            step,
-            output,
-        } => SetReturningCall::GenerateSeries {
-            func_oid,
-            func_variadic,
-            start: rewrite(start),
-            stop: rewrite(stop),
-            step: rewrite(step),
-            output,
-        },
-        SetReturningCall::Unnest {
-            func_oid,
-            func_variadic,
-            args,
-            output_columns,
-        } => SetReturningCall::Unnest {
-            func_oid,
-            func_variadic,
-            args: args.into_iter().map(rewrite).collect(),
-            output_columns,
-        },
-        SetReturningCall::JsonTableFunction {
-            func_oid,
-            func_variadic,
-            kind,
-            args,
-            output_columns,
-        } => SetReturningCall::JsonTableFunction {
-            func_oid,
-            func_variadic,
-            kind,
-            args: args.into_iter().map(rewrite).collect(),
-            output_columns,
-        },
-        SetReturningCall::RegexTableFunction {
-            func_oid,
-            func_variadic,
-            kind,
-            args,
-            output_columns,
-        } => SetReturningCall::RegexTableFunction {
-            func_oid,
-            func_variadic,
-            kind,
-            args: args.into_iter().map(rewrite).collect(),
-            output_columns,
-        },
-        SetReturningCall::TextSearchTableFunction {
-            kind,
-            args,
-            output_columns,
-        } => SetReturningCall::TextSearchTableFunction {
-            kind,
-            args: args.into_iter().map(rewrite).collect(),
-            output_columns,
-        },
-        SetReturningCall::UserDefined {
-            proc_oid,
-            func_variadic,
-            args,
-            output_columns,
-        } => SetReturningCall::UserDefined {
-            proc_oid,
-            func_variadic,
-            args: args.into_iter().map(rewrite).collect(),
-            output_columns,
-        },
-    }
+    setrefs::create_plan(root, path)
 }
 
 fn pathkeys_to_order_items(pathkeys: &[PathKey]) -> Vec<OrderByEntry> {
@@ -1666,7 +1342,7 @@ fn make_join_rel(
     root: &mut PlannerInfo,
     left_rel: &RelOptInfo,
     right_rel: &RelOptInfo,
-    _catalog: &dyn CatalogLookup,
+    catalog: &dyn CatalogLookup,
 ) -> Option<RelOptInfo> {
     if !relids_disjoint(&left_rel.relids, &right_rel.relids) {
         return None;
@@ -1724,7 +1400,17 @@ fn make_join_rel(
         join_rel.add_path(path);
     }
     bestpath::set_cheapest(join_rel);
-    Some(join_rel.clone())
+    let rel = join_rel.clone();
+    let rel = if let Some(rtindex) = spec
+        .rtindex
+        .filter(|rtindex| exact_join_rtindex(root, &relids) == Some(*rtindex))
+    {
+        normalize_join_output_rel(root, rel, rtindex, catalog)
+    } else {
+        rel
+    };
+    root.join_rel_list[join_rel_index] = rel.clone();
+    Some(rel)
 }
 
 fn join_search_one_level(root: &mut PlannerInfo, level: usize, catalog: &dyn CatalogLookup) {
@@ -1774,11 +1460,17 @@ fn make_one_rel(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) -> RelOptIn
     for level in 2..=query_relids.len() {
         join_search_one_level(root, level, catalog);
     }
-    root.join_rel_list
+    let rel = root
+        .join_rel_list
         .iter()
         .find(|rel| rel.relids == query_relids)
         .cloned()
-        .unwrap_or_else(|| panic!("failed to build join rel for relids {:?}", query_relids))
+        .unwrap_or_else(|| panic!("failed to build join rel for relids {:?}", query_relids));
+    if let Some(rtindex) = top_join_rtindex(root) {
+        normalize_join_output_rel(root, rel, rtindex, catalog)
+    } else {
+        rel
+    }
 }
 
 fn query_planner(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) -> RelOptInfo {
