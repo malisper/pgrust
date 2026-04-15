@@ -19,3 +19,8 @@ pub fn fsync_file(file: &std::fs::File) -> std::io::Result<()> {
         Err(std::io::Error::last_os_error())
     }
 }
+
+#[cfg(not(unix))]
+pub fn fsync_file(_file: &std::fs::File) -> std::io::Result<()> {
+    Ok(())
+}

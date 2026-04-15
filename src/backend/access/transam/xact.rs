@@ -28,7 +28,7 @@ pub enum MvccError {
     CorruptStatusFile(&'static str),
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct TransactionManager {
     next_xid: TransactionId,
     statuses: BTreeMap<TransactionId, TransactionStatus>,
@@ -58,6 +58,18 @@ impl Clone for TransactionManager {
 }
 
 impl TransactionManager {
+    pub fn new_ephemeral() -> Self {
+        let clog_buf = INVALID_TRANSACTION_ID.to_le_bytes().to_vec();
+        Self {
+            next_xid: INVALID_TRANSACTION_ID,
+            statuses: BTreeMap::new(),
+            in_progress: Vec::new(),
+            status_path: None,
+            status_file: None,
+            clog_buf,
+        }
+    }
+
     pub fn new_durable(base_dir: impl Into<PathBuf>) -> Result<Self, MvccError> {
         let path = Self::status_path(base_dir.into());
         if let Some(parent) = path.parent() {
@@ -249,6 +261,12 @@ impl TransactionManager {
 impl Drop for TransactionManager {
     fn drop(&mut self) {
         self.flush_clog();
+    }
+}
+
+impl Default for TransactionManager {
+    fn default() -> Self {
+        Self::new_ephemeral()
     }
 }
 
