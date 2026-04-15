@@ -6,8 +6,7 @@ use crate::backend::parser::SqlTypeKind;
 
 use super::{
     CatalogLookup, CheckConstraintAction, CreateTableStatement, IndexBackedConstraintAction,
-    NotNullConstraintAction, ParseError, normalize_create_table_constraints,
-    resolve_raw_type_name,
+    NotNullConstraintAction, ParseError, normalize_create_table_constraints, resolve_raw_type_name,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,17 +155,23 @@ mod tests {
             if_not_exists: false,
         };
 
-        let lowered =
-            lower_create_table(&stmt, &crate::backend::parser::analyze::LiteralDefaultCatalog)
-                .unwrap();
+        let lowered = lower_create_table(
+            &stmt,
+            &crate::backend::parser::analyze::LiteralDefaultCatalog,
+        )
+        .unwrap();
         assert_eq!(lowered.not_null_actions.len(), 2);
         assert_eq!(
-            lowered.relation_desc.columns[0].not_null_constraint_name.as_deref(),
+            lowered.relation_desc.columns[0]
+                .not_null_constraint_name
+                .as_deref(),
             Some("items_id_not_null")
         );
         assert!(lowered.relation_desc.columns[0].not_null_primary_key_owned);
         assert_eq!(
-            lowered.relation_desc.columns[1].not_null_constraint_name.as_deref(),
+            lowered.relation_desc.columns[1]
+                .not_null_constraint_name
+                .as_deref(),
             Some("items_note_nn")
         );
         assert!(!lowered.relation_desc.columns[1].not_null_constraint_validated);

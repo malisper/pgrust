@@ -42,8 +42,8 @@ use crate::backend::utils::cache::system_views::{build_pg_stats_rows, build_pg_v
 use agg::*;
 use agg_output::*;
 use coerce::*;
-pub use create_table::*;
 pub(crate) use constraints::*;
+pub use create_table::*;
 use expr::*;
 use functions::*;
 use geometry::*;
