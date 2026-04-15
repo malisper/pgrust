@@ -60,7 +60,8 @@ impl Database {
         let interrupts = self.interrupt_state(client_id);
         let (table_name, persistence) =
             self.normalize_create_table_stmt_with_search_path(create_stmt, configured_search_path)?;
-        let lowered = lower_create_table(create_stmt)?;
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let lowered = lower_create_table_with_catalog(create_stmt, &catalog, persistence)?;
         let desc = lowered.relation_desc;
         match persistence {
             TablePersistence::Permanent => {
@@ -85,6 +86,29 @@ impl Database {
                         drop(catalog_guard);
                         self.apply_catalog_mutation_effect_immediate(&effect)?;
                         catalog_effects.push(effect);
+                        let inherit_cid_offset = u32::from(!lowered.parent_oids.is_empty());
+                        if !lowered.parent_oids.is_empty() {
+                            let inherit_ctx = CatalogWriteContext {
+                                pool: self.pool.clone(),
+                                txns: self.txns.clone(),
+                                xid,
+                                cid: cid.saturating_add(1),
+                                client_id,
+                                waiter: None,
+                                interrupts: Arc::clone(&interrupts),
+                            };
+                            let inherit_effect = self
+                                .catalog
+                                .write()
+                                .create_relation_inheritance_mvcc(
+                                    created.entry.relation_oid,
+                                    &lowered.parent_oids,
+                                    &inherit_ctx,
+                                )
+                                .map_err(map_catalog_error)?;
+                            self.apply_catalog_mutation_effect_immediate(&inherit_effect)?;
+                            catalog_effects.push(inherit_effect);
+                        }
                         let relation = crate::backend::parser::BoundRelation {
                             rel: created.entry.rel,
                             relation_oid: created.entry.relation_oid,
@@ -97,6 +121,7 @@ impl Database {
                         for (index, action) in lowered.constraint_actions.iter().enumerate() {
                             let action_cid = cid
                                 .saturating_add(1)
+                                .saturating_add(inherit_cid_offset)
                                 .saturating_add((index as u32).saturating_mul(3));
                             let index_name = self.choose_index_backed_constraint_name(
                                 client_id,
@@ -172,7 +197,7 @@ impl Database {
                         actual: "temporary table".into(),
                     }));
                 }
-                let _ = self.create_temp_relation_in_transaction(
+                let created = self.create_temp_relation_in_transaction(
                     client_id,
                     table_name,
                     desc,
@@ -182,6 +207,28 @@ impl Database {
                     catalog_effects,
                     temp_effects,
                 )?;
+                if !lowered.parent_oids.is_empty() {
+                    let inherit_ctx = CatalogWriteContext {
+                        pool: self.pool.clone(),
+                        txns: self.txns.clone(),
+                        xid,
+                        cid: cid.saturating_add(1),
+                        client_id,
+                        waiter: None,
+                        interrupts,
+                    };
+                    let inherit_effect = self
+                        .catalog
+                        .write()
+                        .create_relation_inheritance_mvcc(
+                            created.entry.relation_oid,
+                            &lowered.parent_oids,
+                            &inherit_ctx,
+                        )
+                        .map_err(map_catalog_error)?;
+                    self.apply_catalog_mutation_effect_immediate(&inherit_effect)?;
+                    catalog_effects.push(inherit_effect);
+                }
                 Ok(StatementResult::AffectedRows(0))
             }
         }
@@ -326,6 +373,7 @@ impl Database {
                             )
                         })
                         .collect(),
+                    inherits: Vec::new(),
                     if_not_exists: create_stmt.if_not_exists,
                 };
                 let mut catalog_guard = self.catalog.write();

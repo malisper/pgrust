@@ -37,6 +37,7 @@ impl PlannerInfo {
             final_target,
             query_pathkeys,
             simple_rel_array,
+            append_rel_infos: vec![None; parse.rtable.len() + 1],
             join_rel_list: Vec::new(),
             upper_rels: Vec::new(),
             join_info_list,

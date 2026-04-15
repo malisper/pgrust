@@ -74,6 +74,7 @@ impl AnalyzedFrom {
         relation_oid: u32,
         relkind: char,
         toast: Option<ToastRelationRef>,
+        inh: bool,
         desc: RelationDesc,
     ) -> Self {
         let output_columns = desc
@@ -88,6 +89,7 @@ impl AnalyzedFrom {
             rtable: vec![RangeTblEntry {
                 alias: None,
                 desc,
+                inh,
                 kind: RangeTblEntryKind::Relation {
                     rel,
                     relation_oid,
@@ -112,6 +114,7 @@ impl AnalyzedFrom {
             rtable: vec![RangeTblEntry {
                 alias: None,
                 desc,
+                inh: false,
                 kind: RangeTblEntryKind::Values {
                     rows,
                     output_columns: output_columns.clone(),
@@ -135,6 +138,7 @@ impl AnalyzedFrom {
             rtable: vec![RangeTblEntry {
                 alias: None,
                 desc,
+                inh: false,
                 kind: RangeTblEntryKind::Function { call },
             }],
             jointree: Some(JoinTreeNode::RangeTblRef(1)),
@@ -155,6 +159,7 @@ impl AnalyzedFrom {
             rtable: vec![RangeTblEntry {
                 alias: None,
                 desc,
+                inh: false,
                 kind: RangeTblEntryKind::Subquery {
                     query: Box::new(query),
                 },
@@ -222,6 +227,7 @@ impl AnalyzedFrom {
         rtable.push(RangeTblEntry {
             alias: None,
             desc,
+            inh: false,
             kind: RangeTblEntryKind::Join {
                 jointype: kind,
                 joinmergedcols,

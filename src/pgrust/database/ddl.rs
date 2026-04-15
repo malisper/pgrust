@@ -111,6 +111,19 @@ pub(super) fn reject_relation_with_dependent_views(
     }))
 }
 
+pub(super) fn reject_inheritance_tree_ddl(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+    operation: &'static str,
+) -> Result<(), ExecError> {
+    if catalog.has_subclass(relation_oid) || !catalog.inheritance_parents(relation_oid).is_empty() {
+        return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+            operation.to_string(),
+        )));
+    }
+    Ok(())
+}
+
 pub(super) fn validate_alter_table_add_column(
     desc: &RelationDesc,
     column: &ColumnDef,

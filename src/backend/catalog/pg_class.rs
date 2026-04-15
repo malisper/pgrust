@@ -13,6 +13,8 @@ pub fn relkind_for_plain_table() -> PgClassRow {
         reltoastrelid: 0,
         relpersistence: 'p',
         relkind: 'r',
+        relhassubclass: false,
+        relispartition: false,
         relnatts: 0,
         relpages: 0,
         reltuples: 0.0,

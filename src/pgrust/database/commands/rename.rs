@@ -155,6 +155,11 @@ impl Database {
                 actual: "temporary table".into(),
             }));
         }
+        reject_inheritance_tree_ddl(
+            &catalog,
+            relation.relation_oid,
+            "ALTER TABLE RENAME COLUMN on inheritance tree members is not supported yet",
+        )?;
         let new_column_name = validate_alter_table_rename_column(
             &relation.desc,
             &rename_stmt.column_name,

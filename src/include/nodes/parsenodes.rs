@@ -268,6 +268,7 @@ impl Query {
 pub struct RangeTblEntry {
     pub alias: Option<String>,
     pub desc: RelationDesc,
+    pub inh: bool,
     pub kind: RangeTblEntryKind,
 }
 
@@ -421,6 +422,7 @@ pub enum CteBody {
 pub enum FromItem {
     Table {
         name: String,
+        only: bool,
     },
     Values {
         rows: Vec<Vec<SqlExpr>>,
@@ -537,6 +539,7 @@ pub struct CreateTableStatement {
     pub persistence: TablePersistence,
     pub on_commit: OnCommitAction,
     pub elements: Vec<CreateTableElement>,
+    pub inherits: Vec<String>,
     pub if_not_exists: bool,
 }
 

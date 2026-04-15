@@ -349,7 +349,7 @@ pub(super) fn bind_from_item_with_ctes(
     expanded_views: &[u32],
 ) -> Result<(AnalyzedFrom, BoundScope), ParseError> {
     match stmt {
-        FromItem::Table { name } => {
+        FromItem::Table { name, only } => {
             if let Some(cte) = ctes.iter().find(|cte| cte.name.eq_ignore_ascii_case(name)) {
                 return Ok((
                     AnalyzedFrom::subquery(cte.plan.clone()),
@@ -375,6 +375,7 @@ pub(super) fn bind_from_item_with_ctes(
                     entry.relation_oid,
                     entry.relkind,
                     entry.toast,
+                    !*only && entry.relkind == 'r',
                     desc.clone(),
                 ),
                 scope_for_relation(Some(name), &desc),

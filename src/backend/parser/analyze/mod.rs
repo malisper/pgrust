@@ -3,6 +3,7 @@ mod agg_output;
 mod agg_output_special;
 mod coerce;
 mod create_table;
+mod create_table_inherits;
 mod expr;
 mod functions;
 mod geometry;
@@ -20,9 +21,10 @@ use crate::backend::executor::{Value, cast_value};
 use crate::backend::optimizer::planner;
 use crate::backend::rewrite::pg_rewrite_query;
 use crate::include::catalog::{
-    PgCastRow, PgClassRow, PgOperatorRow, PgProcRow, PgRewriteRow, PgStatisticRow, PgTypeRow,
-    bootstrap_pg_cast_rows, bootstrap_pg_operator_rows, bootstrap_pg_proc_rows, builtin_type_rows,
-    proc_oid_for_builtin_aggregate_function, RECORD_TYPE_OID,
+    PgCastRow, PgClassRow, PgInheritsRow, PgOperatorRow, PgProcRow, PgRewriteRow,
+    PgStatisticRow, PgTypeRow, bootstrap_pg_cast_rows, bootstrap_pg_operator_rows,
+    bootstrap_pg_proc_rows, builtin_type_rows, proc_oid_for_builtin_aggregate_function,
+    RECORD_TYPE_OID,
 };
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{
@@ -39,6 +41,7 @@ use agg::*;
 use agg_output::*;
 use coerce::*;
 pub use create_table::*;
+pub use create_table_inherits::*;
 use expr::*;
 use functions::*;
 use geometry::*;
@@ -72,6 +75,10 @@ pub struct BoundIndexRelation {
 
 pub trait CatalogLookup {
     fn lookup_any_relation(&self, name: &str) -> Option<BoundRelation>;
+
+    fn relation_by_oid(&self, _relation_oid: u32) -> Option<BoundRelation> {
+        None
+    }
 
     fn index_relations_for_heap(&self, _relation_oid: u32) -> Vec<BoundIndexRelation> {
         Vec::new()
@@ -144,6 +151,43 @@ pub trait CatalogLookup {
         None
     }
 
+    fn inheritance_parents(&self, _relation_oid: u32) -> Vec<PgInheritsRow> {
+        Vec::new()
+    }
+
+    fn inheritance_children(&self, _relation_oid: u32) -> Vec<PgInheritsRow> {
+        Vec::new()
+    }
+
+    fn find_all_inheritors(&self, relation_oid: u32) -> Vec<u32> {
+        let mut out = vec![relation_oid];
+        let mut pending = vec![relation_oid];
+        while let Some(parent_oid) = pending.pop() {
+            let mut child_oids = self
+                .inheritance_children(parent_oid)
+                .into_iter()
+                .map(|row| row.inhrelid)
+                .collect::<Vec<_>>();
+            child_oids.sort_unstable();
+            child_oids.dedup();
+            for child_oid in child_oids {
+                if out.contains(&child_oid) {
+                    continue;
+                }
+                out.push(child_oid);
+                pending.push(child_oid);
+            }
+        }
+        out.sort_unstable();
+        out
+    }
+
+    fn has_subclass(&self, relation_oid: u32) -> bool {
+        self.class_row_by_oid(relation_oid)
+            .map(|row| row.relhassubclass)
+            .unwrap_or_else(|| !self.inheritance_children(relation_oid).is_empty())
+    }
+
     fn statistic_rows_for_relation(&self, _relation_oid: u32) -> Vec<PgStatisticRow> {
         Vec::new()
     }
@@ -161,6 +205,19 @@ impl CatalogLookup for Catalog {
     fn lookup_any_relation(&self, name: &str) -> Option<BoundRelation> {
         let relcache = RelCache::from_catalog(self);
         relcache.get_by_name(name).map(|entry| BoundRelation {
+            rel: entry.rel,
+            relation_oid: entry.relation_oid,
+            toast: toast_relation_from_cache(&relcache, entry),
+            namespace_oid: entry.namespace_oid,
+            relpersistence: entry.relpersistence,
+            relkind: entry.relkind,
+            desc: entry.desc.clone(),
+        })
+    }
+
+    fn relation_by_oid(&self, relation_oid: u32) -> Option<BoundRelation> {
+        let relcache = RelCache::from_catalog(self);
+        relcache.get_by_oid(relation_oid).map(|entry| BoundRelation {
             rel: entry.rel,
             relation_oid: entry.relation_oid,
             toast: toast_relation_from_cache(&relcache, entry),
@@ -197,6 +254,22 @@ impl CatalogLookup for Catalog {
         catcache.class_by_oid(relation_oid).cloned()
     }
 
+    fn inheritance_parents(&self, relation_oid: u32) -> Vec<PgInheritsRow> {
+        self.inherit_rows()
+            .iter()
+            .filter(|row| row.inhrelid == relation_oid)
+            .cloned()
+            .collect()
+    }
+
+    fn inheritance_children(&self, relation_oid: u32) -> Vec<PgInheritsRow> {
+        self.inherit_rows()
+            .iter()
+            .filter(|row| row.inhparent == relation_oid)
+            .cloned()
+            .collect()
+    }
+
     fn statistic_rows_for_relation(&self, relation_oid: u32) -> Vec<PgStatisticRow> {
         let catcache = crate::backend::utils::cache::catcache::CatCache::from_catalog(self);
         catcache
@@ -229,6 +302,18 @@ impl CatalogLookup for Catalog {
 impl CatalogLookup for RelCache {
     fn lookup_any_relation(&self, name: &str) -> Option<BoundRelation> {
         self.get_by_name(name).map(|entry| BoundRelation {
+            rel: entry.rel,
+            relation_oid: entry.relation_oid,
+            toast: toast_relation_from_cache(self, entry),
+            namespace_oid: entry.namespace_oid,
+            relpersistence: entry.relpersistence,
+            relkind: entry.relkind,
+            desc: entry.desc.clone(),
+        })
+    }
+
+    fn relation_by_oid(&self, relation_oid: u32) -> Option<BoundRelation> {
+        self.get_by_oid(relation_oid).map(|entry| BoundRelation {
             rel: entry.rel,
             relation_oid: entry.relation_oid,
             toast: toast_relation_from_cache(self, entry),

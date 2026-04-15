@@ -524,6 +524,190 @@ fn analyze_populates_pg_stats_view_and_anyarray_columns() {
 }
 
 #[test]
+fn table_inheritance_merges_columns_and_scans_children() {
+    let dir = temp_dir("table_inheritance_scan");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table parent_inh(a int4, b text default 'parent')")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table child_inh(b text default 'child', c int4) inherits (parent_inh)",
+        )
+        .unwrap();
+
+    let att_rows = query_rows(
+        &db,
+        1,
+        "select attname, attinhcount, attislocal
+         from pg_attribute
+         where attrelid = (select oid from pg_class where relname = 'child_inh')
+           and attnum > 0
+         order by attnum",
+    );
+    assert_eq!(att_rows.len(), 3);
+    assert_eq!(att_rows[0][0], Value::Text("a".into()));
+    assert_eq!(int_value(&att_rows[0][1]), 1);
+    assert_eq!(att_rows[0][2], Value::Bool(false));
+    assert_eq!(att_rows[1][0], Value::Text("b".into()));
+    assert_eq!(int_value(&att_rows[1][1]), 1);
+    assert_eq!(att_rows[1][2], Value::Bool(true));
+    assert_eq!(att_rows[2][0], Value::Text("c".into()));
+    assert_eq!(int_value(&att_rows[2][1]), 0);
+    assert_eq!(att_rows[2][2], Value::Bool(true));
+
+    session
+        .execute(&db, "insert into parent_inh(a, b) values (1, 'parent')")
+        .unwrap();
+    session
+        .execute(&db, "insert into child_inh(a, c) values (2, 20)")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select a, b from parent_inh order by a"),
+        vec![
+            vec![Value::Int32(1), Value::Text("parent".into())],
+            vec![Value::Int32(2), Value::Text("child".into())],
+        ]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select a, b from only parent_inh order by a"),
+        vec![vec![Value::Int32(1), Value::Text("parent".into())]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select a, b, c from child_inh"),
+        vec![vec![
+            Value::Int32(2),
+            Value::Text("child".into()),
+            Value::Int32(20),
+        ]]
+    );
+
+    let subclass_rows = query_rows(
+        &db,
+        1,
+        "select relhassubclass from pg_class where relname = 'parent_inh'",
+    );
+    assert_eq!(subclass_rows, vec![vec![Value::Bool(true)]]);
+
+    let inherit_rows = query_rows(
+        &db,
+        1,
+        "select count(*) from pg_inherits where inhparent = (select oid from pg_class where relname = 'parent_inh')",
+    );
+    assert_eq!(int_value(&inherit_rows[0][0]), 1);
+
+    let explain = explain_lines(&db, 1, "select a, b from parent_inh order by a");
+    assert!(explain.iter().any(|line| line.contains("Append")));
+}
+
+#[test]
+fn analyze_inheritance_tracks_root_and_inherited_stats_separately() {
+    let dir = temp_dir("analyze_inheritance_stats");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table parent_stats(a int4)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table child_stats(extra int4) inherits (parent_stats)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into child_stats(a, extra) values (1, 10), (2, 20), (3, 30)",
+        )
+        .unwrap();
+
+    session.execute(&db, "analyze only parent_stats").unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select attname, inherited
+             from pg_stats
+             where tablename = 'parent_stats'
+             order by inherited"
+        ),
+        vec![vec![Value::Text("a".into()), Value::Bool(false)]]
+    );
+
+    session.execute(&db, "analyze parent_stats").unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select attname, inherited
+             from pg_stats
+             where tablename = 'parent_stats'
+             order by inherited"
+        ),
+        vec![
+            vec![Value::Text("a".into()), Value::Bool(false)],
+            vec![Value::Text("a".into()), Value::Bool(true)],
+        ]
+    );
+
+    let reltuples = query_rows(
+        &db,
+        1,
+        "select reltuples from pg_class where relname = 'parent_stats'",
+    );
+    assert_eq!(float_value(&reltuples[0][0]), 0.0);
+}
+
+#[test]
+fn inheritance_guardrails_reject_recursive_dml_and_column_alter() {
+    let dir = temp_dir("inheritance_guardrails");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table parent_guard(a int4)")
+        .unwrap();
+    session
+        .execute(&db, "create table child_guard() inherits (parent_guard)")
+        .unwrap();
+
+    let update_err = session.execute(&db, "update parent_guard set a = 1").unwrap_err();
+    assert!(matches!(
+        update_err,
+        ExecError::Parse(ParseError::FeatureNotSupported(message))
+            if message.contains("UPDATE on inherited parents")
+    ));
+
+    let delete_err = session.execute(&db, "delete from parent_guard").unwrap_err();
+    assert!(matches!(
+        delete_err,
+        ExecError::Parse(ParseError::FeatureNotSupported(message))
+            if message.contains("DELETE on inherited parents")
+    ));
+
+    let truncate_err = session.execute(&db, "truncate parent_guard").unwrap_err();
+    assert!(matches!(
+        truncate_err,
+        ExecError::Parse(ParseError::FeatureNotSupported(message))
+            if message.contains("TRUNCATE on inherited parents")
+    ));
+
+    let alter_err = session
+        .execute(&db, "alter table parent_guard add column b int4")
+        .unwrap_err();
+    assert!(matches!(
+        alter_err,
+        ExecError::Parse(ParseError::FeatureNotSupported(message))
+            if message.contains("inheritance tree members")
+    ));
+}
+
+#[test]
 fn create_view_selects_and_persists_rewrite_rule() {
     let dir = temp_dir("create_view_selects");
     let db = Database::open(&dir, 128).unwrap();

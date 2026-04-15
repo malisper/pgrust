@@ -633,6 +633,11 @@ pub fn execute_truncate_table(
                 )));
             }
         };
+        if catalog.has_subclass(entry.relation_oid) {
+            return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                "TRUNCATE on inherited parents is not supported yet".into(),
+            )));
+        }
         let indexes = catalog.index_relations_for_heap(entry.relation_oid);
         let _ = ctx.pool.invalidate_relation(entry.rel);
         ctx.pool

@@ -17,6 +17,7 @@ pub struct IndexBackedConstraintAction {
 pub struct LoweredCreateTable {
     pub relation_desc: RelationDesc,
     pub constraint_actions: Vec<IndexBackedConstraintAction>,
+    pub parent_oids: Vec<u32>,
 }
 
 pub fn create_relation_desc(stmt: &CreateTableStatement) -> Result<RelationDesc, ParseError> {
@@ -146,6 +147,7 @@ pub fn lower_create_table(stmt: &CreateTableStatement) -> Result<LoweredCreateTa
     Ok(LoweredCreateTable {
         relation_desc,
         constraint_actions,
+        parent_oids: Vec::new(),
     })
 }
 
@@ -197,6 +199,7 @@ mod tests {
                 primary_key: false,
                 unique: false,
             })],
+            inherits: Vec::new(),
             if_not_exists: false,
         };
 

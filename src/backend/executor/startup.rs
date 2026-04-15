@@ -4,9 +4,9 @@ use crate::backend::executor::hashjoin::HashJoinPhase;
 use crate::include::catalog::bootstrap_catalog_kinds;
 use crate::include::catalog::builtin_aggregate_function_for_proc_oid;
 use crate::include::nodes::execnodes::{
-    AggregateState, FilterState, FunctionScanState, HashJoinState, HashState, IndexScanState,
-    LimitState, NestedLoopJoinState, NodeExecStats, OrderByState, ProjectSetState, ProjectionState,
-    ResultState, SeqScanState, ValuesState,
+    AggregateState, AppendState, FilterState, FunctionScanState, HashJoinState, HashState,
+    IndexScanState, LimitState, NestedLoopJoinState, NodeExecStats, OrderByState,
+    ProjectSetState, ProjectionState, ResultState, SeqScanState, ValuesState,
 };
 
 use std::rc::Rc;
@@ -16,6 +16,18 @@ pub fn executor_start(plan: Plan) -> PlanState {
         Plan::Result { plan_info } => Box::new(ResultState {
             emitted: false,
             slot: TupleSlot::empty(0),
+            plan_info,
+            stats: NodeExecStats::default(),
+        }),
+        Plan::Append {
+            plan_info,
+            desc,
+            children,
+        } => Box::new(AppendState {
+            children: children.into_iter().map(executor_start).collect(),
+            current_child: 0,
+            column_names: desc.columns.iter().map(|c| c.name.clone()).collect(),
+            slot: TupleSlot::empty(desc.columns.len()),
             plan_info,
             stats: NodeExecStats::default(),
         }),

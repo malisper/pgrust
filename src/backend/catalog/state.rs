@@ -5,16 +5,18 @@ use crate::backend::catalog::catalog::allocate_relation_object_oids;
 use crate::backend::catalog::indexing::insert_bootstrap_system_indexes;
 use crate::backend::catalog::pg_constraint::{derived_pg_constraint_rows, sort_pg_constraint_rows};
 use crate::backend::catalog::pg_depend::{
-    derived_pg_depend_rows, index_backed_constraint_depend_rows, sort_pg_depend_rows,
+    derived_pg_depend_rows, index_backed_constraint_depend_rows, inheritance_depend_rows,
+    sort_pg_depend_rows,
 };
+use crate::backend::catalog::pg_inherits::sort_pg_inherits_rows;
 use crate::backend::catalog::store::{DEFAULT_FIRST_REL_NUMBER, DEFAULT_FIRST_USER_OID};
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::misc::interrupts::InterruptReason;
 use crate::include::catalog::{
-    CONSTRAINT_NOTNULL, PUBLIC_NAMESPACE_OID, PgConstraintRow, PgDependRow, PgRewriteRow,
-    builtin_type_rows, sort_pg_rewrite_rows,
+    CONSTRAINT_NOTNULL, PUBLIC_NAMESPACE_OID, PgConstraintRow, PgDependRow, PgInheritsRow,
+    PgRewriteRow, builtin_type_rows, sort_pg_rewrite_rows,
 };
 
 const DEFAULT_SPC_OID: u32 = 0;
@@ -57,6 +59,8 @@ pub struct CatalogEntry {
     pub reltoastrelid: u32,
     pub relpersistence: char,
     pub relkind: char,
+    pub relhassubclass: bool,
+    pub relispartition: bool,
     pub relpages: i32,
     pub reltuples: f64,
     pub desc: RelationDesc,
@@ -80,6 +84,7 @@ pub struct Catalog {
     pub(crate) tables: BTreeMap<String, CatalogEntry>,
     pub(crate) constraints: Vec<PgConstraintRow>,
     pub(crate) depends: Vec<PgDependRow>,
+    pub(crate) inherits: Vec<PgInheritsRow>,
     pub(crate) rewrites: Vec<PgRewriteRow>,
     pub(crate) next_rel_number: u32,
     pub(crate) next_oid: u32,
@@ -91,6 +96,7 @@ impl Default for Catalog {
             tables: BTreeMap::new(),
             constraints: Vec::new(),
             depends: Vec::new(),
+            inherits: Vec::new(),
             rewrites: Vec::new(),
             next_rel_number: DEFAULT_FIRST_REL_NUMBER,
             next_oid: DEFAULT_FIRST_USER_OID,
@@ -151,6 +157,13 @@ impl Catalog {
             .find(|entry| entry.relation_oid == relation_oid)
     }
 
+    pub fn relation_name_by_oid(&self, relation_oid: u32) -> Option<&str> {
+        self.tables
+            .iter()
+            .find(|(_, entry)| entry.relation_oid == relation_oid)
+            .map(|(name, _)| name.as_str())
+    }
+
     pub fn table_names(&self) -> impl Iterator<Item = &str> {
         self.tables.keys().map(String::as_str)
     }
@@ -167,6 +180,58 @@ impl Catalog {
 
     pub fn depend_rows(&self) -> &[PgDependRow] {
         &self.depends
+    }
+
+    pub fn inherit_rows(&self) -> &[PgInheritsRow] {
+        &self.inherits
+    }
+
+    pub fn inheritance_parents(&self, relation_oid: u32) -> Vec<PgInheritsRow> {
+        self.inherits
+            .iter()
+            .filter(|row| row.inhrelid == relation_oid)
+            .cloned()
+            .collect()
+    }
+
+    pub fn inheritance_children(&self, relation_oid: u32) -> Vec<PgInheritsRow> {
+        self.inherits
+            .iter()
+            .filter(|row| row.inhparent == relation_oid)
+            .cloned()
+            .collect()
+    }
+
+    pub fn find_all_inheritors(&self, relation_oid: u32) -> Vec<u32> {
+        fn walk(catalog: &Catalog, relation_oid: u32, out: &mut Vec<u32>) {
+            let mut child_oids = catalog
+                .inheritance_children(relation_oid)
+                .into_iter()
+                .map(|row| row.inhrelid)
+                .collect::<Vec<_>>();
+            child_oids.sort_unstable();
+            child_oids.dedup();
+            for child_oid in child_oids {
+                if out.contains(&child_oid) {
+                    continue;
+                }
+                out.push(child_oid);
+                walk(catalog, child_oid, out);
+            }
+        }
+
+        let mut out = vec![relation_oid];
+        walk(self, relation_oid, &mut out);
+        out.sort_unstable();
+        out
+    }
+
+    pub fn has_subclass(&self, relation_oid: u32) -> bool {
+        self.tables
+            .values()
+            .find(|entry| entry.relation_oid == relation_oid)
+            .map(|entry| entry.relhassubclass)
+            .unwrap_or_else(|| !self.inheritance_children(relation_oid).is_empty())
     }
 
     pub fn rewrite_rows(&self) -> &[PgRewriteRow] {
@@ -244,6 +309,8 @@ impl Catalog {
             reltoastrelid: 0,
             relpersistence,
             relkind,
+            relhassubclass: false,
+            relispartition: false,
             relpages: 0,
             reltuples: 0.0,
             desc,
@@ -376,6 +443,8 @@ impl Catalog {
             reltoastrelid: 0,
             relpersistence: table.relpersistence,
             relkind: 'i',
+            relhassubclass: false,
+            relispartition: false,
             relpages: 0,
             reltuples: 0.0,
             desc: RelationDesc {
@@ -829,6 +898,76 @@ impl Catalog {
         sort_pg_depend_rows(&mut self.depends);
     }
 
+    pub fn add_inherit_row(&mut self, row: PgInheritsRow) {
+        if self.inherits.iter().any(|existing| existing == &row) {
+            return;
+        }
+        self.inherits.push(row);
+        sort_pg_inherits_rows(&mut self.inherits);
+    }
+
+    pub fn attach_inheritance(
+        &mut self,
+        relation_oid: u32,
+        parent_oids: &[u32],
+    ) -> Result<(), CatalogError> {
+        let child_name = self
+            .relation_name_by_oid(relation_oid)
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?
+            .to_string();
+        for (index, parent_oid) in parent_oids.iter().copied().enumerate() {
+            let parent_name = self
+                .relation_name_by_oid(parent_oid)
+                .ok_or_else(|| CatalogError::UnknownTable(parent_oid.to_string()))?
+                .to_string();
+            let Some(parent) = self.tables.get_mut(&parent_name) else {
+                return Err(CatalogError::UnknownTable(parent_oid.to_string()));
+            };
+            parent.relhassubclass = true;
+            self.add_inherit_row(PgInheritsRow {
+                inhrelid: relation_oid,
+                inhparent: parent_oid,
+                inhseqno: index.saturating_add(1) as i32,
+                inhdetachpending: false,
+            });
+        }
+        let child = self
+            .tables
+            .get(&child_name)
+            .cloned()
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        self.replace_depend_rows_for_entry(&child);
+        Ok(())
+    }
+
+    pub fn detach_inheritance(&mut self, relation_oid: u32) -> Result<Vec<u32>, CatalogError> {
+        if self.get_by_oid(relation_oid).is_none() {
+            return Err(CatalogError::UnknownTable(relation_oid.to_string()));
+        }
+        let parent_oids = self
+            .inheritance_parents(relation_oid)
+            .into_iter()
+            .map(|row| row.inhparent)
+            .collect::<Vec<_>>();
+        self.inherits.retain(|row| row.inhrelid != relation_oid);
+        for parent_oid in &parent_oids {
+            if let Some(parent_name) = self.relation_name_by_oid(*parent_oid).map(str::to_string)
+                && let Some(parent) = self.tables.get_mut(&parent_name)
+            {
+                parent.relhassubclass = self
+                    .inherits
+                    .iter()
+                    .any(|row| row.inhparent == *parent_oid);
+            }
+        }
+        if let Some(child_name) = self.relation_name_by_oid(relation_oid).map(str::to_string)
+            && let Some(child) = self.tables.get(&child_name).cloned()
+        {
+            self.replace_depend_rows_for_entry(&child);
+        }
+        Ok(parent_oids)
+    }
+
     pub fn add_rewrite_row(&mut self, row: PgRewriteRow) {
         if self.rewrites.iter().any(|existing| existing == &row) {
             return;
@@ -876,6 +1015,14 @@ impl Catalog {
             return;
         }
         self.depends.extend(derived_pg_depend_rows(entry));
+        self.depends.extend(inheritance_depend_rows(
+            entry.relation_oid,
+            &self
+                .inheritance_parents(entry.relation_oid)
+                .into_iter()
+                .map(|row| row.inhparent)
+                .collect::<Vec<_>>(),
+        ));
         sort_pg_depend_rows(&mut self.depends);
     }
 }

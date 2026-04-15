@@ -12,8 +12,16 @@ use crate::include::nodes::primnodes::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RelOptKind {
     BaseRel,
+    OtherMemberRel,
     JoinRel,
     UpperRel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppendRelInfo {
+    pub parent_relid: usize,
+    pub child_relid: usize,
+    pub translated_vars: Vec<Expr>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -205,6 +213,7 @@ pub struct UpperRelEntry {
 pub struct PlannerInfo {
     pub parse: Query,
     pub simple_rel_array: Vec<Option<RelOptInfo>>,
+    pub append_rel_infos: Vec<Option<AppendRelInfo>>,
     pub join_rel_list: Vec<RelOptInfo>,
     pub upper_rels: Vec<UpperRelEntry>,
     pub join_info_list: Vec<SpecialJoinInfo>,
@@ -226,7 +235,11 @@ impl PlannerInfo {
             .iter()
             .enumerate()
             .skip(1)
-            .filter_map(|(rtindex, rel)| rel.as_ref().map(|_| rtindex))
+            .filter_map(|(rtindex, rel)| {
+                rel.as_ref()
+                    .filter(|rel| rel.reloptkind != RelOptKind::OtherMemberRel)
+                    .map(|_| rtindex)
+            })
             .collect::<Vec<_>>();
         relids.sort_unstable();
         relids.dedup();
@@ -238,6 +251,12 @@ impl PlannerInfo {
 pub enum Path {
     Result {
         plan_info: PlanEstimate,
+    },
+    Append {
+        plan_info: PlanEstimate,
+        source_id: usize,
+        desc: RelationDesc,
+        children: Vec<Path>,
     },
     SeqScan {
         plan_info: PlanEstimate,

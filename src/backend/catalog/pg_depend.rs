@@ -71,6 +71,24 @@ pub fn index_backed_constraint_depend_rows(
     rows
 }
 
+pub fn inheritance_depend_rows(relation_oid: u32, parent_oids: &[u32]) -> Vec<PgDependRow> {
+    let mut rows = parent_oids
+        .iter()
+        .copied()
+        .map(|parent_oid| PgDependRow {
+            classid: PG_CLASS_RELATION_OID,
+            objid: relation_oid,
+            objsubid: 0,
+            refclassid: PG_CLASS_RELATION_OID,
+            refobjid: parent_oid,
+            refobjsubid: 0,
+            deptype: DEPENDENCY_NORMAL,
+        })
+        .collect::<Vec<_>>();
+    sort_pg_depend_rows(&mut rows);
+    rows
+}
+
 pub fn derived_relation_depend_rows(
     relation_oid: u32,
     namespace_oid: u32,

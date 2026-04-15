@@ -54,6 +54,11 @@ impl Database {
                 actual: "temporary table".into(),
             }));
         }
+        reject_inheritance_tree_ddl(
+            &catalog,
+            relation.relation_oid,
+            "ALTER TABLE DROP COLUMN on inheritance tree members is not supported yet",
+        )?;
         if is_system_column_name(&drop_stmt.column_name) {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "user column name for DROP COLUMN",
