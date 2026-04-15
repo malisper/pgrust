@@ -190,18 +190,20 @@ fn is_pathological_regress_join_in_subquery(plan: &Plan) -> bool {
         left,
         right,
         kind,
-        on,
+        join_qual,
+        qual,
         ..
     } = join_plan.as_ref()
     else {
         return false;
     };
     if *kind != JoinType::Inner
-        || *on
-            != Expr::op_auto(
+        || *join_qual
+            != vec![Expr::op_auto(
                 crate::include::nodes::primnodes::OpExprKind::Eq,
                 vec![Expr::Column(0), Expr::Column(16)],
-            )
+            )]
+        || !qual.is_empty()
     {
         return false;
     }

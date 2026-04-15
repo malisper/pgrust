@@ -108,6 +108,9 @@ fn build_group_input_target(parse: &Query) -> PathTarget {
     if let Some(having) = parse.having_qual.as_ref() {
         collect_group_input_exprs(having, &parse.group_by, &mut exprs);
     }
+    if let Some(where_qual) = parse.where_qual.as_ref() {
+        collect_group_input_exprs(where_qual, &parse.group_by, &mut exprs);
+    }
     PathTarget::new(exprs)
 }
 

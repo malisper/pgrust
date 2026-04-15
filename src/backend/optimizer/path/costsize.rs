@@ -6,7 +6,7 @@ use crate::backend::executor::{Value, compare_order_values};
 use crate::backend::parser::{BoundIndexRelation, CatalogLookup, SqlType, SqlTypeKind};
 use crate::include::catalog::{BTREE_AM_OID, PgStatisticRow};
 use crate::include::nodes::datum::ArrayValue;
-use crate::include::nodes::pathnodes::{Path, PathKey, PlannerInfo};
+use crate::include::nodes::pathnodes::{Path, PathKey, PlannerInfo, RestrictInfo};
 use crate::include::nodes::plannodes::PlanEstimate;
 use crate::include::nodes::primnodes::{
     BoolExprType, Expr, ExprArraySubscript, JoinType, OpExprKind, OrderByEntry, ProjectSetTarget,
@@ -263,12 +263,12 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                 left,
                 right,
                 kind,
-                on,
+                restrict_clauses,
                 ..
             } => {
                 let left = optimize_path(*left, catalog);
                 let right = optimize_path(*right, catalog);
-                choose_join_plan(left, right, kind, on)
+                choose_join_plan(left, right, kind, restrict_clauses)
             }
             Path::HashJoin {
                 left,
@@ -277,11 +277,20 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                 hash_clauses,
                 outer_hash_keys,
                 inner_hash_keys,
-                join_qual,
+                restrict_clauses,
                 ..
             } => {
                 let left = optimize_path(*left, catalog);
                 let right = optimize_path(*right, catalog);
+                let left_relids = path_relids(&left);
+                let right_relids = path_relids(&right);
+                let join_clauses = extract_hash_join_clauses(
+                    &restrict_clauses,
+                    &left_relids,
+                    &right_relids,
+                )
+                .map(|clauses| clauses.join_clauses)
+                .unwrap_or_default();
                 estimate_hash_join(
                     left,
                     right,
@@ -289,7 +298,8 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                     hash_clauses,
                     outer_hash_keys,
                     inner_hash_keys,
-                    join_qual,
+                    join_clauses,
+                    restrict_clauses,
                 )
             }
             Path::FunctionScan { call, slot_id, .. } => {
@@ -678,7 +688,12 @@ fn seq_scan_estimate(stats: &RelationStats) -> PlanEstimate {
     PlanEstimate::new(0.0, total_cost, clamp_rows(stats.reltuples), stats.width)
 }
 
-fn choose_join_plan(left: Path, right: Path, kind: JoinType, on: Expr) -> Path {
+fn choose_join_plan(
+    left: Path,
+    right: Path,
+    kind: JoinType,
+    restrict_clauses: Vec<RestrictInfo>,
+) -> Path {
     let left_relids = path_relids(&left);
     let right_relids = path_relids(&right);
     select_best_join_path(build_join_paths(
@@ -687,7 +702,7 @@ fn choose_join_plan(left: Path, right: Path, kind: JoinType, on: Expr) -> Path {
         &left_relids,
         &right_relids,
         kind,
-        on,
+        restrict_clauses,
     ))
 }
 
@@ -697,9 +712,17 @@ pub(super) fn build_join_paths(
     left_relids: &[usize],
     right_relids: &[usize],
     kind: JoinType,
-    on: Expr,
+    restrict_clauses: Vec<RestrictInfo>,
 ) -> Vec<Path> {
-    build_join_paths_internal(None, left, right, left_relids, right_relids, kind, on)
+    build_join_paths_internal(
+        None,
+        left,
+        right,
+        left_relids,
+        right_relids,
+        kind,
+        restrict_clauses,
+    )
 }
 
 pub(super) fn build_join_paths_with_root(
@@ -709,9 +732,17 @@ pub(super) fn build_join_paths_with_root(
     left_relids: &[usize],
     right_relids: &[usize],
     kind: JoinType,
-    on: Expr,
+    restrict_clauses: Vec<RestrictInfo>,
 ) -> Vec<Path> {
-    build_join_paths_internal(Some(root), left, right, left_relids, right_relids, kind, on)
+    build_join_paths_internal(
+        Some(root),
+        left,
+        right,
+        left_relids,
+        right_relids,
+        kind,
+        restrict_clauses,
+    )
 }
 
 fn build_join_paths_internal(
@@ -721,14 +752,14 @@ fn build_join_paths_internal(
     left_relids: &[usize],
     right_relids: &[usize],
     kind: JoinType,
-    on: Expr,
+    restrict_clauses: Vec<RestrictInfo>,
 ) -> Vec<Path> {
     let mut paths = vec![estimate_nested_loop_join_internal(
         root,
         left.clone(),
         right.clone(),
         kind,
-        on.clone(),
+        restrict_clauses.clone(),
     )];
 
     if matches!(kind, JoinType::Inner) {
@@ -736,8 +767,13 @@ fn build_join_paths_internal(
         let right_columns = right.columns();
         let left_vars = left.output_vars();
         let right_vars = right.output_vars();
-        let swapped_join =
-            estimate_nested_loop_join_internal(root, right.clone(), left.clone(), kind, on.clone());
+        let swapped_join = estimate_nested_loop_join_internal(
+            root,
+            right.clone(),
+            left.clone(),
+            kind,
+            restrict_clauses.clone(),
+        );
         paths.push(restore_join_output_order(
             swapped_join,
             &left_columns,
@@ -748,7 +784,8 @@ fn build_join_paths_internal(
     }
 
     if !matches!(kind, JoinType::Cross)
-        && let Some(hash_join) = extract_hash_join_clauses(&on, left_relids, right_relids)
+        && let Some(hash_join) =
+            extract_hash_join_clauses(&restrict_clauses, left_relids, right_relids)
         && hash_join_inputs_rewrite_cleanly(root, &left, &right, &hash_join)
     {
         paths.push(estimate_hash_join_internal(
@@ -759,12 +796,14 @@ fn build_join_paths_internal(
             hash_join.hash_clauses,
             hash_join.outer_hash_keys,
             hash_join.inner_hash_keys,
-            hash_join.join_qual,
+            hash_join.join_clauses,
+            restrict_clauses.clone(),
         ));
     }
 
     if matches!(kind, JoinType::Inner)
-        && let Some(hash_join) = extract_hash_join_clauses(&on, right_relids, left_relids)
+        && let Some(hash_join) =
+            extract_hash_join_clauses(&restrict_clauses, right_relids, left_relids)
         && hash_join_inputs_rewrite_cleanly(root, &right, &left, &hash_join)
     {
         let left_columns = left.columns();
@@ -779,7 +818,8 @@ fn build_join_paths_internal(
             hash_join.hash_clauses,
             hash_join.outer_hash_keys,
             hash_join.inner_hash_keys,
-            hash_join.join_qual,
+            hash_join.join_clauses,
+            restrict_clauses,
         );
         paths.push(restore_join_output_order(
             swapped_join,
@@ -827,7 +867,7 @@ fn better_join_path(candidate: &Path, current: &Path) -> bool {
 }
 
 pub(super) fn extract_hash_join_clauses(
-    on: &Expr,
+    restrict_clauses: &[RestrictInfo],
     left_relids: &[usize],
     right_relids: &[usize],
 ) -> Option<HashJoinClauses> {
@@ -836,15 +876,15 @@ pub(super) fn extract_hash_join_clauses(
     let mut inner_hash_keys = Vec::new();
     let mut residual = Vec::new();
 
-    for clause in flatten_and_conjuncts(on) {
+    for restrict in restrict_clauses {
         if let Some((outer_key, inner_key)) =
-            hash_join_clause_sides(&clause, left_relids, right_relids)
+            hash_join_clause_sides(&restrict.clause, left_relids, right_relids)
         {
-            hash_clauses.push(clause);
+            hash_clauses.push(restrict.clone());
             outer_hash_keys.push(outer_key);
             inner_hash_keys.push(inner_key);
         } else {
-            residual.push(clause);
+            residual.push(restrict.clone());
         }
     }
 
@@ -852,8 +892,27 @@ pub(super) fn extract_hash_join_clauses(
         hash_clauses,
         outer_hash_keys,
         inner_hash_keys,
-        join_qual: and_exprs(residual),
+        join_clauses: residual,
     })
+}
+
+fn clause_exprs(clauses: &[RestrictInfo]) -> Vec<Expr> {
+    clauses.iter().map(|restrict| restrict.clause.clone()).collect()
+}
+
+fn selectivity_for_restrict_clauses(clauses: &[RestrictInfo], rows: f64) -> f64 {
+    clauses
+        .iter()
+        .map(|restrict| clause_selectivity(&restrict.clause, None, rows))
+        .product::<f64>()
+        .clamp(0.0, 1.0)
+}
+
+fn predicate_cost_for_restrict_clauses(clauses: &[RestrictInfo]) -> f64 {
+    clauses
+        .iter()
+        .map(|restrict| predicate_cost(&restrict.clause))
+        .sum()
 }
 
 fn hash_join_clause_sides(
@@ -984,7 +1043,13 @@ fn hash_join_inputs_rewrite_cleanly(
 
     clauses.hash_clauses.iter().all(|clause| {
         expr_uses_only_layout_vars(
-            &rewrite_semantic_expr_for_join_inputs(root, clause.clone(), left, right, &join_layout),
+            &rewrite_semantic_expr_for_join_inputs(
+                root,
+                clause.clause.clone(),
+                left,
+                right,
+                &join_layout,
+            ),
             &join_layout,
         )
     }) && clauses.outer_hash_keys.iter().all(|expr| {
@@ -997,9 +1062,15 @@ fn hash_join_inputs_rewrite_cleanly(
             &rewrite_join_input_expr(root, expr.clone(), right, &right_layout),
             &right_layout,
         )
-    }) && clauses.join_qual.as_ref().is_none_or(|expr| {
+    }) && clauses.join_clauses.iter().all(|clause| {
         expr_uses_only_layout_vars(
-            &rewrite_semantic_expr_for_join_inputs(root, expr.clone(), left, right, &join_layout),
+            &rewrite_semantic_expr_for_join_inputs(
+                root,
+                clause.clause.clone(),
+                left,
+                right,
+                &join_layout,
+            ),
             &join_layout,
         )
     })
@@ -1345,15 +1416,11 @@ fn estimate_nested_loop_join_internal(
     left: Path,
     right: Path,
     kind: JoinType,
-    on: Expr,
+    restrict_clauses: Vec<RestrictInfo>,
 ) -> Path {
-    let mut join_layout = left.output_vars();
-    join_layout.extend(right.output_vars());
-    let rewritten_on =
-        rewrite_semantic_expr_for_join_inputs(root, on.clone(), &left, &right, &join_layout);
     let left_info = left.plan_info();
     let right_info = right.plan_info();
-    let join_sel = clause_selectivity(&on, None, left_info.plan_rows.as_f64());
+    let join_sel = selectivity_for_restrict_clauses(&restrict_clauses, left_info.plan_rows.as_f64());
     let rows = estimate_join_rows(
         left_info.plan_rows.as_f64(),
         right_info.plan_rows.as_f64(),
@@ -1364,7 +1431,7 @@ fn estimate_nested_loop_join_internal(
         + left_info.plan_rows.as_f64() * right_info.total_cost.as_f64()
         + left_info.plan_rows.as_f64()
             * right_info.plan_rows.as_f64()
-            * predicate_cost(&on)
+            * predicate_cost_for_restrict_clauses(&restrict_clauses)
             * CPU_OPERATOR_COST;
     Path::NestedLoopJoin {
         plan_info: PlanEstimate::new(
@@ -1376,12 +1443,17 @@ fn estimate_nested_loop_join_internal(
         left: Box::new(left),
         right: Box::new(right),
         kind,
-        on: rewritten_on,
+        restrict_clauses,
     }
 }
 
-fn estimate_nested_loop_join(left: Path, right: Path, kind: JoinType, on: Expr) -> Path {
-    estimate_nested_loop_join_internal(None, left, right, kind, on)
+fn estimate_nested_loop_join(
+    left: Path,
+    right: Path,
+    kind: JoinType,
+    restrict_clauses: Vec<RestrictInfo>,
+) -> Path {
+    estimate_nested_loop_join_internal(None, left, right, kind, restrict_clauses)
 }
 
 fn estimate_nested_loop_join_with_root(
@@ -1389,19 +1461,16 @@ fn estimate_nested_loop_join_with_root(
     left: Path,
     right: Path,
     kind: JoinType,
-    on: Expr,
+    restrict_clauses: Vec<RestrictInfo>,
 ) -> Path {
-    estimate_nested_loop_join_internal(Some(root), left, right, kind, on)
+    estimate_nested_loop_join_internal(Some(root), left, right, kind, restrict_clauses)
 }
 
-fn hash_join_selectivity(hash_clauses: &[Expr], join_qual: Option<&Expr>, left_rows: f64) -> f64 {
-    let mut clauses = hash_clauses.to_vec();
-    if let Some(join_qual) = join_qual {
-        clauses.push(join_qual.clone());
-    }
-    clauses
-        .into_iter()
-        .map(|expr| clause_selectivity(&expr, None, left_rows))
+fn hash_join_selectivity(hash_clauses: &[Expr], join_qual: &[Expr], left_rows: f64) -> f64 {
+    hash_clauses
+        .iter()
+        .chain(join_qual.iter())
+        .map(|expr| clause_selectivity(expr, None, left_rows))
         .product::<f64>()
         .clamp(0.0, 1.0)
 }
@@ -1422,10 +1491,11 @@ fn estimate_hash_join(
     left: Path,
     right: Path,
     kind: JoinType,
-    hash_clauses: Vec<Expr>,
+    hash_clauses: Vec<RestrictInfo>,
     outer_hash_keys: Vec<Expr>,
     inner_hash_keys: Vec<Expr>,
-    join_qual: Option<Expr>,
+    join_clauses: Vec<RestrictInfo>,
+    restrict_clauses: Vec<RestrictInfo>,
 ) -> Path {
     estimate_hash_join_internal(
         None,
@@ -1435,7 +1505,8 @@ fn estimate_hash_join(
         hash_clauses,
         outer_hash_keys,
         inner_hash_keys,
-        join_qual,
+        join_clauses,
+        restrict_clauses,
     )
 }
 
@@ -1444,10 +1515,11 @@ fn estimate_hash_join_internal(
     left: Path,
     right: Path,
     kind: JoinType,
-    hash_clauses: Vec<Expr>,
+    hash_clauses: Vec<RestrictInfo>,
     outer_hash_keys: Vec<Expr>,
     inner_hash_keys: Vec<Expr>,
-    join_qual: Option<Expr>,
+    join_clauses: Vec<RestrictInfo>,
+    restrict_clauses: Vec<RestrictInfo>,
 ) -> Path {
     debug_assert!(
         !hash_clauses.is_empty(),
@@ -1462,7 +1534,20 @@ fn estimate_hash_join_internal(
     let right_layout = right.output_vars();
     let mut join_layout = left_layout.clone();
     join_layout.extend(right_layout.clone());
-    let _ = hash_clauses;
+    let rewritten_hash_clauses = hash_clauses
+        .iter()
+        .map(|restrict| RestrictInfo {
+            clause: rewrite_semantic_expr_for_join_inputs(
+                root,
+                restrict.clause.clone(),
+                &left,
+                &right,
+                &join_layout,
+            ),
+            required_relids: restrict.required_relids.clone(),
+            is_pushed_down: restrict.is_pushed_down,
+        })
+        .collect::<Vec<_>>();
     let rewritten_outer_hash_keys = outer_hash_keys
         .into_iter()
         .map(|expr| rewrite_join_input_expr(root, expr, &left, &left_layout))
@@ -1471,22 +1556,32 @@ fn estimate_hash_join_internal(
         .into_iter()
         .map(|expr| rewrite_join_input_expr(root, expr, &right, &right_layout))
         .collect::<Vec<_>>();
-    let rewritten_join_qual = join_qual
-        .map(|expr| rewrite_semantic_expr_for_join_inputs(root, expr, &left, &right, &join_layout));
+    let rewritten_join_clauses = join_clauses
+        .into_iter()
+        .map(|restrict| RestrictInfo {
+            clause: rewrite_semantic_expr_for_join_inputs(
+                root,
+                restrict.clause,
+                &left,
+                &right,
+                &join_layout,
+            ),
+            required_relids: restrict.required_relids,
+            is_pushed_down: restrict.is_pushed_down,
+        })
+        .collect::<Vec<_>>();
     let canonical_hash_clauses = rewritten_outer_hash_keys
         .iter()
         .cloned()
         .zip(rewritten_inner_hash_keys.iter().cloned())
         .map(|(outer, inner)| Expr::op_auto(OpExprKind::Eq, vec![outer, inner]))
         .collect::<Vec<_>>();
+    let rewritten_join_qual = clause_exprs(&rewritten_join_clauses);
 
     let left_info = left.plan_info();
     let right_info = right.plan_info();
-    let join_sel = hash_join_selectivity(
-        &canonical_hash_clauses,
-        rewritten_join_qual.as_ref(),
-        left_info.plan_rows.as_f64(),
-    );
+    let join_sel =
+        hash_join_selectivity(&canonical_hash_clauses, &rewritten_join_qual, left_info.plan_rows.as_f64());
     let rows = estimate_join_rows(
         left_info.plan_rows.as_f64(),
         right_info.plan_rows.as_f64(),
@@ -1497,12 +1592,8 @@ fn estimate_hash_join_internal(
         * ((rewritten_inner_hash_keys.len() as f64) * CPU_OPERATOR_COST + CPU_TUPLE_COST);
     let probe_cpu =
         left_info.plan_rows.as_f64() * (rewritten_outer_hash_keys.len() as f64) * CPU_OPERATOR_COST;
-    let recheck_cpu = rows
-        * rewritten_join_qual
-            .as_ref()
-            .map(predicate_cost)
-            .unwrap_or(0.0)
-        * CPU_OPERATOR_COST;
+    let recheck_cpu =
+        rows * predicate_cost_for_restrict_clauses(&rewritten_join_clauses) * CPU_OPERATOR_COST;
     let startup = left_info.startup_cost.as_f64() + right_info.total_cost.as_f64() + build_cpu;
     let total = startup + left_info.total_cost.as_f64() + probe_cpu + recheck_cpu;
 
@@ -1516,10 +1607,10 @@ fn estimate_hash_join_internal(
         left: Box::new(left),
         right: Box::new(right),
         kind,
-        hash_clauses: canonical_hash_clauses,
+        hash_clauses: rewritten_hash_clauses,
         outer_hash_keys: rewritten_outer_hash_keys,
         inner_hash_keys: rewritten_inner_hash_keys,
-        join_qual: rewritten_join_qual,
+        restrict_clauses,
     }
 }
 

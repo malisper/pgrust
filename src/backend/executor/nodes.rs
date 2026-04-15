@@ -36,6 +36,39 @@ fn slot_toast_context(
     )
 }
 
+fn eval_bool_qual(
+    expr: &Expr,
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<bool, ExecError> {
+    match eval_expr(expr, slot, ctx)? {
+        Value::Bool(true) => Ok(true),
+        Value::Bool(false) | Value::Null => Ok(false),
+        other => Err(ExecError::NonBoolQual(other)),
+    }
+}
+
+fn eval_qual_list(
+    quals: &[Expr],
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<bool, ExecError> {
+    for qual in quals {
+        if !eval_bool_qual(qual, slot, ctx)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn format_qual_list(quals: &[Expr]) -> Expr {
+    let mut quals = quals.to_vec();
+    let first = quals.remove(0);
+    quals
+        .into_iter()
+        .fold(first, |acc, qual| Expr::and(acc, qual))
+}
+
 impl PlanNode for ResultState {
     fn exec_proc_node<'a>(
         &'a mut self,
@@ -579,14 +612,12 @@ impl PlanNode for NestedLoopJoinState {
                 self.slot.kind = SlotKind::Virtual;
                 self.slot.decode_offset = 0;
 
-                match eval_expr(&self.on, &mut self.slot, ctx)? {
-                    Value::Bool(true) => {
-                        self.current_left_matched = true;
-                        right_matched[ri] = true;
+                if eval_qual_list(&self.join_qual, &mut self.slot, ctx)? {
+                    self.current_left_matched = true;
+                    right_matched[ri] = true;
+                    if eval_qual_list(&self.qual, &mut self.slot, ctx)? {
                         return Ok(Some(&mut self.slot));
                     }
-                    Value::Bool(false) | Value::Null => {}
-                    other => return Err(ExecError::NonBoolQual(other)),
                 }
             }
 
@@ -624,6 +655,16 @@ impl PlanNode for NestedLoopJoinState {
         "Nested Loop".into()
     }
     fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
+        let prefix = "  ".repeat(indent + 1);
+        if !self.join_qual.is_empty() {
+            lines.push(format!(
+                "{prefix}Join Filter: {:?}",
+                format_qual_list(&self.join_qual)
+            ));
+        }
+        if !self.qual.is_empty() {
+            lines.push(format!("{prefix}Filter: {:?}", format_qual_list(&self.qual)));
+        }
         format_explain_lines(&*self.left, indent, analyze, lines);
         format_explain_lines(&*self.right, indent, analyze, lines);
     }
@@ -679,13 +720,11 @@ fn exec_lateral_join<'a>(
             state.slot.kind = SlotKind::Virtual;
             state.slot.decode_offset = 0;
 
-            match eval_expr(&state.on, &mut state.slot, ctx)? {
-                Value::Bool(true) => {
-                    state.current_left_matched = true;
+            if eval_qual_list(&state.join_qual, &mut state.slot, ctx)? {
+                state.current_left_matched = true;
+                if eval_qual_list(&state.qual, &mut state.slot, ctx)? {
                     return Ok(Some(&mut state.slot));
                 }
-                Value::Bool(false) | Value::Null => {}
-                other => return Err(ExecError::NonBoolQual(other)),
             }
         }
 
@@ -750,10 +789,10 @@ fn exec_cross_join<'a>(
             state.slot.kind = SlotKind::Virtual;
             state.slot.decode_offset = 0;
 
-            match eval_expr(&state.on, &mut state.slot, ctx)? {
-                Value::Bool(true) => return Ok(Some(&mut state.slot)),
-                Value::Bool(false) | Value::Null => {}
-                other => return Err(ExecError::NonBoolQual(other)),
+            if eval_qual_list(&state.join_qual, &mut state.slot, ctx)?
+                && eval_qual_list(&state.qual, &mut state.slot, ctx)?
+            {
+                return Ok(Some(&mut state.slot));
             }
         }
 

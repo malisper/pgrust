@@ -40,6 +40,10 @@ fn gt(left: Expr, right: Expr) -> Expr {
     Expr::op_auto(OpExprKind::Gt, vec![left, right])
 }
 
+fn restrict(clause: Expr) -> crate::include::nodes::pathnodes::RestrictInfo {
+    crate::include::nodes::pathnodes::RestrictInfo::new(clause.clone(), super::expr_relids(&clause))
+}
+
 fn values_path(slot_id: usize, startup_cost: f64, total_cost: f64) -> Path {
     Path::Values {
         plan_info: PlanEstimate::new(startup_cost, total_cost, 10.0, 2),
@@ -277,7 +281,7 @@ fn build_join_paths_emits_nested_loop_and_hash_join_for_equijoin() {
         &[1],
         &[2],
         JoinType::Inner,
-        eq(var(1, 1), var(2, 1)),
+        vec![restrict(eq(var(1, 1), var(2, 1)))],
     );
 
     assert!(
@@ -295,16 +299,16 @@ fn build_join_paths_emits_nested_loop_and_hash_join_for_equijoin() {
 #[test]
 fn extract_hash_join_clauses_splits_residual_predicates() {
     let clauses = super::extract_hash_join_clauses(
-        &Expr::and(eq(var(1, 1), var(2, 1)), gt(var(1, 2), var(2, 2))),
+        &[restrict(eq(var(1, 1), var(2, 1))), restrict(gt(var(1, 2), var(2, 2)))],
         &[1],
         &[2],
     )
     .expect("hash join clauses");
 
-    assert_eq!(clauses.hash_clauses, vec![eq(var(1, 1), var(2, 1))]);
+    assert_eq!(clauses.hash_clauses, vec![restrict(eq(var(1, 1), var(2, 1)))]);
     assert_eq!(clauses.outer_hash_keys, vec![var(1, 1)]);
     assert_eq!(clauses.inner_hash_keys, vec![var(2, 1)]);
-    assert_eq!(clauses.join_qual, Some(gt(var(1, 2), var(2, 2))));
+    assert_eq!(clauses.join_clauses, vec![restrict(gt(var(1, 2), var(2, 2)))]);
 }
 
 #[test]
@@ -315,7 +319,7 @@ fn build_join_paths_skips_hash_join_for_cross_and_non_equi_joins() {
         &[1],
         &[2],
         JoinType::Cross,
-        eq(var(1, 1), var(2, 1)),
+        vec![restrict(eq(var(1, 1), var(2, 1)))],
     );
     assert!(
         !cross_paths
@@ -329,7 +333,7 @@ fn build_join_paths_skips_hash_join_for_cross_and_non_equi_joins() {
         &[1],
         &[2],
         JoinType::Inner,
-        gt(var(1, 1), var(2, 1)),
+        vec![restrict(gt(var(1, 1), var(2, 1)))],
     );
     assert!(
         !non_equi_paths
@@ -345,10 +349,13 @@ fn hash_join_path_lowers_to_hash_join_plan_with_hash_inner() {
         left: Box::new(values_path(1, 1.0, 10.0)),
         right: Box::new(values_path(2, 2.0, 20.0)),
         kind: JoinType::Inner,
-        hash_clauses: vec![eq(var(1, 1), var(2, 1))],
+        hash_clauses: vec![restrict(eq(var(1, 1), var(2, 1)))],
         outer_hash_keys: vec![var(1, 1)],
         inner_hash_keys: vec![var(2, 1)],
-        join_qual: Some(gt(var(1, 2), var(2, 2))),
+        restrict_clauses: vec![
+            restrict(eq(var(1, 1), var(2, 1))),
+            restrict(gt(var(1, 2), var(2, 2))),
+        ],
     }
     .into_plan();
 
@@ -359,12 +366,14 @@ fn hash_join_path_lowers_to_hash_join_plan_with_hash_inner() {
             hash_clauses,
             hash_keys,
             join_qual,
+            qual,
             ..
         } => {
             assert_eq!(kind, JoinType::Inner);
             assert_eq!(hash_keys, vec![Expr::Column(0)]);
             assert_eq!(hash_clauses, vec![eq(Expr::Column(0), Expr::Column(2))]);
-            assert_eq!(join_qual, Some(gt(Expr::Column(1), Expr::Column(3))));
+            assert_eq!(join_qual, vec![eq(Expr::Column(0), Expr::Column(2)), gt(Expr::Column(1), Expr::Column(3))]);
+            assert!(qual.is_empty());
             match *right {
                 Plan::Hash {
                     hash_keys,

@@ -472,17 +472,25 @@ fn set_base_rel_pathlists(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) {
     }
 }
 
-fn build_join_qual(
+fn build_join_restrict_clauses(
     kind: JoinType,
     explicit_qual: Option<Expr>,
     left_relids: &[usize],
     right_relids: &[usize],
     inner_join_clauses: &[RestrictInfo],
-) -> Expr {
+) -> Vec<RestrictInfo> {
     let join_relids = relids_union(left_relids, right_relids);
     let mut clauses = Vec::new();
     if let Some(explicit_qual) = explicit_qual {
-        clauses.push(explicit_qual);
+        clauses.extend(
+            flatten_and_conjuncts(&explicit_qual)
+                .into_iter()
+                .map(|clause| RestrictInfo {
+                    required_relids: expr_relids(&clause),
+                    clause,
+                    is_pushed_down: false,
+                }),
+        );
     }
     if matches!(kind, JoinType::Inner | JoinType::Cross) {
         for restrict in inner_join_clauses {
@@ -494,13 +502,13 @@ fn build_join_qual(
             if relids_subset(&clause_relids, &join_relids)
                 && !relids_subset(&clause_relids, left_relids)
                 && !relids_subset(&clause_relids, right_relids)
-                && !clauses.contains(clause)
+                && !clauses.iter().any(|existing: &RestrictInfo| existing.clause == *clause)
             {
-                clauses.push(clause.clone());
+                clauses.push(restrict.clone());
             }
         }
     }
-    and_exprs(clauses).unwrap_or(Expr::Const(Value::Bool(true)))
+    clauses
 }
 
 fn maybe_project_join_alias(
@@ -845,7 +853,7 @@ fn make_join_rel(
     let relids = relids_union(&left_rel.relids, &right_rel.relids);
     let spec = join_is_legal(root, left_rel, right_rel)?;
     let reltarget = join_reltarget(root, &relids, left_rel, right_rel);
-    let join_qual = build_join_qual(
+    let join_restrict_clauses = build_join_restrict_clauses(
         spec.kind,
         spec.explicit_qual.clone(),
         &left_rel.relids,
@@ -877,7 +885,7 @@ fn make_join_rel(
                 &left_rel.relids,
                 &right_rel.relids,
                 spec.kind,
-                join_qual.clone(),
+                join_restrict_clauses.clone(),
             );
             for path in paths {
                 let path = if spec.reversed {
@@ -908,11 +916,9 @@ fn make_join_rel(
     if !join_rel
         .joininfo
         .iter()
-        .any(|info| info.clause == join_qual)
+        .any(|info| join_restrict_clauses.iter().any(|clause| clause.clause == info.clause))
     {
-        join_rel
-            .joininfo
-            .push(joininfo::make_restrict_info(join_qual.clone()));
+        join_rel.joininfo.extend(join_restrict_clauses.clone());
     }
     for path in candidate_paths {
         join_rel.add_path(path);

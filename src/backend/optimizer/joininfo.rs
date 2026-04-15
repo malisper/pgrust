@@ -48,10 +48,11 @@ pub(super) fn build_special_join_info(query: &Query) -> Vec<SpecialJoinInfo> {
             } => {
                 let left_relids = jointree_relids(left);
                 let right_relids = jointree_relids(right);
+                let original_quals = quals.clone();
                 let expanded_quals = if matches!(kind, JoinType::Inner | JoinType::Cross) {
                     None
                 } else {
-                    Some(expand_join_rte_vars_query(query, quals.clone()))
+                    Some(expand_join_rte_vars_query(query, original_quals.clone()))
                 };
                 let clause_relids = expanded_quals.as_ref().map(expr_relids).unwrap_or_default();
                 let strict_relids = expanded_quals
@@ -126,7 +127,7 @@ pub(super) fn build_special_join_info(query: &Query) -> Vec<SpecialJoinInfo> {
                         commute_below_l: Vec::new(),
                         commute_below_r: Vec::new(),
                         lhs_strict,
-                        join_quals: expanded_quals,
+                        join_quals: original_quals,
                     });
                 }
                 JoinTreeInfo {

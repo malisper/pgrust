@@ -11,8 +11,7 @@ use crate::include::nodes::primnodes::{Expr, ProjectSetTarget, TargetEntry};
 use super::super::bestpath;
 use super::super::create_plan;
 use super::super::has_grouping;
-use super::super::path::query_planner;
-use super::super::path::residual_where_qual;
+use super::super::path::{query_planner, residual_where_qual};
 use super::super::pathnodes::{
     aggregate_output_vars, expr_sql_type, lower_agg_output_expr, next_synthetic_slot_id,
     rewrite_project_set_target_against_layout,
@@ -53,36 +52,6 @@ pub(super) fn make_pathtarget_projection_rel(
                 slot_id,
                 input: Box::new(path),
                 targets: lowered_targets,
-            },
-            catalog,
-        ));
-    }
-    bestpath::set_cheapest(&mut rel);
-    rel
-}
-
-fn make_filter_rel(
-    root: &PlannerInfo,
-    input_rel: RelOptInfo,
-    predicate: Expr,
-    catalog: &dyn CatalogLookup,
-) -> RelOptInfo {
-    let mut rel = RelOptInfo::new(
-        input_rel.relids.clone(),
-        RelOptKind::UpperRel,
-        input_rel.reltarget.clone(),
-    );
-    for path in input_rel.pathlist {
-        rel.add_path(optimize_path(
-            Path::Filter {
-                plan_info: PlanEstimate::default(),
-                predicate: rewrite_semantic_expr_for_path_or_expand_join_vars(
-                    root,
-                    predicate.clone(),
-                    &path,
-                    &path.output_vars(),
-                ),
-                input: Box::new(path),
             },
             catalog,
         ));
@@ -156,6 +125,38 @@ fn make_aggregate_rel(
     }
     bestpath::set_cheapest(&mut rel);
     root.upper_rels[upper_rel_index].rel = rel.clone();
+    rel
+}
+
+fn make_filter_rel(
+    root: &PlannerInfo,
+    input_rel: RelOptInfo,
+    predicate: Expr,
+    catalog: &dyn CatalogLookup,
+) -> RelOptInfo {
+    let mut rel = RelOptInfo::new(
+        input_rel.relids.clone(),
+        RelOptKind::UpperRel,
+        input_rel.reltarget.clone(),
+    );
+    for path in input_rel.pathlist {
+        let layout = path.output_vars();
+        let predicate = rewrite_semantic_expr_for_path_or_expand_join_vars(
+            root,
+            predicate.clone(),
+            &path,
+            &layout,
+        );
+        rel.add_path(optimize_path(
+            Path::Filter {
+                plan_info: PlanEstimate::default(),
+                input: Box::new(path),
+                predicate,
+            },
+            catalog,
+        ));
+    }
+    bestpath::set_cheapest(&mut rel);
     rel
 }
 

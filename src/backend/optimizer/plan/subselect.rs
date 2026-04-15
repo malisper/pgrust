@@ -534,13 +534,21 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
             left,
             right,
             kind,
-            on,
+            join_qual,
+            qual,
         } => Plan::NestedLoopJoin {
             plan_info,
             left: Box::new(rebase_plan_subplan_ids(*left, base)),
             right: Box::new(rebase_plan_subplan_ids(*right, base)),
             kind,
-            on: rebase_expr_subplan_ids(on, base),
+            join_qual: join_qual
+                .into_iter()
+                .map(|expr| rebase_expr_subplan_ids(expr, base))
+                .collect(),
+            qual: qual
+                .into_iter()
+                .map(|expr| rebase_expr_subplan_ids(expr, base))
+                .collect(),
         },
         Plan::HashJoin {
             plan_info,
@@ -550,6 +558,7 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
             hash_clauses,
             hash_keys,
             join_qual,
+            qual,
         } => Plan::HashJoin {
             plan_info,
             left: Box::new(rebase_plan_subplan_ids(*left, base)),
@@ -563,7 +572,14 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
                 .into_iter()
                 .map(|expr| rebase_expr_subplan_ids(expr, base))
                 .collect(),
-            join_qual: join_qual.map(|expr| rebase_expr_subplan_ids(expr, base)),
+            join_qual: join_qual
+                .into_iter()
+                .map(|expr| rebase_expr_subplan_ids(expr, base))
+                .collect(),
+            qual: qual
+                .into_iter()
+                .map(|expr| rebase_expr_subplan_ids(expr, base))
+                .collect(),
         },
         Plan::Filter {
             plan_info,
@@ -726,13 +742,21 @@ pub(super) fn finalize_plan_subqueries(
             left,
             right,
             kind,
-            on,
+            join_qual,
+            qual,
         } => Plan::NestedLoopJoin {
             plan_info,
             left: Box::new(finalize_plan_subqueries(*left, catalog, subplans)),
             right: Box::new(finalize_plan_subqueries(*right, catalog, subplans)),
             kind,
-            on: finalize_expr_subqueries(on, catalog, subplans),
+            join_qual: join_qual
+                .into_iter()
+                .map(|expr| finalize_expr_subqueries(expr, catalog, subplans))
+                .collect(),
+            qual: qual
+                .into_iter()
+                .map(|expr| finalize_expr_subqueries(expr, catalog, subplans))
+                .collect(),
         },
         Plan::HashJoin {
             plan_info,
@@ -742,6 +766,7 @@ pub(super) fn finalize_plan_subqueries(
             hash_clauses,
             hash_keys,
             join_qual,
+            qual,
         } => Plan::HashJoin {
             plan_info,
             left: Box::new(finalize_plan_subqueries(*left, catalog, subplans)),
@@ -755,7 +780,14 @@ pub(super) fn finalize_plan_subqueries(
                 .into_iter()
                 .map(|expr| finalize_expr_subqueries(expr, catalog, subplans))
                 .collect(),
-            join_qual: join_qual.map(|expr| finalize_expr_subqueries(expr, catalog, subplans)),
+            join_qual: join_qual
+                .into_iter()
+                .map(|expr| finalize_expr_subqueries(expr, catalog, subplans))
+                .collect(),
+            qual: qual
+                .into_iter()
+                .map(|expr| finalize_expr_subqueries(expr, catalog, subplans))
+                .collect(),
         },
         Plan::Filter {
             plan_info,
