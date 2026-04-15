@@ -128,6 +128,7 @@ impl Database {
                 actual: "temporary table".into(),
             }));
         }
+        ensure_relation_owner(self, client_id, &relation, &alter_stmt.table_name)?;
         reject_relation_with_dependent_views(
             self,
             client_id,

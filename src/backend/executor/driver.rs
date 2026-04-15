@@ -119,6 +119,10 @@ fn execute_statement_with_source(
             expected: "ALTER TABLE RENAME handled by database/session layer",
             actual: "ALTER TABLE RENAME".into(),
         })),
+        Statement::AlterTableOwner(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "ALTER TABLE OWNER handled by database/session layer",
+            actual: "ALTER TABLE OWNER".into(),
+        })),
         Statement::AlterTableRenameColumn(_) => {
             Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "ALTER TABLE RENAME COLUMN handled by database/session layer",
@@ -149,6 +153,10 @@ fn execute_statement_with_source(
                 actual: "ALTER TABLE ALTER COLUMN TYPE".into(),
             }))
         }
+        Statement::AlterViewOwner(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "ALTER VIEW OWNER handled by database/session layer",
+            actual: "ALTER VIEW OWNER".into(),
+        })),
         Statement::CommentOnTable(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "COMMENT ON TABLE handled by database/session layer",
             actual: "COMMENT ON TABLE".into(),
