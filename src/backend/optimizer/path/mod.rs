@@ -5,7 +5,7 @@ use crate::RelFileLocator;
 use crate::backend::optimizer::{AccessCandidate, IndexPathSpec, RelationStats};
 use crate::backend::parser::BoundIndexRelation;
 use crate::backend::parser::CatalogLookup;
-use crate::include::nodes::pathnodes::{Path, PlannerInfo, RelOptInfo};
+use crate::include::nodes::pathnodes::{Path, PlannerInfo, RelOptInfo, RestrictInfo};
 use crate::include::nodes::plannodes::PlanEstimate;
 use crate::include::nodes::primnodes::ToastRelationRef;
 use crate::include::nodes::primnodes::{Expr, JoinType, OrderByEntry, QueryColumn, RelationDesc};
@@ -114,9 +114,17 @@ pub(super) fn build_join_paths_with_root(
     left_relids: &[usize],
     right_relids: &[usize],
     kind: JoinType,
-    on: Expr,
+    restrict_clauses: Vec<RestrictInfo>,
 ) -> Vec<Path> {
-    costsize::build_join_paths_with_root(root, left, right, left_relids, right_relids, kind, on)
+    costsize::build_join_paths_with_root(
+        root,
+        left,
+        right,
+        left_relids,
+        right_relids,
+        kind,
+        restrict_clauses,
+    )
 }
 
 pub(super) fn build_join_paths(
@@ -125,9 +133,9 @@ pub(super) fn build_join_paths(
     left_relids: &[usize],
     right_relids: &[usize],
     kind: JoinType,
-    on: Expr,
+    restrict_clauses: Vec<RestrictInfo>,
 ) -> Vec<Path> {
-    costsize::build_join_paths(left, right, left_relids, right_relids, kind, on)
+    costsize::build_join_paths(left, right, left_relids, right_relids, kind, restrict_clauses)
 }
 
 pub(super) fn restore_join_output_order(
@@ -141,11 +149,11 @@ pub(super) fn restore_join_output_order(
 }
 
 pub(super) fn extract_hash_join_clauses(
-    on: &Expr,
+    restrict_clauses: &[RestrictInfo],
     left_relids: &[usize],
     right_relids: &[usize],
 ) -> Option<crate::backend::optimizer::HashJoinClauses> {
-    costsize::extract_hash_join_clauses(on, left_relids, right_relids)
+    costsize::extract_hash_join_clauses(restrict_clauses, left_relids, right_relids)
 }
 
 pub(super) fn rewrite_semantic_expr_for_join_inputs(

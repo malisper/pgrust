@@ -83,10 +83,10 @@ struct JoinBuildSpec {
 
 #[derive(Debug, Clone)]
 struct HashJoinClauses {
-    hash_clauses: Vec<Expr>,
+    hash_clauses: Vec<RestrictInfo>,
     outer_hash_keys: Vec<Expr>,
     inner_hash_keys: Vec<Expr>,
-    join_qual: Option<Expr>,
+    join_clauses: Vec<RestrictInfo>,
 }
 
 fn create_plan(root: &PlannerInfo, path: Path) -> Plan {
@@ -288,17 +288,24 @@ fn build_join_paths(
     left_relids: &[usize],
     right_relids: &[usize],
     kind: JoinType,
-    on: Expr,
+    restrict_clauses: Vec<RestrictInfo>,
 ) -> Vec<Path> {
-    path::build_join_paths(left, right, left_relids, right_relids, kind, on)
+    path::build_join_paths(
+        left,
+        right,
+        left_relids,
+        right_relids,
+        kind,
+        restrict_clauses,
+    )
 }
 
 fn extract_hash_join_clauses(
-    on: &Expr,
+    restrict_clauses: &[RestrictInfo],
     left_relids: &[usize],
     right_relids: &[usize],
 ) -> Option<HashJoinClauses> {
-    path::extract_hash_join_clauses(on, left_relids, right_relids)
+    path::extract_hash_join_clauses(restrict_clauses, left_relids, right_relids)
 }
 
 pub(crate) fn planner(query: Query, catalog: &dyn CatalogLookup) -> PlannedStmt {

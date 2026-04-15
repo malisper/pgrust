@@ -19,7 +19,7 @@ fn eval_bool_expr(
     }
 }
 
-fn eval_hash_clauses(
+fn eval_qual_list(
     clauses: &[Expr],
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
@@ -30,6 +30,14 @@ fn eval_hash_clauses(
         }
     }
     Ok(true)
+}
+
+fn format_qual_list(quals: &[Expr]) -> Expr {
+    let mut quals = quals.to_vec();
+    let first = quals.remove(0);
+    quals
+        .into_iter()
+        .fold(first, |acc, qual| Expr::and(acc, qual))
 }
 
 fn store_virtual_row(slot: &mut TupleSlot, values: Vec<Value>) {
@@ -118,15 +126,12 @@ impl PlanNode for HashJoinState {
                         .expect("current outer tuple must exist while scanning a bucket");
                     store_virtual_row(&mut self.slot, combine_slots(outer, &right_values));
 
-                    if !eval_hash_clauses(&self.hash_clauses, &mut self.slot, ctx)? {
+                    if !eval_qual_list(&self.hash_clauses, &mut self.slot, ctx)? {
                         continue;
                     }
-                    if let Some(expr) = &self.join_qual {
-                        if !eval_bool_expr(expr, &mut self.slot, ctx)? {
-                            continue;
-                        }
+                    if !eval_qual_list(&self.join_qual, &mut self.slot, ctx)? {
+                        continue;
                     }
-
                     self.matched_outer = true;
                     self.right
                         .table
@@ -134,6 +139,9 @@ impl PlanNode for HashJoinState {
                         .expect("hash table must be built before probing")
                         .entries[entry_index]
                         .matched = true;
+                    if !eval_qual_list(&self.qual, &mut self.slot, ctx)? {
+                        continue;
+                    }
                     self.stats.rows += 1;
                     return Ok(Some(&mut self.slot));
                 }
@@ -212,6 +220,22 @@ impl PlanNode for HashJoinState {
     }
 
     fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
+        let prefix = "  ".repeat(indent + 1);
+        if !self.hash_clauses.is_empty() {
+            lines.push(format!(
+                "{prefix}Hash Cond: {:?}",
+                format_qual_list(&self.hash_clauses)
+            ));
+        }
+        if !self.join_qual.is_empty() {
+            lines.push(format!(
+                "{prefix}Join Filter: {:?}",
+                format_qual_list(&self.join_qual)
+            ));
+        }
+        if !self.qual.is_empty() {
+            lines.push(format!("{prefix}Filter: {:?}", format_qual_list(&self.qual)));
+        }
         format_explain_lines(&*self.left, indent, analyze, lines);
         format_explain_lines(self.right.as_ref(), indent, analyze, lines);
     }

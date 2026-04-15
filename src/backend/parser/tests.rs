@@ -2197,19 +2197,24 @@ fn build_join_plan_resolves_qualified_columns() {
         Plan::Projection { input, targets, .. } => {
             assert_eq!(targets.len(), 2);
             match strip_projections(&input) {
-                Plan::NestedLoopJoin { on, .. } => assert!(matches!(
-                    on,
-                    Expr::Op(op) if op.op == crate::include::nodes::primnodes::OpExprKind::Eq
-                )),
+                Plan::NestedLoopJoin { join_qual, qual, .. } => {
+                    assert!(qual.is_empty());
+                    assert!(matches!(
+                    join_qual.as_slice(),
+                    [Expr::Op(op)] if op.op == crate::include::nodes::primnodes::OpExprKind::Eq
+                ))
+                }
                 Plan::HashJoin {
                     kind,
                     hash_clauses,
                     join_qual,
+                    qual,
                     ..
                 } => {
                     assert_eq!(*kind, JoinType::Inner);
                     assert_eq!(hash_clauses.len(), 1);
-                    assert!(join_qual.is_none());
+                    assert_eq!(join_qual.len(), 1);
+                    assert!(qual.is_empty());
                     assert!(matches!(
                         hash_clauses.first(),
                         Some(Expr::Op(op))
@@ -2240,11 +2245,13 @@ fn build_left_join_plan_uses_hash_join_for_equijoin() {
                     kind,
                     hash_clauses,
                     join_qual,
+                    qual,
                     ..
                 } => {
                     assert_eq!(*kind, JoinType::Left);
                     assert_eq!(hash_clauses.len(), 1);
-                    assert!(join_qual.is_none());
+                    assert_eq!(join_qual.len(), 1);
+                    assert!(qual.is_empty());
                 }
                 other => panic!("expected hash join, got {:?}", other),
             }
@@ -2266,10 +2273,13 @@ fn build_non_equi_join_plan_stays_nested_loop() {
         Plan::Projection { input, targets, .. } => {
             assert_eq!(targets.len(), 2);
             match strip_projections(&input) {
-                Plan::NestedLoopJoin { on, .. } => assert!(matches!(
-                    on,
-                    Expr::Op(op) if op.op == crate::include::nodes::primnodes::OpExprKind::Gt
-                )),
+                Plan::NestedLoopJoin { join_qual, qual, .. } => {
+                    assert!(qual.is_empty());
+                    assert!(matches!(
+                    join_qual.as_slice(),
+                    [Expr::Op(op)] if op.op == crate::include::nodes::primnodes::OpExprKind::Gt
+                ))
+                }
                 other => panic!("expected nested loop join, got {:?}", other),
             }
         }

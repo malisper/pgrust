@@ -122,11 +122,16 @@ fn plan_uses_outer_columns(plan: &Plan) -> bool {
             input, hash_keys, ..
         } => plan_uses_outer_columns(input) || hash_keys.iter().any(expr_uses_outer_columns),
         Plan::NestedLoopJoin {
-            left, right, on, ..
+            left,
+            right,
+            join_qual,
+            qual,
+            ..
         } => {
             plan_uses_outer_columns(left)
                 || plan_uses_outer_columns(right)
-                || expr_uses_outer_columns(on)
+                || join_qual.iter().any(expr_uses_outer_columns)
+                || qual.iter().any(expr_uses_outer_columns)
         }
         Plan::HashJoin {
             left,
@@ -134,13 +139,15 @@ fn plan_uses_outer_columns(plan: &Plan) -> bool {
             hash_clauses,
             hash_keys,
             join_qual,
+            qual,
             ..
         } => {
             plan_uses_outer_columns(left)
                 || plan_uses_outer_columns(right)
                 || hash_clauses.iter().any(expr_uses_outer_columns)
                 || hash_keys.iter().any(expr_uses_outer_columns)
-                || join_qual.as_ref().is_some_and(expr_uses_outer_columns)
+                || join_qual.iter().any(expr_uses_outer_columns)
+                || qual.iter().any(expr_uses_outer_columns)
         }
         Plan::Filter {
             input, predicate, ..
@@ -277,7 +284,8 @@ pub fn executor_start(plan: Plan) -> PlanState {
             left,
             right,
             kind,
-            on,
+            join_qual,
+            qual,
         } => {
             let right_plan = *right;
             let right_uses_outer = plan_uses_outer_columns(&right_plan);
@@ -305,7 +313,8 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 right_plan: right_uses_outer.then_some(right_plan),
                 kind,
                 cross_right_outer,
-                on,
+                join_qual,
+                qual,
                 combined_names,
                 left_rows: None,
                 right_rows: None,
@@ -331,6 +340,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
             hash_clauses,
             hash_keys,
             join_qual,
+            qual,
         } => {
             assert!(
                 !matches!(kind, crate::include::nodes::primnodes::JoinType::Cross),
@@ -365,6 +375,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 hash_clauses,
                 hash_keys,
                 join_qual,
+                qual,
                 combined_names,
                 left_width,
                 right_width,

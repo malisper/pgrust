@@ -217,7 +217,7 @@ fn pets_scan_plan() -> Plan {
     }
 }
 
-fn people_pets_hash_join_plan(kind: JoinType, join_qual: Option<Expr>) -> Plan {
+fn people_pets_hash_join_plan(kind: JoinType, join_qual: Vec<Expr>, qual: Vec<Expr>) -> Plan {
     Plan::HashJoin {
         plan_info: PlanEstimate::default(),
         left: Box::new(people_scan_plan()),
@@ -233,6 +233,7 @@ fn people_pets_hash_join_plan(kind: JoinType, join_qual: Option<Expr>) -> Plan {
         )],
         hash_keys: vec![Expr::Column(0)],
         join_qual,
+        qual,
     }
 }
 
@@ -933,7 +934,7 @@ fn manual_hash_join_inner_returns_matching_rows() {
 
     let plan = Plan::Projection {
         plan_info: PlanEstimate::default(),
-        input: Box::new(people_pets_hash_join_plan(JoinType::Inner, None)),
+        input: Box::new(people_pets_hash_join_plan(JoinType::Inner, vec![], vec![])),
         targets: vec![
             TargetEntry::new(
                 "person_id",
@@ -978,7 +979,7 @@ fn manual_hash_join_left_emits_null_extended_rows() {
 
     let plan = Plan::Projection {
         plan_info: PlanEstimate::default(),
-        input: Box::new(people_pets_hash_join_plan(JoinType::Left, None)),
+        input: Box::new(people_pets_hash_join_plan(JoinType::Left, vec![], vec![])),
         targets: vec![
             TargetEntry::new(
                 "person_id",
@@ -1027,7 +1028,7 @@ fn manual_hash_join_right_emits_unmatched_inner_rows() {
 
     let plan = Plan::Projection {
         plan_info: PlanEstimate::default(),
-        input: Box::new(people_pets_hash_join_plan(JoinType::Right, None)),
+        input: Box::new(people_pets_hash_join_plan(JoinType::Right, vec![], vec![])),
         targets: vec![
             TargetEntry::new(
                 "person_id",
@@ -1076,7 +1077,7 @@ fn manual_hash_join_full_emits_unmatched_rows_from_both_sides() {
 
     let plan = Plan::Projection {
         plan_info: PlanEstimate::default(),
-        input: Box::new(people_pets_hash_join_plan(JoinType::Full, None)),
+        input: Box::new(people_pets_hash_join_plan(JoinType::Full, vec![], vec![])),
         targets: vec![
             TargetEntry::new(
                 "person_id",
@@ -1159,7 +1160,8 @@ fn manual_hash_join_null_hash_keys_do_not_match_each_other() {
             vec![Expr::Column(0), Expr::Column(1)],
         )],
         hash_keys: vec![Expr::Column(0)],
-        join_qual: None,
+        join_qual: vec![],
+        qual: vec![],
     };
 
     let rows = run_plan(&base, &txns, plan).unwrap();
@@ -1182,10 +1184,11 @@ fn manual_hash_join_join_qual_preserves_left_outer_fill() {
         plan_info: PlanEstimate::default(),
         input: Box::new(people_pets_hash_join_plan(
             JoinType::Left,
-            Some(Expr::op_auto(
+            vec![Expr::op_auto(
                 crate::include::nodes::primnodes::OpExprKind::Eq,
                 vec![Expr::Column(3), Expr::Const(Value::Int32(11))],
-            )),
+            )],
+            vec![],
         )),
         targets: vec![
             TargetEntry::new(
@@ -1225,7 +1228,7 @@ fn manual_hash_join_join_qual_preserves_left_outer_fill() {
 
 #[test]
 fn manual_hash_join_explain_formats_hash_child() {
-    let lines = explain_lines(people_pets_hash_join_plan(JoinType::Inner, None));
+    let lines = explain_lines(people_pets_hash_join_plan(JoinType::Inner, vec![], vec![]));
     assert!(lines.first().is_some_and(|line| line.contains("Hash Join")));
     assert!(lines.iter().any(|line| line.contains("Hash  (cost=")));
 }
@@ -1243,7 +1246,8 @@ fn manual_hash_join_rejects_non_hash_inner_plan() {
             vec![Expr::Column(0), Expr::Column(5)],
         )],
         hash_keys: vec![Expr::Column(0)],
-        join_qual: None,
+        join_qual: vec![],
+        qual: vec![],
     });
 }
 

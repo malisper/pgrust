@@ -99,7 +99,8 @@ pub enum Plan {
         left: Box<Plan>,
         right: Box<Plan>,
         kind: JoinType,
-        on: Expr,
+        join_qual: Vec<Expr>,
+        qual: Vec<Expr>,
     },
     HashJoin {
         plan_info: PlanEstimate,
@@ -108,7 +109,8 @@ pub enum Plan {
         kind: JoinType,
         hash_clauses: Vec<Expr>,
         hash_keys: Vec<Expr>,
-        join_qual: Option<Expr>,
+        join_qual: Vec<Expr>,
+        qual: Vec<Expr>,
     },
     Filter {
         plan_info: PlanEstimate,

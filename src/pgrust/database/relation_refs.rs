@@ -225,11 +225,20 @@ pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLoc
             }
         }
         Plan::NestedLoopJoin {
-            left, right, on, ..
+            left,
+            right,
+            join_qual,
+            qual,
+            ..
         } => {
             collect_rels_from_plan(left, rels);
             collect_rels_from_plan(right, rels);
-            collect_rels_from_expr(on, rels);
+            for expr in join_qual {
+                collect_rels_from_expr(expr, rels);
+            }
+            for expr in qual {
+                collect_rels_from_expr(expr, rels);
+            }
         }
         Plan::HashJoin {
             left,
@@ -237,6 +246,7 @@ pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLoc
             hash_clauses,
             hash_keys,
             join_qual,
+            qual,
             ..
         } => {
             collect_rels_from_plan(left, rels);
@@ -247,7 +257,10 @@ pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLoc
             for expr in hash_keys {
                 collect_rels_from_expr(expr, rels);
             }
-            if let Some(expr) = join_qual {
+            for expr in join_qual {
+                collect_rels_from_expr(expr, rels);
+            }
+            for expr in qual {
                 collect_rels_from_expr(expr, rels);
             }
         }

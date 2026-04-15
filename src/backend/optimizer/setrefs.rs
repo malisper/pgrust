@@ -10,7 +10,7 @@ use super::{
     rewrite_join_input_expr, rewrite_semantic_expr_for_path,
     rewrite_semantic_expr_for_path_or_expand_join_vars,
 };
-use crate::include::nodes::pathnodes::{Path, PlannerInfo};
+use crate::include::nodes::pathnodes::{Path, PlannerInfo, RestrictInfo};
 use crate::include::nodes::plannodes::{Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
     Aggref, BoolExpr, Expr, ExprArraySubscript, FuncExpr, OpExpr, OrderByEntry, ScalarArrayOpExpr,
@@ -96,19 +96,39 @@ fn set_plan_refs(root: Option<&PlannerInfo>, path: Path) -> Plan {
             left,
             right,
             kind,
-            on,
+            restrict_clauses,
         } => {
             let left_layout = left.output_vars();
             let right_layout = right.output_vars();
-            let on = fix_join_expr(root, on, &left, &left_layout, &right, &right_layout);
-            let mut join_layout = left_layout;
-            join_layout.extend(right_layout);
+            let mut join_layout = left_layout.clone();
+            join_layout.extend(right_layout.clone());
+            let (join_restrict_clauses, other_restrict_clauses) =
+                split_join_restrict_clauses(kind, &restrict_clauses);
+            let join_qual = lower_join_clause_list(
+                root,
+                join_restrict_clauses,
+                &left,
+                &right,
+                &left_layout,
+                &right_layout,
+                &join_layout,
+            );
+            let qual = lower_join_clause_list(
+                root,
+                other_restrict_clauses,
+                &left,
+                &right,
+                &left_layout,
+                &right_layout,
+                &join_layout,
+            );
             Plan::NestedLoopJoin {
                 plan_info,
                 left: Box::new(set_plan_refs(root, *left)),
                 right: Box::new(set_plan_refs(root, *right)),
                 kind,
-                on: lower_expr_to_plan_layout(on, &join_layout),
+                join_qual,
+                qual,
             }
         }
         Path::HashJoin {
@@ -116,10 +136,10 @@ fn set_plan_refs(root: Option<&PlannerInfo>, path: Path) -> Plan {
             left,
             right,
             kind,
-            hash_clauses: _,
+            hash_clauses,
             outer_hash_keys,
             inner_hash_keys,
-            join_qual,
+            restrict_clauses,
         } => {
             let left_layout = left.output_vars();
             let right_layout = right.output_vars();
@@ -134,18 +154,18 @@ fn set_plan_refs(root: Option<&PlannerInfo>, path: Path) -> Plan {
                 .into_iter()
                 .map(|expr| fix_upper_expr(root, expr, &right, &right_layout))
                 .collect::<Vec<_>>();
-            let hash_clauses = outer_hash_keys
-                .iter()
-                .cloned()
-                .zip(inner_hash_keys.iter().cloned())
-                .map(|(outer, inner)| {
-                    Expr::op_auto(
-                        crate::include::nodes::primnodes::OpExprKind::Eq,
-                        vec![
-                            lower_expr_to_plan_layout(outer, &join_layout),
-                            lower_expr_to_plan_layout(inner, &join_layout),
-                        ],
-                    )
+            let hash_clauses = hash_clauses
+                .into_iter()
+                .map(|restrict| {
+                    let expr = fix_join_expr(
+                        root,
+                        restrict.clause,
+                        &left,
+                        &left_layout,
+                        &right,
+                        &right_layout,
+                    );
+                    lower_expr_to_plan_layout(expr, &join_layout)
                 })
                 .collect::<Vec<_>>();
             let outer_hash_keys = outer_hash_keys
@@ -156,9 +176,26 @@ fn set_plan_refs(root: Option<&PlannerInfo>, path: Path) -> Plan {
                 .into_iter()
                 .map(|expr| lower_expr_to_plan_layout(expr, &right_layout))
                 .collect::<Vec<_>>();
-            let join_qual = join_qual
-                .map(|expr| fix_join_expr(root, expr, &left, &left_layout, &right, &right_layout))
-                .map(|expr| lower_expr_to_plan_layout(expr, &join_layout));
+            let (join_restrict_clauses, other_restrict_clauses) =
+                split_join_restrict_clauses(kind, &restrict_clauses);
+            let join_qual = lower_join_clause_list(
+                root,
+                join_restrict_clauses,
+                &left,
+                &right,
+                &left_layout,
+                &right_layout,
+                &join_layout,
+            );
+            let qual = lower_join_clause_list(
+                root,
+                other_restrict_clauses,
+                &left,
+                &right,
+                &left_layout,
+                &right_layout,
+                &join_layout,
+            );
 
             let left_plan = set_plan_refs(root, *left);
             let right_plan = set_plan_refs(root, *right);
@@ -183,6 +220,7 @@ fn set_plan_refs(root: Option<&PlannerInfo>, path: Path) -> Plan {
                 hash_clauses,
                 hash_keys: outer_hash_keys,
                 join_qual,
+                qual,
             }
         }
         Path::Projection {
@@ -331,6 +369,45 @@ fn set_plan_refs(root: Option<&PlannerInfo>, path: Path) -> Plan {
     }
 }
 
+fn split_join_restrict_clauses<'a>(
+    kind: crate::include::nodes::primnodes::JoinType,
+    restrict_clauses: &'a [RestrictInfo],
+) -> (&'a [RestrictInfo], &'a [RestrictInfo]) {
+    if matches!(kind, crate::include::nodes::primnodes::JoinType::Inner | crate::include::nodes::primnodes::JoinType::Cross) {
+        return (restrict_clauses, &[]);
+    }
+    let split_at = restrict_clauses
+        .iter()
+        .position(|restrict| restrict.is_pushed_down)
+        .unwrap_or(restrict_clauses.len());
+    restrict_clauses.split_at(split_at)
+}
+
+fn lower_join_clause_list(
+    root: Option<&PlannerInfo>,
+    restrict_clauses: &[RestrictInfo],
+    left: &Path,
+    right: &Path,
+    left_layout: &[Expr],
+    right_layout: &[Expr],
+    join_layout: &[Expr],
+) -> Vec<Expr> {
+    restrict_clauses
+        .iter()
+        .map(|restrict| {
+            fix_join_expr(
+                root,
+                restrict.clause.clone(),
+                left,
+                left_layout,
+                right,
+                right_layout,
+            )
+        })
+        .map(|expr| lower_expr_to_plan_layout(expr, join_layout))
+        .collect()
+}
+
 fn fix_upper_expr(root: Option<&PlannerInfo>, expr: Expr, path: &Path, layout: &[Expr]) -> Expr {
     if let Some(rewritten) = find_exposed_output_match(root, &expr, path) {
         return rewritten;
@@ -356,7 +433,19 @@ fn exprs_equivalent(root: Option<&PlannerInfo>, left: &Expr, right: &Expr) -> bo
     };
     let expanded_left = expand_join_rte_vars(root, left.clone());
     let expanded_right = expand_join_rte_vars(root, right.clone());
-    expanded_left == *right || expanded_right == *left || expanded_left == expanded_right
+    expanded_left == *right
+        || expanded_right == *left
+        || expanded_left == expanded_right
+        || matches!(
+            &expanded_right,
+            Expr::Coalesce(coalesce_left, coalesce_right)
+                if expanded_left == **coalesce_left || expanded_left == **coalesce_right
+        )
+        || matches!(
+            &expanded_left,
+            Expr::Coalesce(coalesce_left, coalesce_right)
+                if expanded_right == **coalesce_left || expanded_right == **coalesce_right
+        )
 }
 
 fn slot_var(slot_id: usize, attno: usize, vartype: crate::backend::parser::SqlType) -> Expr {
@@ -520,7 +609,8 @@ fn find_exposed_output_match(root: Option<&PlannerInfo>, expr: &Expr, path: &Pat
                 (exprs_equivalent(root, expr, &target.expr)
                     || exprs_equivalent(root, expr, &semantic)
                     || exprs_equivalent(root, expr, &rewritten_semantic)
-                    || exprs_equivalent(root, expr, &expanded_semantic))
+                    || exprs_equivalent(root, expr, &expanded_semantic)
+                    || expr_occurs_in_output(expr, &expanded_semantic))
                 .then(|| slot_var(*slot_id, index + 1, target.sql_type))
             })
         }
@@ -528,6 +618,75 @@ fn find_exposed_output_match(root: Option<&PlannerInfo>, expr: &Expr, path: &Pat
             find_exposed_output_match(root, expr, input)
         }
         _ => None,
+    }
+}
+
+fn expr_occurs_in_output(needle: &Expr, haystack: &Expr) -> bool {
+    if needle == haystack {
+        return true;
+    }
+    match haystack {
+        Expr::Aggref(aggref) => aggref.args.iter().any(|arg| expr_occurs_in_output(needle, arg)),
+        Expr::Op(op) => op.args.iter().any(|arg| expr_occurs_in_output(needle, arg)),
+        Expr::Bool(bool_expr) => bool_expr
+            .args
+            .iter()
+            .any(|arg| expr_occurs_in_output(needle, arg)),
+        Expr::Func(func) => func.args.iter().any(|arg| expr_occurs_in_output(needle, arg)),
+        Expr::SubLink(sublink) => sublink
+            .testexpr
+            .as_deref()
+            .is_some_and(|expr| expr_occurs_in_output(needle, expr)),
+        Expr::SubPlan(subplan) => subplan
+            .testexpr
+            .as_deref()
+            .is_some_and(|expr| expr_occurs_in_output(needle, expr)),
+        Expr::ScalarArrayOp(saop) => {
+            expr_occurs_in_output(needle, &saop.left) || expr_occurs_in_output(needle, &saop.right)
+        }
+        Expr::Cast(inner, _) | Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
+            expr_occurs_in_output(needle, inner)
+        }
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_occurs_in_output(needle, expr)
+                || expr_occurs_in_output(needle, pattern)
+                || escape
+                    .as_deref()
+                    .is_some_and(|expr| expr_occurs_in_output(needle, expr))
+        }
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            expr_occurs_in_output(needle, left) || expr_occurs_in_output(needle, right)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements
+            .iter()
+            .any(|element| expr_occurs_in_output(needle, element)),
+        Expr::ArraySubscript { array, subscripts } => {
+            expr_occurs_in_output(needle, array)
+                || subscripts.iter().any(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .is_some_and(|expr| expr_occurs_in_output(needle, expr))
+                        || subscript
+                            .upper
+                            .as_ref()
+                            .is_some_and(|expr| expr_occurs_in_output(needle, expr))
+                })
+        }
+        _ => false,
     }
 }
 
@@ -593,6 +752,25 @@ fn fix_join_expr(
     right: &Path,
     right_layout: &[Expr],
 ) -> Expr {
+    let expr = match (&expr, root) {
+        (Expr::Var(var), Some(root))
+            if !left_layout.contains(&expr)
+                && !right_layout.contains(&expr)
+                && root
+                    .parse
+                    .rtable
+                    .get(var.varno.saturating_sub(1))
+                    .is_some_and(|rte| {
+                        matches!(
+                            rte.kind,
+                            crate::include::nodes::parsenodes::RangeTblEntryKind::Join { .. }
+                        )
+                    }) =>
+        {
+            expand_join_rte_vars(root, expr)
+        }
+        _ => expr,
+    };
     if let Some(rewritten) =
         rewrite_join_whole_expr(root, &expr, left, left_layout, right, right_layout)
     {
