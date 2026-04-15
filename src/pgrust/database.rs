@@ -62,7 +62,6 @@ use crate::backend::utils::cache::syscache::{
     SessionCatalogState, invalidate_session_catalog_state,
 };
 use crate::backend::utils::misc::interrupts::InterruptState;
-<<<<<<< HEAD
 use crate::backend::catalog::rows::physical_catalog_rows_from_catcache;
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
