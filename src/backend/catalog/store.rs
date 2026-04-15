@@ -1817,6 +1817,27 @@ fn collect_relation_drop_oids(
 }
 
 impl CatalogStore {
+    pub fn refresh_committed_state(
+        &mut self,
+        pool: &BufferPool<SmgrStorageBackend>,
+        txns: &TransactionManager,
+        client_id: crate::ClientId,
+    ) -> Result<(), CatalogError> {
+        let mut catalog = match &self.mode {
+            CatalogStoreMode::Durable { .. } => self.catalog_snapshot_with_control()?,
+            CatalogStoreMode::Ephemeral => {
+                let snapshot = txns
+                    .snapshot(INVALID_TRANSACTION_ID)
+                    .map_err(|e| CatalogError::Io(format!("catalog snapshot failed: {e:?}")))?;
+                load_catalog_from_visible_pool(pool, txns, &snapshot, client_id)?
+            }
+        };
+        catalog.next_oid = catalog.next_oid.max(self.control.next_oid);
+        catalog.next_rel_number = catalog.next_rel_number.max(self.control.next_rel_number);
+        self.catalog = catalog;
+        Ok(())
+    }
+
     fn catalog_snapshot_with_control(&self) -> Result<Catalog, CatalogError> {
         match &self.mode {
             CatalogStoreMode::Durable { base_dir, control_path } => {
