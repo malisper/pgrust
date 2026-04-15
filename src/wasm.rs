@@ -106,12 +106,10 @@ fn render_value_json(value: &Value) -> String {
         Value::Json(v) => v.to_string(),
         Value::Jsonb(v) => json_string(&format!("{:?}", v)),
         Value::JsonPath(v) => json_string(v.as_str()),
-        Value::Bytea(v) => {
-            json_string(&crate::backend::libpq::pqformat::format_bytea_text(
-                v,
-                ByteaOutputFormat::Hex,
-            ))
-        }
+        Value::Bytea(v) => json_string(&crate::backend::libpq::pqformat::format_bytea_text(
+            v,
+            ByteaOutputFormat::Hex,
+        )),
         Value::Date(_)
         | Value::Time(_)
         | Value::TimeTz(_)

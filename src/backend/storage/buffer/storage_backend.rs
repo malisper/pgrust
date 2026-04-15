@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, HashMap};
 
-use crate::backend::storage::smgr::{AnyStorageManager, MdStorageManager, SmgrError, StorageManager};
+use crate::backend::storage::smgr::{
+    AnyStorageManager, MdStorageManager, SmgrError, StorageManager,
+};
 use crate::include::storage::buf_internals::*;
 
 pub trait StorageBackend {

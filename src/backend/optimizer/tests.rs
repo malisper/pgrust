@@ -280,8 +280,16 @@ fn build_join_paths_emits_nested_loop_and_hash_join_for_equijoin() {
         eq(var(1, 1), var(2, 1)),
     );
 
-    assert!(paths.iter().any(|path| matches!(path, Path::NestedLoopJoin { .. })));
-    assert!(paths.iter().any(|path| matches!(path, Path::HashJoin { .. })));
+    assert!(
+        paths
+            .iter()
+            .any(|path| matches!(path, Path::NestedLoopJoin { .. }))
+    );
+    assert!(
+        paths
+            .iter()
+            .any(|path| matches!(path, Path::HashJoin { .. }))
+    );
 }
 
 #[test]
@@ -309,9 +317,11 @@ fn build_join_paths_skips_hash_join_for_cross_and_non_equi_joins() {
         JoinType::Cross,
         eq(var(1, 1), var(2, 1)),
     );
-    assert!(!cross_paths
-        .iter()
-        .any(|path| matches!(path, Path::HashJoin { .. })));
+    assert!(
+        !cross_paths
+            .iter()
+            .any(|path| matches!(path, Path::HashJoin { .. }))
+    );
 
     let non_equi_paths = super::build_join_paths(
         values_path(1, 1.0, 10.0),
@@ -321,9 +331,11 @@ fn build_join_paths_skips_hash_join_for_cross_and_non_equi_joins() {
         JoinType::Inner,
         gt(var(1, 1), var(2, 1)),
     );
-    assert!(!non_equi_paths
-        .iter()
-        .any(|path| matches!(path, Path::HashJoin { .. })));
+    assert!(
+        !non_equi_paths
+            .iter()
+            .any(|path| matches!(path, Path::HashJoin { .. }))
+    );
 }
 
 #[test]

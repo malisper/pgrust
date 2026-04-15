@@ -240,6 +240,8 @@ fn visible_catalog_without_text_input_cast(
         base.index_rows(),
         base.rewrite_rows(),
         base.am_rows(),
+        base.amop_rows(),
+        base.amproc_rows(),
         base.authid_rows(),
         base.auth_members_rows(),
         base.language_rows(),
@@ -250,6 +252,8 @@ fn visible_catalog_without_text_input_cast(
         base.ts_config_map_rows(),
         base.constraint_rows(),
         base.operator_rows(),
+        base.opclass_rows(),
+        base.opfamily_rows(),
         base.proc_rows(),
         base.cast_rows()
             .into_iter()
@@ -286,6 +290,8 @@ fn visible_catalog_without_operator(
         base.index_rows(),
         base.rewrite_rows(),
         base.am_rows(),
+        base.amop_rows(),
+        base.amproc_rows(),
         base.authid_rows(),
         base.auth_members_rows(),
         base.language_rows(),
@@ -301,6 +307,8 @@ fn visible_catalog_without_operator(
                 !(row.oprname == name && row.oprleft == left_oid && row.oprright == right_oid)
             })
             .collect(),
+        base.opclass_rows(),
+        base.opfamily_rows(),
         base.proc_rows(),
         base.cast_rows(),
         base.collation_rows(),
@@ -2630,11 +2638,7 @@ fn parse_create_table_inherits_clause() {
 fn parse_select_from_only_table() {
     match parse_statement("select * from only parent").unwrap() {
         Statement::Select(SelectStatement {
-            from:
-                Some(FromItem::Table {
-                    name,
-                    only,
-                }),
+            from: Some(FromItem::Table { name, only }),
             ..
         }) => {
             assert_eq!(name, "parent");

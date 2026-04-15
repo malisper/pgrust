@@ -1,7 +1,9 @@
 use crate::backend::parser::CatalogLookup;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{RangeTblEntry, RangeTblEntryKind};
-use crate::include::nodes::pathnodes::{AppendRelInfo, PlannerInfo, RelOptInfo, RelOptKind, RestrictInfo};
+use crate::include::nodes::pathnodes::{
+    AppendRelInfo, PlannerInfo, RelOptInfo, RelOptKind, RestrictInfo,
+};
 use crate::include::nodes::primnodes::{Expr, RelationDesc, Var};
 
 use super::pathnodes::rewrite_expr_against_layout;

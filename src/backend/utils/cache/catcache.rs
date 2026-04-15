@@ -32,32 +32,31 @@ use crate::backend::catalog::pg_ts_template::sort_pg_ts_template_rows;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::{
     ANYARRAYOID, BIT_ARRAY_TYPE_OID, BIT_TYPE_OID, BOOL_ARRAY_TYPE_OID, BOOL_TYPE_OID,
-    BOX_TYPE_OID, BPCHAR_ARRAY_TYPE_OID, BPCHAR_TYPE_OID, BYTEA_ARRAY_TYPE_OID, BYTEA_TYPE_OID,
-    CIRCLE_TYPE_OID, FLOAT4_ARRAY_TYPE_OID, FLOAT4_TYPE_OID, FLOAT8_ARRAY_TYPE_OID,
-    FLOAT8_TYPE_OID, INT2_ARRAY_TYPE_OID, INT2_TYPE_OID, INT4_ARRAY_TYPE_OID, INT4_TYPE_OID,
-    INT8_ARRAY_TYPE_OID, INT8_TYPE_OID, INTERNAL_CHAR_ARRAY_TYPE_OID, INTERNAL_CHAR_TYPE_OID,
-    JSON_ARRAY_TYPE_OID, JSON_TYPE_OID, JSONB_ARRAY_TYPE_OID, JSONB_TYPE_OID,
-    JSONPATH_ARRAY_TYPE_OID, JSONPATH_TYPE_OID, LINE_TYPE_OID, LSEG_TYPE_OID, MONEY_ARRAY_TYPE_OID,
-    MONEY_TYPE_OID, NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID, OID_ARRAY_TYPE_OID, OID_TYPE_OID,
-    PATH_TYPE_OID, POINT_TYPE_OID, POLYGON_TYPE_OID, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow,
-    PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow,
-    PgConstraintRow, PgDatabaseRow, PgDependRow, PgIndexRow, PgLanguageRow, PgNamespaceRow,
-    PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow, PgRewriteRow, PgStatisticRow,
-    PgTablespaceRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow,
-    PgTypeRow, PgInheritsRow, REGCONFIG_ARRAY_TYPE_OID, REGCONFIG_TYPE_OID,
-    REGDICTIONARY_ARRAY_TYPE_OID, REGDICTIONARY_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID,
-    TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID, TSQUERY_ARRAY_TYPE_OID, TSQUERY_TYPE_OID,
-    TSVECTOR_ARRAY_TYPE_OID, TSVECTOR_TYPE_OID, VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID,
-    VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID, BOOTSTRAP_SUPERUSER_OID,
-    bootstrap_composite_type_rows, bootstrap_pg_am_rows, bootstrap_pg_amop_rows,
+    BOOTSTRAP_SUPERUSER_OID, BOX_TYPE_OID, BPCHAR_ARRAY_TYPE_OID, BPCHAR_TYPE_OID,
+    BYTEA_ARRAY_TYPE_OID, BYTEA_TYPE_OID, CIRCLE_TYPE_OID, FLOAT4_ARRAY_TYPE_OID, FLOAT4_TYPE_OID,
+    FLOAT8_ARRAY_TYPE_OID, FLOAT8_TYPE_OID, INT2_ARRAY_TYPE_OID, INT2_TYPE_OID,
+    INT4_ARRAY_TYPE_OID, INT4_TYPE_OID, INT8_ARRAY_TYPE_OID, INT8_TYPE_OID,
+    INTERNAL_CHAR_ARRAY_TYPE_OID, INTERNAL_CHAR_TYPE_OID, JSON_ARRAY_TYPE_OID, JSON_TYPE_OID,
+    JSONB_ARRAY_TYPE_OID, JSONB_TYPE_OID, JSONPATH_ARRAY_TYPE_OID, JSONPATH_TYPE_OID,
+    LINE_TYPE_OID, LSEG_TYPE_OID, MONEY_ARRAY_TYPE_OID, MONEY_TYPE_OID, NUMERIC_ARRAY_TYPE_OID,
+    NUMERIC_TYPE_OID, OID_ARRAY_TYPE_OID, OID_TYPE_OID, PATH_TYPE_OID, POINT_TYPE_OID,
+    POLYGON_TYPE_OID, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow, PgAuthIdRow,
+    PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow, PgDatabaseRow,
+    PgDependRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow,
+    PgOperatorRow, PgOpfamilyRow, PgProcRow, PgRewriteRow, PgStatisticRow, PgTablespaceRow,
+    PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
+    REGCONFIG_ARRAY_TYPE_OID, REGCONFIG_TYPE_OID, REGDICTIONARY_ARRAY_TYPE_OID,
+    REGDICTIONARY_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID,
+    TIMESTAMP_TYPE_OID, TSQUERY_ARRAY_TYPE_OID, TSQUERY_TYPE_OID, TSVECTOR_ARRAY_TYPE_OID,
+    TSVECTOR_TYPE_OID, VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID,
+    VARCHAR_TYPE_OID, bootstrap_composite_type_rows, bootstrap_pg_am_rows, bootstrap_pg_amop_rows,
     bootstrap_pg_amproc_rows, bootstrap_pg_auth_members_rows, bootstrap_pg_authid_rows,
-    bootstrap_pg_cast_rows, bootstrap_pg_collation_rows,
-    bootstrap_pg_constraint_rows, bootstrap_pg_database_rows, bootstrap_pg_language_rows,
-    bootstrap_pg_namespace_rows, bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows,
-    bootstrap_pg_opfamily_rows, bootstrap_pg_proc_rows, bootstrap_pg_tablespace_rows,
-    bootstrap_pg_ts_config_map_rows, bootstrap_pg_ts_config_rows, bootstrap_pg_ts_dict_rows,
-    bootstrap_pg_ts_parser_rows, bootstrap_pg_ts_template_rows, builtin_type_rows,
-    sort_pg_rewrite_rows,
+    bootstrap_pg_cast_rows, bootstrap_pg_collation_rows, bootstrap_pg_constraint_rows,
+    bootstrap_pg_database_rows, bootstrap_pg_language_rows, bootstrap_pg_namespace_rows,
+    bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows, bootstrap_pg_opfamily_rows,
+    bootstrap_pg_proc_rows, bootstrap_pg_tablespace_rows, bootstrap_pg_ts_config_map_rows,
+    bootstrap_pg_ts_config_rows, bootstrap_pg_ts_dict_rows, bootstrap_pg_ts_parser_rows,
+    bootstrap_pg_ts_template_rows, builtin_type_rows, sort_pg_rewrite_rows,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -338,6 +337,8 @@ impl CatCache {
             rows.indexes,
             rows.rewrites,
             rows.ams,
+            rows.amops,
+            rows.amprocs,
             rows.authids,
             rows.auth_members,
             rows.languages,
@@ -348,6 +349,8 @@ impl CatCache {
             rows.ts_config_maps,
             rows.constraints,
             rows.operators,
+            rows.opclasses,
+            rows.opfamilies,
             rows.procs,
             rows.casts,
             rows.collations,
@@ -368,6 +371,8 @@ impl CatCache {
         index_rows: Vec<PgIndexRow>,
         rewrite_rows: Vec<PgRewriteRow>,
         am_rows: Vec<PgAmRow>,
+        amop_rows: Vec<PgAmopRow>,
+        amproc_rows: Vec<PgAmprocRow>,
         authid_rows: Vec<PgAuthIdRow>,
         auth_members_rows: Vec<PgAuthMembersRow>,
         language_rows: Vec<PgLanguageRow>,
@@ -378,6 +383,8 @@ impl CatCache {
         ts_config_map_rows: Vec<PgTsConfigMapRow>,
         constraint_rows: Vec<PgConstraintRow>,
         operator_rows: Vec<PgOperatorRow>,
+        opclass_rows: Vec<PgOpclassRow>,
+        opfamily_rows: Vec<PgOpfamilyRow>,
         proc_rows: Vec<PgProcRow>,
         cast_rows: Vec<PgCastRow>,
         collation_rows: Vec<PgCollationRow>,
@@ -428,7 +435,9 @@ impl CatCache {
         sort_pg_rewrite_rows(&mut cache.rewrite_rows);
         cache.am_rows = am_rows;
         sort_pg_am_rows(&mut cache.am_rows);
+        cache.amop_rows = amop_rows;
         sort_pg_amop_rows(&mut cache.amop_rows);
+        cache.amproc_rows = amproc_rows;
         sort_pg_amproc_rows(&mut cache.amproc_rows);
         cache.authid_rows = authid_rows;
         sort_pg_authid_rows(&mut cache.authid_rows);
@@ -450,7 +459,9 @@ impl CatCache {
         sort_pg_constraint_rows(&mut cache.constraint_rows);
         cache.operator_rows = operator_rows;
         sort_pg_operator_rows(&mut cache.operator_rows);
+        cache.opclass_rows = opclass_rows;
         sort_pg_opclass_rows(&mut cache.opclass_rows);
+        cache.opfamily_rows = opfamily_rows;
         sort_pg_opfamily_rows(&mut cache.opfamily_rows);
         cache.proc_rows = proc_rows;
         sort_pg_proc_rows(&mut cache.proc_rows);

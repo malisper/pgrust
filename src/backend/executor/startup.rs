@@ -5,8 +5,8 @@ use crate::include::catalog::bootstrap_catalog_kinds;
 use crate::include::catalog::builtin_aggregate_function_for_proc_oid;
 use crate::include::nodes::execnodes::{
     AggregateState, AppendState, FilterState, FunctionScanState, HashJoinState, HashState,
-    IndexScanState, LimitState, NestedLoopJoinState, NodeExecStats, OrderByState,
-    ProjectSetState, ProjectionState, ResultState, SeqScanState, ValuesState,
+    IndexScanState, LimitState, NestedLoopJoinState, NodeExecStats, OrderByState, ProjectSetState,
+    ProjectionState, ResultState, SeqScanState, ValuesState,
 };
 use crate::include::nodes::primnodes::{Expr, SetReturningCall};
 
@@ -93,9 +93,7 @@ fn set_returning_call_uses_outer_columns(call: &SetReturningCall) -> bool {
         | SetReturningCall::JsonTableFunction { args, .. }
         | SetReturningCall::RegexTableFunction { args, .. }
         | SetReturningCall::TextSearchTableFunction { args, .. }
-        | SetReturningCall::UserDefined { args, .. } => {
-            args.iter().any(expr_uses_outer_columns)
-        }
+        | SetReturningCall::UserDefined { args, .. } => args.iter().any(expr_uses_outer_columns),
     }
 }
 

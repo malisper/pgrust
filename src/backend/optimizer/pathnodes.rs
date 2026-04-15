@@ -288,14 +288,20 @@ pub(super) fn rewrite_target_entry_against_layout(
     }
 }
 
-pub(super) fn lower_target_entry_to_plan_layout(target: TargetEntry, layout: &[Expr]) -> TargetEntry {
+pub(super) fn lower_target_entry_to_plan_layout(
+    target: TargetEntry,
+    layout: &[Expr],
+) -> TargetEntry {
     TargetEntry {
         expr: lower_expr_to_plan_layout(target.expr, layout),
         ..target
     }
 }
 
-pub(super) fn lower_order_by_entry_to_plan_layout(item: OrderByEntry, layout: &[Expr]) -> OrderByEntry {
+pub(super) fn lower_order_by_entry_to_plan_layout(
+    item: OrderByEntry,
+    layout: &[Expr],
+) -> OrderByEntry {
     OrderByEntry {
         expr: lower_expr_to_plan_layout(item.expr, layout),
         ..item
@@ -536,7 +542,11 @@ pub(super) fn lower_set_returning_call_to_plan_layout(
     }
 }
 
-pub(super) fn lower_agg_accum_to_plan_layout(accum: AggAccum, path: &Path, layout: &[Expr]) -> AggAccum {
+pub(super) fn lower_agg_accum_to_plan_layout(
+    accum: AggAccum,
+    path: &Path,
+    layout: &[Expr],
+) -> AggAccum {
     AggAccum {
         args: accum
             .args
@@ -570,18 +580,11 @@ fn rewrite_expr_for_input_path(expr: Expr, path: &Path, layout: &[Expr]) -> Expr
             } else {
                 let rewritten_input_expr =
                     rewrite_semantic_expr_for_path(expr.clone(), input, &input_layout);
-                if let Some((index, target)) = targets
-                    .iter()
-                    .enumerate()
-                    .find(|(_, target)| {
-                        target.expr == rewritten_input_expr
-                            || rewrite_semantic_expr_for_path(
-                                target.expr.clone(),
-                                input,
-                                &input_layout,
-                            ) == rewritten_input_expr
-                    })
-                {
+                if let Some((index, target)) = targets.iter().enumerate().find(|(_, target)| {
+                    target.expr == rewritten_input_expr
+                        || rewrite_semantic_expr_for_path(target.expr.clone(), input, &input_layout)
+                            == rewritten_input_expr
+                }) {
                     slot_var(*slot_id, index + 1, target.sql_type)
                 } else {
                     rewrite_expr_against_layout(expr, layout)

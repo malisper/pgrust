@@ -4,11 +4,10 @@ use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::relcache::RelCache;
 use crate::backend::utils::cache::system_views::{build_pg_stats_rows, build_pg_views_rows};
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, PgCastRow, PgClassRow, PgConstraintRow, PgOperatorRow, PgProcRow,
-    PgRewriteRow, PgStatisticRow, PgTypeRow, PgLanguageRow, bootstrap_pg_cast_rows,
+    BOOTSTRAP_SUPERUSER_OID, PgCastRow, PgClassRow, PgConstraintRow, PgInheritsRow, PgLanguageRow,
+    PgOperatorRow, PgProcRow, PgRewriteRow, PgStatisticRow, PgTypeRow, bootstrap_pg_cast_rows,
     bootstrap_pg_language_rows, bootstrap_pg_operator_rows, bootstrap_pg_proc_rows,
     builtin_type_rows,
-    PgInheritsRow,
 };
 
 #[derive(Debug, Clone)]
@@ -117,7 +116,11 @@ impl CatalogLookup for VisibleCatalog {
         self.catcache
             .as_ref()
             .and_then(|catcache| catcache.proc_by_oid(oid).cloned())
-            .or_else(|| bootstrap_pg_proc_rows().into_iter().find(|row| row.oid == oid))
+            .or_else(|| {
+                bootstrap_pg_proc_rows()
+                    .into_iter()
+                    .find(|row| row.oid == oid)
+            })
     }
 
     fn operator_by_name_left_right(
@@ -334,6 +337,8 @@ mod tests {
             base.index_rows(),
             base.rewrite_rows(),
             base.am_rows(),
+            base.amop_rows(),
+            base.amproc_rows(),
             base.authid_rows(),
             base.auth_members_rows(),
             base.language_rows(),
@@ -344,6 +349,8 @@ mod tests {
             base.ts_config_map_rows(),
             base.constraint_rows(),
             base.operator_rows(),
+            base.opclass_rows(),
+            base.opfamily_rows(),
             base.proc_rows()
                 .into_iter()
                 .filter(|row| row.proname != "lower")

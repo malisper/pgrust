@@ -13,8 +13,8 @@ use super::{
 use crate::include::nodes::pathnodes::{Path, PlannerInfo};
 use crate::include::nodes::plannodes::{Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
-    Aggref, BoolExpr, Expr, ExprArraySubscript, FuncExpr, OpExpr, OrderByEntry,
-    ScalarArrayOpExpr, TargetEntry, Var,
+    Aggref, BoolExpr, Expr, ExprArraySubscript, FuncExpr, OpExpr, OrderByEntry, ScalarArrayOpExpr,
+    TargetEntry, Var,
 };
 
 pub(super) fn create_plan(root: &PlannerInfo, path: Path) -> Plan {
@@ -410,9 +410,7 @@ fn fully_expand_output_expr(expr: Expr, path: &Path) -> Expr {
         })),
         Expr::Cast(inner, ty) => Expr::Cast(Box::new(fully_expand_output_expr(*inner, path)), ty),
         Expr::IsNull(inner) => Expr::IsNull(Box::new(fully_expand_output_expr(*inner, path))),
-        Expr::IsNotNull(inner) => {
-            Expr::IsNotNull(Box::new(fully_expand_output_expr(*inner, path)))
-        }
+        Expr::IsNotNull(inner) => Expr::IsNotNull(Box::new(fully_expand_output_expr(*inner, path))),
         Expr::IsDistinctFrom(left, right) => Expr::IsDistinctFrom(
             Box::new(fully_expand_output_expr(*left, path)),
             Box::new(fully_expand_output_expr(*right, path)),
@@ -505,11 +503,7 @@ fn expand_output_var(var: Var, path: &Path) -> Expr {
     }
 }
 
-fn find_exposed_output_match(
-    root: Option<&PlannerInfo>,
-    expr: &Expr,
-    path: &Path,
-) -> Option<Expr> {
+fn find_exposed_output_match(root: Option<&PlannerInfo>, expr: &Expr, path: &Path) -> Option<Expr> {
     match path {
         Path::Projection {
             slot_id,

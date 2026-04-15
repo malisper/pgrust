@@ -167,12 +167,11 @@ pub(crate) fn compile_function_from_proc(
     let mut parameter_slots = Vec::new();
     let mut output_slots = Vec::new();
 
-    let input_type_oids = parse_proc_argtype_oids(&row.proargtypes).ok_or_else(|| {
-        ParseError::UnexpectedToken {
+    let input_type_oids =
+        parse_proc_argtype_oids(&row.proargtypes).ok_or_else(|| ParseError::UnexpectedToken {
             expected: "valid pg_proc.proargtypes",
             actual: row.proargtypes.clone(),
-        }
-    })?;
+        })?;
     let input_types = input_type_oids
         .iter()
         .map(|oid| {
@@ -271,16 +270,19 @@ fn function_return_contract(
                     FunctionReturnContract::AnonymousRecord { setof: true }
                 } else {
                     FunctionReturnContract::FixedRow {
-                        columns: output_slots.iter().map(|slot| slot.column.clone()).collect(),
+                        columns: output_slots
+                            .iter()
+                            .map(|slot| slot.column.clone())
+                            .collect(),
                         setof: true,
                         uses_output_vars: true,
                     }
                 }
             }
             SqlTypeKind::Composite => {
-                let relation = catalog.lookup_relation_by_oid(result_type.typrelid).ok_or_else(|| {
-                    ParseError::UnsupportedType(result_type.typrelid.to_string())
-                })?;
+                let relation = catalog
+                    .lookup_relation_by_oid(result_type.typrelid)
+                    .ok_or_else(|| ParseError::UnsupportedType(result_type.typrelid.to_string()))?;
                 FunctionReturnContract::FixedRow {
                     columns: relation
                         .desc
@@ -435,7 +437,9 @@ fn compile_stmt(
                     .collect::<Result<_, _>>()?,
             }
         }
-        Stmt::Return { expr } => compile_return_stmt(expr.as_deref(), catalog, env, return_contract)?,
+        Stmt::Return { expr } => {
+            compile_return_stmt(expr.as_deref(), catalog, env, return_contract)?
+        }
         Stmt::ReturnNext { expr } => {
             compile_return_next_stmt(expr.as_deref(), catalog, env, return_contract)?
         }
@@ -457,19 +461,17 @@ fn compile_return_stmt(
         ));
     };
     match (contract, expr) {
+        (FunctionReturnContract::Scalar { setof: false, .. }, Some(expr)) => {
+            Ok(CompiledStmt::Return {
+                expr: Some(compile_expr_text(expr, catalog, env)?),
+            })
+        }
         (
             FunctionReturnContract::Scalar {
-                setof: false, ..
+                output_slot, setof, ..
             },
-            Some(expr),
-        ) => Ok(CompiledStmt::Return {
-            expr: Some(compile_expr_text(expr, catalog, env)?),
-        }),
-        (FunctionReturnContract::Scalar { output_slot, setof, .. }, None)
-            if output_slot.is_some() || *setof =>
-        {
-            Ok(CompiledStmt::Return { expr: None })
-        }
+            None,
+        ) if output_slot.is_some() || *setof => Ok(CompiledStmt::Return { expr: None }),
         (FunctionReturnContract::FixedRow { .. }, None)
         | (FunctionReturnContract::AnonymousRecord { .. }, None) => {
             Ok(CompiledStmt::Return { expr: None })
@@ -535,7 +537,9 @@ fn compile_return_query_stmt(
     }
 
     let planned = match parse_statement(sql)? {
-        Statement::Select(stmt) => pg_plan_query_with_outer(&stmt, catalog, &env.visible_columns())?,
+        Statement::Select(stmt) => {
+            pg_plan_query_with_outer(&stmt, catalog, &env.visible_columns())?
+        }
         Statement::Values(stmt) => {
             pg_plan_values_query_with_outer(&stmt, catalog, &env.visible_columns())?
         }
@@ -546,7 +550,10 @@ fn compile_return_query_stmt(
             });
         }
     };
-    Ok(CompiledStmt::ReturnQuery { plan: planned, kind })
+    Ok(CompiledStmt::ReturnQuery {
+        plan: planned,
+        kind,
+    })
 }
 
 fn compile_stmt_list(

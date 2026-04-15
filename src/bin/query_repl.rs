@@ -21,8 +21,7 @@ use pgrust::executor::{
 use pgrust::include::access::htup::{HeapTuple, TupleValue};
 use pgrust::parser::{
     CatalogLookup, ParseError, SqlType, SqlTypeKind, Statement, bind_delete, bind_insert,
-    bind_update,
-    create_relation_desc, normalize_create_table_name, parse_statement,
+    bind_update, create_relation_desc, normalize_create_table_name, parse_statement,
 };
 use pgrust::pl::plpgsql::{RaiseLevel, clear_notices, execute_do, take_notices};
 use pgrust::{BufferPool, SmgrStorageBackend};
@@ -670,11 +669,9 @@ fn run_statement(
         Statement::CommentOnDomain(_)
         | Statement::CreateFunction(_)
         | Statement::CreateDomain(_)
-        | Statement::DropDomain(_) => {
-            Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                "domain/function statements are not supported in query_repl".into(),
-            )))
-        }
+        | Statement::DropDomain(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
+            "domain/function statements are not supported in query_repl".into(),
+        ))),
         Statement::CreateTable(stmt) => {
             let (table_name, _) = normalize_create_table_name(&stmt)?;
             let entry = catalog_store

@@ -18,17 +18,16 @@ mod views;
 
 use crate::RelFileLocator;
 use crate::backend::catalog::catalog::column_desc;
-use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::executor::{Value, cast_value};
 use crate::backend::optimizer::planner;
 use crate::backend::rewrite::pg_rewrite_query;
+use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, PgCastRow, PgClassRow, PgLanguageRow, PgOperatorRow, PgProcRow,
-    PgConstraintRow, PgRewriteRow, PgStatisticRow, PgTypeRow, RECORD_TYPE_OID,
+    BOOTSTRAP_SUPERUSER_OID, PgCastRow, PgClassRow, PgConstraintRow, PgInheritsRow, PgLanguageRow,
+    PgOperatorRow, PgProcRow, PgRewriteRow, PgStatisticRow, PgTypeRow, RECORD_TYPE_OID,
     bootstrap_pg_cast_rows, bootstrap_pg_language_rows, bootstrap_pg_operator_rows,
     bootstrap_pg_proc_rows, builtin_type_rows, proc_oid_for_builtin_aggregate_function,
-    PgInheritsRow,
 };
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{
@@ -111,7 +110,9 @@ pub trait CatalogLookup {
     }
 
     fn proc_row_by_oid(&self, oid: u32) -> Option<PgProcRow> {
-        bootstrap_pg_proc_rows().into_iter().find(|row| row.oid == oid)
+        bootstrap_pg_proc_rows()
+            .into_iter()
+            .find(|row| row.oid == oid)
     }
 
     fn operator_by_name_left_right(

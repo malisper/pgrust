@@ -438,15 +438,11 @@ fn inherited_selected_column_mapping(
         .iter()
         .map(|index| {
             let parent_column = &parent.desc.columns[*index];
-            Ok(member
-                .desc
-                .columns
-                .iter()
-                .position(|child_column| {
-                    !child_column.dropped
-                        && child_column.name.eq_ignore_ascii_case(&parent_column.name)
-                        && child_column.sql_type == parent_column.sql_type
-                }))
+            Ok(member.desc.columns.iter().position(|child_column| {
+                !child_column.dropped
+                    && child_column.name.eq_ignore_ascii_case(&parent_column.name)
+                    && child_column.sql_type == parent_column.sql_type
+            }))
         })
         .collect()
 }

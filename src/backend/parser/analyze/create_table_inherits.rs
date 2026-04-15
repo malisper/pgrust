@@ -29,16 +29,28 @@ pub fn lower_create_table_with_catalog(
     synthetic.elements = merged_columns
         .iter()
         .map(|column| CreateTableElement::Column(column.column.clone()))
-        .chain(stmt.constraints().cloned().map(CreateTableElement::Constraint))
+        .chain(
+            stmt.constraints()
+                .cloned()
+                .map(CreateTableElement::Constraint),
+        )
         .collect();
     synthetic.inherits.clear();
 
     let mut lowered = lower_create_table(&synthetic, catalog)?;
-    for (column, merged) in lowered.relation_desc.columns.iter_mut().zip(merged_columns.iter()) {
+    for (column, merged) in lowered
+        .relation_desc
+        .columns
+        .iter_mut()
+        .zip(merged_columns.iter())
+    {
         column.attinhcount = merged.attinhcount;
         column.attislocal = merged.attislocal;
     }
-    lowered.parent_oids = parents.into_iter().map(|parent| parent.relation_oid).collect();
+    lowered.parent_oids = parents
+        .into_iter()
+        .map(|parent| parent.relation_oid)
+        .collect();
     Ok(lowered)
 }
 
@@ -123,10 +135,16 @@ fn merge_inherited_columns(
         }
     }
 
-    if let Some(conflict) = merged.iter().find(|column| column.conflicting_parent_default) {
+    if let Some(conflict) = merged
+        .iter()
+        .find(|column| column.conflicting_parent_default)
+    {
         return Err(ParseError::UnexpectedToken {
             expected: "compatible inherited column defaults",
-            actual: format!("conflicting inherited defaults for column {}", conflict.column.name),
+            actual: format!(
+                "conflicting inherited defaults for column {}",
+                conflict.column.name
+            ),
         });
     }
 
@@ -142,8 +160,10 @@ fn merge_parent_column(
     if !parent.nullable() {
         ensure_not_null_constraint(&mut merged.column);
     }
-    merged.conflicting_parent_default |=
-        !merge_parent_default(&mut merged.column.default_expr, parent.default_expr.as_deref());
+    merged.conflicting_parent_default |= !merge_parent_default(
+        &mut merged.column.default_expr,
+        parent.default_expr.as_deref(),
+    );
     Ok(())
 }
 
@@ -222,10 +242,7 @@ fn ensure_matching_column_type(
     })
 }
 
-fn merge_parent_default(
-    current: &mut Option<String>,
-    incoming: Option<&str>,
-) -> bool {
+fn merge_parent_default(current: &mut Option<String>, incoming: Option<&str>) -> bool {
     match (current.as_deref(), incoming) {
         (_, None) => true,
         (None, Some(incoming)) => {

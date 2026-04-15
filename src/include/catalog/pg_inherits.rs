@@ -36,7 +36,11 @@ mod tests {
     #[test]
     fn pg_inherits_desc_matches_expected_columns() {
         let desc = pg_inherits_desc();
-        let names: Vec<_> = desc.columns.iter().map(|column| column.name.as_str()).collect();
+        let names: Vec<_> = desc
+            .columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect();
         assert_eq!(
             names,
             vec!["inhrelid", "inhparent", "inhseqno", "inhdetachpending"]
