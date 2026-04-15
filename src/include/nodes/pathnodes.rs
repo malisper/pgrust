@@ -291,6 +291,16 @@ pub enum Path {
         kind: JoinType,
         on: Expr,
     },
+    HashJoin {
+        plan_info: PlanEstimate,
+        left: Box<Path>,
+        right: Box<Path>,
+        kind: JoinType,
+        hash_clauses: Vec<Expr>,
+        outer_hash_keys: Vec<Expr>,
+        inner_hash_keys: Vec<Expr>,
+        join_qual: Option<Expr>,
+    },
     Projection {
         plan_info: PlanEstimate,
         slot_id: usize,
