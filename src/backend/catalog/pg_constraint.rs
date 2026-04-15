@@ -24,19 +24,19 @@ pub fn derived_pg_constraint_rows(
         .map(|(index, column)| {
             let attnum = index.saturating_add(1) as i16;
             PgConstraintRow {
-                // :HACK: NOT NULL constraints are still derived from column metadata rather than
-                // stored as first-class catalog objects. Prefer the persisted OID when the DDL
-                // path allocated one, but keep a deterministic fallback for older catalogs.
                 oid: column
                     .not_null_constraint_oid
                     .unwrap_or_else(|| synthetic_not_null_constraint_oid(relation_oid, attnum)),
-                conname: not_null_constraint_name(relation_name, &column.name),
+                conname: column
+                    .not_null_constraint_name
+                    .clone()
+                    .unwrap_or_else(|| not_null_constraint_name(relation_name, &column.name)),
                 connamespace: namespace_oid,
                 contype: CONSTRAINT_NOTNULL,
                 condeferrable: false,
                 condeferred: false,
                 conenforced: true,
-                convalidated: true,
+                convalidated: column.not_null_constraint_validated,
                 conrelid: relation_oid,
                 contypid: 0,
                 conindid: 0,
@@ -45,6 +45,14 @@ pub fn derived_pg_constraint_rows(
                 confupdtype: ' ',
                 confdeltype: ' ',
                 confmatchtype: ' ',
+                conkey: Some(vec![attnum]),
+                confkey: None,
+                conpfeqop: None,
+                conppeqop: None,
+                conffeqop: None,
+                confdelsetcols: None,
+                conexclop: None,
+                conbin: None,
                 conislocal: true,
                 coninhcount: 0,
                 connoinherit: false,

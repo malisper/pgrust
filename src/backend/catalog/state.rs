@@ -366,6 +366,9 @@ impl Catalog {
             indkey.push(attnum.saturating_add(1) as i16);
             let mut column = column.clone();
             column.not_null_constraint_oid = None;
+            column.not_null_constraint_name = None;
+            column.not_null_constraint_validated = false;
+            column.not_null_primary_key_owned = false;
             column.attrdef_oid = None;
             column.default_expr = None;
             index_columns.push(column);
@@ -462,6 +465,14 @@ impl Catalog {
             confupdtype: ' ',
             confdeltype: ' ',
             confmatchtype: ' ',
+            conkey: index.index_meta.as_ref().map(|meta| meta.indkey.clone()),
+            confkey: None,
+            conpfeqop: None,
+            conppeqop: None,
+            conffeqop: None,
+            confdelsetcols: None,
+            conexclop: None,
+            conbin: None,
             conislocal: true,
             coninhcount: 0,
             connoinherit: false,
@@ -619,6 +630,9 @@ impl Catalog {
         column.dropped = true;
         column.attstattarget = -1;
         column.not_null_constraint_oid = None;
+        column.not_null_constraint_name = None;
+        column.not_null_constraint_validated = false;
+        column.not_null_primary_key_owned = false;
         column.attrdef_oid = None;
         column.default_expr = None;
         column.missing_default_value = None;

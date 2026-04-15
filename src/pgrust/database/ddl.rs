@@ -404,6 +404,9 @@ pub(super) fn validate_alter_table_alter_column_type(
     );
     new_column.attstattarget = current_column.attstattarget;
     new_column.not_null_constraint_oid = current_column.not_null_constraint_oid;
+    new_column.not_null_constraint_name = current_column.not_null_constraint_name.clone();
+    new_column.not_null_constraint_validated = current_column.not_null_constraint_validated;
+    new_column.not_null_primary_key_owned = current_column.not_null_primary_key_owned;
     new_column.attrdef_oid = current_column.attrdef_oid;
     new_column.default_expr = current_column.default_expr.clone();
     new_column.missing_default_value = current_column
