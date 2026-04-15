@@ -37,6 +37,7 @@ pub struct BoundRelation {
     pub relation_oid: u32,
     pub toast: Option<ToastRelationRef>,
     pub namespace_oid: u32,
+    pub owner_oid: u32,
     pub relpersistence: char,
     pub relkind: char,
     pub desc: RelationDesc,

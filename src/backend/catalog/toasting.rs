@@ -174,6 +174,7 @@ pub fn new_relation_create_toast_table(
         parent.rel.db_oid,
         parent.relpersistence,
         't',
+        parent.owner_oid,
     )?;
     catalog.add_depend_row(PgDependRow {
         classid: PG_CLASS_RELATION_OID,
@@ -315,6 +316,7 @@ mod tests {
                 0x7000_0001,
                 0x7000_0001,
                 't',
+                crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
             )
             .unwrap();
 

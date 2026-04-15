@@ -117,8 +117,12 @@ impl Database {
                     waiter: None,
                     interrupts: Arc::clone(&interrupts),
                 };
-                let result =
-                    catalog_guard.create_table_mvcc(table_name.clone(), desc.clone(), &ctx);
+                let result = catalog_guard.create_table_mvcc(
+                    table_name.clone(),
+                    desc.clone(),
+                    self.auth_state(client_id).current_user_oid(),
+                    &ctx,
+                );
                 match result {
                     Err(CatalogError::TableAlreadyExists(name)) if create_stmt.if_not_exists => {
                         Ok(StatementResult::AffectedRows(0))
@@ -132,6 +136,7 @@ impl Database {
                             rel: created.entry.rel,
                             relation_oid: created.entry.relation_oid,
                             namespace_oid: created.entry.namespace_oid,
+                            owner_oid: created.entry.owner_oid,
                             relpersistence: created.entry.relpersistence,
                             relkind: created.entry.relkind,
                             toast: None,
@@ -275,6 +280,7 @@ impl Database {
                 view_name.clone(),
                 desc,
                 namespace_oid_for_relation_name(&view_name),
+                self.auth_state(client_id).current_user_oid(),
                 create_stmt.query_sql.clone(),
                 &referenced_relation_oids.into_iter().collect::<Vec<_>>(),
                 &ctx,
@@ -386,6 +392,7 @@ impl Database {
                     .create_table_mvcc(
                         table_name.clone(),
                         create_relation_desc(&stmt, &catalog)?,
+                        self.auth_state(client_id).current_user_oid(),
                         &write_ctx,
                     )
                     .map_err(map_catalog_error)?;

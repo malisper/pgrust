@@ -32,13 +32,12 @@ use crate::backend::executor::{
 };
 use crate::backend::parser::Statement;
 use crate::backend::parser::{
-    AlterTableAddColumnStatement, AlterTableDropColumnStatement,
-    AlterTableRenameColumnStatement, AlterTableRenameStatement, AnalyzeStatement, CatalogLookup,
-    CommentOnDomainStatement, CommentOnTableStatement, CreateDomainStatement,
-    CreateIndexStatement, CreateTableAsStatement, CreateTableStatement, CreateViewStatement,
-    DropDomainStatement, DropViewStatement, OnCommitAction, ParseError, SqlType,
-    TablePersistence,
-    bind_delete, bind_insert, bind_update, create_relation_desc, lower_create_table,
+    AlterTableAddColumnStatement, AlterTableDropColumnStatement, AlterTableRenameColumnStatement,
+    AlterTableRenameStatement, AnalyzeStatement, CatalogLookup, CommentOnDomainStatement,
+    CommentOnTableStatement, CreateDomainStatement, CreateIndexStatement, CreateTableAsStatement,
+    CreateTableStatement, CreateViewStatement, DropDomainStatement, DropViewStatement,
+    OnCommitAction, ParseError, SqlType, TablePersistence, bind_delete, bind_insert, bind_update,
+    create_relation_desc, lower_create_table,
 };
 use crate::backend::storage::lmgr::{
     TableLockManager, TableLockMode, lock_relations_interruptible, lock_tables_interruptible,
@@ -69,8 +68,9 @@ use crate::pgrust::auth::{AuthCatalog, AuthState};
 use crate::pl::plpgsql::execute_do;
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
 use ddl::{
-    lookup_heap_relation_for_ddl, map_catalog_error, namespace_oid_for_relation_name,
-    reject_relation_with_dependent_views, validate_alter_table_add_column,
+    ensure_can_set_role, ensure_relation_owner, lookup_heap_relation_for_ddl, map_catalog_error,
+    namespace_oid_for_relation_name, reject_relation_with_dependent_views,
+    validate_alter_table_add_column,
 };
 use relation_refs::{collect_direct_relation_oids_from_select, collect_rels_from_planned_stmt};
 use toast::{toast_bindings_from_create_result, toast_bindings_from_temp_relation};
@@ -129,6 +129,7 @@ pub(crate) struct TempCatalogEntry {
 pub(crate) struct TempNamespace {
     pub oid: u32,
     pub name: String,
+    pub owner_oid: u32,
     pub toast_oid: u32,
     pub toast_name: String,
     pub tables: BTreeMap<String, TempCatalogEntry>,
@@ -325,7 +326,11 @@ impl Database {
                     }
                     _ => PUBLIC_NAMESPACE_OID,
                 };
-                Ok((name.to_ascii_lowercase(), object.to_ascii_lowercase(), namespace_oid))
+                Ok((
+                    name.to_ascii_lowercase(),
+                    object.to_ascii_lowercase(),
+                    namespace_oid,
+                ))
             }
             Some(_) => Err(ParseError::UnsupportedQualifiedName(name.to_string())),
             None => Ok((
@@ -343,7 +348,10 @@ impl Database {
         }
     }
 
-    pub(crate) fn domain_type_rows_for_search_path(&self, search_path: &[String]) -> Vec<PgTypeRow> {
+    pub(crate) fn domain_type_rows_for_search_path(
+        &self,
+        search_path: &[String],
+    ) -> Vec<PgTypeRow> {
         let domains = self.domains.read();
         let mut rows = domains
             .values()

@@ -146,6 +146,7 @@ fn main() -> Result<(), ExecError> {
             rel: rel(),
             relation_oid: 16_384,
             namespace_oid: 11,
+            owner_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
             row_type_oid: 16_385,
             reltoastrelid: 0,
             relpersistence: 'p',

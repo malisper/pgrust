@@ -37,6 +37,7 @@ impl Database {
         let namespace = TempNamespace {
             oid: Self::temp_namespace_oid(client_id),
             name: Self::temp_namespace_name(client_id),
+            owner_oid: self.auth_state(client_id).current_user_oid(),
             toast_oid: Self::temp_toast_namespace_oid(client_id),
             toast_name: Self::temp_toast_namespace_name(client_id),
             tables: BTreeMap::new(),
@@ -54,13 +55,18 @@ impl Database {
         let effect = self
             .catalog
             .write()
-            .create_namespace_mvcc(namespace.oid, &namespace.name, &ctx)
+            .create_namespace_mvcc(namespace.oid, &namespace.name, namespace.owner_oid, &ctx)
             .map_err(map_catalog_error)?;
         catalog_effects.push(effect);
         let effect = self
             .catalog
             .write()
-            .create_namespace_mvcc(namespace.toast_oid, &namespace.toast_name, &ctx)
+            .create_namespace_mvcc(
+                namespace.toast_oid,
+                &namespace.toast_name,
+                namespace.owner_oid,
+                &ctx,
+            )
             .map_err(map_catalog_error)?;
         catalog_effects.push(effect);
         {
@@ -78,6 +84,7 @@ impl Database {
                 },
                 relation_oid: namespace.oid,
                 namespace_oid: namespace.oid,
+                owner_oid: namespace.owner_oid,
                 row_type_oid: 0,
                 reltoastrelid: 0,
                 relpersistence: 't',
@@ -133,6 +140,7 @@ impl Database {
                 't',
                 namespace.toast_oid,
                 &namespace.toast_name,
+                self.auth_state(client_id).current_user_oid(),
                 &ctx,
             )
             .map_err(map_catalog_error)?;
@@ -142,6 +150,7 @@ impl Database {
             rel: created.entry.rel,
             relation_oid: created.entry.relation_oid,
             namespace_oid: created.entry.namespace_oid,
+            owner_oid: created.entry.owner_oid,
             row_type_oid: created.entry.row_type_oid,
             reltoastrelid: created.entry.reltoastrelid,
             relpersistence: created.entry.relpersistence,
@@ -392,16 +401,18 @@ impl Database {
             interrupts: self.interrupt_state(client_id),
         };
         let mut effects = Vec::new();
-        if let Ok(effect) =
-            self.catalog
-                .write()
-                .drop_namespace_mvcc(namespace.oid, &namespace.name, &ctx)
-        {
+        if let Ok(effect) = self.catalog.write().drop_namespace_mvcc(
+            namespace.oid,
+            &namespace.name,
+            namespace.owner_oid,
+            &ctx,
+        ) {
             effects.push(effect);
         }
         if let Ok(effect) = self.catalog.write().drop_namespace_mvcc(
             namespace.toast_oid,
             &namespace.toast_name,
+            namespace.owner_oid,
             &ctx,
         ) {
             effects.push(effect);
