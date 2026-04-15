@@ -18,7 +18,7 @@ use crate::include::catalog::{
     REGDICTIONARY_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID,
     TIMESTAMP_TYPE_OID, TSQUERY_ARRAY_TYPE_OID, TSQUERY_TYPE_OID, TSVECTOR_ARRAY_TYPE_OID,
     TSVECTOR_TYPE_OID, VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID,
-    VARCHAR_TYPE_OID,
+    VARCHAR_TYPE_OID, NAME_ARRAY_TYPE_OID, NAME_TYPE_OID,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -184,6 +184,7 @@ fn text_input_cast_rows(first_oid: u32) -> Vec<PgCastRow> {
         TSQUERY_TYPE_OID,
         REGCONFIG_TYPE_OID,
         REGDICTIONARY_TYPE_OID,
+        NAME_TYPE_OID,
         INTERNAL_CHAR_TYPE_OID,
         DATE_TYPE_OID,
         BPCHAR_TYPE_OID,
@@ -248,6 +249,7 @@ fn text_input_array_cast_rows(first_oid: u32) -> Vec<PgCastRow> {
         TSQUERY_ARRAY_TYPE_OID,
         REGCONFIG_ARRAY_TYPE_OID,
         REGDICTIONARY_ARRAY_TYPE_OID,
+        NAME_ARRAY_TYPE_OID,
         INTERNAL_CHAR_ARRAY_TYPE_OID,
         BPCHAR_ARRAY_TYPE_OID,
         VARCHAR_ARRAY_TYPE_OID,
@@ -309,7 +311,19 @@ mod tests {
         }));
         assert!(rows.iter().any(|row| {
             row.castsource == TEXT_TYPE_OID
+                && row.casttarget == NAME_TYPE_OID
+                && row.castcontext == 'e'
+                && row.castmethod == 'i'
+        }));
+        assert!(rows.iter().any(|row| {
+            row.castsource == TEXT_TYPE_OID
                 && row.casttarget == INT4_ARRAY_TYPE_OID
+                && row.castcontext == 'e'
+                && row.castmethod == 'i'
+        }));
+        assert!(rows.iter().any(|row| {
+            row.castsource == TEXT_TYPE_OID
+                && row.casttarget == NAME_ARRAY_TYPE_OID
                 && row.castcontext == 'e'
                 && row.castmethod == 'i'
         }));

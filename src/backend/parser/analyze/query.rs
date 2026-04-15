@@ -2,7 +2,7 @@ use super::*;
 use crate::include::executor::execdesc::CommandType;
 use crate::include::nodes::parsenodes::{JoinTreeNode, Query, RangeTblEntry, RangeTblEntryKind};
 use crate::include::nodes::primnodes::{
-    Aggref, BoolExpr, FuncExpr, OpExpr, ScalarArrayOpExpr, SubLink,
+    Aggref, BoolExpr, FuncExpr, OpExpr, ScalarArrayOpExpr, SubLink, user_attrno,
 };
 use crate::include::nodes::primnodes::{ExprArraySubscript, JoinType, Var};
 
@@ -517,7 +517,7 @@ fn rte_output_exprs(rtindex: usize, columns: &[QueryColumn]) -> Vec<Expr> {
         .map(|(index, column)| {
             Expr::Var(Var {
                 varno: rtindex,
-                varattno: index + 1,
+                varattno: user_attrno(index),
                 varlevelsup: 0,
                 vartype: column.sql_type,
             })

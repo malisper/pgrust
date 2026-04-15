@@ -3,7 +3,7 @@ use crate::backend::commands::explain::format_explain_lines;
 use crate::backend::executor::exec_expr::eval_expr;
 use crate::backend::executor::{ExecError, ExecutorContext};
 use crate::include::nodes::datum::Value;
-use crate::include::nodes::execnodes::{HashState, PlanNode, TupleSlot};
+use crate::include::nodes::execnodes::{HashState, MaterializedRow, PlanNode, SystemVarBinding, TupleSlot};
 
 pub(crate) fn eval_hash_key_exprs(
     exprs: &[crate::include::nodes::primnodes::Expr],
@@ -29,13 +29,18 @@ impl HashState {
 
         let mut table = HashJoinTable::default();
         while let Some(slot) = self.input.exec_proc_node(ctx)? {
-            let mut values = slot.values()?.iter().cloned().collect::<Vec<_>>();
-            Value::materialize_all(&mut values);
-            let mut materialized = TupleSlot::virtual_row(values);
-            let bucket_key = eval_hash_key_exprs(&self.hash_keys, &mut materialized, ctx)?;
+            let mut materialized = MaterializedRow::new(
+                TupleSlot::virtual_row({
+                    let mut values = slot.values()?.iter().cloned().collect::<Vec<_>>();
+                    Value::materialize_all(&mut values);
+                    values
+                }),
+                self.input.current_system_bindings().to_vec(),
+            );
+            let bucket_key = eval_hash_key_exprs(&self.hash_keys, &mut materialized.slot, ctx)?;
             let index = table.entries.len();
             table.entries.push(HashJoinTupleEntry {
-                slot: materialized,
+                row: materialized,
                 bucket_key: bucket_key.clone(),
                 matched: false,
             });
@@ -63,6 +68,9 @@ impl PlanNode for HashState {
 
     fn current_slot(&mut self) -> Option<&mut TupleSlot> {
         None
+    }
+    fn current_system_bindings(&self) -> &[SystemVarBinding] {
+        &[]
     }
 
     fn column_names(&self) -> &[String] {

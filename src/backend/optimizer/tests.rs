@@ -4,7 +4,7 @@ use crate::include::nodes::datum::Value;
 use crate::include::nodes::pathnodes::{Path, PathKey, PathTarget, RelOptInfo, RelOptKind};
 use crate::include::nodes::plannodes::{Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
-    Expr, JoinType, OpExpr, OpExprKind, OrderByEntry, QueryColumn, TargetEntry, Var,
+    AttrNumber, Expr, JoinType, OpExpr, OpExprKind, OrderByEntry, QueryColumn, TargetEntry, Var,
 };
 
 fn int4() -> SqlType {
@@ -18,7 +18,7 @@ fn bool_ty() -> SqlType {
 fn var(varno: usize, attno: usize) -> crate::include::nodes::primnodes::Expr {
     crate::include::nodes::primnodes::Expr::Var(Var {
         varno,
-        varattno: attno,
+        varattno: attno as AttrNumber,
         varlevelsup: 0,
         vartype: int4(),
     })

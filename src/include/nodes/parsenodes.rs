@@ -1230,6 +1230,7 @@ impl PartialEq<RawTypeName> for SqlType {
 pub struct UpdateStatement {
     pub with: Vec<CommonTableExpr>,
     pub table_name: String,
+    pub only: bool,
     pub assignments: Vec<Assignment>,
     pub where_clause: Option<SqlExpr>,
 }
@@ -1238,6 +1239,7 @@ pub struct UpdateStatement {
 pub struct DeleteStatement {
     pub with: Vec<CommonTableExpr>,
     pub table_name: String,
+    pub only: bool,
     pub where_clause: Option<SqlExpr>,
 }
 

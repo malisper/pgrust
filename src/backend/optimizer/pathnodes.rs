@@ -8,7 +8,7 @@ use crate::include::nodes::plannodes::{Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
     AggAccum, Aggref, BoolExpr, Expr, ExprArraySubscript, FuncExpr, JoinType, OpExpr, OrderByEntry,
     ProjectSetTarget, QueryColumn, ScalarArrayOpExpr, SetReturningCall, SubLinkType, TargetEntry,
-    Var,
+    Var, attrno_index, is_system_attr, user_attrno,
 };
 
 // :HACK: Planner-generated slot Vars still share the same Var identity space as parse-time
@@ -136,7 +136,7 @@ impl Path {
             } => targets
                 .iter()
                 .enumerate()
-                .map(|(index, target)| slot_var(*slot_id, index + 1, target.sql_type))
+                .map(|(index, target)| slot_var(*slot_id, user_attrno(index), target.sql_type))
                 .collect(),
             Self::Aggregate {
                 slot_id,
@@ -159,10 +159,10 @@ impl Path {
                 .enumerate()
                 .map(|(index, target)| match target {
                     ProjectSetTarget::Scalar(entry) => {
-                        slot_var(*slot_id, index + 1, entry.sql_type)
+                        slot_var(*slot_id, user_attrno(index), entry.sql_type)
                     }
                     ProjectSetTarget::Set { sql_type, .. } => {
-                        slot_var(*slot_id, index + 1, *sql_type)
+                        slot_var(*slot_id, user_attrno(index), *sql_type)
                     }
                 })
                 .collect(),
@@ -223,11 +223,15 @@ fn slot_output_vars<T>(
     columns
         .iter()
         .enumerate()
-        .map(|(index, column)| slot_var(slot_id, index + 1, sql_type(column)))
+        .map(|(index, column)| slot_var(slot_id, user_attrno(index), sql_type(column)))
         .collect()
 }
 
-fn slot_var(slot_id: usize, attno: usize, vartype: SqlType) -> Expr {
+fn slot_var(
+    slot_id: usize,
+    attno: crate::include::nodes::primnodes::AttrNumber,
+    vartype: SqlType,
+) -> Expr {
     Expr::Var(Var {
         varno: slot_id,
         varattno: attno,
@@ -248,7 +252,7 @@ fn project_pathkeys(
                 .iter()
                 .enumerate()
                 .find(|(_, target)| target.expr == key.expr)
-                .map(|(index, target)| slot_var(slot_id, index + 1, target.sql_type))
+                .map(|(index, target)| slot_var(slot_id, user_attrno(index), target.sql_type))
                 .unwrap_or_else(|| key.expr.clone());
             PathKey {
                 expr,
@@ -266,12 +270,12 @@ pub(super) fn aggregate_output_vars(
 ) -> Vec<Expr> {
     let mut vars = Vec::with_capacity(group_by.len() + accumulators.len());
     for (index, expr) in group_by.iter().enumerate() {
-        vars.push(slot_var(slot_id, index + 1, expr_sql_type(expr)));
+        vars.push(slot_var(slot_id, user_attrno(index), expr_sql_type(expr)));
     }
     for (index, accum) in accumulators.iter().enumerate() {
         vars.push(slot_var(
             slot_id,
-            group_by.len() + index + 1,
+            user_attrno(group_by.len() + index),
             accum.sql_type,
         ));
     }
@@ -571,21 +575,34 @@ fn rewrite_expr_for_input_path(expr: Expr, path: &Path, layout: &[Expr]) -> Expr
             ..
         } => {
             let input_layout = input.output_vars();
+            let passthrough_boundary = targets.len() == input_layout.len()
+                && targets
+                    .iter()
+                    .zip(input_layout.iter())
+                    .all(|(target, expr)| target.expr == *expr);
             if let Some((index, target)) = targets
                 .iter()
                 .enumerate()
                 .find(|(_, target)| target.expr == expr)
             {
-                slot_var(*slot_id, index + 1, target.sql_type)
+                slot_var(*slot_id, user_attrno(index), target.sql_type)
             } else {
                 let rewritten_input_expr =
                     rewrite_semantic_expr_for_path(expr.clone(), input, &input_layout);
+                if passthrough_boundary
+                    && is_synthetic_slot_id(*slot_id)
+                    && let Some(index) = input_layout
+                        .iter()
+                        .position(|candidate| *candidate == rewritten_input_expr)
+                {
+                    return slot_var(*slot_id, user_attrno(index), targets[index].sql_type);
+                }
                 if let Some((index, target)) = targets.iter().enumerate().find(|(_, target)| {
                     target.expr == rewritten_input_expr
                         || rewrite_semantic_expr_for_path(target.expr.clone(), input, &input_layout)
                             == rewritten_input_expr
                 }) {
-                    slot_var(*slot_id, index + 1, target.sql_type)
+                    slot_var(*slot_id, user_attrno(index), target.sql_type)
                 } else {
                     rewrite_expr_against_layout(expr, layout)
                 }
@@ -1039,6 +1056,7 @@ pub(super) fn lower_expr_to_plan_layout(expr: Expr, layout: &[Expr]) -> Expr {
     }
     if let Expr::Var(var) = &expr
         && var.varlevelsup == 0
+        && !is_system_attr(var.varattno)
         && let Some(index) = layout.iter().position(|candidate| match candidate {
             Expr::Var(candidate_var) => {
                 candidate_var.varlevelsup == 0
@@ -1051,10 +1069,14 @@ pub(super) fn lower_expr_to_plan_layout(expr: Expr, layout: &[Expr]) -> Expr {
         return Expr::Column(index);
     }
     match expr {
-        Expr::Var(var) if var.varlevelsup > 0 => Expr::OuterColumn {
-            depth: var.varlevelsup - 1,
-            index: var.varattno.saturating_sub(1),
-        },
+        Expr::Var(var) if var.varlevelsup > 0 && !is_system_attr(var.varattno) => {
+            Expr::OuterColumn {
+                depth: var.varlevelsup - 1,
+                index: attrno_index(var.varattno)
+                    .expect("outer Vars lowered to plan layout must reference user columns"),
+            }
+        }
+        Expr::Var(var) if is_system_attr(var.varattno) => Expr::Var(var),
         Expr::Var(var) => panic!(
             "semantic Var {var:?} was not rewritten against path layout {layout:?} before create_plan"
         ),

@@ -42,7 +42,7 @@ pub struct PreparedInsert {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BoundUpdateStatement {
+pub struct BoundUpdateTarget {
     pub relation_name: String,
     pub rel: RelFileLocator,
     pub relation_oid: u32,
@@ -54,17 +54,28 @@ pub struct BoundUpdateStatement {
     pub indexes: Vec<BoundIndexRelation>,
     pub assignments: Vec<BoundAssignment>,
     pub predicate: Option<Expr>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundUpdateStatement {
+    pub targets: Vec<BoundUpdateTarget>,
     pub subplans: Vec<Plan>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BoundDeleteStatement {
+pub struct BoundDeleteTarget {
+    pub relation_name: String,
     pub rel: RelFileLocator,
     pub relation_oid: u32,
     pub toast: Option<ToastRelationRef>,
     pub desc: RelationDesc,
     pub row_source: BoundModifyRowSource,
     pub predicate: Option<Expr>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundDeleteStatement {
+    pub targets: Vec<BoundDeleteTarget>,
     pub subplans: Vec<Plan>,
 }
 
@@ -97,6 +108,125 @@ fn first_toast_index(
         .index_relations_for_heap(toast.relation_oid)
         .into_iter()
         .next()
+}
+
+fn relation_display_name(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+    fallback: &str,
+) -> String {
+    catalog
+        .class_row_by_oid(relation_oid)
+        .map(|row| row.relname)
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+fn inheritance_translation_layout(parent_desc: &RelationDesc, child_desc: &RelationDesc) -> Vec<Expr> {
+    parent_desc
+        .columns
+        .iter()
+        .map(|parent_column| {
+            child_desc
+                .columns
+                .iter()
+                .enumerate()
+                .find(|(_, child_column)| {
+                    !child_column.dropped
+                        && child_column.name.eq_ignore_ascii_case(&parent_column.name)
+                        && child_column.sql_type == parent_column.sql_type
+                })
+                .map(|(index, _)| Expr::Column(index))
+                .unwrap_or(Expr::Const(Value::Null))
+        })
+        .collect()
+}
+
+fn translated_child_column_index(
+    parent_index: usize,
+    layout: &[Expr],
+    relation_name: &str,
+) -> Result<usize, ParseError> {
+    match layout.get(parent_index) {
+        Some(Expr::Column(index)) => Ok(*index),
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "inherited target column present in child relation",
+            actual: format!(
+                "column {} has no compatible inherited mapping in relation \"{}\"",
+                parent_index + 1,
+                relation_name
+            ),
+        }),
+    }
+}
+
+fn build_update_target(
+    base_relation_name: &str,
+    parent_desc: &RelationDesc,
+    parent_assignments: &[BoundAssignment],
+    parent_predicate: Option<&Expr>,
+    child: &BoundRelation,
+    catalog: &dyn CatalogLookup,
+) -> Result<BoundUpdateTarget, ParseError> {
+    let relation_name = relation_display_name(catalog, child.relation_oid, base_relation_name);
+    let layout = inheritance_translation_layout(parent_desc, &child.desc);
+    let indexes = catalog.index_relations_for_heap(child.relation_oid);
+    let predicate = parent_predicate.map(|expr| rewrite_expr_columns(expr.clone(), &layout));
+    let assignments = parent_assignments
+        .iter()
+        .map(|assignment| {
+            Ok(BoundAssignment {
+                column_index: translated_child_column_index(
+                    assignment.column_index,
+                    &layout,
+                    &relation_name,
+                )?,
+                subscripts: assignment.subscripts.clone(),
+                expr: rewrite_expr_columns(assignment.expr.clone(), &layout),
+            })
+        })
+        .collect::<Result<Vec<_>, ParseError>>()?;
+
+    Ok(BoundUpdateTarget {
+        relation_name: relation_name.clone(),
+        rel: child.rel,
+        relation_oid: child.relation_oid,
+        toast: child.toast,
+        toast_index: first_toast_index(catalog, child.toast),
+        desc: child.desc.clone(),
+        relation_constraints: bind_relation_constraints(
+            Some(&relation_name),
+            child.relation_oid,
+            &child.desc,
+            catalog,
+        )?,
+        row_source: choose_modify_row_source(predicate.as_ref(), &indexes),
+        indexes,
+        assignments,
+        predicate,
+    })
+}
+
+fn build_delete_target(
+    base_relation_name: &str,
+    parent_desc: &RelationDesc,
+    parent_predicate: Option<&Expr>,
+    child: &BoundRelation,
+    catalog: &dyn CatalogLookup,
+) -> BoundDeleteTarget {
+    let relation_name = relation_display_name(catalog, child.relation_oid, base_relation_name);
+    let layout = inheritance_translation_layout(parent_desc, &child.desc);
+    let predicate = parent_predicate.map(|expr| rewrite_expr_columns(expr.clone(), &layout));
+    let indexes = catalog.index_relations_for_heap(child.relation_oid);
+
+    BoundDeleteTarget {
+        relation_name,
+        rel: child.rel,
+        relation_oid: child.relation_oid,
+        toast: child.toast,
+        desc: child.desc.clone(),
+        row_source: choose_modify_row_source(predicate.as_ref(), &indexes),
+        predicate,
+    }
 }
 
 fn bind_insert_column_defaults(
@@ -314,58 +444,59 @@ pub fn bind_update(
 ) -> Result<BoundUpdateStatement, ParseError> {
     let local_ctes = bind_ctes(&stmt.with, catalog, &[], None, &[], &[])?;
     let entry = lookup_relation(catalog, &stmt.table_name)?;
-    if catalog.has_subclass(entry.relation_oid) {
-        return Err(ParseError::FeatureNotSupported(
-            "UPDATE on inherited parents is not supported yet".into(),
-        ));
-    }
     let scope = scope_for_relation(Some(&stmt.table_name), &entry.desc);
-    let indexes = catalog.index_relations_for_heap(entry.relation_oid);
     let predicate = stmt
         .where_clause
         .as_ref()
         .map(|expr| bind_expr_with_outer_and_ctes(expr, &scope, catalog, &[], None, &local_ctes))
         .transpose()?;
+    let assignments = stmt
+        .assignments
+        .iter()
+        .map(|assignment| {
+            Ok(BoundAssignment {
+                column_index: resolve_column(&scope, &assignment.target.column)?,
+                subscripts: bind_assignment_subscripts(
+                    &assignment.target.subscripts,
+                    &scope,
+                    catalog,
+                    &local_ctes,
+                )?,
+                expr: bind_expr_with_outer_and_ctes(
+                    &assignment.expr,
+                    &scope,
+                    catalog,
+                    &[],
+                    None,
+                    &local_ctes,
+                )?,
+            })
+        })
+        .collect::<Result<Vec<_>, ParseError>>()?;
+
+    let targets = if stmt.only {
+        vec![entry.relation_oid]
+    } else {
+        catalog.find_all_inheritors(entry.relation_oid)
+    }
+    .into_iter()
+    .map(|relation_oid| {
+        let child = catalog
+            .relation_by_oid(relation_oid)
+            .ok_or_else(|| ParseError::UnknownTable(stmt.table_name.clone()))?;
+        build_update_target(
+            &stmt.table_name,
+            &entry.desc,
+            &assignments,
+            predicate.as_ref(),
+            &child,
+            catalog,
+        )
+    })
+    .collect::<Result<Vec<_>, ParseError>>()?;
 
     Ok(BoundUpdateStatement {
-        relation_name: stmt.table_name.clone(),
-        rel: entry.rel,
-        relation_oid: entry.relation_oid,
-        toast: entry.toast,
-        toast_index: first_toast_index(catalog, entry.toast),
-        desc: entry.desc.clone(),
-        relation_constraints: bind_relation_constraints(
-            Some(&stmt.table_name),
-            entry.relation_oid,
-            &entry.desc,
-            catalog,
-        )?,
-        row_source: choose_modify_row_source(predicate.as_ref(), &indexes),
-        indexes,
-        assignments: stmt
-            .assignments
-            .iter()
-            .map(|assignment| {
-                Ok(BoundAssignment {
-                    column_index: resolve_column(&scope, &assignment.target.column)?,
-                    subscripts: bind_assignment_subscripts(
-                        &assignment.target.subscripts,
-                        &scope,
-                        catalog,
-                        &local_ctes,
-                    )?,
-                    expr: bind_expr_with_outer_and_ctes(
-                        &assignment.expr,
-                        &scope,
-                        catalog,
-                        &[],
-                        None,
-                        &local_ctes,
-                    )?,
-                })
-            })
-            .collect::<Result<Vec<_>, ParseError>>()?,
-        predicate,
+        targets,
         subplans: Vec::new(),
     })
 }
@@ -418,26 +549,35 @@ pub fn bind_delete(
 ) -> Result<BoundDeleteStatement, ParseError> {
     let local_ctes = bind_ctes(&stmt.with, catalog, &[], None, &[], &[])?;
     let entry = lookup_relation(catalog, &stmt.table_name)?;
-    if catalog.has_subclass(entry.relation_oid) {
-        return Err(ParseError::FeatureNotSupported(
-            "DELETE on inherited parents is not supported yet".into(),
-        ));
-    }
     let scope = scope_for_relation(Some(&stmt.table_name), &entry.desc);
     let predicate = stmt
         .where_clause
         .as_ref()
         .map(|expr| bind_expr_with_outer_and_ctes(expr, &scope, catalog, &[], None, &local_ctes))
         .transpose()?;
-    let indexes = catalog.index_relations_for_heap(entry.relation_oid);
+
+    let targets = if stmt.only {
+        vec![entry.relation_oid]
+    } else {
+        catalog.find_all_inheritors(entry.relation_oid)
+    }
+    .into_iter()
+    .map(|relation_oid| {
+        let child = catalog
+            .relation_by_oid(relation_oid)
+            .ok_or_else(|| ParseError::UnknownTable(stmt.table_name.clone()))?;
+        Ok(build_delete_target(
+            &stmt.table_name,
+            &entry.desc,
+            predicate.as_ref(),
+            &child,
+            catalog,
+        ))
+    })
+    .collect::<Result<Vec<_>, ParseError>>()?;
 
     Ok(BoundDeleteStatement {
-        rel: entry.rel,
-        relation_oid: entry.relation_oid,
-        toast: entry.toast,
-        desc: entry.desc.clone(),
-        row_source: choose_modify_row_source(predicate.as_ref(), &indexes),
-        predicate,
+        targets,
         subplans: Vec::new(),
     })
 }

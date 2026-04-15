@@ -1,6 +1,8 @@
 use crate::include::nodes::parsenodes::{JoinTreeNode, Query, RangeTblEntryKind};
 use crate::include::nodes::pathnodes::{PlannerInfo, RestrictInfo, SpecialJoinInfo};
-use crate::include::nodes::primnodes::{BoolExprType, Expr, ExprArraySubscript, JoinType};
+use crate::include::nodes::primnodes::{
+    BoolExprType, Expr, ExprArraySubscript, JoinType, attrno_index,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AncestorSide {
@@ -281,7 +283,7 @@ pub(super) fn flatten_join_alias_vars_query(query: &Query, expr: Expr) -> Expr {
                 return Expr::Var(var);
             };
             joinaliasvars
-                .get(var.varattno.saturating_sub(1))
+                .get(attrno_index(var.varattno).unwrap_or(usize::MAX))
                 .cloned()
                 .map(|expr| flatten_join_alias_vars_query(query, expr))
                 .unwrap_or(Expr::Var(var))

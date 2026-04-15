@@ -38,6 +38,7 @@ pub struct TupleSlot {
     /// the slot is created; shared via Rc so future scan types can share it.
     pub(crate) decoder: Option<Rc<crate::backend::executor::exec_tuples::CompiledTupleDecoder>>,
     pub(crate) toast: Option<ToastFetchContext>,
+    pub(crate) table_oid: Option<u32>,
 }
 
 #[derive(Clone)]
@@ -47,6 +48,25 @@ pub(crate) struct ToastFetchContext {
     pub(crate) txns: Arc<RwLock<TransactionManager>>,
     pub(crate) snapshot: Snapshot,
     pub(crate) client_id: ClientId,
+}
+
+/// Executor-local binding for system Vars like `tableoid`.
+///
+/// PostgreSQL resolves these against dedicated scan/outer/inner slots rather
+/// than against projected user-column layouts. pgrust does not mirror that
+/// slot/opcode machinery exactly yet, so upper executor nodes carry the active
+/// base-relation bindings explicitly and `eval_expr` consults them when
+/// evaluating a system Var.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SystemVarBinding {
+    pub(crate) varno: usize,
+    pub(crate) table_oid: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaterializedRow {
+    pub(crate) slot: TupleSlot,
+    pub(crate) system_bindings: Vec<SystemVarBinding>,
 }
 
 /// Describes how the slot's underlying tuple data is stored.
@@ -148,6 +168,7 @@ impl Clone for TupleSlot {
             decode_offset: 0,
             decoder: None,
             toast: self.toast.clone(),
+            table_oid: self.table_oid,
         }
     }
 }
@@ -187,6 +208,19 @@ pub trait PlanNode: std::fmt::Debug {
     /// Used by filter to return a reference to the child's slot
     /// after evaluating the predicate.
     fn current_slot(&mut self) -> Option<&mut TupleSlot>;
+    fn current_system_bindings(&self) -> &[SystemVarBinding];
+    fn materialize_current_row(&mut self) -> Result<MaterializedRow, ExecError> {
+        let bindings = self.current_system_bindings().to_vec();
+        let slot = self.current_slot().ok_or(ExecError::DetailedError {
+            message: "executor node has no current slot to materialize".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        })?;
+        let mut values = slot.values()?.iter().cloned().collect::<Vec<_>>();
+        Value::materialize_all(&mut values);
+        Ok(MaterializedRow::new(TupleSlot::virtual_row(values), bindings))
+    }
 
     /// Output column names for this node. Fixed for the lifetime of the query.
     fn column_names(&self) -> &[String];
@@ -205,6 +239,15 @@ pub trait PlanNode: std::fmt::Debug {
 /// Executor plan state — a trait object for dynamic dispatch.
 pub type PlanState = Box<dyn PlanNode>;
 
+impl MaterializedRow {
+    pub(crate) fn new(slot: TupleSlot, system_bindings: Vec<SystemVarBinding>) -> Self {
+        Self {
+            slot,
+            system_bindings,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct ResultState {
     pub(crate) emitted: bool,
@@ -215,10 +258,12 @@ pub struct ResultState {
 
 #[derive(Debug)]
 pub struct AppendState {
+    pub(crate) source_id: usize,
     pub(crate) children: Vec<PlanState>,
     pub(crate) current_child: usize,
     pub(crate) column_names: Vec<String>,
     pub(crate) slot: TupleSlot,
+    pub(crate) current_bindings: Vec<SystemVarBinding>,
     pub(crate) plan_info: PlanEstimate,
     pub(crate) stats: NodeExecStats,
 }
@@ -240,6 +285,9 @@ pub struct SeqScanState {
     /// Avoids a separate FilterState and its per-tuple vtable dispatch.
     pub(crate) qual: Option<crate::backend::executor::expr::CompiledPredicate>,
     pub(crate) qual_expr: Option<Expr>,
+    pub(crate) source_id: usize,
+    pub(crate) relation_oid: u32,
+    pub(crate) current_bindings: Vec<SystemVarBinding>,
     pub(crate) plan_info: PlanEstimate,
     pub(crate) stats: NodeExecStats,
 }
@@ -267,6 +315,9 @@ pub struct IndexScanState {
     pub(crate) direction: ScanDirection,
     pub(crate) scan: Option<IndexScanDesc>,
     pub(crate) slot: TupleSlot,
+    pub(crate) source_id: usize,
+    pub(crate) relation_oid: u32,
+    pub(crate) current_bindings: Vec<SystemVarBinding>,
     pub(crate) plan_info: PlanEstimate,
     pub(crate) stats: NodeExecStats,
 }
@@ -307,11 +358,11 @@ pub struct NestedLoopJoinState {
     pub(crate) join_qual: Vec<Expr>,
     pub(crate) qual: Vec<Expr>,
     pub(crate) combined_names: Vec<String>,
-    pub(crate) left_rows: Option<Vec<TupleSlot>>,
-    pub(crate) right_rows: Option<Vec<TupleSlot>>,
+    pub(crate) left_rows: Option<Vec<MaterializedRow>>,
+    pub(crate) right_rows: Option<Vec<MaterializedRow>>,
     pub(crate) right_matched: Option<Vec<bool>>,
-    pub(crate) current_left: Option<TupleSlot>,
-    pub(crate) current_right: Option<TupleSlot>,
+    pub(crate) current_left: Option<MaterializedRow>,
+    pub(crate) current_right: Option<MaterializedRow>,
     pub(crate) current_left_matched: bool,
     pub(crate) left_index: usize,
     pub(crate) right_index: usize,
@@ -319,6 +370,7 @@ pub struct NestedLoopJoinState {
     pub(crate) right_width: usize,
     pub(crate) unmatched_right_index: usize,
     pub(crate) slot: TupleSlot,
+    pub(crate) current_bindings: Vec<SystemVarBinding>,
     pub(crate) plan_info: PlanEstimate,
     pub(crate) stats: NodeExecStats,
 }
@@ -347,12 +399,13 @@ pub struct HashJoinState {
     pub(crate) left_width: usize,
     pub(crate) right_width: usize,
     pub(crate) phase: HashJoinPhase,
-    pub(crate) current_outer: Option<TupleSlot>,
+    pub(crate) current_outer: Option<MaterializedRow>,
     pub(crate) current_bucket_entries: Vec<usize>,
     pub(crate) current_bucket_index: usize,
     pub(crate) matched_outer: bool,
     pub(crate) unmatched_inner_index: usize,
     pub(crate) slot: TupleSlot,
+    pub(crate) current_bindings: Vec<SystemVarBinding>,
     pub(crate) plan_info: PlanEstimate,
     pub(crate) stats: NodeExecStats,
 }
@@ -363,6 +416,7 @@ pub struct ProjectionState {
     pub(crate) targets: Vec<TargetEntry>,
     pub(crate) column_names: Vec<String>,
     pub(crate) slot: TupleSlot,
+    pub(crate) current_bindings: Vec<SystemVarBinding>,
     pub(crate) plan_info: PlanEstimate,
     pub(crate) stats: NodeExecStats,
 }
@@ -371,8 +425,9 @@ pub struct ProjectionState {
 pub struct OrderByState {
     pub(crate) input: PlanState,
     pub(crate) items: Vec<OrderByEntry>,
-    pub(crate) rows: Option<Vec<TupleSlot>>,
+    pub(crate) rows: Option<Vec<MaterializedRow>>,
     pub(crate) next_index: usize,
+    pub(crate) current_bindings: Vec<SystemVarBinding>,
     pub(crate) plan_info: PlanEstimate,
     pub(crate) stats: NodeExecStats,
 }
@@ -395,13 +450,14 @@ pub struct AggregateState {
     pub(crate) accumulators: Vec<AggAccum>,
     pub(crate) having: Option<Expr>,
     pub(crate) output_columns: Vec<String>,
-    pub(crate) result_rows: Option<Vec<TupleSlot>>,
+    pub(crate) result_rows: Option<Vec<MaterializedRow>>,
     pub(crate) next_index: usize,
     /// Reusable buffer for group-by key evaluation, allocated once at plan start.
     pub(crate) key_buffer: Vec<Value>,
     /// Compiled transition functions resolved at plan time, like PG's
     /// aggregate transfn pointers. Avoids per-tuple enum dispatch.
     pub(crate) trans_fns: Vec<fn(&mut AccumState, &[Value])>,
+    pub(crate) current_bindings: Vec<SystemVarBinding>,
     pub(crate) plan_info: PlanEstimate,
     pub(crate) stats: NodeExecStats,
 }
@@ -410,8 +466,9 @@ pub struct AggregateState {
 pub struct ValuesState {
     pub(crate) rows: Vec<Vec<Expr>>,
     pub(crate) output_columns: Vec<String>,
-    pub(crate) result_rows: Option<Vec<TupleSlot>>,
+    pub(crate) result_rows: Option<Vec<MaterializedRow>>,
     pub(crate) next_index: usize,
+    pub(crate) current_bindings: Vec<SystemVarBinding>,
     pub(crate) plan_info: PlanEstimate,
     pub(crate) stats: NodeExecStats,
 }
@@ -420,8 +477,9 @@ pub struct ValuesState {
 pub struct FunctionScanState {
     pub(crate) call: SetReturningCall,
     pub(crate) output_columns: Vec<String>,
-    pub(crate) rows: Option<Vec<TupleSlot>>,
+    pub(crate) rows: Option<Vec<MaterializedRow>>,
     pub(crate) next_index: usize,
+    pub(crate) current_bindings: Vec<SystemVarBinding>,
     pub(crate) plan_info: PlanEstimate,
     pub(crate) stats: NodeExecStats,
 }
@@ -431,11 +489,12 @@ pub struct ProjectSetState {
     pub(crate) input: PlanState,
     pub(crate) targets: Vec<ProjectSetTarget>,
     pub(crate) output_columns: Vec<String>,
-    pub(crate) current_input: Option<TupleSlot>,
+    pub(crate) current_input: Option<MaterializedRow>,
     pub(crate) current_srf_rows: Vec<Vec<Value>>,
     pub(crate) current_row_count: usize,
     pub(crate) next_index: usize,
     pub(crate) slot: TupleSlot,
+    pub(crate) current_bindings: Vec<SystemVarBinding>,
     pub(crate) plan_info: PlanEstimate,
     pub(crate) stats: NodeExecStats,
 }
@@ -460,6 +519,7 @@ impl TupleSlot {
             decode_offset: 0,
             decoder: None,
             toast: None,
+            table_oid: None,
         }
     }
 
@@ -472,6 +532,7 @@ impl TupleSlot {
             decode_offset: 0,
             decoder: None,
             toast: None,
+            table_oid: None,
         }
     }
 
@@ -483,6 +544,7 @@ impl TupleSlot {
             decode_offset: 0,
             decoder: None,
             toast: None,
+            table_oid: None,
         }
     }
 
@@ -537,6 +599,7 @@ impl TupleSlot {
             decode_offset: 0,
             decoder: None,
             toast: self.toast,
+            table_oid: self.table_oid,
         })
     }
 

@@ -385,10 +385,10 @@ impl CatalogStore {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        let mut old_rows = PhysicalCatalogRows::default();
-        add_catalog_entry_rows(&mut old_rows, &catalog, &child_name, &child_entry);
+        let old_child_rows = physical_catalog_rows_for_catalog_entry(&catalog, &child_name, &child_entry);
+        let mut old_parent_rows = PhysicalCatalogRows::default();
         for (parent_name, parent_entry) in &parent_entries {
-            add_catalog_entry_rows(&mut old_rows, &catalog, parent_name, parent_entry);
+            add_catalog_entry_rows(&mut old_parent_rows, &catalog, parent_name, parent_entry);
         }
 
         catalog.attach_inheritance(relation_oid, parent_oids)?;
@@ -398,26 +398,29 @@ impl CatalogStore {
             .get_by_oid(relation_oid)
             .cloned()
             .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
-        let mut new_rows = PhysicalCatalogRows::default();
-        add_catalog_entry_rows(&mut new_rows, &catalog, &child_name, &child_entry);
+        let new_child_rows = physical_catalog_rows_for_catalog_entry(&catalog, &child_name, &child_entry);
+        let mut new_parent_rows = PhysicalCatalogRows::default();
         for (parent_name, _) in &parent_entries {
             let parent_entry = catalog
                 .get(parent_name)
                 .cloned()
                 .ok_or_else(|| CatalogError::UnknownTable(parent_name.clone()))?;
-            add_catalog_entry_rows(&mut new_rows, &catalog, parent_name, &parent_entry);
+            add_catalog_entry_rows(&mut new_parent_rows, &catalog, parent_name, &parent_entry);
         }
 
-        let kinds = vec![
-            BootstrapCatalogKind::PgClass,
+        let parent_kinds = vec![BootstrapCatalogKind::PgClass];
+        let child_kinds = vec![
             BootstrapCatalogKind::PgDepend,
             BootstrapCatalogKind::PgInherits,
         ];
-        delete_catalog_rows_subset_mvcc(ctx, &old_rows, 1, &kinds)?;
-        insert_catalog_rows_subset_mvcc(ctx, &new_rows, 1, &kinds)?;
+        delete_catalog_rows_subset_mvcc(ctx, &old_parent_rows, 1, &parent_kinds)?;
+        delete_catalog_rows_subset_mvcc(ctx, &old_child_rows, 1, &child_kinds)?;
+        insert_catalog_rows_subset_mvcc(ctx, &new_parent_rows, 1, &parent_kinds)?;
+        insert_catalog_rows_subset_mvcc(ctx, &new_child_rows, 1, &child_kinds)?;
 
         let mut effect = CatalogMutationEffect::default();
-        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_catalog_kinds(&mut effect, &parent_kinds);
+        effect_record_catalog_kinds(&mut effect, &child_kinds);
         effect_record_oid(&mut effect.relation_oids, relation_oid);
         for parent_oid in parent_oids {
             effect_record_oid(&mut effect.relation_oids, *parent_oid);
@@ -907,6 +910,7 @@ impl CatalogStore {
         let oids = drop_relation_oids_by_oid(&catalog, relation_oid)?;
         let mut dropped = Vec::with_capacity(oids.len());
         let mut rows = PhysicalCatalogRows::default();
+        let mut inherit_rows = PhysicalCatalogRows::default();
         for oid in oids {
             let Some((name, entry)) = catalog
                 .entries()
@@ -915,10 +919,12 @@ impl CatalogStore {
             else {
                 continue;
             };
-            extend_physical_catalog_rows(
-                &mut rows,
-                physical_catalog_rows_for_catalog_entry(&catalog, &name, &entry),
-            );
+            inherit_rows
+                .inherits
+                .extend(catalog.inheritance_parents(entry.relation_oid));
+            let mut entry_rows = physical_catalog_rows_for_catalog_entry(&catalog, &name, &entry);
+            entry_rows.inherits.clear();
+            extend_physical_catalog_rows(&mut rows, entry_rows);
             dropped.push(entry);
         }
 
@@ -926,11 +932,18 @@ impl CatalogStore {
         for (name, entry) in &affected_parent_entries {
             add_catalog_entry_rows(&mut old_parent_rows, &catalog, name, entry);
         }
+        let inherit_kinds = vec![BootstrapCatalogKind::PgInherits];
+        if !inherit_rows.inherits.is_empty() {
+            delete_catalog_rows_subset_mvcc(ctx, &inherit_rows, 1, &inherit_kinds)?;
+        }
         for entry in &dropped {
             let _ = catalog.detach_inheritance(entry.relation_oid);
         }
 
-        let kinds = drop_relation_delete_kinds();
+        let kinds = drop_relation_delete_kinds()
+            .into_iter()
+            .filter(|kind| *kind != BootstrapCatalogKind::PgInherits)
+            .collect::<Vec<_>>();
         delete_catalog_rows_subset_mvcc(ctx, &rows, 1, &kinds)?;
         let parent_kinds = vec![BootstrapCatalogKind::PgClass];
         let mut new_parent_rows = PhysicalCatalogRows::default();
@@ -946,6 +959,7 @@ impl CatalogStore {
         }
 
         let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &inherit_kinds);
         effect_record_catalog_kinds(&mut effect, &kinds);
         effect_record_catalog_kinds(&mut effect, &parent_kinds);
         for entry in &dropped {

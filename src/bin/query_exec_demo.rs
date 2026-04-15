@@ -142,6 +142,7 @@ fn main() -> Result<(), ExecError> {
             plan_info: pgrust::backend::executor::PlanEstimate::default(),
             input: Box::new(Plan::SeqScan {
                 plan_info: pgrust::backend::executor::PlanEstimate::default(),
+                source_id: 1,
                 rel: rel(),
                 relation_name: "items".into(),
                 relation_oid: 0,
@@ -171,6 +172,8 @@ fn main() -> Result<(), ExecError> {
         client_id: 7,
         next_command_id: 0,
         outer_rows: Vec::new(),
+        outer_system_bindings: Vec::new(),
+        system_bindings: Vec::new(),
         subplans: Vec::new(),
         timed: false,
         catalog: None,

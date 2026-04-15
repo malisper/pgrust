@@ -53,9 +53,19 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
 ) -> Result<Expr, ParseError> {
     Ok(match expr {
         SqlExpr::Column(name) => {
-            match resolve_column_with_outer(scope, outer_scopes, name, grouped_outer)? {
-                ResolvedColumn::Local(index) => Expr::Column(index),
-                ResolvedColumn::Outer { depth, index } => Expr::OuterColumn { depth, index },
+            if let Some(system_column) = resolve_system_column_with_outer(scope, outer_scopes, name)?
+            {
+                Expr::Var(crate::include::nodes::primnodes::Var {
+                    varno: system_column.varno,
+                    varattno: crate::include::nodes::primnodes::TABLE_OID_ATTR_NO,
+                    varlevelsup: system_column.varlevelsup,
+                    vartype: system_column.sql_type,
+                })
+            } else {
+                match resolve_column_with_outer(scope, outer_scopes, name, grouped_outer)? {
+                    ResolvedColumn::Local(index) => Expr::Column(index),
+                    ResolvedColumn::Outer { depth, index } => Expr::OuterColumn { depth, index },
+                }
             }
         }
         SqlExpr::Default => {

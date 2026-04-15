@@ -10,7 +10,7 @@ use crate::include::nodes::pathnodes::{Path, PathKey, PlannerInfo, RestrictInfo}
 use crate::include::nodes::plannodes::PlanEstimate;
 use crate::include::nodes::primnodes::{
     BoolExprType, Expr, ExprArraySubscript, JoinType, OpExprKind, OrderByEntry, ProjectSetTarget,
-    QueryColumn, RelationDesc, TargetEntry, ToastRelationRef,
+    QueryColumn, RelationDesc, TargetEntry, ToastRelationRef, attrno_index,
 };
 
 use super::super::pathnodes::next_synthetic_slot_id;
@@ -94,6 +94,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
             Path::IndexScan {
                 source_id,
                 rel,
+                relation_oid,
                 index_rel,
                 am_oid,
                 toast,
@@ -120,6 +121,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                     plan_info,
                     source_id,
                     rel,
+                    relation_oid,
                     index_rel,
                     am_oid,
                     toast,
@@ -511,6 +513,7 @@ fn try_optimize_access_subtree(plan: Path, catalog: &dyn CatalogLookup) -> Resul
         let candidate = estimate_index_candidate(
             source_id,
             rel,
+            relation_oid,
             toast,
             desc.clone(),
             &stats,
@@ -620,6 +623,7 @@ pub(super) fn estimate_seqscan_candidate(
 pub(super) fn estimate_index_candidate(
     source_id: usize,
     rel: RelFileLocator,
+    relation_oid: u32,
     toast: Option<ToastRelationRef>,
     desc: RelationDesc,
     stats: &RelationStats,
@@ -667,6 +671,7 @@ pub(super) fn estimate_index_candidate(
         plan_info: scan_info,
         source_id,
         rel,
+        relation_oid,
         index_rel: spec.index.rel,
         am_oid: spec.index.index_meta.am_oid,
         toast,
@@ -2194,7 +2199,7 @@ fn index_order_match(
 
 fn expr_column_index(expr: &Expr) -> Option<usize> {
     match expr {
-        Expr::Var(var) if var.varlevelsup == 0 => Some(var.varattno.saturating_sub(1)),
+        Expr::Var(var) if var.varlevelsup == 0 => attrno_index(var.varattno),
         Expr::Column(column) => Some(*column),
         _ => None,
     }

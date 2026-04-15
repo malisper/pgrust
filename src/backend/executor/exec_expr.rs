@@ -75,7 +75,7 @@ use crate::include::catalog::builtin_scalar_function_for_proc_oid;
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue};
 use crate::include::nodes::primnodes::{
     BoolExpr, BoolExprType, FuncExpr, OpExpr, OpExprKind, ScalarArrayOpExpr, ScalarFunctionImpl,
-    SubLinkType,
+    SubLinkType, TABLE_OID_ATTR_NO, attrno_index,
 };
 use crate::pl::plpgsql::execute_user_defined_scalar_function;
 
@@ -101,6 +101,22 @@ fn malformed_expr_error(kind: &str) -> ExecError {
         hint: None,
         sqlstate: "XX000",
     }
+}
+
+fn lookup_system_binding(
+    bindings: &[crate::include::nodes::execnodes::SystemVarBinding],
+    varno: usize,
+) -> Result<Value, ExecError> {
+    bindings
+        .iter()
+        .find(|binding| binding.varno == varno)
+        .map(|binding| Value::Int64(i64::from(binding.table_oid)))
+        .ok_or(ExecError::DetailedError {
+            message: "tableoid is not available for this row".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        })
 }
 
 fn builtin_function_for_expr(funcid: u32) -> Result<BuiltinScalarFunction, ExecError> {
@@ -298,16 +314,34 @@ pub fn eval_expr(
             sqlstate: "XX000",
         }),
         Expr::Var(var) => {
-            if var.varlevelsup > 0 {
+            if var.varlevelsup > 0 && var.varattno == TABLE_OID_ATTR_NO {
                 let depth = var.varlevelsup - 1;
-                let index = var.varattno.saturating_sub(1);
+                ctx.outer_system_bindings
+                    .get(depth)
+                    .ok_or(ExecError::DetailedError {
+                        message: "outer tableoid is not available for this row".into(),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "XX000",
+                    })
+                    .and_then(|bindings| lookup_system_binding(bindings, var.varno))
+            } else if var.varlevelsup > 0 {
+                let depth = var.varlevelsup - 1;
+                let index = attrno_index(var.varattno).ok_or(ExecError::UnboundOuterColumn {
+                    depth,
+                    index: 0,
+                })?;
                 ctx.outer_rows
                     .get(depth)
                     .and_then(|row| row.get(index))
                     .cloned()
                     .ok_or(ExecError::UnboundOuterColumn { depth, index })
+            } else if var.varattno == TABLE_OID_ATTR_NO {
+                lookup_system_binding(&ctx.system_bindings, var.varno)
             } else {
-                let index = var.varattno.saturating_sub(1);
+                let index = attrno_index(var.varattno).ok_or_else(|| {
+                    malformed_expr_error("system attribute outside executor support")
+                })?;
                 let val = slot.get_attr(index)?;
                 Ok(val.clone())
             }
@@ -583,12 +617,19 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
             sqlstate: "0A000",
         }),
         Expr::Var(var) => {
-            if var.varlevelsup == 0 {
-                Ok(slot.get_attr(var.varattno.saturating_sub(1))?.clone())
+            if var.varlevelsup == 0 && var.varattno == TABLE_OID_ATTR_NO {
+                slot.table_oid
+                    .map(|table_oid| Value::Int64(i64::from(table_oid)))
+                    .ok_or_else(|| malformed_expr_error("tableoid in PL/pgSQL"))
+            } else if var.varlevelsup == 0 {
+                let index = attrno_index(var.varattno).ok_or_else(|| {
+                    malformed_expr_error("system attribute outside PL/pgSQL support")
+                })?;
+                Ok(slot.get_attr(index)?.clone())
             } else {
                 Err(ExecError::UnboundOuterColumn {
                     depth: var.varlevelsup - 1,
-                    index: var.varattno.saturating_sub(1),
+                    index: attrno_index(var.varattno).unwrap_or(0),
                 })
             }
         }

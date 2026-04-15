@@ -3,6 +3,7 @@ use crate::include::nodes::pathnodes::{Path, PathKey, PathTarget, PlannerInfo, R
 use crate::include::nodes::plannodes::PlanEstimate;
 use crate::include::nodes::primnodes::{
     AggAccum, Expr, ExprArraySubscript, OrderByEntry, QueryColumn, RelationDesc, TargetEntry, Var,
+    attrno_index, user_attrno,
 };
 
 use super::super::optimize_path;
@@ -11,6 +12,8 @@ use super::super::pathnodes::{
     rewrite_semantic_expr_for_input_path,
 };
 use super::super::{expand_join_rte_vars, expr_relids, flatten_join_alias_vars};
+use super::super::inherit::append_translation;
+use crate::include::nodes::pathnodes::AppendRelInfo;
 
 pub(super) fn pathkeys_to_order_items(pathkeys: &[PathKey]) -> Vec<OrderByEntry> {
     pathkeys
@@ -105,7 +108,7 @@ pub(super) fn normalize_rte_path(
             .map(|(index, column)| {
                 Expr::Var(Var {
                     varno: rtindex,
-                    varattno: index + 1,
+                    varattno: user_attrno(index),
                     varlevelsup: 0,
                     vartype: column.sql_type,
                 })
@@ -215,7 +218,11 @@ pub(super) fn projection_is_identity(path: &Path, targets: &[TargetEntry]) -> bo
         })
 }
 
-fn projection_slot_var(slot_id: usize, attno: usize, vartype: SqlType) -> Expr {
+fn projection_slot_var(
+    slot_id: usize,
+    attno: crate::include::nodes::primnodes::AttrNumber,
+    vartype: SqlType,
+) -> Expr {
     Expr::Var(Var {
         varno: slot_id,
         varattno: attno,
@@ -257,6 +264,146 @@ fn projection_target_matches_expr(target_expr: &Expr, candidate: &Expr) -> bool 
     )
 }
 
+fn path_relids(path: &Path) -> Vec<usize> {
+    match path {
+        Path::Result { .. } => Vec::new(),
+        Path::Append { source_id, .. } => vec![*source_id],
+        Path::SeqScan { source_id, .. } | Path::IndexScan { source_id, .. } => vec![*source_id],
+        Path::Filter { input, .. }
+        | Path::Projection { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::Limit { input, .. }
+        | Path::Aggregate { input, .. }
+        | Path::ProjectSet { input, .. } => path_relids(input),
+        Path::Values { slot_id, .. } | Path::FunctionScan { slot_id, .. } => vec![*slot_id],
+        Path::NestedLoopJoin { left, right, .. } | Path::HashJoin { left, right, .. } => {
+            let mut relids = path_relids(left);
+            relids.extend(path_relids(right));
+            relids.sort_unstable();
+            relids.dedup();
+            relids
+        }
+    }
+}
+
+fn rewrite_appendrel_expr_for_path(root: &PlannerInfo, expr: Expr, path: &Path) -> Expr {
+    let relids = path_relids(path);
+    if relids.len() != 1 {
+        return expr;
+    }
+    append_translation(root, relids[0])
+        .map(|info| rewrite_expr_for_append_rel(expr.clone(), info))
+        .unwrap_or(expr)
+}
+
+fn rewrite_expr_for_append_rel(expr: Expr, info: &AppendRelInfo) -> Expr {
+    match expr {
+        Expr::Var(var) if var.varlevelsup == 0 && var.varno == info.parent_relid => info
+            .translated_vars
+            .get(attrno_index(var.varattno).unwrap_or(usize::MAX))
+            .cloned()
+            .unwrap_or(Expr::Var(var)),
+        Expr::Op(op) => Expr::Op(Box::new(crate::include::nodes::primnodes::OpExpr {
+            args: op
+                .args
+                .into_iter()
+                .map(|arg| rewrite_expr_for_append_rel(arg, info))
+                .collect(),
+            ..*op
+        })),
+        Expr::Bool(bool_expr) => Expr::Bool(Box::new(crate::include::nodes::primnodes::BoolExpr {
+            args: bool_expr
+                .args
+                .into_iter()
+                .map(|arg| rewrite_expr_for_append_rel(arg, info))
+                .collect(),
+            ..*bool_expr
+        })),
+        Expr::Func(func) => Expr::Func(Box::new(crate::include::nodes::primnodes::FuncExpr {
+            args: func
+                .args
+                .into_iter()
+                .map(|arg| rewrite_expr_for_append_rel(arg, info))
+                .collect(),
+            ..*func
+        })),
+        Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(
+            crate::include::nodes::primnodes::ScalarArrayOpExpr {
+                left: Box::new(rewrite_expr_for_append_rel(*saop.left, info)),
+                right: Box::new(rewrite_expr_for_append_rel(*saop.right, info)),
+                ..*saop
+            },
+        )),
+        Expr::Cast(inner, ty) => Expr::Cast(Box::new(rewrite_expr_for_append_rel(*inner, info)), ty),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            case_insensitive,
+            negated,
+        } => Expr::Like {
+            expr: Box::new(rewrite_expr_for_append_rel(*expr, info)),
+            pattern: Box::new(rewrite_expr_for_append_rel(*pattern, info)),
+            escape: escape.map(|expr| Box::new(rewrite_expr_for_append_rel(*expr, info))),
+            case_insensitive,
+            negated,
+        },
+        Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            negated,
+        } => Expr::Similar {
+            expr: Box::new(rewrite_expr_for_append_rel(*expr, info)),
+            pattern: Box::new(rewrite_expr_for_append_rel(*pattern, info)),
+            escape: escape.map(|expr| Box::new(rewrite_expr_for_append_rel(*expr, info))),
+            negated,
+        },
+        Expr::IsNull(inner) => Expr::IsNull(Box::new(rewrite_expr_for_append_rel(*inner, info))),
+        Expr::IsNotNull(inner) => {
+            Expr::IsNotNull(Box::new(rewrite_expr_for_append_rel(*inner, info)))
+        }
+        Expr::IsDistinctFrom(left, right) => Expr::IsDistinctFrom(
+            Box::new(rewrite_expr_for_append_rel(*left, info)),
+            Box::new(rewrite_expr_for_append_rel(*right, info)),
+        ),
+        Expr::IsNotDistinctFrom(left, right) => Expr::IsNotDistinctFrom(
+            Box::new(rewrite_expr_for_append_rel(*left, info)),
+            Box::new(rewrite_expr_for_append_rel(*right, info)),
+        ),
+        Expr::Coalesce(left, right) => Expr::Coalesce(
+            Box::new(rewrite_expr_for_append_rel(*left, info)),
+            Box::new(rewrite_expr_for_append_rel(*right, info)),
+        ),
+        Expr::ArrayLiteral {
+            elements,
+            array_type,
+        } => Expr::ArrayLiteral {
+            elements: elements
+                .into_iter()
+                .map(|element| rewrite_expr_for_append_rel(element, info))
+                .collect(),
+            array_type,
+        },
+        Expr::ArraySubscript { array, subscripts } => Expr::ArraySubscript {
+            array: Box::new(rewrite_expr_for_append_rel(*array, info)),
+            subscripts: subscripts
+                .into_iter()
+                .map(|subscript| ExprArraySubscript {
+                    is_slice: subscript.is_slice,
+                    lower: subscript
+                        .lower
+                        .map(|expr| rewrite_expr_for_append_rel(expr, info)),
+                    upper: subscript
+                        .upper
+                        .map(|expr| rewrite_expr_for_append_rel(expr, info)),
+                })
+                .collect(),
+        },
+        other => other,
+    }
+}
+
 pub(super) fn rewrite_expr_for_path(expr: Expr, path: &Path, layout: &[Expr]) -> Expr {
     if layout.contains(&expr) {
         return expr;
@@ -274,7 +421,7 @@ pub(super) fn rewrite_expr_for_path(expr: Expr, path: &Path, layout: &[Expr]) ->
                 projection_target_index_for_semantic_expr(targets, &input_layout, &expr)
             {
                 let target = &targets[index];
-                projection_slot_var(*slot_id, index + 1, target.sql_type)
+                projection_slot_var(*slot_id, user_attrno(index), target.sql_type)
             } else {
                 // :HACK: Identity projections on synthetic slots are planner-only boundaries.
                 // Map semantic input Vars onto the synthetic output slot by ordinal there, but
@@ -287,7 +434,11 @@ pub(super) fn rewrite_expr_for_path(expr: Expr, path: &Path, layout: &[Expr]) ->
                         .iter()
                         .position(|candidate| *candidate == rewritten_input_expr)
                 {
-                    return projection_slot_var(*slot_id, index + 1, targets[index].sql_type);
+                    return projection_slot_var(
+                        *slot_id,
+                        user_attrno(index),
+                        targets[index].sql_type,
+                    );
                 }
                 if matches!(expr, Expr::Column(_)) && passthrough_boundary {
                     return rewrite_expr_against_layout(expr, layout);
@@ -298,7 +449,7 @@ pub(super) fn rewrite_expr_for_path(expr: Expr, path: &Path, layout: &[Expr]) ->
                     &rewritten_input_expr,
                 ) {
                     let target = &targets[index];
-                    projection_slot_var(*slot_id, index + 1, target.sql_type)
+                    projection_slot_var(*slot_id, user_attrno(index), target.sql_type)
                 } else {
                     rewrite_expr_against_layout(expr, layout)
                 }
@@ -481,6 +632,7 @@ pub(super) fn rewrite_semantic_expr_for_path_or_expand_join_vars(
     path: &Path,
     layout: &[Expr],
 ) -> Expr {
+    let expr = rewrite_appendrel_expr_for_path(root, expr, path);
     if let Some(candidate) = layout_candidate_for_expr(root, &expr, layout) {
         return candidate;
     }

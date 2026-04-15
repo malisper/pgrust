@@ -212,6 +212,8 @@ impl Database {
                     client_id,
                     next_command_id: 0,
                     outer_rows: Vec::new(),
+            outer_system_bindings: Vec::new(),
+            system_bindings: Vec::new(),
                     subplans: Vec::new(),
                     timed: false,
                     catalog: visible_catalog.materialize_visible_catalog(),
@@ -248,6 +250,8 @@ impl Database {
                     client_id,
                     next_command_id: 0,
                     outer_rows: Vec::new(),
+            outer_system_bindings: Vec::new(),
+            system_bindings: Vec::new(),
                     subplans: Vec::new(),
                     timed: false,
                     catalog: catalog.materialize_visible_catalog(),
@@ -263,13 +267,15 @@ impl Database {
             Statement::Update(ref update_stmt) => {
                 let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
                 let bound = bind_update(update_stmt, &catalog)?;
-                let rel = bound.rel;
-                self.table_locks.lock_table_interruptible(
-                    rel,
-                    TableLockMode::RowExclusive,
-                    client_id,
-                    interrupts.as_ref(),
-                )?;
+                let rels = bound.targets.iter().map(|target| target.rel).collect::<Vec<_>>();
+                for rel in &rels {
+                    self.table_locks.lock_table_interruptible(
+                        *rel,
+                        TableLockMode::RowExclusive,
+                        client_id,
+                        interrupts.as_ref(),
+                    )?;
+                }
 
                 let xid = self.txns.write().begin();
                 let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
@@ -285,6 +291,8 @@ impl Database {
                     client_id,
                     next_command_id: 0,
                     outer_rows: Vec::new(),
+            outer_system_bindings: Vec::new(),
+            system_bindings: Vec::new(),
                     subplans: Vec::new(),
                     timed: false,
                     catalog: catalog.materialize_visible_catalog(),
@@ -301,19 +309,23 @@ impl Database {
                 drop(ctx);
                 let result = self.finish_txn(client_id, xid, result, &[], &[]);
                 guard.disarm();
-                self.table_locks.unlock_table(rel, client_id);
+                for rel in rels {
+                    self.table_locks.unlock_table(rel, client_id);
+                }
                 result
             }
             Statement::Delete(ref delete_stmt) => {
                 let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
                 let bound = bind_delete(delete_stmt, &catalog)?;
-                let rel = bound.rel;
-                self.table_locks.lock_table_interruptible(
-                    rel,
-                    TableLockMode::RowExclusive,
-                    client_id,
-                    interrupts.as_ref(),
-                )?;
+                let rels = bound.targets.iter().map(|target| target.rel).collect::<Vec<_>>();
+                for rel in &rels {
+                    self.table_locks.lock_table_interruptible(
+                        *rel,
+                        TableLockMode::RowExclusive,
+                        client_id,
+                        interrupts.as_ref(),
+                    )?;
+                }
 
                 let xid = self.txns.write().begin();
                 let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
@@ -329,6 +341,8 @@ impl Database {
                     client_id,
                     next_command_id: 0,
                     outer_rows: Vec::new(),
+            outer_system_bindings: Vec::new(),
+            system_bindings: Vec::new(),
                     subplans: Vec::new(),
                     timed: false,
                     catalog: catalog.materialize_visible_catalog(),
@@ -344,7 +358,9 @@ impl Database {
                 drop(ctx);
                 let result = self.finish_txn(client_id, xid, result, &[], &[]);
                 guard.disarm();
-                self.table_locks.unlock_table(rel, client_id);
+                for rel in rels {
+                    self.table_locks.unlock_table(rel, client_id);
+                }
                 result
             }
             Statement::CreateTable(ref create_stmt) => self
@@ -440,6 +456,8 @@ impl Database {
                     client_id,
                     next_command_id: 0,
                     outer_rows: Vec::new(),
+            outer_system_bindings: Vec::new(),
+            system_bindings: Vec::new(),
                     subplans: Vec::new(),
                     timed: false,
                     catalog: catalog.materialize_visible_catalog(),
@@ -488,6 +506,8 @@ impl Database {
                     datetime_config:
                         crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                     outer_rows: Vec::new(),
+            outer_system_bindings: Vec::new(),
+            system_bindings: Vec::new(),
                     subplans: Vec::new(),
                     timed: false,
                     catalog: catalog.materialize_visible_catalog(),
@@ -555,6 +575,8 @@ impl Database {
             client_id,
             next_command_id: command_id,
             outer_rows: Vec::new(),
+            outer_system_bindings: Vec::new(),
+            system_bindings: Vec::new(),
             subplans: query_desc.planned_stmt.subplans,
             timed: false,
             catalog: visible_catalog_snapshot,

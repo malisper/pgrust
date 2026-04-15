@@ -4,7 +4,7 @@ use crate::include::nodes::parsenodes::{RangeTblEntry, RangeTblEntryKind};
 use crate::include::nodes::pathnodes::{
     AppendRelInfo, PlannerInfo, RelOptInfo, RelOptKind, RestrictInfo,
 };
-use crate::include::nodes::primnodes::{Expr, RelationDesc, Var};
+use crate::include::nodes::primnodes::{Expr, RelationDesc, Var, user_attrno};
 
 use super::pathnodes::rewrite_expr_against_layout;
 
@@ -128,7 +128,7 @@ fn translate_parent_vars_to_child(
                 .map(|(index, child_column)| {
                     Expr::Var(Var {
                         varno: child_rtindex,
-                        varattno: index + 1,
+                        varattno: user_attrno(index),
                         varlevelsup: 0,
                         vartype: child_column.sql_type,
                     })

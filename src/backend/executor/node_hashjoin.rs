@@ -5,7 +5,9 @@ use crate::backend::executor::exec_expr::eval_expr;
 use crate::backend::executor::nodes::render_explain_expr;
 use crate::backend::executor::{ExecError, ExecutorContext};
 use crate::include::nodes::datum::Value;
-use crate::include::nodes::execnodes::{HashJoinState, PlanNode, SlotKind, TupleSlot};
+use crate::include::nodes::execnodes::{
+    HashJoinState, MaterializedRow, PlanNode, SlotKind, SystemVarBinding, TupleSlot,
+};
 use crate::include::nodes::primnodes::{Expr, JoinType};
 
 fn eval_bool_expr(
@@ -41,6 +43,24 @@ fn format_qual_list(quals: &[Expr]) -> Expr {
         .fold(first, |acc, qual| Expr::and(acc, qual))
 }
 
+fn set_active_system_bindings(ctx: &mut ExecutorContext, bindings: &[SystemVarBinding]) {
+    ctx.system_bindings.clear();
+    ctx.system_bindings.extend_from_slice(bindings);
+}
+
+fn merge_system_bindings(
+    left: &[SystemVarBinding],
+    right: &[SystemVarBinding],
+) -> Vec<SystemVarBinding> {
+    let mut merged = left.to_vec();
+    for binding in right {
+        if !merged.iter().any(|existing| existing.varno == binding.varno) {
+            merged.push(*binding);
+        }
+    }
+    merged
+}
+
 fn store_virtual_row(slot: &mut TupleSlot, values: Vec<Value>) {
     let nvalid = values.len();
     slot.tts_values = values;
@@ -49,8 +69,8 @@ fn store_virtual_row(slot: &mut TupleSlot, values: Vec<Value>) {
     slot.decode_offset = 0;
 }
 
-fn combine_slots(left: &TupleSlot, right: &[Value]) -> Vec<Value> {
-    let mut combined = left.tts_values.clone();
+fn combine_slots(left: &MaterializedRow, right: &[Value]) -> Vec<Value> {
+    let mut combined = left.slot.tts_values.clone();
     combined.extend(right.iter().cloned());
     combined
 }
@@ -70,7 +90,10 @@ impl PlanNode for HashJoinState {
                     Some(slot) => {
                         let mut values = slot.values()?.iter().cloned().collect::<Vec<_>>();
                         Value::materialize_all(&mut values);
-                        self.current_outer = Some(TupleSlot::virtual_row(values));
+                        self.current_outer = Some(MaterializedRow::new(
+                            TupleSlot::virtual_row(values),
+                            self.left.current_system_bindings().to_vec(),
+                        ));
                         self.current_bucket_entries.clear();
                         self.current_bucket_index = 0;
                         self.matched_outer = false;
@@ -79,7 +102,9 @@ impl PlanNode for HashJoinState {
                             .current_outer
                             .as_mut()
                             .expect("current outer tuple must be materialized");
-                        if let Some(key) = eval_hash_key_exprs(&self.hash_keys, current_outer, ctx)?
+                        set_active_system_bindings(ctx, &current_outer.system_bindings);
+                        if let Some(key) =
+                            eval_hash_key_exprs(&self.hash_keys, &mut current_outer.slot, ctx)?
                         {
                             self.current_bucket_entries = self
                                 .right
@@ -118,6 +143,7 @@ impl PlanNode for HashJoinState {
                         .as_ref()
                         .expect("hash table must be built before probing")
                         .entries[entry_index]
+                        .row
                         .slot
                         .tts_values
                         .clone();
@@ -126,6 +152,18 @@ impl PlanNode for HashJoinState {
                         .as_ref()
                         .expect("current outer tuple must exist while scanning a bucket");
                     store_virtual_row(&mut self.slot, combine_slots(outer, &right_values));
+                    self.current_bindings = merge_system_bindings(
+                        &outer.system_bindings,
+                        &self
+                            .right
+                            .table
+                            .as_ref()
+                            .expect("hash table must be built before probing")
+                            .entries[entry_index]
+                            .row
+                            .system_bindings,
+                    );
+                    set_active_system_bindings(ctx, &self.current_bindings);
 
                     if !eval_qual_list(&self.hash_clauses, &mut self.slot, ctx)? {
                         continue;
@@ -153,9 +191,11 @@ impl PlanNode for HashJoinState {
                             .current_outer
                             .take()
                             .expect("current outer tuple must exist for outer fill");
-                        let mut values = outer.tts_values;
+                        let mut values = outer.slot.tts_values;
                         values.extend(std::iter::repeat_n(Value::Null, self.right_width));
                         store_virtual_row(&mut self.slot, values);
+                        self.current_bindings = outer.system_bindings;
+                        set_active_system_bindings(ctx, &self.current_bindings);
                         self.stats.rows += 1;
                         return Ok(Some(&mut self.slot));
                     }
@@ -175,8 +215,10 @@ impl PlanNode for HashJoinState {
                         }
 
                         let mut values = vec![Value::Null; self.left_width];
-                        values.extend(table.entries[entry_index].slot.tts_values.iter().cloned());
+                        values.extend(table.entries[entry_index].row.slot.tts_values.iter().cloned());
                         store_virtual_row(&mut self.slot, values);
+                        self.current_bindings = table.entries[entry_index].row.system_bindings.clone();
+                        set_active_system_bindings(ctx, &self.current_bindings);
                         self.stats.rows += 1;
                         return Ok(Some(&mut self.slot));
                     }
@@ -192,6 +234,9 @@ impl PlanNode for HashJoinState {
 
     fn current_slot(&mut self) -> Option<&mut TupleSlot> {
         Some(&mut self.slot)
+    }
+    fn current_system_bindings(&self) -> &[SystemVarBinding] {
+        &self.current_bindings
     }
 
     fn column_names(&self) -> &[String] {

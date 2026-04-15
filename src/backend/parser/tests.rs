@@ -2548,10 +2548,16 @@ fn parse_insert_update_delete() {
         matches!(parse_statement("vacuum (analyze, full) vactst").unwrap(), Statement::Vacuum(VacuumStatement { analyze: true, full: true, targets, .. }) if targets == vec![MaintenanceTarget { table_name: "vactst".into(), columns: vec![], only: false }])
     );
     assert!(
-        matches!(parse_statement("update people set note = 'x' where id = 1").unwrap(), Statement::Update(UpdateStatement { table_name, .. }) if table_name == "people")
+        matches!(parse_statement("update people set note = 'x' where id = 1").unwrap(), Statement::Update(UpdateStatement { table_name, only, .. }) if table_name == "people" && !only)
     );
     assert!(
-        matches!(parse_statement("delete from people where note is null").unwrap(), Statement::Delete(DeleteStatement { table_name, .. }) if table_name == "people")
+        matches!(parse_statement("update only people set note = 'x' where id = 1").unwrap(), Statement::Update(UpdateStatement { table_name, only, .. }) if table_name == "people" && only)
+    );
+    assert!(
+        matches!(parse_statement("delete from people where note is null").unwrap(), Statement::Delete(DeleteStatement { table_name, only, .. }) if table_name == "people" && !only)
+    );
+    assert!(
+        matches!(parse_statement("delete from only people where note is null").unwrap(), Statement::Delete(DeleteStatement { table_name, only, .. }) if table_name == "people" && only)
     );
 }
 
@@ -2563,7 +2569,8 @@ fn bind_update_prefers_index_row_source_for_equality_predicate() {
         other => panic!("expected update statement, got {other:?}"),
     };
     let bound = bind_update(&stmt, &catalog).unwrap();
-    match bound.row_source {
+    assert_eq!(bound.targets.len(), 1);
+    match &bound.targets[0].row_source {
         BoundModifyRowSource::Index { index, keys } => {
             assert_eq!(index.relation_oid, 50010);
             assert_eq!(keys.len(), 1);
@@ -2583,7 +2590,8 @@ fn bind_delete_falls_back_to_heap_for_or_predicate() {
         other => panic!("expected delete statement, got {other:?}"),
     };
     let bound = bind_delete(&stmt, &catalog).unwrap();
-    assert!(matches!(bound.row_source, BoundModifyRowSource::Heap));
+    assert_eq!(bound.targets.len(), 1);
+    assert!(matches!(bound.targets[0].row_source, BoundModifyRowSource::Heap));
 }
 
 #[test]
