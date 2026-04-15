@@ -6,103 +6,282 @@
     <title>pgrust wasm demo</title>
     <style>
       :root {
-        color-scheme: light;
-        --bg: #f5f1e8;
-        --panel: #fffdf8;
-        --ink: #1b1b18;
-        --accent: #a23e2a;
-        --border: #d7c9b4;
+        color-scheme: dark;
+        --page-bg: #1f232b;
+        --terminal-bg: #2b303b;
+        --terminal-2: #313742;
+        --ink: #f4f6fa;
+        --muted: #c8ced9;
+        --accent: #dce4f0;
+        --accent-dim: #414856;
+        --warn: #ffb4bd;
+        --border: #454c59;
+        --prompt: #8bff87;
       }
+
+      * {
+        box-sizing: border-box;
+      }
+
       body {
         margin: 0;
-        font-family: Georgia, "Iowan Old Style", serif;
+        min-height: 100vh;
+        font-family:
+          "Iosevka Term",
+          "IBM Plex Mono",
+          "SFMono-Regular",
+          Menlo,
+          Consolas,
+          monospace;
         color: var(--ink);
-        background:
-          radial-gradient(circle at top left, #efe1c6 0, transparent 28rem),
-          linear-gradient(180deg, #f7f0e3, var(--bg));
+        background: var(--page-bg);
       }
+
       main {
-        max-width: 960px;
+        max-width: 1240px;
         margin: 0 auto;
-        padding: 32px 20px 48px;
+        padding: 0;
       }
-      h1 {
-        margin: 0 0 12px;
-        font-size: 40px;
+
+      .terminal {
+        background: var(--terminal-bg);
       }
-      p {
-        max-width: 60ch;
-      }
-      .panel {
-        background: var(--panel);
-        border: 1px solid var(--border);
-        border-radius: 16px;
-        box-shadow: 0 12px 30px rgba(70, 47, 24, 0.08);
-        padding: 18px;
-        margin-top: 20px;
-      }
-      textarea {
-        width: 100%;
-        min-height: 220px;
-        resize: vertical;
-        border-radius: 12px;
-        border: 1px solid var(--border);
-        padding: 14px;
-        box-sizing: border-box;
-        font: 15px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
-        background: #fff;
-      }
-      .actions {
+
+      .toolbar {
         display: flex;
+        align-items: center;
         gap: 12px;
-        margin-top: 14px;
         flex-wrap: wrap;
+        padding: 12px 16px;
+        background: var(--terminal-2);
+        border-bottom: 1px solid var(--border);
       }
+
+      .title {
+        font-size: 12px;
+        color: var(--muted);
+        margin-right: auto;
+      }
+
+      label {
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      select,
       button {
-        border: 0;
-        border-radius: 999px;
-        padding: 10px 16px;
-        cursor: pointer;
         font: inherit;
-        background: var(--accent);
-        color: white;
       }
-      button.secondary {
-        background: #6d675d;
+
+      select {
+        color: var(--ink);
+        background: #252a34;
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        padding: 7px 10px;
       }
-      pre {
-        overflow: auto;
-        border-radius: 12px;
-        padding: 14px;
-        background: #1f1f1b;
-        color: #f7f0e3;
-        font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+
+      .example-note {
+        margin: 0;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      button {
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        padding: 7px 12px;
+        cursor: pointer;
+        background: #252a34;
+        color: var(--ink);
+      }
+
+      button.primary {
+        background: var(--accent-dim);
+        border-color: #596173;
+      }
+
+      button:hover {
+        filter: brightness(1.08);
+      }
+
+      .status {
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      .status strong {
+        color: var(--accent);
+      }
+
+      .session {
+        padding: 8px 10px 12px;
+      }
+
+      .transcript {
+        margin: 0;
+        min-height: 0;
+        overflow: visible;
+        padding: 0;
+        line-height: 1.33;
+        white-space: pre-wrap;
+      }
+
+      .live-console {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr);
+        gap: 8px;
+        align-items: start;
+        padding: 0;
+        margin-top: 2px;
+      }
+
+      .live-prompt {
+        padding-top: 2px;
+        color: var(--prompt);
+        white-space: nowrap;
+      }
+
+      .live-input {
+        min-height: 96px;
+        resize: none;
+        overflow: hidden;
+        padding: 0;
+        border: 0;
+        background: transparent;
+        color: var(--ink);
+        line-height: 1.33;
+        outline: none;
+        box-shadow: none;
+        width: 100%;
+      }
+
+      .prompt {
+        color: var(--prompt);
+      }
+
+      .error {
+        color: var(--warn);
+      }
+
+      .footer {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 0 16px 12px;
+      }
+
+      @media (max-width: 720px) {
+        .footer {
+          align-items: flex-start;
+          flex-direction: column;
+        }
       }
     </style>
   </head>
   <body>
     <main>
-      <h1>pgrust in the browser</h1>
-      <p>
-        This demo boots an ephemeral in-memory database in wasm and executes SQL
-        through the new browser entrypoint.
-      </p>
-
-      <section class="panel">
-        <textarea id="sql">create table items (id int, name text);
-insert into items values (1, 'alpha'), (2, 'beta');
-select * from items order by id;</textarea>
-        <div class="actions">
-          <button id="run">Run SQL</button>
-          <button id="reset" class="secondary">Reset Database</button>
+      <section class="terminal">
+        <div class="toolbar">
+          <div class="title">pgrust wasm demo</div>
+          <label for="example-select">example</label>
+          <select id="example-select"></select>
+          <button id="run-live" class="primary">Run</button>
+          <button id="reset">Reset Database</button>
+          <button id="clear">Clear Screen</button>
+          <div class="status">status: <strong id="status">booting</strong></div>
         </div>
-      </section>
-
-      <section class="panel">
-        <pre id="output">Loading wasm...</pre>
+        <div class="session">
+          <pre id="output" class="transcript">Loading wasm...</pre>
+          <div class="live-console">
+            <div class="live-prompt">pgrust=#</div>
+            <textarea
+              id="live-sql"
+              class="live-input"
+              spellcheck="false"
+              placeholder="select 1;"
+            ></textarea>
+          </div>
+        </div>
+        <div class="footer">
+          <p id="example-note" class="example-note"></p>
+          <div class="status">`Enter` runs. `Shift+Enter` adds a new line.</div>
+        </div>
       </section>
     </main>
 
+    <script>
+      window.__PGRUST_ANALYTICS__ = {
+        posthogKey: "phc_pShx8jpdxg92kob8f5UncCwLiBNE4BXVdBhLqGhtxebj",
+        posthogHost: "https://us.i.posthog.com",
+      };
+    </script>
+    <script>
+      !(function (t, e) {
+        var o, n, p, r;
+        if (!e.__SV) {
+          window.posthog = e;
+          e._i = [];
+          e.init = function (i, s, a) {
+            function g(t, e) {
+              var o = e.split(".");
+              if (o.length === 2) {
+                t = t[o[0]];
+                e = o[1];
+              }
+              t[e] = function () {
+                t.push([e].concat(Array.prototype.slice.call(arguments, 0)));
+              };
+            }
+            p = t.createElement("script");
+            p.type = "text/javascript";
+            p.async = true;
+            p.src =
+              s.api_host.replace(".i.posthog.com", "-assets.i.posthog.com") +
+              "/static/array.js";
+            r = t.getElementsByTagName("script")[0];
+            r.parentNode.insertBefore(p, r);
+            var u = e;
+            if (a !== undefined) {
+              u = e[a] = [];
+            } else {
+              a = "posthog";
+            }
+            u.people = u.people || [];
+            u.toString = function (t) {
+              var e = "posthog";
+              if (a !== "posthog") {
+                e += "." + a;
+              }
+              if (!t) {
+                e += " (stub)";
+              }
+              return e;
+            };
+            u.people.toString = function () {
+              return u.toString(1) + ".people (stub)";
+            };
+            o =
+              "capture identify alias people.set people.set_once reset group set_config set_person_properties set_person_properties_for_flags"
+                .split(" ");
+            for (n = 0; n < o.length; n++) {
+              g(u, o[n]);
+            }
+            e._i.push([i, s, a]);
+          };
+          e.__SV = 1;
+        }
+      })(document, window.posthog || []);
+
+      const analyticsConfig = window.__PGRUST_ANALYTICS__;
+      if (analyticsConfig?.posthogKey) {
+        window.posthog.init(analyticsConfig.posthogKey, {
+          api_host: analyticsConfig.posthogHost,
+          person_profiles: "identified_only",
+        });
+      }
+    </script>
     <script type="module" src="./main.js"></script>
   </body>
 </html>

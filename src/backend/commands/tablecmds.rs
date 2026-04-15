@@ -26,6 +26,7 @@ use crate::backend::parser::{
 use crate::backend::rewrite::pg_rewrite_query;
 use crate::backend::storage::smgr::ForkNumber;
 use crate::backend::storage::smgr::StorageManager;
+use crate::backend::utils::time::instant::Instant;
 use crate::pgrust::database::TransactionWaiter;
 
 use super::explain::{format_buffer_usage, format_explain_lines};
@@ -132,7 +133,7 @@ pub(crate) fn execute_explain(
         }));
     };
 
-    let plan_start = std::time::Instant::now();
+    let plan_start = Instant::now();
     let query_desc = create_query_desc(
         crate::backend::parser::pg_plan_query(&select, catalog)?,
         None,
@@ -147,7 +148,7 @@ pub(crate) fn execute_explain(
             let mut state = executor_start(query_desc.planned_stmt.plan_tree.clone());
             let plan_elapsed = plan_start.elapsed();
             let mut row_count: u64 = 0;
-            let started_at = std::time::Instant::now();
+            let started_at = Instant::now();
             while let Some(_slot) = state.exec_proc_node(ctx)? {
                 row_count += 1;
             }

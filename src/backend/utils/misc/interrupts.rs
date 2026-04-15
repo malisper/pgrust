@@ -1,7 +1,8 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use crate::backend::utils::time::instant::Instant;
 use parking_lot::Mutex;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
