@@ -32,6 +32,7 @@ fn choose_available_constraint_name(
 
 fn ddl_executor_context(
     db: &Database,
+    catalog: &dyn CatalogLookup,
     client_id: ClientId,
     xid: TransactionId,
     cid: CommandId,
@@ -50,7 +51,7 @@ fn ddl_executor_context(
         outer_rows: Vec::new(),
         subplans: Vec::new(),
         timed: false,
-        catalog: None,
+        catalog: catalog.materialize_visible_catalog(),
         compiled_functions: std::collections::HashMap::new(),
     })
 }
@@ -61,12 +62,13 @@ fn validate_not_null_rows(
     relation_name: &str,
     column_index: usize,
     constraint_name: &str,
+    catalog: &dyn CatalogLookup,
     client_id: ClientId,
     xid: TransactionId,
     cid: CommandId,
     interrupts: std::sync::Arc<crate::backend::utils::misc::interrupts::InterruptState>,
 ) -> Result<(), ExecError> {
-    let mut ctx = ddl_executor_context(db, client_id, xid, cid, interrupts)?;
+    let mut ctx = ddl_executor_context(db, catalog, client_id, xid, cid, interrupts)?;
     let rows =
         collect_matching_rows_heap(relation.rel, &relation.desc, relation.toast, None, &mut ctx)?;
     let column_name = relation.desc.columns[column_index].name.clone();
@@ -105,7 +107,7 @@ fn validate_check_rows(
         constraint_name: constraint_name.to_string(),
         expr,
     };
-    let mut ctx = ddl_executor_context(db, client_id, xid, cid, interrupts)?;
+    let mut ctx = ddl_executor_context(db, catalog, client_id, xid, cid, interrupts)?;
     let rows =
         collect_matching_rows_heap(relation.rel, &relation.desc, relation.toast, None, &mut ctx)?;
     for (_, values) in rows {
@@ -286,6 +288,7 @@ impl Database {
                         &table_name,
                         column_index,
                         &action.constraint_name,
+                        &catalog,
                         client_id,
                         xid,
                         cid,
@@ -391,6 +394,7 @@ impl Database {
                                 &table_name,
                                 column_index,
                                 &not_null_name,
+                                &catalog,
                                 client_id,
                                 xid,
                                 cid,
@@ -793,6 +797,7 @@ impl Database {
             relation_basename(&alter_stmt.table_name),
             column_index,
             &constraint_name,
+            &catalog,
             client_id,
             xid,
             cid,
@@ -997,6 +1002,7 @@ impl Database {
                     relation_basename(&alter_stmt.table_name),
                     column_index,
                     &row.conname,
+                    &catalog,
                     client_id,
                     xid,
                     cid,
