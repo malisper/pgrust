@@ -304,6 +304,14 @@ fn visible_catalog_without_operator(
     crate::backend::utils::cache::visible_catalog::VisibleCatalog::new(relcache, Some(filtered))
 }
 
+fn strip_projections(plan: &Plan) -> &Plan {
+    let mut current = plan;
+    while let Plan::Projection { input, .. } = current {
+        current = input;
+    }
+    current
+}
+
 #[test]
 fn pest_matches_basic_select_keyword() {
     let result = gram::pest_parse_keyword(gram::Rule::kw_select_atom, "select").unwrap();
@@ -2139,12 +2147,81 @@ fn build_join_plan_resolves_qualified_columns() {
     match plan {
         Plan::Projection { input, targets, .. } => {
             assert_eq!(targets.len(), 2);
-            match *input {
+            match strip_projections(&input) {
                 Plan::NestedLoopJoin { on, .. } => assert!(matches!(
                     on,
                     Expr::Op(op) if op.op == crate::include::nodes::primnodes::OpExprKind::Eq
                 )),
+                Plan::HashJoin {
+                    kind,
+                    hash_clauses,
+                    join_qual,
+                    ..
+                } => {
+                    assert_eq!(*kind, JoinType::Inner);
+                    assert_eq!(hash_clauses.len(), 1);
+                    assert!(join_qual.is_none());
+                    assert!(matches!(
+                        hash_clauses.first(),
+                        Some(Expr::Op(op))
+                            if op.op == crate::include::nodes::primnodes::OpExprKind::Eq
+                    ));
+                }
                 other => panic!("expected join, got {:?}", other),
+            }
+        }
+        other => panic!("expected projection, got {:?}", other),
+    }
+}
+
+#[test]
+fn build_left_join_plan_uses_hash_join_for_equijoin() {
+    let mut catalog = catalog();
+    catalog.insert("pets", pets_entry());
+    let stmt = parse_select(
+        "select people.name, pets.id from people left join pets on people.id = pets.owner_id",
+    )
+    .unwrap();
+    let plan = build_plan(&stmt, &catalog).unwrap();
+    match plan {
+        Plan::Projection { input, targets, .. } => {
+            assert_eq!(targets.len(), 2);
+            match strip_projections(&input) {
+                Plan::HashJoin {
+                    kind,
+                    hash_clauses,
+                    join_qual,
+                    ..
+                } => {
+                    assert_eq!(*kind, JoinType::Left);
+                    assert_eq!(hash_clauses.len(), 1);
+                    assert!(join_qual.is_none());
+                }
+                other => panic!("expected hash join, got {:?}", other),
+            }
+        }
+        other => panic!("expected projection, got {:?}", other),
+    }
+}
+
+#[test]
+fn build_non_equi_join_plan_stays_nested_loop() {
+    let mut catalog = catalog();
+    catalog.insert("pets", pets_entry());
+    let stmt = parse_select(
+        "select people.name, pets.id from people join pets on people.id > pets.owner_id",
+    )
+    .unwrap();
+    let plan = build_plan(&stmt, &catalog).unwrap();
+    match plan {
+        Plan::Projection { input, targets, .. } => {
+            assert_eq!(targets.len(), 2);
+            match strip_projections(&input) {
+                Plan::NestedLoopJoin { on, .. } => assert!(matches!(
+                    on,
+                    Expr::Op(op) if op.op == crate::include::nodes::primnodes::OpExprKind::Gt
+                )),
+                other => panic!("expected nested loop join, got {:?}", other),
             }
         }
         other => panic!("expected projection, got {:?}", other),
