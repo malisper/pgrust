@@ -479,10 +479,18 @@ pub(crate) fn pg_constraint_row_from_values(
         confupdtype: expect_char(&values[13], "confupdtype")?,
         confdeltype: expect_char(&values[14], "confdeltype")?,
         confmatchtype: expect_char(&values[15], "confmatchtype")?,
-        conislocal: expect_bool(&values[16])?,
-        coninhcount: expect_int16(&values[17])?,
-        connoinherit: expect_bool(&values[18])?,
-        conperiod: expect_bool(&values[19])?,
+        conkey: nullable_int16_array(&values[16])?,
+        confkey: nullable_int16_array(&values[17])?,
+        conpfeqop: nullable_oid_array(&values[18])?,
+        conppeqop: nullable_oid_array(&values[19])?,
+        conffeqop: nullable_oid_array(&values[20])?,
+        confdelsetcols: nullable_int16_array(&values[21])?,
+        conexclop: nullable_oid_array(&values[22])?,
+        conbin: nullable_text(&values[23])?,
+        conislocal: expect_bool(&values[24])?,
+        coninhcount: expect_int16(&values[25])?,
+        connoinherit: expect_bool(&values[26])?,
+        conperiod: expect_bool(&values[27])?,
     })
 }
 
@@ -979,6 +987,14 @@ fn pg_constraint_row_values(row: PgConstraintRow) -> Vec<Value> {
         Value::Text(row.confupdtype.to_string().into()),
         Value::Text(row.confdeltype.to_string().into()),
         Value::Text(row.confmatchtype.to_string().into()),
+        nullable_array_value(row.conkey.map(int16_array_value)),
+        nullable_array_value(row.confkey.map(int16_array_value)),
+        nullable_array_value(row.conpfeqop.map(oid_array_value)),
+        nullable_array_value(row.conppeqop.map(oid_array_value)),
+        nullable_array_value(row.conffeqop.map(oid_array_value)),
+        nullable_array_value(row.confdelsetcols.map(int16_array_value)),
+        nullable_array_value(row.conexclop.map(oid_array_value)),
+        nullable_text_value(row.conbin),
         Value::Bool(row.conislocal),
         Value::Int16(row.coninhcount),
         Value::Bool(row.connoinherit),
@@ -1279,6 +1295,21 @@ fn nullable_oid_array(value: &Value) -> Result<Option<Vec<u32>>, CatalogError> {
         .map(Some)
 }
 
+fn nullable_int16_array(value: &Value) -> Result<Option<Vec<i16>>, CatalogError> {
+    let Some(array) = expect_nullable_array(value)? else {
+        return Ok(None);
+    };
+    array
+        .elements
+        .into_iter()
+        .map(|value| match value {
+            Value::Int16(v) => Ok(v),
+            _ => Err(CatalogError::Corrupt("expected int2 array value")),
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
+}
+
 fn nullable_char_array(value: &Value) -> Result<Option<Vec<u8>>, CatalogError> {
     let Some(array) = expect_nullable_array(value)? else {
         return Ok(None);
@@ -1308,6 +1339,28 @@ fn nullable_text_array(value: &Value) -> Result<Option<Vec<String>>, CatalogErro
         })
         .collect::<Result<Vec<_>, _>>()
         .map(Some)
+}
+
+fn nullable_text(value: &Value) -> Result<Option<String>, CatalogError> {
+    match value {
+        Value::Null => Ok(None),
+        Value::Text(text) => Ok(Some(text.to_string())),
+        _ => Err(CatalogError::Corrupt("expected nullable text value")),
+    }
+}
+
+fn oid_array_value(values: Vec<u32>) -> ArrayValue {
+    ArrayValue::from_1d(values.into_iter().map(|oid| Value::Int32(oid as i32)).collect())
+        .with_element_type_oid(crate::include::catalog::OID_TYPE_OID)
+}
+
+fn int16_array_value(values: Vec<i16>) -> ArrayValue {
+    ArrayValue::from_1d(values.into_iter().map(Value::Int16).collect())
+        .with_element_type_oid(crate::include::catalog::INT2_TYPE_OID)
+}
+
+fn nullable_text_value(value: Option<String>) -> Value {
+    value.map(|text| Value::Text(text.into())).unwrap_or(Value::Null)
 }
 
 fn expect_char(value: &Value, label: &'static str) -> Result<char, CatalogError> {
