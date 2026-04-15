@@ -86,6 +86,12 @@ impl Database {
                 expected: "COPY handled by session layer",
                 actual: "COPY".into(),
             })),
+            Statement::CreateFunction(ref create_stmt) => self
+                .execute_create_function_stmt_with_search_path(
+                    client_id,
+                    create_stmt,
+                    configured_search_path,
+                ),
             Statement::CommentOnTable(ref comment_stmt) => self
                 .execute_comment_on_table_stmt_with_search_path(
                     client_id,
@@ -143,6 +149,8 @@ impl Database {
                     outer_rows: Vec::new(),
                     subplans: Vec::new(),
                     timed: false,
+                    catalog: visible_catalog.materialize_visible_catalog(),
+                    compiled_functions: std::collections::HashMap::new(),
                 };
                 let result = execute_readonly_statement(plan_or_stmt, &visible_catalog, &mut ctx);
                 drop(ctx);
@@ -175,6 +183,8 @@ impl Database {
                     outer_rows: Vec::new(),
                     subplans: Vec::new(),
                     timed: false,
+                    catalog: catalog.materialize_visible_catalog(),
+                    compiled_functions: std::collections::HashMap::new(),
                 };
                 let result = execute_insert(bound, &catalog, &mut ctx, xid, 0);
                 drop(ctx);
@@ -208,6 +218,8 @@ impl Database {
                     outer_rows: Vec::new(),
                     subplans: Vec::new(),
                     timed: false,
+                    catalog: catalog.materialize_visible_catalog(),
+                    compiled_functions: std::collections::HashMap::new(),
                 };
                 let result = execute_update_with_waiter(
                     bound,
@@ -248,6 +260,8 @@ impl Database {
                     outer_rows: Vec::new(),
                     subplans: Vec::new(),
                     timed: false,
+                    catalog: catalog.materialize_visible_catalog(),
+                    compiled_functions: std::collections::HashMap::new(),
                 };
                 let result = execute_delete_with_waiter(
                     bound,
@@ -356,6 +370,8 @@ impl Database {
                     outer_rows: Vec::new(),
                     subplans: Vec::new(),
                     timed: false,
+                    catalog: catalog.materialize_visible_catalog(),
+                    compiled_functions: std::collections::HashMap::new(),
                 };
                 let result = execute_truncate_table(
                     truncate_stmt.clone(),
@@ -398,9 +414,9 @@ impl Database {
         use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
         use crate::backend::executor::executor_start;
 
+        let visible_catalog = self.lazy_catalog_lookup(client_id, txn_ctx, configured_search_path);
+        let visible_catalog_snapshot = visible_catalog.materialize_visible_catalog();
         let (query_desc, rels) = {
-            let visible_catalog =
-                self.lazy_catalog_lookup(client_id, txn_ctx, configured_search_path);
             let query_desc = crate::backend::executor::create_query_desc(
                 crate::backend::parser::pg_plan_query(select_stmt, &visible_catalog)?,
                 None,
@@ -431,6 +447,8 @@ impl Database {
             outer_rows: Vec::new(),
             subplans: query_desc.planned_stmt.subplans,
             timed: false,
+            catalog: visible_catalog_snapshot,
+            compiled_functions: std::collections::HashMap::new(),
         };
 
         Ok(SelectGuard {

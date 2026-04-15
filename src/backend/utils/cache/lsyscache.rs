@@ -8,10 +8,12 @@ use crate::backend::catalog::rowcodec::{
     namespace_row_from_values, pg_am_row_from_values, pg_amop_row_from_values,
     pg_amproc_row_from_values, pg_attrdef_row_from_values, pg_attribute_row_from_values,
     pg_class_row_from_values, pg_collation_row_from_values, pg_index_row_from_values,
-    pg_opclass_row_from_values, pg_opfamily_row_from_values, pg_type_row_from_values,
+    pg_language_row_from_values, pg_opclass_row_from_values, pg_opfamily_row_from_values,
+    pg_proc_row_from_values, pg_type_row_from_values,
 };
 use crate::backend::parser::{BoundRelation, CatalogLookup, SqlType};
-use crate::backend::utils::cache::relcache::{IndexRelCacheEntry, RelCacheEntry};
+use crate::backend::utils::cache::relcache::{IndexRelCacheEntry, RelCache, RelCacheEntry};
+use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::backend::utils::cache::syscache::{
     catalog_snapshot_for_lookup, ensure_attribute_rows, ensure_class_rows, ensure_constraint_rows,
     ensure_namespace_rows, ensure_rewrite_rows, ensure_statistic_rows, ensure_type_rows,
@@ -21,7 +23,8 @@ use crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER;
 use crate::include::access::scankey::ScanKeyData;
 use crate::include::catalog::{
     PgAmRow, PgAmopRow, PgAmprocRow, PgClassRow, PgCollationRow, PgConstraintRow, PgIndexRow,
-    PgOpclassRow, PgOpfamilyRow, PgRewriteRow, PgStatisticRow, PgTypeRow,
+    PgLanguageRow, PgOpclassRow, PgOpfamilyRow, PgProcRow, PgRewriteRow, PgStatisticRow,
+    PgTypeRow,
 };
 use crate::include::nodes::datum::Value;
 use crate::pgrust::database::{Database, TempNamespace};
@@ -34,6 +37,10 @@ const PG_CLASS_RELNAME_NSP_INDEX_OID: u32 = 2663;
 const PG_ATTRIBUTE_RELID_ATTNUM_INDEX_OID: u32 = 2659;
 const PG_ATTRDEF_ADRELID_ADNUM_INDEX_OID: u32 = 2656;
 const PG_TYPE_OID_INDEX_OID: u32 = 2703;
+const PG_PROC_OID_INDEX_OID: u32 = 2690;
+const PG_PROC_PRONAME_ARGS_NSP_INDEX_OID: u32 = 2691;
+const PG_LANGUAGE_NAME_INDEX_OID: u32 = 2681;
+const PG_LANGUAGE_OID_INDEX_OID: u32 = 2682;
 const PG_INDEX_INDRELID_INDEX_OID: u32 = 2678;
 const PG_INDEX_INDEXRELID_INDEX_OID: u32 = 2679;
 const PG_AM_NAME_INDEX_OID: u32 = 2651;
@@ -212,6 +219,98 @@ fn type_row_by_oid(
         PG_TYPE_OID_INDEX_OID,
         vec![eq_key(1, oid_value(oid))],
         pg_type_row_from_values,
+    )
+}
+
+fn visible_catcache(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+) -> Option<crate::backend::utils::cache::catcache::CatCache> {
+    let snapshot = catalog_snapshot_for_lookup(db, client_id, txn_ctx)?;
+    let catalog = db.catalog.read();
+    let txns = db.txns.read();
+    catalog
+        .catcache_with_snapshot(&db.pool, &txns, &snapshot, client_id)
+        .ok()
+}
+
+fn proc_row_by_oid(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    oid: u32,
+) -> Option<PgProcRow> {
+    probe_first_row(
+        db,
+        client_id,
+        txn_ctx,
+        PG_PROC_OID_INDEX_OID,
+        vec![eq_key(1, oid_value(oid))],
+        pg_proc_row_from_values,
+    )
+}
+
+fn proc_rows_by_name(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    name: &str,
+) -> Vec<PgProcRow> {
+    visible_catcache(db, client_id, txn_ctx)
+        .into_iter()
+        .flat_map(|catcache| {
+            catcache
+                .proc_rows_by_name(name)
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn language_row_by_oid(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    oid: u32,
+) -> Option<PgLanguageRow> {
+    probe_first_row(
+        db,
+        client_id,
+        txn_ctx,
+        PG_LANGUAGE_OID_INDEX_OID,
+        vec![eq_key(1, oid_value(oid))],
+        pg_language_row_from_values,
+    )
+}
+
+fn language_rows(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+) -> Vec<PgLanguageRow> {
+    visible_catcache(db, client_id, txn_ctx)
+        .map(|catcache| catcache.language_rows())
+        .unwrap_or_default()
+}
+
+fn language_row_by_name(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    name: &str,
+) -> Option<PgLanguageRow> {
+    probe_first_row(
+        db,
+        client_id,
+        txn_ctx,
+        PG_LANGUAGE_NAME_INDEX_OID,
+        vec![eq_key(
+            1,
+            Value::Text(normalize_catalog_name(name).to_ascii_lowercase().into()),
+        )],
+        pg_language_row_from_values,
     )
 }
 
@@ -781,10 +880,30 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         })
     }
 
+    fn proc_rows_by_name(&self, name: &str) -> Vec<PgProcRow> {
+        proc_rows_by_name(self.db, self.client_id, self.txn_ctx, name)
+    }
+
+    fn proc_row_by_oid(&self, oid: u32) -> Option<PgProcRow> {
+        proc_row_by_oid(self.db, self.client_id, self.txn_ctx, oid)
+    }
+
     fn type_rows(&self) -> Vec<PgTypeRow> {
         let mut rows = ensure_type_rows(self.db, self.client_id, self.txn_ctx);
         rows.extend(self.db.domain_type_rows_for_search_path(&self.search_path));
         rows
+    }
+
+    fn language_rows(&self) -> Vec<PgLanguageRow> {
+        language_rows(self.db, self.client_id, self.txn_ctx)
+    }
+
+    fn language_row_by_oid(&self, oid: u32) -> Option<PgLanguageRow> {
+        language_row_by_oid(self.db, self.client_id, self.txn_ctx, oid)
+    }
+
+    fn language_row_by_name(&self, name: &str) -> Option<PgLanguageRow> {
+        language_row_by_name(self.db, self.client_id, self.txn_ctx, name)
     }
 
     fn rewrite_rows_for_relation(&self, relation_oid: u32) -> Vec<PgRewriteRow> {
@@ -843,5 +962,23 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
                 })
             })
             .collect()
+    }
+
+    fn materialize_visible_catalog(&self) -> Option<VisibleCatalog> {
+        let catcache = visible_catcache(self.db, self.client_id, self.txn_ctx)?;
+        let mut relcache = RelCache::from_catcache(&catcache).ok()?;
+        if let Some(temp_namespace) = owned_temp_namespace(self.db, self.client_id) {
+            for (name, entry) in temp_namespace.tables {
+                relcache.insert(name.clone(), entry.entry.clone());
+                relcache.insert(
+                    format!("{}.{}", temp_namespace.name, name),
+                    entry.entry,
+                );
+            }
+        }
+        Some(VisibleCatalog::new(
+            relcache.with_search_path(&self.search_path),
+            Some(catcache),
+        ))
     }
 }

@@ -283,6 +283,20 @@ fn rewrite_set_returning_call(
                 .collect::<Result<Vec<_>, _>>()?,
             output_columns,
         },
+        SetReturningCall::UserDefined {
+            proc_oid,
+            func_variadic,
+            args,
+            output_columns,
+        } => SetReturningCall::UserDefined {
+            proc_oid,
+            func_variadic,
+            args: args
+                .into_iter()
+                .map(|expr| rewrite_semantic_expr(expr, catalog, expanded_views))
+                .collect::<Result<Vec<_>, _>>()?,
+            output_columns,
+        },
     })
 }
 

@@ -159,6 +159,8 @@ impl Database {
             outer_rows: Vec::new(),
             subplans: Vec::new(),
             timed: false,
+            catalog: catalog.materialize_visible_catalog(),
+            compiled_functions: std::collections::HashMap::new(),
         };
         rewrite_heap_rows_for_alter_column_type(
             self,

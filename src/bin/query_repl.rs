@@ -20,7 +20,8 @@ use pgrust::executor::{
 };
 use pgrust::include::access::htup::{HeapTuple, TupleValue};
 use pgrust::parser::{
-    ParseError, SqlType, SqlTypeKind, Statement, bind_delete, bind_insert, bind_update,
+    CatalogLookup, ParseError, SqlType, SqlTypeKind, Statement, bind_delete, bind_insert,
+    bind_update,
     create_relation_desc, normalize_create_table_name, parse_statement,
 };
 use pgrust::pl::plpgsql::{RaiseLevel, clear_notices, execute_do, take_notices};
@@ -576,6 +577,8 @@ fn run_statement(
                 outer_rows: Vec::new(),
                 subplans: Vec::new(),
                 timed: false,
+                catalog: relcache.materialize_visible_catalog(),
+                compiled_functions: std::collections::HashMap::new(),
             };
             execute_readonly_statement(Statement::Explain(stmt), &relcache, &mut ctx)
         }
@@ -591,6 +594,8 @@ fn run_statement(
                 outer_rows: Vec::new(),
                 subplans: Vec::new(),
                 timed: false,
+                catalog: relcache.materialize_visible_catalog(),
+                compiled_functions: std::collections::HashMap::new(),
             };
             execute_readonly_statement(Statement::Select(stmt), &relcache, &mut ctx)
         }
@@ -606,6 +611,8 @@ fn run_statement(
                 outer_rows: Vec::new(),
                 subplans: Vec::new(),
                 timed: false,
+                catalog: relcache.materialize_visible_catalog(),
+                compiled_functions: std::collections::HashMap::new(),
             };
             execute_readonly_statement(Statement::Values(stmt), &relcache, &mut ctx)
         }
@@ -621,12 +628,17 @@ fn run_statement(
                 outer_rows: Vec::new(),
                 subplans: Vec::new(),
                 timed: false,
+                catalog: relcache.materialize_visible_catalog(),
+                compiled_functions: std::collections::HashMap::new(),
             };
             execute_readonly_statement(Statement::Analyze(stmt), &relcache, &mut ctx)
         }
-        Statement::CommentOnDomain(_) | Statement::CreateDomain(_) | Statement::DropDomain(_) => {
+        Statement::CommentOnDomain(_)
+        | Statement::CreateFunction(_)
+        | Statement::CreateDomain(_)
+        | Statement::DropDomain(_) => {
             Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                "domain statements are not supported in query_repl".into(),
+                "domain/function statements are not supported in query_repl".into(),
             )))
         }
         Statement::CreateTable(stmt) => {
@@ -698,6 +710,8 @@ fn run_statement(
                 outer_rows: Vec::new(),
                 subplans: Vec::new(),
                 timed: false,
+                catalog: relcache.materialize_visible_catalog(),
+                compiled_functions: std::collections::HashMap::new(),
             };
             execute_truncate_table(stmt, &relcache, &mut ctx, INVALID_TRANSACTION_ID)
         }
@@ -713,6 +727,8 @@ fn run_statement(
                 outer_rows: Vec::new(),
                 subplans: Vec::new(),
                 timed: false,
+                catalog: relcache.materialize_visible_catalog(),
+                compiled_functions: std::collections::HashMap::new(),
             };
             execute_readonly_statement(Statement::Vacuum(stmt), &relcache, &mut ctx)
         }
@@ -731,6 +747,8 @@ fn run_statement(
                     outer_rows: Vec::new(),
                     subplans: Vec::new(),
                     timed: false,
+                    catalog: relcache.materialize_visible_catalog(),
+                    compiled_functions: std::collections::HashMap::new(),
                 };
                 execute_insert(bound, &relcache, &mut ctx, xid, 0)
             };
@@ -760,6 +778,8 @@ fn run_statement(
                     outer_rows: Vec::new(),
                     subplans: Vec::new(),
                     timed: false,
+                    catalog: relcache.materialize_visible_catalog(),
+                    compiled_functions: std::collections::HashMap::new(),
                 };
                 execute_update_with_waiter(bound, &relcache, &mut ctx, xid, 0, None)
             };
@@ -789,6 +809,8 @@ fn run_statement(
                     outer_rows: Vec::new(),
                     subplans: Vec::new(),
                     timed: false,
+                    catalog: relcache.materialize_visible_catalog(),
+                    compiled_functions: std::collections::HashMap::new(),
                 };
                 execute_delete_with_waiter(bound, &relcache, &mut ctx, xid, None)
             };

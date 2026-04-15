@@ -646,6 +646,20 @@ fn rewrite_set_returning_call(call: SetReturningCall, output_exprs: &[Expr]) -> 
                 .collect(),
             output_columns,
         },
+        SetReturningCall::UserDefined {
+            proc_oid,
+            func_variadic,
+            args,
+            output_columns,
+        } => SetReturningCall::UserDefined {
+            proc_oid,
+            func_variadic,
+            args: args
+                .into_iter()
+                .map(|expr| rewrite_expr_columns(expr, output_exprs))
+                .collect(),
+            output_columns,
+        },
     }
 }
 

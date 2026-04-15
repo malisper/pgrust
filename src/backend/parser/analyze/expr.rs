@@ -1163,6 +1163,58 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     },
                 ));
             }
+            let actual_types = args
+                .iter()
+                .map(|arg| {
+                    infer_sql_expr_type_with_ctes(
+                        &arg.value,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )
+                })
+                .collect::<Vec<_>>();
+            if let Ok(resolved) =
+                resolve_function_call(catalog, name, &actual_types, *func_variadic)
+            {
+                if resolved.prokind != 'f' || resolved.proretset {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "supported scalar function",
+                        actual: name.clone(),
+                    });
+                }
+                if let Some(func) = resolved.scalar_impl {
+                    let lowered_args = lower_named_scalar_function_args(func, args)?;
+                    return bind_scalar_function_call(
+                        func,
+                        resolved.proc_oid,
+                        Some(resolved.result_type),
+                        resolved.func_variadic,
+                        resolved.nvargs,
+                        resolved.vatype_oid,
+                        &resolved.declared_arg_types,
+                        &lowered_args,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    );
+                }
+                return bind_user_defined_scalar_function_call(
+                    resolved.proc_oid,
+                    resolved.result_type,
+                    &resolved.declared_arg_types,
+                    args,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                );
+            }
             let legacy_func =
                 resolve_scalar_function(name).ok_or_else(|| ParseError::UnexpectedToken {
                     expected: "supported builtin function",
@@ -1182,31 +1234,6 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     )
                 })
                 .collect::<Vec<_>>();
-            if let Ok(resolved) =
-                resolve_function_call(catalog, name, &actual_types, *func_variadic)
-            {
-                if resolved.prokind != 'f' || resolved.proretset || resolved.scalar_impl.is_none() {
-                    return Err(ParseError::UnexpectedToken {
-                        expected: "supported builtin scalar function",
-                        actual: name.clone(),
-                    });
-                }
-                return bind_scalar_function_call(
-                    resolved.scalar_impl.expect("scalar impl"),
-                    resolved.proc_oid,
-                    Some(resolved.result_type),
-                    resolved.func_variadic,
-                    resolved.nvargs,
-                    resolved.vatype_oid,
-                    &resolved.declared_arg_types,
-                    &lowered_args,
-                    scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    ctes,
-                );
-            }
             validate_scalar_function_arity(legacy_func, &lowered_args)?;
             bind_scalar_function_call(
                 legacy_func,
@@ -1339,6 +1366,64 @@ fn validate_catalog_backed_explicit_cast(
             sql_type_name(target_type)
         ),
     })
+}
+
+fn bind_user_defined_scalar_function_call(
+    proc_oid: u32,
+    result_type: SqlType,
+    declared_arg_types: &[SqlType],
+    args: &[SqlFunctionArg],
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Expr, ParseError> {
+    if args.iter().any(|arg| arg.name.is_some()) {
+        return Err(ParseError::FeatureNotSupported(
+            "named arguments are not supported for user-defined function calls".into(),
+        ));
+    }
+    let arg_types = args
+        .iter()
+        .map(|arg| {
+            infer_sql_expr_type_with_ctes(
+                &arg.value,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )
+        })
+        .collect::<Vec<_>>();
+    let bound_args = args
+        .iter()
+        .map(|arg| {
+            bind_expr_with_outer_and_ctes(
+                &arg.value,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let coerced_args = bound_args
+        .into_iter()
+        .zip(arg_types)
+        .zip(declared_arg_types.iter().copied())
+        .map(|((arg, actual_type), declared_type)| {
+            coerce_bound_expr(arg, actual_type, declared_type)
+        })
+        .collect();
+    Ok(Expr::user_defined_func(
+        proc_oid,
+        Some(result_type),
+        false,
+        coerced_args,
+    ))
 }
 
 fn bind_scalar_function_call(

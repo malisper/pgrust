@@ -1,4 +1,54 @@
 use super::super::*;
+use crate::backend::parser::{
+    CreateFunctionReturnSpec, CreateFunctionStatement, FunctionArgMode, SqlTypeKind,
+    resolve_raw_type_name,
+};
+use crate::include::catalog::{
+    BOOTSTRAP_SUPERUSER_OID, PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_PLPGSQL_OID,
+    PUBLIC_NAMESPACE_OID, PgProcRow, RECORD_TYPE_OID,
+};
+use crate::include::nodes::primnodes::QueryColumn;
+
+fn normalize_create_function_name_for_search_path(
+    stmt: &CreateFunctionStatement,
+    configured_search_path: Option<&[String]>,
+) -> Result<(String, u32), ParseError> {
+    let normalized = stmt.function_name.to_ascii_lowercase();
+    match stmt.schema_name.as_deref().map(str::to_ascii_lowercase) {
+        Some(schema) if schema == "public" => Ok((normalized, PUBLIC_NAMESPACE_OID)),
+        Some(schema) if schema == "pg_catalog" => Ok((normalized, PG_CATALOG_NAMESPACE_OID)),
+        Some(schema) if schema == "pg_temp" => Err(ParseError::UnexpectedToken {
+            expected: "permanent function",
+            actual: "temporary function".into(),
+        }),
+        Some(schema) => Err(ParseError::UnsupportedQualifiedName(format!(
+            "{schema}.{}",
+            stmt.function_name
+        ))),
+        None => {
+            let search_path = configured_search_path
+                .map(|path| path.iter().map(|s| s.trim().to_ascii_lowercase()).collect::<Vec<_>>())
+                .unwrap_or_else(|| vec!["public".into()]);
+            for schema in search_path {
+                match schema.as_str() {
+                    "" | "$user" | "pg_temp" => continue,
+                    "pg_catalog" => continue,
+                    "public" => return Ok((normalized, PUBLIC_NAMESPACE_OID)),
+                    _ => continue,
+                }
+            }
+            Err(ParseError::NoSchemaSelectedForCreate)
+        }
+    }
+}
+
+fn proc_arg_mode(mode: FunctionArgMode) -> u8 {
+    match mode {
+        FunctionArgMode::In => b'i',
+        FunctionArgMode::Out => b'o',
+        FunctionArgMode::InOut => b'b',
+    }
+}
 
 impl Database {
     pub(crate) fn execute_create_domain_stmt_with_search_path(
@@ -40,6 +90,257 @@ impl Database {
             },
         );
         self.plan_cache.invalidate_all();
+        Ok(StatementResult::AffectedRows(0))
+    }
+
+    pub(crate) fn execute_create_function_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        create_stmt: &CreateFunctionStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_create_function_stmt_in_transaction_with_search_path(
+            client_id,
+            create_stmt,
+            xid,
+            0,
+            configured_search_path,
+            &mut catalog_effects,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[]);
+        guard.disarm();
+        result
+    }
+
+    pub(crate) fn execute_create_function_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        create_stmt: &CreateFunctionStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let interrupts = self.interrupt_state(client_id);
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let (function_name, namespace_oid) =
+            normalize_create_function_name_for_search_path(create_stmt, configured_search_path)?;
+
+        let language_row = catalog
+            .language_row_by_name(&create_stmt.language)
+            .ok_or_else(|| {
+                ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "LANGUAGE plpgsql",
+                    actual: format!("LANGUAGE {}", create_stmt.language),
+                })
+            })?;
+        if language_row.oid != PG_LANGUAGE_PLPGSQL_OID {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "LANGUAGE plpgsql",
+                actual: format!("LANGUAGE {}", create_stmt.language),
+            }));
+        }
+
+        let mut callable_arg_oids = Vec::new();
+        let mut all_arg_oids = Vec::new();
+        let mut all_arg_modes = Vec::new();
+        let mut all_arg_names = Vec::new();
+        let mut output_args = Vec::new();
+
+        for arg in &create_stmt.args {
+            let sql_type = resolve_raw_type_name(&arg.ty, &catalog).map_err(ExecError::Parse)?;
+            if matches!(sql_type.kind, SqlTypeKind::Composite | SqlTypeKind::Record) {
+                return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                    "record and composite function arguments are not supported yet".into(),
+                )));
+            }
+            let type_oid = catalog
+                .type_oid_for_sql_type(sql_type)
+                .or_else(|| matches!(sql_type.kind, SqlTypeKind::Record).then_some(RECORD_TYPE_OID))
+                .ok_or_else(|| ExecError::Parse(ParseError::UnsupportedType(arg.name.clone())))?;
+
+            if matches!(arg.mode, FunctionArgMode::In | FunctionArgMode::InOut) {
+                callable_arg_oids.push(type_oid);
+            }
+            if matches!(arg.mode, FunctionArgMode::Out | FunctionArgMode::InOut) {
+                output_args.push(QueryColumn {
+                    name: arg.name.clone(),
+                    sql_type,
+                });
+            }
+            all_arg_oids.push(type_oid);
+            all_arg_modes.push(proc_arg_mode(arg.mode));
+            all_arg_names.push(arg.name.clone());
+        }
+
+        let mut proretset = false;
+        let mut prorettype = 0u32;
+        let mut proallargtypes = None;
+        let mut proargmodes = None;
+        let mut proargnames = (!all_arg_names.is_empty()).then_some(all_arg_names.clone());
+
+        match &create_stmt.return_spec {
+            CreateFunctionReturnSpec::Type { ty, setof } => {
+                let sql_type = resolve_raw_type_name(ty, &catalog).map_err(ExecError::Parse)?;
+                if matches!(sql_type.kind, SqlTypeKind::Record) && !setof {
+                    return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                        "non-set RETURNS record is not supported yet".into(),
+                    )));
+                }
+                if matches!(sql_type.kind, SqlTypeKind::Composite) && !setof {
+                    return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                        "non-set RETURNS named composite is not supported yet".into(),
+                    )));
+                }
+                if !output_args.is_empty() {
+                    return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                        "explicit RETURNS with OUT/INOUT arguments is not supported unless RETURNS SETOF record".into(),
+                    )));
+                }
+                proretset = *setof;
+                prorettype = if matches!(sql_type.kind, SqlTypeKind::Record) {
+                    RECORD_TYPE_OID
+                } else {
+                    catalog.type_oid_for_sql_type(sql_type).ok_or_else(|| {
+                        ExecError::Parse(ParseError::UnsupportedType(format!("{sql_type:?}")))
+                    })?
+                };
+            }
+            CreateFunctionReturnSpec::Table(columns) => {
+                proretset = true;
+                prorettype = RECORD_TYPE_OID;
+                let mut table_oids = Vec::with_capacity(columns.len());
+                let mut table_names = Vec::with_capacity(columns.len());
+                for column in columns {
+                    let sql_type =
+                        resolve_raw_type_name(&column.ty, &catalog).map_err(ExecError::Parse)?;
+                    if matches!(sql_type.kind, SqlTypeKind::Composite | SqlTypeKind::Record) {
+                        return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                            "record and composite RETURNS TABLE columns are not supported yet"
+                                .into(),
+                        )));
+                    }
+                    table_oids.push(catalog.type_oid_for_sql_type(sql_type).ok_or_else(|| {
+                        ExecError::Parse(ParseError::UnsupportedType(column.name.clone()))
+                    })?);
+                    table_names.push(column.name.clone());
+                }
+                proallargtypes = Some(
+                    callable_arg_oids
+                        .iter()
+                        .copied()
+                        .chain(table_oids.iter().copied())
+                        .collect(),
+                );
+                proargmodes = Some(
+                    create_stmt
+                        .args
+                        .iter()
+                        .map(|arg| proc_arg_mode(arg.mode))
+                        .filter(|mode| matches!(*mode, b'i' | b'b'))
+                        .chain(std::iter::repeat_n(b't', table_oids.len()))
+                        .collect(),
+                );
+                let mut names = create_stmt
+                    .args
+                    .iter()
+                    .filter(|arg| matches!(arg.mode, FunctionArgMode::In | FunctionArgMode::InOut))
+                    .map(|arg| arg.name.clone())
+                    .collect::<Vec<_>>();
+                names.extend(table_names);
+                proargnames = Some(names);
+            }
+            CreateFunctionReturnSpec::DerivedFromOutArgs { setof_record } => {
+                if output_args.is_empty() {
+                    return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "OUT or INOUT arguments",
+                        actual: create_stmt.function_name.clone(),
+                    }));
+                }
+                proallargtypes = Some(all_arg_oids.clone());
+                proargmodes = Some(all_arg_modes.clone());
+                proargnames = Some(all_arg_names.clone());
+                if *setof_record {
+                    proretset = true;
+                    prorettype = RECORD_TYPE_OID;
+                } else if output_args.len() == 1 {
+                    prorettype = catalog
+                        .type_oid_for_sql_type(output_args[0].sql_type)
+                        .ok_or_else(|| {
+                            ExecError::Parse(ParseError::UnsupportedType(output_args[0].name.clone()))
+                        })?;
+                } else {
+                    return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                        "multi-OUT non-set functions are not supported yet".into(),
+                    )));
+                }
+            }
+        }
+
+        let proargtypes = callable_arg_oids
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(" ");
+        if catalog
+            .proc_rows_by_name(&function_name)
+            .into_iter()
+            .any(|row| row.pronamespace == namespace_oid && row.proargtypes == proargtypes)
+        {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "unique function signature",
+                actual: format!("function {}({}) already exists", function_name, proargtypes),
+            }));
+        }
+
+        let proc_row = PgProcRow {
+            oid: 0,
+            proname: function_name.clone(),
+            pronamespace: namespace_oid,
+            proowner: BOOTSTRAP_SUPERUSER_OID,
+            prolang: PG_LANGUAGE_PLPGSQL_OID,
+            procost: 100.0,
+            prorows: if proretset { 1000.0 } else { 0.0 },
+            provariadic: 0,
+            prosupport: 0,
+            prokind: 'f',
+            prosecdef: false,
+            proleakproof: false,
+            proisstrict: false,
+            proretset,
+            provolatile: 'v',
+            proparallel: 'u',
+            pronargs: callable_arg_oids.len() as i16,
+            pronargdefaults: 0,
+            prorettype,
+            proargtypes,
+            proallargtypes,
+            proargmodes,
+            proargnames,
+            prosrc: create_stmt.body.clone(),
+        };
+
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+            interrupts,
+        };
+        let effect = {
+            let mut catalog_store = self.catalog.write();
+            let (_oid, effect) = catalog_store
+                .create_proc_mvcc(proc_row, &ctx)
+                .map_err(map_catalog_error)?;
+            effect
+        };
+        self.apply_catalog_mutation_effect_immediate(&effect)?;
+        catalog_effects.push(effect);
         Ok(StatementResult::AffectedRows(0))
     }
 
@@ -314,6 +615,8 @@ impl Database {
             outer_rows: Vec::new(),
             subplans: Vec::new(),
             timed: false,
+            catalog: catalog.materialize_visible_catalog(),
+            compiled_functions: std::collections::HashMap::new(),
         };
         let query_result = execute_readonly_statement(
             Statement::Select(create_stmt.query.clone()),
@@ -425,6 +728,8 @@ impl Database {
             outer_rows: Vec::new(),
             subplans: Vec::new(),
             timed: false,
+            catalog: catalog.materialize_visible_catalog(),
+            compiled_functions: std::collections::HashMap::new(),
         };
         let inserted = crate::backend::commands::tablecmds::execute_insert_values(
             rel,

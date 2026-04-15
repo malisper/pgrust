@@ -1,7 +1,9 @@
 use crate::RelFileLocator;
 use crate::backend::parser::{SqlType, SqlTypeKind, SubqueryComparisonOp};
 use crate::include::access::htup::AttributeDesc;
-use crate::include::catalog::proc_oid_for_builtin_scalar_function;
+use crate::include::catalog::{
+    builtin_scalar_function_for_proc_oid, proc_oid_for_builtin_scalar_function,
+};
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::Query;
 
@@ -467,6 +469,12 @@ pub enum SetReturningCall {
         args: Vec<Expr>,
         output_columns: Vec<QueryColumn>,
     },
+    UserDefined {
+        proc_oid: u32,
+        func_variadic: bool,
+        args: Vec<Expr>,
+        output_columns: Vec<QueryColumn>,
+    },
 }
 
 impl SetReturningCall {
@@ -476,7 +484,8 @@ impl SetReturningCall {
             SetReturningCall::Unnest { output_columns, .. }
             | SetReturningCall::JsonTableFunction { output_columns, .. }
             | SetReturningCall::RegexTableFunction { output_columns, .. }
-            | SetReturningCall::TextSearchTableFunction { output_columns, .. } => output_columns,
+            | SetReturningCall::TextSearchTableFunction { output_columns, .. }
+            | SetReturningCall::UserDefined { output_columns, .. } => output_columns,
         }
     }
 }
@@ -593,7 +602,14 @@ pub struct FuncExpr {
     pub funcid: u32,
     pub funcresulttype: Option<SqlType>,
     pub funcvariadic: bool,
+    pub implementation: ScalarFunctionImpl,
     pub args: Vec<Expr>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScalarFunctionImpl {
+    Builtin(BuiltinScalarFunction),
+    UserDefined { proc_oid: u32 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -762,10 +778,24 @@ impl Expr {
         funcvariadic: bool,
         args: Vec<Expr>,
     ) -> Self {
+        let implementation = builtin_scalar_function_for_proc_oid(funcid)
+            .map(ScalarFunctionImpl::Builtin)
+            .unwrap_or(ScalarFunctionImpl::UserDefined { proc_oid: funcid });
+        Self::func_with_impl(funcid, funcresulttype, funcvariadic, implementation, args)
+    }
+
+    pub fn func_with_impl(
+        funcid: u32,
+        funcresulttype: Option<SqlType>,
+        funcvariadic: bool,
+        implementation: ScalarFunctionImpl,
+        args: Vec<Expr>,
+    ) -> Self {
         Expr::Func(Box::new(FuncExpr {
             funcid,
             funcresulttype,
             funcvariadic,
+            implementation,
             args,
         }))
     }
@@ -801,7 +831,13 @@ impl Expr {
                 func
             )
         });
-        Self::func(funcid, funcresulttype, funcvariadic, args)
+        Self::func_with_impl(
+            funcid,
+            funcresulttype,
+            funcvariadic,
+            ScalarFunctionImpl::Builtin(func),
+            args,
+        )
     }
 
     pub fn resolved_builtin_func(
@@ -812,10 +848,31 @@ impl Expr {
         args: Vec<Expr>,
     ) -> Self {
         if funcid != 0 {
-            Self::func(funcid, funcresulttype, funcvariadic, args)
+            Self::func_with_impl(
+                funcid,
+                funcresulttype,
+                funcvariadic,
+                ScalarFunctionImpl::Builtin(func),
+                args,
+            )
         } else {
             Self::builtin_func(func, funcresulttype, funcvariadic, args)
         }
+    }
+
+    pub fn user_defined_func(
+        funcid: u32,
+        funcresulttype: Option<SqlType>,
+        funcvariadic: bool,
+        args: Vec<Expr>,
+    ) -> Self {
+        Self::func_with_impl(
+            funcid,
+            funcresulttype,
+            funcvariadic,
+            ScalarFunctionImpl::UserDefined { proc_oid: funcid },
+            args,
+        )
     }
 
     pub fn scalar_array_op(

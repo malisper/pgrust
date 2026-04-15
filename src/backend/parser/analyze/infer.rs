@@ -1,4 +1,4 @@
-use super::functions::resolve_scalar_function;
+use super::functions::{resolve_function_call, resolve_scalar_function};
 use super::*;
 use crate::include::catalog::RECORD_TYPE_OID;
 
@@ -252,7 +252,11 @@ pub(super) fn infer_sql_expr_type_with_ctes(
             SqlType::new(SqlTypeKind::Bool)
         }
         SqlExpr::Random => SqlType::new(SqlTypeKind::Float8),
-        SqlExpr::FuncCall { name, args, .. } => {
+        SqlExpr::FuncCall {
+            name,
+            args,
+            func_variadic,
+        } => {
             if name.eq_ignore_ascii_case("coalesce") {
                 let values = args.iter().map(|arg| arg.value.clone()).collect::<Vec<_>>();
                 return infer_common_scalar_expr_type_with_ctes(
@@ -265,6 +269,24 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                     "COALESCE arguments with a common type",
                 )
                 .unwrap_or(SqlType::new(SqlTypeKind::Text));
+            }
+            let actual_types = args
+                .iter()
+                .map(|arg| {
+                    infer_sql_expr_type_with_ctes(
+                        &arg.value,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )
+                })
+                .collect::<Vec<_>>();
+            if let Ok(resolved) =
+                resolve_function_call(catalog, name, &actual_types, *func_variadic)
+            {
+                return resolved.result_type;
             }
             let resolved = resolve_scalar_function(name);
             if let Some(func) = resolved

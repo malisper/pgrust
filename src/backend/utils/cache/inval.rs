@@ -56,13 +56,16 @@ pub fn apply_session_catalog_invalidation(
         return;
     }
 
+    if !invalidation.touched_catalogs.is_empty() {
+        state.catalog_snapshot = None;
+    }
+
     if invalidation
         .touched_catalogs
         .iter()
         .any(|kind| matches!(kind, BootstrapCatalogKind::PgNamespace))
     {
         state.namespace_rows = None;
-        state.catalog_snapshot = None;
     }
     if invalidation
         .touched_catalogs
@@ -70,7 +73,6 @@ pub fn apply_session_catalog_invalidation(
         .any(|kind| matches!(kind, BootstrapCatalogKind::PgClass))
     {
         state.class_rows = None;
-        state.catalog_snapshot = None;
     }
     if invalidation
         .touched_catalogs
@@ -78,7 +80,6 @@ pub fn apply_session_catalog_invalidation(
         .any(|kind| matches!(kind, BootstrapCatalogKind::PgAttribute))
     {
         state.attribute_rows = None;
-        state.catalog_snapshot = None;
     }
     if invalidation
         .touched_catalogs
@@ -86,7 +87,6 @@ pub fn apply_session_catalog_invalidation(
         .any(|kind| matches!(kind, BootstrapCatalogKind::PgAttrdef))
     {
         state.attrdef_rows = None;
-        state.catalog_snapshot = None;
     }
     if invalidation
         .touched_catalogs
@@ -94,7 +94,6 @@ pub fn apply_session_catalog_invalidation(
         .any(|kind| matches!(kind, BootstrapCatalogKind::PgType))
     {
         state.type_rows = None;
-        state.catalog_snapshot = None;
     }
     if invalidation
         .touched_catalogs
@@ -102,7 +101,6 @@ pub fn apply_session_catalog_invalidation(
         .any(|kind| matches!(kind, BootstrapCatalogKind::PgIndex))
     {
         state.index_rows = None;
-        state.catalog_snapshot = None;
     }
     if invalidation
         .touched_catalogs
@@ -110,7 +108,6 @@ pub fn apply_session_catalog_invalidation(
         .any(|kind| matches!(kind, BootstrapCatalogKind::PgConstraint))
     {
         state.constraint_rows = None;
-        state.catalog_snapshot = None;
     }
     if invalidation
         .touched_catalogs
@@ -118,7 +115,6 @@ pub fn apply_session_catalog_invalidation(
         .any(|kind| matches!(kind, BootstrapCatalogKind::PgStatistic))
     {
         state.statistic_rows = None;
-        state.catalog_snapshot = None;
     }
     if invalidation
         .touched_catalogs
@@ -126,7 +122,6 @@ pub fn apply_session_catalog_invalidation(
         .any(|kind| matches!(kind, BootstrapCatalogKind::PgDepend))
     {
         state.depend_rows = None;
-        state.catalog_snapshot = None;
     }
     if invalidation
         .touched_catalogs
@@ -134,7 +129,6 @@ pub fn apply_session_catalog_invalidation(
         .any(|kind| matches!(kind, BootstrapCatalogKind::PgRewrite))
     {
         state.rewrite_rows = None;
-        state.catalog_snapshot = None;
     }
     if invalidation
         .touched_catalogs
@@ -142,7 +136,6 @@ pub fn apply_session_catalog_invalidation(
         .any(|kind| matches!(kind, BootstrapCatalogKind::PgAm))
     {
         state.am_rows = None;
-        state.catalog_snapshot = None;
     }
     if invalidation
         .touched_catalogs
@@ -150,7 +143,6 @@ pub fn apply_session_catalog_invalidation(
         .any(|kind| matches!(kind, BootstrapCatalogKind::PgAmop))
     {
         state.amop_rows = None;
-        state.catalog_snapshot = None;
     }
     if invalidation
         .touched_catalogs
@@ -158,7 +150,6 @@ pub fn apply_session_catalog_invalidation(
         .any(|kind| matches!(kind, BootstrapCatalogKind::PgAmproc))
     {
         state.amproc_rows = None;
-        state.catalog_snapshot = None;
     }
     if invalidation
         .touched_catalogs
@@ -166,7 +157,6 @@ pub fn apply_session_catalog_invalidation(
         .any(|kind| matches!(kind, BootstrapCatalogKind::PgOpclass))
     {
         state.opclass_rows = None;
-        state.catalog_snapshot = None;
     }
     if invalidation
         .touched_catalogs
@@ -174,7 +164,6 @@ pub fn apply_session_catalog_invalidation(
         .any(|kind| matches!(kind, BootstrapCatalogKind::PgOpfamily))
     {
         state.opfamily_rows = None;
-        state.catalog_snapshot = None;
     }
     if invalidation
         .touched_catalogs
@@ -182,7 +171,6 @@ pub fn apply_session_catalog_invalidation(
         .any(|kind| matches!(kind, BootstrapCatalogKind::PgCollation))
     {
         state.collation_rows = None;
-        state.catalog_snapshot = None;
     }
 
     for oid in &invalidation.relation_oids {

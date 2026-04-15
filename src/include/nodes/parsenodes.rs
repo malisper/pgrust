@@ -200,6 +200,7 @@ pub enum Statement {
     Analyze(AnalyzeStatement),
     Set(SetStatement),
     Reset(ResetStatement),
+    CreateFunction(CreateFunctionStatement),
     CreateTable(CreateTableStatement),
     CreateTableAs(CreateTableAsStatement),
     CreateView(CreateViewStatement),
@@ -319,6 +320,43 @@ pub enum JoinTreeNode {
 pub struct DoStatement {
     pub language: Option<String>,
     pub code: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FunctionArgMode {
+    In,
+    Out,
+    InOut,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateFunctionArg {
+    pub mode: FunctionArgMode,
+    pub name: String,
+    pub ty: RawTypeName,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateFunctionTableColumn {
+    pub name: String,
+    pub ty: RawTypeName,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CreateFunctionReturnSpec {
+    Type { ty: RawTypeName, setof: bool },
+    Table(Vec<CreateFunctionTableColumn>),
+    DerivedFromOutArgs { setof_record: bool },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateFunctionStatement {
+    pub schema_name: Option<String>,
+    pub function_name: String,
+    pub args: Vec<CreateFunctionArg>,
+    pub return_spec: CreateFunctionReturnSpec,
+    pub language: String,
+    pub body: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

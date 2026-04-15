@@ -428,7 +428,8 @@ fn collect_set_returning_call_outer_refs(
         SetReturningCall::Unnest { args, .. }
         | SetReturningCall::JsonTableFunction { args, .. }
         | SetReturningCall::RegexTableFunction { args, .. }
-        | SetReturningCall::TextSearchTableFunction { args, .. } => {
+        | SetReturningCall::TextSearchTableFunction { args, .. }
+        | SetReturningCall::UserDefined { args, .. } => {
             for arg in args {
                 collect_query_outer_refs_expr(arg, levelsup, exprs);
             }
