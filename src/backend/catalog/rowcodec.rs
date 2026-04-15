@@ -1350,8 +1350,13 @@ fn nullable_text(value: &Value) -> Result<Option<String>, CatalogError> {
 }
 
 fn oid_array_value(values: Vec<u32>) -> ArrayValue {
-    ArrayValue::from_1d(values.into_iter().map(|oid| Value::Int32(oid as i32)).collect())
-        .with_element_type_oid(crate::include::catalog::OID_TYPE_OID)
+    ArrayValue::from_1d(
+        values
+            .into_iter()
+            .map(|oid| Value::Int32(oid as i32))
+            .collect(),
+    )
+    .with_element_type_oid(crate::include::catalog::OID_TYPE_OID)
 }
 
 fn int16_array_value(values: Vec<i16>) -> ArrayValue {
@@ -1360,7 +1365,9 @@ fn int16_array_value(values: Vec<i16>) -> ArrayValue {
 }
 
 fn nullable_text_value(value: Option<String>) -> Value {
-    value.map(|text| Value::Text(text.into())).unwrap_or(Value::Null)
+    value
+        .map(|text| Value::Text(text.into()))
+        .unwrap_or(Value::Null)
 }
 
 fn expect_char(value: &Value, label: &'static str) -> Result<char, CatalogError> {
