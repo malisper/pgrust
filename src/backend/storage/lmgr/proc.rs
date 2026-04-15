@@ -1,10 +1,12 @@
 use parking_lot::Mutex;
 use parking_lot::{Condvar, RwLock};
+use std::time::Duration;
 
 use crate::backend::access::transam::xact::{TransactionId, TransactionManager, TransactionStatus};
 use crate::backend::utils::misc::interrupts::{
     InterruptReason, InterruptState, check_for_interrupts,
 };
+use crate::backend::utils::time::instant::Instant;
 
 pub enum WaitOutcome {
     Completed,
@@ -35,7 +37,7 @@ impl TransactionWaiter {
         xid: TransactionId,
         interrupts: &InterruptState,
     ) -> WaitOutcome {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             if let Err(reason) = check_for_interrupts(interrupts) {
                 return WaitOutcome::Interrupted(reason);
@@ -47,12 +49,11 @@ impl TransactionWaiter {
                     _ => return WaitOutcome::Completed,
                 }
             }
-            if std::time::Instant::now() >= deadline {
+            if Instant::now() >= deadline {
                 return WaitOutcome::DeadlockTimeout;
             }
             let mut guard = self.mu.lock();
-            self.cv
-                .wait_for(&mut guard, std::time::Duration::from_millis(10));
+            self.cv.wait_for(&mut guard, Duration::from_millis(10));
         }
     }
 

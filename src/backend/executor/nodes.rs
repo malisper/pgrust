@@ -9,6 +9,7 @@ use crate::backend::executor::exec_expr::{compare_order_by_keys, eval_expr};
 use crate::backend::executor::srf::{
     eval_scalar_set_returning_call, eval_set_returning_call, set_returning_call_label,
 };
+use crate::backend::utils::time::instant::Instant;
 use crate::backend::executor::value_io::{decode_value_with_toast, missing_column_value};
 use crate::include::catalog::builtin_aggregate_function_for_proc_oid;
 use crate::include::nodes::datum::Value;
@@ -18,8 +19,6 @@ use crate::include::nodes::execnodes::{
     ResultState, SeqScanState, SlotKind, ToastRelationRef, TupleSlot, ValuesState,
 };
 use crate::include::nodes::primnodes::{Expr, JoinType};
-
-use std::time::Instant;
 
 fn slot_toast_context(
     relation: Option<ToastRelationRef>,
@@ -69,18 +68,39 @@ fn format_qual_list(quals: &[Expr]) -> Expr {
         .fold(first, |acc, qual| Expr::and(acc, qual))
 }
 
+fn finish_row(stats: &mut NodeExecStats, start: Option<Instant>) {
+    stats.rows += 1;
+    if let Some(start) = start {
+        stats.total_time += start.elapsed();
+    }
+}
+
+fn finish_eof(stats: &mut NodeExecStats, start: Option<Instant>) {
+    stats.loops += 1;
+    if let Some(start) = start {
+        stats.total_time += start.elapsed();
+    }
+}
+
 impl PlanNode for ResultState {
     fn exec_proc_node<'a>(
         &'a mut self,
-        _ctx: &mut ExecutorContext,
+        ctx: &mut ExecutorContext,
     ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        let start = if ctx.timed {
+            Some(Instant::now())
+        } else {
+            None
+        };
         if self.emitted {
+            finish_eof(&mut self.stats, start);
             Ok(None)
         } else {
             self.emitted = true;
             self.slot.kind = SlotKind::Virtual;
             self.slot.tts_values.clear();
             self.slot.tts_nvalid = 0;
+            finish_row(&mut self.stats, start);
             Ok(Some(&mut self.slot))
         }
     }
@@ -123,19 +143,12 @@ impl PlanNode for AppendState {
                 self.slot.tts_nvalid = values.len();
                 self.slot.tts_values = values;
                 self.slot.decode_offset = 0;
-                if let Some(start) = start {
-                    self.stats.loops += 1;
-                    self.stats.rows += 1;
-                    self.stats.total_time += start.elapsed();
-                }
+                finish_row(&mut self.stats, start);
                 return Ok(Some(&mut self.slot));
             }
             self.current_child += 1;
         }
-        if let Some(start) = start {
-            self.stats.loops += 1;
-            self.stats.total_time += start.elapsed();
-        }
+        finish_eof(&mut self.stats, start);
         Ok(None)
     }
     fn current_slot(&mut self) -> Option<&mut TupleSlot> {
@@ -214,11 +227,7 @@ impl PlanNode for SeqScanState {
                         }
                     }
 
-                    if let Some(s) = start {
-                        self.stats.loops += 1;
-                        self.stats.total_time += s.elapsed();
-                        self.stats.rows += 1;
-                    }
+                    finish_row(&mut self.stats, start);
                     return Ok(Some(&mut self.slot));
                 }
             }
@@ -227,10 +236,7 @@ impl PlanNode for SeqScanState {
                 heap_scan_prepare_next_page(&*ctx.pool, ctx.client_id, &ctx.txns, scan);
             if next?.is_none() {
                 heap_scan_end::<ExecError>(&*ctx.pool, ctx.client_id, scan)?;
-                if let Some(s) = start {
-                    self.stats.loops += 1;
-                    self.stats.total_time += s.elapsed();
-                }
+                finish_eof(&mut self.stats, start);
                 return Ok(None);
             }
         }
@@ -317,10 +323,7 @@ impl PlanNode for IndexScanState {
                         })
                     })?;
                 }
-                if let Some(s) = start {
-                    self.stats.loops += 1;
-                    self.stats.total_time += s.elapsed();
-                }
+                finish_eof(&mut self.stats, start);
                 return Ok(None);
             }
 
@@ -351,11 +354,7 @@ impl PlanNode for IndexScanState {
             self.slot.tts_values.clear();
             self.slot.decode_offset = 0;
 
-            if let Some(s) = start {
-                self.stats.loops += 1;
-                self.stats.total_time += s.elapsed();
-                self.stats.rows += 1;
-            }
+            finish_row(&mut self.stats, start);
             return Ok(Some(&mut self.slot));
         }
     }
@@ -495,20 +494,13 @@ impl PlanNode for FilterState {
             let slot = match self.input.exec_proc_node(ctx)? {
                 Some(s) => s,
                 None => {
-                    if let Some(s) = start {
-                        self.stats.loops += 1;
-                        self.stats.total_time += s.elapsed();
-                    }
+                    finish_eof(&mut self.stats, start);
                     return Ok(None);
                 }
             };
 
             if (self.compiled_predicate)(slot, ctx)? {
-                if let Some(s) = start {
-                    self.stats.loops += 1;
-                    self.stats.total_time += s.elapsed();
-                    self.stats.rows += 1;
-                }
+                finish_row(&mut self.stats, start);
                 return Ok(self.input.current_slot());
             }
         }
@@ -541,11 +533,16 @@ impl PlanNode for NestedLoopJoinState {
         &'a mut self,
         ctx: &mut ExecutorContext,
     ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        let start = if ctx.timed {
+            Some(Instant::now())
+        } else {
+            None
+        };
         if self.right_plan.is_some() {
-            return exec_lateral_join(self, ctx);
+            return exec_lateral_join(self, ctx, start);
         }
         if matches!(self.kind, JoinType::Cross) && self.cross_right_outer {
-            return exec_cross_join(self, ctx);
+            return exec_cross_join(self, ctx, start);
         }
 
         if self.right_rows.is_none() {
@@ -587,9 +584,11 @@ impl PlanNode for NestedLoopJoinState {
                                 self.slot.tts_nvalid = self.left_width + self.right_width;
                                 self.slot.kind = SlotKind::Virtual;
                                 self.slot.decode_offset = 0;
+                                finish_row(&mut self.stats, start);
                                 return Ok(Some(&mut self.slot));
                             }
                         }
+                        finish_eof(&mut self.stats, start);
                         return Ok(None);
                     }
                 }
@@ -616,6 +615,7 @@ impl PlanNode for NestedLoopJoinState {
                     self.current_left_matched = true;
                     right_matched[ri] = true;
                     if eval_qual_list(&self.qual, &mut self.slot, ctx)? {
+                        finish_row(&mut self.stats, start);
                         return Ok(Some(&mut self.slot));
                     }
                 }
@@ -630,6 +630,7 @@ impl PlanNode for NestedLoopJoinState {
                 self.slot.kind = SlotKind::Virtual;
                 self.slot.decode_offset = 0;
                 self.current_left = None;
+                finish_row(&mut self.stats, start);
                 return Ok(Some(&mut self.slot));
             }
 
@@ -679,6 +680,7 @@ impl PlanNode for NestedLoopJoinState {
 fn exec_lateral_join<'a>(
     state: &'a mut NestedLoopJoinState,
     ctx: &mut ExecutorContext,
+    start: Option<Instant>,
 ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
     if matches!(state.kind, JoinType::Right | JoinType::Full) {
         return Err(ExecError::DetailedError {
@@ -709,7 +711,10 @@ fn exec_lateral_join<'a>(
                             .clone(),
                     );
                 }
-                None => return Ok(None),
+                None => {
+                    finish_eof(&mut state.stats, start);
+                    return Ok(None);
+                }
             }
         }
 
@@ -729,6 +734,7 @@ fn exec_lateral_join<'a>(
             if eval_qual_list(&state.join_qual, &mut state.slot, ctx)? {
                 state.current_left_matched = true;
                 if eval_qual_list(&state.qual, &mut state.slot, ctx)? {
+                    finish_row(&mut state.stats, start);
                     return Ok(Some(&mut state.slot));
                 }
             }
@@ -744,6 +750,7 @@ fn exec_lateral_join<'a>(
             state.slot.kind = SlotKind::Virtual;
             state.slot.decode_offset = 0;
             state.current_left = None;
+            finish_row(&mut state.stats, start);
             return Ok(Some(&mut state.slot));
         }
 
@@ -754,6 +761,7 @@ fn exec_lateral_join<'a>(
 fn exec_cross_join<'a>(
     state: &'a mut NestedLoopJoinState,
     ctx: &mut ExecutorContext,
+    start: Option<Instant>,
 ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
     if state.left_rows.is_none() {
         let mut rows = Vec::new();
@@ -776,7 +784,10 @@ fn exec_cross_join<'a>(
                     state.current_right = Some(TupleSlot::virtual_row(values));
                     state.left_index = 0;
                 }
-                None => return Ok(None),
+                None => {
+                    finish_eof(&mut state.stats, start);
+                    return Ok(None);
+                }
             }
         }
 
@@ -798,6 +809,7 @@ fn exec_cross_join<'a>(
             if eval_qual_list(&state.join_qual, &mut state.slot, ctx)?
                 && eval_qual_list(&state.qual, &mut state.slot, ctx)?
             {
+                finish_row(&mut state.stats, start);
                 return Ok(Some(&mut state.slot));
             }
         }
@@ -811,6 +823,11 @@ impl PlanNode for OrderByState {
         &'a mut self,
         ctx: &mut ExecutorContext,
     ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        let start = if ctx.timed {
+            Some(Instant::now())
+        } else {
+            None
+        };
         if self.rows.is_none() {
             let mut rows = Vec::new();
             while let Some(slot) = self.input.exec_proc_node(ctx)? {
@@ -838,11 +855,13 @@ impl PlanNode for OrderByState {
 
         let rows = self.rows.as_mut().unwrap();
         if self.next_index >= rows.len() {
+            finish_eof(&mut self.stats, start);
             return Ok(None);
         }
 
         let idx = self.next_index;
         self.next_index += 1;
+        finish_row(&mut self.stats, start);
         Ok(Some(&mut rows[idx]))
     }
     fn current_slot(&mut self) -> Option<&mut TupleSlot> {
@@ -875,8 +894,14 @@ impl PlanNode for LimitState {
         &'a mut self,
         ctx: &mut ExecutorContext,
     ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        let start = if ctx.timed {
+            Some(Instant::now())
+        } else {
+            None
+        };
         if let Some(limit) = self.limit {
             if self.returned >= limit {
+                finish_eof(&mut self.stats, start);
                 return Ok(None);
             }
         }
@@ -884,6 +909,7 @@ impl PlanNode for LimitState {
         while self.skipped < self.offset {
             ctx.check_for_interrupts()?;
             if self.input.exec_proc_node(ctx)?.is_none() {
+                finish_eof(&mut self.stats, start);
                 return Ok(None);
             }
             self.skipped += 1;
@@ -892,6 +918,9 @@ impl PlanNode for LimitState {
         let slot = self.input.exec_proc_node(ctx)?;
         if slot.is_some() {
             self.returned += 1;
+            finish_row(&mut self.stats, start);
+        } else {
+            finish_eof(&mut self.stats, start);
         }
         Ok(slot)
     }
@@ -923,9 +952,17 @@ impl PlanNode for ProjectionState {
         &'a mut self,
         ctx: &mut ExecutorContext,
     ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        let start = if ctx.timed {
+            Some(Instant::now())
+        } else {
+            None
+        };
         let input_slot = match self.input.exec_proc_node(ctx)? {
             Some(s) => s,
-            None => return Ok(None),
+            None => {
+                finish_eof(&mut self.stats, start);
+                return Ok(None);
+            }
         };
 
         let mut values = Vec::with_capacity(self.targets.len());
@@ -938,6 +975,7 @@ impl PlanNode for ProjectionState {
         self.slot.tts_nvalid = nvalid;
         self.slot.kind = SlotKind::Virtual;
         self.slot.decode_offset = 0;
+        finish_row(&mut self.stats, start);
         Ok(Some(&mut self.slot))
     }
     fn current_slot(&mut self) -> Option<&mut TupleSlot> {
@@ -968,6 +1006,11 @@ impl PlanNode for AggregateState {
         &'a mut self,
         ctx: &mut ExecutorContext,
     ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        let start = if ctx.timed {
+            Some(Instant::now())
+        } else {
+            None
+        };
         if self.result_rows.is_none() {
             let mut groups: Vec<AggGroup> = Vec::new();
 
@@ -1060,11 +1103,13 @@ impl PlanNode for AggregateState {
 
         let rows = self.result_rows.as_mut().unwrap();
         if self.next_index >= rows.len() {
+            finish_eof(&mut self.stats, start);
             return Ok(None);
         }
 
         let idx = self.next_index;
         self.next_index += 1;
+        finish_row(&mut self.stats, start);
         Ok(Some(&mut rows[idx]))
     }
     fn current_slot(&mut self) -> Option<&mut TupleSlot> {
@@ -1097,6 +1142,11 @@ impl PlanNode for FunctionScanState {
         &'a mut self,
         ctx: &mut ExecutorContext,
     ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        let start = if ctx.timed {
+            Some(Instant::now())
+        } else {
+            None
+        };
         if self.rows.is_none() {
             let mut dummy = TupleSlot::empty(0);
             self.rows = Some(eval_set_returning_call(&self.call, &mut dummy, ctx)?);
@@ -1104,11 +1154,13 @@ impl PlanNode for FunctionScanState {
 
         let rows = self.rows.as_mut().unwrap();
         if self.next_index >= rows.len() {
+            finish_eof(&mut self.stats, start);
             return Ok(None);
         }
 
         let idx = self.next_index;
         self.next_index += 1;
+        finish_row(&mut self.stats, start);
         Ok(Some(&mut rows[idx]))
     }
     fn current_slot(&mut self) -> Option<&mut TupleSlot> {
@@ -1139,6 +1191,11 @@ impl PlanNode for ValuesState {
         &'a mut self,
         ctx: &mut ExecutorContext,
     ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        let start = if ctx.timed {
+            Some(Instant::now())
+        } else {
+            None
+        };
         if self.result_rows.is_none() {
             let mut dummy = TupleSlot::empty(0);
             let rows = self
@@ -1156,10 +1213,12 @@ impl PlanNode for ValuesState {
 
         let rows = self.result_rows.as_mut().unwrap();
         if self.next_index >= rows.len() {
+            finish_eof(&mut self.stats, start);
             return Ok(None);
         }
         let idx = self.next_index;
         self.next_index += 1;
+        finish_row(&mut self.stats, start);
         Ok(Some(&mut rows[idx]))
     }
 
@@ -1192,10 +1251,16 @@ impl PlanNode for ProjectSetState {
         &'a mut self,
         ctx: &mut ExecutorContext,
     ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        let start = if ctx.timed {
+            Some(Instant::now())
+        } else {
+            None
+        };
         loop {
             ctx.check_for_interrupts()?;
             if self.current_input.is_none() || self.next_index >= self.current_row_count {
                 let Some(input_slot) = self.input.exec_proc_node(ctx)? else {
+                    finish_eof(&mut self.stats, start);
                     return Ok(None);
                 };
                 let mut values = input_slot.values()?.to_vec();
@@ -1263,6 +1328,7 @@ impl PlanNode for ProjectSetState {
                 self.next_index = 0;
             }
 
+            finish_row(&mut self.stats, start);
             return Ok(Some(&mut self.slot));
         }
     }

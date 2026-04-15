@@ -1935,6 +1935,100 @@ fn explain_analyze_buffers_reports_runtime_and_buffers() {
         other => panic!("expected query result, got {:?}", other),
     }
 }
+
+#[test]
+fn explain_analyze_timing_off_still_reports_nonzero_actual_rows() {
+    let base = temp_dir("explain_analyze_timing_off_rows");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let xid = txns.begin();
+    run_sql(
+        &base,
+        &txns,
+        xid,
+        "insert into people (id, name, note) values (1, 'alice', 'alpha')",
+    )
+    .unwrap();
+    txns.commit(xid).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "explain (analyze, timing off) select name from people order by name",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            let rendered = rows
+                .into_iter()
+                .map(|row| match &row[0] {
+                    Value::Text(text) => text.clone(),
+                    other => panic!("expected text explain line, got {:?}", other),
+                })
+                .collect::<Vec<_>>();
+            let plan_lines = rendered
+                .iter()
+                .filter(|line| line.contains("actual rows="))
+                .collect::<Vec<_>>();
+            assert!(!plan_lines.is_empty(), "expected explain analyze plan lines");
+            assert!(
+                plan_lines.iter().all(|line| !line.contains("actual rows=0")),
+                "expected nonzero actual rows for populated plan nodes, got {plan_lines:?}"
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn explain_analyze_reports_single_loop_for_simple_scan_and_sort() {
+    let base = temp_dir("explain_analyze_simple_loops");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let xid = txns.begin();
+    run_sql(
+        &base,
+        &txns,
+        xid,
+        "insert into people (id, name, note) values
+         (1, 'alice', 'alpha'),
+         (2, 'bob', null),
+         (3, 'carol', 'storage')",
+    )
+    .unwrap();
+    txns.commit(xid).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "explain (analyze, buffers) select name from people where id >= 1 order by name",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            let rendered = rows
+                .into_iter()
+                .map(|row| match &row[0] {
+                    Value::Text(text) => text.clone(),
+                    other => panic!("expected text explain line, got {:?}", other),
+                })
+                .collect::<Vec<_>>();
+            let plan_lines = rendered
+                .iter()
+                .filter(|line| line.contains("actual rows="))
+                .collect::<Vec<_>>();
+            assert!(
+                plan_lines.iter().any(|line| line.contains("Sort") && line.contains("loops=1")),
+                "expected Sort loops=1, got {plan_lines:?}"
+            );
+            assert!(
+                plan_lines
+                    .iter()
+                    .any(|line| line.contains("Seq Scan") && line.contains("loops=1")),
+                "expected Seq Scan loops=1, got {plan_lines:?}"
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
 #[test]
 fn inner_join_returns_matching_rows() {
     let base = temp_dir("join_sql");
