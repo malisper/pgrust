@@ -24,10 +24,13 @@ use crate::backend::catalog::namespace::{
     normalize_create_table_stmt_with_search_path as namespace_normalize_create_table_stmt_with_search_path,
     normalize_create_view_stmt_with_search_path as namespace_normalize_create_view_stmt_with_search_path,
 };
+use crate::backend::catalog::rows::physical_catalog_rows_from_catcache;
 use crate::backend::catalog::store::{CatalogMutationEffect, CatalogWriteContext};
 use crate::backend::catalog::toasting::ToastCatalogChanges;
 use crate::backend::catalog::{CatalogError, CatalogStore};
-use crate::backend::catalog::{bootstrap::bootstrap_catalog_kinds, persistence::sync_catalog_rows_subset_in_pool};
+use crate::backend::catalog::{
+    bootstrap::bootstrap_catalog_kinds, persistence::sync_catalog_rows_subset_in_pool,
+};
 use crate::backend::commands::analyze::collect_analyze_stats;
 use crate::backend::executor::{
     ExecError, ExecutorContext, StatementResult, execute_readonly_statement,
@@ -46,10 +49,11 @@ use crate::backend::storage::lmgr::{
     unlock_relations,
 };
 use crate::backend::storage::smgr::{MdStorageManager, RelFileLocator, StorageManager};
+use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::inval::{
-    CatalogInvalidation, catalog_invalidation_from_effect,
+    CatalogInvalidation, accept_invalidation_messages, catalog_invalidation_from_effect,
     finalize_aborted_local_catalog_invalidations, finalize_command_end_local_catalog_invalidations,
-    finalize_committed_catalog_effects,
+    finalize_committed_catalog_effects, publish_committed_catalog_invalidation,
 };
 use crate::backend::utils::cache::lsyscache::{
     LazyCatalogLookup, access_method_name_for_relation, constraint_rows_for_relation,
@@ -59,11 +63,10 @@ use crate::backend::utils::cache::lsyscache::{
 use crate::backend::utils::cache::plancache::PlanCache;
 use crate::backend::utils::cache::relcache::RelCacheEntry;
 use crate::backend::utils::cache::syscache::{
-    SessionCatalogState, invalidate_session_catalog_state,
+    BackendCacheState, backend_catcache as syscache_backend_catcache,
+    invalidate_backend_cache_state,
 };
 use crate::backend::utils::misc::interrupts::InterruptState;
-use crate::backend::catalog::rows::physical_catalog_rows_from_catcache;
-use crate::backend::utils::cache::catcache::CatCache;
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, PUBLIC_NAMESPACE_OID, PgConstraintRow, PgTypeRow,
@@ -75,8 +78,7 @@ use crate::{BufferPool, ClientId, SmgrStorageBackend};
 use ddl::{
     ensure_can_set_role, ensure_relation_owner, lookup_heap_relation_for_ddl, map_catalog_error,
     namespace_oid_for_relation_name, reject_inheritance_tree_ddl,
-    reject_relation_with_dependent_views,
-    validate_alter_table_add_column,
+    reject_relation_with_dependent_views, validate_alter_table_add_column,
 };
 use relation_refs::{collect_direct_relation_oids_from_select, collect_rels_from_planned_stmt};
 use toast::{toast_bindings_from_create_result, toast_bindings_from_temp_relation};
@@ -113,7 +115,7 @@ pub struct Database {
     pub txn_waiter: Arc<TransactionWaiter>,
     pub table_locks: Arc<TableLockManager>,
     pub plan_cache: Arc<PlanCache>,
-    pub(crate) session_catalog_states: Arc<RwLock<HashMap<ClientId, SessionCatalogState>>>,
+    pub(crate) backend_cache_states: Arc<RwLock<HashMap<ClientId, BackendCacheState>>>,
     pub(crate) session_interrupt_states: Arc<RwLock<HashMap<ClientId, Arc<InterruptState>>>>,
     pub(crate) session_auth_states: Arc<RwLock<HashMap<ClientId, AuthState>>>,
     pub(crate) temp_relations: Arc<RwLock<HashMap<ClientId, TempNamespace>>>,
@@ -247,7 +249,7 @@ impl Database {
             txn_waiter: Arc::new(TransactionWaiter::new()),
             table_locks: Arc::new(TableLockManager::new()),
             plan_cache: Arc::new(PlanCache::new()),
-            session_catalog_states: Arc::new(RwLock::new(HashMap::new())),
+            backend_cache_states: Arc::new(RwLock::new(HashMap::new())),
             session_interrupt_states: Arc::new(RwLock::new(HashMap::new())),
             session_auth_states: Arc::new(RwLock::new(HashMap::new())),
             temp_relations: Arc::new(RwLock::new(HashMap::new())),
@@ -270,7 +272,7 @@ impl Database {
             txn_waiter: Arc::new(TransactionWaiter::new()),
             table_locks: Arc::new(TableLockManager::new()),
             plan_cache: Arc::new(PlanCache::new()),
-            session_catalog_states: Arc::new(RwLock::new(HashMap::new())),
+            backend_cache_states: Arc::new(RwLock::new(HashMap::new())),
             session_interrupt_states: Arc::new(RwLock::new(HashMap::new())),
             session_auth_states: Arc::new(RwLock::new(HashMap::new())),
             temp_relations: Arc::new(RwLock::new(HashMap::new())),
@@ -318,27 +320,19 @@ impl Database {
         client_id: ClientId,
         txn_ctx: CatalogTxnContext,
     ) -> Result<AuthCatalog, CatalogError> {
-        let store = self.catalog.read();
-        let cache = if let Some((xid, cid)) = txn_ctx {
-            let snapshot = self
-                .txns
-                .read()
-                .snapshot_for_command(xid, cid)
-                .map_err(DatabaseError::from)
-                .map_err(|err| match err {
-                    DatabaseError::Catalog(catalog) => catalog,
-                    DatabaseError::Mvcc(mvcc) => CatalogError::Io(format!("{mvcc:?}")),
-                    DatabaseError::Wal(wal) => CatalogError::Io(format!("{wal:?}")),
-                })?;
-            let txns = self.txns.read();
-            store.catcache_with_snapshot(&self.pool, &txns, &snapshot, client_id)?
-        } else {
-            store.catcache()?
-        };
+        let cache = self.backend_catcache(client_id, txn_ctx)?;
         Ok(AuthCatalog::new(
             cache.authid_rows(),
             cache.auth_members_rows(),
         ))
+    }
+
+    pub(crate) fn backend_catcache(
+        &self,
+        client_id: ClientId,
+        txn_ctx: CatalogTxnContext,
+    ) -> Result<CatCache, CatalogError> {
+        syscache_backend_catcache(self, client_id, txn_ctx)
     }
 
     pub(crate) fn normalize_domain_name_for_create(
@@ -413,6 +407,10 @@ impl Database {
         self.session_interrupt_states.write().remove(&client_id);
         self.clear_auth_state(client_id);
     }
+
+    pub(crate) fn accept_invalidation_messages(&self, client_id: ClientId) {
+        accept_invalidation_messages(self, client_id);
+    }
 }
 
 fn bootstrap_ephemeral_catalog(
@@ -427,7 +425,10 @@ fn bootstrap_ephemeral_catalog(
                 rel_number: kind.relation_oid(),
             };
             let _ = storage.smgr.open(rel);
-            let _ = storage.smgr.create(rel, crate::backend::storage::smgr::ForkNumber::Main, false);
+            let _ =
+                storage
+                    .smgr
+                    .create(rel, crate::backend::storage::smgr::ForkNumber::Main, false);
         }
         for descriptor in system_catalog_indexes() {
             let rel = RelFileLocator {
@@ -436,7 +437,10 @@ fn bootstrap_ephemeral_catalog(
                 rel_number: descriptor.relation_oid,
             };
             let _ = storage.smgr.open(rel);
-            let _ = storage.smgr.create(rel, crate::backend::storage::smgr::ForkNumber::Main, false);
+            let _ =
+                storage
+                    .smgr
+                    .create(rel, crate::backend::storage::smgr::ForkNumber::Main, false);
         }
     });
 

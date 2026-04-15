@@ -97,7 +97,7 @@ impl Database {
             on_commit: OnCommitAction::PreserveRows,
             namespace_created: true,
         });
-        self.invalidate_session_catalog_state(client_id);
+        self.invalidate_backend_cache_state(client_id);
         Ok(namespace)
     }
 
@@ -178,7 +178,7 @@ impl Database {
             on_commit,
             namespace_created: false,
         });
-        self.invalidate_session_catalog_state(client_id);
+        self.invalidate_backend_cache_state(client_id);
         Ok(CreatedTempRelation {
             entry: rel_entry,
             toast: created.toast,
@@ -229,7 +229,7 @@ impl Database {
             entry: removed.entry.clone(),
             on_commit: removed.on_commit,
         });
-        self.invalidate_session_catalog_state(client_id);
+        self.invalidate_backend_cache_state(client_id);
         Ok(removed.entry)
     }
 
@@ -307,7 +307,7 @@ impl Database {
             old_name,
             new_name: normalized_new,
         });
-        self.invalidate_session_catalog_state(client_id);
+        self.invalidate_backend_cache_state(client_id);
         Ok(renamed)
     }
 
@@ -428,6 +428,6 @@ impl Database {
             guard.disarm();
         }
         self.temp_relations.write().remove(&client_id);
-        self.invalidate_session_catalog_state(client_id);
+        self.invalidate_backend_cache_state(client_id);
     }
 }

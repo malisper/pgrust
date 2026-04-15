@@ -4,7 +4,7 @@ use crate::ClientId;
 use crate::backend::catalog::bootstrap::bootstrap_catalog_entry;
 use crate::backend::catalog::store::CatalogMutationEffect;
 use crate::backend::storage::smgr::StorageManager;
-use crate::backend::utils::cache::syscache::SessionCatalogState;
+use crate::backend::utils::cache::syscache::{BackendCacheState, drain_pending_invalidations};
 use crate::include::catalog::BootstrapCatalogKind;
 use crate::pgrust::database::Database;
 
@@ -37,7 +37,7 @@ pub fn catalog_invalidation_from_effect(effect: &CatalogMutationEffect) -> Catal
     }
 }
 
-pub fn apply_session_catalog_invalidation(
+pub fn apply_backend_cache_invalidation(
     db: &Database,
     client_id: ClientId,
     invalidation: &CatalogInvalidation,
@@ -46,151 +46,24 @@ pub fn apply_session_catalog_invalidation(
         return;
     }
 
-    let mut states = db.session_catalog_states.write();
+    let mut states = db.backend_cache_states.write();
     let Some(state) = states.get_mut(&client_id) else {
         return;
     };
 
     if invalidation.full_reset {
-        *state = SessionCatalogState::default();
+        *state = BackendCacheState::default();
         return;
     }
 
-    if !invalidation.touched_catalogs.is_empty() {
-        state.catalog_snapshot = None;
-    }
-
-    if invalidation
-        .touched_catalogs
-        .iter()
-        .any(|kind| matches!(kind, BootstrapCatalogKind::PgNamespace))
-    {
-        state.namespace_rows = None;
-    }
-    if invalidation
-        .touched_catalogs
-        .iter()
-        .any(|kind| matches!(kind, BootstrapCatalogKind::PgClass))
-    {
-        state.class_rows = None;
-    }
-    if invalidation
-        .touched_catalogs
-        .iter()
-        .any(|kind| matches!(kind, BootstrapCatalogKind::PgAttribute))
-    {
-        state.attribute_rows = None;
-    }
-    if invalidation
-        .touched_catalogs
-        .iter()
-        .any(|kind| matches!(kind, BootstrapCatalogKind::PgAttrdef))
-    {
-        state.attrdef_rows = None;
-    }
-    if invalidation
-        .touched_catalogs
-        .iter()
-        .any(|kind| matches!(kind, BootstrapCatalogKind::PgType))
-    {
-        state.type_rows = None;
-    }
-    if invalidation
-        .touched_catalogs
-        .iter()
-        .any(|kind| matches!(kind, BootstrapCatalogKind::PgIndex))
-    {
-        state.index_rows = None;
-    }
-    if invalidation
-        .touched_catalogs
-        .iter()
-        .any(|kind| matches!(kind, BootstrapCatalogKind::PgConstraint))
-    {
-        state.constraint_rows = None;
-    }
-    if invalidation
-        .touched_catalogs
-        .iter()
-        .any(|kind| matches!(kind, BootstrapCatalogKind::PgStatistic))
-    {
-        state.statistic_rows = None;
-    }
-    if invalidation
-        .touched_catalogs
-        .iter()
-        .any(|kind| matches!(kind, BootstrapCatalogKind::PgDepend))
-    {
-        state.depend_rows = None;
-    }
-    if invalidation
-        .touched_catalogs
-        .iter()
-        .any(|kind| matches!(kind, BootstrapCatalogKind::PgRewrite))
-    {
-        state.rewrite_rows = None;
-    }
-    if invalidation
-        .touched_catalogs
-        .iter()
-        .any(|kind| matches!(kind, BootstrapCatalogKind::PgAm))
-    {
-        state.am_rows = None;
-    }
-    if invalidation
-        .touched_catalogs
-        .iter()
-        .any(|kind| matches!(kind, BootstrapCatalogKind::PgAmop))
-    {
-        state.amop_rows = None;
-    }
-    if invalidation
-        .touched_catalogs
-        .iter()
-        .any(|kind| matches!(kind, BootstrapCatalogKind::PgAmproc))
-    {
-        state.amproc_rows = None;
-    }
-    if invalidation
-        .touched_catalogs
-        .iter()
-        .any(|kind| matches!(kind, BootstrapCatalogKind::PgOpclass))
-    {
-        state.opclass_rows = None;
-    }
-    if invalidation
-        .touched_catalogs
-        .iter()
-        .any(|kind| matches!(kind, BootstrapCatalogKind::PgOpfamily))
-    {
-        state.opfamily_rows = None;
-    }
-    if invalidation
-        .touched_catalogs
-        .iter()
-        .any(|kind| matches!(kind, BootstrapCatalogKind::PgCollation))
-    {
-        state.collation_rows = None;
-    }
-
-    for oid in &invalidation.relation_oids {
-        state.relation_entries_by_oid.remove(oid);
-    }
-
-    if !invalidation.namespace_oids.is_empty() {
-        state.namespace_rows = None;
-        state.class_rows = None;
-        state.relation_entries_by_oid.clear();
-        state.catalog_snapshot = None;
-    }
-    if !invalidation.type_oids.is_empty() {
-        state.type_rows = None;
-        state.relation_entries_by_oid.clear();
-        state.catalog_snapshot = None;
-    }
+    state.catcache = None;
+    state.relcache = None;
+    state.cache_ctx = None;
+    state.catalog_snapshot = None;
+    state.catalog_snapshot_ctx = None;
 }
 
-pub fn publish_session_catalog_invalidation(
+fn queue_backend_cache_invalidation(
     db: &Database,
     source_client_id: Option<ClientId>,
     invalidation: &CatalogInvalidation,
@@ -198,12 +71,8 @@ pub fn publish_session_catalog_invalidation(
     if invalidation.is_empty() {
         return;
     }
-    if invalidation.full_reset {
-        db.session_catalog_states.write().clear();
-        return;
-    }
     let client_ids = db
-        .session_catalog_states
+        .backend_cache_states
         .read()
         .keys()
         .copied()
@@ -212,7 +81,30 @@ pub fn publish_session_catalog_invalidation(
         if Some(client_id) == source_client_id {
             continue;
         }
-        apply_session_catalog_invalidation(db, client_id, invalidation);
+        db.backend_cache_states
+            .write()
+            .entry(client_id)
+            .or_default()
+            .pending_invalidations
+            .push(invalidation.clone());
+    }
+}
+
+pub fn publish_committed_catalog_invalidation(
+    db: &Database,
+    source_client_id: ClientId,
+    invalidation: &CatalogInvalidation,
+) {
+    if invalidation.is_empty() {
+        return;
+    }
+    apply_backend_cache_invalidation(db, source_client_id, invalidation);
+    queue_backend_cache_invalidation(db, Some(source_client_id), invalidation);
+}
+
+pub fn accept_invalidation_messages(db: &Database, client_id: ClientId) {
+    for invalidation in drain_pending_invalidations(db, client_id) {
+        apply_backend_cache_invalidation(db, client_id, &invalidation);
     }
 }
 
@@ -222,7 +114,7 @@ pub fn finalize_command_end_local_catalog_invalidations(
     invalidations: &[CatalogInvalidation],
 ) {
     for invalidation in invalidations {
-        apply_session_catalog_invalidation(db, client_id, invalidation);
+        apply_backend_cache_invalidation(db, client_id, invalidation);
     }
 }
 
@@ -260,16 +152,12 @@ pub fn finalize_committed_catalog_effects(
                 .with_storage_mut(|s| s.smgr.unlink(*rel, None, false));
         }
     }
-    {
-        let txns = db.txns.read();
-        let _ = db
-            .catalog
-            .write()
-            .refresh_committed_state(&db.pool, &txns, source_client_id);
-    }
+    // PostgreSQL invalidates catcache/relcache entries at commit and reloads
+    // them lazily on the next lookup. Avoid rebuilding the shared catalog
+    // snapshot here; some readers already resolve visible catalog state on
+    // demand, and eager refresh introduces lock-order and hot-path costs.
     for invalidation in invalidations {
-        apply_session_catalog_invalidation(db, source_client_id, invalidation);
-        publish_session_catalog_invalidation(db, Some(source_client_id), invalidation);
+        publish_committed_catalog_invalidation(db, source_client_id, invalidation);
     }
 }
 
@@ -280,9 +168,9 @@ pub fn finalize_aborted_local_catalog_invalidations(
     current_invalidations: &[CatalogInvalidation],
 ) {
     for invalidation in prior_invalidations {
-        apply_session_catalog_invalidation(db, client_id, invalidation);
+        apply_backend_cache_invalidation(db, client_id, invalidation);
     }
     for invalidation in current_invalidations {
-        apply_session_catalog_invalidation(db, client_id, invalidation);
+        apply_backend_cache_invalidation(db, client_id, invalidation);
     }
 }

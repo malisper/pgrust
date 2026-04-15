@@ -42,8 +42,8 @@ impl Database {
                 && namespace_oid != Self::temp_toast_namespace_oid(client_id))
     }
 
-    pub(super) fn invalidate_session_catalog_state(&self, client_id: ClientId) {
-        invalidate_session_catalog_state(self, client_id);
+    pub(super) fn invalidate_backend_cache_state(&self, client_id: ClientId) {
+        invalidate_backend_cache_state(self, client_id);
     }
 
     pub(crate) fn effective_search_path(
@@ -99,6 +99,9 @@ impl Database {
         txn_ctx: CatalogTxnContext,
         configured_search_path: Option<&[String]>,
     ) -> LazyCatalogLookup<'_> {
+        if txn_ctx.is_none() {
+            self.accept_invalidation_messages(client_id);
+        }
         let search_path = self.effective_search_path(client_id, configured_search_path);
         LazyCatalogLookup {
             db: self,

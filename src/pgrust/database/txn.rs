@@ -42,6 +42,14 @@ impl Database {
         finalize_committed_catalog_effects(self, source_client_id, effects, invalidations);
     }
 
+    pub(crate) fn publish_committed_catalog_invalidation(
+        &self,
+        source_client_id: ClientId,
+        invalidation: &CatalogInvalidation,
+    ) {
+        publish_committed_catalog_invalidation(self, source_client_id, invalidation);
+    }
+
     pub(crate) fn finalize_aborted_catalog_effects(&self, effects: &[CatalogMutationEffect]) {
         for effect in effects {
             for rel in &effect.created_rels {
@@ -122,7 +130,7 @@ impl Database {
             }
         }
         drop(namespaces);
-        self.invalidate_session_catalog_state(client_id);
+        self.invalidate_backend_cache_state(client_id);
     }
 
     pub(super) fn finish_txn(
@@ -168,6 +176,12 @@ impl Database {
             }
             Err(e) => {
                 let _ = self.txns.write().abort(xid);
+                let invalidations = catalog_effects
+                    .iter()
+                    .map(Self::catalog_invalidation_from_effect)
+                    .filter(|invalidation| !invalidation.is_empty())
+                    .collect::<Vec<_>>();
+                self.finalize_aborted_local_catalog_invalidations(client_id, &[], &invalidations);
                 self.finalize_aborted_catalog_effects(catalog_effects);
                 self.finalize_aborted_temp_effects(client_id, temp_effects);
                 self.txn_waiter.notify();
