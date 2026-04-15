@@ -6,10 +6,11 @@ use super::pathnodes::{
     rewrite_semantic_expr_for_input_path,
 };
 use super::{
-    aggregate_group_by, expand_join_rte_vars, expr_relids, path_relids, relids_subset,
-    rewrite_join_input_expr, rewrite_semantic_expr_for_path,
+    aggregate_group_by, expand_join_rte_vars, flatten_join_alias_vars,
+    rewrite_semantic_expr_for_path,
     rewrite_semantic_expr_for_path_or_expand_join_vars,
 };
+use crate::include::nodes::parsenodes::RangeTblEntryKind;
 use crate::include::nodes::pathnodes::{Path, PlannerInfo, RestrictInfo};
 use crate::include::nodes::plannodes::{Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
@@ -145,6 +146,7 @@ fn set_plan_refs(root: Option<&PlannerInfo>, path: Path) -> Plan {
             let right_layout = right.output_vars();
             let mut join_layout = left_layout.clone();
             join_layout.extend(right_layout.clone());
+            let hash_restrict_clauses = hash_clauses.clone();
 
             let outer_hash_keys = outer_hash_keys
                 .into_iter()
@@ -154,7 +156,7 @@ fn set_plan_refs(root: Option<&PlannerInfo>, path: Path) -> Plan {
                 .into_iter()
                 .map(|expr| fix_upper_expr(root, expr, &right, &right_layout))
                 .collect::<Vec<_>>();
-            let hash_clauses = hash_clauses
+            let lowered_hash_clauses = hash_clauses
                 .into_iter()
                 .map(|restrict| {
                     let expr = fix_join_expr(
@@ -178,9 +180,11 @@ fn set_plan_refs(root: Option<&PlannerInfo>, path: Path) -> Plan {
                 .collect::<Vec<_>>();
             let (join_restrict_clauses, other_restrict_clauses) =
                 split_join_restrict_clauses(kind, &restrict_clauses);
+            let join_restrict_clauses =
+                remove_hash_clauses(join_restrict_clauses, &hash_restrict_clauses);
             let join_qual = lower_join_clause_list(
                 root,
-                join_restrict_clauses,
+                &join_restrict_clauses,
                 &left,
                 &right,
                 &left_layout,
@@ -217,7 +221,7 @@ fn set_plan_refs(root: Option<&PlannerInfo>, path: Path) -> Plan {
                     hash_keys: inner_hash_keys,
                 }),
                 kind,
-                hash_clauses,
+                hash_clauses: lowered_hash_clauses,
                 hash_keys: outer_hash_keys,
                 join_qual,
                 qual,
@@ -383,6 +387,21 @@ fn split_join_restrict_clauses<'a>(
     restrict_clauses.split_at(split_at)
 }
 
+fn remove_hash_clauses<'a>(
+    restrict_clauses: &'a [RestrictInfo],
+    hash_clauses: &[RestrictInfo],
+) -> Vec<RestrictInfo> {
+    restrict_clauses
+        .iter()
+        .filter(|restrict| {
+            !hash_clauses
+                .iter()
+                .any(|hash_clause| hash_clause.clause == restrict.clause)
+        })
+        .cloned()
+        .collect()
+}
+
 fn lower_join_clause_list(
     root: Option<&PlannerInfo>,
     restrict_clauses: &[RestrictInfo],
@@ -421,7 +440,6 @@ fn fix_upper_expr(root: Option<&PlannerInfo>, expr: Expr, path: &Path, layout: &
 #[derive(Debug)]
 struct PathRewrite {
     expr: Expr,
-    exposed: bool,
 }
 
 fn exprs_equivalent(root: Option<&PlannerInfo>, left: &Expr, right: &Expr) -> bool {
@@ -431,21 +449,7 @@ fn exprs_equivalent(root: Option<&PlannerInfo>, left: &Expr, right: &Expr) -> bo
     let Some(root) = root else {
         return false;
     };
-    let expanded_left = expand_join_rte_vars(root, left.clone());
-    let expanded_right = expand_join_rte_vars(root, right.clone());
-    expanded_left == *right
-        || expanded_right == *left
-        || expanded_left == expanded_right
-        || matches!(
-            &expanded_right,
-            Expr::Coalesce(coalesce_left, coalesce_right)
-                if expanded_left == **coalesce_left || expanded_left == **coalesce_right
-        )
-        || matches!(
-            &expanded_left,
-            Expr::Coalesce(coalesce_left, coalesce_right)
-                if expanded_right == **coalesce_left || expanded_right == **coalesce_right
-        )
+    flatten_join_alias_vars(root, left.clone()) == flatten_join_alias_vars(root, right.clone())
 }
 
 fn slot_var(slot_id: usize, attno: usize, vartype: crate::backend::parser::SqlType) -> Expr {
@@ -565,6 +569,14 @@ fn fully_expand_output_expr(expr: Expr, path: &Path) -> Expr {
     }
 }
 
+fn fully_expand_output_expr_with_root(root: Option<&PlannerInfo>, expr: Expr, path: &Path) -> Expr {
+    let expr = match root {
+        Some(root) => flatten_join_alias_vars(root, expr),
+        None => expr,
+    };
+    fully_expand_output_expr(expr, path)
+}
+
 fn expand_output_var(var: Var, path: &Path) -> Expr {
     match path {
         Path::Projection {
@@ -605,12 +617,12 @@ fn find_exposed_output_match(root: Option<&PlannerInfo>, expr: &Expr, path: &Pat
                 let semantic = rewrite_expr_against_layout(target.expr.clone(), &input_layout);
                 let rewritten_semantic =
                     rewrite_semantic_expr_for_path(target.expr.clone(), input, &input_layout);
-                let expanded_semantic = fully_expand_output_expr(target.expr.clone(), input);
+                let expanded_semantic =
+                    fully_expand_output_expr_with_root(root, target.expr.clone(), input);
                 (exprs_equivalent(root, expr, &target.expr)
                     || exprs_equivalent(root, expr, &semantic)
                     || exprs_equivalent(root, expr, &rewritten_semantic)
-                    || exprs_equivalent(root, expr, &expanded_semantic)
-                    || expr_occurs_in_output(expr, &expanded_semantic))
+                    || exprs_equivalent(root, expr, &expanded_semantic))
                 .then(|| slot_var(*slot_id, index + 1, target.sql_type))
             })
         }
@@ -621,125 +633,25 @@ fn find_exposed_output_match(root: Option<&PlannerInfo>, expr: &Expr, path: &Pat
     }
 }
 
-fn expr_occurs_in_output(needle: &Expr, haystack: &Expr) -> bool {
-    if needle == haystack {
-        return true;
-    }
-    match haystack {
-        Expr::Aggref(aggref) => aggref.args.iter().any(|arg| expr_occurs_in_output(needle, arg)),
-        Expr::Op(op) => op.args.iter().any(|arg| expr_occurs_in_output(needle, arg)),
-        Expr::Bool(bool_expr) => bool_expr
-            .args
-            .iter()
-            .any(|arg| expr_occurs_in_output(needle, arg)),
-        Expr::Func(func) => func.args.iter().any(|arg| expr_occurs_in_output(needle, arg)),
-        Expr::SubLink(sublink) => sublink
-            .testexpr
-            .as_deref()
-            .is_some_and(|expr| expr_occurs_in_output(needle, expr)),
-        Expr::SubPlan(subplan) => subplan
-            .testexpr
-            .as_deref()
-            .is_some_and(|expr| expr_occurs_in_output(needle, expr)),
-        Expr::ScalarArrayOp(saop) => {
-            expr_occurs_in_output(needle, &saop.left) || expr_occurs_in_output(needle, &saop.right)
-        }
-        Expr::Cast(inner, _) | Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
-            expr_occurs_in_output(needle, inner)
-        }
-        Expr::Like {
-            expr,
-            pattern,
-            escape,
-            ..
-        }
-        | Expr::Similar {
-            expr,
-            pattern,
-            escape,
-            ..
-        } => {
-            expr_occurs_in_output(needle, expr)
-                || expr_occurs_in_output(needle, pattern)
-                || escape
-                    .as_deref()
-                    .is_some_and(|expr| expr_occurs_in_output(needle, expr))
-        }
-        Expr::IsDistinctFrom(left, right)
-        | Expr::IsNotDistinctFrom(left, right)
-        | Expr::Coalesce(left, right) => {
-            expr_occurs_in_output(needle, left) || expr_occurs_in_output(needle, right)
-        }
-        Expr::ArrayLiteral { elements, .. } => elements
-            .iter()
-            .any(|element| expr_occurs_in_output(needle, element)),
-        Expr::ArraySubscript { array, subscripts } => {
-            expr_occurs_in_output(needle, array)
-                || subscripts.iter().any(|subscript| {
-                    subscript
-                        .lower
-                        .as_ref()
-                        .is_some_and(|expr| expr_occurs_in_output(needle, expr))
-                        || subscript
-                            .upper
-                            .as_ref()
-                            .is_some_and(|expr| expr_occurs_in_output(needle, expr))
-                })
-        }
-        _ => false,
-    }
-}
-
-fn maybe_rewrite_against_path(
-    root: Option<&PlannerInfo>,
-    expr: &Expr,
-    path: &Path,
-    layout: &[Expr],
-) -> Option<PathRewrite> {
-    if let Some(rewritten) = find_exposed_output_match(root, expr, path) {
+fn match_join_input_output(expr: &Expr, path: &Path, layout: &[Expr]) -> Option<PathRewrite> {
+    if let Some(index) = layout.iter().position(|candidate| candidate == expr) {
         return Some(PathRewrite {
-            expr: rewritten,
-            exposed: true,
+            expr: layout[index].clone(),
         });
     }
-    let rewritten = rewrite_join_input_expr(root, expr.clone(), path, layout);
-    let exposed = layout.contains(expr) || layout.contains(&rewritten);
-    (rewritten != *expr || exposed).then_some(PathRewrite {
-        expr: rewritten,
-        exposed,
-    })
-}
-
-fn rewrite_join_whole_expr(
-    root: Option<&PlannerInfo>,
-    expr: &Expr,
-    left: &Path,
-    left_layout: &[Expr],
-    right: &Path,
-    right_layout: &[Expr],
-) -> Option<Expr> {
-    let expr_relids = expr_relids(expr);
-    let left_relids = path_relids(left);
-    let right_relids = path_relids(right);
-
-    if !expr_relids.is_empty() {
-        if relids_subset(&expr_relids, &left_relids) {
-            return maybe_rewrite_against_path(root, expr, left, left_layout).map(|m| m.expr);
+    match path {
+        Path::Projection {
+            slot_id,
+            targets,
+            ..
+        } => targets.iter().enumerate().find_map(|(index, target)| {
+            (target.expr == *expr).then(|| PathRewrite {
+                expr: slot_var(*slot_id, index + 1, target.sql_type),
+            })
+        }),
+        Path::Filter { input, .. } | Path::OrderBy { input, .. } | Path::Limit { input, .. } => {
+            match_join_input_output(expr, input, layout)
         }
-        if relids_subset(&expr_relids, &right_relids) {
-            return maybe_rewrite_against_path(root, expr, right, right_layout).map(|m| m.expr);
-        }
-    }
-
-    match (
-        maybe_rewrite_against_path(root, expr, left, left_layout),
-        maybe_rewrite_against_path(root, expr, right, right_layout),
-    ) {
-        (Some(left), None) => Some(left.expr),
-        (None, Some(right)) => Some(right.expr),
-        (Some(left), Some(right)) if left.exposed && !right.exposed => Some(left.expr),
-        (Some(left), Some(right)) if !left.exposed && right.exposed => Some(right.expr),
-        (Some(left), Some(right)) if left.expr == right.expr => Some(left.expr),
         _ => None,
     }
 }
@@ -752,33 +664,27 @@ fn fix_join_expr(
     right: &Path,
     right_layout: &[Expr],
 ) -> Expr {
-    let expr = match (&expr, root) {
-        (Expr::Var(var), Some(root))
-            if !left_layout.contains(&expr)
-                && !right_layout.contains(&expr)
-                && root
-                    .parse
-                    .rtable
-                    .get(var.varno.saturating_sub(1))
-                    .is_some_and(|rte| {
-                        matches!(
-                            rte.kind,
-                            crate::include::nodes::parsenodes::RangeTblEntryKind::Join { .. }
-                        )
-                    }) =>
-        {
-            expand_join_rte_vars(root, expr)
-        }
-        _ => expr,
-    };
-    if let Some(rewritten) =
-        rewrite_join_whole_expr(root, &expr, left, left_layout, right, right_layout)
+    if let Some(rewritten) = match_join_input_output(&expr, left, left_layout)
+        .or_else(|| match_join_input_output(&expr, right, right_layout))
+        .map(|rewrite| rewrite.expr)
     {
         return if rewritten == expr {
             rewritten
         } else {
             fix_join_expr(root, rewritten, left, left_layout, right, right_layout)
         };
+    }
+    if let (Expr::Var(var), Some(root)) = (&expr, root)
+        && root
+            .parse
+            .rtable
+            .get(var.varno.saturating_sub(1))
+            .is_some_and(|rte| matches!(rte.kind, RangeTblEntryKind::Join { .. }))
+    {
+        let flattened = flatten_join_alias_vars(root, expr.clone());
+        if flattened != expr {
+            return fix_join_expr(Some(root), flattened, left, left_layout, right, right_layout);
+        }
     }
 
     let rebuilt = match expr {
@@ -1050,7 +956,10 @@ fn fix_join_expr(
         other => other,
     };
 
-    match rewrite_join_whole_expr(root, &rebuilt, left, left_layout, right, right_layout) {
+    match match_join_input_output(&rebuilt, left, left_layout)
+        .or_else(|| match_join_input_output(&rebuilt, right, right_layout))
+        .map(|rewrite| rewrite.expr)
+    {
         Some(rewritten) if rewritten != rebuilt => {
             fix_join_expr(root, rewritten, left, left_layout, right, right_layout)
         }

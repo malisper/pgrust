@@ -2213,7 +2213,7 @@ fn build_join_plan_resolves_qualified_columns() {
                 } => {
                     assert_eq!(*kind, JoinType::Inner);
                     assert_eq!(hash_clauses.len(), 1);
-                    assert_eq!(join_qual.len(), 1);
+                    assert!(join_qual.is_empty());
                     assert!(qual.is_empty());
                     assert!(matches!(
                         hash_clauses.first(),
@@ -2250,7 +2250,7 @@ fn build_left_join_plan_uses_hash_join_for_equijoin() {
                 } => {
                     assert_eq!(*kind, JoinType::Left);
                     assert_eq!(hash_clauses.len(), 1);
-                    assert_eq!(join_qual.len(), 1);
+                    assert!(join_qual.is_empty());
                     assert!(qual.is_empty());
                 }
                 other => panic!("expected hash join, got {:?}", other),

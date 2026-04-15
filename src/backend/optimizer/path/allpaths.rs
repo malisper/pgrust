@@ -999,9 +999,5 @@ pub(super) fn make_one_rel(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) 
 }
 
 pub(super) fn query_planner(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) -> RelOptInfo {
-    let mut rel = make_one_rel(root, catalog);
-    if has_grouping(root) && rel.relids.len() > 1 && rel.reltarget != root.scanjoin_target {
-        rel = make_pathtarget_projection_rel(root, rel, &root.scanjoin_target, catalog, false);
-    }
-    rel
+    make_one_rel(root, catalog)
 }

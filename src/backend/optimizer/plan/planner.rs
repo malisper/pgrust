@@ -336,6 +336,13 @@ pub(super) fn grouping_planner(
     }
 
     let has_grouping = has_grouping(root);
+    if has_grouping
+        && current_rel.relids.len() > 1
+        && current_rel.reltarget != root.scanjoin_target
+    {
+        current_rel =
+            make_pathtarget_projection_rel(root, current_rel, &root.scanjoin_target, catalog, false);
+    }
     let mut projection_done = false;
     let final_targets = root.parse.target_list.clone();
     if has_grouping {

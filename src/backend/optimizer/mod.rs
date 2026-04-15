@@ -218,6 +218,10 @@ fn expand_join_rte_vars(root: &PlannerInfo, expr: Expr) -> Expr {
     joininfo::expand_join_rte_vars(root, expr)
 }
 
+fn flatten_join_alias_vars(root: &PlannerInfo, expr: Expr) -> Expr {
+    joininfo::flatten_join_alias_vars(root, expr)
+}
+
 fn rewrite_semantic_expr_for_path(expr: Expr, path: &Path, layout: &[Expr]) -> Expr {
     util::rewrite_semantic_expr_for_path(expr, path, layout)
 }
