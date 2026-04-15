@@ -15,10 +15,7 @@ use crate::pgrust::database::Database;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendCacheContext {
     Autocommit,
-    Transaction {
-        xid: TransactionId,
-        cid: CommandId,
-    },
+    Transaction { xid: TransactionId, cid: CommandId },
 }
 
 impl From<Option<(TransactionId, CommandId)>> for BackendCacheContext {
@@ -104,10 +101,7 @@ pub fn backend_relcache(
     Ok(relcache)
 }
 
-pub fn drain_pending_invalidations(
-    db: &Database,
-    client_id: ClientId,
-) -> Vec<CatalogInvalidation> {
+pub fn drain_pending_invalidations(db: &Database, client_id: ClientId) -> Vec<CatalogInvalidation> {
     db.backend_cache_states
         .write()
         .entry(client_id)
