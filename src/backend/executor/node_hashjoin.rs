@@ -2,6 +2,7 @@ use super::hashjoin::HashJoinPhase;
 use super::node_hash::eval_hash_key_exprs;
 use crate::backend::commands::explain::format_explain_lines;
 use crate::backend::executor::exec_expr::eval_expr;
+use crate::backend::executor::nodes::render_explain_expr;
 use crate::backend::executor::{ExecError, ExecutorContext};
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::{HashJoinState, PlanNode, SlotKind, TupleSlot};
@@ -223,18 +224,21 @@ impl PlanNode for HashJoinState {
         let prefix = "  ".repeat(indent + 1);
         if !self.hash_clauses.is_empty() {
             lines.push(format!(
-                "{prefix}Hash Cond: {:?}",
-                format_qual_list(&self.hash_clauses)
+                "{prefix}Hash Cond: {}",
+                render_explain_expr(&format_qual_list(&self.hash_clauses), &self.combined_names)
             ));
         }
         if !self.join_qual.is_empty() {
             lines.push(format!(
-                "{prefix}Join Filter: {:?}",
-                format_qual_list(&self.join_qual)
+                "{prefix}Join Filter: {}",
+                render_explain_expr(&format_qual_list(&self.join_qual), &self.combined_names)
             ));
         }
         if !self.qual.is_empty() {
-            lines.push(format!("{prefix}Filter: {:?}", format_qual_list(&self.qual)));
+            lines.push(format!(
+                "{prefix}Filter: {}",
+                render_explain_expr(&format_qual_list(&self.qual), &self.combined_names)
+            ));
         }
         format_explain_lines(&*self.left, indent, analyze, lines);
         format_explain_lines(self.right.as_ref(), indent, analyze, lines);

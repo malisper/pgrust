@@ -2029,6 +2029,56 @@ fn explain_analyze_reports_single_loop_for_simple_scan_and_sort() {
         other => panic!("expected query result, got {:?}", other),
     }
 }
+
+#[test]
+fn explain_hash_join_conditions_render_readably() {
+    let base = temp_dir("explain_hash_join_rendering");
+    let db = Database::open(&base, 16).unwrap();
+    db.execute(1, "create table customers (customer_id int4, name text)").unwrap();
+    db.execute(1, "create table orders (order_id int4, customer_id int4, total int4)").unwrap();
+    db.execute(
+        1,
+        "insert into customers values (1, 'ada'), (2, 'ben'), (3, 'cora')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into orders values (101, 1, 44), (102, 1, 65), (103, 3, 27), (104, 2, 18)",
+    )
+    .unwrap();
+
+    match db
+        .execute(
+            1,
+            "explain (analyze, buffers)
+             select c.name, o.order_id, o.total
+             from customers c
+             join orders o on o.customer_id = c.customer_id
+             where o.total >= 25
+             order by o.order_id",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            let rendered = rows
+                .into_iter()
+                .map(|row| match &row[0] {
+                    Value::Text(text) => text.clone(),
+                    other => panic!("expected text explain line, got {:?}", other),
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                rendered.iter().any(|line| line.contains("Hash Cond: (customer_id = customer_id)")),
+                "expected readable hash condition, got {rendered:?}"
+            );
+            assert!(
+                rendered.iter().all(|line| !line.contains("Op(OpExpr")),
+                "expected explain output without debug op expression formatting, got {rendered:?}"
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
 #[test]
 fn inner_join_returns_matching_rows() {
     let base = temp_dir("join_sql");
