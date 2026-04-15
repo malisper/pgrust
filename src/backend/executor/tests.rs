@@ -3,7 +3,7 @@ use crate::RelFileLocator;
 use crate::backend::access::heap::heapam::{heap_flush, heap_insert_mvcc, heap_update};
 use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
 use crate::backend::libpq::pqformat::format_exec_error;
-use crate::backend::parser::{Catalog, CatalogEntry};
+use crate::backend::parser::{Catalog, CatalogEntry, CatalogLookup};
 use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, StorageManager};
 use crate::include::access::htup::TupleValue;
 use crate::include::access::htup::{AttributeDesc, HeapTuple};
@@ -560,6 +560,8 @@ fn empty_executor_context(base: &PathBuf) -> ExecutorContext {
         outer_rows: Vec::new(),
         subplans: Vec::new(),
         timed: false,
+        catalog: None,
+        compiled_functions: std::collections::HashMap::new(),
     }
 }
 
@@ -585,6 +587,8 @@ fn run_plan(
         outer_rows: Vec::new(),
         subplans: Vec::new(),
         timed: false,
+        catalog: None,
+        compiled_functions: std::collections::HashMap::new(),
     };
 
     let names = state.column_names().to_vec();
@@ -648,6 +652,8 @@ fn run_sql_with_catalog(
             outer_rows: Vec::new(),
             subplans: Vec::new(),
             timed: false,
+            catalog: catalog.materialize_visible_catalog(),
+            compiled_functions: std::collections::HashMap::new(),
         };
         execute_sql(&sql, &mut catalog, &mut ctx, xid)
     })
@@ -4677,6 +4683,8 @@ fn prepared_insert_uses_defaults_for_omitted_columns() {
         outer_rows: Vec::new(),
         subplans: Vec::new(),
         timed: false,
+        catalog: catalog.materialize_visible_catalog(),
+        compiled_functions: std::collections::HashMap::new(),
     };
 
     let prepared = crate::backend::parser::bind_insert_prepared(

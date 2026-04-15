@@ -913,6 +913,38 @@ fn parse_do_statement_with_explicit_language() {
 }
 
 #[test]
+fn parse_create_function_statement_with_returns_table() {
+    let stmt = parse_statement(
+        "create function public.pair_rows(x int4) returns table(a int4, b text) language plpgsql as $$ begin return next; end $$",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateFunction(CreateFunctionStatement {
+            schema_name: Some("public".into()),
+            function_name: "pair_rows".into(),
+            args: vec![CreateFunctionArg {
+                mode: FunctionArgMode::In,
+                name: "x".into(),
+                ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
+            }],
+            return_spec: CreateFunctionReturnSpec::Table(vec![
+                CreateFunctionTableColumn {
+                    name: "a".into(),
+                    ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
+                },
+                CreateFunctionTableColumn {
+                    name: "b".into(),
+                    ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Text)),
+                },
+            ]),
+            language: "plpgsql".into(),
+            body: " begin return next; end ".into(),
+        })
+    );
+}
+
+#[test]
 fn parse_expression_entrypoint_reuses_sql_expression_grammar() {
     let expr = parse_expr("1 + 2 * 3").unwrap();
     assert!(matches!(expr, SqlExpr::Add(_, _)));

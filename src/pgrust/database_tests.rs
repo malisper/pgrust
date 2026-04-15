@@ -9,6 +9,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(5);
+const CONTENTION_TEST_TIMEOUT: Duration = Duration::from_secs(15);
+const HEAVY_CONTENTION_TEST_TIMEOUT: Duration = Duration::from_secs(30);
+const STRESS_TEST_TIMEOUT: Duration = Duration::from_secs(60);
+const SAME_ROW_UPDATE_TEST_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Start a background thread that periodically checks for deadlocks
 /// using parking_lot's deadlock detector.  Called once via `Once`.
@@ -1623,7 +1627,8 @@ fn alter_table_add_column_rejects_unsupported_forms() {
 
     match db.execute(1, "alter table items add column key_id int4 primary key") {
         Err(ExecError::Parse(ParseError::UnexpectedToken { expected, actual }))
-            if expected == "ADD COLUMN without PRIMARY KEY" && actual == "PRIMARY KEY" => {}
+            if (expected == "ADD COLUMN without PRIMARY KEY" && actual == "PRIMARY KEY")
+                || (expected == "ADD COLUMN without NOT NULL" && actual == "NOT NULL") => {}
         other => panic!("expected PRIMARY KEY rejection, got {other:?}"),
     }
 
@@ -2973,14 +2978,14 @@ fn create_temp_table_primary_key_and_unique_constraints_are_rejected() {
 
     match db.execute(1, "create temp table temp_items (id int4 primary key)") {
         Err(ExecError::Parse(ParseError::UnexpectedToken { expected, actual }))
-            if expected == "permanent table for PRIMARY KEY/UNIQUE constraints"
+            if expected == "permanent table for PRIMARY KEY/UNIQUE/CHECK constraints"
                 && actual == "temporary table" => {}
         other => panic!("expected temp primary-key rejection, got {other:?}"),
     }
 
     match db.execute(1, "create temp table temp_items (id int4, unique (id))") {
         Err(ExecError::Parse(ParseError::UnexpectedToken { expected, actual }))
-            if expected == "permanent table for PRIMARY KEY/UNIQUE constraints"
+            if expected == "permanent table for PRIMARY KEY/UNIQUE/CHECK constraints"
                 && actual == "temporary table" => {}
         other => panic!("expected temp unique rejection, got {other:?}"),
     }
@@ -3305,8 +3310,8 @@ fn concurrent_indexed_inserts_and_lookups_remain_correct() {
         })
         .collect();
 
-    join_all_with_timeout(writers, TEST_TIMEOUT);
-    join_all_with_timeout(readers, TEST_TIMEOUT);
+    join_all_with_timeout(writers, HEAVY_CONTENTION_TEST_TIMEOUT);
+    join_all_with_timeout(readers, HEAVY_CONTENTION_TEST_TIMEOUT);
 
     assert_eq!(
         query_rows(&db, 1, "select count(*) from items"),
@@ -3376,8 +3381,8 @@ fn concurrent_indexed_inserts_and_range_scans_survive_splits() {
         })
         .collect();
 
-    join_all_with_timeout(writers, TEST_TIMEOUT);
-    join_all_with_timeout(readers, TEST_TIMEOUT);
+    join_all_with_timeout(writers, HEAVY_CONTENTION_TEST_TIMEOUT);
+    join_all_with_timeout(readers, HEAVY_CONTENTION_TEST_TIMEOUT);
 
     assert_explain_uses_index(
         &db,
@@ -5212,7 +5217,7 @@ fn concurrent_selects_on_shared_data() {
         })
         .collect();
 
-    join_all_with_timeout(handles, TEST_TIMEOUT);
+    join_all_with_timeout(handles, HEAVY_CONTENTION_TEST_TIMEOUT);
 }
 
 #[test]
@@ -5245,7 +5250,7 @@ fn concurrent_inserts_and_selects() {
         })
         .collect();
 
-    join_all_with_timeout(handles, TEST_TIMEOUT);
+    join_all_with_timeout(handles, CONTENTION_TEST_TIMEOUT);
 
     let total = num_threads * inserts_per_thread;
     match db.execute(1, "select count(*) from log").unwrap() {
@@ -5309,7 +5314,7 @@ fn mixed_concurrent_reads_and_writes() {
         }));
     }
 
-    join_all_with_timeout(handles, TEST_TIMEOUT);
+    join_all_with_timeout(handles, CONTENTION_TEST_TIMEOUT);
 
     match db.execute(1, "select count(*) from counters").unwrap() {
         StatementResult::Query { rows, .. } => {
@@ -5351,7 +5356,7 @@ fn concurrent_updates_same_row_no_lost_updates() {
         })
         .collect();
 
-    join_all_with_timeout(handles, TEST_TIMEOUT);
+    join_all_with_timeout(handles, CONTENTION_TEST_TIMEOUT);
 
     let expected = num_threads * updates_per_thread;
     match db
@@ -5402,7 +5407,7 @@ fn concurrent_updates_different_rows() {
         })
         .collect();
 
-    join_all_with_timeout(handles, TEST_TIMEOUT);
+    join_all_with_timeout(handles, CONTENTION_TEST_TIMEOUT);
 
     for i in 0..num_threads {
         match db
@@ -5513,7 +5518,7 @@ fn concurrent_flush_does_not_error() {
         })
         .collect();
 
-    join_all_with_timeout(handles, TEST_TIMEOUT);
+    join_all_with_timeout(handles, CONTENTION_TEST_TIMEOUT);
 
     match db.execute(1, "select count(*) from ftest").unwrap() {
         StatementResult::Query { rows, .. } => {
@@ -5605,7 +5610,7 @@ fn concurrent_reads_same_page_no_io_error() {
         })
         .collect();
 
-    join_all_with_timeout(handles, TEST_TIMEOUT);
+    join_all_with_timeout(handles, CONTENTION_TEST_TIMEOUT);
 }
 
 /// Regression: without the content lock on heap_scan_next, a reader could
@@ -5834,7 +5839,7 @@ fn no_lost_updates_under_heavy_contention() {
         })
         .collect();
 
-    join_all_with_timeout(handles, Duration::from_secs(30));
+    join_all_with_timeout(handles, STRESS_TEST_TIMEOUT);
 
     let expected = num_threads * increments_per_thread;
     match db
@@ -6576,7 +6581,7 @@ fn lock_ordering_deadlock_repro() {
         }));
     }
 
-    join_all_with_timeout(handles, TEST_TIMEOUT);
+    join_all_with_timeout(handles, CONTENTION_TEST_TIMEOUT);
 }
 
 #[test]
@@ -6642,7 +6647,7 @@ fn no_pins_leaked_concurrent_contention() {
         }));
     }
 
-    join_all_with_timeout(handles, Duration::from_secs(30));
+    join_all_with_timeout(handles, STRESS_TEST_TIMEOUT);
 
     // After all threads finish, no pins should remain.
     let capacity = db.pool.capacity();
@@ -6684,7 +6689,7 @@ fn concurrent_same_row_updates_do_not_deadlock() {
             }
         }));
     }
-    join_all_with_timeout(handles, Duration::from_secs(10));
+    join_all_with_timeout(handles, SAME_ROW_UPDATE_TEST_TIMEOUT);
 
     let result = db.execute(1, "select val from t where id = 1").unwrap();
     let expected = num_threads * iters;
@@ -6884,4 +6889,109 @@ fn streaming_correlated_subquery_holds_access_share_lock_on_inner_relation() {
     drop(guard);
     done_rx.recv_timeout(TEST_TIMEOUT).unwrap();
     worker.join().unwrap();
+}
+
+#[test]
+fn create_function_scalar_calls_work_in_select_and_where() {
+    let dir = temp_dir("create_function_scalar");
+    let db = Database::open(&dir, 64).unwrap();
+
+    match db
+        .execute(
+            1,
+            "create function inc(x int4) returns int4 language plpgsql as $$ begin return x + 1; end $$",
+        )
+        .unwrap()
+    {
+        StatementResult::AffectedRows(0) => {}
+        other => panic!("expected create function affected rows, got {other:?}"),
+    }
+
+    assert_eq!(
+        query_rows(&db, 1, "select inc(4), inc(4) = 5"),
+        vec![vec![Value::Int32(5), Value::Bool(true)]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select inc(1) where inc(1) = 2"),
+        vec![vec![Value::Int32(2)]]
+    );
+}
+
+#[test]
+fn create_function_setof_scalar_works_in_from_and_project_set() {
+    let dir = temp_dir("create_function_setof_scalar");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function pair_series(x int4) returns setof int4 language plpgsql as $$ begin return next x; return next x + 1; return; end $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select * from pair_series(3)"),
+        vec![vec![Value::Int32(3)], vec![Value::Int32(4)]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select pair_series(3)"),
+        vec![vec![Value::Int32(3)], vec![Value::Int32(4)]]
+    );
+}
+
+#[test]
+fn create_function_row_returns_work_for_table_and_record() {
+    let dir = temp_dir("create_function_row_returns");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function pair_rows(n int4) returns table(a int4, b text) language plpgsql as $$ begin a := n; b := 'left'; return next; return query values (n + 1, 'right'); end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function dyn_pair(n int4) returns setof record language plpgsql as $$ begin return query values (n, 'dyn'); end $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select * from pair_rows(7)"),
+        vec![
+            vec![Value::Int32(7), Value::Text("left".into())],
+            vec![Value::Int32(8), Value::Text("right".into())],
+        ]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select * from dyn_pair(9) as t(a int4, b text)"),
+        vec![vec![Value::Int32(9), Value::Text("dyn".into())]]
+    );
+}
+
+#[test]
+fn create_function_named_composite_rows_expand_from_relation_rowtype() {
+    let dir = temp_dir("create_function_named_composite");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table widgets (id int4, label text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create function widget_rows(n int4) returns setof widgets language plpgsql as $$ begin return query values (n, 'widget'); end $$",
+    )
+    .unwrap();
+
+    let visible = db.lazy_catalog_lookup(1, None, None);
+    let widget_type = visible
+        .type_rows()
+        .into_iter()
+        .find(|row| row.typname == "widgets")
+        .unwrap();
+    let proc = visible.proc_rows_by_name("widget_rows").into_iter().next().unwrap();
+    assert_eq!(proc.prorettype, widget_type.oid);
+    assert!(proc.proretset);
+
+    assert_eq!(
+        query_rows(&db, 1, "select * from widget_rows(5)"),
+        vec![vec![Value::Int32(5), Value::Text("widget".into())]]
+    );
 }

@@ -56,6 +56,9 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_domain_statement(&sql)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_create_function_statement(&sql)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_unsupported_statement(&sql) {
         if matches!(
             stmt,
@@ -155,8 +158,6 @@ fn try_parse_unsupported_statement(sql: &str) -> Option<Statement> {
         Some("COMMENT ON CONSTRAINT")
     } else if lowered.starts_with("comment on index ") {
         Some("COMMENT ON INDEX")
-    } else if lowered.starts_with("create function ") {
-        Some("CREATE FUNCTION")
     } else if lowered.starts_with("create domain ") {
         Some("CREATE DOMAIN")
     } else if lowered.starts_with("create rule ") {
@@ -202,6 +203,448 @@ fn try_parse_domain_statement(sql: &str) -> Result<Option<Statement>, ParseError
             .map(|stmt| Some(Statement::CommentOnDomain(stmt)));
     }
     Ok(None)
+}
+
+fn try_parse_create_function_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if lowered.starts_with("create or replace function ") {
+        return Err(ParseError::FeatureNotSupported(
+            "CREATE OR REPLACE FUNCTION is not supported yet".into(),
+        ));
+    }
+    if !lowered.starts_with("create function ") {
+        return Ok(None);
+    }
+    Ok(Some(Statement::CreateFunction(
+        build_create_function_statement(trimmed)?,
+    )))
+}
+
+fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement, ParseError> {
+    let prefix = "create function";
+    let Some(rest) = sql.get(prefix.len()..) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "CREATE FUNCTION name(args) ...",
+            actual: sql.into(),
+        });
+    };
+    let rest = rest.trim_start();
+    let ((schema_name, function_name), rest) = parse_create_function_name(rest)?;
+    let (arg_list, mut rest) = take_parenthesized_segment(rest)?;
+    let args = parse_create_function_args(&arg_list)?;
+
+    let mut return_spec = None;
+    let mut language = None;
+    let mut body = None;
+
+    while !rest.trim_start().is_empty() {
+        rest = rest.trim_start();
+        if keyword_at_start(rest, "returns") {
+            if return_spec.is_some() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "single RETURNS clause",
+                    actual: rest.into(),
+                });
+            }
+            let (parsed, next_rest) = parse_create_function_returns(rest)?;
+            return_spec = Some(parsed);
+            rest = next_rest;
+            continue;
+        }
+        if keyword_at_start(rest, "language") {
+            if language.is_some() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "single LANGUAGE clause",
+                    actual: rest.into(),
+                });
+            }
+            let (parsed, next_rest) = parse_create_function_language(rest)?;
+            language = Some(parsed);
+            rest = next_rest;
+            continue;
+        }
+        if keyword_at_start(rest, "as") {
+            if body.is_some() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "single AS clause",
+                    actual: rest.into(),
+                });
+            }
+            let (parsed, next_rest) = parse_create_function_body(rest)?;
+            body = Some(parsed);
+            rest = next_rest;
+            continue;
+        }
+        return Err(ParseError::FeatureNotSupported(format!(
+            "unsupported CREATE FUNCTION clause: {}",
+            rest.split_whitespace().next().unwrap_or(rest)
+        )));
+    }
+
+    let has_out_args = args
+        .iter()
+        .any(|arg| matches!(arg.mode, FunctionArgMode::Out | FunctionArgMode::InOut));
+    let return_spec = match return_spec {
+        Some(CreateFunctionReturnSpec::Type {
+            ty: RawTypeName::Record,
+            setof,
+        }) if has_out_args => CreateFunctionReturnSpec::DerivedFromOutArgs {
+            setof_record: setof,
+        },
+        Some(spec) => spec,
+        None if has_out_args => CreateFunctionReturnSpec::DerivedFromOutArgs {
+            setof_record: false,
+        },
+        None => {
+            return Err(ParseError::UnexpectedToken {
+                expected: "RETURNS clause or OUT/INOUT arguments",
+                actual: sql.into(),
+            });
+        }
+    };
+
+    Ok(CreateFunctionStatement {
+        schema_name,
+        function_name,
+        args,
+        return_spec,
+        language: language.ok_or(ParseError::UnexpectedEof)?,
+        body: body.ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
+fn parse_create_function_name(
+    input: &str,
+) -> Result<((Option<String>, String), &str), ParseError> {
+    let (first, mut rest) = parse_sql_identifier(input)?;
+    rest = rest.trim_start();
+    if let Some(after_dot) = rest.strip_prefix('.') {
+        let (second, rest) = parse_sql_identifier(after_dot.trim_start())?;
+        return Ok(((Some(first), second), rest));
+    }
+    Ok(((None, first), rest))
+}
+
+fn parse_create_function_args(input: &str) -> Result<Vec<CreateFunctionArg>, ParseError> {
+    let items = split_top_level_items(input, ',')?;
+    if items.len() == 1 && items[0].trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    items
+        .into_iter()
+        .filter(|item| !item.trim().is_empty())
+        .map(|item| parse_create_function_arg(&item))
+        .collect()
+}
+
+fn parse_create_function_arg(input: &str) -> Result<CreateFunctionArg, ParseError> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "function argument",
+            actual: input.into(),
+        });
+    }
+    let lowered = trimmed.to_ascii_lowercase();
+    if lowered.contains(" default ")
+        || lowered.contains(":=")
+        || lowered.starts_with("variadic ")
+        || lowered.contains(" variadic ")
+    {
+        return Err(ParseError::FeatureNotSupported(
+            "default arguments and VARIADIC are not supported in CREATE FUNCTION".into(),
+        ));
+    }
+
+    let (mode, rest) = if keyword_at_start(trimmed, "inout") {
+        (FunctionArgMode::InOut, consume_keyword(trimmed, "inout"))
+    } else if keyword_at_start(trimmed, "out") {
+        (FunctionArgMode::Out, consume_keyword(trimmed, "out"))
+    } else if keyword_at_start(trimmed, "in") {
+        (FunctionArgMode::In, consume_keyword(trimmed, "in"))
+    } else {
+        (FunctionArgMode::In, trimmed)
+    };
+    let (name, rest) = parse_sql_identifier(rest.trim_start())?;
+    let type_sql = rest.trim();
+    if type_sql.is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "argument type name",
+            actual: input.into(),
+        });
+    }
+    Ok(CreateFunctionArg {
+        mode,
+        name,
+        ty: parse_type_name(type_sql)?,
+    })
+}
+
+fn parse_create_function_returns(
+    input: &str,
+) -> Result<(CreateFunctionReturnSpec, &str), ParseError> {
+    let rest = consume_keyword(input.trim_start(), "returns").trim_start();
+    if keyword_at_start(rest, "table") {
+        let rest = consume_keyword(rest, "table").trim_start();
+        let (columns_sql, rest) = take_parenthesized_segment(rest)?;
+        return Ok((
+            CreateFunctionReturnSpec::Table(parse_create_function_table_columns(&columns_sql)?),
+            rest,
+        ));
+    }
+
+    let setof = keyword_at_start(rest, "setof");
+    let type_rest = if setof {
+        consume_keyword(rest, "setof").trim_start()
+    } else {
+        rest
+    };
+    let boundary = find_next_top_level_keyword(type_rest, &["language", "as"])
+        .unwrap_or(type_rest.len());
+    let type_sql = type_rest[..boundary].trim();
+    if type_sql.is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "return type name",
+            actual: input.into(),
+        });
+    }
+    Ok((
+        CreateFunctionReturnSpec::Type {
+            ty: parse_type_name(type_sql)?,
+            setof,
+        },
+        &type_rest[boundary..],
+    ))
+}
+
+fn parse_create_function_table_columns(
+    input: &str,
+) -> Result<Vec<CreateFunctionTableColumn>, ParseError> {
+    split_top_level_items(input, ',')?
+        .into_iter()
+        .filter(|item| !item.trim().is_empty())
+        .map(|item| {
+            let (name, rest) = parse_sql_identifier(item.trim())?;
+            let type_sql = rest.trim();
+            if type_sql.is_empty() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "TABLE column type",
+                    actual: item.to_string(),
+                });
+            }
+            Ok(CreateFunctionTableColumn {
+                name,
+                ty: parse_type_name(type_sql)?,
+            })
+        })
+        .collect()
+}
+
+fn parse_create_function_language(input: &str) -> Result<(String, &str), ParseError> {
+    let rest = consume_keyword(input.trim_start(), "language").trim_start();
+    let (language, rest) = parse_sql_identifier(rest)?;
+    Ok((language, rest))
+}
+
+fn parse_create_function_body(input: &str) -> Result<(String, &str), ParseError> {
+    let rest = consume_keyword(input.trim_start(), "as").trim_start();
+    let token_len = scan_string_literal_token_len(rest).ok_or(ParseError::UnexpectedToken {
+        expected: "function body string literal",
+        actual: rest.into(),
+    })?;
+    Ok((decode_string_literal(&rest[..token_len])?, &rest[token_len..]))
+}
+
+fn parse_sql_identifier(input: &str) -> Result<(String, &str), ParseError> {
+    let input = input.trim_start();
+    let Some(first) = input.chars().next() else {
+        return Err(ParseError::UnexpectedEof);
+    };
+    if first == '"' {
+        let mut i = 1usize;
+        let bytes = input.as_bytes();
+        while i < bytes.len() {
+            if bytes[i] == b'"' {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'"' {
+                    i += 2;
+                } else {
+                    return Ok((input[1..i].replace("\"\"", "\""), &input[i + 1..]));
+                }
+            } else {
+                i += 1;
+            }
+        }
+        return Err(ParseError::UnexpectedEof);
+    }
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return Err(ParseError::UnexpectedToken {
+            expected: "SQL identifier",
+            actual: input.into(),
+        });
+    }
+    let mut end = first.len_utf8();
+    for ch in input[end..].chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            end += ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    Ok((input[..end].to_ascii_lowercase(), &input[end..]))
+}
+
+fn take_parenthesized_segment(input: &str) -> Result<(String, &str), ParseError> {
+    let input = input.trim_start();
+    if !input.starts_with('(') {
+        return Err(ParseError::UnexpectedToken {
+            expected: "(",
+            actual: input.into(),
+        });
+    }
+    let bytes = input.as_bytes();
+    let mut depth = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' => {
+                i = parse_delimited_token_end(bytes, i, b'\'');
+                continue;
+            }
+            b'"' => {
+                i = parse_delimited_token_end(bytes, i, b'"');
+                continue;
+            }
+            b'$' => {
+                if let Some(end) = scan_dollar_string_token_end(input, i) {
+                    i = end;
+                    continue;
+                }
+            }
+            b'(' => depth += 1,
+            b')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Ok((input[1..i].to_string(), &input[i + 1..]));
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    Err(ParseError::UnexpectedEof)
+}
+
+fn split_top_level_items(input: &str, separator: char) -> Result<Vec<String>, ParseError> {
+    let mut items = Vec::new();
+    let mut start = 0usize;
+    let mut depth = 0usize;
+    let bytes = input.as_bytes();
+    let sep = separator as u8;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' => {
+                i = parse_delimited_token_end(bytes, i, b'\'');
+                continue;
+            }
+            b'"' => {
+                i = parse_delimited_token_end(bytes, i, b'"');
+                continue;
+            }
+            b'$' => {
+                if let Some(end) = scan_dollar_string_token_end(input, i) {
+                    i = end;
+                    continue;
+                }
+            }
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth = depth.saturating_sub(1),
+            byte if byte == sep && depth == 0 => {
+                items.push(input[start..i].trim().to_string());
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    items.push(input[start..].trim().to_string());
+    Ok(items)
+}
+
+fn find_next_top_level_keyword(input: &str, keywords: &[&str]) -> Option<usize> {
+    let bytes = input.as_bytes();
+    let mut depth = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' => {
+                i = parse_delimited_token_end(bytes, i, b'\'');
+                continue;
+            }
+            b'"' => {
+                i = parse_delimited_token_end(bytes, i, b'"');
+                continue;
+            }
+            b'$' => {
+                if let Some(end) = scan_dollar_string_token_end(input, i) {
+                    i = end;
+                    continue;
+                }
+            }
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth = depth.saturating_sub(1),
+            _ if depth == 0 => {
+                if keywords.iter().any(|keyword| keyword_at_boundary(input, i, keyword)) {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+fn scan_string_literal_token_len(input: &str) -> Option<usize> {
+    let bytes = input.as_bytes();
+    match bytes.first().copied()? {
+        b'\'' => Some(parse_delimited_token_end(bytes, 0, b'\'')),
+        b'e' | b'E' if bytes.get(1) == Some(&b'\'') => Some(parse_delimited_token_end(bytes, 1, b'\'')),
+        b'$' => scan_dollar_string_token_end(input, 0),
+        _ => None,
+    }
+}
+
+fn scan_dollar_string_token_end(input: &str, start: usize) -> Option<usize> {
+    let suffix = &input[start..];
+    if !suffix.starts_with('$') {
+        return None;
+    }
+    let tag_end = suffix[1..].find('$')? + 1;
+    let tag = &suffix[..=tag_end];
+    let rest = &suffix[tag_end + 1..];
+    let closing = rest.find(tag)?;
+    Some(start + tag_end + 1 + closing + tag.len())
+}
+
+fn keyword_at_start(input: &str, keyword: &str) -> bool {
+    keyword_at_boundary(input.trim_start(), 0, keyword)
+}
+
+fn keyword_at_boundary(input: &str, start: usize, keyword: &str) -> bool {
+    let end = start.saturating_add(keyword.len());
+    input
+        .get(start..end)
+        .is_some_and(|slice| slice.eq_ignore_ascii_case(keyword))
+        && input
+            .get(end..)
+            .and_then(|slice| slice.chars().next())
+            .is_none_or(|ch| !(ch.is_ascii_alphanumeric() || ch == '_'))
+}
+
+fn consume_keyword<'a>(input: &'a str, keyword: &str) -> &'a str {
+    &input[keyword.len()..]
 }
 
 fn build_create_domain_statement(sql: &str) -> Result<CreateDomainStatement, ParseError> {

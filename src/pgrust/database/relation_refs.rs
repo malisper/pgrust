@@ -196,6 +196,10 @@ fn collect_rels_from_set_returning_call(
         | crate::include::nodes::primnodes::SetReturningCall::TextSearchTableFunction {
             args,
             ..
+        }
+        | crate::include::nodes::primnodes::SetReturningCall::UserDefined {
+            args,
+            ..
         } => {
             for arg in args {
                 collect_rels_from_expr(arg, rels);
@@ -305,6 +309,10 @@ pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLoc
             | crate::include::nodes::primnodes::SetReturningCall::TextSearchTableFunction {
                 args,
                 ..
+            }
+            | crate::include::nodes::primnodes::SetReturningCall::UserDefined {
+                args,
+                ..
             } => {
                 for arg in args {
                     collect_rels_from_expr(arg, rels);
@@ -347,6 +355,9 @@ pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLoc
                                 args, ..
                             }
                             | crate::include::nodes::primnodes::SetReturningCall::TextSearchTableFunction {
+                                args, ..
+                            }
+                            | crate::include::nodes::primnodes::SetReturningCall::UserDefined {
                                 args, ..
                             } => {
                                 for arg in args {

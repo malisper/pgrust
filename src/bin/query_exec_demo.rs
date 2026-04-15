@@ -172,6 +172,8 @@ fn main() -> Result<(), ExecError> {
         outer_rows: Vec::new(),
         subplans: Vec::new(),
         timed: false,
+        catalog: None,
+        compiled_functions: std::collections::HashMap::new(),
     };
 
     let names = state.column_names().to_vec();

@@ -298,6 +298,24 @@ impl Session {
             Statement::Set(ref set_stmt) => self.apply_set(set_stmt),
             Statement::Reset(ref reset_stmt) => self.apply_reset(reset_stmt),
             Statement::CopyFrom(ref copy_stmt) => self.execute_copy_from_file(db, copy_stmt),
+            Statement::CreateFunction(ref create_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_create_function_stmt_with_search_path(
+                        self.client_id,
+                        create_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
             Statement::CreateDomain(ref create_stmt) => {
                 let search_path = self.configured_search_path();
                 db.execute_create_domain_stmt_with_search_path(
@@ -1022,6 +1040,8 @@ impl Session {
                     timed: false,
                     outer_rows: Vec::new(),
                     subplans: Vec::new(),
+                    catalog: catalog.materialize_visible_catalog(),
+                    compiled_functions: std::collections::HashMap::new(),
                 };
                 execute_readonly_statement(stmt, &catalog, &mut ctx)
             }
@@ -1044,6 +1064,8 @@ impl Session {
                     timed: false,
                     outer_rows: Vec::new(),
                     subplans: Vec::new(),
+                    catalog: catalog.materialize_visible_catalog(),
+                    compiled_functions: std::collections::HashMap::new(),
                 };
                 execute_insert(bound, &catalog, &mut ctx, xid, cid)
             }
@@ -1066,6 +1088,8 @@ impl Session {
                     timed: false,
                     outer_rows: Vec::new(),
                     subplans: Vec::new(),
+                    catalog: catalog.materialize_visible_catalog(),
+                    compiled_functions: std::collections::HashMap::new(),
                 };
                 execute_update_with_waiter(
                     bound,
@@ -1095,6 +1119,8 @@ impl Session {
                     timed: false,
                     outer_rows: Vec::new(),
                     subplans: Vec::new(),
+                    catalog: catalog.materialize_visible_catalog(),
+                    compiled_functions: std::collections::HashMap::new(),
                 };
                 execute_delete_with_waiter(
                     bound,
@@ -1102,6 +1128,18 @@ impl Session {
                     &mut ctx,
                     xid,
                     Some((&db.txns, &db.txn_waiter, interrupts.as_ref())),
+                )
+            }
+            Statement::CreateFunction(ref create_stmt) => {
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_create_function_stmt_in_transaction_with_search_path(
+                    client_id,
+                    create_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
                 )
             }
             Statement::CreateTable(ref create_stmt) => {
@@ -1222,6 +1260,8 @@ impl Session {
                     timed: false,
                     outer_rows: Vec::new(),
                     subplans: Vec::new(),
+                    catalog: catalog.materialize_visible_catalog(),
+                    compiled_functions: std::collections::HashMap::new(),
                 };
                 execute_truncate_table(truncate_stmt.clone(), &catalog, &mut ctx, xid)
             }
@@ -1393,6 +1433,7 @@ impl Session {
 
         let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
         let interrupts = self.interrupts();
+        let catalog = self.catalog_lookup_for_command(db, xid, cid);
         let mut ctx = ExecutorContext {
             pool: Arc::clone(&db.pool),
             txns: db.txns.clone(),
@@ -1405,6 +1446,8 @@ impl Session {
             timed: false,
             outer_rows: Vec::new(),
             subplans: Vec::new(),
+            catalog: catalog.materialize_visible_catalog(),
+            compiled_functions: std::collections::HashMap::new(),
         };
         execute_prepared_insert_row(prepared, params, &mut ctx, xid, cid)
     }
@@ -1612,6 +1655,7 @@ impl Session {
 
             let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
             let interrupts = self.interrupts();
+            let catalog = self.catalog_lookup_for_command(db, xid, cid);
             let mut ctx = ExecutorContext {
                 pool: Arc::clone(&db.pool),
                 txns: db.txns.clone(),
@@ -1624,6 +1668,8 @@ impl Session {
                 timed: false,
                 outer_rows: Vec::new(),
                 subplans: Vec::new(),
+                catalog: catalog.materialize_visible_catalog(),
+                compiled_functions: std::collections::HashMap::new(),
             };
             let relation_constraints = crate::backend::parser::bind_relation_constraints(
                 None,

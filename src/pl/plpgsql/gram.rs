@@ -5,7 +5,7 @@ use pest_derive::Parser;
 use crate::backend::executor::Value;
 use crate::backend::parser::{ParseError, SqlExpr, parse_expr, parse_type_name};
 
-use super::ast::{Block, RaiseLevel, Stmt, VarDecl};
+use super::ast::{Block, RaiseLevel, ReturnQueryKind, Stmt, VarDecl};
 
 #[derive(Parser)]
 #[grammar = "pl/plpgsql/gram.pest"]
@@ -113,6 +113,9 @@ fn build_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
         Rule::if_stmt => build_if_stmt(inner),
         Rule::for_int_stmt => build_for_stmt(inner),
         Rule::raise_stmt => build_raise_stmt(inner),
+        Rule::return_stmt => build_return_stmt(inner),
+        Rule::return_next_stmt => build_return_next_stmt(inner),
+        Rule::return_query_stmt => build_return_query_stmt(inner),
         _ => Err(ParseError::UnexpectedToken {
             expected: "plpgsql statement",
             actual: inner.as_str().into(),
@@ -247,6 +250,44 @@ fn build_raise_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
         message: message.ok_or(ParseError::UnexpectedEof)?,
         params,
     })
+}
+
+fn build_return_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
+    let expr = pair
+        .into_inner()
+        .find(|part| part.as_rule() == Rule::expr_until_semi)
+        .map(|part| part.as_str().trim().to_string())
+        .filter(|text| !text.is_empty());
+    Ok(Stmt::Return { expr })
+}
+
+fn build_return_next_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
+    let expr = pair
+        .into_inner()
+        .find(|part| part.as_rule() == Rule::expr_until_semi)
+        .map(|part| part.as_str().trim().to_string())
+        .filter(|text| !text.is_empty());
+    Ok(Stmt::ReturnNext { expr })
+}
+
+fn build_return_query_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
+    let sql = pair
+        .into_inner()
+        .find(|part| part.as_rule() == Rule::return_query_sql)
+        .map(|part| part.as_str().trim().to_string())
+        .ok_or(ParseError::UnexpectedEof)?;
+    let lowered = sql.trim_start().to_ascii_lowercase();
+    let kind = if lowered.starts_with("select") || lowered.starts_with("with") {
+        ReturnQueryKind::Select
+    } else if lowered.starts_with("values") {
+        ReturnQueryKind::Values
+    } else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "RETURN QUERY SELECT ... or RETURN QUERY VALUES (...)",
+            actual: sql,
+        });
+    };
+    Ok(Stmt::ReturnQuery { sql, kind })
 }
 
 fn build_ident(pair: Pair<'_, Rule>) -> String {
