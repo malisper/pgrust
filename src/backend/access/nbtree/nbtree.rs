@@ -1,6 +1,8 @@
 use std::cmp::Ordering;
 use std::sync::Arc;
 
+use parking_lot::RwLockWriteGuard;
+
 use crate::backend::access::heap::heapam::{
     heap_fetch, heap_scan_begin_visible, heap_scan_next_visible,
 };
@@ -8,8 +10,8 @@ use crate::backend::access::index::indexam;
 use crate::backend::access::nbtree::nbtcompare::{compare_bt_keyspace, compare_bt_values};
 use crate::backend::access::nbtree::nbtpreprocesskeys::preprocess_scan_keys;
 use crate::backend::access::nbtree::nbtsplitloc::choose_split_index;
-use crate::backend::access::nbtree::nbtxlog::log_btree_record;
 use crate::backend::access::nbtree::nbtutils::BtSortTuple;
+use crate::backend::access::nbtree::nbtxlog::log_btree_record;
 use crate::backend::access::transam::xact::{
     INVALID_TRANSACTION_ID, TransactionId, TransactionStatus,
 };
@@ -42,6 +44,7 @@ use crate::include::access::relscan::{
 use crate::include::access::scankey::ScanKeyData;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::primnodes::{ColumnDesc, RelationDesc};
+use crate::include::storage::buf_internals::Page;
 use crate::{BufferPool, ClientId, OwnedBufferPin, PinnedBuffer, SmgrStorageBackend};
 
 fn check_catalog_interrupts(
@@ -65,6 +68,19 @@ struct PageSplitResult {
     right_block: u32,
     level: u32,
     right_lower_bound: Vec<Value>,
+    parent_stack: Vec<InsertStackEntry>,
+}
+
+#[derive(Debug, Clone)]
+struct InsertStackEntry {
+    block: u32,
+    offset: usize,
+}
+
+#[derive(Debug, Clone)]
+struct InsertSearchPath {
+    leaf_block: u32,
+    parent_stack: Vec<InsertStackEntry>,
 }
 
 fn encode_index_value(
@@ -424,7 +440,7 @@ fn truncate_relation(
         let _ = storage.smgr.truncate(rel, ForkNumber::Fsm, 0);
         Ok::<(), crate::backend::storage::smgr::SmgrError>(())
     })
-        .map_err(|err| CatalogError::Io(err.to_string()))
+    .map_err(|err| CatalogError::Io(err.to_string()))
 }
 
 fn read_page(
@@ -919,6 +935,21 @@ fn find_leaf_with_ancestors(
     Ok((ancestors, block))
 }
 
+fn find_child_index(items: &[IndexTupleData], child_block: u32, start: usize) -> Option<usize> {
+    let start = start.min(items.len());
+    for (idx, item) in items.iter().enumerate().skip(start) {
+        if item.t_tid.block_number == child_block {
+            return Some(idx);
+        }
+    }
+    for idx in (0..start).rev() {
+        if items[idx].t_tid.block_number == child_block {
+            return Some(idx);
+        }
+    }
+    None
+}
+
 fn leaf_upper_bound(
     ctx: &IndexInsertContext,
     page: &[u8; crate::backend::storage::smgr::BLCKSZ],
@@ -941,11 +972,49 @@ fn leaf_upper_bound(
     tuple_key_values(&ctx.index_desc, first_tuple).map(Some)
 }
 
-// :HACK: This linearly refinds parents instead of carrying a precise insertion
-// stack through concurrent splits. It keeps split propagation correct after
-// move-right/restart behavior until pgrust grows PostgreSQL-style stack
-// recovery.
-fn find_parent_block_for_insert(
+fn find_parent_from_stack(
+    ctx: &IndexInsertContext,
+    parent_stack: &mut Vec<InsertStackEntry>,
+    child_block: u32,
+) -> Result<Option<(u32, usize)>, CatalogError> {
+    let Some(mut entry) = parent_stack.last().cloned() else {
+        return Ok(None);
+    };
+
+    loop {
+        let page = read_page(&ctx.pool, ctx.index_relation, entry.block)?;
+        let opaque = bt_page_get_opaque(&page)
+            .map_err(|err| CatalogError::Io(format!("btree opaque read failed: {err:?}")))?;
+        if opaque.btpo_flags & BTP_INCOMPLETE_SPLIT != 0 {
+            let mut ancestor_stack = parent_stack.clone();
+            ancestor_stack.pop();
+            finish_incomplete_split(ctx, entry.block, &ancestor_stack)?;
+            continue;
+        }
+        if opaque.is_meta() || opaque.is_leaf() || opaque.btpo_flags & BTP_DELETED != 0 {
+            return Ok(None);
+        }
+        let items = bt_page_data_items(&page)
+            .map_err(|err| CatalogError::Io(format!("btree parent parse failed: {err:?}")))?;
+        if let Some(index) = find_child_index(&items, child_block, entry.offset) {
+            if let Some(top) = parent_stack.last_mut() {
+                top.block = entry.block;
+                top.offset = index;
+            }
+            return Ok(Some((entry.block, index)));
+        }
+        if opaque.btpo_next == P_NONE {
+            return Ok(None);
+        }
+        entry.block = opaque.btpo_next;
+        entry.offset = 0;
+    }
+}
+
+// :HACK: Stack-based recovery should locate the parent in normal concurrent
+// split cases. Keep a full-tree fallback for rare stale-path cases until this
+// matches PostgreSQL's BTStack recovery more closely.
+fn find_parent_block_by_scan(
     ctx: &IndexInsertContext,
     child_block: u32,
 ) -> Result<Option<u32>, CatalogError> {
@@ -962,7 +1031,10 @@ fn find_parent_block_for_insert(
         }
         let items = bt_page_data_items(&page)
             .map_err(|err| CatalogError::Io(format!("btree parent parse failed: {err:?}")))?;
-        if items.iter().any(|item| item.t_tid.block_number == child_block) {
+        if items
+            .iter()
+            .any(|item| item.t_tid.block_number == child_block)
+        {
             return Ok(Some(block));
         }
     }
@@ -975,42 +1047,136 @@ fn parent_contains_child(
     child_block: u32,
 ) -> Result<bool, CatalogError> {
     let page = read_page(&ctx.pool, ctx.index_relation, parent_block)?;
+    page_contains_child(&page, child_block)
+}
+
+fn page_contains_child(page: &Page, child_block: u32) -> Result<bool, CatalogError> {
     let items = bt_page_data_items(&page)
         .map_err(|err| CatalogError::Io(format!("btree parent parse failed: {err:?}")))?;
-    Ok(items.iter().any(|item| item.t_tid.block_number == child_block))
+    Ok(items
+        .iter()
+        .any(|item| item.t_tid.block_number == child_block))
 }
 
 fn find_leaf_for_insert(
     ctx: &IndexInsertContext,
     key_values: &[Value],
-) -> Result<u32, CatalogError> {
+) -> Result<InsertSearchPath, CatalogError> {
     loop {
-        let (_, mut block) = find_leaf_with_ancestors(
-            &ctx.pool,
-            ctx.index_relation,
-            &ctx.index_desc,
-            key_values,
-            ScanDirection::Forward,
-        )?;
+        let meta_page = read_page(&ctx.pool, ctx.index_relation, BTREE_METAPAGE)?;
+        let meta = bt_page_get_meta(&meta_page)
+            .map_err(|err| CatalogError::Io(format!("btree metapage read failed: {err:?}")))?;
+        let mut block = meta.btm_root;
+        let mut level = meta.btm_level;
+        let mut parent_stack = Vec::new();
+
+        while level > 0 {
+            let page = read_page(&ctx.pool, ctx.index_relation, block)?;
+            let opaque = bt_page_get_opaque(&page)
+                .map_err(|err| CatalogError::Io(format!("btree opaque read failed: {err:?}")))?;
+            if opaque.btpo_flags & BTP_INCOMPLETE_SPLIT != 0 {
+                finish_incomplete_split(ctx, block, &parent_stack)?;
+                break;
+            }
+            let items = bt_page_data_items(&page)
+                .map_err(|err| CatalogError::Io(format!("btree page parse failed: {err:?}")))?;
+            let slot =
+                choose_child_slot(&ctx.index_desc, &items, key_values, ScanDirection::Forward)?;
+            parent_stack.push(InsertStackEntry {
+                block,
+                offset: slot,
+            });
+            block = items[slot].t_tid.block_number;
+            level -= 1;
+        }
+        if level > 0 {
+            continue;
+        }
+
         loop {
             let page = read_page(&ctx.pool, ctx.index_relation, block)?;
             let opaque = bt_page_get_opaque(&page)
                 .map_err(|err| CatalogError::Io(format!("btree opaque read failed: {err:?}")))?;
             if opaque.btpo_flags & BTP_INCOMPLETE_SPLIT != 0 {
-                finish_incomplete_split(ctx, block)?;
+                finish_incomplete_split(ctx, block, &parent_stack)?;
                 break;
             }
             let Some(upper_bound) = leaf_upper_bound(ctx, &page, opaque)? else {
-                return Ok(block);
+                return Ok(InsertSearchPath {
+                    leaf_block: block,
+                    parent_stack,
+                });
             };
             if compare_key_arrays(key_values, &upper_bound) != Ordering::Greater {
-                return Ok(block);
+                return Ok(InsertSearchPath {
+                    leaf_block: block,
+                    parent_stack,
+                });
             }
             if opaque.btpo_next == P_NONE {
-                return Ok(block);
+                return Ok(InsertSearchPath {
+                    leaf_block: block,
+                    parent_stack,
+                });
             }
             block = opaque.btpo_next;
         }
+    }
+}
+
+fn find_parent_stack_for_key(
+    ctx: &IndexInsertContext,
+    key_values: &[Value],
+    child_level: u32,
+) -> Result<Option<Vec<InsertStackEntry>>, CatalogError> {
+    'restart: loop {
+        let meta_page = read_page(&ctx.pool, ctx.index_relation, BTREE_METAPAGE)?;
+        let meta = bt_page_get_meta(&meta_page)
+            .map_err(|err| CatalogError::Io(format!("btree metapage read failed: {err:?}")))?;
+
+        if meta.btm_level <= child_level {
+            return Ok(None);
+        }
+
+        let mut block = meta.btm_root;
+        let mut level = meta.btm_level;
+        let mut parent_stack = Vec::new();
+
+        while level > child_level + 1 {
+            let page = read_page(&ctx.pool, ctx.index_relation, block)?;
+            let opaque = bt_page_get_opaque(&page)
+                .map_err(|err| CatalogError::Io(format!("btree opaque read failed: {err:?}")))?;
+            if opaque.btpo_flags & BTP_INCOMPLETE_SPLIT != 0 {
+                finish_incomplete_split(ctx, block, &parent_stack)?;
+                continue 'restart;
+            }
+            let items = bt_page_data_items(&page)
+                .map_err(|err| CatalogError::Io(format!("btree page parse failed: {err:?}")))?;
+            let slot =
+                choose_child_slot(&ctx.index_desc, &items, key_values, ScanDirection::Forward)?;
+            parent_stack.push(InsertStackEntry {
+                block,
+                offset: slot,
+            });
+            block = items[slot].t_tid.block_number;
+            level -= 1;
+        }
+
+        let page = read_page(&ctx.pool, ctx.index_relation, block)?;
+        let opaque = bt_page_get_opaque(&page)
+            .map_err(|err| CatalogError::Io(format!("btree opaque read failed: {err:?}")))?;
+        if opaque.btpo_flags & BTP_INCOMPLETE_SPLIT != 0 {
+            finish_incomplete_split(ctx, block, &parent_stack)?;
+            continue;
+        }
+        let items = bt_page_data_items(&page)
+            .map_err(|err| CatalogError::Io(format!("btree page parse failed: {err:?}")))?;
+        let slot = choose_child_slot(&ctx.index_desc, &items, key_values, ScanDirection::Forward)?;
+        parent_stack.push(InsertStackEntry {
+            block,
+            offset: slot,
+        });
+        return Ok(Some(parent_stack));
     }
 }
 
@@ -1261,9 +1427,12 @@ fn allocate_btree_block(ctx: &IndexInsertContext) -> Result<u32, CatalogError> {
     }
 }
 
-fn write_split_pages(
+fn write_split_pages_locked(
     ctx: &IndexInsertContext,
     block: u32,
+    pin: PinnedBuffer<'_, SmgrStorageBackend>,
+    mut guard: RwLockWriteGuard<'_, Page>,
+    existing_high_key: Option<IndexTupleData>,
     left_items: &[IndexTupleData],
     right_items: &[IndexTupleData],
     old_opaque: crate::include::access::nbtree::BTPageOpaqueData,
@@ -1275,9 +1444,7 @@ fn write_split_pages(
     let level = old_opaque.btpo_level;
     let flags = if is_leaf { BTP_LEAF } else { 0 };
     let inherited_high_key = if is_leaf {
-        if let Some(high_key) = bt_page_high_key(&read_page(&ctx.pool, ctx.index_relation, block)?)
-            .map_err(|err| CatalogError::Io(format!("btree high-key read failed: {err:?}")))?
-        {
+        if let Some(high_key) = existing_high_key {
             Some(high_key)
         } else if old_opaque.btpo_next != P_NONE {
             let next_page = read_page(&ctx.pool, ctx.index_relation, old_opaque.btpo_next)?;
@@ -1324,10 +1491,15 @@ fn write_split_pages(
         )
         .map_err(|err| CatalogError::Io(format!("btree left split rebuild failed: {err:?}")))?;
         if let Some(high_key) = inherited_high_key {
-            bt_page_set_high_key(&mut right_page, &high_key, right_items.to_vec(), right_opaque)
-                .map_err(|err| {
-                    CatalogError::Io(format!("btree right split rebuild failed: {err:?}"))
-                })?;
+            bt_page_set_high_key(
+                &mut right_page,
+                &high_key,
+                right_items.to_vec(),
+                right_opaque,
+            )
+            .map_err(|err| {
+                CatalogError::Io(format!("btree right split rebuild failed: {err:?}"))
+            })?;
         } else {
             for tuple in right_items {
                 bt_page_append_tuple(&mut right_page, tuple)
@@ -1374,15 +1546,33 @@ fn write_split_pages(
     }
     // Publish the new sibling only after its page image is initialized and any
     // existing right neighbor already links back to it.
-    write_buffered_btree_page(
-        &ctx.pool,
-        ctx.client_id,
-        ctx.snapshot.current_xid,
-        ctx.index_relation,
-        block,
-        &left_page,
-        XLOG_BTREE_SPLIT_L,
-    )?;
+    let lsn = if let Some(wal) = ctx.pool.wal_writer() {
+        log_btree_record(
+            &wal,
+            ctx.snapshot.current_xid,
+            XLOG_BTREE_SPLIT_L,
+            &[crate::backend::access::nbtree::nbtxlog::LoggedBtreeBlock {
+                block_id: 0,
+                tag: crate::backend::storage::buffer::BufferTag {
+                    rel: ctx.index_relation,
+                    fork: ForkNumber::Main,
+                    block,
+                },
+                page: &left_page,
+                will_init: false,
+                data: &[],
+            }],
+            &[],
+        )
+        .map_err(|err| CatalogError::Io(format!("btree WAL log failed: {err}")))?
+    } else {
+        INVALID_LSN
+    };
+    ctx.pool
+        .install_page_image_locked(pin.buffer_id(), &left_page, lsn, &mut guard)
+        .map_err(|err| CatalogError::Io(format!("btree buffered write failed: {err:?}")))?;
+    drop(guard);
+    drop(pin);
 
     Ok(PageSplitResult {
         left_block: block,
@@ -1394,6 +1584,7 @@ fn write_split_pages(
                 .first()
                 .ok_or(CatalogError::Corrupt("right split page empty"))?,
         )?,
+        parent_stack: Vec::new(),
     })
 }
 
@@ -1439,18 +1630,15 @@ fn clear_incomplete_split(ctx: &IndexInsertContext, block: u32) -> Result<(), Ca
         .map_err(|err| CatalogError::Io(format!("btree buffered write failed: {err:?}")))
 }
 
-fn insert_tuple_into_page(
+fn insert_tuple_into_locked_page(
     ctx: &IndexInsertContext,
+    pin: PinnedBuffer<'_, SmgrStorageBackend>,
+    mut guard: RwLockWriteGuard<'_, Page>,
     block: u32,
     new_tuple: IndexTupleData,
     key_values: &[Value],
     is_leaf: bool,
 ) -> Result<Option<PageSplitResult>, CatalogError> {
-    let pin = pin_btree_block(&ctx.pool, ctx.client_id, ctx.index_relation, block)?;
-    let mut guard = ctx
-        .pool
-        .lock_buffer_exclusive(pin.buffer_id())
-        .map_err(|err| CatalogError::Io(format!("btree exclusive lock failed: {err:?}")))?;
     let page = *guard;
     let old_opaque = bt_page_get_opaque(&page)
         .map_err(|err| CatalogError::Io(format!("btree opaque read failed: {err:?}")))?;
@@ -1500,13 +1688,21 @@ fn insert_tuple_into_page(
         }
     };
     if append_result.is_err() {
-        drop(guard);
-        drop(pin);
         let split = choose_split_index(&items, None);
         let right_items = items.split_off(split);
         let left_items = items;
-        return write_split_pages(ctx, block, &left_items, &right_items, old_opaque, is_leaf)
-            .map(Some);
+        return write_split_pages_locked(
+            ctx,
+            block,
+            pin,
+            guard,
+            existing_high_key.clone(),
+            &left_items,
+            &right_items,
+            old_opaque,
+            is_leaf,
+        )
+        .map(Some);
     }
     let wal_info = if is_leaf {
         XLOG_BTREE_INSERT_LEAF
@@ -1539,6 +1735,21 @@ fn insert_tuple_into_page(
         .install_page_image_locked(pin.buffer_id(), &rebuilt, lsn, &mut guard)
         .map_err(|err| CatalogError::Io(format!("btree buffered write failed: {err:?}")))?;
     Ok(None)
+}
+
+fn insert_tuple_into_page(
+    ctx: &IndexInsertContext,
+    block: u32,
+    new_tuple: IndexTupleData,
+    key_values: &[Value],
+    is_leaf: bool,
+) -> Result<Option<PageSplitResult>, CatalogError> {
+    let pin = pin_btree_block(&ctx.pool, ctx.client_id, ctx.index_relation, block)?;
+    let guard = ctx
+        .pool
+        .lock_buffer_exclusive(pin.buffer_id())
+        .map_err(|err| CatalogError::Io(format!("btree exclusive lock failed: {err:?}")))?;
+    insert_tuple_into_locked_page(ctx, pin, guard, block, new_tuple, key_values, is_leaf)
 }
 
 fn create_new_root(
@@ -1582,62 +1793,112 @@ fn create_new_root(
     Ok(())
 }
 
+fn refresh_parent_stack_for_split(
+    ctx: &IndexInsertContext,
+    split: &PageSplitResult,
+) -> Result<Option<Vec<InsertStackEntry>>, CatalogError> {
+    find_parent_stack_for_key(ctx, &split.right_lower_bound, split.level)
+}
+
 fn propagate_split_upwards(
     ctx: &IndexInsertContext,
     mut split: PageSplitResult,
 ) -> Result<(), CatalogError> {
     loop {
-        let right_pivot = pivot_tuple(
-            &ctx.index_desc,
-            split.right_block,
-            &split.right_lower_bound,
-        )?;
-        let parent_block = find_parent_block_for_insert(ctx, split.left_block)?;
-        if let Some(parent_block) = parent_block {
-            if parent_contains_child(ctx, parent_block, split.right_block)? {
+        if split.parent_stack.is_empty() {
+            if let Some(parent_stack) = refresh_parent_stack_for_split(ctx, &split)? {
+                split.parent_stack = parent_stack;
+            } else {
+                create_new_root(
+                    ctx,
+                    split.left_block,
+                    split.right_block,
+                    split.level,
+                    &split.right_lower_bound,
+                )?;
                 clear_incomplete_split(ctx, split.left_block)?;
                 return Ok(());
             }
-            let next_split = insert_tuple_into_page(
+        }
+
+        let right_pivot =
+            pivot_tuple(&ctx.index_desc, split.right_block, &split.right_lower_bound)?;
+        let parent = find_parent_from_stack(ctx, &mut split.parent_stack, split.left_block)?;
+        let fallback_parent = if parent.is_none() {
+            find_parent_block_by_scan(ctx, split.left_block)?
+        } else {
+            None
+        };
+        if let Some(parent_block) = parent.map(|(block, _)| block).or(fallback_parent) {
+            let pin = pin_btree_block(&ctx.pool, ctx.client_id, ctx.index_relation, parent_block)?;
+            let guard = ctx
+                .pool
+                .lock_buffer_exclusive(pin.buffer_id())
+                .map_err(|err| CatalogError::Io(format!("btree exclusive lock failed: {err:?}")))?;
+            let parent_page = *guard;
+            let parent_opaque = bt_page_get_opaque(&parent_page)
+                .map_err(|err| CatalogError::Io(format!("btree opaque read failed: {err:?}")))?;
+            if parent_opaque.btpo_flags & BTP_INCOMPLETE_SPLIT != 0
+                || parent_opaque.is_meta()
+                || parent_opaque.is_leaf()
+                || parent_opaque.btpo_flags & BTP_DELETED != 0
+                || !page_contains_child(&parent_page, split.left_block)?
+            {
+                drop(guard);
+                drop(pin);
+                split.parent_stack.clear();
+                continue;
+            }
+            if page_contains_child(&parent_page, split.right_block)? {
+                drop(guard);
+                drop(pin);
+                clear_incomplete_split(ctx, split.left_block)?;
+                return Ok(());
+            }
+            let next_split = insert_tuple_into_locked_page(
                 ctx,
+                pin,
+                guard,
                 parent_block,
                 right_pivot,
                 &split.right_lower_bound,
                 false,
             )?;
             clear_incomplete_split(ctx, split.left_block)?;
-            if let Some(next_split) = next_split {
+            if let Some(mut next_split) = next_split {
+                next_split.parent_stack.clear();
                 split = next_split;
                 continue;
             }
             return Ok(());
         }
-        create_new_root(
-            ctx,
-            split.left_block,
-            split.right_block,
-            split.level,
-            &split.right_lower_bound,
-        )?;
-        clear_incomplete_split(ctx, split.left_block)?;
-        return Ok(());
+        split.parent_stack.clear();
     }
 }
 
-fn finish_incomplete_split(ctx: &IndexInsertContext, left_block: u32) -> Result<(), CatalogError> {
+fn finish_incomplete_split(
+    ctx: &IndexInsertContext,
+    left_block: u32,
+    parent_stack: &[InsertStackEntry],
+) -> Result<(), CatalogError> {
     let page = read_page(&ctx.pool, ctx.index_relation, left_block)?;
     let opaque = bt_page_get_opaque(&page)
         .map_err(|err| CatalogError::Io(format!("btree opaque read failed: {err:?}")))?;
     if opaque.btpo_flags & BTP_INCOMPLETE_SPLIT == 0 || opaque.btpo_next == P_NONE {
         return Ok(());
     }
-    if let Some(parent_block) = find_parent_block_for_insert(ctx, left_block)?
+    let mut parent_stack = parent_stack.to_vec();
+    if let Some((parent_block, _)) = find_parent_from_stack(ctx, &mut parent_stack, left_block)?
         && parent_contains_child(ctx, parent_block, opaque.btpo_next)?
     {
         return clear_incomplete_split(ctx, left_block);
     }
-    let right_lower_bound =
-        page_lower_bound(&ctx.index_desc, &ctx.pool, ctx.index_relation, opaque.btpo_next)?;
+    let right_lower_bound = page_lower_bound(
+        &ctx.index_desc,
+        &ctx.pool,
+        ctx.index_relation,
+        opaque.btpo_next,
+    )?;
     propagate_split_upwards(
         ctx,
         PageSplitResult {
@@ -1645,6 +1906,7 @@ fn finish_incomplete_split(ctx: &IndexInsertContext, left_block: u32) -> Result<
             right_block: opaque.btpo_next,
             level: opaque.btpo_level,
             right_lower_bound,
+            parent_stack,
         },
     )
 }
@@ -1774,9 +2036,12 @@ fn btinsert(ctx: &IndexInsertContext) -> Result<bool, CatalogError> {
 
     let payload = encode_key_payload(&ctx.index_desc, &key_values)?;
     let new_tuple = IndexTupleData::new_raw(ctx.heap_tid, false, false, false, payload);
-    let leaf_block = find_leaf_for_insert(ctx, &key_values)?;
+    let search = find_leaf_for_insert(ctx, &key_values)?;
 
-    if let Some(split) = insert_tuple_into_page(ctx, leaf_block, new_tuple, &key_values, true)? {
+    if let Some(mut split) =
+        insert_tuple_into_page(ctx, search.leaf_block, new_tuple, &key_values, true)?
+    {
+        split.parent_stack = search.parent_stack;
         check_catalog_interrupts(ctx.interrupts.as_ref())?;
         propagate_split_upwards(ctx, split)?;
     }
