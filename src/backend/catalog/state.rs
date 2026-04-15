@@ -5,8 +5,8 @@ use crate::backend::catalog::catalog::allocate_relation_object_oids;
 use crate::backend::catalog::indexing::insert_bootstrap_system_indexes;
 use crate::backend::catalog::pg_constraint::{derived_pg_constraint_rows, sort_pg_constraint_rows};
 use crate::backend::catalog::pg_depend::{
-    derived_pg_depend_rows, index_backed_constraint_depend_rows, relation_constraint_depend_rows,
-    sort_pg_depend_rows,
+    derived_pg_depend_rows, index_backed_constraint_depend_rows,
+    primary_key_owned_not_null_depend_rows, relation_constraint_depend_rows, sort_pg_depend_rows,
 };
 use crate::backend::catalog::store::{DEFAULT_FIRST_REL_NUMBER, DEFAULT_FIRST_USER_OID};
 use crate::backend::executor::RelationDesc;
@@ -446,6 +446,7 @@ impl Catalog {
         index_oid: u32,
         conname: impl Into<String>,
         contype: char,
+        primary_key_owned_not_null_oids: &[u32],
     ) -> Result<PgConstraintRow, CatalogError> {
         let table = self
             .get_by_oid(relation_oid)
@@ -453,6 +454,7 @@ impl Catalog {
         if table.relkind != 'r' {
             return Err(CatalogError::UnknownTable(relation_oid.to_string()));
         }
+        let table_namespace_oid = table.namespace_oid;
         let index = self
             .get_by_oid(index_oid)
             .ok_or_else(|| CatalogError::UnknownTable(index_oid.to_string()))?;
@@ -472,7 +474,7 @@ impl Catalog {
         let row = PgConstraintRow {
             oid: self.next_oid,
             conname,
-            connamespace: table.namespace_oid,
+            connamespace: table_namespace_oid,
             contype,
             condeferrable: false,
             condeferred: false,
@@ -507,6 +509,14 @@ impl Catalog {
             relation_oid,
             index_oid,
         ));
+        if contype == crate::include::catalog::CONSTRAINT_PRIMARY {
+            for &not_null_constraint_oid in primary_key_owned_not_null_oids {
+                self.depends.extend(primary_key_owned_not_null_depend_rows(
+                    not_null_constraint_oid,
+                    row.oid,
+                ));
+            }
+        }
         sort_pg_depend_rows(&mut self.depends);
         Ok(row)
     }
@@ -571,6 +581,160 @@ impl Catalog {
             .extend(relation_constraint_depend_rows(row.oid, relation_oid));
         sort_pg_depend_rows(&mut self.depends);
         Ok(row)
+    }
+
+    pub fn drop_relation_entry_by_oid(
+        &mut self,
+        relation_oid: u32,
+    ) -> Result<(String, CatalogEntry), CatalogError> {
+        self.remove_by_oid(relation_oid)
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))
+    }
+
+    pub fn set_column_not_null(
+        &mut self,
+        relation_oid: u32,
+        column_name: &str,
+        constraint_name: impl Into<String>,
+        validated: bool,
+        primary_key_owned: bool,
+    ) -> Result<(u32, String, CatalogEntry, CatalogEntry), CatalogError> {
+        let name = self.relation_name_for_oid(relation_oid)?;
+        let old_entry = self
+            .tables
+            .get(&name)
+            .cloned()
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        if old_entry.relkind != 'r' {
+            return Err(CatalogError::UnknownTable(relation_oid.to_string()));
+        }
+
+        let column_index = relation_column_index(&old_entry.desc, column_name)?;
+        let mut new_entry = old_entry.clone();
+        let column = &mut new_entry.desc.columns[column_index];
+        column.storage.nullable = false;
+        if column.not_null_constraint_oid.is_none() {
+            column.not_null_constraint_oid = Some(self.next_oid);
+            self.next_oid = self.next_oid.saturating_add(1);
+        }
+        let constraint_oid = column
+            .not_null_constraint_oid
+            .expect("not-null constraint oid");
+        column.not_null_constraint_name = Some(constraint_name.into());
+        column.not_null_constraint_validated = validated;
+        column.not_null_primary_key_owned = primary_key_owned;
+
+        let entry = self
+            .tables
+            .get_mut(&name)
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        *entry = new_entry.clone();
+        self.replace_constraint_rows_for_entry(&name, &new_entry);
+        self.replace_depend_rows_for_entry(&new_entry);
+        Ok((constraint_oid, name, old_entry, new_entry))
+    }
+
+    pub fn drop_column_not_null(
+        &mut self,
+        relation_oid: u32,
+        column_name: &str,
+    ) -> Result<(String, CatalogEntry, CatalogEntry), CatalogError> {
+        let name = self.relation_name_for_oid(relation_oid)?;
+        let old_entry = self
+            .tables
+            .get(&name)
+            .cloned()
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        if old_entry.relkind != 'r' {
+            return Err(CatalogError::UnknownTable(relation_oid.to_string()));
+        }
+
+        let column_index = relation_column_index(&old_entry.desc, column_name)?;
+        let mut new_entry = old_entry.clone();
+        let column = &mut new_entry.desc.columns[column_index];
+        column.storage.nullable = true;
+        column.not_null_constraint_oid = None;
+        column.not_null_constraint_name = None;
+        column.not_null_constraint_validated = false;
+        column.not_null_primary_key_owned = false;
+
+        let entry = self
+            .tables
+            .get_mut(&name)
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        *entry = new_entry.clone();
+        self.replace_constraint_rows_for_entry(&name, &new_entry);
+        self.replace_depend_rows_for_entry(&new_entry);
+        Ok((name, old_entry, new_entry))
+    }
+
+    pub fn validate_not_null_constraint(
+        &mut self,
+        relation_oid: u32,
+        constraint_name: &str,
+    ) -> Result<(String, CatalogEntry, CatalogEntry), CatalogError> {
+        let name = self.relation_name_for_oid(relation_oid)?;
+        let old_entry = self
+            .tables
+            .get(&name)
+            .cloned()
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        if old_entry.relkind != 'r' {
+            return Err(CatalogError::UnknownTable(relation_oid.to_string()));
+        }
+
+        let column_index = not_null_constraint_column_index(&old_entry.desc, constraint_name)?;
+        let mut new_entry = old_entry.clone();
+        new_entry.desc.columns[column_index].not_null_constraint_validated = true;
+
+        let entry = self
+            .tables
+            .get_mut(&name)
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        *entry = new_entry.clone();
+        self.replace_constraint_rows_for_entry(&name, &new_entry);
+        self.replace_depend_rows_for_entry(&new_entry);
+        Ok((name, old_entry, new_entry))
+    }
+
+    pub fn validate_check_constraint(
+        &mut self,
+        relation_oid: u32,
+        constraint_name: &str,
+    ) -> Result<(PgConstraintRow, PgConstraintRow), CatalogError> {
+        let row = self
+            .constraints
+            .iter_mut()
+            .find(|row| {
+                row.conrelid == relation_oid
+                    && row.contype == crate::include::catalog::CONSTRAINT_CHECK
+                    && row.conname.eq_ignore_ascii_case(constraint_name)
+            })
+            .ok_or_else(|| CatalogError::UnknownTable(constraint_name.to_string()))?;
+        let old_row = row.clone();
+        row.convalidated = true;
+        let new_row = row.clone();
+        Ok((old_row, new_row))
+    }
+
+    pub fn drop_relation_constraint(
+        &mut self,
+        relation_oid: u32,
+        constraint_name: &str,
+    ) -> Result<PgConstraintRow, CatalogError> {
+        let index = self
+            .constraints
+            .iter()
+            .position(|row| {
+                row.conrelid == relation_oid && row.conname.eq_ignore_ascii_case(constraint_name)
+            })
+            .ok_or_else(|| CatalogError::UnknownTable(constraint_name.to_string()))?;
+        let removed = self.constraints.remove(index);
+        self.depends
+            .retain(|row| row.objid != removed.oid && row.refobjid != removed.oid);
+        sort_pg_constraint_rows(&mut self.constraints);
+        sort_pg_depend_rows(&mut self.depends);
+        Ok(removed)
     }
 
     fn default_index_build_options(
@@ -1064,7 +1228,40 @@ impl Catalog {
             return;
         }
         self.depends.extend(derived_pg_depend_rows(entry));
+        if entry.relkind == 'r'
+            && let Some(primary_constraint_oid) =
+                self.primary_constraint_oid_for_relation(entry.relation_oid)
+        {
+            for column in &entry.desc.columns {
+                if column.not_null_primary_key_owned
+                    && let Some(not_null_constraint_oid) = column.not_null_constraint_oid
+                {
+                    self.depends.extend(primary_key_owned_not_null_depend_rows(
+                        not_null_constraint_oid,
+                        primary_constraint_oid,
+                    ));
+                }
+            }
+        }
         sort_pg_depend_rows(&mut self.depends);
+    }
+
+    fn relation_name_for_oid(&self, relation_oid: u32) -> Result<String, CatalogError> {
+        self.tables
+            .iter()
+            .find(|(_, entry)| entry.relation_oid == relation_oid)
+            .map(|(name, _)| name.clone())
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))
+    }
+
+    fn primary_constraint_oid_for_relation(&self, relation_oid: u32) -> Option<u32> {
+        self.constraints
+            .iter()
+            .find(|row| {
+                row.conrelid == relation_oid
+                    && row.contype == crate::include::catalog::CONSTRAINT_PRIMARY
+            })
+            .map(|row| row.oid)
     }
 }
 
@@ -1082,6 +1279,34 @@ fn entry_owned_object_oids(entry: &CatalogEntry) -> BTreeSet<u32> {
         }
     }
     oids
+}
+
+fn relation_column_index(desc: &RelationDesc, column_name: &str) -> Result<usize, CatalogError> {
+    desc.columns
+        .iter()
+        .enumerate()
+        .find_map(|(index, column)| {
+            (!column.dropped && column.name.eq_ignore_ascii_case(column_name)).then_some(index)
+        })
+        .ok_or_else(|| CatalogError::UnknownColumn(column_name.to_string()))
+}
+
+fn not_null_constraint_column_index(
+    desc: &RelationDesc,
+    constraint_name: &str,
+) -> Result<usize, CatalogError> {
+    desc.columns
+        .iter()
+        .enumerate()
+        .find_map(|(index, column)| {
+            (!column.dropped
+                && column
+                    .not_null_constraint_name
+                    .as_deref()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(constraint_name)))
+            .then_some(index)
+        })
+        .ok_or_else(|| CatalogError::UnknownTable(constraint_name.to_string()))
 }
 
 fn validate_builtin_type_rows(desc: &RelationDesc) -> Result<(), CatalogError> {

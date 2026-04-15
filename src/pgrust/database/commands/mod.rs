@@ -1,4 +1,5 @@
 mod alter_column_type;
+mod constraint;
 mod create;
 mod drop;
 mod drop_column;

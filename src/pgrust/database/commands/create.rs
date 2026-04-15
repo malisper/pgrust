@@ -193,6 +193,22 @@ impl Database {
                                 waiter: None,
                                 interrupts: Arc::clone(&interrupts),
                             };
+                            let primary_key_owned_not_null_oids = if action.primary {
+                                action
+                                    .columns
+                                    .iter()
+                                    .filter_map(|column_name| {
+                                        relation.desc.columns.iter().find_map(|column| {
+                                            (column.name.eq_ignore_ascii_case(column_name)
+                                                && column.not_null_primary_key_owned)
+                                                .then_some(column.not_null_constraint_oid)
+                                                .flatten()
+                                        })
+                                    })
+                                    .collect::<Vec<_>>()
+                            } else {
+                                Vec::new()
+                            };
                             let constraint_effect = self
                                 .catalog
                                 .write()
@@ -205,6 +221,7 @@ impl Database {
                                     } else {
                                         crate::include::catalog::CONSTRAINT_UNIQUE
                                     },
+                                    &primary_key_owned_not_null_oids,
                                     &constraint_ctx,
                                 )
                                 .map_err(map_catalog_error)?;

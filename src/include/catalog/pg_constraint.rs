@@ -73,7 +73,11 @@ pub fn pg_constraint_desc() -> RelationDesc {
                 SqlType::new(SqlTypeKind::InternalChar),
                 false,
             ),
-            column_desc("conkey", SqlType::array_of(SqlType::new(SqlTypeKind::Int2)), true),
+            column_desc(
+                "conkey",
+                SqlType::array_of(SqlType::new(SqlTypeKind::Int2)),
+                true,
+            ),
             column_desc(
                 "confkey",
                 SqlType::array_of(SqlType::new(SqlTypeKind::Int2)),
