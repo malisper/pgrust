@@ -52,6 +52,9 @@ pub fn column_desc(name: impl Into<String>, sql_type: SqlType, nullable: bool) -
         dropped: false,
         attstattarget: -1,
         not_null_constraint_oid: None,
+        not_null_constraint_name: None,
+        not_null_constraint_validated: !nullable,
+        not_null_primary_key_owned: false,
         attrdef_oid: None,
         default_expr: None,
         missing_default_value: None,
@@ -122,6 +125,9 @@ pub fn allocate_relation_object_oids(desc: &mut RelationDesc, next_oid: &mut u32
         if !column.storage.nullable && column.not_null_constraint_oid.is_none() {
             column.not_null_constraint_oid = Some(*next_oid);
             *next_oid = next_oid.saturating_add(1);
+        }
+        if !column.storage.nullable {
+            column.not_null_constraint_validated = true;
         }
         if column.default_expr.is_some() && column.attrdef_oid.is_none() {
             column.attrdef_oid = Some(*next_oid);

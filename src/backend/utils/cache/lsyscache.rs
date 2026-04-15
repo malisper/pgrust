@@ -786,6 +786,10 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         })
     }
 
+    fn constraint_rows_for_relation(&self, relation_oid: u32) -> Vec<PgConstraintRow> {
+        constraint_rows_for_relation(self.db, self.client_id, self.txn_ctx, relation_oid)
+    }
+
     fn type_rows(&self) -> Vec<PgTypeRow> {
         let mut rows = ensure_type_rows(self.db, self.client_id, self.txn_ctx);
         rows.extend(self.db.domain_type_rows_for_search_path(&self.search_path));

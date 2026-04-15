@@ -2613,6 +2613,65 @@ fn lower_create_table_rejects_invalid_key_constraints() {
 }
 
 #[test]
+fn lower_create_table_rejects_duplicate_constraint_names() {
+    let stmt = parse_statement(
+        "create table items (id int4 constraint dup not null, note text, constraint dup unique (note))",
+    )
+    .unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+    assert!(matches!(
+        lower_create_table(&ct, &crate::backend::parser::analyze::LiteralDefaultCatalog),
+        Err(ParseError::UnexpectedToken { expected, actual })
+            if expected == "distinct constraint names"
+                && actual == "duplicate constraint name: dup"
+    ));
+}
+
+#[test]
+fn lower_create_table_rejects_unsupported_constraint_attributes() {
+    let stmt =
+        parse_statement("create table items (id int4 check (id > 0) deferrable)").unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+    assert!(matches!(
+        lower_create_table(&ct, &crate::backend::parser::analyze::LiteralDefaultCatalog),
+        Err(ParseError::FeatureNotSupported(feature)) if feature == "CHECK DEFERRABLE"
+    ));
+
+    let stmt = parse_statement("create table items (id int4 primary key not valid)").unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+    assert!(matches!(
+        lower_create_table(&ct, &crate::backend::parser::analyze::LiteralDefaultCatalog),
+        Err(ParseError::FeatureNotSupported(feature)) if feature == "PRIMARY KEY NOT VALID"
+    ));
+}
+
+#[test]
+fn lower_create_table_collapses_duplicate_not_null_constraints() {
+    let stmt = parse_statement(
+        "create table items (id int4 not null, constraint items_id_nn not null id)",
+    )
+    .unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+    let lowered = lower_create_table(&ct, &crate::backend::parser::analyze::LiteralDefaultCatalog)
+        .unwrap();
+    assert_eq!(lowered.not_null_actions.len(), 1);
+    assert_eq!(
+        lowered.relation_desc.columns[0]
+            .not_null_constraint_name
+            .as_deref(),
+        Some("items_id_nn")
+    );
+}
+
+#[test]
 fn parse_create_drop_and_comment_on_domain_statements() {
     let Statement::CreateDomain(create) = parse_statement("create domain dom_int as int4").unwrap()
     else {

@@ -1,23 +1,20 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::SqlTypeKind;
 
 use super::{
-    CatalogLookup, CreateTableStatement, ParseError, TableConstraint, resolve_raw_type_name,
+    CatalogLookup, CheckConstraintAction, CreateTableStatement, IndexBackedConstraintAction,
+    NotNullConstraintAction, ParseError, normalize_create_table_constraints,
+    resolve_raw_type_name,
 };
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IndexBackedConstraintAction {
-    pub constraint_name: Option<String>,
-    pub columns: Vec<String>,
-    pub primary: bool,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoweredCreateTable {
     pub relation_desc: RelationDesc,
+    pub not_null_actions: Vec<NotNullConstraintAction>,
+    pub check_actions: Vec<CheckConstraintAction>,
     pub constraint_actions: Vec<IndexBackedConstraintAction>,
 }
 
@@ -33,70 +30,8 @@ pub fn lower_create_table(
     catalog: &dyn CatalogLookup,
 ) -> Result<LoweredCreateTable, ParseError> {
     let columns = stmt.columns().cloned().collect::<Vec<_>>();
-    let column_lookup = columns
-        .iter()
-        .enumerate()
-        .map(|(index, column)| (column.name.to_ascii_lowercase(), index))
-        .collect::<BTreeMap<_, _>>();
-
-    let mut constraint_actions = Vec::new();
-    let mut primary_declared = false;
-
-    for column in &columns {
-        if column.primary_key() {
-            if primary_declared {
-                return Err(ParseError::UnexpectedToken {
-                    expected: "at most one PRIMARY KEY",
-                    actual: "multiple PRIMARY KEY constraints".into(),
-                });
-            }
-            primary_declared = true;
-            constraint_actions.push(IndexBackedConstraintAction {
-                constraint_name: None,
-                columns: vec![column.name.clone()],
-                primary: true,
-            });
-        }
-        if column.unique() {
-            constraint_actions.push(IndexBackedConstraintAction {
-                constraint_name: None,
-                columns: vec![column.name.clone()],
-                primary: false,
-            });
-        }
-    }
-
-    for constraint in stmt.constraints() {
-        let columns = validate_constraint_columns(constraint, &columns, &column_lookup)?;
-        match constraint {
-            TableConstraint::PrimaryKey { .. } => {
-                if primary_declared {
-                    return Err(ParseError::UnexpectedToken {
-                        expected: "at most one PRIMARY KEY",
-                        actual: "multiple PRIMARY KEY constraints".into(),
-                    });
-                }
-                primary_declared = true;
-                constraint_actions.push(IndexBackedConstraintAction {
-                    constraint_name: None,
-                    columns,
-                    primary: true,
-                });
-            }
-            TableConstraint::Unique { .. } => {
-                constraint_actions.push(IndexBackedConstraintAction {
-                    constraint_name: None,
-                    columns,
-                    primary: false,
-                });
-            }
-            TableConstraint::NotNull { .. } | TableConstraint::Check { .. } => {
-                return Err(ParseError::FeatureNotSupported(
-                    "CHECK and table-level NOT NULL constraints".into(),
-                ));
-            }
-        }
-    }
+    let normalized = normalize_create_table_constraints(stmt)?;
+    let constraint_actions = normalized.index_backed.clone();
 
     let mut seen_keys = BTreeSet::new();
     for action in &constraint_actions {
@@ -116,16 +51,11 @@ pub fn lower_create_table(
         }
     }
 
-    let primary_columns = constraint_actions
+    let not_nulls_by_column = normalized
+        .not_nulls
         .iter()
-        .filter(|action| action.primary)
-        .flat_map(|action| {
-            action
-                .columns
-                .iter()
-                .map(|column| column.to_ascii_lowercase())
-        })
-        .collect::<BTreeSet<_>>();
+        .map(|constraint| (constraint.column.to_ascii_lowercase(), constraint))
+        .collect::<std::collections::BTreeMap<_, _>>();
 
     let relation_desc = RelationDesc {
         columns: columns
@@ -135,9 +65,14 @@ pub fn lower_create_table(
                 if sql_type.kind == SqlTypeKind::AnyArray {
                     return Err(ParseError::UnsupportedType("anyarray".into()));
                 }
-                let nullable = column.nullable()
-                    && !primary_columns.contains(&column.name.to_ascii_lowercase());
+                let not_null = not_nulls_by_column.get(&column.name.to_ascii_lowercase());
+                let nullable = not_null.is_none();
                 let mut desc = column_desc(column.name.clone(), sql_type, nullable);
+                if let Some(not_null) = not_null {
+                    desc.not_null_constraint_name = Some(not_null.constraint_name.clone());
+                    desc.not_null_constraint_validated = !not_null.not_valid;
+                    desc.not_null_primary_key_owned = not_null.primary_key_owned;
+                }
                 desc.default_expr = column.default_expr.clone();
                 desc.missing_default_value = column
                     .default_expr
@@ -150,48 +85,18 @@ pub fn lower_create_table(
 
     Ok(LoweredCreateTable {
         relation_desc,
+        not_null_actions: normalized.not_nulls,
+        check_actions: normalized.checks,
         constraint_actions,
     })
-}
-
-fn validate_constraint_columns(
-    constraint: &TableConstraint,
-    columns: &[crate::backend::parser::ColumnDef],
-    column_lookup: &BTreeMap<String, usize>,
-) -> Result<Vec<String>, ParseError> {
-    let referenced = match constraint {
-        TableConstraint::PrimaryKey { columns, .. } | TableConstraint::Unique { columns, .. } => {
-            columns
-        }
-        TableConstraint::NotNull { .. } | TableConstraint::Check { .. } => {
-            return Err(ParseError::FeatureNotSupported(
-                "CHECK and table-level NOT NULL constraints".into(),
-            ));
-        }
-    };
-    let mut seen = BTreeSet::new();
-    let mut resolved = Vec::with_capacity(referenced.len());
-    for column in referenced {
-        let normalized = column.to_ascii_lowercase();
-        if !seen.insert(normalized.clone()) {
-            return Err(ParseError::UnexpectedToken {
-                expected: "unique column names in table constraint",
-                actual: format!("duplicate column in constraint: {column}"),
-            });
-        }
-        let index = column_lookup
-            .get(&normalized)
-            .ok_or_else(|| ParseError::UnknownColumn(column.clone()))?;
-        resolved.push(columns[*index].name.clone());
-    }
-    Ok(resolved)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::backend::parser::{
-        ColumnDef, CreateTableElement, OnCommitAction, RawTypeName, SqlType, TablePersistence,
+        ColumnDef, ConstraintAttributes, CreateTableElement, OnCommitAction, RawTypeName, SqlType,
+        TablePersistence,
     };
 
     #[test]
@@ -217,5 +122,53 @@ mod tests {
             ),
             Err(ParseError::UnsupportedType("anyarray".into()))
         );
+    }
+
+    #[test]
+    fn lower_create_table_materializes_not_null_metadata() {
+        let stmt = CreateTableStatement {
+            schema_name: None,
+            table_name: "items".into(),
+            persistence: TablePersistence::Permanent,
+            on_commit: OnCommitAction::PreserveRows,
+            elements: vec![
+                CreateTableElement::Column(ColumnDef {
+                    name: "id".into(),
+                    ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
+                    default_expr: None,
+                    constraints: vec![crate::backend::parser::ColumnConstraint::PrimaryKey {
+                        attributes: ConstraintAttributes::default(),
+                    }],
+                }),
+                CreateTableElement::Column(ColumnDef {
+                    name: "note".into(),
+                    ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Text)),
+                    default_expr: None,
+                    constraints: vec![crate::backend::parser::ColumnConstraint::NotNull {
+                        attributes: ConstraintAttributes {
+                            name: Some("items_note_nn".into()),
+                            not_valid: true,
+                            ..ConstraintAttributes::default()
+                        },
+                    }],
+                }),
+            ],
+            if_not_exists: false,
+        };
+
+        let lowered =
+            lower_create_table(&stmt, &crate::backend::parser::analyze::LiteralDefaultCatalog)
+                .unwrap();
+        assert_eq!(lowered.not_null_actions.len(), 2);
+        assert_eq!(
+            lowered.relation_desc.columns[0].not_null_constraint_name.as_deref(),
+            Some("items_id_not_null")
+        );
+        assert!(lowered.relation_desc.columns[0].not_null_primary_key_owned);
+        assert_eq!(
+            lowered.relation_desc.columns[1].not_null_constraint_name.as_deref(),
+            Some("items_note_nn")
+        );
+        assert!(!lowered.relation_desc.columns[1].not_null_constraint_validated);
     }
 }

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
@@ -11,7 +11,6 @@ use crate::backend::catalog::catalog::{
     Catalog, CatalogEntry, CatalogError, CatalogIndexMeta, column_desc,
 };
 use crate::backend::catalog::pg_constraint::derived_pg_constraint_rows;
-use crate::backend::catalog::pg_constraint::not_null_constraint_name;
 use crate::backend::catalog::pg_depend::derived_pg_depend_rows;
 use crate::backend::catalog::rowcodec::{
     namespace_row_from_values, pg_am_row_from_values, pg_amop_row_from_values,
@@ -107,10 +106,13 @@ pub(crate) fn catalog_from_physical_rows(
         .into_iter()
         .map(|row| ((row.adrelid, row.adnum), row))
         .collect::<BTreeMap<_, _>>();
-    let not_null_constraint_oids = constraint_rows
+    let not_null_constraints = constraint_rows
         .iter()
         .filter(|row| row.contype == crate::include::catalog::CONSTRAINT_NOTNULL)
-        .map(|row| ((row.conrelid, row.conname.clone()), row.oid))
+        .filter_map(|row| {
+            let attnum = *row.conkey.as_ref()?.first()?;
+            Some(((row.conrelid, attnum), row.clone()))
+        })
         .collect::<BTreeMap<_, _>>();
     let indexes_by_relid = index_rows
         .into_iter()
@@ -222,11 +224,10 @@ pub(crate) fn catalog_from_physical_rows(
                             .ok();
                     catalog.next_oid = catalog.next_oid.saturating_add(1);
                 }
-                if let Some(constraint_oid) = not_null_constraint_oids.get(&(
-                    row.oid,
-                    not_null_constraint_name(&row.relname, &attr.attname),
-                )) {
-                    desc.not_null_constraint_oid = Some(*constraint_oid);
+                if let Some(constraint) = not_null_constraints.get(&(row.oid, attr.attnum)) {
+                    desc.not_null_constraint_oid = Some(constraint.oid);
+                    desc.not_null_constraint_name = Some(constraint.conname.clone());
+                    desc.not_null_constraint_validated = constraint.convalidated;
                 }
                 Ok(desc)
             })
@@ -285,6 +286,29 @@ pub(crate) fn catalog_from_physical_rows(
     }
     catalog.constraints = constraint_rows;
     catalog.depends = depend_rows;
+    let primary_constraint_oids = catalog
+        .constraints
+        .iter()
+        .filter(|row| row.contype == crate::include::catalog::CONSTRAINT_PRIMARY)
+        .map(|row| row.oid)
+        .collect::<BTreeSet<_>>();
+    let pk_owned_not_null = catalog
+        .depends
+        .iter()
+        .filter(|row| {
+            row.classid == crate::include::catalog::PG_CONSTRAINT_RELATION_OID
+                && row.refclassid == crate::include::catalog::PG_CONSTRAINT_RELATION_OID
+                && primary_constraint_oids.contains(&row.refobjid)
+        })
+        .map(|row| row.objid)
+        .collect::<BTreeSet<_>>();
+    for entry in catalog.tables.values_mut() {
+        for column in &mut entry.desc.columns {
+            if let Some(constraint_oid) = column.not_null_constraint_oid {
+                column.not_null_primary_key_owned = pk_owned_not_null.contains(&constraint_oid);
+            }
+        }
+    }
     catalog.rewrites = rewrite_rows;
     crate::include::catalog::sort_pg_rewrite_rows(&mut catalog.rewrites);
     Ok(catalog)
