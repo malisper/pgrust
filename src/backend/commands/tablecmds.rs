@@ -591,28 +591,43 @@ pub fn execute_create_index(
     catalog: &mut Catalog,
     ctx: &mut ExecutorContext,
 ) -> Result<StatementResult, ExecError> {
-    let entry = catalog
-        .create_index(
-            stmt.index_name,
-            &stmt.table_name,
-            stmt.unique,
-            &stmt.columns,
-        )
-        .map_err(|err| match err {
-            crate::backend::catalog::catalog::CatalogError::TableAlreadyExists(name) => {
-                ExecError::Parse(ParseError::TableAlreadyExists(name))
-            }
-            crate::backend::catalog::catalog::CatalogError::UnknownTable(name) => {
-                ExecError::Parse(ParseError::TableDoesNotExist(name))
-            }
-            crate::backend::catalog::catalog::CatalogError::UnknownColumn(name) => {
-                ExecError::Parse(ParseError::UnknownColumn(name))
-            }
-            other => ExecError::Parse(ParseError::UnexpectedToken {
+    if stmt
+        .using_method
+        .as_deref()
+        .is_some_and(|method| !method.eq_ignore_ascii_case("btree"))
+    {
+        return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+            "unsupported index access method".into(),
+        )));
+    }
+    if !stmt.include_columns.is_empty() || stmt.predicate.is_some() || !stmt.options.is_empty() {
+        return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+            "CREATE INDEX options".into(),
+        )));
+    }
+    let entry = match catalog.create_index(stmt.index_name, &stmt.table_name, stmt.unique, &stmt.columns) {
+        Ok(entry) => entry,
+        Err(crate::backend::catalog::catalog::CatalogError::TableAlreadyExists(_))
+            if stmt.if_not_exists =>
+        {
+            return Ok(StatementResult::AffectedRows(0));
+        }
+        Err(crate::backend::catalog::catalog::CatalogError::TableAlreadyExists(name)) => {
+            return Err(ExecError::Parse(ParseError::TableAlreadyExists(name)));
+        }
+        Err(crate::backend::catalog::catalog::CatalogError::UnknownTable(name)) => {
+            return Err(ExecError::Parse(ParseError::TableDoesNotExist(name)));
+        }
+        Err(crate::backend::catalog::catalog::CatalogError::UnknownColumn(name)) => {
+            return Err(ExecError::Parse(ParseError::UnknownColumn(name)));
+        }
+        Err(other) => {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "catalog index creation",
                 actual: format!("{other:?}"),
-            }),
-        })?;
+            }));
+        }
+    };
     let _ = ctx;
     let _ = entry;
     Ok(StatementResult::AffectedRows(0))
