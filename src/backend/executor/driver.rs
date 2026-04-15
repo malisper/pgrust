@@ -129,6 +129,16 @@ fn execute_statement_with_source(
             expected: "ALTER TABLE ADD COLUMN handled by database/session layer",
             actual: "ALTER TABLE ADD COLUMN".into(),
         })),
+        Statement::AlterTableAddConstraint(_)
+        | Statement::AlterTableDropConstraint(_)
+        | Statement::AlterTableSetNotNull(_)
+        | Statement::AlterTableDropNotNull(_)
+        | Statement::AlterTableValidateConstraint(_) => {
+            Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "ALTER TABLE constraint operations handled by database/session layer",
+                actual: "ALTER TABLE constraint operation".into(),
+            }))
+        }
         Statement::AlterTableDropColumn(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "ALTER TABLE DROP COLUMN handled by database/session layer",
             actual: "ALTER TABLE DROP COLUMN".into(),

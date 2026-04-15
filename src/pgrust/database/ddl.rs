@@ -117,19 +117,19 @@ pub(super) fn validate_alter_table_add_column(
     column: &ColumnDef,
     catalog: &dyn CatalogLookup,
 ) -> Result<crate::backend::executor::ColumnDesc, ExecError> {
-    if !column.nullable {
+    if !column.nullable() {
         return Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "ADD COLUMN without NOT NULL",
             actual: "NOT NULL".into(),
         }));
     }
-    if column.primary_key {
+    if column.primary_key() {
         return Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "ADD COLUMN without PRIMARY KEY",
             actual: "PRIMARY KEY".into(),
         }));
     }
-    if column.unique {
+    if column.unique() {
         return Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "ADD COLUMN without UNIQUE",
             actual: "UNIQUE".into(),

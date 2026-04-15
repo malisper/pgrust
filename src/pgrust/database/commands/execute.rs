@@ -76,6 +76,13 @@ impl Database {
             | Statement::Set(_)
             | Statement::Reset(_)
             | Statement::AlterTableSet(_) => Ok(StatementResult::AffectedRows(0)),
+            Statement::AlterTableAddConstraint(_)
+            | Statement::AlterTableDropConstraint(_)
+            | Statement::AlterTableSetNotNull(_)
+            | Statement::AlterTableDropNotNull(_)
+            | Statement::AlterTableValidateConstraint(_) => Err(ExecError::Parse(
+                ParseError::FeatureNotSupported("ALTER TABLE constraint operations".into()),
+            )),
             Statement::CreateRole(ref create_stmt) => {
                 self.execute_create_role_stmt(client_id, create_stmt, None)
             }
