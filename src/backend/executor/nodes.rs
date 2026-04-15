@@ -382,7 +382,7 @@ impl PlanNode for IndexScanState {
     fn explain_children(&self, _indent: usize, _analyze: bool, _lines: &mut Vec<String>) {}
 }
 
-fn render_explain_expr(expr: &Expr, column_names: &[String]) -> String {
+pub(crate) fn render_explain_expr(expr: &Expr, column_names: &[String]) -> String {
     format!("({})", render_explain_expr_inner(expr, column_names))
 }
 
@@ -665,12 +665,15 @@ impl PlanNode for NestedLoopJoinState {
         let prefix = "  ".repeat(indent + 1);
         if !self.join_qual.is_empty() {
             lines.push(format!(
-                "{prefix}Join Filter: {:?}",
-                format_qual_list(&self.join_qual)
+                "{prefix}Join Filter: {}",
+                render_explain_expr(&format_qual_list(&self.join_qual), &self.combined_names)
             ));
         }
         if !self.qual.is_empty() {
-            lines.push(format!("{prefix}Filter: {:?}", format_qual_list(&self.qual)));
+            lines.push(format!(
+                "{prefix}Filter: {}",
+                render_explain_expr(&format_qual_list(&self.qual), &self.combined_names)
+            ));
         }
         format_explain_lines(&*self.left, indent, analyze, lines);
         format_explain_lines(&*self.right, indent, analyze, lines);

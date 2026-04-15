@@ -104,7 +104,10 @@ fn render_value_json(value: &Value) -> String {
         Value::Text(v) => json_string(v.as_str()),
         Value::TextRef(_, _) => json_string(value.as_text().unwrap_or("")),
         Value::Json(v) => v.to_string(),
-        Value::Jsonb(v) => json_string(&format!("{:?}", v)),
+        Value::Jsonb(v) => json_string(
+            &crate::backend::executor::jsonb::render_jsonb_bytes(v)
+                .unwrap_or_else(|_| "null".to_string()),
+        ),
         Value::JsonPath(v) => json_string(v.as_str()),
         Value::Bytea(v) => json_string(&crate::backend::libpq::pqformat::format_bytea_text(
             v,
@@ -140,4 +143,19 @@ fn render_value_json(value: &Value) -> String {
 
 fn json_string(value: &str) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_value_json;
+    use crate::backend::executor::Value;
+
+    #[test]
+    fn render_value_json_formats_jsonb_textually() {
+        let value = Value::Jsonb(
+            crate::backend::executor::jsonb::parse_jsonb_text("{\"a\":1,\"b\":[true,null]}")
+                .unwrap(),
+        );
+        assert_eq!(render_value_json(&value), "\"{\\\"a\\\":1,\\\"b\\\":[true,null]}\"");
+    }
 }
