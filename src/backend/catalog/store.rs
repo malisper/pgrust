@@ -25,6 +25,7 @@ use crate::backend::catalog::persistence::{
     append_catalog_entry_rows, delete_catalog_rows_subset_mvcc, insert_catalog_rows_subset_mvcc,
     sync_catalog_rows_subset,
 };
+use crate::backend::catalog::pg_depend::view_rewrite_depend_rows;
 use crate::backend::catalog::role_memberships::{
     NewRoleMembership, grant_membership as grant_role_membership_row,
     revoke_role_membership_option as update_role_membership_row,
@@ -33,7 +34,6 @@ use crate::backend::catalog::roles::{
     RoleAttributes, alter_role_attributes as alter_role_row, create_role as create_role_row,
     drop_roles as drop_role_rows, rename_role as rename_role_row,
 };
-use crate::backend::catalog::pg_depend::view_rewrite_depend_rows;
 use crate::backend::catalog::rowcodec::{
     pg_description_row_from_values, pg_statistic_row_from_values,
 };
@@ -51,9 +51,8 @@ use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::relcache::{RelCache, RelCacheEntry};
 use crate::backend::utils::misc::interrupts::{InterruptState, check_for_interrupts};
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, BootstrapCatalogKind, PG_CLASS_RELATION_OID, PgAuthIdRow,
-    PgAuthMembersRow, PgDependRow, PgDescriptionRow, PgNamespaceRow, PgRewriteRow, PgStatisticRow,
-    bootstrap_catalog_kinds,
+    BootstrapCatalogKind, PG_CLASS_RELATION_OID, PgAuthIdRow, PgAuthMembersRow, PgDependRow,
+    PgDescriptionRow, PgNamespaceRow, PgRewriteRow, PgStatisticRow, bootstrap_catalog_kinds,
 };
 use crate::include::nodes::datum::Value;
 
@@ -428,6 +427,7 @@ impl CatalogStore {
         &mut self,
         name: impl Into<String>,
         desc: RelationDesc,
+        owner_oid: u32,
         ctx: &CatalogWriteContext,
     ) -> Result<(CreateTableResult, CatalogMutationEffect), CatalogError> {
         self.create_table_mvcc_with_options(
@@ -438,6 +438,7 @@ impl CatalogStore {
             'p',
             crate::include::catalog::PG_TOAST_NAMESPACE_OID,
             crate::backend::catalog::toasting::PG_TOAST_NAMESPACE,
+            owner_oid,
             ctx,
         )
     }
@@ -451,6 +452,7 @@ impl CatalogStore {
         relpersistence: char,
         toast_namespace_oid: u32,
         toast_namespace_name: &str,
+        owner_oid: u32,
         ctx: &CatalogWriteContext,
     ) -> Result<(CreateTableResult, CatalogMutationEffect), CatalogError> {
         let name = name.into();
@@ -461,6 +463,7 @@ impl CatalogStore {
             namespace_oid,
             db_oid,
             relpersistence,
+            owner_oid,
         )?;
         let toast = new_relation_create_toast_table(
             &mut catalog,
@@ -499,13 +502,14 @@ impl CatalogStore {
         &mut self,
         namespace_oid: u32,
         namespace_name: &str,
+        owner_oid: u32,
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let rows = PhysicalCatalogRows {
             namespaces: vec![PgNamespaceRow {
                 oid: namespace_oid,
                 nspname: namespace_name.to_string(),
-                nspowner: BOOTSTRAP_SUPERUSER_OID,
+                nspowner: owner_oid,
             }],
             ..PhysicalCatalogRows::default()
         };
@@ -523,7 +527,12 @@ impl CatalogStore {
         attrs: &RoleAttributes,
     ) -> Result<PgAuthIdRow, CatalogError> {
         let mut catalog = self.catalog_snapshot_with_control()?;
-        let row = create_role_row(&mut catalog.authids, &mut catalog.next_oid, role_name, attrs)?;
+        let row = create_role_row(
+            &mut catalog.authids,
+            &mut catalog.next_oid,
+            role_name,
+            attrs,
+        )?;
         self.persist_catalog_kinds(&catalog, &[BootstrapCatalogKind::PgAuthId])?;
         Ok(row)
     }
@@ -564,7 +573,10 @@ impl CatalogStore {
         });
         self.persist_catalog_kinds(
             &catalog,
-            &[BootstrapCatalogKind::PgAuthId, BootstrapCatalogKind::PgAuthMembers],
+            &[
+                BootstrapCatalogKind::PgAuthId,
+                BootstrapCatalogKind::PgAuthMembers,
+            ],
         )?;
         Ok(removed_row)
     }
@@ -610,13 +622,14 @@ impl CatalogStore {
         &mut self,
         namespace_oid: u32,
         namespace_name: &str,
+        owner_oid: u32,
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let rows = PhysicalCatalogRows {
             namespaces: vec![PgNamespaceRow {
                 oid: namespace_oid,
                 nspname: namespace_name.to_string(),
-                nspowner: BOOTSTRAP_SUPERUSER_OID,
+                nspowner: owner_oid,
             }],
             ..PhysicalCatalogRows::default()
         };
@@ -633,14 +646,22 @@ impl CatalogStore {
         name: impl Into<String>,
         desc: RelationDesc,
         namespace_oid: u32,
+        owner_oid: u32,
         definition: String,
         referenced_relation_oids: &[u32],
         ctx: &CatalogWriteContext,
     ) -> Result<(CatalogEntry, CatalogMutationEffect), CatalogError> {
         let name = name.into();
         let mut catalog = self.catalog_snapshot_with_control_for_snapshot(ctx)?;
-        let entry =
-            catalog.create_table_with_relkind(name.clone(), desc, namespace_oid, 1, 'p', 'v')?;
+        let entry = catalog.create_table_with_relkind(
+            name.clone(),
+            desc,
+            namespace_oid,
+            1,
+            'p',
+            'v',
+            owner_oid,
+        )?;
         let rewrite_row = PgRewriteRow {
             oid: catalog.next_oid(),
             rulename: "_RETURN".to_string(),
@@ -1066,6 +1087,34 @@ impl CatalogStore {
         effect_record_oid(&mut effect.relation_oids, relation_oid);
         effect_record_oid(&mut effect.namespace_oids, new_entry.namespace_oid);
         effect_record_oid(&mut effect.type_oids, new_entry.row_type_oid);
+        Ok(effect)
+    }
+
+    pub fn alter_relation_owner_mvcc(
+        &mut self,
+        relation_oid: u32,
+        new_owner_oid: u32,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let mut catalog = self.catalog_snapshot_with_control_for_snapshot(ctx)?;
+        let (name, old_entry, new_entry) =
+            catalog.alter_relation_owner(relation_oid, new_owner_oid)?;
+
+        let mut kinds = vec![BootstrapCatalogKind::PgClass];
+        if old_entry.row_type_oid != 0 || new_entry.row_type_oid != 0 {
+            kinds.push(BootstrapCatalogKind::PgType);
+        }
+        let old_rows = physical_catalog_rows_for_catalog_entry(&catalog, &name, &old_entry);
+        let new_rows = physical_catalog_rows_for_catalog_entry(&catalog, &name, &new_entry);
+        delete_catalog_rows_subset_mvcc(ctx, &old_rows, 1, &kinds)?;
+        insert_catalog_rows_subset_mvcc(ctx, &new_rows, 1, &kinds)?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        if new_entry.row_type_oid != 0 {
+            effect_record_oid(&mut effect.type_oids, new_entry.row_type_oid);
+        }
         Ok(effect)
     }
 
@@ -1881,10 +1930,11 @@ mod tests {
             .unwrap();
         let reopened = CatalogStore::load(&base).unwrap();
         let rows = load_physical_catalog_rows(reopened.base_dir()).unwrap();
-        assert!(rows
-            .authids
-            .iter()
-            .any(|row| row.oid == created.oid && row.rolname == "app_user" && row.rolcanlogin));
+        assert!(
+            rows.authids
+                .iter()
+                .any(|row| row.oid == created.oid && row.rolname == "app_user" && row.rolcanlogin)
+        );
     }
 
     #[test]
@@ -1904,10 +1954,12 @@ mod tests {
 
         let reopened = CatalogStore::load(&base).unwrap();
         let rows = load_physical_catalog_rows(reopened.base_dir()).unwrap();
-        assert!(!rows
-            .authids
-            .iter()
-            .any(|row| row.rolname == "app_user" || row.rolname == "app_owner"));
+        assert!(
+            !rows
+                .authids
+                .iter()
+                .any(|row| row.rolname == "app_user" || row.rolname == "app_owner")
+        );
     }
 
     #[test]
@@ -1927,14 +1979,16 @@ mod tests {
             )
             .unwrap();
         let created = store
-            .grant_role_membership(&crate::backend::catalog::role_memberships::NewRoleMembership {
-                roleid: parent.oid,
-                member: member.oid,
-                grantor: BOOTSTRAP_SUPERUSER_OID,
-                admin_option: false,
-                inherit_option: true,
-                set_option: true,
-            })
+            .grant_role_membership(
+                &crate::backend::catalog::role_memberships::NewRoleMembership {
+                    roleid: parent.oid,
+                    member: member.oid,
+                    grantor: BOOTSTRAP_SUPERUSER_OID,
+                    admin_option: false,
+                    inherit_option: true,
+                    set_option: true,
+                },
+            )
             .unwrap();
         let updated = store
             .update_role_membership_options(

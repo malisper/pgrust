@@ -60,6 +60,7 @@ impl Database {
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let relation = lookup_heap_relation_for_ddl(&catalog, &rename_stmt.table_name)?;
         let new_table_name = normalize_rename_target_name(&rename_stmt.new_table_name)?;
+        ensure_relation_owner(self, client_id, &relation, &rename_stmt.table_name)?;
 
         if relation.relpersistence != 't' {
             reject_relation_with_dependent_views(
@@ -155,6 +156,7 @@ impl Database {
                 actual: "temporary table".into(),
             }));
         }
+        ensure_relation_owner(self, client_id, &relation, &rename_stmt.table_name)?;
         let new_column_name = validate_alter_table_rename_column(
             &relation.desc,
             &rename_stmt.column_name,

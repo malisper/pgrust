@@ -1,11 +1,11 @@
 use super::*;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::{AggFunc, Expr, Plan, RelationDesc, Value};
+use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, JSON_TYPE_OID, PUBLIC_NAMESPACE_OID, PgProcRow, PgRewriteRow,
     PgTypeRow, RECORD_TYPE_OID, bootstrap_pg_proc_rows, sort_pg_rewrite_rows,
 };
-use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::nodes::parsenodes::{
     AliasColumnDef, AliasColumnSpec, JoinTreeNode, RangeTblEntryKind, RawTypeName,
 };
@@ -62,6 +62,7 @@ fn test_catalog_entry(rel_number: u32, desc: RelationDesc) -> CatalogEntry {
         },
         relation_oid: 50_000u32.saturating_add(rel_number),
         namespace_oid: 11,
+        owner_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         row_type_oid: 60_000u32.saturating_add(rel_number),
         reltoastrelid: 0,
         relpersistence: 'p',
@@ -94,6 +95,7 @@ fn people_view_entry() -> CatalogEntry {
         },
         relation_oid: 50020,
         namespace_oid: 11,
+        owner_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         row_type_oid: 60020,
         reltoastrelid: 0,
         relpersistence: 'p',
@@ -187,6 +189,7 @@ fn catalog_with_people_id_index() -> Catalog {
             },
             relation_oid: 50010,
             namespace_oid: 11,
+            owner_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
             row_type_oid: 60010,
             reltoastrelid: 0,
             relpersistence: 'p',
@@ -702,11 +705,34 @@ fn parse_alter_table_alter_column_type_statement() {
 }
 
 #[test]
+fn parse_alter_table_owner_statement() {
+    let stmt = parse_statement("alter table items owner to app_owner").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableOwner(AlterRelationOwnerStatement {
+            relation_name: "items".into(),
+            new_owner: "app_owner".into(),
+        })
+    );
+}
+
+#[test]
+fn parse_alter_view_owner_statement() {
+    let stmt = parse_statement("alter view items_view owner to app_owner").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterViewOwner(AlterRelationOwnerStatement {
+            relation_name: "items_view".into(),
+            new_owner: "app_owner".into(),
+        })
+    );
+}
+
+#[test]
 fn parse_create_role_statement_with_options() {
-    let stmt = parse_statement(
-        "create role regress_role_admin createdb createrole replication bypassrls",
-    )
-    .unwrap();
+    let stmt =
+        parse_statement("create role regress_role_admin createdb createrole replication bypassrls")
+            .unwrap();
     assert_eq!(
         stmt,
         Statement::CreateRole(CreateRoleStatement {
@@ -820,7 +846,9 @@ fn parse_comment_on_role_statement() {
 
 #[test]
 fn parse_reassign_owned_statement() {
-    let stmt = parse_statement("reassign owned by regress_tenant, regress_tenant2 to regress_createrole").unwrap();
+    let stmt =
+        parse_statement("reassign owned by regress_tenant, regress_tenant2 to regress_createrole")
+            .unwrap();
     assert_eq!(
         stmt,
         Statement::ReassignOwned(ReassignOwnedStatement {

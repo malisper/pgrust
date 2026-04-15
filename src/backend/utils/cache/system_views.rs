@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use crate::backend::executor::Value;
 use crate::include::catalog::{
-    PgAttributeRow, PgClassRow, PgNamespaceRow, PgRewriteRow, PgStatisticRow,
+    PgAttributeRow, PgAuthIdRow, PgClassRow, PgNamespaceRow, PgRewriteRow, PgStatisticRow,
 };
 
 const STATISTIC_KIND_MCV: i16 = 1;
@@ -15,12 +15,17 @@ const STATISTIC_KIND_BOUNDS_HISTOGRAM: i16 = 7;
 
 pub fn build_pg_views_rows(
     namespaces: Vec<PgNamespaceRow>,
+    authids: Vec<PgAuthIdRow>,
     classes: Vec<PgClassRow>,
     rewrites: Vec<PgRewriteRow>,
 ) -> Vec<Vec<Value>> {
     let namespace_names = namespaces
         .into_iter()
         .map(|row| (row.oid, row.nspname))
+        .collect::<BTreeMap<_, _>>();
+    let role_names = authids
+        .into_iter()
+        .map(|row| (row.oid, row.rolname))
         .collect::<BTreeMap<_, _>>();
     let return_rules = rewrites
         .into_iter()
@@ -43,7 +48,13 @@ pub fn build_pg_views_rows(
                 vec![
                     Value::Text(schemaname.into()),
                     Value::Text(class.relname.into()),
-                    Value::Text("postgres".into()),
+                    Value::Text(
+                        role_names
+                            .get(&class.relowner)
+                            .cloned()
+                            .unwrap_or_else(|| "unknown".into())
+                            .into(),
+                    ),
                     Value::Text(definition.into()),
                 ],
             ))

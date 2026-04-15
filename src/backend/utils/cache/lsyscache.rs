@@ -535,6 +535,7 @@ pub fn relation_entry_by_oid(
         },
         relation_oid: class.oid,
         namespace_oid: class.relnamespace,
+        owner_oid: class.relowner,
         row_type_oid: class.reltype,
         reltoastrelid: class.reltoastrelid,
         relpersistence: class.relpersistence,
@@ -590,6 +591,7 @@ pub fn lookup_any_relation(
             relation_oid: entry.relation_oid,
             toast: toast_relation_from_entry(db, client_id, txn_ctx, &entry),
             namespace_oid: entry.namespace_oid,
+            owner_oid: entry.owner_oid,
             relpersistence: entry.relpersistence,
             relkind: entry.relkind,
             desc: entry.desc.clone(),
@@ -612,6 +614,7 @@ pub fn lookup_any_relation(
             relation_oid: temp.relation_oid,
             toast: toast_relation_from_entry(db, client_id, txn_ctx, &temp),
             namespace_oid: temp.namespace_oid,
+            owner_oid: temp.owner_oid,
             relpersistence: temp.relpersistence,
             relkind: temp.relkind,
             desc: temp.desc.clone(),
@@ -635,6 +638,7 @@ pub fn lookup_any_relation(
             relation_oid: entry.relation_oid,
             toast: toast_relation_from_entry(db, client_id, txn_ctx, &entry),
             namespace_oid: entry.namespace_oid,
+            owner_oid: entry.owner_oid,
             relpersistence: entry.relpersistence,
             relkind: entry.relkind,
             desc: entry.desc.clone(),
@@ -775,6 +779,7 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
             relation_oid: entry.relation_oid,
             toast: toast_relation_from_entry(self.db, self.client_id, self.txn_ctx, &entry),
             namespace_oid: entry.namespace_oid,
+            owner_oid: entry.owner_oid,
             relpersistence: entry.relpersistence,
             relkind: entry.relkind,
             desc: entry.desc,
@@ -806,8 +811,14 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
     }
 
     fn pg_views_rows(&self) -> Vec<Vec<Value>> {
+        let authids = self
+            .db
+            .auth_catalog(self.client_id, self.txn_ctx)
+            .map(|catalog| catalog.roles().to_vec())
+            .unwrap_or_default();
         build_pg_views_rows(
             ensure_namespace_rows(self.db, self.client_id, self.txn_ctx),
+            authids,
             ensure_class_rows(self.db, self.client_id, self.txn_ctx),
             ensure_rewrite_rows(self.db, self.client_id, self.txn_ctx),
         )

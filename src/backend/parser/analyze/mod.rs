@@ -222,6 +222,7 @@ impl CatalogLookup for Catalog {
         let catcache = crate::backend::utils::cache::catcache::CatCache::from_catalog(self);
         build_pg_views_rows(
             catcache.namespace_rows(),
+            catcache.authid_rows(),
             catcache.class_rows(),
             catcache.rewrite_rows(),
         )
@@ -298,6 +299,7 @@ fn bound_relation_from_relcache_entry(
         relation_oid: entry.relation_oid,
         toast: toast_relation_from_cache(relcache, entry),
         namespace_oid: entry.namespace_oid,
+        owner_oid: entry.owner_oid,
         relpersistence: entry.relpersistence,
         relkind: entry.relkind,
         desc: entry.desc.clone(),

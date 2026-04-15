@@ -39,6 +39,68 @@ pub(super) fn lookup_heap_relation_for_ddl(
     }
 }
 
+fn auth_catalog_for_ddl(
+    db: &Database,
+    client_id: ClientId,
+) -> Result<crate::pgrust::auth::AuthCatalog, ExecError> {
+    db.auth_catalog(client_id, None).map_err(|err| {
+        ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "authorization catalog",
+            actual: format!("{err:?}"),
+        })
+    })
+}
+
+pub(super) fn relation_kind_name(relkind: char) -> &'static str {
+    match relkind {
+        'v' => "view",
+        'i' => "index",
+        _ => "table",
+    }
+}
+
+pub(super) fn ensure_relation_owner(
+    db: &Database,
+    client_id: ClientId,
+    relation: &BoundRelation,
+    display_name: &str,
+) -> Result<(), ExecError> {
+    let auth = db.auth_state(client_id);
+    let auth_catalog = auth_catalog_for_ddl(db, client_id)?;
+    if auth.has_effective_membership(relation.owner_oid, &auth_catalog) {
+        return Ok(());
+    }
+    Err(ExecError::DetailedError {
+        message: format!(
+            "must be owner of {} {}",
+            relation_kind_name(relation.relkind),
+            display_name
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "42501",
+    })
+}
+
+pub(super) fn ensure_can_set_role(
+    db: &Database,
+    client_id: ClientId,
+    role_oid: u32,
+    role_name: &str,
+) -> Result<(), ExecError> {
+    let auth = db.auth_state(client_id);
+    let auth_catalog = auth_catalog_for_ddl(db, client_id)?;
+    if auth.can_set_role(role_oid, &auth_catalog) {
+        return Ok(());
+    }
+    Err(ExecError::DetailedError {
+        message: format!("must be able to SET ROLE \"{role_name}\""),
+        detail: None,
+        hint: None,
+        sqlstate: "42501",
+    })
+}
+
 pub(super) fn namespace_oid_for_relation_name(name: &str) -> u32 {
     match name.split_once('.') {
         Some(("pg_catalog", _)) => PG_CATALOG_NAMESPACE_OID,

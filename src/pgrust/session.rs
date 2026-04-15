@@ -315,6 +315,24 @@ impl Session {
                     self.maintenance_work_mem_kb()?,
                 )
             }
+            Statement::AlterTableOwner(ref alter_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_alter_table_owner_stmt_with_search_path(
+                        self.client_id,
+                        alter_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
             Statement::AlterTableRename(ref rename_stmt) => {
                 if self.active_txn.is_some() {
                     let result = self.execute_in_transaction(db, stmt);
@@ -329,6 +347,24 @@ impl Session {
                     db.execute_alter_table_rename_stmt_with_search_path(
                         self.client_id,
                         rename_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
+            Statement::AlterViewOwner(ref alter_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_alter_view_owner_stmt_with_search_path(
+                        self.client_id,
+                        alter_stmt,
                         search_path.as_deref(),
                     )
                 }
@@ -458,7 +494,8 @@ impl Session {
                     }
                     result
                 } else {
-                    self.auth = db.execute_set_session_authorization_stmt(self.client_id, set_stmt)?;
+                    self.auth =
+                        db.execute_set_session_authorization_stmt(self.client_id, set_stmt)?;
                     Ok(StatementResult::AffectedRows(0))
                 }
             }
@@ -731,6 +768,27 @@ impl Session {
                     catalog_effects,
                 )
             }
+            Statement::AlterTableOwner(ref alter_stmt) => {
+                let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                let relation = catalog
+                    .lookup_any_relation(&alter_stmt.relation_name)
+                    .ok_or_else(|| {
+                        ExecError::Parse(ParseError::TableDoesNotExist(
+                            alter_stmt.relation_name.clone(),
+                        ))
+                    })?;
+                self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_alter_table_owner_stmt_in_transaction_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
             Statement::AlterTableRename(ref rename_stmt) => {
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);
                 let relation = catalog
@@ -751,6 +809,27 @@ impl Session {
                     search_path.as_deref(),
                     &mut txn.catalog_effects,
                     &mut txn.temp_effects,
+                )
+            }
+            Statement::AlterViewOwner(ref alter_stmt) => {
+                let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                let relation = catalog
+                    .lookup_any_relation(&alter_stmt.relation_name)
+                    .ok_or_else(|| {
+                        ExecError::Parse(ParseError::TableDoesNotExist(
+                            alter_stmt.relation_name.clone(),
+                        ))
+                    })?;
+                self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_alter_view_owner_stmt_in_transaction_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
                 )
             }
             Statement::AlterTableRenameColumn(ref rename_stmt) => {
@@ -859,12 +938,23 @@ impl Session {
                 create_stmt,
                 self.gucs.get("createrole_self_grant").map(String::as_str),
             ),
-            Statement::AlterRole(ref alter_stmt) => db.execute_alter_role_stmt(client_id, alter_stmt),
+            Statement::AlterRole(ref alter_stmt) => {
+                db.execute_alter_role_stmt(client_id, alter_stmt)
+            }
             Statement::DropRole(ref drop_stmt) => db.execute_drop_role_stmt(client_id, drop_stmt),
-            Statement::CommentOnRole(_)
-            | Statement::ReassignOwned(_) => Err(ExecError::Parse(
-                ParseError::FeatureNotSupported("role management".into()),
-            )),
+            Statement::ReassignOwned(ref reassign_stmt) => {
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_reassign_owned_stmt_in_transaction(
+                    client_id,
+                    reassign_stmt,
+                    xid,
+                    cid,
+                    &mut txn.catalog_effects,
+                )
+            }
+            Statement::CommentOnRole(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                "role management".into(),
+            ))),
             Statement::SetSessionAuthorization(ref set_stmt) => {
                 self.auth = db.execute_set_session_authorization_stmt(client_id, set_stmt)?;
                 Ok(StatementResult::AffectedRows(0))

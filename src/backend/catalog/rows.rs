@@ -4,12 +4,12 @@ use crate::backend::catalog::catalog::{Catalog, CatalogEntry};
 use crate::backend::parser::SqlType;
 use crate::backend::utils::cache::catcache::{CatCache, sql_type_oid};
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, BootstrapCatalogKind, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow,
-    PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow,
-    PgConstraintRow, PgDatabaseRow, PgDependRow, PgDescriptionRow, PgIndexRow, PgLanguageRow,
-    PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow, PgRewriteRow,
-    PgStatisticRow, PgTablespaceRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow,
-    PgTsTemplateRow, PgTypeRow,
+    BootstrapCatalogKind, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow,
+    PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow,
+    PgDatabaseRow, PgDependRow, PgDescriptionRow, PgIndexRow, PgLanguageRow, PgNamespaceRow,
+    PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow, PgRewriteRow, PgStatisticRow,
+    PgTablespaceRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow,
+    PgTypeRow,
 };
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -206,7 +206,7 @@ pub(crate) fn physical_catalog_rows_for_catalog_entry(
         relname: relname.to_string(),
         relnamespace: entry.namespace_oid,
         reltype: entry.row_type_oid,
-        relowner: BOOTSTRAP_SUPERUSER_OID,
+        relowner: entry.owner_oid,
         relam: crate::include::catalog::relam_for_relkind(entry.relkind),
         reltablespace: 0,
         relfilenode: entry.rel.rel_number,
@@ -223,7 +223,7 @@ pub(crate) fn physical_catalog_rows_for_catalog_entry(
             oid: entry.row_type_oid,
             typname: relname.to_string(),
             typnamespace: entry.namespace_oid,
-            typowner: BOOTSTRAP_SUPERUSER_OID,
+            typowner: entry.owner_oid,
             typlen: -1,
             typalign: crate::include::access::htup::AttributeAlign::Double,
             typstorage: crate::include::access::htup::AttributeStorage::Extended,
