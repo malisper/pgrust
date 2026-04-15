@@ -2,6 +2,7 @@ use crate::ClientId;
 use crate::backend::access::transam::xact::{CommandId, TransactionId};
 use crate::backend::catalog::pg_constraint::derived_pg_constraint_rows;
 use crate::backend::parser::{BoundRelation, CatalogLookup};
+use crate::backend::utils::cache::catcache::normalize_catalog_name;
 use crate::backend::utils::cache::relcache::RelCacheEntry;
 use crate::backend::utils::cache::syscache::{
     backend_catcache, backend_relcache, ensure_attribute_rows, ensure_class_rows,
@@ -17,7 +18,6 @@ use crate::include::catalog::{
 };
 use crate::include::nodes::datum::Value;
 use crate::pgrust::database::{Database, TempNamespace};
-use crate::backend::utils::cache::catcache::normalize_catalog_name;
 
 fn namespace_row_by_name(
     db: &Database,
@@ -447,7 +447,10 @@ pub fn lookup_any_relation(
         if let Some(temp_namespace) = owned_temp_namespace(db, client_id) {
             for (temp_name, entry) in temp_namespace.tables {
                 relcache.insert(temp_name.clone(), entry.entry.clone());
-                relcache.insert(format!("{}.{}", temp_namespace.name, temp_name), entry.entry);
+                relcache.insert(
+                    format!("{}.{}", temp_namespace.name, temp_name),
+                    entry.entry,
+                );
             }
         }
         let entry = relcache
@@ -493,7 +496,10 @@ pub fn lookup_any_relation(
     if let Some(temp_namespace) = owned_temp_namespace(db, client_id) {
         for (temp_name, entry) in temp_namespace.tables {
             relcache.insert(temp_name.clone(), entry.entry.clone());
-            relcache.insert(format!("{}.{}", temp_namespace.name, temp_name), entry.entry);
+            relcache.insert(
+                format!("{}.{}", temp_namespace.name, temp_name),
+                entry.entry,
+            );
         }
     }
     let relcache = relcache.with_search_path(search_path);

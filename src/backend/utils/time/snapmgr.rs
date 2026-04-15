@@ -1,10 +1,10 @@
 use std::collections::BTreeSet;
 
+use crate::ClientId;
 use crate::backend::access::transam::xact::{CommandId, INVALID_TRANSACTION_ID, TransactionId};
 use crate::backend::utils::cache::syscache::BackendCacheContext;
 use crate::include::catalog::BootstrapCatalogKind;
 use crate::pgrust::database::Database;
-use crate::ClientId;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
@@ -72,9 +72,8 @@ pub fn get_catalog_snapshot(
     relation_oid: Option<u32>,
 ) -> Option<Snapshot> {
     let snapshot_ctx = BackendCacheContext::from(txn_ctx);
-    let reusable_snapshot = relation_oid.is_none_or(|oid| {
-        relation_has_syscache(oid) || relation_invalidates_snapshots_only(oid)
-    });
+    let reusable_snapshot = relation_oid
+        .is_none_or(|oid| relation_has_syscache(oid) || relation_invalidates_snapshots_only(oid));
 
     if !reusable_snapshot {
         invalidate_catalog_snapshot(db, client_id);
