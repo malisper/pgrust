@@ -2,6 +2,7 @@ mod agg;
 mod agg_output;
 mod agg_output_special;
 mod coerce;
+mod constraints;
 mod create_table;
 mod expr;
 mod functions;
@@ -20,9 +21,10 @@ use crate::backend::executor::{Value, cast_value};
 use crate::backend::optimizer::planner;
 use crate::backend::rewrite::pg_rewrite_query;
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, PgCastRow, PgClassRow, PgOperatorRow, PgProcRow, PgRewriteRow,
-    PgStatisticRow, PgTypeRow, RECORD_TYPE_OID, bootstrap_pg_cast_rows, bootstrap_pg_operator_rows,
-    bootstrap_pg_proc_rows, builtin_type_rows, proc_oid_for_builtin_aggregate_function,
+    BOOTSTRAP_SUPERUSER_OID, PgCastRow, PgClassRow, PgConstraintRow, PgOperatorRow, PgProcRow,
+    PgRewriteRow, PgStatisticRow, PgTypeRow, RECORD_TYPE_OID, bootstrap_pg_cast_rows,
+    bootstrap_pg_operator_rows, bootstrap_pg_proc_rows, builtin_type_rows,
+    proc_oid_for_builtin_aggregate_function,
 };
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{
@@ -39,6 +41,7 @@ use agg::*;
 use agg_output::*;
 use coerce::*;
 pub use create_table::*;
+pub(crate) use constraints::*;
 use expr::*;
 use functions::*;
 use geometry::*;
@@ -144,6 +147,10 @@ pub trait CatalogLookup {
         Vec::new()
     }
 
+    fn constraint_rows_for_relation(&self, _relation_oid: u32) -> Vec<PgConstraintRow> {
+        Vec::new()
+    }
+
     fn class_row_by_oid(&self, _relation_oid: u32) -> Option<PgClassRow> {
         None
     }
@@ -204,6 +211,11 @@ impl CatalogLookup for Catalog {
         self.rewrite_rows_for_relation(relation_oid).to_vec()
     }
 
+    fn constraint_rows_for_relation(&self, relation_oid: u32) -> Vec<PgConstraintRow> {
+        let catcache = crate::backend::utils::cache::catcache::CatCache::from_catalog(self);
+        catcache.constraint_rows_for_relation(relation_oid)
+    }
+
     fn class_row_by_oid(&self, relation_oid: u32) -> Option<PgClassRow> {
         let catcache = crate::backend::utils::cache::catcache::CatCache::from_catalog(self);
         catcache.class_by_oid(relation_oid).cloned()
@@ -247,6 +259,21 @@ impl CatalogLookup for RelCache {
     fn lookup_relation_by_oid(&self, relation_oid: u32) -> Option<BoundRelation> {
         self.get_by_oid(relation_oid)
             .map(|entry| bound_relation_from_relcache_entry(self, entry))
+    }
+
+    fn constraint_rows_for_relation(&self, relation_oid: u32) -> Vec<PgConstraintRow> {
+        let Some((name, entry)) = self
+            .entries()
+            .find(|(_, entry)| entry.relation_oid == relation_oid)
+        else {
+            return Vec::new();
+        };
+        crate::backend::catalog::pg_constraint::derived_pg_constraint_rows(
+            relation_oid,
+            name.rsplit('.').next().unwrap_or(name),
+            entry.namespace_oid,
+            &entry.desc,
+        )
     }
 
     fn index_relations_for_heap(&self, relation_oid: u32) -> Vec<BoundIndexRelation> {

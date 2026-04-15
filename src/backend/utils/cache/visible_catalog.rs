@@ -82,6 +82,10 @@ impl CatalogLookup for VisibleCatalog {
             .map(|entry| bound_relation_from_relcache_entry(&self.relcache, entry))
     }
 
+    fn constraint_rows_for_relation(&self, relation_oid: u32) -> Vec<PgConstraintRow> {
+        VisibleCatalog::constraint_rows_for_relation(self, relation_oid)
+    }
+
     fn proc_rows_by_name(&self, name: &str) -> Vec<PgProcRow> {
         self.catcache
             .as_ref()
