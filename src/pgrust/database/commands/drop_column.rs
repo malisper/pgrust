@@ -54,6 +54,7 @@ impl Database {
                 actual: "temporary table".into(),
             }));
         }
+        ensure_relation_owner(self, client_id, &relation, &drop_stmt.table_name)?;
         if is_system_column_name(&drop_stmt.column_name) {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "user column name for DROP COLUMN",

@@ -55,6 +55,12 @@ impl Database {
                 .as_ref()
                 .is_some_and(|entry| entry.relpersistence == 't')
             {
+                if let Some(entry) = maybe_entry.as_ref() {
+                    if let Err(err) = ensure_relation_owner(self, client_id, entry, table_name) {
+                        result = Err(err);
+                        break;
+                    }
+                }
                 match self.drop_temp_relation_in_transaction(
                     client_id,
                     table_name,
@@ -90,6 +96,12 @@ impl Database {
                     break;
                 }
             };
+            if let Some(entry) = maybe_entry.as_ref() {
+                if let Err(err) = ensure_relation_owner(self, client_id, entry, table_name) {
+                    result = Err(err);
+                    break;
+                }
+            }
             if let Err(err) = reject_relation_with_dependent_views(
                 self,
                 client_id,
@@ -191,6 +203,12 @@ impl Database {
                     break;
                 }
             };
+            if let Some(entry) = maybe_entry.as_ref() {
+                if let Err(err) = ensure_relation_owner(self, client_id, entry, view_name) {
+                    result = Err(err);
+                    break;
+                }
+            }
             if let Err(err) = reject_relation_with_dependent_views(
                 self,
                 client_id,

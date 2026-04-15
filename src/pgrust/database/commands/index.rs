@@ -319,6 +319,7 @@ impl Database {
                 expected: "table",
             }));
         }
+        ensure_relation_owner(self, client_id, &entry, &create_stmt.table_name)?;
         if create_stmt
             .using_method
             .as_deref()

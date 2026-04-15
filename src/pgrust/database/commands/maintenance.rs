@@ -206,6 +206,7 @@ impl Database {
                 actual: "temporary table".into(),
             }));
         }
+        ensure_relation_owner(self, client_id, &relation, &comment_stmt.table_name)?;
 
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
@@ -243,6 +244,7 @@ impl Database {
                 actual: "temporary table".into(),
             }));
         }
+        ensure_relation_owner(self, client_id, &relation, &alter_stmt.table_name)?;
         reject_relation_with_dependent_views(
             self,
             client_id,

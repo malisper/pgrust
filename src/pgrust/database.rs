@@ -68,8 +68,9 @@ use crate::pgrust::auth::{AuthCatalog, AuthState};
 use crate::pl::plpgsql::execute_do;
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
 use ddl::{
-    lookup_heap_relation_for_ddl, map_catalog_error, namespace_oid_for_relation_name,
-    reject_relation_with_dependent_views, validate_alter_table_add_column,
+    ensure_can_set_role, ensure_relation_owner, lookup_heap_relation_for_ddl, map_catalog_error,
+    namespace_oid_for_relation_name, reject_relation_with_dependent_views,
+    validate_alter_table_add_column,
 };
 use relation_refs::{collect_direct_relation_oids_from_select, collect_rels_from_planned_stmt};
 use toast::{toast_bindings_from_create_result, toast_bindings_from_temp_relation};
@@ -128,6 +129,7 @@ pub(crate) struct TempCatalogEntry {
 pub(crate) struct TempNamespace {
     pub oid: u32,
     pub name: String,
+    pub owner_oid: u32,
     pub toast_oid: u32,
     pub toast_name: String,
     pub tables: BTreeMap<String, TempCatalogEntry>,

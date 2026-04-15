@@ -22,8 +22,8 @@ use crate::include::access::amapi::{
 use crate::include::access::relscan::ScanDirection;
 use crate::include::access::scankey::ScanKeyData;
 use crate::include::catalog::{
-    BTREE_AM_OID, BootstrapCatalogKind, PG_CATALOG_NAMESPACE_OID, system_catalog_index_by_oid,
-    system_catalog_indexes, system_catalog_indexes_for_heap,
+    BOOTSTRAP_SUPERUSER_OID, BTREE_AM_OID, BootstrapCatalogKind, PG_CATALOG_NAMESPACE_OID,
+    system_catalog_index_by_oid, system_catalog_indexes, system_catalog_indexes_for_heap,
 };
 use crate::include::nodes::datum::Value;
 
@@ -48,6 +48,7 @@ pub fn system_catalog_index_entry(
         },
         relation_oid: descriptor.relation_oid,
         namespace_oid: PG_CATALOG_NAMESPACE_OID,
+        owner_oid: BOOTSTRAP_SUPERUSER_OID,
         row_type_oid: 0,
         reltoastrelid: 0,
         relpersistence: 'p',
