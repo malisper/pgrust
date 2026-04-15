@@ -118,6 +118,7 @@ pub fn parse_type_name(sql: &str) -> Result<RawTypeName, ParseError> {
         })
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn run_with_parser_stack<F, T>(f: F) -> T
 where
     F: FnOnce() -> T + Send + 'static,
@@ -130,6 +131,17 @@ where
         .expect("spawn parser thread")
         .join()
         .expect("parser thread panicked")
+}
+
+#[cfg(target_arch = "wasm32")]
+fn run_with_parser_stack<F, T>(f: F) -> T
+where
+    F: FnOnce() -> T,
+{
+    // Browser wasm cannot spawn threads without a different runtime model.
+    // Run inline there and keep the larger parser stack workaround only on
+    // native targets.
+    f()
 }
 
 fn try_parse_unsupported_statement(sql: &str) -> Option<Statement> {

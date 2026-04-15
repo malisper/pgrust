@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>pgrust wasm demo</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f5f1e8;
+        --panel: #fffdf8;
+        --ink: #1b1b18;
+        --accent: #a23e2a;
+        --border: #d7c9b4;
+      }
+      body {
+        margin: 0;
+        font-family: Georgia, "Iowan Old Style", serif;
+        color: var(--ink);
+        background:
+          radial-gradient(circle at top left, #efe1c6 0, transparent 28rem),
+          linear-gradient(180deg, #f7f0e3, var(--bg));
+      }
+      main {
+        max-width: 960px;
+        margin: 0 auto;
+        padding: 32px 20px 48px;
+      }
+      h1 {
+        margin: 0 0 12px;
+        font-size: 40px;
+      }
+      p {
+        max-width: 60ch;
+      }
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        box-shadow: 0 12px 30px rgba(70, 47, 24, 0.08);
+        padding: 18px;
+        margin-top: 20px;
+      }
+      textarea {
+        width: 100%;
+        min-height: 220px;
+        resize: vertical;
+        border-radius: 12px;
+        border: 1px solid var(--border);
+        padding: 14px;
+        box-sizing: border-box;
+        font: 15px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+        background: #fff;
+      }
+      .actions {
+        display: flex;
+        gap: 12px;
+        margin-top: 14px;
+        flex-wrap: wrap;
+      }
+      button {
+        border: 0;
+        border-radius: 999px;
+        padding: 10px 16px;
+        cursor: pointer;
+        font: inherit;
+        background: var(--accent);
+        color: white;
+      }
+      button.secondary {
+        background: #6d675d;
+      }
+      pre {
+        overflow: auto;
+        border-radius: 12px;
+        padding: 14px;
+        background: #1f1f1b;
+        color: #f7f0e3;
+        font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>pgrust in the browser</h1>
+      <p>
+        This demo boots an ephemeral in-memory database in wasm and executes SQL
+        through the new browser entrypoint.
+      </p>
+
+      <section class="panel">
+        <textarea id="sql">create table items (id int, name text);
+insert into items values (1, 'alpha'), (2, 'beta');
+select * from items order by id;</textarea>
+        <div class="actions">
+          <button id="run">Run SQL</button>
+          <button id="reset" class="secondary">Reset Database</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <pre id="output">Loading wasm...</pre>
+      </section>
+    </main>
+
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

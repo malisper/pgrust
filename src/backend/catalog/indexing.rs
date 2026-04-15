@@ -151,6 +151,13 @@ pub fn rebuild_system_catalog_indexes(base_dir: &Path) -> Result<(), CatalogErro
     let txns = Arc::new(RwLock::new(
         TransactionManager::new_durable(base_dir.to_path_buf()).unwrap_or_default(),
     ));
+    rebuild_system_catalog_indexes_in_pool(&pool, &txns)
+}
+
+pub fn rebuild_system_catalog_indexes_in_pool(
+    pool: &Arc<BufferPool<SmgrStorageBackend>>,
+    txns: &Arc<RwLock<TransactionManager>>,
+) -> Result<(), CatalogError> {
     let snapshot = txns
         .read()
         .snapshot(INVALID_TRANSACTION_ID)
@@ -158,8 +165,8 @@ pub fn rebuild_system_catalog_indexes(base_dir: &Path) -> Result<(), CatalogErro
     let interrupts = Arc::new(InterruptState::new());
     for descriptor in system_catalog_indexes() {
         let build_ctx = IndexBuildContext {
-            pool: Arc::clone(&pool),
-            txns: Arc::clone(&txns),
+            pool: Arc::clone(pool),
+            txns: Arc::clone(txns),
             client_id: 0,
             interrupts: Arc::clone(&interrupts),
             snapshot: snapshot.clone(),

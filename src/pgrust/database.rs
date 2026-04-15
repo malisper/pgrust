@@ -17,6 +17,7 @@ use crate::backend::access::transam::xact::{
 };
 use crate::backend::access::transam::xlog::{WalBgWriter, WalError, WalWriter};
 use crate::backend::catalog::catalog::{CatalogIndexBuildOptions, column_desc};
+use crate::backend::catalog::indexing::rebuild_system_catalog_indexes_in_pool;
 use crate::backend::catalog::namespace::{
     effective_search_path as namespace_effective_search_path,
     normalize_create_table_as_stmt_with_search_path as namespace_normalize_create_table_as_stmt_with_search_path,
@@ -26,6 +27,7 @@ use crate::backend::catalog::namespace::{
 use crate::backend::catalog::store::{CatalogMutationEffect, CatalogWriteContext};
 use crate::backend::catalog::toasting::ToastCatalogChanges;
 use crate::backend::catalog::{CatalogError, CatalogStore};
+use crate::backend::catalog::{bootstrap::bootstrap_catalog_kinds, persistence::sync_catalog_rows_subset_in_pool};
 use crate::backend::commands::analyze::collect_analyze_stats;
 use crate::backend::executor::{
     ExecError, ExecutorContext, StatementResult, execute_readonly_statement,
@@ -60,9 +62,13 @@ use crate::backend::utils::cache::syscache::{
     SessionCatalogState, invalidate_session_catalog_state,
 };
 use crate::backend::utils::misc::interrupts::InterruptState;
+<<<<<<< HEAD
+use crate::backend::catalog::rows::physical_catalog_rows_from_catcache;
+use crate::backend::utils::cache::catcache::CatCache;
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, PUBLIC_NAMESPACE_OID, PgConstraintRow, PgTypeRow,
+    system_catalog_indexes,
 };
 use crate::pgrust::auth::{AuthCatalog, AuthState};
 use crate::pl::plpgsql::execute_do;
@@ -101,7 +107,7 @@ pub use crate::pgrust::session::{SelectGuard, Session};
 #[derive(Clone)]
 pub struct Database {
     pub pool: Arc<BufferPool<SmgrStorageBackend>>,
-    pub wal: Arc<WalWriter>,
+    pub wal: Option<Arc<WalWriter>>,
     pub txns: Arc<RwLock<TransactionManager>>,
     pub catalog: Arc<RwLock<CatalogStore>>,
     pub txn_waiter: Arc<TransactionWaiter>,
@@ -112,7 +118,7 @@ pub struct Database {
     pub(crate) session_auth_states: Arc<RwLock<HashMap<ClientId, AuthState>>>,
     pub(crate) temp_relations: Arc<RwLock<HashMap<ClientId, TempNamespace>>>,
     pub(crate) domains: Arc<RwLock<BTreeMap<String, DomainEntry>>>,
-    _wal_bg_writer: Arc<WalBgWriter>,
+    _wal_bg_writer: Option<Arc<WalBgWriter>>,
 }
 
 const TEMP_DB_OID_BASE: u32 = 0x7000_0000;
@@ -235,7 +241,7 @@ impl Database {
 
         Ok(Self {
             pool: Arc::new(pool),
-            wal,
+            wal: Some(wal),
             txns: Arc::new(RwLock::new(txns)),
             catalog: Arc::new(RwLock::new(catalog)),
             txn_waiter: Arc::new(TransactionWaiter::new()),
@@ -246,7 +252,31 @@ impl Database {
             session_auth_states: Arc::new(RwLock::new(HashMap::new())),
             temp_relations: Arc::new(RwLock::new(HashMap::new())),
             domains: Arc::new(RwLock::new(BTreeMap::new())),
-            _wal_bg_writer: Arc::new(wal_bg_writer),
+            domains: Arc::new(RwLock::new(BTreeMap::new())),
+            _wal_bg_writer: Some(Arc::new(wal_bg_writer)),
+        })
+    }
+
+    pub fn open_ephemeral(pool_size: usize) -> Result<Self, DatabaseError> {
+        let pool = Arc::new(BufferPool::new(SmgrStorageBackend::new_mem(), pool_size));
+        let txns = Arc::new(RwLock::new(TransactionManager::new_ephemeral()));
+        bootstrap_ephemeral_catalog(&pool, &txns)?;
+        let catalog = CatalogStore::new_ephemeral();
+
+        Ok(Self {
+            pool,
+            wal: None,
+            txns,
+            catalog: Arc::new(RwLock::new(catalog)),
+            txn_waiter: Arc::new(TransactionWaiter::new()),
+            table_locks: Arc::new(TableLockManager::new()),
+            plan_cache: Arc::new(PlanCache::new()),
+            session_catalog_states: Arc::new(RwLock::new(HashMap::new())),
+            session_interrupt_states: Arc::new(RwLock::new(HashMap::new())),
+            session_auth_states: Arc::new(RwLock::new(HashMap::new())),
+            temp_relations: Arc::new(RwLock::new(HashMap::new())),
+            domains: Arc::new(RwLock::new(BTreeMap::new())),
+            _wal_bg_writer: None,
         })
     }
 
@@ -384,6 +414,38 @@ impl Database {
         self.session_interrupt_states.write().remove(&client_id);
         self.clear_auth_state(client_id);
     }
+}
+
+fn bootstrap_ephemeral_catalog(
+    pool: &Arc<BufferPool<SmgrStorageBackend>>,
+    txns: &Arc<RwLock<TransactionManager>>,
+) -> Result<(), DatabaseError> {
+    pool.with_storage_mut(|storage| {
+        for kind in bootstrap_catalog_kinds() {
+            let rel = RelFileLocator {
+                spc_oid: 0,
+                db_oid: 1,
+                rel_number: kind.relation_oid(),
+            };
+            let _ = storage.smgr.open(rel);
+            let _ = storage.smgr.create(rel, crate::backend::storage::smgr::ForkNumber::Main, false);
+        }
+        for descriptor in system_catalog_indexes() {
+            let rel = RelFileLocator {
+                spc_oid: 0,
+                db_oid: 1,
+                rel_number: descriptor.relation_oid,
+            };
+            let _ = storage.smgr.open(rel);
+            let _ = storage.smgr.create(rel, crate::backend::storage::smgr::ForkNumber::Main, false);
+        }
+    });
+
+    let catalog = crate::backend::catalog::Catalog::default();
+    let rows = physical_catalog_rows_from_catcache(&CatCache::from_catalog(&catalog));
+    sync_catalog_rows_subset_in_pool(pool, &rows, 1, &bootstrap_catalog_kinds())?;
+    rebuild_system_catalog_indexes_in_pool(pool, txns)?;
+    Ok(())
 }
 
 impl Drop for Database {

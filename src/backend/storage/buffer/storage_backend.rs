@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 
-use crate::backend::storage::smgr::{MdStorageManager, SmgrError, StorageManager};
+use crate::backend::storage::smgr::{AnyStorageManager, MdStorageManager, SmgrError, StorageManager};
 use crate::include::storage::buf_internals::*;
 
 pub trait StorageBackend {
@@ -58,12 +58,20 @@ impl StorageBackend for FakeStorage {
 /// Adapts `MdStorageManager` to the `StorageBackend` interface expected by
 /// `BufferPool`.
 pub struct SmgrStorageBackend {
-    pub smgr: MdStorageManager,
+    pub smgr: AnyStorageManager,
 }
 
 impl SmgrStorageBackend {
     pub fn new(smgr: MdStorageManager) -> Self {
-        Self { smgr }
+        Self {
+            smgr: AnyStorageManager::Md(smgr),
+        }
+    }
+
+    pub fn new_mem() -> Self {
+        Self {
+            smgr: AnyStorageManager::mem(),
+        }
     }
 }
 
