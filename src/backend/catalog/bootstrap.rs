@@ -5,7 +5,7 @@ use crate::include::catalog::{
     bootstrap_namespace_oid, bootstrap_relation_desc,
 };
 
-pub fn bootstrap_catalog_kinds() -> [BootstrapCatalogKind; 30] {
+pub fn bootstrap_catalog_kinds() -> [BootstrapCatalogKind; 31] {
     shared_bootstrap_catalog_kinds()
 }
 
@@ -22,6 +22,8 @@ pub fn bootstrap_catalog_entry(kind: BootstrapCatalogKind) -> CatalogEntry {
         reltoastrelid: 0,
         relpersistence: 'p',
         relkind: 'r',
+        relhassubclass: false,
+        relispartition: false,
         relpages: 0,
         reltuples: 0.0,
         desc: bootstrap_relation_desc(kind),
@@ -55,12 +57,12 @@ mod tests {
             desc.columns
                 .iter()
                 .rev()
-                .nth(3)
+                .nth(5)
                 .map(|col| col.name.as_str()),
             Some("relkind")
         );
         assert_eq!(
-            desc.columns.iter().rev().nth(3).map(|col| col.sql_type),
+            desc.columns.iter().rev().nth(5).map(|col| col.sql_type),
             Some(SqlType::new(SqlTypeKind::InternalChar))
         );
     }

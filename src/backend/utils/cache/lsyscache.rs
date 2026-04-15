@@ -14,14 +14,15 @@ use crate::backend::parser::{BoundRelation, CatalogLookup, SqlType};
 use crate::backend::utils::cache::relcache::{IndexRelCacheEntry, RelCacheEntry};
 use crate::backend::utils::cache::syscache::{
     catalog_snapshot_for_lookup, ensure_attribute_rows, ensure_class_rows, ensure_constraint_rows,
-    ensure_namespace_rows, ensure_rewrite_rows, ensure_statistic_rows, ensure_type_rows,
+    ensure_inherit_rows, ensure_namespace_rows, ensure_rewrite_rows, ensure_statistic_rows,
+    ensure_type_rows,
 };
 use crate::backend::utils::cache::system_views::{build_pg_stats_rows, build_pg_views_rows};
 use crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER;
 use crate::include::access::scankey::ScanKeyData;
 use crate::include::catalog::{
     PgAmRow, PgAmopRow, PgAmprocRow, PgClassRow, PgCollationRow, PgConstraintRow, PgIndexRow,
-    PgOpclassRow, PgOpfamilyRow, PgRewriteRow, PgStatisticRow, PgTypeRow,
+    PgInheritsRow, PgOpclassRow, PgOpfamilyRow, PgRewriteRow, PgStatisticRow, PgTypeRow,
 };
 use crate::include::nodes::datum::Value;
 use crate::pgrust::database::{Database, TempNamespace};
@@ -768,6 +769,19 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         )
     }
 
+    fn relation_by_oid(&self, relation_oid: u32) -> Option<BoundRelation> {
+        let entry = relation_entry_by_oid(self.db, self.client_id, self.txn_ctx, relation_oid)?;
+        Some(BoundRelation {
+            rel: entry.rel,
+            relation_oid: entry.relation_oid,
+            toast: toast_relation_from_entry(self.db, self.client_id, self.txn_ctx, &entry),
+            namespace_oid: entry.namespace_oid,
+            relpersistence: entry.relpersistence,
+            relkind: entry.relkind,
+            desc: entry.desc.clone(),
+        })
+    }
+
     fn type_rows(&self) -> Vec<PgTypeRow> {
         ensure_type_rows(self.db, self.client_id, self.txn_ctx)
     }
@@ -781,6 +795,20 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
 
     fn class_row_by_oid(&self, relation_oid: u32) -> Option<PgClassRow> {
         class_row_by_oid(self.db, self.client_id, self.txn_ctx, relation_oid)
+    }
+
+    fn inheritance_parents(&self, relation_oid: u32) -> Vec<PgInheritsRow> {
+        ensure_inherit_rows(self.db, self.client_id, self.txn_ctx)
+            .into_iter()
+            .filter(|row| row.inhrelid == relation_oid)
+            .collect()
+    }
+
+    fn inheritance_children(&self, relation_oid: u32) -> Vec<PgInheritsRow> {
+        ensure_inherit_rows(self.db, self.client_id, self.txn_ctx)
+            .into_iter()
+            .filter(|row| row.inhparent == relation_oid)
+            .collect()
     }
 
     fn statistic_rows_for_relation(&self, relation_oid: u32) -> Vec<PgStatisticRow> {

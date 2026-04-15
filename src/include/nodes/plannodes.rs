@@ -66,6 +66,11 @@ pub enum Plan {
     Result {
         plan_info: PlanEstimate,
     },
+    Append {
+        plan_info: PlanEstimate,
+        desc: RelationDesc,
+        children: Vec<Plan>,
+    },
     SeqScan {
         plan_info: PlanEstimate,
         rel: RelFileLocator,
@@ -154,6 +159,7 @@ impl Plan {
     pub fn plan_info(&self) -> PlanEstimate {
         match self {
             Plan::Result { plan_info }
+            | Plan::Append { plan_info, .. }
             | Plan::SeqScan { plan_info, .. }
             | Plan::IndexScan { plan_info, .. }
             | Plan::Hash { plan_info, .. }
@@ -173,6 +179,7 @@ impl Plan {
     pub fn set_plan_info(&mut self, value: PlanEstimate) {
         match self {
             Plan::Result { plan_info }
+            | Plan::Append { plan_info, .. }
             | Plan::SeqScan { plan_info, .. }
             | Plan::IndexScan { plan_info, .. }
             | Plan::Hash { plan_info, .. }
@@ -192,6 +199,14 @@ impl Plan {
     pub fn columns(&self) -> Vec<QueryColumn> {
         match self {
             Plan::Result { .. } => vec![],
+            Plan::Append { desc, .. } => desc
+                .columns
+                .iter()
+                .map(|c| QueryColumn {
+                    name: c.name.clone(),
+                    sql_type: c.sql_type,
+                })
+                .collect(),
             Plan::SeqScan { desc, .. } => desc
                 .columns
                 .iter()

@@ -224,6 +224,11 @@ impl Database {
                 actual: "temporary table".into(),
             }));
         }
+        reject_inheritance_tree_ddl(
+            &catalog,
+            relation.relation_oid,
+            "ALTER TABLE ADD COLUMN on inheritance tree members is not supported yet",
+        )?;
         reject_relation_with_dependent_views(
             self,
             client_id,

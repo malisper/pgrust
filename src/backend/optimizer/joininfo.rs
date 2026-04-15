@@ -628,6 +628,7 @@ mod tests {
         RangeTblEntry {
             alias: None,
             desc: RelationDesc { columns: Vec::new() },
+            inh: false,
             kind: RangeTblEntryKind::Result,
         }
     }

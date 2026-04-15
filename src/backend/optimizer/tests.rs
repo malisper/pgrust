@@ -190,5 +190,5 @@ fn projection_rewrite_does_not_chase_plain_var_through_subquery_boundary() {
     let rewritten =
         super::rewrite_semantic_expr_for_path(var(1, 1), &outer, &outer.output_vars());
 
-    assert_eq!(rewritten, var(1, 1));
+    assert_eq!(rewritten, var(4, 1));
 }

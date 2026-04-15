@@ -8,10 +8,10 @@ use crate::include::access::htup::{AttributeAlign, AttributeCompression, Attribu
 use crate::include::catalog::{
     BootstrapCatalogKind, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow,
     PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow,
-    PgDatabaseRow, PgDependRow, PgDescriptionRow, PgIndexRow, PgLanguageRow, PgNamespaceRow,
-    PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow, PgRewriteRow, PgStatisticRow,
-    PgTablespaceRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow,
-    PgTypeRow, bootstrap_composite_type_rows, builtin_type_rows,
+    PgDatabaseRow, PgDependRow, PgDescriptionRow, PgIndexRow, PgInheritsRow, PgLanguageRow,
+    PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow, PgRewriteRow,
+    PgStatisticRow, PgTablespaceRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow,
+    PgTsTemplateRow, PgTypeRow, bootstrap_composite_type_rows, builtin_type_rows,
 };
 use crate::include::nodes::datum::{ArrayValue, Value};
 
@@ -147,6 +147,12 @@ pub(crate) fn catalog_row_values_for_kind(
             .cloned()
             .map(pg_depend_row_values)
             .collect(),
+        BootstrapCatalogKind::PgInherits => rows
+            .inherits
+            .iter()
+            .cloned()
+            .map(pg_inherits_row_values)
+            .collect(),
         BootstrapCatalogKind::PgDescription => rows
             .descriptions
             .iter()
@@ -238,9 +244,11 @@ pub(crate) fn pg_class_row_from_values(values: Vec<Value>) -> Result<PgClassRow,
         reltoastrelid: expect_oid(&values[8])?,
         relpersistence,
         relkind,
-        relnatts: expect_int16(&values[11])?,
-        relpages: expect_int32(&values[12])?,
-        reltuples: expect_float64(&values[13])?,
+        relhassubclass: expect_bool(&values[11])?,
+        relispartition: expect_bool(&values[12])?,
+        relnatts: expect_int16(&values[13])?,
+        relpages: expect_int32(&values[14])?,
+        reltuples: expect_float64(&values[15])?,
     })
 }
 
@@ -534,7 +542,18 @@ pub(crate) fn pg_attribute_row_from_values(
         attcompression: AttributeCompression::from_char(attcompression)
             .ok_or(CatalogError::Corrupt("unknown attcompression"))?,
         attstattarget: expect_int16(&values[11])?,
+        attinhcount: expect_int16(&values[12])?,
+        attislocal: expect_bool(&values[13])?,
         sql_type: SqlType::new(SqlTypeKind::Text),
+    })
+}
+
+pub(crate) fn pg_inherits_row_from_values(values: Vec<Value>) -> Result<PgInheritsRow, CatalogError> {
+    Ok(PgInheritsRow {
+        inhrelid: expect_oid(&values[0])?,
+        inhparent: expect_oid(&values[1])?,
+        inhseqno: expect_int32(&values[2])?,
+        inhdetachpending: expect_bool(&values[3])?,
     })
 }
 
@@ -727,6 +746,8 @@ fn pg_class_row_values(row: PgClassRow) -> Vec<Value> {
         Value::Int32(row.reltoastrelid as i32),
         Value::Text(row.relpersistence.to_string().into()),
         Value::Text(row.relkind.to_string().into()),
+        Value::Bool(row.relhassubclass),
+        Value::Bool(row.relispartition),
         Value::Int16(row.relnatts),
         Value::Int32(row.relpages),
         Value::Float64(row.reltuples),
@@ -1015,6 +1036,17 @@ fn pg_attribute_row_values(row: PgAttributeRow) -> Vec<Value> {
         Value::InternalChar(row.attstorage.as_char() as u8),
         Value::InternalChar(row.attcompression.as_char() as u8),
         Value::Int16(row.attstattarget),
+        Value::Int16(row.attinhcount),
+        Value::Bool(row.attislocal),
+    ]
+}
+
+fn pg_inherits_row_values(row: PgInheritsRow) -> Vec<Value> {
+    vec![
+        Value::Int32(row.inhrelid as i32),
+        Value::Int32(row.inhparent as i32),
+        Value::Int32(row.inhseqno),
+        Value::Bool(row.inhdetachpending),
     ]
 }
 

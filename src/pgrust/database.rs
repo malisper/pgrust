@@ -36,7 +36,7 @@ use crate::backend::parser::{
     AlterTableRenameColumnStatement, AlterTableRenameStatement, AnalyzeStatement, CatalogLookup,
     CommentOnTableStatement, CreateIndexStatement, CreateTableAsStatement, CreateTableStatement,
     CreateViewStatement, DropViewStatement, OnCommitAction, ParseError, TablePersistence,
-    bind_delete, bind_insert, bind_update, create_relation_desc, lower_create_table,
+    bind_delete, bind_insert, bind_update, create_relation_desc, lower_create_table_with_catalog,
 };
 use crate::backend::storage::lmgr::{
     TableLockManager, TableLockMode, lock_relations_interruptible, lock_tables_interruptible,
@@ -64,7 +64,8 @@ use crate::pl::plpgsql::execute_do;
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
 use ddl::{
     lookup_heap_relation_for_ddl, map_catalog_error, namespace_oid_for_relation_name,
-    reject_relation_with_dependent_views, validate_alter_table_add_column,
+    reject_inheritance_tree_ddl, reject_relation_with_dependent_views,
+    validate_alter_table_add_column,
 };
 use relation_refs::{collect_direct_relation_oids_from_select, collect_rels_from_planned_stmt};
 use toast::{toast_bindings_from_create_result, toast_bindings_from_temp_relation};

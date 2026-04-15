@@ -19,11 +19,12 @@ use crate::backend::catalog::rowcodec::{
     pg_auth_members_row_from_values, pg_authid_row_from_values, pg_cast_row_from_values,
     pg_class_row_from_values, pg_collation_row_from_values, pg_constraint_row_from_values,
     pg_database_row_from_values, pg_depend_row_from_values, pg_description_row_from_values,
-    pg_index_row_from_values, pg_language_row_from_values, pg_opclass_row_from_values,
-    pg_operator_row_from_values, pg_opfamily_row_from_values, pg_proc_row_from_values,
-    pg_rewrite_row_from_values, pg_statistic_row_from_values, pg_tablespace_row_from_values,
-    pg_ts_config_map_row_from_values, pg_ts_config_row_from_values, pg_ts_dict_row_from_values,
-    pg_ts_parser_row_from_values, pg_ts_template_row_from_values, pg_type_row_from_values,
+    pg_index_row_from_values, pg_inherits_row_from_values, pg_language_row_from_values,
+    pg_opclass_row_from_values, pg_operator_row_from_values, pg_opfamily_row_from_values,
+    pg_proc_row_from_values, pg_rewrite_row_from_values, pg_statistic_row_from_values,
+    pg_tablespace_row_from_values, pg_ts_config_map_row_from_values, pg_ts_config_row_from_values,
+    pg_ts_dict_row_from_values, pg_ts_parser_row_from_values, pg_ts_template_row_from_values,
+    pg_type_row_from_values,
 };
 use crate::backend::catalog::rows::PhysicalCatalogRows;
 use crate::backend::executor::RelationDesc;
@@ -67,6 +68,7 @@ pub(crate) fn catalog_from_physical_rows(
     let attribute_rows = rows.attributes;
     let attrdef_rows = rows.attrdefs;
     let depend_rows = rows.depends;
+    let inherit_rows = rows.inherits;
     let rewrite_rows = rows.rewrites;
     let index_rows = rows.indexes;
     let _description_rows = rows.descriptions;
@@ -159,6 +161,7 @@ pub(crate) fn catalog_from_physical_rows(
         tables: BTreeMap::new(),
         constraints: Vec::new(),
         depends: Vec::new(),
+        inherits: inherit_rows,
         rewrites: Vec::new(),
         next_rel_number: DEFAULT_FIRST_REL_NUMBER,
         next_oid,
@@ -187,6 +190,8 @@ pub(crate) fn catalog_from_physical_rows(
                 desc.storage.attstorage = attr.attstorage;
                 desc.storage.attcompression = attr.attcompression;
                 desc.attstattarget = attr.attstattarget;
+                desc.attinhcount = attr.attinhcount;
+                desc.attislocal = attr.attislocal;
                 desc.dropped = attr.attisdropped;
                 if let Some(attrdef) = attrdefs_by_key.get(&(row.oid, attr.attnum)) {
                     desc.attrdef_oid = Some(attrdef.oid);
@@ -236,6 +241,8 @@ pub(crate) fn catalog_from_physical_rows(
                 reltoastrelid: row.reltoastrelid,
                 relpersistence: row.relpersistence,
                 relkind: row.relkind,
+                relhassubclass: row.relhassubclass,
+                relispartition: row.relispartition,
                 relpages: row.relpages,
                 reltuples: row.reltuples,
                 desc: RelationDesc { columns },
@@ -367,6 +374,7 @@ pub(crate) fn load_physical_catalog_rows(
     let mut missing_collation = false;
     let mut missing_database = false;
     let mut missing_tablespace = false;
+    let mut missing_inherits = false;
     let mut missing_rewrite = false;
     let mut missing_statistic = false;
     for kind in bootstrap_catalog_kinds() {
@@ -390,6 +398,10 @@ pub(crate) fn load_physical_catalog_rows(
             }
             if kind == BootstrapCatalogKind::PgIndex {
                 missing_index = true;
+                continue;
+            }
+            if kind == BootstrapCatalogKind::PgInherits {
+                missing_inherits = true;
                 continue;
             }
             if kind == BootstrapCatalogKind::PgAm {
@@ -696,6 +708,18 @@ pub(crate) fn load_physical_catalog_rows(
         .map(pg_depend_row_from_values)
         .collect::<Result<Vec<_>, _>>()?
     };
+    let inherit_rows = if missing_inherits {
+        Vec::new()
+    } else {
+        scan_catalog_relation(
+            &pool,
+            rels[&BootstrapCatalogKind::PgInherits],
+            &bootstrap_relation_desc(BootstrapCatalogKind::PgInherits),
+        )?
+        .into_iter()
+        .map(pg_inherits_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+    };
     let description_rows = if missing_description {
         Vec::new()
     } else {
@@ -775,6 +799,7 @@ pub(crate) fn load_physical_catalog_rows(
         attributes: attribute_rows,
         attrdefs: attrdef_rows,
         depends: depend_rows,
+        inherits: inherit_rows,
         descriptions: description_rows,
         indexes: index_rows,
         rewrites: rewrite_rows,
@@ -839,6 +864,7 @@ pub(crate) fn load_physical_catalog_rows_visible(
     let mut missing_collation = false;
     let mut missing_database = false;
     let mut missing_tablespace = false;
+    let mut missing_inherits = false;
     let mut missing_rewrite = false;
     let mut missing_statistic = false;
     for kind in bootstrap_catalog_kinds() {
@@ -862,6 +888,10 @@ pub(crate) fn load_physical_catalog_rows_visible(
             }
             if kind == BootstrapCatalogKind::PgIndex {
                 missing_index = true;
+                continue;
+            }
+            if kind == BootstrapCatalogKind::PgInherits {
+                missing_inherits = true;
                 continue;
             }
             if kind == BootstrapCatalogKind::PgAm {
@@ -1227,6 +1257,21 @@ pub(crate) fn load_physical_catalog_rows_visible(
         .map(pg_depend_row_from_values)
         .collect::<Result<Vec<_>, _>>()?
     };
+    let inherit_rows = if missing_inherits {
+        Vec::new()
+    } else {
+        scan_catalog_relation_visible(
+            &pool,
+            txns,
+            snapshot,
+            client_id,
+            rels[&BootstrapCatalogKind::PgInherits],
+            &bootstrap_relation_desc(BootstrapCatalogKind::PgInherits),
+        )?
+        .into_iter()
+        .map(pg_inherits_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+    };
     let description_rows = if missing_description {
         Vec::new()
     } else {
@@ -1324,6 +1369,7 @@ pub(crate) fn load_physical_catalog_rows_visible(
         attributes: attribute_rows,
         attrdefs: attrdef_rows,
         depends: depend_rows,
+        inherits: inherit_rows,
         descriptions: description_rows,
         indexes: index_rows,
         rewrites: rewrite_rows,
@@ -1516,6 +1562,26 @@ pub(crate) fn load_visible_depend_rows(
     )?
     .into_iter()
     .map(pg_depend_row_from_values)
+    .collect()
+}
+
+pub(crate) fn load_visible_inherit_rows(
+    base_dir: &Path,
+    pool: &BufferPool<SmgrStorageBackend>,
+    txns: &TransactionManager,
+    snapshot: &Snapshot,
+    client_id: crate::ClientId,
+) -> Result<Vec<crate::include::catalog::PgInheritsRow>, CatalogError> {
+    load_visible_catalog_kind(
+        base_dir,
+        pool,
+        txns,
+        snapshot,
+        client_id,
+        BootstrapCatalogKind::PgInherits,
+    )?
+    .into_iter()
+    .map(pg_inherits_row_from_values)
     .collect()
 }
 

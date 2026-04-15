@@ -21,10 +21,24 @@ pub(crate) fn next_synthetic_slot_id() -> usize {
     NEXT_SYNTHETIC_SLOT_ID.fetch_add(1, Ordering::Relaxed)
 }
 
+pub(crate) fn is_synthetic_slot_id(slot_id: usize) -> bool {
+    slot_id >= SYNTHETIC_SLOT_ID_BASE
+}
+
 impl Path {
     pub fn into_plan(self) -> Plan {
         match self {
             Self::Result { plan_info } => Plan::Result { plan_info },
+            Self::Append {
+                plan_info,
+                desc,
+                children,
+                ..
+            } => Plan::Append {
+                plan_info,
+                desc,
+                children: children.into_iter().map(Path::into_plan).collect(),
+            },
             Self::SeqScan {
                 plan_info,
                 source_id: _,
@@ -212,6 +226,7 @@ impl Path {
     pub fn plan_info(&self) -> PlanEstimate {
         match self {
             Self::Result { plan_info }
+            | Self::Append { plan_info, .. }
             | Self::SeqScan { plan_info, .. }
             | Self::IndexScan { plan_info, .. }
             | Self::Filter { plan_info, .. }
@@ -229,6 +244,14 @@ impl Path {
     pub fn columns(&self) -> Vec<QueryColumn> {
         match self {
             Self::Result { .. } => Vec::new(),
+            Self::Append { desc, .. } => desc
+                .columns
+                .iter()
+                .map(|c| QueryColumn {
+                    name: c.name.clone(),
+                    sql_type: c.sql_type,
+                })
+                .collect(),
             Self::SeqScan { desc, .. } | Self::IndexScan { desc, .. } => desc
                 .columns
                 .iter()
@@ -274,6 +297,9 @@ impl Path {
     pub fn output_vars(&self) -> Vec<Expr> {
         match self {
             Self::Result { .. } => Vec::new(),
+            Self::Append {
+                source_id, desc, ..
+            } => slot_output_vars(*source_id, &desc.columns, |column| column.sql_type),
             Self::SeqScan {
                 source_id, desc, ..
             }
@@ -329,6 +355,7 @@ impl Path {
     pub fn pathkeys(&self) -> Vec<PathKey> {
         match self {
             Self::Result { .. }
+            | Self::Append { .. }
             | Self::SeqScan { .. }
             | Self::Aggregate { .. }
             | Self::Values { .. }
@@ -995,6 +1022,7 @@ pub(super) fn lower_agg_output_expr(
 pub(super) fn rewrite_expr_against_layout(expr: Expr, layout: &[Expr]) -> Expr {
     match expr {
         Expr::Column(index) => layout.get(index).cloned().unwrap_or(Expr::Column(index)),
+        Expr::Var(var) => Expr::Var(var),
         Expr::Aggref(aggref) => Expr::Aggref(Box::new(Aggref {
             args: aggref
                 .args

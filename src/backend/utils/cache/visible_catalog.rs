@@ -4,9 +4,9 @@ use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::relcache::RelCache;
 use crate::backend::utils::cache::system_views::{build_pg_stats_rows, build_pg_views_rows};
 use crate::include::catalog::{
-    PgCastRow, PgClassRow, PgConstraintRow, PgOperatorRow, PgProcRow, PgRewriteRow, PgStatisticRow,
-    PgTypeRow, bootstrap_pg_cast_rows, bootstrap_pg_operator_rows, bootstrap_pg_proc_rows,
-    builtin_type_rows,
+    PgCastRow, PgClassRow, PgConstraintRow, PgInheritsRow, PgOperatorRow, PgProcRow, PgRewriteRow,
+    PgStatisticRow, PgTypeRow, bootstrap_pg_cast_rows, bootstrap_pg_operator_rows,
+    bootstrap_pg_proc_rows, builtin_type_rows,
 };
 
 #[derive(Debug, Clone)]
@@ -72,6 +72,24 @@ impl VisibleCatalog {
 impl CatalogLookup for VisibleCatalog {
     fn lookup_any_relation(&self, name: &str) -> Option<BoundRelation> {
         self.relcache.get_by_name(name).map(|entry| BoundRelation {
+            rel: entry.rel,
+            relation_oid: entry.relation_oid,
+            toast: (entry.reltoastrelid != 0)
+                .then(|| self.relcache.get_by_oid(entry.reltoastrelid))
+                .flatten()
+                .map(|toast| crate::include::nodes::primnodes::ToastRelationRef {
+                    rel: toast.rel,
+                    relation_oid: toast.relation_oid,
+                }),
+            namespace_oid: entry.namespace_oid,
+            relpersistence: entry.relpersistence,
+            relkind: entry.relkind,
+            desc: entry.desc.clone(),
+        })
+    }
+
+    fn relation_by_oid(&self, relation_oid: u32) -> Option<BoundRelation> {
+        self.relcache.get_by_oid(relation_oid).map(|entry| BoundRelation {
             rel: entry.rel,
             relation_oid: entry.relation_oid,
             toast: (entry.reltoastrelid != 0)
@@ -161,6 +179,32 @@ impl CatalogLookup for VisibleCatalog {
             .and_then(|catcache| catcache.class_by_oid(relation_oid).cloned())
     }
 
+    fn inheritance_parents(&self, relation_oid: u32) -> Vec<PgInheritsRow> {
+        self.catcache
+            .as_ref()
+            .map(|catcache| {
+                catcache
+                    .inherit_rows()
+                    .into_iter()
+                    .filter(|row| row.inhrelid == relation_oid)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn inheritance_children(&self, relation_oid: u32) -> Vec<PgInheritsRow> {
+        self.catcache
+            .as_ref()
+            .map(|catcache| {
+                catcache
+                    .inherit_rows()
+                    .into_iter()
+                    .filter(|row| row.inhparent == relation_oid)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     fn statistic_rows_for_relation(&self, relation_oid: u32) -> Vec<PgStatisticRow> {
         self.catcache
             .as_ref()
@@ -218,6 +262,7 @@ mod tests {
             base.attribute_rows(),
             base.attrdef_rows(),
             base.depend_rows(),
+            base.inherit_rows(),
             base.index_rows(),
             base.rewrite_rows(),
             base.am_rows(),
