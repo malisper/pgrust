@@ -333,7 +333,13 @@ fn catalog_row_identity_matches(
                 && catalog_value_eq(left.get(1), right.get(1))
                 && catalog_value_eq(left.get(2), right.get(2))
         }
-        _ => left == right,
+        _ => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right.iter())
+                    .all(|(lhs, rhs)| catalog_value_eq(Some(lhs), Some(rhs)))
+        }
     }
 }
 

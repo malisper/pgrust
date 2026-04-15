@@ -15,10 +15,13 @@ use crate::include::catalog::builtin_aggregate_function_for_proc_oid;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::{
     AggregateState, AppendState, FilterState, FunctionScanState, IndexScanState, LimitState,
-    NestedLoopJoinState, NodeExecStats, OrderByState, PlanNode, ProjectSetState, ProjectionState,
-    ResultState, SeqScanState, SlotKind, ToastRelationRef, TupleSlot, ValuesState,
+    MaterializedRow, NestedLoopJoinState, NodeExecStats, OrderByState, PlanNode, ProjectSetState,
+    ProjectionState, ResultState, SeqScanState, SlotKind, SystemVarBinding, ToastRelationRef,
+    TupleSlot, ValuesState,
 };
 use crate::include::nodes::primnodes::{Expr, JoinType};
+
+const EMPTY_SYSTEM_BINDINGS: [SystemVarBinding; 0] = [];
 
 fn slot_toast_context(
     relation: Option<ToastRelationRef>,
@@ -58,6 +61,24 @@ fn eval_qual_list(
         }
     }
     Ok(true)
+}
+
+fn set_active_system_bindings(ctx: &mut ExecutorContext, bindings: &[SystemVarBinding]) {
+    ctx.system_bindings.clear();
+    ctx.system_bindings.extend_from_slice(bindings);
+}
+
+fn merge_system_bindings(
+    left: &[SystemVarBinding],
+    right: &[SystemVarBinding],
+) -> Vec<SystemVarBinding> {
+    let mut merged = left.to_vec();
+    for binding in right {
+        if !merged.iter().any(|existing| existing.varno == binding.varno) {
+            merged.push(*binding);
+        }
+    }
+    merged
 }
 
 fn format_qual_list(quals: &[Expr]) -> Expr {
@@ -124,12 +145,16 @@ impl PlanNode for ResultState {
             self.slot.kind = SlotKind::Virtual;
             self.slot.tts_values.clear();
             self.slot.tts_nvalid = 0;
+            ctx.system_bindings.clear();
             finish_row(&mut self.stats, start);
             Ok(Some(&mut self.slot))
         }
     }
     fn current_slot(&mut self) -> Option<&mut TupleSlot> {
         Some(&mut self.slot)
+    }
+    fn current_system_bindings(&self) -> &[SystemVarBinding] {
+        &EMPTY_SYSTEM_BINDINGS
     }
     fn column_names(&self) -> &[String] {
         &[]
@@ -168,6 +193,18 @@ impl PlanNode for AppendState {
                 self.slot.tts_nvalid = values.len();
                 self.slot.tts_values = values;
                 self.slot.decode_offset = 0;
+                self.current_bindings = self.children[self.current_child]
+                    .current_system_bindings()
+                    .first()
+                    .map(|binding| {
+                        vec![SystemVarBinding {
+                            varno: self.source_id,
+                            table_oid: binding.table_oid,
+                        }]
+                    })
+                    .unwrap_or_default();
+                self.slot.table_oid = self.current_bindings.first().map(|binding| binding.table_oid);
+                set_active_system_bindings(ctx, &self.current_bindings);
                 finish_row(&mut self.stats, start);
                 return Ok(Some(&mut self.slot));
             }
@@ -178,6 +215,9 @@ impl PlanNode for AppendState {
     }
     fn current_slot(&mut self) -> Option<&mut TupleSlot> {
         Some(&mut self.slot)
+    }
+    fn current_system_bindings(&self) -> &[SystemVarBinding] {
+        &self.current_bindings
     }
     fn column_names(&self) -> &[String] {
         &self.column_names
@@ -246,6 +286,12 @@ impl PlanNode for SeqScanState {
                     self.slot.tts_nvalid = 0;
                     self.slot.tts_values.clear();
                     self.slot.decode_offset = 0;
+                    self.slot.table_oid = Some(self.relation_oid);
+                    self.current_bindings = vec![SystemVarBinding {
+                        varno: self.source_id,
+                        table_oid: self.relation_oid,
+                    }];
+                    set_active_system_bindings(ctx, &self.current_bindings);
 
                     if let Some(qual) = &self.qual {
                         if !qual(&mut self.slot, ctx)? {
@@ -270,6 +316,9 @@ impl PlanNode for SeqScanState {
     }
     fn current_slot(&mut self) -> Option<&mut TupleSlot> {
         Some(&mut self.slot)
+    }
+    fn current_system_bindings(&self) -> &[SystemVarBinding] {
+        &self.current_bindings
     }
     fn column_names(&self) -> &[String] {
         &self.column_names
@@ -398,6 +447,12 @@ impl PlanNode for IndexScanState {
             self.slot.tts_nvalid = 0;
             self.slot.tts_values.clear();
             self.slot.decode_offset = 0;
+            self.slot.table_oid = Some(self.relation_oid);
+            self.current_bindings = vec![SystemVarBinding {
+                varno: self.source_id,
+                table_oid: self.relation_oid,
+            }];
+            set_active_system_bindings(ctx, &self.current_bindings);
 
             finish_row(&mut self.stats, start);
             return Ok(Some(&mut self.slot));
@@ -405,6 +460,9 @@ impl PlanNode for IndexScanState {
     }
     fn current_slot(&mut self) -> Option<&mut TupleSlot> {
         Some(&mut self.slot)
+    }
+    fn current_system_bindings(&self) -> &[SystemVarBinding] {
+        &self.current_bindings
     }
     fn column_names(&self) -> &[String] {
         &self.column_names
@@ -555,6 +613,9 @@ impl PlanNode for FilterState {
     fn current_slot(&mut self) -> Option<&mut TupleSlot> {
         self.input.current_slot()
     }
+    fn current_system_bindings(&self) -> &[SystemVarBinding] {
+        self.input.current_system_bindings()
+    }
     fn column_names(&self) -> &[String] {
         self.input.column_names()
     }
@@ -607,11 +668,9 @@ impl PlanNode for NestedLoopJoinState {
 
         if self.right_rows.is_none() {
             let mut rows = Vec::new();
-            while let Some(slot) = self.right.exec_proc_node(ctx)? {
+            while self.right.exec_proc_node(ctx)?.is_some() {
                 ctx.check_for_interrupts()?;
-                let mut values = slot.values()?.iter().cloned().collect::<Vec<_>>();
-                Value::materialize_all(&mut values);
-                rows.push(TupleSlot::virtual_row(values));
+                rows.push(self.right.materialize_current_row()?);
             }
             self.right_matched = Some(vec![false; rows.len()]);
             self.right_rows = Some(rows);
@@ -620,15 +679,13 @@ impl PlanNode for NestedLoopJoinState {
         loop {
             ctx.check_for_interrupts()?;
             if self.current_left.is_none() {
-                match self.left.exec_proc_node(ctx)? {
-                    Some(slot) => {
-                        let mut values = slot.values()?.iter().cloned().collect::<Vec<_>>();
-                        Value::materialize_all(&mut values);
-                        self.current_left = Some(TupleSlot::virtual_row(values));
+                match self.left.exec_proc_node(ctx)?.is_some() {
+                    true => {
+                        self.current_left = Some(self.left.materialize_current_row()?);
                         self.current_left_matched = false;
                         self.right_index = 0;
                     }
-                    None => {
+                    false => {
                         if matches!(self.kind, JoinType::Right | JoinType::Full) {
                             let right_rows = self.right_rows.as_ref().unwrap();
                             let right_matched = self.right_matched.as_mut().unwrap();
@@ -639,11 +696,14 @@ impl PlanNode for NestedLoopJoinState {
                                     continue;
                                 }
                                 let mut combined_values = vec![Value::Null; self.left_width];
-                                combined_values.extend(right_rows[ri].tts_values.iter().cloned());
+                                combined_values
+                                    .extend(right_rows[ri].slot.tts_values.iter().cloned());
                                 self.slot.tts_values = combined_values;
                                 self.slot.tts_nvalid = self.left_width + self.right_width;
                                 self.slot.kind = SlotKind::Virtual;
                                 self.slot.decode_offset = 0;
+                                self.current_bindings = right_rows[ri].system_bindings.clone();
+                                set_active_system_bindings(ctx, &self.current_bindings);
                                 finish_row(&mut self.stats, start);
                                 return Ok(Some(&mut self.slot));
                             }
@@ -663,13 +723,16 @@ impl PlanNode for NestedLoopJoinState {
 
                 let left = self.current_left.as_ref().unwrap();
                 let right = &right_rows[ri];
-                let mut combined_values: Vec<Value> = left.tts_values.clone();
-                combined_values.extend(right.tts_values.iter().cloned());
+                let mut combined_values: Vec<Value> = left.slot.tts_values.clone();
+                combined_values.extend(right.slot.tts_values.iter().cloned());
                 let nvalid = combined_values.len();
                 self.slot.tts_values = combined_values;
                 self.slot.tts_nvalid = nvalid;
                 self.slot.kind = SlotKind::Virtual;
                 self.slot.decode_offset = 0;
+                self.current_bindings =
+                    merge_system_bindings(&left.system_bindings, &right.system_bindings);
+                set_active_system_bindings(ctx, &self.current_bindings);
 
                 if eval_qual_list(&self.join_qual, &mut self.slot, ctx)? {
                     self.current_left_matched = true;
@@ -683,12 +746,14 @@ impl PlanNode for NestedLoopJoinState {
 
             if !self.current_left_matched && matches!(self.kind, JoinType::Left | JoinType::Full) {
                 let left = self.current_left.as_ref().unwrap();
-                let mut combined_values: Vec<Value> = left.tts_values.clone();
+                let mut combined_values: Vec<Value> = left.slot.tts_values.clone();
                 combined_values.extend(std::iter::repeat_n(Value::Null, self.right_width));
                 self.slot.tts_values = combined_values;
                 self.slot.tts_nvalid = self.left_width + self.right_width;
                 self.slot.kind = SlotKind::Virtual;
                 self.slot.decode_offset = 0;
+                self.current_bindings = left.system_bindings.clone();
+                set_active_system_bindings(ctx, &self.current_bindings);
                 self.current_left = None;
                 finish_row(&mut self.stats, start);
                 return Ok(Some(&mut self.slot));
@@ -699,6 +764,9 @@ impl PlanNode for NestedLoopJoinState {
     }
     fn current_slot(&mut self) -> Option<&mut TupleSlot> {
         Some(&mut self.slot)
+    }
+    fn current_system_bindings(&self) -> &[SystemVarBinding] {
+        &self.current_bindings
     }
     fn column_names(&self) -> &[String] {
         &self.combined_names
@@ -759,13 +827,15 @@ fn exec_lateral_join<'a>(
     loop {
         ctx.check_for_interrupts()?;
         if state.current_left.is_none() {
-            match state.left.exec_proc_node(ctx)? {
-                Some(slot) => {
-                    let mut values = slot.values()?.iter().cloned().collect::<Vec<_>>();
-                    Value::materialize_all(&mut values);
-                    state.current_left = Some(TupleSlot::virtual_row(values.clone()));
+            match state.left.exec_proc_node(ctx)?.is_some() {
+                true => {
+                    let current_left = state.left.materialize_current_row()?;
+                    let values = current_left.slot.tts_values.clone();
+                    state.current_left = Some(current_left);
                     state.current_left_matched = false;
                     ctx.outer_rows.insert(0, values);
+                    ctx.outer_system_bindings
+                        .insert(0, state.current_left.as_ref().unwrap().system_bindings.clone());
                     state.right = super::executor_start(
                         state
                             .right_plan
@@ -774,7 +844,7 @@ fn exec_lateral_join<'a>(
                             .clone(),
                     );
                 }
-                None => {
+                false => {
                     finish_eof(&mut state.stats, start, ctx);
                     return Ok(None);
                 }
@@ -786,13 +856,18 @@ fn exec_lateral_join<'a>(
             let mut values = slot.values()?.iter().cloned().collect::<Vec<_>>();
             Value::materialize_all(&mut values);
             let left = state.current_left.as_ref().unwrap();
-            let mut combined_values: Vec<Value> = left.tts_values.clone();
+            let mut combined_values: Vec<Value> = left.slot.tts_values.clone();
             combined_values.extend(values);
             let nvalid = combined_values.len();
             state.slot.tts_values = combined_values;
             state.slot.tts_nvalid = nvalid;
             state.slot.kind = SlotKind::Virtual;
             state.slot.decode_offset = 0;
+            state.current_bindings = merge_system_bindings(
+                &left.system_bindings,
+                state.right.current_system_bindings(),
+            );
+            set_active_system_bindings(ctx, &state.current_bindings);
 
             if eval_qual_list(&state.join_qual, &mut state.slot, ctx)? {
                 state.current_left_matched = true;
@@ -804,14 +879,17 @@ fn exec_lateral_join<'a>(
         }
 
         ctx.outer_rows.remove(0);
+        ctx.outer_system_bindings.remove(0);
         if !state.current_left_matched && matches!(state.kind, JoinType::Left) {
             let left = state.current_left.as_ref().unwrap();
-            let mut combined_values: Vec<Value> = left.tts_values.clone();
+            let mut combined_values: Vec<Value> = left.slot.tts_values.clone();
             combined_values.extend(std::iter::repeat_n(Value::Null, state.right_width));
             state.slot.tts_values = combined_values;
             state.slot.tts_nvalid = state.left_width + state.right_width;
             state.slot.kind = SlotKind::Virtual;
             state.slot.decode_offset = 0;
+            state.current_bindings = left.system_bindings.clone();
+            set_active_system_bindings(ctx, &state.current_bindings);
             state.current_left = None;
             finish_row(&mut state.stats, start);
             return Ok(Some(&mut state.slot));
@@ -828,11 +906,9 @@ fn exec_cross_join<'a>(
 ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
     if state.left_rows.is_none() {
         let mut rows = Vec::new();
-        while let Some(slot) = state.left.exec_proc_node(ctx)? {
+        while state.left.exec_proc_node(ctx)?.is_some() {
             ctx.check_for_interrupts()?;
-            let mut values = slot.values()?.iter().cloned().collect::<Vec<_>>();
-            Value::materialize_all(&mut values);
-            rows.push(TupleSlot::virtual_row(values));
+            rows.push(state.left.materialize_current_row()?);
         }
         state.left_rows = Some(rows);
     }
@@ -840,14 +916,12 @@ fn exec_cross_join<'a>(
     loop {
         ctx.check_for_interrupts()?;
         if state.current_right.is_none() {
-            match state.right.exec_proc_node(ctx)? {
-                Some(slot) => {
-                    let mut values = slot.values()?.iter().cloned().collect::<Vec<_>>();
-                    Value::materialize_all(&mut values);
-                    state.current_right = Some(TupleSlot::virtual_row(values));
+            match state.right.exec_proc_node(ctx)?.is_some() {
+                true => {
+                    state.current_right = Some(state.right.materialize_current_row()?);
                     state.left_index = 0;
                 }
-                None => {
+                false => {
                     finish_eof(&mut state.stats, start, ctx);
                     return Ok(None);
                 }
@@ -861,13 +935,16 @@ fn exec_cross_join<'a>(
 
             let left = &left_rows[li];
             let right = state.current_right.as_ref().unwrap();
-            let mut combined_values: Vec<Value> = left.tts_values.clone();
-            combined_values.extend(right.tts_values.iter().cloned());
+            let mut combined_values: Vec<Value> = left.slot.tts_values.clone();
+            combined_values.extend(right.slot.tts_values.iter().cloned());
             let nvalid = combined_values.len();
             state.slot.tts_values = combined_values;
             state.slot.tts_nvalid = nvalid;
             state.slot.kind = SlotKind::Virtual;
             state.slot.decode_offset = 0;
+            state.current_bindings =
+                merge_system_bindings(&left.system_bindings, &right.system_bindings);
+            set_active_system_bindings(ctx, &state.current_bindings);
 
             if eval_qual_list(&state.join_qual, &mut state.slot, ctx)?
                 && eval_qual_list(&state.qual, &mut state.slot, ctx)?
@@ -894,19 +971,18 @@ impl PlanNode for OrderByState {
         begin_node(&mut self.stats, ctx);
         if self.rows.is_none() {
             let mut rows = Vec::new();
-            while let Some(slot) = self.input.exec_proc_node(ctx)? {
+            while self.input.exec_proc_node(ctx)?.is_some() {
                 ctx.check_for_interrupts()?;
-                let mut values = slot.values()?.iter().cloned().collect::<Vec<_>>();
-                Value::materialize_all(&mut values);
-                rows.push(TupleSlot::virtual_row(values));
+                rows.push(self.input.materialize_current_row()?);
             }
 
             let mut keyed_rows = Vec::with_capacity(rows.len());
             for mut row in rows {
                 ctx.check_for_interrupts()?;
+                set_active_system_bindings(ctx, &row.system_bindings);
                 let mut keys = Vec::with_capacity(self.items.len());
                 for item in &self.items {
-                    keys.push(eval_expr(&item.expr, &mut row, ctx)?);
+                    keys.push(eval_expr(&item.expr, &mut row.slot, ctx)?);
                 }
                 keyed_rows.push((keys, row));
             }
@@ -925,13 +1001,18 @@ impl PlanNode for OrderByState {
 
         let idx = self.next_index;
         self.next_index += 1;
+        self.current_bindings = rows[idx].system_bindings.clone();
+        set_active_system_bindings(ctx, &self.current_bindings);
         finish_row(&mut self.stats, start);
-        Ok(Some(&mut rows[idx]))
+        Ok(Some(&mut rows[idx].slot))
     }
     fn current_slot(&mut self) -> Option<&mut TupleSlot> {
         let rows = self.rows.as_mut()?;
         let idx = self.next_index.checked_sub(1)?;
-        rows.get_mut(idx)
+        rows.get_mut(idx).map(|row| &mut row.slot)
+    }
+    fn current_system_bindings(&self) -> &[SystemVarBinding] {
+        &self.current_bindings
     }
     fn column_names(&self) -> &[String] {
         self.input.column_names()
@@ -1023,6 +1104,9 @@ impl PlanNode for LimitState {
     fn current_slot(&mut self) -> Option<&mut TupleSlot> {
         self.input.current_slot()
     }
+    fn current_system_bindings(&self) -> &[SystemVarBinding] {
+        self.input.current_system_bindings()
+    }
     fn column_names(&self) -> &[String] {
         self.input.column_names()
     }
@@ -1071,11 +1155,16 @@ impl PlanNode for ProjectionState {
         self.slot.tts_nvalid = nvalid;
         self.slot.kind = SlotKind::Virtual;
         self.slot.decode_offset = 0;
+        self.current_bindings = self.input.current_system_bindings().to_vec();
+        set_active_system_bindings(ctx, &self.current_bindings);
         finish_row(&mut self.stats, start);
         Ok(Some(&mut self.slot))
     }
     fn current_slot(&mut self) -> Option<&mut TupleSlot> {
         Some(&mut self.slot)
+    }
+    fn current_system_bindings(&self) -> &[SystemVarBinding] {
+        &self.current_bindings
     }
     fn column_names(&self) -> &[String] {
         &self.column_names
@@ -1184,6 +1273,7 @@ impl PlanNode for AggregateState {
 
                 if let Some(having) = &self.having {
                     let mut having_slot = TupleSlot::virtual_row(row_values.clone());
+                    ctx.system_bindings.clear();
                     match eval_expr(having, &mut having_slot, ctx)? {
                         Value::Bool(true) => {}
                         Value::Bool(false) | Value::Null => continue,
@@ -1191,7 +1281,10 @@ impl PlanNode for AggregateState {
                     }
                 }
 
-                result_rows.push(TupleSlot::virtual_row(row_values));
+                result_rows.push(MaterializedRow::new(
+                    TupleSlot::virtual_row(row_values),
+                    Vec::new(),
+                ));
             }
 
             self.result_rows = Some(result_rows);
@@ -1205,13 +1298,18 @@ impl PlanNode for AggregateState {
 
         let idx = self.next_index;
         self.next_index += 1;
+        self.current_bindings = rows[idx].system_bindings.clone();
+        set_active_system_bindings(ctx, &self.current_bindings);
         finish_row(&mut self.stats, start);
-        Ok(Some(&mut rows[idx]))
+        Ok(Some(&mut rows[idx].slot))
     }
     fn current_slot(&mut self) -> Option<&mut TupleSlot> {
         let rows = self.result_rows.as_mut()?;
         let idx = self.next_index.checked_sub(1)?;
-        rows.get_mut(idx)
+        rows.get_mut(idx).map(|row| &mut row.slot)
+    }
+    fn current_system_bindings(&self) -> &[SystemVarBinding] {
+        &self.current_bindings
     }
     fn column_names(&self) -> &[String] {
         &self.output_columns
@@ -1245,7 +1343,12 @@ impl PlanNode for FunctionScanState {
         };
         if self.rows.is_none() {
             let mut dummy = TupleSlot::empty(0);
-            self.rows = Some(eval_set_returning_call(&self.call, &mut dummy, ctx)?);
+            self.rows = Some(
+                eval_set_returning_call(&self.call, &mut dummy, ctx)?
+                    .into_iter()
+                    .map(|slot| MaterializedRow::new(slot, Vec::new()))
+                    .collect(),
+            );
         }
 
         let rows = self.rows.as_mut().unwrap();
@@ -1256,13 +1359,18 @@ impl PlanNode for FunctionScanState {
 
         let idx = self.next_index;
         self.next_index += 1;
+        self.current_bindings = rows[idx].system_bindings.clone();
+        set_active_system_bindings(ctx, &self.current_bindings);
         finish_row(&mut self.stats, start);
-        Ok(Some(&mut rows[idx]))
+        Ok(Some(&mut rows[idx].slot))
     }
     fn current_slot(&mut self) -> Option<&mut TupleSlot> {
         let rows = self.rows.as_mut()?;
         let idx = self.next_index.checked_sub(1)?;
-        rows.get_mut(idx)
+        rows.get_mut(idx).map(|row| &mut row.slot)
+    }
+    fn current_system_bindings(&self) -> &[SystemVarBinding] {
+        &self.current_bindings
     }
     fn column_names(&self) -> &[String] {
         &self.output_columns
@@ -1301,7 +1409,9 @@ impl PlanNode for ValuesState {
                     row.iter()
                         .map(|expr| eval_expr(expr, &mut dummy, ctx))
                         .collect::<Result<Vec<_>, ExecError>>()
-                        .map(TupleSlot::virtual_row)
+                        .map(|slot_values| {
+                            MaterializedRow::new(TupleSlot::virtual_row(slot_values), Vec::new())
+                        })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             self.result_rows = Some(rows);
@@ -1314,14 +1424,20 @@ impl PlanNode for ValuesState {
         }
         let idx = self.next_index;
         self.next_index += 1;
+        self.current_bindings = rows[idx].system_bindings.clone();
+        set_active_system_bindings(ctx, &self.current_bindings);
         finish_row(&mut self.stats, start);
-        Ok(Some(&mut rows[idx]))
+        Ok(Some(&mut rows[idx].slot))
     }
 
     fn current_slot(&mut self) -> Option<&mut TupleSlot> {
         let rows = self.result_rows.as_mut()?;
         let idx = self.next_index.checked_sub(1)?;
-        rows.get_mut(idx)
+        rows.get_mut(idx).map(|row| &mut row.slot)
+    }
+
+    fn current_system_bindings(&self) -> &[SystemVarBinding] {
+        &self.current_bindings
     }
 
     fn column_names(&self) -> &[String] {
@@ -1383,7 +1499,10 @@ impl PlanNode for ProjectSetState {
                     continue;
                 }
 
-                self.current_input = Some(materialized);
+                self.current_input = Some(MaterializedRow::new(
+                    materialized,
+                    self.input.current_system_bindings().to_vec(),
+                ));
                 self.current_srf_rows = srf_rows;
                 self.current_row_count = max_rows;
                 self.next_index = 0;
@@ -1398,7 +1517,8 @@ impl PlanNode for ProjectSetState {
             for target in &self.targets {
                 match target {
                     crate::include::nodes::primnodes::ProjectSetTarget::Scalar(entry) => {
-                        values.push(eval_expr(&entry.expr, input_slot, ctx)?.to_owned_value());
+                        set_active_system_bindings(ctx, &input_slot.system_bindings);
+                        values.push(eval_expr(&entry.expr, &mut input_slot.slot, ctx)?.to_owned_value());
                     }
                     crate::include::nodes::primnodes::ProjectSetTarget::Set { .. } => {
                         values.push(
@@ -1416,6 +1536,8 @@ impl PlanNode for ProjectSetState {
             self.slot.tts_values = values;
             self.slot.tts_nvalid = self.slot.tts_values.len();
             self.slot.decode_offset = 0;
+            self.current_bindings = input_slot.system_bindings.clone();
+            set_active_system_bindings(ctx, &self.current_bindings);
 
             if self.next_index >= self.current_row_count {
                 self.current_input = None;
@@ -1431,6 +1553,9 @@ impl PlanNode for ProjectSetState {
 
     fn current_slot(&mut self) -> Option<&mut TupleSlot> {
         Some(&mut self.slot)
+    }
+    fn current_system_bindings(&self) -> &[SystemVarBinding] {
+        &self.current_bindings
     }
 
     fn column_names(&self) -> &[String] {

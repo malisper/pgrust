@@ -200,6 +200,7 @@ fn join_chain_catalog() -> Catalog {
 fn people_scan_plan() -> Plan {
     Plan::SeqScan {
         plan_info: PlanEstimate::default(),
+        source_id: 1,
         rel: rel(),
         relation_name: "people".into(),
         relation_oid: 0,
@@ -211,6 +212,7 @@ fn people_scan_plan() -> Plan {
 fn pets_scan_plan() -> Plan {
     Plan::SeqScan {
         plan_info: PlanEstimate::default(),
+        source_id: 2,
         rel: pets_rel(),
         relation_name: "pets".into(),
         relation_oid: 0,
@@ -563,6 +565,8 @@ fn empty_executor_context(base: &PathBuf) -> ExecutorContext {
         client_id: 1,
         next_command_id: 0,
         outer_rows: Vec::new(),
+            outer_system_bindings: Vec::new(),
+            system_bindings: Vec::new(),
         subplans: Vec::new(),
         timed: false,
         catalog: None,
@@ -590,6 +594,8 @@ fn run_plan(
         client_id: 42,
         next_command_id: 0,
         outer_rows: Vec::new(),
+            outer_system_bindings: Vec::new(),
+            system_bindings: Vec::new(),
         subplans: Vec::new(),
         timed: false,
         catalog: None,
@@ -655,6 +661,8 @@ fn run_sql_with_catalog(
             client_id: 77,
             next_command_id: 0,
             outer_rows: Vec::new(),
+            outer_system_bindings: Vec::new(),
+            system_bindings: Vec::new(),
             subplans: Vec::new(),
             timed: false,
             catalog: catalog.materialize_visible_catalog(),
@@ -834,6 +842,7 @@ fn seqscan_filter_projection_returns_expected_rows() {
             plan_info: crate::backend::executor::PlanEstimate::default(),
             input: Box::new(Plan::SeqScan {
                 plan_info: crate::backend::executor::PlanEstimate::default(),
+                source_id: 1,
                 rel: rel(),
                 relation_name: "people".into(),
                 relation_oid: 0,
@@ -910,6 +919,7 @@ fn seqscan_skips_superseded_versions() {
     drop(pool);
     let plan = Plan::SeqScan {
         plan_info: crate::backend::executor::PlanEstimate::default(),
+        source_id: 1,
         rel: rel(),
         relation_name: "people".into(),
         relation_oid: 0,
@@ -4883,6 +4893,8 @@ fn prepared_insert_uses_defaults_for_omitted_columns() {
         client_id: 77,
         next_command_id: 0,
         outer_rows: Vec::new(),
+            outer_system_bindings: Vec::new(),
+            system_bindings: Vec::new(),
         subplans: Vec::new(),
         timed: false,
         catalog: catalog.materialize_visible_catalog(),

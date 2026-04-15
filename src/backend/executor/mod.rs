@@ -108,6 +108,8 @@ pub struct ExecutorContext {
     pub client_id: ClientId,
     pub next_command_id: CommandId,
     pub outer_rows: Vec<Vec<Value>>,
+    pub outer_system_bindings: Vec<Vec<SystemVarBinding>>,
+    pub system_bindings: Vec<SystemVarBinding>,
     pub subplans: Vec<Plan>,
     /// When true, each node records per-node timing stats (for EXPLAIN ANALYZE).
     pub timed: bool,

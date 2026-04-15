@@ -2777,11 +2777,13 @@ fn build_maintenance_target(pair: Pair<'_, Rule>) -> Result<MaintenanceTarget, P
 fn build_update(pair: Pair<'_, Rule>) -> Result<UpdateStatement, ParseError> {
     let mut with = Vec::new();
     let mut table_name = None;
+    let mut only = false;
     let mut assignments = Vec::new();
     let mut where_clause = None;
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::cte_clause => with = build_cte_clause(part)?,
+            Rule::only_clause => only = true,
             Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
             Rule::assignment => assignments.push(build_assignment(part)?),
             Rule::expr => where_clause = Some(build_expr(part)?),
@@ -2791,6 +2793,7 @@ fn build_update(pair: Pair<'_, Rule>) -> Result<UpdateStatement, ParseError> {
     Ok(UpdateStatement {
         with,
         table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
+        only,
         assignments,
         where_clause,
     })
@@ -2799,10 +2802,12 @@ fn build_update(pair: Pair<'_, Rule>) -> Result<UpdateStatement, ParseError> {
 fn build_delete(pair: Pair<'_, Rule>) -> Result<DeleteStatement, ParseError> {
     let mut with = Vec::new();
     let mut table_name = None;
+    let mut only = false;
     let mut where_clause = None;
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::cte_clause => with = build_cte_clause(part)?,
+            Rule::only_clause => only = true,
             Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
             Rule::expr => where_clause = Some(build_expr(part)?),
             _ => {}
@@ -2811,6 +2816,7 @@ fn build_delete(pair: Pair<'_, Rule>) -> Result<DeleteStatement, ParseError> {
     Ok(DeleteStatement {
         with,
         table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
+        only,
         where_clause,
     })
 }

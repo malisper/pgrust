@@ -507,10 +507,12 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
         Plan::Result { .. } | Plan::SeqScan { .. } | Plan::IndexScan { .. } => plan,
         Plan::Append {
             plan_info,
+            source_id,
             desc,
             children,
         } => Plan::Append {
             plan_info,
+            source_id,
             desc,
             children: children
                 .into_iter()
@@ -715,10 +717,12 @@ pub(super) fn finalize_plan_subqueries(
         Plan::Result { .. } | Plan::SeqScan { .. } | Plan::IndexScan { .. } => plan,
         Plan::Append {
             plan_info,
+            source_id,
             desc,
             children,
         } => Plan::Append {
             plan_info,
+            source_id,
             desc,
             children: children
                 .into_iter()

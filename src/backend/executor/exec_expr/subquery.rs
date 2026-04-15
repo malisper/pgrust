@@ -27,6 +27,8 @@ pub(super) fn eval_scalar_subquery(
     let mut outer_row = slot.values()?.iter().cloned().collect::<Vec<_>>();
     Value::materialize_all(&mut outer_row);
     ctx.outer_rows.insert(0, outer_row);
+    ctx.outer_system_bindings
+        .insert(0, ctx.system_bindings.clone());
     let result = (|| {
         let mut state = executor_start(plan.clone());
         let mut first_value = None;
@@ -48,6 +50,7 @@ pub(super) fn eval_scalar_subquery(
         Ok(first_value.unwrap_or(Value::Null))
     })();
     ctx.outer_rows.remove(0);
+    ctx.outer_system_bindings.remove(0);
     result
 }
 
@@ -60,11 +63,14 @@ pub(super) fn eval_exists_subquery(
     let mut outer_row = slot.values()?.iter().cloned().collect::<Vec<_>>();
     Value::materialize_all(&mut outer_row);
     ctx.outer_rows.insert(0, outer_row);
+    ctx.outer_system_bindings
+        .insert(0, ctx.system_bindings.clone());
     let result = (|| {
         let mut state = executor_start(plan.clone());
         Ok(Value::Bool(exec_next(&mut state, ctx)?.is_some()))
     })();
     ctx.outer_rows.remove(0);
+    ctx.outer_system_bindings.remove(0);
     result
 }
 
@@ -100,6 +106,8 @@ pub(super) fn eval_quantified_subquery(
     let mut outer_row = slot.values()?.iter().cloned().collect::<Vec<_>>();
     Value::materialize_all(&mut outer_row);
     ctx.outer_rows.insert(0, outer_row);
+    ctx.outer_system_bindings
+        .insert(0, ctx.system_bindings.clone());
     let result = (|| {
         let mut state = executor_start(plan.clone());
         let mut saw_row = false;
@@ -134,6 +142,7 @@ pub(super) fn eval_quantified_subquery(
         }
     })();
     ctx.outer_rows.remove(0);
+    ctx.outer_system_bindings.remove(0);
     result
 }
 

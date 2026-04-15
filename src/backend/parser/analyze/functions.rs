@@ -1900,11 +1900,19 @@ mod tests {
         ));
         assert!(explicit_text_input_cast_exists(
             &Catalog::default(),
+            SqlType::new(SqlTypeKind::Name)
+        ));
+        assert!(explicit_text_input_cast_exists(
+            &Catalog::default(),
             SqlType::with_bit_len(SqlTypeKind::Bit, 4)
         ));
         assert!(explicit_text_input_cast_exists(
             &Catalog::default(),
             SqlType::array_of(SqlType::new(SqlTypeKind::Int4))
+        ));
+        assert!(explicit_text_input_cast_exists(
+            &Catalog::default(),
+            SqlType::array_of(SqlType::new(SqlTypeKind::Name))
         ));
         assert!(explicit_text_input_cast_exists(
             &Catalog::default(),

@@ -1230,6 +1230,8 @@ impl Session {
                     next_command_id: cid,
                     timed: false,
                     outer_rows: Vec::new(),
+            outer_system_bindings: Vec::new(),
+            system_bindings: Vec::new(),
                     subplans: Vec::new(),
                     catalog: catalog.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
@@ -1254,6 +1256,8 @@ impl Session {
                     next_command_id: cid,
                     timed: false,
                     outer_rows: Vec::new(),
+            outer_system_bindings: Vec::new(),
+            system_bindings: Vec::new(),
                     subplans: Vec::new(),
                     catalog: catalog.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
@@ -1263,8 +1267,9 @@ impl Session {
             Statement::Update(ref update_stmt) => {
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);
                 let bound = bind_update(update_stmt, &catalog)?;
-                let rel = bound.rel;
-                self.lock_table_if_needed(db, rel, TableLockMode::RowExclusive)?;
+                for target in &bound.targets {
+                    self.lock_table_if_needed(db, target.rel, TableLockMode::RowExclusive)?;
+                }
                 let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
                 let interrupts = self.interrupts();
                 let mut ctx = ExecutorContext {
@@ -1278,6 +1283,8 @@ impl Session {
                     next_command_id: cid,
                     timed: false,
                     outer_rows: Vec::new(),
+            outer_system_bindings: Vec::new(),
+            system_bindings: Vec::new(),
                     subplans: Vec::new(),
                     catalog: catalog.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
@@ -1294,8 +1301,9 @@ impl Session {
             Statement::Delete(ref delete_stmt) => {
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);
                 let bound = bind_delete(delete_stmt, &catalog)?;
-                let rel = bound.rel;
-                self.lock_table_if_needed(db, rel, TableLockMode::RowExclusive)?;
+                for target in &bound.targets {
+                    self.lock_table_if_needed(db, target.rel, TableLockMode::RowExclusive)?;
+                }
                 let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
                 let interrupts = self.interrupts();
                 let mut ctx = ExecutorContext {
@@ -1309,6 +1317,8 @@ impl Session {
                     next_command_id: cid,
                     timed: false,
                     outer_rows: Vec::new(),
+            outer_system_bindings: Vec::new(),
+            system_bindings: Vec::new(),
                     subplans: Vec::new(),
                     catalog: catalog.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
@@ -1450,6 +1460,8 @@ impl Session {
                     next_command_id: cid,
                     timed: false,
                     outer_rows: Vec::new(),
+            outer_system_bindings: Vec::new(),
+            system_bindings: Vec::new(),
                     subplans: Vec::new(),
                     catalog: catalog.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
@@ -1636,6 +1648,8 @@ impl Session {
             next_command_id: cid,
             timed: false,
             outer_rows: Vec::new(),
+            outer_system_bindings: Vec::new(),
+            system_bindings: Vec::new(),
             subplans: Vec::new(),
             catalog: catalog.materialize_visible_catalog(),
             compiled_functions: std::collections::HashMap::new(),
@@ -1858,6 +1872,8 @@ impl Session {
                 next_command_id: cid,
                 timed: false,
                 outer_rows: Vec::new(),
+            outer_system_bindings: Vec::new(),
+            system_bindings: Vec::new(),
                 subplans: Vec::new(),
                 catalog: catalog.materialize_visible_catalog(),
                 compiled_functions: std::collections::HashMap::new(),

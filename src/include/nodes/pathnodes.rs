@@ -6,7 +6,7 @@ use crate::include::nodes::parsenodes::{Query, RangeTblEntry, RangeTblEntryKind}
 use crate::include::nodes::plannodes::PlanEstimate;
 use crate::include::nodes::primnodes::{
     AggAccum, Expr, JoinType, OrderByEntry, ProjectSetTarget, QueryColumn, RelationDesc,
-    SetReturningCall, SortGroupClause, TargetEntry, ToastRelationRef, Var,
+    SetReturningCall, SortGroupClause, TargetEntry, ToastRelationRef, Var, user_attrno,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,7 +71,7 @@ impl PathTarget {
                     .map(|(index, column)| {
                         Expr::Var(Var {
                             varno: rtindex,
-                            varattno: index + 1,
+                            varattno: user_attrno(index),
                             varlevelsup: 0,
                             vartype: column.sql_type,
                         })
@@ -271,6 +271,7 @@ pub enum Path {
         plan_info: PlanEstimate,
         source_id: usize,
         rel: RelFileLocator,
+        relation_oid: u32,
         index_rel: RelFileLocator,
         am_oid: u32,
         toast: Option<ToastRelationRef>,

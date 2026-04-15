@@ -1,12 +1,13 @@
 use super::query::{AnalyzedFrom, JoinAliasInfo};
 use super::*;
 use crate::backend::storage::smgr::RelFileLocator;
-use crate::include::nodes::primnodes::JoinType;
+use crate::include::nodes::primnodes::{JoinType, TABLE_OID_ATTR_NO, Var};
 
 #[derive(Debug, Clone)]
 pub(crate) struct BoundScope {
     pub(crate) desc: RelationDesc,
     pub(crate) columns: Vec<ScopeColumn>,
+    pub(crate) relations: Vec<ScopeRelation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -16,6 +17,14 @@ pub(crate) struct ScopeColumn {
     pub(crate) relation_names: Vec<String>,
     pub(crate) hidden_invalid_relation_names: Vec<String>,
     pub(crate) hidden_missing_relation_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ScopeRelation {
+    pub(crate) relation_names: Vec<String>,
+    pub(crate) hidden_invalid_relation_names: Vec<String>,
+    pub(crate) hidden_missing_relation_names: Vec<String>,
+    pub(crate) system_varno: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -49,12 +58,20 @@ pub(super) enum ResolvedColumn {
     Outer { depth: usize, index: usize },
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ResolvedSystemColumn {
+    pub(super) varno: usize,
+    pub(super) varlevelsup: usize,
+    pub(super) sql_type: SqlType,
+}
+
 pub(super) fn empty_scope() -> BoundScope {
     BoundScope {
         desc: RelationDesc {
             columns: Vec::new(),
         },
         columns: Vec::new(),
+        relations: Vec::new(),
     }
 }
 
@@ -270,6 +287,91 @@ pub(super) fn resolve_column(scope: &BoundScope, name: &str) -> Result<usize, Pa
     Ok(first.0)
 }
 
+fn resolve_system_column_in_scope(
+    scope: &BoundScope,
+    name: &str,
+    varlevelsup: usize,
+) -> Result<Option<ResolvedSystemColumn>, ParseError> {
+    let (relation, column_name) = match name.rsplit_once('.') {
+        Some((relation, column_name)) => (Some(relation), column_name),
+        None => (None, name),
+    };
+    if !column_name.eq_ignore_ascii_case("tableoid") {
+        return Ok(None);
+    }
+
+    let system_type = SqlType::new(SqlTypeKind::Oid);
+    if let Some(relation) = relation {
+        let mut matches = scope.relations.iter().filter(|entry| {
+            entry
+                .relation_names
+                .iter()
+                .any(|visible_relation| visible_relation.eq_ignore_ascii_case(relation))
+        });
+        if let Some(first) = matches.next() {
+            if matches.next().is_some() {
+                return Err(ParseError::AmbiguousColumn(name.to_string()));
+            }
+            return Ok(first.system_varno.map(|varno| ResolvedSystemColumn {
+                varno,
+                varlevelsup,
+                sql_type: system_type,
+            }));
+        }
+        let normalized_relation = relation.to_ascii_lowercase();
+        if scope.relations.iter().any(|entry| {
+            entry.hidden_invalid_relation_names.iter().any(|hidden| {
+                hidden.eq_ignore_ascii_case(relation)
+            })
+        }) {
+            return Err(ParseError::InvalidFromClauseReference(normalized_relation));
+        }
+        if scope.relations.iter().any(|entry| {
+            entry.hidden_missing_relation_names.iter().any(|hidden| {
+                hidden.eq_ignore_ascii_case(relation)
+            })
+        }) {
+            return Err(ParseError::MissingFromClauseEntry(normalized_relation));
+        }
+        return Ok(None);
+    }
+
+    let mut matches = scope
+        .relations
+        .iter()
+        .filter_map(|entry| entry.system_varno)
+        .map(|varno| ResolvedSystemColumn {
+            varno,
+            varlevelsup,
+            sql_type: system_type,
+        });
+    let Some(first) = matches.next() else {
+        return Ok(None);
+    };
+    if matches.next().is_some() {
+        return Err(ParseError::AmbiguousColumn(name.to_string()));
+    }
+    Ok(Some(first))
+}
+
+pub(super) fn resolve_system_column_with_outer(
+    scope: &BoundScope,
+    outer_scopes: &[BoundScope],
+    name: &str,
+) -> Result<Option<ResolvedSystemColumn>, ParseError> {
+    if let Some(resolved) = resolve_system_column_in_scope(scope, name, 0)? {
+        return Ok(Some(resolved));
+    }
+
+    for (depth, outer_scope) in outer_scopes.iter().enumerate() {
+        if let Some(resolved) = resolve_system_column_in_scope(outer_scope, name, depth + 1)? {
+            return Ok(Some(resolved));
+        }
+    }
+
+    Ok(None)
+}
+
 pub(super) fn resolve_column_with_outer(
     scope: &BoundScope,
     outer_scopes: &[BoundScope],
@@ -377,7 +479,7 @@ pub(super) fn bind_from_item_with_ctes(
                     !*only && entry.relkind == 'r',
                     desc.clone(),
                 ),
-                scope_for_relation(Some(name), &desc),
+                scope_for_base_relation(name, &desc),
             ))
         }
         FromItem::Values { rows } => {
@@ -452,6 +554,7 @@ pub(super) fn bind_from_item_with_ctes(
                 ctes,
                 expanded_views,
             )?;
+            let right_scope = shift_scope_rtindexes(right_scope, left_plan.rtable.len());
             let raw_scope = combine_scopes(&left_scope, &right_scope);
             let (on, alias_info, scope) = bind_join_constraint_with_ctes(
                 kind,
@@ -1050,7 +1153,40 @@ pub(super) fn scope_for_relation(relation_name: Option<&str>, desc: &RelationDes
                 hidden_missing_relation_names: vec![],
             })
             .collect(),
+        relations: relation_name
+            .map(|name| {
+                vec![ScopeRelation {
+                    relation_names: vec![name.to_string()],
+                    hidden_invalid_relation_names: vec![],
+                    hidden_missing_relation_names: vec![],
+                    system_varno: None,
+                }]
+            })
+            .unwrap_or_default(),
     }
+}
+
+pub(super) fn scope_for_base_relation(relation_name: &str, desc: &RelationDesc) -> BoundScope {
+    let mut scope = scope_for_relation(Some(relation_name), desc);
+    scope.relations = vec![ScopeRelation {
+        relation_names: vec![relation_name.to_string()],
+        hidden_invalid_relation_names: vec![],
+        hidden_missing_relation_names: vec![],
+        system_varno: Some(1),
+    }];
+    scope
+}
+
+fn shift_scope_rtindexes(mut scope: BoundScope, offset: usize) -> BoundScope {
+    if offset == 0 {
+        return scope;
+    }
+    for relation in &mut scope.relations {
+        if let Some(varno) = relation.system_varno.as_mut() {
+            *varno += offset;
+        }
+    }
+    scope
 }
 
 pub(super) fn combine_scopes(left: &BoundScope, right: &BoundScope) -> BoundScope {
@@ -1058,7 +1194,13 @@ pub(super) fn combine_scopes(left: &BoundScope, right: &BoundScope) -> BoundScop
     desc.columns.extend(right.desc.columns.clone());
     let mut columns = left.columns.clone();
     columns.extend(right.columns.clone());
-    BoundScope { desc, columns }
+    let mut relations = left.relations.clone();
+    relations.extend(right.relations.clone());
+    BoundScope {
+        desc,
+        columns,
+        relations,
+    }
 }
 
 fn plan_join_type(kind: JoinKind) -> JoinType {
@@ -1232,6 +1374,7 @@ fn bind_join_using_projection(
             columns: desc_columns,
         },
         columns: scope_columns,
+        relations: combine_scopes(left_scope, right_scope).relations,
     };
     Ok((
         on,
@@ -1287,9 +1430,15 @@ fn apply_relation_alias(
 
     let mut desc = scope.desc.clone();
     let mut columns = scope.columns.clone();
+    let mut relations = scope.relations.clone();
     let mut renamed = false;
 
-    if columns.iter().any(|column| {
+    if relations.iter().any(|relation| {
+        relation
+            .relation_names
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(alias))
+    }) || columns.iter().any(|column| {
         column
             .relation_names
             .iter()
@@ -1324,6 +1473,30 @@ fn apply_relation_alias(
                 column.relation_names.push(alias.to_string());
             }
         }
+        let relation_alias_only_anonymous = relations
+            .iter()
+            .any(|relation| relation.relation_names.is_empty());
+        if relations.is_empty() {
+            relations.push(ScopeRelation {
+                relation_names: vec![alias.to_string()],
+                hidden_invalid_relation_names: vec![],
+                hidden_missing_relation_names: vec![],
+                system_varno: None,
+            });
+        } else {
+            for relation in &mut relations {
+                if relation_alias_only_anonymous && !relation.relation_names.is_empty() {
+                    continue;
+                }
+                if !relation
+                    .relation_names
+                    .iter()
+                    .any(|name| name.eq_ignore_ascii_case(alias))
+                {
+                    relation.relation_names.push(alias.to_string());
+                }
+            }
+        }
     } else {
         for column in &mut columns {
             if !source_is_alias {
@@ -1350,6 +1523,71 @@ fn apply_relation_alias(
             }
             column.relation_names = vec![alias.to_string()];
         }
+        if relations.len() == 1 {
+            let relation = &mut relations[0];
+            if !source_is_alias {
+                for hidden in relation.relation_names.drain(..) {
+                    if !relation
+                        .hidden_invalid_relation_names
+                        .iter()
+                        .any(|name| name.eq_ignore_ascii_case(&hidden))
+                    {
+                        relation.hidden_invalid_relation_names.push(hidden);
+                    }
+                }
+            } else {
+                for hidden in relation.relation_names.drain(..) {
+                    if !relation
+                        .hidden_missing_relation_names
+                        .iter()
+                        .any(|name| name.eq_ignore_ascii_case(&hidden))
+                    {
+                        relation.hidden_missing_relation_names.push(hidden);
+                    }
+                }
+            }
+            relation.relation_names = vec![alias.to_string()];
+        } else {
+            let mut hidden_invalid_relation_names = Vec::new();
+            let mut hidden_missing_relation_names = Vec::new();
+            for relation in relations {
+                let hidden_names = if source_is_alias {
+                    &mut hidden_missing_relation_names
+                } else {
+                    &mut hidden_invalid_relation_names
+                };
+                for hidden in relation.relation_names {
+                    if !hidden_names
+                        .iter()
+                        .any(|name: &String| name.eq_ignore_ascii_case(&hidden))
+                    {
+                        hidden_names.push(hidden);
+                    }
+                }
+                for hidden in relation.hidden_invalid_relation_names {
+                    if !hidden_invalid_relation_names
+                        .iter()
+                        .any(|name| name.eq_ignore_ascii_case(&hidden))
+                    {
+                        hidden_invalid_relation_names.push(hidden);
+                    }
+                }
+                for hidden in relation.hidden_missing_relation_names {
+                    if !hidden_missing_relation_names
+                        .iter()
+                        .any(|name| name.eq_ignore_ascii_case(&hidden))
+                    {
+                        hidden_missing_relation_names.push(hidden);
+                    }
+                }
+            }
+            relations = vec![ScopeRelation {
+                relation_names: vec![alias.to_string()],
+                hidden_invalid_relation_names,
+                hidden_missing_relation_names,
+                system_varno: None,
+            }];
+        }
     }
 
     if renamed {
@@ -1369,5 +1607,12 @@ fn apply_relation_alias(
         );
     }
 
-    Ok((plan, BoundScope { desc, columns }))
+    Ok((
+        plan,
+        BoundScope {
+            desc,
+            columns,
+            relations,
+        },
+    ))
 }

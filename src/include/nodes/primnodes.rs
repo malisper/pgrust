@@ -530,6 +530,27 @@ pub struct Aggref {
     pub aggno: usize,
 }
 
+pub type AttrNumber = i32;
+
+pub const SELF_ITEM_POINTER_ATTR_NO: AttrNumber = -1;
+pub const TABLE_OID_ATTR_NO: AttrNumber = -6;
+
+pub const fn user_attrno(index: usize) -> AttrNumber {
+    index as AttrNumber + 1
+}
+
+pub const fn attrno_index(attno: AttrNumber) -> Option<usize> {
+    if attno > 0 {
+        Some((attno - 1) as usize)
+    } else {
+        None
+    }
+}
+
+pub const fn is_system_attr(attno: AttrNumber) -> bool {
+    attno < 0
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JoinType {
     Inner,
@@ -542,7 +563,7 @@ pub enum JoinType {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Var {
     pub varno: usize,
-    pub varattno: usize,
+    pub varattno: AttrNumber,
     pub varlevelsup: usize,
     pub vartype: SqlType,
 }

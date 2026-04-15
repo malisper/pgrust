@@ -52,8 +52,9 @@ use geometry::*;
 use infer::*;
 pub use modify::{
     BoundArraySubscript, BoundAssignment, BoundAssignmentTarget, BoundDeleteStatement,
-    BoundInsertSource, BoundInsertStatement, BoundUpdateStatement, PreparedInsert, bind_delete,
-    bind_insert, bind_insert_prepared, bind_update,
+    BoundDeleteTarget, BoundInsertSource, BoundInsertStatement, BoundUpdateStatement,
+    BoundUpdateTarget, PreparedInsert, bind_delete, bind_insert, bind_insert_prepared,
+    bind_update,
 };
 pub use paths::BoundModifyRowSource;
 use paths::bind_order_by_items;
@@ -664,6 +665,7 @@ pub(crate) fn bind_scalar_expr_in_scope(
                 hidden_missing_relation_names: vec![],
             })
             .collect(),
+        relations: vec![],
     };
     let empty_outer = Vec::new();
     let bound = bind_expr_with_outer(expr, &scope, catalog, &empty_outer, None)?;
@@ -904,6 +906,7 @@ pub fn pg_plan_query_with_outer(
                 hidden_missing_relation_names: vec![],
             })
             .collect(),
+        relations: vec![],
     };
     build_plan_with_outer(stmt, catalog, &[outer_scope], None, &[], &[])
 }
@@ -941,6 +944,7 @@ pub fn pg_plan_values_query_with_outer(
                 hidden_missing_relation_names: vec![],
             })
             .collect(),
+        relations: vec![],
     };
     build_values_plan_with_outer(stmt, catalog, &[outer_scope], None, &[], &[])
 }

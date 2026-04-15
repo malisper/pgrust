@@ -15,7 +15,7 @@ use crate::include::nodes::pathnodes::{Path, PlannerInfo, RestrictInfo};
 use crate::include::nodes::plannodes::{Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
     Aggref, BoolExpr, Expr, ExprArraySubscript, FuncExpr, OpExpr, OrderByEntry, ScalarArrayOpExpr,
-    TargetEntry, Var,
+    TargetEntry, Var, attrno_index, user_attrno,
 };
 
 pub(super) fn create_plan(root: &PlannerInfo, path: Path) -> Plan {
@@ -31,11 +31,12 @@ fn set_plan_refs(root: Option<&PlannerInfo>, path: Path) -> Plan {
         Path::Result { plan_info } => Plan::Result { plan_info },
         Path::Append {
             plan_info,
-            source_id: _,
+            source_id,
             desc,
             children,
         } => Plan::Append {
             plan_info,
+            source_id,
             desc,
             children: children
                 .into_iter()
@@ -44,7 +45,7 @@ fn set_plan_refs(root: Option<&PlannerInfo>, path: Path) -> Plan {
         },
         Path::SeqScan {
             plan_info,
-            source_id: _,
+            source_id,
             rel,
             relation_name,
             relation_oid,
@@ -52,6 +53,7 @@ fn set_plan_refs(root: Option<&PlannerInfo>, path: Path) -> Plan {
             desc,
         } => Plan::SeqScan {
             plan_info,
+            source_id,
             rel,
             relation_name,
             relation_oid,
@@ -60,8 +62,9 @@ fn set_plan_refs(root: Option<&PlannerInfo>, path: Path) -> Plan {
         },
         Path::IndexScan {
             plan_info,
-            source_id: _,
+            source_id,
             rel,
+            relation_oid,
             index_rel,
             am_oid,
             toast,
@@ -72,7 +75,9 @@ fn set_plan_refs(root: Option<&PlannerInfo>, path: Path) -> Plan {
             pathkeys: _,
         } => Plan::IndexScan {
             plan_info,
+            source_id,
             rel,
+            relation_oid,
             index_rel,
             am_oid,
             toast,
@@ -454,7 +459,11 @@ fn exprs_equivalent(root: Option<&PlannerInfo>, left: &Expr, right: &Expr) -> bo
     flatten_join_alias_vars(root, left.clone()) == flatten_join_alias_vars(root, right.clone())
 }
 
-fn slot_var(slot_id: usize, attno: usize, vartype: crate::backend::parser::SqlType) -> Expr {
+fn slot_var(
+    slot_id: usize,
+    attno: crate::include::nodes::primnodes::AttrNumber,
+    vartype: crate::backend::parser::SqlType,
+) -> Expr {
     Expr::Var(Var {
         varno: slot_id,
         varattno: attno,
@@ -586,9 +595,10 @@ fn expand_output_var(var: Var, path: &Path) -> Expr {
             input,
             targets,
             ..
-        } if var.varno == *slot_id && var.varattno >= 1 && var.varattno <= targets.len() => {
-            fully_expand_output_expr(targets[var.varattno - 1].expr.clone(), input)
-        }
+        } if var.varno == *slot_id => attrno_index(var.varattno)
+            .filter(|index| *index < targets.len())
+            .map(|index| fully_expand_output_expr(targets[index].expr.clone(), input))
+            .unwrap_or(Expr::Var(var)),
         Path::Filter { input, .. } | Path::OrderBy { input, .. } | Path::Limit { input, .. } => {
             expand_output_var(var, input)
         }
@@ -625,7 +635,7 @@ fn find_exposed_output_match(root: Option<&PlannerInfo>, expr: &Expr, path: &Pat
                     || exprs_equivalent(root, expr, &semantic)
                     || exprs_equivalent(root, expr, &rewritten_semantic)
                     || exprs_equivalent(root, expr, &expanded_semantic))
-                .then(|| slot_var(*slot_id, index + 1, target.sql_type))
+                .then(|| slot_var(*slot_id, user_attrno(index), target.sql_type))
             })
         }
         Path::Filter { input, .. } | Path::OrderBy { input, .. } | Path::Limit { input, .. } => {
@@ -648,7 +658,7 @@ fn match_join_input_output(expr: &Expr, path: &Path, layout: &[Expr]) -> Option<
             ..
         } => targets.iter().enumerate().find_map(|(index, target)| {
             (target.expr == *expr).then(|| PathRewrite {
-                expr: slot_var(*slot_id, index + 1, target.sql_type),
+                expr: slot_var(*slot_id, user_attrno(index), target.sql_type),
             })
         }),
         Path::Filter { input, .. } | Path::OrderBy { input, .. } | Path::Limit { input, .. } => {

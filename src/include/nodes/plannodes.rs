@@ -68,11 +68,13 @@ pub enum Plan {
     },
     Append {
         plan_info: PlanEstimate,
+        source_id: usize,
         desc: RelationDesc,
         children: Vec<Plan>,
     },
     SeqScan {
         plan_info: PlanEstimate,
+        source_id: usize,
         rel: RelFileLocator,
         relation_name: String,
         relation_oid: u32,
@@ -81,7 +83,9 @@ pub enum Plan {
     },
     IndexScan {
         plan_info: PlanEstimate,
+        source_id: usize,
         rel: RelFileLocator,
+        relation_oid: u32,
         index_rel: RelFileLocator,
         am_oid: u32,
         toast: Option<ToastRelationRef>,

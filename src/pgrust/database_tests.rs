@@ -723,7 +723,217 @@ fn analyze_inheritance_tracks_root_and_inherited_stats_separately() {
 }
 
 #[test]
-fn inheritance_guardrails_reject_recursive_dml_and_column_alter() {
+fn inheritance_multi_parent_create_and_drop_clean_up_catalog_rows() {
+    let dir = temp_dir("inheritance_multi_parent_catalog");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create table a (aa text)").unwrap();
+    session
+        .execute(&db, "create table b (bb text) inherits (a)")
+        .unwrap();
+    session
+        .execute(&db, "create table c (cc text) inherits (a)")
+        .unwrap();
+    session
+        .execute(&db, "create table d (dd text) inherits (b, c, a)")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select p.relname
+             from pg_inherits i
+             join pg_class c on c.oid = i.inhrelid
+             join pg_class p on p.oid = i.inhparent
+             where c.relname = 'd'
+             order by i.inhseqno",
+        ),
+        vec![
+            vec![Value::Text("b".into())],
+            vec![Value::Text("c".into())],
+            vec![Value::Text("a".into())],
+        ]
+    );
+
+    session.execute(&db, "drop table d").unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relhassubclass
+             from pg_class
+             where relname in ('b', 'c')
+             order by relname",
+        ),
+        vec![vec![Value::Bool(false)], vec![Value::Bool(false)]]
+    );
+}
+
+#[test]
+fn dropping_inherited_child_removes_pg_inherits_rows() {
+    let dir = temp_dir("inheritance_drop_cleanup");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create table p1 (id int4)").unwrap();
+    session.execute(&db, "create table p2 (id int4)").unwrap();
+    session
+        .execute(&db, "create table c1 (extra text) inherits (p1, p2)")
+        .unwrap();
+
+    assert_eq!(
+        int_value(
+            &query_rows(
+                &db,
+                1,
+                "select count(*)
+                 from pg_inherits i
+                 join pg_class c on c.oid = i.inhrelid
+                 where c.relname = 'c1'",
+            )[0][0],
+        ),
+        2
+    );
+
+    session.execute(&db, "drop table c1").unwrap();
+
+    assert_eq!(
+        int_value(
+            &query_rows(
+                &db,
+                1,
+                "select count(*)
+                 from pg_inherits i
+                 join pg_class p on p.oid = i.inhparent
+                 where p.relname in ('p1', 'p2')",
+            )[0][0],
+        ),
+        0
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relhassubclass
+             from pg_class
+             where relname in ('p1', 'p2')
+             order by relname",
+        ),
+        vec![vec![Value::Bool(false)], vec![Value::Bool(false)]]
+    );
+}
+
+#[test]
+fn explain_inherited_self_join_with_order_by_does_not_panic() {
+    let dir = temp_dir("inheritance_explain_self_join");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table matest0 (a int4, b int4, c int4, d int4)")
+        .unwrap();
+    session
+        .execute(&db, "create table matest1 () inherits (matest0)")
+        .unwrap();
+    session
+        .execute(&db, "create index matest0i on matest0 (b, c)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into matest0 values (1, 1, 1, 1), (2, 2, 2, 2), (3, 3, 3, 3)",
+        )
+        .unwrap();
+
+    let lines = explain_lines(
+        &db,
+        1,
+        "select t1.* from matest0 t1, matest0 t2
+         where t1.b = t2.b and t2.c = t2.d
+         order by t1.b
+         limit 10",
+    );
+    assert!(
+        !lines.is_empty(),
+        "expected EXPLAIN output for inherited self-join"
+    );
+}
+
+#[test]
+fn explain_inherited_order_by_scan_does_not_panic() {
+    let dir = temp_dir("inheritance_explain_order_by");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table matest0 (a int4 primary key)")
+        .unwrap();
+    session
+        .execute(&db, "create table matest1 () inherits (matest0)")
+        .unwrap();
+    session
+        .execute(&db, "insert into matest0 select generate_series(1, 400)")
+        .unwrap();
+    session.execute(&db, "analyze matest0").unwrap();
+
+    let lines = explain_lines(&db, 1, "select * from matest0 where a < 100 order by a");
+    assert!(
+        !lines.is_empty(),
+        "expected EXPLAIN output for inherited ordered scan"
+    );
+}
+
+#[test]
+fn inherited_scan_tableoid_tracks_physical_child_relation() {
+    let dir = temp_dir("inheritance_tableoid");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table parent_inh(a int4)")
+        .unwrap();
+    session
+        .execute(&db, "create table child_inh(extra int4) inherits (parent_inh)")
+        .unwrap();
+    session
+        .execute(&db, "insert into parent_inh values (1)")
+        .unwrap();
+    session
+        .execute(&db, "insert into child_inh(a, extra) values (2, 10)")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relname, p.a
+             from parent_inh p
+             join pg_class c on p.tableoid = c.oid
+             order by p.a",
+        ),
+        vec![
+            vec![Value::Text("parent_inh".into()), Value::Int32(1)],
+            vec![Value::Text("child_inh".into()), Value::Int32(2)],
+        ]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relname, p.a
+             from only parent_inh p
+             join pg_class c on p.tableoid = c.oid
+             order by p.a",
+        ),
+        vec![vec![Value::Text("parent_inh".into()), Value::Int32(1)]]
+    );
+}
+
+#[test]
+fn inherited_update_delete_follow_postgres_targeting_rules() {
     let dir = temp_dir("inheritance_guardrails");
     let db = Database::open(&dir, 128).unwrap();
     let mut session = Session::new(1);
@@ -734,24 +944,82 @@ fn inheritance_guardrails_reject_recursive_dml_and_column_alter() {
     session
         .execute(&db, "create table child_guard() inherits (parent_guard)")
         .unwrap();
+    session
+        .execute(&db, "insert into parent_guard values (1)")
+        .unwrap();
+    session
+        .execute(&db, "insert into child_guard values (2)")
+        .unwrap();
 
-    let update_err = session
-        .execute(&db, "update parent_guard set a = 1")
-        .unwrap_err();
-    assert!(matches!(
-        update_err,
-        ExecError::Parse(ParseError::FeatureNotSupported(message))
-            if message.contains("UPDATE on inherited parents")
-    ));
+    match session
+        .execute(&db, "update parent_guard set a = a + 10")
+        .unwrap()
+    {
+        StatementResult::AffectedRows(2) => {}
+        other => panic!("expected inherited update to touch parent and child, got {other:?}"),
+    }
+    assert_eq!(
+        query_rows(&db, 1, "select a from only parent_guard order by 1"),
+        vec![vec![Value::Int32(11)]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select a from only child_guard order by 1"),
+        vec![vec![Value::Int32(12)]]
+    );
 
-    let delete_err = session
-        .execute(&db, "delete from parent_guard")
-        .unwrap_err();
-    assert!(matches!(
-        delete_err,
-        ExecError::Parse(ParseError::FeatureNotSupported(message))
-            if message.contains("DELETE on inherited parents")
-    ));
+    match session
+        .execute(&db, "update only parent_guard set a = a + 100")
+        .unwrap()
+    {
+        StatementResult::AffectedRows(1) => {}
+        other => panic!("expected ONLY update to touch parent only, got {other:?}"),
+    }
+    assert_eq!(
+        query_rows(&db, 1, "select a from only parent_guard order by 1"),
+        vec![vec![Value::Int32(111)]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select a from only child_guard order by 1"),
+        vec![vec![Value::Int32(12)]]
+    );
+
+    match session
+        .execute(&db, "delete from only child_guard where a = 12")
+        .unwrap()
+    {
+        StatementResult::AffectedRows(1) => {}
+        other => panic!("expected ONLY delete to touch child only, got {other:?}"),
+    }
+    assert_eq!(
+        query_rows(&db, 1, "select a from only child_guard order by 1"),
+        Vec::<Vec<Value>>::new()
+    );
+
+    session
+        .execute(&db, "insert into child_guard values (5)")
+        .unwrap();
+    match session.execute(&db, "delete from parent_guard").unwrap() {
+        StatementResult::AffectedRows(2) => {}
+        other => panic!("expected inherited delete to touch parent and child, got {other:?}"),
+    }
+    assert_eq!(
+        query_rows(&db, 1, "select a from parent_guard order by 1"),
+        Vec::<Vec<Value>>::new()
+    );
+}
+
+#[test]
+fn inheritance_guardrails_still_reject_truncate_and_column_alter() {
+    let dir = temp_dir("inheritance_guardrails");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table parent_guard(a int4)")
+        .unwrap();
+    session
+        .execute(&db, "create table child_guard() inherits (parent_guard)")
+        .unwrap();
 
     let truncate_err = session.execute(&db, "truncate parent_guard").unwrap_err();
     assert!(matches!(
@@ -7625,5 +7893,22 @@ fn create_function_named_composite_rows_expand_from_relation_rowtype() {
     assert_eq!(
         query_rows(&db, 1, "select * from widget_rows(5)"),
         vec![vec![Value::Int32(5), Value::Text("widget".into())]]
+    );
+}
+
+#[test]
+fn explicit_text_to_name_cast_works_via_pg_cast() {
+    let dir = temp_dir("explicit_text_to_name_cast");
+    let db = Database::open(&dir, 64).unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select 'hi mom'::name, '{alice,bob}'::name[]"),
+        vec![vec![
+            Value::Text("hi mom".into()),
+            Value::Array(vec![
+                Value::Text("alice".into()),
+                Value::Text("bob".into()),
+            ]),
+        ]]
     );
 }

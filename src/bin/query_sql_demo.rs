@@ -166,6 +166,8 @@ fn main() -> Result<(), ExecError> {
         client_id: 11,
         next_command_id: 0,
         outer_rows: Vec::new(),
+        outer_system_bindings: Vec::new(),
+        system_bindings: Vec::new(),
         subplans: Vec::new(),
         timed: false,
         catalog: relcache.materialize_visible_catalog(),

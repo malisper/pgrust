@@ -1,12 +1,12 @@
 use crate::include::nodes::datum::Value;
-use crate::include::nodes::execnodes::TupleSlot;
+use crate::include::nodes::execnodes::MaterializedRow;
 use std::collections::HashMap;
 
 pub(crate) type HashKey = Vec<Value>;
 
 #[derive(Debug)]
 pub(crate) struct HashJoinTupleEntry {
-    pub(crate) slot: TupleSlot,
+    pub(crate) row: MaterializedRow,
     #[allow(dead_code)]
     pub(crate) bucket_key: Option<HashKey>,
     pub(crate) matched: bool,

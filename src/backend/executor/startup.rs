@@ -193,21 +193,25 @@ pub fn executor_start(plan: Plan) -> PlanState {
         }),
         Plan::Append {
             plan_info,
+            source_id,
             desc,
             children,
         } => Box::new(AppendState {
+            source_id,
             children: children.into_iter().map(executor_start).collect(),
             current_child: 0,
             column_names: desc.columns.iter().map(|c| c.name.clone()).collect(),
             slot: TupleSlot::empty(desc.columns.len()),
+            current_bindings: Vec::new(),
             plan_info,
             stats: NodeExecStats::default(),
         }),
         Plan::SeqScan {
             plan_info,
+            source_id,
             rel,
             relation_name,
-            relation_oid: _,
+            relation_oid,
             toast,
             desc,
         } => {
@@ -232,15 +236,20 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 slot,
                 qual: None,
                 qual_expr: None,
+                source_id,
+                relation_oid,
+                current_bindings: Vec::new(),
                 plan_info,
                 stats: NodeExecStats::default(),
             })
         }
         Plan::IndexScan {
             plan_info,
+            source_id,
             rel,
             index_rel,
             am_oid,
+            relation_oid,
             toast,
             desc,
             index_meta,
@@ -270,6 +279,9 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 direction,
                 scan: None,
                 slot,
+                source_id,
+                relation_oid,
+                current_bindings: Vec::new(),
                 plan_info,
                 stats: NodeExecStats::default(),
             })
@@ -328,6 +340,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 right_width,
                 unmatched_right_index: 0,
                 slot: TupleSlot::empty(ncols),
+                current_bindings: Vec::new(),
                 plan_info,
                 stats: NodeExecStats::default(),
             })
@@ -386,6 +399,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 matched_outer: false,
                 unmatched_inner_index: 0,
                 slot: TupleSlot::empty(left_width + right_width),
+                current_bindings: Vec::new(),
                 plan_info,
                 stats: NodeExecStats::default(),
             })
@@ -397,9 +411,10 @@ pub fn executor_start(plan: Plan) -> PlanState {
         } if matches!(&*input, Plan::SeqScan { .. }) => {
             let Plan::SeqScan {
                 plan_info: _,
+                source_id,
                 rel,
                 relation_name,
-                relation_oid: _,
+                relation_oid,
                 toast,
                 desc,
             } = *input
@@ -428,6 +443,9 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 slot,
                 qual: Some(qual),
                 qual_expr: Some(predicate),
+                source_id,
+                relation_oid,
+                current_bindings: Vec::new(),
                 plan_info,
                 stats: NodeExecStats::default(),
             })
@@ -455,6 +473,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
             items,
             rows: None,
             next_index: 0,
+            current_bindings: Vec::new(),
             plan_info,
             stats: NodeExecStats::default(),
         }),
@@ -484,6 +503,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 targets,
                 column_names,
                 slot: TupleSlot::empty(ncols),
+                current_bindings: Vec::new(),
                 plan_info,
                 stats: NodeExecStats::default(),
             })
@@ -521,6 +541,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 next_index: 0,
                 key_buffer,
                 trans_fns,
+                current_bindings: Vec::new(),
                 plan_info,
                 stats: NodeExecStats::default(),
             })
@@ -534,6 +555,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
             call,
             rows: None,
             next_index: 0,
+            current_bindings: Vec::new(),
             plan_info,
             stats: NodeExecStats::default(),
         }),
@@ -546,6 +568,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
             output_columns: output_columns.into_iter().map(|c| c.name).collect(),
             result_rows: None,
             next_index: 0,
+            current_bindings: Vec::new(),
             plan_info,
             stats: NodeExecStats::default(),
         }),
@@ -574,6 +597,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 current_row_count: 0,
                 next_index: 0,
                 slot: TupleSlot::empty(column_names.len()),
+                current_bindings: Vec::new(),
                 plan_info,
                 stats: NodeExecStats::default(),
             })
