@@ -1,5 +1,6 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use super::{rewrite_semantic_expr_for_join_inputs, rewrite_semantic_expr_for_path};
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::pathnodes::{Path, PathKey};
@@ -14,11 +15,24 @@ use crate::include::nodes::primnodes::{
 // rtindex Vars, so keep synthetic slots in a disjoint high range until slot identity is split
 // from relation identity more cleanly.
 const SYNTHETIC_SLOT_ID_BASE: usize = 1_000_000;
+const RTE_SLOT_ID_BASE: usize = 2_000_000;
 
 static NEXT_SYNTHETIC_SLOT_ID: AtomicUsize = AtomicUsize::new(SYNTHETIC_SLOT_ID_BASE);
 
 pub(crate) fn next_synthetic_slot_id() -> usize {
     NEXT_SYNTHETIC_SLOT_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+pub(crate) fn rte_slot_id(rtindex: usize) -> usize {
+    RTE_SLOT_ID_BASE + rtindex
+}
+
+pub(crate) fn rte_slot_varno(slot_id: usize) -> Option<usize> {
+    if slot_id >= RTE_SLOT_ID_BASE {
+        Some(slot_id - RTE_SLOT_ID_BASE)
+    } else {
+        None
+    }
 }
 
 impl Path {
@@ -91,6 +105,82 @@ impl Path {
                     on: lower_expr_to_plan_layout(on, &layout),
                 }
             }
+            Self::HashJoin {
+                plan_info,
+                left,
+                right,
+                kind,
+                hash_clauses,
+                outer_hash_keys,
+                inner_hash_keys,
+                join_qual,
+            } => {
+                let left_layout = left.output_vars();
+                let right_layout = right.output_vars();
+                let mut join_layout = left_layout.clone();
+                join_layout.extend(right_layout.clone());
+
+                let lowered_hash_clauses = hash_clauses
+                    .into_iter()
+                    .map(|expr| {
+                        lower_expr_to_plan_layout(
+                            rewrite_semantic_expr_for_join_inputs(
+                                expr,
+                                &left,
+                                &right,
+                                &join_layout,
+                            ),
+                            &join_layout,
+                        )
+                    })
+                    .collect();
+                let lowered_outer_hash_keys = outer_hash_keys
+                    .into_iter()
+                    .map(|expr| {
+                        lower_expr_to_plan_layout(
+                            rewrite_semantic_expr_for_path(expr, &left, &left_layout),
+                            &left_layout,
+                        )
+                    })
+                    .collect();
+                let lowered_inner_hash_keys = inner_hash_keys
+                    .into_iter()
+                    .map(|expr| {
+                        lower_expr_to_plan_layout(
+                            rewrite_semantic_expr_for_path(expr, &right, &right_layout),
+                            &right_layout,
+                        )
+                    })
+                    .collect();
+                let lowered_join_qual = join_qual.map(|expr| {
+                    lower_expr_to_plan_layout(
+                        rewrite_semantic_expr_for_join_inputs(expr, &left, &right, &join_layout),
+                        &join_layout,
+                    )
+                });
+                let left_plan = left.into_plan();
+                let right_plan = right.into_plan();
+                let right_plan_info = right_plan.plan_info();
+
+                Plan::HashJoin {
+                    plan_info,
+                    left: Box::new(left_plan),
+                    right: Box::new(Plan::Hash {
+                        plan_info: PlanEstimate::new(
+                            right_plan_info.total_cost.as_f64(),
+                            right_plan_info.total_cost.as_f64(),
+                            right_plan_info.plan_rows.as_f64(),
+                            right_plan_info.plan_width,
+                        ),
+                        input: Box::new(right_plan),
+                        hash_keys: lowered_inner_hash_keys,
+                    }),
+                    kind,
+                    hash_clauses: lowered_hash_clauses,
+                    hash_keys: lowered_outer_hash_keys,
+                    join_qual: lowered_join_qual,
+                }
+            }
             Self::Projection {
                 plan_info,
                 input,
@@ -98,13 +188,22 @@ impl Path {
                 ..
             } => {
                 let layout = input.output_vars();
+                let lowered_targets = targets
+                    .into_iter()
+                    .map(|target| {
+                        let rewritten_expr =
+                            rewrite_semantic_expr_for_path(target.expr.clone(), &input, &layout);
+                        TargetEntry {
+                            expr: rewritten_expr,
+                            ..target
+                        }
+                    })
+                    .map(|target| lower_target_entry_to_plan_layout(target, &layout))
+                    .collect();
                 Plan::Projection {
                     plan_info,
                     input: Box::new(input.into_plan()),
-                    targets: targets
-                        .into_iter()
-                        .map(|target| lower_target_entry_to_plan_layout(target, &layout))
-                        .collect(),
+                    targets: lowered_targets,
                 }
             }
             Self::OrderBy {
@@ -113,13 +212,18 @@ impl Path {
                 items,
             } => {
                 let layout = input.output_vars();
+                let lowered_items = items
+                    .into_iter()
+                    .map(|item| OrderByEntry {
+                        expr: rewrite_semantic_expr_for_path(item.expr.clone(), &input, &layout),
+                        ..item
+                    })
+                    .map(|item| lower_order_by_entry_to_plan_layout(item, &layout))
+                    .collect();
                 Plan::OrderBy {
                     plan_info,
                     input: Box::new(input.into_plan()),
-                    items: items
-                        .into_iter()
-                        .map(|item| lower_order_by_entry_to_plan_layout(item, &layout))
-                        .collect(),
+                    items: lowered_items,
                 }
             }
             Self::Limit {
@@ -216,6 +320,7 @@ impl Path {
             | Self::IndexScan { plan_info, .. }
             | Self::Filter { plan_info, .. }
             | Self::NestedLoopJoin { plan_info, .. }
+            | Self::HashJoin { plan_info, .. }
             | Self::Projection { plan_info, .. }
             | Self::OrderBy { plan_info, .. }
             | Self::Limit { plan_info, .. }
@@ -248,7 +353,7 @@ impl Path {
                 })
                 .collect(),
             Self::Aggregate { output_columns, .. } => output_columns.clone(),
-            Self::NestedLoopJoin { left, right, .. } => {
+            Self::NestedLoopJoin { left, right, .. } | Self::HashJoin { left, right, .. } => {
                 let mut cols = left.columns();
                 cols.extend(right.columns());
                 cols
@@ -323,6 +428,11 @@ impl Path {
                 vars.extend(right.output_vars());
                 vars
             }
+            Self::HashJoin { left, right, .. } => {
+                let mut vars = left.output_vars();
+                vars.extend(right.output_vars());
+                vars
+            }
         }
     }
 
@@ -355,6 +465,7 @@ impl Path {
             {
                 left.pathkeys()
             }
+            Self::HashJoin { .. } => Vec::new(),
             Self::NestedLoopJoin { .. } => Vec::new(),
         }
     }
@@ -705,6 +816,7 @@ fn rewrite_expr_for_input_path(expr: Expr, path: &Path, layout: &[Expr]) -> Expr
             targets,
             ..
         } => {
+            let input_layout = input.output_vars();
             if let Some((index, target)) = targets
                 .iter()
                 .enumerate()
@@ -713,11 +825,18 @@ fn rewrite_expr_for_input_path(expr: Expr, path: &Path, layout: &[Expr]) -> Expr
                 slot_var(*slot_id, index + 1, target.sql_type)
             } else {
                 let rewritten_input_expr =
-                    rewrite_expr_for_input_path(expr.clone(), input, &input.output_vars());
+                    rewrite_semantic_expr_for_path(expr.clone(), input, &input_layout);
                 if let Some((index, target)) = targets
                     .iter()
                     .enumerate()
-                    .find(|(_, target)| target.expr == rewritten_input_expr)
+                    .find(|(_, target)| {
+                        target.expr == rewritten_input_expr
+                            || rewrite_semantic_expr_for_path(
+                                target.expr.clone(),
+                                input,
+                                &input_layout,
+                            ) == rewritten_input_expr
+                    })
                 {
                     slot_var(*slot_id, index + 1, target.sql_type)
                 } else {
@@ -728,7 +847,7 @@ fn rewrite_expr_for_input_path(expr: Expr, path: &Path, layout: &[Expr]) -> Expr
         Path::Filter { input, .. } | Path::OrderBy { input, .. } | Path::Limit { input, .. } => {
             rewrite_expr_for_input_path(expr, input, layout)
         }
-        Path::NestedLoopJoin { left, right, .. } => {
+        Path::NestedLoopJoin { left, right, .. } | Path::HashJoin { left, right, .. } => {
             let left_layout = left.output_vars();
             let rewritten_left = rewrite_expr_for_input_path(expr.clone(), left, &left_layout);
             if rewritten_left != expr || left_layout.contains(&expr) {
@@ -1168,6 +1287,19 @@ pub(super) fn rewrite_expr_against_layout(expr: Expr, layout: &[Expr]) -> Expr {
 
 fn lower_expr_to_plan_layout(expr: Expr, layout: &[Expr]) -> Expr {
     if let Some(index) = layout.iter().position(|candidate| *candidate == expr) {
+        return Expr::Column(index);
+    }
+    if let Expr::Var(var) = &expr
+        && var.varlevelsup == 0
+        && let Some(index) = layout.iter().position(|candidate| match candidate {
+            Expr::Var(candidate_var) => {
+                candidate_var.varlevelsup == 0
+                    && candidate_var.varattno == var.varattno
+                    && rte_slot_varno(candidate_var.varno) == Some(var.varno)
+            }
+            _ => false,
+        })
+    {
         return Expr::Column(index);
     }
     match expr {
