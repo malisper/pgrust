@@ -4,11 +4,11 @@ pub mod nbtinsert;
 pub mod nbtpage;
 pub mod nbtpreprocesskeys;
 pub mod nbtree;
-pub mod nbtvacuum;
 pub mod nbtsearch;
 pub mod nbtsort;
 pub mod nbtsplitloc;
 pub mod nbtutils;
+pub mod nbtvacuum;
 pub mod nbtvalidate;
 pub mod nbtxlog;
 

@@ -388,11 +388,9 @@ pub(crate) fn send_typed_data_row(
             | Value::TimeTz(_)
             | Value::Timestamp(_)
             | Value::TimestampTz(_) => {
-                let rendered = render_datetime_value_text_with_config(
-                    val,
-                    &float_format.datetime_config,
-                )
-                .expect("datetime values render");
+                let rendered =
+                    render_datetime_value_text_with_config(val, &float_format.datetime_config)
+                        .expect("datetime values render");
                 buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
                 buf.extend_from_slice(rendered.as_bytes());
             }

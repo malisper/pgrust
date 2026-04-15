@@ -3,9 +3,7 @@ use super::exec_expr::parse_numeric_text;
 use super::expr_bit::{coerce_bit_string, parse_bit_text, render_bit_text};
 use super::expr_bool::cast_integer_to_bool;
 use super::expr_bool::parse_pg_bool_text;
-use super::expr_datetime::{
-    apply_time_precision, render_datetime_value_text_with_config,
-};
+use super::expr_datetime::{apply_time_precision, render_datetime_value_text_with_config};
 use super::expr_geometry::{
     cast_geometry_value, geometry_input_error_message, parse_geometry_text,
 };
@@ -17,7 +15,9 @@ use super::node_types::*;
 use crate::backend::executor::jsonb::{parse_jsonb_text, render_jsonb_bytes};
 use crate::backend::parser::{SqlType, SqlTypeKind, parse_type_name};
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
-use crate::backend::utils::time::date::{DateParseError, parse_date_text, parse_time_text, parse_timetz_text};
+use crate::backend::utils::time::date::{
+    DateParseError, parse_date_text, parse_time_text, parse_timetz_text,
+};
 use crate::backend::utils::time::datetime::DateTimeParseError;
 use crate::backend::utils::time::timestamp::{parse_timestamp_text, parse_timestamptz_text};
 use crate::include::catalog::{TEXT_TYPE_OID, bootstrap_pg_cast_rows, builtin_type_rows};
@@ -790,9 +790,8 @@ fn date_parse_error(text: &str, err: DateParseError) -> ExecError {
         DateParseError::FieldOutOfRange { datestyle_hint } => ExecError::DetailedError {
             message: format!("date/time field value out of range: \"{text}\""),
             detail: None,
-            hint: datestyle_hint.then_some(
-                "Perhaps you need a different \"DateStyle\" setting.".into(),
-            ),
+            hint: datestyle_hint
+                .then_some("Perhaps you need a different \"DateStyle\" setting.".into()),
             sqlstate: "22008",
         },
         DateParseError::OutOfRange => ExecError::DetailedError {

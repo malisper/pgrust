@@ -675,7 +675,10 @@ fn handle_query(
                                         FloatFormatOptions {
                                             extra_float_digits: state.session.extra_float_digits(),
                                             bytea_output: state.session.bytea_output(),
-                                            datetime_config: state.session.datetime_config().clone(),
+                                            datetime_config: state
+                                                .session
+                                                .datetime_config()
+                                                .clone(),
                                         },
                                     )?;
                                     row_count += 1;

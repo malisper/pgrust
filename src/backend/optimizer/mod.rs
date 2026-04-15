@@ -819,7 +819,8 @@ fn rewrite_expr_for_path(expr: Expr, path: &Path, layout: &[Expr]) -> Expr {
                 let target = &targets[index];
                 projection_slot_var(*slot_id, index + 1, target.sql_type)
             } else {
-                let rewritten_input_expr = rewrite_expr_for_path(expr.clone(), input, &input_layout);
+                let rewritten_input_expr =
+                    rewrite_expr_for_path(expr.clone(), input, &input_layout);
                 if let Some(index) = projection_target_index_for_semantic_expr(
                     targets,
                     &input_layout,

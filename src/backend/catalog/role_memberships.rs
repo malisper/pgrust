@@ -32,11 +32,7 @@ pub fn has_admin_option(rows: &[PgAuthMembersRow], roleid: u32, member: u32) -> 
         .any(|row| row.roleid == roleid && row.member == member && row.admin_option)
 }
 
-pub fn would_create_membership_cycle(
-    rows: &[PgAuthMembersRow],
-    roleid: u32,
-    member: u32,
-) -> bool {
+pub fn would_create_membership_cycle(rows: &[PgAuthMembersRow], roleid: u32, member: u32) -> bool {
     if roleid == member {
         return true;
     }

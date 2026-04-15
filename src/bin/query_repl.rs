@@ -475,9 +475,9 @@ fn run_statement(
         | Statement::DropRole(_)
         | Statement::SetSessionAuthorization(_)
         | Statement::ResetSessionAuthorization(_)
-        | Statement::ReassignOwned(_) => Err(ExecError::Parse(
-            ParseError::FeatureNotSupported("role management".into()),
-        )),
+        | Statement::ReassignOwned(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
+            "role management".into(),
+        ))),
         Statement::AlterTableRenameColumn(stmt) => {
             Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
                 "ALTER TABLE RENAME COLUMN in query_repl: {}.{} -> {}",

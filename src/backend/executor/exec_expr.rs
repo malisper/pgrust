@@ -7,17 +7,17 @@ use super::expr_bit::{
 };
 use super::expr_bool::{eval_booleq, eval_boolne};
 use super::expr_casts::{cast_value, cast_value_with_config, soft_input_error_info_with_config};
+pub(crate) use super::expr_compile::{
+    CompiledPredicate, compile_predicate, compile_predicate_with_decoder,
+};
 use super::expr_date::{
     eval_date_part_function, eval_date_trunc_function, eval_isfinite_function,
     eval_make_date_function,
 };
-pub(crate) use super::expr_compile::{
-    CompiledPredicate, compile_predicate, compile_predicate_with_decoder,
-};
 use super::expr_datetime::{
     current_date_value, current_date_value_with_config, current_time_value,
-    current_time_value_with_config, current_timestamp_value,
-    current_timestamp_value_with_config, render_datetime_value_text_with_config,
+    current_time_value_with_config, current_timestamp_value, current_timestamp_value_with_config,
+    render_datetime_value_text_with_config,
 };
 use super::expr_geometry::eval_geometry_function;
 use super::expr_json::{
@@ -1192,9 +1192,11 @@ fn eval_builtin_function(
         BuiltinScalarFunction::Now
         | BuiltinScalarFunction::TransactionTimestamp
         | BuiltinScalarFunction::StatementTimestamp
-        | BuiltinScalarFunction::ClockTimestamp => {
-            Ok(current_timestamp_value_with_config(&ctx.datetime_config, None, true))
-        }
+        | BuiltinScalarFunction::ClockTimestamp => Ok(current_timestamp_value_with_config(
+            &ctx.datetime_config,
+            None,
+            true,
+        )),
         BuiltinScalarFunction::TimeOfDay => {
             let value = current_timestamp_value_with_config(&ctx.datetime_config, None, true);
             Ok(Value::Text(

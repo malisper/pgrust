@@ -174,7 +174,10 @@ fn join_input_rewrite_keeps_composite_expr_semantic_until_late_rewrite() {
     let rewritten =
         super::rewrite_semantic_expr_for_join_inputs(None, merged, &left, &right, &join_layout);
 
-    assert_eq!(rewritten, Expr::Coalesce(Box::new(var(1, 1)), Box::new(var(1, 2))));
+    assert_eq!(
+        rewritten,
+        Expr::Coalesce(Box::new(var(1, 1)), Box::new(var(1, 2)))
+    );
 }
 
 #[test]

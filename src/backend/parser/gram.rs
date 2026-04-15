@@ -796,7 +796,10 @@ fn build_reset(pair: Pair<'_, Rule>) -> Result<ResetStatement, ParseError> {
 }
 
 fn build_create_role(pair: Pair<'_, Rule>) -> Result<CreateRoleStatement, ParseError> {
-    let is_user = pair.as_str().to_ascii_lowercase().starts_with("create user ");
+    let is_user = pair
+        .as_str()
+        .to_ascii_lowercase()
+        .starts_with("create user ");
     let mut role_name = None;
     let mut options = Vec::new();
 
@@ -886,7 +889,9 @@ fn build_role_option_from_rule(pair: Pair<'_, Rule>) -> Result<RoleOption, Parse
                     _ => {}
                 }
             }
-            Ok(RoleOption::Password(value.ok_or(ParseError::UnexpectedEof)?))
+            Ok(RoleOption::Password(
+                value.ok_or(ParseError::UnexpectedEof)?,
+            ))
         }
         Rule::role_encrypted_password_option => {
             let value = pair
@@ -1762,7 +1767,10 @@ fn build_constraint_attributes(pair: Pair<'_, Rule>) -> ConstraintAttributes {
         if part.as_rule() != Rule::constraint_attribute {
             continue;
         }
-        let attr = part.into_inner().next().expect("constraint attribute inner");
+        let attr = part
+            .into_inner()
+            .next()
+            .expect("constraint attribute inner");
         match attr.as_rule() {
             Rule::not_valid_constraint_attribute => attributes.not_valid = true,
             Rule::deferrable_constraint_attribute => attributes.deferrable = Some(true),
@@ -1801,7 +1809,9 @@ fn build_column_constraint(pair: Pair<'_, Rule>) -> Result<ColumnConstraint, Par
                 Rule::not_null_column_constraint
                 | Rule::check_column_constraint
                 | Rule::primary_key_column_constraint
-                | Rule::unique_column_constraint => constraint = Some(build_column_constraint(part)?),
+                | Rule::unique_column_constraint => {
+                    constraint = Some(build_column_constraint(part)?)
+                }
                 _ => {}
             }
         }

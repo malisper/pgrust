@@ -103,8 +103,8 @@ pub fn index_vacuum_cleanup(
 ) -> Result<IndexBulkDeleteResult, CatalogError> {
     let routine = crate::backend::access::index::amapi::index_am_handler(am_oid)
         .ok_or(CatalogError::Corrupt("unknown index access method"))?;
-    let amvacuumcleanup = routine
-        .amvacuumcleanup
-        .ok_or(CatalogError::Corrupt("missing index vacuumcleanup callback"))?;
+    let amvacuumcleanup = routine.amvacuumcleanup.ok_or(CatalogError::Corrupt(
+        "missing index vacuumcleanup callback",
+    ))?;
     amvacuumcleanup(ctx, stats)
 }
