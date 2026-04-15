@@ -54,9 +54,20 @@ pub(crate) fn sync_catalog_rows_subset(
     }
 
     let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 16);
+    sync_catalog_rows_subset_in_pool(&pool, rows, db_oid, kinds)?;
+    rebuild_system_catalog_indexes(base_dir)?;
+    Ok(())
+}
+
+pub(crate) fn sync_catalog_rows_subset_in_pool(
+    pool: &BufferPool<SmgrStorageBackend>,
+    rows: &PhysicalCatalogRows,
+    db_oid: u32,
+    kinds: &[BootstrapCatalogKind],
+) -> Result<(), CatalogError> {
     for &kind in kinds {
         insert_catalog_rows(
-            &pool,
+            pool,
             RelFileLocator {
                 spc_oid: 0,
                 db_oid,
@@ -66,7 +77,6 @@ pub(crate) fn sync_catalog_rows_subset(
             catalog_row_values_for_kind(rows, kind),
         )?;
     }
-    rebuild_system_catalog_indexes(base_dir)?;
     Ok(())
 }
 

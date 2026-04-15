@@ -6,6 +6,7 @@ edition = "2024"
 [lib]
 name = "pgrust"
 path = "src/lib.rs"
+crate-type = ["rlib", "cdylib"]
 
 [features]
 default = []
@@ -14,9 +15,9 @@ deadlock_detection = ["parking_lot/deadlock_detection"]
 base64 = "0.22"
 crc32c = "0.6.8"
 crc32fast = "1.4"
+getrandom = { version = "0.2", features = ["js"] }
 itoa = "1"
 libc = "0.2"
-mimalloc = "0.1.48"
 num-bigint = "0.4.6"
 num-integer = "0.1.46"
 num-traits = "0.2.19"
@@ -32,6 +33,13 @@ sha2 = "0.10"
 encoding_rs = "0.8"
 md-5 = "0.10"
 rust-stemmers = "1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+mimalloc = "0.1.48"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+console_error_panic_hook = "0.1"
+wasm-bindgen = "0.2"
 
 [profile.release]
 debug = true
