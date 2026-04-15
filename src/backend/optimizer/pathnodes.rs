@@ -125,6 +125,7 @@ impl Path {
                     .map(|expr| {
                         lower_expr_to_plan_layout(
                             rewrite_semantic_expr_for_join_inputs(
+                                None,
                                 expr,
                                 &left,
                                 &right,
@@ -154,7 +155,13 @@ impl Path {
                     .collect();
                 let lowered_join_qual = join_qual.map(|expr| {
                     lower_expr_to_plan_layout(
-                        rewrite_semantic_expr_for_join_inputs(expr, &left, &right, &join_layout),
+                        rewrite_semantic_expr_for_join_inputs(
+                            None,
+                            expr,
+                            &left,
+                            &right,
+                            &join_layout,
+                        ),
                         &join_layout,
                     )
                 });

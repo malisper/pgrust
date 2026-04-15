@@ -2,9 +2,9 @@ use super::bestpath::{self, CostSelector};
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::pathnodes::{Path, PathKey, PathTarget, RelOptInfo, RelOptKind};
-use crate::include::nodes::plannodes::PlanEstimate;
+use crate::include::nodes::plannodes::{Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
-    Expr, OpExpr, OpExprKind, OrderByEntry, QueryColumn, TargetEntry, Var,
+    Expr, JoinType, OpExpr, OpExprKind, OrderByEntry, QueryColumn, TargetEntry, Var,
 };
 
 fn int4() -> SqlType {
@@ -30,6 +30,14 @@ fn pathkey(expr: crate::include::nodes::primnodes::Expr) -> PathKey {
         descending: false,
         nulls_first: None,
     }
+}
+
+fn eq(left: Expr, right: Expr) -> Expr {
+    Expr::op_auto(OpExprKind::Eq, vec![left, right])
+}
+
+fn gt(left: Expr, right: Expr) -> Expr {
+    Expr::op_auto(OpExprKind::Gt, vec![left, right])
 }
 
 fn values_path(slot_id: usize, startup_cost: f64, total_cost: f64) -> Path {
@@ -259,4 +267,111 @@ fn join_input_rewrite_maps_var_through_projected_join_output_slot() {
             ],
         }))
     );
+}
+
+#[test]
+fn build_join_paths_emits_nested_loop_and_hash_join_for_equijoin() {
+    let paths = super::build_join_paths(
+        values_path(1, 1.0, 10.0),
+        values_path(2, 2.0, 20.0),
+        &[1],
+        &[2],
+        JoinType::Inner,
+        eq(var(1, 1), var(2, 1)),
+    );
+
+    assert!(paths.iter().any(|path| matches!(path, Path::NestedLoopJoin { .. })));
+    assert!(paths.iter().any(|path| matches!(path, Path::HashJoin { .. })));
+}
+
+#[test]
+fn extract_hash_join_clauses_splits_residual_predicates() {
+    let clauses = super::extract_hash_join_clauses(
+        &Expr::and(eq(var(1, 1), var(2, 1)), gt(var(1, 2), var(2, 2))),
+        &[1],
+        &[2],
+    )
+    .expect("hash join clauses");
+
+    assert_eq!(clauses.hash_clauses, vec![eq(var(1, 1), var(2, 1))]);
+    assert_eq!(clauses.outer_hash_keys, vec![var(1, 1)]);
+    assert_eq!(clauses.inner_hash_keys, vec![var(2, 1)]);
+    assert_eq!(clauses.join_qual, Some(gt(var(1, 2), var(2, 2))));
+}
+
+#[test]
+fn build_join_paths_skips_hash_join_for_cross_and_non_equi_joins() {
+    let cross_paths = super::build_join_paths(
+        values_path(1, 1.0, 10.0),
+        values_path(2, 2.0, 20.0),
+        &[1],
+        &[2],
+        JoinType::Cross,
+        eq(var(1, 1), var(2, 1)),
+    );
+    assert!(!cross_paths
+        .iter()
+        .any(|path| matches!(path, Path::HashJoin { .. })));
+
+    let non_equi_paths = super::build_join_paths(
+        values_path(1, 1.0, 10.0),
+        values_path(2, 2.0, 20.0),
+        &[1],
+        &[2],
+        JoinType::Inner,
+        gt(var(1, 1), var(2, 1)),
+    );
+    assert!(!non_equi_paths
+        .iter()
+        .any(|path| matches!(path, Path::HashJoin { .. })));
+}
+
+#[test]
+fn hash_join_path_lowers_to_hash_join_plan_with_hash_inner() {
+    let plan = Path::HashJoin {
+        plan_info: PlanEstimate::new(5.0, 15.0, 10.0, 4),
+        left: Box::new(values_path(1, 1.0, 10.0)),
+        right: Box::new(values_path(2, 2.0, 20.0)),
+        kind: JoinType::Inner,
+        hash_clauses: vec![eq(var(1, 1), var(2, 1))],
+        outer_hash_keys: vec![var(1, 1)],
+        inner_hash_keys: vec![var(2, 1)],
+        join_qual: Some(gt(var(1, 2), var(2, 2))),
+    }
+    .into_plan();
+
+    match plan {
+        Plan::HashJoin {
+            kind,
+            right,
+            hash_clauses,
+            hash_keys,
+            join_qual,
+            ..
+        } => {
+            assert_eq!(kind, JoinType::Inner);
+            assert_eq!(hash_keys, vec![Expr::Column(0)]);
+            assert_eq!(hash_clauses, vec![eq(Expr::Column(0), Expr::Column(2))]);
+            assert_eq!(join_qual, Some(gt(Expr::Column(1), Expr::Column(3))));
+            match *right {
+                Plan::Hash {
+                    hash_keys,
+                    input,
+                    plan_info,
+                } => {
+                    assert_eq!(hash_keys, vec![Expr::Column(0)]);
+                    assert_eq!(
+                        plan_info.startup_cost.as_f64(),
+                        input.plan_info().total_cost.as_f64()
+                    );
+                    assert_eq!(
+                        plan_info.total_cost.as_f64(),
+                        input.plan_info().total_cost.as_f64()
+                    );
+                }
+                other => panic!("expected hash inner, got {:?}", other),
+            }
+        }
+        other => panic!("expected hash join, got {:?}", other),
+    }
 }
