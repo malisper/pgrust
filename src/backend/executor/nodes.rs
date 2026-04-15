@@ -652,7 +652,13 @@ impl PlanNode for NestedLoopJoinState {
         self.plan_info
     }
     fn node_label(&self) -> String {
-        "Nested Loop".into()
+        match self.kind {
+            JoinType::Inner => "Nested Loop".into(),
+            JoinType::Left => "Nested Loop Left Join".into(),
+            JoinType::Right => "Nested Loop Right Join".into(),
+            JoinType::Full => "Nested Loop Full Join".into(),
+            JoinType::Cross => "Nested Loop".into(),
+        }
     }
     fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
         let prefix = "  ".repeat(indent + 1);

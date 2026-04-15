@@ -372,7 +372,7 @@ fn hash_join_path_lowers_to_hash_join_plan_with_hash_inner() {
             assert_eq!(kind, JoinType::Inner);
             assert_eq!(hash_keys, vec![Expr::Column(0)]);
             assert_eq!(hash_clauses, vec![eq(Expr::Column(0), Expr::Column(2))]);
-            assert_eq!(join_qual, vec![eq(Expr::Column(0), Expr::Column(2)), gt(Expr::Column(1), Expr::Column(3))]);
+            assert_eq!(join_qual, vec![gt(Expr::Column(1), Expr::Column(3))]);
             assert!(qual.is_empty());
             match *right {
                 Plan::Hash {

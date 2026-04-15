@@ -52,7 +52,7 @@ pub(super) fn build_special_join_info(query: &Query) -> Vec<SpecialJoinInfo> {
                 let expanded_quals = if matches!(kind, JoinType::Inner | JoinType::Cross) {
                     None
                 } else {
-                    Some(expand_join_rte_vars_query(query, original_quals.clone()))
+                    Some(flatten_join_alias_vars_query(query, original_quals.clone()))
                 };
                 let clause_relids = expanded_quals.as_ref().map(expr_relids).unwrap_or_default();
                 let strict_relids = expanded_quals
@@ -260,10 +260,18 @@ pub(super) fn relids_disjoint(left: &[usize], right: &[usize]) -> bool {
 }
 
 pub(super) fn expand_join_rte_vars(root: &PlannerInfo, expr: Expr) -> Expr {
-    expand_join_rte_vars_query(&root.parse, expr)
+    flatten_join_alias_vars_query(&root.parse, expr)
 }
 
 pub(super) fn expand_join_rte_vars_query(query: &Query, expr: Expr) -> Expr {
+    flatten_join_alias_vars_query(query, expr)
+}
+
+pub(super) fn flatten_join_alias_vars(root: &PlannerInfo, expr: Expr) -> Expr {
+    flatten_join_alias_vars_query(&root.parse, expr)
+}
+
+pub(super) fn flatten_join_alias_vars_query(query: &Query, expr: Expr) -> Expr {
     match expr {
         Expr::Var(var) if var.varlevelsup == 0 => {
             let Some(rte) = query.rtable.get(var.varno.saturating_sub(1)) else {
@@ -275,14 +283,14 @@ pub(super) fn expand_join_rte_vars_query(query: &Query, expr: Expr) -> Expr {
             joinaliasvars
                 .get(var.varattno.saturating_sub(1))
                 .cloned()
-                .map(|expr| expand_join_rte_vars_query(query, expr))
+                .map(|expr| flatten_join_alias_vars_query(query, expr))
                 .unwrap_or(Expr::Var(var))
         }
         Expr::Aggref(aggref) => Expr::Aggref(Box::new(crate::include::nodes::primnodes::Aggref {
             args: aggref
                 .args
                 .into_iter()
-                .map(|arg| expand_join_rte_vars_query(query, arg))
+                .map(|arg| flatten_join_alias_vars_query(query, arg))
                 .collect(),
             ..*aggref
         })),
@@ -290,7 +298,7 @@ pub(super) fn expand_join_rte_vars_query(query: &Query, expr: Expr) -> Expr {
             args: op
                 .args
                 .into_iter()
-                .map(|arg| expand_join_rte_vars_query(query, arg))
+                .map(|arg| flatten_join_alias_vars_query(query, arg))
                 .collect(),
             ..*op
         })),
@@ -298,7 +306,7 @@ pub(super) fn expand_join_rte_vars_query(query: &Query, expr: Expr) -> Expr {
             args: bool_expr
                 .args
                 .into_iter()
-                .map(|arg| expand_join_rte_vars_query(query, arg))
+                .map(|arg| flatten_join_alias_vars_query(query, arg))
                 .collect(),
             ..*bool_expr
         })),
@@ -306,7 +314,7 @@ pub(super) fn expand_join_rte_vars_query(query: &Query, expr: Expr) -> Expr {
             args: func
                 .args
                 .into_iter()
-                .map(|arg| expand_join_rte_vars_query(query, arg))
+                .map(|arg| flatten_join_alias_vars_query(query, arg))
                 .collect(),
             ..*func
         })),
@@ -314,7 +322,7 @@ pub(super) fn expand_join_rte_vars_query(query: &Query, expr: Expr) -> Expr {
             Expr::SubLink(Box::new(crate::include::nodes::primnodes::SubLink {
                 testexpr: sublink
                     .testexpr
-                    .map(|expr| Box::new(expand_join_rte_vars_query(query, *expr))),
+                    .map(|expr| Box::new(flatten_join_alias_vars_query(query, *expr))),
                 ..*sublink
             }))
         }
@@ -322,19 +330,19 @@ pub(super) fn expand_join_rte_vars_query(query: &Query, expr: Expr) -> Expr {
             Expr::SubPlan(Box::new(crate::include::nodes::primnodes::SubPlan {
                 testexpr: subplan
                     .testexpr
-                    .map(|expr| Box::new(expand_join_rte_vars_query(query, *expr))),
+                    .map(|expr| Box::new(flatten_join_alias_vars_query(query, *expr))),
                 ..*subplan
             }))
         }
         Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(
             crate::include::nodes::primnodes::ScalarArrayOpExpr {
-                left: Box::new(expand_join_rte_vars_query(query, *saop.left)),
-                right: Box::new(expand_join_rte_vars_query(query, *saop.right)),
+                left: Box::new(flatten_join_alias_vars_query(query, *saop.left)),
+                right: Box::new(flatten_join_alias_vars_query(query, *saop.right)),
                 ..*saop
             },
         )),
         Expr::Cast(inner, ty) => {
-            Expr::Cast(Box::new(expand_join_rte_vars_query(query, *inner)), ty)
+            Expr::Cast(Box::new(flatten_join_alias_vars_query(query, *inner)), ty)
         }
         Expr::Like {
             expr,
@@ -343,9 +351,9 @@ pub(super) fn expand_join_rte_vars_query(query: &Query, expr: Expr) -> Expr {
             case_insensitive,
             negated,
         } => Expr::Like {
-            expr: Box::new(expand_join_rte_vars_query(query, *expr)),
-            pattern: Box::new(expand_join_rte_vars_query(query, *pattern)),
-            escape: escape.map(|expr| Box::new(expand_join_rte_vars_query(query, *expr))),
+            expr: Box::new(flatten_join_alias_vars_query(query, *expr)),
+            pattern: Box::new(flatten_join_alias_vars_query(query, *pattern)),
+            escape: escape.map(|expr| Box::new(flatten_join_alias_vars_query(query, *expr))),
             case_insensitive,
             negated,
         },
@@ -355,22 +363,22 @@ pub(super) fn expand_join_rte_vars_query(query: &Query, expr: Expr) -> Expr {
             escape,
             negated,
         } => Expr::Similar {
-            expr: Box::new(expand_join_rte_vars_query(query, *expr)),
-            pattern: Box::new(expand_join_rte_vars_query(query, *pattern)),
-            escape: escape.map(|expr| Box::new(expand_join_rte_vars_query(query, *expr))),
+            expr: Box::new(flatten_join_alias_vars_query(query, *expr)),
+            pattern: Box::new(flatten_join_alias_vars_query(query, *pattern)),
+            escape: escape.map(|expr| Box::new(flatten_join_alias_vars_query(query, *expr))),
             negated,
         },
-        Expr::IsNull(inner) => Expr::IsNull(Box::new(expand_join_rte_vars_query(query, *inner))),
+        Expr::IsNull(inner) => Expr::IsNull(Box::new(flatten_join_alias_vars_query(query, *inner))),
         Expr::IsNotNull(inner) => {
-            Expr::IsNotNull(Box::new(expand_join_rte_vars_query(query, *inner)))
+            Expr::IsNotNull(Box::new(flatten_join_alias_vars_query(query, *inner)))
         }
         Expr::IsDistinctFrom(left, right) => Expr::IsDistinctFrom(
-            Box::new(expand_join_rte_vars_query(query, *left)),
-            Box::new(expand_join_rte_vars_query(query, *right)),
+            Box::new(flatten_join_alias_vars_query(query, *left)),
+            Box::new(flatten_join_alias_vars_query(query, *right)),
         ),
         Expr::IsNotDistinctFrom(left, right) => Expr::IsNotDistinctFrom(
-            Box::new(expand_join_rte_vars_query(query, *left)),
-            Box::new(expand_join_rte_vars_query(query, *right)),
+            Box::new(flatten_join_alias_vars_query(query, *left)),
+            Box::new(flatten_join_alias_vars_query(query, *right)),
         ),
         Expr::ArrayLiteral {
             elements,
@@ -378,26 +386,26 @@ pub(super) fn expand_join_rte_vars_query(query: &Query, expr: Expr) -> Expr {
         } => Expr::ArrayLiteral {
             elements: elements
                 .into_iter()
-                .map(|element| expand_join_rte_vars_query(query, element))
+                .map(|element| flatten_join_alias_vars_query(query, element))
                 .collect(),
             array_type,
         },
         Expr::Coalesce(left, right) => Expr::Coalesce(
-            Box::new(expand_join_rte_vars_query(query, *left)),
-            Box::new(expand_join_rte_vars_query(query, *right)),
+            Box::new(flatten_join_alias_vars_query(query, *left)),
+            Box::new(flatten_join_alias_vars_query(query, *right)),
         ),
         Expr::ArraySubscript { array, subscripts } => Expr::ArraySubscript {
-            array: Box::new(expand_join_rte_vars_query(query, *array)),
+            array: Box::new(flatten_join_alias_vars_query(query, *array)),
             subscripts: subscripts
                 .into_iter()
                 .map(|subscript| ExprArraySubscript {
                     is_slice: subscript.is_slice,
                     lower: subscript
                         .lower
-                        .map(|expr| expand_join_rte_vars_query(query, expr)),
+                        .map(|expr| flatten_join_alias_vars_query(query, expr)),
                     upper: subscript
                         .upper
-                        .map(|expr| expand_join_rte_vars_query(query, expr)),
+                        .map(|expr| flatten_join_alias_vars_query(query, expr)),
                 })
                 .collect(),
         },
