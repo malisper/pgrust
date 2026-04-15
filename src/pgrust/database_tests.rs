@@ -2628,7 +2628,11 @@ fn create_table_primary_key_and_unique_constraints_are_enforced_and_persisted() 
     .unwrap();
 
     match db.execute(1, "insert into items values (null, 10)") {
-        Err(ExecError::MissingRequiredColumn(name)) if name == "id" => {}
+        Err(ExecError::NotNullViolation {
+            relation,
+            column,
+            constraint,
+        }) if relation == "items" && column == "id" && constraint == "items_id_not_null" => {}
         other => panic!("expected primary-key NOT NULL rejection, got {other:?}"),
     }
 
@@ -2745,9 +2749,221 @@ fn create_table_table_level_primary_key_and_unique_constraints_work() {
     }
 
     match db.execute(1, "insert into memberships values (5, null, 102)") {
-        Err(ExecError::MissingRequiredColumn(name)) if name == "tag" => {}
+        Err(ExecError::NotNullViolation {
+            relation,
+            column,
+            constraint,
+        }) if relation == "memberships"
+            && column == "tag"
+            && constraint == "memberships_tag_not_null" => {}
         other => panic!("expected primary-key column NOT NULL rejection, got {other:?}"),
     }
+}
+
+#[test]
+fn create_table_check_and_named_not_null_constraints_are_enforced_and_persisted() {
+    let base = temp_dir("create_table_check_constraints");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table items (
+            id int4 constraint items_id_positive check (id > 0),
+            note text constraint items_note_required not null,
+            constraint items_note_nonempty check (note <> '')
+        )",
+    )
+    .unwrap();
+
+    match db.execute(1, "insert into items values (0, 'hello')") {
+        Err(ExecError::CheckViolation {
+            relation,
+            constraint,
+        }) if relation == "items" && constraint == "items_id_positive" => {}
+        other => panic!("expected check violation, got {other:?}"),
+    }
+
+    match db.execute(1, "insert into items values (1, null)") {
+        Err(ExecError::NotNullViolation {
+            relation,
+            column,
+            constraint,
+        }) if relation == "items" && column == "note" && constraint == "items_note_required" => {}
+        other => panic!("expected named not-null violation, got {other:?}"),
+    }
+
+    match db.execute(1, "insert into items values (1, '')") {
+        Err(ExecError::CheckViolation {
+            relation,
+            constraint,
+        }) if relation == "items" && constraint == "items_note_nonempty" => {}
+        other => panic!("expected second check violation, got {other:?}"),
+    }
+
+    db.execute(1, "insert into items values (null, 'nullable id')")
+        .unwrap();
+    db.execute(1, "insert into items values (2, 'ok')").unwrap();
+    db.execute(1, "insert into items values (3, 'fine')")
+        .unwrap();
+
+    let rows = query_rows(
+        &db,
+        1,
+        "select conname, contype, convalidated, conbin \
+         from pg_constraint \
+         where conrelid = (select oid from pg_class where relname = 'items') \
+         order by conname",
+    );
+    assert_eq!(
+        rows,
+        vec![
+            vec![
+                Value::Text("items_id_positive".into()),
+                Value::Text("c".into()),
+                Value::Bool(true),
+                Value::Text("id > 0".into()),
+            ],
+            vec![
+                Value::Text("items_note_nonempty".into()),
+                Value::Text("c".into()),
+                Value::Bool(true),
+                Value::Text("note <> ''".into()),
+            ],
+            vec![
+                Value::Text("items_note_required".into()),
+                Value::Text("n".into()),
+                Value::Bool(true),
+                Value::Null,
+            ],
+        ]
+    );
+
+    drop(db);
+    let reopened = Database::open(&base, 16).unwrap();
+    match reopened.execute(1, "insert into items values (4, null)") {
+        Err(ExecError::NotNullViolation {
+            relation,
+            column,
+            constraint,
+        }) if relation == "items" && column == "note" && constraint == "items_note_required" => {}
+        other => panic!("expected reopened named not-null violation, got {other:?}"),
+    }
+    match reopened.execute(1, "insert into items values (0, 'after reopen')") {
+        Err(ExecError::CheckViolation {
+            relation,
+            constraint,
+        }) if relation == "items" && constraint == "items_id_positive" => {}
+        other => panic!("expected reopened check violation, got {other:?}"),
+    }
+    reopened
+        .execute(1, "insert into items values (null, 'still nullable')")
+        .unwrap();
+}
+
+#[test]
+fn update_and_copy_from_enforce_check_and_not_null_constraints() {
+    let base = temp_dir("update_and_copy_constraint_checks");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    db.execute(
+        1,
+        "create table items (
+            id int4 constraint items_id_positive check (id > 0),
+            note text constraint items_note_required not null
+        )",
+    )
+    .unwrap();
+    db.execute(1, "insert into items values (1, 'ok')").unwrap();
+
+    match db.execute(1, "update items set id = 0 where id = 1") {
+        Err(ExecError::CheckViolation {
+            relation,
+            constraint,
+        }) if relation == "items" && constraint == "items_id_positive" => {}
+        other => panic!("expected update check violation, got {other:?}"),
+    }
+
+    match db.execute(1, "update items set note = null where id = 1") {
+        Err(ExecError::NotNullViolation {
+            relation,
+            column,
+            constraint,
+        }) if relation == "items" && column == "note" && constraint == "items_note_required" => {}
+        other => panic!("expected update not-null violation, got {other:?}"),
+    }
+
+    match session.copy_from_rows(&db, "items", &[vec!["0".into(), "copy".into()]]) {
+        Err(ExecError::CheckViolation {
+            relation,
+            constraint,
+        }) if relation == "items" && constraint == "items_id_positive" => {}
+        other => panic!("expected copy check violation, got {other:?}"),
+    }
+
+    match session.copy_from_rows(&db, "items", &[vec!["2".into(), "\\N".into()]]) {
+        Err(ExecError::NotNullViolation {
+            relation,
+            column,
+            constraint,
+        }) if relation == "items" && column == "note" && constraint == "items_note_required" => {}
+        other => panic!("expected copy not-null violation, got {other:?}"),
+    }
+
+    assert_eq!(
+        query_rows(&db, 1, "select id, note from items order by id"),
+        vec![vec![Value::Int32(1), Value::Text("ok".into())]]
+    );
+}
+
+#[test]
+fn prepared_insert_enforces_check_and_not_null_constraints() {
+    let base = temp_dir("prepared_insert_constraints");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    db.execute(
+        1,
+        "create table items (
+            id int4 constraint items_id_positive check (id > 0),
+            note text constraint items_note_required not null
+        )",
+    )
+    .unwrap();
+
+    let prepared = session.prepare_insert(&db, "items", None, 2).unwrap();
+    session.execute(&db, "begin").unwrap();
+
+    match session.execute_prepared_insert(
+        &db,
+        &prepared,
+        &[Value::Int32(0), Value::Text("bad".into())],
+    ) {
+        Err(ExecError::CheckViolation {
+            relation,
+            constraint,
+        }) if relation == "items" && constraint == "items_id_positive" => {}
+        other => panic!("expected prepared-insert check violation, got {other:?}"),
+    }
+
+    match session.execute_prepared_insert(&db, &prepared, &[Value::Int32(2), Value::Null]) {
+        Err(ExecError::NotNullViolation {
+            relation,
+            column,
+            constraint,
+        }) if relation == "items" && column == "note" && constraint == "items_note_required" => {}
+        other => panic!("expected prepared-insert not-null violation, got {other:?}"),
+    }
+
+    session
+        .execute_prepared_insert(&db, &prepared, &[Value::Int32(3), Value::Text("ok".into())])
+        .unwrap();
+    session.execute(&db, "commit").unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select id, note from items"),
+        vec![vec![Value::Int32(3), Value::Text("ok".into())]]
+    );
 }
 
 #[test]

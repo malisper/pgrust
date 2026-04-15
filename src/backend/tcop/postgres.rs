@@ -47,6 +47,8 @@ fn exec_error_sqlstate(e: &ExecError) -> &'static str {
         ExecError::NegativeSubstringLength => "22011",
         ExecError::Parse(crate::backend::parser::ParseError::UndefinedOperator { .. }) => "42883",
         ExecError::UniqueViolation { .. } => "23505",
+        ExecError::NotNullViolation { .. } => "23502",
+        ExecError::CheckViolation { .. } => "23514",
         ExecError::Parse(crate::backend::parser::ParseError::UnknownConfigurationParameter(_)) => {
             "42704"
         }

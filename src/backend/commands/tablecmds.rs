@@ -789,10 +789,12 @@ pub fn execute_insert(
         };
 
         let inserted = execute_insert_values(
+            &stmt.relation_name,
             stmt.rel,
             stmt.toast,
             stmt.toast_index.as_ref(),
             &stmt.desc,
+            &stmt.relation_constraints,
             &stmt.indexes,
             &values,
             ctx,
@@ -1058,10 +1060,12 @@ fn assignment_subscript_index(value: Option<&Value>) -> Result<Option<i32>, Exec
 }
 
 pub fn execute_insert_values(
+    relation_name: &str,
     rel: crate::backend::storage::smgr::RelFileLocator,
     toast: Option<ToastRelationRef>,
     toast_index: Option<&BoundIndexRelation>,
     desc: &RelationDesc,
+    relation_constraints: &crate::backend::parser::BoundRelationConstraints,
     indexes: &[BoundIndexRelation],
     rows: &[Vec<Value>],
     ctx: &mut ExecutorContext,
@@ -1069,6 +1073,13 @@ pub fn execute_insert_values(
     cid: CommandId,
 ) -> Result<usize, ExecError> {
     for values in rows {
+        crate::backend::executor::enforce_relation_constraints(
+            relation_name,
+            desc,
+            relation_constraints,
+            values,
+            ctx,
+        )?;
         let (tuple, _toasted) =
             toast_tuple_for_write(desc, values, toast, toast_index, ctx, xid, cid)?;
         let heap_tid = heap_insert_mvcc_with_cid(&*ctx.pool, ctx.client_id, rel, xid, cid, &tuple)?;
@@ -1096,6 +1107,13 @@ pub fn execute_prepared_insert_row(
     for (column_index, param) in prepared.target_columns.iter().zip(params.iter()) {
         values[*column_index] = param.clone();
     }
+    crate::backend::executor::enforce_relation_constraints(
+        &prepared.relation_name,
+        &prepared.desc,
+        &prepared.relation_constraints,
+        &values,
+        ctx,
+    )?;
     let (tuple, _toasted) = toast_tuple_for_write(
         &prepared.desc,
         &values,
@@ -1195,6 +1213,13 @@ pub fn execute_update_with_waiter(
             loop {
                 ctx.check_for_interrupts()?;
                 let old_tuple = heap_fetch(&*ctx.pool, ctx.client_id, stmt.rel, current_tid)?;
+                crate::backend::executor::enforce_relation_constraints(
+                    &stmt.relation_name,
+                    &stmt.desc,
+                    &stmt.relation_constraints,
+                    &current_values,
+                    ctx,
+                )?;
                 let (current_replacement, toasted) = toast_tuple_for_write(
                     &stmt.desc,
                     &current_values,

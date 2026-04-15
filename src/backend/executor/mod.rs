@@ -1,4 +1,5 @@
 mod agg;
+mod constraints;
 mod driver;
 pub mod exec_expr;
 pub(crate) mod exec_tuples;
@@ -89,6 +90,7 @@ use crate::include::access::htup::TupleError;
 use crate::pgrust::database::TransactionWaiter;
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
 
+pub(crate) use constraints::enforce_relation_constraints;
 pub(crate) use expr_ops::compare_order_values;
 use expr_ops::parse_numeric_text;
 
@@ -127,6 +129,15 @@ pub enum ExecError {
     Tuple(TupleError),
     Parse(ParseError),
     UniqueViolation {
+        constraint: String,
+    },
+    NotNullViolation {
+        relation: String,
+        column: String,
+        constraint: String,
+    },
+    CheckViolation {
+        relation: String,
         constraint: String,
     },
     InvalidColumn(usize),
