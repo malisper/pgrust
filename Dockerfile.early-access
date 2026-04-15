@@ -7,6 +7,9 @@ FROM rust:${RUST_VERSION}-bookworm AS builder
 
 WORKDIR /usr/src/pgrust
 
+# Compile the evaluator binary without debuginfo, then strip it before shipping.
+ENV CARGO_PROFILE_RELEASE_DEBUG=0
+
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 
