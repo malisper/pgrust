@@ -260,6 +260,13 @@ pub fn finalize_committed_catalog_effects(
                 .with_storage_mut(|s| s.smgr.unlink(*rel, None, false));
         }
     }
+    {
+        let txns = db.txns.read();
+        let _ = db
+            .catalog
+            .write()
+            .refresh_committed_state(&db.pool, &txns, source_client_id);
+    }
     for invalidation in invalidations {
         apply_session_catalog_invalidation(db, source_client_id, invalidation);
         publish_session_catalog_invalidation(db, Some(source_client_id), invalidation);
