@@ -637,6 +637,7 @@ pub struct CreateViewStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateIndexStatement {
     pub unique: bool,
+    pub if_not_exists: bool,
     pub index_name: String,
     pub table_name: String,
     pub using_method: Option<String>,

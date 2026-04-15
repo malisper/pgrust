@@ -2350,6 +2350,7 @@ fn set_column_constraint_name(constraint: &mut ColumnConstraint, name: String) {
 fn build_create_index(pair: Pair<'_, Rule>) -> Result<CreateIndexStatement, ParseError> {
     let raw = pair.as_str().to_ascii_lowercase();
     let unique = raw.starts_with("create unique index");
+    let mut if_not_exists = false;
     let mut index_name = None;
     let mut table_name = None;
     let mut using_method = None;
@@ -2359,7 +2360,12 @@ fn build_create_index(pair: Pair<'_, Rule>) -> Result<CreateIndexStatement, Pars
     let mut options = Vec::new();
     for part in pair.into_inner() {
         match part.as_rule() {
-            Rule::identifier if index_name.is_none() => index_name = Some(build_identifier(part)),
+            Rule::if_not_exists_clause => if_not_exists = true,
+            Rule::create_index_name if index_name.is_none() => {
+                index_name = Some(build_identifier(
+                    part.into_inner().next().ok_or(ParseError::UnexpectedEof)?,
+                ))
+            }
             Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
             Rule::create_index_using_clause => {
                 using_method = part
@@ -2396,9 +2402,16 @@ fn build_create_index(pair: Pair<'_, Rule>) -> Result<CreateIndexStatement, Pars
     if columns.is_empty() {
         return Err(ParseError::UnexpectedEof);
     }
+    if if_not_exists && index_name.is_none() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "index name after IF NOT EXISTS",
+            actual: "syntax error at or near \"ON\"".into(),
+        });
+    }
     Ok(CreateIndexStatement {
         unique,
-        index_name: index_name.ok_or(ParseError::UnexpectedEof)?,
+        if_not_exists,
+        index_name: index_name.unwrap_or_default(),
         table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
         using_method,
         columns,
@@ -2410,11 +2423,15 @@ fn build_create_index(pair: Pair<'_, Rule>) -> Result<CreateIndexStatement, Pars
 
 fn build_create_index_item(pair: Pair<'_, Rule>) -> Result<IndexColumnDef, ParseError> {
     let mut name = None;
+    let mut opclass = None;
     let mut descending = false;
     let mut nulls_first = None;
     for part in pair.into_inner() {
         match part.as_rule() {
-            Rule::identifier => name = Some(build_identifier(part)),
+            Rule::identifier if name.is_none() => name = Some(build_identifier(part)),
+            Rule::create_index_opclass if opclass.is_none() => {
+                opclass = Some(build_identifier(part.into_inner().next().ok_or(ParseError::UnexpectedEof)?))
+            }
             Rule::kw_desc => descending = true,
             Rule::nulls_ordering => {
                 let text = part.as_str().to_ascii_lowercase();
@@ -2426,7 +2443,7 @@ fn build_create_index_item(pair: Pair<'_, Rule>) -> Result<IndexColumnDef, Parse
     Ok(IndexColumnDef {
         name: name.ok_or(ParseError::UnexpectedEof)?,
         collation: None,
-        opclass: None,
+        opclass,
         descending,
         nulls_first,
     })

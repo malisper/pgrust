@@ -2,6 +2,17 @@ use super::super::*;
 use std::collections::BTreeSet;
 
 impl Database {
+    fn default_index_base_name(
+        relation_name: &str,
+        columns: &[crate::backend::parser::IndexColumnDef],
+    ) -> String {
+        let first_column = columns
+            .first()
+            .map(|column| column.name.as_str())
+            .unwrap_or("idx");
+        format!("{relation_name}_{first_column}_idx")
+    }
+
     pub(super) fn resolve_simple_btree_build_options(
         &self,
         client_id: ClientId,
@@ -343,10 +354,21 @@ impl Database {
                 &entry,
                 &create_stmt.columns,
             )?;
-        self.build_simple_btree_index_in_transaction(
+        let index_name = if create_stmt.index_name.is_empty() {
+            self.choose_available_relation_name(
+                client_id,
+                xid,
+                cid,
+                entry.namespace_oid,
+                &Self::default_index_base_name(&create_stmt.table_name, &create_stmt.columns),
+            )?
+        } else {
+            create_stmt.index_name.clone()
+        };
+        match self.build_simple_btree_index_in_transaction(
             client_id,
             &entry,
-            &create_stmt.index_name,
+            &index_name,
             &create_stmt.columns,
             create_stmt.unique,
             false,
@@ -357,7 +379,13 @@ impl Database {
             &build_options,
             maintenance_work_mem_kb,
             catalog_effects,
-        )?;
+        ) {
+            Ok(_) => {}
+            Err(ExecError::Parse(ParseError::TableAlreadyExists(_))) if create_stmt.if_not_exists => {
+                return Ok(StatementResult::AffectedRows(0));
+            }
+            Err(err) => return Err(err),
+        }
         Ok(StatementResult::AffectedRows(0))
     }
 }

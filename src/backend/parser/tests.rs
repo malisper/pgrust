@@ -482,6 +482,7 @@ fn parse_create_unique_index_statement() {
         stmt,
         Statement::CreateIndex(CreateIndexStatement {
             unique: true,
+            if_not_exists: false,
             index_name: "num_exp_add_idx".into(),
             table_name: "num_exp_add".into(),
             using_method: None,
@@ -542,6 +543,7 @@ fn parse_create_index_with_method_and_ordering() {
         stmt,
         Statement::CreateIndex(CreateIndexStatement {
             unique: false,
+            if_not_exists: false,
             index_name: "num_exp_add_idx".into(),
             table_name: "num_exp_add".into(),
             using_method: Some("btree".into()),
@@ -566,6 +568,74 @@ fn parse_create_index_with_method_and_ordering() {
             options: Vec::new(),
         })
     );
+}
+
+#[test]
+fn parse_create_index_with_if_not_exists_and_opclass() {
+    let stmt = parse_statement(
+        "create index if not exists onek_unique1 on onek using btree(unique1 int4_ops)",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateIndex(CreateIndexStatement {
+            unique: false,
+            if_not_exists: true,
+            index_name: "onek_unique1".into(),
+            table_name: "onek".into(),
+            using_method: Some("btree".into()),
+            columns: vec![IndexColumnDef {
+                name: "unique1".into(),
+                collation: None,
+                opclass: Some("int4_ops".into()),
+                descending: false,
+                nulls_first: None,
+            }],
+            include_columns: Vec::new(),
+            predicate: None,
+            options: Vec::new(),
+        })
+    );
+}
+
+#[test]
+fn parse_create_index_without_name() {
+    let stmt = parse_statement("create index on tenk1 (thousand, tenthous)").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateIndex(CreateIndexStatement {
+            unique: false,
+            if_not_exists: false,
+            index_name: String::new(),
+            table_name: "tenk1".into(),
+            using_method: None,
+            columns: vec![
+                IndexColumnDef {
+                    name: "thousand".into(),
+                    collation: None,
+                    opclass: None,
+                    descending: false,
+                    nulls_first: None,
+                },
+                IndexColumnDef {
+                    name: "tenthous".into(),
+                    collation: None,
+                    opclass: None,
+                    descending: false,
+                    nulls_first: None,
+                },
+            ],
+            include_columns: Vec::new(),
+            predicate: None,
+            options: Vec::new(),
+        })
+    );
+}
+
+#[test]
+fn parse_create_index_if_not_exists_requires_name() {
+    let err = parse_statement("create index if not exists on tenk1 (thousand)").unwrap_err();
+    assert_eq!(err.to_string(), "syntax error at or near \"ON\"");
 }
 
 #[test]
