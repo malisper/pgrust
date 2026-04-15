@@ -5,6 +5,7 @@ mod drop_column;
 mod execute;
 mod index;
 mod maintenance;
+mod owner;
 mod rename;
 mod role;
 mod session_auth;
