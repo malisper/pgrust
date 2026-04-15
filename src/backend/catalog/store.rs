@@ -825,6 +825,45 @@ impl CatalogStore {
         Ok(effect)
     }
 
+    pub fn create_check_constraint_mvcc(
+        &mut self,
+        relation_oid: u32,
+        conname: impl Into<String>,
+        convalidated: bool,
+        conbin: impl Into<String>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let mut catalog = self.catalog_snapshot_with_control_for_snapshot(ctx)?;
+        let constraint = catalog.create_check_constraint(
+            relation_oid,
+            conname.into(),
+            convalidated,
+            conbin.into(),
+        )?;
+        self.persist_control_state(&catalog)?;
+
+        let rows = PhysicalCatalogRows {
+            constraints: vec![constraint.clone()],
+            depends: catalog
+                .depend_rows()
+                .iter()
+                .filter(|row| row.objid == constraint.oid)
+                .cloned()
+                .collect(),
+            ..PhysicalCatalogRows::default()
+        };
+        let kinds = vec![
+            BootstrapCatalogKind::PgConstraint,
+            BootstrapCatalogKind::PgDepend,
+        ];
+        insert_catalog_rows_subset_mvcc(ctx, &rows, 1, &kinds)?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        Ok(effect)
+    }
+
     pub fn drop_relation_by_oid_mvcc(
         &mut self,
         relation_oid: u32,

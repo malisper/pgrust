@@ -213,21 +213,14 @@ impl Database {
         Ok(index_entry)
     }
 
-    pub(super) fn choose_index_backed_constraint_name(
+    pub(super) fn choose_available_relation_name(
         &self,
         client_id: ClientId,
         xid: TransactionId,
         cid: CommandId,
         namespace_oid: u32,
-        table_name: &str,
-        columns: &[String],
-        primary: bool,
+        base: &str,
     ) -> Result<String, ExecError> {
-        let base = if primary {
-            format!("{table_name}_pkey")
-        } else {
-            format!("{table_name}_{}_key", columns.join("_"))
-        };
         let snapshot = self
             .txns
             .read()
@@ -253,7 +246,7 @@ impl Database {
         .map(|row| row.relname.to_ascii_lowercase())
         .collect::<BTreeSet<_>>();
         if !existing.contains(&base.to_ascii_lowercase()) {
-            return Ok(base);
+            return Ok(base.to_string());
         }
         for suffix in 1.. {
             let candidate = format!("{base}{suffix}");

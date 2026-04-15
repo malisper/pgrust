@@ -146,14 +146,16 @@ impl Database {
                             let action_cid = cid
                                 .saturating_add(1)
                                 .saturating_add((index as u32).saturating_mul(3));
-                            let index_name = self.choose_index_backed_constraint_name(
+                            let constraint_name = action
+                                .constraint_name
+                                .clone()
+                                .expect("normalized key constraint name");
+                            let index_name = self.choose_available_relation_name(
                                 client_id,
                                 xid,
                                 action_cid,
                                 relation.namespace_oid,
-                                &table_name,
-                                &action.columns,
-                                action.primary,
+                                &constraint_name,
                             )?;
                             let index_columns = action
                                 .columns
@@ -197,7 +199,7 @@ impl Database {
                                 .create_index_backed_constraint_mvcc(
                                     relation.relation_oid,
                                     index_entry.relation_oid,
-                                    index_name,
+                                    constraint_name,
                                     if action.primary {
                                         crate::include::catalog::CONSTRAINT_PRIMARY
                                     } else {
@@ -209,14 +211,47 @@ impl Database {
                             self.apply_catalog_mutation_effect_immediate(&constraint_effect)?;
                             catalog_effects.push(constraint_effect);
                         }
+                        let check_base_cid = cid.saturating_add(1).saturating_add(
+                            (lowered.constraint_actions.len() as u32).saturating_mul(3),
+                        );
+                        for (index, action) in lowered.check_actions.iter().enumerate() {
+                            crate::backend::parser::bind_check_constraint_expr(
+                                &action.expr_sql,
+                                Some(&table_name),
+                                &relation.desc,
+                                &catalog,
+                            )?;
+                            let constraint_ctx = CatalogWriteContext {
+                                pool: self.pool.clone(),
+                                txns: self.txns.clone(),
+                                xid,
+                                cid: check_base_cid.saturating_add(index as u32),
+                                client_id,
+                                waiter: None,
+                                interrupts: Arc::clone(&interrupts),
+                            };
+                            let constraint_effect = self
+                                .catalog
+                                .write()
+                                .create_check_constraint_mvcc(
+                                    relation.relation_oid,
+                                    action.constraint_name.clone(),
+                                    !action.not_valid,
+                                    action.expr_sql.clone(),
+                                    &constraint_ctx,
+                                )
+                                .map_err(map_catalog_error)?;
+                            self.apply_catalog_mutation_effect_immediate(&constraint_effect)?;
+                            catalog_effects.push(constraint_effect);
+                        }
                         Ok(StatementResult::AffectedRows(0))
                     }
                 }
             }
             TablePersistence::Temporary => {
-                if !lowered.constraint_actions.is_empty() {
+                if !lowered.constraint_actions.is_empty() || !lowered.check_actions.is_empty() {
                     return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                        expected: "permanent table for PRIMARY KEY/UNIQUE constraints",
+                        expected: "permanent table for PRIMARY KEY/UNIQUE/CHECK constraints",
                         actual: "temporary table".into(),
                     }));
                 }
@@ -434,10 +469,12 @@ impl Database {
             timed: false,
         };
         let inserted = crate::backend::commands::tablecmds::execute_insert_values(
+            &table_name,
             rel,
             toast,
             toast_index.as_ref(),
             &desc,
+            &crate::backend::parser::BoundRelationConstraints::default(),
             &[],
             &rows,
             &mut insert_ctx,
