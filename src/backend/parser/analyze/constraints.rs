@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlExpr, SqlType, SqlTypeKind, parse_expr};
+use crate::include::catalog::PgConstraintRow;
 use crate::include::nodes::parsenodes::{
     ColumnConstraint, ConstraintAttributes, CreateTableStatement, TableConstraint,
 };
@@ -54,6 +55,13 @@ pub struct NormalizedCreateTableConstraints {
     pub not_nulls: Vec<NotNullConstraintAction>,
     pub checks: Vec<CheckConstraintAction>,
     pub index_backed: Vec<IndexBackedConstraintAction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NormalizedAlterTableConstraint {
+    NotNull(NotNullConstraintAction),
+    Check(CheckConstraintAction),
+    IndexBacked(IndexBackedConstraintAction),
 }
 
 #[derive(Debug, Clone)]
@@ -323,6 +331,121 @@ pub fn bind_relation_constraints(
     Ok(BoundRelationConstraints { not_nulls, checks })
 }
 
+pub fn normalize_alter_table_add_constraint(
+    table_name: &str,
+    desc: &RelationDesc,
+    existing_constraints: &[PgConstraintRow],
+    constraint: &TableConstraint,
+) -> Result<NormalizedAlterTableConstraint, ParseError> {
+    let column_lookup = relation_column_lookup(desc);
+    let mut used_names = existing_constraint_names(existing_constraints);
+
+    match constraint {
+        TableConstraint::NotNull { attributes, column } => {
+            validate_not_null_or_check_attributes(attributes, "NOT NULL")?;
+            let column_index = *column_lookup
+                .get(&column.to_ascii_lowercase())
+                .ok_or_else(|| ParseError::UnknownColumn(column.clone()))?;
+            if desc.columns[column_index].storage.nullable {
+                let constraint_name = assign_constraint_name(
+                    attributes.name.clone(),
+                    format!("{table_name}_{column}_not_null"),
+                    &mut used_names,
+                )?;
+                Ok(NormalizedAlterTableConstraint::NotNull(
+                    NotNullConstraintAction {
+                        constraint_name,
+                        column: desc.columns[column_index].name.clone(),
+                        not_valid: attributes.not_valid,
+                        primary_key_owned: false,
+                    },
+                ))
+            } else {
+                Err(ParseError::UnexpectedToken {
+                    expected: "nullable column for NOT NULL constraint",
+                    actual: format!("column \"{}\" is already marked NOT NULL", column),
+                })
+            }
+        }
+        TableConstraint::Check {
+            attributes,
+            expr_sql,
+        } => {
+            validate_not_null_or_check_attributes(attributes, "CHECK")?;
+            let constraint_name = assign_constraint_name(
+                attributes.name.clone(),
+                format!("{table_name}_check"),
+                &mut used_names,
+            )?;
+            Ok(NormalizedAlterTableConstraint::Check(
+                CheckConstraintAction {
+                    constraint_name,
+                    expr_sql: expr_sql.clone(),
+                    not_valid: attributes.not_valid,
+                },
+            ))
+        }
+        TableConstraint::PrimaryKey {
+            attributes,
+            columns,
+        } => {
+            validate_key_attributes(attributes, "PRIMARY KEY")?;
+            if existing_constraints
+                .iter()
+                .any(|row| row.contype == crate::include::catalog::CONSTRAINT_PRIMARY)
+            {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "at most one PRIMARY KEY",
+                    actual: "multiple PRIMARY KEY constraints".into(),
+                });
+            }
+            let constraint_name = assign_constraint_name(
+                attributes.name.clone(),
+                format!("{table_name}_pkey"),
+                &mut used_names,
+            )?;
+            Ok(NormalizedAlterTableConstraint::IndexBacked(
+                IndexBackedConstraintAction {
+                    constraint_name: Some(constraint_name),
+                    columns: resolve_relation_constraint_columns(columns, desc, &column_lookup)?,
+                    primary: true,
+                },
+            ))
+        }
+        TableConstraint::Unique {
+            attributes,
+            columns,
+        } => {
+            validate_key_attributes(attributes, "UNIQUE")?;
+            let resolved = resolve_relation_constraint_columns(columns, desc, &column_lookup)?;
+            let constraint_name = assign_constraint_name(
+                attributes.name.clone(),
+                format!("{table_name}_{}_key", resolved.join("_")),
+                &mut used_names,
+            )?;
+            Ok(NormalizedAlterTableConstraint::IndexBacked(
+                IndexBackedConstraintAction {
+                    constraint_name: Some(constraint_name),
+                    columns: resolved,
+                    primary: false,
+                },
+            ))
+        }
+    }
+}
+
+pub fn generated_not_null_constraint_name(
+    table_name: &str,
+    column_name: &str,
+    existing_constraints: &[PgConstraintRow],
+) -> String {
+    let mut used_names = existing_constraint_names(existing_constraints);
+    choose_generated_constraint_name(
+        &format!("{table_name}_{column_name}_not_null"),
+        &mut used_names,
+    )
+}
+
 pub fn bind_check_constraint_expr(
     expr_sql: &str,
     relation_name: Option<&str>,
@@ -450,6 +573,70 @@ fn resolve_constraint_columns(
         resolved.push(columns[*index].name.clone());
     }
     Ok(resolved)
+}
+
+fn resolve_relation_constraint_columns(
+    referenced: &[String],
+    desc: &RelationDesc,
+    column_lookup: &BTreeMap<String, usize>,
+) -> Result<Vec<String>, ParseError> {
+    let mut seen = BTreeSet::new();
+    let mut resolved = Vec::with_capacity(referenced.len());
+    for column in referenced {
+        let normalized = column.to_ascii_lowercase();
+        if !seen.insert(normalized.clone()) {
+            return Err(ParseError::UnexpectedToken {
+                expected: "unique column names in table constraint",
+                actual: format!("duplicate column in constraint: {column}"),
+            });
+        }
+        let index = column_lookup
+            .get(&normalized)
+            .ok_or_else(|| ParseError::UnknownColumn(column.clone()))?;
+        let desc_column = &desc.columns[*index];
+        if desc_column.dropped {
+            return Err(ParseError::UnknownColumn(column.clone()));
+        }
+        resolved.push(desc_column.name.clone());
+    }
+    Ok(resolved)
+}
+
+fn relation_column_lookup(desc: &RelationDesc) -> BTreeMap<String, usize> {
+    desc.columns
+        .iter()
+        .enumerate()
+        .filter(|(_, column)| !column.dropped)
+        .map(|(index, column)| (column.name.to_ascii_lowercase(), index))
+        .collect()
+}
+
+fn existing_constraint_names(existing_constraints: &[PgConstraintRow]) -> BTreeSet<String> {
+    existing_constraints
+        .iter()
+        .map(|row| row.conname.to_ascii_lowercase())
+        .collect()
+}
+
+fn assign_constraint_name(
+    explicit_name: Option<String>,
+    generated_base: String,
+    used_names: &mut BTreeSet<String>,
+) -> Result<String, ParseError> {
+    if let Some(name) = explicit_name {
+        if !used_names.insert(name.to_ascii_lowercase()) {
+            return Err(ParseError::UnexpectedToken {
+                expected: "distinct constraint names",
+                actual: format!("duplicate constraint name: {name}"),
+            });
+        }
+        Ok(name)
+    } else {
+        Ok(choose_generated_constraint_name(
+            &generated_base,
+            used_names,
+        ))
+    }
 }
 
 fn reserve_explicit_constraint_names<'a>(

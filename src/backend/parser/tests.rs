@@ -582,6 +582,27 @@ fn parse_alter_table_constraint_statements() {
         })
     );
 
+    let stmt = parse_statement(
+        "alter table items add constraint items_note_required not null note not valid",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableAddConstraint(AlterTableAddConstraintStatement {
+            table_name: "items".into(),
+            constraint: TableConstraint::NotNull {
+                attributes: ConstraintAttributes {
+                    name: Some("items_note_required".into()),
+                    not_valid: true,
+                    deferrable: None,
+                    initially_deferred: None,
+                    enforced: None,
+                },
+                column: "note".into(),
+            },
+        })
+    );
+
     let stmt = parse_statement("alter table items drop constraint items_id_check").unwrap();
     assert_eq!(
         stmt,
@@ -2663,8 +2684,7 @@ fn lower_create_table_rejects_duplicate_constraint_names() {
 
 #[test]
 fn lower_create_table_rejects_unsupported_constraint_attributes() {
-    let stmt =
-        parse_statement("create table items (id int4 check (id > 0) deferrable)").unwrap();
+    let stmt = parse_statement("create table items (id int4 check (id > 0) deferrable)").unwrap();
     let Statement::CreateTable(ct) = stmt else {
         panic!("expected create table");
     };
@@ -2692,8 +2712,8 @@ fn lower_create_table_collapses_duplicate_not_null_constraints() {
     let Statement::CreateTable(ct) = stmt else {
         panic!("expected create table");
     };
-    let lowered = lower_create_table(&ct, &crate::backend::parser::analyze::LiteralDefaultCatalog)
-        .unwrap();
+    let lowered =
+        lower_create_table(&ct, &crate::backend::parser::analyze::LiteralDefaultCatalog).unwrap();
     assert_eq!(lowered.not_null_actions.len(), 1);
     assert_eq!(
         lowered.relation_desc.columns[0]

@@ -84,17 +84,40 @@ impl Database {
                     alter_stmt,
                     configured_search_path,
                 ),
+            Statement::AlterTableAddConstraint(ref alter_stmt) => self
+                .execute_alter_table_add_constraint_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
+            Statement::AlterTableDropConstraint(ref alter_stmt) => self
+                .execute_alter_table_drop_constraint_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
+            Statement::AlterTableSetNotNull(ref alter_stmt) => self
+                .execute_alter_table_set_not_null_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
+            Statement::AlterTableDropNotNull(ref alter_stmt) => self
+                .execute_alter_table_drop_not_null_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
+            Statement::AlterTableValidateConstraint(ref alter_stmt) => self
+                .execute_alter_table_validate_constraint_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
             Statement::Show(_)
             | Statement::Set(_)
             | Statement::Reset(_)
             | Statement::AlterTableSet(_) => Ok(StatementResult::AffectedRows(0)),
-            Statement::AlterTableAddConstraint(_)
-            | Statement::AlterTableDropConstraint(_)
-            | Statement::AlterTableSetNotNull(_)
-            | Statement::AlterTableDropNotNull(_)
-            | Statement::AlterTableValidateConstraint(_) => Err(ExecError::Parse(
-                ParseError::FeatureNotSupported("ALTER TABLE constraint operations".into()),
-            )),
             Statement::CreateRole(ref create_stmt) => {
                 self.execute_create_role_stmt(client_id, create_stmt, None)
             }

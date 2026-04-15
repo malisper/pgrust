@@ -2972,6 +2972,347 @@ fn prepared_insert_enforces_check_and_not_null_constraints() {
 }
 
 #[test]
+fn alter_table_add_constraints_support_not_valid_and_validate() {
+    let base = temp_dir("alter_table_add_constraints_validate");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4, note text)")
+        .unwrap();
+    db.execute(1, "insert into items values (0, null), (2, 'ok')")
+        .unwrap();
+
+    db.execute(
+        1,
+        "alter table items add constraint items_id_positive check (id > 0) not valid",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table items add constraint items_note_required not null note not valid",
+    )
+    .unwrap();
+
+    match db.execute(1, "insert into items values (0, 'later')") {
+        Err(ExecError::CheckViolation {
+            relation,
+            constraint,
+        }) if relation == "items" && constraint == "items_id_positive" => {}
+        other => panic!("expected ALTER TABLE CHECK violation, got {other:?}"),
+    }
+
+    match db.execute(1, "insert into items values (3, null)") {
+        Err(ExecError::NotNullViolation {
+            relation,
+            column,
+            constraint,
+        }) if relation == "items" && column == "note" && constraint == "items_note_required" => {}
+        other => panic!("expected ALTER TABLE NOT NULL violation, got {other:?}"),
+    }
+
+    let rows = query_rows(
+        &db,
+        1,
+        "select conname, contype, convalidated, array_length(conkey, 1), conbin \
+         from pg_constraint \
+         where conrelid = (select oid from pg_class where relname = 'items') \
+         order by conname",
+    );
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0][0], Value::Text("items_id_positive".into()));
+    assert_eq!(rows[0][1], Value::Text("c".into()));
+    assert_eq!(rows[0][2], Value::Bool(false));
+    assert_eq!(rows[0][3], Value::Null);
+    assert_eq!(rows[0][4], Value::Text("id > 0".into()));
+    assert_eq!(rows[1][0], Value::Text("items_note_required".into()));
+    assert_eq!(rows[1][1], Value::Text("n".into()));
+    assert_eq!(rows[1][2], Value::Bool(false));
+    assert_eq!(int_value(&rows[1][3]), 1);
+    assert_eq!(rows[1][4], Value::Null);
+
+    match db.execute(1, "alter table items validate constraint items_id_positive") {
+        Err(ExecError::CheckViolation {
+            relation,
+            constraint,
+        }) if relation == "items" && constraint == "items_id_positive" => {}
+        other => panic!("expected CHECK validate failure, got {other:?}"),
+    }
+
+    match db.execute(
+        1,
+        "alter table items validate constraint items_note_required",
+    ) {
+        Err(ExecError::NotNullViolation {
+            relation,
+            column,
+            constraint,
+        }) if relation == "items" && column == "note" && constraint == "items_note_required" => {}
+        other => panic!("expected NOT NULL validate failure, got {other:?}"),
+    }
+
+    db.execute(
+        1,
+        "update items set id = 1, note = 'filled' where id = 0 and note is null",
+    )
+    .unwrap();
+    db.execute(1, "alter table items validate constraint items_id_positive")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table items validate constraint items_note_required",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conname, convalidated \
+             from pg_constraint \
+             where conrelid = (select oid from pg_class where relname = 'items') \
+             order by conname",
+        ),
+        vec![
+            vec![Value::Text("items_id_positive".into()), Value::Bool(true)],
+            vec![Value::Text("items_note_required".into()), Value::Bool(true)],
+        ]
+    );
+}
+
+#[test]
+fn alter_table_set_and_drop_not_null_updates_enforcement_and_catalog() {
+    let base = temp_dir("alter_table_set_drop_not_null");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4, note text)")
+        .unwrap();
+    db.execute(1, "insert into items values (1, null), (2, 'ok')")
+        .unwrap();
+
+    match db.execute(1, "alter table items alter column note set not null") {
+        Err(ExecError::NotNullViolation {
+            relation,
+            column,
+            constraint,
+        }) if relation == "items" && column == "note" && constraint == "items_note_not_null" => {}
+        other => panic!("expected SET NOT NULL validation failure, got {other:?}"),
+    }
+
+    db.execute(1, "update items set note = 'filled' where id = 1")
+        .unwrap();
+    db.execute(1, "alter table items alter column note set not null")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conname, contype, convalidated \
+             from pg_constraint \
+             where conrelid = (select oid from pg_class where relname = 'items') \
+             order by conname",
+        ),
+        vec![vec![
+            Value::Text("items_note_not_null".into()),
+            Value::Text("n".into()),
+            Value::Bool(true),
+        ]]
+    );
+
+    match db.execute(1, "insert into items values (3, null)") {
+        Err(ExecError::NotNullViolation {
+            relation,
+            column,
+            constraint,
+        }) if relation == "items" && column == "note" && constraint == "items_note_not_null" => {}
+        other => panic!("expected enforced SET NOT NULL violation, got {other:?}"),
+    }
+
+    db.execute(1, "alter table items alter column note drop not null")
+        .unwrap();
+    db.execute(1, "insert into items values (3, null)").unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_constraint \
+             where conrelid = (select oid from pg_class where relname = 'items')",
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
+fn alter_table_add_and_drop_key_constraints_manage_indexes() {
+    let base = temp_dir("alter_table_key_constraints_indexes");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4, code int4, note text)")
+        .unwrap();
+    db.execute(1, "insert into items values (1, 10, 'a'), (2, 20, 'b')")
+        .unwrap();
+
+    db.execute(
+        1,
+        "alter table items add constraint items_pkey primary key (id)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table items add constraint items_code_key unique (code)",
+    )
+    .unwrap();
+
+    let rows = query_rows(
+        &db,
+        1,
+        "select conname, contype, convalidated, conindid, array_length(conkey, 1) \
+         from pg_constraint \
+         where conrelid = (select oid from pg_class where relname = 'items') \
+         order by conname",
+    );
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0][0], Value::Text("items_code_key".into()));
+    assert_eq!(rows[0][1], Value::Text("u".into()));
+    assert_eq!(rows[0][2], Value::Bool(true));
+    assert!(int_value(&rows[0][3]) > 0);
+    assert_eq!(int_value(&rows[0][4]), 1);
+    assert_eq!(rows[1][0], Value::Text("items_id_not_null".into()));
+    assert_eq!(rows[1][1], Value::Text("n".into()));
+    assert_eq!(rows[1][2], Value::Bool(true));
+    assert_eq!(int_value(&rows[1][3]), 0);
+    assert_eq!(int_value(&rows[1][4]), 1);
+    assert_eq!(rows[2][0], Value::Text("items_pkey".into()));
+    assert_eq!(rows[2][1], Value::Text("p".into()));
+    assert_eq!(rows[2][2], Value::Bool(true));
+    assert!(int_value(&rows[2][3]) > 0);
+    assert_eq!(int_value(&rows[2][4]), 1);
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relname \
+             from pg_class \
+             where relname in ('items_code_key', 'items_pkey') \
+             order by relname",
+        ),
+        vec![
+            vec![Value::Text("items_code_key".into())],
+            vec![Value::Text("items_pkey".into())],
+        ]
+    );
+
+    db.execute(1, "alter table items drop constraint items_code_key")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relname \
+             from pg_class \
+             where relname in ('items_code_key', 'items_pkey') \
+             order by relname",
+        ),
+        vec![vec![Value::Text("items_pkey".into())]]
+    );
+
+    db.execute(1, "alter table items drop constraint items_pkey")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conname \
+             from pg_constraint \
+             where conrelid = (select oid from pg_class where relname = 'items') \
+             order by conname",
+        ),
+        Vec::<Vec<Value>>::new()
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relname \
+             from pg_class \
+             where relname in ('items_code_key', 'items_pkey')",
+        ),
+        Vec::<Vec<Value>>::new()
+    );
+    db.execute(1, "insert into items values (null, 10, 'after drop')")
+        .unwrap();
+}
+
+#[test]
+fn alter_table_drop_primary_key_removes_only_pk_owned_not_null_constraints() {
+    let base = temp_dir("alter_table_drop_primary_key_owned_not_null");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table items (id int4 not null, code int4, note text)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table items add constraint items_pkey primary key (code)",
+    )
+    .unwrap();
+
+    match db.execute(1, "alter table items drop constraint items_code_not_null") {
+        Err(ExecError::Parse(ParseError::UnexpectedToken { actual, .. }))
+            if actual.contains("PRIMARY KEY constraint \"items_pkey\"") => {}
+        other => panic!("expected PK-owned NOT NULL drop rejection, got {other:?}"),
+    }
+
+    match db.execute(1, "alter table items alter column code drop not null") {
+        Err(ExecError::Parse(ParseError::UnexpectedToken { actual, .. }))
+            if actual.contains("PRIMARY KEY constraint \"items_pkey\"") => {}
+        other => panic!("expected PK-owned column drop-not-null rejection, got {other:?}"),
+    }
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select d.deptype \
+             from pg_depend d \
+             join pg_constraint n on n.oid = d.objid \
+             join pg_constraint p on p.oid = d.refobjid \
+             where n.conname = 'items_code_not_null' and p.conname = 'items_pkey'",
+        ),
+        vec![vec![Value::Text("i".into())]]
+    );
+
+    db.execute(1, "alter table items drop constraint items_pkey")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conname \
+             from pg_constraint \
+             where conrelid = (select oid from pg_class where relname = 'items') \
+             order by conname",
+        ),
+        vec![vec![Value::Text("items_id_not_null".into())]]
+    );
+
+    db.execute(1, "insert into items values (1, null, 'nullable code')")
+        .unwrap();
+    match db.execute(1, "insert into items values (null, 2, 'missing id')") {
+        Err(ExecError::NotNullViolation {
+            relation,
+            column,
+            constraint,
+        }) if relation == "items" && column == "id" && constraint == "items_id_not_null" => {}
+        other => panic!("expected user-owned NOT NULL to remain, got {other:?}"),
+    }
+}
+
+#[test]
 fn create_temp_table_primary_key_and_unique_constraints_are_rejected() {
     let base = temp_dir("temp_table_primary_key_unique_rejected");
     let db = Database::open(&base, 16).unwrap();

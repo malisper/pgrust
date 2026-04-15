@@ -1195,6 +1195,8 @@ fn psql_describe_constraints_query(
     })?;
     let contype_filter = if lower.contains("contype = 'f'") {
         Some(crate::include::catalog::CONSTRAINT_FOREIGN)
+    } else if lower.contains("contype = 'c'") {
+        Some(crate::include::catalog::CONSTRAINT_CHECK)
     } else if lower.contains("contype = 'p'") {
         Some(crate::include::catalog::CONSTRAINT_PRIMARY)
     } else if lower.contains("contype = 'u'") {
@@ -1310,6 +1312,10 @@ fn constraint_def_for_row(
 ) -> Option<String> {
     match row.contype {
         crate::include::catalog::CONSTRAINT_NOTNULL => Some("NOT NULL".to_string()),
+        crate::include::catalog::CONSTRAINT_CHECK => row
+            .conbin
+            .as_deref()
+            .map(|expr_sql| format!("CHECK ({expr_sql})")),
         crate::include::catalog::CONSTRAINT_PRIMARY
         | crate::include::catalog::CONSTRAINT_UNIQUE => {
             let relation = relation.cloned().or_else(|| {
@@ -2534,6 +2540,38 @@ mod tests {
                     Value::Text("PRIMARY KEY (id)".into()),
                 ],
             ]
+        );
+    }
+
+    #[test]
+    fn psql_describe_constraint_query_returns_check_rows() {
+        let db = Database::open(temp_dir("describe_constraints_check"), 16).unwrap();
+        let session = Session::new(1);
+        db.execute(
+            1,
+            "create table widgets (id int4, note text constraint widgets_note_nonempty check (note <> ''))",
+        )
+        .unwrap();
+        let entry = session
+            .catalog_lookup(&db)
+            .lookup_any_relation("widgets")
+            .unwrap();
+
+        let sql = format!(
+            "select conname, conrelid::pg_catalog.regclass as ontable, \
+                 pg_catalog.pg_get_constraintdef(oid, true) as condef \
+                 from pg_catalog.pg_constraint c \
+                 where c.conrelid = '{}'",
+            entry.relation_oid
+        );
+        let (_, rows) = execute_psql_describe_query(&db, &session, &sql).unwrap();
+        assert_eq!(
+            rows,
+            vec![vec![
+                Value::Text("widgets_note_nonempty".into()),
+                Value::Text("widgets".into()),
+                Value::Text("CHECK (note <> '')".into()),
+            ]]
         );
     }
 
