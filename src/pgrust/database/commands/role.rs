@@ -27,6 +27,7 @@ impl Database {
                 "permission denied to create role",
             )));
         }
+        let mut touched_catalogs = vec![crate::include::catalog::BootstrapCatalogKind::PgAuthId];
         self.catalog
             .write()
             .create_role(&stmt.role_name, &spec.attrs)
@@ -58,6 +59,7 @@ impl Database {
                     false,
                 ))
                 .map_err(map_role_catalog_error)?;
+            touched_catalogs.push(crate::include::catalog::BootstrapCatalogKind::PgAuthMembers);
 
             if let Some(raw) = createrole_self_grant {
                 if let Some(options) = parse_createrole_self_grant(raw).map_err(ExecError::Parse)? {
@@ -72,13 +74,13 @@ impl Database {
                             options.set,
                         ))
                         .map_err(map_role_catalog_error)?;
+                    touched_catalogs
+                        .push(crate::include::catalog::BootstrapCatalogKind::PgAuthMembers);
                 }
             }
         }
 
-        let live_catalog = self
-            .auth_catalog(client_id, None)
-            .map_err(map_role_catalog_error)?;
+        let live_catalog = live_auth_catalog(self).map_err(map_role_catalog_error)?;
         for role_name in &spec.add_role_to {
             let parent = grant_membership_authorized(&auth, &live_catalog, role_name)
                 .map_err(ExecError::Parse)?;
@@ -93,6 +95,7 @@ impl Database {
                     true,
                 ))
                 .map_err(map_role_catalog_error)?;
+            touched_catalogs.push(crate::include::catalog::BootstrapCatalogKind::PgAuthMembers);
         }
         for member_name in &spec.role_members {
             let member = lookup_membership_member(&live_catalog, member_name)?;
@@ -107,6 +110,7 @@ impl Database {
                     true,
                 ))
                 .map_err(map_role_catalog_error)?;
+            touched_catalogs.push(crate::include::catalog::BootstrapCatalogKind::PgAuthMembers);
         }
         for member_name in &spec.admin_members {
             let member = lookup_membership_member(&live_catalog, member_name)?;
@@ -121,7 +125,9 @@ impl Database {
                     true,
                 ))
                 .map_err(map_role_catalog_error)?;
+            touched_catalogs.push(crate::include::catalog::BootstrapCatalogKind::PgAuthMembers);
         }
+        publish_direct_catalog_invalidation(self, client_id, &touched_catalogs);
         Ok(StatementResult::AffectedRows(0))
     }
 
@@ -154,6 +160,11 @@ impl Database {
                     .write()
                     .rename_role(&stmt.role_name, new_name)
                     .map_err(map_role_catalog_error)?;
+                publish_direct_catalog_invalidation(
+                    self,
+                    client_id,
+                    &[crate::include::catalog::BootstrapCatalogKind::PgAuthId],
+                );
             }
             AlterRoleAction::Options(_) => {
                 let spec = build_alter_role_spec(stmt, &existing)
@@ -168,6 +179,11 @@ impl Database {
                     .write()
                     .alter_role_attributes(&stmt.role_name, &spec.attrs)
                     .map_err(map_role_catalog_error)?;
+                publish_direct_catalog_invalidation(
+                    self,
+                    client_id,
+                    &[crate::include::catalog::BootstrapCatalogKind::PgAuthId],
+                );
             }
         }
 
@@ -183,6 +199,7 @@ impl Database {
         let auth_catalog = self
             .auth_catalog(client_id, None)
             .map_err(map_role_catalog_error)?;
+        let mut dropped_any = false;
 
         for role_name in normalize_drop_role_names(stmt) {
             let Some(existing) = find_role_by_name(auth_catalog.roles(), &role_name).cloned()
@@ -204,7 +221,7 @@ impl Database {
                     "permission denied to drop role",
                 )));
             }
-            let owned_objects = owned_objects_for_roles(self, &[existing.oid])?;
+            let owned_objects = owned_objects_for_roles(self, client_id, &[existing.oid])?;
             if !owned_objects.is_empty() {
                 let detail = owned_objects
                     .iter()
@@ -226,6 +243,18 @@ impl Database {
                 .write()
                 .drop_role(&role_name)
                 .map_err(map_role_catalog_error)?;
+            dropped_any = true;
+        }
+
+        if dropped_any {
+            publish_direct_catalog_invalidation(
+                self,
+                client_id,
+                &[
+                    crate::include::catalog::BootstrapCatalogKind::PgAuthId,
+                    crate::include::catalog::BootstrapCatalogKind::PgAuthMembers,
+                ],
+            );
         }
 
         Ok(StatementResult::AffectedRows(0))
@@ -288,8 +317,11 @@ impl Database {
             .iter()
             .map(|role| role.oid)
             .collect::<BTreeSet<_>>();
-        let owned_objects =
-            owned_objects_for_roles(self, &old_role_oids.into_iter().collect::<Vec<_>>())?;
+        let owned_objects = owned_objects_for_roles(
+            self,
+            client_id,
+            &old_role_oids.into_iter().collect::<Vec<_>>(),
+        )?;
         if owned_objects.is_empty() {
             return Ok(StatementResult::AffectedRows(0));
         }
@@ -327,6 +359,26 @@ fn map_role_catalog_error(err: crate::backend::catalog::CatalogError) -> ExecErr
         ),
         other => ExecError::Parse(role_management_error(format!("{other:?}"))),
     }
+}
+
+fn live_auth_catalog(db: &Database) -> Result<crate::pgrust::auth::AuthCatalog, CatalogError> {
+    let cache = db.catalog.read().catcache()?;
+    Ok(crate::pgrust::auth::AuthCatalog::new(
+        cache.authid_rows(),
+        cache.auth_members_rows(),
+    ))
+}
+
+fn publish_direct_catalog_invalidation(
+    db: &Database,
+    client_id: ClientId,
+    kinds: &[crate::include::catalog::BootstrapCatalogKind],
+) {
+    let invalidation = crate::backend::utils::cache::inval::CatalogInvalidation {
+        touched_catalogs: kinds.iter().copied().collect(),
+        ..Default::default()
+    };
+    db.publish_committed_catalog_invalidation(client_id, &invalidation);
 }
 
 fn lookup_membership_member(
@@ -385,13 +437,12 @@ impl OwnedObject {
 
 fn owned_objects_for_roles(
     db: &Database,
+    client_id: ClientId,
     role_oids: &[u32],
 ) -> Result<Vec<OwnedObject>, ExecError> {
     let role_oids = role_oids.iter().copied().collect::<BTreeSet<_>>();
     let catcache = db
-        .catalog
-        .read()
-        .catcache()
+        .backend_catcache(client_id, None)
         .map_err(map_role_catalog_error)?;
     let namespaces = catcache
         .namespace_rows()
@@ -447,9 +498,7 @@ mod tests {
     }
 
     fn role_oid(db: &Database, role_name: &str) -> u32 {
-        db.catalog
-            .read()
-            .catcache()
+        db.backend_catcache(1, None)
             .unwrap()
             .authid_rows()
             .into_iter()
@@ -459,9 +508,7 @@ mod tests {
     }
 
     fn role_row(db: &Database, role_name: &str) -> PgAuthIdRow {
-        db.catalog
-            .read()
-            .catcache()
+        db.backend_catcache(1, None)
             .unwrap()
             .authid_rows()
             .into_iter()
@@ -477,7 +524,7 @@ mod tests {
     }
 
     fn relation_owner_name(db: &Database, relname: &str) -> String {
-        let catcache = db.catalog.read().catcache().unwrap();
+        let catcache = db.backend_catcache(1, None).unwrap();
         let owner_oid = catcache
             .class_rows()
             .into_iter()
@@ -493,9 +540,7 @@ mod tests {
     }
 
     fn relation_oid(db: &Database, relname: &str) -> u32 {
-        db.catalog
-            .read()
-            .catcache()
+        db.backend_catcache(1, None)
             .unwrap()
             .class_rows()
             .into_iter()

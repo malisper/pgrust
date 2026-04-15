@@ -586,7 +586,10 @@ fn table_inheritance_merges_columns_and_scans_children() {
     let mut session = Session::new(1);
 
     session
-        .execute(&db, "create table parent_inh(a int4, b text default 'parent')")
+        .execute(
+            &db,
+            "create table parent_inh(a int4, b text default 'parent')",
+        )
         .unwrap();
     session
         .execute(
@@ -732,14 +735,18 @@ fn inheritance_guardrails_reject_recursive_dml_and_column_alter() {
         .execute(&db, "create table child_guard() inherits (parent_guard)")
         .unwrap();
 
-    let update_err = session.execute(&db, "update parent_guard set a = 1").unwrap_err();
+    let update_err = session
+        .execute(&db, "update parent_guard set a = 1")
+        .unwrap_err();
     assert!(matches!(
         update_err,
         ExecError::Parse(ParseError::FeatureNotSupported(message))
             if message.contains("UPDATE on inherited parents")
     ));
 
-    let delete_err = session.execute(&db, "delete from parent_guard").unwrap_err();
+    let delete_err = session
+        .execute(&db, "delete from parent_guard")
+        .unwrap_err();
     assert!(matches!(
         delete_err,
         ExecError::Parse(ParseError::FeatureNotSupported(message))
@@ -1077,11 +1084,11 @@ fn client_visible_cache_refreshes_after_create_table() {
 
     let visible = db.lazy_catalog_lookup(1, None, None);
     assert!(visible.lookup_any_relation("cache_test").is_none());
-    assert!(db.session_catalog_states.read().contains_key(&1));
+    assert!(db.backend_cache_states.read().contains_key(&1));
 
     db.execute(1, "create table cache_test (id int4)").unwrap();
 
-    assert!(db.session_catalog_states.read().contains_key(&1));
+    assert!(db.backend_cache_states.read().contains_key(&1));
     let visible = db.lazy_catalog_lookup(1, None, None);
     assert!(visible.lookup_any_relation("cache_test").is_some());
 }
@@ -1103,14 +1110,24 @@ fn committed_catalog_invalidation_evicts_other_sessions_without_global_reset() {
             .lookup_any_relation("fanout_test")
             .is_none()
     );
+    {
+        let states = db.backend_cache_states.read();
+        let writer_state = states.get(&1).unwrap();
+        let reader_state = states.get(&2).unwrap();
+        assert!(writer_state.catcache.is_some());
+        assert!(writer_state.relcache.is_some());
+        assert!(reader_state.catcache.is_some());
+        assert!(reader_state.relcache.is_some());
+        assert!(reader_state.pending_invalidations.is_empty());
+    }
 
     writer.execute(&db, "begin").unwrap();
     writer
         .execute(&db, "create table fanout_test (id int4 not null)")
         .unwrap();
 
-    assert!(db.session_catalog_states.read().contains_key(&1));
-    assert!(db.session_catalog_states.read().contains_key(&2));
+    assert!(db.backend_cache_states.read().contains_key(&1));
+    assert!(db.backend_cache_states.read().contains_key(&2));
     assert!(
         reader
             .execute(&db, "select count(*) from fanout_test")
@@ -1120,7 +1137,13 @@ fn committed_catalog_invalidation_evicts_other_sessions_without_global_reset() {
 
     writer.execute(&db, "commit").unwrap();
 
-    assert!(db.session_catalog_states.read().contains_key(&2));
+    {
+        let states = db.backend_cache_states.read();
+        let reader_state = states.get(&2).unwrap();
+        assert!(reader_state.catcache.is_some());
+        assert!(reader_state.relcache.is_some());
+        assert_eq!(reader_state.pending_invalidations.len(), 1);
+    }
     match reader
         .execute(&db, "select count(*) from fanout_test")
         .unwrap()
@@ -1129,6 +1152,11 @@ fn committed_catalog_invalidation_evicts_other_sessions_without_global_reset() {
             assert_eq!(rows, vec![vec![Value::Int64(0)]]);
         }
         other => panic!("expected query, got {:?}", other),
+    }
+    {
+        let states = db.backend_cache_states.read();
+        let reader_state = states.get(&2).unwrap();
+        assert!(reader_state.pending_invalidations.is_empty());
     }
 }
 
@@ -7578,7 +7606,11 @@ fn create_function_named_composite_rows_expand_from_relation_rowtype() {
         .into_iter()
         .find(|row| row.typname == "widgets")
         .unwrap();
-    let proc = visible.proc_rows_by_name("widget_rows").into_iter().next().unwrap();
+    let proc = visible
+        .proc_rows_by_name("widget_rows")
+        .into_iter()
+        .next()
+        .unwrap();
     assert_eq!(proc.prorettype, widget_type.oid);
     assert!(proc.proretset);
 
