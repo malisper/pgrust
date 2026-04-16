@@ -2,6 +2,13 @@ use super::agg_output_special::*;
 use super::*;
 use crate::include::nodes::primnodes::OpExprKind;
 
+fn grouped_key_expr(group_key_exprs: &[Expr], index: usize) -> Expr {
+    group_key_exprs
+        .get(index)
+        .cloned()
+        .unwrap_or(Expr::Column(index))
+}
+
 pub(super) fn bind_agg_output_expr(
     expr: &SqlExpr,
     group_by_exprs: &[SqlExpr],
@@ -41,7 +48,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
 ) -> Result<Expr, ParseError> {
     for (i, gk) in group_by_exprs.iter().enumerate() {
         if gk == expr {
-            return Ok(group_key_exprs.get(i).cloned().unwrap_or(Expr::Column(i)));
+            return Ok(grouped_key_expr(group_key_exprs, i));
         }
     }
 
@@ -131,7 +138,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                     && let Ok(gk_index) = resolve_column(input_scope, gk_name)
                     && gk_index == col_index
                 {
-                    return Ok(group_key_exprs.get(i).cloned().unwrap_or(Expr::Column(i)));
+                    return Ok(grouped_key_expr(group_key_exprs, i));
                 }
             }
             Err(build_ungrouped_column_error(
