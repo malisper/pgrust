@@ -1457,7 +1457,8 @@ fn bind_select_query_with_outer(
                     group_keys.get(i).cloned().unwrap_or(Expr::Column(i)),
                     name.sql_type,
                     i + 1,
-                ));
+                )
+                .with_input_resno(i + 1));
             }
             for (i, accum) in accumulators.iter().enumerate() {
                 let target_index = n_keys + i;
