@@ -13,7 +13,7 @@ pub(super) fn pathkeys_satisfy(actual: &[PathKey], required: &[PathKey]) -> bool
         && actual
             .iter()
             .zip(required.iter())
-            .all(|(actual, required)| actual == required)
+            .all(|(actual, required)| pathkeys_equivalent(actual, required))
 }
 
 pub(super) fn set_cheapest(rel: &mut RelOptInfo) {
@@ -97,4 +97,15 @@ fn compare_path_costs(left: &Path, right: &Path, cost: CostSelector) -> Ordering
 
 fn better_pathkeys(left: &[PathKey], right: &[PathKey]) -> bool {
     left.len() > right.len()
+}
+
+fn pathkeys_equivalent(left: &PathKey, right: &PathKey) -> bool {
+    let same_identity = if left.ressortgroupref != 0 && right.ressortgroupref != 0 {
+        left.ressortgroupref == right.ressortgroupref
+    } else {
+        left.expr == right.expr
+    };
+    same_identity
+        && left.descending == right.descending
+        && left.nulls_first == right.nulls_first
 }

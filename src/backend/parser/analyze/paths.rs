@@ -287,6 +287,7 @@ pub(super) fn bind_order_by_items(
             };
             Ok(crate::backend::executor::OrderByEntry {
                 expr,
+                ressortgroupref: 0,
                 descending: item.descending,
                 nulls_first: item.nulls_first,
             })

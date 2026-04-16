@@ -224,6 +224,7 @@ impl Path {
                 .iter()
                 .map(|item| PathKey {
                     expr: item.expr.clone(),
+                    ressortgroupref: item.ressortgroupref,
                     descending: item.descending,
                     nulls_first: item.nulls_first,
                 })
@@ -275,11 +276,15 @@ fn project_pathkeys(
             let expr = targets
                 .iter()
                 .enumerate()
-                .find(|(_, target)| target.expr == key.expr)
+                .find(|(_, target)| {
+                    (key.ressortgroupref != 0 && target.ressortgroupref == key.ressortgroupref)
+                        || target.expr == key.expr
+                })
                 .map(|(index, target)| slot_var(slot_id, user_attrno(index), target.sql_type))
                 .unwrap_or_else(|| key.expr.clone());
             PathKey {
                 expr,
+                ressortgroupref: key.ressortgroupref,
                 descending: key.descending,
                 nulls_first: key.nulls_first,
             }

@@ -20,6 +20,7 @@ pub(super) fn pathkeys_to_order_items(pathkeys: &[PathKey]) -> Vec<OrderByEntry>
         .iter()
         .map(|key| OrderByEntry {
             expr: key.expr.clone(),
+            ressortgroupref: key.ressortgroupref,
             descending: key.descending,
             nulls_first: key.nulls_first,
         })
@@ -174,6 +175,7 @@ pub(super) fn lower_pathkeys_for_path(
                     group_by,
                     &layout,
                 ),
+                ressortgroupref: key.ressortgroupref,
                 descending: key.descending,
                 nulls_first: key.nulls_first,
             })
@@ -190,6 +192,7 @@ pub(super) fn lower_pathkeys_for_path(
                 );
                 PathKey {
                     expr,
+                    ressortgroupref: key.ressortgroupref,
                     descending: key.descending,
                     nulls_first: key.nulls_first,
                 }

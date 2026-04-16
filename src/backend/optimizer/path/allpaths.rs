@@ -138,6 +138,7 @@ fn query_order_items_for_base_rel(root: &PlannerInfo, rtindex: usize) -> Option<
         .cloned()
         .map(|key| PathKey {
             expr: expand_join_rte_vars(root, key.expr),
+            ressortgroupref: key.ressortgroupref,
             descending: key.descending,
             nulls_first: key.nulls_first,
         })
