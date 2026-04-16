@@ -131,6 +131,25 @@ pub(super) fn create_plan_without_root(path: Path) -> Plan {
     plan
 }
 
+fn recurse_with_root(
+    ctx: &mut SetRefsContext<'_>,
+    root: Option<&PlannerInfo>,
+    path: Path,
+) -> Plan {
+    let ext_params = std::mem::take(&mut ctx.ext_params);
+    let mut nested = SetRefsContext {
+        root,
+        catalog: ctx.catalog,
+        subplans: ctx.subplans,
+        next_param_id: ctx.next_param_id,
+        ext_params,
+    };
+    let plan = set_plan_refs(&mut nested, path);
+    ctx.next_param_id = nested.next_param_id;
+    ctx.ext_params = nested.ext_params;
+    plan
+}
+
 fn special_slot_var(
     varno: usize,
     index: usize,
@@ -2268,13 +2287,15 @@ fn set_cte_scan_references(
     ctx: &mut SetRefsContext<'_>,
     plan_info: PlanEstimate,
     cte_id: usize,
+    query: Box<crate::include::nodes::parsenodes::Query>,
     cte_plan: Box<Path>,
     output_columns: Vec<QueryColumn>,
 ) -> Plan {
+    let subroot = PlannerInfo::new(*query);
     Plan::CteScan {
         plan_info,
         cte_id,
-        cte_plan: Box::new(set_plan_refs(ctx, *cte_plan)),
+        cte_plan: Box::new(recurse_with_root(ctx, Some(&subroot), *cte_plan)),
         output_columns,
     }
 }
@@ -2296,17 +2317,21 @@ fn set_recursive_union_references(
     plan_info: PlanEstimate,
     worktable_id: usize,
     distinct: bool,
+    anchor_query: Box<crate::include::nodes::parsenodes::Query>,
+    recursive_query: Box<crate::include::nodes::parsenodes::Query>,
     output_columns: Vec<QueryColumn>,
     anchor: Box<Path>,
     recursive: Box<Path>,
 ) -> Plan {
+    let anchor_root = PlannerInfo::new(*anchor_query);
+    let recursive_root = PlannerInfo::new(*recursive_query);
     Plan::RecursiveUnion {
         plan_info,
         worktable_id,
         distinct,
         output_columns,
-        anchor: Box::new(set_plan_refs(ctx, *anchor)),
-        recursive: Box::new(set_plan_refs(ctx, *recursive)),
+        anchor: Box::new(recurse_with_root(ctx, Some(&anchor_root), *anchor)),
+        recursive: Box::new(recurse_with_root(ctx, Some(&recursive_root), *recursive)),
     }
 }
 
@@ -2481,10 +2506,11 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
         Path::CteScan {
             plan_info,
             cte_id,
+            query,
             cte_plan,
             output_columns,
             ..
-        } => set_cte_scan_references(ctx, plan_info, cte_id, cte_plan, output_columns),
+        } => set_cte_scan_references(ctx, plan_info, cte_id, query, cte_plan, output_columns),
         Path::WorkTableScan {
             plan_info,
             worktable_id,
@@ -2495,6 +2521,8 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             plan_info,
             worktable_id,
             distinct,
+            anchor_query,
+            recursive_query,
             output_columns,
             anchor,
             recursive,
@@ -2504,6 +2532,8 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             plan_info,
             worktable_id,
             distinct,
+            anchor_query,
+            recursive_query,
             output_columns,
             anchor,
             recursive,
