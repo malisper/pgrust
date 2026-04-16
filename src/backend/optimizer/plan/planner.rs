@@ -20,30 +20,8 @@ use super::super::upperrels;
 use super::super::util::{
     build_aggregate_output_columns, lower_targets_for_path, pathkeys_to_order_items,
     projection_is_identity, required_query_pathkeys_for_path, required_query_pathkeys_for_rel,
-    rewrite_semantic_expr_for_path_or_expand_join_vars,
 };
 use super::super::{expand_join_rte_vars, optimize_path};
-
-fn path_contains_recursive_namespace(path: &Path) -> bool {
-    match path {
-        Path::CteScan { .. } | Path::WorkTableScan { .. } | Path::RecursiveUnion { .. } => true,
-        Path::Filter { input, .. }
-        | Path::Projection { input, .. }
-        | Path::OrderBy { input, .. }
-        | Path::Limit { input, .. }
-        | Path::Aggregate { input, .. }
-        | Path::ProjectSet { input, .. } => path_contains_recursive_namespace(input),
-        Path::NestedLoopJoin { left, right, .. } | Path::HashJoin { left, right, .. } => {
-            path_contains_recursive_namespace(left) || path_contains_recursive_namespace(right)
-        }
-        Path::Append { children, .. } => children.iter().any(path_contains_recursive_namespace),
-        Path::Result { .. }
-        | Path::SeqScan { .. }
-        | Path::IndexScan { .. }
-        | Path::Values { .. }
-        | Path::FunctionScan { .. } => false,
-    }
-}
 
 pub(super) fn make_pathtarget_projection_rel(
     root: &PlannerInfo,
@@ -148,7 +126,7 @@ fn make_aggregate_rel(
 }
 
 fn make_filter_rel(
-    root: &PlannerInfo,
+    _root: &PlannerInfo,
     input_rel: RelOptInfo,
     predicate: Expr,
     catalog: &dyn CatalogLookup,
@@ -159,17 +137,11 @@ fn make_filter_rel(
         input_rel.reltarget.clone(),
     );
     for path in input_rel.pathlist {
-        let predicate = if path_contains_recursive_namespace(&path) {
-            let layout = path.output_vars();
-            rewrite_semantic_expr_for_path_or_expand_join_vars(root, predicate.clone(), &path, &layout)
-        } else {
-            predicate.clone()
-        };
         rel.add_path(optimize_path(
             Path::Filter {
                 plan_info: PlanEstimate::default(),
                 input: Box::new(path),
-                predicate,
+                predicate: predicate.clone(),
             },
             catalog,
         ));
@@ -197,43 +169,12 @@ fn make_project_set_rel(
     let slot_id = next_synthetic_slot_id();
     let mut rel = RelOptInfo::new(input_rel.relids.clone(), RelOptKind::UpperRel, reltarget);
     for path in input_rel.pathlist {
-        let targets = if path_contains_recursive_namespace(&path) {
-            let layout = path.output_vars();
-            targets
-                .iter()
-                .cloned()
-                .map(|target| match target {
-                    ProjectSetTarget::Scalar(entry) => ProjectSetTarget::Scalar(TargetEntry {
-                        expr: rewrite_semantic_expr_for_path_or_expand_join_vars(
-                            root,
-                            entry.expr,
-                            &path,
-                            &layout,
-                        ),
-                        ..entry
-                    }),
-                    ProjectSetTarget::Set {
-                        name,
-                        call,
-                        sql_type,
-                        column_index,
-                    } => ProjectSetTarget::Set {
-                        name,
-                        call,
-                        sql_type,
-                        column_index,
-                    },
-                })
-                .collect()
-        } else {
-            targets.to_vec()
-        };
         rel.add_path(optimize_path(
             Path::ProjectSet {
                 plan_info: PlanEstimate::default(),
                 slot_id,
                 input: Box::new(path),
-                targets,
+                targets: targets.to_vec(),
             },
             catalog,
         ));
