@@ -115,6 +115,12 @@ fn resolve_aggregate_call(
     arg_types: &[SqlType],
     func_variadic: bool,
 ) -> Option<ResolvedFunctionCall> {
+    if matches!(
+        func,
+        AggFunc::Sum | AggFunc::Avg | AggFunc::Variance | AggFunc::Stddev
+    ) {
+        return None;
+    }
     resolve_function_call(catalog, func.name(), arg_types, func_variadic)
         .ok()
         .or_else(|| {
