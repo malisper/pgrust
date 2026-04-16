@@ -730,6 +730,7 @@ impl Database {
             timed: false,
             catalog: catalog.materialize_visible_catalog(),
             compiled_functions: std::collections::HashMap::new(),
+            recursive_worktables: std::collections::HashMap::new(),
         };
         let query_result = execute_readonly_statement(
             Statement::Select(create_stmt.query.clone()),
@@ -846,6 +847,7 @@ impl Database {
             timed: false,
             catalog: catalog.materialize_visible_catalog(),
             compiled_functions: std::collections::HashMap::new(),
+            recursive_worktables: std::collections::HashMap::new(),
         };
         let inserted = crate::backend::commands::tablecmds::execute_insert_values(
             &table_name,

@@ -110,18 +110,17 @@ fn first_toast_index(
         .next()
 }
 
-fn relation_display_name(
-    catalog: &dyn CatalogLookup,
-    relation_oid: u32,
-    fallback: &str,
-) -> String {
+fn relation_display_name(catalog: &dyn CatalogLookup, relation_oid: u32, fallback: &str) -> String {
     catalog
         .class_row_by_oid(relation_oid)
         .map(|row| row.relname)
         .unwrap_or_else(|| fallback.to_string())
 }
 
-fn inheritance_translation_layout(parent_desc: &RelationDesc, child_desc: &RelationDesc) -> Vec<Expr> {
+fn inheritance_translation_layout(
+    parent_desc: &RelationDesc,
+    child_desc: &RelationDesc,
+) -> Vec<Expr> {
     parent_desc
         .columns
         .iter()
@@ -324,7 +323,15 @@ pub fn bind_insert(
     stmt: &InsertStatement,
     catalog: &dyn CatalogLookup,
 ) -> Result<BoundInsertStatement, ParseError> {
-    let local_ctes = bind_ctes(&stmt.with, catalog, &[], None, &[], &[])?;
+    let local_ctes = bind_ctes(
+        stmt.with_recursive,
+        &stmt.with,
+        catalog,
+        &[],
+        None,
+        &[],
+        &[],
+    )?;
     let entry = lookup_relation(catalog, &stmt.table_name)?;
     let column_defaults = bind_insert_column_defaults(&entry.desc, catalog, &local_ctes)?;
     let scope = scope_for_relation(Some(&stmt.table_name), &entry.desc);
@@ -442,7 +449,15 @@ pub fn bind_update(
     stmt: &UpdateStatement,
     catalog: &dyn CatalogLookup,
 ) -> Result<BoundUpdateStatement, ParseError> {
-    let local_ctes = bind_ctes(&stmt.with, catalog, &[], None, &[], &[])?;
+    let local_ctes = bind_ctes(
+        stmt.with_recursive,
+        &stmt.with,
+        catalog,
+        &[],
+        None,
+        &[],
+        &[],
+    )?;
     let entry = lookup_relation(catalog, &stmt.table_name)?;
     let scope = scope_for_relation(Some(&stmt.table_name), &entry.desc);
     let predicate = stmt
@@ -547,7 +562,15 @@ pub fn bind_delete(
     stmt: &DeleteStatement,
     catalog: &dyn CatalogLookup,
 ) -> Result<BoundDeleteStatement, ParseError> {
-    let local_ctes = bind_ctes(&stmt.with, catalog, &[], None, &[], &[])?;
+    let local_ctes = bind_ctes(
+        stmt.with_recursive,
+        &stmt.with,
+        catalog,
+        &[],
+        None,
+        &[],
+        &[],
+    )?;
     let entry = lookup_relation(catalog, &stmt.table_name)?;
     let scope = scope_for_relation(Some(&stmt.table_name), &entry.desc);
     let predicate = stmt

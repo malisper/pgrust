@@ -299,16 +299,25 @@ fn build_join_paths_emits_nested_loop_and_hash_join_for_equijoin() {
 #[test]
 fn extract_hash_join_clauses_splits_residual_predicates() {
     let clauses = super::extract_hash_join_clauses(
-        &[restrict(eq(var(1, 1), var(2, 1))), restrict(gt(var(1, 2), var(2, 2)))],
+        &[
+            restrict(eq(var(1, 1), var(2, 1))),
+            restrict(gt(var(1, 2), var(2, 2))),
+        ],
         &[1],
         &[2],
     )
     .expect("hash join clauses");
 
-    assert_eq!(clauses.hash_clauses, vec![restrict(eq(var(1, 1), var(2, 1)))]);
+    assert_eq!(
+        clauses.hash_clauses,
+        vec![restrict(eq(var(1, 1), var(2, 1)))]
+    );
     assert_eq!(clauses.outer_hash_keys, vec![var(1, 1)]);
     assert_eq!(clauses.inner_hash_keys, vec![var(2, 1)]);
-    assert_eq!(clauses.join_clauses, vec![restrict(gt(var(1, 2), var(2, 2)))]);
+    assert_eq!(
+        clauses.join_clauses,
+        vec![restrict(gt(var(1, 2), var(2, 2)))]
+    );
 }
 
 #[test]

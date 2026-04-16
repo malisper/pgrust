@@ -1230,11 +1230,12 @@ impl Session {
                     next_command_id: cid,
                     timed: false,
                     outer_rows: Vec::new(),
-            outer_system_bindings: Vec::new(),
-            system_bindings: Vec::new(),
+                    outer_system_bindings: Vec::new(),
+                    system_bindings: Vec::new(),
                     subplans: Vec::new(),
                     catalog: catalog.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
+                    recursive_worktables: std::collections::HashMap::new(),
                 };
                 execute_readonly_statement(stmt, &catalog, &mut ctx)
             }
@@ -1256,11 +1257,12 @@ impl Session {
                     next_command_id: cid,
                     timed: false,
                     outer_rows: Vec::new(),
-            outer_system_bindings: Vec::new(),
-            system_bindings: Vec::new(),
+                    outer_system_bindings: Vec::new(),
+                    system_bindings: Vec::new(),
                     subplans: Vec::new(),
                     catalog: catalog.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
+                    recursive_worktables: std::collections::HashMap::new(),
                 };
                 execute_insert(bound, &catalog, &mut ctx, xid, cid)
             }
@@ -1283,11 +1285,12 @@ impl Session {
                     next_command_id: cid,
                     timed: false,
                     outer_rows: Vec::new(),
-            outer_system_bindings: Vec::new(),
-            system_bindings: Vec::new(),
+                    outer_system_bindings: Vec::new(),
+                    system_bindings: Vec::new(),
                     subplans: Vec::new(),
                     catalog: catalog.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
+                    recursive_worktables: std::collections::HashMap::new(),
                 };
                 execute_update_with_waiter(
                     bound,
@@ -1317,11 +1320,12 @@ impl Session {
                     next_command_id: cid,
                     timed: false,
                     outer_rows: Vec::new(),
-            outer_system_bindings: Vec::new(),
-            system_bindings: Vec::new(),
+                    outer_system_bindings: Vec::new(),
+                    system_bindings: Vec::new(),
                     subplans: Vec::new(),
                     catalog: catalog.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
+                    recursive_worktables: std::collections::HashMap::new(),
                 };
                 execute_delete_with_waiter(
                     bound,
@@ -1460,11 +1464,12 @@ impl Session {
                     next_command_id: cid,
                     timed: false,
                     outer_rows: Vec::new(),
-            outer_system_bindings: Vec::new(),
-            system_bindings: Vec::new(),
+                    outer_system_bindings: Vec::new(),
+                    system_bindings: Vec::new(),
                     subplans: Vec::new(),
                     catalog: catalog.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
+                    recursive_worktables: std::collections::HashMap::new(),
                 };
                 execute_truncate_table(truncate_stmt.clone(), &catalog, &mut ctx, xid)
             }
@@ -1653,6 +1658,7 @@ impl Session {
             subplans: Vec::new(),
             catalog: catalog.materialize_visible_catalog(),
             compiled_functions: std::collections::HashMap::new(),
+            recursive_worktables: std::collections::HashMap::new(),
         };
         execute_prepared_insert_row(prepared, params, &mut ctx, xid, cid)
     }
@@ -1872,11 +1878,12 @@ impl Session {
                 next_command_id: cid,
                 timed: false,
                 outer_rows: Vec::new(),
-            outer_system_bindings: Vec::new(),
-            system_bindings: Vec::new(),
+                outer_system_bindings: Vec::new(),
+                system_bindings: Vec::new(),
                 subplans: Vec::new(),
                 catalog: catalog.materialize_visible_catalog(),
                 compiled_functions: std::collections::HashMap::new(),
+                recursive_worktables: std::collections::HashMap::new(),
             };
             let relation_constraints = crate::backend::parser::bind_relation_constraints(
                 None,

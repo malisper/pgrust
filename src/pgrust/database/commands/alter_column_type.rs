@@ -165,6 +165,7 @@ impl Database {
             timed: false,
             catalog: catalog.materialize_visible_catalog(),
             compiled_functions: std::collections::HashMap::new(),
+            recursive_worktables: std::collections::HashMap::new(),
         };
         rewrite_heap_rows_for_alter_column_type(
             self,

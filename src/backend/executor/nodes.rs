@@ -1,4 +1,4 @@
-use super::{AccumState, AggGroup, ExecError, ExecutorContext};
+use super::{AccumState, AggGroup, ExecError, ExecutorContext, executor_start};
 use crate::backend::access::heap::heapam::{
     heap_fetch_visible_with_txns, heap_scan_begin_visible, heap_scan_end,
     heap_scan_page_next_tuple, heap_scan_prepare_next_page,
@@ -9,15 +9,15 @@ use crate::backend::executor::exec_expr::{compare_order_by_keys, eval_expr};
 use crate::backend::executor::srf::{
     eval_scalar_set_returning_call, eval_set_returning_call, set_returning_call_label,
 };
-use crate::backend::utils::time::instant::Instant;
 use crate::backend::executor::value_io::{decode_value_with_toast, missing_column_value};
+use crate::backend::utils::time::instant::Instant;
 use crate::include::catalog::builtin_aggregate_function_for_proc_oid;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::{
     AggregateState, AppendState, FilterState, FunctionScanState, IndexScanState, LimitState,
     MaterializedRow, NestedLoopJoinState, NodeExecStats, OrderByState, PlanNode, ProjectSetState,
-    ProjectionState, ResultState, SeqScanState, SlotKind, SystemVarBinding, ToastRelationRef,
-    TupleSlot, ValuesState,
+    ProjectionState, RecursiveUnionState, ResultState, SeqScanState, SlotKind, SystemVarBinding,
+    ToastRelationRef, TupleSlot, ValuesState, WorkTableScanState,
 };
 use crate::include::nodes::primnodes::{Expr, JoinType};
 
@@ -74,7 +74,10 @@ fn merge_system_bindings(
 ) -> Vec<SystemVarBinding> {
     let mut merged = left.to_vec();
     for binding in right {
-        if !merged.iter().any(|existing| existing.varno == binding.varno) {
+        if !merged
+            .iter()
+            .any(|existing| existing.varno == binding.varno)
+        {
             merged.push(*binding);
         }
     }
@@ -107,8 +110,9 @@ fn finish_eof(stats: &mut NodeExecStats, start: Option<Instant>, ctx: &ExecutorC
     if let Some(start_usage) = stats.buffer_usage_start.take() {
         let end_usage = ctx.pool.usage_stats();
         stats.buffer_usage.shared_hit = end_usage.shared_hit.saturating_sub(start_usage.shared_hit);
-        stats.buffer_usage.shared_read =
-            end_usage.shared_read.saturating_sub(start_usage.shared_read);
+        stats.buffer_usage.shared_read = end_usage
+            .shared_read
+            .saturating_sub(start_usage.shared_read);
         stats.buffer_usage.shared_written = end_usage
             .shared_written
             .saturating_sub(start_usage.shared_written);
@@ -123,6 +127,26 @@ fn begin_node(stats: &mut NodeExecStats, ctx: &ExecutorContext) {
 
 fn note_filtered_row(stats: &mut NodeExecStats) {
     stats.rows_removed_by_filter += 1;
+}
+
+fn materialize_cte_row(slot: &mut TupleSlot) -> Result<MaterializedRow, ExecError> {
+    let mut values = slot.values()?.to_vec();
+    Value::materialize_all(&mut values);
+    Ok(MaterializedRow::new(
+        TupleSlot::virtual_row(values),
+        Vec::new(),
+    ))
+}
+
+fn load_materialized_row(
+    slot: &mut TupleSlot,
+    row: &MaterializedRow,
+    bindings: &mut Vec<SystemVarBinding>,
+    ctx: &mut ExecutorContext,
+) {
+    *slot = row.slot.clone();
+    bindings.clear();
+    set_active_system_bindings(ctx, bindings);
 }
 
 impl PlanNode for ResultState {
@@ -203,7 +227,10 @@ impl PlanNode for AppendState {
                         }]
                     })
                     .unwrap_or_default();
-                self.slot.table_oid = self.current_bindings.first().map(|binding| binding.table_oid);
+                self.slot.table_oid = self
+                    .current_bindings
+                    .first()
+                    .map(|binding| binding.table_oid);
                 set_active_system_bindings(ctx, &self.current_bindings);
                 finish_row(&mut self.stats, start);
                 return Ok(Some(&mut self.slot));
@@ -834,8 +861,10 @@ fn exec_lateral_join<'a>(
                     state.current_left = Some(current_left);
                     state.current_left_matched = false;
                     ctx.outer_rows.insert(0, values);
-                    ctx.outer_system_bindings
-                        .insert(0, state.current_left.as_ref().unwrap().system_bindings.clone());
+                    ctx.outer_system_bindings.insert(
+                        0,
+                        state.current_left.as_ref().unwrap().system_bindings.clone(),
+                    );
                     state.right = super::executor_start(
                         state
                             .right_plan
@@ -863,10 +892,8 @@ fn exec_lateral_join<'a>(
             state.slot.tts_nvalid = nvalid;
             state.slot.kind = SlotKind::Virtual;
             state.slot.decode_offset = 0;
-            state.current_bindings = merge_system_bindings(
-                &left.system_bindings,
-                state.right.current_system_bindings(),
-            );
+            state.current_bindings =
+                merge_system_bindings(&left.system_bindings, state.right.current_system_bindings());
             set_active_system_bindings(ctx, &state.current_bindings);
 
             if eval_qual_list(&state.join_qual, &mut state.slot, ctx)? {
@@ -1458,6 +1485,168 @@ impl PlanNode for ValuesState {
     fn explain_children(&self, _indent: usize, _analyze: bool, _lines: &mut Vec<String>) {}
 }
 
+impl PlanNode for WorkTableScanState {
+    fn exec_proc_node<'a>(
+        &'a mut self,
+        ctx: &mut ExecutorContext,
+    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        let start = if ctx.timed {
+            Some(Instant::now())
+        } else {
+            None
+        };
+        begin_node(&mut self.stats, ctx);
+        let Some(worktable) = ctx.recursive_worktables.get(&self.worktable_id).cloned() else {
+            return Err(ExecError::DetailedError {
+                message: "worktable scan executed without an active recursive union".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
+            });
+        };
+        let Some(row) = worktable.borrow().rows.get(self.next_index).cloned() else {
+            finish_eof(&mut self.stats, start, ctx);
+            return Ok(None);
+        };
+        self.next_index += 1;
+        load_materialized_row(&mut self.slot, &row, &mut self.current_bindings, ctx);
+        finish_row(&mut self.stats, start);
+        Ok(Some(&mut self.slot))
+    }
+
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
+        Some(&mut self.slot)
+    }
+
+    fn current_system_bindings(&self) -> &[SystemVarBinding] {
+        &self.current_bindings
+    }
+
+    fn column_names(&self) -> &[String] {
+        &self.output_columns
+    }
+    fn node_stats(&self) -> &NodeExecStats {
+        &self.stats
+    }
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
+        &mut self.stats
+    }
+    fn plan_info(&self) -> crate::include::nodes::plannodes::PlanEstimate {
+        self.plan_info
+    }
+    fn node_label(&self) -> String {
+        "WorkTable Scan".into()
+    }
+    fn explain_children(&self, _indent: usize, _analyze: bool, _lines: &mut Vec<String>) {}
+}
+
+impl PlanNode for RecursiveUnionState {
+    fn exec_proc_node<'a>(
+        &'a mut self,
+        ctx: &mut ExecutorContext,
+    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        let start = if ctx.timed {
+            Some(Instant::now())
+        } else {
+            None
+        };
+        begin_node(&mut self.stats, ctx);
+        ctx.recursive_worktables
+            .insert(self.worktable_id, self.worktable.clone());
+
+        loop {
+            if !self.anchor_done {
+                match self.anchor.exec_proc_node(ctx)? {
+                    Some(slot) => {
+                        let mut row = materialize_cte_row(slot)?;
+                        if self.distinct {
+                            let signature = row.slot.values()?.to_vec();
+                            if !self.seen_rows.insert(signature) {
+                                continue;
+                            }
+                        }
+                        self.worktable.borrow_mut().rows.push(row.clone());
+                        load_materialized_row(
+                            &mut self.slot,
+                            &row,
+                            &mut self.current_bindings,
+                            ctx,
+                        );
+                        finish_row(&mut self.stats, start);
+                        return Ok(Some(&mut self.slot));
+                    }
+                    None => {
+                        self.anchor_done = true;
+                        self.recursive_state = Some(executor_start(self.recursive_plan.clone()));
+                        continue;
+                    }
+                }
+            }
+
+            let recursive_state = self
+                .recursive_state
+                .get_or_insert_with(|| executor_start(self.recursive_plan.clone()));
+            match recursive_state.exec_proc_node(ctx)? {
+                Some(slot) => {
+                    let mut row = materialize_cte_row(slot)?;
+                    if self.distinct {
+                        let signature = row.slot.values()?.to_vec();
+                        if !self.seen_rows.insert(signature) {
+                            continue;
+                        }
+                    }
+                    self.intermediate_rows.push(row.clone());
+                    load_materialized_row(&mut self.slot, &row, &mut self.current_bindings, ctx);
+                    finish_row(&mut self.stats, start);
+                    return Ok(Some(&mut self.slot));
+                }
+                None => {
+                    if self.intermediate_rows.is_empty() {
+                        ctx.recursive_worktables.remove(&self.worktable_id);
+                        finish_eof(&mut self.stats, start, ctx);
+                        return Ok(None);
+                    }
+                    self.worktable.borrow_mut().rows = std::mem::take(&mut self.intermediate_rows);
+                    self.recursive_state = Some(executor_start(self.recursive_plan.clone()));
+                }
+            }
+        }
+    }
+
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
+        Some(&mut self.slot)
+    }
+
+    fn current_system_bindings(&self) -> &[SystemVarBinding] {
+        &self.current_bindings
+    }
+
+    fn column_names(&self) -> &[String] {
+        &self.output_columns
+    }
+    fn node_stats(&self) -> &NodeExecStats {
+        &self.stats
+    }
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
+        &mut self.stats
+    }
+    fn plan_info(&self) -> crate::include::nodes::plannodes::PlanEstimate {
+        self.plan_info
+    }
+    fn node_label(&self) -> String {
+        "Recursive Union".into()
+    }
+    fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
+        format_explain_lines(&*self.anchor, indent + 1, analyze, lines);
+        if let Some(recursive_state) = &self.recursive_state {
+            format_explain_lines(&**recursive_state, indent + 1, analyze, lines);
+        } else {
+            let recursive_state = executor_start(self.recursive_plan.clone());
+            format_explain_lines(&*recursive_state, indent + 1, analyze, lines);
+        }
+    }
+}
+
 impl PlanNode for ProjectSetState {
     fn exec_proc_node<'a>(
         &'a mut self,
@@ -1518,7 +1707,9 @@ impl PlanNode for ProjectSetState {
                 match target {
                     crate::include::nodes::primnodes::ProjectSetTarget::Scalar(entry) => {
                         set_active_system_bindings(ctx, &input_slot.system_bindings);
-                        values.push(eval_expr(&entry.expr, &mut input_slot.slot, ctx)?.to_owned_value());
+                        values.push(
+                            eval_expr(&entry.expr, &mut input_slot.slot, ctx)?.to_owned_value(),
+                        );
                     }
                     crate::include::nodes::primnodes::ProjectSetTarget::Set { .. } => {
                         values.push(

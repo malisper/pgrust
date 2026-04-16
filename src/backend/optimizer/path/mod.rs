@@ -139,7 +139,14 @@ pub(super) fn build_join_paths(
     kind: JoinType,
     restrict_clauses: Vec<RestrictInfo>,
 ) -> Vec<Path> {
-    costsize::build_join_paths(left, right, left_relids, right_relids, kind, restrict_clauses)
+    costsize::build_join_paths(
+        left,
+        right,
+        left_relids,
+        right_relids,
+        kind,
+        restrict_clauses,
+    )
 }
 
 pub(super) fn restore_join_output_order(

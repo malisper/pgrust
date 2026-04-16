@@ -35,9 +35,12 @@ use crate::include::nodes::primnodes::{
     ProjectSetTarget, QueryColumn, RelationDesc, SetReturningCall, SortGroupClause, TargetEntry,
     ToastRelationRef,
 };
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::parsenodes::*;
 pub use crate::backend::catalog::catalog::{Catalog, CatalogEntry};
+
+static NEXT_WORKTABLE_ID: AtomicUsize = AtomicUsize::new(1);
 use crate::backend::utils::cache::relcache::RelCache;
 use crate::backend::utils::cache::system_views::{build_pg_stats_rows, build_pg_views_rows};
 use agg::*;
@@ -53,8 +56,7 @@ use infer::*;
 pub use modify::{
     BoundArraySubscript, BoundAssignment, BoundAssignmentTarget, BoundDeleteStatement,
     BoundDeleteTarget, BoundInsertSource, BoundInsertStatement, BoundUpdateStatement,
-    BoundUpdateTarget, PreparedInsert, bind_delete, bind_insert, bind_insert_prepared,
-    bind_update,
+    BoundUpdateTarget, PreparedInsert, bind_delete, bind_insert, bind_insert_prepared, bind_update,
 };
 pub use paths::BoundModifyRowSource;
 use paths::bind_order_by_items;
@@ -780,7 +782,57 @@ fn apply_cte_column_names(
     Ok((query, renamed_desc))
 }
 
+fn cte_query_desc(query: &Query) -> RelationDesc {
+    RelationDesc {
+        columns: query
+            .columns()
+            .into_iter()
+            .map(|col| column_desc(col.name, col.sql_type, true))
+            .collect(),
+    }
+}
+
+fn analyze_non_recursive_cte_body(
+    body: &CteBody,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<GroupedOuterScope>,
+    visible_ctes: &[BoundCte],
+    expanded_views: &[u32],
+) -> Result<(Query, RelationDesc), ParseError> {
+    match body {
+        CteBody::Select(select) => {
+            let (query, _) = analyze_select_query_with_outer(
+                select,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                visible_ctes,
+                expanded_views,
+            )?;
+            let desc = cte_query_desc(&query);
+            Ok((query, desc))
+        }
+        CteBody::Values(values) => {
+            let (query, _) = analyze_values_query_with_outer(
+                values,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                visible_ctes,
+                expanded_views,
+            )?;
+            let desc = cte_query_desc(&query);
+            Ok((query, desc))
+        }
+        CteBody::RecursiveUnion { .. } => Err(ParseError::FeatureNotSupported(
+            "nested recursive UNION CTE bodies".into(),
+        )),
+    }
+}
+
 fn bind_ctes(
+    with_recursive: bool,
     ctes: &[CommonTableExpr],
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
@@ -793,40 +845,151 @@ fn bind_ctes(
         let mut visible = bound.clone();
         visible.extend_from_slice(outer_ctes);
         let (plan, desc) = match &cte.body {
-            CteBody::Select(select) => {
-                let (query, _) = analyze_select_query_with_outer(
-                    select,
+            CteBody::RecursiveUnion {
+                all,
+                anchor,
+                recursive,
+            } => {
+                if !with_recursive {
+                    return Err(ParseError::FeatureNotSupported(
+                        "recursive CTE requires WITH RECURSIVE".into(),
+                    ));
+                }
+                let (anchor_query, anchor_desc) = analyze_non_recursive_cte_body(
+                    anchor,
                     catalog,
                     outer_scopes,
                     grouped_outer.clone(),
                     &visible,
                     expanded_views,
                 )?;
-                let desc = RelationDesc {
-                    columns: query
-                        .columns()
-                        .into_iter()
-                        .map(|col| column_desc(col.name, col.sql_type, true))
-                        .collect(),
-                };
-                apply_cte_column_names(query, desc, &cte.column_names)?
+                let (anchor_query, desc) =
+                    apply_cte_column_names(anchor_query, anchor_desc, &cte.column_names)?;
+                let worktable_id = NEXT_WORKTABLE_ID.fetch_add(1, Ordering::Relaxed);
+                let mut recursive_visible = visible.clone();
+                recursive_visible.push(BoundCte {
+                    name: cte.name.clone(),
+                    plan: Query {
+                        command_type: crate::include::executor::execdesc::CommandType::Select,
+                        rtable: Vec::new(),
+                        jointree: None,
+                        target_list: identity_target_list(
+                            &desc
+                                .columns
+                                .iter()
+                                .map(|column| QueryColumn {
+                                    name: column.name.clone(),
+                                    sql_type: column.sql_type,
+                                })
+                                .collect::<Vec<_>>(),
+                            &desc
+                                .columns
+                                .iter()
+                                .enumerate()
+                                .map(|(index, column)| Expr::Column(index))
+                                .collect::<Vec<_>>(),
+                        ),
+                        where_qual: None,
+                        group_by: Vec::new(),
+                        accumulators: Vec::new(),
+                        having_qual: None,
+                        sort_clause: Vec::new(),
+                        limit_count: None,
+                        limit_offset: 0,
+                        project_set: None,
+                        recursive_union: None,
+                    },
+                    desc: desc.clone(),
+                    self_reference: true,
+                    worktable_id,
+                });
+                let (recursive_query, _) = analyze_select_query_with_outer(
+                    recursive,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer.clone(),
+                    &recursive_visible,
+                    expanded_views,
+                )?;
+                let recursive_desc = cte_query_desc(&recursive_query);
+                if recursive_desc.columns.len() != desc.columns.len() {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "recursive term width matching non-recursive term",
+                        actual: format!(
+                            "recursive term has {} columns but non-recursive term has {}",
+                            recursive_desc.columns.len(),
+                            desc.columns.len()
+                        ),
+                    });
+                }
+                for (index, (left, right)) in desc
+                    .columns
+                    .iter()
+                    .zip(recursive_desc.columns.iter())
+                    .enumerate()
+                {
+                    if left.sql_type != right.sql_type {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "recursive term column types matching non-recursive term",
+                            actual: format!(
+                                "recursive CTE column {} has type {} in the non-recursive term but {} in the recursive term",
+                                index + 1,
+                                sql_type_name(left.sql_type),
+                                sql_type_name(right.sql_type)
+                            ),
+                        });
+                    }
+                }
+                let output_columns = desc
+                    .columns
+                    .iter()
+                    .map(|column| QueryColumn {
+                        name: column.name.clone(),
+                        sql_type: column.sql_type,
+                    })
+                    .collect::<Vec<_>>();
+                let target_list = normalize_target_list(identity_target_list(
+                    &output_columns,
+                    &output_columns
+                        .iter()
+                        .enumerate()
+                        .map(|(index, _)| Expr::Column(index))
+                        .collect::<Vec<_>>(),
+                ));
+                (
+                    Query {
+                        command_type: crate::include::executor::execdesc::CommandType::Select,
+                        rtable: Vec::new(),
+                        jointree: None,
+                        target_list,
+                        where_qual: None,
+                        group_by: Vec::new(),
+                        accumulators: Vec::new(),
+                        having_qual: None,
+                        sort_clause: Vec::new(),
+                        limit_count: None,
+                        limit_offset: 0,
+                        project_set: None,
+                        recursive_union: Some(Box::new(RecursiveUnionQuery {
+                            output_desc: desc.clone(),
+                            anchor: anchor_query,
+                            recursive: recursive_query,
+                            distinct: !*all,
+                            worktable_id,
+                        })),
+                    },
+                    desc,
+                )
             }
-            CteBody::Values(values) => {
-                let (query, _) = analyze_values_query_with_outer(
-                    values,
+            _ => {
+                let (query, desc) = analyze_non_recursive_cte_body(
+                    &cte.body,
                     catalog,
                     outer_scopes,
                     grouped_outer.clone(),
                     &visible,
                     expanded_views,
                 )?;
-                let desc = RelationDesc {
-                    columns: query
-                        .columns()
-                        .into_iter()
-                        .map(|col| column_desc(col.name, col.sql_type, true))
-                        .collect(),
-                };
                 apply_cte_column_names(query, desc, &cte.column_names)?
             }
         };
@@ -834,6 +997,8 @@ fn bind_ctes(
             name: cte.name.clone(),
             plan,
             desc,
+            self_reference: false,
+            worktable_id: 0,
         });
     }
     Ok(bound)
@@ -965,6 +1130,7 @@ fn bind_values_query_with_outer(
     expanded_views: &[u32],
 ) -> Result<(Query, BoundScope), ParseError> {
     let local_ctes = bind_ctes(
+        stmt.with_recursive,
         &stmt.with,
         catalog,
         outer_scopes,
@@ -1030,6 +1196,7 @@ fn bind_values_query_with_outer(
             limit_count: stmt.limit,
             limit_offset: stmt.offset.unwrap_or(0),
             project_set: None,
+            recursive_union: None,
         },
         scope,
     ))
@@ -1066,6 +1233,7 @@ fn bind_select_query_with_outer(
     expanded_views: &[u32],
 ) -> Result<(Query, BoundScope), ParseError> {
     let local_ctes = bind_ctes(
+        stmt.with_recursive,
         &stmt.with,
         catalog,
         outer_scopes,
@@ -1402,6 +1570,7 @@ fn bind_select_query_with_outer(
                 limit_count: stmt.limit,
                 limit_offset: stmt.offset.unwrap_or(0),
                 project_set: None,
+                recursive_union: None,
             },
             scope,
         ))
@@ -1469,6 +1638,7 @@ fn bind_select_query_with_outer(
                         limit_count: stmt.limit,
                         limit_offset: stmt.offset.unwrap_or(0),
                         project_set: None,
+                        recursive_union: None,
                     },
                     scope,
                 ))
@@ -1517,6 +1687,7 @@ fn bind_select_query_with_outer(
                             project_targets,
                             &base.output_exprs,
                         )),
+                        recursive_union: None,
                     },
                     scope,
                 ))

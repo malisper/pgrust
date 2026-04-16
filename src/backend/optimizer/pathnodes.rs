@@ -57,6 +57,8 @@ impl Path {
             | Self::OrderBy { plan_info, .. }
             | Self::Limit { plan_info, .. }
             | Self::Aggregate { plan_info, .. }
+            | Self::WorkTableScan { plan_info, .. }
+            | Self::RecursiveUnion { plan_info, .. }
             | Self::Values { plan_info, .. }
             | Self::FunctionScan { plan_info, .. }
             | Self::ProjectSet { plan_info, .. } => *plan_info,
@@ -93,6 +95,8 @@ impl Path {
                 })
                 .collect(),
             Self::Aggregate { output_columns, .. } => output_columns.clone(),
+            Self::WorkTableScan { output_columns, .. }
+            | Self::RecursiveUnion { output_columns, .. } => output_columns.clone(),
             Self::NestedLoopJoin { left, right, .. } | Self::HashJoin { left, right, .. } => {
                 let mut cols = left.columns();
                 cols.extend(right.columns());
@@ -149,6 +153,16 @@ impl Path {
                 output_columns,
                 ..
             } => slot_output_vars(*slot_id, output_columns, |column| column.sql_type),
+            Self::WorkTableScan {
+                slot_id,
+                output_columns,
+                ..
+            }
+            | Self::RecursiveUnion {
+                slot_id,
+                output_columns,
+                ..
+            } => slot_output_vars(*slot_id, output_columns, |column| column.sql_type),
             Self::FunctionScan { slot_id, call, .. } => {
                 slot_output_vars(*slot_id, call.output_columns(), |column| column.sql_type)
             }
@@ -185,6 +199,8 @@ impl Path {
             | Self::Append { .. }
             | Self::SeqScan { .. }
             | Self::Aggregate { .. }
+            | Self::WorkTableScan { .. }
+            | Self::RecursiveUnion { .. }
             | Self::Values { .. }
             | Self::FunctionScan { .. }
             | Self::ProjectSet { .. } => Vec::new(),

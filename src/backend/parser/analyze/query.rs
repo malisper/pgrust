@@ -148,6 +148,26 @@ impl AnalyzedFrom {
         }
     }
 
+    pub(super) fn worktable(worktable_id: usize, output_columns: Vec<QueryColumn>) -> Self {
+        let desc = RelationDesc {
+            columns: output_columns
+                .iter()
+                .map(|column| column_desc(column.name.clone(), column.sql_type, true))
+                .collect(),
+        };
+        Self {
+            rtable: vec![RangeTblEntry {
+                alias: None,
+                desc,
+                inh: false,
+                kind: RangeTblEntryKind::WorkTable { worktable_id },
+            }],
+            jointree: Some(JoinTreeNode::RangeTblRef(1)),
+            output_exprs: rte_output_exprs(1, &output_columns),
+            output_columns,
+        }
+    }
+
     pub(super) fn subquery(query: Query) -> Self {
         let output_columns = query.columns();
         let desc = RelationDesc {
@@ -307,6 +327,7 @@ pub(super) fn query_from_from_projection(input: AnalyzedFrom, targets: Vec<Targe
         limit_count: None,
         limit_offset: 0,
         project_set: None,
+        recursive_union: None,
     }
 }
 

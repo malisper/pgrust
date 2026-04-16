@@ -2,14 +2,16 @@ use crate::backend::access::heap::heapam::VisibleHeapScan;
 use crate::backend::access::transam::xact::{Snapshot, TransactionManager};
 use crate::backend::executor::hashjoin::{HashJoinPhase, HashJoinTable};
 use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
-use crate::include::storage::buf_internals::BufferUsageStats;
 use crate::include::access::htup::{AttributeDesc, HeapTuple, ItemPointerData};
 use crate::include::access::relscan::IndexScanDesc;
 use crate::include::access::relscan::ScanDirection;
 use crate::include::access::scankey::ScanKeyData;
 use crate::include::nodes::plannodes::PlanEstimate;
+use crate::include::storage::buf_internals::BufferUsageStats;
 use crate::{BufferPool, ClientId, OwnedBufferPin, RelFileLocator, SmgrStorageBackend};
 use parking_lot::RwLock;
+use std::cell::RefCell;
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -219,7 +221,10 @@ pub trait PlanNode: std::fmt::Debug {
         })?;
         let mut values = slot.values()?.iter().cloned().collect::<Vec<_>>();
         Value::materialize_all(&mut values);
-        Ok(MaterializedRow::new(TupleSlot::virtual_row(values), bindings))
+        Ok(MaterializedRow::new(
+            TupleSlot::virtual_row(values),
+            bindings,
+        ))
     }
 
     /// Output column names for this node. Fixed for the lifetime of the query.
@@ -479,6 +484,40 @@ pub struct FunctionScanState {
     pub(crate) output_columns: Vec<String>,
     pub(crate) rows: Option<Vec<MaterializedRow>>,
     pub(crate) next_index: usize,
+    pub(crate) current_bindings: Vec<SystemVarBinding>,
+    pub(crate) plan_info: PlanEstimate,
+    pub(crate) stats: NodeExecStats,
+}
+
+#[derive(Debug, Default)]
+pub struct RecursiveWorkTable {
+    pub(crate) rows: Vec<MaterializedRow>,
+}
+
+#[derive(Debug)]
+pub struct WorkTableScanState {
+    pub(crate) worktable_id: usize,
+    pub(crate) output_columns: Vec<String>,
+    pub(crate) next_index: usize,
+    pub(crate) slot: TupleSlot,
+    pub(crate) current_bindings: Vec<SystemVarBinding>,
+    pub(crate) plan_info: PlanEstimate,
+    pub(crate) stats: NodeExecStats,
+}
+
+#[derive(Debug)]
+pub struct RecursiveUnionState {
+    pub(crate) worktable_id: usize,
+    pub(crate) distinct: bool,
+    pub(crate) anchor: PlanState,
+    pub(crate) recursive_plan: Plan,
+    pub(crate) recursive_state: Option<PlanState>,
+    pub(crate) output_columns: Vec<String>,
+    pub(crate) worktable: Rc<RefCell<RecursiveWorkTable>>,
+    pub(crate) intermediate_rows: Vec<MaterializedRow>,
+    pub(crate) seen_rows: HashSet<Vec<Value>>,
+    pub(crate) anchor_done: bool,
+    pub(crate) slot: TupleSlot,
     pub(crate) current_bindings: Vec<SystemVarBinding>,
     pub(crate) plan_info: PlanEstimate,
     pub(crate) stats: NodeExecStats,

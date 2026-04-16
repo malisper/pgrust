@@ -54,7 +54,10 @@ fn merge_system_bindings(
 ) -> Vec<SystemVarBinding> {
     let mut merged = left.to_vec();
     for binding in right {
-        if !merged.iter().any(|existing| existing.varno == binding.varno) {
+        if !merged
+            .iter()
+            .any(|existing| existing.varno == binding.varno)
+        {
             merged.push(*binding);
         }
     }
@@ -215,9 +218,17 @@ impl PlanNode for HashJoinState {
                         }
 
                         let mut values = vec![Value::Null; self.left_width];
-                        values.extend(table.entries[entry_index].row.slot.tts_values.iter().cloned());
+                        values.extend(
+                            table.entries[entry_index]
+                                .row
+                                .slot
+                                .tts_values
+                                .iter()
+                                .cloned(),
+                        );
                         store_virtual_row(&mut self.slot, values);
-                        self.current_bindings = table.entries[entry_index].row.system_bindings.clone();
+                        self.current_bindings =
+                            table.entries[entry_index].row.system_bindings.clone();
                         set_active_system_bindings(ctx, &self.current_bindings);
                         self.stats.rows += 1;
                         return Ok(Some(&mut self.slot));

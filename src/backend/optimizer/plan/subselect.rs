@@ -659,6 +659,30 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
             plan_info,
             call: rebase_set_returning_call_subplan_ids(call, base),
         },
+        Plan::WorkTableScan {
+            plan_info,
+            worktable_id,
+            output_columns,
+        } => Plan::WorkTableScan {
+            plan_info,
+            worktable_id,
+            output_columns,
+        },
+        Plan::RecursiveUnion {
+            plan_info,
+            worktable_id,
+            distinct,
+            output_columns,
+            anchor,
+            recursive,
+        } => Plan::RecursiveUnion {
+            plan_info,
+            worktable_id,
+            distinct,
+            output_columns,
+            anchor: Box::new(rebase_plan_subplan_ids(*anchor, base)),
+            recursive: Box::new(rebase_plan_subplan_ids(*recursive, base)),
+        },
         Plan::Values {
             plan_info,
             rows,
@@ -714,7 +738,10 @@ pub(super) fn finalize_plan_subqueries(
     subplans: &mut Vec<Plan>,
 ) -> Plan {
     match plan {
-        Plan::Result { .. } | Plan::SeqScan { .. } | Plan::IndexScan { .. } => plan,
+        Plan::Result { .. }
+        | Plan::SeqScan { .. }
+        | Plan::IndexScan { .. }
+        | Plan::WorkTableScan { .. } => plan,
         Plan::Append {
             plan_info,
             source_id,
@@ -872,6 +899,21 @@ pub(super) fn finalize_plan_subqueries(
         Plan::FunctionScan { plan_info, call } => Plan::FunctionScan {
             plan_info,
             call: finalize_set_returning_call(call, catalog, subplans),
+        },
+        Plan::RecursiveUnion {
+            plan_info,
+            worktable_id,
+            distinct,
+            output_columns,
+            anchor,
+            recursive,
+        } => Plan::RecursiveUnion {
+            plan_info,
+            worktable_id,
+            distinct,
+            output_columns,
+            anchor: Box::new(finalize_plan_subqueries(*anchor, catalog, subplans)),
+            recursive: Box::new(finalize_plan_subqueries(*recursive, catalog, subplans)),
         },
         Plan::Values {
             plan_info,

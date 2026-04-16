@@ -263,6 +263,65 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                     output_columns,
                 }
             }
+            Path::WorkTableScan {
+                slot_id,
+                worktable_id,
+                output_columns,
+                ..
+            } => {
+                let width = output_columns
+                    .iter()
+                    .map(|col| estimate_sql_type_width(col.sql_type))
+                    .sum();
+                Path::WorkTableScan {
+                    plan_info: PlanEstimate::new(0.0, CPU_TUPLE_COST, 100.0, width),
+                    slot_id,
+                    worktable_id,
+                    output_columns,
+                }
+            }
+            Path::RecursiveUnion {
+                slot_id,
+                worktable_id,
+                distinct,
+                output_columns,
+                anchor,
+                recursive,
+                ..
+            } => {
+                let anchor = optimize_path(*anchor, catalog);
+                let recursive = optimize_path(*recursive, catalog);
+                let anchor_info = anchor.plan_info();
+                let recursive_info = recursive.plan_info();
+                let rows = clamp_rows(
+                    anchor_info.plan_rows.as_f64() + recursive_info.plan_rows.as_f64() * 10.0,
+                );
+                let width = output_columns
+                    .iter()
+                    .map(|col| estimate_sql_type_width(col.sql_type))
+                    .sum();
+                let duplicate_cost = if distinct {
+                    rows * CPU_OPERATOR_COST
+                } else {
+                    0.0
+                };
+                Path::RecursiveUnion {
+                    plan_info: PlanEstimate::new(
+                        anchor_info.startup_cost.as_f64(),
+                        anchor_info.total_cost.as_f64()
+                            + recursive_info.total_cost.as_f64() * 10.0
+                            + duplicate_cost,
+                        rows,
+                        width,
+                    ),
+                    slot_id,
+                    worktable_id,
+                    distinct,
+                    output_columns,
+                    anchor: Box::new(anchor),
+                    recursive: Box::new(recursive),
+                }
+            }
             Path::NestedLoopJoin {
                 left,
                 right,
@@ -288,13 +347,10 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                 let right = optimize_path(*right, catalog);
                 let left_relids = path_relids(&left);
                 let right_relids = path_relids(&right);
-                let join_clauses = extract_hash_join_clauses(
-                    &restrict_clauses,
-                    &left_relids,
-                    &right_relids,
-                )
-                .map(|clauses| clauses.join_clauses)
-                .unwrap_or_default();
+                let join_clauses =
+                    extract_hash_join_clauses(&restrict_clauses, &left_relids, &right_relids)
+                        .map(|clauses| clauses.join_clauses)
+                        .unwrap_or_default();
                 estimate_hash_join(
                     left,
                     right,
@@ -372,8 +428,8 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
 }
 
 fn try_optimize_access_subtree(plan: Path, catalog: &dyn CatalogLookup) -> Result<Path, Path> {
-    let (source_id, rel, relation_name, relation_oid, toast, desc, filter, order_items) =
-        match plan {
+    let (source_id, rel, relation_name, relation_oid, toast, desc, filter, order_items) = match plan
+    {
         Path::SeqScan {
             source_id,
             rel,
@@ -932,7 +988,10 @@ pub(super) fn extract_hash_join_clauses(
 }
 
 fn clause_exprs(clauses: &[RestrictInfo]) -> Vec<Expr> {
-    clauses.iter().map(|restrict| restrict.clause.clone()).collect()
+    clauses
+        .iter()
+        .map(|restrict| restrict.clause.clone())
+        .collect()
 }
 
 fn selectivity_for_restrict_clauses(clauses: &[RestrictInfo], rows: f64) -> f64 {
@@ -1455,7 +1514,8 @@ fn estimate_nested_loop_join_internal(
 ) -> Path {
     let left_info = left.plan_info();
     let right_info = right.plan_info();
-    let join_sel = selectivity_for_restrict_clauses(&restrict_clauses, left_info.plan_rows.as_f64());
+    let join_sel =
+        selectivity_for_restrict_clauses(&restrict_clauses, left_info.plan_rows.as_f64());
     let rows = estimate_join_rows(
         left_info.plan_rows.as_f64(),
         right_info.plan_rows.as_f64(),
@@ -1615,8 +1675,11 @@ fn estimate_hash_join_internal(
 
     let left_info = left.plan_info();
     let right_info = right.plan_info();
-    let join_sel =
-        hash_join_selectivity(&canonical_hash_clauses, &rewritten_join_qual, left_info.plan_rows.as_f64());
+    let join_sel = hash_join_selectivity(
+        &canonical_hash_clauses,
+        &rewritten_join_qual,
+        left_info.plan_rows.as_f64(),
+    );
     let rows = estimate_join_rows(
         left_info.plan_rows.as_f64(),
         right_info.plan_rows.as_f64(),

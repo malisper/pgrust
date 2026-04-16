@@ -608,6 +608,7 @@ fn run_statement(
                 timed: false,
                 catalog: relcache.materialize_visible_catalog(),
                 compiled_functions: std::collections::HashMap::new(),
+                recursive_worktables: std::collections::HashMap::new(),
             };
             execute_readonly_statement(Statement::Explain(stmt), &relcache, &mut ctx)
         }
@@ -629,6 +630,7 @@ fn run_statement(
                 timed: false,
                 catalog: relcache.materialize_visible_catalog(),
                 compiled_functions: std::collections::HashMap::new(),
+                recursive_worktables: std::collections::HashMap::new(),
             };
             execute_readonly_statement(Statement::Select(stmt), &relcache, &mut ctx)
         }
@@ -650,6 +652,7 @@ fn run_statement(
                 timed: false,
                 catalog: relcache.materialize_visible_catalog(),
                 compiled_functions: std::collections::HashMap::new(),
+                recursive_worktables: std::collections::HashMap::new(),
             };
             execute_readonly_statement(Statement::Values(stmt), &relcache, &mut ctx)
         }
@@ -671,6 +674,7 @@ fn run_statement(
                 timed: false,
                 catalog: relcache.materialize_visible_catalog(),
                 compiled_functions: std::collections::HashMap::new(),
+                recursive_worktables: std::collections::HashMap::new(),
             };
             execute_readonly_statement(Statement::Analyze(stmt), &relcache, &mut ctx)
         }
@@ -752,6 +756,7 @@ fn run_statement(
                 timed: false,
                 catalog: relcache.materialize_visible_catalog(),
                 compiled_functions: std::collections::HashMap::new(),
+                recursive_worktables: std::collections::HashMap::new(),
             };
             execute_truncate_table(stmt, &relcache, &mut ctx, INVALID_TRANSACTION_ID)
         }
@@ -773,6 +778,7 @@ fn run_statement(
                 timed: false,
                 catalog: relcache.materialize_visible_catalog(),
                 compiled_functions: std::collections::HashMap::new(),
+                recursive_worktables: std::collections::HashMap::new(),
             };
             execute_readonly_statement(Statement::Vacuum(stmt), &relcache, &mut ctx)
         }
@@ -797,6 +803,7 @@ fn run_statement(
                     timed: false,
                     catalog: relcache.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
+                    recursive_worktables: std::collections::HashMap::new(),
                 };
                 execute_insert(bound, &relcache, &mut ctx, xid, 0)
             };
@@ -832,6 +839,7 @@ fn run_statement(
                     timed: false,
                     catalog: relcache.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
+                    recursive_worktables: std::collections::HashMap::new(),
                 };
                 execute_update_with_waiter(bound, &relcache, &mut ctx, xid, 0, None)
             };
@@ -867,6 +875,7 @@ fn run_statement(
                     timed: false,
                     catalog: relcache.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
+                    recursive_worktables: std::collections::HashMap::new(),
                 };
                 execute_delete_with_waiter(bound, &relcache, &mut ctx, xid, None)
             };

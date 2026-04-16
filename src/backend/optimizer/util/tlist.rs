@@ -6,13 +6,13 @@ use crate::include::nodes::primnodes::{
     attrno_index, user_attrno,
 };
 
+use super::super::inherit::append_translation;
 use super::super::optimize_path;
 use super::super::pathnodes::{
     expr_sql_type, is_synthetic_slot_id, lower_agg_output_expr, rewrite_expr_against_layout,
     rewrite_semantic_expr_for_input_path,
 };
 use super::super::{expand_join_rte_vars, expr_relids, flatten_join_alias_vars};
-use super::super::inherit::append_translation;
 use crate::include::nodes::pathnodes::AppendRelInfo;
 
 pub(super) fn pathkeys_to_order_items(pathkeys: &[PathKey]) -> Vec<OrderByEntry> {
@@ -275,7 +275,18 @@ fn path_relids(path: &Path) -> Vec<usize> {
         | Path::Limit { input, .. }
         | Path::Aggregate { input, .. }
         | Path::ProjectSet { input, .. } => path_relids(input),
-        Path::Values { slot_id, .. } | Path::FunctionScan { slot_id, .. } => vec![*slot_id],
+        Path::Values { slot_id, .. }
+        | Path::FunctionScan { slot_id, .. }
+        | Path::WorkTableScan { slot_id, .. } => vec![*slot_id],
+        Path::RecursiveUnion {
+            anchor, recursive, ..
+        } => {
+            let mut relids = path_relids(anchor);
+            relids.extend(path_relids(recursive));
+            relids.sort_unstable();
+            relids.dedup();
+            relids
+        }
         Path::NestedLoopJoin { left, right, .. } | Path::HashJoin { left, right, .. } => {
             let mut relids = path_relids(left);
             relids.extend(path_relids(right));
@@ -334,7 +345,9 @@ fn rewrite_expr_for_append_rel(expr: Expr, info: &AppendRelInfo) -> Expr {
                 ..*saop
             },
         )),
-        Expr::Cast(inner, ty) => Expr::Cast(Box::new(rewrite_expr_for_append_rel(*inner, info)), ty),
+        Expr::Cast(inner, ty) => {
+            Expr::Cast(Box::new(rewrite_expr_for_append_rel(*inner, info)), ty)
+        }
         Expr::Like {
             expr,
             pattern,

@@ -212,12 +212,13 @@ impl Database {
                     client_id,
                     next_command_id: 0,
                     outer_rows: Vec::new(),
-            outer_system_bindings: Vec::new(),
-            system_bindings: Vec::new(),
+                    outer_system_bindings: Vec::new(),
+                    system_bindings: Vec::new(),
                     subplans: Vec::new(),
                     timed: false,
                     catalog: visible_catalog.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
+                    recursive_worktables: std::collections::HashMap::new(),
                 };
                 let result = execute_readonly_statement(plan_or_stmt, &visible_catalog, &mut ctx);
                 drop(ctx);
@@ -250,12 +251,13 @@ impl Database {
                     client_id,
                     next_command_id: 0,
                     outer_rows: Vec::new(),
-            outer_system_bindings: Vec::new(),
-            system_bindings: Vec::new(),
+                    outer_system_bindings: Vec::new(),
+                    system_bindings: Vec::new(),
                     subplans: Vec::new(),
                     timed: false,
                     catalog: catalog.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
+                    recursive_worktables: std::collections::HashMap::new(),
                 };
                 let result = execute_insert(bound, &catalog, &mut ctx, xid, 0);
                 drop(ctx);
@@ -267,7 +269,11 @@ impl Database {
             Statement::Update(ref update_stmt) => {
                 let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
                 let bound = bind_update(update_stmt, &catalog)?;
-                let rels = bound.targets.iter().map(|target| target.rel).collect::<Vec<_>>();
+                let rels = bound
+                    .targets
+                    .iter()
+                    .map(|target| target.rel)
+                    .collect::<Vec<_>>();
                 for rel in &rels {
                     self.table_locks.lock_table_interruptible(
                         *rel,
@@ -291,12 +297,13 @@ impl Database {
                     client_id,
                     next_command_id: 0,
                     outer_rows: Vec::new(),
-            outer_system_bindings: Vec::new(),
-            system_bindings: Vec::new(),
+                    outer_system_bindings: Vec::new(),
+                    system_bindings: Vec::new(),
                     subplans: Vec::new(),
                     timed: false,
                     catalog: catalog.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
+                    recursive_worktables: std::collections::HashMap::new(),
                 };
                 let result = execute_update_with_waiter(
                     bound,
@@ -317,7 +324,11 @@ impl Database {
             Statement::Delete(ref delete_stmt) => {
                 let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
                 let bound = bind_delete(delete_stmt, &catalog)?;
-                let rels = bound.targets.iter().map(|target| target.rel).collect::<Vec<_>>();
+                let rels = bound
+                    .targets
+                    .iter()
+                    .map(|target| target.rel)
+                    .collect::<Vec<_>>();
                 for rel in &rels {
                     self.table_locks.lock_table_interruptible(
                         *rel,
@@ -341,12 +352,13 @@ impl Database {
                     client_id,
                     next_command_id: 0,
                     outer_rows: Vec::new(),
-            outer_system_bindings: Vec::new(),
-            system_bindings: Vec::new(),
+                    outer_system_bindings: Vec::new(),
+                    system_bindings: Vec::new(),
                     subplans: Vec::new(),
                     timed: false,
                     catalog: catalog.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
+                    recursive_worktables: std::collections::HashMap::new(),
                 };
                 let result = execute_delete_with_waiter(
                     bound,
@@ -456,12 +468,13 @@ impl Database {
                     client_id,
                     next_command_id: 0,
                     outer_rows: Vec::new(),
-            outer_system_bindings: Vec::new(),
-            system_bindings: Vec::new(),
+                    outer_system_bindings: Vec::new(),
+                    system_bindings: Vec::new(),
                     subplans: Vec::new(),
                     timed: false,
                     catalog: catalog.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
+                    recursive_worktables: std::collections::HashMap::new(),
                 };
                 let result = execute_truncate_table(
                     truncate_stmt.clone(),
@@ -506,12 +519,13 @@ impl Database {
                     datetime_config:
                         crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                     outer_rows: Vec::new(),
-            outer_system_bindings: Vec::new(),
-            system_bindings: Vec::new(),
+                    outer_system_bindings: Vec::new(),
+                    system_bindings: Vec::new(),
                     subplans: Vec::new(),
                     timed: false,
                     catalog: catalog.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
+                    recursive_worktables: std::collections::HashMap::new(),
                 };
                 let result = execute_vacuum(vacuum_stmt.clone(), &catalog, &mut ctx);
                 drop(ctx);
@@ -581,6 +595,7 @@ impl Database {
             timed: false,
             catalog: visible_catalog_snapshot,
             compiled_functions: std::collections::HashMap::new(),
+            recursive_worktables: std::collections::HashMap::new(),
         };
 
         Ok(SelectGuard {

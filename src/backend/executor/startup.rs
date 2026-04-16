@@ -5,7 +5,8 @@ use crate::include::catalog::builtin_aggregate_function_for_proc_oid;
 use crate::include::nodes::execnodes::{
     AggregateState, AppendState, FilterState, FunctionScanState, HashJoinState, HashState,
     IndexScanState, LimitState, NestedLoopJoinState, NodeExecStats, OrderByState, ProjectSetState,
-    ProjectionState, ResultState, SeqScanState, ValuesState,
+    ProjectionState, RecursiveUnionState, RecursiveWorkTable, ResultState, SeqScanState,
+    ValuesState, WorkTableScanState,
 };
 use crate::include::nodes::primnodes::{Expr, SetReturningCall};
 
@@ -115,7 +116,10 @@ fn project_set_target_uses_outer_columns(
 
 fn plan_uses_outer_columns(plan: &Plan) -> bool {
     match plan {
-        Plan::Result { .. } | Plan::SeqScan { .. } | Plan::IndexScan { .. } => false,
+        Plan::Result { .. }
+        | Plan::SeqScan { .. }
+        | Plan::IndexScan { .. }
+        | Plan::WorkTableScan { .. } => false,
         Plan::Append { children, .. } => children.iter().any(plan_uses_outer_columns),
         Plan::Hash {
             input, hash_keys, ..
@@ -180,6 +184,9 @@ fn plan_uses_outer_columns(plan: &Plan) -> bool {
             plan_uses_outer_columns(input)
                 || targets.iter().any(project_set_target_uses_outer_columns)
         }
+        Plan::RecursiveUnion {
+            anchor, recursive, ..
+        } => plan_uses_outer_columns(anchor) || plan_uses_outer_columns(recursive),
     }
 }
 
@@ -559,6 +566,48 @@ pub fn executor_start(plan: Plan) -> PlanState {
             plan_info,
             stats: NodeExecStats::default(),
         }),
+        Plan::WorkTableScan {
+            plan_info,
+            worktable_id,
+            output_columns,
+        } => {
+            let width = output_columns.len();
+            Box::new(WorkTableScanState {
+                worktable_id,
+                output_columns: output_columns.into_iter().map(|c| c.name).collect(),
+                next_index: 0,
+                slot: TupleSlot::empty(width),
+                current_bindings: Vec::new(),
+                plan_info,
+                stats: NodeExecStats::default(),
+            })
+        }
+        Plan::RecursiveUnion {
+            plan_info,
+            worktable_id,
+            distinct,
+            output_columns,
+            anchor,
+            recursive,
+        } => {
+            let width = output_columns.len();
+            Box::new(RecursiveUnionState {
+                worktable_id,
+                distinct,
+                anchor: executor_start(*anchor),
+                recursive_plan: *recursive,
+                recursive_state: None,
+                output_columns: output_columns.into_iter().map(|c| c.name).collect(),
+                worktable: Rc::new(std::cell::RefCell::new(RecursiveWorkTable::default())),
+                intermediate_rows: Vec::new(),
+                seen_rows: std::collections::HashSet::new(),
+                anchor_done: false,
+                slot: TupleSlot::empty(width),
+                current_bindings: Vec::new(),
+                plan_info,
+                stats: NodeExecStats::default(),
+            })
+        }
         Plan::Values {
             plan_info,
             rows,

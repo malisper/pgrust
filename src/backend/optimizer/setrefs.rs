@@ -7,8 +7,7 @@ use super::pathnodes::{
 };
 use super::{
     aggregate_group_by, expand_join_rte_vars, flatten_join_alias_vars,
-    rewrite_semantic_expr_for_path,
-    rewrite_semantic_expr_for_path_or_expand_join_vars,
+    rewrite_semantic_expr_for_path, rewrite_semantic_expr_for_path_or_expand_join_vars,
 };
 use crate::include::nodes::parsenodes::RangeTblEntryKind;
 use crate::include::nodes::pathnodes::{Path, PlannerInfo, RestrictInfo};
@@ -361,6 +360,32 @@ fn set_plan_refs(root: Option<&PlannerInfo>, path: Path) -> Plan {
             plan_info,
             call: lower_set_returning_call_to_plan_layout(call, &[]),
         },
+        Path::WorkTableScan {
+            plan_info,
+            worktable_id,
+            output_columns,
+            ..
+        } => Plan::WorkTableScan {
+            plan_info,
+            worktable_id,
+            output_columns,
+        },
+        Path::RecursiveUnion {
+            plan_info,
+            worktable_id,
+            distinct,
+            output_columns,
+            anchor,
+            recursive,
+            ..
+        } => Plan::RecursiveUnion {
+            plan_info,
+            worktable_id,
+            distinct,
+            output_columns,
+            anchor: Box::new(set_plan_refs(root, *anchor)),
+            recursive: Box::new(set_plan_refs(root, *recursive)),
+        },
         Path::ProjectSet {
             plan_info,
             input,
@@ -384,7 +409,11 @@ fn split_join_restrict_clauses<'a>(
     kind: crate::include::nodes::primnodes::JoinType,
     restrict_clauses: &'a [RestrictInfo],
 ) -> (&'a [RestrictInfo], &'a [RestrictInfo]) {
-    if matches!(kind, crate::include::nodes::primnodes::JoinType::Inner | crate::include::nodes::primnodes::JoinType::Cross) {
+    if matches!(
+        kind,
+        crate::include::nodes::primnodes::JoinType::Inner
+            | crate::include::nodes::primnodes::JoinType::Cross
+    ) {
         return (restrict_clauses, &[]);
     }
     let split_at = restrict_clauses
@@ -653,9 +682,7 @@ fn match_join_input_output(expr: &Expr, path: &Path, layout: &[Expr]) -> Option<
     }
     match path {
         Path::Projection {
-            slot_id,
-            targets,
-            ..
+            slot_id, targets, ..
         } => targets.iter().enumerate().find_map(|(index, target)| {
             (target.expr == *expr).then(|| PathRewrite {
                 expr: slot_var(*slot_id, user_attrno(index), target.sql_type),
@@ -695,7 +722,14 @@ fn fix_join_expr(
     {
         let flattened = flatten_join_alias_vars(root, expr.clone());
         if flattened != expr {
-            return fix_join_expr(Some(root), flattened, left, left_layout, right, right_layout);
+            return fix_join_expr(
+                Some(root),
+                flattened,
+                left,
+                left_layout,
+                right,
+                right_layout,
+            );
         }
     }
 
