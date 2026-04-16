@@ -6,6 +6,7 @@ mod joininfo;
 mod path;
 mod pathnodes;
 mod plan;
+mod rewrite;
 mod root;
 mod setrefs;
 #[cfg(test)]
@@ -248,7 +249,11 @@ fn flatten_join_alias_vars(root: &PlannerInfo, expr: Expr) -> Expr {
 }
 
 fn rewrite_semantic_expr_for_path(expr: Expr, path: &Path, layout: &[Expr]) -> Expr {
-    util::rewrite_semantic_expr_for_path(expr, path, layout)
+    rewrite::rewrite_semantic_expr_for_path(expr, path, layout)
+}
+
+fn rewrite_expr_for_path(expr: Expr, path: &Path, layout: &[Expr]) -> Expr {
+    rewrite::rewrite_expr_for_path(expr, path, layout)
 }
 
 fn rewrite_semantic_expr_for_path_or_expand_join_vars(
@@ -257,11 +262,11 @@ fn rewrite_semantic_expr_for_path_or_expand_join_vars(
     path: &Path,
     layout: &[Expr],
 ) -> Expr {
-    util::rewrite_semantic_expr_for_path_or_expand_join_vars(root, expr, path, layout)
+    rewrite::rewrite_semantic_expr_for_path_or_expand_join_vars(root, expr, path, layout)
 }
 
 fn layout_candidate_for_expr(root: &PlannerInfo, expr: &Expr, layout: &[Expr]) -> Option<Expr> {
-    util::layout_candidate_for_expr(root, expr, layout)
+    rewrite::layout_candidate_for_expr(root, expr, layout)
 }
 
 fn aggregate_group_by(path: &Path) -> Option<&[Expr]> {
