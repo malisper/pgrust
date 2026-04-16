@@ -1,10 +1,14 @@
 use super::bestpath::{self, CostSelector};
+use crate::backend::catalog::catalog::column_desc;
+use crate::backend::optimizer::util;
+use crate::backend::parser::analyze::LiteralDefaultCatalog;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::pathnodes::{Path, PathKey, PathTarget, RelOptInfo, RelOptKind};
 use crate::include::nodes::plannodes::{Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
-    AttrNumber, Expr, JoinType, OpExpr, OpExprKind, OrderByEntry, QueryColumn, TargetEntry, Var,
+    AttrNumber, Expr, JoinType, OpExpr, OpExprKind, OrderByEntry, QueryColumn, RelationDesc,
+    TargetEntry, Var,
     INNER_VAR, OUTER_VAR,
 };
 
@@ -29,6 +33,15 @@ fn pathkey(expr: crate::include::nodes::primnodes::Expr) -> PathKey {
     PathKey {
         expr,
         ressortgroupref: 0,
+        descending: false,
+        nulls_first: None,
+    }
+}
+
+fn pathkey_with_ref(expr: crate::include::nodes::primnodes::Expr, ressortgroupref: usize) -> PathKey {
+    PathKey {
+        expr,
+        ressortgroupref,
         descending: false,
         nulls_first: None,
     }
@@ -183,6 +196,55 @@ fn projection_keeps_hidden_order_pathkeys() {
     };
 
     assert_eq!(projection.pathkeys(), vec![pathkey(order_expr)]);
+}
+
+#[test]
+fn projection_output_target_keeps_sortgrouprefs() {
+    let projection = Path::Projection {
+        plan_info: PlanEstimate::new(1.0, 1.5, 10.0, 1),
+        slot_id: 20,
+        input: Box::new(values_path(10, 1.0, 1.0)),
+        targets: vec![
+            TargetEntry::new("a", var(10, 1), int4(), 1).with_sort_group_ref(11),
+            TargetEntry::new("b", var(10, 2), int4(), 2),
+        ],
+    };
+
+    assert_eq!(projection.output_target().sortgrouprefs, vec![11, 0]);
+}
+
+#[test]
+fn normalize_rte_path_preserves_projection_sortgrouprefs() {
+    let catalog = LiteralDefaultCatalog;
+    let ordered_projection = Path::OrderBy {
+        plan_info: PlanEstimate::new(1.0, 1.5, 10.0, 1),
+        input: Box::new(Path::Projection {
+            plan_info: PlanEstimate::new(1.0, 1.2, 10.0, 1),
+            slot_id: 20,
+            input: Box::new(values_path(10, 1.0, 1.0)),
+            targets: vec![
+                TargetEntry::new("a", var(10, 1), int4(), 1).with_sort_group_ref(17),
+                TargetEntry::new("b", var(10, 2), int4(), 2),
+            ],
+        }),
+        items: vec![OrderByEntry {
+            expr: var(20, 1),
+            ressortgroupref: 17,
+            descending: false,
+            nulls_first: None,
+        }],
+    };
+    let desc = RelationDesc {
+        columns: vec![
+            column_desc("a", int4(), true),
+            column_desc("b", int4(), true),
+        ],
+    };
+
+    let normalized = util::normalize_rte_path(1, &desc, ordered_projection, &catalog);
+
+    assert_eq!(normalized.output_target().sortgrouprefs, vec![17, 0]);
+    assert_eq!(normalized.pathkeys(), vec![pathkey_with_ref(var(1, 1), 17)]);
 }
 
 #[test]

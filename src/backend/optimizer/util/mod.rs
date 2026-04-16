@@ -1,7 +1,7 @@
 mod tlist;
 
 use crate::backend::parser::CatalogLookup;
-use crate::include::nodes::pathnodes::{Path, PathKey, PlannerInfo, RelOptInfo};
+use crate::include::nodes::pathnodes::{Path, PathKey, PathTarget, PlannerInfo, RelOptInfo};
 use crate::include::nodes::primnodes::{AggAccum, Expr, QueryColumn, RelationDesc, TargetEntry};
 
 pub(super) fn build_aggregate_output_columns(
@@ -15,10 +15,10 @@ pub(super) fn project_to_slot_layout(
     slot_id: usize,
     desc: &RelationDesc,
     input: Path,
-    target_exprs: Vec<Expr>,
+    target: PathTarget,
     catalog: &dyn CatalogLookup,
 ) -> Path {
-    tlist::project_to_slot_layout(slot_id, desc, input, target_exprs, catalog)
+    tlist::project_to_slot_layout(slot_id, desc, input, target, catalog)
 }
 
 pub(super) fn project_to_slot_layout_internal(
@@ -26,10 +26,10 @@ pub(super) fn project_to_slot_layout_internal(
     slot_id: usize,
     desc: &RelationDesc,
     input: Path,
-    target_exprs: Vec<Expr>,
+    target: PathTarget,
     catalog: &dyn CatalogLookup,
 ) -> Path {
-    tlist::project_to_slot_layout_internal(root, slot_id, desc, input, target_exprs, catalog)
+    tlist::project_to_slot_layout_internal(root, slot_id, desc, input, target, catalog)
 }
 
 pub(super) fn normalize_rte_path(

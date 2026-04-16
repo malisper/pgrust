@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use super::rewrite_semantic_expr_for_path;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::nodes::datum::Value;
-use crate::include::nodes::pathnodes::{Path, PathKey};
+use crate::include::nodes::pathnodes::{Path, PathKey, PathTarget};
 use crate::include::nodes::plannodes::{Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
     AggAccum, Aggref, BoolExpr, Expr, ExprArraySubscript, FuncExpr, JoinType, OpExpr, OrderByEntry,
@@ -197,6 +197,28 @@ impl Path {
                 vars.extend(right.output_vars());
                 vars
             }
+        }
+    }
+
+    pub fn output_target(&self) -> PathTarget {
+        match self {
+            Self::Filter { input, .. } | Self::OrderBy { input, .. } | Self::Limit { input, .. } => {
+                input.output_target()
+            }
+            Self::Projection {
+                slot_id, targets, ..
+            } => PathTarget::with_sortgrouprefs(
+                targets
+                    .iter()
+                    .enumerate()
+                    .map(|(index, target)| slot_var(*slot_id, user_attrno(index), target.sql_type))
+                    .collect(),
+                targets
+                    .iter()
+                    .map(|target| target.ressortgroupref)
+                    .collect(),
+            ),
+            _ => PathTarget::new(self.output_vars()),
         }
     }
 
