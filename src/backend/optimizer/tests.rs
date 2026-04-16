@@ -639,22 +639,17 @@ fn planner_keeps_function_scan_filter_semantic_until_setrefs() {
     let planned =
         planned_stmt_for_sql("select * from generate_series(1, 3) as g(x) where x > 1");
 
-    match planned.plan_tree {
+    assert!(plan_contains(&planned.plan_tree, |plan| match plan {
         Plan::Filter { predicate, input, .. } => {
-            match predicate {
-                Expr::Op(op) => {
-                    assert!(is_special_user_var(&op.args[0], OUTER_VAR, 0));
-                    assert_eq!(op.args[1], Expr::Const(Value::Int32(1)));
-                }
-                other => panic!("expected filter op, got {other:?}"),
-            }
-            assert!(matches!(
-                *input,
-                Plan::FunctionScan { .. } | Plan::Projection { .. }
-            ));
+            matches!(
+                predicate,
+                Expr::Op(op)
+                    if is_special_user_var(&op.args[0], OUTER_VAR, 0)
+                        && op.args[1] == Expr::Const(Value::Int32(1))
+            ) && matches!(input.as_ref(), Plan::FunctionScan { .. } | Plan::Projection { .. })
         }
-        other => panic!("expected filter over function scan, got {other:?}"),
-    }
+        _ => false,
+    }));
 }
 
 #[test]

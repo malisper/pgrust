@@ -1535,7 +1535,7 @@ fn apply_relation_alias(
     scope: BoundScope,
     alias: &str,
     column_aliases: &AliasColumnSpec,
-    alias_single_function_output: bool,
+    _alias_single_function_output: bool,
     preserve_source_names: bool,
     source_is_alias: bool,
 ) -> Result<(AnalyzedFrom, BoundScope), ParseError> {
@@ -1593,15 +1593,6 @@ fn apply_relation_alias(
             desc.columns[column_index].name = new_name.clone();
             desc.columns[column_index].storage.name = new_name.clone();
         }
-    }
-
-    if column_aliases.is_empty() && alias_single_function_output && visible_positions.len() == 1 {
-        let column_index = visible_positions[0];
-        let column = &mut columns[column_index];
-        renamed |= column.output_name != alias;
-        column.output_name = alias.to_string();
-        desc.columns[column_index].name = alias.to_string();
-        desc.columns[column_index].storage.name = alias.to_string();
     }
 
     if preserve_source_names {
