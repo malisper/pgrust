@@ -8,7 +8,7 @@ use crate::backend::parser::{Catalog, DoStatement, ParseError};
 
 pub use ast::*;
 pub use compile::CompiledFunction;
-pub use exec::{PlpgsqlNotice, clear_notices, take_notices};
+pub use exec::{clear_notices, take_notices, PlpgsqlNotice};
 pub(crate) use exec::{
     execute_user_defined_scalar_function, execute_user_defined_set_returning_function,
 };
@@ -80,6 +80,35 @@ mod tests {
                     message: "done 7".into(),
                 }
             ]
+        );
+    }
+
+    #[test]
+    fn execute_do_runs_elsif_branch() {
+        let stmt = DoStatement {
+            language: None,
+            code: r#"
+                begin
+                    if 1 = 0 then
+                        raise exception 'wrong if';
+                    elsif 2 = 2 then
+                        raise notice 'elsif';
+                    else
+                        raise exception 'wrong else';
+                    end if;
+                end
+            "#
+            .into(),
+        };
+
+        let result = execute_do(&stmt).unwrap();
+        assert_eq!(result, StatementResult::AffectedRows(0));
+        assert_eq!(
+            take_notices(),
+            vec![PlpgsqlNotice {
+                level: RaiseLevel::Notice,
+                message: "elsif".into(),
+            }]
         );
     }
 

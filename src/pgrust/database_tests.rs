@@ -7814,6 +7814,31 @@ fn create_function_scalar_calls_work_in_select_and_where() {
 }
 
 #[test]
+fn create_function_scalar_elsif_branches_work() {
+    let dir = temp_dir("create_function_scalar_elsif");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function classify_size(x int4) returns text language plpgsql as $$ begin if x >= 10 then return 'large'; elsif x >= 5 then return 'medium'; else return 'small'; end if; end $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select classify_size(12), classify_size(7), classify_size(3)",
+        ),
+        vec![vec![
+            Value::Text("large".into()),
+            Value::Text("medium".into()),
+            Value::Text("small".into()),
+        ]]
+    );
+}
+
+#[test]
 fn create_function_setof_scalar_works_in_from_and_project_set() {
     let dir = temp_dir("create_function_setof_scalar");
     let db = Database::open(&dir, 64).unwrap();

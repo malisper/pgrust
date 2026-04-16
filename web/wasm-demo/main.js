@@ -34,30 +34,6 @@ where score >= 12
 order by id;`,
   },
   {
-    id: "btree-index",
-    label: "Btree Index",
-    note:
-      "Creates a simple btree index and then probes it with an equality predicate.",
-    sql: `create table if not exists wasm_index_demo (
-  id int4,
-  sku text,
-  qty int4
-);
-delete from wasm_index_demo;
-insert into wasm_index_demo values
-  (1, 'A-100', 8),
-  (2, 'B-200', 3),
-  (3, 'C-300', 11),
-  (4, 'D-400', 6),
-  (5, 'E-500', 15);
-create index if not exists wasm_index_demo_sku_idx
-  on wasm_index_demo (sku);
-explain (analyze, buffers)
-select id, sku, qty
-from wasm_index_demo
-where sku = 'C-300';`,
-  },
-  {
     id: "hash-join",
     label: "Hash Join",
     note:
@@ -91,46 +67,33 @@ where o.total >= 25
 order by o.order_id;`,
   },
   {
-    id: "multiway-join",
-    label: "Multiway Join",
+    id: "plpgsql-function",
+    label: "Custom PL/pgSQL Function",
     note:
-      "Three relations joined together so you can inspect a wider join tree than a single binary join.",
-    sql: `create table if not exists wasm_join_departments (
-  department_id int4,
-  department_name text
-);
-create table if not exists wasm_join_employees (
-  employee_id int4,
-  department_id int4,
-  employee_name text
-);
-create table if not exists wasm_join_tasks (
-  task_id int4,
-  employee_id int4,
-  hours int4
-);
-delete from wasm_join_departments;
-delete from wasm_join_employees;
-delete from wasm_join_tasks;
-insert into wasm_join_departments values
-  (10, 'planner'),
-  (20, 'executor');
-insert into wasm_join_employees values
-  (1, 10, 'alice'),
-  (2, 10, 'bruno'),
-  (3, 20, 'carol');
-insert into wasm_join_tasks values
-  (1001, 1, 5),
-  (1002, 1, 3),
-  (1003, 3, 8),
-  (1004, 2, 2);
-explain (analyze, buffers)
-select d.department_name, e.employee_name, t.task_id, t.hours
-from wasm_join_departments d
-join wasm_join_employees e on e.department_id = d.department_id
-join wasm_join_tasks t on t.employee_id = e.employee_id
-where t.hours >= 3
-order by t.task_id;`,
+      "Builds a FizzBuzz-style `LANGUAGE plpgsql` table function using `FOR ... LOOP`, `ELSIF`, and `RETURN NEXT`. Use `Reset Database` before rerunning this example unchanged, because `CREATE FUNCTION` here does not support `IF NOT EXISTS` yet.",
+    sql: `create function wasm_fizzbuzz(limit int4)
+returns table(n int4, label text)
+language plpgsql
+as $fn$
+begin
+  for i in 1..limit loop
+    n := i;
+    if i % 15 = 0 then
+      label := 'fizzbuzz';
+    elsif i % 3 = 0 then
+      label := 'fizz';
+    elsif i % 5 = 0 then
+      label := 'buzz';
+    else
+      label := i::text;
+    end if;
+    return next;
+  end loop;
+  return;
+end
+$fn$;
+select *
+from wasm_fizzbuzz(100);`,
   },
   {
     id: "json",
@@ -257,10 +220,55 @@ function splitStatements(script) {
   let current = "";
   let singleQuoted = false;
   let doubleQuoted = false;
+  let dollarQuotedTag = null;
+
+  function readDollarQuotedTag(start) {
+    if (script[start] !== "$") {
+      return null;
+    }
+    let end = start + 1;
+    while (end < script.length) {
+      const ch = script[end];
+      if (ch === "$") {
+        return script.slice(start, end + 1);
+      }
+      const isIdentifierChar =
+        (ch >= "a" && ch <= "z") ||
+        (ch >= "A" && ch <= "Z") ||
+        (ch >= "0" && ch <= "9") ||
+        ch === "_";
+      if (!isIdentifierChar) {
+        return null;
+      }
+      end += 1;
+    }
+    return null;
+  }
 
   for (let i = 0; i < script.length; i++) {
     const ch = script[i];
     const prev = i > 0 ? script[i - 1] : "";
+
+    if (dollarQuotedTag) {
+      if (script.startsWith(dollarQuotedTag, i)) {
+        current += dollarQuotedTag;
+        i += dollarQuotedTag.length - 1;
+        dollarQuotedTag = null;
+      } else {
+        current += ch;
+      }
+      continue;
+    }
+
+    if (!singleQuoted && !doubleQuoted) {
+      const nextDollarTag = readDollarQuotedTag(i);
+      if (nextDollarTag) {
+        current += nextDollarTag;
+        i += nextDollarTag.length - 1;
+        dollarQuotedTag = nextDollarTag;
+        continue;
+      }
+    }
 
     if (ch === "'" && !doubleQuoted && prev !== "\\") {
       singleQuoted = !singleQuoted;
