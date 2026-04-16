@@ -1,4 +1,5 @@
 use super::*;
+use crate::backend::parser::analyze::query::project_set_output_placeholder;
 
 pub(crate) enum BoundSelectTargets {
     Plain(Vec<TargetEntry>),
@@ -99,7 +100,7 @@ pub(crate) fn bind_select_targets(
             });
             final_targets.push(TargetEntry::new(
                 output_name,
-                Expr::Column(base_width + srf_index),
+                project_set_output_placeholder(base_width + srf_index),
                 sql_type,
                 final_targets.len() + 1,
             )

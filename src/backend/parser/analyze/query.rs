@@ -543,10 +543,7 @@ pub(super) fn shift_expr_rtindexes(expr: Expr, offset: usize) -> Expr {
     }
 }
 
-pub(super) fn identity_target_list(
-    columns: &[QueryColumn],
-    output_exprs: &[Expr],
-) -> Vec<TargetEntry> {
+pub(super) fn identity_target_list(columns: &[QueryColumn], output_exprs: &[Expr]) -> Vec<TargetEntry> {
     columns
         .iter()
         .enumerate()
@@ -564,8 +561,28 @@ pub(super) fn identity_target_list(
         .collect()
 }
 
-pub(super) fn identity_output_exprs(width: usize) -> Vec<Expr> {
-    (0..width).map(Expr::Column).collect()
+fn legacy_output_identity_expr(index: usize) -> Expr {
+    Expr::Column(index)
+}
+
+pub(super) fn legacy_identity_target_list(columns: &[QueryColumn]) -> Vec<TargetEntry> {
+    columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| {
+            TargetEntry::new(
+                column.name.clone(),
+                legacy_output_identity_expr(index),
+                column.sql_type,
+                index + 1,
+            )
+            .with_input_resno(index + 1)
+        })
+        .collect()
+}
+
+pub(super) fn project_set_output_placeholder(index: usize) -> Expr {
+    legacy_output_identity_expr(index)
 }
 
 pub(super) fn normalize_target_list(mut targets: Vec<TargetEntry>) -> Vec<TargetEntry> {

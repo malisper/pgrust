@@ -63,8 +63,8 @@ pub use paths::BoundModifyRowSource;
 use paths::bind_order_by_items;
 pub(crate) use query::analyze_select_query_with_outer;
 use query::{
-    AnalyzedFrom, analyze_values_query_with_outer, identity_output_exprs, identity_target_list,
-    normalize_target_list,
+    AnalyzedFrom, analyze_values_query_with_outer, identity_target_list,
+    legacy_identity_target_list, normalize_target_list,
     rewrite_agg_accums, rewrite_expr_columns, rewrite_order_by_entries,
     rewrite_project_set_targets, rewrite_target_entries,
 };
@@ -885,7 +885,7 @@ fn bind_ctes(
                         command_type: crate::include::executor::execdesc::CommandType::Select,
                         rtable: Vec::new(),
                         jointree: None,
-                        target_list: identity_target_list(
+                        target_list: legacy_identity_target_list(
                             &desc
                                 .columns
                                 .iter()
@@ -894,7 +894,6 @@ fn bind_ctes(
                                     sql_type: column.sql_type,
                                 })
                                 .collect::<Vec<_>>(),
-                            &identity_output_exprs(desc.columns.len()),
                         ),
                         where_qual: None,
                         group_by: Vec::new(),
@@ -955,10 +954,7 @@ fn bind_ctes(
                         sql_type: column.sql_type,
                     })
                     .collect::<Vec<_>>();
-                let target_list = normalize_target_list(identity_target_list(
-                    &output_columns,
-                    &identity_output_exprs(output_columns.len()),
-                ));
+                let target_list = normalize_target_list(legacy_identity_target_list(&output_columns));
                 (
                     Query {
                         command_type: crate::include::executor::execdesc::CommandType::Select,
