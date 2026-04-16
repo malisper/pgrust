@@ -242,8 +242,6 @@ pass_list=()
 fail_list=()
 error_list=()
 
-SKIPPED_HANGING_TESTS=("join" "join_hash" "memoize" "subselect" "tablespace")
-
 echo ""
 echo "Running ${#TEST_FILES[@]} regression tests..."
 echo "=============================================="
@@ -397,24 +395,6 @@ for sql_file in "${TEST_FILES[@]}"; do
     if [[ ! -f "$expected_file" ]]; then
         printf "%-40s SKIP (no expected output)\n" "$test_name"
         TOTAL=$((TOTAL - 1))
-        continue
-    fi
-
-    if [[ " ${SKIPPED_HANGING_TESTS[*]} " == *" ${test_name} "* ]]; then
-        # :HACK: `join.sql` currently contains pathological queries that can
-        # spin indefinitely in pgrust. Record the test as a full mismatch so
-        # the regression summary completes while executor work continues.
-        {
-            echo "SKIPPED: known hanging regression test in pgrust"
-            echo "Test file: $sql_file"
-        } > "$output_file"
-        read -r q_matched q_mismatched q_total < <(count_matching_queries "$expected_file" /dev/null "$sql_file")
-        TOTAL_QUERIES=$((TOTAL_QUERIES + q_total))
-        QUERIES_MATCHED=$((QUERIES_MATCHED + q_matched))
-        QUERIES_MISMATCHED=$((QUERIES_MISMATCHED + q_mismatched))
-        printf "%-40s FAIL  (%d/%d queries matched, skipped known hang)\n" "$test_name" "$q_matched" "$q_total"
-        FAILED=$((FAILED + 1))
-        fail_list+=("$test_name")
         continue
     fi
 
