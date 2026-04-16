@@ -1,9 +1,12 @@
 use super::inherit::append_translation;
 use super::pathnodes::{
-    aggregate_output_vars, expr_sql_type, lower_agg_output_expr, rewrite_semantic_expr_for_input_path,
+    aggregate_output_vars, expr_sql_type, lower_agg_output_expr,
     rte_slot_varno,
 };
 use super::plan::append_planned_subquery;
+use super::util::{
+    rewrite_semantic_expr_for_path, rewrite_semantic_expr_for_path_or_expand_join_vars,
+};
 use super::{
     expand_join_rte_vars, flatten_join_alias_vars, planner_with_param_base,
 };
@@ -45,7 +48,7 @@ impl IndexedTlist {
                                         == flatten_join_alias_vars(root, expr.clone())
                                 })
                         }
-                        _ => false,
+                        _ => output_component_matches_expr(candidate, expr),
                     })
             }),
             _ => self.entries.iter().find(|entry| {
@@ -357,16 +360,29 @@ fn search_input_tlist_entry<'a>(
     input: &Path,
     tlist: &'a IndexedTlist,
 ) -> Option<&'a IndexedTlistEntry> {
+    let flattened_expr = root.map(|root| flatten_join_alias_vars(root, expr.clone()));
     search_tlist_entry(root, expr, tlist).or_else(|| {
         let mut matched_index = None;
         for entry in &tlist.entries {
             let entry_matches = entry.match_exprs.iter().any(|candidate| {
                 exprs_equivalent(root, candidate, expr)
+                    || output_component_matches_expr(candidate, expr)
+                    || flattened_expr.as_ref().is_some_and(|flattened_expr| {
+                        exprs_equivalent(root, candidate, flattened_expr)
+                            || output_component_matches_expr(candidate, flattened_expr)
+                    })
                     || exprs_equivalent(
                         root,
                         &fully_expand_output_expr_with_root(root, candidate.clone(), input),
                         expr,
                     )
+                    || flattened_expr.as_ref().is_some_and(|flattened_expr| {
+                        exprs_equivalent(
+                            root,
+                            &fully_expand_output_expr_with_root(root, candidate.clone(), input),
+                            flattened_expr,
+                        )
+                    })
             });
             if !entry_matches {
                 continue;
@@ -379,6 +395,18 @@ fn search_input_tlist_entry<'a>(
         }
         matched_index.and_then(|index| tlist.entries.iter().find(|entry| entry.index == index))
     })
+}
+
+fn output_component_matches_expr(candidate: &Expr, expr: &Expr) -> bool {
+    if candidate == expr {
+        return true;
+    }
+    match candidate {
+        Expr::Coalesce(left, right) => {
+            output_component_matches_expr(left, expr) || output_component_matches_expr(right, expr)
+        }
+        _ => false,
+    }
 }
 
 fn search_tlist_entry_by_sortgroupref(
@@ -1277,9 +1305,15 @@ fn lower_agg_accum(
             .args
             .into_iter()
             .map(|arg| {
+                let arg = match ctx.root {
+                    Some(root) => {
+                        rewrite_semantic_expr_for_path_or_expand_join_vars(root, arg, path, layout)
+                    }
+                    None => rewrite_semantic_expr_for_path(arg, path, layout),
+                };
                 lower_expr(
                     ctx,
-                    rewrite_semantic_expr_for_input_path(arg, path, layout),
+                    arg,
                     LowerMode::Input { tlist: input_tlist },
                 )
             })
@@ -2259,13 +2293,22 @@ fn set_projection_references(
                     let rewritten =
                         fix_upper_expr_for_input(root, target.expr.clone(), &input, &input_tlist);
                     if expr_contains_local_semantic_var(&rewritten) {
-                        fix_upper_expr_for_input(
-                            root,
-                            rewrite_semantic_expr_for_input_path(
+                        let semantic = match root {
+                            Some(root) => rewrite_semantic_expr_for_path_or_expand_join_vars(
+                                root,
                                 target.expr.clone(),
                                 &input,
                                 &input.output_vars(),
                             ),
+                            None => rewrite_semantic_expr_for_path(
+                                target.expr.clone(),
+                                &input,
+                                &input.output_vars(),
+                            ),
+                        };
+                        fix_upper_expr_for_input(
+                            root,
+                            semantic,
                             &input,
                             &input_tlist,
                         )
@@ -2342,9 +2385,15 @@ fn set_aggregate_references(
     let aggregate_layout = aggregate_output_vars(slot_id, &group_by, &accumulators);
     let aggregate_tlist = build_aggregate_tlist(ctx.root, slot_id, &group_by, &accumulators);
     let semantic_group_by = group_by.clone();
+    let root = ctx.root;
     let group_by = group_by
         .into_iter()
-        .map(|expr| rewrite_semantic_expr_for_input_path(expr, &input, &layout))
+        .map(|expr| match root {
+            Some(root) => rewrite_semantic_expr_for_path_or_expand_join_vars(
+                root, expr, &input, &layout,
+            ),
+            None => rewrite_semantic_expr_for_path(expr, &input, &layout),
+        })
         .map(|expr| lower_expr(ctx, expr, LowerMode::Input { tlist: &input_tlist }))
         .collect();
     let accumulators = accumulators

@@ -9,7 +9,7 @@ use crate::include::nodes::primnodes::{
 use super::super::inherit::append_translation;
 use super::super::optimize_path;
 use super::super::pathnodes::{
-    expr_sql_type, is_synthetic_slot_id, lower_agg_output_expr, rewrite_semantic_expr_for_input_path,
+    expr_sql_type, is_synthetic_slot_id, lower_agg_output_expr,
 };
 use super::super::{expand_join_rte_vars, flatten_join_alias_vars};
 use crate::include::nodes::pathnodes::AppendRelInfo;
@@ -761,7 +761,7 @@ pub(super) fn rewrite_semantic_expr_for_path_or_expand_join_vars(
     if let Some(candidate) = layout_candidate_for_expr(root, &expr, layout) {
         return candidate;
     }
-    let rewritten = rewrite_semantic_expr_for_input_path(expr.clone(), path, layout);
+    let rewritten = rewrite_semantic_expr_for_path(expr.clone(), path, layout);
     if rewritten != expr || layout.contains(&rewritten) {
         return rewritten;
     }
@@ -770,7 +770,7 @@ pub(super) fn rewrite_semantic_expr_for_path_or_expand_join_vars(
         if let Some(candidate) = layout_candidate_for_expr(root, &expanded, layout) {
             return candidate;
         }
-        rewrite_semantic_expr_for_input_path(expanded, path, layout)
+        rewrite_semantic_expr_for_path(expanded, path, layout)
     } else {
         rewritten
     }
