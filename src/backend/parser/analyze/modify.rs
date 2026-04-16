@@ -117,10 +117,10 @@ fn relation_display_name(catalog: &dyn CatalogLookup, relation_oid: u32, fallbac
         .unwrap_or_else(|| fallback.to_string())
 }
 
-fn inheritance_translation_layout(
+fn inheritance_translation_indexes(
     parent_desc: &RelationDesc,
     child_desc: &RelationDesc,
-) -> Vec<Expr> {
+) -> Vec<Option<usize>> {
     parent_desc
         .columns
         .iter()
@@ -134,19 +134,28 @@ fn inheritance_translation_layout(
                         && child_column.name.eq_ignore_ascii_case(&parent_column.name)
                         && child_column.sql_type == parent_column.sql_type
                 })
-                .map(|(index, _)| Expr::Column(index))
-                .unwrap_or(Expr::Const(Value::Null))
+                .map(|(index, _)| index)
+        })
+        .collect()
+}
+
+fn inheritance_translation_layout(indexes: &[Option<usize>]) -> Vec<Expr> {
+    indexes
+        .iter()
+        .map(|index| match index {
+            Some(index) => Expr::Column(*index),
+            None => Expr::Const(Value::Null),
         })
         .collect()
 }
 
 fn translated_child_column_index(
     parent_index: usize,
-    layout: &[Expr],
+    indexes: &[Option<usize>],
     relation_name: &str,
 ) -> Result<usize, ParseError> {
-    match layout.get(parent_index) {
-        Some(Expr::Column(index)) => Ok(*index),
+    match indexes.get(parent_index).copied().flatten() {
+        Some(index) => Ok(index),
         _ => Err(ParseError::UnexpectedToken {
             expected: "inherited target column present in child relation",
             actual: format!(
@@ -167,7 +176,8 @@ fn build_update_target(
     catalog: &dyn CatalogLookup,
 ) -> Result<BoundUpdateTarget, ParseError> {
     let relation_name = relation_display_name(catalog, child.relation_oid, base_relation_name);
-    let layout = inheritance_translation_layout(parent_desc, &child.desc);
+    let translation_indexes = inheritance_translation_indexes(parent_desc, &child.desc);
+    let layout = inheritance_translation_layout(&translation_indexes);
     let indexes = catalog.index_relations_for_heap(child.relation_oid);
     let predicate = parent_predicate.map(|expr| rewrite_expr_columns(expr.clone(), &layout));
     let assignments = parent_assignments
@@ -176,7 +186,7 @@ fn build_update_target(
             Ok(BoundAssignment {
                 column_index: translated_child_column_index(
                     assignment.column_index,
-                    &layout,
+                    &translation_indexes,
                     &relation_name,
                 )?,
                 subscripts: assignment.subscripts.clone(),
@@ -213,7 +223,10 @@ fn build_delete_target(
     catalog: &dyn CatalogLookup,
 ) -> BoundDeleteTarget {
     let relation_name = relation_display_name(catalog, child.relation_oid, base_relation_name);
-    let layout = inheritance_translation_layout(parent_desc, &child.desc);
+    let layout = inheritance_translation_layout(&inheritance_translation_indexes(
+        parent_desc,
+        &child.desc,
+    ));
     let predicate = parent_predicate.map(|expr| rewrite_expr_columns(expr.clone(), &layout));
     let indexes = catalog.index_relations_for_heap(child.relation_oid);
 
