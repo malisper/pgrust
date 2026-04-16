@@ -1116,9 +1116,17 @@ mod tests {
         xlog_register_buffer_image, xlog_register_data,
     };
     use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(1);
 
     fn test_dir(label: &str) -> std::path::PathBuf {
-        let p = std::env::temp_dir().join(format!("pgrust_wal_test_{label}"));
+        let p = std::env::temp_dir().join(format!(
+            "pgrust_wal_test_{}_{}_{}",
+            label,
+            std::process::id(),
+            NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed)
+        ));
         let _ = fs::remove_dir_all(&p);
         fs::create_dir_all(&p).unwrap();
         p
