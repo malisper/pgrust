@@ -459,6 +459,99 @@ fn into_plan_project_set_set_arg_lowers_via_child_tlist_identity() {
 }
 
 #[test]
+fn into_plan_nested_loop_join_lowers_join_qual_via_child_tlist_identity() {
+    let left = Path::Projection {
+        plan_info: PlanEstimate::new(1.0, 1.5, 10.0, 1),
+        slot_id: 20,
+        input: Box::new(values_path(10, 1.0, 1.0)),
+        targets: vec![TargetEntry::new("a", var(10, 1), int4(), 1)],
+    };
+    let right = Path::Projection {
+        plan_info: PlanEstimate::new(2.0, 2.5, 10.0, 1),
+        slot_id: 21,
+        input: Box::new(values_path(11, 2.0, 2.0)),
+        targets: vec![TargetEntry::new("b", var(11, 1), int4(), 1)],
+    };
+    let plan = Path::NestedLoopJoin {
+        plan_info: PlanEstimate::new(5.0, 6.0, 10.0, 2),
+        left: Box::new(left),
+        right: Box::new(right),
+        kind: JoinType::Inner,
+        restrict_clauses: vec![restrict(eq(var(10, 1), var(11, 1)))],
+    }
+    .into_plan();
+
+    match plan {
+        Plan::NestedLoopJoin { join_qual, .. } => {
+            assert_eq!(join_qual.len(), 1);
+            match &join_qual[0] {
+                Expr::Op(op) => {
+                    assert!(is_special_user_var(&op.args[0], OUTER_VAR, 0));
+                    assert!(is_special_user_var(&op.args[1], INNER_VAR, 0));
+                }
+                other => panic!("expected join qual op, got {other:?}"),
+            }
+        }
+        other => panic!("expected nested loop join plan, got {other:?}"),
+    }
+}
+
+#[test]
+fn into_plan_hash_join_lowers_hash_clause_via_child_tlist_identity() {
+    let left = Path::Projection {
+        plan_info: PlanEstimate::new(1.0, 1.5, 10.0, 1),
+        slot_id: 20,
+        input: Box::new(values_path(10, 1.0, 1.0)),
+        targets: vec![TargetEntry::new("a", var(10, 1), int4(), 1)],
+    };
+    let right = Path::Projection {
+        plan_info: PlanEstimate::new(2.0, 2.5, 10.0, 1),
+        slot_id: 21,
+        input: Box::new(values_path(11, 2.0, 2.0)),
+        targets: vec![TargetEntry::new("b", var(11, 1), int4(), 1)],
+    };
+    let plan = Path::HashJoin {
+        plan_info: PlanEstimate::new(5.0, 6.0, 10.0, 2),
+        left: Box::new(left),
+        right: Box::new(right),
+        kind: JoinType::Inner,
+        hash_clauses: vec![restrict(eq(var(10, 1), var(11, 1)))],
+        outer_hash_keys: vec![var(10, 1)],
+        inner_hash_keys: vec![var(11, 1)],
+        restrict_clauses: vec![restrict(eq(var(10, 1), var(11, 1)))],
+    }
+    .into_plan();
+
+    match plan {
+        Plan::HashJoin {
+            hash_clauses,
+            hash_keys,
+            right,
+            ..
+        } => {
+            assert_eq!(hash_keys.len(), 1);
+            assert!(is_special_user_var(&hash_keys[0], OUTER_VAR, 0));
+            assert_eq!(hash_clauses.len(), 1);
+            match &hash_clauses[0] {
+                Expr::Op(op) => {
+                    assert!(is_special_user_var(&op.args[0], OUTER_VAR, 0));
+                    assert!(is_special_user_var(&op.args[1], INNER_VAR, 0));
+                }
+                other => panic!("expected hash clause op, got {other:?}"),
+            }
+            match *right {
+                Plan::Hash { hash_keys, .. } => {
+                    assert_eq!(hash_keys.len(), 1);
+                    assert!(is_special_user_var(&hash_keys[0], OUTER_VAR, 0));
+                }
+                other => panic!("expected hash plan, got {other:?}"),
+            }
+        }
+        other => panic!("expected hash join plan, got {other:?}"),
+    }
+}
+
+#[test]
 fn required_query_pathkeys_for_path_falls_back_when_input_lacks_sortgroup_identity() {
     let root = planner_info_for_sql("select column1 as a from (values (1)) v order by a");
     let path = Path::Projection {
