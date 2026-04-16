@@ -447,11 +447,7 @@ pub(super) fn shift_expr_rtindexes(expr: Expr, offset: usize) -> Expr {
             }
             Expr::Var(var)
         }
-        expr @ (Expr::Param(_)
-        | Expr::OuterColumn { .. }
-        | Expr::Column(_)
-        | Expr::Const(_)
-        | Expr::Random) => expr,
+        expr @ (Expr::Param(_) | Expr::Column(_) | Expr::Const(_) | Expr::Random) => expr,
         Expr::Cast(inner, ty) => Expr::Cast(Box::new(shift_expr_rtindexes(*inner, offset)), ty),
         Expr::Like {
             expr,
@@ -800,11 +796,7 @@ pub(super) fn rewrite_expr_columns(expr: Expr, output_exprs: &[Expr]) -> Expr {
             .get(index)
             .cloned()
             .unwrap_or(Expr::Column(index)),
-        expr @ (Expr::Param(_)
-        | Expr::OuterColumn { .. }
-        | Expr::Var(_)
-        | Expr::Const(_)
-        | Expr::Random) => expr,
+        expr @ (Expr::Param(_) | Expr::Var(_) | Expr::Const(_) | Expr::Random) => expr,
         Expr::Cast(inner, ty) => {
             Expr::Cast(Box::new(rewrite_expr_columns(*inner, output_exprs)), ty)
         }

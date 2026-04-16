@@ -334,7 +334,6 @@ fn rewrite_semantic_expr(
         other @ (Expr::Var(_)
         | Expr::Param(_)
         | Expr::Column(_)
-        | Expr::OuterColumn { .. }
         | Expr::Const(_)
         | Expr::Random
         | Expr::CurrentDate

@@ -47,7 +47,7 @@ pub(crate) fn bind_expr_with_outer(
     bind_expr_with_outer_and_ctes(expr, scope, catalog, outer_scopes, grouped_outer, &[])
 }
 
-fn raise_expr_varlevels(expr: Expr, levels: usize) -> Expr {
+pub(super) fn raise_expr_varlevels(expr: Expr, levels: usize) -> Expr {
     if levels == 0 {
         return expr;
     }

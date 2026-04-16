@@ -358,7 +358,7 @@ pub(super) fn aggregate_output_vars(
 fn rewrite_expr_for_input_path(expr: Expr, path: &Path, layout: &[Expr]) -> Expr {
     fn expr_contains_legacy_layout_ref(expr: &Expr) -> bool {
         match expr {
-            Expr::Column(_) | Expr::OuterColumn { .. } => true,
+            Expr::Column(_) => true,
             Expr::Aggref(aggref) => aggref.args.iter().any(expr_contains_legacy_layout_ref),
             Expr::Op(op) => op.args.iter().any(expr_contains_legacy_layout_ref),
             Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_contains_legacy_layout_ref),
@@ -1032,7 +1032,7 @@ pub(super) fn expr_sql_type(expr: &Expr) -> SqlType {
         Expr::CurrentTimestamp { .. } => SqlType::new(SqlTypeKind::TimestampTz),
         Expr::LocalTime { .. } => SqlType::new(SqlTypeKind::Time),
         Expr::LocalTimestamp { .. } => SqlType::new(SqlTypeKind::Timestamp),
-        Expr::Column(_) | Expr::OuterColumn { .. } | Expr::ArraySubscript { .. } => {
+        Expr::Column(_) | Expr::ArraySubscript { .. } => {
             SqlType::new(SqlTypeKind::Text)
         }
     }
@@ -1040,7 +1040,7 @@ pub(super) fn expr_sql_type(expr: &Expr) -> SqlType {
 
 fn expr_sql_type_maybe(expr: &Expr) -> Option<SqlType> {
     match expr {
-        Expr::Column(_) | Expr::OuterColumn { .. } | Expr::ArraySubscript { .. } => None,
+        Expr::Column(_) | Expr::ArraySubscript { .. } => None,
         Expr::Param(param) => Some(param.paramtype),
         other => Some(expr_sql_type(other)),
     }

@@ -427,24 +427,6 @@ pub fn eval_expr(
             let val = slot.get_attr(*index)?;
             Ok(val.clone())
         }
-        Expr::OuterColumn { depth, index } => {
-            if *depth == 0 {
-                ctx.expr_bindings
-                    .outer_tuple
-                    .as_ref()
-                    .and_then(|row| row.get(*index))
-                    .cloned()
-                    .ok_or(ExecError::UnboundOuterColumn {
-                        depth: *depth,
-                        index: *index,
-                    })
-            } else {
-                Err(ExecError::UnboundOuterColumn {
-                    depth: *depth,
-                    index: *index,
-                })
-            }
-        }
         Expr::Const(value) => Ok(value.clone()),
         Expr::Cast(inner, ty) => cast_value_with_config(eval_expr(inner, slot, ctx)?, *ty, &ctx.datetime_config),
         Expr::Coalesce(left, right) => {
@@ -725,7 +707,6 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
                 })
             }
         }
-        Expr::Column(index) => Ok(slot.get_attr(*index)?.clone()),
         Expr::Const(value) => Ok(value.clone()),
         Expr::Case(case_expr) => {
             if case_expr.arg.is_some() {
