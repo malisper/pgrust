@@ -8,6 +8,7 @@ use crate::include::catalog::{BTREE_AM_OID, PgStatisticRow};
 use crate::include::nodes::datum::ArrayValue;
 use crate::include::nodes::pathnodes::{Path, PathKey, PlannerInfo, RestrictInfo};
 use crate::include::nodes::plannodes::PlanEstimate;
+use crate::include::nodes::primnodes::SetReturningCall;
 use crate::include::nodes::primnodes::{
     BoolExprType, Expr, ExprArraySubscript, JoinType, OpExprKind, OrderByEntry, ProjectSetTarget,
     QueryColumn, RelationDesc, TargetEntry, ToastRelationRef, attrno_index,
@@ -871,15 +872,25 @@ fn build_join_paths_internal(
     kind: JoinType,
     restrict_clauses: Vec<RestrictInfo>,
 ) -> Vec<Path> {
-    let mut paths = vec![estimate_nested_loop_join_internal(
-        root,
-        left.clone(),
-        right.clone(),
-        kind,
-        restrict_clauses.clone(),
-    )];
+    let left_uses_immediate_outer = path_uses_immediate_outer_columns(&left);
+    let right_uses_immediate_outer = path_uses_immediate_outer_columns(&right);
+    let lateral_orientation_locked = left_uses_immediate_outer ^ right_uses_immediate_outer;
+    let allow_default_orientation = !left_uses_immediate_outer || !lateral_orientation_locked;
+    let allow_swapped_orientation = matches!(kind, JoinType::Inner)
+        && (!right_uses_immediate_outer || !lateral_orientation_locked);
 
-    if matches!(kind, JoinType::Inner) {
+    let mut paths = Vec::new();
+    if allow_default_orientation {
+        paths.push(estimate_nested_loop_join_internal(
+            root,
+            left.clone(),
+            right.clone(),
+            kind,
+            restrict_clauses.clone(),
+        ));
+    }
+
+    if allow_swapped_orientation {
         let left_columns = left.columns();
         let right_columns = right.columns();
         let left_vars = left.output_vars();
@@ -900,7 +911,8 @@ fn build_join_paths_internal(
         ));
     }
 
-    if !matches!(kind, JoinType::Cross)
+    if !lateral_orientation_locked
+        && !matches!(kind, JoinType::Cross)
         && let Some(hash_join) =
             extract_hash_join_clauses(&restrict_clauses, left_relids, right_relids)
         && hash_join_inputs_rewrite_cleanly(root, &left, &right, &hash_join)
@@ -918,7 +930,8 @@ fn build_join_paths_internal(
         ));
     }
 
-    if matches!(kind, JoinType::Inner)
+    if !lateral_orientation_locked
+        && matches!(kind, JoinType::Inner)
         && let Some(hash_join) =
             extract_hash_join_clauses(&restrict_clauses, right_relids, left_relids)
         && hash_join_inputs_rewrite_cleanly(root, &right, &left, &hash_join)
@@ -1529,6 +1542,194 @@ pub(super) fn rewrite_semantic_expr_for_join_inputs(
         }
     }
     rebuilt
+}
+
+fn expr_uses_immediate_outer_columns(expr: &Expr) -> bool {
+    match expr {
+        Expr::Var(var) => var.varlevelsup == 1,
+        Expr::OuterColumn { depth, .. } => *depth == 0,
+        Expr::Aggref(aggref) => aggref.args.iter().any(expr_uses_immediate_outer_columns),
+        Expr::Op(op) => op.args.iter().any(expr_uses_immediate_outer_columns),
+        Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_uses_immediate_outer_columns),
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_deref()
+                .is_some_and(expr_uses_immediate_outer_columns)
+                || case_expr.args.iter().any(|arm| {
+                    expr_uses_immediate_outer_columns(&arm.expr)
+                        || expr_uses_immediate_outer_columns(&arm.result)
+                })
+                || expr_uses_immediate_outer_columns(&case_expr.defresult)
+        }
+        Expr::CaseTest(_) => false,
+        Expr::Func(func) => func.args.iter().any(expr_uses_immediate_outer_columns),
+        Expr::SubLink(sublink) => sublink
+            .testexpr
+            .as_deref()
+            .is_some_and(expr_uses_immediate_outer_columns),
+        Expr::SubPlan(subplan) => subplan
+            .testexpr
+            .as_deref()
+            .is_some_and(expr_uses_immediate_outer_columns),
+        Expr::ScalarArrayOp(saop) => {
+            expr_uses_immediate_outer_columns(&saop.left)
+                || expr_uses_immediate_outer_columns(&saop.right)
+        }
+        Expr::Cast(inner, _) | Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
+            expr_uses_immediate_outer_columns(inner)
+        }
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_uses_immediate_outer_columns(expr)
+                || expr_uses_immediate_outer_columns(pattern)
+                || escape
+                    .as_deref()
+                    .is_some_and(expr_uses_immediate_outer_columns)
+        }
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            expr_uses_immediate_outer_columns(left) || expr_uses_immediate_outer_columns(right)
+        }
+        Expr::ArrayLiteral { elements, .. } => {
+            elements.iter().any(expr_uses_immediate_outer_columns)
+        }
+        Expr::ArraySubscript { array, subscripts } => {
+            expr_uses_immediate_outer_columns(array)
+                || subscripts.iter().any(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .is_some_and(expr_uses_immediate_outer_columns)
+                        || subscript
+                            .upper
+                            .as_ref()
+                            .is_some_and(expr_uses_immediate_outer_columns)
+                })
+        }
+        Expr::Column(_)
+        | Expr::Const(_)
+        | Expr::Random
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => false,
+    }
+}
+
+fn set_returning_call_uses_immediate_outer_columns(call: &SetReturningCall) -> bool {
+    match call {
+        SetReturningCall::GenerateSeries {
+            start, stop, step, ..
+        } => {
+            expr_uses_immediate_outer_columns(start)
+                || expr_uses_immediate_outer_columns(stop)
+                || expr_uses_immediate_outer_columns(step)
+        }
+        SetReturningCall::Unnest { args, .. }
+        | SetReturningCall::JsonTableFunction { args, .. }
+        | SetReturningCall::RegexTableFunction { args, .. }
+        | SetReturningCall::TextSearchTableFunction { args, .. }
+        | SetReturningCall::UserDefined { args, .. } => {
+            args.iter().any(expr_uses_immediate_outer_columns)
+        }
+    }
+}
+
+fn project_set_target_uses_immediate_outer_columns(target: &ProjectSetTarget) -> bool {
+    match target {
+        ProjectSetTarget::Scalar(entry) => expr_uses_immediate_outer_columns(&entry.expr),
+        ProjectSetTarget::Set { call, .. } => set_returning_call_uses_immediate_outer_columns(call),
+    }
+}
+
+fn path_uses_immediate_outer_columns(path: &Path) -> bool {
+    match path {
+        Path::Result { .. }
+        | Path::SeqScan { .. }
+        | Path::IndexScan { .. }
+        | Path::WorkTableScan { .. } => false,
+        Path::Append { children, .. } => children.iter().any(path_uses_immediate_outer_columns),
+        Path::Filter {
+            input, predicate, ..
+        } => {
+            path_uses_immediate_outer_columns(input) || expr_uses_immediate_outer_columns(predicate)
+        }
+        Path::NestedLoopJoin {
+            left,
+            right,
+            restrict_clauses,
+            ..
+        }
+        | Path::HashJoin {
+            left,
+            right,
+            restrict_clauses,
+            ..
+        } => {
+            path_uses_immediate_outer_columns(left)
+                || path_uses_immediate_outer_columns(right)
+                || restrict_clauses
+                    .iter()
+                    .any(|restrict| expr_uses_immediate_outer_columns(&restrict.clause))
+        }
+        Path::Projection { input, targets, .. } => {
+            path_uses_immediate_outer_columns(input)
+                || targets
+                    .iter()
+                    .any(|target| expr_uses_immediate_outer_columns(&target.expr))
+        }
+        Path::OrderBy { input, items, .. } => {
+            path_uses_immediate_outer_columns(input)
+                || items
+                    .iter()
+                    .any(|item| expr_uses_immediate_outer_columns(&item.expr))
+        }
+        Path::Limit { input, .. } => path_uses_immediate_outer_columns(input),
+        Path::Aggregate {
+            input,
+            group_by,
+            accumulators,
+            having,
+            ..
+        } => {
+            path_uses_immediate_outer_columns(input)
+                || group_by.iter().any(expr_uses_immediate_outer_columns)
+                || accumulators
+                    .iter()
+                    .any(|accum| accum.args.iter().any(expr_uses_immediate_outer_columns))
+                || having
+                    .as_ref()
+                    .is_some_and(expr_uses_immediate_outer_columns)
+        }
+        Path::Values { rows, .. } => rows.iter().flatten().any(expr_uses_immediate_outer_columns),
+        Path::FunctionScan { call, .. } => set_returning_call_uses_immediate_outer_columns(call),
+        Path::CteScan { cte_plan, .. } => path_uses_immediate_outer_columns(cte_plan),
+        Path::RecursiveUnion {
+            anchor, recursive, ..
+        } => {
+            path_uses_immediate_outer_columns(anchor)
+                || path_uses_immediate_outer_columns(recursive)
+        }
+        Path::ProjectSet { input, targets, .. } => {
+            path_uses_immediate_outer_columns(input)
+                || targets
+                    .iter()
+                    .any(project_set_target_uses_immediate_outer_columns)
+        }
+    }
 }
 
 fn estimate_nested_loop_join_internal(

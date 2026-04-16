@@ -331,6 +331,21 @@ fn rewrite_expr_for_append_rel(expr: Expr, info: &AppendRelInfo) -> Expr {
                 .collect(),
             ..*bool_expr
         })),
+        Expr::Case(case_expr) => Expr::Case(Box::new(crate::include::nodes::primnodes::CaseExpr {
+            arg: case_expr
+                .arg
+                .map(|arg| Box::new(rewrite_expr_for_append_rel(*arg, info))),
+            args: case_expr
+                .args
+                .into_iter()
+                .map(|arm| crate::include::nodes::primnodes::CaseWhen {
+                    expr: rewrite_expr_for_append_rel(arm.expr, info),
+                    result: rewrite_expr_for_append_rel(arm.result, info),
+                })
+                .collect(),
+            defresult: Box::new(rewrite_expr_for_append_rel(*case_expr.defresult, info)),
+            ..*case_expr
+        })),
         Expr::Func(func) => Expr::Func(Box::new(crate::include::nodes::primnodes::FuncExpr {
             args: func
                 .args
@@ -491,6 +506,18 @@ pub(super) fn rewrite_expr_for_path(expr: Expr, path: &Path, layout: &[Expr]) ->
             }
             rewrite_expr_against_layout(expr, layout)
         }
+        Path::RecursiveUnion { .. } => {
+            if let Expr::Var(var) = &expr
+                && var.varlevelsup == 0
+                && path_relids(path).contains(&var.varno)
+                && let Some(index) = attrno_index(var.varattno)
+                && let Some(candidate) = layout.get(index)
+                && expr_sql_type(candidate) == var.vartype
+            {
+                return candidate.clone();
+            }
+            rewrite_expr_against_layout(expr, layout)
+        }
         _ => rewrite_expr_against_layout(expr, layout),
     }
 }
@@ -525,6 +552,25 @@ pub(super) fn rewrite_semantic_expr_for_path(expr: Expr, path: &Path, layout: &[
                 .map(|arg| rewrite_semantic_expr_for_path(arg, path, layout))
                 .collect(),
             ..*bool_expr
+        })),
+        Expr::Case(case_expr) => Expr::Case(Box::new(crate::include::nodes::primnodes::CaseExpr {
+            arg: case_expr
+                .arg
+                .map(|arg| Box::new(rewrite_semantic_expr_for_path(*arg, path, layout))),
+            args: case_expr
+                .args
+                .into_iter()
+                .map(|arm| crate::include::nodes::primnodes::CaseWhen {
+                    expr: rewrite_semantic_expr_for_path(arm.expr, path, layout),
+                    result: rewrite_semantic_expr_for_path(arm.result, path, layout),
+                })
+                .collect(),
+            defresult: Box::new(rewrite_semantic_expr_for_path(
+                *case_expr.defresult,
+                path,
+                layout,
+            )),
+            ..*case_expr
         })),
         Expr::Func(func) => Expr::Func(Box::new(crate::include::nodes::primnodes::FuncExpr {
             args: func

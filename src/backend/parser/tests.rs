@@ -1638,6 +1638,34 @@ fn parse_bit_substring_and_overlay_syntax() {
 }
 
 #[test]
+fn parse_substring_for_syntax() {
+    let stmt = parse_select("select substring('abcdef' for 3), substring(note for 1) from people")
+        .unwrap();
+    match &stmt.targets[0].expr {
+        SqlExpr::FuncCall { name, args, .. } => {
+            assert_eq!(name, "substring");
+            assert_eq!(args.len(), 3);
+            assert!(matches!(
+                &args[1].value,
+                SqlExpr::IntegerLiteral(value) if value == "1"
+            ));
+        }
+        other => panic!("expected substring call, got {other:?}"),
+    }
+    match &stmt.targets[1].expr {
+        SqlExpr::FuncCall { name, args, .. } => {
+            assert_eq!(name, "substring");
+            assert_eq!(args.len(), 3);
+            assert!(matches!(
+                &args[1].value,
+                SqlExpr::IntegerLiteral(value) if value == "1"
+            ));
+        }
+        other => panic!("expected substring call, got {other:?}"),
+    }
+}
+
+#[test]
 fn parse_internal_char_casts() {
     let stmt = parse_select("select 'a'::\"char\", cast('b' as \"char\")").unwrap();
     match &stmt.targets[0].expr {
@@ -2815,7 +2843,10 @@ fn parse_with_recursive_mixed_ctes_and_exists_case() {
             assert!(with_recursive);
             assert_eq!(with.len(), 5);
             assert!(matches!(with[0].body, CteBody::Select(_)));
-            assert!(matches!(with[1].body, CteBody::RecursiveUnion { all: true, .. }));
+            assert!(matches!(
+                with[1].body,
+                CteBody::RecursiveUnion { all: true, .. }
+            ));
             assert!(matches!(with[2].body, CteBody::Select(_)));
             assert!(matches!(with[3].body, CteBody::Select(_)));
             assert!(matches!(with[4].body, CteBody::Select(_)));
@@ -2911,6 +2942,113 @@ fn build_plan_for_recursive_mixed_cte_query() {
         "expected EXISTS subplan to use CTE Scan, got {:?}",
         planned.subplans
     );
+}
+
+#[test]
+fn parse_recursive_lsystem_segments_query() {
+    let sql = "with recursive iterations as (
+  select 'FX' as path, 0 as iteration
+  union all
+  select replace(replace(replace(path, 'X', 'X+ZF+'), 'Y', '-FX-Y'), 'Z', 'Y'), iteration+1 as iteration
+  from iterations where iteration < 8
+), segments as (
+    select
+      0 as start_row,
+      0 as start_col,
+      0 as mid_row,
+      0 as mid_col,
+      0 as end_row,
+      0 as end_col,
+      0 as row_diff,
+      1 as col_diff,
+      (select path from iterations order by iteration desc limit 1) as path_left
+  union all
+    select
+      end_row as start_row,
+      end_col as start_col,
+      end_row + row_diff * step_size as mid_row,
+      end_col + col_diff * step_size as mid_col,
+      end_row + 2 * row_diff * step_size as end_row,
+      end_col + 2 * col_diff * step_size as end_col,
+      case when substring(path_left for 1) = '-' then -col_diff
+           when substring(path_left for 1) = '+' then col_diff
+           else row_diff
+      end as row_diff,
+      case when substring(path_left for 1) = '-' then row_diff
+           when substring(path_left for 1) = '+' then -row_diff
+           else col_diff
+      end as col_diff,
+      substring(path_left from 2) as path_left
+    from segments, lateral (select case when substring(path_left for 1) = 'F' then 1 else 0 end as step_size) sub
+    where char_length(path_left) > 0
+) select count(*) from segments";
+    assert!(parse_select(sql).is_ok());
+}
+
+#[test]
+fn parse_recursive_lsystem_points_query() {
+    let sql = "with recursive iterations as (
+  select 'FX' as path, 0 as iteration
+  union all
+  select replace(replace(replace(path, 'X', 'X+ZF+'), 'Y', '-FX-Y'), 'Z', 'Y'), iteration+1 as iteration
+  from iterations where iteration < 8
+), segments as (
+    select
+      0 as start_row,
+      0 as start_col,
+      0 as mid_row,
+      0 as mid_col,
+      0 as end_row,
+      0 as end_col,
+      0 as row_diff,
+      1 as col_diff,
+      (select path from iterations order by iteration desc limit 1) as path_left
+  union all
+    select
+      end_row as start_row,
+      end_col as start_col,
+      end_row + row_diff * step_size as mid_row,
+      end_col + col_diff * step_size as mid_col,
+      end_row + 2 * row_diff * step_size as end_row,
+      end_col + 2 * col_diff * step_size as end_col,
+      case when substring(path_left for 1) = '-' then -col_diff
+           when substring(path_left for 1) = '+' then col_diff
+           else row_diff
+      end as row_diff,
+      case when substring(path_left for 1) = '-' then row_diff
+           when substring(path_left for 1) = '+' then -row_diff
+           else col_diff
+      end as col_diff,
+      substring(path_left from 2) as path_left
+    from segments, lateral (select case when substring(path_left for 1) = 'F' then 1 else 0 end as step_size) sub
+    where char_length(path_left) > 0
+), end_points as (
+  select start_row as r, start_col as c from segments union select end_row as r, end_col as c from segments
+), points as (
+  select r, c from generate_series((select min(r) from end_points), (select max(r) from end_points)) a(r)
+  cross join generate_series((select min(c) from end_points), (select max(c) from end_points)) b(c)
+), marked_points as (
+  select r, c, (case when
+    exists (select 1 from end_points e where p.r = e.r and p.c = e.c)
+    then '*'
+
+    when exists (select 1 from segments s where p.r = s.mid_row and p.c = s.mid_col and col_diff != 0)
+    then '-'
+
+    when exists (select 1 from segments s where p.r = s.mid_row and p.c = s.mid_col and row_diff != 0)
+    then '|'
+
+    else ' '
+    end
+    ) as marker
+  from points p
+), lines as (
+   select r, string_agg(marker, '') as row_text
+   from marked_points
+   group by r
+   order by r desc
+) select string_agg(row_text, E'\n') from lines";
+    assert!(parse_select(sql).is_ok());
 }
 
 #[test]
