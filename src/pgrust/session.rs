@@ -9,7 +9,7 @@ use crate::backend::catalog::store::CatalogMutationEffect;
 use crate::backend::commands::copyfrom::parse_text_array_literal;
 use crate::backend::commands::tablecmds::{
     execute_delete_with_waiter, execute_insert, execute_prepared_insert_row,
-    execute_truncate_table, execute_update_with_waiter,
+    execute_update_with_waiter,
 };
 use crate::backend::executor::jsonpath::canonicalize_jsonpath;
 use crate::backend::executor::{
@@ -1488,28 +1488,16 @@ impl Session {
                 for rel in rels {
                     self.lock_table_if_needed(db, rel, TableLockMode::AccessExclusive)?;
                 }
-                let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
-                let mut ctx = ExecutorContext {
-                    pool: Arc::clone(&db.pool),
-                    txns: db.txns.clone(),
-                    txn_waiter: Some(db.txn_waiter.clone()),
-                    datetime_config: self.datetime_config.clone(),
-                    interrupts: self.interrupts(),
-                    snapshot,
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_truncate_table_in_transaction_with_search_path(
                     client_id,
-                    next_command_id: cid,
-                    timed: false,
-                    expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
-                    case_test_values: Vec::new(),
-                    system_bindings: Vec::new(),
-                    subplans: Vec::new(),
-                    catalog: catalog.materialize_visible_catalog(),
-                    compiled_functions: std::collections::HashMap::new(),
-                    cte_tables: std::collections::HashMap::new(),
-                    cte_producers: std::collections::HashMap::new(),
-                    recursive_worktables: std::collections::HashMap::new(),
-                };
-                execute_truncate_table(truncate_stmt.clone(), &catalog, &mut ctx, xid)
+                    truncate_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
             }
             Statement::Begin | Statement::Commit | Statement::Rollback => {
                 unreachable!("handled in Session::execute")
