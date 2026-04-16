@@ -18,8 +18,8 @@ use super::super::pathnodes::{
 use super::super::root;
 use super::super::upperrels;
 use super::super::util::{
-    build_aggregate_output_columns, lower_pathkeys_for_path, lower_pathkeys_for_rel,
-    lower_targets_for_path, pathkeys_to_order_items, projection_is_identity,
+    build_aggregate_output_columns, lower_targets_for_path, pathkeys_to_order_items,
+    projection_is_identity, required_query_pathkeys_for_path, required_query_pathkeys_for_rel,
     rewrite_semantic_expr_for_path_or_expand_join_vars,
 };
 use super::super::{expand_join_rte_vars, optimize_path};
@@ -330,7 +330,7 @@ fn make_ordered_rel(
         .pathlist
         .iter()
         .filter(|path| {
-            let required = lower_pathkeys_for_path(root, path, &root.query_pathkeys);
+            let required = required_query_pathkeys_for_path(root, path);
             bestpath::pathkeys_satisfy(&path.pathkeys(), &required)
         })
         .min_by(|left, right| {
@@ -344,7 +344,7 @@ fn make_ordered_rel(
         rel.add_path(path.clone());
     }
     if let Some(path) = input_rel.cheapest_total_path() {
-        let required_pathkeys = lower_pathkeys_for_path(root, path, &root.query_pathkeys);
+        let required_pathkeys = required_query_pathkeys_for_path(root, path);
         if !bestpath::pathkeys_satisfy(&path.pathkeys(), &required_pathkeys) {
             rel.add_path(optimize_path(
                 Path::OrderBy {
@@ -536,7 +536,7 @@ fn standard_planner_with_param_base(
     let command_type = root.parse.command_type;
     let scanjoin_rel = query_planner(&mut root, catalog);
     let final_rel = grouping_planner(&mut root, scanjoin_rel, catalog);
-    let required_pathkeys = lower_pathkeys_for_rel(&root, &final_rel, &root.query_pathkeys);
+    let required_pathkeys = required_query_pathkeys_for_rel(&root, &final_rel);
     let best_path = bestpath::choose_final_path(&final_rel, &required_pathkeys)
         .cloned()
         .unwrap_or(Path::Result {

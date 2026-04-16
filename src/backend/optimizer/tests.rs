@@ -1,10 +1,11 @@
 use super::bestpath::{self, CostSelector};
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::optimizer::util;
+use crate::backend::parser::{analyze_select_query_with_outer, parse_select};
 use crate::backend::parser::analyze::LiteralDefaultCatalog;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::nodes::datum::Value;
-use crate::include::nodes::pathnodes::{Path, PathKey, PathTarget, RelOptInfo, RelOptKind};
+use crate::include::nodes::pathnodes::{Path, PathKey, PathTarget, PlannerInfo, RelOptInfo, RelOptKind};
 use crate::include::nodes::plannodes::{Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
     AttrNumber, Expr, JoinType, OpExpr, OpExprKind, OrderByEntry, QueryColumn, RelationDesc,
@@ -245,6 +246,63 @@ fn normalize_rte_path_preserves_projection_sortgrouprefs() {
 
     assert_eq!(normalized.output_target().sortgrouprefs, vec![17, 0]);
     assert_eq!(normalized.pathkeys(), vec![pathkey_with_ref(var(1, 1), 17)]);
+}
+
+fn planner_info_for_sql(sql: &str) -> PlannerInfo {
+    let catalog = LiteralDefaultCatalog;
+    let stmt = parse_select(sql).expect("parse");
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog, &[], None, &[], &[]).expect("analyze");
+    PlannerInfo::new(query)
+}
+
+#[test]
+fn required_query_pathkeys_for_path_keeps_sortgroup_identified_keys() {
+    let root = planner_info_for_sql("select column1 as a from (values (1)) v order by a");
+    let sortgroupref = root.query_pathkeys[0].ressortgroupref;
+    let path = Path::Projection {
+        plan_info: PlanEstimate::new(1.0, 1.5, 10.0, 1),
+        slot_id: 20,
+        input: Box::new(values_path(10, 1.0, 1.0)),
+        targets: vec![TargetEntry::new("a", var(10, 1), int4(), 1).with_sort_group_ref(sortgroupref)],
+    };
+
+    let required = util::required_query_pathkeys_for_path(&root, &path);
+
+    assert_eq!(required, root.query_pathkeys);
+    assert!(required.iter().all(|key| key.ressortgroupref != 0));
+}
+
+#[test]
+fn required_query_pathkeys_for_path_falls_back_when_input_lacks_sortgroup_identity() {
+    let root = planner_info_for_sql("select column1 as a from (values (1)) v order by a");
+    let path = Path::Projection {
+        plan_info: PlanEstimate::new(1.0, 1.5, 10.0, 1),
+        slot_id: 20,
+        input: Box::new(values_path(10, 1.0, 1.0)),
+        targets: vec![TargetEntry::new("a", var(10, 1), int4(), 1)],
+    };
+
+    let required = util::required_query_pathkeys_for_path(&root, &path);
+    let lowered = util::lower_pathkeys_for_path(&root, &path, &root.query_pathkeys);
+
+    assert_eq!(required, lowered);
+}
+
+#[test]
+fn required_query_pathkeys_for_path_falls_back_for_zero_ref_keys() {
+    let mut root = planner_info_for_sql("select 1");
+    root.query_pathkeys = vec![pathkey(var(10, 1))];
+    let path = Path::Projection {
+        plan_info: PlanEstimate::new(1.0, 1.5, 10.0, 1),
+        slot_id: 20,
+        input: Box::new(values_path(10, 1.0, 1.0)),
+        targets: vec![TargetEntry::new("a", var(10, 1), int4(), 1)],
+    };
+
+    let required = util::required_query_pathkeys_for_path(&root, &path);
+
+    assert_eq!(required, vec![pathkey(var(20, 1))]);
 }
 
 #[test]
