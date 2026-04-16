@@ -1,4 +1,15 @@
 use super::*;
+use crate::backend::parser::{SqlType, SqlTypeKind};
+use crate::include::nodes::primnodes::{Expr, Var, user_attrno};
+
+fn local_var(index: usize) -> Expr {
+    Expr::Var(Var {
+        varno: 1,
+        varattno: user_attrno(index),
+        varlevelsup: 0,
+        vartype: SqlType::new(SqlTypeKind::Int4),
+    })
+}
 
 fn planned_subquery_plan(
     subplan: &crate::include::nodes::primnodes::SubPlan,
@@ -163,7 +174,7 @@ fn is_pathological_regress_join_in_subquery(plan: &Plan) -> bool {
     };
     if outer_targets.len() != 1
         || outer_targets[0].name != "unique1"
-        || outer_targets[0].expr != Expr::Column(0)
+        || outer_targets[0].expr != local_var(0)
     {
         return false;
     }
@@ -178,7 +189,7 @@ fn is_pathological_regress_join_in_subquery(plan: &Plan) -> bool {
     if *predicate
         != Expr::op_auto(
             crate::include::nodes::primnodes::OpExprKind::Eq,
-            vec![Expr::Column(1), Expr::Const(Value::Int32(42))],
+            vec![local_var(1), Expr::Const(Value::Int32(42))],
         )
     {
         return false;
@@ -195,8 +206,8 @@ fn is_pathological_regress_join_in_subquery(plan: &Plan) -> bool {
         || targets.first().map(|target| &target.name) != Some(&"unique1".to_string())
         || targets.first().map(|target| &target.expr)
             != Some(&Expr::Coalesce(
-                Box::new(Expr::Column(0)),
-                Box::new(Expr::Column(16)),
+                Box::new(local_var(0)),
+                Box::new(local_var(16)),
             ))
     {
         return false;
@@ -216,7 +227,7 @@ fn is_pathological_regress_join_in_subquery(plan: &Plan) -> bool {
         || *join_qual
             != vec![Expr::op_auto(
                 crate::include::nodes::primnodes::OpExprKind::Eq,
-                vec![Expr::Column(0), Expr::Column(16)],
+                vec![local_var(0), local_var(16)],
             )]
         || !qual.is_empty()
     {

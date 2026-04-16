@@ -15,6 +15,7 @@ use crate::include::catalog::{
     DEPENDENCY_NORMAL, PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID, PG_REWRITE_RELATION_OID,
     PUBLIC_NAMESPACE_OID,
 };
+use crate::include::nodes::primnodes::{Var, user_attrno};
 
 pub(super) fn is_system_column_name(name: &str) -> bool {
     matches!(
@@ -444,7 +445,15 @@ pub(super) fn validate_alter_table_alter_column_type(
                 .map_err(ExecError::Parse)?;
             (bound, from_type)
         }
-        None => (Expr::Column(column_index), current_column.sql_type),
+        None => (
+            Expr::Var(Var {
+                varno: 1,
+                varattno: user_attrno(column_index),
+                varlevelsup: 0,
+                vartype: current_column.sql_type,
+            }),
+            current_column.sql_type,
+        ),
     };
 
     if !automatic_alter_type_cast_allowed(catalog, rewrite_type, target_sql_type) {

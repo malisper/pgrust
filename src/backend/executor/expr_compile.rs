@@ -2,7 +2,9 @@ use super::exec_expr::eval_expr;
 use super::node_types::*;
 use super::pg_regex::{compile_pg_regex_predicate, pg_regex_is_match};
 use super::{ExecError, ExecutorContext};
-use crate::include::nodes::primnodes::{BoolExprType, OpExprKind};
+use crate::include::nodes::primnodes::{
+    BoolExprType, OpExprKind, Var, attrno_index, is_special_varno,
+};
 
 pub(crate) type CompiledPredicate =
     Box<dyn Fn(&mut TupleSlot, &mut ExecutorContext) -> Result<bool, ExecError>>;
@@ -23,8 +25,9 @@ fn try_compile_fixed_offset(
 ) -> Option<CompiledPredicate> {
     match expr {
         Expr::Op(op) if op.op == OpExprKind::Gt => {
-            if let [Expr::Column(col), Expr::Const(Value::Int32(val))] = op.args.as_slice() {
-                let (col, off, val) = (*col, decoder.fixed_int32_offset(*col)?, *val);
+            if let [Expr::Var(var), Expr::Const(Value::Int32(val))] = op.args.as_slice() {
+                let col = local_var_index(var)?;
+                let (col, off, val) = (col, decoder.fixed_int32_offset(col)?, *val);
                 return Some(Box::new(move |slot, _ctx| {
                     if let Some(v) = slot.get_fixed_int32(off) {
                         return Ok(v > val);
@@ -42,8 +45,9 @@ fn try_compile_fixed_offset(
             }
         }
         Expr::Op(op) if op.op == OpExprKind::Lt => {
-            if let [Expr::Column(col), Expr::Const(Value::Int32(val))] = op.args.as_slice() {
-                let (col, off, val) = (*col, decoder.fixed_int32_offset(*col)?, *val);
+            if let [Expr::Var(var), Expr::Const(Value::Int32(val))] = op.args.as_slice() {
+                let col = local_var_index(var)?;
+                let (col, off, val) = (col, decoder.fixed_int32_offset(col)?, *val);
                 return Some(Box::new(move |slot, _ctx| {
                     if let Some(v) = slot.get_fixed_int32(off) {
                         return Ok(v < val);
@@ -61,8 +65,9 @@ fn try_compile_fixed_offset(
             }
         }
         Expr::Op(op) if op.op == OpExprKind::Eq => {
-            if let [Expr::Column(col), Expr::Const(Value::Int32(val))] = op.args.as_slice() {
-                let (col, off, val) = (*col, decoder.fixed_int32_offset(*col)?, *val);
+            if let [Expr::Var(var), Expr::Const(Value::Int32(val))] = op.args.as_slice() {
+                let col = local_var_index(var)?;
+                let (col, off, val) = (col, decoder.fixed_int32_offset(col)?, *val);
                 return Some(Box::new(move |slot, _ctx| {
                     if let Some(v) = slot.get_fixed_int32(off) {
                         return Ok(v == val);
@@ -161,8 +166,11 @@ fn flatten_or_with_decoder_inner(
 pub(crate) fn compile_predicate(expr: &Expr) -> CompiledPredicate {
     match expr {
         Expr::Op(op) if op.op == OpExprKind::Gt => {
-            if let [Expr::Column(col), Expr::Const(Value::Int32(val))] = op.args.as_slice() {
-                let (col, val) = (*col, *val);
+            if let [Expr::Var(var), Expr::Const(Value::Int32(val))] = op.args.as_slice() {
+                let (col, val) = match local_var_index(var) {
+                    Some(col) => (col, *val),
+                    None => return compile_fallback(expr),
+                };
                 return Box::new(move |slot, _ctx| match slot.get_attr(col)? {
                     Value::Int32(v) => Ok(*v > val),
                     Value::Null => Ok(false),
@@ -175,8 +183,11 @@ pub(crate) fn compile_predicate(expr: &Expr) -> CompiledPredicate {
             }
         }
         Expr::Op(op) if op.op == OpExprKind::Lt => {
-            if let [Expr::Column(col), Expr::Const(Value::Int32(val))] = op.args.as_slice() {
-                let (col, val) = (*col, *val);
+            if let [Expr::Var(var), Expr::Const(Value::Int32(val))] = op.args.as_slice() {
+                let (col, val) = match local_var_index(var) {
+                    Some(col) => (col, *val),
+                    None => return compile_fallback(expr),
+                };
                 return Box::new(move |slot, _ctx| match slot.get_attr(col)? {
                     Value::Int32(v) => Ok(*v < val),
                     Value::Null => Ok(false),
@@ -189,8 +200,11 @@ pub(crate) fn compile_predicate(expr: &Expr) -> CompiledPredicate {
             }
         }
         Expr::Op(op) if op.op == OpExprKind::Eq => {
-            if let [Expr::Column(col), Expr::Const(Value::Int32(val))] = op.args.as_slice() {
-                let (col, val) = (*col, *val);
+            if let [Expr::Var(var), Expr::Const(Value::Int32(val))] = op.args.as_slice() {
+                let (col, val) = match local_var_index(var) {
+                    Some(col) => (col, *val),
+                    None => return compile_fallback(expr),
+                };
                 return Box::new(move |slot, _ctx| match slot.get_attr(col)? {
                     Value::Int32(v) => Ok(*v == val),
                     Value::Null => Ok(false),
@@ -225,8 +239,11 @@ pub(crate) fn compile_predicate(expr: &Expr) -> CompiledPredicate {
             });
         }
         Expr::Op(op) if op.op == OpExprKind::RegexMatch => {
-            if let [Expr::Column(col), Expr::Const(Value::Text(pat))] = op.args.as_slice() {
-                let col = *col;
+            if let [Expr::Var(var), Expr::Const(Value::Text(pat))] = op.args.as_slice() {
+                let col = match local_var_index(var) {
+                    Some(col) => col,
+                    None => return compile_fallback(expr),
+                };
                 if let Ok(regex) = compile_pg_regex_predicate(pat.as_str()) {
                     let regex = std::sync::Arc::new(regex);
                     return Box::new(move |slot, _ctx| {
@@ -249,6 +266,10 @@ pub(crate) fn compile_predicate(expr: &Expr) -> CompiledPredicate {
         _ => {}
     }
 
+    compile_fallback(expr)
+}
+
+fn compile_fallback(expr: &Expr) -> CompiledPredicate {
     let expr = expr.clone();
     Box::new(move |slot, ctx| match eval_expr(&expr, slot, ctx)? {
         Value::Bool(true) => Ok(true),
@@ -274,6 +295,12 @@ fn flatten_and_inner(expr: &Expr, out: &mut Vec<CompiledPredicate>) {
             out.push(compile_predicate(expr));
         }
     }
+}
+
+fn local_var_index(var: &Var) -> Option<usize> {
+    (var.varlevelsup == 0 && !is_special_varno(var.varno))
+        .then_some(())
+        .and_then(|_| attrno_index(var.varattno))
 }
 
 fn flatten_or(expr: &Expr) -> Vec<CompiledPredicate> {
