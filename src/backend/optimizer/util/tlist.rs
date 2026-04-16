@@ -12,7 +12,7 @@ use super::super::pathnodes::{
     expr_sql_type, is_synthetic_slot_id, lower_agg_output_expr, rewrite_expr_against_layout,
     rewrite_semantic_expr_for_input_path,
 };
-use super::super::{expand_join_rte_vars, expr_relids, flatten_join_alias_vars};
+use super::super::{expand_join_rte_vars, flatten_join_alias_vars};
 use crate::include::nodes::pathnodes::AppendRelInfo;
 
 pub(super) fn pathkeys_to_order_items(pathkeys: &[PathKey]) -> Vec<OrderByEntry> {
