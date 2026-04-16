@@ -1016,8 +1016,22 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             let lowered_hash_clauses = hash_clauses
                 .into_iter()
                 .map(|restrict| {
-                    let expr = fix_join_expr_for_paths(ctx.root, restrict.clause, &left, &right);
-                    lower_expr(ctx, expr, LowerMode::Join { outer_tlist: &left_tlist, inner_tlist: &right_tlist })
+                    let expr = fix_join_expr_for_inputs(
+                        ctx.root,
+                        restrict.clause,
+                        &left,
+                        &right,
+                        &left_tlist,
+                        &right_tlist,
+                    );
+                    lower_expr(
+                        ctx,
+                        expr,
+                        LowerMode::Join {
+                            outer_tlist: &left_tlist,
+                            inner_tlist: &right_tlist,
+                        },
+                    )
                 })
                 .collect::<Vec<_>>();
             let outer_hash_keys = outer_hash_keys
@@ -1347,7 +1361,14 @@ fn lower_join_clause_list(
     let inner_tlist = build_path_tlist(root, right);
     let mut lowered = Vec::with_capacity(restrict_clauses.len());
     for restrict in restrict_clauses {
-        let expr = fix_join_expr_for_paths(root, restrict.clause.clone(), left, right);
+        let expr = fix_join_expr_for_inputs(
+            root,
+            restrict.clause.clone(),
+            left,
+            right,
+            &outer_tlist,
+            &inner_tlist,
+        );
         lowered.push(lower_expr(
             ctx,
             expr,
@@ -1407,6 +1428,21 @@ fn fix_join_expr_for_paths(
     let mut join_layout = left.output_vars();
     join_layout.extend(right.output_vars());
     rewrite_semantic_expr_for_join_inputs(root, expr, left, right, &join_layout)
+}
+
+fn fix_join_expr_for_inputs(
+    root: Option<&PlannerInfo>,
+    expr: Expr,
+    left: &Path,
+    right: &Path,
+    outer_tlist: &IndexedTlist,
+    inner_tlist: &IndexedTlist,
+) -> Expr {
+    let rewritten = fix_join_expr(root, expr.clone(), outer_tlist, inner_tlist);
+    if rewritten != expr {
+        return rewritten;
+    }
+    fix_join_expr_for_paths(root, expr, left, right)
 }
 
 fn exprs_equivalent(root: Option<&PlannerInfo>, left: &Expr, right: &Expr) -> bool {
