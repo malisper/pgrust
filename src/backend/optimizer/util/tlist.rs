@@ -74,7 +74,11 @@ pub(super) fn project_to_slot_layout_internal(
                 .get(index)
                 .cloned()
                 .or_else(|| layout.get(index).cloned())
-                .unwrap_or_else(|| Expr::Column(index));
+                .unwrap_or_else(|| {
+                    panic!(
+                        "projection target layout is shorter than descriptor width while projecting slot {slot_id}"
+                    )
+                });
             let ressortgroupref = target
                 .sortgrouprefs
                 .get(index)
@@ -82,17 +86,13 @@ pub(super) fn project_to_slot_layout_internal(
                 .or_else(|| input_target.sortgrouprefs.get(index).copied())
                 .unwrap_or(0);
             let input_resno = passthrough_input_resno(&expr);
-            let expr = match root {
-                Some(root) => {
-                    rewrite_semantic_expr_for_path_or_expand_join_vars(root, expr, &input, &layout)
-                }
-                None => rewrite_semantic_expr_for_input_path(expr, &input, &layout),
-            };
             TargetEntry::new(column.name.clone(), expr, column.sql_type, index + 1)
                 .with_sort_group_ref(ressortgroupref)
                 .with_input_resno_opt(input_resno)
         })
-        .collect();
+        .collect::<Vec<_>>();
+    let rewritten_targets = annotate_targets_for_input(root, &input, &rewritten_targets);
+
     optimize_path(
         Path::Projection {
             plan_info: PlanEstimate::default(),
@@ -192,6 +192,42 @@ pub(super) fn lower_targets_for_path(
     }
 }
 
+pub(super) fn annotate_targets_for_input(
+    root: Option<&PlannerInfo>,
+    path: &Path,
+    targets: &[TargetEntry],
+) -> Vec<TargetEntry> {
+    let input_target = path.output_target();
+    let layout = path.output_vars();
+    targets
+        .iter()
+        .cloned()
+        .map(|target| {
+            let input_resno = input_target
+                .exprs
+                .iter()
+                .position(|candidate| *candidate == target.expr)
+                .or_else(|| {
+                    root.and_then(|root| {
+                        let flattened = flatten_join_alias_vars(root, target.expr.clone());
+                        input_target
+                            .exprs
+                            .iter()
+                            .position(|candidate| {
+                                *candidate == flattened
+                                    || flatten_join_alias_vars(root, candidate.clone()) == flattened
+                            })
+                    })
+                })
+                .map(|index| index + 1);
+            TargetEntry {
+                input_resno,
+                ..target
+            }
+        })
+        .collect()
+}
+
 pub(super) fn lower_pathkeys_for_path(
     root: &PlannerInfo,
     path: &Path,
@@ -287,7 +323,8 @@ pub(super) fn projection_is_identity(path: &Path, targets: &[TargetEntry]) -> bo
     let layout = path.output_vars();
     targets.len() == input_columns.len()
         && targets.iter().enumerate().all(|(index, target)| {
-            target.expr == layout[index] && target.name == input_columns[index].name
+            (target.expr == layout[index] || target.input_resno == Some(index + 1))
+                && target.name == input_columns[index].name
         })
 }
 
@@ -310,11 +347,17 @@ fn projection_is_passthrough_boundary(input: &Path, targets: &[TargetEntry]) -> 
         && targets
             .iter()
             .zip(input_layout.iter())
-            .all(|(target, expr)| target.expr == *expr)
+            .enumerate()
+            .all(|(index, (target, expr))| {
+                target.expr == *expr || target.input_resno == Some(index + 1)
+            })
 }
 
 fn projection_target_semantic_expr(target: &TargetEntry, input_layout: &[Expr]) -> Expr {
-    rewrite_expr_against_layout(target.expr.clone(), input_layout)
+    target
+        .input_resno
+        .and_then(|input_resno| input_layout.get(input_resno.saturating_sub(1)).cloned())
+        .unwrap_or_else(|| rewrite_expr_against_layout(target.expr.clone(), input_layout))
 }
 
 fn projection_target_index_for_semantic_expr(

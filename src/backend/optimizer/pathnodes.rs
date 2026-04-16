@@ -294,11 +294,6 @@ fn project_pathkeys(
     input_pathkeys: &[PathKey],
 ) -> Vec<PathKey> {
     let input_layout = input.output_vars();
-    let passthrough_boundary = targets.len() == input_layout.len()
-        && targets
-            .iter()
-            .zip(input_layout.iter())
-            .all(|(target, expr)| target.expr == *expr);
     input_pathkeys
         .iter()
         .map(|key| {
@@ -310,14 +305,18 @@ fn project_pathkeys(
                 })
                 .map(|(index, target)| slot_var(slot_id, user_attrno(index), target.sql_type))
                 .or_else(|| {
-                    passthrough_boundary.then(|| {
-                        input_layout
-                            .iter()
-                            .position(|expr| *expr == key.expr)
-                            .map(|index| {
-                                slot_var(slot_id, user_attrno(index), targets[index].sql_type)
-                            })
-                    })?
+                    input_layout
+                        .iter()
+                        .position(|expr| *expr == key.expr)
+                        .and_then(|input_index| {
+                            targets
+                                .iter()
+                                .enumerate()
+                                .find(|(_, target)| target.input_resno == Some(input_index + 1))
+                                .map(|(target_index, target)| {
+                                    slot_var(slot_id, user_attrno(target_index), target.sql_type)
+                                })
+                        })
                 })
                 .or_else(|| {
                     targets
@@ -650,15 +649,16 @@ fn rewrite_expr_for_input_path(expr: Expr, path: &Path, layout: &[Expr]) -> Expr
         } => {
             let input_layout = input.output_vars();
             let passthrough_boundary = targets.len() == input_layout.len()
-                && targets
-                    .iter()
-                    .zip(input_layout.iter())
-                    .all(|(target, expr)| target.expr == *expr);
-            if let Some((index, target)) = targets
-                .iter()
-                .enumerate()
-                .find(|(_, target)| target.expr == expr)
-            {
+                && targets.iter().enumerate().all(|(index, target)| {
+                    target.expr == input_layout[index] || target.input_resno == Some(index + 1)
+                });
+            if let Some((index, target)) = targets.iter().enumerate().find(|(_, target)| {
+                target.expr == expr
+                    || target
+                        .input_resno
+                        .and_then(|input_resno| input_layout.get(input_resno.saturating_sub(1)))
+                        .is_some_and(|candidate| *candidate == expr)
+            }) {
                 slot_var(*slot_id, user_attrno(index), target.sql_type)
             } else {
                 let rewritten_input_expr =
@@ -673,6 +673,12 @@ fn rewrite_expr_for_input_path(expr: Expr, path: &Path, layout: &[Expr]) -> Expr
                 }
                 if let Some((index, target)) = targets.iter().enumerate().find(|(_, target)| {
                     target.expr == rewritten_input_expr
+                        || target
+                            .input_resno
+                            .and_then(|input_resno| {
+                                input_layout.get(input_resno.saturating_sub(1))
+                            })
+                            .is_some_and(|candidate| *candidate == rewritten_input_expr)
                         || rewrite_semantic_expr_for_path(target.expr.clone(), input, &input_layout)
                             == rewritten_input_expr
                 }) {

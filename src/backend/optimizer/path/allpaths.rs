@@ -1,7 +1,6 @@
 use std::cmp::Ordering;
 
 use crate::RelFileLocator;
-use crate::backend::executor::Value;
 use crate::backend::parser::CatalogLookup;
 use crate::include::catalog::BTREE_AM_OID;
 use crate::include::nodes::parsenodes::{JoinTreeNode, RangeTblEntryKind};
@@ -14,19 +13,16 @@ use crate::include::nodes::primnodes::{
 };
 
 use super::super::bestpath;
-use super::super::has_grouping;
 use super::super::inherit::{
     append_child_rtindexes, append_translation, expand_inherited_rtentries,
 };
 use super::super::joininfo;
 use super::super::optimize_path;
 use super::super::pathnodes::{expr_sql_type, next_synthetic_slot_id};
-use super::super::plan::{grouping_planner, make_pathtarget_projection_rel};
+use super::super::plan::grouping_planner;
 use super::super::util::{
-    build_aggregate_output_columns, layout_candidate_for_expr, normalize_rte_path,
-    pathkeys_to_order_items, project_to_slot_layout,
-    project_to_slot_layout_internal, rewrite_semantic_expr_for_path,
-    rewrite_semantic_expr_for_path_or_expand_join_vars, required_query_pathkeys_for_rel,
+    annotate_targets_for_input, layout_candidate_for_expr, normalize_rte_path,
+    pathkeys_to_order_items, project_to_slot_layout, required_query_pathkeys_for_rel,
 };
 use super::super::{
     JoinBuildSpec, and_exprs, exact_join_rtindex, expand_join_rte_vars, expr_relids,
@@ -652,45 +648,16 @@ fn maybe_project_join_alias(
     let input_target = input.output_target();
     let layout = input.output_vars();
     let desired_layout = PathTarget::from_rte(rtindex, rte).exprs;
-    let alias_target_exprs = joinaliasvars
-        .iter()
-        .cloned()
-        .map(|expr| {
-            let original_expr = expr.clone();
-            let rewritten = rewrite_semantic_expr_for_path(original_expr.clone(), &input, &layout);
-            if rewritten == original_expr && !layout.contains(&rewritten) {
-                let expanded = expand_join_rte_vars(root, original_expr.clone());
-                if expanded != original_expr {
-                    rewrite_semantic_expr_for_path(expanded, &input, &layout)
-                } else {
-                    rewritten
-                }
-            } else {
-                rewritten
-            }
-        })
-        .collect::<Vec<_>>();
+    let alias_target_exprs = joinaliasvars.clone();
     let extra_exprs = reltarget
         .exprs
         .iter()
         .filter(|expr| layout_candidate_for_expr(root, expr, &desired_layout).is_none())
         .cloned()
-        .map(|expr| rewrite_semantic_expr_for_path_or_expand_join_vars(root, expr, &input, &layout))
         .collect::<Vec<_>>();
     if extra_exprs.is_empty() && (layout == desired_layout || alias_target_exprs == layout) {
         return input;
     }
-    if extra_exprs.is_empty() {
-        return project_to_slot_layout_internal(
-            Some(root),
-            rtindex,
-            &rte.desc,
-            input,
-            PathTarget::new(alias_target_exprs),
-            catalog,
-        );
-    }
-
     let mut targets = rte
         .desc
         .columns
@@ -708,20 +675,21 @@ fn maybe_project_join_alias(
         })
         .collect::<Vec<_>>();
     let base_resno = targets.len();
-    targets.extend(
-        extra_exprs
-            .into_iter()
-            .enumerate()
-            .map(|(index, expr): (usize, Expr)| {
-                let resno = base_resno + index + 1;
-                TargetEntry::new(
-                    format!("support{resno}"),
-                    expr.clone(),
-                    expr_sql_type(&expr),
-                    resno,
-                )
-            }),
-    );
+    let support_targets = extra_exprs
+        .into_iter()
+        .enumerate()
+        .map(|(index, expr): (usize, Expr)| {
+            let resno = base_resno + index + 1;
+            TargetEntry::new(
+                format!("support{resno}"),
+                expr.clone(),
+                expr_sql_type(&expr),
+                resno,
+            )
+        })
+        .collect::<Vec<_>>();
+    let support_targets = annotate_targets_for_input(Some(root), &input, &support_targets);
+    targets.extend(support_targets);
 
     optimize_path(
         Path::Projection {

@@ -18,7 +18,7 @@ use super::super::pathnodes::{
 use super::super::root;
 use super::super::upperrels;
 use super::super::util::{
-    build_aggregate_output_columns, lower_targets_for_path, pathkeys_to_order_items,
+    annotate_targets_for_input, build_aggregate_output_columns, pathkeys_to_order_items,
     projection_is_identity, required_query_pathkeys_for_path, required_query_pathkeys_for_rel,
 };
 use super::super::{expand_join_rte_vars, optimize_path};
@@ -38,7 +38,7 @@ pub(super) fn make_pathtarget_projection_rel(
         reltarget.clone(),
     );
     for path in input_rel.pathlist {
-        let targets = lower_targets_for_path(root, &path, &targets);
+        let targets = annotate_targets_for_input(Some(root), &path, &targets);
         if allow_identity_elision && projection_is_identity(&path, &targets) {
             rel.add_path(path);
             continue;
@@ -351,7 +351,7 @@ fn make_projection_rel(
     let slot_id = next_synthetic_slot_id();
     let mut rel = RelOptInfo::new(input_rel.relids.clone(), RelOptKind::UpperRel, reltarget);
     for path in input_rel.pathlist {
-        let targets = lower_targets_for_path(root, &path, targets);
+        let targets = annotate_targets_for_input(Some(root), &path, targets);
         if allow_identity_elision && projection_is_identity(&path, &targets) {
             rel.add_path(path);
             continue;
