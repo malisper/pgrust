@@ -41,14 +41,6 @@ pub(super) fn normalize_rte_path(
     tlist::normalize_rte_path(rtindex, desc, input, catalog)
 }
 
-pub(super) fn lower_targets_for_path(
-    root: &PlannerInfo,
-    path: &Path,
-    targets: &[TargetEntry],
-) -> Vec<TargetEntry> {
-    tlist::lower_targets_for_path(root, path, targets)
-}
-
 pub(super) fn annotate_targets_for_input(
     root: Option<&PlannerInfo>,
     path: &Path,
@@ -116,14 +108,14 @@ pub(super) fn rewrite_semantic_expr_for_path_or_expand_join_vars(
     tlist::rewrite_semantic_expr_for_path_or_expand_join_vars(root, expr, path, layout)
 }
 
+pub(super) fn aggregate_group_by(path: &Path) -> Option<&[Expr]> {
+    tlist::aggregate_group_by(path)
+}
+
 pub(super) fn layout_candidate_for_expr(
     root: &PlannerInfo,
     expr: &Expr,
     layout: &[Expr],
 ) -> Option<Expr> {
     tlist::layout_candidate_for_expr(root, expr, layout)
-}
-
-pub(super) fn aggregate_group_by(path: &Path) -> Option<&[Expr]> {
-    tlist::aggregate_group_by(path)
 }

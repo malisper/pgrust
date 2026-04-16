@@ -141,57 +141,6 @@ pub(super) fn normalize_rte_path(
     }
 }
 
-pub(super) fn lower_targets_for_path(
-    root: &PlannerInfo,
-    path: &Path,
-    targets: &[TargetEntry],
-) -> Vec<TargetEntry> {
-    let layout = path.output_vars();
-    let input_target = path.output_target();
-    let passthrough_input_resno = |expr: &Expr| {
-        input_target
-            .exprs
-            .iter()
-            .position(|candidate| candidate == expr)
-            .map(|index| index + 1)
-    };
-    match aggregate_group_by(path) {
-        Some(group_by) => targets
-            .iter()
-            .cloned()
-            .map(|target| {
-                let expr = lower_agg_output_expr(
-                    expand_join_rte_vars(root, target.expr),
-                    group_by,
-                    &layout,
-                );
-                TargetEntry {
-                    expr: expr.clone(),
-                    input_resno: passthrough_input_resno(&expr),
-                    ..target
-                }
-            })
-            .collect(),
-        None => targets
-            .iter()
-            .cloned()
-            .map(|target| {
-                let expr = rewrite_semantic_expr_for_path_or_expand_join_vars(
-                    root,
-                    target.expr.clone(),
-                    path,
-                    &layout,
-                );
-                TargetEntry {
-                    expr: expr.clone(),
-                    input_resno: passthrough_input_resno(&expr),
-                    ..target
-                }
-            })
-            .collect(),
-    }
-}
-
 pub(super) fn annotate_targets_for_input(
     root: Option<&PlannerInfo>,
     path: &Path,
