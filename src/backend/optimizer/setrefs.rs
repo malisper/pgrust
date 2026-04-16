@@ -108,6 +108,7 @@ pub(super) fn create_plan_with_param_base(
         next_param_id,
         ext_params: Vec::new(),
     };
+    validate_planner_path(&path);
     let plan = set_plan_refs(&mut ctx, path);
     validate_executable_plan(&plan);
     (plan, ctx.ext_params, ctx.next_param_id)
@@ -122,6 +123,7 @@ pub(super) fn create_plan_without_root(path: Path) -> Plan {
         next_param_id: 0,
         ext_params: Vec::new(),
     };
+    validate_planner_path(&path);
     let plan = set_plan_refs(&mut ctx, path);
     validate_executable_plan(&plan);
     assert!(ctx.ext_params.is_empty());
@@ -1149,9 +1151,269 @@ fn validate_executable_plan(plan: &Plan) {
     }
 }
 
+fn validate_planner_expr(expr: &Expr, path_node: &str, field: &str) {
+    match expr {
+        Expr::Var(var) if is_special_varno(var.varno) => panic!(
+            "planner path contains executor-only Var in {path_node}.{field}: {var:?}"
+        ),
+        Expr::Param(Param {
+            paramkind: ParamKind::Exec,
+            ..
+        }) => panic!("planner path contains PARAM_EXEC in {path_node}.{field}: {expr:?}"),
+        Expr::Op(op) => op
+            .args
+            .iter()
+            .for_each(|arg| validate_planner_expr(arg, path_node, field)),
+        Expr::Bool(bool_expr) => bool_expr
+            .args
+            .iter()
+            .for_each(|arg| validate_planner_expr(arg, path_node, field)),
+        Expr::Case(case_expr) => {
+            if let Some(arg) = &case_expr.arg {
+                validate_planner_expr(arg, path_node, field);
+            }
+            for arm in &case_expr.args {
+                validate_planner_expr(&arm.expr, path_node, field);
+                validate_planner_expr(&arm.result, path_node, field);
+            }
+            validate_planner_expr(&case_expr.defresult, path_node, field);
+        }
+        Expr::Func(func) => func
+            .args
+            .iter()
+            .for_each(|arg| validate_planner_expr(arg, path_node, field)),
+        Expr::SubLink(sublink) => {
+            if let Some(testexpr) = &sublink.testexpr {
+                validate_planner_expr(testexpr, path_node, field);
+            }
+        }
+        Expr::SubPlan(subplan) => {
+            if let Some(testexpr) = &subplan.testexpr {
+                validate_planner_expr(testexpr, path_node, field);
+            }
+            subplan
+                .args
+                .iter()
+                .for_each(|arg| validate_planner_expr(arg, path_node, field));
+        }
+        Expr::ScalarArrayOp(saop) => {
+            validate_planner_expr(&saop.left, path_node, field);
+            validate_planner_expr(&saop.right, path_node, field);
+        }
+        Expr::Cast(inner, _) => validate_planner_expr(inner, path_node, field),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            validate_planner_expr(expr, path_node, field);
+            validate_planner_expr(pattern, path_node, field);
+            if let Some(escape) = escape {
+                validate_planner_expr(escape, path_node, field);
+            }
+        }
+        Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
+            validate_planner_expr(inner, path_node, field);
+        }
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            validate_planner_expr(left, path_node, field);
+            validate_planner_expr(right, path_node, field);
+        }
+        Expr::ArrayLiteral { elements, .. } => elements
+            .iter()
+            .for_each(|element| validate_planner_expr(element, path_node, field)),
+        Expr::ArraySubscript { array, subscripts } => {
+            validate_planner_expr(array, path_node, field);
+            for subscript in subscripts {
+                if let Some(lower) = &subscript.lower {
+                    validate_planner_expr(lower, path_node, field);
+                }
+                if let Some(upper) = &subscript.upper {
+                    validate_planner_expr(upper, path_node, field);
+                }
+            }
+        }
+        Expr::Var(_)
+        | Expr::Column(_)
+        | Expr::OuterColumn { .. }
+        | Expr::Const(_)
+        | Expr::Aggref(_)
+        | Expr::CaseTest(_)
+        | Expr::Random
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => {}
+    }
+}
+
+fn validate_planner_set_returning_call(
+    call: &crate::include::nodes::primnodes::SetReturningCall,
+    path_node: &str,
+    field: &str,
+) {
+    use crate::include::nodes::primnodes::SetReturningCall;
+
+    match call {
+        SetReturningCall::GenerateSeries {
+            start, stop, step, ..
+        } => {
+            validate_planner_expr(start, path_node, field);
+            validate_planner_expr(stop, path_node, field);
+            validate_planner_expr(step, path_node, field);
+        }
+        SetReturningCall::Unnest { args, .. }
+        | SetReturningCall::JsonTableFunction { args, .. }
+        | SetReturningCall::RegexTableFunction { args, .. }
+        | SetReturningCall::TextSearchTableFunction { args, .. }
+        | SetReturningCall::UserDefined { args, .. } => args
+            .iter()
+            .for_each(|arg| validate_planner_expr(arg, path_node, field)),
+    }
+}
+
+fn validate_planner_agg_accum(
+    accum: &crate::include::nodes::primnodes::AggAccum,
+    path_node: &str,
+    field: &str,
+) {
+    accum
+        .args
+        .iter()
+        .for_each(|arg| validate_planner_expr(arg, path_node, field));
+}
+
+fn validate_planner_path(path: &Path) {
+    match path {
+        Path::Result { .. } | Path::SeqScan { .. } | Path::IndexScan { .. } => {}
+        Path::Append { children, .. } => {
+            for child in children {
+                validate_planner_path(child);
+            }
+        }
+        Path::Filter { input, predicate, .. } => {
+            validate_planner_expr(predicate, "Filter", "predicate");
+            validate_planner_path(input);
+        }
+        Path::NestedLoopJoin {
+            left,
+            right,
+            restrict_clauses,
+            ..
+        } => {
+            for restrict in restrict_clauses {
+                validate_planner_expr(&restrict.clause, "Join", "restrict_clauses");
+            }
+            validate_planner_path(left);
+            validate_planner_path(right);
+        }
+        Path::HashJoin {
+            left,
+            right,
+            restrict_clauses,
+            hash_clauses,
+            outer_hash_keys,
+            inner_hash_keys,
+            ..
+        } => {
+            for restrict in restrict_clauses {
+                validate_planner_expr(&restrict.clause, "HashJoin", "restrict_clauses");
+            }
+            for restrict in hash_clauses {
+                validate_planner_expr(&restrict.clause, "HashJoin", "hash_clauses");
+            }
+            for expr in outer_hash_keys {
+                validate_planner_expr(expr, "HashJoin", "outer_hash_keys");
+            }
+            for expr in inner_hash_keys {
+                validate_planner_expr(expr, "HashJoin", "inner_hash_keys");
+            }
+            validate_planner_path(left);
+            validate_planner_path(right);
+        }
+        Path::Projection { input, targets, .. } => {
+            for target in targets {
+                validate_planner_expr(&target.expr, "Projection", "targets");
+            }
+            validate_planner_path(input);
+        }
+        Path::OrderBy { input, items, .. } => {
+            for item in items {
+                validate_planner_expr(&item.expr, "OrderBy", "items");
+            }
+            validate_planner_path(input);
+        }
+        Path::Limit { input, .. } => validate_planner_path(input),
+        Path::Aggregate {
+            input,
+            group_by,
+            accumulators,
+            having,
+            ..
+        } => {
+            for expr in group_by {
+                validate_planner_expr(expr, "Aggregate", "group_by");
+            }
+            for accum in accumulators {
+                validate_planner_agg_accum(accum, "Aggregate", "accumulators");
+            }
+            if let Some(having) = having {
+                validate_planner_expr(having, "Aggregate", "having");
+            }
+            validate_planner_path(input);
+        }
+        Path::Values { rows, .. } => {
+            for row in rows {
+                for expr in row {
+                    validate_planner_expr(expr, "Values", "rows");
+                }
+            }
+        }
+        Path::FunctionScan { call, .. } => {
+            validate_planner_set_returning_call(call, "FunctionScan", "call");
+        }
+        Path::CteScan { cte_plan, .. } => validate_planner_path(cte_plan),
+        Path::WorkTableScan { .. } => {}
+        Path::RecursiveUnion {
+            anchor, recursive, ..
+        } => {
+            validate_planner_path(anchor);
+            validate_planner_path(recursive);
+        }
+        Path::ProjectSet { input, targets, .. } => {
+            for target in targets {
+                match target {
+                    crate::include::nodes::primnodes::ProjectSetTarget::Scalar(entry) => {
+                        validate_planner_expr(&entry.expr, "ProjectSet", "targets");
+                    }
+                    crate::include::nodes::primnodes::ProjectSetTarget::Set { call, .. } => {
+                        validate_planner_set_returning_call(call, "ProjectSet", "targets");
+                    }
+                }
+            }
+            validate_planner_path(input);
+        }
+    }
+}
+
 #[cfg(test)]
 pub(super) fn validate_executable_plan_for_tests(plan: &Plan) {
     validate_executable_plan(plan);
+}
+
+#[cfg(test)]
+pub(super) fn validate_planner_path_for_tests(path: &Path) {
+    validate_planner_path(path);
 }
 
 fn set_filter_references(
