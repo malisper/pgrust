@@ -318,6 +318,33 @@ fn build_recursive_union_path(
     )
 }
 
+fn build_cte_scan_path(
+    cte_id: usize,
+    query: crate::include::nodes::parsenodes::Query,
+    desc: &RelationDesc,
+    catalog: &dyn CatalogLookup,
+) -> Path {
+    let cte_path = if let Some(recursive_union) = query.recursive_union.clone() {
+        build_recursive_union_path(*recursive_union, catalog)
+    } else {
+        best_query_path(query, catalog)
+    };
+    Path::CteScan {
+        plan_info: cte_path.plan_info(),
+        slot_id: next_synthetic_slot_id(),
+        cte_id,
+        cte_plan: Box::new(cte_path),
+        output_columns: desc
+            .columns
+            .iter()
+            .map(|column| QueryColumn {
+                name: column.name.clone(),
+                sql_type: column.sql_type,
+            })
+            .collect(),
+    }
+}
+
 fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn CatalogLookup) {
     let Some(rte) = root.parse.rtable.get(rtindex.saturating_sub(1)).cloned() else {
         return;
@@ -501,6 +528,21 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                 },
                 catalog,
             );
+            if let Some(filter) = base_filter_expr(rel) {
+                path = optimize_path(
+                    Path::Filter {
+                        plan_info: PlanEstimate::default(),
+                        predicate: rewrite_expr_against_layout(filter, &path.output_vars()),
+                        input: Box::new(path),
+                    },
+                    catalog,
+                );
+            }
+            rel.add_path(path);
+        }
+        RangeTblEntryKind::Cte { cte_id, query } => {
+            let mut path = build_cte_scan_path(cte_id, *query, &rte.desc, catalog);
+            path = normalize_rte_path(rtindex, &rte.desc, path, catalog);
             if let Some(filter) = base_filter_expr(rel) {
                 path = optimize_path(
                     Path::Filter {

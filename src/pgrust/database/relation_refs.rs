@@ -139,6 +139,7 @@ fn collect_rels_from_query(query: &Query, rels: &mut BTreeSet<RelFileLocator>) {
                 collect_rels_from_set_returning_call(call, rels)
             }
             RangeTblEntryKind::WorkTable { .. } => {}
+            RangeTblEntryKind::Cte { query, .. } => collect_rels_from_query(query, rels),
             RangeTblEntryKind::Subquery { query } => collect_rels_from_query(query, rels),
         }
     }
@@ -347,6 +348,9 @@ pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLoc
                 }
             }
         },
+        Plan::CteScan { cte_plan, .. } => {
+            collect_rels_from_plan(cte_plan, rels);
+        }
         Plan::RecursiveUnion {
             anchor, recursive, ..
         } => {

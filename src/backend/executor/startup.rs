@@ -3,10 +3,10 @@ use super::{Plan, PlanState, TupleSlot, expr, tuple_decoder};
 use crate::backend::executor::hashjoin::HashJoinPhase;
 use crate::include::catalog::builtin_aggregate_function_for_proc_oid;
 use crate::include::nodes::execnodes::{
-    AggregateState, AppendState, FilterState, FunctionScanState, HashJoinState, HashState,
-    IndexScanState, LimitState, NestedLoopJoinState, NodeExecStats, OrderByState, ProjectSetState,
-    ProjectionState, RecursiveUnionState, RecursiveWorkTable, ResultState, SeqScanState,
-    ValuesState, WorkTableScanState,
+    AggregateState, AppendState, CteScanState, FilterState, FunctionScanState, HashJoinState,
+    HashState, IndexScanState, LimitState, NestedLoopJoinState, NodeExecStats, OrderByState,
+    ProjectSetState, ProjectionState, RecursiveUnionState, RecursiveWorkTable, ResultState,
+    SeqScanState, ValuesState, WorkTableScanState,
 };
 use crate::include::nodes::primnodes::{Expr, SetReturningCall};
 
@@ -198,6 +198,7 @@ fn plan_uses_outer_columns(plan: &Plan) -> bool {
         Plan::RecursiveUnion {
             anchor, recursive, ..
         } => plan_uses_outer_columns(anchor) || plan_uses_outer_columns(recursive),
+        Plan::CteScan { cte_plan, .. } => plan_uses_outer_columns(cte_plan),
     }
 }
 
@@ -577,6 +578,24 @@ pub fn executor_start(plan: Plan) -> PlanState {
             plan_info,
             stats: NodeExecStats::default(),
         }),
+        Plan::CteScan {
+            plan_info,
+            cte_id,
+            cte_plan,
+            output_columns,
+        } => {
+            let width = output_columns.len();
+            Box::new(CteScanState {
+                cte_id,
+                cte_plan: *cte_plan,
+                output_columns: output_columns.into_iter().map(|c| c.name).collect(),
+                next_index: 0,
+                slot: TupleSlot::empty(width),
+                current_bindings: Vec::new(),
+                plan_info,
+                stats: NodeExecStats::default(),
+            })
+        }
         Plan::WorkTableScan {
             plan_info,
             worktable_id,

@@ -2847,6 +2847,32 @@ fn build_plan_resolves_float_type_alias() {
 
 #[test]
 fn build_plan_for_recursive_mixed_cte_query() {
+    fn plan_contains_cte_scan(plan: &Plan) -> bool {
+        match plan {
+            Plan::CteScan { .. } => true,
+            Plan::Append { children, .. } => children.iter().any(plan_contains_cte_scan),
+            Plan::Hash { input, .. }
+            | Plan::Filter { input, .. }
+            | Plan::OrderBy { input, .. }
+            | Plan::Limit { input, .. }
+            | Plan::Projection { input, .. }
+            | Plan::Aggregate { input, .. }
+            | Plan::ProjectSet { input, .. } => plan_contains_cte_scan(input),
+            Plan::NestedLoopJoin { left, right, .. } | Plan::HashJoin { left, right, .. } => {
+                plan_contains_cte_scan(left) || plan_contains_cte_scan(right)
+            }
+            Plan::RecursiveUnion {
+                anchor, recursive, ..
+            } => plan_contains_cte_scan(anchor) || plan_contains_cte_scan(recursive),
+            Plan::Result { .. }
+            | Plan::SeqScan { .. }
+            | Plan::IndexScan { .. }
+            | Plan::FunctionScan { .. }
+            | Plan::WorkTableScan { .. }
+            | Plan::Values { .. } => false,
+        }
+    }
+
     let stmt = parse_select(
         "with recursive points as (
             select r, c from generate_series(-2, 2, 0.05) a(r)
@@ -2874,7 +2900,17 @@ fn build_plan_for_recursive_mixed_cte_query() {
         select string_agg(r_text, e'\\n') from rows",
     )
     .unwrap();
-    assert!(build_plan(&stmt, &catalog()).is_ok());
+    let planned = pg_plan_query(&stmt, &catalog()).unwrap();
+    assert!(
+        plan_contains_cte_scan(&planned.plan_tree),
+        "expected outer query plan to use CTE Scan, got {:?}",
+        planned.plan_tree
+    );
+    assert!(
+        planned.subplans.iter().any(plan_contains_cte_scan),
+        "expected EXISTS subplan to use CTE Scan, got {:?}",
+        planned.subplans
+    );
 }
 
 #[test]

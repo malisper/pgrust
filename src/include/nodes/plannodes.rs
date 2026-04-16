@@ -150,6 +150,12 @@ pub enum Plan {
         plan_info: PlanEstimate,
         call: SetReturningCall,
     },
+    CteScan {
+        plan_info: PlanEstimate,
+        cte_id: usize,
+        cte_plan: Box<Plan>,
+        output_columns: Vec<QueryColumn>,
+    },
     WorkTableScan {
         plan_info: PlanEstimate,
         worktable_id: usize,
@@ -190,6 +196,7 @@ impl Plan {
             | Plan::Limit { plan_info, .. }
             | Plan::Projection { plan_info, .. }
             | Plan::Aggregate { plan_info, .. }
+            | Plan::CteScan { plan_info, .. }
             | Plan::WorkTableScan { plan_info, .. }
             | Plan::RecursiveUnion { plan_info, .. }
             | Plan::FunctionScan { plan_info, .. }
@@ -212,6 +219,7 @@ impl Plan {
             | Plan::Limit { plan_info, .. }
             | Plan::Projection { plan_info, .. }
             | Plan::Aggregate { plan_info, .. }
+            | Plan::CteScan { plan_info, .. }
             | Plan::WorkTableScan { plan_info, .. }
             | Plan::RecursiveUnion { plan_info, .. }
             | Plan::FunctionScan { plan_info, .. }
@@ -259,6 +267,7 @@ impl Plan {
                 })
                 .collect(),
             Plan::Aggregate { output_columns, .. } => output_columns.clone(),
+            Plan::CteScan { output_columns, .. } => output_columns.clone(),
             Plan::WorkTableScan { output_columns, .. }
             | Plan::RecursiveUnion { output_columns, .. } => output_columns.clone(),
             Plan::NestedLoopJoin { left, right, .. } | Plan::HashJoin { left, right, .. } => {

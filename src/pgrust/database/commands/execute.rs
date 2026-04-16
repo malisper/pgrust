@@ -219,6 +219,8 @@ impl Database {
                     timed: false,
                     catalog: visible_catalog.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
+                    cte_tables: std::collections::HashMap::new(),
+                    cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
                 };
                 let result = execute_readonly_statement(plan_or_stmt, &visible_catalog, &mut ctx);
@@ -259,6 +261,8 @@ impl Database {
                     timed: false,
                     catalog: catalog.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
+                    cte_tables: std::collections::HashMap::new(),
+                    cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
                 };
                 let result = execute_insert(bound, &catalog, &mut ctx, xid, 0);
@@ -306,6 +310,8 @@ impl Database {
                     timed: false,
                     catalog: catalog.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
+                    cte_tables: std::collections::HashMap::new(),
+                    cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
                 };
                 let result = execute_update_with_waiter(
@@ -362,6 +368,8 @@ impl Database {
                     timed: false,
                     catalog: catalog.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
+                    cte_tables: std::collections::HashMap::new(),
+                    cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
                 };
                 let result = execute_delete_with_waiter(
@@ -479,6 +487,8 @@ impl Database {
                     timed: false,
                     catalog: catalog.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
+                    cte_tables: std::collections::HashMap::new(),
+                    cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
                 };
                 let result = execute_truncate_table(
@@ -531,6 +541,8 @@ impl Database {
                     timed: false,
                     catalog: catalog.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
+                    cte_tables: std::collections::HashMap::new(),
+                    cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
                 };
                 let result = execute_vacuum(vacuum_stmt.clone(), &catalog, &mut ctx);
@@ -602,6 +614,8 @@ impl Database {
             timed: false,
             catalog: visible_catalog_snapshot,
             compiled_functions: std::collections::HashMap::new(),
+            cte_tables: std::collections::HashMap::new(),
+            cte_producers: std::collections::HashMap::new(),
             recursive_worktables: std::collections::HashMap::new(),
         };
 

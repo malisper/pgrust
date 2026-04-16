@@ -30,6 +30,8 @@ pub fn execute_query_desc(
     let columns = query_desc.columns();
     let column_names = query_desc.column_names();
     let saved_subplans = std::mem::replace(&mut ctx.subplans, query_desc.planned_stmt.subplans);
+    ctx.cte_tables.clear();
+    ctx.cte_producers.clear();
     ctx.recursive_worktables.clear();
     let result = (|| {
         let mut state = executor_start(query_desc.planned_stmt.plan_tree);
@@ -45,6 +47,8 @@ pub fn execute_query_desc(
             rows,
         })
     })();
+    ctx.cte_tables.clear();
+    ctx.cte_producers.clear();
     ctx.recursive_worktables.clear();
     ctx.subplans = saved_subplans;
     result

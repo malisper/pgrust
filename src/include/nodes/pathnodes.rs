@@ -391,6 +391,13 @@ pub enum Path {
         slot_id: usize,
         call: SetReturningCall,
     },
+    CteScan {
+        plan_info: PlanEstimate,
+        slot_id: usize,
+        cte_id: usize,
+        cte_plan: Box<Path>,
+        output_columns: Vec<QueryColumn>,
+    },
     WorkTableScan {
         plan_info: PlanEstimate,
         slot_id: usize,

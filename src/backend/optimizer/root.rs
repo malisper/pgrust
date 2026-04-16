@@ -590,6 +590,9 @@ fn collect_query_outer_refs(query: &Query, levelsup: usize, exprs: &mut Vec<Expr
             RangeTblEntryKind::Function { call } => {
                 collect_set_returning_call_outer_refs(call, levelsup, exprs)
             }
+            RangeTblEntryKind::Cte { query, .. } => {
+                collect_query_outer_refs(query, levelsup + 1, exprs)
+            }
             RangeTblEntryKind::Subquery { query } => {
                 collect_query_outer_refs(query, levelsup + 1, exprs)
             }

@@ -41,6 +41,7 @@ use super::parsenodes::*;
 pub use crate::backend::catalog::catalog::{Catalog, CatalogEntry};
 
 static NEXT_WORKTABLE_ID: AtomicUsize = AtomicUsize::new(1);
+static NEXT_CTE_ID: AtomicUsize = AtomicUsize::new(1);
 use crate::backend::utils::cache::relcache::RelCache;
 use crate::backend::utils::cache::system_views::{build_pg_stats_rows, build_pg_views_rows};
 use agg::*;
@@ -862,6 +863,7 @@ fn bind_ctes(
 ) -> Result<Vec<BoundCte>, ParseError> {
     let mut bound = Vec::with_capacity(ctes.len());
     for cte in ctes {
+        let cte_id = NEXT_CTE_ID.fetch_add(1, Ordering::Relaxed);
         let mut visible = bound.clone();
         visible.extend_from_slice(outer_ctes);
         let (plan, desc) = match &cte.body {
@@ -889,6 +891,7 @@ fn bind_ctes(
                 let mut recursive_visible = visible.clone();
                 recursive_visible.push(BoundCte {
                     name: cte.name.clone(),
+                    cte_id,
                     plan: Query {
                         command_type: crate::include::executor::execdesc::CommandType::Select,
                         rtable: Vec::new(),
@@ -1015,6 +1018,7 @@ fn bind_ctes(
         };
         bound.push(BoundCte {
             name: cte.name.clone(),
+            cte_id,
             plan,
             desc,
             self_reference: false,

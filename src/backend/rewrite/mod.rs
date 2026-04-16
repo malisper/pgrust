@@ -152,6 +152,10 @@ fn rewrite_rte(
         RangeTblEntryKind::Function { call } => RangeTblEntryKind::Function {
             call: rewrite_set_returning_call(call, catalog, expanded_views)?,
         },
+        RangeTblEntryKind::Cte { cte_id, query } => RangeTblEntryKind::Cte {
+            cte_id,
+            query: Box::new(rewrite_query(*query, catalog, expanded_views)?),
+        },
         RangeTblEntryKind::Subquery { query } => RangeTblEntryKind::Subquery {
             query: Box::new(rewrite_query(*query, catalog, expanded_views)?),
         },
