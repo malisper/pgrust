@@ -1547,6 +1547,7 @@ pub(super) fn rewrite_semantic_expr_for_join_inputs(
 fn expr_uses_immediate_outer_columns(expr: &Expr) -> bool {
     match expr {
         Expr::Var(var) => var.varlevelsup == 1,
+        Expr::Param(_) => true,
         Expr::OuterColumn { depth, .. } => *depth == 0,
         Expr::Aggref(aggref) => aggref.args.iter().any(expr_uses_immediate_outer_columns),
         Expr::Op(op) => op.args.iter().any(expr_uses_immediate_outer_columns),

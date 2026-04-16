@@ -75,7 +75,7 @@ use crate::include::catalog::builtin_scalar_function_for_proc_oid;
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue};
 use crate::include::nodes::primnodes::{
     BoolExpr, BoolExprType, FuncExpr, OpExpr, OpExprKind, ScalarArrayOpExpr, ScalarFunctionImpl,
-    SubLinkType, TABLE_OID_ATTR_NO, attrno_index,
+    SubLinkType, INDEX_VAR, INNER_VAR, OUTER_VAR, TABLE_OID_ATTR_NO, attrno_index,
 };
 use crate::pl::plpgsql::execute_user_defined_scalar_function;
 
@@ -321,6 +321,42 @@ fn eval_scalar_array_op_expr(
     eval_quantified_array(&left_value, saop.op, !saop.use_or, &right_value)
 }
 
+fn eval_bound_tuple_var(
+    tuple: Option<&Vec<Value>>,
+    var: &crate::include::nodes::primnodes::Var,
+) -> Result<Value, ExecError> {
+    let index = attrno_index(var.varattno).ok_or_else(|| ExecError::DetailedError {
+        message: "special executor Var referenced an unsupported system attribute".into(),
+        detail: Some(format!(
+            "varno={}, varattno={}, varlevelsup={}",
+            var.varno, var.varattno, var.varlevelsup
+        )),
+        hint: None,
+        sqlstate: "XX000",
+    })?;
+    let row = tuple.ok_or_else(|| ExecError::DetailedError {
+        message: "special executor Var referenced without a bound tuple".into(),
+        detail: Some(format!(
+            "varno={}, varattno={}, index={}",
+            var.varno, var.varattno, index
+        )),
+        hint: None,
+        sqlstate: "XX000",
+    })?;
+    row.get(index).cloned().ok_or_else(|| ExecError::DetailedError {
+        message: "special executor Var referenced beyond the bound tuple width".into(),
+        detail: Some(format!(
+            "varno={}, varattno={}, index={}, tuple_width={}",
+            var.varno,
+            var.varattno,
+            index,
+            row.len()
+        )),
+        hint: None,
+        sqlstate: "XX000",
+    })
+}
+
 pub fn eval_expr(
     expr: &Expr,
     slot: &mut TupleSlot,
@@ -349,29 +385,34 @@ pub fn eval_expr(
             hint: None,
             sqlstate: "XX000",
         }),
+        Expr::Param(param) => ctx
+            .expr_bindings
+            .exec_params
+            .get(&param.paramid)
+            .cloned()
+            .ok_or(ExecError::DetailedError {
+                message: "executor param reached expression evaluation without a binding".into(),
+                detail: Some(format!(
+                    "paramkind={:?}, paramid={}, paramtype={:?}",
+                    param.paramkind, param.paramid, param.paramtype
+                )),
+                hint: None,
+                sqlstate: "XX000",
+            }),
         Expr::Var(var) => {
-            if var.varlevelsup > 0 && var.varattno == TABLE_OID_ATTR_NO {
-                let depth = var.varlevelsup - 1;
-                ctx.outer_system_bindings
-                    .get(depth)
-                    .ok_or(ExecError::DetailedError {
-                        message: "outer tableoid is not available for this row".into(),
-                        detail: None,
-                        hint: None,
-                        sqlstate: "XX000",
-                    })
-                    .and_then(|bindings| lookup_system_binding(bindings, var.varno))
+            if var.varno == OUTER_VAR {
+                eval_bound_tuple_var(ctx.expr_bindings.outer_tuple.as_ref(), var)
+            } else if var.varno == INNER_VAR {
+                eval_bound_tuple_var(ctx.expr_bindings.inner_tuple.as_ref(), var)
+            } else if var.varno == INDEX_VAR {
+                eval_bound_tuple_var(ctx.expr_bindings.index_tuple.as_ref(), var)
             } else if var.varlevelsup > 0 {
-                let depth = var.varlevelsup - 1;
-                let index = attrno_index(var.varattno).ok_or(ExecError::UnboundOuterColumn {
-                    depth,
-                    index: 0,
-                })?;
-                ctx.outer_rows
-                    .get(depth)
-                    .and_then(|row| row.get(index))
-                    .cloned()
-                    .ok_or(ExecError::UnboundOuterColumn { depth, index })
+                Err(ExecError::DetailedError {
+                    message: "unlowered outer Var reached executor".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "XX000",
+                })
             } else if var.varattno == TABLE_OID_ATTR_NO {
                 lookup_system_binding(&ctx.system_bindings, var.varno)
             } else {
@@ -386,15 +427,24 @@ pub fn eval_expr(
             let val = slot.get_attr(*index)?;
             Ok(val.clone())
         }
-        Expr::OuterColumn { depth, index } => ctx
-            .outer_rows
-            .get(*depth)
-            .and_then(|row| row.get(*index))
-            .cloned()
-            .ok_or(ExecError::UnboundOuterColumn {
-                depth: *depth,
-                index: *index,
-            }),
+        Expr::OuterColumn { depth, index } => {
+            if *depth == 0 {
+                ctx.expr_bindings
+                    .outer_tuple
+                    .as_ref()
+                    .and_then(|row| row.get(*index))
+                    .cloned()
+                    .ok_or(ExecError::UnboundOuterColumn {
+                        depth: *depth,
+                        index: *index,
+                    })
+            } else {
+                Err(ExecError::UnboundOuterColumn {
+                    depth: *depth,
+                    index: *index,
+                })
+            }
+        }
         Expr::Const(value) => Ok(value.clone()),
         Expr::Cast(inner, ty) => cast_value_with_config(eval_expr(inner, slot, ctx)?, *ty, &ctx.datetime_config),
         Expr::Coalesce(left, right) => {
@@ -648,6 +698,12 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
         }
         Expr::SubLink(_) | Expr::SubPlan(_) => Err(ExecError::DetailedError {
             message: "subqueries are not supported in PL/pgSQL expression evaluation".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        }),
+        Expr::Param(_) => Err(ExecError::DetailedError {
+            message: "executor params are not supported in PL/pgSQL expression evaluation".into(),
             detail: None,
             hint: None,
             sqlstate: "0A000",

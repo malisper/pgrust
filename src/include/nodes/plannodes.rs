@@ -45,10 +45,17 @@ impl PlanEstimate {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecParamSource {
+    pub paramid: usize,
+    pub expr: Expr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlannedStmt {
     pub command_type: CommandType,
     pub plan_tree: Plan,
     pub subplans: Vec<Plan>,
+    pub ext_params: Vec<ExecParamSource>,
 }
 
 impl PlannedStmt {
@@ -104,6 +111,7 @@ pub enum Plan {
         left: Box<Plan>,
         right: Box<Plan>,
         kind: JoinType,
+        nest_params: Vec<ExecParamSource>,
         join_qual: Vec<Expr>,
         qual: Vec<Expr>,
     },

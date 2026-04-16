@@ -1,9 +1,9 @@
 use super::{
     Catalog, ExecError, ExecutorContext, ParseError, Plan, PlannedStmt, QueryDesc, Statement,
-    StatementResult, TransactionId, Value, bind_delete, bind_insert, bind_update,
+    StatementResult, TransactionId, TupleSlot, Value, bind_delete, bind_insert, bind_update,
     create_query_desc, execute_analyze, execute_create_index, execute_create_table, execute_delete,
     execute_drop_table, execute_explain, execute_insert, execute_truncate_table, execute_update,
-    execute_vacuum, executor_start, parse_statement, pg_plan_query, pg_plan_values_query,
+    execute_vacuum, eval_expr, executor_start, parse_statement, pg_plan_query, pg_plan_values_query,
 };
 use crate::backend::parser::CatalogLookup;
 use crate::backend::parser::UnsupportedStatement;
@@ -29,12 +29,30 @@ pub fn execute_query_desc(
 ) -> Result<StatementResult, ExecError> {
     let columns = query_desc.columns();
     let column_names = query_desc.column_names();
-    let saved_subplans = std::mem::replace(&mut ctx.subplans, query_desc.planned_stmt.subplans);
+    let planned_stmt = query_desc.planned_stmt;
+    let saved_subplans = std::mem::replace(&mut ctx.subplans, planned_stmt.subplans);
+    let saved_exec_params = if planned_stmt.ext_params.is_empty() {
+        Vec::new()
+    } else {
+        let mut param_slot = ctx
+            .expr_bindings
+            .outer_tuple
+            .clone()
+            .map(TupleSlot::virtual_row)
+            .unwrap_or_else(|| TupleSlot::empty(0));
+        let mut saved = Vec::with_capacity(planned_stmt.ext_params.len());
+        for param in &planned_stmt.ext_params {
+            let value = eval_expr(&param.expr, &mut param_slot, ctx)?;
+            let old = ctx.expr_bindings.exec_params.insert(param.paramid, value);
+            saved.push((param.paramid, old));
+        }
+        saved
+    };
     ctx.cte_tables.clear();
     ctx.cte_producers.clear();
     ctx.recursive_worktables.clear();
     let result = (|| {
-        let mut state = executor_start(query_desc.planned_stmt.plan_tree);
+        let mut state = executor_start(planned_stmt.plan_tree);
         let mut rows = Vec::new();
         while let Some(slot) = state.exec_proc_node(ctx)? {
             let mut values = slot.values()?.iter().cloned().collect::<Vec<_>>();
@@ -50,6 +68,13 @@ pub fn execute_query_desc(
     ctx.cte_tables.clear();
     ctx.cte_producers.clear();
     ctx.recursive_worktables.clear();
+    for (paramid, old) in saved_exec_params {
+        if let Some(value) = old {
+            ctx.expr_bindings.exec_params.insert(paramid, value);
+        } else {
+            ctx.expr_bindings.exec_params.remove(&paramid);
+        }
+    }
     ctx.subplans = saved_subplans;
     result
 }
@@ -61,6 +86,7 @@ pub fn execute_plan(plan: Plan, ctx: &mut ExecutorContext) -> Result<StatementRe
                 command_type: crate::include::executor::execdesc::CommandType::Select,
                 plan_tree: plan,
                 subplans: Vec::new(),
+                ext_params: Vec::new(),
             },
             None,
         ),

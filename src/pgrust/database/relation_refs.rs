@@ -55,6 +55,7 @@ pub(super) fn collect_rels_from_expr(expr: &Expr, rels: &mut BTreeSet<RelFileLoc
             }
         }
         Expr::Var(_)
+        | Expr::Param(_)
         | Expr::Column(_)
         | Expr::OuterColumn { .. }
         | Expr::Const(_)

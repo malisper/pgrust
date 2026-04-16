@@ -2,7 +2,7 @@ use super::hashjoin::HashJoinPhase;
 use super::node_hash::eval_hash_key_exprs;
 use crate::backend::commands::explain::format_explain_lines;
 use crate::backend::executor::exec_expr::eval_expr;
-use crate::backend::executor::nodes::render_explain_expr;
+use crate::backend::executor::nodes::render_explain_join_expr;
 use crate::backend::executor::{ExecError, ExecutorContext};
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::{
@@ -106,6 +106,9 @@ impl PlanNode for HashJoinState {
                             .as_mut()
                             .expect("current outer tuple must be materialized");
                         set_active_system_bindings(ctx, &current_outer.system_bindings);
+                        ctx.expr_bindings.outer_tuple = Some(current_outer.slot.tts_values.clone());
+                        ctx.expr_bindings.outer_system_bindings =
+                            current_outer.system_bindings.clone();
                         if let Some(key) =
                             eval_hash_key_exprs(&self.hash_keys, &mut current_outer.slot, ctx)?
                         {
@@ -167,6 +170,18 @@ impl PlanNode for HashJoinState {
                             .system_bindings,
                     );
                     set_active_system_bindings(ctx, &self.current_bindings);
+                    ctx.expr_bindings.outer_tuple = Some(outer.slot.tts_values.clone());
+                    ctx.expr_bindings.outer_system_bindings = outer.system_bindings.clone();
+                    ctx.expr_bindings.inner_tuple = Some(right_values.clone());
+                    ctx.expr_bindings.inner_system_bindings = self
+                        .right
+                        .table
+                        .as_ref()
+                        .expect("hash table must be built before probing")
+                        .entries[entry_index]
+                        .row
+                        .system_bindings
+                        .clone();
 
                     if !eval_qual_list(&self.hash_clauses, &mut self.slot, ctx)? {
                         continue;
@@ -279,21 +294,32 @@ impl PlanNode for HashJoinState {
     fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
         let prefix = "  ".repeat(indent + 1);
         if !self.hash_clauses.is_empty() {
+            let (left_names, right_names) = self.combined_names.split_at(self.left_width);
             lines.push(format!(
                 "{prefix}Hash Cond: {}",
-                render_explain_expr(&format_qual_list(&self.hash_clauses), &self.combined_names)
+                render_explain_join_expr(
+                    &format_qual_list(&self.hash_clauses),
+                    left_names,
+                    right_names,
+                )
             ));
         }
         if !self.join_qual.is_empty() {
+            let (left_names, right_names) = self.combined_names.split_at(self.left_width);
             lines.push(format!(
                 "{prefix}Join Filter: {}",
-                render_explain_expr(&format_qual_list(&self.join_qual), &self.combined_names)
+                render_explain_join_expr(
+                    &format_qual_list(&self.join_qual),
+                    left_names,
+                    right_names,
+                )
             ));
         }
         if !self.qual.is_empty() {
+            let (left_names, right_names) = self.combined_names.split_at(self.left_width);
             lines.push(format!(
                 "{prefix}Filter: {}",
-                render_explain_expr(&format_qual_list(&self.qual), &self.combined_names)
+                render_explain_join_expr(&format_qual_list(&self.qual), left_names, right_names)
             ));
         }
         format_explain_lines(&*self.left, indent + 1, analyze, lines);

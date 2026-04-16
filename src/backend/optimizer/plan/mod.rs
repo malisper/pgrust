@@ -11,6 +11,14 @@ pub(crate) fn planner(query: Query, catalog: &dyn CatalogLookup) -> PlannedStmt 
     planner::planner(query, catalog)
 }
 
+pub(crate) fn planner_with_param_base(
+    query: Query,
+    catalog: &dyn CatalogLookup,
+    next_param_id: usize,
+) -> (PlannedStmt, usize) {
+    planner::planner_with_param_base(query, catalog, next_param_id)
+}
+
 pub(super) fn finalize_expr_subqueries(
     expr: Expr,
     catalog: &dyn CatalogLookup,
@@ -25,6 +33,10 @@ pub(super) fn finalize_plan_subqueries(
     subplans: &mut Vec<Plan>,
 ) -> Plan {
     subselect::finalize_plan_subqueries(plan, catalog, subplans)
+}
+
+pub(super) fn append_planned_subquery(planned_stmt: PlannedStmt, subplans: &mut Vec<Plan>) -> usize {
+    subselect::append_planned_subquery(planned_stmt, subplans)
 }
 
 pub(super) fn grouping_planner(

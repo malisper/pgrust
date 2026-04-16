@@ -1288,6 +1288,7 @@ pub(super) fn lower_expr_to_plan_layout(expr: Expr, layout: &[Expr]) -> Expr {
 pub(super) fn expr_sql_type(expr: &Expr) -> SqlType {
     match expr {
         Expr::Var(var) => var.vartype,
+        Expr::Param(param) => param.paramtype,
         Expr::Aggref(aggref) => aggref.aggtype,
         Expr::Op(op) => op.opresulttype,
         Expr::Func(func) => func
@@ -1343,6 +1344,7 @@ pub(super) fn expr_sql_type(expr: &Expr) -> SqlType {
 fn expr_sql_type_maybe(expr: &Expr) -> Option<SqlType> {
     match expr {
         Expr::Column(_) | Expr::OuterColumn { .. } | Expr::ArraySubscript { .. } => None,
+        Expr::Param(param) => Some(param.paramtype),
         other => Some(expr_sql_type(other)),
     }
 }

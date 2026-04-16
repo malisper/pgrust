@@ -19,7 +19,7 @@ use crate::include::nodes::execnodes::{
     ProjectSetState, ProjectionState, RecursiveUnionState, ResultState, SeqScanState, SlotKind,
     SystemVarBinding, ToastRelationRef, TupleSlot, ValuesState, WorkTableScanState,
 };
-use crate::include::nodes::primnodes::{Expr, JoinType};
+use crate::include::nodes::primnodes::{Expr, JoinType, Var, attrno_index, INDEX_VAR, INNER_VAR, OUTER_VAR};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -68,6 +68,64 @@ fn eval_qual_list(
 fn set_active_system_bindings(ctx: &mut ExecutorContext, bindings: &[SystemVarBinding]) {
     ctx.system_bindings.clear();
     ctx.system_bindings.extend_from_slice(bindings);
+}
+
+fn set_outer_expr_bindings(
+    ctx: &mut ExecutorContext,
+    values: Vec<Value>,
+    bindings: &[SystemVarBinding],
+) {
+    ctx.expr_bindings.outer_tuple = Some(values);
+    ctx.expr_bindings.outer_system_bindings = bindings.to_vec();
+}
+
+fn clear_outer_expr_bindings(ctx: &mut ExecutorContext) {
+    ctx.expr_bindings.outer_tuple = None;
+    ctx.expr_bindings.outer_system_bindings.clear();
+}
+
+fn set_inner_expr_bindings(
+    ctx: &mut ExecutorContext,
+    values: Vec<Value>,
+    bindings: &[SystemVarBinding],
+) {
+    ctx.expr_bindings.inner_tuple = Some(values);
+    ctx.expr_bindings.inner_system_bindings = bindings.to_vec();
+}
+
+fn clear_inner_expr_bindings(ctx: &mut ExecutorContext) {
+    ctx.expr_bindings.inner_tuple = None;
+    ctx.expr_bindings.inner_system_bindings.clear();
+}
+
+fn materialize_slot_values(slot: &mut TupleSlot) -> Result<Vec<Value>, ExecError> {
+    let mut values = slot.values()?.to_vec();
+    Value::materialize_all(&mut values);
+    Ok(values)
+}
+
+fn bind_exec_params(
+    params: &[crate::include::nodes::plannodes::ExecParamSource],
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<(usize, Option<Value>)>, ExecError> {
+    let mut saved = Vec::with_capacity(params.len());
+    for param in params {
+        let value = eval_expr(&param.expr, slot, ctx)?;
+        let old = ctx.expr_bindings.exec_params.insert(param.paramid, value);
+        saved.push((param.paramid, old));
+    }
+    Ok(saved)
+}
+
+fn restore_exec_params(saved: Vec<(usize, Option<Value>)>, ctx: &mut ExecutorContext) {
+    for (paramid, old) in saved {
+        if let Some(value) = old {
+            ctx.expr_bindings.exec_params.insert(paramid, value);
+        } else {
+            ctx.expr_bindings.exec_params.remove(&paramid);
+        }
+    }
 }
 
 fn merge_system_bindings(
@@ -323,6 +381,10 @@ impl PlanNode for SeqScanState {
                     set_active_system_bindings(ctx, &self.current_bindings);
 
                     if let Some(qual) = &self.qual {
+                        let outer_values = materialize_slot_values(&mut self.slot)?;
+                        let current_bindings = self.current_bindings.clone();
+                        set_outer_expr_bindings(ctx, outer_values, &current_bindings);
+                        clear_inner_expr_bindings(ctx);
                         if !qual(&mut self.slot, ctx)? {
                             note_filtered_row(&mut self.stats);
                             continue;
@@ -518,12 +580,29 @@ pub(crate) fn render_explain_expr(expr: &Expr, column_names: &[String]) -> Strin
     format!("({})", render_explain_expr_inner(expr, column_names))
 }
 
+pub(crate) fn render_explain_join_expr(
+    expr: &Expr,
+    outer_names: &[String],
+    inner_names: &[String],
+) -> String {
+    format!(
+        "({})",
+        render_explain_join_expr_inner(expr, outer_names, inner_names)
+    )
+}
+
+fn render_explain_var_name(var: &Var, column_names: &[String]) -> Option<String> {
+    attrno_index(var.varattno).and_then(|index| column_names.get(index).cloned())
+}
+
 fn render_explain_expr_inner(expr: &Expr, column_names: &[String]) -> String {
     match expr {
         Expr::Column(index) => column_names
             .get(*index)
             .cloned()
             .unwrap_or_else(|| format!("column{}", index + 1)),
+        Expr::Var(var) => render_explain_var_name(var, column_names)
+            .unwrap_or_else(|| format!("{expr:?}")),
         Expr::Const(value) => render_explain_const(value),
         Expr::Op(op) => match op.op {
             crate::include::nodes::primnodes::OpExprKind::Eq
@@ -597,6 +676,102 @@ fn render_explain_expr_inner(expr: &Expr, column_names: &[String]) -> String {
     }
 }
 
+fn render_explain_join_expr_inner(
+    expr: &Expr,
+    outer_names: &[String],
+    inner_names: &[String],
+) -> String {
+    match expr {
+        Expr::Var(var) if var.varno == OUTER_VAR => render_explain_var_name(var, outer_names)
+            .unwrap_or_else(|| format!("{expr:?}")),
+        Expr::Var(var) if var.varno == INNER_VAR => render_explain_var_name(var, inner_names)
+            .unwrap_or_else(|| format!("{expr:?}")),
+        Expr::Var(var) if var.varno == INDEX_VAR => render_explain_var_name(var, inner_names)
+            .unwrap_or_else(|| format!("{expr:?}")),
+        Expr::Column(index) => outer_names
+            .get(*index)
+            .cloned()
+            .or_else(|| inner_names.get(index.saturating_sub(outer_names.len())).cloned())
+            .unwrap_or_else(|| format!("column{}", index + 1)),
+        Expr::Var(var) => {
+            let mut combined_names = outer_names.to_vec();
+            combined_names.extend_from_slice(inner_names);
+            render_explain_var_name(var, &combined_names).unwrap_or_else(|| format!("{expr:?}"))
+        }
+        Expr::Const(value) => render_explain_const(value),
+        Expr::Op(op) => match op.op {
+            crate::include::nodes::primnodes::OpExprKind::Eq
+            | crate::include::nodes::primnodes::OpExprKind::NotEq
+            | crate::include::nodes::primnodes::OpExprKind::Lt
+            | crate::include::nodes::primnodes::OpExprKind::LtEq
+            | crate::include::nodes::primnodes::OpExprKind::Gt
+            | crate::include::nodes::primnodes::OpExprKind::GtEq
+            | crate::include::nodes::primnodes::OpExprKind::RegexMatch => {
+                let [left, right] = op.args.as_slice() else {
+                    return format!("{expr:?}");
+                };
+                let op_text = match op.op {
+                    crate::include::nodes::primnodes::OpExprKind::Eq => "=",
+                    crate::include::nodes::primnodes::OpExprKind::NotEq => "<>",
+                    crate::include::nodes::primnodes::OpExprKind::Lt => "<",
+                    crate::include::nodes::primnodes::OpExprKind::LtEq => "<=",
+                    crate::include::nodes::primnodes::OpExprKind::Gt => ">",
+                    crate::include::nodes::primnodes::OpExprKind::GtEq => ">=",
+                    crate::include::nodes::primnodes::OpExprKind::RegexMatch => "~",
+                    _ => unreachable!(),
+                };
+                format!(
+                    "{} {} {}",
+                    render_explain_join_expr_inner(left, outer_names, inner_names),
+                    op_text,
+                    render_explain_join_expr_inner(right, outer_names, inner_names)
+                )
+            }
+            _ => format!("{expr:?}"),
+        },
+        Expr::Bool(bool_expr) => match bool_expr.boolop {
+            crate::include::nodes::primnodes::BoolExprType::And => {
+                let rendered = bool_expr
+                    .args
+                    .iter()
+                    .map(|arg| render_explain_join_expr_inner(arg, outer_names, inner_names))
+                    .collect::<Vec<_>>();
+                format!("({})", rendered.join(" AND "))
+            }
+            crate::include::nodes::primnodes::BoolExprType::Or => {
+                let rendered = bool_expr
+                    .args
+                    .iter()
+                    .map(|arg| render_explain_join_expr_inner(arg, outer_names, inner_names))
+                    .collect::<Vec<_>>();
+                format!("({})", rendered.join(" OR "))
+            }
+            crate::include::nodes::primnodes::BoolExprType::Not => {
+                let Some(inner) = bool_expr.args.first() else {
+                    return format!("{expr:?}");
+                };
+                format!(
+                    "NOT {}",
+                    render_explain_join_expr_inner(inner, outer_names, inner_names)
+                )
+            }
+        },
+        Expr::Coalesce(left, right) => format!(
+            "COALESCE({}, {})",
+            render_explain_join_expr_inner(left, outer_names, inner_names),
+            render_explain_join_expr_inner(right, outer_names, inner_names)
+        ),
+        Expr::IsNull(inner) => {
+            format!("{} IS NULL", render_explain_join_expr_inner(inner, outer_names, inner_names))
+        }
+        Expr::IsNotNull(inner) => format!(
+            "{} IS NOT NULL",
+            render_explain_join_expr_inner(inner, outer_names, inner_names)
+        ),
+        other => format!("{other:?}"),
+    }
+}
+
 fn render_explain_const(value: &Value) -> String {
     match value {
         Value::Text(_) | Value::TextRef(_, _) => {
@@ -631,6 +806,10 @@ impl PlanNode for FilterState {
                     return Ok(None);
                 }
             };
+            let outer_values = materialize_slot_values(slot)?;
+            let current_bindings = ctx.system_bindings.clone();
+            set_outer_expr_bindings(ctx, outer_values, &current_bindings);
+            clear_inner_expr_bindings(ctx);
 
             if (self.compiled_predicate)(slot, ctx)? {
                 finish_row(&mut self.stats, start);
@@ -762,6 +941,8 @@ impl PlanNode for NestedLoopJoinState {
                 self.current_bindings =
                     merge_system_bindings(&left.system_bindings, &right.system_bindings);
                 set_active_system_bindings(ctx, &self.current_bindings);
+                set_outer_expr_bindings(ctx, left.slot.tts_values.clone(), &left.system_bindings);
+                set_inner_expr_bindings(ctx, right.slot.tts_values.clone(), &right.system_bindings);
 
                 if eval_qual_list(&self.join_qual, &mut self.slot, ctx)? {
                     self.current_left_matched = true;
@@ -821,15 +1002,17 @@ impl PlanNode for NestedLoopJoinState {
     fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
         let prefix = "  ".repeat(indent + 1);
         if !self.join_qual.is_empty() {
+            let (left_names, right_names) = self.combined_names.split_at(self.left_width);
             lines.push(format!(
                 "{prefix}Join Filter: {}",
-                render_explain_expr(&format_qual_list(&self.join_qual), &self.combined_names)
+                render_explain_join_expr(&format_qual_list(&self.join_qual), left_names, right_names)
             ));
         }
         if !self.qual.is_empty() {
+            let (left_names, right_names) = self.combined_names.split_at(self.left_width);
             lines.push(format!(
                 "{prefix}Filter: {}",
-                render_explain_expr(&format_qual_list(&self.qual), &self.combined_names)
+                render_explain_join_expr(&format_qual_list(&self.qual), left_names, right_names)
             ));
         }
         format_explain_lines(&*self.left, indent + 1, analyze, lines);
@@ -862,11 +1045,16 @@ fn exec_lateral_join<'a>(
                     let values = current_left.slot.tts_values.clone();
                     state.current_left = Some(current_left);
                     state.current_left_matched = false;
-                    ctx.outer_rows.insert(0, values);
-                    ctx.outer_system_bindings.insert(
-                        0,
-                        state.current_left.as_ref().unwrap().system_bindings.clone(),
+                    set_outer_expr_bindings(
+                        ctx,
+                        values,
+                        &state.current_left.as_ref().unwrap().system_bindings,
                     );
+                    let saved_params = bind_exec_params(
+                        &state.nest_params,
+                        &mut state.current_left.as_mut().unwrap().slot,
+                        ctx,
+                    )?;
                     state.right = super::executor_start(
                         state
                             .right_plan
@@ -874,6 +1062,7 @@ fn exec_lateral_join<'a>(
                             .expect("lateral right plan")
                             .clone(),
                     );
+                    state.current_nest_param_saves = Some(saved_params);
                 }
                 false => {
                     finish_eof(&mut state.stats, start, ctx);
@@ -884,6 +1073,7 @@ fn exec_lateral_join<'a>(
 
         while let Some(slot) = state.right.exec_proc_node(ctx)? {
             ctx.check_for_interrupts()?;
+            let right_bindings = ctx.system_bindings.clone();
             let mut values = slot.values()?.iter().cloned().collect::<Vec<_>>();
             Value::materialize_all(&mut values);
             let left = state.current_left.as_ref().unwrap();
@@ -894,9 +1084,11 @@ fn exec_lateral_join<'a>(
             state.slot.tts_nvalid = nvalid;
             state.slot.kind = SlotKind::Virtual;
             state.slot.decode_offset = 0;
-            state.current_bindings =
-                merge_system_bindings(&left.system_bindings, state.right.current_system_bindings());
+            state.current_bindings = merge_system_bindings(&left.system_bindings, &right_bindings);
             set_active_system_bindings(ctx, &state.current_bindings);
+            set_outer_expr_bindings(ctx, left.slot.tts_values.clone(), &left.system_bindings);
+            let inner_values = materialize_slot_values(slot)?;
+            set_inner_expr_bindings(ctx, inner_values, &right_bindings);
 
             if eval_qual_list(&state.join_qual, &mut state.slot, ctx)? {
                 state.current_left_matched = true;
@@ -907,8 +1099,8 @@ fn exec_lateral_join<'a>(
             }
         }
 
-        ctx.outer_rows.remove(0);
-        ctx.outer_system_bindings.remove(0);
+        clear_outer_expr_bindings(ctx);
+        clear_inner_expr_bindings(ctx);
         if !state.current_left_matched && matches!(state.kind, JoinType::Left) {
             let left = state.current_left.as_ref().unwrap();
             let mut combined_values: Vec<Value> = left.slot.tts_values.clone();
@@ -919,11 +1111,17 @@ fn exec_lateral_join<'a>(
             state.slot.decode_offset = 0;
             state.current_bindings = left.system_bindings.clone();
             set_active_system_bindings(ctx, &state.current_bindings);
+            if let Some(saved_params) = state.current_nest_param_saves.take() {
+                restore_exec_params(saved_params, ctx);
+            }
             state.current_left = None;
             finish_row(&mut state.stats, start);
             return Ok(Some(&mut state.slot));
         }
 
+        if let Some(saved_params) = state.current_nest_param_saves.take() {
+            restore_exec_params(saved_params, ctx);
+        }
         state.current_left = None;
     }
 }
@@ -974,6 +1172,8 @@ fn exec_cross_join<'a>(
             state.current_bindings =
                 merge_system_bindings(&left.system_bindings, &right.system_bindings);
             set_active_system_bindings(ctx, &state.current_bindings);
+            set_outer_expr_bindings(ctx, left.slot.tts_values.clone(), &left.system_bindings);
+            set_inner_expr_bindings(ctx, right.slot.tts_values.clone(), &right.system_bindings);
 
             if eval_qual_list(&state.join_qual, &mut state.slot, ctx)?
                 && eval_qual_list(&state.qual, &mut state.slot, ctx)?
@@ -1009,6 +1209,7 @@ impl PlanNode for OrderByState {
             for mut row in rows {
                 ctx.check_for_interrupts()?;
                 set_active_system_bindings(ctx, &row.system_bindings);
+                set_outer_expr_bindings(ctx, row.slot.tts_values.clone(), &row.system_bindings);
                 let mut keys = Vec::with_capacity(self.items.len());
                 for item in &self.items {
                     keys.push(eval_expr(&item.expr, &mut row.slot, ctx)?);
@@ -1175,6 +1376,10 @@ impl PlanNode for ProjectionState {
         };
 
         let mut values = Vec::with_capacity(self.targets.len());
+        let outer_values = materialize_slot_values(input_slot)?;
+        let current_bindings = ctx.system_bindings.clone();
+        set_outer_expr_bindings(ctx, outer_values, &current_bindings);
+        clear_inner_expr_bindings(ctx);
         for target in &self.targets {
             values.push(eval_expr(&target.expr, input_slot, ctx)?.to_owned_value());
         }
@@ -1230,6 +1435,10 @@ impl PlanNode for AggregateState {
 
             while let Some(slot) = self.input.exec_proc_node(ctx)? {
                 ctx.check_for_interrupts()?;
+                let outer_values = materialize_slot_values(slot)?;
+                let current_bindings = ctx.system_bindings.clone();
+                set_outer_expr_bindings(ctx, outer_values, &current_bindings);
+                clear_inner_expr_bindings(ctx);
                 self.key_buffer.clear();
                 for expr in &self.group_by {
                     self.key_buffer.push(eval_expr(expr, slot, ctx)?);
@@ -1303,6 +1512,7 @@ impl PlanNode for AggregateState {
                 if let Some(having) = &self.having {
                     let mut having_slot = TupleSlot::virtual_row(row_values.clone());
                     ctx.system_bindings.clear();
+                    set_outer_expr_bindings(ctx, row_values.clone(), &[]);
                     match eval_expr(having, &mut having_slot, ctx)? {
                         Value::Bool(true) => {}
                         Value::Bool(false) | Value::Null => continue,
@@ -1746,6 +1956,11 @@ impl PlanNode for ProjectSetState {
                         call, ..
                     } = target
                     {
+                        set_outer_expr_bindings(
+                            ctx,
+                            materialized.tts_values.clone(),
+                            self.input.current_system_bindings(),
+                        );
                         let rows = eval_scalar_set_returning_call(call, &mut materialized, ctx)?;
                         max_rows = max_rows.max(rows.len());
                         srf_rows.push(rows);
@@ -1779,6 +1994,11 @@ impl PlanNode for ProjectSetState {
                 match target {
                     crate::include::nodes::primnodes::ProjectSetTarget::Scalar(entry) => {
                         set_active_system_bindings(ctx, &input_slot.system_bindings);
+                        set_outer_expr_bindings(
+                            ctx,
+                            input_slot.slot.tts_values.clone(),
+                            &input_slot.system_bindings,
+                        );
                         values.push(
                             eval_expr(&entry.expr, &mut input_slot.slot, ctx)?.to_owned_value(),
                         );

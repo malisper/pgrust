@@ -332,6 +332,7 @@ fn rewrite_semantic_expr(
 ) -> Result<Expr, ParseError> {
     Ok(match expr {
         other @ (Expr::Var(_)
+        | Expr::Param(_)
         | Expr::Column(_)
         | Expr::OuterColumn { .. }
         | Expr::Const(_)

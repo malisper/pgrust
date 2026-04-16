@@ -550,9 +550,9 @@ fn exec_function_return_query(
     state: &mut FunctionState,
     ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
-    ctx.outer_rows.insert(0, state.values.clone());
+    ctx.expr_bindings.outer_tuple = Some(state.values.clone());
     let result = execute_planned_stmt(plan.clone(), ctx);
-    ctx.outer_rows.remove(0);
+    ctx.expr_bindings.outer_tuple = None;
 
     let StatementResult::Query { rows, .. } = result? else {
         return Err(function_runtime_error(

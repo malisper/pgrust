@@ -18,18 +18,28 @@ fn planned_subquery_plan(
         })
 }
 
+fn bind_subplan_params(
+    subplan: &crate::include::nodes::primnodes::SubPlan,
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    for (paramid, arg) in subplan.par_param.iter().zip(subplan.args.iter()) {
+        let value = eval_expr(arg, slot, ctx)?;
+        ctx.expr_bindings.exec_params.insert(*paramid, value);
+    }
+    Ok(())
+}
+
 pub(super) fn eval_scalar_subquery(
     subplan: &crate::include::nodes::primnodes::SubPlan,
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
     let plan = planned_subquery_plan(subplan, ctx)?;
-    let mut outer_row = slot.values()?.iter().cloned().collect::<Vec<_>>();
-    Value::materialize_all(&mut outer_row);
-    ctx.outer_rows.insert(0, outer_row);
-    ctx.outer_system_bindings
-        .insert(0, ctx.system_bindings.clone());
+    let saved_bindings = ctx.expr_bindings.clone();
+    let saved_system_bindings = ctx.system_bindings.clone();
     let result = (|| {
+        bind_subplan_params(subplan, slot, ctx)?;
         let mut state = executor_start(plan.clone());
         let mut first_value = None;
         while let Some(inner_slot) = exec_next(&mut state, ctx)? {
@@ -49,8 +59,8 @@ pub(super) fn eval_scalar_subquery(
         }
         Ok(first_value.unwrap_or(Value::Null))
     })();
-    ctx.outer_rows.remove(0);
-    ctx.outer_system_bindings.remove(0);
+    ctx.expr_bindings = saved_bindings;
+    ctx.system_bindings = saved_system_bindings;
     result
 }
 
@@ -60,17 +70,15 @@ pub(super) fn eval_exists_subquery(
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
     let plan = planned_subquery_plan(subplan, ctx)?;
-    let mut outer_row = slot.values()?.iter().cloned().collect::<Vec<_>>();
-    Value::materialize_all(&mut outer_row);
-    ctx.outer_rows.insert(0, outer_row);
-    ctx.outer_system_bindings
-        .insert(0, ctx.system_bindings.clone());
+    let saved_bindings = ctx.expr_bindings.clone();
+    let saved_system_bindings = ctx.system_bindings.clone();
     let result = (|| {
+        bind_subplan_params(subplan, slot, ctx)?;
         let mut state = executor_start(plan.clone());
         Ok(Value::Bool(exec_next(&mut state, ctx)?.is_some()))
     })();
-    ctx.outer_rows.remove(0);
-    ctx.outer_system_bindings.remove(0);
+    ctx.expr_bindings = saved_bindings;
+    ctx.system_bindings = saved_system_bindings;
     result
 }
 
@@ -103,12 +111,10 @@ pub(super) fn eval_quantified_subquery(
             sqlstate: "0A000",
         });
     }
-    let mut outer_row = slot.values()?.iter().cloned().collect::<Vec<_>>();
-    Value::materialize_all(&mut outer_row);
-    ctx.outer_rows.insert(0, outer_row);
-    ctx.outer_system_bindings
-        .insert(0, ctx.system_bindings.clone());
+    let saved_bindings = ctx.expr_bindings.clone();
+    let saved_system_bindings = ctx.system_bindings.clone();
     let result = (|| {
+        bind_subplan_params(subplan, slot, ctx)?;
         let mut state = executor_start(plan.clone());
         let mut saw_row = false;
         let mut saw_null = false;
@@ -141,8 +147,8 @@ pub(super) fn eval_quantified_subquery(
             Ok(Value::Bool(is_all))
         }
     })();
-    ctx.outer_rows.remove(0);
-    ctx.outer_system_bindings.remove(0);
+    ctx.expr_bindings = saved_bindings;
+    ctx.system_bindings = saved_system_bindings;
     result
 }
 

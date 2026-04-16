@@ -9,7 +9,7 @@ use crate::include::catalog::{
 use crate::include::nodes::parsenodes::{
     AliasColumnDef, AliasColumnSpec, JoinTreeNode, RangeTblEntryKind, RawTypeName,
 };
-use crate::include::nodes::primnodes::{JoinType, Var};
+use crate::include::nodes::primnodes::{AttrNumber, JoinType, Var, OUTER_VAR};
 
 fn desc() -> RelationDesc {
     RelationDesc {
@@ -27,6 +27,18 @@ fn builtin_type(ty: SqlType) -> RawTypeName {
 
 fn attrs() -> ConstraintAttributes {
     ConstraintAttributes::default()
+}
+
+fn is_outer_user_var(expr: &Expr, index: usize) -> bool {
+    matches!(
+        expr,
+        Expr::Var(Var {
+            varno,
+            varattno,
+            varlevelsup: 0,
+            ..
+        }) if *varno == OUTER_VAR && *varattno == (index + 1) as AttrNumber
+    )
 }
 
 #[derive(Default)]
@@ -2452,10 +2464,7 @@ fn build_plan_resolves_order_by_ordinal_against_target_list() {
             Plan::OrderBy { items, .. } => {
                 assert_eq!(items.len(), 1);
                 assert!(items[0].descending);
-                assert!(matches!(
-                    items[0].expr,
-                    crate::backend::executor::Expr::Column(0)
-                ));
+                assert!(is_outer_user_var(&items[0].expr, 0));
             }
             other => panic!("expected order by, got {:?}", other),
         },
@@ -3523,7 +3532,7 @@ fn build_plan_with_group_by_order_by_wraps_aggregate_then_sort() {
             match *input {
                 Plan::OrderBy { input, items, .. } => {
                     assert_eq!(items.len(), 1);
-                    assert!(matches!(items[0].expr, Expr::Column(0)));
+                    assert!(is_outer_user_var(&items[0].expr, 0));
                     assert!(matches!(*input, Plan::Aggregate { .. }));
                 }
                 other => panic!("expected order by above aggregate, got {:?}", other),
@@ -3549,13 +3558,13 @@ fn grouped_join_using_projects_scanjoin_target_before_aggregate() {
             match *input {
                 Plan::OrderBy { input, items, .. } => {
                     assert_eq!(items.len(), 1);
-                    assert!(matches!(items[0].expr, Expr::Column(0)));
+                    assert!(is_outer_user_var(&items[0].expr, 0));
                     match *input {
                         Plan::Aggregate {
                             input, group_by, ..
                         } => {
                             assert_eq!(group_by.len(), 1);
-                            assert!(matches!(group_by[0], Expr::Column(0)));
+                            assert!(is_outer_user_var(&group_by[0], 0));
                             match *input {
                                 Plan::Projection { targets, .. } => {
                                     assert_eq!(targets.len(), 2);

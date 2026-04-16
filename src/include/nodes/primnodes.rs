@@ -536,6 +536,26 @@ pub type AttrNumber = i32;
 
 pub const SELF_ITEM_POINTER_ATTR_NO: AttrNumber = -1;
 pub const TABLE_OID_ATTR_NO: AttrNumber = -6;
+pub const OUTER_VAR: usize = usize::MAX;
+pub const INNER_VAR: usize = usize::MAX - 1;
+pub const INDEX_VAR: usize = usize::MAX - 2;
+pub const ROWID_VAR: usize = usize::MAX - 3;
+
+pub const fn is_special_varno(varno: usize) -> bool {
+    varno >= ROWID_VAR
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParamKind {
+    Exec,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Param {
+    pub paramkind: ParamKind,
+    pub paramid: usize,
+    pub paramtype: SqlType,
+}
 
 pub const fn user_attrno(index: usize) -> AttrNumber {
     index as AttrNumber + 1
@@ -684,6 +704,8 @@ pub struct SubPlan {
     pub testexpr: Option<Box<Expr>>,
     pub first_col_type: Option<SqlType>,
     pub plan_id: usize,
+    pub par_param: Vec<usize>,
+    pub args: Vec<Expr>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -697,6 +719,7 @@ pub struct ScalarArrayOpExpr {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expr {
     Var(Var),
+    Param(Param),
     Column(usize),
     OuterColumn {
         depth: usize,
@@ -956,6 +979,7 @@ fn binary_result_type(left: &Expr, right: &Expr) -> SqlType {
 fn expr_sql_type_hint(expr: &Expr) -> Option<SqlType> {
     match expr {
         Expr::Var(var) => Some(var.vartype),
+        Expr::Param(param) => Some(param.paramtype),
         Expr::Const(value) => value_sql_type_hint(value),
         Expr::Aggref(aggref) => Some(aggref.aggtype),
         Expr::Cast(_, ty) => Some(*ty),
