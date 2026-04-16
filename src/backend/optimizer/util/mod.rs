@@ -95,15 +95,15 @@ pub(super) fn rewrite_expr_for_append_rel(
     expr: Expr,
     info: &crate::include::nodes::pathnodes::AppendRelInfo,
 ) -> Expr {
-    tlist::rewrite_expr_for_append_rel(expr, info)
+    crate::backend::optimizer::rewrite::rewrite_expr_for_append_rel(expr, info)
 }
 
 pub(super) fn rewrite_semantic_expr_for_path(expr: Expr, path: &Path, layout: &[Expr]) -> Expr {
-    tlist::rewrite_semantic_expr_for_path(expr, path, layout)
+    crate::backend::optimizer::rewrite::rewrite_semantic_expr_for_path(expr, path, layout)
 }
 
 pub(super) fn rewrite_expr_for_path(expr: Expr, path: &Path, layout: &[Expr]) -> Expr {
-    tlist::rewrite_expr_for_path(expr, path, layout)
+    crate::backend::optimizer::rewrite::rewrite_expr_for_path(expr, path, layout)
 }
 
 pub(super) fn rewrite_semantic_expr_for_path_or_expand_join_vars(
@@ -112,7 +112,9 @@ pub(super) fn rewrite_semantic_expr_for_path_or_expand_join_vars(
     path: &Path,
     layout: &[Expr],
 ) -> Expr {
-    tlist::rewrite_semantic_expr_for_path_or_expand_join_vars(root, expr, path, layout)
+    crate::backend::optimizer::rewrite::rewrite_semantic_expr_for_path_or_expand_join_vars(
+        root, expr, path, layout,
+    )
 }
 
 pub(super) fn aggregate_group_by(path: &Path) -> Option<&[Expr]> {
@@ -124,5 +126,5 @@ pub(super) fn layout_candidate_for_expr(
     expr: &Expr,
     layout: &[Expr],
 ) -> Option<Expr> {
-    tlist::layout_candidate_for_expr(root, expr, layout)
+    crate::backend::optimizer::rewrite::layout_candidate_for_expr(root, expr, layout)
 }
