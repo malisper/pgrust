@@ -49,6 +49,14 @@ pub(super) fn lower_targets_for_path(
     tlist::lower_targets_for_path(root, path, targets)
 }
 
+pub(super) fn annotate_targets_for_input(
+    root: Option<&PlannerInfo>,
+    path: &Path,
+    targets: &[TargetEntry],
+) -> Vec<TargetEntry> {
+    tlist::annotate_targets_for_input(root, path, targets)
+}
+
 pub(super) fn lower_pathkeys_for_path(
     root: &PlannerInfo,
     path: &Path,

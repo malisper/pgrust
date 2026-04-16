@@ -182,7 +182,7 @@ fn dedup_match_exprs(exprs: Vec<Expr>) -> Vec<Expr> {
 }
 
 fn build_projection_tlist(
-    _root: Option<&PlannerInfo>,
+    root: Option<&PlannerInfo>,
     slot_id: usize,
     input: &Path,
     targets: &[TargetEntry],
@@ -197,9 +197,33 @@ fn build_projection_tlist(
                 if let Some(input_resno) = target.input_resno {
                     if let Some(input_expr) = input_target.exprs.get(input_resno.saturating_sub(1)) {
                         match_exprs.push(input_expr.clone());
+                        match_exprs.push(fully_expand_output_expr_with_root(
+                            root,
+                            input_expr.clone(),
+                            input,
+                        ));
+                        if let Some(root) = root {
+                            match_exprs.push(flatten_join_alias_vars(root, input_expr.clone()));
+                            match_exprs.push(flatten_join_alias_vars(
+                                root,
+                                fully_expand_output_expr_with_root(
+                                    Some(root),
+                                    input_expr.clone(),
+                                    input,
+                                ),
+                            ));
+                        }
                     }
                 }
                 match_exprs.push(target.expr.clone());
+                match_exprs.push(fully_expand_output_expr_with_root(root, target.expr.clone(), input));
+                if let Some(root) = root {
+                    match_exprs.push(flatten_join_alias_vars(root, target.expr.clone()));
+                    match_exprs.push(flatten_join_alias_vars(
+                        root,
+                        fully_expand_output_expr_with_root(Some(root), target.expr.clone(), input),
+                    ));
+                }
                 IndexedTlistEntry {
                     index,
                     sql_type: target.sql_type,
@@ -309,6 +333,36 @@ fn search_tlist_entry<'a>(
     })
 }
 
+fn search_input_tlist_entry<'a>(
+    root: Option<&PlannerInfo>,
+    expr: &Expr,
+    input: &Path,
+    tlist: &'a IndexedTlist,
+) -> Option<&'a IndexedTlistEntry> {
+    search_tlist_entry(root, expr, tlist).or_else(|| {
+        let mut matched_index = None;
+        for entry in &tlist.entries {
+            let entry_matches = entry.match_exprs.iter().any(|candidate| {
+                exprs_equivalent(root, candidate, expr)
+                    || exprs_equivalent(
+                        root,
+                        &fully_expand_output_expr_with_root(root, candidate.clone(), input),
+                        expr,
+                    )
+            });
+            if !entry_matches {
+                continue;
+            }
+            match matched_index {
+                Some(index) if index != entry.index => return None,
+                Some(_) => {}
+                None => matched_index = Some(entry.index),
+            }
+        }
+        matched_index.and_then(|index| tlist.entries.iter().find(|entry| entry.index == index))
+    })
+}
+
 fn search_tlist_entry_by_sortgroupref(
     ressortgroupref: usize,
     tlist: &IndexedTlist,
@@ -319,6 +373,277 @@ fn search_tlist_entry_by_sortgroupref(
     tlist.entries
         .iter()
         .find(|entry| entry.ressortgroupref == ressortgroupref)
+}
+
+fn lower_top_level_input_var(
+    root: Option<&PlannerInfo>,
+    expr: Expr,
+    input: &Path,
+    tlist: &IndexedTlist,
+) -> Expr {
+    match expr {
+        Expr::Var(var)
+            if var.varlevelsup == 0
+                && !is_special_varno(var.varno)
+                && !is_system_attr(var.varattno) =>
+        {
+            search_input_tlist_entry(root, &Expr::Var(var.clone()), input, tlist)
+                .filter(|entry| entry.sql_type == var.vartype)
+                .map(|entry| special_slot_var(OUTER_VAR, entry.index, entry.sql_type))
+                .unwrap_or(Expr::Var(var))
+        }
+        other => other,
+    }
+}
+
+fn lower_projection_expr_by_input_target(
+    root: Option<&PlannerInfo>,
+    expr: Expr,
+    input: &Path,
+    input_tlist: &IndexedTlist,
+) -> Expr {
+    let map_var = |var: Var| {
+        if var.varlevelsup != 0 || is_special_varno(var.varno) || is_system_attr(var.varattno) {
+            return Expr::Var(var);
+        }
+        let expr = Expr::Var(var.clone());
+        search_input_tlist_entry(root, &expr, input, input_tlist)
+            .filter(|entry| entry.sql_type == var.vartype)
+            .map(|entry| special_slot_var(OUTER_VAR, entry.index, entry.sql_type))
+            .unwrap_or(Expr::Var(var))
+    };
+    match expr {
+        Expr::Var(var) => map_var(var),
+        Expr::Aggref(aggref) => Expr::Aggref(Box::new(Aggref {
+            args: aggref
+                .args
+                .into_iter()
+                .map(|arg| lower_projection_expr_by_input_target(root, arg, input, input_tlist))
+                .collect(),
+            ..*aggref
+        })),
+        Expr::Op(op) => Expr::Op(Box::new(OpExpr {
+            args: op
+                .args
+                .into_iter()
+                .map(|arg| lower_projection_expr_by_input_target(root, arg, input, input_tlist))
+                .collect(),
+            ..*op
+        })),
+        Expr::Bool(bool_expr) => Expr::Bool(Box::new(BoolExpr {
+            args: bool_expr
+                .args
+                .into_iter()
+                .map(|arg| lower_projection_expr_by_input_target(root, arg, input, input_tlist))
+                .collect(),
+            ..*bool_expr
+        })),
+        Expr::Case(case_expr) => Expr::Case(Box::new(crate::include::nodes::primnodes::CaseExpr {
+            arg: case_expr.arg.map(|arg| {
+                Box::new(lower_projection_expr_by_input_target(
+                    root,
+                    *arg,
+                    input,
+                    input_tlist,
+                ))
+            }),
+            args: case_expr
+                .args
+                .into_iter()
+                .map(|arm| crate::include::nodes::primnodes::CaseWhen {
+                    expr: lower_projection_expr_by_input_target(root, arm.expr, input, input_tlist),
+                    result: lower_projection_expr_by_input_target(
+                        root,
+                        arm.result,
+                        input,
+                        input_tlist,
+                    ),
+                })
+                .collect(),
+            defresult: Box::new(lower_projection_expr_by_input_target(
+                root,
+                *case_expr.defresult,
+                input,
+                input_tlist,
+            )),
+            ..*case_expr
+        })),
+        Expr::Func(func) => Expr::Func(Box::new(FuncExpr {
+            args: func
+                .args
+                .into_iter()
+                .map(|arg| lower_projection_expr_by_input_target(root, arg, input, input_tlist))
+                .collect(),
+            ..*func
+        })),
+        Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(ScalarArrayOpExpr {
+            left: Box::new(lower_projection_expr_by_input_target(
+                root,
+                *saop.left,
+                input,
+                input_tlist,
+            )),
+            right: Box::new(lower_projection_expr_by_input_target(
+                root,
+                *saop.right,
+                input,
+                input_tlist,
+            )),
+            ..*saop
+        })),
+        Expr::Cast(inner, ty) => Expr::Cast(
+            Box::new(lower_projection_expr_by_input_target(
+                root,
+                *inner,
+                input,
+                input_tlist,
+            )),
+            ty,
+        ),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            case_insensitive,
+            negated,
+        } => Expr::Like {
+            expr: Box::new(lower_projection_expr_by_input_target(
+                root,
+                *expr,
+                input,
+                input_tlist,
+            )),
+            pattern: Box::new(lower_projection_expr_by_input_target(
+                root,
+                *pattern,
+                input,
+                input_tlist,
+            )),
+            escape: escape.map(|expr| {
+                Box::new(lower_projection_expr_by_input_target(
+                    root,
+                    *expr,
+                    input,
+                    input_tlist,
+                ))
+            }),
+            case_insensitive,
+            negated,
+        },
+        Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            negated,
+        } => Expr::Similar {
+            expr: Box::new(lower_projection_expr_by_input_target(
+                root,
+                *expr,
+                input,
+                input_tlist,
+            )),
+            pattern: Box::new(lower_projection_expr_by_input_target(
+                root,
+                *pattern,
+                input,
+                input_tlist,
+            )),
+            escape: escape.map(|expr| {
+                Box::new(lower_projection_expr_by_input_target(
+                    root,
+                    *expr,
+                    input,
+                    input_tlist,
+                ))
+            }),
+            negated,
+        },
+        Expr::IsNull(inner) => Expr::IsNull(Box::new(lower_projection_expr_by_input_target(
+            root,
+            *inner,
+            input,
+            input_tlist,
+        ))),
+        Expr::IsNotNull(inner) => Expr::IsNotNull(Box::new(lower_projection_expr_by_input_target(
+            root,
+            *inner,
+            input,
+            input_tlist,
+        ))),
+        Expr::IsDistinctFrom(left, right) => Expr::IsDistinctFrom(
+            Box::new(lower_projection_expr_by_input_target(
+                root,
+                *left,
+                input,
+                input_tlist,
+            )),
+            Box::new(lower_projection_expr_by_input_target(
+                root,
+                *right,
+                input,
+                input_tlist,
+            )),
+        ),
+        Expr::IsNotDistinctFrom(left, right) => Expr::IsNotDistinctFrom(
+            Box::new(lower_projection_expr_by_input_target(
+                root,
+                *left,
+                input,
+                input_tlist,
+            )),
+            Box::new(lower_projection_expr_by_input_target(
+                root,
+                *right,
+                input,
+                input_tlist,
+            )),
+        ),
+        Expr::ArrayLiteral {
+            elements,
+            array_type,
+        } => Expr::ArrayLiteral {
+            elements: elements
+                .into_iter()
+                .map(|element| lower_projection_expr_by_input_target(root, element, input, input_tlist))
+                .collect(),
+            array_type,
+        },
+        Expr::Coalesce(left, right) => Expr::Coalesce(
+            Box::new(lower_projection_expr_by_input_target(
+                root,
+                *left,
+                input,
+                input_tlist,
+            )),
+            Box::new(lower_projection_expr_by_input_target(
+                root,
+                *right,
+                input,
+                input_tlist,
+            )),
+        ),
+        Expr::ArraySubscript { array, subscripts } => Expr::ArraySubscript {
+            array: Box::new(lower_projection_expr_by_input_target(
+                root,
+                *array,
+                input,
+                input_tlist,
+            )),
+            subscripts: subscripts
+                .into_iter()
+                .map(|subscript| ExprArraySubscript {
+                    is_slice: subscript.is_slice,
+                    lower: subscript.lower.map(|expr| {
+                        lower_projection_expr_by_input_target(root, expr, input, input_tlist)
+                    }),
+                    upper: subscript.upper.map(|expr| {
+                        lower_projection_expr_by_input_target(root, expr, input, input_tlist)
+                    }),
+                })
+                .collect(),
+        },
+        other => other,
+    }
 }
 
 fn lower_order_by_expr_for_input(
@@ -334,8 +659,101 @@ fn lower_order_by_expr_for_input(
         };
     }
     OrderByEntry {
-        expr: fix_upper_expr_for_input(root, item.expr, input, input_tlist),
+        expr: lower_top_level_input_var(
+            root,
+            fix_upper_expr_for_input(root, item.expr, input, input_tlist),
+            input,
+            input_tlist,
+        ),
         ..item
+    }
+}
+
+fn expr_contains_local_semantic_var(expr: &Expr) -> bool {
+    match expr {
+        Expr::Var(var) => {
+            var.varlevelsup == 0 && !is_special_varno(var.varno) && !is_system_attr(var.varattno)
+        }
+        Expr::Aggref(aggref) => aggref.args.iter().any(expr_contains_local_semantic_var),
+        Expr::Op(op) => op.args.iter().any(expr_contains_local_semantic_var),
+        Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_contains_local_semantic_var),
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_deref()
+                .is_some_and(expr_contains_local_semantic_var)
+                || case_expr
+                    .args
+                    .iter()
+                    .any(|arm| {
+                        expr_contains_local_semantic_var(&arm.expr)
+                            || expr_contains_local_semantic_var(&arm.result)
+                    })
+                || expr_contains_local_semantic_var(&case_expr.defresult)
+        }
+        Expr::Func(func) => func.args.iter().any(expr_contains_local_semantic_var),
+        Expr::SubLink(sublink) => sublink
+            .testexpr
+            .as_deref()
+            .is_some_and(expr_contains_local_semantic_var),
+        Expr::SubPlan(subplan) => {
+            subplan
+                .testexpr
+                .as_deref()
+                .is_some_and(expr_contains_local_semantic_var)
+                || subplan.args.iter().any(expr_contains_local_semantic_var)
+        }
+        Expr::ScalarArrayOp(saop) => {
+            expr_contains_local_semantic_var(&saop.left)
+                || expr_contains_local_semantic_var(&saop.right)
+        }
+        Expr::Cast(inner, _) => expr_contains_local_semantic_var(inner),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_contains_local_semantic_var(expr)
+                || expr_contains_local_semantic_var(pattern)
+                || escape
+                    .as_deref()
+                    .is_some_and(expr_contains_local_semantic_var)
+        }
+        Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_contains_local_semantic_var(expr)
+                || expr_contains_local_semantic_var(pattern)
+                || escape
+                    .as_deref()
+                    .is_some_and(expr_contains_local_semantic_var)
+        }
+        Expr::IsNull(inner) | Expr::IsNotNull(inner) => expr_contains_local_semantic_var(inner),
+        Expr::IsDistinctFrom(left, right) | Expr::IsNotDistinctFrom(left, right) => {
+            expr_contains_local_semantic_var(left) || expr_contains_local_semantic_var(right)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements.iter().any(expr_contains_local_semantic_var),
+        Expr::Coalesce(left, right) => {
+            expr_contains_local_semantic_var(left) || expr_contains_local_semantic_var(right)
+        }
+        Expr::ArraySubscript { array, subscripts } => {
+            expr_contains_local_semantic_var(array)
+                || subscripts.iter().any(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .is_some_and(expr_contains_local_semantic_var)
+                        || subscript
+                            .upper
+                            .as_ref()
+                            .is_some_and(expr_contains_local_semantic_var)
+                })
+        }
+        _ => false,
     }
 }
 
@@ -359,6 +777,8 @@ fn lower_direct_ref(expr: &Expr, mode: LowerMode<'_>) -> Option<Expr> {
             Expr::Column(index) => tlist
                 .entries
                 .get(*index)
+                .map(|entry| special_slot_var(OUTER_VAR, entry.index, entry.sql_type)),
+            Expr::Var(_) => search_tlist_entry(None, expr, tlist)
                 .map(|entry| special_slot_var(OUTER_VAR, entry.index, entry.sql_type)),
             _ => search_tlist_entry(None, expr, tlist)
                 .map(|entry| special_slot_var(OUTER_VAR, entry.index, entry.sql_type)),
@@ -1644,7 +2064,50 @@ fn set_projection_references(
     let root = ctx.root;
     let mut lowered_targets = Vec::with_capacity(targets.len());
     for target in targets {
-        let expr = fix_upper_expr_for_input(root, target.expr, &input, &input_tlist);
+        let expr = target
+            .input_resno
+            .and_then(|input_resno| input_tlist.entries.get(input_resno.saturating_sub(1)))
+            .map(|entry| special_slot_var(OUTER_VAR, entry.index, entry.sql_type))
+            .unwrap_or_else(|| {
+                let lowered = lower_projection_expr_by_input_target(
+                    root,
+                    target.expr.clone(),
+                    &input,
+                    &input_tlist,
+                );
+                if expr_contains_local_semantic_var(&lowered) {
+                    let rewritten = match root {
+                        Some(root) => rewrite_semantic_expr_for_path_or_expand_join_vars(
+                            root,
+                            target.expr.clone(),
+                            &input,
+                            &input.output_vars(),
+                        ),
+                        None => rewrite_semantic_expr_for_path(
+                            target.expr.clone(),
+                            &input,
+                            &input.output_vars(),
+                        ),
+                    };
+                    let rewritten = fix_upper_expr_for_input(root, rewritten, &input, &input_tlist);
+                    if expr_contains_local_semantic_var(&rewritten) {
+                        fix_upper_expr_for_input(
+                            root,
+                            rewrite_semantic_expr_for_input_path(
+                                target.expr.clone(),
+                                &input,
+                                &input.output_vars(),
+                            ),
+                            &input,
+                            &input_tlist,
+                        )
+                    } else {
+                        rewritten
+                    }
+                } else {
+                    fix_upper_expr_for_input(root, lowered, &input, &input_tlist)
+                }
+            });
         lowered_targets.push(lower_target_entry(
             ctx,
             TargetEntry { expr, ..target },
