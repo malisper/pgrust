@@ -16,7 +16,6 @@ fn expr_uses_outer_columns(expr: &Expr) -> bool {
     match expr {
         Expr::Var(var) => var.varlevelsup > 0,
         Expr::Param(_) => true,
-        Expr::OuterColumn { .. } => true,
         Expr::Aggref(aggref) => aggref.args.iter().any(expr_uses_outer_columns),
         Expr::Op(op) => op.args.iter().any(expr_uses_outer_columns),
         Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_uses_outer_columns),

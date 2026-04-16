@@ -1095,7 +1095,7 @@ fn expr_uses_only_layout_vars(expr: &Expr, layout: &[Expr]) -> bool {
     }
     match expr {
         Expr::Var(var) => var.varlevelsup > 0,
-        Expr::Column(_) | Expr::OuterColumn { .. } | Expr::Const(_) => true,
+        Expr::Column(_) | Expr::Const(_) => true,
         Expr::Aggref(aggref) => aggref
             .args
             .iter()
@@ -1555,7 +1555,6 @@ fn expr_uses_immediate_outer_columns(expr: &Expr) -> bool {
     match expr {
         Expr::Var(var) => var.varlevelsup == 1,
         Expr::Param(_) => true,
-        Expr::OuterColumn { depth, .. } => *depth == 0,
         Expr::Aggref(aggref) => aggref.args.iter().any(expr_uses_immediate_outer_columns),
         Expr::Op(op) => op.args.iter().any(expr_uses_immediate_outer_columns),
         Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_uses_immediate_outer_columns),

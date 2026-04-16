@@ -634,7 +634,7 @@ pub fn derive_literal_default_value(sql: &str, target: SqlType) -> Result<Value,
     } else {
         let catalog = LiteralDefaultCatalog;
         let (bound, from_type) = bind_scalar_expr_in_scope(&parsed, &[], &catalog)?;
-        if matches!(bound, Expr::Column(_) | Expr::OuterColumn { .. }) {
+        if matches!(bound, Expr::Column(_)) || matches!(&bound, Expr::Var(var) if var.varlevelsup > 0) {
             return Err(ParseError::UnexpectedToken {
                 expected: "literal DEFAULT expression",
                 actual: sql.to_string(),

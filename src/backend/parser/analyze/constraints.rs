@@ -678,7 +678,7 @@ fn reject_unsupported_check_expr(expr: &Expr) -> Result<(), ParseError> {
         Expr::SubLink(_) | Expr::SubPlan(_) => Err(ParseError::FeatureNotSupported(
             "subqueries in CHECK constraints".into(),
         )),
-        Expr::OuterColumn { .. } => Err(ParseError::FeatureNotSupported(
+        Expr::Var(var) if var.varlevelsup > 0 => Err(ParseError::FeatureNotSupported(
             "outer references in CHECK constraints".into(),
         )),
         Expr::Op(op) => {

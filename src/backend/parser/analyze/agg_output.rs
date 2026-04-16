@@ -1,4 +1,5 @@
 use super::agg_output_special::*;
+use super::expr::raise_expr_varlevels;
 use super::*;
 use crate::include::nodes::primnodes::OpExprKind;
 
@@ -130,7 +131,15 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 match resolve_column_with_outer(input_scope, outer_scopes, name, grouped_outer)? {
                     ResolvedColumn::Local(index) => index,
                     ResolvedColumn::Outer { depth, index } => {
-                        return Ok(Expr::OuterColumn { depth, index });
+                        return outer_scopes
+                            .get(depth)
+                            .and_then(|scope| scope.output_exprs.get(index))
+                            .cloned()
+                            .map(|expr| raise_expr_varlevels(expr, depth + 1))
+                            .ok_or_else(|| ParseError::UnexpectedToken {
+                                expected: "resolved outer grouped column",
+                                actual: name.clone(),
+                            });
                     }
                 };
             for (i, gk) in group_by_exprs.iter().enumerate() {

@@ -779,7 +779,7 @@ fn expr_contains_local_semantic_var(expr: &Expr) -> bool {
 
 fn expr_contains_legacy_layout_ref(expr: &Expr) -> bool {
     match expr {
-        Expr::Column(_) | Expr::OuterColumn { .. } => true,
+        Expr::Column(_) => true,
         Expr::Aggref(aggref) => aggref.args.iter().any(expr_contains_legacy_layout_ref),
         Expr::Op(op) => op.args.iter().any(expr_contains_legacy_layout_ref),
         Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_contains_legacy_layout_ref),
@@ -1438,9 +1438,6 @@ fn lower_expr(ctx: &mut SetRefsContext<'_>, expr: Expr, mode: LowerMode<'_>) -> 
         }
         Expr::Param(param) => Expr::Param(param),
         Expr::Column(index) => panic!("unresolved Column({index}) survived setrefs"),
-        Expr::OuterColumn { depth, index } => {
-            panic!("unresolved OuterColumn(depth={depth}, index={index}) survived setrefs")
-        }
         Expr::Aggref(_) => {
             panic!("Aggref should be lowered before executable plan creation")
         }
@@ -1575,9 +1572,6 @@ fn validate_executable_expr(expr: &Expr, plan_node: &str, field: &str) {
         ),
         Expr::Column(index) => panic!(
             "executable plan contains planner-only Column({index}) in {plan_node}.{field}"
-        ),
-        Expr::OuterColumn { depth, index } => panic!(
-            "executable plan contains planner-only OuterColumn(depth={depth}, index={index}) in {plan_node}.{field}"
         ),
         Expr::Aggref(aggref) => panic!(
             "executable plan contains unresolved Aggref in {plan_node}.{field}: {aggref:?}"
@@ -1929,7 +1923,6 @@ fn validate_planner_expr(expr: &Expr, path_node: &str, field: &str) {
         }
         Expr::Var(_)
         | Expr::Column(_)
-        | Expr::OuterColumn { .. }
         | Expr::Const(_)
         | Expr::Aggref(_)
         | Expr::CaseTest(_)
@@ -2920,7 +2913,7 @@ fn rebuild_setrefs_expr(
     recurse: impl Copy + Fn(Expr) -> Expr,
 ) -> Expr {
     match expr {
-        Expr::Var(_) | Expr::Column(_) | Expr::OuterColumn { .. } | Expr::Param(_) => expr,
+        Expr::Var(_) | Expr::Column(_) | Expr::Param(_) => expr,
         Expr::Aggref(aggref) => Expr::Aggref(Box::new(Aggref {
             args: aggref.args.into_iter().map(recurse).collect(),
             ..*aggref

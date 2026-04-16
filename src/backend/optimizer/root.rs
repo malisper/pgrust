@@ -263,7 +263,7 @@ fn collect_group_input_exprs(expr: &Expr, group_by: &[Expr], exprs: &mut Vec<Exp
         return;
     }
     match expr {
-        Expr::Var(_) | Expr::OuterColumn { .. } => push_expr(exprs, expr.clone()),
+        Expr::Var(_) => push_expr(exprs, expr.clone()),
         Expr::Param(_) => {}
         Expr::Column(_) => panic!("unexpected Expr::Column in group input target derivation"),
         Expr::Aggref(aggref) => {
@@ -361,7 +361,7 @@ fn collect_expr_vec(args: &[Expr], group_by: &[Expr], exprs: &mut Vec<Expr>) {
 
 fn collect_supporting_inputs(expr: &Expr, exprs: &mut Vec<Expr>) {
     match expr {
-        Expr::Var(_) | Expr::OuterColumn { .. } => push_expr(exprs, expr.clone()),
+        Expr::Var(_) => push_expr(exprs, expr.clone()),
         Expr::Param(_) => {}
         Expr::Column(_) => panic!("unexpected Expr::Column in supporting input derivation"),
         Expr::Aggref(aggref) => {
@@ -593,7 +593,6 @@ fn collect_query_outer_refs_expr(expr: &Expr, levelsup: usize, exprs: &mut Vec<E
         ),
         Expr::Var(_)
         | Expr::Param(_)
-        | Expr::OuterColumn { .. }
         | Expr::Column(_)
         | Expr::Const(_)
         | Expr::Random => {}

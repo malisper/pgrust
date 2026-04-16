@@ -612,7 +612,6 @@ fn collect_expr_relids(expr: &Expr, relids: &mut Vec<usize>) {
         }
         Expr::Param(_)
         | Expr::Column(_)
-        | Expr::OuterColumn { .. }
         | Expr::Const(_)
         | Expr::Random
         | Expr::CurrentDate

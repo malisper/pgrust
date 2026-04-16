@@ -304,7 +304,7 @@ fn projection_is_passthrough_boundary(input: &Path, targets: &[TargetEntry]) -> 
 
 fn expr_contains_legacy_layout_ref(expr: &Expr) -> bool {
     match expr {
-        Expr::Column(_) | Expr::OuterColumn { .. } => true,
+        Expr::Column(_) => true,
         Expr::Aggref(aggref) => aggref.args.iter().any(expr_contains_legacy_layout_ref),
         Expr::Op(op) => op.args.iter().any(expr_contains_legacy_layout_ref),
         Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_contains_legacy_layout_ref),

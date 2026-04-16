@@ -734,10 +734,6 @@ pub enum Expr {
     Var(Var),
     Param(Param),
     Column(usize),
-    OuterColumn {
-        depth: usize,
-        index: usize,
-    },
     Const(Value),
     Aggref(Box<Aggref>),
     Op(Box<OpExpr>),
@@ -1037,7 +1033,6 @@ fn expr_sql_type_hint(expr: &Expr) -> Option<SqlType> {
         }
         Expr::SubPlan(subplan) => subplan.first_col_type,
         Expr::Column(_)
-        | Expr::OuterColumn { .. }
         | Expr::Like { .. }
         | Expr::Similar { .. }
         | Expr::ArraySubscript { .. }
