@@ -8,6 +8,8 @@ use crate::include::nodes::execnodes::{
     ProjectSetState, ProjectionState, RecursiveUnionState, RecursiveWorkTable, ResultState,
     SeqScanState, SubqueryScanState, ValuesState, WorkTableScanState,
 };
+use crate::backend::parser::SqlType;
+use crate::include::nodes::parsenodes::SqlTypeKind;
 use crate::include::nodes::primnodes::{Expr, SetReturningCall};
 
 use std::rc::Rc;
@@ -88,6 +90,13 @@ fn expr_uses_outer_columns(expr: &Expr) -> bool {
         | Expr::LocalTime { .. }
         | Expr::LocalTimestamp { .. } => false,
     }
+}
+
+fn recursive_union_distinct_hashable(sql_type: SqlType) -> bool {
+    !matches!(
+        sql_type.element_type().kind,
+        SqlTypeKind::VarBit | SqlTypeKind::Json | SqlTypeKind::JsonPath | SqlTypeKind::Record
+    )
 }
 
 fn set_returning_call_uses_outer_columns(call: &SetReturningCall) -> bool {
@@ -634,9 +643,13 @@ pub fn executor_start(plan: Plan) -> PlanState {
             recursive,
         } => {
             let width = output_columns.len();
+            let distinct_hashable = output_columns
+                .iter()
+                .all(|column| recursive_union_distinct_hashable(column.sql_type));
             Box::new(RecursiveUnionState {
                 worktable_id,
                 distinct,
+                distinct_hashable,
                 anchor: executor_start(*anchor),
                 recursive_plan: *recursive,
                 recursive_state: None,
