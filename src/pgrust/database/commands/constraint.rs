@@ -50,6 +50,7 @@ fn ddl_executor_context(
         next_command_id: cid,
         outer_rows: Vec::new(),
         outer_system_bindings: Vec::new(),
+        case_test_values: Vec::new(),
         system_bindings: Vec::new(),
         subplans: Vec::new(),
         timed: false,

@@ -457,6 +457,29 @@ fn rewrite_semantic_expr(
             Box::new(rewrite_semantic_expr(*left, catalog, expanded_views)?),
             Box::new(rewrite_semantic_expr(*right, catalog, expanded_views)?),
         ),
+        Expr::Case(case_expr) => Expr::Case(Box::new(crate::include::nodes::primnodes::CaseExpr {
+            arg: case_expr
+                .arg
+                .map(|arg| rewrite_semantic_expr(*arg, catalog, expanded_views).map(Box::new))
+                .transpose()?,
+            args: case_expr
+                .args
+                .into_iter()
+                .map(|arm| {
+                    Ok(crate::include::nodes::primnodes::CaseWhen {
+                        expr: rewrite_semantic_expr(arm.expr, catalog, expanded_views)?,
+                        result: rewrite_semantic_expr(arm.result, catalog, expanded_views)?,
+                    })
+                })
+                .collect::<Result<Vec<_>, ParseError>>()?,
+            defresult: Box::new(rewrite_semantic_expr(
+                *case_expr.defresult,
+                catalog,
+                expanded_views,
+            )?),
+            ..*case_expr
+        })),
+        Expr::CaseTest(case_test) => Expr::CaseTest(case_test),
         Expr::ArraySubscript { array, subscripts } => Expr::ArraySubscript {
             array: Box::new(rewrite_semantic_expr(*array, catalog, expanded_views)?),
             subscripts: subscripts

@@ -152,6 +152,7 @@ impl Database {
             timed: false,
             outer_rows: Vec::new(),
             outer_system_bindings: Vec::new(),
+            case_test_values: Vec::new(),
             system_bindings: Vec::new(),
             subplans: Vec::new(),
             catalog: catalog.materialize_visible_catalog(),

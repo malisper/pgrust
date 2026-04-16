@@ -70,7 +70,6 @@ Only `=`, `<`, `>`, `+`, and unary `-` are supported. Missing operators include:
 - `BETWEEN`
 - `IN (list)` and `IN (subquery)`
 - `ANY` / `ALL`
-- `CASE WHEN ... THEN ... ELSE ... END`
 - `COALESCE`, `NULLIF`, `GREATEST`, `LEAST`
 - type cast (`::` and `CAST`)
 
@@ -190,9 +189,17 @@ Set operations are not supported.
 
 ## Expressions in target list
 
-Only column references, constants, aggregate calls, and `+` are supported
-in the target list. Function calls, `CASE`, casts, and complex expressions
-are missing.
+The main SQL executor now supports target-list expressions such as function
+calls, `CASE`, casts, and other compound expressions.
+
+Still deferred in PL/pgSQL expression evaluation:
+
+- simple `CASE arg WHEN ... THEN ... ELSE ... END` in PL/pgSQL expression
+  contexts (for example `RETURN case n when 1 then ... end`)
+
+Searched `CASE WHEN ... THEN ... ELSE ... END` works in SQL. The remaining gap
+is specific to the PL/pgSQL expression-evaluation path, not the main SQL
+executor.
 
 ## Built-in functions
 

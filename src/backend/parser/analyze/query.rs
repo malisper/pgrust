@@ -480,6 +480,22 @@ fn shift_expr_rtindexes(expr: Expr, offset: usize) -> Expr {
             Box::new(shift_expr_rtindexes(*left, offset)),
             Box::new(shift_expr_rtindexes(*right, offset)),
         ),
+        Expr::Case(case_expr) => Expr::Case(Box::new(crate::include::nodes::primnodes::CaseExpr {
+            arg: case_expr
+                .arg
+                .map(|arg| Box::new(shift_expr_rtindexes(*arg, offset))),
+            args: case_expr
+                .args
+                .into_iter()
+                .map(|arm| crate::include::nodes::primnodes::CaseWhen {
+                    expr: shift_expr_rtindexes(arm.expr, offset),
+                    result: shift_expr_rtindexes(arm.result, offset),
+                })
+                .collect(),
+            defresult: Box::new(shift_expr_rtindexes(*case_expr.defresult, offset)),
+            ..*case_expr
+        })),
+        Expr::CaseTest(case_test) => Expr::CaseTest(case_test),
         Expr::ArraySubscript { array, subscripts } => Expr::ArraySubscript {
             array: Box::new(shift_expr_rtindexes(*array, offset)),
             subscripts: subscripts
@@ -814,6 +830,22 @@ pub(super) fn rewrite_expr_columns(expr: Expr, output_exprs: &[Expr]) -> Expr {
             Box::new(rewrite_expr_columns(*left, output_exprs)),
             Box::new(rewrite_expr_columns(*right, output_exprs)),
         ),
+        Expr::Case(case_expr) => Expr::Case(Box::new(crate::include::nodes::primnodes::CaseExpr {
+            arg: case_expr
+                .arg
+                .map(|arg| Box::new(rewrite_expr_columns(*arg, output_exprs))),
+            args: case_expr
+                .args
+                .into_iter()
+                .map(|arm| crate::include::nodes::primnodes::CaseWhen {
+                    expr: rewrite_expr_columns(arm.expr, output_exprs),
+                    result: rewrite_expr_columns(arm.result, output_exprs),
+                })
+                .collect(),
+            defresult: Box::new(rewrite_expr_columns(*case_expr.defresult, output_exprs)),
+            ..*case_expr
+        })),
+        Expr::CaseTest(case_test) => Expr::CaseTest(case_test),
         Expr::ArraySubscript { array, subscripts } => Expr::ArraySubscript {
             array: Box::new(rewrite_expr_columns(*array, output_exprs)),
             subscripts: subscripts

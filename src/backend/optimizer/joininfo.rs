@@ -312,6 +312,22 @@ pub(super) fn flatten_join_alias_vars_query(query: &Query, expr: Expr) -> Expr {
                 .collect(),
             ..*bool_expr
         })),
+        Expr::Case(case_expr) => Expr::Case(Box::new(crate::include::nodes::primnodes::CaseExpr {
+            arg: case_expr
+                .arg
+                .map(|expr| Box::new(flatten_join_alias_vars_query(query, *expr))),
+            args: case_expr
+                .args
+                .into_iter()
+                .map(|arm| crate::include::nodes::primnodes::CaseWhen {
+                    expr: flatten_join_alias_vars_query(query, arm.expr),
+                    result: flatten_join_alias_vars_query(query, arm.result),
+                })
+                .collect(),
+            defresult: Box::new(flatten_join_alias_vars_query(query, *case_expr.defresult)),
+            ..*case_expr
+        })),
+        Expr::CaseTest(case_test) => Expr::CaseTest(case_test),
         Expr::Func(func) => Expr::Func(Box::new(crate::include::nodes::primnodes::FuncExpr {
             args: func
                 .args
@@ -438,6 +454,19 @@ pub(super) fn strict_relids(expr: &Expr) -> Vec<usize> {
                 .unwrap_or_default(),
         },
         Expr::Func(func) => strict_relids_union(&func.args),
+        Expr::Case(case_expr) => {
+            let mut relids = case_expr
+                .arg
+                .as_deref()
+                .map(strict_relids)
+                .unwrap_or_default();
+            for arm in &case_expr.args {
+                relids = relids_union(&relids, &strict_relids(&arm.expr));
+                relids = relids_union(&relids, &strict_relids(&arm.result));
+            }
+            relids_union(&relids, &strict_relids(&case_expr.defresult))
+        }
+        Expr::CaseTest(_) => Vec::new(),
         Expr::ScalarArrayOp(saop) => {
             relids_union(&strict_relids(&saop.left), &strict_relids(&saop.right))
         }
@@ -508,6 +537,17 @@ fn collect_expr_relids(expr: &Expr, relids: &mut Vec<usize>) {
                 collect_expr_relids(arg, relids);
             }
         }
+        Expr::Case(case_expr) => {
+            if let Some(arg) = &case_expr.arg {
+                collect_expr_relids(arg, relids);
+            }
+            for arm in &case_expr.args {
+                collect_expr_relids(&arm.expr, relids);
+                collect_expr_relids(&arm.result, relids);
+            }
+            collect_expr_relids(&case_expr.defresult, relids);
+        }
+        Expr::CaseTest(_) => {}
         Expr::Func(func) => {
             for arg in &func.args {
                 collect_expr_relids(arg, relids);

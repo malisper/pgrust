@@ -266,6 +266,36 @@ fn eval_bool_expr(
     }
 }
 
+fn eval_case_expr(
+    case_expr: &crate::include::nodes::primnodes::CaseExpr,
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    let arg_value = match &case_expr.arg {
+        Some(arg) => Some(eval_expr(arg, slot, ctx)?),
+        None => None,
+    };
+    let eval_active =
+        |slot: &mut TupleSlot, ctx: &mut ExecutorContext| -> Result<Value, ExecError> {
+            for when in &case_expr.args {
+                match eval_expr(&when.expr, slot, ctx)? {
+                    Value::Bool(true) => return eval_expr(&when.result, slot, ctx),
+                    Value::Bool(false) | Value::Null => {}
+                    other => return Err(ExecError::NonBoolQual(other)),
+                }
+            }
+            eval_expr(&case_expr.defresult, slot, ctx)
+        };
+    if let Some(arg_value) = arg_value {
+        ctx.case_test_values.push(arg_value);
+        let result = eval_active(slot, ctx);
+        ctx.case_test_values.pop();
+        result
+    } else {
+        eval_active(slot, ctx)
+    }
+}
+
 fn eval_func_expr(
     func: &FuncExpr,
     slot: &mut TupleSlot,
@@ -299,6 +329,12 @@ pub fn eval_expr(
     match expr {
         Expr::Op(op) => eval_op_expr(op, slot, ctx),
         Expr::Bool(bool_expr) => eval_bool_expr(bool_expr, slot, ctx),
+        Expr::Case(case_expr) => eval_case_expr(case_expr, slot, ctx),
+        Expr::CaseTest(_) => ctx
+            .case_test_values
+            .last()
+            .cloned()
+            .ok_or_else(|| malformed_expr_error("CASE test")),
         Expr::Func(func) => eval_func_expr(func, slot, ctx),
         Expr::Aggref(_) => Err(ExecError::DetailedError {
             message: "aggregate reference reached executor outside aggregate lowering".into(),
@@ -635,6 +671,20 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
         }
         Expr::Column(index) => Ok(slot.get_attr(*index)?.clone()),
         Expr::Const(value) => Ok(value.clone()),
+        Expr::Case(case_expr) => {
+            if case_expr.arg.is_some() {
+                return Err(malformed_expr_error("CASE in PL/pgSQL"));
+            }
+            for when in &case_expr.args {
+                match eval_plpgsql_expr(&when.expr, slot)? {
+                    Value::Bool(true) => return eval_plpgsql_expr(&when.result, slot),
+                    Value::Bool(false) | Value::Null => {}
+                    other => return Err(ExecError::NonBoolQual(other)),
+                }
+            }
+            eval_plpgsql_expr(&case_expr.defresult, slot)
+        }
+        Expr::CaseTest(_) => Err(malformed_expr_error("CASE test in PL/pgSQL")),
         Expr::Cast(inner, ty) => cast_value(eval_plpgsql_expr(inner, slot)?, *ty),
         Expr::Coalesce(left, right) => {
             let left = eval_plpgsql_expr(left, slot)?;

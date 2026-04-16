@@ -581,6 +581,25 @@ pub struct BoolExpr {
     pub args: Vec<Expr>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaseWhen {
+    pub expr: Expr,
+    pub result: Expr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaseExpr {
+    pub casetype: SqlType,
+    pub arg: Option<Box<Expr>>,
+    pub args: Vec<CaseWhen>,
+    pub defresult: Box<Expr>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaseTestExpr {
+    pub type_id: SqlType,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpExprKind {
     UnaryPlus,
@@ -685,6 +704,8 @@ pub enum Expr {
     Aggref(Box<Aggref>),
     Op(Box<OpExpr>),
     Bool(Box<BoolExpr>),
+    Case(Box<CaseExpr>),
+    CaseTest(Box<CaseTestExpr>),
     Func(Box<FuncExpr>),
     SubLink(Box<SubLink>),
     SubPlan(Box<SubPlan>),
@@ -940,6 +961,8 @@ fn expr_sql_type_hint(expr: &Expr) -> Option<SqlType> {
         Expr::Coalesce(left, right) => {
             expr_sql_type_hint(left).or_else(|| expr_sql_type_hint(right))
         }
+        Expr::Case(case_expr) => Some(case_expr.casetype),
+        Expr::CaseTest(case_test) => Some(case_test.type_id),
         Expr::Op(op) => Some(op.opresulttype),
         Expr::Func(func) => func.funcresulttype,
         Expr::ScalarArrayOp(_) => Some(SqlType::new(SqlTypeKind::Bool)),

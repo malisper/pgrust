@@ -198,6 +198,40 @@ pub(super) fn infer_sql_expr_type_with_ctes(
         | SqlExpr::JsonbPathExists(_, _)
         | SqlExpr::JsonbPathMatch(_, _)
         | SqlExpr::QuantifiedArray { .. } => SqlType::new(SqlTypeKind::Bool),
+        SqlExpr::Case {
+            args, defresult, ..
+        } => {
+            let mut common = defresult.as_deref().map(|expr| {
+                infer_sql_expr_type_with_ctes(
+                    expr,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )
+                .element_type()
+            });
+            for arm in args {
+                if matches!(arm.result, SqlExpr::Const(Value::Null)) {
+                    continue;
+                }
+                let ty = infer_sql_expr_type_with_ctes(
+                    &arm.result,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )
+                .element_type();
+                common = Some(match common {
+                    None => ty,
+                    Some(current) => resolve_common_scalar_type(current, ty).unwrap_or(ty),
+                });
+            }
+            common.unwrap_or(SqlType::new(SqlTypeKind::Text))
+        }
         SqlExpr::JsonGet(left, _) | SqlExpr::JsonPath(left, _) => {
             let left_type = infer_sql_expr_type_with_ctes(
                 left,
