@@ -3542,15 +3542,21 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         Rule::expr
         | Rule::or_expr
         | Rule::and_expr
+        | Rule::json_access_expr
         | Rule::concat_expr
         | Rule::add_expr
         | Rule::bit_expr
         | Rule::shift_expr
         | Rule::pow_expr
         | Rule::mul_expr => {
+            let rule = pair.as_rule();
             let mut inner = pair.into_inner();
             let first = build_expr(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
-            fold_infix(first, inner)
+            if rule == Rule::json_access_expr {
+                fold_json_access(first, inner)
+            } else {
+                fold_infix(first, inner)
+            }
         }
         Rule::postfix_expr => {
             let mut inner = pair.into_inner();
@@ -3891,10 +3897,6 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                             left: Box::new(left),
                             right: Box::new(right),
                         },
-                        "->" => SqlExpr::JsonGet(Box::new(left), Box::new(right)),
-                        "->>" => SqlExpr::JsonGetText(Box::new(left), Box::new(right)),
-                        "#>" => SqlExpr::JsonPath(Box::new(left), Box::new(right)),
-                        "#>>" => SqlExpr::JsonPathText(Box::new(left), Box::new(right)),
                         "=" => SqlExpr::Eq(Box::new(left), Box::new(right)),
                         "<>" | "!=" => SqlExpr::NotEq(Box::new(left), Box::new(right)),
                         "<" => SqlExpr::Lt(Box::new(left), Box::new(right)),
@@ -4675,6 +4677,28 @@ fn fold_infix(
         };
     }
     Ok(expr)
+}
+
+fn fold_json_access(
+    mut left: SqlExpr,
+    mut inner: pest::iterators::Pairs<'_, Rule>,
+) -> Result<SqlExpr, ParseError> {
+    while let Some(op) = inner.next() {
+        let right = build_expr(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
+        left = match op.as_str() {
+            "->" => SqlExpr::JsonGet(Box::new(left), Box::new(right)),
+            "->>" => SqlExpr::JsonGetText(Box::new(left), Box::new(right)),
+            "#>" => SqlExpr::JsonPath(Box::new(left), Box::new(right)),
+            "#>>" => SqlExpr::JsonPathText(Box::new(left), Box::new(right)),
+            other => {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "json access operator",
+                    actual: other.into(),
+                });
+            }
+        };
+    }
+    Ok(left)
 }
 
 fn decode_string_literal(raw: &str) -> Result<String, ParseError> {

@@ -215,7 +215,8 @@ expr = { or_expr }
 or_expr = { and_expr ~ (kw_or ~ and_expr)* }
 and_expr = { not_expr ~ (kw_and ~ not_expr)* }
 not_expr = { kw_not ~ not_expr | cmp_expr }
-cmp_expr = { concat_expr ~ (null_predicate_suffix | between_suffix | in_expr_list_suffix | in_subquery_suffix | quantified_suffix | like_suffix | similar_suffix | comp_op ~ concat_expr)? }
+cmp_expr = { json_access_expr ~ (null_predicate_suffix | between_suffix | in_expr_list_suffix | in_subquery_suffix | quantified_suffix | like_suffix | similar_suffix | comp_op ~ json_access_expr)? }
+json_access_expr = { concat_expr ~ (json_access_op ~ concat_expr)* }
 concat_expr = { add_expr ~ (concat_op ~ add_expr)* }
 add_expr = { bit_expr ~ (add_op ~ bit_expr)* }
 bit_expr = { shift_expr ~ (bit_op ~ shift_expr)* }
@@ -248,7 +249,8 @@ quantified_comp_op = { "@@" | "&&" | "=" | "<>" | "!=" | "<=" | ">=" | "<" | ">"
 like_suffix = { kw_not? ~ (kw_ilike | kw_like) ~ concat_expr ~ escape_clause? }
 similar_suffix = { kw_not? ~ kw_similar ~ kw_to ~ concat_expr ~ escape_clause? }
 escape_clause = { kw_escape ~ concat_expr }
-comp_op = { "<->" | "##" | "?#" | "?||" | "?-|" | "~=" | "&<|" | "|&>" | "<<|" | "|>>" | "&<" | "&>" | "<^" | ">^" | "?-" | "@>" | "<@" | "@?" | "@@" | "?|" | "?&" | "?" | "&&" | "#>>" | "#>" | "->>" | "->" | "=" | "<>" | "!=" | "<=" | ">=" | "<" | ">" | "~" }
+json_access_op = { "#>>" | "#>" | "->>" | "->" }
+comp_op = { "<->" | "##" | "?#" | "?||" | "?-|" | "~=" | "&<|" | "|&>" | "<<|" | "|>>" | "&<" | "&>" | "<^" | ">^" | "?-" | "@>" | "<@" | "@?" | "@@" | "?|" | "?&" | "?" | "&&" | "=" | "<>" | "!=" | "<=" | ">=" | "<" | ">" | "~" }
 unary_expr = { positive_expr | negated_expr | primary_expr }
 postfix_expr = { unary_expr ~ (cast_suffix | subscript_suffix | field_select_suffix)* }
 cast_suffix = { "::" ~ type_name }
