@@ -25,6 +25,16 @@ struct ChosenIndexPath {
     removes_order: bool,
 }
 
+fn simple_column_index(expr: &Expr) -> Option<usize> {
+    match expr {
+        Expr::Column(index) => Some(*index),
+        Expr::Var(var) if var.varlevelsup == 0 && !crate::include::nodes::primnodes::is_system_attr(var.varattno) => {
+            crate::include::nodes::primnodes::attrno_index(var.varattno)
+        }
+        _ => None,
+    }
+}
+
 fn choose_index_path(
     filter: Option<&Expr>,
     order_items: Option<&[OrderByEntry]>,
@@ -141,7 +151,7 @@ fn index_order_match(
     let mut direction = None;
     let mut matched = 0usize;
     for (idx, item) in items.iter().enumerate() {
-        let Expr::Column(column) = item.expr else {
+        let Some(column) = simple_column_index(&item.expr) else {
             break;
         };
         let Some(attnum) = index.index_meta.indkey.get(equality_prefix + idx) else {
@@ -200,28 +210,38 @@ fn indexable_qual(expr: &Expr) -> Option<IndexableQual> {
     match expr {
         Expr::Op(op) => match op.op {
             crate::include::nodes::primnodes::OpExprKind::Eq => match op.args.as_slice() {
-                [Expr::Column(column), Expr::Const(value)] => mk(*column, 3, value),
-                [Expr::Const(value), Expr::Column(column)] => mk(*column, 3, value),
+                [left, Expr::Const(value)] => simple_column_index(left)
+                    .and_then(|column| mk(column, 3, value)),
+                [Expr::Const(value), right] => simple_column_index(right)
+                    .and_then(|column| mk(column, 3, value)),
                 _ => None,
             },
             crate::include::nodes::primnodes::OpExprKind::Lt => match op.args.as_slice() {
-                [Expr::Column(column), Expr::Const(value)] => mk(*column, 1, value),
-                [Expr::Const(value), Expr::Column(column)] => mk(*column, 5, value),
+                [left, Expr::Const(value)] => simple_column_index(left)
+                    .and_then(|column| mk(column, 1, value)),
+                [Expr::Const(value), right] => simple_column_index(right)
+                    .and_then(|column| mk(column, 5, value)),
                 _ => None,
             },
             crate::include::nodes::primnodes::OpExprKind::LtEq => match op.args.as_slice() {
-                [Expr::Column(column), Expr::Const(value)] => mk(*column, 2, value),
-                [Expr::Const(value), Expr::Column(column)] => mk(*column, 4, value),
+                [left, Expr::Const(value)] => simple_column_index(left)
+                    .and_then(|column| mk(column, 2, value)),
+                [Expr::Const(value), right] => simple_column_index(right)
+                    .and_then(|column| mk(column, 4, value)),
                 _ => None,
             },
             crate::include::nodes::primnodes::OpExprKind::Gt => match op.args.as_slice() {
-                [Expr::Column(column), Expr::Const(value)] => mk(*column, 5, value),
-                [Expr::Const(value), Expr::Column(column)] => mk(*column, 1, value),
+                [left, Expr::Const(value)] => simple_column_index(left)
+                    .and_then(|column| mk(column, 5, value)),
+                [Expr::Const(value), right] => simple_column_index(right)
+                    .and_then(|column| mk(column, 1, value)),
                 _ => None,
             },
             crate::include::nodes::primnodes::OpExprKind::GtEq => match op.args.as_slice() {
-                [Expr::Column(column), Expr::Const(value)] => mk(*column, 4, value),
-                [Expr::Const(value), Expr::Column(column)] => mk(*column, 2, value),
+                [left, Expr::Const(value)] => simple_column_index(left)
+                    .and_then(|column| mk(column, 4, value)),
+                [Expr::Const(value), right] => simple_column_index(right)
+                    .and_then(|column| mk(column, 2, value)),
                 _ => None,
             },
             _ => None,

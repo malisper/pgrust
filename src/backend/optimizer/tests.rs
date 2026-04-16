@@ -5,6 +5,7 @@ use crate::include::nodes::pathnodes::{Path, PathKey, PathTarget, RelOptInfo, Re
 use crate::include::nodes::plannodes::{Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
     AttrNumber, Expr, JoinType, OpExpr, OpExprKind, OrderByEntry, QueryColumn, TargetEntry, Var,
+    INNER_VAR, OUTER_VAR,
 };
 
 fn int4() -> SqlType {
@@ -38,6 +39,18 @@ fn eq(left: Expr, right: Expr) -> Expr {
 
 fn gt(left: Expr, right: Expr) -> Expr {
     Expr::op_auto(OpExprKind::Gt, vec![left, right])
+}
+
+fn is_special_user_var(expr: &Expr, varno: usize, index: usize) -> bool {
+    matches!(
+        expr,
+        Expr::Var(Var {
+            varno: actual_varno,
+            varattno,
+            varlevelsup: 0,
+            ..
+        }) if *actual_varno == varno && *varattno == (index + 1) as AttrNumber
+    )
 }
 
 fn restrict(clause: Expr) -> crate::include::nodes::pathnodes::RestrictInfo {
@@ -379,9 +392,28 @@ fn hash_join_path_lowers_to_hash_join_plan_with_hash_inner() {
             ..
         } => {
             assert_eq!(kind, JoinType::Inner);
-            assert_eq!(hash_keys, vec![Expr::Column(0)]);
-            assert_eq!(hash_clauses, vec![eq(Expr::Column(0), Expr::Column(2))]);
-            assert_eq!(join_qual, vec![gt(Expr::Column(1), Expr::Column(3))]);
+            assert_eq!(hash_keys.len(), 1);
+            assert!(is_special_user_var(&hash_keys[0], OUTER_VAR, 0));
+            assert_eq!(hash_clauses.len(), 1);
+            match &hash_clauses[0] {
+                Expr::Op(op) => {
+                    assert_eq!(op.op, OpExprKind::Eq);
+                    assert_eq!(op.args.len(), 2);
+                    assert!(is_special_user_var(&op.args[0], OUTER_VAR, 0));
+                    assert!(is_special_user_var(&op.args[1], INNER_VAR, 0));
+                }
+                other => panic!("expected hash clause op, got {other:?}"),
+            }
+            assert_eq!(join_qual.len(), 1);
+            match &join_qual[0] {
+                Expr::Op(op) => {
+                    assert_eq!(op.op, OpExprKind::Gt);
+                    assert_eq!(op.args.len(), 2);
+                    assert!(is_special_user_var(&op.args[0], OUTER_VAR, 1));
+                    assert!(is_special_user_var(&op.args[1], INNER_VAR, 1));
+                }
+                other => panic!("expected join qual op, got {other:?}"),
+            }
             assert!(qual.is_empty());
             match *right {
                 Plan::Hash {
@@ -389,7 +421,8 @@ fn hash_join_path_lowers_to_hash_join_plan_with_hash_inner() {
                     input,
                     plan_info,
                 } => {
-                    assert_eq!(hash_keys, vec![Expr::Column(0)]);
+                    assert_eq!(hash_keys.len(), 1);
+                    assert!(is_special_user_var(&hash_keys[0], OUTER_VAR, 0));
                     assert_eq!(
                         plan_info.startup_cost.as_f64(),
                         input.plan_info().total_cost.as_f64()

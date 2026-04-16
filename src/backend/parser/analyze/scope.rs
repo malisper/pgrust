@@ -1,11 +1,12 @@
-use super::query::{AnalyzedFrom, JoinAliasInfo};
+use super::query::{AnalyzedFrom, JoinAliasInfo, shift_expr_rtindexes};
 use super::*;
 use crate::backend::storage::smgr::RelFileLocator;
-use crate::include::nodes::primnodes::{JoinType, TABLE_OID_ATTR_NO, Var};
+use crate::include::nodes::primnodes::{JoinType, Var, user_attrno};
 
 #[derive(Debug, Clone)]
 pub(crate) struct BoundScope {
     pub(crate) desc: RelationDesc,
+    pub(crate) output_exprs: Vec<Expr>,
     pub(crate) columns: Vec<ScopeColumn>,
     pub(crate) relations: Vec<ScopeRelation>,
 }
@@ -73,9 +74,25 @@ pub(super) fn empty_scope() -> BoundScope {
         desc: RelationDesc {
             columns: Vec::new(),
         },
+        output_exprs: Vec::new(),
         columns: Vec::new(),
         relations: Vec::new(),
     }
+}
+
+fn default_scope_output_exprs(varno: usize, desc: &RelationDesc) -> Vec<Expr> {
+    desc.columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| {
+            Expr::Var(Var {
+                varno,
+                varattno: user_attrno(index),
+                varlevelsup: 0,
+                vartype: column.sql_type,
+            })
+        })
+        .collect()
 }
 
 pub(super) fn bind_values_rows(
@@ -445,6 +462,11 @@ fn outer_column_is_grouped(index: usize, scope: &BoundScope, group_by_exprs: &[S
     })
 }
 
+fn scope_with_output_exprs(mut scope: BoundScope, output_exprs: &[Expr]) -> BoundScope {
+    scope.output_exprs = output_exprs.to_vec();
+    scope
+}
+
 pub(super) fn bind_from_item_with_ctes(
     stmt: &FromItem,
     catalog: &dyn CatalogLookup,
@@ -466,14 +488,22 @@ pub(super) fn bind_from_item_with_ctes(
                             sql_type: column.sql_type,
                         })
                         .collect::<Vec<_>>();
+                    let plan = AnalyzedFrom::worktable(cte.worktable_id, output_columns);
                     return Ok((
-                        AnalyzedFrom::worktable(cte.worktable_id, output_columns),
-                        scope_for_relation(Some(name), &cte.desc),
+                        plan.clone(),
+                        scope_with_output_exprs(
+                            scope_for_relation(Some(name), &cte.desc),
+                            &plan.output_exprs,
+                        ),
                     ));
                 }
+                let plan = AnalyzedFrom::cte_scan(cte.cte_id, cte.plan.clone());
                 return Ok((
-                    AnalyzedFrom::cte_scan(cte.cte_id, cte.plan.clone()),
-                    scope_for_relation(Some(name), &cte.desc),
+                    plan.clone(),
+                    scope_with_output_exprs(
+                        scope_for_relation(Some(name), &cte.desc),
+                        &plan.output_exprs,
+                    ),
                 ));
             }
             if let Some(bound) = bind_builtin_system_view(name, catalog) {
@@ -524,7 +554,10 @@ pub(super) fn bind_from_item_with_ctes(
                 analyze_select_query_with_outer(select, catalog, &[], None, ctes, expanded_views)?;
             let bound = AnalyzedFrom::subquery(plan);
             let desc = synthetic_desc_from_analyzed_from(&bound);
-            Ok((bound, scope_for_relation(None, &desc)))
+            Ok((
+                bound.clone(),
+                scope_with_output_exprs(scope_for_relation(None, &desc), &bound.output_exprs),
+            ))
         }
         FromItem::Lateral(source) => match source.as_ref() {
             FromItem::DerivedTable(select) => {
@@ -538,7 +571,10 @@ pub(super) fn bind_from_item_with_ctes(
                 )?;
                 let bound = AnalyzedFrom::subquery(plan);
                 let desc = synthetic_desc_from_analyzed_from(&bound);
-                Ok((bound, scope_for_relation(None, &desc)))
+                Ok((
+                    bound.clone(),
+                    scope_with_output_exprs(scope_for_relation(None, &desc), &bound.output_exprs),
+                ))
             }
             other => bind_from_item_with_ctes(
                 other,
@@ -588,10 +624,9 @@ pub(super) fn bind_from_item_with_ctes(
                 grouped_outer,
                 ctes,
             )?;
-            Ok((
-                AnalyzedFrom::join(left_plan, right_plan, plan_join_type(*kind), on, alias_info),
-                scope.unwrap_or(raw_scope),
-            ))
+            let plan = AnalyzedFrom::join(left_plan, right_plan, plan_join_type(*kind), on, alias_info);
+            let scope = scope_with_output_exprs(scope.unwrap_or(raw_scope), &plan.output_exprs);
+            Ok((plan, scope))
         }
         FromItem::Alias {
             source,
@@ -1231,6 +1266,7 @@ pub(super) fn lookup_relation(
 pub(super) fn scope_for_relation(relation_name: Option<&str>, desc: &RelationDesc) -> BoundScope {
     BoundScope {
         desc: desc.clone(),
+        output_exprs: default_scope_output_exprs(1, desc),
         columns: desc
             .columns
             .iter()
@@ -1257,6 +1293,7 @@ pub(super) fn scope_for_relation(relation_name: Option<&str>, desc: &RelationDes
 
 pub(super) fn scope_for_base_relation(relation_name: &str, desc: &RelationDesc) -> BoundScope {
     let mut scope = scope_for_relation(Some(relation_name), desc);
+    scope.output_exprs = default_scope_output_exprs(1, desc);
     scope.relations = vec![ScopeRelation {
         relation_names: vec![relation_name.to_string()],
         hidden_invalid_relation_names: vec![],
@@ -1270,6 +1307,11 @@ fn shift_scope_rtindexes(mut scope: BoundScope, offset: usize) -> BoundScope {
     if offset == 0 {
         return scope;
     }
+    scope.output_exprs = scope
+        .output_exprs
+        .into_iter()
+        .map(|expr| shift_expr_rtindexes(expr, offset))
+        .collect();
     for relation in &mut scope.relations {
         if let Some(varno) = relation.system_varno.as_mut() {
             *varno += offset;
@@ -1281,12 +1323,15 @@ fn shift_scope_rtindexes(mut scope: BoundScope, offset: usize) -> BoundScope {
 pub(super) fn combine_scopes(left: &BoundScope, right: &BoundScope) -> BoundScope {
     let mut desc = left.desc.clone();
     desc.columns.extend(right.desc.columns.clone());
+    let mut output_exprs = left.output_exprs.clone();
+    output_exprs.extend(right.output_exprs.clone());
     let mut columns = left.columns.clone();
     columns.extend(right.columns.clone());
     let mut relations = left.relations.clone();
     relations.extend(right.relations.clone());
     BoundScope {
         desc,
+        output_exprs,
         columns,
         relations,
     }
@@ -1383,10 +1428,12 @@ fn bind_join_using_projection(
     let on = using_pairs
         .iter()
         .fold(Expr::Const(Value::Bool(true)), |expr, (_, left, right)| {
-            let right_index = left_scope.columns.len() + *right;
             let predicate = Expr::op_auto(
                 crate::include::nodes::primnodes::OpExprKind::Eq,
-                vec![Expr::Column(*left), Expr::Column(right_index)],
+                vec![
+                    left_scope.output_exprs[*left].clone(),
+                    right_scope.output_exprs[*right].clone(),
+                ],
             );
             match expr {
                 Expr::Const(Value::Bool(true)) => predicate,
@@ -1410,8 +1457,8 @@ fn bind_join_using_projection(
         used_left[*left_index] = true;
         used_right[*right_index] = true;
         let left_ty = left_scope.desc.columns[*left_index].sql_type;
-        let left_expr = Expr::Column(*left_index);
-        let right_expr = Expr::Column(left_scope.columns.len() + *right_index);
+        let left_expr = left_scope.output_exprs[*left_index].clone();
+        let right_expr = right_scope.output_exprs[*right_index].clone();
         alias_exprs.push(Expr::Coalesce(Box::new(left_expr), Box::new(right_expr)));
         output_columns.push(QueryColumn {
             name: name.clone(),
@@ -1433,7 +1480,7 @@ fn bind_join_using_projection(
         if used_left[index] || column.hidden {
             continue;
         }
-        alias_exprs.push(Expr::Column(index));
+        alias_exprs.push(left_scope.output_exprs[index].clone());
         output_columns.push(QueryColumn {
             name: column.output_name.clone(),
             sql_type: left_scope.desc.columns[index].sql_type,
@@ -1447,8 +1494,7 @@ fn bind_join_using_projection(
         if used_right[index] || column.hidden {
             continue;
         }
-        let raw_index = left_scope.columns.len() + index;
-        alias_exprs.push(Expr::Column(raw_index));
+        alias_exprs.push(right_scope.output_exprs[index].clone());
         output_columns.push(QueryColumn {
             name: column.output_name.clone(),
             sql_type: right_scope.desc.columns[index].sql_type,
@@ -1462,6 +1508,7 @@ fn bind_join_using_projection(
         desc: RelationDesc {
             columns: desc_columns,
         },
+        output_exprs: alias_exprs.clone(),
         columns: scope_columns,
         relations: combine_scopes(left_scope, right_scope).relations,
     };
@@ -1687,7 +1734,7 @@ fn apply_relation_alias(
                 .map(|(index, column)| {
                     TargetEntry::new(
                         column.output_name.clone(),
-                        Expr::Column(index),
+                        scope.output_exprs[index].clone(),
                         desc.columns[index].sql_type,
                         index + 1,
                     )
@@ -1700,6 +1747,7 @@ fn apply_relation_alias(
         plan,
         BoundScope {
             desc,
+            output_exprs: scope.output_exprs,
             columns,
             relations,
         },

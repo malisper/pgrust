@@ -671,25 +671,13 @@ pub(crate) fn bind_scalar_expr_in_scope(
     columns: &[(String, SqlType)],
     catalog: &dyn CatalogLookup,
 ) -> Result<(Expr, SqlType), ParseError> {
-    let scope = BoundScope {
-        desc: RelationDesc {
-            columns: columns
-                .iter()
-                .map(|(name, sql_type)| column_desc(name.clone(), *sql_type, true))
-                .collect(),
-        },
+    let desc = RelationDesc {
         columns: columns
             .iter()
-            .map(|(name, _)| ScopeColumn {
-                output_name: name.clone(),
-                hidden: false,
-                relation_names: vec![],
-                hidden_invalid_relation_names: vec![],
-                hidden_missing_relation_names: vec![],
-            })
+            .map(|(name, sql_type)| column_desc(name.clone(), *sql_type, true))
             .collect(),
-        relations: vec![],
     };
+    let scope = scope_for_relation(None, &desc);
     let empty_outer = Vec::new();
     let bound = bind_expr_with_outer(expr, &scope, catalog, &empty_outer, None)?;
     let sql_type = infer_sql_expr_type(expr, &scope, catalog, &empty_outer, None);
@@ -1078,25 +1066,13 @@ pub fn pg_plan_query_with_outer(
     catalog: &dyn CatalogLookup,
     outer_columns: &[(String, SqlType)],
 ) -> Result<PlannedStmt, ParseError> {
-    let outer_scope = BoundScope {
-        desc: RelationDesc {
-            columns: outer_columns
-                .iter()
-                .map(|(name, sql_type)| column_desc(name.clone(), *sql_type, true))
-                .collect(),
-        },
+    let desc = RelationDesc {
         columns: outer_columns
             .iter()
-            .map(|(name, _)| ScopeColumn {
-                output_name: name.clone(),
-                hidden: false,
-                relation_names: vec![],
-                hidden_invalid_relation_names: vec![],
-                hidden_missing_relation_names: vec![],
-            })
+            .map(|(name, sql_type)| column_desc(name.clone(), *sql_type, true))
             .collect(),
-        relations: vec![],
     };
+    let outer_scope = scope_for_relation(None, &desc);
     build_plan_with_outer(stmt, catalog, &[outer_scope], None, &[], &[])
 }
 
@@ -1116,25 +1092,13 @@ pub fn pg_plan_values_query_with_outer(
     catalog: &dyn CatalogLookup,
     outer_columns: &[(String, SqlType)],
 ) -> Result<PlannedStmt, ParseError> {
-    let outer_scope = BoundScope {
-        desc: RelationDesc {
-            columns: outer_columns
-                .iter()
-                .map(|(name, sql_type)| column_desc(name.clone(), *sql_type, true))
-                .collect(),
-        },
+    let desc = RelationDesc {
         columns: outer_columns
             .iter()
-            .map(|(name, _)| ScopeColumn {
-                output_name: name.clone(),
-                hidden: false,
-                relation_names: vec![],
-                hidden_invalid_relation_names: vec![],
-                hidden_missing_relation_names: vec![],
-            })
+            .map(|(name, sql_type)| column_desc(name.clone(), *sql_type, true))
             .collect(),
-        relations: vec![],
     };
+    let outer_scope = scope_for_relation(None, &desc);
     build_values_plan_with_outer(stmt, catalog, &[outer_scope], None, &[], &[])
 }
 

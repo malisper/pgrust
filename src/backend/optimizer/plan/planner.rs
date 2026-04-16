@@ -9,7 +9,7 @@ use crate::include::nodes::plannodes::{PlanEstimate, PlannedStmt};
 use crate::include::nodes::primnodes::{Expr, ProjectSetTarget, TargetEntry};
 
 use super::super::bestpath;
-use super::super::create_plan;
+use super::super::create_plan_with_param_base;
 use super::super::has_grouping;
 use super::super::path::{query_planner, residual_where_qual};
 use super::super::pathnodes::{
@@ -24,8 +24,6 @@ use super::super::util::{
     rewrite_semantic_expr_for_path_or_expand_join_vars,
 };
 use super::super::{expand_join_rte_vars, optimize_path};
-use super::subselect::finalize_plan_subqueries;
-
 pub(super) fn make_pathtarget_projection_rel(
     root: &PlannerInfo,
     input_rel: RelOptInfo,
@@ -482,7 +480,11 @@ pub(super) fn grouping_planner(
     current_rel
 }
 
-fn standard_planner(query: Query, catalog: &dyn CatalogLookup) -> PlannedStmt {
+fn standard_planner_with_param_base(
+    query: Query,
+    catalog: &dyn CatalogLookup,
+    next_param_id: usize,
+) -> (PlannedStmt, usize) {
     let mut glob = PlannerGlobal::new();
     let mut root = PlannerInfo::new(query);
     let command_type = root.parse.command_type;
@@ -494,17 +496,31 @@ fn standard_planner(query: Query, catalog: &dyn CatalogLookup) -> PlannedStmt {
         .unwrap_or(Path::Result {
             plan_info: PlanEstimate::default(),
         });
-    PlannedStmt {
-        command_type,
-        plan_tree: finalize_plan_subqueries(
-            create_plan(&root, best_path),
-            catalog,
-            &mut glob.subplans,
-        ),
-        subplans: glob.subplans,
-    }
+    let (plan_tree, ext_params, next_param_id) =
+        create_plan_with_param_base(&root, best_path, catalog, &mut glob.subplans, next_param_id);
+    (
+        PlannedStmt {
+            command_type,
+            plan_tree,
+            subplans: glob.subplans,
+            ext_params,
+        },
+        next_param_id,
+    )
+}
+
+fn standard_planner(query: Query, catalog: &dyn CatalogLookup) -> PlannedStmt {
+    standard_planner_with_param_base(query, catalog, 0).0
 }
 
 pub(crate) fn planner(query: Query, catalog: &dyn CatalogLookup) -> PlannedStmt {
     standard_planner(query, catalog)
+}
+
+pub(crate) fn planner_with_param_base(
+    query: Query,
+    catalog: &dyn CatalogLookup,
+    next_param_id: usize,
+) -> (PlannedStmt, usize) {
+    standard_planner_with_param_base(query, catalog, next_param_id)
 }

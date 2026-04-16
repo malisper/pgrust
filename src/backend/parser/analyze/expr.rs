@@ -3,7 +3,7 @@ use super::infer::*;
 use super::*;
 use crate::include::nodes::primnodes::{
     BoolExprType, CaseExpr as BoundCaseExpr, CaseTestExpr as BoundCaseTestExpr,
-    CaseWhen as BoundCaseWhen, OpExprKind,
+    CaseWhen as BoundCaseWhen, ExprArraySubscript, OpExprKind,
 };
 
 mod func;
@@ -47,6 +47,142 @@ pub(crate) fn bind_expr_with_outer(
     bind_expr_with_outer_and_ctes(expr, scope, catalog, outer_scopes, grouped_outer, &[])
 }
 
+fn raise_expr_varlevels(expr: Expr, levels: usize) -> Expr {
+    if levels == 0 {
+        return expr;
+    }
+    match expr {
+        Expr::Var(mut var) => {
+            var.varlevelsup += levels;
+            Expr::Var(var)
+        }
+        Expr::Aggref(mut aggref) => {
+            aggref.agglevelsup += levels;
+            Expr::Aggref(Box::new(crate::include::nodes::primnodes::Aggref {
+                args: aggref
+                    .args
+                    .into_iter()
+                    .map(|arg| raise_expr_varlevels(arg, levels))
+                    .collect(),
+                ..*aggref
+            }))
+        }
+        Expr::Op(op) => Expr::Op(Box::new(crate::include::nodes::primnodes::OpExpr {
+            args: op
+                .args
+                .into_iter()
+                .map(|arg| raise_expr_varlevels(arg, levels))
+                .collect(),
+            ..*op
+        })),
+        Expr::Bool(bool_expr) => {
+            Expr::Bool(Box::new(crate::include::nodes::primnodes::BoolExpr {
+                args: bool_expr
+                    .args
+                    .into_iter()
+                    .map(|arg| raise_expr_varlevels(arg, levels))
+                    .collect(),
+                ..*bool_expr
+            }))
+        }
+        Expr::Func(func) => Expr::Func(Box::new(crate::include::nodes::primnodes::FuncExpr {
+            args: func
+                .args
+                .into_iter()
+                .map(|arg| raise_expr_varlevels(arg, levels))
+                .collect(),
+            ..*func
+        })),
+        Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(
+            crate::include::nodes::primnodes::ScalarArrayOpExpr {
+                left: Box::new(raise_expr_varlevels(*saop.left, levels)),
+                right: Box::new(raise_expr_varlevels(*saop.right, levels)),
+                ..*saop
+            },
+        )),
+        Expr::Cast(inner, ty) => Expr::Cast(Box::new(raise_expr_varlevels(*inner, levels)), ty),
+        Expr::IsNull(inner) => Expr::IsNull(Box::new(raise_expr_varlevels(*inner, levels))),
+        Expr::IsNotNull(inner) => Expr::IsNotNull(Box::new(raise_expr_varlevels(*inner, levels))),
+        Expr::IsDistinctFrom(left, right) => Expr::IsDistinctFrom(
+            Box::new(raise_expr_varlevels(*left, levels)),
+            Box::new(raise_expr_varlevels(*right, levels)),
+        ),
+        Expr::IsNotDistinctFrom(left, right) => Expr::IsNotDistinctFrom(
+            Box::new(raise_expr_varlevels(*left, levels)),
+            Box::new(raise_expr_varlevels(*right, levels)),
+        ),
+        Expr::Coalesce(left, right) => Expr::Coalesce(
+            Box::new(raise_expr_varlevels(*left, levels)),
+            Box::new(raise_expr_varlevels(*right, levels)),
+        ),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            case_insensitive,
+            negated,
+        } => Expr::Like {
+            expr: Box::new(raise_expr_varlevels(*expr, levels)),
+            pattern: Box::new(raise_expr_varlevels(*pattern, levels)),
+            escape: escape.map(|expr| Box::new(raise_expr_varlevels(*expr, levels))),
+            case_insensitive,
+            negated,
+        },
+        Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            negated,
+        } => Expr::Similar {
+            expr: Box::new(raise_expr_varlevels(*expr, levels)),
+            pattern: Box::new(raise_expr_varlevels(*pattern, levels)),
+            escape: escape.map(|expr| Box::new(raise_expr_varlevels(*expr, levels))),
+            negated,
+        },
+        Expr::ArrayLiteral {
+            elements,
+            array_type,
+        } => Expr::ArrayLiteral {
+            elements: elements
+                .into_iter()
+                .map(|element| raise_expr_varlevels(element, levels))
+                .collect(),
+            array_type,
+        },
+        Expr::Case(case_expr) => Expr::Case(Box::new(crate::include::nodes::primnodes::CaseExpr {
+            arg: case_expr
+                .arg
+                .map(|arg| Box::new(raise_expr_varlevels(*arg, levels))),
+            args: case_expr
+                .args
+                .into_iter()
+                .map(|arm| crate::include::nodes::primnodes::CaseWhen {
+                    expr: raise_expr_varlevels(arm.expr, levels),
+                    result: raise_expr_varlevels(arm.result, levels),
+                })
+                .collect(),
+            defresult: Box::new(raise_expr_varlevels(*case_expr.defresult, levels)),
+            ..*case_expr
+        })),
+        Expr::ArraySubscript { array, subscripts } => Expr::ArraySubscript {
+            array: Box::new(raise_expr_varlevels(*array, levels)),
+            subscripts: subscripts
+                .into_iter()
+                .map(|subscript| ExprArraySubscript {
+                    is_slice: subscript.is_slice,
+                    lower: subscript
+                        .lower
+                        .map(|expr| raise_expr_varlevels(expr, levels)),
+                    upper: subscript
+                        .upper
+                        .map(|expr| raise_expr_varlevels(expr, levels)),
+                })
+                .collect(),
+        },
+        other => other,
+    }
+}
+
 pub(crate) fn bind_expr_with_outer_and_ctes(
     expr: &SqlExpr,
     scope: &BoundScope,
@@ -68,8 +204,17 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 })
             } else {
                 match resolve_column_with_outer(scope, outer_scopes, name, grouped_outer)? {
-                    ResolvedColumn::Local(index) => Expr::Column(index),
-                    ResolvedColumn::Outer { depth, index } => Expr::OuterColumn { depth, index },
+                    ResolvedColumn::Local(index) => scope
+                        .output_exprs
+                        .get(index)
+                        .cloned()
+                        .unwrap_or(Expr::Column(index)),
+                    ResolvedColumn::Outer { depth, index } => outer_scopes
+                        .get(depth)
+                        .and_then(|scope| scope.output_exprs.get(index))
+                        .cloned()
+                        .map(|expr| raise_expr_varlevels(expr, depth + 1))
+                        .unwrap_or(Expr::OuterColumn { depth, index }),
                 }
             }
         }

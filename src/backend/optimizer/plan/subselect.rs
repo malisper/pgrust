@@ -6,7 +6,7 @@ use crate::include::nodes::primnodes::{
 
 use super::planner::planner;
 
-fn append_planned_subquery(planned_stmt: PlannedStmt, subplans: &mut Vec<Plan>) -> usize {
+pub(super) fn append_planned_subquery(planned_stmt: PlannedStmt, subplans: &mut Vec<Plan>) -> usize {
     let base = subplans.len();
     subplans.extend(
         planned_stmt
@@ -38,6 +38,8 @@ fn lower_sublink_to_subplan(
         testexpr,
         first_col_type,
         plan_id,
+        par_param: Vec::new(),
+        args: Vec::new(),
     }))
 }
 
@@ -48,6 +50,7 @@ pub(super) fn finalize_expr_subqueries(
 ) -> Expr {
     match expr {
         other @ (Expr::Var(_)
+        | Expr::Param(_)
         | Expr::Column(_)
         | Expr::OuterColumn { .. }
         | Expr::Const(_)
@@ -114,6 +117,11 @@ pub(super) fn finalize_expr_subqueries(
             testexpr: subplan
                 .testexpr
                 .map(|expr| Box::new(finalize_expr_subqueries(*expr, catalog, subplans))),
+            args: subplan
+                .args
+                .into_iter()
+                .map(|expr| finalize_expr_subqueries(expr, catalog, subplans))
+                .collect(),
             ..*subplan
         })),
         Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(
@@ -320,6 +328,7 @@ fn finalize_agg_accum(
 fn rebase_expr_subplan_ids(expr: Expr, base: usize) -> Expr {
     match expr {
         other @ (Expr::Var(_)
+        | Expr::Param(_)
         | Expr::Column(_)
         | Expr::OuterColumn { .. }
         | Expr::Const(_)
@@ -387,9 +396,15 @@ fn rebase_expr_subplan_ids(expr: Expr, base: usize) -> Expr {
             testexpr: subplan
                 .testexpr
                 .map(|expr| Box::new(rebase_expr_subplan_ids(*expr, base))),
+            args: subplan
+                .args
+                .into_iter()
+                .map(|expr| rebase_expr_subplan_ids(expr, base))
+                .collect(),
             first_col_type: subplan.first_col_type,
             plan_id: subplan.plan_id + base,
             sublink_type: subplan.sublink_type,
+            par_param: subplan.par_param,
         })),
         Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(
             crate::include::nodes::primnodes::ScalarArrayOpExpr {
@@ -602,6 +617,7 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
             left,
             right,
             kind,
+            nest_params,
             join_qual,
             qual,
         } => Plan::NestedLoopJoin {
@@ -609,6 +625,13 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
             left: Box::new(rebase_plan_subplan_ids(*left, base)),
             right: Box::new(rebase_plan_subplan_ids(*right, base)),
             kind,
+            nest_params: nest_params
+                .into_iter()
+                .map(|param| crate::include::nodes::plannodes::ExecParamSource {
+                    paramid: param.paramid,
+                    expr: rebase_expr_subplan_ids(param.expr, base),
+                })
+                .collect(),
             join_qual: join_qual
                 .into_iter()
                 .map(|expr| rebase_expr_subplan_ids(expr, base))
@@ -850,6 +873,7 @@ pub(super) fn finalize_plan_subqueries(
             left,
             right,
             kind,
+            nest_params,
             join_qual,
             qual,
         } => Plan::NestedLoopJoin {
@@ -857,6 +881,13 @@ pub(super) fn finalize_plan_subqueries(
             left: Box::new(finalize_plan_subqueries(*left, catalog, subplans)),
             right: Box::new(finalize_plan_subqueries(*right, catalog, subplans)),
             kind,
+            nest_params: nest_params
+                .into_iter()
+                .map(|param| crate::include::nodes::plannodes::ExecParamSource {
+                    paramid: param.paramid,
+                    expr: finalize_expr_subqueries(param.expr, catalog, subplans),
+                })
+                .collect(),
             join_qual: join_qual
                 .into_iter()
                 .map(|expr| finalize_expr_subqueries(expr, catalog, subplans))

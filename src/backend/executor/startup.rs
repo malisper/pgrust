@@ -15,6 +15,7 @@ use std::rc::Rc;
 fn expr_uses_outer_columns(expr: &Expr) -> bool {
     match expr {
         Expr::Var(var) => var.varlevelsup > 0,
+        Expr::Param(_) => true,
         Expr::OuterColumn { .. } => true,
         Expr::Aggref(aggref) => aggref.args.iter().any(expr_uses_outer_columns),
         Expr::Op(op) => op.args.iter().any(expr_uses_outer_columns),
@@ -315,11 +316,12 @@ pub fn executor_start(plan: Plan) -> PlanState {
             left,
             right,
             kind,
+            nest_params,
             join_qual,
             qual,
         } => {
             let right_plan = *right;
-            let right_uses_outer = plan_uses_outer_columns(&right_plan);
+            let right_uses_outer = !nest_params.is_empty();
             let cross_right_outer =
                 matches!(kind, crate::include::nodes::primnodes::JoinType::Cross)
                     && !right_uses_outer
@@ -344,6 +346,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 right_plan: right_uses_outer.then_some(right_plan),
                 kind,
                 cross_right_outer,
+                nest_params,
                 join_qual,
                 qual,
                 combined_names,
@@ -352,6 +355,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 right_matched: None,
                 current_left: None,
                 current_right: None,
+                current_nest_param_saves: None,
                 current_left_matched: false,
                 left_index: 0,
                 right_index: 0,

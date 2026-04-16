@@ -89,8 +89,27 @@ struct HashJoinClauses {
     join_clauses: Vec<RestrictInfo>,
 }
 
-fn create_plan(root: &PlannerInfo, path: Path) -> Plan {
-    setrefs::create_plan(root, path)
+fn create_plan(
+    root: &PlannerInfo,
+    path: Path,
+    catalog: &dyn CatalogLookup,
+    subplans: &mut Vec<Plan>,
+) -> (Plan, Vec<crate::include::nodes::plannodes::ExecParamSource>) {
+    setrefs::create_plan(root, path, catalog, subplans)
+}
+
+fn create_plan_with_param_base(
+    root: &PlannerInfo,
+    path: Path,
+    catalog: &dyn CatalogLookup,
+    subplans: &mut Vec<Plan>,
+    next_param_id: usize,
+) -> (
+    Plan,
+    Vec<crate::include::nodes::plannodes::ExecParamSource>,
+    usize,
+) {
+    setrefs::create_plan_with_param_base(root, path, catalog, subplans, next_param_id)
 }
 
 fn has_outer_joins(root: &PlannerInfo) -> bool {
@@ -320,6 +339,14 @@ fn extract_hash_join_clauses(
 
 pub(crate) fn planner(query: Query, catalog: &dyn CatalogLookup) -> PlannedStmt {
     plan::planner(query, catalog)
+}
+
+pub(crate) fn planner_with_param_base(
+    query: Query,
+    catalog: &dyn CatalogLookup,
+    next_param_id: usize,
+) -> (PlannedStmt, usize) {
+    plan::planner_with_param_base(query, catalog, next_param_id)
 }
 
 pub(crate) fn finalize_expr_subqueries(

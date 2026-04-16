@@ -100,6 +100,17 @@ pub(crate) use constraints::enforce_relation_constraints;
 pub(crate) use expr_ops::compare_order_values;
 use expr_ops::parse_numeric_text;
 
+#[derive(Debug, Clone, Default)]
+pub struct ExprEvalBindings {
+    pub exec_params: HashMap<usize, Value>,
+    pub outer_tuple: Option<Vec<Value>>,
+    pub outer_system_bindings: Vec<SystemVarBinding>,
+    pub inner_tuple: Option<Vec<Value>>,
+    pub inner_system_bindings: Vec<SystemVarBinding>,
+    pub index_tuple: Option<Vec<Value>>,
+    pub index_system_bindings: Vec<SystemVarBinding>,
+}
+
 pub struct ExecutorContext {
     pub pool: std::sync::Arc<BufferPool<SmgrStorageBackend>>,
     pub txns: std::sync::Arc<parking_lot::RwLock<TransactionManager>>,
@@ -109,8 +120,7 @@ pub struct ExecutorContext {
     pub snapshot: Snapshot,
     pub client_id: ClientId,
     pub next_command_id: CommandId,
-    pub outer_rows: Vec<Vec<Value>>,
-    pub outer_system_bindings: Vec<Vec<SystemVarBinding>>,
+    pub expr_bindings: ExprEvalBindings,
     pub case_test_values: Vec<Value>,
     pub system_bindings: Vec<SystemVarBinding>,
     pub subplans: Vec<Plan>,

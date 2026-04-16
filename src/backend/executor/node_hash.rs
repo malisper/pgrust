@@ -39,6 +39,8 @@ impl HashState {
                 }),
                 self.input.current_system_bindings().to_vec(),
             );
+            ctx.expr_bindings.outer_tuple = Some(materialized.slot.tts_values.clone());
+            ctx.expr_bindings.outer_system_bindings = materialized.system_bindings.clone();
             let bucket_key = eval_hash_key_exprs(&self.hash_keys, &mut materialized.slot, ctx)?;
             let index = table.entries.len();
             table.entries.push(HashJoinTupleEntry {
