@@ -569,6 +569,10 @@ pub(super) fn identity_target_list(
         .collect()
 }
 
+pub(super) fn identity_output_exprs(width: usize) -> Vec<Expr> {
+    (0..width).map(Expr::Column).collect()
+}
+
 pub(super) fn normalize_target_list(mut targets: Vec<TargetEntry>) -> Vec<TargetEntry> {
     for (index, target) in targets.iter_mut().enumerate() {
         target.resno = index + 1;
