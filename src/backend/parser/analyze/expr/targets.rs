@@ -758,16 +758,19 @@ fn bind_select_list_srf_call(
                 grouped_outer,
                 ctes,
             );
-            let common = resolve_numeric_binary_type("+", start_type, stop_type)?;
-            if !matches!(
-                common.kind,
-                SqlTypeKind::Int4 | SqlTypeKind::Int8 | SqlTypeKind::Numeric
-            ) {
-                return Err(ParseError::UnexpectedToken {
-                    expected: "generate_series integer or numeric arguments",
-                    actual: sql_type_name(common),
-                });
-            }
+            let step_type = if args.len() == 3 {
+                Some(infer_sql_expr_type_with_ctes(
+                    &args[2],
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                ))
+            } else {
+                None
+            };
+            let common = resolve_generate_series_common_type(start_type, stop_type, step_type)?;
             let step = if args.len() == 3 {
                 let step_expr = bind_expr_with_outer_and_ctes(
                     &args[2],
@@ -777,14 +780,7 @@ fn bind_select_list_srf_call(
                     grouped_outer,
                     ctes,
                 )?;
-                let step_type = infer_sql_expr_type_with_ctes(
-                    &args[2],
-                    scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    ctes,
-                );
+                let step_type = step_type.expect("generate_series step type");
                 coerce_bound_expr(step_expr, step_type, common)
             } else {
                 match common.kind {

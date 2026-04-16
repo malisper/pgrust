@@ -1651,7 +1651,7 @@ fn build_cte_body(pair: Pair<'_, Rule>) -> Result<CteBody, ParseError> {
         Rule::select_stmt => Ok(CteBody::Select(Box::new(build_select(pair)?))),
         Rule::values_stmt => Ok(CteBody::Values(build_values_statement(pair)?)),
         Rule::recursive_union_cte_body => {
-            let all = pair.as_str().to_ascii_lowercase().contains(" union all ");
+            let all = contains_union_all(pair.as_str());
             let mut inner = pair.into_inner();
             let anchor = build_cte_body(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
             let mut recursive = None;
@@ -1672,6 +1672,17 @@ fn build_cte_body(pair: Pair<'_, Rule>) -> Result<CteBody, ParseError> {
             actual: pair.as_str().into(),
         }),
     }
+}
+
+fn contains_union_all(sql: &str) -> bool {
+    let mut prev_union = false;
+    for token in sql.split_whitespace() {
+        if prev_union && token.eq_ignore_ascii_case("all") {
+            return true;
+        }
+        prev_union = token.eq_ignore_ascii_case("union");
+    }
+    false
 }
 
 fn build_group_by_clause(pair: Pair<'_, Rule>) -> Result<Vec<SqlExpr>, ParseError> {
