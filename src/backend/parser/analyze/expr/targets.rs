@@ -56,7 +56,8 @@ pub(crate) fn bind_select_targets(
                 Expr::Column(index),
                 scope.desc.columns[index].sql_type,
                 index + 1,
-            ))
+            )
+            .with_input_resno(index + 1))
         })
         .collect::<Vec<_>>();
 
@@ -95,7 +96,8 @@ pub(crate) fn bind_select_targets(
                 Expr::Column(base_width + srf_index),
                 sql_type,
                 final_targets.len() + 1,
-            ));
+            )
+            .with_input_resno(base_width + srf_index + 1));
             srf_index += 1;
             continue;
         }
@@ -1066,6 +1068,7 @@ fn expand_star_targets(
                 scope.desc.columns[index].sql_type,
                 index + 1,
             )
+            .with_input_resno(index + 1)
         })
         .collect::<Vec<_>>();
 

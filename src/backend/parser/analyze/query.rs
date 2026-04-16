@@ -564,6 +564,7 @@ pub(super) fn identity_target_list(
                 column.sql_type,
                 index + 1,
             )
+            .with_input_resno(index + 1)
         })
         .collect()
 }
