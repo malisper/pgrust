@@ -132,6 +132,13 @@ pub(super) fn project_set_base_width(project_set: &[ProjectSetTarget]) -> usize 
         .count()
 }
 
+pub(super) fn target_references_project_set_output(target: &TargetEntry, base_width: usize) -> bool {
+    target
+        .input_resno
+        .is_some_and(|input_resno| input_resno > base_width)
+        || expr_references_project_set_output(&target.expr, base_width)
+}
+
 pub(super) fn expr_references_project_set_output(expr: &Expr, base_width: usize) -> bool {
     match expr {
         Expr::Column(index) => *index >= base_width,
@@ -263,7 +270,7 @@ fn make_sort_input_target(
 
     let base_width = project_set_base_width(project_set);
     let have_srf_sortcols = processed_tlist.iter().any(|target| {
-        target.ressortgroupref != 0 && expr_references_project_set_output(&target.expr, base_width)
+        target.ressortgroupref != 0 && target_references_project_set_output(target, base_width)
     });
     if have_srf_sortcols {
         return PathTarget::from_target_list(processed_tlist);
@@ -271,7 +278,7 @@ fn make_sort_input_target(
 
     let mut input_target = PathTarget::new(Vec::new());
     for target in processed_tlist {
-        if expr_references_project_set_output(&target.expr, base_width) {
+        if target_references_project_set_output(target, base_width) {
             continue;
         }
         input_target.add_column_to_pathtarget(target.expr.clone(), target.ressortgroupref);
