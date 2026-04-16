@@ -9,11 +9,12 @@ use super::pathnodes::expr_sql_type;
 
 impl PlannerInfo {
     pub fn new(parse: Query) -> Self {
+        let processed_tlist = make_processed_tlist(&parse);
         let final_target = PathTarget::from_target_list(&parse.target_list);
-        let query_pathkeys = PathTarget::from_sort_clause(&parse.sort_clause);
-        let sort_input_target = build_sort_input_target(&parse, &final_target);
+        let query_pathkeys = PathTarget::from_sort_clause(&parse.sort_clause, &processed_tlist);
+        let sort_input_target = make_sort_input_target(&parse, &processed_tlist, &final_target);
         let group_input_target = if has_grouping(&parse) {
-            build_group_input_target(&parse)
+            make_group_input_target(&parse)
         } else {
             sort_input_target.clone()
         };
@@ -31,7 +32,7 @@ impl PlannerInfo {
         let simple_rel_array = build_simple_rel_array(&parse.rtable);
         let join_info_list = build_special_join_info(&parse);
         Self {
-            processed_tlist: parse.target_list.clone(),
+            processed_tlist,
             scanjoin_target,
             group_input_target,
             grouped_target,
@@ -62,6 +63,7 @@ pub(super) fn build_projection_targets_for_pathtarget(target: &PathTarget) -> Ve
                 expr_sql_type(expr),
                 index + 1,
             )
+            .with_sort_group_ref(target.get_pathtarget_sortgroupref(index))
         })
         .collect()
 }
@@ -84,15 +86,190 @@ fn has_grouping(query: &Query) -> bool {
     !query.group_by.is_empty() || !query.accumulators.is_empty() || query.having_qual.is_some()
 }
 
-fn build_sort_input_target(parse: &Query, final_target: &PathTarget) -> PathTarget {
-    let mut exprs = final_target.exprs.clone();
+fn make_processed_tlist(parse: &Query) -> Vec<TargetEntry> {
+    let mut processed_tlist = parse.target_list.clone();
+    let mut next_sort_group_ref = processed_tlist
+        .iter()
+        .map(|target| target.ressortgroupref)
+        .max()
+        .unwrap_or(0)
+        + 1;
+    let mut next_resno = processed_tlist.len() + 1;
+
     for clause in &parse.sort_clause {
-        push_expr(&mut exprs, clause.expr.clone());
+        if let Some(target) = processed_tlist
+            .iter_mut()
+            .find(|target| target.expr == clause.expr)
+        {
+            if target.ressortgroupref == 0 {
+                target.ressortgroupref = next_sort_group_ref;
+                next_sort_group_ref += 1;
+            }
+            continue;
+        }
+
+        processed_tlist.push(
+            TargetEntry::new("?column?", clause.expr.clone(), expr_sql_type(&clause.expr), next_resno)
+                .with_sort_group_ref(next_sort_group_ref)
+                .as_resjunk(),
+        );
+        next_sort_group_ref += 1;
+        next_resno += 1;
     }
-    PathTarget::new(exprs)
+
+    processed_tlist
 }
 
-fn build_group_input_target(parse: &Query) -> PathTarget {
+pub(super) fn project_set_base_width(project_set: &[ProjectSetTarget]) -> usize {
+    project_set
+        .iter()
+        .take_while(|target| matches!(target, ProjectSetTarget::Scalar(_)))
+        .count()
+}
+
+pub(super) fn expr_references_project_set_output(expr: &Expr, base_width: usize) -> bool {
+    match expr {
+        Expr::Column(index) => *index >= base_width,
+        Expr::Op(op) => op
+            .args
+            .iter()
+            .any(|arg| expr_references_project_set_output(arg, base_width)),
+        Expr::Bool(bool_expr) => bool_expr
+            .args
+            .iter()
+            .any(|arg| expr_references_project_set_output(arg, base_width)),
+        Expr::Func(func) => func
+            .args
+            .iter()
+            .any(|arg| expr_references_project_set_output(arg, base_width)),
+        Expr::SubLink(sublink) => sublink
+            .testexpr
+            .as_deref()
+            .is_some_and(|expr| expr_references_project_set_output(expr, base_width)),
+        Expr::SubPlan(subplan) => subplan
+            .testexpr
+            .as_deref()
+            .is_some_and(|expr| expr_references_project_set_output(expr, base_width)),
+        Expr::ScalarArrayOp(saop) => {
+            expr_references_project_set_output(&saop.left, base_width)
+                || expr_references_project_set_output(&saop.right, base_width)
+        }
+        Expr::Cast(inner, _)
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner) => expr_references_project_set_output(inner, base_width),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_references_project_set_output(expr, base_width)
+                || expr_references_project_set_output(pattern, base_width)
+                || escape
+                    .as_deref()
+                    .is_some_and(|expr| expr_references_project_set_output(expr, base_width))
+        }
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            expr_references_project_set_output(left, base_width)
+                || expr_references_project_set_output(right, base_width)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements
+            .iter()
+            .any(|element| expr_references_project_set_output(element, base_width)),
+        Expr::ArraySubscript { array, subscripts } => {
+            expr_references_project_set_output(array, base_width)
+                || subscripts.iter().any(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .is_some_and(|expr| expr_references_project_set_output(expr, base_width))
+                        || subscript
+                            .upper
+                            .as_ref()
+                            .is_some_and(|expr| expr_references_project_set_output(expr, base_width))
+                })
+        }
+        Expr::Var(_)
+        | Expr::OuterColumn { .. }
+        | Expr::Aggref(_)
+        | Expr::Const(_)
+        | Expr::Random
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => false,
+    }
+}
+
+fn collect_set_returning_call_supporting_inputs(call: &SetReturningCall, exprs: &mut Vec<Expr>) {
+    match call {
+        SetReturningCall::GenerateSeries {
+            start, stop, step, ..
+        } => {
+            collect_supporting_inputs(start, exprs);
+            collect_supporting_inputs(stop, exprs);
+            collect_supporting_inputs(step, exprs);
+        }
+        SetReturningCall::Unnest { args, .. }
+        | SetReturningCall::JsonTableFunction { args, .. }
+        | SetReturningCall::RegexTableFunction { args, .. }
+        | SetReturningCall::TextSearchTableFunction { args, .. }
+        | SetReturningCall::UserDefined { args, .. } => {
+            for arg in args {
+                collect_supporting_inputs(arg, exprs);
+            }
+        }
+    }
+}
+
+fn make_sort_input_target(
+    parse: &Query,
+    processed_tlist: &[TargetEntry],
+    final_target: &PathTarget,
+) -> PathTarget {
+    if parse.sort_clause.is_empty() {
+        return final_target.clone();
+    }
+
+    let Some(project_set) = parse.project_set.as_ref() else {
+        return PathTarget::from_target_list(processed_tlist);
+    };
+
+    let base_width = project_set_base_width(project_set);
+    let have_srf_sortcols = processed_tlist.iter().any(|target| {
+        target.ressortgroupref != 0 && expr_references_project_set_output(&target.expr, base_width)
+    });
+    if have_srf_sortcols {
+        return PathTarget::from_target_list(processed_tlist);
+    }
+
+    let mut input_target = PathTarget::new(Vec::new());
+    for target in processed_tlist {
+        if expr_references_project_set_output(&target.expr, base_width) {
+            continue;
+        }
+        input_target.add_column_to_pathtarget(target.expr.clone(), target.ressortgroupref);
+    }
+    for target in project_set {
+        if let ProjectSetTarget::Set { call, .. } = target {
+            let mut supporting_inputs = Vec::new();
+            collect_set_returning_call_supporting_inputs(call, &mut supporting_inputs);
+            input_target.add_new_columns_to_pathtarget(supporting_inputs);
+        }
+    }
+    input_target
+}
+
+fn make_group_input_target(parse: &Query) -> PathTarget {
     let mut exprs = Vec::new();
     for group_expr in &parse.group_by {
         push_expr(&mut exprs, group_expr.clone());

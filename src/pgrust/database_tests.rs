@@ -2982,6 +2982,60 @@ fn explain_join_order_by_can_reuse_ordered_outer_path() {
 }
 
 #[test]
+fn select_list_srf_order_by_limit_is_sorted_before_project_set() {
+    let base = temp_dir("project_set_order_by_limit");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table items (unique1 int4 not null, unique2 int4 not null, tenthous int4 not null)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into items values (2, 20, 200), (1, 10, 100), (3, 30, 300)",
+    )
+    .unwrap();
+
+    let lines = explain_lines(
+        &db,
+        1,
+        "select unique1, unique2, generate_series(1, 10) \
+         from items order by tenthous limit 7",
+    );
+    let project_set_idx = lines
+        .iter()
+        .position(|line| line.trim_start().starts_with("ProjectSet"))
+        .expect("expected ProjectSet in explain output");
+    let sort_idx = lines
+        .iter()
+        .position(|line| line.trim_start().starts_with("Sort  "))
+        .expect("expected Sort in explain output");
+    assert!(
+        project_set_idx < sort_idx,
+        "expected planner to postpone ProjectSet until after Sort, got {lines:?}"
+    );
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select unique1, unique2, generate_series(1, 10) \
+             from items order by tenthous limit 7",
+        ),
+        vec![
+            vec![Value::Int32(1), Value::Int32(10), Value::Int32(1)],
+            vec![Value::Int32(1), Value::Int32(10), Value::Int32(2)],
+            vec![Value::Int32(1), Value::Int32(10), Value::Int32(3)],
+            vec![Value::Int32(1), Value::Int32(10), Value::Int32(4)],
+            vec![Value::Int32(1), Value::Int32(10), Value::Int32(5)],
+            vec![Value::Int32(1), Value::Int32(10), Value::Int32(6)],
+            vec![Value::Int32(1), Value::Int32(10), Value::Int32(7)],
+        ]
+    );
+}
+
+#[test]
 fn left_join_rhs_boundary_stays_legal() {
     let base = temp_dir("left_join_rhs_boundary");
     let db = Database::open(&base, 16).unwrap();

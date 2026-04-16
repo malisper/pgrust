@@ -3420,20 +3420,17 @@ fn build_plan_for_select_list_generate_series_uses_project_set() {
     let stmt = parse_select("select generate_series(1, 3)").unwrap();
     let plan = build_plan(&stmt, &catalog()).unwrap();
     match plan {
-        Plan::Projection { input, .. } => match *input {
-            Plan::ProjectSet { targets, .. } => {
-                assert_eq!(targets.len(), 1);
-                assert!(matches!(
-                    &targets[0],
-                    crate::include::nodes::primnodes::ProjectSetTarget::Set {
-                        call: crate::include::nodes::primnodes::SetReturningCall::GenerateSeries { .. },
-                        ..
-                    }
-                ));
-            }
-            other => panic!("expected ProjectSet input, got {other:?}"),
-        },
-        other => panic!("expected projection over project set, got {other:?}"),
+        Plan::ProjectSet { targets, .. } => {
+            assert_eq!(targets.len(), 1);
+            assert!(matches!(
+                &targets[0],
+                crate::include::nodes::primnodes::ProjectSetTarget::Set {
+                    call: crate::include::nodes::primnodes::SetReturningCall::GenerateSeries { .. },
+                    ..
+                }
+            ));
+        }
+        other => panic!("expected project set plan, got {other:?}"),
     }
 }
 

@@ -1,16 +1,16 @@
 use std::sync::Arc;
 
 use crate::backend::executor::{
-    ExecError, ExecutorContext, Expr, StatementResult, TupleSlot, Value, cast_value, eval_expr,
-    eval_plpgsql_expr, execute_planned_stmt,
+    cast_value, eval_expr, eval_plpgsql_expr, execute_planned_stmt, ExecError, ExecutorContext,
+    Expr, StatementResult, TupleSlot, Value,
 };
 use crate::backend::parser::{CatalogLookup, ParseError, SqlType, SqlTypeKind};
 use crate::include::nodes::primnodes::QueryColumn;
 
 use super::ast::RaiseLevel;
 use super::compile::{
-    CompiledBlock, CompiledExpr, CompiledFunction, CompiledStmt, FunctionReturnContract,
-    compile_function_from_proc,
+    compile_function_from_proc, CompiledBlock, CompiledExpr, CompiledFunction, CompiledStmt,
+    FunctionReturnContract,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -211,9 +211,9 @@ fn execute_compiled_function(
                     ));
                 }
             }
-            Ok(vec![TupleSlot::virtual_row(vec![
-                state.scalar_return.expect("scalar return set above"),
-            ])])
+            Ok(vec![TupleSlot::virtual_row(vec![state
+                .scalar_return
+                .expect("scalar return set above")])])
         }
         FunctionReturnContract::Scalar { setof: true, .. }
         | FunctionReturnContract::FixedRow { .. }
