@@ -323,9 +323,22 @@ fn lower_order_by_expr_for_input(
         };
     }
     OrderByEntry {
-        expr: fix_upper_expr_for_path(root, item.expr, input),
+        expr: fix_upper_expr_for_input(root, item.expr, input, input_tlist),
         ..item
     }
+}
+
+fn fix_upper_expr_for_input(
+    root: Option<&PlannerInfo>,
+    expr: Expr,
+    input: &Path,
+    input_tlist: &IndexedTlist,
+) -> Expr {
+    let rewritten = fix_upper_expr(root, expr.clone(), input_tlist);
+    if rewritten != expr {
+        return rewritten;
+    }
+    fix_upper_expr_for_path(root, expr, input)
 }
 
 fn lower_direct_ref(expr: &Expr, mode: LowerMode<'_>) -> Option<Expr> {
@@ -921,7 +934,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             predicate,
         } => {
             let input_tlist = build_path_tlist(ctx.root, &input);
-            let predicate = fix_upper_expr_for_path(ctx.root, predicate, &input);
+            let predicate = fix_upper_expr_for_input(ctx.root, predicate, &input, &input_tlist);
             let predicate = lower_expr(ctx, predicate, LowerMode::Input { tlist: &input_tlist });
             let input_plan = Box::new(set_plan_refs(ctx, *input));
             Plan::Filter {
@@ -1053,7 +1066,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             let root = ctx.root;
             let mut lowered_targets = Vec::with_capacity(targets.len());
             for target in targets {
-                let expr = fix_upper_expr_for_path(root, target.expr, &input);
+                let expr = fix_upper_expr_for_input(root, target.expr, &input, &input_tlist);
                 lowered_targets.push(lower_target_entry(
                     ctx,
                     TargetEntry { expr, ..target },
@@ -1246,7 +1259,12 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
                     let target = match target {
                         crate::include::nodes::primnodes::ProjectSetTarget::Scalar(entry) => {
                             crate::include::nodes::primnodes::ProjectSetTarget::Scalar(TargetEntry {
-                                expr: fix_upper_expr_for_path(ctx.root, entry.expr, &input),
+                                expr: fix_upper_expr_for_input(
+                                    ctx.root,
+                                    entry.expr,
+                                    &input,
+                                    &input_tlist,
+                                ),
                                 ..entry
                             })
                         }
