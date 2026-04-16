@@ -91,7 +91,9 @@ use crate::include::access::htup::TupleError;
 use crate::pgrust::database::TransactionWaiter;
 use crate::pl::plpgsql::CompiledFunction;
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 pub(crate) use constraints::enforce_relation_constraints;
@@ -115,6 +117,7 @@ pub struct ExecutorContext {
     pub timed: bool,
     pub catalog: Option<VisibleCatalog>,
     pub compiled_functions: HashMap<u32, Arc<CompiledFunction>>,
+    pub recursive_worktables: HashMap<usize, Rc<RefCell<RecursiveWorkTable>>>,
 }
 
 impl ExecutorContext {

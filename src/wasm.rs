@@ -156,6 +156,9 @@ mod tests {
             crate::backend::executor::jsonb::parse_jsonb_text("{\"a\":1,\"b\":[true,null]}")
                 .unwrap(),
         );
-        assert_eq!(render_value_json(&value), "\"{\\\"a\\\":1,\\\"b\\\":[true,null]}\"");
+        assert_eq!(
+            render_value_json(&value),
+            "\"{\\\"a\\\":1,\\\"b\\\":[true,null]}\""
+        );
     }
 }

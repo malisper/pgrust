@@ -565,12 +565,13 @@ fn empty_executor_context(base: &PathBuf) -> ExecutorContext {
         client_id: 1,
         next_command_id: 0,
         outer_rows: Vec::new(),
-            outer_system_bindings: Vec::new(),
-            system_bindings: Vec::new(),
+        outer_system_bindings: Vec::new(),
+        system_bindings: Vec::new(),
         subplans: Vec::new(),
         timed: false,
         catalog: None,
         compiled_functions: std::collections::HashMap::new(),
+        recursive_worktables: std::collections::HashMap::new(),
     }
 }
 
@@ -594,12 +595,13 @@ fn run_plan(
         client_id: 42,
         next_command_id: 0,
         outer_rows: Vec::new(),
-            outer_system_bindings: Vec::new(),
-            system_bindings: Vec::new(),
+        outer_system_bindings: Vec::new(),
+        system_bindings: Vec::new(),
         subplans: Vec::new(),
         timed: false,
         catalog: None,
         compiled_functions: std::collections::HashMap::new(),
+        recursive_worktables: std::collections::HashMap::new(),
     };
 
     let names = state.column_names().to_vec();
@@ -667,6 +669,7 @@ fn run_sql_with_catalog(
             timed: false,
             catalog: catalog.materialize_visible_catalog(),
             compiled_functions: std::collections::HashMap::new(),
+            recursive_worktables: std::collections::HashMap::new(),
         };
         execute_sql(&sql, &mut catalog, &mut ctx, xid)
     })
@@ -1983,7 +1986,10 @@ fn explain_analyze_timing_off_still_reports_nonzero_actual_rows() {
                 .iter()
                 .filter(|line| line.contains("actual time="))
                 .collect::<Vec<_>>();
-            assert!(!plan_lines.is_empty(), "expected explain analyze plan lines");
+            assert!(
+                !plan_lines.is_empty(),
+                "expected explain analyze plan lines"
+            );
             assert!(
                 plan_lines.iter().all(|line| !line.contains("rows=0.00")),
                 "expected nonzero actual rows for populated plan nodes, got {plan_lines:?}"
@@ -2030,7 +2036,9 @@ fn explain_analyze_reports_single_loop_for_simple_scan_and_sort() {
                 .filter(|line| line.contains("actual time="))
                 .collect::<Vec<_>>();
             assert!(
-                plan_lines.iter().any(|line| line.contains("Sort") && line.contains("loops=1")),
+                plan_lines
+                    .iter()
+                    .any(|line| line.contains("Sort") && line.contains("loops=1")),
                 "expected Sort loops=1, got {plan_lines:?}"
             );
             assert!(
@@ -2048,8 +2056,13 @@ fn explain_analyze_reports_single_loop_for_simple_scan_and_sort() {
 fn explain_hash_join_conditions_render_readably() {
     let base = temp_dir("explain_hash_join_rendering");
     let db = Database::open(&base, 16).unwrap();
-    db.execute(1, "create table customers (customer_id int4, name text)").unwrap();
-    db.execute(1, "create table orders (order_id int4, customer_id int4, total int4)").unwrap();
+    db.execute(1, "create table customers (customer_id int4, name text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table orders (order_id int4, customer_id int4, total int4)",
+    )
+    .unwrap();
     db.execute(
         1,
         "insert into customers values (1, 'ada'), (2, 'ben'), (3, 'cora')",
@@ -2082,7 +2095,9 @@ fn explain_hash_join_conditions_render_readably() {
                 })
                 .collect::<Vec<_>>();
             assert!(
-                rendered.iter().any(|line| line.contains("Hash Cond: (customer_id = customer_id)")),
+                rendered
+                    .iter()
+                    .any(|line| line.contains("Hash Cond: (customer_id = customer_id)")),
                 "expected readable hash condition, got {rendered:?}"
             );
             assert!(
@@ -2098,7 +2113,8 @@ fn explain_hash_join_conditions_render_readably() {
 fn explain_indents_child_plan_nodes() {
     let base = temp_dir("explain_indent_children");
     let db = Database::open(&base, 16).unwrap();
-    db.execute(1, "create table people_indent (id int4, name text)").unwrap();
+    db.execute(1, "create table people_indent (id int4, name text)")
+        .unwrap();
     db.execute(
         1,
         "insert into people_indent values (2, 'bob'), (1, 'alice'), (3, 'carol')",
@@ -4893,12 +4909,13 @@ fn prepared_insert_uses_defaults_for_omitted_columns() {
         client_id: 77,
         next_command_id: 0,
         outer_rows: Vec::new(),
-            outer_system_bindings: Vec::new(),
-            system_bindings: Vec::new(),
+        outer_system_bindings: Vec::new(),
+        system_bindings: Vec::new(),
         subplans: Vec::new(),
         timed: false,
         catalog: catalog.materialize_visible_catalog(),
         compiled_functions: std::collections::HashMap::new(),
+        recursive_worktables: std::collections::HashMap::new(),
     };
 
     let prepared = crate::backend::parser::bind_insert_prepared(

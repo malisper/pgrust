@@ -177,10 +177,7 @@ pub(crate) fn execute_explain(
         format_explain_lines(state.as_ref(), 0, true, &mut lines);
         if stmt.buffers {
             lines.push("Planning:".into());
-            lines.push(format!(
-                "  {}",
-                format_buffer_usage(planning_buffer_stats)
-            ));
+            lines.push(format!("  {}", format_buffer_usage(planning_buffer_stats)));
         }
         lines.push(format!(
             "Planning Time: {:.3} ms",
@@ -629,7 +626,12 @@ pub fn execute_create_index(
             "CREATE INDEX options".into(),
         )));
     }
-    let entry = match catalog.create_index(stmt.index_name, &stmt.table_name, stmt.unique, &stmt.columns) {
+    let entry = match catalog.create_index(
+        stmt.index_name,
+        &stmt.table_name,
+        stmt.unique,
+        &stmt.columns,
+    ) {
         Ok(entry) => entry,
         Err(crate::backend::catalog::catalog::CatalogError::TableAlreadyExists(_))
             if stmt.if_not_exists =>
@@ -1257,8 +1259,7 @@ pub fn execute_update_with_waiter(
                 let mut current_values = values;
                 loop {
                     ctx.check_for_interrupts()?;
-                    let old_tuple =
-                        heap_fetch(&*ctx.pool, ctx.client_id, target.rel, current_tid)?;
+                    let old_tuple = heap_fetch(&*ctx.pool, ctx.client_id, target.rel, current_tid)?;
                     crate::backend::executor::enforce_relation_constraints(
                         &target.relation_name,
                         &target.desc,
@@ -1448,7 +1449,8 @@ pub fn execute_delete_with_waiter(
                         waiter,
                     ) {
                         Ok(()) => {
-                            if let (Some(toast), Some(old_tuple)) = (target.toast, old_tuple.as_ref())
+                            if let (Some(toast), Some(old_tuple)) =
+                                (target.toast, old_tuple.as_ref())
                             {
                                 delete_external_from_tuple(
                                     ctx,

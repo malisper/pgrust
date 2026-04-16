@@ -381,7 +381,9 @@ impl Database {
             catalog_effects,
         ) {
             Ok(_) => {}
-            Err(ExecError::Parse(ParseError::TableAlreadyExists(_))) if create_stmt.if_not_exists => {
+            Err(ExecError::Parse(ParseError::TableAlreadyExists(_)))
+                if create_stmt.if_not_exists =>
+            {
                 return Ok(StatementResult::AffectedRows(0));
             }
             Err(err) => return Err(err),

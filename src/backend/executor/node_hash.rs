@@ -3,7 +3,9 @@ use crate::backend::commands::explain::format_explain_lines;
 use crate::backend::executor::exec_expr::eval_expr;
 use crate::backend::executor::{ExecError, ExecutorContext};
 use crate::include::nodes::datum::Value;
-use crate::include::nodes::execnodes::{HashState, MaterializedRow, PlanNode, SystemVarBinding, TupleSlot};
+use crate::include::nodes::execnodes::{
+    HashState, MaterializedRow, PlanNode, SystemVarBinding, TupleSlot,
+};
 
 pub(crate) fn eval_hash_key_exprs(
     exprs: &[crate::include::nodes::primnodes::Expr],

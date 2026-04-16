@@ -156,6 +156,7 @@ impl Database {
             subplans: Vec::new(),
             catalog: catalog.materialize_visible_catalog(),
             compiled_functions: std::collections::HashMap::new(),
+            recursive_worktables: std::collections::HashMap::new(),
         };
         let analyzed = collect_analyze_stats(&analyze_stmt.targets, &catalog, &mut ctx)?;
         drop(ctx);

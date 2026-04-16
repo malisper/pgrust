@@ -32,24 +32,22 @@ pub(super) fn infer_sql_expr_type_with_ctes(
     }
 
     match expr {
-        SqlExpr::Column(name) => {
-            resolve_system_column_with_outer(scope, outer_scopes, name)
-                .ok()
-                .flatten()
-                .map(|resolved| resolved.sql_type)
-                .or_else(|| {
-                    match resolve_column_with_outer(scope, outer_scopes, name, grouped_outer) {
-                        Ok(ResolvedColumn::Local(idx)) => {
-                            scope.desc.columns.get(idx).map(|c| c.sql_type)
-                        }
-                        Ok(ResolvedColumn::Outer { depth, index }) => outer_scopes
-                            .get(depth)
-                            .and_then(|s| s.desc.columns.get(index).map(|c| c.sql_type)),
-                        Err(_) => None,
+        SqlExpr::Column(name) => resolve_system_column_with_outer(scope, outer_scopes, name)
+            .ok()
+            .flatten()
+            .map(|resolved| resolved.sql_type)
+            .or_else(
+                || match resolve_column_with_outer(scope, outer_scopes, name, grouped_outer) {
+                    Ok(ResolvedColumn::Local(idx)) => {
+                        scope.desc.columns.get(idx).map(|c| c.sql_type)
                     }
-                })
-                .unwrap_or(SqlType::new(SqlTypeKind::Text))
-        }
+                    Ok(ResolvedColumn::Outer { depth, index }) => outer_scopes
+                        .get(depth)
+                        .and_then(|s| s.desc.columns.get(index).map(|c| c.sql_type)),
+                    Err(_) => None,
+                },
+            )
+            .unwrap_or(SqlType::new(SqlTypeKind::Text)),
         SqlExpr::Default => SqlType::new(SqlTypeKind::Text),
         SqlExpr::Const(Value::Int16(_)) => SqlType::new(SqlTypeKind::Int2),
         SqlExpr::Const(Value::Int32(_)) => SqlType::new(SqlTypeKind::Int4),

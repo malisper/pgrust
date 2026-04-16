@@ -277,6 +277,47 @@ fn cheapest_relation_access_path(
     })
 }
 
+fn best_query_path(
+    query: crate::include::nodes::parsenodes::Query,
+    catalog: &dyn CatalogLookup,
+) -> Path {
+    let mut root = PlannerInfo::new(query);
+    let scanjoin_rel = query_planner(&mut root, catalog);
+    let final_rel = grouping_planner(&mut root, scanjoin_rel, catalog);
+    let required_pathkeys = lower_pathkeys_for_rel(&root, &final_rel, &root.query_pathkeys);
+    bestpath::choose_final_path(&final_rel, &required_pathkeys)
+        .cloned()
+        .unwrap_or(Path::Result {
+            plan_info: PlanEstimate::default(),
+        })
+}
+
+fn build_recursive_union_path(
+    recursive_union: crate::include::nodes::parsenodes::RecursiveUnionQuery,
+    catalog: &dyn CatalogLookup,
+) -> Path {
+    optimize_path(
+        Path::RecursiveUnion {
+            plan_info: PlanEstimate::default(),
+            slot_id: next_synthetic_slot_id(),
+            worktable_id: recursive_union.worktable_id,
+            distinct: recursive_union.distinct,
+            output_columns: recursive_union
+                .output_desc
+                .columns
+                .iter()
+                .map(|column| QueryColumn {
+                    name: column.name.clone(),
+                    sql_type: column.sql_type,
+                })
+                .collect(),
+            anchor: Box::new(best_query_path(recursive_union.anchor, catalog)),
+            recursive: Box::new(best_query_path(recursive_union.recursive, catalog)),
+        },
+        catalog,
+    )
+}
+
 fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn CatalogLookup) {
     let Some(rte) = root.parse.rtable.get(rtindex.saturating_sub(1)).cloned() else {
         return;
@@ -442,17 +483,43 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
             }
             rel.add_path(path);
         }
-        RangeTblEntryKind::Subquery { query } => {
-            let mut subroot = PlannerInfo::new(*query);
-            let scanjoin_rel = query_planner(&mut subroot, catalog);
-            let final_rel = grouping_planner(&mut subroot, scanjoin_rel, catalog);
-            let required_pathkeys =
-                lower_pathkeys_for_rel(&subroot, &final_rel, &subroot.query_pathkeys);
-            let mut path = bestpath::choose_final_path(&final_rel, &required_pathkeys)
-                .cloned()
-                .unwrap_or(Path::Result {
+        RangeTblEntryKind::WorkTable { worktable_id } => {
+            let mut path = optimize_path(
+                Path::WorkTableScan {
                     plan_info: PlanEstimate::default(),
-                });
+                    slot_id: rtindex,
+                    worktable_id,
+                    output_columns: rte
+                        .desc
+                        .columns
+                        .iter()
+                        .map(|column| QueryColumn {
+                            name: column.name.clone(),
+                            sql_type: column.sql_type,
+                        })
+                        .collect(),
+                },
+                catalog,
+            );
+            if let Some(filter) = base_filter_expr(rel) {
+                path = optimize_path(
+                    Path::Filter {
+                        plan_info: PlanEstimate::default(),
+                        predicate: rewrite_expr_against_layout(filter, &path.output_vars()),
+                        input: Box::new(path),
+                    },
+                    catalog,
+                );
+            }
+            rel.add_path(path);
+        }
+        RangeTblEntryKind::Subquery { query } => {
+            let query = *query;
+            let mut path = if let Some(recursive_union) = query.recursive_union.clone() {
+                build_recursive_union_path(*recursive_union, catalog)
+            } else {
+                best_query_path(query, catalog)
+            };
             path = normalize_rte_path(rtindex, &rte.desc, path, catalog);
             if let Some(filter) = base_filter_expr(rel) {
                 path = optimize_path(
@@ -515,7 +582,9 @@ fn build_join_restrict_clauses(
             if relids_subset(&clause_relids, &join_relids)
                 && !relids_subset(&clause_relids, left_relids)
                 && !relids_subset(&clause_relids, right_relids)
-                && !clauses.iter().any(|existing: &RestrictInfo| existing.clause == *clause)
+                && !clauses
+                    .iter()
+                    .any(|existing: &RestrictInfo| existing.clause == *clause)
             {
                 clauses.push(restrict.clone());
             }
@@ -926,11 +995,11 @@ fn make_join_rel(
         .join_rel_list
         .get_mut(join_rel_index)
         .expect("join rel just inserted or found");
-    if !join_rel
-        .joininfo
-        .iter()
-        .any(|info| join_restrict_clauses.iter().any(|clause| clause.clause == info.clause))
-    {
+    if !join_rel.joininfo.iter().any(|info| {
+        join_restrict_clauses
+            .iter()
+            .any(|clause| clause.clause == info.clause)
+    }) {
         join_rel.joininfo.extend(join_restrict_clauses.clone());
     }
     for path in candidate_paths {

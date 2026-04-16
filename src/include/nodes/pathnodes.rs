@@ -391,6 +391,21 @@ pub enum Path {
         slot_id: usize,
         call: SetReturningCall,
     },
+    WorkTableScan {
+        plan_info: PlanEstimate,
+        slot_id: usize,
+        worktable_id: usize,
+        output_columns: Vec<QueryColumn>,
+    },
+    RecursiveUnion {
+        plan_info: PlanEstimate,
+        slot_id: usize,
+        worktable_id: usize,
+        distinct: bool,
+        output_columns: Vec<QueryColumn>,
+        anchor: Box<Path>,
+        recursive: Box<Path>,
+    },
     ProjectSet {
         plan_info: PlanEstimate,
         slot_id: usize,

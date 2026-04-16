@@ -49,12 +49,13 @@ fn ddl_executor_context(
         client_id,
         next_command_id: cid,
         outer_rows: Vec::new(),
-            outer_system_bindings: Vec::new(),
-            system_bindings: Vec::new(),
+        outer_system_bindings: Vec::new(),
+        system_bindings: Vec::new(),
         subplans: Vec::new(),
         timed: false,
         catalog: catalog.materialize_visible_catalog(),
         compiled_functions: std::collections::HashMap::new(),
+        recursive_worktables: std::collections::HashMap::new(),
     })
 }
 

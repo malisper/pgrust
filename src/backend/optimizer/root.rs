@@ -109,9 +109,14 @@ fn make_processed_tlist(parse: &Query) -> Vec<TargetEntry> {
         }
 
         processed_tlist.push(
-            TargetEntry::new("?column?", clause.expr.clone(), expr_sql_type(&clause.expr), next_resno)
-                .with_sort_group_ref(next_sort_group_ref)
-                .as_resjunk(),
+            TargetEntry::new(
+                "?column?",
+                clause.expr.clone(),
+                expr_sql_type(&clause.expr),
+                next_resno,
+            )
+            .with_sort_group_ref(next_sort_group_ref)
+            .as_resjunk(),
         );
         next_sort_group_ref += 1;
         next_resno += 1;
@@ -154,9 +159,9 @@ pub(super) fn expr_references_project_set_output(expr: &Expr, base_width: usize)
             expr_references_project_set_output(&saop.left, base_width)
                 || expr_references_project_set_output(&saop.right, base_width)
         }
-        Expr::Cast(inner, _)
-        | Expr::IsNull(inner)
-        | Expr::IsNotNull(inner) => expr_references_project_set_output(inner, base_width),
+        Expr::Cast(inner, _) | Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
+            expr_references_project_set_output(inner, base_width)
+        }
         Expr::Like {
             expr,
             pattern,
@@ -191,10 +196,9 @@ pub(super) fn expr_references_project_set_output(expr: &Expr, base_width: usize)
                         .lower
                         .as_ref()
                         .is_some_and(|expr| expr_references_project_set_output(expr, base_width))
-                        || subscript
-                            .upper
-                            .as_ref()
-                            .is_some_and(|expr| expr_references_project_set_output(expr, base_width))
+                        || subscript.upper.as_ref().is_some_and(|expr| {
+                            expr_references_project_set_output(expr, base_width)
+                        })
                 })
         }
         Expr::Var(_)
@@ -555,6 +559,7 @@ fn collect_query_outer_refs(query: &Query, levelsup: usize, exprs: &mut Vec<Expr
             RangeTblEntryKind::Subquery { query } => {
                 collect_query_outer_refs(query, levelsup + 1, exprs)
             }
+            RangeTblEntryKind::WorkTable { .. } => {}
             RangeTblEntryKind::Result
             | RangeTblEntryKind::Relation { .. }
             | RangeTblEntryKind::Join { .. } => {}

@@ -53,7 +53,8 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
 ) -> Result<Expr, ParseError> {
     Ok(match expr {
         SqlExpr::Column(name) => {
-            if let Some(system_column) = resolve_system_column_with_outer(scope, outer_scopes, name)?
+            if let Some(system_column) =
+                resolve_system_column_with_outer(scope, outer_scopes, name)?
             {
                 Expr::Var(crate::include::nodes::primnodes::Var {
                     varno: system_column.varno,

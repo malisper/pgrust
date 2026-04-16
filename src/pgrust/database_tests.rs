@@ -133,6 +133,99 @@ fn ephemeral_database_executes_basic_sql() {
 }
 
 #[test]
+fn recursive_cte_union_all_counts_up() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    let result = session
+        .execute(
+            &db,
+            "with recursive t(n) as (
+                values (1)
+                union all
+                select n + 1 from t where n < 5
+            )
+            select n from t order by n",
+        )
+        .expect("run recursive cte");
+
+    match result {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(1)],
+                    vec![Value::Int32(2)],
+                    vec![Value::Int32(3)],
+                    vec![Value::Int32(4)],
+                    vec![Value::Int32(5)],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn recursive_cte_respects_outer_limit() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    let result = session
+        .execute(
+            &db,
+            "with recursive t(n) as (
+                values (1)
+                union all
+                select n + 1 from t
+            )
+            select n from t limit 5",
+        )
+        .expect("run recursive cte with limit");
+
+    match result {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(1)],
+                    vec![Value::Int32(2)],
+                    vec![Value::Int32(3)],
+                    vec![Value::Int32(4)],
+                    vec![Value::Int32(5)],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn recursive_cte_union_deduplicates_and_terminates() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    let result = session
+        .execute(
+            &db,
+            "with recursive t(n) as (
+                values (1), (1)
+                union
+                select n from t where n < 2
+            )
+            select n from t",
+        )
+        .expect("run recursive union");
+
+    match result {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int32(1)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn ephemeral_database_rolls_back_aborted_transaction() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);
@@ -896,7 +989,10 @@ fn inherited_scan_tableoid_tracks_physical_child_relation() {
         .execute(&db, "create table parent_inh(a int4)")
         .unwrap();
     session
-        .execute(&db, "create table child_inh(extra int4) inherits (parent_inh)")
+        .execute(
+            &db,
+            "create table child_inh(extra int4) inherits (parent_inh)",
+        )
         .unwrap();
     session
         .execute(&db, "insert into parent_inh values (1)")
@@ -7984,10 +8080,7 @@ fn explicit_text_to_name_cast_works_via_pg_cast() {
         query_rows(&db, 1, "select 'hi mom'::name, '{alice,bob}'::name[]"),
         vec![vec![
             Value::Text("hi mom".into()),
-            Value::Array(vec![
-                Value::Text("alice".into()),
-                Value::Text("bob".into()),
-            ]),
+            Value::Array(vec![Value::Text("alice".into()), Value::Text("bob".into()),]),
         ]]
     );
 }

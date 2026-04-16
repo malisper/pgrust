@@ -620,6 +620,7 @@ mod tests {
             limit_count: None,
             limit_offset: 0,
             project_set: None,
+            recursive_union: None,
         }
     }
 

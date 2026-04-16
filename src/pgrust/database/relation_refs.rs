@@ -127,6 +127,7 @@ fn collect_rels_from_query(query: &Query, rels: &mut BTreeSet<RelFileLocator>) {
             RangeTblEntryKind::Function { call } => {
                 collect_rels_from_set_returning_call(call, rels)
             }
+            RangeTblEntryKind::WorkTable { .. } => {}
             RangeTblEntryKind::Subquery { query } => collect_rels_from_query(query, rels),
         }
     }
@@ -156,6 +157,10 @@ fn collect_rels_from_query(query: &Query, rels: &mut BTreeSet<RelFileLocator>) {
                 }
             }
         }
+    }
+    if let Some(recursive_union) = &query.recursive_union {
+        collect_rels_from_query(&recursive_union.anchor, rels);
+        collect_rels_from_query(&recursive_union.recursive, rels);
     }
     if let Some(jointree) = &query.jointree {
         collect_rels_from_jointree(jointree, rels);
@@ -207,7 +212,7 @@ fn collect_rels_from_set_returning_call(
 
 pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLocator>) {
     match plan {
-        Plan::Result { .. } => {}
+        Plan::Result { .. } | Plan::WorkTableScan { .. } => {}
         Plan::Append { children, .. } => {
             for child in children {
                 collect_rels_from_plan(child, rels);
@@ -331,6 +336,12 @@ pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLoc
                 }
             }
         },
+        Plan::RecursiveUnion {
+            anchor, recursive, ..
+        } => {
+            collect_rels_from_plan(anchor, rels);
+            collect_rels_from_plan(recursive, rels);
+        }
         Plan::Values { rows, .. } => {
             for row in rows {
                 for expr in row {
@@ -402,14 +413,7 @@ pub(super) fn collect_direct_relation_oids_from_select(
 ) {
     let cte_base = visible_ctes.len();
     for cte in &select.with {
-        match &cte.body {
-            crate::backend::parser::CteBody::Select(subquery) => {
-                collect_direct_relation_oids_from_select(subquery, catalog, visible_ctes, rels);
-            }
-            crate::backend::parser::CteBody::Values(values) => {
-                collect_direct_relation_oids_from_values(values, catalog, visible_ctes, rels);
-            }
-        }
+        collect_direct_relation_oids_from_cte_body(&cte.body, catalog, visible_ctes, rels);
         visible_ctes.push(cte.name.to_ascii_lowercase());
     }
 
@@ -443,14 +447,7 @@ fn collect_direct_relation_oids_from_values(
 ) {
     let cte_base = visible_ctes.len();
     for cte in &values.with {
-        match &cte.body {
-            crate::backend::parser::CteBody::Select(subquery) => {
-                collect_direct_relation_oids_from_select(subquery, catalog, visible_ctes, rels);
-            }
-            crate::backend::parser::CteBody::Values(inner) => {
-                collect_direct_relation_oids_from_values(inner, catalog, visible_ctes, rels);
-            }
-        }
+        collect_direct_relation_oids_from_cte_body(&cte.body, catalog, visible_ctes, rels);
         visible_ctes.push(cte.name.to_ascii_lowercase());
     }
     for row in &values.rows {
@@ -462,6 +459,28 @@ fn collect_direct_relation_oids_from_values(
         collect_direct_relation_oids_from_sql_expr(&item.expr, catalog, visible_ctes, rels);
     }
     visible_ctes.truncate(cte_base);
+}
+
+fn collect_direct_relation_oids_from_cte_body(
+    body: &crate::backend::parser::CteBody,
+    catalog: &dyn CatalogLookup,
+    visible_ctes: &mut Vec<String>,
+    rels: &mut BTreeSet<u32>,
+) {
+    match body {
+        crate::backend::parser::CteBody::Select(subquery) => {
+            collect_direct_relation_oids_from_select(subquery, catalog, visible_ctes, rels);
+        }
+        crate::backend::parser::CteBody::Values(values) => {
+            collect_direct_relation_oids_from_values(values, catalog, visible_ctes, rels);
+        }
+        crate::backend::parser::CteBody::RecursiveUnion {
+            anchor, recursive, ..
+        } => {
+            collect_direct_relation_oids_from_cte_body(anchor, catalog, visible_ctes, rels);
+            collect_direct_relation_oids_from_select(recursive, catalog, visible_ctes, rels);
+        }
+    }
 }
 
 fn collect_direct_relation_oids_from_from_item(

@@ -1071,6 +1071,7 @@ fn build_table_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, ParseErro
         .ok_or(ParseError::UnexpectedEof)?;
     Ok(SelectStatement {
         with: Vec::new(),
+        with_recursive: false,
         from: Some(FromItem::Table { name, only: false }),
         targets: vec![SelectItem {
             expr: SqlExpr::Column("*".into()),
@@ -1526,6 +1527,7 @@ fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
 }
 
 pub(crate) fn build_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, ParseError> {
+    let mut with_recursive = false;
     let mut with = Vec::new();
     let mut targets = None;
     let mut from = None;
@@ -1537,7 +1539,11 @@ pub(crate) fn build_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, Pars
     let mut offset = None;
     for part in pair.into_inner() {
         match part.as_rule() {
-            Rule::cte_clause => with = build_cte_clause(part)?,
+            Rule::cte_clause => {
+                let (recursive, ctes) = build_cte_clause(part)?;
+                with_recursive = recursive;
+                with = ctes;
+            }
             Rule::select_list => targets = Some(build_select_list(part)?),
             Rule::from_item => from = Some(build_from_item(part)?),
             Rule::expr => where_clause = Some(build_expr(part)?),
@@ -1550,6 +1556,7 @@ pub(crate) fn build_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, Pars
         }
     }
     Ok(SelectStatement {
+        with_recursive,
         with,
         from,
         targets: targets.unwrap_or_default(),
@@ -1563,6 +1570,7 @@ pub(crate) fn build_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, Pars
 }
 
 fn build_values_statement(pair: Pair<'_, Rule>) -> Result<ValuesStatement, ParseError> {
+    let mut with_recursive = false;
     let mut with = Vec::new();
     let mut rows = Vec::new();
     let mut order_by = Vec::new();
@@ -1570,7 +1578,11 @@ fn build_values_statement(pair: Pair<'_, Rule>) -> Result<ValuesStatement, Parse
     let mut offset = None;
     for part in pair.into_inner() {
         match part.as_rule() {
-            Rule::cte_clause => with = build_cte_clause(part)?,
+            Rule::cte_clause => {
+                let (recursive, ctes) = build_cte_clause(part)?;
+                with_recursive = recursive;
+                with = ctes;
+            }
             Rule::values_row => rows.push(build_values_row(part)?),
             Rule::order_by_clause => order_by = build_order_by_clause(part)?,
             Rule::limit_clause => limit = Some(build_limit_clause(part)?),
@@ -1579,6 +1591,7 @@ fn build_values_statement(pair: Pair<'_, Rule>) -> Result<ValuesStatement, Parse
         }
     }
     Ok(ValuesStatement {
+        with_recursive,
         with,
         rows,
         order_by,
@@ -1587,11 +1600,20 @@ fn build_values_statement(pair: Pair<'_, Rule>) -> Result<ValuesStatement, Parse
     })
 }
 
-fn build_cte_clause(pair: Pair<'_, Rule>) -> Result<Vec<CommonTableExpr>, ParseError> {
-    pair.into_inner()
-        .filter(|part| part.as_rule() == Rule::common_table_expr)
-        .map(build_common_table_expr)
-        .collect()
+fn build_cte_clause(pair: Pair<'_, Rule>) -> Result<(bool, Vec<CommonTableExpr>), ParseError> {
+    let recursive = pair
+        .as_str()
+        .trim_start()
+        .to_ascii_lowercase()
+        .starts_with("with recursive");
+    let mut ctes = Vec::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::common_table_expr => ctes.push(build_common_table_expr(part)?),
+            _ => {}
+        }
+    }
+    Ok((recursive, ctes))
 }
 
 fn build_common_table_expr(pair: Pair<'_, Rule>) -> Result<CommonTableExpr, ParseError> {
@@ -1610,17 +1632,9 @@ fn build_common_table_expr(pair: Pair<'_, Rule>) -> Result<CommonTableExpr, Pars
                 }
             }
             Rule::cte_body => {
-                let inner = part.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
-                body = Some(match inner.as_rule() {
-                    Rule::select_stmt => CteBody::Select(Box::new(build_select(inner)?)),
-                    Rule::values_stmt => CteBody::Values(build_values_statement(inner)?),
-                    _ => {
-                        return Err(ParseError::UnexpectedToken {
-                            expected: "SELECT or VALUES CTE body",
-                            actual: inner.as_str().into(),
-                        });
-                    }
-                });
+                body = Some(build_cte_body(
+                    part.into_inner().next().ok_or(ParseError::UnexpectedEof)?,
+                )?)
             }
             _ => {}
         }
@@ -1630,6 +1644,34 @@ fn build_common_table_expr(pair: Pair<'_, Rule>) -> Result<CommonTableExpr, Pars
         column_names,
         body: body.ok_or(ParseError::UnexpectedEof)?,
     })
+}
+
+fn build_cte_body(pair: Pair<'_, Rule>) -> Result<CteBody, ParseError> {
+    match pair.as_rule() {
+        Rule::select_stmt => Ok(CteBody::Select(Box::new(build_select(pair)?))),
+        Rule::values_stmt => Ok(CteBody::Values(build_values_statement(pair)?)),
+        Rule::recursive_union_cte_body => {
+            let all = pair.as_str().to_ascii_lowercase().contains(" union all ");
+            let mut inner = pair.into_inner();
+            let anchor = build_cte_body(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
+            let mut recursive = None;
+            for part in inner {
+                match part.as_rule() {
+                    Rule::select_stmt => recursive = Some(build_select(part)?),
+                    _ => {}
+                }
+            }
+            Ok(CteBody::RecursiveUnion {
+                all,
+                anchor: Box::new(anchor),
+                recursive: Box::new(recursive.ok_or(ParseError::UnexpectedEof)?),
+            })
+        }
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "SELECT or VALUES CTE body",
+            actual: pair.as_str().into(),
+        }),
+    }
 }
 
 fn build_group_by_clause(pair: Pair<'_, Rule>) -> Result<Vec<SqlExpr>, ParseError> {
@@ -2002,13 +2044,18 @@ fn build_alias_column_def(pair: Pair<'_, Rule>) -> Result<AliasColumnDef, ParseE
 }
 
 fn build_insert(pair: Pair<'_, Rule>) -> Result<InsertStatement, ParseError> {
+    let mut with_recursive = false;
     let mut with = Vec::new();
     let mut table_name = None;
     let mut columns = None;
     let mut source = None;
     for part in pair.into_inner() {
         match part.as_rule() {
-            Rule::cte_clause => with = build_cte_clause(part)?,
+            Rule::cte_clause => {
+                let (recursive, ctes) = build_cte_clause(part)?;
+                with_recursive = recursive;
+                with = ctes;
+            }
             Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
             Rule::assignment_target_list => columns = Some(build_assignment_target_list(part)?),
             Rule::insert_values_source => {
@@ -2025,6 +2072,7 @@ fn build_insert(pair: Pair<'_, Rule>) -> Result<InsertStatement, ParseError> {
         }
     }
     Ok(InsertStatement {
+        with_recursive,
         with,
         table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
         columns,
@@ -2430,7 +2478,9 @@ fn build_create_index_item(pair: Pair<'_, Rule>) -> Result<IndexColumnDef, Parse
         match part.as_rule() {
             Rule::identifier if name.is_none() => name = Some(build_identifier(part)),
             Rule::create_index_opclass if opclass.is_none() => {
-                opclass = Some(build_identifier(part.into_inner().next().ok_or(ParseError::UnexpectedEof)?))
+                opclass = Some(build_identifier(
+                    part.into_inner().next().ok_or(ParseError::UnexpectedEof)?,
+                ))
             }
             Rule::kw_desc => descending = true,
             Rule::nulls_ordering => {
@@ -2775,6 +2825,7 @@ fn build_maintenance_target(pair: Pair<'_, Rule>) -> Result<MaintenanceTarget, P
 }
 
 fn build_update(pair: Pair<'_, Rule>) -> Result<UpdateStatement, ParseError> {
+    let mut with_recursive = false;
     let mut with = Vec::new();
     let mut table_name = None;
     let mut only = false;
@@ -2782,7 +2833,11 @@ fn build_update(pair: Pair<'_, Rule>) -> Result<UpdateStatement, ParseError> {
     let mut where_clause = None;
     for part in pair.into_inner() {
         match part.as_rule() {
-            Rule::cte_clause => with = build_cte_clause(part)?,
+            Rule::cte_clause => {
+                let (recursive, ctes) = build_cte_clause(part)?;
+                with_recursive = recursive;
+                with = ctes;
+            }
             Rule::only_clause => only = true,
             Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
             Rule::assignment => assignments.push(build_assignment(part)?),
@@ -2791,6 +2846,7 @@ fn build_update(pair: Pair<'_, Rule>) -> Result<UpdateStatement, ParseError> {
         }
     }
     Ok(UpdateStatement {
+        with_recursive,
         with,
         table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
         only,
@@ -2800,13 +2856,18 @@ fn build_update(pair: Pair<'_, Rule>) -> Result<UpdateStatement, ParseError> {
 }
 
 fn build_delete(pair: Pair<'_, Rule>) -> Result<DeleteStatement, ParseError> {
+    let mut with_recursive = false;
     let mut with = Vec::new();
     let mut table_name = None;
     let mut only = false;
     let mut where_clause = None;
     for part in pair.into_inner() {
         match part.as_rule() {
-            Rule::cte_clause => with = build_cte_clause(part)?,
+            Rule::cte_clause => {
+                let (recursive, ctes) = build_cte_clause(part)?;
+                with_recursive = recursive;
+                with = ctes;
+            }
             Rule::only_clause => only = true,
             Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
             Rule::expr => where_clause = Some(build_expr(part)?),
@@ -2814,6 +2875,7 @@ fn build_delete(pair: Pair<'_, Rule>) -> Result<DeleteStatement, ParseError> {
         }
     }
     Ok(DeleteStatement {
+        with_recursive,
         with,
         table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
         only,

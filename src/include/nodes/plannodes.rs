@@ -150,6 +150,19 @@ pub enum Plan {
         plan_info: PlanEstimate,
         call: SetReturningCall,
     },
+    WorkTableScan {
+        plan_info: PlanEstimate,
+        worktable_id: usize,
+        output_columns: Vec<QueryColumn>,
+    },
+    RecursiveUnion {
+        plan_info: PlanEstimate,
+        worktable_id: usize,
+        distinct: bool,
+        output_columns: Vec<QueryColumn>,
+        anchor: Box<Plan>,
+        recursive: Box<Plan>,
+    },
     Values {
         plan_info: PlanEstimate,
         rows: Vec<Vec<Expr>>,
@@ -177,6 +190,8 @@ impl Plan {
             | Plan::Limit { plan_info, .. }
             | Plan::Projection { plan_info, .. }
             | Plan::Aggregate { plan_info, .. }
+            | Plan::WorkTableScan { plan_info, .. }
+            | Plan::RecursiveUnion { plan_info, .. }
             | Plan::FunctionScan { plan_info, .. }
             | Plan::Values { plan_info, .. }
             | Plan::ProjectSet { plan_info, .. } => *plan_info,
@@ -197,6 +212,8 @@ impl Plan {
             | Plan::Limit { plan_info, .. }
             | Plan::Projection { plan_info, .. }
             | Plan::Aggregate { plan_info, .. }
+            | Plan::WorkTableScan { plan_info, .. }
+            | Plan::RecursiveUnion { plan_info, .. }
             | Plan::FunctionScan { plan_info, .. }
             | Plan::Values { plan_info, .. }
             | Plan::ProjectSet { plan_info, .. } => *plan_info = value,
@@ -242,6 +259,8 @@ impl Plan {
                 })
                 .collect(),
             Plan::Aggregate { output_columns, .. } => output_columns.clone(),
+            Plan::WorkTableScan { output_columns, .. }
+            | Plan::RecursiveUnion { output_columns, .. } => output_columns.clone(),
             Plan::NestedLoopJoin { left, right, .. } | Plan::HashJoin { left, right, .. } => {
                 let mut cols = left.columns();
                 cols.extend(right.columns());

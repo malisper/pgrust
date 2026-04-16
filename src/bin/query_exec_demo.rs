@@ -178,6 +178,7 @@ fn main() -> Result<(), ExecError> {
         timed: false,
         catalog: None,
         compiled_functions: std::collections::HashMap::new(),
+        recursive_worktables: std::collections::HashMap::new(),
     };
 
     let names = state.column_names().to_vec();

@@ -155,7 +155,12 @@ fn path_relids(path: &Path) -> Vec<usize> {
         | Path::Limit { input, .. }
         | Path::Aggregate { input, .. }
         | Path::ProjectSet { input, .. } => path_relids(input),
-        Path::Values { slot_id, .. } | Path::FunctionScan { slot_id, .. } => vec![*slot_id],
+        Path::Values { slot_id, .. }
+        | Path::FunctionScan { slot_id, .. }
+        | Path::WorkTableScan { slot_id, .. } => vec![*slot_id],
+        Path::RecursiveUnion {
+            anchor, recursive, ..
+        } => relids_union(&path_relids(anchor), &path_relids(recursive)),
         Path::NestedLoopJoin { left, right, .. } | Path::HashJoin { left, right, .. } => {
             relids_union(&path_relids(left), &path_relids(right))
         }

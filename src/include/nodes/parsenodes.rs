@@ -262,6 +262,7 @@ pub struct Query {
     pub limit_count: Option<usize>,
     pub limit_offset: usize,
     pub project_set: Option<Vec<ProjectSetTarget>>,
+    pub recursive_union: Option<Box<RecursiveUnionQuery>>,
 }
 
 impl Query {
@@ -314,9 +315,21 @@ pub enum RangeTblEntryKind {
     Function {
         call: SetReturningCall,
     },
+    WorkTable {
+        worktable_id: usize,
+    },
     Subquery {
         query: Box<Query>,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecursiveUnionQuery {
+    pub output_desc: RelationDesc,
+    pub anchor: Query,
+    pub recursive: Query,
+    pub distinct: bool,
+    pub worktable_id: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -441,6 +454,7 @@ pub struct AnalyzeStatement {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectStatement {
+    pub with_recursive: bool,
     pub with: Vec<CommonTableExpr>,
     pub from: Option<FromItem>,
     pub targets: Vec<SelectItem>,
@@ -454,6 +468,7 @@ pub struct SelectStatement {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValuesStatement {
+    pub with_recursive: bool,
     pub with: Vec<CommonTableExpr>,
     pub rows: Vec<Vec<SqlExpr>>,
     pub order_by: Vec<OrderByItem>,
@@ -472,6 +487,11 @@ pub struct CommonTableExpr {
 pub enum CteBody {
     Select(Box<SelectStatement>),
     Values(ValuesStatement),
+    RecursiveUnion {
+        all: bool,
+        anchor: Box<CteBody>,
+        recursive: Box<SelectStatement>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -575,6 +595,7 @@ pub struct OrderByItem {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InsertStatement {
+    pub with_recursive: bool,
     pub with: Vec<CommonTableExpr>,
     pub table_name: String,
     pub columns: Option<Vec<AssignmentTarget>>,
@@ -1228,6 +1249,7 @@ impl PartialEq<RawTypeName> for SqlType {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateStatement {
+    pub with_recursive: bool,
     pub with: Vec<CommonTableExpr>,
     pub table_name: String,
     pub only: bool,
@@ -1237,6 +1259,7 @@ pub struct UpdateStatement {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeleteStatement {
+    pub with_recursive: bool,
     pub with: Vec<CommonTableExpr>,
     pub table_name: String,
     pub only: bool,

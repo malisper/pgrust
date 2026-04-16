@@ -2267,12 +2267,14 @@ fn build_join_plan_resolves_qualified_columns() {
         Plan::Projection { input, targets, .. } => {
             assert_eq!(targets.len(), 2);
             match strip_projections(&input) {
-                Plan::NestedLoopJoin { join_qual, qual, .. } => {
+                Plan::NestedLoopJoin {
+                    join_qual, qual, ..
+                } => {
                     assert!(qual.is_empty());
                     assert!(matches!(
-                    join_qual.as_slice(),
-                    [Expr::Op(op)] if op.op == crate::include::nodes::primnodes::OpExprKind::Eq
-                ))
+                        join_qual.as_slice(),
+                        [Expr::Op(op)] if op.op == crate::include::nodes::primnodes::OpExprKind::Eq
+                    ))
                 }
                 Plan::HashJoin {
                     kind,
@@ -2343,12 +2345,14 @@ fn build_non_equi_join_plan_stays_nested_loop() {
         Plan::Projection { input, targets, .. } => {
             assert_eq!(targets.len(), 2);
             match strip_projections(&input) {
-                Plan::NestedLoopJoin { join_qual, qual, .. } => {
+                Plan::NestedLoopJoin {
+                    join_qual, qual, ..
+                } => {
                     assert!(qual.is_empty());
                     assert!(matches!(
-                    join_qual.as_slice(),
-                    [Expr::Op(op)] if op.op == crate::include::nodes::primnodes::OpExprKind::Gt
-                ))
+                        join_qual.as_slice(),
+                        [Expr::Op(op)] if op.op == crate::include::nodes::primnodes::OpExprKind::Gt
+                    ))
                 }
                 other => panic!("expected nested loop join, got {:?}", other),
             }
@@ -2591,7 +2595,10 @@ fn bind_delete_falls_back_to_heap_for_or_predicate() {
     };
     let bound = bind_delete(&stmt, &catalog).unwrap();
     assert_eq!(bound.targets.len(), 1);
-    assert!(matches!(bound.targets[0].row_source, BoundModifyRowSource::Heap));
+    assert!(matches!(
+        bound.targets[0].row_source,
+        BoundModifyRowSource::Heap
+    ));
 }
 
 #[test]
@@ -2733,6 +2740,42 @@ fn parse_select_from_only_table() {
             assert!(only);
         }
         other => panic!("expected Select with ONLY table, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_with_recursive_cte_union_all() {
+    match parse_statement(
+        "with recursive t(n) as (values (1) union all select n + 1 from t) select * from t",
+    )
+    .unwrap()
+    {
+        Statement::Select(SelectStatement {
+            with_recursive,
+            with,
+            ..
+        }) => {
+            assert!(with_recursive);
+            assert_eq!(with.len(), 1);
+            match &with[0].body {
+                crate::backend::parser::CteBody::RecursiveUnion {
+                    all,
+                    anchor,
+                    recursive,
+                } => {
+                    assert!(*all);
+                    assert!(matches!(
+                        anchor.as_ref(),
+                        crate::backend::parser::CteBody::Values(_)
+                    ));
+                    assert!(
+                        matches!(recursive.from, Some(FromItem::Table { ref name, .. }) if name == "t")
+                    );
+                }
+                other => panic!("expected recursive union CTE body, got {:?}", other),
+            }
+        }
+        other => panic!("expected Select with WITH RECURSIVE, got {:?}", other),
     }
 }
 

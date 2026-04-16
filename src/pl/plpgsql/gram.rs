@@ -1,9 +1,9 @@
-use pest::iterators::Pair;
 use pest::Parser as _;
+use pest::iterators::Pair;
 use pest_derive::Parser;
 
 use crate::backend::executor::Value;
-use crate::backend::parser::{parse_expr, parse_type_name, ParseError, SqlExpr};
+use crate::backend::parser::{ParseError, SqlExpr, parse_expr, parse_type_name};
 
 use super::ast::{Block, RaiseLevel, ReturnQueryKind, Stmt, VarDecl};
 

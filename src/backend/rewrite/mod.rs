@@ -61,6 +61,24 @@ fn rewrite_query(
                     .collect::<Result<Vec<_>, _>>()
             })
             .transpose()?,
+        recursive_union: query
+            .recursive_union
+            .map(|recursive_union| {
+                Ok(Box::new(
+                    crate::include::nodes::parsenodes::RecursiveUnionQuery {
+                        output_desc: recursive_union.output_desc,
+                        anchor: rewrite_query(recursive_union.anchor, catalog, expanded_views)?,
+                        recursive: rewrite_query(
+                            recursive_union.recursive,
+                            catalog,
+                            expanded_views,
+                        )?,
+                        distinct: recursive_union.distinct,
+                        worktable_id: recursive_union.worktable_id,
+                    },
+                ))
+            })
+            .transpose()?,
         ..query
     })
 }
@@ -137,6 +155,9 @@ fn rewrite_rte(
         RangeTblEntryKind::Subquery { query } => RangeTblEntryKind::Subquery {
             query: Box::new(rewrite_query(*query, catalog, expanded_views)?),
         },
+        RangeTblEntryKind::WorkTable { worktable_id } => {
+            RangeTblEntryKind::WorkTable { worktable_id }
+        }
         RangeTblEntryKind::Result => RangeTblEntryKind::Result,
     };
     Ok(RangeTblEntry { kind, ..rte })

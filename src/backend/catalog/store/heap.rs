@@ -385,7 +385,8 @@ impl CatalogStore {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        let old_child_rows = physical_catalog_rows_for_catalog_entry(&catalog, &child_name, &child_entry);
+        let old_child_rows =
+            physical_catalog_rows_for_catalog_entry(&catalog, &child_name, &child_entry);
         let mut old_parent_rows = PhysicalCatalogRows::default();
         for (parent_name, parent_entry) in &parent_entries {
             add_catalog_entry_rows(&mut old_parent_rows, &catalog, parent_name, parent_entry);
@@ -398,7 +399,8 @@ impl CatalogStore {
             .get_by_oid(relation_oid)
             .cloned()
             .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
-        let new_child_rows = physical_catalog_rows_for_catalog_entry(&catalog, &child_name, &child_entry);
+        let new_child_rows =
+            physical_catalog_rows_for_catalog_entry(&catalog, &child_name, &child_entry);
         let mut new_parent_rows = PhysicalCatalogRows::default();
         for (parent_name, _) in &parent_entries {
             let parent_entry = catalog

@@ -38,6 +38,8 @@ pub(crate) struct BoundCte {
     pub(crate) name: String,
     pub(crate) plan: Query,
     pub(crate) desc: RelationDesc,
+    pub(crate) self_reference: bool,
+    pub(crate) worktable_id: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -320,16 +322,18 @@ fn resolve_system_column_in_scope(
         }
         let normalized_relation = relation.to_ascii_lowercase();
         if scope.relations.iter().any(|entry| {
-            entry.hidden_invalid_relation_names.iter().any(|hidden| {
-                hidden.eq_ignore_ascii_case(relation)
-            })
+            entry
+                .hidden_invalid_relation_names
+                .iter()
+                .any(|hidden| hidden.eq_ignore_ascii_case(relation))
         }) {
             return Err(ParseError::InvalidFromClauseReference(normalized_relation));
         }
         if scope.relations.iter().any(|entry| {
-            entry.hidden_missing_relation_names.iter().any(|hidden| {
-                hidden.eq_ignore_ascii_case(relation)
-            })
+            entry
+                .hidden_missing_relation_names
+                .iter()
+                .any(|hidden| hidden.eq_ignore_ascii_case(relation))
         }) {
             return Err(ParseError::MissingFromClauseEntry(normalized_relation));
         }
@@ -451,6 +455,21 @@ pub(super) fn bind_from_item_with_ctes(
     match stmt {
         FromItem::Table { name, only } => {
             if let Some(cte) = ctes.iter().find(|cte| cte.name.eq_ignore_ascii_case(name)) {
+                if cte.self_reference {
+                    let output_columns = cte
+                        .desc
+                        .columns
+                        .iter()
+                        .map(|column| QueryColumn {
+                            name: column.name.clone(),
+                            sql_type: column.sql_type,
+                        })
+                        .collect::<Vec<_>>();
+                    return Ok((
+                        AnalyzedFrom::worktable(cte.worktable_id, output_columns),
+                        scope_for_relation(Some(name), &cte.desc),
+                    ));
+                }
                 return Ok((
                     AnalyzedFrom::subquery(cte.plan.clone()),
                     scope_for_relation(Some(name), &cte.desc),
