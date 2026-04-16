@@ -475,6 +475,7 @@ pub(super) fn aggregate_sql_type(func: AggFunc, arg_type: Option<SqlType>) -> Sq
                 }
             })
             .unwrap_or(SqlType::array_of(SqlType::new(Text))),
+        AggFunc::StringAgg => arg_type.unwrap_or(SqlType::new(Text)),
         AggFunc::Min | AggFunc::Max => arg_type.unwrap_or(SqlType::new(Text)),
         AggFunc::Count
         | AggFunc::JsonAgg
@@ -508,6 +509,10 @@ mod tests {
         assert_eq!(
             aggregate_sql_type(AggFunc::Sum, Some(SqlType::new(SqlTypeKind::Int4))),
             SqlType::new(SqlTypeKind::Int8)
+        );
+        assert_eq!(
+            aggregate_sql_type(AggFunc::StringAgg, Some(SqlType::new(SqlTypeKind::Bytea))),
+            SqlType::new(SqlTypeKind::Bytea)
         );
     }
 }

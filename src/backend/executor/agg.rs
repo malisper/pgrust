@@ -4,6 +4,7 @@ use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue, NumericValue, Value};
 use crate::include::nodes::primnodes::AggFunc;
+use crate::pgrust::compact_string::CompactString;
 use crate::pgrust::session::ByteaOutputFormat;
 
 use num_traits::Zero;
@@ -53,6 +54,11 @@ pub(crate) enum AccumState {
     JsonObjectAgg {
         pairs: Vec<(Value, Value)>,
         jsonb: bool,
+    },
+    StringAgg {
+        bytes: Vec<u8>,
+        first_delim_len: Option<usize>,
+        bytea: bool,
     },
     Min {
         min: Option<Value>,
@@ -108,6 +114,11 @@ impl AccumState {
             (AggFunc::JsonbObjectAgg, _) => AccumState::JsonObjectAgg {
                 pairs: Vec::new(),
                 jsonb: true,
+            },
+            (AggFunc::StringAgg, _) => AccumState::StringAgg {
+                bytes: Vec::new(),
+                first_delim_len: None,
+                bytea: matches!(sql_type.kind, SqlTypeKind::Bytea),
             },
             (AggFunc::Min, _) => AccumState::Min { min: None },
             (AggFunc::Max, _) => AccumState::Max { max: None },
@@ -191,6 +202,26 @@ impl AccumState {
                     let key = values.first().unwrap_or(&Value::Null);
                     let value = values.get(1).unwrap_or(&Value::Null);
                     pairs.push((key.to_owned_value(), value.to_owned_value()));
+                }
+            },
+            (AggFunc::StringAgg, _, _) => |state, values| {
+                if let AccumState::StringAgg {
+                    bytes,
+                    first_delim_len,
+                    bytea,
+                } = state
+                {
+                    let value = values.first().unwrap_or(&Value::Null);
+                    if matches!(value, Value::Null) {
+                        return;
+                    }
+                    let delimiter = values.get(1).unwrap_or(&Value::Null);
+                    let delimiter_bytes = string_agg_input_bytes(delimiter, *bytea);
+                    if first_delim_len.is_none() {
+                        *first_delim_len = Some(delimiter_bytes.len());
+                    }
+                    bytes.extend_from_slice(&delimiter_bytes);
+                    bytes.extend_from_slice(&string_agg_input_bytes(value, *bytea));
                 }
             },
             (AggFunc::Min, _, _) => |state, values| {
@@ -343,9 +374,39 @@ impl AccumState {
                     ))
                 }
             }
+            AccumState::StringAgg {
+                bytes,
+                first_delim_len,
+                bytea,
+            } => {
+                let Some(prefix_len) = first_delim_len else {
+                    return Value::Null;
+                };
+                let rendered = bytes[*prefix_len..].to_vec();
+                if *bytea {
+                    Value::Bytea(rendered)
+                } else {
+                    Value::Text(CompactString::from_owned(
+                        String::from_utf8(rendered).expect("text string_agg state must be utf-8"),
+                    ))
+                }
+            }
             AccumState::Min { min } => min.clone().unwrap_or(Value::Null),
             AccumState::Max { max } => max.clone().unwrap_or(Value::Null),
         }
+    }
+}
+
+fn string_agg_input_bytes(value: &Value, bytea: bool) -> Vec<u8> {
+    match value {
+        Value::Null => Vec::new(),
+        Value::Bytea(bytes) if bytea => bytes.clone(),
+        _ if !bytea => value
+            .as_text()
+            .expect("text string_agg input must be text")
+            .as_bytes()
+            .to_vec(),
+        _ => panic!("bytea string_agg input must be bytea"),
     }
 }
 
