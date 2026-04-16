@@ -792,10 +792,12 @@ pub(super) fn rewrite_expr_columns(expr: Expr, output_exprs: &[Expr]) -> Expr {
             right: Box::new(rewrite_expr_columns(*saop.right, output_exprs)),
             ..*saop
         })),
-        Expr::Column(index) => output_exprs
-            .get(index)
-            .cloned()
-            .unwrap_or(Expr::Column(index)),
+        Expr::Column(index) => output_exprs.get(index).cloned().unwrap_or_else(|| {
+            panic!(
+                "rewrite_expr_columns missing output expr for Column({index}); \
+                 parser/analyze should provide explicit output identity"
+            )
+        }),
         expr @ (Expr::Param(_) | Expr::Var(_) | Expr::Const(_) | Expr::Random) => expr,
         Expr::Cast(inner, ty) => {
             Expr::Cast(Box::new(rewrite_expr_columns(*inner, output_exprs)), ty)

@@ -7,7 +7,13 @@ fn grouped_key_expr(group_key_exprs: &[Expr], index: usize) -> Expr {
     group_key_exprs
         .get(index)
         .cloned()
-        .unwrap_or(Expr::Column(index))
+        .unwrap_or_else(|| {
+            panic!(
+                "grouped aggregate output missing group key expr for position {}; \
+                 parser/analyze should provide explicit grouped key identity",
+                index + 1
+            )
+        })
 }
 
 pub(super) fn bind_agg_output_expr(
