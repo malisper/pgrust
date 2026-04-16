@@ -597,16 +597,9 @@ pub(super) fn rewrite_target_entries(
 ) -> Vec<TargetEntry> {
     targets
         .into_iter()
-        .map(|target| {
-            let input_resno = match &target.expr {
-                Expr::Column(index) => Some(index + 1),
-                _ => target.input_resno,
-            };
-            TargetEntry {
-                expr: rewrite_expr_columns(target.expr, output_exprs),
-                input_resno,
-                ..target
-            }
+        .map(|target| TargetEntry {
+            expr: rewrite_expr_columns(target.expr, output_exprs),
+            ..target
         })
         .collect()
 }
