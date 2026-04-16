@@ -179,6 +179,8 @@ fn main() -> Result<(), ExecError> {
         timed: false,
         catalog: None,
         compiled_functions: std::collections::HashMap::new(),
+        cte_tables: std::collections::HashMap::new(),
+        cte_producers: std::collections::HashMap::new(),
         recursive_worktables: std::collections::HashMap::new(),
     };
 

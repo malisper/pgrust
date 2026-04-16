@@ -14,12 +14,14 @@ use crate::backend::utils::time::instant::Instant;
 use crate::include::catalog::builtin_aggregate_function_for_proc_oid;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::{
-    AggregateState, AppendState, FilterState, FunctionScanState, IndexScanState, LimitState,
-    MaterializedRow, NestedLoopJoinState, NodeExecStats, OrderByState, PlanNode, ProjectSetState,
-    ProjectionState, RecursiveUnionState, ResultState, SeqScanState, SlotKind, SystemVarBinding,
-    ToastRelationRef, TupleSlot, ValuesState, WorkTableScanState,
+    AggregateState, AppendState, CteScanState, FilterState, FunctionScanState, IndexScanState,
+    LimitState, MaterializedRow, NestedLoopJoinState, NodeExecStats, OrderByState, PlanNode,
+    ProjectSetState, ProjectionState, RecursiveUnionState, ResultState, SeqScanState, SlotKind,
+    SystemVarBinding, ToastRelationRef, TupleSlot, ValuesState, WorkTableScanState,
 };
 use crate::include::nodes::primnodes::{Expr, JoinType};
+use std::cell::RefCell;
+use std::rc::Rc;
 
 const EMPTY_SYSTEM_BINDINGS: [SystemVarBinding; 0] = [];
 
@@ -1536,6 +1538,76 @@ impl PlanNode for WorkTableScanState {
     }
     fn node_label(&self) -> String {
         "WorkTable Scan".into()
+    }
+    fn explain_children(&self, _indent: usize, _analyze: bool, _lines: &mut Vec<String>) {}
+}
+
+impl PlanNode for CteScanState {
+    fn exec_proc_node<'a>(
+        &'a mut self,
+        ctx: &mut ExecutorContext,
+    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        let start = if ctx.timed {
+            Some(Instant::now())
+        } else {
+            None
+        };
+        begin_node(&mut self.stats, ctx);
+        let table = ctx
+            .cte_tables
+            .entry(self.cte_id)
+            .or_insert_with(|| Rc::new(RefCell::new(Default::default())))
+            .clone();
+        loop {
+            if let Some(row) = table.borrow().rows.get(self.next_index).cloned() {
+                self.next_index += 1;
+                load_materialized_row(&mut self.slot, &row, &mut self.current_bindings, ctx);
+                finish_row(&mut self.stats, start);
+                return Ok(Some(&mut self.slot));
+            }
+            if table.borrow().eof {
+                finish_eof(&mut self.stats, start, ctx);
+                return Ok(None);
+            }
+            let producer = ctx
+                .cte_producers
+                .entry(self.cte_id)
+                .or_insert_with(|| Rc::new(RefCell::new(executor_start(self.cte_plan.clone()))))
+                .clone();
+            match producer.borrow_mut().exec_proc_node(ctx)? {
+                Some(slot) => {
+                    let row = materialize_cte_row(slot)?;
+                    table.borrow_mut().rows.push(row);
+                }
+                None => {
+                    table.borrow_mut().eof = true;
+                }
+            }
+        }
+    }
+
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
+        Some(&mut self.slot)
+    }
+
+    fn current_system_bindings(&self) -> &[SystemVarBinding] {
+        &self.current_bindings
+    }
+
+    fn column_names(&self) -> &[String] {
+        &self.output_columns
+    }
+    fn node_stats(&self) -> &NodeExecStats {
+        &self.stats
+    }
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
+        &mut self.stats
+    }
+    fn plan_info(&self) -> crate::include::nodes::plannodes::PlanEstimate {
+        self.plan_info
+    }
+    fn node_label(&self) -> String {
+        "CTE Scan".into()
     }
     fn explain_children(&self, _indent: usize, _analyze: bool, _lines: &mut Vec<String>) {}
 }

@@ -36,6 +36,7 @@ pub(crate) struct GroupedOuterScope {
 #[derive(Debug, Clone)]
 pub(crate) struct BoundCte {
     pub(crate) name: String,
+    pub(crate) cte_id: usize,
     pub(crate) plan: Query,
     pub(crate) desc: RelationDesc,
     pub(crate) self_reference: bool,
@@ -471,7 +472,7 @@ pub(super) fn bind_from_item_with_ctes(
                     ));
                 }
                 return Ok((
-                    AnalyzedFrom::subquery(cte.plan.clone()),
+                    AnalyzedFrom::cte_scan(cte.cte_id, cte.plan.clone()),
                     scope_for_relation(Some(name), &cte.desc),
                 ));
             }

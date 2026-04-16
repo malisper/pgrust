@@ -157,6 +157,7 @@ fn path_relids(path: &Path) -> Vec<usize> {
         | Path::ProjectSet { input, .. } => path_relids(input),
         Path::Values { slot_id, .. }
         | Path::FunctionScan { slot_id, .. }
+        | Path::CteScan { slot_id, .. }
         | Path::WorkTableScan { slot_id, .. } => vec![*slot_id],
         Path::RecursiveUnion {
             anchor, recursive, ..

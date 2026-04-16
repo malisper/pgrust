@@ -572,6 +572,8 @@ fn empty_executor_context(base: &PathBuf) -> ExecutorContext {
         timed: false,
         catalog: None,
         compiled_functions: std::collections::HashMap::new(),
+        cte_tables: std::collections::HashMap::new(),
+        cte_producers: std::collections::HashMap::new(),
         recursive_worktables: std::collections::HashMap::new(),
     }
 }
@@ -603,6 +605,8 @@ fn run_plan(
         timed: false,
         catalog: None,
         compiled_functions: std::collections::HashMap::new(),
+        cte_tables: std::collections::HashMap::new(),
+        cte_producers: std::collections::HashMap::new(),
         recursive_worktables: std::collections::HashMap::new(),
     };
 
@@ -672,6 +676,8 @@ fn run_sql_with_catalog(
             timed: false,
             catalog: catalog.materialize_visible_catalog(),
             compiled_functions: std::collections::HashMap::new(),
+            cte_tables: std::collections::HashMap::new(),
+            cte_producers: std::collections::HashMap::new(),
             recursive_worktables: std::collections::HashMap::new(),
         };
         execute_sql(&sql, &mut catalog, &mut ctx, xid)
@@ -4983,6 +4989,8 @@ fn prepared_insert_uses_defaults_for_omitted_columns() {
         timed: false,
         catalog: catalog.materialize_visible_catalog(),
         compiled_functions: std::collections::HashMap::new(),
+        cte_tables: std::collections::HashMap::new(),
+        cte_producers: std::collections::HashMap::new(),
         recursive_worktables: std::collections::HashMap::new(),
     };
 
@@ -10055,6 +10063,42 @@ select string_agg(r_text, E'\n') from lines
                 }
                 other => panic!("expected text result, got {:?}", other),
             }
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn explain_recursive_exists_query_uses_cte_scan() {
+    let base = temp_dir("explain_recursive_exists_cte_scan");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    let sql = r#"
+explain
+with recursive t(n) as (
+  values (1)
+  union all
+  select n + 1 from t where n < 3
+), final_t as (
+  select * from t where n = 3
+)
+select n
+from t s
+where exists (select 1 from final_t f where f.n = s.n)
+order by n
+"#;
+    match run_sql(&base, &txns, INVALID_TRANSACTION_ID, sql).unwrap() {
+        StatementResult::Query { rows, .. } => {
+            let rendered = rows
+                .into_iter()
+                .map(|row| match &row[0] {
+                    Value::Text(text) => text.clone(),
+                    other => panic!("expected text explain line, got {:?}", other),
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                rendered.iter().any(|line| line.contains("CTE Scan")),
+                "expected CTE Scan in explain output, got {rendered:?}"
+            );
         }
         other => panic!("expected query result, got {:?}", other),
     }

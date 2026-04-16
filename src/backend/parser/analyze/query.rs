@@ -168,6 +168,30 @@ impl AnalyzedFrom {
         }
     }
 
+    pub(super) fn cte_scan(cte_id: usize, query: Query) -> Self {
+        let output_columns = query.columns();
+        let desc = RelationDesc {
+            columns: output_columns
+                .iter()
+                .map(|column| column_desc(column.name.clone(), column.sql_type, true))
+                .collect(),
+        };
+        Self {
+            rtable: vec![RangeTblEntry {
+                alias: None,
+                desc,
+                inh: false,
+                kind: RangeTblEntryKind::Cte {
+                    cte_id,
+                    query: Box::new(query),
+                },
+            }],
+            jointree: Some(JoinTreeNode::RangeTblRef(1)),
+            output_exprs: rte_output_exprs(1, &output_columns),
+            output_columns,
+        }
+    }
+
     pub(super) fn subquery(query: Query) -> Self {
         let output_columns = query.columns();
         let desc = RelationDesc {

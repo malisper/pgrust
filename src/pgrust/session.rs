@@ -1236,6 +1236,8 @@ impl Session {
                     subplans: Vec::new(),
                     catalog: catalog.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
+                    cte_tables: std::collections::HashMap::new(),
+                    cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
                 };
                 execute_readonly_statement(stmt, &catalog, &mut ctx)
@@ -1264,6 +1266,8 @@ impl Session {
                     subplans: Vec::new(),
                     catalog: catalog.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
+                    cte_tables: std::collections::HashMap::new(),
+                    cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
                 };
                 execute_insert(bound, &catalog, &mut ctx, xid, cid)
@@ -1293,6 +1297,8 @@ impl Session {
                     subplans: Vec::new(),
                     catalog: catalog.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
+                    cte_tables: std::collections::HashMap::new(),
+                    cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
                 };
                 execute_update_with_waiter(
@@ -1329,6 +1335,8 @@ impl Session {
                     subplans: Vec::new(),
                     catalog: catalog.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
+                    cte_tables: std::collections::HashMap::new(),
+                    cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
                 };
                 execute_delete_with_waiter(
@@ -1474,6 +1482,8 @@ impl Session {
                     subplans: Vec::new(),
                     catalog: catalog.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
+                    cte_tables: std::collections::HashMap::new(),
+                    cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
                 };
                 execute_truncate_table(truncate_stmt.clone(), &catalog, &mut ctx, xid)
@@ -1664,6 +1674,8 @@ impl Session {
             subplans: Vec::new(),
             catalog: catalog.materialize_visible_catalog(),
             compiled_functions: std::collections::HashMap::new(),
+            cte_tables: std::collections::HashMap::new(),
+            cte_producers: std::collections::HashMap::new(),
             recursive_worktables: std::collections::HashMap::new(),
         };
         execute_prepared_insert_row(prepared, params, &mut ctx, xid, cid)
@@ -1890,6 +1902,8 @@ impl Session {
                 subplans: Vec::new(),
                 catalog: catalog.materialize_visible_catalog(),
                 compiled_functions: std::collections::HashMap::new(),
+                cte_tables: std::collections::HashMap::new(),
+                cte_producers: std::collections::HashMap::new(),
                 recursive_worktables: std::collections::HashMap::new(),
             };
             let relation_constraints = crate::backend::parser::bind_relation_constraints(

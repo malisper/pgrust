@@ -263,6 +263,32 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                     output_columns,
                 }
             }
+            Path::CteScan {
+                slot_id,
+                cte_id,
+                cte_plan,
+                output_columns,
+                ..
+            } => {
+                let cte_plan = optimize_path(*cte_plan, catalog);
+                let cte_info = cte_plan.plan_info();
+                let width = output_columns
+                    .iter()
+                    .map(|col| estimate_sql_type_width(col.sql_type))
+                    .sum();
+                Path::CteScan {
+                    plan_info: PlanEstimate::new(
+                        cte_info.startup_cost.as_f64(),
+                        cte_info.total_cost.as_f64() + CPU_TUPLE_COST,
+                        cte_info.plan_rows.as_f64(),
+                        width,
+                    ),
+                    slot_id,
+                    cte_id,
+                    cte_plan: Box::new(cte_plan),
+                    output_columns,
+                }
+            }
             Path::WorkTableScan {
                 slot_id,
                 worktable_id,

@@ -57,6 +57,7 @@ impl Path {
             | Self::OrderBy { plan_info, .. }
             | Self::Limit { plan_info, .. }
             | Self::Aggregate { plan_info, .. }
+            | Self::CteScan { plan_info, .. }
             | Self::WorkTableScan { plan_info, .. }
             | Self::RecursiveUnion { plan_info, .. }
             | Self::Values { plan_info, .. }
@@ -95,6 +96,7 @@ impl Path {
                 })
                 .collect(),
             Self::Aggregate { output_columns, .. } => output_columns.clone(),
+            Self::CteScan { output_columns, .. } => output_columns.clone(),
             Self::WorkTableScan { output_columns, .. }
             | Self::RecursiveUnion { output_columns, .. } => output_columns.clone(),
             Self::NestedLoopJoin { left, right, .. } | Self::HashJoin { left, right, .. } => {
@@ -153,6 +155,11 @@ impl Path {
                 output_columns,
                 ..
             } => slot_output_vars(*slot_id, output_columns, |column| column.sql_type),
+            Self::CteScan {
+                slot_id,
+                output_columns,
+                ..
+            } => slot_output_vars(*slot_id, output_columns, |column| column.sql_type),
             Self::WorkTableScan {
                 slot_id,
                 output_columns,
@@ -199,6 +206,7 @@ impl Path {
             | Self::Append { .. }
             | Self::SeqScan { .. }
             | Self::Aggregate { .. }
+            | Self::CteScan { .. }
             | Self::WorkTableScan { .. }
             | Self::RecursiveUnion { .. }
             | Self::Values { .. }

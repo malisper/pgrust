@@ -118,6 +118,8 @@ pub struct ExecutorContext {
     pub timed: bool,
     pub catalog: Option<VisibleCatalog>,
     pub compiled_functions: HashMap<u32, Arc<CompiledFunction>>,
+    pub cte_tables: HashMap<usize, Rc<RefCell<MaterializedCteTable>>>,
+    pub cte_producers: HashMap<usize, Rc<RefCell<PlanState>>>,
     pub recursive_worktables: HashMap<usize, Rc<RefCell<RecursiveWorkTable>>>,
 }
 

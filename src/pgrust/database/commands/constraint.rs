@@ -56,6 +56,8 @@ fn ddl_executor_context(
         timed: false,
         catalog: catalog.materialize_visible_catalog(),
         compiled_functions: std::collections::HashMap::new(),
+        cte_tables: std::collections::HashMap::new(),
+        cte_producers: std::collections::HashMap::new(),
         recursive_worktables: std::collections::HashMap::new(),
     })
 }

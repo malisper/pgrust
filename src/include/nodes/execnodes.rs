@@ -494,6 +494,24 @@ pub struct RecursiveWorkTable {
     pub(crate) rows: Vec<MaterializedRow>,
 }
 
+#[derive(Debug, Default)]
+pub struct MaterializedCteTable {
+    pub(crate) rows: Vec<MaterializedRow>,
+    pub(crate) eof: bool,
+}
+
+#[derive(Debug)]
+pub struct CteScanState {
+    pub(crate) cte_id: usize,
+    pub(crate) cte_plan: Plan,
+    pub(crate) output_columns: Vec<String>,
+    pub(crate) next_index: usize,
+    pub(crate) slot: TupleSlot,
+    pub(crate) current_bindings: Vec<SystemVarBinding>,
+    pub(crate) plan_info: PlanEstimate,
+    pub(crate) stats: NodeExecStats,
+}
+
 #[derive(Debug)]
 pub struct WorkTableScanState {
     pub(crate) worktable_id: usize,

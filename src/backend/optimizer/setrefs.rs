@@ -360,6 +360,18 @@ fn set_plan_refs(root: Option<&PlannerInfo>, path: Path) -> Plan {
             plan_info,
             call: lower_set_returning_call_to_plan_layout(call, &[]),
         },
+        Path::CteScan {
+            plan_info,
+            cte_id,
+            cte_plan,
+            output_columns,
+            ..
+        } => Plan::CteScan {
+            plan_info,
+            cte_id,
+            cte_plan: Box::new(set_plan_refs(root, *cte_plan)),
+            output_columns,
+        },
         Path::WorkTableScan {
             plan_info,
             worktable_id,

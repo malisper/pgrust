@@ -318,6 +318,10 @@ pub enum RangeTblEntryKind {
     WorkTable {
         worktable_id: usize,
     },
+    Cte {
+        cte_id: usize,
+        query: Box<Query>,
+    },
     Subquery {
         query: Box<Query>,
     },
