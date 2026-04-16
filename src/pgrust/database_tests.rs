@@ -226,6 +226,23 @@ fn recursive_cte_union_deduplicates_and_terminates() {
 }
 
 #[test]
+fn scalar_values_subquery_expr_returns_single_value() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    let result = session
+        .execute(&db, "select (values (1))")
+        .expect("run scalar values subquery");
+
+    match result {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int32(1)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn ephemeral_database_rolls_back_aborted_transaction() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);
