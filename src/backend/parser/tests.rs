@@ -4542,3 +4542,68 @@ fn parse_similar_to_syntax() {
         other => panic!("expected select statement, got {other:?}"),
     }
 }
+
+#[test]
+fn parse_case_expressions() {
+    let stmt = parse_select(
+        "select
+            case id when 1 then 'one' else 'other' end,
+            case when id > 0 then note else name end
+         from people",
+    )
+    .unwrap();
+
+    assert!(matches!(
+        &stmt.targets[0].expr,
+        SqlExpr::Case {
+            arg: Some(arg),
+            args,
+            defresult: Some(_),
+        } if matches!(arg.as_ref(), SqlExpr::Column(name) if name == "id") && args.len() == 1
+    ));
+    assert!(matches!(
+        &stmt.targets[1].expr,
+        SqlExpr::Case {
+            arg: None,
+            args,
+            defresult: Some(_),
+        } if args.len() == 1
+    ));
+}
+
+#[test]
+fn analyze_simple_case_uses_case_test_expr() {
+    let stmt =
+        parse_select("select case id when 1 then 'one' else 'other' end from people").unwrap();
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, &[], &[]).unwrap();
+
+    match &query.target_list[0].expr {
+        Expr::Case(case_expr) => {
+            assert_eq!(case_expr.casetype, SqlType::new(SqlTypeKind::Text));
+            assert!(matches!(
+                case_expr.arg.as_deref(),
+                Some(Expr::Var(Var {
+                    varno: 1,
+                    varattno: 1,
+                    varlevelsup: 0,
+                    vartype,
+                })) if *vartype == SqlType::new(SqlTypeKind::Int4)
+            ));
+            assert_eq!(case_expr.args.len(), 1);
+            assert!(matches!(
+                &case_expr.args[0].expr,
+                Expr::Op(op) if matches!(op.args.as_slice(), [Expr::CaseTest(_), _])
+            ));
+            assert_eq!(
+                case_expr.args[0].result,
+                Expr::Const(Value::Text("one".into()))
+            );
+            assert_eq!(
+                case_expr.defresult.as_ref(),
+                &Expr::Const(Value::Text("other".into()))
+            );
+        }
+        other => panic!("expected CASE expression, got {other:?}"),
+    }
+}

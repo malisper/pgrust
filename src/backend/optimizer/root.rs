@@ -143,6 +143,18 @@ pub(super) fn expr_references_project_set_output(expr: &Expr, base_width: usize)
             .args
             .iter()
             .any(|arg| expr_references_project_set_output(arg, base_width)),
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_deref()
+                .is_some_and(|expr| expr_references_project_set_output(expr, base_width))
+                || case_expr.args.iter().any(|arm| {
+                    expr_references_project_set_output(&arm.expr, base_width)
+                        || expr_references_project_set_output(&arm.result, base_width)
+                })
+                || expr_references_project_set_output(&case_expr.defresult, base_width)
+        }
+        Expr::CaseTest(_) => false,
         Expr::Func(func) => func
             .args
             .iter()
@@ -348,6 +360,17 @@ fn collect_group_input_exprs(expr: &Expr, group_by: &[Expr], exprs: &mut Vec<Exp
         }
         Expr::Op(op) => collect_expr_vec(&op.args, group_by, exprs),
         Expr::Bool(bool_expr) => collect_expr_vec(&bool_expr.args, group_by, exprs),
+        Expr::Case(case_expr) => {
+            if let Some(arg) = &case_expr.arg {
+                collect_group_input_exprs(arg, group_by, exprs);
+            }
+            for arm in &case_expr.args {
+                collect_group_input_exprs(&arm.expr, group_by, exprs);
+                collect_group_input_exprs(&arm.result, group_by, exprs);
+            }
+            collect_group_input_exprs(&case_expr.defresult, group_by, exprs);
+        }
+        Expr::CaseTest(_) => {}
         Expr::Func(func) => collect_expr_vec(&func.args, group_by, exprs),
         Expr::SubLink(sublink) => {
             if let Some(testexpr) = &sublink.testexpr {
@@ -442,6 +465,17 @@ fn collect_supporting_inputs(expr: &Expr, exprs: &mut Vec<Expr>) {
                 collect_supporting_inputs(arg, exprs);
             }
         }
+        Expr::Case(case_expr) => {
+            if let Some(arg) = &case_expr.arg {
+                collect_supporting_inputs(arg, exprs);
+            }
+            for arm in &case_expr.args {
+                collect_supporting_inputs(&arm.expr, exprs);
+                collect_supporting_inputs(&arm.result, exprs);
+            }
+            collect_supporting_inputs(&case_expr.defresult, exprs);
+        }
+        Expr::CaseTest(_) => {}
         Expr::Func(func) => {
             for arg in &func.args {
                 collect_supporting_inputs(arg, exprs);
@@ -665,6 +699,17 @@ fn collect_query_outer_refs_expr(expr: &Expr, levelsup: usize, exprs: &mut Vec<E
                 collect_query_outer_refs_expr(arg, levelsup, exprs);
             }
         }
+        Expr::Case(case_expr) => {
+            if let Some(arg) = &case_expr.arg {
+                collect_query_outer_refs_expr(arg, levelsup, exprs);
+            }
+            for arm in &case_expr.args {
+                collect_query_outer_refs_expr(&arm.expr, levelsup, exprs);
+                collect_query_outer_refs_expr(&arm.result, levelsup, exprs);
+            }
+            collect_query_outer_refs_expr(&case_expr.defresult, levelsup, exprs);
+        }
+        Expr::CaseTest(_) => {}
         Expr::Func(func) => {
             for arg in &func.args {
                 collect_query_outer_refs_expr(arg, levelsup, exprs);

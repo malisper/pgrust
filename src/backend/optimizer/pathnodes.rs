@@ -1197,6 +1197,22 @@ pub(super) fn lower_expr_to_plan_layout(expr: Expr, layout: &[Expr]) -> Expr {
             Box::new(lower_expr_to_plan_layout(*left, layout)),
             Box::new(lower_expr_to_plan_layout(*right, layout)),
         ),
+        Expr::Case(case_expr) => Expr::Case(Box::new(crate::include::nodes::primnodes::CaseExpr {
+            arg: case_expr
+                .arg
+                .map(|arg| Box::new(lower_expr_to_plan_layout(*arg, layout))),
+            args: case_expr
+                .args
+                .into_iter()
+                .map(|arm| crate::include::nodes::primnodes::CaseWhen {
+                    expr: lower_expr_to_plan_layout(arm.expr, layout),
+                    result: lower_expr_to_plan_layout(arm.result, layout),
+                })
+                .collect(),
+            defresult: Box::new(lower_expr_to_plan_layout(*case_expr.defresult, layout)),
+            ..*case_expr
+        })),
+        Expr::CaseTest(case_test) => Expr::CaseTest(case_test),
         Expr::ArraySubscript { array, subscripts } => Expr::ArraySubscript {
             array: Box::new(lower_expr_to_plan_layout(*array, layout)),
             subscripts: subscripts
@@ -1237,6 +1253,8 @@ pub(super) fn expr_sql_type(expr: &Expr) -> SqlType {
         Expr::Coalesce(left, right) => expr_sql_type_maybe(left)
             .or_else(|| expr_sql_type_maybe(right))
             .unwrap_or(SqlType::new(SqlTypeKind::Text)),
+        Expr::Case(case_expr) => case_expr.casetype,
+        Expr::CaseTest(case_test) => case_test.type_id,
         Expr::SubLink(sublink) => match sublink.sublink_type {
             SubLinkType::ExistsSubLink
             | SubLinkType::AnySubLink(_)

@@ -693,6 +693,17 @@ fn reject_unsupported_check_expr(expr: &Expr) -> Result<(), ParseError> {
             }
             Ok(())
         }
+        Expr::Case(case_expr) => {
+            if let Some(arg) = &case_expr.arg {
+                reject_unsupported_check_expr(arg)?;
+            }
+            for arm in &case_expr.args {
+                reject_unsupported_check_expr(&arm.expr)?;
+                reject_unsupported_check_expr(&arm.result)?;
+            }
+            reject_unsupported_check_expr(&case_expr.defresult)
+        }
+        Expr::CaseTest(_) => Ok(()),
         Expr::Func(func) => {
             for arg in &func.args {
                 reject_unsupported_check_expr(arg)?;

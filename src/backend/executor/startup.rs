@@ -19,6 +19,17 @@ fn expr_uses_outer_columns(expr: &Expr) -> bool {
         Expr::Aggref(aggref) => aggref.args.iter().any(expr_uses_outer_columns),
         Expr::Op(op) => op.args.iter().any(expr_uses_outer_columns),
         Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_uses_outer_columns),
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_deref()
+                .is_some_and(expr_uses_outer_columns)
+                || case_expr.args.iter().any(|arm| {
+                    expr_uses_outer_columns(&arm.expr) || expr_uses_outer_columns(&arm.result)
+                })
+                || expr_uses_outer_columns(&case_expr.defresult)
+        }
+        Expr::CaseTest(_) => false,
         Expr::Func(func) => func.args.iter().any(expr_uses_outer_columns),
         Expr::SubLink(sublink) => sublink
             .testexpr

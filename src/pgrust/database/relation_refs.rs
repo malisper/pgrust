@@ -23,6 +23,17 @@ pub(super) fn collect_rels_from_expr(expr: &Expr, rels: &mut BTreeSet<RelFileLoc
                 collect_rels_from_expr(arg, rels);
             }
         }
+        Expr::Case(case_expr) => {
+            if let Some(arg) = &case_expr.arg {
+                collect_rels_from_expr(arg, rels);
+            }
+            for arm in &case_expr.args {
+                collect_rels_from_expr(&arm.expr, rels);
+                collect_rels_from_expr(&arm.result, rels);
+            }
+            collect_rels_from_expr(&case_expr.defresult, rels);
+        }
+        Expr::CaseTest(_) => {}
         Expr::Func(func) => {
             for arg in &func.args {
                 collect_rels_from_expr(arg, rels);
@@ -623,6 +634,27 @@ fn collect_direct_relation_oids_from_sql_expr(
             collect_direct_relation_oids_from_sql_expr(pattern, catalog, visible_ctes, rels);
             if let Some(escape) = escape {
                 collect_direct_relation_oids_from_sql_expr(escape, catalog, visible_ctes, rels);
+            }
+        }
+        SqlExpr::Case {
+            arg,
+            args,
+            defresult,
+        } => {
+            if let Some(arg) = arg {
+                collect_direct_relation_oids_from_sql_expr(arg, catalog, visible_ctes, rels);
+            }
+            for arm in args {
+                collect_direct_relation_oids_from_sql_expr(&arm.expr, catalog, visible_ctes, rels);
+                collect_direct_relation_oids_from_sql_expr(
+                    &arm.result,
+                    catalog,
+                    visible_ctes,
+                    rels,
+                );
+            }
+            if let Some(defresult) = defresult {
+                collect_direct_relation_oids_from_sql_expr(defresult, catalog, visible_ctes, rels);
             }
         }
         SqlExpr::ArrayLiteral(elements) | SqlExpr::Row(elements) => {

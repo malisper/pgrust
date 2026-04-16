@@ -3919,6 +3919,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
             )?;
             Ok(SqlExpr::Exists(Box::new(subquery)))
         }
+        Rule::case_expr => build_case_expr(pair),
         Rule::array_expr => Ok(SqlExpr::ArrayLiteral(
             pair.into_inner()
                 .find(|part| part.as_rule() == Rule::expr_list)
@@ -4516,6 +4517,83 @@ fn build_trim_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         .into(),
         args,
         func_variadic: false,
+    })
+}
+
+fn build_case_when(pair: Pair<'_, Rule>) -> Result<SqlCaseWhen, ParseError> {
+    let mut expr = None;
+    let mut result = None;
+    for part in pair.into_inner() {
+        if part.as_rule() == Rule::expr {
+            if expr.is_none() {
+                expr = Some(build_expr(part)?);
+            } else {
+                result = Some(build_expr(part)?);
+            }
+        }
+    }
+    Ok(SqlCaseWhen {
+        expr: expr.ok_or(ParseError::UnexpectedEof)?,
+        result: result.ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
+fn build_case_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
+    let body = pair
+        .into_inner()
+        .find(|part| {
+            matches!(
+                part.as_rule(),
+                Rule::searched_case_body | Rule::simple_case_body
+            )
+        })
+        .ok_or(ParseError::UnexpectedEof)?;
+    let mut arg = None;
+    let mut args = Vec::new();
+    let mut defresult = None;
+    match body.as_rule() {
+        Rule::searched_case_body => {
+            for part in body.into_inner() {
+                match part.as_rule() {
+                    Rule::when_clause => args.push(build_case_when(part)?),
+                    Rule::else_clause => {
+                        let expr = part
+                            .into_inner()
+                            .find(|inner| inner.as_rule() == Rule::expr)
+                            .ok_or(ParseError::UnexpectedEof)?;
+                        defresult = Some(Box::new(build_expr(expr)?));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Rule::simple_case_body => {
+            for part in body.into_inner() {
+                match part.as_rule() {
+                    Rule::expr if arg.is_none() => arg = Some(Box::new(build_expr(part)?)),
+                    Rule::when_clause => args.push(build_case_when(part)?),
+                    Rule::else_clause => {
+                        let expr = part
+                            .into_inner()
+                            .find(|inner| inner.as_rule() == Rule::expr)
+                            .ok_or(ParseError::UnexpectedEof)?;
+                        defresult = Some(Box::new(build_expr(expr)?));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {
+            return Err(ParseError::UnexpectedToken {
+                expected: "CASE body",
+                actual: body.as_str().into(),
+            });
+        }
+    }
+    Ok(SqlExpr::Case {
+        arg,
+        args,
+        defresult,
     })
 }
 

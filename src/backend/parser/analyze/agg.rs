@@ -83,6 +83,17 @@ pub(super) fn expr_contains_agg(expr: &SqlExpr) -> bool {
                 || expr_contains_agg(pattern)
                 || escape.as_ref().is_some_and(|e| expr_contains_agg(e))
         }
+        SqlExpr::Case {
+            arg,
+            args,
+            defresult,
+        } => {
+            arg.as_deref().is_some_and(expr_contains_agg)
+                || args
+                    .iter()
+                    .any(|arm| expr_contains_agg(&arm.expr) || expr_contains_agg(&arm.result))
+                || defresult.as_deref().is_some_and(expr_contains_agg)
+        }
         SqlExpr::Similar {
             expr,
             pattern,
@@ -203,6 +214,20 @@ pub(super) fn expr_references_input_scope(expr: &SqlExpr) -> bool {
                 || escape
                     .as_ref()
                     .is_some_and(|e| expr_references_input_scope(e))
+        }
+        SqlExpr::Case {
+            arg,
+            args,
+            defresult,
+        } => {
+            arg.as_deref().is_some_and(expr_references_input_scope)
+                || args.iter().any(|arm| {
+                    expr_references_input_scope(&arm.expr)
+                        || expr_references_input_scope(&arm.result)
+                })
+                || defresult
+                    .as_deref()
+                    .is_some_and(expr_references_input_scope)
         }
         SqlExpr::Similar {
             expr,
@@ -344,6 +369,22 @@ pub(super) fn collect_aggs(
             collect_aggs(pattern, aggs);
             if let Some(escape) = escape {
                 collect_aggs(escape, aggs);
+            }
+        }
+        SqlExpr::Case {
+            arg,
+            args,
+            defresult,
+        } => {
+            if let Some(arg) = arg {
+                collect_aggs(arg, aggs);
+            }
+            for arm in args {
+                collect_aggs(&arm.expr, aggs);
+                collect_aggs(&arm.result, aggs);
+            }
+            if let Some(defresult) = defresult {
+                collect_aggs(defresult, aggs);
             }
         }
         SqlExpr::Similar {

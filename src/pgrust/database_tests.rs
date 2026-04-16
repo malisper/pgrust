@@ -8084,3 +8084,65 @@ fn explicit_text_to_name_cast_works_via_pg_cast() {
         ]]
     );
 }
+
+#[test]
+fn case_expressions_execute_with_pg_style_null_and_short_circuit_semantics() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    let result = session
+        .execute(
+            &db,
+            "select
+                case 2 when 1 then 'a' when 2 then 'b' else 'c' end,
+                case null when null then 1 else 2 end,
+                case when false then 1 end,
+                case when true then 1 else 'nope'::int4 end",
+        )
+        .expect("run case query");
+
+    match result {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Text("b".into()),
+                    Value::Int32(2),
+                    Value::Null,
+                    Value::Int32(1),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn case_expressions_work_in_where_and_order_by() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table items (id int4, label text)")
+        .expect("create table");
+    session
+        .execute(&db, "insert into items values (1, 'c'), (2, 'a'), (3, 'b')")
+        .expect("insert rows");
+
+    let result = session
+        .execute(
+            &db,
+            "select id
+             from items
+             where case when id = 1 then false else true end
+             order by case when id = 2 then 0 else 1 end, id",
+        )
+        .expect("run case query");
+
+    match result {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int32(2)], vec![Value::Int32(3)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}

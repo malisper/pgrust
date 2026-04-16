@@ -484,6 +484,12 @@ pub struct CommonTableExpr {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlCaseWhen {
+    pub expr: SqlExpr,
+    pub result: SqlExpr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CteBody {
     Select(Box<SelectStatement>),
     Values(ValuesStatement),
@@ -1359,6 +1365,11 @@ pub enum SqlExpr {
         pattern: Box<SqlExpr>,
         escape: Option<Box<SqlExpr>>,
         negated: bool,
+    },
+    Case {
+        arg: Option<Box<SqlExpr>>,
+        args: Vec<SqlCaseWhen>,
+        defresult: Option<Box<SqlExpr>>,
     },
     And(Box<SqlExpr>, Box<SqlExpr>),
     Or(Box<SqlExpr>, Box<SqlExpr>),

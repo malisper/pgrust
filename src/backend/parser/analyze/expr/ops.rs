@@ -125,18 +125,102 @@ pub(super) fn bind_comparison_expr(
             ctes,
         )?;
         let money = SqlType::new(SqlTypeKind::Money);
-        return Ok(Expr::op_auto(
+        return bind_lowered_comparison_expr(
+            op,
             make,
-            vec![
-                coerce_bound_expr(left_bound, raw_left_type, money),
-                coerce_bound_expr(right_bound, raw_right_type, money),
-            ],
-        ));
+            left_bound,
+            raw_left_type,
+            left_type,
+            right_bound,
+            raw_right_type,
+            right_type,
+            catalog,
+        );
     }
     let left_bound =
         bind_expr_with_outer_and_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes)?;
     let right_bound =
         bind_expr_with_outer_and_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes)?;
+    bind_lowered_comparison_expr(
+        op,
+        make,
+        left_bound,
+        raw_left_type,
+        left_type,
+        right_bound,
+        raw_right_type,
+        right_type,
+        catalog,
+    )
+}
+
+pub(super) fn bind_bound_comparison_expr(
+    op: &'static str,
+    make: crate::include::nodes::primnodes::OpExprKind,
+    left_bound: Expr,
+    raw_left_type: SqlType,
+    left_type: SqlType,
+    right: &SqlExpr,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Expr, ParseError> {
+    let raw_right_type =
+        infer_sql_expr_type_with_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes);
+    let right_type = coerce_unknown_string_literal_type(right, raw_right_type, left_type);
+    if !left_type.is_array
+        && !right_type.is_array
+        && matches!(left_type.kind, SqlTypeKind::Money)
+        && matches!(right_type.kind, SqlTypeKind::Money)
+    {
+        let right_bound = bind_expr_with_outer_and_ctes(
+            right,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        )?;
+        return bind_lowered_comparison_expr(
+            op,
+            make,
+            left_bound,
+            raw_left_type,
+            left_type,
+            right_bound,
+            raw_right_type,
+            right_type,
+            catalog,
+        );
+    }
+    let right_bound =
+        bind_expr_with_outer_and_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes)?;
+    bind_lowered_comparison_expr(
+        op,
+        make,
+        left_bound,
+        raw_left_type,
+        left_type,
+        right_bound,
+        raw_right_type,
+        right_type,
+        catalog,
+    )
+}
+
+pub(crate) fn bind_lowered_comparison_expr(
+    op: &'static str,
+    make: crate::include::nodes::primnodes::OpExprKind,
+    left_bound: Expr,
+    raw_left_type: SqlType,
+    left_type: SqlType,
+    right_bound: Expr,
+    raw_right_type: SqlType,
+    right_type: SqlType,
+    catalog: &dyn CatalogLookup,
+) -> Result<Expr, ParseError> {
     let (left, right) = if is_numeric_family(left_type) && is_numeric_family(right_type) {
         let common = if is_oid_integer_comparison(left_type, right_type) {
             SqlType::new(SqlTypeKind::Oid)

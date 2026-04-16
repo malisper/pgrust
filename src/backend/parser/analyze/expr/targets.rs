@@ -460,6 +460,46 @@ fn visit_nested_srfs(
                 );
             }
         }
+        SqlExpr::Case {
+            arg,
+            args,
+            defresult,
+        } => {
+            if let Some(arg) = arg {
+                visit_nested_srfs(arg, info, scope, catalog, outer_scopes, grouped_outer, ctes);
+            }
+            for arm in args {
+                visit_nested_srfs(
+                    &arm.expr,
+                    info,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                );
+                visit_nested_srfs(
+                    &arm.result,
+                    info,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                );
+            }
+            if let Some(defresult) = defresult {
+                visit_nested_srfs(
+                    defresult,
+                    info,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                );
+            }
+        }
         SqlExpr::UnaryPlus(inner)
         | SqlExpr::Negate(inner)
         | SqlExpr::BitNot(inner)

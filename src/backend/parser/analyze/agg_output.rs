@@ -789,6 +789,168 @@ pub(super) fn bind_agg_output_expr_in_clause(
             },
             negated: *negated,
         }),
+        SqlExpr::Case {
+            arg,
+            args,
+            defresult,
+        } => {
+            let default_sql_expr = SqlExpr::Const(Value::Null);
+            let default_expr = defresult.as_deref().unwrap_or(&default_sql_expr);
+            let mut result_exprs = Vec::with_capacity(args.len() + 1);
+            result_exprs.push(default_expr.clone());
+            result_exprs.extend(args.iter().map(|arm| arm.result.clone()));
+            let result_type = infer_common_scalar_expr_type_with_ctes(
+                &result_exprs,
+                input_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                &[],
+                "CASE result expressions with a common type",
+            )?;
+            let (bound_arg, arg_type) = if let Some(arg) = arg {
+                (
+                    Some(bind_agg_output_expr(
+                        arg,
+                        group_by_exprs,
+                        group_key_exprs,
+                        input_scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        agg_list,
+                        n_keys,
+                    )?),
+                    Some(infer_sql_expr_type_with_ctes(
+                        arg,
+                        input_scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        &[],
+                    )),
+                )
+            } else {
+                (None, None)
+            };
+            let mut bound_arms = Vec::with_capacity(args.len());
+            for arm in args {
+                let condition = if let Some(arg_type) = arg_type {
+                    let right_bound = bind_agg_output_expr(
+                        &arm.expr,
+                        group_by_exprs,
+                        group_key_exprs,
+                        input_scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        agg_list,
+                        n_keys,
+                    )?;
+                    let raw_right_type = infer_sql_expr_type_with_ctes(
+                        &arm.expr,
+                        input_scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        &[],
+                    );
+                    bind_lowered_comparison_expr(
+                        "=",
+                        OpExprKind::Eq,
+                        Expr::CaseTest(Box::new(crate::include::nodes::primnodes::CaseTestExpr {
+                            type_id: arg_type,
+                        })),
+                        arg_type,
+                        arg_type,
+                        right_bound,
+                        raw_right_type,
+                        raw_right_type,
+                        catalog,
+                    )?
+                } else {
+                    let expr_type = infer_sql_expr_type_with_ctes(
+                        &arm.expr,
+                        input_scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        &[],
+                    );
+                    if expr_type != SqlType::new(SqlTypeKind::Bool) {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "boolean CASE condition",
+                            actual: "CASE WHEN expression must return boolean".into(),
+                        });
+                    }
+                    bind_agg_output_expr(
+                        &arm.expr,
+                        group_by_exprs,
+                        group_key_exprs,
+                        input_scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        agg_list,
+                        n_keys,
+                    )?
+                };
+                let raw_result_type = infer_sql_expr_type_with_ctes(
+                    &arm.result,
+                    input_scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    &[],
+                );
+                let bound_result = bind_agg_output_expr(
+                    &arm.result,
+                    group_by_exprs,
+                    group_key_exprs,
+                    input_scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    agg_list,
+                    n_keys,
+                )?;
+                bound_arms.push(crate::include::nodes::primnodes::CaseWhen {
+                    expr: condition,
+                    result: coerce_bound_expr(bound_result, raw_result_type, result_type),
+                });
+            }
+            let raw_default_type = infer_sql_expr_type_with_ctes(
+                default_expr,
+                input_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                &[],
+            );
+            let bound_default = bind_agg_output_expr(
+                default_expr,
+                group_by_exprs,
+                group_key_exprs,
+                input_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                agg_list,
+                n_keys,
+            )?;
+            Ok(Expr::Case(Box::new(
+                crate::include::nodes::primnodes::CaseExpr {
+                    casetype: result_type,
+                    arg: bound_arg.map(Box::new),
+                    args: bound_arms,
+                    defresult: Box::new(coerce_bound_expr(
+                        bound_default,
+                        raw_default_type,
+                        result_type,
+                    )),
+                },
+            )))
+        }
         SqlExpr::And(l, r) => Ok(Expr::and(
             bind_agg_output_expr(
                 l,

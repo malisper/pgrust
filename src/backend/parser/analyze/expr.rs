@@ -1,7 +1,10 @@
 use super::functions::*;
 use super::infer::*;
 use super::*;
-use crate::include::nodes::primnodes::{BoolExprType, OpExprKind};
+use crate::include::nodes::primnodes::{
+    BoolExprType, CaseExpr as BoundCaseExpr, CaseTestExpr as BoundCaseTestExpr,
+    CaseWhen as BoundCaseWhen, OpExprKind,
+};
 
 mod func;
 mod json;
@@ -16,9 +19,10 @@ use self::json::{
     bind_jsonb_path_binary_expr, bind_maybe_jsonb_delete,
 };
 pub(crate) use self::ops::bind_concat_operands;
+pub(super) use self::ops::bind_lowered_comparison_expr;
 use self::ops::{
-    bind_arithmetic_expr, bind_bitwise_expr, bind_comparison_expr, bind_concat_expr,
-    bind_overloaded_binary_expr, bind_prefix_operator_expr, bind_shift_expr,
+    bind_arithmetic_expr, bind_bitwise_expr, bind_bound_comparison_expr, bind_comparison_expr,
+    bind_concat_expr, bind_overloaded_binary_expr, bind_prefix_operator_expr, bind_shift_expr,
 };
 use self::subquery::{
     bind_exists_subquery_expr, bind_in_subquery_expr, bind_quantified_array_expr,
@@ -1285,6 +1289,20 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             grouped_outer,
             ctes,
         )?,
+        SqlExpr::Case {
+            arg,
+            args,
+            defresult,
+        } => bind_case_expr(
+            arg.as_deref(),
+            args,
+            defresult.as_deref(),
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        )?,
         SqlExpr::FieldSelect { field, .. } => {
             return Err(ParseError::UnexpectedToken {
                 expected: "scalar expression",
@@ -1305,6 +1323,152 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             precision: *precision,
         },
     })
+}
+
+fn bind_case_expr(
+    arg: Option<&SqlExpr>,
+    args: &[SqlCaseWhen],
+    defresult: Option<&SqlExpr>,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Expr, ParseError> {
+    if args.is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "at least one WHEN clause",
+            actual: "CASE".into(),
+        });
+    }
+
+    let default_sql_expr = SqlExpr::Const(Value::Null);
+    let default_expr = defresult.unwrap_or(&default_sql_expr);
+    let mut result_exprs = Vec::with_capacity(args.len() + 1);
+    result_exprs.push(default_expr.clone());
+    result_exprs.extend(args.iter().map(|arm| arm.result.clone()));
+    let result_type = infer_common_scalar_expr_type_with_ctes(
+        &result_exprs,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+        "CASE result expressions with a common type",
+    )?;
+
+    let (bound_arg, arg_type) = if let Some(arg) = arg {
+        (
+            Some(bind_expr_with_outer_and_ctes(
+                arg,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?),
+            Some(infer_sql_expr_type_with_ctes(
+                arg,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )),
+        )
+    } else {
+        (None, None)
+    };
+
+    let mut bound_arms = Vec::with_capacity(args.len());
+    for arm in args {
+        let condition = if let Some(arg_type) = arg_type {
+            bind_bound_comparison_expr(
+                "=",
+                OpExprKind::Eq,
+                Expr::CaseTest(Box::new(BoundCaseTestExpr { type_id: arg_type })),
+                arg_type,
+                arg_type,
+                &arm.expr,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?
+        } else {
+            let expr_type = infer_sql_expr_type_with_ctes(
+                &arm.expr,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            if expr_type != SqlType::new(SqlTypeKind::Bool) {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "boolean CASE condition",
+                    actual: "CASE WHEN expression must return boolean".into(),
+                });
+            }
+            bind_expr_with_outer_and_ctes(
+                &arm.expr,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?
+        };
+        let raw_result_type = infer_sql_expr_type_with_ctes(
+            &arm.result,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        );
+        let bound_result = bind_expr_with_outer_and_ctes(
+            &arm.result,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        )?;
+        bound_arms.push(BoundCaseWhen {
+            expr: condition,
+            result: coerce_bound_expr(bound_result, raw_result_type, result_type),
+        });
+    }
+
+    let raw_default_type = infer_sql_expr_type_with_ctes(
+        default_expr,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    );
+    let bound_default = bind_expr_with_outer_and_ctes(
+        default_expr,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    )?;
+
+    Ok(Expr::Case(Box::new(BoundCaseExpr {
+        casetype: result_type,
+        arg: bound_arg.map(Box::new),
+        args: bound_arms,
+        defresult: Box::new(coerce_bound_expr(
+            bound_default,
+            raw_default_type,
+            result_type,
+        )),
+    })))
 }
 
 fn bind_coalesce_call(
