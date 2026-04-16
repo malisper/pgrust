@@ -56,7 +56,8 @@ http://localhost:8000/web/wasm-demo/
 - The engine uses `Database::open_ephemeral()`, so all data is in-memory.
 - Press `Reset Database` or reload the page to start from a clean database.
 - The textarea runs one SQL statement at a time under the hood by splitting on
-  top-level semicolons in the demo JS.
+  top-level semicolons in the demo JS while honoring quoted strings and
+  dollar-quoted function bodies.
 - The browser API currently exposes `WasmEngine` with:
   - `new(poolSize?)`
   - `execute(sql)`

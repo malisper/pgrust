@@ -1,9 +1,9 @@
-use pest::Parser as _;
 use pest::iterators::Pair;
+use pest::Parser as _;
 use pest_derive::Parser;
 
 use crate::backend::executor::Value;
-use crate::backend::parser::{ParseError, SqlExpr, parse_expr, parse_type_name};
+use crate::backend::parser::{parse_expr, parse_type_name, ParseError, SqlExpr};
 
 use super::ast::{Block, RaiseLevel, ReturnQueryKind, Stmt, VarDecl};
 
@@ -163,6 +163,20 @@ fn build_if_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
                     else_branch.push(stmt);
                 } else {
                     current_body.push(stmt);
+                }
+            }
+            Rule::elsif_clause => {
+                if let Some(condition) = current_condition.take() {
+                    branches.push((condition, std::mem::take(&mut current_body)));
+                }
+                for inner in part.into_inner() {
+                    match inner.as_rule() {
+                        Rule::expr_until_then => {
+                            current_condition = Some(inner.as_str().trim().to_string());
+                        }
+                        Rule::stmt => current_body.push(build_stmt(inner)?),
+                        _ => {}
+                    }
                 }
             }
             Rule::else_clause => {
@@ -330,6 +344,40 @@ mod tests {
         assert_eq!(block.declarations[0].name, "total");
         assert_eq!(block.declarations[0].ty.kind, SqlTypeKind::Int4);
         assert_eq!(block.statements.len(), 3);
+    }
+
+    #[test]
+    fn parse_if_stmt_preserves_elsif_branches() {
+        let block = parse_block(
+            "
+            begin
+                if first_condition then
+                    null;
+                elsif second_condition then
+                    null;
+                elsif third_condition then
+                    null;
+                else
+                    null;
+                end if;
+            end
+            ",
+        )
+        .unwrap();
+
+        let Stmt::If {
+            branches,
+            else_branch,
+        } = &block.statements[0]
+        else {
+            panic!("expected top-level if statement");
+        };
+
+        assert_eq!(branches.len(), 3);
+        assert_eq!(branches[0].0, "first_condition");
+        assert_eq!(branches[1].0, "second_condition");
+        assert_eq!(branches[2].0, "third_condition");
+        assert_eq!(else_branch.len(), 1);
     }
 
     #[test]
