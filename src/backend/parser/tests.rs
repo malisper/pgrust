@@ -9,7 +9,7 @@ use crate::include::catalog::{
 use crate::include::nodes::parsenodes::{
     AliasColumnDef, AliasColumnSpec, JoinTreeNode, RangeTblEntryKind, RawTypeName,
 };
-use crate::include::nodes::primnodes::{AttrNumber, JoinType, Var, OUTER_VAR};
+use crate::include::nodes::primnodes::{AttrNumber, JoinType, Var, is_system_attr};
 
 fn desc() -> RelationDesc {
     RelationDesc {
@@ -30,15 +30,17 @@ fn attrs() -> ConstraintAttributes {
 }
 
 fn is_outer_user_var(expr: &Expr, index: usize) -> bool {
-    matches!(
-        expr,
+    match expr {
         Expr::Var(Var {
-            varno,
             varattno,
             varlevelsup: 0,
             ..
-        }) if *varno == OUTER_VAR && *varattno == (index + 1) as AttrNumber
-    )
+        }) => *varattno == (index + 1) as AttrNumber && !is_system_attr(*varattno),
+        Expr::Coalesce(left, right) => {
+            is_outer_user_var(left, index) && is_outer_user_var(right, index)
+        }
+        _ => false,
+    }
 }
 
 #[derive(Default)]

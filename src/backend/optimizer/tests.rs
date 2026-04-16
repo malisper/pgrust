@@ -865,7 +865,7 @@ fn join_input_rewrite_keeps_composite_expr_semantic_until_late_rewrite() {
 
     assert_eq!(
         rewritten,
-        Expr::Coalesce(Box::new(var(1, 1)), Box::new(var(1, 2)))
+        Expr::Coalesce(Box::new(var(30, 1)), Box::new(var(1, 2)))
     );
 }
 
@@ -939,7 +939,7 @@ fn join_input_rewrite_maps_var_through_projected_join_output_slot() {
             opresulttype: bool_ty(),
             args: vec![
                 Expr::Coalesce(
-                    Box::new(var(3, 5)),
+                    Box::new(var(3, 1)),
                     Box::new(crate::include::nodes::primnodes::Expr::Const(Value::Int32(
                         1
                     ))),
