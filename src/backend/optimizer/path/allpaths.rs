@@ -649,6 +649,7 @@ fn maybe_project_join_alias(
     let RangeTblEntryKind::Join { joinaliasvars, .. } = &rte.kind else {
         return input;
     };
+    let input_target = input.output_target();
     let layout = input.output_vars();
     let desired_layout = PathTarget::from_rte(rtindex, rte).exprs;
     let alias_target_exprs = joinaliasvars
@@ -697,7 +698,13 @@ fn maybe_project_join_alias(
         .zip(alias_target_exprs)
         .enumerate()
         .map(|(index, (column, expr))| {
+            let input_resno = input_target
+                .exprs
+                .iter()
+                .position(|candidate| candidate == &expr)
+                .map(|position| position + 1);
             TargetEntry::new(column.name.clone(), expr, column.sql_type, index + 1)
+                .with_input_resno_opt(input_resno)
         })
         .collect::<Vec<_>>();
     let base_resno = targets.len();

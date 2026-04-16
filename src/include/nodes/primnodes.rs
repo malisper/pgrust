@@ -101,6 +101,7 @@ pub struct TargetEntry {
     pub sql_type: SqlType,
     pub resno: usize,
     pub ressortgroupref: usize,
+    pub input_resno: Option<usize>,
     pub resjunk: bool,
 }
 
@@ -112,12 +113,23 @@ impl TargetEntry {
             sql_type,
             resno,
             ressortgroupref: 0,
+            input_resno: None,
             resjunk: false,
         }
     }
 
     pub fn with_sort_group_ref(mut self, ressortgroupref: usize) -> Self {
         self.ressortgroupref = ressortgroupref;
+        self
+    }
+
+    pub fn with_input_resno(mut self, input_resno: usize) -> Self {
+        self.input_resno = Some(input_resno);
+        self
+    }
+
+    pub fn with_input_resno_opt(mut self, input_resno: Option<usize>) -> Self {
+        self.input_resno = input_resno;
         self
     }
 
