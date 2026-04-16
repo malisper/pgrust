@@ -204,17 +204,20 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 })
             } else {
                 match resolve_column_with_outer(scope, outer_scopes, name, grouped_outer)? {
-                    ResolvedColumn::Local(index) => scope
-                        .output_exprs
-                        .get(index)
-                        .cloned()
-                        .unwrap_or(Expr::Column(index)),
+                    ResolvedColumn::Local(index) => scope.output_exprs.get(index).cloned().unwrap_or_else(|| {
+                        panic!("bound scope output_exprs missing local column {index} for {name}")
+                    }),
                     ResolvedColumn::Outer { depth, index } => outer_scopes
                         .get(depth)
                         .and_then(|scope| scope.output_exprs.get(index))
                         .cloned()
                         .map(|expr| raise_expr_varlevels(expr, depth + 1))
-                        .unwrap_or(Expr::OuterColumn { depth, index }),
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "outer scope output_exprs missing outer column depth={} index={} for {}",
+                                depth, index, name
+                            )
+                        }),
                 }
             }
         }

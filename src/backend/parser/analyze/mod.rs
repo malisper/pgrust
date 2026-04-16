@@ -1584,8 +1584,7 @@ fn bind_select_query_with_outer(
 
                 let is_identity = targets.len() == base.output_columns.len()
                     && targets.iter().enumerate().all(|(i, t)| {
-                        (t.input_resno == Some(i + 1) || matches!(t.expr, Expr::Column(c) if c == i))
-                            && t.name == base.output_columns[i].name
+                        t.input_resno == Some(i + 1) && t.name == base.output_columns[i].name
                     });
                 let target_list = if is_identity {
                     normalize_target_list(identity_target_list(

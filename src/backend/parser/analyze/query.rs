@@ -557,10 +557,9 @@ pub(super) fn identity_target_list(
         .map(|(index, column)| {
             TargetEntry::new(
                 column.name.clone(),
-                output_exprs
-                    .get(index)
-                    .cloned()
-                    .unwrap_or(Expr::Column(index)),
+                output_exprs.get(index).cloned().unwrap_or_else(|| {
+                    panic!("identity target list missing output expr for column {}", index + 1)
+                }),
                 column.sql_type,
                 index + 1,
             )
