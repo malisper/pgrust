@@ -1095,7 +1095,7 @@ fn expr_uses_only_layout_vars(expr: &Expr, layout: &[Expr]) -> bool {
     }
     match expr {
         Expr::Var(var) => var.varlevelsup > 0,
-        Expr::Column(_) | Expr::Const(_) => true,
+        Expr::Const(_) => true,
         Expr::Aggref(aggref) => aggref
             .args
             .iter()
@@ -1259,7 +1259,7 @@ pub(super) fn rewrite_semantic_expr_for_join_inputs(
     if right_layout.contains(&original) {
         return rewrite_expr_for_path(original, right, &right_layout);
     }
-    if matches!(original, Expr::Var(_) | Expr::Column(_)) {
+    if matches!(original, Expr::Var(_)) {
         let rewritten_left = rewrite_join_input_expr(root, original.clone(), left, &left_layout);
         if rewritten_left != original || left_layout.contains(&original) {
             return rewritten_left;
@@ -1270,7 +1270,7 @@ pub(super) fn rewrite_semantic_expr_for_join_inputs(
         }
     }
     let rebuilt = match original.clone() {
-        Expr::Var(_) | Expr::Column(_) => original,
+        Expr::Var(_) => original,
         Expr::Aggref(aggref) => Expr::Aggref(Box::new(crate::include::nodes::primnodes::Aggref {
             args: aggref
                 .args
@@ -1538,7 +1538,7 @@ pub(super) fn rewrite_semantic_expr_for_join_inputs(
     if right_layout.contains(&rebuilt) {
         return rewrite_expr_for_path(rebuilt, right, &right_layout);
     }
-    if matches!(rebuilt, Expr::Var(_) | Expr::Column(_)) {
+    if matches!(rebuilt, Expr::Var(_)) {
         let rewritten_left = rewrite_join_input_expr(root, rebuilt.clone(), left, &left_layout);
         if rewritten_left != rebuilt || left_layout.contains(&rebuilt) {
             return rewritten_left;
@@ -1625,8 +1625,7 @@ fn expr_uses_immediate_outer_columns(expr: &Expr) -> bool {
                             .is_some_and(expr_uses_immediate_outer_columns)
                 })
         }
-        Expr::Column(_)
-        | Expr::Const(_)
+        Expr::Const(_)
         | Expr::Random
         | Expr::CurrentDate
         | Expr::CurrentTime { .. }
@@ -2499,7 +2498,6 @@ fn index_order_match(
 fn expr_column_index(expr: &Expr) -> Option<usize> {
     match expr {
         Expr::Var(var) if var.varlevelsup == 0 => attrno_index(var.varattno),
-        Expr::Column(column) => Some(*column),
         _ => None,
     }
 }

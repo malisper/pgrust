@@ -8,8 +8,8 @@ use crate::include::nodes::datum::Value;
 use crate::include::nodes::pathnodes::{Path, PathKey, PathTarget, PlannerInfo, RelOptInfo, RelOptKind};
 use crate::include::nodes::plannodes::{Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
-    AttrNumber, Expr, JoinType, OpExpr, OpExprKind, OrderByEntry, Param, ParamKind, QueryColumn,
-    RelationDesc, TargetEntry, Var,
+    Aggref, AttrNumber, Expr, JoinType, OpExpr, OpExprKind, OrderByEntry, Param, ParamKind,
+    QueryColumn, RelationDesc, TargetEntry, Var,
     INNER_VAR, OUTER_VAR,
 };
 
@@ -346,7 +346,20 @@ fn executable_plan_validator_reports_node_and_field() {
     let plan = Plan::Projection {
         plan_info: PlanEstimate::new(1.0, 1.0, 1.0, 1),
         input: Box::new(values_path(10, 1.0, 1.0).into_plan()),
-        targets: vec![TargetEntry::new("bad", Expr::Column(0), int4(), 1)],
+        targets: vec![TargetEntry::new(
+            "bad",
+            Expr::Aggref(Box::new(Aggref {
+                aggfnoid: 0,
+                aggtype: int4(),
+                aggvariadic: false,
+                aggdistinct: false,
+                args: vec![],
+                agglevelsup: 0,
+                aggno: 0,
+            })),
+            int4(),
+            1,
+        )],
     };
 
     let panic = std::panic::catch_unwind(|| {
@@ -356,7 +369,7 @@ fn executable_plan_validator_reports_node_and_field() {
 
     let message = panic_message(panic);
     assert!(message.contains("Projection.targets"));
-    assert!(message.contains("Column(0)"));
+    assert!(message.contains("Aggref"));
 }
 
 #[test]

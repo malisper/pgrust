@@ -51,7 +51,6 @@ pub(super) fn finalize_expr_subqueries(
     match expr {
         other @ (Expr::Var(_)
         | Expr::Param(_)
-        | Expr::Column(_)
         | Expr::Const(_)
         | Expr::Random
         | Expr::CurrentDate
@@ -328,7 +327,6 @@ fn rebase_expr_subplan_ids(expr: Expr, base: usize) -> Expr {
     match expr {
         other @ (Expr::Var(_)
         | Expr::Param(_)
-        | Expr::Column(_)
         | Expr::Const(_)
         | Expr::Random
         | Expr::CurrentDate

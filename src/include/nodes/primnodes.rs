@@ -553,8 +553,13 @@ pub const OUTER_VAR: usize = usize::MAX;
 pub const INNER_VAR: usize = usize::MAX - 1;
 pub const INDEX_VAR: usize = usize::MAX - 2;
 pub const ROWID_VAR: usize = usize::MAX - 3;
+pub const OUTPUT_VAR: usize = usize::MAX - 4;
 
 pub const fn is_special_varno(varno: usize) -> bool {
+    varno >= OUTPUT_VAR
+}
+
+pub const fn is_executor_special_varno(varno: usize) -> bool {
     varno >= ROWID_VAR
 }
 
@@ -733,7 +738,6 @@ pub struct ScalarArrayOpExpr {
 pub enum Expr {
     Var(Var),
     Param(Param),
-    Column(usize),
     Const(Value),
     Aggref(Box<Aggref>),
     Op(Box<OpExpr>),
@@ -1032,8 +1036,7 @@ fn expr_sql_type_hint(expr: &Expr) -> Option<SqlType> {
             Some(SqlType::new(SqlTypeKind::Bool))
         }
         Expr::SubPlan(subplan) => subplan.first_col_type,
-        Expr::Column(_)
-        | Expr::Like { .. }
+        Expr::Like { .. }
         | Expr::Similar { .. }
         | Expr::ArraySubscript { .. }
         | Expr::Random

@@ -6,7 +6,7 @@ use crate::include::nodes::pathnodes::{
 };
 use crate::include::nodes::primnodes::{Expr, RelationDesc, Var, user_attrno};
 
-use super::pathnodes::rewrite_expr_against_layout;
+use super::util::rewrite_expr_for_append_rel;
 
 pub(super) fn expand_inherited_rtentries(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) {
     let original_len = root.parse.rtable.len();
@@ -72,9 +72,13 @@ pub(super) fn expand_inherited_rtentries(root: &mut PlannerInfo, catalog: &dyn C
                 rel.baserestrictinfo = parent_restrictinfo
                     .iter()
                     .map(|restrict| RestrictInfo {
-                        clause: rewrite_expr_against_layout(
+                        clause: rewrite_expr_for_append_rel(
                             restrict.clause.clone(),
-                            &translated_vars,
+                            &AppendRelInfo {
+                                parent_relid: parent_rtindex,
+                                child_relid: child_rtindex,
+                                translated_vars: translated_vars.clone(),
+                            },
                         ),
                         required_relids: vec![child_rtindex],
                         is_pushed_down: restrict.is_pushed_down,

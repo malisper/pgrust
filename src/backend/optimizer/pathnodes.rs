@@ -356,6 +356,14 @@ pub(super) fn aggregate_output_vars(
 }
 
 fn rewrite_expr_for_input_path(expr: Expr, path: &Path, layout: &[Expr]) -> Expr {
+    if let Expr::Var(var) = &expr
+        && var.varlevelsup == 0
+        && let Some(index) = attrno_index(var.varattno)
+        && let Some(candidate) = layout.get(index)
+        && expr_sql_type(candidate) == var.vartype
+    {
+        return candidate.clone();
+    }
     match path {
         Path::Projection {
             slot_id,
@@ -399,8 +407,6 @@ fn rewrite_expr_for_input_path(expr: Expr, path: &Path, layout: &[Expr]) -> Expr
                             == rewritten_input_expr
                 }) {
                     slot_var(*slot_id, user_attrno(index), target.sql_type)
-                } else if matches!(expr, Expr::Column(_)) {
-                    rewrite_expr_against_layout(expr, layout)
                 } else {
                     expr
                 }
@@ -420,34 +426,10 @@ fn rewrite_expr_for_input_path(expr: Expr, path: &Path, layout: &[Expr]) -> Expr
             if rewritten_right != expr || right_layout.contains(&expr) {
                 return rewritten_right;
             }
-            if matches!(expr, Expr::Column(_)) {
-                rewrite_expr_against_layout(expr, layout)
-            } else {
-                expr
-            }
+            expr
         }
-        Path::RecursiveUnion { .. } => {
-            if let Expr::Var(var) = &expr
-                && var.varlevelsup == 0
-                && let Some(index) = attrno_index(var.varattno)
-                && let Some(candidate) = layout.get(index)
-                && expr_sql_type(candidate) == var.vartype
-            {
-                return candidate.clone();
-            }
-            if matches!(expr, Expr::Column(_)) {
-                rewrite_expr_against_layout(expr, layout)
-            } else {
-                expr
-            }
-        }
-        _ => {
-            if matches!(expr, Expr::Column(_)) {
-                rewrite_expr_against_layout(expr, layout)
-            } else {
-                expr
-            }
-        }
+        Path::RecursiveUnion { .. } => expr,
+        _ => expr,
     }
 }
 
@@ -763,150 +745,6 @@ pub(super) fn lower_agg_output_expr(
     }
 }
 
-pub(super) fn rewrite_expr_against_layout(expr: Expr, layout: &[Expr]) -> Expr {
-    match expr {
-        Expr::Column(index) => layout.get(index).cloned().unwrap_or(Expr::Column(index)),
-        Expr::Var(var) => Expr::Var(var),
-        Expr::Aggref(aggref) => Expr::Aggref(Box::new(Aggref {
-            args: aggref
-                .args
-                .into_iter()
-                .map(|arg| rewrite_expr_against_layout(arg, layout))
-                .collect(),
-            ..*aggref
-        })),
-        Expr::Op(op) => Expr::Op(Box::new(OpExpr {
-            args: op
-                .args
-                .into_iter()
-                .map(|arg| rewrite_expr_against_layout(arg, layout))
-                .collect(),
-            ..*op
-        })),
-        Expr::Bool(bool_expr) => Expr::Bool(Box::new(BoolExpr {
-            args: bool_expr
-                .args
-                .into_iter()
-                .map(|arg| rewrite_expr_against_layout(arg, layout))
-                .collect(),
-            ..*bool_expr
-        })),
-        Expr::Case(case_expr) => Expr::Case(Box::new(crate::include::nodes::primnodes::CaseExpr {
-            arg: case_expr
-                .arg
-                .map(|arg| Box::new(rewrite_expr_against_layout(*arg, layout))),
-            args: case_expr
-                .args
-                .into_iter()
-                .map(|arm| crate::include::nodes::primnodes::CaseWhen {
-                    expr: rewrite_expr_against_layout(arm.expr, layout),
-                    result: rewrite_expr_against_layout(arm.result, layout),
-                })
-                .collect(),
-            defresult: Box::new(rewrite_expr_against_layout(*case_expr.defresult, layout)),
-            ..*case_expr
-        })),
-        Expr::Func(func) => Expr::Func(Box::new(FuncExpr {
-            args: func
-                .args
-                .into_iter()
-                .map(|arg| rewrite_expr_against_layout(arg, layout))
-                .collect(),
-            ..*func
-        })),
-        Expr::SubLink(sublink) => {
-            Expr::SubLink(Box::new(crate::include::nodes::primnodes::SubLink {
-                testexpr: sublink
-                    .testexpr
-                    .map(|expr| Box::new(rewrite_expr_against_layout(*expr, layout))),
-                ..*sublink
-            }))
-        }
-        Expr::SubPlan(subplan) => {
-            Expr::SubPlan(Box::new(crate::include::nodes::primnodes::SubPlan {
-                testexpr: subplan
-                    .testexpr
-                    .map(|expr| Box::new(rewrite_expr_against_layout(*expr, layout))),
-                ..*subplan
-            }))
-        }
-        Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(ScalarArrayOpExpr {
-            left: Box::new(rewrite_expr_against_layout(*saop.left, layout)),
-            right: Box::new(rewrite_expr_against_layout(*saop.right, layout)),
-            ..*saop
-        })),
-        Expr::Cast(inner, ty) => {
-            Expr::Cast(Box::new(rewrite_expr_against_layout(*inner, layout)), ty)
-        }
-        Expr::Like {
-            expr,
-            pattern,
-            escape,
-            case_insensitive,
-            negated,
-        } => Expr::Like {
-            expr: Box::new(rewrite_expr_against_layout(*expr, layout)),
-            pattern: Box::new(rewrite_expr_against_layout(*pattern, layout)),
-            escape: escape.map(|expr| Box::new(rewrite_expr_against_layout(*expr, layout))),
-            case_insensitive,
-            negated,
-        },
-        Expr::Similar {
-            expr,
-            pattern,
-            escape,
-            negated,
-        } => Expr::Similar {
-            expr: Box::new(rewrite_expr_against_layout(*expr, layout)),
-            pattern: Box::new(rewrite_expr_against_layout(*pattern, layout)),
-            escape: escape.map(|expr| Box::new(rewrite_expr_against_layout(*expr, layout))),
-            negated,
-        },
-        Expr::IsNull(inner) => Expr::IsNull(Box::new(rewrite_expr_against_layout(*inner, layout))),
-        Expr::IsNotNull(inner) => {
-            Expr::IsNotNull(Box::new(rewrite_expr_against_layout(*inner, layout)))
-        }
-        Expr::IsDistinctFrom(left, right) => Expr::IsDistinctFrom(
-            Box::new(rewrite_expr_against_layout(*left, layout)),
-            Box::new(rewrite_expr_against_layout(*right, layout)),
-        ),
-        Expr::IsNotDistinctFrom(left, right) => Expr::IsNotDistinctFrom(
-            Box::new(rewrite_expr_against_layout(*left, layout)),
-            Box::new(rewrite_expr_against_layout(*right, layout)),
-        ),
-        Expr::ArrayLiteral {
-            elements,
-            array_type,
-        } => Expr::ArrayLiteral {
-            elements: elements
-                .into_iter()
-                .map(|element| rewrite_expr_against_layout(element, layout))
-                .collect(),
-            array_type,
-        },
-        Expr::Coalesce(left, right) => Expr::Coalesce(
-            Box::new(rewrite_expr_against_layout(*left, layout)),
-            Box::new(rewrite_expr_against_layout(*right, layout)),
-        ),
-        Expr::ArraySubscript { array, subscripts } => Expr::ArraySubscript {
-            array: Box::new(rewrite_expr_against_layout(*array, layout)),
-            subscripts: subscripts
-                .into_iter()
-                .map(|subscript| ExprArraySubscript {
-                    is_slice: subscript.is_slice,
-                    lower: subscript
-                        .lower
-                        .map(|expr| rewrite_expr_against_layout(expr, layout)),
-                    upper: subscript
-                        .upper
-                        .map(|expr| rewrite_expr_against_layout(expr, layout)),
-                })
-                .collect(),
-        },
-        other => other,
-    }
-}
-
 pub(super) fn expr_sql_type(expr: &Expr) -> SqlType {
     match expr {
         Expr::Var(var) => var.vartype,
@@ -957,15 +795,13 @@ pub(super) fn expr_sql_type(expr: &Expr) -> SqlType {
         Expr::CurrentTimestamp { .. } => SqlType::new(SqlTypeKind::TimestampTz),
         Expr::LocalTime { .. } => SqlType::new(SqlTypeKind::Time),
         Expr::LocalTimestamp { .. } => SqlType::new(SqlTypeKind::Timestamp),
-        Expr::Column(_) | Expr::ArraySubscript { .. } => {
-            SqlType::new(SqlTypeKind::Text)
-        }
+        Expr::ArraySubscript { .. } => SqlType::new(SqlTypeKind::Text),
     }
 }
 
 fn expr_sql_type_maybe(expr: &Expr) -> Option<SqlType> {
     match expr {
-        Expr::Column(_) | Expr::ArraySubscript { .. } => None,
+        Expr::ArraySubscript { .. } => None,
         Expr::Param(param) => Some(param.paramtype),
         other => Some(expr_sql_type(other)),
     }

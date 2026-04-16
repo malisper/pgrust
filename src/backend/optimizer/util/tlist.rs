@@ -9,8 +9,7 @@ use crate::include::nodes::primnodes::{
 use super::super::inherit::append_translation;
 use super::super::optimize_path;
 use super::super::pathnodes::{
-    expr_sql_type, is_synthetic_slot_id, lower_agg_output_expr, rewrite_expr_against_layout,
-    rewrite_semantic_expr_for_input_path,
+    expr_sql_type, is_synthetic_slot_id, lower_agg_output_expr, rewrite_semantic_expr_for_input_path,
 };
 use super::super::{expand_join_rte_vars, flatten_join_alias_vars};
 use crate::include::nodes::pathnodes::AppendRelInfo;
@@ -306,13 +305,7 @@ fn projection_target_semantic_expr(target: &TargetEntry, input_layout: &[Expr]) 
     target
         .input_resno
         .and_then(|input_resno| input_layout.get(input_resno.saturating_sub(1)).cloned())
-        .unwrap_or_else(|| {
-            if matches!(target.expr, Expr::Column(_)) {
-                rewrite_expr_against_layout(target.expr.clone(), input_layout)
-            } else {
-                target.expr.clone()
-            }
-        })
+        .unwrap_or_else(|| target.expr.clone())
 }
 
 fn projection_target_index_for_semantic_expr(
@@ -379,7 +372,7 @@ fn rewrite_appendrel_expr_for_path(root: &PlannerInfo, expr: Expr, path: &Path) 
         .unwrap_or(expr)
 }
 
-fn rewrite_expr_for_append_rel(expr: Expr, info: &AppendRelInfo) -> Expr {
+pub(super) fn rewrite_expr_for_append_rel(expr: Expr, info: &AppendRelInfo) -> Expr {
     match expr {
         Expr::Var(var) if var.varlevelsup == 0 && var.varno == info.parent_relid => info
             .translated_vars
@@ -508,6 +501,15 @@ pub(super) fn rewrite_expr_for_path(expr: Expr, path: &Path, layout: &[Expr]) ->
     if layout.contains(&expr) {
         return expr;
     }
+    if let Expr::Var(var) = &expr
+        && var.varlevelsup == 0
+        && path_relids(path).contains(&var.varno)
+        && let Some(index) = attrno_index(var.varattno)
+        && let Some(candidate) = layout.get(index)
+        && expr_sql_type(candidate) == var.vartype
+    {
+        return candidate.clone();
+    }
     match path {
         Path::Projection {
             slot_id,
@@ -540,9 +542,6 @@ pub(super) fn rewrite_expr_for_path(expr: Expr, path: &Path, layout: &[Expr]) ->
                         targets[index].sql_type,
                     );
                 }
-                if matches!(expr, Expr::Column(_)) && passthrough_boundary {
-                    return rewrite_expr_against_layout(expr, layout);
-                }
                 if let Some(index) = projection_target_index_for_semantic_expr(
                     targets,
                     &input_layout,
@@ -550,8 +549,6 @@ pub(super) fn rewrite_expr_for_path(expr: Expr, path: &Path, layout: &[Expr]) ->
                 ) {
                     let target = &targets[index];
                     projection_slot_var(*slot_id, user_attrno(index), target.sql_type)
-                } else if matches!(expr, Expr::Column(_)) {
-                    rewrite_expr_against_layout(expr, layout)
                 } else {
                     expr
                 }
@@ -577,35 +574,10 @@ pub(super) fn rewrite_expr_for_path(expr: Expr, path: &Path, layout: &[Expr]) ->
             if rewritten_right != expr {
                 return rewritten_right;
             }
-            if matches!(expr, Expr::Column(_)) {
-                rewrite_expr_against_layout(expr, layout)
-            } else {
-                expr
-            }
+            expr
         }
-        Path::RecursiveUnion { .. } => {
-            if let Expr::Var(var) = &expr
-                && var.varlevelsup == 0
-                && path_relids(path).contains(&var.varno)
-                && let Some(index) = attrno_index(var.varattno)
-                && let Some(candidate) = layout.get(index)
-                && expr_sql_type(candidate) == var.vartype
-            {
-                return candidate.clone();
-            }
-            if matches!(expr, Expr::Column(_)) {
-                rewrite_expr_against_layout(expr, layout)
-            } else {
-                expr
-            }
-        }
-        _ => {
-            if matches!(expr, Expr::Column(_)) {
-                rewrite_expr_against_layout(expr, layout)
-            } else {
-                expr
-            }
-        }
+        Path::RecursiveUnion { .. } => expr,
+        _ => expr,
     }
 }
 

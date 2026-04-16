@@ -100,7 +100,7 @@ pub(crate) fn bind_select_targets(
             });
             final_targets.push(TargetEntry::new(
                 output_name,
-                project_set_output_placeholder(base_width + srf_index),
+                project_set_output_placeholder(base_width + srf_index, sql_type),
                 sql_type,
                 final_targets.len() + 1,
             )

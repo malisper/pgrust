@@ -91,6 +91,13 @@ pub(super) fn projection_is_identity(path: &Path, targets: &[TargetEntry]) -> bo
     tlist::projection_is_identity(path, targets)
 }
 
+pub(super) fn rewrite_expr_for_append_rel(
+    expr: Expr,
+    info: &crate::include::nodes::pathnodes::AppendRelInfo,
+) -> Expr {
+    tlist::rewrite_expr_for_append_rel(expr, info)
+}
+
 pub(super) fn rewrite_semantic_expr_for_path(expr: Expr, path: &Path, layout: &[Expr]) -> Expr {
     tlist::rewrite_semantic_expr_for_path(expr, path, layout)
 }

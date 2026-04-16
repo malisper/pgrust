@@ -65,7 +65,7 @@ pub(crate) use query::analyze_select_query_with_outer;
 use query::{
     AnalyzedFrom, analyze_values_query_with_outer, identity_target_list,
     legacy_identity_target_list, normalize_target_list,
-    rewrite_agg_accums, rewrite_expr_columns, rewrite_order_by_entries,
+    rewrite_agg_accums, rewrite_expr_for_outputs, rewrite_order_by_entries,
     rewrite_project_set_targets, rewrite_target_entries,
 };
 pub use scope::BoundRelation;
@@ -634,7 +634,7 @@ pub fn derive_literal_default_value(sql: &str, target: SqlType) -> Result<Value,
     } else {
         let catalog = LiteralDefaultCatalog;
         let (bound, from_type) = bind_scalar_expr_in_scope(&parsed, &[], &catalog)?;
-        if matches!(bound, Expr::Column(_)) || matches!(&bound, Expr::Var(var) if var.varlevelsup > 0) {
+        if matches!(&bound, Expr::Var(var) if var.varlevelsup > 0) {
             return Err(ParseError::UnexpectedToken {
                 expected: "literal DEFAULT expression",
                 actual: sql.to_string(),
@@ -1294,7 +1294,7 @@ fn bind_select_query_with_outer(
     let where_qual = if can_skip_scan_for_degenerate_having {
         None
     } else {
-        bound_where_qual.map(|expr| rewrite_expr_columns(expr, &base.output_exprs))
+        bound_where_qual.map(|expr| rewrite_expr_for_outputs(expr, &base.output_exprs))
     };
 
     if needs_agg {
@@ -1323,7 +1323,7 @@ fn bind_select_query_with_outer(
         let rewritten_group_keys = group_keys
             .iter()
             .cloned()
-            .map(|expr| rewrite_expr_columns(expr, &base.output_exprs))
+            .map(|expr| rewrite_expr_for_outputs(expr, &base.output_exprs))
             .collect::<Vec<_>>();
 
         let accumulators: Vec<AggAccum> = aggs
@@ -1433,7 +1433,7 @@ fn bind_select_query_with_outer(
                 )
             })
             .transpose()?
-            .map(|expr| rewrite_expr_columns(expr, &base.output_exprs));
+            .map(|expr| rewrite_expr_for_outputs(expr, &base.output_exprs));
 
         let targets: Vec<TargetEntry> = if stmt.targets.len() == 1
             && matches!(stmt.targets[0].expr, SqlExpr::Column(ref name) if name == "*")
