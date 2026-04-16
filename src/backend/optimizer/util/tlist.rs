@@ -52,20 +52,28 @@ pub(super) fn project_to_slot_layout_internal(
     slot_id: usize,
     desc: &RelationDesc,
     input: Path,
-    target_exprs: Vec<Expr>,
+    target: PathTarget,
     catalog: &dyn CatalogLookup,
 ) -> Path {
-    let layout = input.output_vars();
+    let input_target = input.output_target();
+    let layout = input_target.exprs.clone();
     let rewritten_targets = desc
         .columns
         .iter()
         .enumerate()
         .map(|(index, column)| {
-            let expr = target_exprs
+            let expr = target
+                .exprs
                 .get(index)
                 .cloned()
                 .or_else(|| layout.get(index).cloned())
                 .unwrap_or_else(|| Expr::Column(index));
+            let ressortgroupref = target
+                .sortgrouprefs
+                .get(index)
+                .copied()
+                .or_else(|| input_target.sortgrouprefs.get(index).copied())
+                .unwrap_or(0);
             let expr = match root {
                 Some(root) => {
                     rewrite_semantic_expr_for_path_or_expand_join_vars(root, expr, &input, &layout)
@@ -73,6 +81,7 @@ pub(super) fn project_to_slot_layout_internal(
                 None => rewrite_semantic_expr_for_input_path(expr, &input, &layout),
             };
             TargetEntry::new(column.name.clone(), expr, column.sql_type, index + 1)
+                .with_sort_group_ref(ressortgroupref)
         })
         .collect();
     optimize_path(
@@ -90,10 +99,10 @@ pub(super) fn project_to_slot_layout(
     slot_id: usize,
     desc: &RelationDesc,
     input: Path,
-    target_exprs: Vec<Expr>,
+    target: PathTarget,
     catalog: &dyn CatalogLookup,
 ) -> Path {
-    project_to_slot_layout_internal(None, slot_id, desc, input, target_exprs, catalog)
+    project_to_slot_layout_internal(None, slot_id, desc, input, target, catalog)
 }
 
 pub(super) fn normalize_rte_path(
@@ -115,12 +124,11 @@ pub(super) fn normalize_rte_path(
                 })
             })
             .collect(),
-    )
-    .exprs;
-    if input.output_vars() == desired_layout {
+    );
+    if input.output_vars() == desired_layout.exprs {
         input
     } else {
-        project_to_slot_layout(rtindex, desc, input.clone(), input.output_vars(), catalog)
+        project_to_slot_layout(rtindex, desc, input.clone(), input.output_target(), catalog)
     }
 }
 

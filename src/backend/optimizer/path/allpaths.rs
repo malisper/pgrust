@@ -407,7 +407,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                 rtindex,
                 &rte.desc,
                 child_path,
-                translated_vars,
+                PathTarget::new(translated_vars),
                 catalog,
             ));
         }
@@ -685,7 +685,7 @@ fn maybe_project_join_alias(
             rtindex,
             &rte.desc,
             input,
-            alias_target_exprs,
+            PathTarget::new(alias_target_exprs),
             catalog,
         );
     }
