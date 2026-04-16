@@ -1100,6 +1100,43 @@ impl Catalog {
         Ok((old_name, old_entry, qualified_new_name, entry))
     }
 
+    pub fn rewrite_relation_storage(
+        &mut self,
+        relation_oids: &[u32],
+    ) -> Result<Vec<(String, CatalogEntry, CatalogEntry)>, CatalogError> {
+        let mut rewritten = Vec::with_capacity(relation_oids.len());
+        for &relation_oid in relation_oids {
+            let name = self
+                .tables
+                .iter()
+                .find(|(_, entry)| entry.relation_oid == relation_oid)
+                .map(|(name, _)| name.clone())
+                .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+            let old_entry = self
+                .tables
+                .get(&name)
+                .cloned()
+                .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+            if !matches!(old_entry.relkind, 'r' | 't' | 'i') {
+                return Err(CatalogError::UnknownTable(relation_oid.to_string()));
+            }
+
+            let mut new_entry = old_entry.clone();
+            new_entry.rel.rel_number = self.next_rel_number;
+            self.next_rel_number = self.next_rel_number.saturating_add(1);
+
+            let entry = self
+                .tables
+                .get_mut(&name)
+                .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+            *entry = new_entry.clone();
+            self.replace_constraint_rows_for_entry(&name, &new_entry);
+            self.replace_depend_rows_for_entry(&new_entry);
+            rewritten.push((name, old_entry, new_entry));
+        }
+        Ok(rewritten)
+    }
+
     pub fn alter_relation_owner(
         &mut self,
         relation_oid: u32,
