@@ -57,6 +57,13 @@ pub(super) fn project_to_slot_layout_internal(
 ) -> Path {
     let input_target = input.output_target();
     let layout = input_target.exprs.clone();
+    let passthrough_input_resno = |expr: &Expr| {
+        input_target
+            .exprs
+            .iter()
+            .position(|candidate| candidate == expr)
+            .map(|index| index + 1)
+    };
     let rewritten_targets = desc
         .columns
         .iter()
@@ -74,6 +81,7 @@ pub(super) fn project_to_slot_layout_internal(
                 .copied()
                 .or_else(|| input_target.sortgrouprefs.get(index).copied())
                 .unwrap_or(0);
+            let input_resno = passthrough_input_resno(&expr);
             let expr = match root {
                 Some(root) => {
                     rewrite_semantic_expr_for_path_or_expand_join_vars(root, expr, &input, &layout)
@@ -82,6 +90,7 @@ pub(super) fn project_to_slot_layout_internal(
             };
             TargetEntry::new(column.name.clone(), expr, column.sql_type, index + 1)
                 .with_sort_group_ref(ressortgroupref)
+                .with_input_resno_opt(input_resno)
         })
         .collect();
     optimize_path(
@@ -138,17 +147,29 @@ pub(super) fn lower_targets_for_path(
     targets: &[TargetEntry],
 ) -> Vec<TargetEntry> {
     let layout = path.output_vars();
+    let input_target = path.output_target();
+    let passthrough_input_resno = |expr: &Expr| {
+        input_target
+            .exprs
+            .iter()
+            .position(|candidate| candidate == expr)
+            .map(|index| index + 1)
+    };
     match aggregate_group_by(path) {
         Some(group_by) => targets
             .iter()
             .cloned()
-            .map(|target| TargetEntry {
-                expr: lower_agg_output_expr(
+            .map(|target| {
+                let expr = lower_agg_output_expr(
                     expand_join_rte_vars(root, target.expr),
                     group_by,
                     &layout,
-                ),
-                ..target
+                );
+                TargetEntry {
+                    expr: expr.clone(),
+                    input_resno: passthrough_input_resno(&expr),
+                    ..target
+                }
             })
             .collect(),
         None => targets
@@ -161,7 +182,11 @@ pub(super) fn lower_targets_for_path(
                     path,
                     &layout,
                 );
-                TargetEntry { expr, ..target }
+                TargetEntry {
+                    expr: expr.clone(),
+                    input_resno: passthrough_input_resno(&expr),
+                    ..target
+                }
             })
             .collect(),
     }

@@ -180,21 +180,28 @@ fn dedup_match_exprs(exprs: Vec<Expr>) -> Vec<Expr> {
 fn build_projection_tlist(
     _root: Option<&PlannerInfo>,
     slot_id: usize,
-    _input: &Path,
+    input: &Path,
     targets: &[TargetEntry],
 ) -> IndexedTlist {
+    let input_target = input.output_target();
     IndexedTlist {
         entries: targets
             .iter()
             .enumerate()
-            .map(|(index, target)| IndexedTlistEntry {
-                index,
-                sql_type: target.sql_type,
-                ressortgroupref: target.ressortgroupref,
-                match_exprs: dedup_match_exprs(vec![
-                    slot_var(slot_id, user_attrno(index), target.sql_type),
-                    target.expr.clone(),
-                ]),
+            .map(|(index, target)| {
+                let mut match_exprs = vec![slot_var(slot_id, user_attrno(index), target.sql_type)];
+                if let Some(input_resno) = target.input_resno {
+                    if let Some(input_expr) = input_target.exprs.get(input_resno.saturating_sub(1)) {
+                        match_exprs.push(input_expr.clone());
+                    }
+                }
+                match_exprs.push(target.expr.clone());
+                IndexedTlistEntry {
+                    index,
+                    sql_type: target.sql_type,
+                    ressortgroupref: target.ressortgroupref,
+                    match_exprs: dedup_match_exprs(match_exprs),
+                }
             })
             .collect(),
     }

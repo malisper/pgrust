@@ -248,6 +248,43 @@ fn normalize_rte_path_preserves_projection_sortgrouprefs() {
     assert_eq!(normalized.pathkeys(), vec![pathkey_with_ref(var(1, 1), 17)]);
 }
 
+#[test]
+fn normalize_rte_path_records_passthrough_input_positions() {
+    let catalog = LiteralDefaultCatalog;
+    let desc = RelationDesc {
+        columns: vec![
+            column_desc("b", int4(), true),
+            column_desc("a", int4(), true),
+        ],
+    };
+    let input = Path::Projection {
+        plan_info: PlanEstimate::new(1.0, 1.2, 10.0, 2),
+        slot_id: 20,
+        input: Box::new(values_path(10, 1.0, 1.0)),
+        targets: vec![
+            TargetEntry::new("a", var(10, 1), int4(), 1),
+            TargetEntry::new("b", var(10, 2), int4(), 2),
+        ],
+    };
+
+    let normalized = super::util::project_to_slot_layout_internal(
+        None,
+        30,
+        &desc,
+        input,
+        PathTarget::new(vec![var(20, 2), var(20, 1)]),
+        &catalog,
+    );
+
+    match normalized {
+        Path::Projection { targets, .. } => {
+            assert_eq!(targets[0].input_resno, Some(2));
+            assert_eq!(targets[1].input_resno, Some(1));
+        }
+        other => panic!("expected projection path, got {other:?}"),
+    }
+}
+
 fn planner_info_for_sql(sql: &str) -> PlannerInfo {
     let catalog = LiteralDefaultCatalog;
     let stmt = parse_select(sql).expect("parse");

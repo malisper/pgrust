@@ -981,6 +981,7 @@ pub(super) fn finalize_plan_subqueries(
                     sql_type: target.sql_type,
                     resno: target.resno,
                     ressortgroupref: target.ressortgroupref,
+                    input_resno: target.input_resno,
                     resjunk: target.resjunk,
                 })
                 .collect(),
@@ -1069,6 +1070,7 @@ pub(super) fn finalize_plan_subqueries(
                             sql_type: entry.sql_type,
                             resno: entry.resno,
                             ressortgroupref: entry.ressortgroupref,
+                            input_resno: entry.input_resno,
                             resjunk: entry.resjunk,
                         })
                     }

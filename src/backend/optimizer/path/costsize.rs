@@ -1970,6 +1970,7 @@ pub(super) fn restore_join_output_order(
             sql_type: column.sql_type,
             resno: targets.len() + 1,
             ressortgroupref: 0,
+            input_resno: None,
             resjunk: false,
         });
     }
@@ -1986,6 +1987,7 @@ pub(super) fn restore_join_output_order(
             sql_type: column.sql_type,
             resno: targets.len() + 1,
             ressortgroupref: 0,
+            input_resno: None,
             resjunk: false,
         });
     }
