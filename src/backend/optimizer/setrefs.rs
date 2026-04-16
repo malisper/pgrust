@@ -523,6 +523,7 @@ fn fix_set_returning_call_upper_exprs(
     root: Option<&PlannerInfo>,
     call: crate::include::nodes::primnodes::SetReturningCall,
     path: &Path,
+    input_tlist: &IndexedTlist,
 ) -> crate::include::nodes::primnodes::SetReturningCall {
     use crate::include::nodes::primnodes::SetReturningCall;
 
@@ -537,9 +538,9 @@ fn fix_set_returning_call_upper_exprs(
         } => SetReturningCall::GenerateSeries {
             func_oid,
             func_variadic,
-            start: fix_upper_expr_for_path(root, start, path),
-            stop: fix_upper_expr_for_path(root, stop, path),
-            step: fix_upper_expr_for_path(root, step, path),
+            start: fix_upper_expr_for_input(root, start, path, input_tlist),
+            stop: fix_upper_expr_for_input(root, stop, path, input_tlist),
+            step: fix_upper_expr_for_input(root, step, path, input_tlist),
             output,
         },
         SetReturningCall::Unnest {
@@ -552,7 +553,7 @@ fn fix_set_returning_call_upper_exprs(
             func_variadic,
             args: args
                 .into_iter()
-                .map(|arg| fix_upper_expr_for_path(root, arg, path))
+                .map(|arg| fix_upper_expr_for_input(root, arg, path, input_tlist))
                 .collect(),
             output_columns,
         },
@@ -568,7 +569,7 @@ fn fix_set_returning_call_upper_exprs(
             kind,
             args: args
                 .into_iter()
-                .map(|arg| fix_upper_expr_for_path(root, arg, path))
+                .map(|arg| fix_upper_expr_for_input(root, arg, path, input_tlist))
                 .collect(),
             output_columns,
         },
@@ -584,7 +585,7 @@ fn fix_set_returning_call_upper_exprs(
             kind,
             args: args
                 .into_iter()
-                .map(|arg| fix_upper_expr_for_path(root, arg, path))
+                .map(|arg| fix_upper_expr_for_input(root, arg, path, input_tlist))
                 .collect(),
             output_columns,
         },
@@ -596,7 +597,7 @@ fn fix_set_returning_call_upper_exprs(
             kind,
             args: args
                 .into_iter()
-                .map(|arg| fix_upper_expr_for_path(root, arg, path))
+                .map(|arg| fix_upper_expr_for_input(root, arg, path, input_tlist))
                 .collect(),
             output_columns,
         },
@@ -610,7 +611,7 @@ fn fix_set_returning_call_upper_exprs(
             func_variadic,
             args: args
                 .into_iter()
-                .map(|arg| fix_upper_expr_for_path(root, arg, path))
+                .map(|arg| fix_upper_expr_for_input(root, arg, path, input_tlist))
                 .collect(),
             output_columns,
         },
@@ -970,7 +971,11 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
                     .into_iter()
                     .map(|param| ExecParamSource {
                         paramid: param.paramid,
-                        expr: lower_expr(ctx, fix_upper_expr_for_path(ctx.root, param.expr, &left), LowerMode::Input { tlist: &left_tlist }),
+                        expr: lower_expr(
+                            ctx,
+                            fix_upper_expr_for_input(ctx.root, param.expr, &left, &left_tlist),
+                            LowerMode::Input { tlist: &left_tlist },
+                        ),
                     })
                     .collect::<Vec<_>>();
                 (plan, params)
@@ -1002,11 +1007,11 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
 
             let outer_hash_keys = outer_hash_keys
                 .into_iter()
-                .map(|expr| fix_upper_expr_for_path(ctx.root, expr, &left))
+                .map(|expr| fix_upper_expr_for_input(ctx.root, expr, &left, &left_tlist))
                 .collect::<Vec<_>>();
             let inner_hash_keys = inner_hash_keys
                 .into_iter()
-                .map(|expr| fix_upper_expr_for_path(ctx.root, expr, &right))
+                .map(|expr| fix_upper_expr_for_input(ctx.root, expr, &right, &right_tlist))
                 .collect::<Vec<_>>();
             let lowered_hash_clauses = hash_clauses
                 .into_iter()
@@ -1275,7 +1280,12 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
                             column_index,
                         } => crate::include::nodes::primnodes::ProjectSetTarget::Set {
                             name,
-                            call: fix_set_returning_call_upper_exprs(ctx.root, call, &input),
+                            call: fix_set_returning_call_upper_exprs(
+                                ctx.root,
+                                call,
+                                &input,
+                                &input_tlist,
+                            ),
                             sql_type,
                             column_index,
                         },

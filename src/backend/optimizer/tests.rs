@@ -410,6 +410,55 @@ fn into_plan_order_by_lowers_via_child_sortgroupref() {
 }
 
 #[test]
+fn into_plan_project_set_set_arg_lowers_via_child_tlist_identity() {
+    let input = Path::Projection {
+        plan_info: PlanEstimate::new(1.0, 1.5, 10.0, 1),
+        slot_id: 20,
+        input: Box::new(values_path(10, 1.0, 1.0)),
+        targets: vec![TargetEntry::new("a", var(10, 1), int4(), 1)],
+    };
+    let plan = Path::ProjectSet {
+        plan_info: PlanEstimate::new(1.0, 1.7, 10.0, 1),
+        slot_id: 21,
+        input: Box::new(input),
+        targets: vec![crate::include::nodes::primnodes::ProjectSetTarget::Set {
+            name: "g".into(),
+            call: crate::include::nodes::primnodes::SetReturningCall::GenerateSeries {
+                func_oid: 1,
+                func_variadic: false,
+                start: var(10, 1),
+                stop: Expr::Const(Value::Int32(3)),
+                step: Expr::Const(Value::Int32(1)),
+                output: QueryColumn {
+                    name: "g".into(),
+                    sql_type: int4(),
+                },
+            },
+            sql_type: int4(),
+            column_index: 1,
+        }],
+    }
+    .into_plan();
+
+    match plan {
+        Plan::ProjectSet { targets, .. } => match &targets[0] {
+            crate::include::nodes::primnodes::ProjectSetTarget::Set { call, .. } => match call {
+                crate::include::nodes::primnodes::SetReturningCall::GenerateSeries {
+                    start, stop, step, ..
+                } => {
+                    assert!(is_special_user_var(start, OUTER_VAR, 0));
+                    assert_eq!(*stop, Expr::Const(Value::Int32(3)));
+                    assert_eq!(*step, Expr::Const(Value::Int32(1)));
+                }
+                other => panic!("expected generate_series call, got {other:?}"),
+            },
+            other => panic!("expected set target, got {other:?}"),
+        },
+        other => panic!("expected project set plan, got {other:?}"),
+    }
+}
+
+#[test]
 fn required_query_pathkeys_for_path_falls_back_when_input_lacks_sortgroup_identity() {
     let root = planner_info_for_sql("select column1 as a from (values (1)) v order by a");
     let path = Path::Projection {
