@@ -20,7 +20,7 @@ use super::super::inherit::{
 };
 use super::super::joininfo;
 use super::super::optimize_path;
-use super::super::pathnodes::{expr_sql_type, next_synthetic_slot_id, rewrite_expr_against_layout};
+use super::super::pathnodes::{expr_sql_type, next_synthetic_slot_id};
 use super::super::plan::{grouping_planner, make_pathtarget_projection_rel};
 use super::super::util::{
     build_aggregate_output_columns, layout_candidate_for_expr, normalize_rte_path,
@@ -482,7 +482,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                 path = optimize_path(
                     Path::Filter {
                         plan_info: PlanEstimate::default(),
-                        predicate: rewrite_expr_against_layout(filter, &path.output_vars()),
+                        predicate: filter,
                         input: Box::new(path),
                     },
                     catalog,
@@ -503,7 +503,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                 path = optimize_path(
                     Path::Filter {
                         plan_info: PlanEstimate::default(),
-                        predicate: rewrite_expr_against_layout(filter, &path.output_vars()),
+                        predicate: filter,
                         input: Box::new(path),
                     },
                     catalog,
@@ -533,7 +533,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                 path = optimize_path(
                     Path::Filter {
                         plan_info: PlanEstimate::default(),
-                        predicate: rewrite_expr_against_layout(filter, &path.output_vars()),
+                        predicate: filter,
                         input: Box::new(path),
                     },
                     catalog,
@@ -548,7 +548,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                 path = optimize_path(
                     Path::Filter {
                         plan_info: PlanEstimate::default(),
-                        predicate: rewrite_expr_against_layout(filter, &path.output_vars()),
+                        predicate: filter,
                         input: Box::new(path),
                     },
                     catalog,
@@ -568,7 +568,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                 path = optimize_path(
                     Path::Filter {
                         plan_info: PlanEstimate::default(),
-                        predicate: rewrite_expr_against_layout(filter, &path.output_vars()),
+                        predicate: filter,
                         input: Box::new(path),
                     },
                     catalog,

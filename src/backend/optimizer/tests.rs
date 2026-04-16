@@ -256,6 +256,14 @@ fn planner_info_for_sql(sql: &str) -> PlannerInfo {
     PlannerInfo::new(query)
 }
 
+fn planned_stmt_for_sql(sql: &str) -> crate::include::nodes::plannodes::PlannedStmt {
+    let catalog = LiteralDefaultCatalog;
+    let stmt = parse_select(sql).expect("parse");
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog, &[], None, &[], &[]).expect("analyze");
+    super::planner(query, &catalog)
+}
+
 #[test]
 fn required_query_pathkeys_for_path_keeps_sortgroup_identified_keys() {
     let root = planner_info_for_sql("select column1 as a from (values (1)) v order by a");
@@ -455,6 +463,29 @@ fn into_plan_project_set_set_arg_lowers_via_child_tlist_identity() {
             other => panic!("expected set target, got {other:?}"),
         },
         other => panic!("expected project set plan, got {other:?}"),
+    }
+}
+
+#[test]
+fn planner_keeps_function_scan_filter_semantic_until_setrefs() {
+    let planned =
+        planned_stmt_for_sql("select * from generate_series(1, 3) as g(x) where x > 1");
+
+    match planned.plan_tree {
+        Plan::Filter { predicate, input, .. } => {
+            match predicate {
+                Expr::Op(op) => {
+                    assert!(is_special_user_var(&op.args[0], OUTER_VAR, 0));
+                    assert_eq!(op.args[1], Expr::Const(Value::Int32(1)));
+                }
+                other => panic!("expected filter op, got {other:?}"),
+            }
+            assert!(matches!(
+                *input,
+                Plan::FunctionScan { .. } | Plan::Projection { .. }
+            ));
+        }
+        other => panic!("expected filter over function scan, got {other:?}"),
     }
 }
 
