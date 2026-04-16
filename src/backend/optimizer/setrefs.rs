@@ -1171,6 +1171,73 @@ fn set_filter_references(
     }
 }
 
+fn set_append_references(
+    ctx: &mut SetRefsContext<'_>,
+    plan_info: PlanEstimate,
+    source_id: usize,
+    desc: crate::include::nodes::primnodes::RelationDesc,
+    children: Vec<Path>,
+) -> Plan {
+    Plan::Append {
+        plan_info,
+        source_id,
+        desc,
+        children: children
+            .into_iter()
+            .map(|child| set_plan_refs(ctx, child))
+            .collect(),
+    }
+}
+
+fn set_seq_scan_references(
+    plan_info: PlanEstimate,
+    source_id: usize,
+    rel: crate::RelFileLocator,
+    relation_name: String,
+    relation_oid: u32,
+    toast: Option<crate::include::nodes::primnodes::ToastRelationRef>,
+    desc: crate::include::nodes::primnodes::RelationDesc,
+) -> Plan {
+    Plan::SeqScan {
+        plan_info,
+        source_id,
+        rel,
+        relation_name,
+        relation_oid,
+        toast,
+        desc,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn set_index_scan_references(
+    plan_info: PlanEstimate,
+    source_id: usize,
+    rel: crate::RelFileLocator,
+    relation_oid: u32,
+    index_rel: crate::RelFileLocator,
+    am_oid: u32,
+    toast: Option<crate::include::nodes::primnodes::ToastRelationRef>,
+    desc: crate::include::nodes::primnodes::RelationDesc,
+    index_meta: crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+    keys: Vec<crate::include::access::scankey::ScanKeyData>,
+    direction: crate::include::access::relscan::ScanDirection,
+) -> Plan {
+    Plan::IndexScan {
+        plan_info,
+        source_id,
+        rel,
+        relation_oid,
+        index_rel,
+        am_oid,
+        toast,
+        desc,
+        index_meta,
+        keys,
+        direction,
+    }
+}
+
 fn set_nested_loop_join_references(
     ctx: &mut SetRefsContext<'_>,
     plan_info: PlanEstimate,
@@ -1373,6 +1440,21 @@ fn set_order_references(
     }
 }
 
+fn set_limit_references(
+    ctx: &mut SetRefsContext<'_>,
+    plan_info: PlanEstimate,
+    input: Box<Path>,
+    limit: Option<usize>,
+    offset: usize,
+) -> Plan {
+    Plan::Limit {
+        plan_info,
+        input: Box::new(set_plan_refs(ctx, *input)),
+        limit,
+        offset,
+    }
+}
+
 fn set_aggregate_references(
     ctx: &mut SetRefsContext<'_>,
     plan_info: PlanEstimate,
@@ -1426,6 +1508,83 @@ fn set_aggregate_references(
     }
 }
 
+fn set_values_references(
+    ctx: &mut SetRefsContext<'_>,
+    plan_info: PlanEstimate,
+    rows: Vec<Vec<Expr>>,
+    output_columns: Vec<QueryColumn>,
+) -> Plan {
+    Plan::Values {
+        plan_info,
+        rows: rows
+            .into_iter()
+            .map(|row| {
+                row.into_iter()
+                    .map(|expr| lower_expr(ctx, expr, LowerMode::Scalar))
+                    .collect()
+            })
+            .collect(),
+        output_columns,
+    }
+}
+
+fn set_function_scan_references(
+    ctx: &mut SetRefsContext<'_>,
+    plan_info: PlanEstimate,
+    call: crate::include::nodes::primnodes::SetReturningCall,
+) -> Plan {
+    Plan::FunctionScan {
+        plan_info,
+        call: lower_set_returning_call(ctx, call, LowerMode::Scalar),
+    }
+}
+
+fn set_cte_scan_references(
+    ctx: &mut SetRefsContext<'_>,
+    plan_info: PlanEstimate,
+    cte_id: usize,
+    cte_plan: Box<Path>,
+    output_columns: Vec<QueryColumn>,
+) -> Plan {
+    Plan::CteScan {
+        plan_info,
+        cte_id,
+        cte_plan: Box::new(set_plan_refs(ctx, *cte_plan)),
+        output_columns,
+    }
+}
+
+fn set_worktable_scan_references(
+    plan_info: PlanEstimate,
+    worktable_id: usize,
+    output_columns: Vec<QueryColumn>,
+) -> Plan {
+    Plan::WorkTableScan {
+        plan_info,
+        worktable_id,
+        output_columns,
+    }
+}
+
+fn set_recursive_union_references(
+    ctx: &mut SetRefsContext<'_>,
+    plan_info: PlanEstimate,
+    worktable_id: usize,
+    distinct: bool,
+    output_columns: Vec<QueryColumn>,
+    anchor: Box<Path>,
+    recursive: Box<Path>,
+) -> Plan {
+    Plan::RecursiveUnion {
+        plan_info,
+        worktable_id,
+        distinct,
+        output_columns,
+        anchor: Box::new(set_plan_refs(ctx, *anchor)),
+        recursive: Box::new(set_plan_refs(ctx, *recursive)),
+    }
+}
+
 fn set_project_set_references(
     ctx: &mut SetRefsContext<'_>,
     plan_info: PlanEstimate,
@@ -1474,15 +1633,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             source_id,
             desc,
             children,
-        } => Plan::Append {
-            plan_info,
-            source_id,
-            desc,
-            children: children
-                .into_iter()
-                .map(|child| set_plan_refs(ctx, child))
-                .collect(),
-        },
+        } => set_append_references(ctx, plan_info, source_id, desc, children),
         Path::SeqScan {
             plan_info,
             source_id,
@@ -1491,7 +1642,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             relation_oid,
             toast,
             desc,
-        } => Plan::SeqScan {
+        } => set_seq_scan_references(
             plan_info,
             source_id,
             rel,
@@ -1499,7 +1650,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             relation_oid,
             toast,
             desc,
-        },
+        ),
         Path::IndexScan {
             plan_info,
             source_id,
@@ -1513,7 +1664,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             keys,
             direction,
             pathkeys: _,
-        } => Plan::IndexScan {
+        } => set_index_scan_references(
             plan_info,
             source_id,
             rel,
@@ -1525,7 +1676,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             index_meta,
             keys,
             direction,
-        },
+        ),
         Path::Filter {
             plan_info,
             input,
@@ -1574,12 +1725,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             input,
             limit,
             offset,
-        } => Plan::Limit {
-            plan_info,
-            input: Box::new(set_plan_refs(ctx, *input)),
-            limit,
-            offset,
-        },
+        } => set_limit_references(ctx, plan_info, input, limit, offset),
         Path::Aggregate {
             plan_info,
             slot_id,
@@ -1603,46 +1749,23 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             rows,
             output_columns,
             ..
-        } => Plan::Values {
-            plan_info,
-            rows: rows
-                .into_iter()
-                .map(|row| {
-                    row.into_iter()
-                        .map(|expr| lower_expr(ctx, expr, LowerMode::Scalar))
-                        .collect()
-                })
-                .collect(),
-            output_columns,
-        },
+        } => set_values_references(ctx, plan_info, rows, output_columns),
         Path::FunctionScan {
             plan_info, call, ..
-        } => Plan::FunctionScan {
-            plan_info,
-            call: lower_set_returning_call(ctx, call, LowerMode::Scalar),
-        },
+        } => set_function_scan_references(ctx, plan_info, call),
         Path::CteScan {
             plan_info,
             cte_id,
             cte_plan,
             output_columns,
             ..
-        } => Plan::CteScan {
-            plan_info,
-            cte_id,
-            cte_plan: Box::new(set_plan_refs(ctx, *cte_plan)),
-            output_columns,
-        },
+        } => set_cte_scan_references(ctx, plan_info, cte_id, cte_plan, output_columns),
         Path::WorkTableScan {
             plan_info,
             worktable_id,
             output_columns,
             ..
-        } => Plan::WorkTableScan {
-            plan_info,
-            worktable_id,
-            output_columns,
-        },
+        } => set_worktable_scan_references(plan_info, worktable_id, output_columns),
         Path::RecursiveUnion {
             plan_info,
             worktable_id,
@@ -1651,14 +1774,15 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             anchor,
             recursive,
             ..
-        } => Plan::RecursiveUnion {
+        } => set_recursive_union_references(
+            ctx,
             plan_info,
             worktable_id,
             distinct,
             output_columns,
-            anchor: Box::new(set_plan_refs(ctx, *anchor)),
-            recursive: Box::new(set_plan_refs(ctx, *recursive)),
-        },
+            anchor,
+            recursive,
+        ),
         Path::ProjectSet {
             plan_info,
             input,
