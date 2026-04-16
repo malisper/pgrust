@@ -92,9 +92,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                             )
                         })
                         .collect::<Vec<_>>();
-                    let resolved =
-                        resolve_function_call(catalog, func.name(), &arg_types, *func_variadic)
-                            .ok();
+                    let resolved = resolve_aggregate_call(catalog, *func, &arg_types, *func_variadic);
                     let aggfnoid = resolved
                         .as_ref()
                         .map(|call| call.proc_oid)
@@ -117,12 +115,24 @@ pub(super) fn bind_agg_output_expr_in_clause(
                             )
                         })
                         .collect::<Result<Vec<_>, _>>()?;
+                    let coerced_args = if let Some(resolved) = &resolved {
+                        bound_args
+                            .into_iter()
+                            .zip(arg_types.iter().copied())
+                            .zip(resolved.declared_arg_types.iter().copied())
+                            .map(|((arg, actual_type), declared_type)| {
+                                coerce_bound_expr(arg, actual_type, declared_type)
+                            })
+                            .collect()
+                    } else {
+                        bound_args
+                    };
                     return Ok(Expr::aggref(
                         aggfnoid,
                         aggregate_sql_type(*func, arg_types.first().copied()),
                         agg_variadic,
                         *distinct,
-                        bound_args,
+                        coerced_args,
                         i,
                     ));
                 }
