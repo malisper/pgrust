@@ -517,6 +517,7 @@ pub(super) fn bind_from_item_with_ctes(
             catalog,
             outer_scopes,
             grouped_outer,
+            ctes,
         ),
         FromItem::DerivedTable(select) => {
             let (plan, _) =
@@ -627,6 +628,7 @@ pub(super) fn bind_from_item_with_ctes(
                     catalog,
                     outer_scopes,
                     grouped_outer,
+                    ctes,
                 )?
             } else {
                 bind_from_item_with_ctes(
@@ -663,12 +665,22 @@ fn bind_function_from_item_with_ctes(
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
 ) -> Result<(AnalyzedFrom, BoundScope), ParseError> {
     let args = lower_named_table_function_args(name, args)?;
     let call_scope = empty_scope();
     let actual_types = args
         .iter()
-        .map(|arg| infer_sql_expr_type(arg, &call_scope, catalog, outer_scopes, grouped_outer))
+        .map(|arg| {
+            infer_sql_expr_type_with_ctes(
+                arg,
+                &call_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )
+        })
         .collect::<Vec<_>>();
     let resolved = resolve_function_call(catalog, name, &actual_types, func_variadic).ok();
     let resolved_proc_oid = resolved.as_ref().map(|call| call.proc_oid).unwrap_or(0);
@@ -687,33 +699,59 @@ fn bind_function_from_item_with_ctes(
                     actual: format!("generate_series with {} arguments", args.len()),
                 });
             }
-            let start =
-                bind_expr_with_outer(&args[0], &call_scope, catalog, outer_scopes, grouped_outer)?;
-            let stop =
-                bind_expr_with_outer(&args[1], &call_scope, catalog, outer_scopes, grouped_outer)?;
-            let start_type =
-                infer_sql_expr_type(&args[0], &call_scope, catalog, outer_scopes, grouped_outer);
-            let stop_type =
-                infer_sql_expr_type(&args[1], &call_scope, catalog, outer_scopes, grouped_outer);
+            let start = bind_expr_with_outer_and_ctes(
+                &args[0],
+                &call_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?;
+            let stop = bind_expr_with_outer_and_ctes(
+                &args[1],
+                &call_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?;
+            let start_type = infer_sql_expr_type_with_ctes(
+                &args[0],
+                &call_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            let stop_type = infer_sql_expr_type_with_ctes(
+                &args[1],
+                &call_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
             let step_type = if args.len() == 3 {
-                Some(infer_sql_expr_type(
+                Some(infer_sql_expr_type_with_ctes(
                     &args[2],
                     &call_scope,
                     catalog,
                     outer_scopes,
                     grouped_outer,
+                    ctes,
                 ))
             } else {
                 None
             };
             let common = resolve_generate_series_common_type(start_type, stop_type, step_type)?;
             let step = if args.len() == 3 {
-                let step_expr = bind_expr_with_outer(
+                let step_expr = bind_expr_with_outer_and_ctes(
                     &args[2],
                     &call_scope,
                     catalog,
                     outer_scopes,
                     grouped_outer,
+                    ctes,
                 )?;
                 let step_type = step_type.expect("generate_series step type");
                 coerce_bound_expr(step_expr, step_type, common)
@@ -762,8 +800,14 @@ fn bind_function_from_item_with_ctes(
             let mut output_columns = Vec::with_capacity(args.len());
             let mut desc_columns = Vec::with_capacity(args.len());
             for (idx, arg) in args.iter().enumerate() {
-                let arg_type =
-                    infer_sql_expr_type(arg, &call_scope, catalog, outer_scopes, grouped_outer);
+                let arg_type = infer_sql_expr_type_with_ctes(
+                    arg,
+                    &call_scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                );
                 if !arg_type.is_array {
                     return Err(ParseError::UnexpectedToken {
                         expected: "array argument to unnest",
@@ -776,12 +820,13 @@ fn bind_function_from_item_with_ctes(
                 } else {
                     format!("unnest_{}", idx + 1)
                 };
-                bound_args.push(bind_expr_with_outer(
+                bound_args.push(bind_expr_with_outer_and_ctes(
                     arg,
                     &call_scope,
                     catalog,
                     outer_scopes,
                     grouped_outer,
+                    ctes,
                 )?);
                 output_columns.push(QueryColumn {
                     name: column_name.clone(),
@@ -812,17 +857,43 @@ fn bind_function_from_item_with_ctes(
             }
             let empty_scope = empty_scope();
             let text_type = SqlType::new(SqlTypeKind::Text);
-            let left_type =
-                infer_sql_expr_type(&args[0], &empty_scope, catalog, outer_scopes, grouped_outer);
-            let right_type =
-                infer_sql_expr_type(&args[1], &empty_scope, catalog, outer_scopes, grouped_outer);
+            let left_type = infer_sql_expr_type_with_ctes(
+                &args[0],
+                &empty_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            let right_type = infer_sql_expr_type_with_ctes(
+                &args[1],
+                &empty_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
             let left = coerce_bound_expr(
-                bind_expr_with_outer(&args[0], &empty_scope, catalog, outer_scopes, grouped_outer)?,
+                bind_expr_with_outer_and_ctes(
+                    &args[0],
+                    &empty_scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?,
                 left_type,
                 text_type,
             );
             let right = coerce_bound_expr(
-                bind_expr_with_outer(&args[1], &empty_scope, catalog, outer_scopes, grouped_outer)?,
+                bind_expr_with_outer_and_ctes(
+                    &args[1],
+                    &empty_scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?,
                 right_type,
                 text_type,
             );
@@ -895,12 +966,13 @@ fn bind_function_from_item_with_ctes(
                 let bound_args = args
                     .iter()
                     .map(|arg| {
-                        bind_expr_with_outer(
+                        bind_expr_with_outer_and_ctes(
                             arg,
                             &empty_scope,
                             catalog,
                             outer_scopes,
                             grouped_outer,
+                            ctes,
                         )
                     })
                     .collect::<Result<Vec<_>, _>>()?;
@@ -970,12 +1042,13 @@ fn bind_function_from_item_with_ctes(
                 let bound_args = args
                     .iter()
                     .map(|arg| {
-                        bind_expr_with_outer(
+                        bind_expr_with_outer_and_ctes(
                             arg,
                             &empty_scope,
                             catalog,
                             outer_scopes,
                             grouped_outer,
+                            ctes,
                         )
                     })
                     .collect::<Result<Vec<_>, _>>()?;

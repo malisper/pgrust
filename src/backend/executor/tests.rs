@@ -8387,6 +8387,17 @@ fn trim_without_explicit_trim_chars_and_text_substring_work() {
     )
     .expect_err("negative length should error");
     assert!(matches!(err, ExecError::NegativeSubstringLength));
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select substring('1234567890' for 3), substring('1234567890' for 0)",
+        )
+        .unwrap(),
+        vec![vec![Value::Text("123".into()), Value::Text("".into())]],
+    );
 }
 
 #[test]
@@ -10066,6 +10077,135 @@ select string_agg(r_text, E'\n') from lines
         }
         other => panic!("expected query result, got {:?}", other),
     }
+}
+
+#[test]
+fn recursive_lsystem_segments_query_executes() {
+    let base = temp_dir("recursive_lsystem_segments");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    let sql = r#"
+with recursive iterations as (
+  select 'FX' as path, 0 as iteration
+  union all
+  select replace(replace(replace(path, 'X', 'X+ZF+'), 'Y', '-FX-Y'), 'Z', 'Y'), iteration + 1
+  from iterations
+  where iteration < 3
+), segments as (
+  select 0 as start_row,
+         0 as start_col,
+         0 as mid_row,
+         0 as mid_col,
+         0 as end_row,
+         0 as end_col,
+         0 as row_diff,
+         1 as col_diff,
+         (select path from iterations order by iteration desc limit 1) as path_left
+  union all
+  select end_row,
+         end_col,
+         end_row + row_diff * step_size,
+         end_col + col_diff * step_size,
+         end_row + 2 * row_diff * step_size,
+         end_col + 2 * col_diff * step_size,
+         case when substring(path_left for 1) = '-' then -col_diff
+              when substring(path_left for 1) = '+' then col_diff
+              else row_diff
+         end,
+         case when substring(path_left for 1) = '-' then row_diff
+              when substring(path_left for 1) = '+' then -row_diff
+              else col_diff
+         end,
+         substring(path_left from 2)
+  from segments,
+       lateral (
+         select case when substring(path_left for 1) = 'F' then 1 else 0 end as step_size
+       ) sub
+  where char_length(path_left) > 0
+)
+select count(*) from segments
+"#;
+    assert_query_rows(
+        run_sql(&base, &txns, INVALID_TRANSACTION_ID, sql).unwrap(),
+        vec![vec![Value::Int64(31)]],
+    );
+}
+
+#[test]
+fn recursive_lsystem_points_query_executes() {
+    let base = temp_dir("recursive_lsystem_points");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    let sql = r#"
+with recursive iterations as (
+  select 'FX' as path, 0 as iteration
+  union all
+  select replace(replace(replace(path, 'X', 'X+ZF+'), 'Y', '-FX-Y'), 'Z', 'Y'), iteration + 1
+  from iterations where iteration < 3
+), segments as (
+  select
+    0 as start_row,
+    0 as start_col,
+    0 as mid_row,
+    0 as mid_col,
+    0 as end_row,
+    0 as end_col,
+    0 as row_diff,
+    1 as col_diff,
+    (select path from iterations order by iteration desc limit 1) as path_left
+  union all
+  select
+    end_row as start_row,
+    end_col as start_col,
+    end_row + row_diff * step_size as mid_row,
+    end_col + col_diff * step_size as mid_col,
+    end_row + 2 * row_diff * step_size as end_row,
+    end_col + 2 * col_diff * step_size as end_col,
+    case when substring(path_left for 1) = '-' then -col_diff
+         when substring(path_left for 1) = '+' then col_diff
+         else row_diff
+    end as row_diff,
+    case when substring(path_left for 1) = '-' then row_diff
+         when substring(path_left for 1) = '+' then -row_diff
+         else col_diff
+    end as col_diff,
+    substring(path_left from 2) as path_left
+  from segments,
+       lateral (select case when substring(path_left for 1) = 'F' then 1 else 0 end as step_size) sub
+  where char_length(path_left) > 0
+), end_points as (
+  select start_row as r, start_col as c from segments
+  union
+  select end_row as r, end_col as c from segments
+), points as (
+  select r, c from generate_series((select min(r) from end_points), (select max(r) from end_points)) a(r)
+  cross join generate_series((select min(c) from end_points), (select max(c) from end_points)) b(c)
+), marked_points as (
+  select r, c, (case when
+    exists (select 1 from end_points e where p.r = e.r and p.c = e.c)
+    then '*'
+
+    when exists (select 1 from segments s where p.r = s.mid_row and p.c = s.mid_col and col_diff != 0)
+    then '-'
+
+    when exists (select 1 from segments s where p.r = s.mid_row and p.c = s.mid_col and row_diff != 0)
+    then '|'
+
+    else ' '
+    end
+    ) as marker
+  from points p
+), lines as (
+   select r, string_agg(marker, '') as row_text
+   from marked_points
+   group by r
+   order by r desc
+) select string_agg(row_text, E'\n') from lines
+"#;
+    assert_query_rows(
+        run_sql(&base, &txns, INVALID_TRANSACTION_ID, sql).unwrap(),
+        vec![vec![Value::Text(
+            "* *-*  \n| | |  \n*-* *-*\n      |\n    *-*".into(),
+        )]],
+    );
 }
 
 #[test]

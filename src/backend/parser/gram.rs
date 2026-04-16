@@ -4039,6 +4039,27 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                         func_variadic: false,
                     })
                 }
+                Rule::substring_for_expr => {
+                    let mut inner = inner
+                        .into_inner()
+                        .filter(|part| !matches!(part.as_rule(), Rule::kw_for | Rule::kw_for_atom));
+                    let value = parse_expr(
+                        inner
+                            .next()
+                            .ok_or(ParseError::UnexpectedEof)?
+                            .as_str()
+                            .trim(),
+                    )?;
+                    let len = build_expr(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
+                    Ok(SqlExpr::FuncCall {
+                        name: "substring".into(),
+                        args: vec![value, SqlExpr::IntegerLiteral("1".into()), len]
+                            .into_iter()
+                            .map(SqlFunctionArg::positional)
+                            .collect(),
+                        func_variadic: false,
+                    })
+                }
                 Rule::substring_similar_expr => {
                     let mut inner = inner.into_inner().filter(|part| {
                         !matches!(
