@@ -306,6 +306,66 @@ fn required_query_pathkeys_for_path_falls_back_for_zero_ref_keys() {
 }
 
 #[test]
+fn rel_exposes_required_pathkey_identity_only_when_a_path_matches() {
+    let root = planner_info_for_sql("select column1 as a from (values (1)) v order by a");
+    let sortgroupref = root.query_pathkeys[0].ressortgroupref;
+    let matching_path = Path::Projection {
+        plan_info: PlanEstimate::new(1.0, 1.5, 10.0, 1),
+        slot_id: 20,
+        input: Box::new(values_path(10, 1.0, 1.0)),
+        targets: vec![TargetEntry::new("a", var(10, 1), int4(), 1).with_sort_group_ref(sortgroupref)],
+    };
+    let non_matching_path = Path::Projection {
+        plan_info: PlanEstimate::new(2.0, 2.5, 10.0, 1),
+        slot_id: 21,
+        input: Box::new(values_path(11, 2.0, 2.0)),
+        targets: vec![TargetEntry::new("a", var(11, 1), int4(), 1)],
+    };
+    let mut rel = RelOptInfo::new(vec![1], RelOptKind::UpperRel, PathTarget::from_target_list(&[]));
+    rel.add_path(non_matching_path.clone());
+    assert!(!util::rel_exposes_required_pathkey_identity(&rel, &root.query_pathkeys));
+    rel.add_path(matching_path.clone());
+    assert!(util::path_exposes_required_pathkey_identity(&matching_path, &root.query_pathkeys));
+    assert!(util::rel_exposes_required_pathkey_identity(&rel, &root.query_pathkeys));
+}
+
+#[test]
+fn required_query_pathkeys_for_rel_falls_back_when_rel_lacks_identity() {
+    let root = planner_info_for_sql("select column1 as a from (values (1)) v order by a");
+    let path = Path::Projection {
+        plan_info: PlanEstimate::new(1.0, 1.5, 10.0, 1),
+        slot_id: 20,
+        input: Box::new(values_path(10, 1.0, 1.0)),
+        targets: vec![TargetEntry::new("a", var(10, 1), int4(), 1)],
+    };
+    let mut rel = RelOptInfo::new(vec![1], RelOptKind::UpperRel, PathTarget::from_target_list(&[]));
+    rel.add_path(path);
+
+    let required = util::required_query_pathkeys_for_rel(&root, &rel);
+    let lowered = util::lower_pathkeys_for_rel(&root, &rel, &root.query_pathkeys);
+
+    assert_eq!(required, lowered);
+}
+
+#[test]
+fn required_query_pathkeys_for_rel_keeps_sortgroup_identified_keys_when_rel_has_matching_path() {
+    let root = planner_info_for_sql("select column1 as a from (values (1)) v order by a");
+    let sortgroupref = root.query_pathkeys[0].ressortgroupref;
+    let path = Path::Projection {
+        plan_info: PlanEstimate::new(1.0, 1.5, 10.0, 1),
+        slot_id: 20,
+        input: Box::new(values_path(10, 1.0, 1.0)),
+        targets: vec![TargetEntry::new("a", var(10, 1), int4(), 1).with_sort_group_ref(sortgroupref)],
+    };
+    let mut rel = RelOptInfo::new(vec![1], RelOptKind::UpperRel, PathTarget::from_target_list(&[]));
+    rel.add_path(path);
+
+    let required = util::required_query_pathkeys_for_rel(&root, &rel);
+
+    assert_eq!(required, root.query_pathkeys);
+}
+
+#[test]
 fn join_input_rewrite_keeps_composite_expr_semantic_until_late_rewrite() {
     let merged = Expr::Coalesce(Box::new(var(1, 1)), Box::new(var(1, 2)));
     let right = Path::Projection {
