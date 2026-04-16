@@ -8,6 +8,7 @@ use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, StorageManager
 use crate::include::access::htup::TupleValue;
 use crate::include::access::htup::{AttributeDesc, HeapTuple};
 use crate::include::nodes::datetime::DateADT;
+use crate::include::nodes::primnodes::{Var, user_attrno};
 use crate::pgrust::database::{Database, Session};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -15,6 +16,15 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
+
+fn local_var(index: usize) -> Expr {
+    Expr::Var(Var {
+        varno: 1,
+        varattno: user_attrno(index),
+        varlevelsup: 0,
+        vartype: crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Int4),
+    })
+}
 
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -228,14 +238,14 @@ fn people_pets_hash_join_plan(kind: JoinType, join_qual: Vec<Expr>, qual: Vec<Ex
         right: Box::new(Plan::Hash {
             plan_info: PlanEstimate::default(),
             input: Box::new(pets_scan_plan()),
-            hash_keys: vec![Expr::Column(2)],
+            hash_keys: vec![local_var(2)],
         }),
         kind,
         hash_clauses: vec![Expr::op_auto(
             crate::include::nodes::primnodes::OpExprKind::Eq,
-            vec![Expr::Column(0), Expr::Column(5)],
+            vec![local_var(0), local_var(5)],
         )],
-        hash_keys: vec![Expr::Column(0)],
+        hash_keys: vec![local_var(0)],
         join_qual,
         qual,
     }
@@ -722,7 +732,7 @@ fn expr_eval_obeys_null_semantics() {
         eval_expr(
             &Expr::op_auto(
                 crate::include::nodes::primnodes::OpExprKind::Eq,
-                vec![Expr::Column(0), Expr::Const(Value::Int32(7))]
+                vec![local_var(0), Expr::Const(Value::Int32(7))]
             ),
             &mut slot,
             &mut ctx
@@ -734,7 +744,7 @@ fn expr_eval_obeys_null_semantics() {
         eval_expr(
             &Expr::op_auto(
                 crate::include::nodes::primnodes::OpExprKind::Eq,
-                vec![Expr::Column(2), Expr::Const(Value::Text("x".into()))]
+                vec![local_var(2), Expr::Const(Value::Text("x".into()))]
             ),
             &mut slot,
             &mut ctx
@@ -753,7 +763,7 @@ fn expr_eval_obeys_null_semantics() {
     );
     assert_eq!(
         eval_expr(
-            &Expr::IsNull(Box::new(Expr::Column(2))),
+            &Expr::IsNull(Box::new(local_var(2))),
             &mut slot,
             &mut ctx
         )
@@ -762,7 +772,7 @@ fn expr_eval_obeys_null_semantics() {
     );
     assert_eq!(
         eval_expr(
-            &Expr::IsNotNull(Box::new(Expr::Column(2))),
+            &Expr::IsNotNull(Box::new(local_var(2))),
             &mut slot,
             &mut ctx
         )
@@ -772,7 +782,7 @@ fn expr_eval_obeys_null_semantics() {
     assert_eq!(
         eval_expr(
             &Expr::IsDistinctFrom(
-                Box::new(Expr::Column(2)),
+                Box::new(local_var(2)),
                 Box::new(Expr::Const(Value::Null))
             ),
             &mut slot,
@@ -784,7 +794,7 @@ fn expr_eval_obeys_null_semantics() {
     assert_eq!(
         eval_expr(
             &Expr::IsDistinctFrom(
-                Box::new(Expr::Column(1)),
+                Box::new(local_var(1)),
                 Box::new(Expr::Const(Value::Null))
             ),
             &mut slot,
@@ -860,19 +870,19 @@ fn seqscan_filter_projection_returns_expected_rows() {
             }),
             predicate: Expr::op_auto(
                 crate::include::nodes::primnodes::OpExprKind::Gt,
-                vec![Expr::Column(0), Expr::Const(Value::Int32(1))],
+                vec![local_var(0), Expr::Const(Value::Int32(1))],
             ),
         }),
         targets: vec![
             TargetEntry::new(
                 "name",
-                Expr::Column(1),
+                local_var(1),
                 crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Text),
                 1,
             ),
             TargetEntry::new(
                 "note_is_null",
-                Expr::IsNull(Box::new(Expr::Column(2))),
+                Expr::IsNull(Box::new(local_var(2))),
                 crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Bool),
                 2,
             ),
@@ -961,13 +971,13 @@ fn manual_hash_join_inner_returns_matching_rows() {
         targets: vec![
             TargetEntry::new(
                 "person_id",
-                Expr::Column(0),
+                local_var(0),
                 crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Int4),
                 1,
             ),
             TargetEntry::new(
                 "pet_id",
-                Expr::Column(3),
+                local_var(3),
                 crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Int4),
                 2,
             ),
@@ -1006,13 +1016,13 @@ fn manual_hash_join_left_emits_null_extended_rows() {
         targets: vec![
             TargetEntry::new(
                 "person_id",
-                Expr::Column(0),
+                local_var(0),
                 crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Int4),
                 1,
             ),
             TargetEntry::new(
                 "pet_id",
-                Expr::Column(3),
+                local_var(3),
                 crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Int4),
                 2,
             ),
@@ -1055,13 +1065,13 @@ fn manual_hash_join_right_emits_unmatched_inner_rows() {
         targets: vec![
             TargetEntry::new(
                 "person_id",
-                Expr::Column(0),
+                local_var(0),
                 crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Int4),
                 1,
             ),
             TargetEntry::new(
                 "pet_id",
-                Expr::Column(3),
+                local_var(3),
                 crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Int4),
                 2,
             ),
@@ -1104,13 +1114,13 @@ fn manual_hash_join_full_emits_unmatched_rows_from_both_sides() {
         targets: vec![
             TargetEntry::new(
                 "person_id",
-                Expr::Column(0),
+                local_var(0),
                 crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Int4),
                 1,
             ),
             TargetEntry::new(
                 "pet_id",
-                Expr::Column(3),
+                local_var(3),
                 crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Int4),
                 2,
             ),
@@ -1175,14 +1185,14 @@ fn manual_hash_join_null_hash_keys_do_not_match_each_other() {
                 ],
                 output_columns,
             }),
-            hash_keys: vec![Expr::Column(0)],
+            hash_keys: vec![local_var(0)],
         }),
         kind: JoinType::Inner,
         hash_clauses: vec![Expr::op_auto(
             crate::include::nodes::primnodes::OpExprKind::Eq,
-            vec![Expr::Column(0), Expr::Column(1)],
+            vec![local_var(0), local_var(1)],
         )],
-        hash_keys: vec![Expr::Column(0)],
+        hash_keys: vec![local_var(0)],
         join_qual: vec![],
         qual: vec![],
     };
@@ -1209,20 +1219,20 @@ fn manual_hash_join_join_qual_preserves_left_outer_fill() {
             JoinType::Left,
             vec![Expr::op_auto(
                 crate::include::nodes::primnodes::OpExprKind::Eq,
-                vec![Expr::Column(3), Expr::Const(Value::Int32(11))],
+                vec![local_var(3), Expr::Const(Value::Int32(11))],
             )],
             vec![],
         )),
         targets: vec![
             TargetEntry::new(
                 "person_id",
-                Expr::Column(0),
+                local_var(0),
                 crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Int4),
                 1,
             ),
             TargetEntry::new(
                 "pet_id",
-                Expr::Column(3),
+                local_var(3),
                 crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Int4),
                 2,
             ),
@@ -1266,9 +1276,9 @@ fn manual_hash_join_rejects_non_hash_inner_plan() {
         kind: JoinType::Inner,
         hash_clauses: vec![Expr::op_auto(
             crate::include::nodes::primnodes::OpExprKind::Eq,
-            vec![Expr::Column(0), Expr::Column(5)],
+            vec![local_var(0), local_var(5)],
         )],
-        hash_keys: vec![Expr::Column(0)],
+        hash_keys: vec![local_var(0)],
         join_qual: vec![],
         qual: vec![],
     });
@@ -7539,7 +7549,7 @@ fn regex_null_text_returns_null() {
         eval_expr(
             &Expr::op_auto(
                 crate::include::nodes::primnodes::OpExprKind::RegexMatch,
-                vec![Expr::Column(0), Expr::Const(Value::Text("foo".into()))]
+                vec![local_var(0), Expr::Const(Value::Text("foo".into()))]
             ),
             &mut slot,
             &mut ctx
@@ -7557,7 +7567,7 @@ fn regex_null_pattern_returns_null() {
         eval_expr(
             &Expr::op_auto(
                 crate::include::nodes::primnodes::OpExprKind::RegexMatch,
-                vec![Expr::Column(0), Expr::Const(Value::Null)]
+                vec![local_var(0), Expr::Const(Value::Null)]
             ),
             &mut slot,
             &mut ctx

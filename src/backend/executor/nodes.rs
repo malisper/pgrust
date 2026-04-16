@@ -597,10 +597,6 @@ fn render_explain_var_name(var: &Var, column_names: &[String]) -> Option<String>
 
 fn render_explain_expr_inner(expr: &Expr, column_names: &[String]) -> String {
     match expr {
-        Expr::Column(index) => column_names
-            .get(*index)
-            .cloned()
-            .unwrap_or_else(|| format!("column{}", index + 1)),
         Expr::Var(var) => render_explain_var_name(var, column_names)
             .unwrap_or_else(|| format!("{expr:?}")),
         Expr::Const(value) => render_explain_const(value),
@@ -688,11 +684,6 @@ fn render_explain_join_expr_inner(
             .unwrap_or_else(|| format!("{expr:?}")),
         Expr::Var(var) if var.varno == INDEX_VAR => render_explain_var_name(var, inner_names)
             .unwrap_or_else(|| format!("{expr:?}")),
-        Expr::Column(index) => outer_names
-            .get(*index)
-            .cloned()
-            .or_else(|| inner_names.get(index.saturating_sub(outer_names.len())).cloned())
-            .unwrap_or_else(|| format!("column{}", index + 1)),
         Expr::Var(var) => {
             let mut combined_names = outer_names.to_vec();
             combined_names.extend_from_slice(inner_names);
