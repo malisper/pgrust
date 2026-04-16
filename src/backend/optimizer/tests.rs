@@ -935,7 +935,8 @@ fn projection_rewrite_maps_semantic_var_to_current_projection_slot() {
         targets: vec![TargetEntry::new("name", var(1_000_100, 1), int4(), 1)],
     };
 
-    let rewritten = super::rewrite_semantic_expr_for_path(var(1, 1), &outer, &outer.output_vars());
+    let rewritten =
+        super::rewrite::rewrite_semantic_expr_for_path(var(1, 1), &outer, &outer.output_vars());
 
     assert_eq!(rewritten, var(4, 1));
 }

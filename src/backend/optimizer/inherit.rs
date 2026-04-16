@@ -6,7 +6,7 @@ use crate::include::nodes::pathnodes::{
 };
 use crate::include::nodes::primnodes::{Expr, RelationDesc, Var, user_attrno};
 
-use super::util::rewrite_expr_for_append_rel;
+use super::rewrite::rewrite_expr_for_append_rel;
 
 pub(super) fn expand_inherited_rtentries(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) {
     let original_len = root.parse.rtable.len();

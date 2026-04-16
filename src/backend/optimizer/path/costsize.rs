@@ -15,13 +15,15 @@ use crate::include::nodes::primnodes::{
 };
 
 use super::super::pathnodes::next_synthetic_slot_id;
+use super::super::rewrite::{
+    layout_candidate_for_expr, rewrite_expr_for_path, rewrite_semantic_expr_for_path,
+    rewrite_semantic_expr_for_path_or_expand_join_vars,
+};
 use super::super::{
     AccessCandidate, CPU_INDEX_TUPLE_COST, CPU_OPERATOR_COST, CPU_TUPLE_COST, DEFAULT_BOOL_SEL,
     DEFAULT_EQ_SEL, DEFAULT_INEQ_SEL, DEFAULT_NUM_PAGES, DEFAULT_NUM_ROWS, HashJoinClauses,
-    IndexPathSpec, IndexableQual, RANDOM_PAGE_COST, RelationStats, SEQ_PAGE_COST, 
-    STATISTIC_KIND_HISTOGRAM, STATISTIC_KIND_MCV, expr_relids, layout_candidate_for_expr,
-    path_relids, relids_subset, rewrite_expr_for_path, rewrite_semantic_expr_for_path,
-    rewrite_semantic_expr_for_path_or_expand_join_vars,
+    IndexPathSpec, IndexableQual, RANDOM_PAGE_COST, RelationStats, SEQ_PAGE_COST,
+    STATISTIC_KIND_HISTOGRAM, STATISTIC_KIND_MCV, expr_relids, path_relids, relids_subset,
 };
 
 pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {

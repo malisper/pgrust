@@ -4,9 +4,6 @@ use super::pathnodes::{
     rte_slot_varno,
 };
 use super::plan::append_planned_subquery;
-use super::util::{
-    rewrite_semantic_expr_for_path, rewrite_semantic_expr_for_path_or_expand_join_vars,
-};
 use super::{
     expand_join_rte_vars, flatten_join_alias_vars, planner_with_param_base,
 };
@@ -1297,7 +1294,6 @@ fn lower_agg_accum(
     ctx: &mut SetRefsContext<'_>,
     accum: crate::include::nodes::primnodes::AggAccum,
     path: &Path,
-    layout: &[Expr],
     input_tlist: &IndexedTlist,
 ) -> crate::include::nodes::primnodes::AggAccum {
     crate::include::nodes::primnodes::AggAccum {
@@ -1305,12 +1301,7 @@ fn lower_agg_accum(
             .args
             .into_iter()
             .map(|arg| {
-                let arg = match ctx.root {
-                    Some(root) => {
-                        rewrite_semantic_expr_for_path_or_expand_join_vars(root, arg, path, layout)
-                    }
-                    None => rewrite_semantic_expr_for_path(arg, path, layout),
-                };
+                let arg = fix_upper_expr_for_input(ctx.root, arg, path, input_tlist);
                 lower_expr(
                     ctx,
                     arg,
@@ -2292,29 +2283,7 @@ fn set_projection_references(
                 if expr_contains_local_semantic_var(&lowered) {
                     let rewritten =
                         fix_upper_expr_for_input(root, target.expr.clone(), &input, &input_tlist);
-                    if expr_contains_local_semantic_var(&rewritten) {
-                        let semantic = match root {
-                            Some(root) => rewrite_semantic_expr_for_path_or_expand_join_vars(
-                                root,
-                                target.expr.clone(),
-                                &input,
-                                &input.output_vars(),
-                            ),
-                            None => rewrite_semantic_expr_for_path(
-                                target.expr.clone(),
-                                &input,
-                                &input.output_vars(),
-                            ),
-                        };
-                        fix_upper_expr_for_input(
-                            root,
-                            semantic,
-                            &input,
-                            &input_tlist,
-                        )
-                    } else {
-                        rewritten
-                    }
+                    rewritten
                 } else {
                     fix_upper_expr_for_input(root, lowered, &input, &input_tlist)
                 }
@@ -2380,7 +2349,6 @@ fn set_aggregate_references(
     having: Option<Expr>,
     output_columns: Vec<QueryColumn>,
 ) -> Plan {
-    let layout = input.output_vars();
     let input_tlist = build_path_tlist(ctx.root, &input);
     let aggregate_layout = aggregate_output_vars(slot_id, &group_by, &accumulators);
     let aggregate_tlist = build_aggregate_tlist(ctx.root, slot_id, &group_by, &accumulators);
@@ -2388,17 +2356,12 @@ fn set_aggregate_references(
     let root = ctx.root;
     let group_by = group_by
         .into_iter()
-        .map(|expr| match root {
-            Some(root) => rewrite_semantic_expr_for_path_or_expand_join_vars(
-                root, expr, &input, &layout,
-            ),
-            None => rewrite_semantic_expr_for_path(expr, &input, &layout),
-        })
+        .map(|expr| fix_upper_expr_for_input(root, expr, &input, &input_tlist))
         .map(|expr| lower_expr(ctx, expr, LowerMode::Input { tlist: &input_tlist }))
         .collect();
     let accumulators = accumulators
         .into_iter()
-        .map(|accum| lower_agg_accum(ctx, accum, &input, &layout, &input_tlist))
+        .map(|accum| lower_agg_accum(ctx, accum, &input, &input_tlist))
         .collect();
     let having = having.map(|expr| {
         let expr = match ctx.root {
