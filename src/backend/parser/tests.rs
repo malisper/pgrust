@@ -3180,6 +3180,21 @@ fn parse_aggregate_select() {
 }
 
 #[test]
+fn parse_string_agg_select() {
+    let stmt = parse_select("select string_agg(note, ',') from people").unwrap();
+    assert!(matches!(
+        &stmt.targets[0].expr,
+        SqlExpr::AggCall {
+            func: AggFunc::StringAgg,
+            args,
+            distinct: false,
+            ..
+        } if args.len() == 2
+    ));
+    assert_eq!(stmt.targets[0].output_name, "string_agg");
+}
+
+#[test]
 fn parse_variadic_aggregate_call_marks_call_level_flag() {
     std::thread::Builder::new()
         .name("parse_variadic_aggregate_call_marks_call_level_flag".into())

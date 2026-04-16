@@ -2376,6 +2376,70 @@ fn sum_avg_min_max_aggregates() {
         other => panic!("expected query result, got {:?}", other),
     }
 }
+
+#[test]
+fn string_agg_skips_null_values() {
+    let base = temp_dir("string_agg_text");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let xid = txns.begin();
+    run_sql(
+        &base,
+        &txns,
+        xid,
+        "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', null), (3, 'carol', 'c')",
+    )
+    .unwrap();
+    txns.commit(xid).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select string_agg(note, ',') from people",
+    )
+    .unwrap()
+    {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(column_names, vec!["string_agg"]);
+            assert_eq!(rows, vec![vec![Value::Text("a,c".into())]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn string_agg_supports_bytea_inputs() {
+    let base = temp_dir("string_agg_bytea");
+    let db = Database::open(&base, 16).unwrap();
+    db.execute(
+        1,
+        "create table bytes_demo (payload bytea, delimiter bytea)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into bytes_demo (payload, delimiter) values (E'\\\\001'::bytea, E'\\\\377'::bytea), (E'\\\\002'::bytea, E'\\\\377'::bytea)",
+    )
+    .unwrap();
+    match db
+        .execute(
+            1,
+            "select encode(agg_payload, 'hex')
+             from (
+                 select string_agg(payload, delimiter) as agg_payload
+                 from bytes_demo
+             ) agg_bytes",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Text("01ff02".into())]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
 #[test]
 fn having_filters_groups() {
     let base = temp_dir("having_filter");

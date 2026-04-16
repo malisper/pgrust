@@ -791,7 +791,9 @@ pub(super) fn validate_aggregate_arity(func: AggFunc, args: &[SqlExpr]) -> Resul
             | AggFunc::ArrayAgg
             | AggFunc::JsonAgg
             | AggFunc::JsonbAgg => args.len() == 1,
-            AggFunc::JsonObjectAgg | AggFunc::JsonbObjectAgg => args.len() == 2,
+            AggFunc::StringAgg | AggFunc::JsonObjectAgg | AggFunc::JsonbObjectAgg => {
+                args.len() == 2
+            }
         });
     if valid {
         Ok(())
@@ -1711,6 +1713,7 @@ fn aggregate_func_for_proname(name: &str) -> Option<AggFunc> {
         "stddev" => Some(AggFunc::Stddev),
         "min" => Some(AggFunc::Min),
         "max" => Some(AggFunc::Max),
+        "string_agg" => Some(AggFunc::StringAgg),
         "array_agg" => Some(AggFunc::ArrayAgg),
         "json_agg" => Some(AggFunc::JsonAgg),
         "jsonb_agg" => Some(AggFunc::JsonbAgg),
@@ -1952,7 +1955,12 @@ mod tests {
             )
             .is_ok()
         );
+        assert!(
+            validate_aggregate_arity(AggFunc::StringAgg, &[SqlExpr::Default, SqlExpr::Default])
+                .is_ok()
+        );
         assert!(validate_aggregate_arity(AggFunc::JsonObjectAgg, &[SqlExpr::Default]).is_err());
+        assert!(validate_aggregate_arity(AggFunc::StringAgg, &[SqlExpr::Default]).is_err());
         assert!(validate_aggregate_arity(AggFunc::Count, &[]).is_ok());
     }
 

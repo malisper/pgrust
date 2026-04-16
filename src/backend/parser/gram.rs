@@ -4222,6 +4222,7 @@ fn build_agg_call(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                     Rule::kw_stddev => AggFunc::Stddev,
                     Rule::kw_min => AggFunc::Min,
                     Rule::kw_max => AggFunc::Max,
+                    Rule::kw_string_agg => AggFunc::StringAgg,
                     Rule::kw_array_agg => AggFunc::ArrayAgg,
                     Rule::kw_json_agg => AggFunc::JsonAgg,
                     Rule::kw_jsonb_agg => AggFunc::JsonbAgg,
