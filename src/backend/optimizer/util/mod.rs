@@ -1,7 +1,7 @@
 mod tlist;
 
 use crate::backend::parser::CatalogLookup;
-use crate::include::nodes::pathnodes::{Path, PathKey, PathTarget, PlannerInfo, RelOptInfo};
+use crate::include::nodes::pathnodes::{Path, PathKey, PlannerInfo, RelOptInfo};
 use crate::include::nodes::primnodes::{AggAccum, Expr, QueryColumn, RelationDesc, TargetEntry};
 
 pub(super) fn build_aggregate_output_columns(
