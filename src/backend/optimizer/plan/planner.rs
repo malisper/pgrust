@@ -194,8 +194,15 @@ fn project_set_targets_for_target_list(
     target_list
         .iter()
         .cloned()
-        .map(|target| match target.expr {
-            Expr::Column(index) if index >= base_width => project_set
+        .map(|target| match target
+            .input_resno
+            .and_then(|input_resno| input_resno.checked_sub(1))
+            .filter(|index| *index >= base_width)
+            .or_else(|| match target.expr {
+                Expr::Column(index) if index >= base_width => Some(index),
+                _ => None,
+            }) {
+            Some(index) => project_set
                 .get(index)
                 .cloned()
                 .map(|project_target| match project_target {
@@ -213,7 +220,7 @@ fn project_set_targets_for_target_list(
                     ProjectSetTarget::Scalar(_) => ProjectSetTarget::Scalar(target.clone()),
                 })
                 .unwrap_or(ProjectSetTarget::Scalar(target)),
-            _ => ProjectSetTarget::Scalar(target),
+            None => ProjectSetTarget::Scalar(target),
         })
         .collect()
 }
@@ -227,8 +234,7 @@ fn query_has_postponed_srfs(root: &PlannerInfo) -> bool {
     }
     let base_width = root::project_set_base_width(project_set);
     !root.processed_tlist.iter().any(|target| {
-        target.ressortgroupref != 0
-            && root::expr_references_project_set_output(&target.expr, base_width)
+        target.ressortgroupref != 0 && root::target_references_project_set_output(target, base_width)
     })
 }
 
