@@ -331,6 +331,34 @@ fn plan_contains(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> bool 
     }
 }
 
+fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<String>() {
+        return message.clone();
+    }
+    if let Some(message) = payload.downcast_ref::<&'static str>() {
+        return (*message).to_string();
+    }
+    format!("{payload:?}")
+}
+
+#[test]
+fn executable_plan_validator_reports_node_and_field() {
+    let plan = Plan::Projection {
+        plan_info: PlanEstimate::new(1.0, 1.0, 1.0, 1),
+        input: Box::new(values_path(10, 1.0, 1.0).into_plan()),
+        targets: vec![TargetEntry::new("bad", Expr::Column(0), int4(), 1)],
+    };
+
+    let panic = std::panic::catch_unwind(|| {
+        super::setrefs::validate_executable_plan_for_tests(&plan);
+    })
+    .expect_err("validator should reject planner-only expressions");
+
+    let message = panic_message(panic);
+    assert!(message.contains("Projection.targets"));
+    assert!(message.contains("Column(0)"));
+}
+
 #[test]
 fn required_query_pathkeys_for_path_keeps_sortgroup_identified_keys() {
     let root = planner_info_for_sql("select column1 as a from (values (1)) v order by a");

@@ -109,6 +109,7 @@ pub(super) fn create_plan_with_param_base(
         ext_params: Vec::new(),
     };
     let plan = set_plan_refs(&mut ctx, path);
+    validate_executable_plan(&plan);
     (plan, ctx.ext_params, ctx.next_param_id)
 }
 
@@ -122,6 +123,7 @@ pub(super) fn create_plan_without_root(path: Path) -> Plan {
         ext_params: Vec::new(),
     };
     let plan = set_plan_refs(&mut ctx, path);
+    validate_executable_plan(&plan);
     assert!(ctx.ext_params.is_empty());
     assert!(ctx.subplans.is_empty());
     plan
@@ -741,7 +743,10 @@ fn lower_expr(ctx: &mut SetRefsContext<'_>, expr: Expr, mode: LowerMode<'_>) -> 
             if is_system_attr(var.varattno) {
                 Expr::Var(var)
             } else {
-                panic!("unresolved semantic Var {var:?} survived setrefs in mode {mode:?}")
+                panic!(
+                    "unresolved semantic Var {var:?} survived setrefs in mode {mode:?}; \
+                     executable plans should only contain executor-facing refs or allowed scan/system Vars"
+                )
             }
         }
         Expr::Param(param) => Expr::Param(param),
@@ -874,6 +879,279 @@ fn lower_expr(ctx: &mut SetRefsContext<'_>, expr: Expr, mode: LowerMode<'_>) -> 
         },
         other => other,
     }
+}
+
+fn validate_executable_expr(expr: &Expr, plan_node: &str, field: &str) {
+    match expr {
+        Expr::Var(var) if var.varlevelsup > 0 => panic!(
+            "executable plan contains outer-level Var in {plan_node}.{field}: {var:?}"
+        ),
+        Expr::Column(index) => panic!(
+            "executable plan contains planner-only Column({index}) in {plan_node}.{field}"
+        ),
+        Expr::OuterColumn { depth, index } => panic!(
+            "executable plan contains planner-only OuterColumn(depth={depth}, index={index}) in {plan_node}.{field}"
+        ),
+        Expr::Aggref(aggref) => panic!(
+            "executable plan contains unresolved Aggref in {plan_node}.{field}: {aggref:?}"
+        ),
+        Expr::SubLink(sublink) => panic!(
+            "executable plan contains unresolved SubLink in {plan_node}.{field}: {sublink:?}"
+        ),
+        Expr::Op(op) => op
+            .args
+            .iter()
+            .for_each(|arg| validate_executable_expr(arg, plan_node, field)),
+        Expr::Bool(bool_expr) => bool_expr
+            .args
+            .iter()
+            .for_each(|arg| validate_executable_expr(arg, plan_node, field)),
+        Expr::Case(case_expr) => {
+            if let Some(arg) = &case_expr.arg {
+                validate_executable_expr(arg, plan_node, field);
+            }
+            for arm in &case_expr.args {
+                validate_executable_expr(&arm.expr, plan_node, field);
+                validate_executable_expr(&arm.result, plan_node, field);
+            }
+            validate_executable_expr(&case_expr.defresult, plan_node, field);
+        }
+        Expr::Func(func) => func
+            .args
+            .iter()
+            .for_each(|arg| validate_executable_expr(arg, plan_node, field)),
+        Expr::SubPlan(subplan) => {
+            if let Some(testexpr) = &subplan.testexpr {
+                validate_executable_expr(testexpr, plan_node, field);
+            }
+            subplan
+                .args
+                .iter()
+                .for_each(|arg| validate_executable_expr(arg, plan_node, field));
+        }
+        Expr::ScalarArrayOp(saop) => {
+            validate_executable_expr(&saop.left, plan_node, field);
+            validate_executable_expr(&saop.right, plan_node, field);
+        }
+        Expr::Cast(inner, _) => validate_executable_expr(inner, plan_node, field),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            validate_executable_expr(expr, plan_node, field);
+            validate_executable_expr(pattern, plan_node, field);
+            if let Some(escape) = escape {
+                validate_executable_expr(escape, plan_node, field);
+            }
+        }
+        Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
+            validate_executable_expr(inner, plan_node, field);
+        }
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            validate_executable_expr(left, plan_node, field);
+            validate_executable_expr(right, plan_node, field);
+        }
+        Expr::ArrayLiteral { elements, .. } => elements
+            .iter()
+            .for_each(|element| validate_executable_expr(element, plan_node, field)),
+        Expr::ArraySubscript { array, subscripts } => {
+            validate_executable_expr(array, plan_node, field);
+            for subscript in subscripts {
+                if let Some(lower) = &subscript.lower {
+                    validate_executable_expr(lower, plan_node, field);
+                }
+                if let Some(upper) = &subscript.upper {
+                    validate_executable_expr(upper, plan_node, field);
+                }
+            }
+        }
+        Expr::Var(_)
+        | Expr::Param(_)
+        | Expr::Const(_)
+        | Expr::CaseTest(_)
+        | Expr::Random
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => {}
+    }
+}
+
+fn validate_set_returning_call(
+    call: &crate::include::nodes::primnodes::SetReturningCall,
+    plan_node: &str,
+    field: &str,
+) {
+    use crate::include::nodes::primnodes::SetReturningCall;
+
+    match call {
+        SetReturningCall::GenerateSeries {
+            start, stop, step, ..
+        } => {
+            validate_executable_expr(start, plan_node, field);
+            validate_executable_expr(stop, plan_node, field);
+            validate_executable_expr(step, plan_node, field);
+        }
+        SetReturningCall::Unnest { args, .. }
+        | SetReturningCall::JsonTableFunction { args, .. }
+        | SetReturningCall::RegexTableFunction { args, .. }
+        | SetReturningCall::TextSearchTableFunction { args, .. }
+        | SetReturningCall::UserDefined { args, .. } => args
+            .iter()
+            .for_each(|arg| validate_executable_expr(arg, plan_node, field)),
+    }
+}
+
+fn validate_agg_accum(
+    accum: &crate::include::nodes::primnodes::AggAccum,
+    plan_node: &str,
+    field: &str,
+) {
+    accum
+        .args
+        .iter()
+        .for_each(|arg| validate_executable_expr(arg, plan_node, field));
+}
+
+fn validate_executable_plan(plan: &Plan) {
+    match plan {
+        Plan::Result { .. } | Plan::SeqScan { .. } => {}
+        Plan::Append { children, .. } => {
+            for child in children {
+                validate_executable_plan(child);
+            }
+        }
+        Plan::IndexScan { .. } => {}
+        Plan::Hash { input, hash_keys, .. } => {
+            hash_keys
+                .iter()
+                .for_each(|expr| validate_executable_expr(expr, "Hash", "hash_keys"));
+            validate_executable_plan(input);
+        }
+        Plan::NestedLoopJoin {
+            left,
+            right,
+            nest_params,
+            join_qual,
+            qual,
+            ..
+        } => {
+            for param in nest_params {
+                validate_executable_expr(&param.expr, "NestedLoopJoin", "nest_params");
+            }
+            join_qual
+                .iter()
+                .for_each(|expr| validate_executable_expr(expr, "NestedLoopJoin", "join_qual"));
+            qual.iter()
+                .for_each(|expr| validate_executable_expr(expr, "NestedLoopJoin", "qual"));
+            validate_executable_plan(left);
+            validate_executable_plan(right);
+        }
+        Plan::HashJoin {
+            left,
+            right,
+            hash_clauses,
+            hash_keys,
+            join_qual,
+            qual,
+            ..
+        } => {
+            hash_clauses
+                .iter()
+                .for_each(|expr| validate_executable_expr(expr, "HashJoin", "hash_clauses"));
+            hash_keys
+                .iter()
+                .for_each(|expr| validate_executable_expr(expr, "HashJoin", "hash_keys"));
+            join_qual
+                .iter()
+                .for_each(|expr| validate_executable_expr(expr, "HashJoin", "join_qual"));
+            qual.iter()
+                .for_each(|expr| validate_executable_expr(expr, "HashJoin", "qual"));
+            validate_executable_plan(left);
+            validate_executable_plan(right);
+        }
+        Plan::Filter { input, predicate, .. } => {
+            validate_executable_expr(predicate, "Filter", "predicate");
+            validate_executable_plan(input);
+        }
+        Plan::OrderBy { input, items, .. } => {
+            items
+                .iter()
+                .for_each(|item| validate_executable_expr(&item.expr, "OrderBy", "items"));
+            validate_executable_plan(input);
+        }
+        Plan::Limit { input, .. } => validate_executable_plan(input),
+        Plan::Projection { input, targets, .. } => {
+            targets
+                .iter()
+                .for_each(|target| validate_executable_expr(&target.expr, "Projection", "targets"));
+            validate_executable_plan(input);
+        }
+        Plan::Aggregate {
+            input,
+            group_by,
+            accumulators,
+            having,
+            ..
+        } => {
+            group_by
+                .iter()
+                .for_each(|expr| validate_executable_expr(expr, "Aggregate", "group_by"));
+            accumulators
+                .iter()
+                .for_each(|accum| validate_agg_accum(accum, "Aggregate", "accumulators"));
+            if let Some(having) = having {
+                validate_executable_expr(having, "Aggregate", "having");
+            }
+            validate_executable_plan(input);
+        }
+        Plan::FunctionScan { call, .. } => {
+            validate_set_returning_call(call, "FunctionScan", "call");
+        }
+        Plan::CteScan { cte_plan, .. } => validate_executable_plan(cte_plan),
+        Plan::WorkTableScan { .. } => {}
+        Plan::RecursiveUnion {
+            anchor, recursive, ..
+        } => {
+            validate_executable_plan(anchor);
+            validate_executable_plan(recursive);
+        }
+        Plan::Values { rows, .. } => {
+            for row in rows {
+                row.iter()
+                    .for_each(|expr| validate_executable_expr(expr, "Values", "rows"));
+            }
+        }
+        Plan::ProjectSet { input, targets, .. } => {
+            for target in targets {
+                match target {
+                    crate::include::nodes::primnodes::ProjectSetTarget::Scalar(entry) => {
+                        validate_executable_expr(&entry.expr, "ProjectSet", "targets");
+                    }
+                    crate::include::nodes::primnodes::ProjectSetTarget::Set { call, .. } => {
+                        validate_set_returning_call(call, "ProjectSet", "targets");
+                    }
+                }
+            }
+            validate_executable_plan(input);
+        }
+    }
+}
+
+#[cfg(test)]
+pub(super) fn validate_executable_plan_for_tests(plan: &Plan) {
+    validate_executable_plan(plan);
 }
 
 fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
