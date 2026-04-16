@@ -1,3 +1,4 @@
+use super::inherit::append_translation;
 use super::pathnodes::{
     aggregate_output_vars, expr_sql_type, lower_agg_output_expr, rewrite_semantic_expr_for_input_path,
     rte_slot_varno,
@@ -776,6 +777,256 @@ fn expr_contains_local_semantic_var(expr: &Expr) -> bool {
     }
 }
 
+fn expr_contains_legacy_layout_ref(expr: &Expr) -> bool {
+    match expr {
+        Expr::Column(_) | Expr::OuterColumn { .. } => true,
+        Expr::Aggref(aggref) => aggref.args.iter().any(expr_contains_legacy_layout_ref),
+        Expr::Op(op) => op.args.iter().any(expr_contains_legacy_layout_ref),
+        Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_contains_legacy_layout_ref),
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_deref()
+                .is_some_and(expr_contains_legacy_layout_ref)
+                || case_expr
+                    .args
+                    .iter()
+                    .any(|arm| {
+                        expr_contains_legacy_layout_ref(&arm.expr)
+                            || expr_contains_legacy_layout_ref(&arm.result)
+                    })
+                || expr_contains_legacy_layout_ref(&case_expr.defresult)
+        }
+        Expr::Func(func) => func.args.iter().any(expr_contains_legacy_layout_ref),
+        Expr::SubLink(sublink) => sublink
+            .testexpr
+            .as_deref()
+            .is_some_and(expr_contains_legacy_layout_ref),
+        Expr::SubPlan(subplan) => subplan
+            .testexpr
+            .as_deref()
+            .is_some_and(expr_contains_legacy_layout_ref),
+        Expr::ScalarArrayOp(saop) => {
+            expr_contains_legacy_layout_ref(&saop.left)
+                || expr_contains_legacy_layout_ref(&saop.right)
+        }
+        Expr::Cast(inner, _) => expr_contains_legacy_layout_ref(inner),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_contains_legacy_layout_ref(expr)
+                || expr_contains_legacy_layout_ref(pattern)
+                || escape
+                    .as_deref()
+                    .is_some_and(expr_contains_legacy_layout_ref)
+        }
+        Expr::IsNull(inner) | Expr::IsNotNull(inner) => expr_contains_legacy_layout_ref(inner),
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            expr_contains_legacy_layout_ref(left) || expr_contains_legacy_layout_ref(right)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements.iter().any(expr_contains_legacy_layout_ref),
+        Expr::ArraySubscript { array, subscripts } => {
+            expr_contains_legacy_layout_ref(array)
+                || subscripts.iter().any(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .is_some_and(expr_contains_legacy_layout_ref)
+                        || subscript
+                            .upper
+                            .as_ref()
+                            .is_some_and(expr_contains_legacy_layout_ref)
+                })
+        }
+        _ => false,
+    }
+}
+
+fn path_single_relid(path: &Path) -> Option<usize> {
+    match path {
+        Path::Append { source_id, .. }
+        | Path::SeqScan { source_id, .. }
+        | Path::IndexScan { source_id, .. } => Some(*source_id),
+        Path::Filter { input, .. }
+        | Path::Projection { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::Limit { input, .. }
+        | Path::Aggregate { input, .. }
+        | Path::ProjectSet { input, .. } => path_single_relid(input),
+        _ => None,
+    }
+}
+
+fn rewrite_expr_for_append_rel(
+    expr: Expr,
+    info: &crate::include::nodes::pathnodes::AppendRelInfo,
+) -> Expr {
+    match expr {
+        Expr::Var(var) if var.varlevelsup == 0 && var.varno == info.parent_relid => info
+            .translated_vars
+            .get(attrno_index(var.varattno).unwrap_or(usize::MAX))
+            .cloned()
+            .unwrap_or(Expr::Var(var)),
+        Expr::Aggref(aggref) => Expr::Aggref(Box::new(Aggref {
+            args: aggref
+                .args
+                .into_iter()
+                .map(|arg| rewrite_expr_for_append_rel(arg, info))
+                .collect(),
+            ..*aggref
+        })),
+        Expr::Op(op) => Expr::Op(Box::new(OpExpr {
+            args: op
+                .args
+                .into_iter()
+                .map(|arg| rewrite_expr_for_append_rel(arg, info))
+                .collect(),
+            ..*op
+        })),
+        Expr::Bool(bool_expr) => Expr::Bool(Box::new(BoolExpr {
+            args: bool_expr
+                .args
+                .into_iter()
+                .map(|arg| rewrite_expr_for_append_rel(arg, info))
+                .collect(),
+            ..*bool_expr
+        })),
+        Expr::Case(case_expr) => Expr::Case(Box::new(crate::include::nodes::primnodes::CaseExpr {
+            arg: case_expr
+                .arg
+                .map(|arg| Box::new(rewrite_expr_for_append_rel(*arg, info))),
+            args: case_expr
+                .args
+                .into_iter()
+                .map(|arm| crate::include::nodes::primnodes::CaseWhen {
+                    expr: rewrite_expr_for_append_rel(arm.expr, info),
+                    result: rewrite_expr_for_append_rel(arm.result, info),
+                })
+                .collect(),
+            defresult: Box::new(rewrite_expr_for_append_rel(*case_expr.defresult, info)),
+            ..*case_expr
+        })),
+        Expr::Func(func) => Expr::Func(Box::new(FuncExpr {
+            args: func
+                .args
+                .into_iter()
+                .map(|arg| rewrite_expr_for_append_rel(arg, info))
+                .collect(),
+            ..*func
+        })),
+        Expr::SubLink(sublink) => {
+            Expr::SubLink(Box::new(crate::include::nodes::primnodes::SubLink {
+                testexpr: sublink
+                    .testexpr
+                    .map(|expr| Box::new(rewrite_expr_for_append_rel(*expr, info))),
+                ..*sublink
+            }))
+        }
+        Expr::SubPlan(subplan) => {
+            Expr::SubPlan(Box::new(crate::include::nodes::primnodes::SubPlan {
+                testexpr: subplan
+                    .testexpr
+                    .map(|expr| Box::new(rewrite_expr_for_append_rel(*expr, info))),
+                ..*subplan
+            }))
+        }
+        Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(ScalarArrayOpExpr {
+            left: Box::new(rewrite_expr_for_append_rel(*saop.left, info)),
+            right: Box::new(rewrite_expr_for_append_rel(*saop.right, info)),
+            ..*saop
+        })),
+        Expr::Cast(inner, ty) => Expr::Cast(Box::new(rewrite_expr_for_append_rel(*inner, info)), ty),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            case_insensitive,
+            negated,
+        } => Expr::Like {
+            expr: Box::new(rewrite_expr_for_append_rel(*expr, info)),
+            pattern: Box::new(rewrite_expr_for_append_rel(*pattern, info)),
+            escape: escape.map(|expr| Box::new(rewrite_expr_for_append_rel(*expr, info))),
+            case_insensitive,
+            negated,
+        },
+        Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            negated,
+        } => Expr::Similar {
+            expr: Box::new(rewrite_expr_for_append_rel(*expr, info)),
+            pattern: Box::new(rewrite_expr_for_append_rel(*pattern, info)),
+            escape: escape.map(|expr| Box::new(rewrite_expr_for_append_rel(*expr, info))),
+            negated,
+        },
+        Expr::IsNull(inner) => Expr::IsNull(Box::new(rewrite_expr_for_append_rel(*inner, info))),
+        Expr::IsNotNull(inner) => {
+            Expr::IsNotNull(Box::new(rewrite_expr_for_append_rel(*inner, info)))
+        }
+        Expr::IsDistinctFrom(left, right) => Expr::IsDistinctFrom(
+            Box::new(rewrite_expr_for_append_rel(*left, info)),
+            Box::new(rewrite_expr_for_append_rel(*right, info)),
+        ),
+        Expr::IsNotDistinctFrom(left, right) => Expr::IsNotDistinctFrom(
+            Box::new(rewrite_expr_for_append_rel(*left, info)),
+            Box::new(rewrite_expr_for_append_rel(*right, info)),
+        ),
+        Expr::ArrayLiteral {
+            elements,
+            array_type,
+        } => Expr::ArrayLiteral {
+            elements: elements
+                .into_iter()
+                .map(|element| rewrite_expr_for_append_rel(element, info))
+                .collect(),
+            array_type,
+        },
+        Expr::Coalesce(left, right) => Expr::Coalesce(
+            Box::new(rewrite_expr_for_append_rel(*left, info)),
+            Box::new(rewrite_expr_for_append_rel(*right, info)),
+        ),
+        Expr::ArraySubscript { array, subscripts } => Expr::ArraySubscript {
+            array: Box::new(rewrite_expr_for_append_rel(*array, info)),
+            subscripts: subscripts
+                .into_iter()
+                .map(|subscript| ExprArraySubscript {
+                    is_slice: subscript.is_slice,
+                    lower: subscript
+                        .lower
+                        .map(|expr| rewrite_expr_for_append_rel(expr, info)),
+                    upper: subscript
+                        .upper
+                        .map(|expr| rewrite_expr_for_append_rel(expr, info)),
+                })
+                .collect(),
+        },
+        other => other,
+    }
+}
+
+fn rewrite_appendrel_expr_for_input_path(
+    root: &PlannerInfo,
+    expr: Expr,
+    path: &Path,
+) -> Expr {
+    path_single_relid(path)
+        .and_then(|relid| append_translation(root, relid))
+        .map(|info| rewrite_expr_for_append_rel(expr.clone(), info))
+        .unwrap_or(expr)
+}
+
 fn fix_upper_expr_for_input(
     root: Option<&PlannerInfo>,
     expr: Expr,
@@ -786,7 +1037,20 @@ fn fix_upper_expr_for_input(
     if rewritten != expr {
         return rewritten;
     }
-    fix_upper_expr_for_path(root, expr, input)
+    if let Some(root) = root {
+        let translated = rewrite_appendrel_expr_for_input_path(root, expr.clone(), input);
+        if translated != expr {
+            let translated_rewritten = fix_upper_expr(Some(root), translated.clone(), input_tlist);
+            if translated_rewritten != translated {
+                return translated_rewritten;
+            }
+        }
+    }
+    if expr_contains_legacy_layout_ref(&expr) {
+        fix_upper_expr_for_path(root, expr, input)
+    } else {
+        expr
+    }
 }
 
 fn lower_direct_ref(expr: &Expr, mode: LowerMode<'_>) -> Option<Expr> {
@@ -2633,7 +2897,11 @@ fn fix_join_expr_for_inputs(
     if rewritten != expr {
         return rewritten;
     }
-    fix_join_expr_for_paths(root, expr, left, right)
+    if expr_contains_legacy_layout_ref(&expr) {
+        fix_join_expr_for_paths(root, expr, left, right)
+    } else {
+        expr
+    }
 }
 
 fn exprs_equivalent(root: Option<&PlannerInfo>, left: &Expr, right: &Expr) -> bool {
