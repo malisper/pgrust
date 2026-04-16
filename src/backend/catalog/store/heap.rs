@@ -311,6 +311,14 @@ impl CatalogStore {
         owner_oid: u32,
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
+        let namespace_oid = if namespace_oid == 0 {
+            let mut catalog = self.catalog_snapshot_with_control_for_snapshot(ctx)?;
+            let oid = catalog.next_oid();
+            self.persist_control_state(&catalog)?;
+            oid
+        } else {
+            namespace_oid
+        };
         let rows = PhysicalCatalogRows {
             namespaces: vec![PgNamespaceRow {
                 oid: namespace_oid,

@@ -1042,6 +1042,7 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::comment_on_table_stmt => {
             Ok(Statement::CommentOnTable(build_comment_on_table(inner)?))
         }
+        Rule::create_schema_stmt => Ok(Statement::CreateSchema(build_create_schema(inner)?)),
         Rule::create_table_stmt => build_create_table(inner),
         Rule::create_view_stmt => Ok(Statement::CreateView(build_create_view(inner)?)),
         Rule::drop_role_stmt => Ok(Statement::DropRole(build_drop_role(inner)?)),
@@ -2179,6 +2180,45 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
             if_not_exists,
         }))
     }
+}
+
+fn build_create_schema(pair: Pair<'_, Rule>) -> Result<CreateSchemaStatement, ParseError> {
+    let mut schema_name = None;
+    let mut auth_role = None;
+    let mut if_not_exists = false;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::if_not_exists_clause => if_not_exists = true,
+            Rule::create_schema_authorization_only => {
+                let role = part
+                    .into_inner()
+                    .find(|inner| inner.as_rule() == Rule::identifier)
+                    .map(build_identifier)
+                    .ok_or(ParseError::UnexpectedEof)?;
+                auth_role = Some(role);
+            }
+            Rule::create_schema_authorization_clause => {
+                let role = part
+                    .into_inner()
+                    .find(|inner| inner.as_rule() == Rule::identifier)
+                    .map(build_identifier)
+                    .ok_or(ParseError::UnexpectedEof)?;
+                auth_role = Some(role);
+            }
+            Rule::identifier => {
+                let ident = build_identifier(part);
+                if schema_name.is_none() {
+                    schema_name = Some(ident);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(CreateSchemaStatement {
+        schema_name,
+        auth_role,
+        if_not_exists,
+    })
 }
 
 fn build_create_view(pair: Pair<'_, Rule>) -> Result<CreateViewStatement, ParseError> {

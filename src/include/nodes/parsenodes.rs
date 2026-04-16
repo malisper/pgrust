@@ -201,6 +201,7 @@ pub enum Statement {
     Set(SetStatement),
     Reset(ResetStatement),
     CreateFunction(CreateFunctionStatement),
+    CreateSchema(CreateSchemaStatement),
     CreateTable(CreateTableStatement),
     CreateTableAs(CreateTableAsStatement),
     CreateView(CreateViewStatement),
@@ -644,6 +645,13 @@ impl CreateTableStatement {
             CreateTableElement::Constraint(constraint) => Some(constraint),
         })
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateSchemaStatement {
+    pub schema_name: Option<String>,
+    pub auth_role: Option<String>,
+    pub if_not_exists: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -46,6 +46,117 @@ impl Database {
         invalidate_backend_cache_state(self, client_id);
     }
 
+    fn visible_namespace_by_name(
+        &self,
+        client_id: ClientId,
+        txn_ctx: CatalogTxnContext,
+        schema_name: &str,
+    ) -> Option<crate::include::catalog::PgNamespaceRow> {
+        self.backend_catcache(client_id, txn_ctx)
+            .ok()?
+            .namespace_by_name(schema_name)
+            .cloned()
+            .filter(|row| !self.other_session_temp_namespace_oid(client_id, row.oid))
+    }
+
+    fn resolve_create_relation_target(
+        &self,
+        client_id: ClientId,
+        txn_ctx: CatalogTxnContext,
+        explicit_schema_name: Option<&str>,
+        object_name: &str,
+        persistence: TablePersistence,
+        configured_search_path: Option<&[String]>,
+        allow_temporary_namespace: bool,
+    ) -> Result<(String, u32, TablePersistence), ParseError> {
+        let lowered_name = object_name.to_ascii_lowercase();
+        let temp_namespace = self.owned_temp_namespace(client_id);
+        let is_temp_schema_name = |schema: &str| {
+            schema.eq_ignore_ascii_case("pg_temp")
+                || temp_namespace
+                    .as_ref()
+                    .is_some_and(|ns| ns.name.eq_ignore_ascii_case(schema))
+        };
+
+        if let Some(schema_name) = explicit_schema_name {
+            let normalized_schema = schema_name.to_ascii_lowercase();
+            if normalized_schema == "pg_catalog" {
+                return Err(ParseError::UnsupportedQualifiedName(format!(
+                    "{normalized_schema}.{lowered_name}"
+                )));
+            }
+            if is_temp_schema_name(&normalized_schema) {
+                if !allow_temporary_namespace {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "permanent view",
+                        actual: "temporary view".into(),
+                    });
+                }
+                return Ok((
+                    lowered_name,
+                    Self::temp_namespace_oid(client_id),
+                    TablePersistence::Temporary,
+                ));
+            }
+            let namespace = self
+                .visible_namespace_by_name(client_id, txn_ctx, &normalized_schema)
+                .ok_or_else(|| ParseError::UnexpectedToken {
+                    expected: "existing schema",
+                    actual: format!("schema \"{normalized_schema}\" does not exist"),
+                })?;
+            let storage_name = if namespace.oid == PUBLIC_NAMESPACE_OID {
+                lowered_name.clone()
+            } else {
+                format!("{}.{}", namespace.nspname, lowered_name)
+            };
+            return Ok((storage_name, namespace.oid, persistence));
+        }
+
+        if allow_temporary_namespace && persistence == TablePersistence::Temporary {
+            return Ok((
+                lowered_name,
+                Self::temp_namespace_oid(client_id),
+                TablePersistence::Temporary,
+            ));
+        }
+
+        let configured_path = configured_search_path.map(|search_path| {
+            search_path
+                .iter()
+                .map(|schema| schema.trim().to_ascii_lowercase())
+                .filter(|schema| !schema.is_empty())
+                .collect::<Vec<_>>()
+        });
+        let search_path = configured_path
+            .clone()
+            .unwrap_or_else(|| self.effective_search_path(client_id, configured_search_path));
+
+        for schema_name in search_path {
+            if schema_name.is_empty() || schema_name == "$user" || schema_name == "pg_catalog" {
+                continue;
+            }
+            if allow_temporary_namespace && is_temp_schema_name(&schema_name) {
+                return Ok((
+                    lowered_name,
+                    Self::temp_namespace_oid(client_id),
+                    TablePersistence::Temporary,
+                ));
+            }
+            if let Some(namespace) =
+                self.visible_namespace_by_name(client_id, txn_ctx, &schema_name)
+            {
+                let storage_name = if namespace.oid == PUBLIC_NAMESPACE_OID {
+                    lowered_name.clone()
+                } else {
+                    format!("{}.{}", namespace.nspname, lowered_name)
+                };
+                return Ok((storage_name, namespace.oid, TablePersistence::Permanent));
+            }
+        }
+
+        Err(ParseError::NoSchemaSelectedForCreate)
+    }
+
     pub(crate) fn effective_search_path(
         &self,
         client_id: ClientId,
@@ -61,36 +172,60 @@ impl Database {
 
     pub(super) fn normalize_create_table_stmt_with_search_path(
         &self,
+        client_id: ClientId,
+        txn_ctx: CatalogTxnContext,
         stmt: &CreateTableStatement,
         configured_search_path: Option<&[String]>,
-    ) -> Result<(String, TablePersistence), ParseError> {
-        namespace_normalize_create_table_stmt_with_search_path(stmt, configured_search_path)
+    ) -> Result<(String, u32, TablePersistence), ParseError> {
+        let (table_name, persistence) = normalize_create_table_name(stmt)?;
+        self.resolve_create_relation_target(
+            client_id,
+            txn_ctx,
+            stmt.schema_name.as_deref(),
+            &table_name,
+            persistence,
+            configured_search_path,
+            true,
+        )
     }
 
     pub(super) fn normalize_create_table_as_stmt_with_search_path(
         &self,
+        client_id: ClientId,
+        txn_ctx: CatalogTxnContext,
         stmt: &CreateTableAsStatement,
         configured_search_path: Option<&[String]>,
-    ) -> Result<(String, TablePersistence), ParseError> {
-        namespace_normalize_create_table_as_stmt_with_search_path(stmt, configured_search_path)
+    ) -> Result<(String, u32, TablePersistence), ParseError> {
+        let (table_name, persistence) = normalize_create_table_as_name(stmt)?;
+        self.resolve_create_relation_target(
+            client_id,
+            txn_ctx,
+            stmt.schema_name.as_deref(),
+            &table_name,
+            persistence,
+            configured_search_path,
+            true,
+        )
     }
 
     pub(super) fn normalize_create_view_stmt_with_search_path(
         &self,
+        client_id: ClientId,
+        txn_ctx: CatalogTxnContext,
         stmt: &CreateViewStatement,
         configured_search_path: Option<&[String]>,
-    ) -> Result<String, ParseError> {
-        if stmt
-            .schema_name
-            .as_deref()
-            .is_some_and(|schema| schema.eq_ignore_ascii_case("pg_temp"))
-        {
-            return Err(ParseError::UnexpectedToken {
-                expected: "permanent view",
-                actual: "temporary view".into(),
-            });
-        }
-        namespace_normalize_create_view_stmt_with_search_path(stmt, configured_search_path)
+    ) -> Result<(String, u32), ParseError> {
+        let view_name = normalize_create_view_name(stmt)?;
+        let (storage_name, namespace_oid, _) = self.resolve_create_relation_target(
+            client_id,
+            txn_ctx,
+            stmt.schema_name.as_deref(),
+            &view_name,
+            TablePersistence::Permanent,
+            configured_search_path,
+            false,
+        )?;
+        Ok((storage_name, namespace_oid))
     }
 
     pub(crate) fn lazy_catalog_lookup(

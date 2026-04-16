@@ -720,19 +720,11 @@ fn normalize_create_table_name_parts(
 ) -> Result<(String, TablePersistence), ParseError> {
     let effective_persistence = match schema_name.map(|s| s.to_ascii_lowercase()) {
         Some(schema) if schema == "pg_temp" => TablePersistence::Temporary,
-        Some(schema) if schema == "public" => {
-            if persistence == TablePersistence::Temporary {
-                return Err(ParseError::TempTableInNonTempSchema(schema));
-            }
-            persistence
-        }
         Some(schema) => {
             if persistence == TablePersistence::Temporary {
                 return Err(ParseError::TempTableInNonTempSchema(schema));
             }
-            return Err(ParseError::UnsupportedQualifiedName(format!(
-                "{schema}.{table_name}"
-            )));
+            persistence
         }
         None => persistence,
     };
