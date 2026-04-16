@@ -423,12 +423,6 @@ pub fn eval_expr(
                 Ok(val.clone())
             }
         }
-        Expr::Column(_) => Err(ExecError::DetailedError {
-            message: "planner layout Column reached executor".into(),
-            detail: Some("executor expressions must use lowered Var references".into()),
-            hint: None,
-            sqlstate: "XX000",
-        }),
         Expr::Const(value) => Ok(value.clone()),
         Expr::Cast(inner, ty) => cast_value_with_config(eval_expr(inner, slot, ctx)?, *ty, &ctx.datetime_config),
         Expr::Coalesce(left, right) => {
