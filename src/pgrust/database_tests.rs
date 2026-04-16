@@ -243,6 +243,34 @@ fn scalar_values_subquery_expr_returns_single_value() {
 }
 
 #[test]
+fn recursive_union_distinct_rejects_varbit_columns() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    match session.execute(
+        &db,
+        "with recursive t(n) as (
+            values ('01'::varbit)
+            union
+            select n || '10'::varbit from t where n < '100'::varbit
+        )
+        select n from t",
+    ) {
+        Err(ExecError::DetailedError {
+            sqlstate,
+            message,
+            detail,
+            ..
+        }) => {
+            assert_eq!(sqlstate, "0A000");
+            assert_eq!(message, "could not implement recursive UNION");
+            assert_eq!(detail.as_deref(), Some("All column datatypes must be hashable."));
+        }
+        other => panic!("expected recursive union hashability error, got {:?}", other),
+    }
+}
+
+#[test]
 fn ephemeral_database_rolls_back_aborted_transaction() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);
