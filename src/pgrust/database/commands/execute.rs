@@ -1,6 +1,77 @@
 use super::super::*;
 
 impl Database {
+    pub(crate) fn execute_truncate_table_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        stmt: &crate::backend::parser::TruncateTableStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let mut rewrite_oids = Vec::new();
+
+        for table_name in &stmt.table_names {
+            let entry = match catalog.lookup_any_relation(table_name) {
+                Some(entry) if entry.relkind == 'r' => entry,
+                Some(_) => {
+                    return Err(ExecError::Parse(ParseError::WrongObjectType {
+                        name: table_name.clone(),
+                        expected: "table",
+                    }));
+                }
+                None => {
+                    return Err(ExecError::Parse(ParseError::UnknownTable(
+                        table_name.clone(),
+                    )));
+                }
+            };
+            if catalog.has_subclass(entry.relation_oid) {
+                return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                    "TRUNCATE on inherited parents is not supported yet".into(),
+                )));
+            }
+
+            if !rewrite_oids.contains(&entry.relation_oid) {
+                rewrite_oids.push(entry.relation_oid);
+            }
+            for index in catalog.index_relations_for_heap(entry.relation_oid) {
+                if !rewrite_oids.contains(&index.relation_oid) {
+                    rewrite_oids.push(index.relation_oid);
+                }
+            }
+            if let Some(toast) = entry.toast {
+                if !rewrite_oids.contains(&toast.relation_oid) {
+                    rewrite_oids.push(toast.relation_oid);
+                }
+                for index in catalog.index_relations_for_heap(toast.relation_oid) {
+                    if !rewrite_oids.contains(&index.relation_oid) {
+                        rewrite_oids.push(index.relation_oid);
+                    }
+                }
+            }
+        }
+
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: Some(self.txn_waiter.clone()),
+            interrupts: self.interrupt_state(client_id),
+        };
+        let effect = self
+            .catalog
+            .write()
+            .rewrite_relation_storage_mvcc(&rewrite_oids, &ctx)?;
+        self.apply_catalog_mutation_effect_immediate(&effect)?;
+        catalog_effects.push(effect);
+        Ok(StatementResult::AffectedRows(0))
+    }
+
     pub fn execute(&self, client_id: ClientId, sql: &str) -> Result<StatementResult, ExecError> {
         self.execute_with_search_path(client_id, sql, None)
     }
