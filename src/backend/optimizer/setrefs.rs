@@ -1171,6 +1171,140 @@ fn set_filter_references(
     }
 }
 
+fn set_nested_loop_join_references(
+    ctx: &mut SetRefsContext<'_>,
+    plan_info: PlanEstimate,
+    left: Box<Path>,
+    right: Box<Path>,
+    kind: crate::include::nodes::primnodes::JoinType,
+    restrict_clauses: Vec<RestrictInfo>,
+) -> Plan {
+    let left_tlist = build_path_tlist(ctx.root, &left);
+    let (join_restrict_clauses, other_restrict_clauses) =
+        split_join_restrict_clauses(kind, &restrict_clauses);
+    let join_qual = lower_join_clause_list(ctx, join_restrict_clauses, &left, &right);
+    let qual = lower_join_clause_list(ctx, other_restrict_clauses, &left, &right);
+    let (right_plan, nest_params) = {
+        let mut right_ctx = SetRefsContext {
+            root: ctx.root,
+            catalog: ctx.catalog,
+            subplans: ctx.subplans,
+            next_param_id: ctx.next_param_id,
+            ext_params: Vec::new(),
+        };
+        let plan = set_plan_refs(&mut right_ctx, *right);
+        ctx.next_param_id = right_ctx.next_param_id;
+        let params = right_ctx
+            .ext_params
+            .into_iter()
+            .map(|param| ExecParamSource {
+                paramid: param.paramid,
+                expr: lower_expr(
+                    ctx,
+                    fix_upper_expr_for_input(ctx.root, param.expr, &left, &left_tlist),
+                    LowerMode::Input { tlist: &left_tlist },
+                ),
+            })
+            .collect::<Vec<_>>();
+        (plan, params)
+    };
+    let left_plan = set_plan_refs(ctx, *left);
+    Plan::NestedLoopJoin {
+        plan_info,
+        left: Box::new(left_plan),
+        right: Box::new(right_plan),
+        kind,
+        nest_params,
+        join_qual,
+        qual,
+    }
+}
+
+fn set_hash_join_references(
+    ctx: &mut SetRefsContext<'_>,
+    plan_info: PlanEstimate,
+    left: Box<Path>,
+    right: Box<Path>,
+    kind: crate::include::nodes::primnodes::JoinType,
+    hash_clauses: Vec<RestrictInfo>,
+    outer_hash_keys: Vec<Expr>,
+    inner_hash_keys: Vec<Expr>,
+    restrict_clauses: Vec<RestrictInfo>,
+) -> Plan {
+    let left_tlist = build_path_tlist(ctx.root, &left);
+    let right_tlist = build_path_tlist(ctx.root, &right);
+    let hash_restrict_clauses = hash_clauses.clone();
+
+    let outer_hash_keys = outer_hash_keys
+        .into_iter()
+        .map(|expr| fix_upper_expr_for_input(ctx.root, expr, &left, &left_tlist))
+        .collect::<Vec<_>>();
+    let inner_hash_keys = inner_hash_keys
+        .into_iter()
+        .map(|expr| fix_upper_expr_for_input(ctx.root, expr, &right, &right_tlist))
+        .collect::<Vec<_>>();
+    let lowered_hash_clauses = hash_clauses
+        .into_iter()
+        .map(|restrict| {
+            let expr = fix_join_expr_for_inputs(
+                ctx.root,
+                restrict.clause,
+                &left,
+                &right,
+                &left_tlist,
+                &right_tlist,
+            );
+            lower_expr(
+                ctx,
+                expr,
+                LowerMode::Join {
+                    outer_tlist: &left_tlist,
+                    inner_tlist: &right_tlist,
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    let outer_hash_keys = outer_hash_keys
+        .into_iter()
+        .map(|expr| lower_expr(ctx, expr, LowerMode::Input { tlist: &left_tlist }))
+        .collect::<Vec<_>>();
+    let inner_hash_keys = inner_hash_keys
+        .into_iter()
+        .map(|expr| lower_expr(ctx, expr, LowerMode::Input { tlist: &right_tlist }))
+        .collect::<Vec<_>>();
+    let (join_restrict_clauses, other_restrict_clauses) =
+        split_join_restrict_clauses(kind, &restrict_clauses);
+    let join_restrict_clauses = remove_hash_clauses(join_restrict_clauses, &hash_restrict_clauses);
+    let join_qual = lower_join_clause_list(ctx, &join_restrict_clauses, &left, &right);
+    let qual = lower_join_clause_list(ctx, other_restrict_clauses, &left, &right);
+
+    let left_plan = set_plan_refs(ctx, *left);
+    let right_plan = set_plan_refs(ctx, *right);
+    let right_plan_info = right_plan.plan_info();
+
+    Plan::HashJoin {
+        plan_info,
+        left: Box::new(left_plan),
+        right: Box::new(Plan::Hash {
+            // :HACK: Keep the synthetic Hash node's displayed cost aligned with the
+            // inner path cost until EXPLAIN has a planner-native hash costing display.
+            plan_info: PlanEstimate::new(
+                right_plan_info.total_cost.as_f64(),
+                right_plan_info.total_cost.as_f64(),
+                right_plan_info.plan_rows.as_f64(),
+                right_plan_info.plan_width,
+            ),
+            input: Box::new(right_plan),
+            hash_keys: inner_hash_keys,
+        }),
+        kind,
+        hash_clauses: lowered_hash_clauses,
+        hash_keys: outer_hash_keys,
+        join_qual,
+        qual,
+    }
+}
+
 fn set_projection_references(
     ctx: &mut SetRefsContext<'_>,
     plan_info: PlanEstimate,
@@ -1403,47 +1537,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             right,
             kind,
             restrict_clauses,
-        } => {
-            let left_tlist = build_path_tlist(ctx.root, &left);
-            let (join_restrict_clauses, other_restrict_clauses) =
-                split_join_restrict_clauses(kind, &restrict_clauses);
-            let join_qual = lower_join_clause_list(ctx, join_restrict_clauses, &left, &right);
-            let qual = lower_join_clause_list(ctx, other_restrict_clauses, &left, &right);
-            let (right_plan, nest_params) = {
-                let mut right_ctx = SetRefsContext {
-                    root: ctx.root,
-                    catalog: ctx.catalog,
-                    subplans: ctx.subplans,
-                    next_param_id: ctx.next_param_id,
-                    ext_params: Vec::new(),
-                };
-                let plan = set_plan_refs(&mut right_ctx, *right);
-                ctx.next_param_id = right_ctx.next_param_id;
-                let params = right_ctx
-                    .ext_params
-                    .into_iter()
-                    .map(|param| ExecParamSource {
-                        paramid: param.paramid,
-                        expr: lower_expr(
-                            ctx,
-                            fix_upper_expr_for_input(ctx.root, param.expr, &left, &left_tlist),
-                            LowerMode::Input { tlist: &left_tlist },
-                        ),
-                    })
-                    .collect::<Vec<_>>();
-                (plan, params)
-            };
-            let left_plan = set_plan_refs(ctx, *left);
-            Plan::NestedLoopJoin {
-                plan_info,
-                left: Box::new(left_plan),
-                right: Box::new(right_plan),
-                kind,
-                nest_params,
-                join_qual,
-                qual,
-            }
-        }
+        } => set_nested_loop_join_references(ctx, plan_info, left, right, kind, restrict_clauses),
         Path::HashJoin {
             plan_info,
             left,
@@ -1453,81 +1547,17 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             outer_hash_keys,
             inner_hash_keys,
             restrict_clauses,
-        } => {
-            let left_tlist = build_path_tlist(ctx.root, &left);
-            let right_tlist = build_path_tlist(ctx.root, &right);
-            let hash_restrict_clauses = hash_clauses.clone();
-
-            let outer_hash_keys = outer_hash_keys
-                .into_iter()
-                .map(|expr| fix_upper_expr_for_input(ctx.root, expr, &left, &left_tlist))
-                .collect::<Vec<_>>();
-            let inner_hash_keys = inner_hash_keys
-                .into_iter()
-                .map(|expr| fix_upper_expr_for_input(ctx.root, expr, &right, &right_tlist))
-                .collect::<Vec<_>>();
-            let lowered_hash_clauses = hash_clauses
-                .into_iter()
-                .map(|restrict| {
-                    let expr = fix_join_expr_for_inputs(
-                        ctx.root,
-                        restrict.clause,
-                        &left,
-                        &right,
-                        &left_tlist,
-                        &right_tlist,
-                    );
-                    lower_expr(
-                        ctx,
-                        expr,
-                        LowerMode::Join {
-                            outer_tlist: &left_tlist,
-                            inner_tlist: &right_tlist,
-                        },
-                    )
-                })
-                .collect::<Vec<_>>();
-            let outer_hash_keys = outer_hash_keys
-                .into_iter()
-                .map(|expr| lower_expr(ctx, expr, LowerMode::Input { tlist: &left_tlist }))
-                .collect::<Vec<_>>();
-            let inner_hash_keys = inner_hash_keys
-                .into_iter()
-                .map(|expr| lower_expr(ctx, expr, LowerMode::Input { tlist: &right_tlist }))
-                .collect::<Vec<_>>();
-            let (join_restrict_clauses, other_restrict_clauses) =
-                split_join_restrict_clauses(kind, &restrict_clauses);
-            let join_restrict_clauses =
-                remove_hash_clauses(join_restrict_clauses, &hash_restrict_clauses);
-            let join_qual = lower_join_clause_list(ctx, &join_restrict_clauses, &left, &right);
-            let qual = lower_join_clause_list(ctx, other_restrict_clauses, &left, &right);
-
-            let left_plan = set_plan_refs(ctx, *left);
-            let right_plan = set_plan_refs(ctx, *right);
-            let right_plan_info = right_plan.plan_info();
-
-            Plan::HashJoin {
-                plan_info,
-                left: Box::new(left_plan),
-                right: Box::new(Plan::Hash {
-                    // :HACK: Keep the synthetic Hash node's displayed cost aligned with the
-                    // inner path cost until EXPLAIN has a planner-native hash costing display.
-                    plan_info: PlanEstimate::new(
-                        right_plan_info.total_cost.as_f64(),
-                        right_plan_info.total_cost.as_f64(),
-                        right_plan_info.plan_rows.as_f64(),
-                        right_plan_info.plan_width,
-                    ),
-                    input: Box::new(right_plan),
-                    hash_keys: inner_hash_keys,
-                }),
-                kind,
-                hash_clauses: lowered_hash_clauses,
-                hash_keys: outer_hash_keys,
-                join_qual,
-                qual,
-            }
-        }
+        } => set_hash_join_references(
+            ctx,
+            plan_info,
+            left,
+            right,
+            kind,
+            hash_clauses,
+            outer_hash_keys,
+            inner_hash_keys,
+            restrict_clauses,
+        ),
         Path::Projection {
             plan_info,
             input,
