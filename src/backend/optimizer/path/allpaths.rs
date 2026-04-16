@@ -299,6 +299,8 @@ fn build_recursive_union_path(
             slot_id: next_synthetic_slot_id(),
             worktable_id: recursive_union.worktable_id,
             distinct: recursive_union.distinct,
+            anchor_query: Box::new(recursive_union.anchor.clone()),
+            recursive_query: Box::new(recursive_union.recursive.clone()),
             output_columns: recursive_union
                 .output_desc
                 .columns
@@ -324,12 +326,13 @@ fn build_cte_scan_path(
     let cte_path = if let Some(recursive_union) = query.recursive_union.clone() {
         build_recursive_union_path(*recursive_union, catalog)
     } else {
-        best_query_path(query, catalog)
+        best_query_path(query.clone(), catalog)
     };
     Path::CteScan {
         plan_info: cte_path.plan_info(),
         slot_id: next_synthetic_slot_id(),
         cte_id,
+        query: Box::new(query),
         cte_plan: Box::new(cte_path),
         output_columns: desc
             .columns

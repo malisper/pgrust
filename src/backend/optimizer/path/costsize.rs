@@ -267,6 +267,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
             Path::CteScan {
                 slot_id,
                 cte_id,
+                query,
                 cte_plan,
                 output_columns,
                 ..
@@ -286,6 +287,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                     ),
                     slot_id,
                     cte_id,
+                    query,
                     cte_plan: Box::new(cte_plan),
                     output_columns,
                 }
@@ -311,6 +313,8 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                 slot_id,
                 worktable_id,
                 distinct,
+                anchor_query,
+                recursive_query,
                 output_columns,
                 anchor,
                 recursive,
@@ -344,6 +348,8 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                     slot_id,
                     worktable_id,
                     distinct,
+                    anchor_query,
+                    recursive_query,
                     output_columns,
                     anchor: Box::new(anchor),
                     recursive: Box::new(recursive),
