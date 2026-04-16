@@ -175,6 +175,7 @@ fn path_relids(path: &Path) -> Vec<usize> {
         | Path::Limit { input, .. }
         | Path::Aggregate { input, .. }
         | Path::ProjectSet { input, .. } => path_relids(input),
+        Path::SubqueryScan { rtindex, .. } => vec![*rtindex],
         Path::Values { slot_id, .. }
         | Path::FunctionScan { slot_id, .. }
         | Path::CteScan { slot_id, .. }

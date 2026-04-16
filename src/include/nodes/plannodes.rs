@@ -158,6 +158,11 @@ pub enum Plan {
         plan_info: PlanEstimate,
         call: SetReturningCall,
     },
+    SubqueryScan {
+        plan_info: PlanEstimate,
+        input: Box<Plan>,
+        output_columns: Vec<QueryColumn>,
+    },
     CteScan {
         plan_info: PlanEstimate,
         cte_id: usize,
@@ -204,6 +209,7 @@ impl Plan {
             | Plan::Limit { plan_info, .. }
             | Plan::Projection { plan_info, .. }
             | Plan::Aggregate { plan_info, .. }
+            | Plan::SubqueryScan { plan_info, .. }
             | Plan::CteScan { plan_info, .. }
             | Plan::WorkTableScan { plan_info, .. }
             | Plan::RecursiveUnion { plan_info, .. }
@@ -227,6 +233,7 @@ impl Plan {
             | Plan::Limit { plan_info, .. }
             | Plan::Projection { plan_info, .. }
             | Plan::Aggregate { plan_info, .. }
+            | Plan::SubqueryScan { plan_info, .. }
             | Plan::CteScan { plan_info, .. }
             | Plan::WorkTableScan { plan_info, .. }
             | Plan::RecursiveUnion { plan_info, .. }
@@ -275,6 +282,7 @@ impl Plan {
                 })
                 .collect(),
             Plan::Aggregate { output_columns, .. } => output_columns.clone(),
+            Plan::SubqueryScan { output_columns, .. } => output_columns.clone(),
             Plan::CteScan { output_columns, .. } => output_columns.clone(),
             Plan::WorkTableScan { output_columns, .. }
             | Plan::RecursiveUnion { output_columns, .. } => output_columns.clone(),

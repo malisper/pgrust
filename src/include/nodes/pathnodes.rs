@@ -393,6 +393,14 @@ pub enum Path {
         slot_id: usize,
         call: SetReturningCall,
     },
+    SubqueryScan {
+        plan_info: PlanEstimate,
+        rtindex: usize,
+        query: Box<Query>,
+        input: Box<Path>,
+        output_columns: Vec<QueryColumn>,
+        pathkeys: Vec<PathKey>,
+    },
     CteScan {
         plan_info: PlanEstimate,
         slot_id: usize,

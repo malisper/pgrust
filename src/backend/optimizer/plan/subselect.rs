@@ -745,6 +745,15 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
             plan_info,
             call: rebase_set_returning_call_subplan_ids(call, base),
         },
+        Plan::SubqueryScan {
+            plan_info,
+            input,
+            output_columns,
+        } => Plan::SubqueryScan {
+            plan_info,
+            input: Box::new(rebase_plan_subplan_ids(*input, base)),
+            output_columns,
+        },
         Plan::CteScan {
             plan_info,
             cte_id,
@@ -1006,6 +1015,15 @@ pub(super) fn finalize_plan_subqueries(
         Plan::FunctionScan { plan_info, call } => Plan::FunctionScan {
             plan_info,
             call: finalize_set_returning_call(call, catalog, subplans),
+        },
+        Plan::SubqueryScan {
+            plan_info,
+            input,
+            output_columns,
+        } => Plan::SubqueryScan {
+            plan_info,
+            input: Box::new(finalize_plan_subqueries(*input, catalog, subplans)),
+            output_columns,
         },
         Plan::CteScan {
             plan_info,

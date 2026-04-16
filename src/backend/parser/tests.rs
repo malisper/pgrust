@@ -136,6 +136,12 @@ fn catalog() -> Catalog {
     catalog
 }
 
+fn catalog_with_pets() -> Catalog {
+    let mut catalog = catalog();
+    catalog.insert("pets", pets_entry());
+    catalog
+}
+
 struct OverrideFunctionCatalog {
     base: Catalog,
     proc_rows: Vec<PgProcRow>,
@@ -2911,6 +2917,7 @@ fn build_plan_for_recursive_mixed_cte_query() {
             | Plan::Limit { input, .. }
             | Plan::Projection { input, .. }
             | Plan::Aggregate { input, .. }
+            | Plan::SubqueryScan { input, .. }
             | Plan::ProjectSet { input, .. } => plan_contains_cte_scan(input),
             Plan::NestedLoopJoin { left, right, .. } | Plan::HashJoin { left, right, .. } => {
                 plan_contains_cte_scan(left) || plan_contains_cte_scan(right)
@@ -2922,6 +2929,7 @@ fn build_plan_for_recursive_mixed_cte_query() {
             | Plan::SeqScan { .. }
             | Plan::IndexScan { .. }
             | Plan::FunctionScan { .. }
+            | Plan::SubqueryScan { .. }
             | Plan::WorkTableScan { .. }
             | Plan::Values { .. } => false,
         }
@@ -4265,6 +4273,24 @@ fn build_plan_partial_derived_table_column_aliases_preserve_suffix() {
             assert_eq!(targets.len(), 2);
             assert_eq!(targets[0].name, "x");
             assert_eq!(targets[1].name, "name");
+        }
+        other => panic!("expected projection, got {:?}", other),
+    }
+}
+
+#[test]
+fn build_plan_cross_join_derived_table_column_aliases() {
+    let stmt = parse_select(
+        "select ii, tt, kk from (people cross join pets) as tx (ii, jj, tt, ii2, kk)",
+    )
+    .unwrap();
+    let plan = build_plan(&stmt, &catalog_with_pets()).unwrap();
+    match plan {
+        Plan::Projection { targets, .. } => {
+            assert_eq!(targets.len(), 3);
+            assert_eq!(targets[0].name, "ii");
+            assert_eq!(targets[1].name, "tt");
+            assert_eq!(targets[2].name, "kk");
         }
         other => panic!("expected projection, got {:?}", other),
     }

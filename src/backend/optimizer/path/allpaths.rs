@@ -9,7 +9,8 @@ use crate::include::nodes::pathnodes::{
 };
 use crate::include::nodes::plannodes::PlanEstimate;
 use crate::include::nodes::primnodes::{
-    Expr, JoinType, OrderByEntry, QueryColumn, RelationDesc, TargetEntry, ToastRelationRef,
+    Expr, JoinType, OrderByEntry, QueryColumn, RelationDesc, TargetEntry, ToastRelationRef, Var,
+    user_attrno,
 };
 
 use super::super::bestpath;
@@ -18,12 +19,12 @@ use super::super::inherit::{
 };
 use super::super::joininfo;
 use super::super::optimize_path;
-use super::super::pathnodes::{expr_sql_type, next_synthetic_slot_id};
+use super::super::pathnodes::{expr_sql_type, next_synthetic_slot_id, rte_slot_id};
 use super::super::plan::grouping_planner;
 use super::super::rewrite::layout_candidate_for_expr;
 use super::super::util::{
-    annotate_targets_for_input, normalize_rte_path, pathkeys_to_order_items, project_to_slot_layout,
-    required_query_pathkeys_for_rel,
+    annotate_targets_for_input, normalize_rte_path, pathkeys_to_order_items,
+    project_to_slot_layout, required_query_pathkeys_for_rel,
 };
 use super::super::{
     JoinBuildSpec, and_exprs, exact_join_rtindex, expand_join_rte_vars, expr_relids,
@@ -346,6 +347,57 @@ fn build_cte_scan_path(
     }
 }
 
+fn build_subquery_scan_path(
+    rtindex: usize,
+    query: crate::include::nodes::parsenodes::Query,
+    desc: &RelationDesc,
+    catalog: &dyn CatalogLookup,
+) -> Path {
+    let input = if let Some(recursive_union) = query.recursive_union.clone() {
+        build_recursive_union_path(*recursive_union, catalog)
+    } else {
+        best_query_path(query.clone(), catalog)
+    };
+    let input_vars = input.output_vars();
+    let slot_id = rte_slot_id(rtindex);
+    let pathkeys = input
+        .pathkeys()
+        .into_iter()
+        .filter_map(|key| {
+            input_vars
+                .iter()
+                .position(|expr| *expr == key.expr)
+                .and_then(|index| desc.columns.get(index).map(|column| (index, column.sql_type)))
+                .map(|(index, sql_type)| PathKey {
+                    expr: Expr::Var(Var {
+                        varno: slot_id,
+                        varattno: user_attrno(index),
+                        varlevelsup: 0,
+                        vartype: sql_type,
+                    }),
+                    ressortgroupref: key.ressortgroupref,
+                    descending: key.descending,
+                    nulls_first: key.nulls_first,
+                })
+        })
+        .collect();
+    Path::SubqueryScan {
+        plan_info: input.plan_info(),
+        rtindex,
+        query: Box::new(query),
+        input: Box::new(input),
+        output_columns: desc
+            .columns
+            .iter()
+            .map(|column| QueryColumn {
+                name: column.name.clone(),
+                sql_type: column.sql_type,
+            })
+            .collect(),
+        pathkeys,
+    }
+}
+
 fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn CatalogLookup) {
     let Some(rte) = root.parse.rtable.get(rtindex.saturating_sub(1)).cloned() else {
         return;
@@ -557,13 +609,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
             rel.add_path(path);
         }
         RangeTblEntryKind::Subquery { query } => {
-            let query = *query;
-            let mut path = if let Some(recursive_union) = query.recursive_union.clone() {
-                build_recursive_union_path(*recursive_union, catalog)
-            } else {
-                best_query_path(query, catalog)
-            };
-            path = normalize_rte_path(rtindex, &rte.desc, path, catalog);
+            let mut path = build_subquery_scan_path(rtindex, *query, &rte.desc, catalog);
             if let Some(filter) = base_filter_expr(rel) {
                 path = optimize_path(
                     Path::Filter {

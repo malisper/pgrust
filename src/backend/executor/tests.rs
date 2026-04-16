@@ -2696,7 +2696,7 @@ fn generate_series_basic() {
         StatementResult::Query {
             column_names, rows, ..
         } => {
-            assert_eq!(column_names, vec!["generate_series"]);
+            assert_eq!(column_names, vec!["g"]);
             assert_eq!(
                 rows,
                 vec![
@@ -6279,7 +6279,7 @@ fn generate_series_table_alias_only() {
         StatementResult::Query {
             column_names, rows, ..
         } => {
-            assert_eq!(column_names, vec!["generate_series"]);
+            assert_eq!(column_names, vec!["g"]);
             assert_eq!(
                 rows,
                 vec![
@@ -6472,6 +6472,71 @@ fn derived_table_partial_column_aliases_preserve_remaining_names() {
         other => panic!("expected query result, got {:?}", other),
     }
 }
+
+#[test]
+fn derived_table_cross_join_column_aliases_lower_without_setrefs_panic() {
+    let base = temp_dir("derived_table_cross_join_alias_cols");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let pool = test_pool_with_pets(&base);
+    let xid = txns.begin();
+    for row in [
+        tuple(1, "alice", Some("alpha")),
+        tuple(2, "bob", None),
+        tuple(3, "carol", Some("storage")),
+    ] {
+        let tid = heap_insert_mvcc(&*pool, 1, rel(), xid, &row).unwrap();
+        heap_flush(&*pool, 1, rel(), tid.block_number).unwrap();
+    }
+    for row in [pet_tuple(10, "Kitchen", 2), pet_tuple(11, "Mocha", 3)] {
+        let tid = heap_insert_mvcc(&*pool, 1, pets_rel(), xid, &row).unwrap();
+        heap_flush(&*pool, 1, pets_rel(), tid.block_number).unwrap();
+    }
+    txns.commit(xid).unwrap();
+    match run_sql_with_catalog(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select ii, tt, kk from (people cross join pets) as tx (ii, jj, tt, ii2, kk) order by ii, kk",
+        catalog_with_pets(),
+    )
+    .unwrap()
+    {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(column_names, vec!["ii", "tt", "kk"]);
+            assert_eq!(
+                rows,
+                vec![
+                    vec![
+                        Value::Int32(1),
+                        Value::Text("alpha".into()),
+                        Value::Text("Kitchen".into()),
+                    ],
+                    vec![
+                        Value::Int32(1),
+                        Value::Text("alpha".into()),
+                        Value::Text("Mocha".into()),
+                    ],
+                    vec![Value::Int32(2), Value::Null, Value::Text("Kitchen".into())],
+                    vec![Value::Int32(2), Value::Null, Value::Text("Mocha".into())],
+                    vec![
+                        Value::Int32(3),
+                        Value::Text("storage".into()),
+                        Value::Text("Kitchen".into()),
+                    ],
+                    vec![
+                        Value::Int32(3),
+                        Value::Text("storage".into()),
+                        Value::Text("Mocha".into()),
+                    ],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
 #[test]
 fn join_against_derived_table_returns_matching_rows() {
     let base = temp_dir("join_derived_table");
@@ -7259,6 +7324,96 @@ fn non_lateral_derived_table_rejects_outer_refs() {
     .unwrap_err();
     assert!(matches!(err, ExecError::Parse(ParseError::UnknownColumn(name)) if name == "p.id"));
 }
+
+#[test]
+fn lateral_full_join_with_multiple_outer_refs_rangefuncs_shape() {
+    let base = temp_dir("rangefuncs_lateral_full_join_multi_outer_refs");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    let sql = r#"
+select *
+from (values (1),(2)) v1(r1)
+    left join lateral (
+        select *
+        from generate_series(1, v1.r1) as gs1
+        left join lateral (
+            select *
+            from generate_series(1, gs1) as gs2
+            left join generate_series(1, gs2) as gs3 on true
+        ) as ss1 on true
+        full join generate_series(1, v1.r1) as gs4 on false
+    ) as ss0 on true
+"#;
+    match run_sql(&base, &txns, INVALID_TRANSACTION_ID, sql).unwrap() {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(column_names, vec!["r1", "gs1", "gs2", "gs3", "gs4"]);
+            assert_eq!(
+                rows,
+                vec![
+                    vec![
+                        Value::Int32(1),
+                        Value::Null,
+                        Value::Null,
+                        Value::Null,
+                        Value::Int32(1),
+                    ],
+                    vec![
+                        Value::Int32(1),
+                        Value::Int32(1),
+                        Value::Int32(1),
+                        Value::Int32(1),
+                        Value::Null,
+                    ],
+                    vec![
+                        Value::Int32(2),
+                        Value::Null,
+                        Value::Null,
+                        Value::Null,
+                        Value::Int32(1),
+                    ],
+                    vec![
+                        Value::Int32(2),
+                        Value::Null,
+                        Value::Null,
+                        Value::Null,
+                        Value::Int32(2),
+                    ],
+                    vec![
+                        Value::Int32(2),
+                        Value::Int32(1),
+                        Value::Int32(1),
+                        Value::Int32(1),
+                        Value::Null,
+                    ],
+                    vec![
+                        Value::Int32(2),
+                        Value::Int32(2),
+                        Value::Int32(1),
+                        Value::Int32(1),
+                        Value::Null,
+                    ],
+                    vec![
+                        Value::Int32(2),
+                        Value::Int32(2),
+                        Value::Int32(2),
+                        Value::Int32(1),
+                        Value::Null,
+                    ],
+                    vec![
+                        Value::Int32(2),
+                        Value::Int32(2),
+                        Value::Int32(2),
+                        Value::Int32(2),
+                        Value::Null,
+                    ],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
 #[test]
 fn derived_table_alias_preserved_for_empty_result() {
     let base = temp_dir("derived_table_empty_alias");

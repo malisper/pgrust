@@ -320,6 +320,7 @@ fn plan_contains(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> bool 
         | Plan::Limit { input, .. }
         | Plan::Aggregate { input, .. }
         | Plan::ProjectSet { input, .. }
+        | Plan::SubqueryScan { input, .. }
         | Plan::CteScan { cte_plan: input, .. } => plan_contains(input, predicate),
         Plan::NestedLoopJoin { left, right, .. }
         | Plan::HashJoin { left, right, .. }
@@ -339,6 +340,43 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
         return (*message).to_string();
     }
     format!("{payload:?}")
+}
+
+#[test]
+fn planned_rangefuncs_lateral_full_join_has_no_root_ext_params() {
+    let sql = r#"
+select *
+from (values (1),(2)) v1(r1)
+    left join lateral (
+        select *
+        from generate_series(1, v1.r1) as gs1
+        left join lateral (
+            select *
+            from generate_series(1, gs1) as gs2
+            left join generate_series(1, gs2) as gs3 on true
+        ) as ss1 on true
+        full join generate_series(1, v1.r1) as gs4 on false
+    ) as ss0 on true
+"#;
+    let planned = planned_stmt_for_sql(sql);
+    assert!(
+        planned.ext_params.is_empty(),
+        "unexpected root ext params: {:?}",
+        planned.ext_params
+    );
+    assert!(plan_contains(&planned.plan_tree, |plan| {
+        matches!(plan, Plan::NestedLoopJoin { kind: crate::include::nodes::primnodes::JoinType::Left, .. })
+    }));
+    assert!(!plan_contains(&planned.plan_tree, |plan| {
+        matches!(
+            plan,
+            Plan::NestedLoopJoin {
+                kind: crate::include::nodes::primnodes::JoinType::Full,
+                nest_params,
+                ..
+            } if !nest_params.is_empty()
+        )
+    }));
 }
 
 #[test]
@@ -694,6 +732,7 @@ fn planned_lockstep_project_set_keeps_both_visible_targets_as_sets() {
             | Plan::FunctionScan { .. }
             | Plan::WorkTableScan { .. }
             | Plan::RecursiveUnion { .. }
+            | Plan::SubqueryScan { .. }
             | Plan::CteScan { .. } => None,
         }
     }

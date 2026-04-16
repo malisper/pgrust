@@ -17,7 +17,8 @@ use crate::include::nodes::execnodes::{
     AggregateState, AppendState, CteScanState, FilterState, FunctionScanState, IndexScanState,
     LimitState, MaterializedRow, NestedLoopJoinState, NodeExecStats, OrderByState, PlanNode,
     ProjectSetState, ProjectionState, RecursiveUnionState, ResultState, SeqScanState, SlotKind,
-    SystemVarBinding, ToastRelationRef, TupleSlot, ValuesState, WorkTableScanState,
+    SubqueryScanState, SystemVarBinding, ToastRelationRef, TupleSlot, ValuesState,
+    WorkTableScanState,
 };
 use crate::include::nodes::primnodes::{Expr, JoinType, Var, attrno_index, INDEX_VAR, INNER_VAR, OUTER_VAR};
 use std::cell::RefCell;
@@ -1016,17 +1017,6 @@ fn exec_lateral_join<'a>(
     ctx: &mut ExecutorContext,
     start: Option<Instant>,
 ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
-    if matches!(state.kind, JoinType::Right | JoinType::Full) {
-        return Err(ExecError::DetailedError {
-            message: "unsupported lateral join type".into(),
-            detail: Some(
-                "outer-dependent right-hand joins are only implemented for INNER, CROSS, and LEFT joins".into(),
-            ),
-            hint: None,
-            sqlstate: "0A000",
-        });
-    }
-
     loop {
         ctx.check_for_interrupts()?;
         if state.current_left.is_none() {
@@ -1053,6 +1043,18 @@ fn exec_lateral_join<'a>(
                             .expect("lateral right plan")
                             .clone(),
                     );
+                    let mut rows = Vec::new();
+                    while state.right.exec_proc_node(ctx)?.is_some() {
+                        ctx.check_for_interrupts()?;
+                        rows.push(state.right.materialize_current_row()?);
+                    }
+                    state.right_rows = Some(rows);
+                    state.right_matched = Some(vec![
+                        false;
+                        state.right_rows.as_ref().expect("lateral right rows").len()
+                    ]);
+                    state.right_index = 0;
+                    state.unmatched_right_index = 0;
                     state.current_nest_param_saves = Some(saved_params);
                 }
                 false => {
@@ -1062,11 +1064,17 @@ fn exec_lateral_join<'a>(
             }
         }
 
-        while let Some(slot) = state.right.exec_proc_node(ctx)? {
+        let right_rows = state.right_rows.as_ref().unwrap();
+        let right_matched = state.right_matched.as_mut().unwrap();
+
+        while state.right_index < right_rows.len() {
             ctx.check_for_interrupts()?;
-            let right_bindings = ctx.system_bindings.clone();
-            let mut values = slot.values()?.iter().cloned().collect::<Vec<_>>();
-            Value::materialize_all(&mut values);
+            let ri = state.right_index;
+            state.right_index += 1;
+
+            let right = &right_rows[ri];
+            let right_bindings = right.system_bindings.clone();
+            let values = right.slot.tts_values.clone();
             let left = state.current_left.as_ref().unwrap();
             let mut combined_values: Vec<Value> = left.slot.tts_values.clone();
             combined_values.extend(values);
@@ -1078,11 +1086,11 @@ fn exec_lateral_join<'a>(
             state.current_bindings = merge_system_bindings(&left.system_bindings, &right_bindings);
             set_active_system_bindings(ctx, &state.current_bindings);
             set_outer_expr_bindings(ctx, left.slot.tts_values.clone(), &left.system_bindings);
-            let inner_values = materialize_slot_values(slot)?;
-            set_inner_expr_bindings(ctx, inner_values, &right_bindings);
+            set_inner_expr_bindings(ctx, right.slot.tts_values.clone(), &right_bindings);
 
             if eval_qual_list(&state.join_qual, &mut state.slot, ctx)? {
                 state.current_left_matched = true;
+                right_matched[ri] = true;
                 if eval_qual_list(&state.qual, &mut state.slot, ctx)? {
                     finish_row(&mut state.stats, start);
                     return Ok(Some(&mut state.slot));
@@ -1090,9 +1098,31 @@ fn exec_lateral_join<'a>(
             }
         }
 
+        if matches!(state.kind, JoinType::Right | JoinType::Full) {
+            while state.unmatched_right_index < right_rows.len() {
+                let ri = state.unmatched_right_index;
+                state.unmatched_right_index += 1;
+                if right_matched[ri] {
+                    continue;
+                }
+
+                let right = &right_rows[ri];
+                let mut combined_values = vec![Value::Null; state.left_width];
+                combined_values.extend(right.slot.tts_values.iter().cloned());
+                state.slot.tts_values = combined_values;
+                state.slot.tts_nvalid = state.left_width + state.right_width;
+                state.slot.kind = SlotKind::Virtual;
+                state.slot.decode_offset = 0;
+                state.current_bindings = right.system_bindings.clone();
+                set_active_system_bindings(ctx, &state.current_bindings);
+                finish_row(&mut state.stats, start);
+                return Ok(Some(&mut state.slot));
+            }
+        }
+
         clear_outer_expr_bindings(ctx);
         clear_inner_expr_bindings(ctx);
-        if !state.current_left_matched && matches!(state.kind, JoinType::Left) {
+        if !state.current_left_matched && matches!(state.kind, JoinType::Left | JoinType::Full) {
             let left = state.current_left.as_ref().unwrap();
             let mut combined_values: Vec<Value> = left.slot.tts_values.clone();
             combined_values.extend(std::iter::repeat_n(Value::Null, state.right_width));
@@ -1105,6 +1135,8 @@ fn exec_lateral_join<'a>(
             if let Some(saved_params) = state.current_nest_param_saves.take() {
                 restore_exec_params(saved_params, ctx);
             }
+            state.right_rows = None;
+            state.right_matched = None;
             state.current_left = None;
             finish_row(&mut state.stats, start);
             return Ok(Some(&mut state.slot));
@@ -1113,6 +1145,8 @@ fn exec_lateral_join<'a>(
         if let Some(saved_params) = state.current_nest_param_saves.take() {
             restore_exec_params(saved_params, ctx);
         }
+        state.right_rows = None;
+        state.right_matched = None;
         state.current_left = None;
     }
 }
@@ -1618,6 +1652,58 @@ impl PlanNode for FunctionScanState {
         format!("Function Scan on {}", set_returning_call_label(&self.call))
     }
     fn explain_children(&self, _indent: usize, _analyze: bool, _lines: &mut Vec<String>) {}
+}
+
+impl PlanNode for SubqueryScanState {
+    fn exec_proc_node<'a>(
+        &'a mut self,
+        ctx: &mut ExecutorContext,
+    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        let start = if ctx.timed {
+            Some(Instant::now())
+        } else {
+            None
+        };
+        let slot = self.input.exec_proc_node(ctx)?;
+        if slot.is_some() {
+            finish_row(&mut self.stats, start);
+        } else {
+            finish_eof(&mut self.stats, start, ctx);
+        }
+        Ok(slot)
+    }
+
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
+        self.input.current_slot()
+    }
+
+    fn current_system_bindings(&self) -> &[SystemVarBinding] {
+        self.input.current_system_bindings()
+    }
+
+    fn column_names(&self) -> &[String] {
+        &self.output_columns
+    }
+
+    fn node_stats(&self) -> &NodeExecStats {
+        &self.stats
+    }
+
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
+        &mut self.stats
+    }
+
+    fn plan_info(&self) -> crate::include::nodes::plannodes::PlanEstimate {
+        self.plan_info
+    }
+
+    fn node_label(&self) -> String {
+        "Subquery Scan".into()
+    }
+
+    fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
+        format_explain_lines(&*self.input, indent + 1, analyze, lines);
+    }
 }
 
 impl PlanNode for ValuesState {

@@ -347,6 +347,9 @@ pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLoc
                 }
             }
         },
+        Plan::SubqueryScan { input, .. } => {
+            collect_rels_from_plan(input, rels);
+        }
         Plan::CteScan { cte_plan, .. } => {
             collect_rels_from_plan(cte_plan, rels);
         }
