@@ -6523,6 +6523,27 @@ fn select_list_generate_series_expands_rows() {
 }
 
 #[test]
+fn select_list_generate_series_promotes_integer_bounds_with_numeric_step() {
+    let base = temp_dir("project_set_generate_series_numeric_step");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select generate_series(0, 1, 0.3)",
+        )
+        .unwrap(),
+        vec![
+            vec![Value::Numeric("0".into())],
+            vec![Value::Numeric("0.3".into())],
+            vec![Value::Numeric("0.6".into())],
+            vec![Value::Numeric("0.9".into())],
+        ],
+    );
+}
+
+#[test]
 fn select_list_unnest_expands_rows() {
     let base = temp_dir("project_set_unnest");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -9954,6 +9975,86 @@ fn generate_series_supports_numeric_arguments() {
             assert_eq!(rows.len(), 4);
             assert_eq!(rows[0], vec![Value::Numeric("0.0".into())]);
             assert_eq!(rows[3], vec![Value::Numeric("0.9".into())]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select * from generate_series(0, 1, 0.3)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Numeric("0".into())],
+                    vec![Value::Numeric("0.3".into())],
+                    vec![Value::Numeric("0.6".into())],
+                    vec![Value::Numeric("0.9".into())],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn recursive_query_with_numeric_generate_series_step_executes() {
+    let base = temp_dir("recursive_generate_series_numeric_step");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    let sql = r#"
+with recursive ps as (
+  select r, c from generate_series(0, 1, 0.5) a(r)
+  cross join generate_series(0, 1, 0.5) b(c)
+  order by r desc, c asc
+), iterations as (
+  select r,
+         c,
+         0.0::float as zr,
+         0.0::float as zc,
+         0 as iteration
+  from ps
+  union all
+  select r,
+         c,
+         zr*zr - zc*zc + c as zr,
+         2*zr*zc + r as zc,
+         iteration + 1 as iteration
+  from iterations
+  where zr*zr + zc*zc < 4 and iteration < 4
+), final_iteration as (
+  select * from iterations where iteration = 4
+), marked_points as (
+  select r,
+         c,
+         (case when exists (select 1 from final_iteration i where p.r = i.r and p.c = i.c)
+               then '**'
+               else '  '
+          end) as marker
+  from ps p
+  order by r desc, c asc
+), lines as (
+  select r, string_agg(marker, '') as r_text
+  from marked_points
+  group by r
+  order by r desc
+)
+select string_agg(r_text, E'\n') from lines
+"#;
+    match run_sql(&base, &txns, INVALID_TRANSACTION_ID, sql).unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].len(), 1);
+            match &rows[0][0] {
+                Value::Text(text) => {
+                    assert!(text.contains("**"));
+                    assert!(text.contains('\n'));
+                }
+                other => panic!("expected text result, got {:?}", other),
+            }
         }
         other => panic!("expected query result, got {:?}", other),
     }

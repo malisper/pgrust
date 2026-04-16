@@ -573,7 +573,8 @@ pub(crate) fn raw_type_name_hint(raw: &RawTypeName) -> SqlType {
     match raw {
         RawTypeName::Builtin(ty) => *ty,
         RawTypeName::Named { array_bounds, .. } => {
-            let mut ty = SqlType::new(SqlTypeKind::Composite);
+            let mut ty = builtin_named_type_alias(raw_type_name_name(raw))
+                .unwrap_or_else(|| SqlType::new(SqlTypeKind::Composite));
             for _ in 0..*array_bounds {
                 ty = SqlType::array_of(ty);
             }
@@ -591,17 +592,36 @@ pub(crate) fn resolve_raw_type_name(
         RawTypeName::Builtin(ty) => Ok(*ty),
         RawTypeName::Record => Ok(SqlType::record(RECORD_TYPE_OID)),
         RawTypeName::Named { name, array_bounds } => {
-            let mut ty = catalog
-                .type_rows()
-                .into_iter()
-                .find(|row| row.typname.eq_ignore_ascii_case(name))
-                .map(|row| row.sql_type)
-                .ok_or_else(|| ParseError::UnsupportedType(name.clone()))?;
+            let mut ty = if let Some(alias) = builtin_named_type_alias(name) {
+                alias
+            } else {
+                catalog
+                    .type_rows()
+                    .into_iter()
+                    .find(|row| row.typname.eq_ignore_ascii_case(name))
+                    .map(|row| row.sql_type)
+                    .ok_or_else(|| ParseError::UnsupportedType(name.clone()))?
+            };
             for _ in 0..*array_bounds {
                 ty = SqlType::array_of(ty);
             }
             Ok(ty)
         }
+    }
+}
+
+fn builtin_named_type_alias(name: &str) -> Option<SqlType> {
+    if name.eq_ignore_ascii_case("float") {
+        Some(SqlType::new(SqlTypeKind::Float8))
+    } else {
+        None
+    }
+}
+
+fn raw_type_name_name(raw: &RawTypeName) -> &str {
+    match raw {
+        RawTypeName::Named { name, .. } => name,
+        _ => unreachable!("raw_type_name_name only valid for named types"),
     }
 }
 

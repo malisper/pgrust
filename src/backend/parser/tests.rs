@@ -2780,6 +2780,104 @@ fn parse_with_recursive_cte_union_all() {
 }
 
 #[test]
+fn parse_with_recursive_mixed_ctes_and_exists_case() {
+    let sql = "with recursive points as (
+  select r, c from generate_series(-2, 2, 0.05) a(r)
+  cross join generate_series(-2, 2, 0.05) b(c)
+  order by r desc, c asc
+), iterations as (
+   select r, c, c::float as zr, r::float as zc, 0 as iteration from points
+   union all
+   select r, c, zr*zr - zc*zc + 1 - 1.61803398875 as zr, 2*zr*zc as zc, iteration+1 as iteration
+   from iterations where zr*zr + zc*zc < 4 and iteration < 1000
+), final_iteration as (
+  select * from iterations where iteration = 1000
+), marked_points as (
+   select r, c, (case when exists (select 1 from final_iteration i where p.r = i.r and p.c = i.c)
+                  then '**'
+                  else '  '
+                  end) as marker
+   from points p
+   order by r desc, c asc
+), rows as (
+   select r, string_agg(marker, '') as r_text
+   from marked_points
+   group by r
+   order by r desc
+) select string_agg(r_text, e'\\n') from rows";
+
+    match parse_statement(sql).unwrap() {
+        Statement::Select(SelectStatement {
+            with_recursive,
+            with,
+            ..
+        }) => {
+            assert!(with_recursive);
+            assert_eq!(with.len(), 5);
+            assert!(matches!(with[0].body, CteBody::Select(_)));
+            assert!(matches!(with[1].body, CteBody::RecursiveUnion { all: true, .. }));
+            assert!(matches!(with[2].body, CteBody::Select(_)));
+            assert!(matches!(with[3].body, CteBody::Select(_)));
+            assert!(matches!(with[4].body, CteBody::Select(_)));
+        }
+        other => panic!("expected Select with WITH RECURSIVE, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_with_recursive_cte_select_anchor_referencing_prior_cte() {
+    let sql = "with recursive points as (select 1 as x), iterations as (
+        select x from points
+        union all
+        select x from iterations
+    )
+    select * from iterations";
+    assert!(parse_select(sql).is_ok());
+}
+
+#[test]
+fn build_plan_resolves_float_type_alias() {
+    let stmt = parse_select("select 1::float, cast(2 as float)").unwrap();
+    let planned = build_plan(&stmt, &catalog()).expect("build plan");
+    let output = planned.columns();
+    assert_eq!(output.len(), 2);
+    assert_eq!(output[0].sql_type, SqlType::new(SqlTypeKind::Float8));
+    assert_eq!(output[1].sql_type, SqlType::new(SqlTypeKind::Float8));
+}
+
+#[test]
+fn build_plan_for_recursive_mixed_cte_query() {
+    let stmt = parse_select(
+        "with recursive points as (
+            select r, c from generate_series(-2, 2, 0.05) a(r)
+            cross join generate_series(-2, 2, 0.05) b(c)
+            order by r desc, c asc
+        ), iterations as (
+            select r, c, c::float as zr, r::float as zc, 0 as iteration from points
+            union all
+            select r, c, zr*zr - zc*zc + 1 - 1.61803398875 as zr, 2*zr*zc as zc, iteration+1 as iteration
+            from iterations where zr*zr + zc*zc < 4 and iteration < 1000
+        ), final_iteration as (
+            select * from iterations where iteration = 1000
+        ), marked_points as (
+            select r, c, (case when exists (
+                select 1 from final_iteration i where p.r = i.r and p.c = i.c
+            ) then '**' else '  ' end) as marker
+            from points p
+            order by r desc, c asc
+        ), rows as (
+            select r, string_agg(marker, '') as r_text
+            from marked_points
+            group by r
+            order by r desc
+        )
+        select string_agg(r_text, e'\\n') from rows",
+    )
+    .unwrap();
+    assert!(build_plan(&stmt, &catalog()).is_ok());
+}
+
+#[test]
 fn parse_create_table_primary_key_and_unique_constraints() {
     let stmt =
         parse_statement("create table items (id int4 primary key, note text unique)").unwrap();

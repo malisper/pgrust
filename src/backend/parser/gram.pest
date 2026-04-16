@@ -165,7 +165,7 @@ parenthesized_from_item = { "(" ~ from_list ~ ")" }
 relation_alias = { kw_as ~ identifier ~ alias_column_spec? | bare_relation_alias ~ alias_column_spec? }
 alias_column_spec = { "(" ~ (alias_column_def ~ ("," ~ alias_column_def)* | ident_list) ~ ")" }
 alias_column_def = { identifier ~ type_name }
-bare_relation_alias = { !kw_as ~ !kw_join ~ !kw_on ~ !kw_where ~ !kw_group ~ !kw_having ~ !kw_order ~ !kw_limit ~ !kw_offset ~ !kw_cross ~ !kw_inner ~ !kw_left ~ !kw_right ~ !kw_full ~ !kw_outer ~ !kw_natural ~ !kw_using ~ identifier }
+bare_relation_alias = { !kw_as ~ !kw_join ~ !kw_on ~ !kw_where ~ !kw_group ~ !kw_having ~ !kw_order ~ !kw_limit ~ !kw_offset ~ !kw_cross ~ !kw_inner ~ !kw_left ~ !kw_right ~ !kw_full ~ !kw_outer ~ !kw_natural ~ !kw_using ~ !kw_union ~ identifier }
 
 column_def = { !kw_constraint ~ identifier ~ type_name ~ column_modifier* }
 column_modifier = { column_default | nullable | named_column_constraint | not_null_column_constraint | check_column_constraint | primary_key_column_constraint | unique_column_constraint }

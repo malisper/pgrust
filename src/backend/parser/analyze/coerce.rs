@@ -60,6 +60,27 @@ pub(super) fn resolve_numeric_binary_type(
     Ok(SqlType::new(Int2))
 }
 
+pub(super) fn resolve_generate_series_common_type(
+    start: SqlType,
+    stop: SqlType,
+    step: Option<SqlType>,
+) -> Result<SqlType, ParseError> {
+    let mut common = resolve_numeric_binary_type("+", start, stop)?;
+    if let Some(step_type) = step {
+        common = resolve_numeric_binary_type("+", common, step_type)?;
+    }
+    if !matches!(
+        common.kind,
+        SqlTypeKind::Int4 | SqlTypeKind::Int8 | SqlTypeKind::Numeric
+    ) {
+        return Err(ParseError::UnexpectedToken {
+            expected: "generate_series integer or numeric arguments",
+            actual: sql_type_name(common),
+        });
+    }
+    Ok(common)
+}
+
 pub(super) fn sql_type_name(ty: SqlType) -> String {
     let base = match ty.kind {
         SqlTypeKind::AnyArray => "anyarray",

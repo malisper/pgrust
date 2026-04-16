@@ -57,6 +57,14 @@ pub(super) fn finalize_expr_subqueries(
         | Expr::CurrentTimestamp { .. }
         | Expr::LocalTime { .. }
         | Expr::LocalTimestamp { .. }) => other,
+        Expr::Aggref(aggref) => Expr::Aggref(Box::new(crate::include::nodes::primnodes::Aggref {
+            args: aggref
+                .args
+                .into_iter()
+                .map(|arg| finalize_expr_subqueries(arg, catalog, subplans))
+                .collect(),
+            ..*aggref
+        })),
         Expr::Op(op) => Expr::Op(Box::new(crate::include::nodes::primnodes::OpExpr {
             args: op
                 .args
@@ -73,6 +81,26 @@ pub(super) fn finalize_expr_subqueries(
                 .collect(),
             ..*bool_expr
         })),
+        Expr::Case(case_expr) => Expr::Case(Box::new(crate::include::nodes::primnodes::CaseExpr {
+            arg: case_expr
+                .arg
+                .map(|expr| Box::new(finalize_expr_subqueries(*expr, catalog, subplans))),
+            args: case_expr
+                .args
+                .into_iter()
+                .map(|arm| crate::include::nodes::primnodes::CaseWhen {
+                    expr: finalize_expr_subqueries(arm.expr, catalog, subplans),
+                    result: finalize_expr_subqueries(arm.result, catalog, subplans),
+                })
+                .collect(),
+            defresult: Box::new(finalize_expr_subqueries(
+                *case_expr.defresult,
+                catalog,
+                subplans,
+            )),
+            ..*case_expr
+        })),
+        Expr::CaseTest(case_test) => Expr::CaseTest(case_test),
         Expr::Func(func) => Expr::Func(Box::new(crate::include::nodes::primnodes::FuncExpr {
             args: func
                 .args
@@ -105,6 +133,14 @@ pub(super) fn finalize_expr_subqueries(
         Expr::IsNotNull(inner) => Expr::IsNotNull(Box::new(finalize_expr_subqueries(
             *inner, catalog, subplans,
         ))),
+        Expr::IsDistinctFrom(left, right) => Expr::IsDistinctFrom(
+            Box::new(finalize_expr_subqueries(*left, catalog, subplans)),
+            Box::new(finalize_expr_subqueries(*right, catalog, subplans)),
+        ),
+        Expr::IsNotDistinctFrom(left, right) => Expr::IsNotDistinctFrom(
+            Box::new(finalize_expr_subqueries(*left, catalog, subplans)),
+            Box::new(finalize_expr_subqueries(*right, catalog, subplans)),
+        ),
         Expr::Like {
             expr,
             pattern,
@@ -158,7 +194,6 @@ pub(super) fn finalize_expr_subqueries(
                 })
                 .collect(),
         },
-        other => other,
     }
 }
 
@@ -294,6 +329,14 @@ fn rebase_expr_subplan_ids(expr: Expr, base: usize) -> Expr {
         | Expr::CurrentTimestamp { .. }
         | Expr::LocalTime { .. }
         | Expr::LocalTimestamp { .. }) => other,
+        Expr::Aggref(aggref) => Expr::Aggref(Box::new(crate::include::nodes::primnodes::Aggref {
+            args: aggref
+                .args
+                .into_iter()
+                .map(|arg| rebase_expr_subplan_ids(arg, base))
+                .collect(),
+            ..*aggref
+        })),
         Expr::Op(op) => Expr::Op(Box::new(crate::include::nodes::primnodes::OpExpr {
             args: op
                 .args
@@ -310,6 +353,22 @@ fn rebase_expr_subplan_ids(expr: Expr, base: usize) -> Expr {
                 .collect(),
             ..*bool_expr
         })),
+        Expr::Case(case_expr) => Expr::Case(Box::new(crate::include::nodes::primnodes::CaseExpr {
+            arg: case_expr
+                .arg
+                .map(|expr| Box::new(rebase_expr_subplan_ids(*expr, base))),
+            args: case_expr
+                .args
+                .into_iter()
+                .map(|arm| crate::include::nodes::primnodes::CaseWhen {
+                    expr: rebase_expr_subplan_ids(arm.expr, base),
+                    result: rebase_expr_subplan_ids(arm.result, base),
+                })
+                .collect(),
+            defresult: Box::new(rebase_expr_subplan_ids(*case_expr.defresult, base)),
+            ..*case_expr
+        })),
+        Expr::CaseTest(case_test) => Expr::CaseTest(case_test),
         Expr::Func(func) => Expr::Func(Box::new(crate::include::nodes::primnodes::FuncExpr {
             args: func
                 .args
@@ -342,6 +401,14 @@ fn rebase_expr_subplan_ids(expr: Expr, base: usize) -> Expr {
         Expr::Cast(inner, ty) => Expr::Cast(Box::new(rebase_expr_subplan_ids(*inner, base)), ty),
         Expr::IsNull(inner) => Expr::IsNull(Box::new(rebase_expr_subplan_ids(*inner, base))),
         Expr::IsNotNull(inner) => Expr::IsNotNull(Box::new(rebase_expr_subplan_ids(*inner, base))),
+        Expr::IsDistinctFrom(left, right) => Expr::IsDistinctFrom(
+            Box::new(rebase_expr_subplan_ids(*left, base)),
+            Box::new(rebase_expr_subplan_ids(*right, base)),
+        ),
+        Expr::IsNotDistinctFrom(left, right) => Expr::IsNotDistinctFrom(
+            Box::new(rebase_expr_subplan_ids(*left, base)),
+            Box::new(rebase_expr_subplan_ids(*right, base)),
+        ),
         Expr::Like {
             expr,
             pattern,
@@ -395,7 +462,6 @@ fn rebase_expr_subplan_ids(expr: Expr, base: usize) -> Expr {
                 })
                 .collect(),
         },
-        other => other,
     }
 }
 
