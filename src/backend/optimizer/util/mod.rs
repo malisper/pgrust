@@ -73,6 +73,14 @@ pub(super) fn required_query_pathkeys_for_rel(root: &PlannerInfo, rel: &RelOptIn
     tlist::required_query_pathkeys_for_rel(root, rel)
 }
 
+pub(super) fn path_exposes_required_pathkey_identity(path: &Path, pathkeys: &[PathKey]) -> bool {
+    tlist::path_exposes_required_pathkey_identity(path, pathkeys)
+}
+
+pub(super) fn rel_exposes_required_pathkey_identity(rel: &RelOptInfo, pathkeys: &[PathKey]) -> bool {
+    tlist::rel_exposes_required_pathkey_identity(rel, pathkeys)
+}
+
 pub(super) fn pathkeys_to_order_items(
     pathkeys: &[PathKey],
 ) -> Vec<crate::include::nodes::primnodes::OrderByEntry> {
