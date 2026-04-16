@@ -422,6 +422,11 @@ fn lower_projection_expr_by_input_target(
     input: &Path,
     input_tlist: &IndexedTlist,
 ) -> Expr {
+    if let Some(entry) = search_input_tlist_entry(root, &expr, input, input_tlist)
+        && entry.sql_type == expr_sql_type(&expr)
+    {
+        return special_slot_var(OUTER_VAR, entry.index, entry.sql_type);
+    }
     let map_var = |var: Var| {
         if var.varlevelsup != 0
             || is_executor_special_varno(var.varno)
