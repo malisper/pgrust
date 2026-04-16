@@ -4,7 +4,7 @@ use super::pathnodes::{
 };
 use super::plan::append_planned_subquery;
 use super::{
-    aggregate_group_by, expand_join_rte_vars, flatten_join_alias_vars, planner_with_param_base,
+    expand_join_rte_vars, flatten_join_alias_vars, planner_with_param_base,
     rewrite_semantic_expr_for_join_inputs, rewrite_semantic_expr_for_path,
     rewrite_semantic_expr_for_path_or_expand_join_vars,
 };
@@ -2146,32 +2146,11 @@ fn set_order_references(
     input: Box<Path>,
     items: Vec<OrderByEntry>,
 ) -> Plan {
-    let layout = input.output_vars();
     let input_tlist = build_path_tlist(ctx.root, &input);
-    let items = match (ctx.root, aggregate_group_by(&input)) {
-        (Some(root), Some(group_by)) => items
-            .into_iter()
-            .map(|item| OrderByEntry {
-                expr: lower_agg_output_expr(
-                    expand_join_rte_vars(root, item.expr),
-                    group_by,
-                    &layout,
-                ),
-                ..item
-            })
-            .collect::<Vec<_>>(),
-        (None, Some(group_by)) => items
-            .into_iter()
-            .map(|item| OrderByEntry {
-                expr: lower_agg_output_expr(item.expr, group_by, &layout),
-                ..item
-            })
-            .collect::<Vec<_>>(),
-        (_, None) => items
-            .into_iter()
-            .map(|item| lower_order_by_expr_for_input(ctx.root, item, &input, &input_tlist))
-            .collect::<Vec<_>>(),
-    };
+    let items = items
+        .into_iter()
+        .map(|item| lower_order_by_expr_for_input(ctx.root, item, &input, &input_tlist))
+        .collect::<Vec<_>>();
     let lowered_items = items
         .into_iter()
         .map(|item| lower_order_by_entry(ctx, item, LowerMode::Input { tlist: &input_tlist }))

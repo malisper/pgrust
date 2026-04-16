@@ -12,9 +12,7 @@ use super::super::bestpath;
 use super::super::create_plan_with_param_base;
 use super::super::has_grouping;
 use super::super::path::{query_planner, residual_where_qual};
-use super::super::pathnodes::{
-    aggregate_output_vars, lower_agg_output_expr, next_synthetic_slot_id,
-};
+use super::super::pathnodes::next_synthetic_slot_id;
 use super::super::root;
 use super::super::upperrels;
 use super::super::util::{
@@ -99,14 +97,11 @@ fn make_aggregate_rel(
                 accum
             })
             .collect::<Vec<_>>();
-        let agg_output_layout = aggregate_output_vars(slot_id, &group_by, &accumulators);
-        let having = root.parse.having_qual.clone().map(|expr| {
-            lower_agg_output_expr(
-                expand_join_rte_vars(root, expr),
-                &group_by,
-                &agg_output_layout,
-            )
-        });
+        let having = root
+            .parse
+            .having_qual
+            .clone()
+            .map(|expr| expand_join_rte_vars(root, expr));
         rel.add_path(optimize_path(
             Path::Aggregate {
                 plan_info: PlanEstimate::default(),
