@@ -333,7 +333,6 @@ fn rewrite_semantic_expr(
     Ok(match expr {
         other @ (Expr::Var(_)
         | Expr::Param(_)
-        | Expr::Column(_)
         | Expr::Const(_)
         | Expr::Random
         | Expr::CurrentDate

@@ -80,8 +80,7 @@ fn expr_uses_outer_columns(expr: &Expr) -> bool {
                             .is_some_and(expr_uses_outer_columns)
                 })
         }
-        Expr::Column(_)
-        | Expr::Const(_)
+        Expr::Const(_)
         | Expr::Random
         | Expr::CurrentDate
         | Expr::CurrentTime { .. }

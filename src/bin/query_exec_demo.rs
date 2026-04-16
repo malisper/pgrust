@@ -13,6 +13,7 @@ use pgrust::executor::{
     executor_start,
 };
 use pgrust::include::access::htup::{HeapTuple, TupleValue};
+use pgrust::include::nodes::primnodes::{Var, user_attrno};
 use pgrust::parser::{SqlType, SqlTypeKind};
 use pgrust::{BufferPool, RelFileLocator, SmgrStorageBackend};
 use std::fs;
@@ -106,6 +107,15 @@ fn render_value(value: &Value) -> String {
     }
 }
 
+fn local_var(index: usize, ty: SqlType) -> Expr {
+    Expr::Var(Var {
+        varno: 1,
+        varattno: user_attrno(index),
+        varlevelsup: 0,
+        vartype: ty,
+    })
+}
+
 fn main() -> Result<(), ExecError> {
     let base_dir = PathBuf::from(std::env::temp_dir()).join("pgrust_query_exec_demo");
     let _ = fs::remove_dir_all(&base_dir);
@@ -151,12 +161,25 @@ fn main() -> Result<(), ExecError> {
             }),
             predicate: Expr::op_auto(
                 pgrust::include::nodes::primnodes::OpExprKind::Gt,
-                vec![Expr::Column(0), Expr::Const(Value::Int32(1))],
+                vec![
+                    local_var(0, SqlType::new(SqlTypeKind::Int4)),
+                    Expr::Const(Value::Int32(1)),
+                ],
             ),
         }),
         targets: vec![
-            TargetEntry::new("name", Expr::Column(1), SqlType::new(SqlTypeKind::Text), 1),
-            TargetEntry::new("note", Expr::Column(2), SqlType::new(SqlTypeKind::Text), 2),
+            TargetEntry::new(
+                "name",
+                local_var(1, SqlType::new(SqlTypeKind::Text)),
+                SqlType::new(SqlTypeKind::Text),
+                1,
+            ),
+            TargetEntry::new(
+                "note",
+                local_var(2, SqlType::new(SqlTypeKind::Text)),
+                SqlType::new(SqlTypeKind::Text),
+                2,
+            ),
         ],
     };
 

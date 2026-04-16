@@ -27,7 +27,6 @@ struct ChosenIndexPath {
 
 fn simple_column_index(expr: &Expr) -> Option<usize> {
     match expr {
-        Expr::Column(index) => Some(*index),
         Expr::Var(var) if var.varlevelsup == 0 && !crate::include::nodes::primnodes::is_system_attr(var.varattno) => {
             crate::include::nodes::primnodes::attrno_index(var.varattno)
         }

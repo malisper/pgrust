@@ -16,7 +16,7 @@ use crate::include::nodes::plannodes::{ExecParamSource, Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
     AggAccum, Aggref, BoolExpr, Expr, ExprArraySubscript, FuncExpr, OpExpr, OrderByEntry, Param,
     ParamKind, QueryColumn, ScalarArrayOpExpr, SubPlan, TargetEntry, Var, attrno_index,
-    is_special_varno, is_system_attr, user_attrno, INNER_VAR, OUTER_VAR,
+    is_executor_special_varno, is_special_varno, is_system_attr, user_attrno, INNER_VAR, OUTER_VAR,
 };
 
 #[derive(Clone, Debug)]
@@ -404,7 +404,7 @@ fn lower_top_level_input_var(
     match expr {
         Expr::Var(var)
             if var.varlevelsup == 0
-                && !is_special_varno(var.varno)
+                && !is_executor_special_varno(var.varno)
                 && !is_system_attr(var.varattno) =>
         {
             search_input_tlist_entry(root, &Expr::Var(var.clone()), input, tlist)
@@ -423,7 +423,10 @@ fn lower_projection_expr_by_input_target(
     input_tlist: &IndexedTlist,
 ) -> Expr {
     let map_var = |var: Var| {
-        if var.varlevelsup != 0 || is_special_varno(var.varno) || is_system_attr(var.varattno) {
+        if var.varlevelsup != 0
+            || is_executor_special_varno(var.varno)
+            || is_system_attr(var.varattno)
+        {
             return Expr::Var(var);
         }
         let expr = Expr::Var(var.clone());
@@ -692,7 +695,9 @@ fn lower_order_by_expr_for_input(
 fn expr_contains_local_semantic_var(expr: &Expr) -> bool {
     match expr {
         Expr::Var(var) => {
-            var.varlevelsup == 0 && !is_special_varno(var.varno) && !is_system_attr(var.varattno)
+            var.varlevelsup == 0
+                && !is_executor_special_varno(var.varno)
+                && !is_system_attr(var.varattno)
         }
         Expr::Aggref(aggref) => aggref.args.iter().any(expr_contains_local_semantic_var),
         Expr::Op(op) => op.args.iter().any(expr_contains_local_semantic_var),
@@ -778,79 +783,8 @@ fn expr_contains_local_semantic_var(expr: &Expr) -> bool {
 }
 
 fn expr_contains_legacy_layout_ref(expr: &Expr) -> bool {
-    match expr {
-        Expr::Column(_) => true,
-        Expr::Aggref(aggref) => aggref.args.iter().any(expr_contains_legacy_layout_ref),
-        Expr::Op(op) => op.args.iter().any(expr_contains_legacy_layout_ref),
-        Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_contains_legacy_layout_ref),
-        Expr::Case(case_expr) => {
-            case_expr
-                .arg
-                .as_deref()
-                .is_some_and(expr_contains_legacy_layout_ref)
-                || case_expr
-                    .args
-                    .iter()
-                    .any(|arm| {
-                        expr_contains_legacy_layout_ref(&arm.expr)
-                            || expr_contains_legacy_layout_ref(&arm.result)
-                    })
-                || expr_contains_legacy_layout_ref(&case_expr.defresult)
-        }
-        Expr::Func(func) => func.args.iter().any(expr_contains_legacy_layout_ref),
-        Expr::SubLink(sublink) => sublink
-            .testexpr
-            .as_deref()
-            .is_some_and(expr_contains_legacy_layout_ref),
-        Expr::SubPlan(subplan) => subplan
-            .testexpr
-            .as_deref()
-            .is_some_and(expr_contains_legacy_layout_ref),
-        Expr::ScalarArrayOp(saop) => {
-            expr_contains_legacy_layout_ref(&saop.left)
-                || expr_contains_legacy_layout_ref(&saop.right)
-        }
-        Expr::Cast(inner, _) => expr_contains_legacy_layout_ref(inner),
-        Expr::Like {
-            expr,
-            pattern,
-            escape,
-            ..
-        }
-        | Expr::Similar {
-            expr,
-            pattern,
-            escape,
-            ..
-        } => {
-            expr_contains_legacy_layout_ref(expr)
-                || expr_contains_legacy_layout_ref(pattern)
-                || escape
-                    .as_deref()
-                    .is_some_and(expr_contains_legacy_layout_ref)
-        }
-        Expr::IsNull(inner) | Expr::IsNotNull(inner) => expr_contains_legacy_layout_ref(inner),
-        Expr::IsDistinctFrom(left, right)
-        | Expr::IsNotDistinctFrom(left, right)
-        | Expr::Coalesce(left, right) => {
-            expr_contains_legacy_layout_ref(left) || expr_contains_legacy_layout_ref(right)
-        }
-        Expr::ArrayLiteral { elements, .. } => elements.iter().any(expr_contains_legacy_layout_ref),
-        Expr::ArraySubscript { array, subscripts } => {
-            expr_contains_legacy_layout_ref(array)
-                || subscripts.iter().any(|subscript| {
-                    subscript
-                        .lower
-                        .as_ref()
-                        .is_some_and(expr_contains_legacy_layout_ref)
-                        || subscript
-                            .upper
-                            .as_ref()
-                            .is_some_and(expr_contains_legacy_layout_ref)
-                })
-        }
-        _ => false,
-    }
+    let _ = expr;
+    false
 }
 
 fn path_single_relid(path: &Path) -> Option<usize> {
@@ -1425,7 +1359,7 @@ fn lower_expr(ctx: &mut SetRefsContext<'_>, expr: Expr, mode: LowerMode<'_>) -> 
     }
     match expr {
         Expr::Var(var) if var.varlevelsup > 0 => exec_param_for_outer_var(ctx, var),
-        Expr::Var(var) if is_special_varno(var.varno) => Expr::Var(var),
+        Expr::Var(var) if is_executor_special_varno(var.varno) => Expr::Var(var),
         Expr::Var(var) => {
             if is_system_attr(var.varattno) {
                 Expr::Var(var)
@@ -1437,7 +1371,6 @@ fn lower_expr(ctx: &mut SetRefsContext<'_>, expr: Expr, mode: LowerMode<'_>) -> 
             }
         }
         Expr::Param(param) => Expr::Param(param),
-        Expr::Column(index) => panic!("unresolved Column({index}) survived setrefs"),
         Expr::Aggref(_) => {
             panic!("Aggref should be lowered before executable plan creation")
         }
@@ -1569,9 +1502,6 @@ fn validate_executable_expr(expr: &Expr, plan_node: &str, field: &str) {
     match expr {
         Expr::Var(var) if var.varlevelsup > 0 => panic!(
             "executable plan contains outer-level Var in {plan_node}.{field}: {var:?}"
-        ),
-        Expr::Column(index) => panic!(
-            "executable plan contains planner-only Column({index}) in {plan_node}.{field}"
         ),
         Expr::Aggref(aggref) => panic!(
             "executable plan contains unresolved Aggref in {plan_node}.{field}: {aggref:?}"
@@ -1832,7 +1762,7 @@ fn validate_executable_plan(plan: &Plan) {
 
 fn validate_planner_expr(expr: &Expr, path_node: &str, field: &str) {
     match expr {
-        Expr::Var(var) if is_special_varno(var.varno) => panic!(
+        Expr::Var(var) if is_executor_special_varno(var.varno) => panic!(
             "planner path contains executor-only Var in {path_node}.{field}: {var:?}"
         ),
         Expr::Param(Param {
@@ -1921,9 +1851,7 @@ fn validate_planner_expr(expr: &Expr, path_node: &str, field: &str) {
                 }
             }
         }
-        Expr::Var(_)
-        | Expr::Column(_)
-        | Expr::Const(_)
+        Expr::Var(_) | Expr::Const(_)
         | Expr::Aggref(_)
         | Expr::CaseTest(_)
         | Expr::Random
@@ -2913,7 +2841,7 @@ fn rebuild_setrefs_expr(
     recurse: impl Copy + Fn(Expr) -> Expr,
 ) -> Expr {
     match expr {
-        Expr::Var(_) | Expr::Column(_) | Expr::Param(_) => expr,
+        Expr::Var(_) | Expr::Param(_) => expr,
         Expr::Aggref(aggref) => Expr::Aggref(Box::new(Aggref {
             args: aggref.args.into_iter().map(recurse).collect(),
             ..*aggref
