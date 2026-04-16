@@ -102,26 +102,34 @@ pub(crate) fn bind_select_targets(
             continue;
         }
 
-        final_targets.push(TargetEntry::new(
-            item.output_name.clone(),
-            bind_expr_with_outer_and_ctes(
-                &item.expr,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?,
-            infer_sql_expr_type_with_ctes(
-                &item.expr,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            ),
-            final_targets.len() + 1,
-        ));
+        let expr = bind_expr_with_outer_and_ctes(
+            &item.expr,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        )?;
+        let input_resno = match &expr {
+            Expr::Column(index) => Some(index + 1),
+            _ => None,
+        };
+        final_targets.push(
+            TargetEntry::new(
+                item.output_name.clone(),
+                expr,
+                infer_sql_expr_type_with_ctes(
+                    &item.expr,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                ),
+                final_targets.len() + 1,
+            )
+            .with_input_resno_opt(input_resno),
+        );
     }
 
     Ok(BoundSelectTargets::WithProjectSet {
@@ -173,26 +181,34 @@ fn bind_plain_select_targets(
             }
         }
 
-        entries.push(TargetEntry::new(
-            item.output_name.clone(),
-            bind_expr_with_outer_and_ctes(
-                &item.expr,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?,
-            infer_sql_expr_type_with_ctes(
-                &item.expr,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            ),
-            entries.len() + 1,
-        ));
+        let expr = bind_expr_with_outer_and_ctes(
+            &item.expr,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        )?;
+        let input_resno = match &expr {
+            Expr::Column(index) => Some(index + 1),
+            _ => None,
+        };
+        entries.push(
+            TargetEntry::new(
+                item.output_name.clone(),
+                expr,
+                infer_sql_expr_type_with_ctes(
+                    &item.expr,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                ),
+                entries.len() + 1,
+            )
+            .with_input_resno_opt(input_resno),
+        );
     }
     Ok(entries)
 }
