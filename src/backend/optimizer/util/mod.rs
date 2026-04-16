@@ -91,40 +91,6 @@ pub(super) fn projection_is_identity(path: &Path, targets: &[TargetEntry]) -> bo
     tlist::projection_is_identity(path, targets)
 }
 
-pub(super) fn rewrite_expr_for_append_rel(
-    expr: Expr,
-    info: &crate::include::nodes::pathnodes::AppendRelInfo,
-) -> Expr {
-    crate::backend::optimizer::rewrite::rewrite_expr_for_append_rel(expr, info)
-}
-
-pub(super) fn rewrite_semantic_expr_for_path(expr: Expr, path: &Path, layout: &[Expr]) -> Expr {
-    crate::backend::optimizer::rewrite::rewrite_semantic_expr_for_path(expr, path, layout)
-}
-
-pub(super) fn rewrite_expr_for_path(expr: Expr, path: &Path, layout: &[Expr]) -> Expr {
-    crate::backend::optimizer::rewrite::rewrite_expr_for_path(expr, path, layout)
-}
-
-pub(super) fn rewrite_semantic_expr_for_path_or_expand_join_vars(
-    root: &PlannerInfo,
-    expr: Expr,
-    path: &Path,
-    layout: &[Expr],
-) -> Expr {
-    crate::backend::optimizer::rewrite::rewrite_semantic_expr_for_path_or_expand_join_vars(
-        root, expr, path, layout,
-    )
-}
-
 pub(super) fn aggregate_group_by(path: &Path) -> Option<&[Expr]> {
     tlist::aggregate_group_by(path)
-}
-
-pub(super) fn layout_candidate_for_expr(
-    root: &PlannerInfo,
-    expr: &Expr,
-    layout: &[Expr],
-) -> Option<Expr> {
-    crate::backend::optimizer::rewrite::layout_candidate_for_expr(root, expr, layout)
 }

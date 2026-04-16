@@ -20,9 +20,10 @@ use super::super::joininfo;
 use super::super::optimize_path;
 use super::super::pathnodes::{expr_sql_type, next_synthetic_slot_id};
 use super::super::plan::grouping_planner;
+use super::super::rewrite::layout_candidate_for_expr;
 use super::super::util::{
-    annotate_targets_for_input, layout_candidate_for_expr, normalize_rte_path,
-    pathkeys_to_order_items, project_to_slot_layout, required_query_pathkeys_for_rel,
+    annotate_targets_for_input, normalize_rte_path, pathkeys_to_order_items, project_to_slot_layout,
+    required_query_pathkeys_for_rel,
 };
 use super::super::{
     JoinBuildSpec, and_exprs, exact_join_rtindex, expand_join_rte_vars, expr_relids,
