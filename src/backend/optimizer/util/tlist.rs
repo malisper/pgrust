@@ -302,11 +302,90 @@ fn projection_is_passthrough_boundary(input: &Path, targets: &[TargetEntry]) -> 
             })
 }
 
+fn expr_contains_legacy_layout_ref(expr: &Expr) -> bool {
+    match expr {
+        Expr::Column(_) | Expr::OuterColumn { .. } => true,
+        Expr::Aggref(aggref) => aggref.args.iter().any(expr_contains_legacy_layout_ref),
+        Expr::Op(op) => op.args.iter().any(expr_contains_legacy_layout_ref),
+        Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_contains_legacy_layout_ref),
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_deref()
+                .is_some_and(expr_contains_legacy_layout_ref)
+                || case_expr.args.iter().any(|arm| {
+                    expr_contains_legacy_layout_ref(&arm.expr)
+                        || expr_contains_legacy_layout_ref(&arm.result)
+                })
+                || expr_contains_legacy_layout_ref(&case_expr.defresult)
+        }
+        Expr::Func(func) => func.args.iter().any(expr_contains_legacy_layout_ref),
+        Expr::SubLink(sublink) => sublink
+            .testexpr
+            .as_deref()
+            .is_some_and(expr_contains_legacy_layout_ref),
+        Expr::SubPlan(subplan) => subplan
+            .testexpr
+            .as_deref()
+            .is_some_and(expr_contains_legacy_layout_ref),
+        Expr::ScalarArrayOp(saop) => {
+            expr_contains_legacy_layout_ref(&saop.left)
+                || expr_contains_legacy_layout_ref(&saop.right)
+        }
+        Expr::Cast(inner, _) => expr_contains_legacy_layout_ref(inner),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_contains_legacy_layout_ref(expr)
+                || expr_contains_legacy_layout_ref(pattern)
+                || escape
+                    .as_deref()
+                    .is_some_and(expr_contains_legacy_layout_ref)
+        }
+        Expr::IsNull(inner) | Expr::IsNotNull(inner) => expr_contains_legacy_layout_ref(inner),
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            expr_contains_legacy_layout_ref(left) || expr_contains_legacy_layout_ref(right)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements.iter().any(expr_contains_legacy_layout_ref),
+        Expr::ArraySubscript { array, subscripts } => {
+            expr_contains_legacy_layout_ref(array)
+                || subscripts.iter().any(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .is_some_and(expr_contains_legacy_layout_ref)
+                        || subscript
+                            .upper
+                            .as_ref()
+                            .is_some_and(expr_contains_legacy_layout_ref)
+                })
+        }
+        _ => false,
+    }
+}
+
 fn projection_target_semantic_expr(target: &TargetEntry, input_layout: &[Expr]) -> Expr {
     target
         .input_resno
         .and_then(|input_resno| input_layout.get(input_resno.saturating_sub(1)).cloned())
-        .unwrap_or_else(|| rewrite_expr_against_layout(target.expr.clone(), input_layout))
+        .unwrap_or_else(|| {
+            if expr_contains_legacy_layout_ref(&target.expr) {
+                rewrite_expr_against_layout(target.expr.clone(), input_layout)
+            } else {
+                target.expr.clone()
+            }
+        })
 }
 
 fn projection_target_index_for_semantic_expr(
@@ -544,8 +623,10 @@ pub(super) fn rewrite_expr_for_path(expr: Expr, path: &Path, layout: &[Expr]) ->
                 ) {
                     let target = &targets[index];
                     projection_slot_var(*slot_id, user_attrno(index), target.sql_type)
-                } else {
+                } else if expr_contains_legacy_layout_ref(&expr) {
                     rewrite_expr_against_layout(expr, layout)
+                } else {
+                    expr
                 }
             }
         }
@@ -569,7 +650,11 @@ pub(super) fn rewrite_expr_for_path(expr: Expr, path: &Path, layout: &[Expr]) ->
             if rewritten_right != expr {
                 return rewritten_right;
             }
-            rewrite_expr_against_layout(expr, layout)
+            if expr_contains_legacy_layout_ref(&expr) {
+                rewrite_expr_against_layout(expr, layout)
+            } else {
+                expr
+            }
         }
         Path::RecursiveUnion { .. } => {
             if let Expr::Var(var) = &expr
@@ -581,9 +666,19 @@ pub(super) fn rewrite_expr_for_path(expr: Expr, path: &Path, layout: &[Expr]) ->
             {
                 return candidate.clone();
             }
-            rewrite_expr_against_layout(expr, layout)
+            if expr_contains_legacy_layout_ref(&expr) {
+                rewrite_expr_against_layout(expr, layout)
+            } else {
+                expr
+            }
         }
-        _ => rewrite_expr_against_layout(expr, layout),
+        _ => {
+            if expr_contains_legacy_layout_ref(&expr) {
+                rewrite_expr_against_layout(expr, layout)
+            } else {
+                expr
+            }
+        }
     }
 }
 
