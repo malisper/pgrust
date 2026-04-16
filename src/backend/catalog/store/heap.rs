@@ -1211,6 +1211,34 @@ impl CatalogStore {
         Ok(effect)
     }
 
+    pub fn rewrite_relation_storage_mvcc(
+        &mut self,
+        relation_oids: &[u32],
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let mut catalog = self.catalog_snapshot_with_control_for_snapshot(ctx)?;
+        let rewritten = catalog.rewrite_relation_storage(relation_oids)?;
+        self.persist_control_state(&catalog)?;
+
+        let kinds = vec![BootstrapCatalogKind::PgClass];
+        let mut old_rows = PhysicalCatalogRows::default();
+        let mut new_rows = PhysicalCatalogRows::default();
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+
+        for (name, old_entry, new_entry) in rewritten {
+            add_catalog_entry_rows(&mut old_rows, &catalog, &name, &old_entry);
+            add_catalog_entry_rows(&mut new_rows, &catalog, &name, &new_entry);
+            effect_record_oid(&mut effect.relation_oids, old_entry.relation_oid);
+            effect_record_rel(&mut effect.dropped_rels, old_entry.rel);
+            effect_record_rel(&mut effect.created_rels, new_entry.rel);
+        }
+
+        delete_catalog_rows_subset_mvcc(ctx, &old_rows, 1, &kinds)?;
+        insert_catalog_rows_subset_mvcc(ctx, &new_rows, 1, &kinds)?;
+        Ok(effect)
+    }
+
     pub fn alter_relation_owner_mvcc(
         &mut self,
         relation_oid: u32,

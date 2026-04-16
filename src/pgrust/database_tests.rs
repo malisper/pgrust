@@ -7300,6 +7300,68 @@ fn rollback_restores_dropped_table() {
 }
 
 #[test]
+fn truncate_rollback_restores_relfilenodes_and_rows() {
+    let base = temp_dir("txn_truncate_rollback");
+    let db = Database::open(&base, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table trunc_rb (id int4 not null, note text)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into trunc_rb values (1, 'alpha'), (2, 'beta')",
+        )
+        .unwrap();
+    session
+        .execute(&db, "create index trunc_rb_idx on trunc_rb (id)")
+        .unwrap();
+
+    let old_heap = relfilenode_for(&db, 1, "trunc_rb");
+    let old_index = relfilenode_for(&db, 1, "trunc_rb_idx");
+
+    session.execute(&db, "begin").unwrap();
+    session.execute(&db, "truncate trunc_rb").unwrap();
+
+    let current_relfilenode = |session: &mut Session, relname: &str| -> i64 {
+        match session
+            .execute(
+                &db,
+                &format!("select relfilenode from pg_class where relname = '{relname}'"),
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => match rows.as_slice() {
+                [row] => int_value(row.first().expect("relfilenode value")),
+                other => panic!("expected one relfilenode row, got {:?}", other),
+            },
+            other => panic!("expected query, got {:?}", other),
+        }
+    };
+
+    let truncated_heap = current_relfilenode(&mut session, "trunc_rb");
+    let truncated_index = current_relfilenode(&mut session, "trunc_rb_idx");
+    assert_ne!(truncated_heap, old_heap);
+    assert_ne!(truncated_index, old_index);
+
+    session
+        .execute(&db, "insert into trunc_rb values (9, 'new')")
+        .unwrap();
+    session.execute(&db, "rollback").unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select id, note from trunc_rb order by id"),
+        vec![
+            vec![Value::Int32(1), Value::Text("alpha".into())],
+            vec![Value::Int32(2), Value::Text("beta".into())],
+        ]
+    );
+    assert_eq!(relfilenode_for(&db, 1, "trunc_rb"), old_heap);
+    assert_eq!(relfilenode_for(&db, 1, "trunc_rb_idx"), old_index);
+}
+
+#[test]
 fn failed_transaction_rejects_commands() {
     let base = temp_dir("failed_txn");
     let db = Database::open(&base, 64).unwrap();
