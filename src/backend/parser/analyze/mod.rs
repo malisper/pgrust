@@ -109,6 +109,32 @@ fn build_sort_clause(
         .collect()
 }
 
+fn resolve_aggregate_call(
+    catalog: &dyn CatalogLookup,
+    func: AggFunc,
+    arg_types: &[SqlType],
+    func_variadic: bool,
+) -> Option<ResolvedFunctionCall> {
+    resolve_function_call(catalog, func.name(), arg_types, func_variadic)
+        .ok()
+        .or_else(|| {
+            // PostgreSQL treats unknown string literals as coercible to bytea for
+            // string_agg(bytea, bytea). pgrust currently infers those literals as
+            // text too early, so retry with a bytea delimiter when the first arg
+            // already forces the bytea aggregate variant.
+            if func == AggFunc::StringAgg
+                && arg_types.len() == 2
+                && arg_types[0].kind == SqlTypeKind::Bytea
+            {
+                let mut retried = arg_types.to_vec();
+                retried[1] = SqlType::new(SqlTypeKind::Bytea);
+                resolve_function_call(catalog, func.name(), &retried, func_variadic).ok()
+            } else {
+                None
+            }
+        })
+}
+
 pub trait CatalogLookup {
     fn lookup_any_relation(&self, name: &str) -> Option<BoundRelation>;
 
@@ -1355,8 +1381,32 @@ fn bind_select_query_with_outer(
                         )
                     })
                     .collect::<Vec<_>>();
-                let resolved =
-                    resolve_function_call(catalog, func.name(), &arg_types, *func_variadic).ok();
+                let resolved = resolve_aggregate_call(catalog, *func, &arg_types, *func_variadic);
+                let bound_args = arg_values
+                    .iter()
+                    .map(|e| {
+                        bind_expr_with_outer_and_ctes(
+                            e,
+                            &scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer.as_ref(),
+                            &visible_ctes,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let coerced_args = if let Some(resolved) = &resolved {
+                    bound_args
+                        .into_iter()
+                        .zip(arg_types.iter().copied())
+                        .zip(resolved.declared_arg_types.iter().copied())
+                        .map(|((arg, actual_type), declared_type)| {
+                            coerce_bound_expr(arg, actual_type, declared_type)
+                        })
+                        .collect()
+                } else {
+                    bound_args
+                };
                 Ok(AggAccum {
                     aggfnoid: resolved
                         .as_ref()
@@ -1367,19 +1417,7 @@ fn bind_select_query_with_outer(
                         .as_ref()
                         .map(|call| call.func_variadic)
                         .unwrap_or(*func_variadic),
-                    args: arg_values
-                        .iter()
-                        .map(|e| {
-                            bind_expr_with_outer_and_ctes(
-                                e,
-                                &scope,
-                                catalog,
-                                outer_scopes,
-                                grouped_outer.as_ref(),
-                                &visible_ctes,
-                            )
-                        })
-                        .collect::<Result<_, _>>()?,
+                    args: coerced_args,
                     distinct: *distinct,
                     sql_type: aggregate_sql_type(*func, arg_types.first().copied()),
                 })

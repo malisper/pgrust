@@ -2454,6 +2454,34 @@ fn string_agg_supports_bytea_inputs() {
 }
 
 #[test]
+fn string_agg_coerces_unknown_delimiter_for_bytea_inputs() {
+    let base = temp_dir("string_agg_bytea_unknown_delimiter");
+    let db = Database::open(&base, 16).unwrap();
+    db.execute(1, "create table bytes_demo (payload bytea)").unwrap();
+    db.execute(
+        1,
+        "insert into bytes_demo (payload) values (decode('ff', 'hex')), (decode('aa', 'hex'))",
+    )
+    .unwrap();
+    match db
+        .execute(
+            1,
+            "select encode(agg_payload, 'hex')
+             from (
+                 select string_agg(payload, '') as agg_payload
+                 from bytes_demo
+             ) agg_bytes",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Text("ffaa".into())]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn having_filters_groups() {
     let base = temp_dir("having_filter");
     let mut txns = TransactionManager::new_durable(&base).unwrap();
