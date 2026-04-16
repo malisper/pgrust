@@ -663,6 +663,57 @@ fn planner_keeps_recursive_project_set_scalar_semantic_until_setrefs() {
 }
 
 #[test]
+fn planned_lockstep_project_set_keeps_both_visible_targets_as_sets() {
+    let catalog = LiteralDefaultCatalog;
+    let stmt = parse_select(
+        "select generate_series(1, 2), unnest(ARRAY['a', 'b', 'c']::varchar[]) order by 1, 2",
+    )
+    .expect("parse");
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog, &[], None, &[], &[]).expect("analyze");
+    let planned = super::planner(query, &catalog);
+    assert!(matches!(planned.plan_tree, Plan::OrderBy { .. }));
+
+    fn find_project_set(plan: &Plan) -> Option<&Plan> {
+        match plan {
+            Plan::ProjectSet { .. } => Some(plan),
+            Plan::Hash { input, .. }
+            | Plan::Filter { input, .. }
+            | Plan::Projection { input, .. }
+            | Plan::OrderBy { input, .. }
+            | Plan::Limit { input, .. }
+            | Plan::Aggregate { input, .. } => find_project_set(input),
+            Plan::Append { children, .. } => children.iter().find_map(find_project_set),
+            Plan::NestedLoopJoin { left, right, .. } | Plan::HashJoin { left, right, .. } => {
+                find_project_set(left).or_else(|| find_project_set(right))
+            }
+            Plan::Result { .. }
+            | Plan::SeqScan { .. }
+            | Plan::IndexScan { .. }
+            | Plan::Values { .. }
+            | Plan::FunctionScan { .. }
+            | Plan::WorkTableScan { .. }
+            | Plan::RecursiveUnion { .. }
+            | Plan::CteScan { .. } => None,
+        }
+    }
+
+    match find_project_set(&planned.plan_tree).expect("project set plan") {
+        Plan::ProjectSet { targets, .. } => {
+            assert!(matches!(
+                &targets[0],
+                crate::include::nodes::primnodes::ProjectSetTarget::Set { .. }
+            ));
+            assert!(matches!(
+                &targets[1],
+                crate::include::nodes::primnodes::ProjectSetTarget::Set { .. }
+            ));
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[test]
 fn into_plan_nested_loop_join_lowers_join_qual_via_child_tlist_identity() {
     let left = Path::Projection {
         plan_info: PlanEstimate::new(1.0, 1.5, 10.0, 1),

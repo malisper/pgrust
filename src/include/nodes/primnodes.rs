@@ -553,10 +553,9 @@ pub const OUTER_VAR: usize = usize::MAX;
 pub const INNER_VAR: usize = usize::MAX - 1;
 pub const INDEX_VAR: usize = usize::MAX - 2;
 pub const ROWID_VAR: usize = usize::MAX - 3;
-pub const OUTPUT_VAR: usize = usize::MAX - 4;
 
 pub const fn is_special_varno(varno: usize) -> bool {
-    varno >= OUTPUT_VAR
+    varno >= ROWID_VAR
 }
 
 pub const fn is_executor_special_varno(varno: usize) -> bool {

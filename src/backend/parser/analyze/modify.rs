@@ -1,5 +1,5 @@
 use super::paths::choose_modify_row_source;
-use super::query::rewrite_expr_for_outputs;
+use super::query::rewrite_local_vars_for_output_exprs;
 use super::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -187,8 +187,9 @@ fn build_update_target(
     let translation_indexes = inheritance_translation_indexes(parent_desc, &child.desc);
     let translation_exprs = inheritance_translation_exprs(&child.desc, &translation_indexes);
     let indexes = catalog.index_relations_for_heap(child.relation_oid);
-    let predicate =
-        parent_predicate.map(|expr| rewrite_expr_for_outputs(expr.clone(), &translation_exprs));
+    let predicate = parent_predicate.map(|expr| {
+        rewrite_local_vars_for_output_exprs(expr.clone(), 1, &translation_exprs)
+    });
     let assignments = parent_assignments
         .iter()
         .map(|assignment| {
@@ -199,7 +200,11 @@ fn build_update_target(
                     &relation_name,
                 )?,
                 subscripts: assignment.subscripts.clone(),
-                expr: rewrite_expr_for_outputs(assignment.expr.clone(), &translation_exprs),
+                expr: rewrite_local_vars_for_output_exprs(
+                    assignment.expr.clone(),
+                    1,
+                    &translation_exprs,
+                ),
             })
         })
         .collect::<Result<Vec<_>, ParseError>>()?;
@@ -236,8 +241,9 @@ fn build_delete_target(
         parent_desc,
         &child.desc,
     ));
-    let predicate =
-        parent_predicate.map(|expr| rewrite_expr_for_outputs(expr.clone(), &translation_exprs));
+    let predicate = parent_predicate.map(|expr| {
+        rewrite_local_vars_for_output_exprs(expr.clone(), 1, &translation_exprs)
+    });
     let indexes = catalog.index_relations_for_heap(child.relation_oid);
 
     BoundDeleteTarget {
