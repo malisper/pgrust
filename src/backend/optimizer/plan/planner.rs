@@ -13,7 +13,7 @@ use super::super::create_plan;
 use super::super::has_grouping;
 use super::super::path::{query_planner, residual_where_qual};
 use super::super::pathnodes::{
-    aggregate_output_vars, expr_sql_type, lower_agg_output_expr, next_synthetic_slot_id,
+    aggregate_output_vars, lower_agg_output_expr, next_synthetic_slot_id,
     rewrite_project_set_target_against_layout,
 };
 use super::super::root;
@@ -163,6 +163,7 @@ fn make_filter_rel(
 fn make_project_set_rel(
     root: &mut PlannerInfo,
     input_rel: RelOptInfo,
+    reltarget: PathTarget,
     targets: &[ProjectSetTarget],
     catalog: &dyn CatalogLookup,
 ) -> RelOptInfo {
@@ -170,7 +171,7 @@ fn make_project_set_rel(
         root,
         UpperRelKind::ProjectSet,
         &input_rel.relids,
-        input_rel.reltarget.clone(),
+        reltarget.clone(),
     );
     if !root.upper_rels[upper_rel_index].rel.pathlist.is_empty() {
         return root.upper_rels[upper_rel_index].rel.clone();
@@ -179,7 +180,7 @@ fn make_project_set_rel(
     let mut rel = RelOptInfo::new(
         input_rel.relids.clone(),
         RelOptKind::UpperRel,
-        input_rel.reltarget.clone(),
+        reltarget,
     );
     for path in input_rel.pathlist {
         let layout = path.output_vars();
@@ -200,6 +201,70 @@ fn make_project_set_rel(
     bestpath::set_cheapest(&mut rel);
     root.upper_rels[upper_rel_index].rel = rel.clone();
     rel
+}
+
+fn project_set_targets_for_target_list(
+    query: &Query,
+    target_list: &[TargetEntry],
+) -> Vec<ProjectSetTarget> {
+    let Some(project_set) = query.project_set.as_ref() else {
+        return target_list
+            .iter()
+            .cloned()
+            .map(ProjectSetTarget::Scalar)
+            .collect();
+    };
+    let base_width = root::project_set_base_width(project_set);
+    target_list
+        .iter()
+        .cloned()
+        .map(|target| match target.expr {
+            Expr::Column(index) if index >= base_width => project_set
+                .get(index)
+                .cloned()
+                .map(|project_target| match project_target {
+                    ProjectSetTarget::Set {
+                        call,
+                        sql_type,
+                        column_index,
+                        ..
+                    } => ProjectSetTarget::Set {
+                        name: target.name.clone(),
+                        call,
+                        sql_type,
+                        column_index,
+                    },
+                    ProjectSetTarget::Scalar(_) => ProjectSetTarget::Scalar(target.clone()),
+                })
+                .unwrap_or(ProjectSetTarget::Scalar(target)),
+            _ => ProjectSetTarget::Scalar(target),
+        })
+        .collect()
+}
+
+fn query_has_postponed_srfs(root: &PlannerInfo) -> bool {
+    let Some(project_set) = root.parse.project_set.as_ref() else {
+        return false;
+    };
+    if root.parse.sort_clause.is_empty() {
+        return false;
+    }
+    let base_width = root::project_set_base_width(project_set);
+    !root.processed_tlist.iter().any(|target| {
+        target.ressortgroupref != 0
+            && root::expr_references_project_set_output(&target.expr, base_width)
+    })
+}
+
+fn adjust_paths_for_srfs(
+    root: &mut PlannerInfo,
+    input_rel: RelOptInfo,
+    target_list: &[TargetEntry],
+    reltarget: PathTarget,
+    catalog: &dyn CatalogLookup,
+) -> RelOptInfo {
+    let project_set_targets = project_set_targets_for_target_list(&root.parse, target_list);
+    make_project_set_rel(root, input_rel, reltarget, &project_set_targets, catalog)
 }
 
 fn make_ordered_rel(
@@ -345,16 +410,57 @@ pub(super) fn grouping_planner(
     }
     let mut projection_done = false;
     let final_targets = root.parse.target_list.clone();
+    let processed_tlist = root.processed_tlist.clone();
+    let processed_target = PathTarget::from_target_list(&processed_tlist);
+    let postponed_srfs = query_has_postponed_srfs(root);
     if has_grouping {
         current_rel = make_aggregate_rel(root, current_rel, catalog);
-    } else if let Some(project_set) = root.parse.project_set.clone() {
-        current_rel = make_project_set_rel(root, current_rel, &project_set, catalog);
-        current_rel = make_projection_rel(root, current_rel, &final_targets, catalog, false);
-        projection_done = true;
+    } else if root.parse.project_set.is_some() {
+        if postponed_srfs {
+            if current_rel.reltarget != root.sort_input_target {
+                current_rel = make_pathtarget_projection_rel(
+                    root,
+                    current_rel,
+                    &root.sort_input_target,
+                    catalog,
+                    false,
+                );
+            }
+        } else {
+            let project_set_target = if root.query_pathkeys.is_empty() {
+                root.final_target.clone()
+            } else {
+                processed_target.clone()
+            };
+            let project_set_tlist = if root.query_pathkeys.is_empty() {
+                final_targets.as_slice()
+            } else {
+                processed_tlist.as_slice()
+            };
+            current_rel = adjust_paths_for_srfs(
+                root,
+                current_rel,
+                project_set_tlist,
+                project_set_target,
+                catalog,
+            );
+            projection_done = root.query_pathkeys.is_empty();
+        }
     }
 
     if !root.query_pathkeys.is_empty() {
         current_rel = make_ordered_rel(root, current_rel, catalog);
+    }
+
+    if root.parse.project_set.is_some() && postponed_srfs {
+        current_rel = adjust_paths_for_srfs(
+            root,
+            current_rel,
+            &final_targets,
+            root.final_target.clone(),
+            catalog,
+        );
+        projection_done = true;
     }
 
     if root.parse.limit_count.is_some() || root.parse.limit_offset != 0 {

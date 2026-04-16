@@ -2,9 +2,9 @@ use std::collections::HashMap;
 
 use crate::backend::executor::Expr;
 use crate::backend::parser::{
-    CatalogLookup, ParseError, SqlType, SqlTypeKind, Statement, bind_scalar_expr_in_scope,
-    parse_expr, parse_statement, parse_type_name, pg_plan_query_with_outer,
-    pg_plan_values_query_with_outer,
+    bind_scalar_expr_in_scope, parse_expr, parse_statement, parse_type_name,
+    pg_plan_query_with_outer, pg_plan_values_query_with_outer, CatalogLookup, ParseError, SqlType,
+    SqlTypeKind, Statement,
 };
 use crate::include::catalog::{PgProcRow, RECORD_TYPE_OID};
 use crate::include::nodes::plannodes::PlannedStmt;

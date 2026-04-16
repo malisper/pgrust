@@ -27,33 +27,59 @@ pub struct AppendRelInfo {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathTarget {
     pub exprs: Vec<Expr>,
+    pub sortgrouprefs: Vec<usize>,
     pub width: usize,
 }
 
 impl PathTarget {
     pub fn new(exprs: Vec<Expr>) -> Self {
+        let width = exprs.len();
+        Self {
+            exprs,
+            sortgrouprefs: vec![0; width],
+            width,
+        }
+    }
+
+    pub fn with_sortgrouprefs(exprs: Vec<Expr>, sortgrouprefs: Vec<usize>) -> Self {
+        assert_eq!(exprs.len(), sortgrouprefs.len());
         Self {
             width: exprs.len(),
             exprs,
+            sortgrouprefs,
         }
     }
 
     pub fn from_target_list(target_list: &[TargetEntry]) -> Self {
-        Self::new(
+        Self::with_sortgrouprefs(
             target_list
                 .iter()
                 .map(|target| target.expr.clone())
                 .collect(),
+            target_list
+                .iter()
+                .map(|target| target.ressortgroupref)
+                .collect(),
         )
     }
 
-    pub fn from_sort_clause(sort_clause: &[SortGroupClause]) -> Vec<PathKey> {
+    pub fn from_sort_clause(
+        sort_clause: &[SortGroupClause],
+        target_list: &[TargetEntry],
+    ) -> Vec<PathKey> {
         sort_clause
             .iter()
-            .map(|clause| PathKey {
-                expr: clause.expr.clone(),
-                descending: clause.descending,
-                nulls_first: clause.nulls_first,
+            .map(|clause| {
+                let expr = target_list
+                    .iter()
+                    .find(|target| target.ressortgroupref == clause.tle_sort_group_ref)
+                    .map(|target| target.expr.clone())
+                    .unwrap_or_else(|| clause.expr.clone());
+                PathKey {
+                    expr,
+                    descending: clause.descending,
+                    nulls_first: clause.nulls_first,
+                }
             })
             .collect()
     }
@@ -78,6 +104,31 @@ impl PathTarget {
                     })
                     .collect(),
             ),
+        }
+    }
+
+    pub fn get_pathtarget_sortgroupref(&self, index: usize) -> usize {
+        self.sortgrouprefs.get(index).copied().unwrap_or(0)
+    }
+
+    pub fn add_column_to_pathtarget(&mut self, expr: Expr, sortgroupref: usize) {
+        if let Some(index) = self.exprs.iter().position(|existing| *existing == expr) {
+            if self.sortgrouprefs[index] == 0 && sortgroupref != 0 {
+                self.sortgrouprefs[index] = sortgroupref;
+            }
+            return;
+        }
+        self.exprs.push(expr);
+        self.sortgrouprefs.push(sortgroupref);
+        self.width = self.exprs.len();
+    }
+
+    pub fn add_new_columns_to_pathtarget<I>(&mut self, exprs: I)
+    where
+        I: IntoIterator<Item = Expr>,
+    {
+        for expr in exprs {
+            self.add_column_to_pathtarget(expr, 0);
         }
     }
 }
