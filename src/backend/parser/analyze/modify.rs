@@ -139,11 +139,18 @@ fn inheritance_translation_indexes(
         .collect()
 }
 
-fn inheritance_translation_layout(indexes: &[Option<usize>]) -> Vec<Expr> {
+fn inheritance_translation_exprs(
+    child_desc: &RelationDesc,
+    indexes: &[Option<usize>],
+) -> Vec<Expr> {
+    let child_output_exprs = scope_for_relation(None, child_desc).output_exprs;
     indexes
         .iter()
         .map(|index| match index {
-            Some(index) => Expr::Column(*index),
+            Some(index) => child_output_exprs
+                .get(*index)
+                .cloned()
+                .unwrap_or_else(|| panic!("missing inherited child output expr for column {}", index + 1)),
             None => Expr::Const(Value::Null),
         })
         .collect()
@@ -177,9 +184,10 @@ fn build_update_target(
 ) -> Result<BoundUpdateTarget, ParseError> {
     let relation_name = relation_display_name(catalog, child.relation_oid, base_relation_name);
     let translation_indexes = inheritance_translation_indexes(parent_desc, &child.desc);
-    let layout = inheritance_translation_layout(&translation_indexes);
+    let translation_exprs = inheritance_translation_exprs(&child.desc, &translation_indexes);
     let indexes = catalog.index_relations_for_heap(child.relation_oid);
-    let predicate = parent_predicate.map(|expr| rewrite_expr_columns(expr.clone(), &layout));
+    let predicate =
+        parent_predicate.map(|expr| rewrite_expr_columns(expr.clone(), &translation_exprs));
     let assignments = parent_assignments
         .iter()
         .map(|assignment| {
@@ -190,7 +198,7 @@ fn build_update_target(
                     &relation_name,
                 )?,
                 subscripts: assignment.subscripts.clone(),
-                expr: rewrite_expr_columns(assignment.expr.clone(), &layout),
+                expr: rewrite_expr_columns(assignment.expr.clone(), &translation_exprs),
             })
         })
         .collect::<Result<Vec<_>, ParseError>>()?;
@@ -223,11 +231,12 @@ fn build_delete_target(
     catalog: &dyn CatalogLookup,
 ) -> BoundDeleteTarget {
     let relation_name = relation_display_name(catalog, child.relation_oid, base_relation_name);
-    let layout = inheritance_translation_layout(&inheritance_translation_indexes(
+    let translation_exprs = inheritance_translation_exprs(&child.desc, &inheritance_translation_indexes(
         parent_desc,
         &child.desc,
     ));
-    let predicate = parent_predicate.map(|expr| rewrite_expr_columns(expr.clone(), &layout));
+    let predicate =
+        parent_predicate.map(|expr| rewrite_expr_columns(expr.clone(), &translation_exprs));
     let indexes = catalog.index_relations_for_heap(child.relation_oid);
 
     BoundDeleteTarget {
