@@ -1446,7 +1446,12 @@ fn bind_select_query_with_outer(
             for (i, name) in output_columns.iter().enumerate().take(n_keys) {
                 targets.push(TargetEntry::new(
                     name.name.clone(),
-                    group_keys.get(i).cloned().unwrap_or(Expr::Column(i)),
+                    group_keys.get(i).cloned().unwrap_or_else(|| {
+                        panic!(
+                            "aggregate SELECT * missing grouped key expr for target position {}",
+                            i + 1
+                        )
+                    }),
                     name.sql_type,
                     i + 1,
                 )
