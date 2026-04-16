@@ -198,10 +198,7 @@ fn project_set_targets_for_target_list(
             .input_resno
             .and_then(|input_resno| input_resno.checked_sub(1))
             .filter(|index| *index >= base_width)
-            .or_else(|| match target.expr {
-                Expr::Column(index) if index >= base_width => Some(index),
-                _ => None,
-            }) {
+        {
             Some(index) => project_set
                 .get(index)
                 .cloned()
