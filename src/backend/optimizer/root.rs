@@ -90,7 +90,7 @@ fn make_processed_tlist(parse: &Query) -> Vec<TargetEntry> {
     let mut processed_tlist = parse.target_list.clone();
     let mut next_sort_group_ref = processed_tlist
         .iter()
-        .map(|target| target.ressortgroupref)
+        .map(|target| target.ressortgroupref.max(target.resno))
         .max()
         .unwrap_or(0)
         + 1;
