@@ -792,35 +792,17 @@ fn fix_upper_expr_for_input(
 fn lower_direct_ref(expr: &Expr, mode: LowerMode<'_>) -> Option<Expr> {
     match mode {
         LowerMode::Scalar => None,
-        LowerMode::Input { tlist } | LowerMode::Aggregate { tlist, .. } => match expr {
-            Expr::Column(index) => tlist
-                .entries
-                .get(*index)
-                .map(|entry| special_slot_var(OUTER_VAR, entry.index, entry.sql_type)),
-            Expr::Var(_) => search_tlist_entry(None, expr, tlist)
-                .map(|entry| special_slot_var(OUTER_VAR, entry.index, entry.sql_type)),
-            _ => search_tlist_entry(None, expr, tlist)
-                .map(|entry| special_slot_var(OUTER_VAR, entry.index, entry.sql_type)),
-        },
+        LowerMode::Input { tlist } | LowerMode::Aggregate { tlist, .. } => search_tlist_entry(None, expr, tlist)
+            .map(|entry| special_slot_var(OUTER_VAR, entry.index, entry.sql_type)),
         LowerMode::Join {
             outer_tlist,
             inner_tlist,
-        } => match expr {
-            Expr::Column(index) if *index < outer_tlist.entries.len() => outer_tlist
-                .entries
-                .get(*index)
-                .map(|entry| special_slot_var(OUTER_VAR, entry.index, entry.sql_type)),
-            Expr::Column(index) => inner_tlist
-                .entries
-                .get(index.saturating_sub(outer_tlist.entries.len()))
-                .map(|entry| special_slot_var(INNER_VAR, entry.index, entry.sql_type)),
-            _ => search_tlist_entry(None, expr, outer_tlist)
-                .map(|entry| special_slot_var(OUTER_VAR, entry.index, entry.sql_type))
-                .or_else(|| {
-                    search_tlist_entry(None, expr, inner_tlist)
-                        .map(|entry| special_slot_var(INNER_VAR, entry.index, entry.sql_type))
-                }),
-        },
+        } => search_tlist_entry(None, expr, outer_tlist)
+            .map(|entry| special_slot_var(OUTER_VAR, entry.index, entry.sql_type))
+            .or_else(|| {
+                search_tlist_entry(None, expr, inner_tlist)
+                    .map(|entry| special_slot_var(INNER_VAR, entry.index, entry.sql_type))
+            }),
     }
 }
 
