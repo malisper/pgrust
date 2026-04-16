@@ -77,6 +77,7 @@ impl PathTarget {
                     .unwrap_or_else(|| clause.expr.clone());
                 PathKey {
                     expr,
+                    ressortgroupref: clause.tle_sort_group_ref,
                     descending: clause.descending,
                     nulls_first: clause.nulls_first,
                 }
@@ -136,6 +137,7 @@ impl PathTarget {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathKey {
     pub expr: Expr,
+    pub ressortgroupref: usize,
     pub descending: bool,
     pub nulls_first: Option<bool>,
 }

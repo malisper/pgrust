@@ -130,6 +130,7 @@ impl TargetEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OrderByEntry {
     pub expr: Expr,
+    pub ressortgroupref: usize,
     pub descending: bool,
     pub nulls_first: Option<bool>,
 }

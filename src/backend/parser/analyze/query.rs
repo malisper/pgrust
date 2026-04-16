@@ -611,6 +611,7 @@ pub(super) fn rewrite_order_by_entries(
         .into_iter()
         .map(|item| OrderByEntry {
             expr: rewrite_expr_columns(item.expr, output_exprs),
+            ressortgroupref: item.ressortgroupref,
             descending: item.descending,
             nulls_first: item.nulls_first,
         })

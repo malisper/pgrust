@@ -28,6 +28,7 @@ fn var(varno: usize, attno: usize) -> crate::include::nodes::primnodes::Expr {
 fn pathkey(expr: crate::include::nodes::primnodes::Expr) -> PathKey {
     PathKey {
         expr,
+        ressortgroupref: 0,
         descending: false,
         nulls_first: None,
     }
@@ -84,6 +85,7 @@ fn ordered_path(slot_id: usize, startup_cost: f64, total_cost: f64, key_attno: u
         input: Box::new(values_path(slot_id, startup_cost, total_cost)),
         items: vec![OrderByEntry {
             expr: var(slot_id, key_attno),
+            ressortgroupref: 0,
             descending: false,
             nulls_first: None,
         }],

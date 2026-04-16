@@ -692,6 +692,7 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
                 .into_iter()
                 .map(|item| crate::include::nodes::primnodes::OrderByEntry {
                     expr: rebase_expr_subplan_ids(item.expr, base),
+                    ressortgroupref: item.ressortgroupref,
                     descending: item.descending,
                     nulls_first: item.nulls_first,
                 })
@@ -948,6 +949,7 @@ pub(super) fn finalize_plan_subqueries(
                 .into_iter()
                 .map(|item| crate::include::nodes::primnodes::OrderByEntry {
                     expr: finalize_expr_subqueries(item.expr, catalog, subplans),
+                    ressortgroupref: item.ressortgroupref,
                     descending: item.descending,
                     nulls_first: item.nulls_first,
                 })

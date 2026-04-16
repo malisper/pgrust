@@ -22,6 +22,7 @@ use crate::include::nodes::primnodes::{
 struct IndexedTlistEntry {
     index: usize,
     sql_type: crate::backend::parser::SqlType,
+    ressortgroupref: usize,
     match_exprs: Vec<Expr>,
 }
 
@@ -147,6 +148,7 @@ fn build_simple_tlist(output_vars: &[Expr]) -> IndexedTlist {
             .map(|(index, expr)| IndexedTlistEntry {
                 index,
                 sql_type: expr_sql_type(expr),
+                ressortgroupref: 0,
                 match_exprs: vec![expr.clone()],
             })
             .collect(),
@@ -188,6 +190,7 @@ fn build_projection_tlist(
             .map(|(index, target)| IndexedTlistEntry {
                 index,
                 sql_type: target.sql_type,
+                ressortgroupref: target.ressortgroupref,
                 match_exprs: dedup_match_exprs(vec![
                     slot_var(slot_id, user_attrno(index), target.sql_type),
                     target.expr.clone(),
@@ -215,6 +218,7 @@ fn build_aggregate_tlist(
         entries.push(IndexedTlistEntry {
             index,
             sql_type: expr_sql_type(expr),
+            ressortgroupref: 0,
             match_exprs: dedup_match_exprs(match_exprs),
         });
     }
@@ -223,6 +227,7 @@ fn build_aggregate_tlist(
         entries.push(IndexedTlistEntry {
             index,
             sql_type: accum.sql_type,
+            ressortgroupref: 0,
             match_exprs: dedup_match_exprs(vec![
                 slot_var(slot_id, user_attrno(index), accum.sql_type),
                 aggregate_output_expr(accum, aggno),
@@ -291,6 +296,36 @@ fn search_tlist_entry<'a>(
             })
         })
     })
+}
+
+fn search_tlist_entry_by_sortgroupref(
+    ressortgroupref: usize,
+    tlist: &IndexedTlist,
+) -> Option<&IndexedTlistEntry> {
+    if ressortgroupref == 0 {
+        return None;
+    }
+    tlist.entries
+        .iter()
+        .find(|entry| entry.ressortgroupref == ressortgroupref)
+}
+
+fn lower_order_by_expr_for_input(
+    root: Option<&PlannerInfo>,
+    item: OrderByEntry,
+    input: &Path,
+    input_tlist: &IndexedTlist,
+) -> OrderByEntry {
+    if let Some(entry) = search_tlist_entry_by_sortgroupref(item.ressortgroupref, input_tlist) {
+        return OrderByEntry {
+            expr: special_slot_var(OUTER_VAR, entry.index, entry.sql_type),
+            ..item
+        };
+    }
+    OrderByEntry {
+        expr: fix_upper_expr_for_path(root, item.expr, input),
+        ..item
+    }
 }
 
 fn lower_direct_ref(expr: &Expr, mode: LowerMode<'_>) -> Option<Expr> {
@@ -1059,10 +1094,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
                     .collect::<Vec<_>>(),
                 (_, None) => items
                     .into_iter()
-                    .map(|item| OrderByEntry {
-                        expr: fix_upper_expr_for_path(ctx.root, item.expr, &input),
-                        ..item
-                    })
+                    .map(|item| lower_order_by_expr_for_input(ctx.root, item, &input, &input_tlist))
                     .collect::<Vec<_>>(),
             };
             let lowered_items = items

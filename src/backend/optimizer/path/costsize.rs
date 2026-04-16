@@ -741,6 +741,7 @@ pub(super) fn estimate_index_candidate(
                     .iter()
                     .map(|item| PathKey {
                         expr: item.expr.clone(),
+                        ressortgroupref: item.ressortgroupref,
                         descending: item.descending,
                         nulls_first: item.nulls_first,
                     })
