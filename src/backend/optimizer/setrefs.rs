@@ -13,9 +13,9 @@ use crate::include::nodes::parsenodes::RangeTblEntryKind;
 use crate::include::nodes::pathnodes::{Path, PlannerInfo, RestrictInfo};
 use crate::include::nodes::plannodes::{ExecParamSource, Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
-    Aggref, BoolExpr, Expr, ExprArraySubscript, FuncExpr, OpExpr, OrderByEntry, Param, ParamKind,
-    ScalarArrayOpExpr, SubPlan, TargetEntry, Var, attrno_index, is_special_varno, is_system_attr,
-    user_attrno, INNER_VAR, OUTER_VAR,
+    AggAccum, Aggref, BoolExpr, Expr, ExprArraySubscript, FuncExpr, OpExpr, OrderByEntry, Param,
+    ParamKind, QueryColumn, ScalarArrayOpExpr, SubPlan, TargetEntry, Var, attrno_index,
+    is_special_varno, is_system_attr, user_attrno, INNER_VAR, OUTER_VAR,
 };
 
 #[derive(Clone, Debug)]
@@ -1154,6 +1154,184 @@ pub(super) fn validate_executable_plan_for_tests(plan: &Plan) {
     validate_executable_plan(plan);
 }
 
+fn set_filter_references(
+    ctx: &mut SetRefsContext<'_>,
+    plan_info: PlanEstimate,
+    input: Box<Path>,
+    predicate: Expr,
+) -> Plan {
+    let input_tlist = build_path_tlist(ctx.root, &input);
+    let predicate = fix_upper_expr_for_input(ctx.root, predicate, &input, &input_tlist);
+    let predicate = lower_expr(ctx, predicate, LowerMode::Input { tlist: &input_tlist });
+    let input_plan = Box::new(set_plan_refs(ctx, *input));
+    Plan::Filter {
+        plan_info,
+        input: input_plan,
+        predicate,
+    }
+}
+
+fn set_projection_references(
+    ctx: &mut SetRefsContext<'_>,
+    plan_info: PlanEstimate,
+    input: Box<Path>,
+    targets: Vec<TargetEntry>,
+) -> Plan {
+    let input_tlist = build_path_tlist(ctx.root, &input);
+    let root = ctx.root;
+    let mut lowered_targets = Vec::with_capacity(targets.len());
+    for target in targets {
+        let expr = fix_upper_expr_for_input(root, target.expr, &input, &input_tlist);
+        lowered_targets.push(lower_target_entry(
+            ctx,
+            TargetEntry { expr, ..target },
+            LowerMode::Input { tlist: &input_tlist },
+        ));
+    }
+    Plan::Projection {
+        plan_info,
+        input: Box::new(set_plan_refs(ctx, *input)),
+        targets: lowered_targets,
+    }
+}
+
+fn set_order_references(
+    ctx: &mut SetRefsContext<'_>,
+    plan_info: PlanEstimate,
+    input: Box<Path>,
+    items: Vec<OrderByEntry>,
+) -> Plan {
+    let layout = input.output_vars();
+    let input_tlist = build_path_tlist(ctx.root, &input);
+    let items = match (ctx.root, aggregate_group_by(&input)) {
+        (Some(root), Some(group_by)) => items
+            .into_iter()
+            .map(|item| OrderByEntry {
+                expr: lower_agg_output_expr(
+                    expand_join_rte_vars(root, item.expr),
+                    group_by,
+                    &layout,
+                ),
+                ..item
+            })
+            .collect::<Vec<_>>(),
+        (None, Some(group_by)) => items
+            .into_iter()
+            .map(|item| OrderByEntry {
+                expr: lower_agg_output_expr(item.expr, group_by, &layout),
+                ..item
+            })
+            .collect::<Vec<_>>(),
+        (_, None) => items
+            .into_iter()
+            .map(|item| lower_order_by_expr_for_input(ctx.root, item, &input, &input_tlist))
+            .collect::<Vec<_>>(),
+    };
+    let lowered_items = items
+        .into_iter()
+        .map(|item| lower_order_by_entry(ctx, item, LowerMode::Input { tlist: &input_tlist }))
+        .collect();
+    let input_plan = Box::new(set_plan_refs(ctx, *input));
+    Plan::OrderBy {
+        plan_info,
+        input: input_plan,
+        items: lowered_items,
+    }
+}
+
+fn set_aggregate_references(
+    ctx: &mut SetRefsContext<'_>,
+    plan_info: PlanEstimate,
+    slot_id: usize,
+    input: Box<Path>,
+    group_by: Vec<Expr>,
+    accumulators: Vec<AggAccum>,
+    having: Option<Expr>,
+    output_columns: Vec<QueryColumn>,
+) -> Plan {
+    let layout = input.output_vars();
+    let input_tlist = build_path_tlist(ctx.root, &input);
+    let aggregate_layout = aggregate_output_vars(slot_id, &group_by, &accumulators);
+    let aggregate_tlist = build_aggregate_tlist(ctx.root, slot_id, &group_by, &accumulators);
+    let semantic_group_by = group_by.clone();
+    let group_by = group_by
+        .into_iter()
+        .map(|expr| rewrite_semantic_expr_for_input_path(expr, &input, &layout))
+        .map(|expr| lower_expr(ctx, expr, LowerMode::Input { tlist: &input_tlist }))
+        .collect();
+    let accumulators = accumulators
+        .into_iter()
+        .map(|accum| lower_agg_accum(ctx, accum, &input, &layout, &input_tlist))
+        .collect();
+    let having = having.map(|expr| {
+        let expr = match ctx.root {
+            Some(root) => lower_agg_output_expr(
+                expand_join_rte_vars(root, expr),
+                &semantic_group_by,
+                &aggregate_layout,
+            ),
+            None => lower_agg_output_expr(expr, &semantic_group_by, &aggregate_layout),
+        };
+        lower_expr(
+            ctx,
+            expr,
+            LowerMode::Aggregate {
+                group_by: &semantic_group_by,
+                layout: &aggregate_layout,
+                tlist: &aggregate_tlist,
+            },
+        )
+    });
+    Plan::Aggregate {
+        plan_info,
+        input: Box::new(set_plan_refs(ctx, *input)),
+        group_by,
+        accumulators,
+        having,
+        output_columns,
+    }
+}
+
+fn set_project_set_references(
+    ctx: &mut SetRefsContext<'_>,
+    plan_info: PlanEstimate,
+    input: Box<Path>,
+    targets: Vec<crate::include::nodes::primnodes::ProjectSetTarget>,
+) -> Plan {
+    let input_tlist = build_path_tlist(ctx.root, &input);
+    let lowered_targets = targets
+        .into_iter()
+        .map(|target| {
+            let target = match target {
+                crate::include::nodes::primnodes::ProjectSetTarget::Scalar(entry) => {
+                    crate::include::nodes::primnodes::ProjectSetTarget::Scalar(TargetEntry {
+                        expr: fix_upper_expr_for_input(ctx.root, entry.expr, &input, &input_tlist),
+                        ..entry
+                    })
+                }
+                crate::include::nodes::primnodes::ProjectSetTarget::Set {
+                    name,
+                    call,
+                    sql_type,
+                    column_index,
+                } => crate::include::nodes::primnodes::ProjectSetTarget::Set {
+                    name,
+                    call: fix_set_returning_call_upper_exprs(ctx.root, call, &input, &input_tlist),
+                    sql_type,
+                    column_index,
+                },
+            };
+            lower_project_set_target(ctx, target, LowerMode::Input { tlist: &input_tlist })
+        })
+        .collect();
+    let input_plan = Box::new(set_plan_refs(ctx, *input));
+    Plan::ProjectSet {
+        plan_info,
+        input: input_plan,
+        targets: lowered_targets,
+    }
+}
+
 fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
     match path {
         Path::Result { plan_info } => Plan::Result { plan_info },
@@ -1218,17 +1396,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             plan_info,
             input,
             predicate,
-        } => {
-            let input_tlist = build_path_tlist(ctx.root, &input);
-            let predicate = fix_upper_expr_for_input(ctx.root, predicate, &input, &input_tlist);
-            let predicate = lower_expr(ctx, predicate, LowerMode::Input { tlist: &input_tlist });
-            let input_plan = Box::new(set_plan_refs(ctx, *input));
-            Plan::Filter {
-                plan_info,
-                input: input_plan,
-                predicate,
-            }
-        }
+        } => set_filter_references(ctx, plan_info, input, predicate),
         Path::NestedLoopJoin {
             plan_info,
             left,
@@ -1365,68 +1533,12 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             input,
             targets,
             ..
-        } => {
-            let input_tlist = build_path_tlist(ctx.root, &input);
-            let root = ctx.root;
-            let mut lowered_targets = Vec::with_capacity(targets.len());
-            for target in targets {
-                let expr = fix_upper_expr_for_input(root, target.expr, &input, &input_tlist);
-                lowered_targets.push(lower_target_entry(
-                    ctx,
-                    TargetEntry { expr, ..target },
-                    LowerMode::Input { tlist: &input_tlist },
-                ));
-            }
-            Plan::Projection {
-                plan_info,
-                input: Box::new(set_plan_refs(ctx, *input)),
-                targets: lowered_targets,
-            }
-        }
+        } => set_projection_references(ctx, plan_info, input, targets),
         Path::OrderBy {
             plan_info,
             input,
             items,
-        } => {
-            let layout = input.output_vars();
-            let input_tlist = build_path_tlist(ctx.root, &input);
-            let items = match (ctx.root, aggregate_group_by(&input)) {
-                (Some(root), Some(group_by)) => items
-                    .into_iter()
-                    .map(|item| OrderByEntry {
-                        expr: lower_agg_output_expr(
-                            expand_join_rte_vars(root, item.expr),
-                            group_by,
-                            &layout,
-                        ),
-                        ..item
-                    })
-                    .collect::<Vec<_>>(),
-                (None, Some(group_by)) => items
-                    .into_iter()
-                    .map(|item| OrderByEntry {
-                        expr: lower_agg_output_expr(item.expr, group_by, &layout),
-                        ..item
-                    })
-                    .collect::<Vec<_>>(),
-                (_, None) => items
-                    .into_iter()
-                    .map(|item| lower_order_by_expr_for_input(ctx.root, item, &input, &input_tlist))
-                    .collect::<Vec<_>>(),
-            };
-            let lowered_items = items
-                .into_iter()
-                .map(|item| {
-                    lower_order_by_entry(ctx, item, LowerMode::Input { tlist: &input_tlist })
-                })
-                .collect();
-            let input_plan = Box::new(set_plan_refs(ctx, *input));
-            Plan::OrderBy {
-                plan_info,
-                input: input_plan,
-                items: lowered_items,
-            }
-        }
+        } => set_order_references(ctx, plan_info, input, items),
         Path::Limit {
             plan_info,
             input,
@@ -1446,49 +1558,16 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             accumulators,
             having,
             output_columns,
-        } => {
-            let layout = input.output_vars();
-            let input_tlist = build_path_tlist(ctx.root, &input);
-            let aggregate_layout = aggregate_output_vars(slot_id, &group_by, &accumulators);
-            let aggregate_tlist = build_aggregate_tlist(ctx.root, slot_id, &group_by, &accumulators);
-            let semantic_group_by = group_by.clone();
-            let group_by = group_by
-                .into_iter()
-                .map(|expr| rewrite_semantic_expr_for_input_path(expr, &input, &layout))
-                .map(|expr| lower_expr(ctx, expr, LowerMode::Input { tlist: &input_tlist }))
-                .collect();
-            let accumulators = accumulators
-                .into_iter()
-                .map(|accum| lower_agg_accum(ctx, accum, &input, &layout, &input_tlist))
-                .collect();
-            let having = having.map(|expr| {
-                let expr = match ctx.root {
-                    Some(root) => lower_agg_output_expr(
-                        expand_join_rte_vars(root, expr),
-                        &semantic_group_by,
-                        &aggregate_layout,
-                    ),
-                    None => lower_agg_output_expr(expr, &semantic_group_by, &aggregate_layout),
-                };
-                lower_expr(
-                    ctx,
-                    expr,
-                    LowerMode::Aggregate {
-                        group_by: &semantic_group_by,
-                        layout: &aggregate_layout,
-                        tlist: &aggregate_tlist,
-                    },
-                )
-            });
-            Plan::Aggregate {
-                plan_info,
-                input: Box::new(set_plan_refs(ctx, *input)),
-                group_by,
-                accumulators,
-                having,
-                output_columns,
-            }
-        }
+        } => set_aggregate_references(
+            ctx,
+            plan_info,
+            slot_id,
+            input,
+            group_by,
+            accumulators,
+            having,
+            output_columns,
+        ),
         Path::Values {
             plan_info,
             rows,
@@ -1555,50 +1634,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             input,
             targets,
             ..
-        } => {
-            let input_tlist = build_path_tlist(ctx.root, &input);
-            let lowered_targets = targets
-                .into_iter()
-                .map(|target| {
-                    let target = match target {
-                        crate::include::nodes::primnodes::ProjectSetTarget::Scalar(entry) => {
-                            crate::include::nodes::primnodes::ProjectSetTarget::Scalar(TargetEntry {
-                                expr: fix_upper_expr_for_input(
-                                    ctx.root,
-                                    entry.expr,
-                                    &input,
-                                    &input_tlist,
-                                ),
-                                ..entry
-                            })
-                        }
-                        crate::include::nodes::primnodes::ProjectSetTarget::Set {
-                            name,
-                            call,
-                            sql_type,
-                            column_index,
-                        } => crate::include::nodes::primnodes::ProjectSetTarget::Set {
-                            name,
-                            call: fix_set_returning_call_upper_exprs(
-                                ctx.root,
-                                call,
-                                &input,
-                                &input_tlist,
-                            ),
-                            sql_type,
-                            column_index,
-                        },
-                    };
-                    lower_project_set_target(ctx, target, LowerMode::Input { tlist: &input_tlist })
-                })
-                .collect();
-            let input_plan = Box::new(set_plan_refs(ctx, *input));
-            Plan::ProjectSet {
-                plan_info,
-                input: input_plan,
-                targets: lowered_targets,
-            }
-        }
+        } => set_project_set_references(ctx, plan_info, input, targets),
     }
 }
 
