@@ -8,6 +8,10 @@ pub(crate) enum BoundSelectTargets {
     },
 }
 
+fn input_resno_for_scope_expr(scope: &BoundScope, expr: &Expr) -> Option<usize> {
+    scope.output_exprs.iter().position(|candidate| candidate == expr).map(|index| index + 1)
+}
+
 pub(crate) fn bind_select_targets(
     targets: &[SelectItem],
     scope: &BoundScope,
@@ -53,7 +57,9 @@ pub(crate) fn bind_select_targets(
         .map(|(index, column)| {
             ProjectSetTarget::Scalar(TargetEntry::new(
                 column.output_name.clone(),
-                Expr::Column(index),
+                scope.output_exprs.get(index).cloned().unwrap_or_else(|| {
+                    panic!("bound scope output_exprs missing project-set base column {index}")
+                }),
                 scope.desc.columns[index].sql_type,
                 index + 1,
             )
@@ -110,10 +116,7 @@ pub(crate) fn bind_select_targets(
             grouped_outer,
             ctes,
         )?;
-        let input_resno = match &expr {
-            Expr::Column(index) => Some(index + 1),
-            _ => None,
-        };
+        let input_resno = input_resno_for_scope_expr(scope, &expr);
         final_targets.push(
             TargetEntry::new(
                 item.output_name.clone(),
@@ -189,10 +192,7 @@ fn bind_plain_select_targets(
             grouped_outer,
             ctes,
         )?;
-        let input_resno = match &expr {
-            Expr::Column(index) => Some(index + 1),
-            _ => None,
-        };
+        let input_resno = input_resno_for_scope_expr(scope, &expr);
         entries.push(
             TargetEntry::new(
                 item.output_name.clone(),
@@ -1080,7 +1080,9 @@ fn expand_star_targets(
         .map(|(index, column)| {
             TargetEntry::new(
                 column.output_name.clone(),
-                Expr::Column(index),
+                scope.output_exprs.get(index).cloned().unwrap_or_else(|| {
+                    panic!("bound scope output_exprs missing star expansion column {index}")
+                }),
                 scope.desc.columns[index].sql_type,
                 index + 1,
             )
