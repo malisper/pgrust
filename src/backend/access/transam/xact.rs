@@ -98,7 +98,7 @@ impl TransactionManager {
                 clog_buf: raw,
             })
         } else {
-            let file = OpenOptions::new()
+            let mut file = OpenOptions::new()
                 .read(true)
                 .write(true)
                 .create(true)
@@ -106,6 +106,7 @@ impl TransactionManager {
                 .open(&path)
                 .map_err(|e| MvccError::Io(e.to_string()))?;
             let clog_buf = INVALID_TRANSACTION_ID.to_le_bytes().to_vec();
+            Self::write_initial_status_file(&mut file, &clog_buf)?;
             Ok(Self {
                 next_xid: INVALID_TRANSACTION_ID,
                 statuses: BTreeMap::new(),
@@ -115,6 +116,15 @@ impl TransactionManager {
                 clog_buf,
             })
         }
+    }
+
+    fn write_initial_status_file(file: &mut File, clog_buf: &[u8]) -> Result<(), MvccError> {
+        file.write_all(clog_buf)
+            .map_err(|e| MvccError::Io(e.to_string()))?;
+        file.sync_data().map_err(|e| MvccError::Io(e.to_string()))?;
+        file.seek(SeekFrom::Start(0))
+            .map_err(|e| MvccError::Io(e.to_string()))?;
+        Ok(())
     }
 
     pub fn begin(&mut self) -> TransactionId {
@@ -462,6 +472,15 @@ mod tests {
         let mut aborted_tuple = HeapTuple::new_raw(1, b"aborted".to_vec());
         aborted_tuple.header.xmin = aborted;
         assert!(!snapshot.tuple_visible(&reopened, &aborted_tuple));
+    }
+
+    #[test]
+    fn durable_status_file_is_initialized_immediately() {
+        let base = temp_dir("durable_status_header_written");
+        let _txns = TransactionManager::new_durable(&base).unwrap();
+        let raw = std::fs::read(base.join("pg_xact").join("status")).unwrap();
+        assert_eq!(raw.len(), STATUS_FILE_HEADER_SIZE);
+        assert_eq!(raw, INVALID_TRANSACTION_ID.to_le_bytes());
     }
 
     /// Build raw tuple bytes for hint bit testing.
