@@ -2053,6 +2053,148 @@ fn create_index_and_alter_table_set_are_noops() {
 }
 
 #[test]
+fn create_schema_creates_namespace_row_and_allows_qualified_create_table() {
+    let db = Database::open_ephemeral(16).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create schema tenant").unwrap();
+    session
+        .execute(&db, "create table tenant.items (id int4)")
+        .unwrap();
+
+    match session
+        .execute(
+            &db,
+            "select n.nspname, c.relname from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.relname = 'items'",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Text("tenant".into()),
+                    Value::Text("items".into()),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn create_schema_supports_authorization_and_if_not_exists() {
+    let db = Database::open_ephemeral(16).unwrap();
+
+    db.execute(1, "create schema authorization postgres").unwrap();
+    db.execute(1, "create schema if not exists postgres").unwrap();
+
+    match db
+        .execute(
+            1,
+            "select n.nspname, a.rolname from pg_namespace n join pg_authid a on a.oid = n.nspowner where n.nspname = 'postgres'",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Text("postgres".into()),
+                    Value::Text("postgres".into()),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn create_schema_reports_duplicate_and_reserved_name_errors() {
+    let db = Database::open_ephemeral(16).unwrap();
+
+    db.execute(1, "create schema tenant").unwrap();
+
+    match db.execute(1, "create schema tenant") {
+        Err(ExecError::DetailedError { sqlstate, message, .. }) => {
+            assert_eq!(sqlstate, "42P06");
+            assert!(message.contains("schema \"tenant\" already exists"));
+        }
+        other => panic!("expected duplicate schema error, got {:?}", other),
+    }
+
+    match db.execute(1, "create schema pg_custom") {
+        Err(ExecError::DetailedError { sqlstate, message, .. }) => {
+            assert_eq!(sqlstate, "42939");
+            assert!(message.contains("unacceptable schema name"));
+        }
+        other => panic!("expected reserved schema name error, got {:?}", other),
+    }
+}
+
+#[test]
+fn create_schema_respects_search_path_for_unqualified_create_table() {
+    let db = Database::open_ephemeral(16).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create schema tenant").unwrap();
+    session.execute(&db, "set search_path to tenant").unwrap();
+    session.execute(&db, "create table items (id int4)").unwrap();
+
+    match session
+        .execute(
+            &db,
+            "select n.nspname, c.relname from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.relname = 'items'",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Text("tenant".into()),
+                    Value::Text("items".into()),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn create_view_uses_created_schema_namespace() {
+    let db = Database::open_ephemeral(16).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create schema tenant").unwrap();
+    session
+        .execute(&db, "create table tenant.items (id int4)")
+        .unwrap();
+    session
+        .execute(&db, "create view tenant.item_view as select id from tenant.items")
+        .unwrap();
+
+    match session
+        .execute(
+            &db,
+            "select n.nspname, c.relname from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.relname = 'item_view'",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Text("tenant".into()),
+                    Value::Text("item_view".into()),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn comment_on_table_upserts_and_clears_pg_description() {
     let base = temp_dir("comment_on_table");
     let db = Database::open(&base, 16).unwrap();

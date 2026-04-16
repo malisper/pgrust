@@ -407,8 +407,13 @@ impl Database {
         temp_effects: &mut Vec<TempMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
-        let (table_name, persistence) =
-            self.normalize_create_table_stmt_with_search_path(create_stmt, configured_search_path)?;
+        let (table_name, namespace_oid, persistence) = self
+            .normalize_create_table_stmt_with_search_path(
+                client_id,
+                Some((xid, cid)),
+                create_stmt,
+                configured_search_path,
+            )?;
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let lowered = lower_create_table_with_catalog(create_stmt, &catalog, persistence)?;
         let desc = lowered.relation_desc;
@@ -424,9 +429,14 @@ impl Database {
                     waiter: None,
                     interrupts: Arc::clone(&interrupts),
                 };
-                let result = catalog_guard.create_table_mvcc(
+                let result = catalog_guard.create_table_mvcc_with_options(
                     table_name.clone(),
                     desc.clone(),
+                    namespace_oid,
+                    1,
+                    'p',
+                    crate::include::catalog::PG_TOAST_NAMESPACE_OID,
+                    crate::backend::catalog::toasting::PG_TOAST_NAMESPACE,
                     self.auth_state(client_id).current_user_oid(),
                     &ctx,
                 );
@@ -650,8 +660,12 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
-        let view_name =
-            self.normalize_create_view_stmt_with_search_path(create_stmt, configured_search_path)?;
+        let (view_name, namespace_oid) = self.normalize_create_view_stmt_with_search_path(
+            client_id,
+            Some((xid, cid)),
+            create_stmt,
+            configured_search_path,
+        )?;
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let plan = crate::backend::parser::pg_plan_query(&create_stmt.query, &catalog)?.plan_tree;
         let desc = crate::backend::executor::RelationDesc {
@@ -684,7 +698,7 @@ impl Database {
             .create_view_mvcc(
                 view_name.clone(),
                 desc,
-                namespace_oid_for_relation_name(&view_name),
+                namespace_oid,
                 self.auth_state(client_id).current_user_oid(),
                 create_stmt.query_sql.clone(),
                 &referenced_relation_oids.into_iter().collect::<Vec<_>>(),
@@ -706,8 +720,13 @@ impl Database {
         temp_effects: &mut Vec<TempMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
-        let (table_name, persistence) = self
-            .normalize_create_table_as_stmt_with_search_path(create_stmt, configured_search_path)?;
+        let (table_name, namespace_oid, persistence) = self
+            .normalize_create_table_as_stmt_with_search_path(
+                client_id,
+                Some((xid, cid)),
+                create_stmt,
+                configured_search_path,
+            )?;
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let planned_stmt = crate::backend::parser::pg_plan_query(&create_stmt.query, &catalog)?;
         let mut rels = std::collections::BTreeSet::new();
@@ -800,9 +819,14 @@ impl Database {
                     interrupts: Arc::clone(&interrupts),
                 };
                 let (created, effect) = catalog_guard
-                    .create_table_mvcc(
+                    .create_table_mvcc_with_options(
                         table_name.clone(),
                         create_relation_desc(&stmt, &catalog)?,
+                        namespace_oid,
+                        1,
+                        'p',
+                        crate::include::catalog::PG_TOAST_NAMESPACE_OID,
+                        crate::backend::catalog::toasting::PG_TOAST_NAMESPACE,
                         self.auth_state(client_id).current_user_oid(),
                         &write_ctx,
                     )

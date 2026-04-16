@@ -9,4 +9,5 @@ mod maintenance;
 mod owner;
 mod rename;
 mod role;
+mod schema;
 mod session_auth;

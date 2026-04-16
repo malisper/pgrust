@@ -1,7 +1,7 @@
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 
 statement = { SOI ~ stmt ~ EOI }
-stmt = _{ do_stmt | explain_stmt | table_stmt | select_stmt | values_stmt | copy_stmt | analyze_stmt | show_stmt | set_session_authorization_stmt | reset_session_authorization_stmt | set_stmt | reset_stmt | create_role_stmt | alter_role_stmt | create_index_stmt | alter_table_add_column_stmt | alter_table_add_constraint_stmt | alter_table_drop_constraint_stmt | alter_table_drop_column_stmt | alter_table_alter_column_type_stmt | alter_table_owner_stmt | alter_table_rename_column_stmt | alter_table_rename_stmt | alter_view_owner_stmt | alter_table_set_stmt | alter_table_set_not_null_stmt | alter_table_drop_not_null_stmt | alter_table_validate_constraint_stmt | comment_on_role_stmt | comment_on_table_stmt | create_table_stmt | create_view_stmt | drop_role_stmt | drop_table_stmt | drop_view_stmt | reassign_owned_stmt | truncate_table_stmt | vacuum_stmt | insert_stmt | update_stmt | delete_stmt | begin_stmt | commit_stmt | rollback_stmt }
+stmt = _{ do_stmt | explain_stmt | table_stmt | select_stmt | values_stmt | copy_stmt | analyze_stmt | show_stmt | set_session_authorization_stmt | reset_session_authorization_stmt | set_stmt | reset_stmt | create_role_stmt | alter_role_stmt | create_schema_stmt | create_index_stmt | alter_table_add_column_stmt | alter_table_add_constraint_stmt | alter_table_drop_constraint_stmt | alter_table_drop_column_stmt | alter_table_alter_column_type_stmt | alter_table_owner_stmt | alter_table_rename_column_stmt | alter_table_rename_stmt | alter_view_owner_stmt | alter_table_set_stmt | alter_table_set_not_null_stmt | alter_table_drop_not_null_stmt | alter_table_validate_constraint_stmt | comment_on_role_stmt | comment_on_table_stmt | create_table_stmt | create_view_stmt | drop_role_stmt | drop_table_stmt | drop_view_stmt | reassign_owned_stmt | truncate_table_stmt | vacuum_stmt | insert_stmt | update_stmt | delete_stmt | begin_stmt | commit_stmt | rollback_stmt }
 
 do_stmt = { kw_do ~ do_body ~ do_language_clause? | kw_do ~ do_language_clause ~ do_body }
 do_body = { quoted_string_literal }
@@ -44,6 +44,9 @@ insert_default_values_source = { kw_default ~ kw_values }
 create_role_stmt = { kw_create ~ (kw_role | kw_user) ~ identifier ~ role_option* }
 alter_role_stmt = { kw_alter ~ kw_role ~ identifier ~ (alter_role_rename_clause | alter_role_option+) }
 alter_role_rename_clause = { kw_rename ~ kw_to ~ identifier }
+create_schema_stmt = { kw_create ~ kw_schema ~ (if_not_exists_clause ~ identifier ~ create_schema_authorization_clause? | create_schema_authorization_only | identifier ~ create_schema_authorization_clause?) }
+create_schema_authorization_clause = { kw_authorization ~ identifier }
+create_schema_authorization_only = { kw_authorization ~ identifier }
 create_table_stmt = { kw_create ~ temp_clause? ~ kw_table ~ if_not_exists_clause? ~ identifier ~ create_table_tail ~ inherits_clause? ~ table_storage_clause? }
 create_view_stmt = { kw_create ~ kw_view ~ identifier ~ kw_as ~ select_stmt }
 create_index_stmt = { kw_create ~ kw_unique? ~ kw_index ~ if_not_exists_clause? ~ create_index_name? ~ kw_on ~ identifier ~ create_index_using_clause? ~ "(" ~ create_index_item ~ ("," ~ create_index_item)* ~ ")" ~ create_index_include_clause? ~ create_index_where_clause? ~ create_index_with_clause? }
@@ -400,6 +403,7 @@ kw_into = _{ kw_into_atom }
 kw_values = _{ kw_values_atom }
 kw_create = _{ kw_create_atom }
 kw_role = _{ kw_role_atom }
+kw_schema = _{ kw_schema_atom }
 kw_user = _{ kw_user_atom }
 kw_primary = _{ kw_primary_atom }
 kw_key = _{ kw_key_atom }
@@ -622,6 +626,7 @@ kw_into_atom = @{ ^"into" ~ keyword_end }
 kw_values_atom = @{ ^"values" ~ keyword_end }
 kw_create_atom = @{ ^"create" ~ keyword_end }
 kw_role_atom = @{ ^"role" ~ keyword_end }
+kw_schema_atom = @{ ^"schema" ~ keyword_end }
 kw_user_atom = @{ ^"user" ~ keyword_end }
 kw_primary_atom = @{ ^"primary" ~ keyword_end }
 kw_key_atom = @{ ^"key" ~ keyword_end }

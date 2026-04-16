@@ -155,6 +155,12 @@ impl Database {
                     create_stmt,
                     configured_search_path,
                 ),
+            Statement::CreateSchema(ref create_stmt) => self
+                .execute_create_schema_stmt_with_search_path(
+                    client_id,
+                    create_stmt,
+                    configured_search_path,
+                ),
             Statement::CommentOnTable(ref comment_stmt) => self
                 .execute_comment_on_table_stmt_with_search_path(
                     client_id,

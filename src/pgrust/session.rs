@@ -319,6 +319,24 @@ impl Session {
                     )
                 }
             }
+            Statement::CreateSchema(ref create_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_create_schema_stmt_with_search_path(
+                        self.client_id,
+                        create_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
             Statement::CreateDomain(ref create_stmt) => {
                 let search_path = self.configured_search_path();
                 db.execute_create_domain_stmt_with_search_path(
@@ -1352,6 +1370,16 @@ impl Session {
                     xid,
                     cid,
                     search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
+            Statement::CreateSchema(ref create_stmt) => {
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_create_schema_stmt_in_transaction_with_search_path(
+                    client_id,
+                    create_stmt,
+                    xid,
+                    cid,
                     &mut txn.catalog_effects,
                 )
             }
