@@ -4416,6 +4416,28 @@ fn parse_json_operators_and_functions() {
 }
 
 #[test]
+fn parse_chained_json_operators() {
+    let stmt = parse_select(
+        "select '{\"a\":{\"b\":[1]}}'::json -> 'a' -> 'b' -> 0, '{\"a\":{\"b\":1}}'::json #> ARRAY['a']::varchar[] ->> 'b'",
+    )
+    .unwrap();
+    assert!(matches!(
+        &stmt.targets[0].expr,
+        SqlExpr::JsonGet(left, _)
+            if matches!(
+                left.as_ref(),
+                SqlExpr::JsonGet(inner_left, _)
+                    if matches!(inner_left.as_ref(), SqlExpr::JsonGet(_, _))
+            )
+    ));
+    assert!(matches!(
+        &stmt.targets[1].expr,
+        SqlExpr::JsonGetText(left, _)
+            if matches!(left.as_ref(), SqlExpr::JsonPath(_, _))
+    ));
+}
+
+#[test]
 fn parse_json_table_function_in_from() {
     let stmt = parse_select("select * from json_each('{\"a\":1}'::json)").unwrap();
     assert!(matches!(
@@ -4455,6 +4477,28 @@ fn parse_jsonb_operators_and_functions() {
     assert!(matches!(stmt.targets[2].expr, SqlExpr::JsonGet(_, _)));
     assert!(matches!(stmt.targets[3].expr, SqlExpr::FuncCall { .. }));
     assert!(matches!(stmt.targets[4].expr, SqlExpr::FuncCall { .. }));
+}
+
+#[test]
+fn parse_chained_jsonb_operators() {
+    let stmt = parse_select(
+        "select '{\"a\":{\"b\":1}}'::jsonb -> 'a' ->> 'b', '{\"a\":{\"b\":[1,2]}}'::jsonb -> 'a' -> 'b' -> 0",
+    )
+    .unwrap();
+    assert!(matches!(
+        &stmt.targets[0].expr,
+        SqlExpr::JsonGetText(left, _)
+            if matches!(left.as_ref(), SqlExpr::JsonGet(_, _))
+    ));
+    assert!(matches!(
+        &stmt.targets[1].expr,
+        SqlExpr::JsonGet(left, _)
+            if matches!(
+                left.as_ref(),
+                SqlExpr::JsonGet(inner_left, _)
+                    if matches!(inner_left.as_ref(), SqlExpr::JsonGet(_, _))
+            )
+    ));
 }
 
 #[test]
