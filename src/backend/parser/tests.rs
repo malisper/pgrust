@@ -2837,6 +2837,26 @@ fn parse_with_recursive_cte_union_all() {
 }
 
 #[test]
+fn parse_scalar_values_subquery_expr() {
+    let stmt = parse_select("select (values (1))").unwrap();
+    assert_eq!(stmt.targets.len(), 1);
+    match &stmt.targets[0].expr {
+        SqlExpr::ScalarSubquery(subquery) => {
+            assert!(matches!(subquery.from, Some(FromItem::Values { .. })));
+            assert_eq!(subquery.targets.len(), 1);
+            assert!(matches!(
+                subquery.targets[0],
+                SelectItem {
+                    ref output_name,
+                    expr: SqlExpr::Column(ref name),
+                } if output_name == "*" && name == "*"
+            ));
+        }
+        other => panic!("expected scalar subquery, got {other:?}"),
+    }
+}
+
+#[test]
 fn parse_with_recursive_mixed_ctes_and_exists_case() {
     let sql = "with recursive points as (
   select r, c from generate_series(-2, 2, 0.05) a(r)

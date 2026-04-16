@@ -1601,6 +1601,24 @@ fn build_values_statement(pair: Pair<'_, Rule>) -> Result<ValuesStatement, Parse
     })
 }
 
+fn wrap_values_as_select(stmt: ValuesStatement) -> SelectStatement {
+    SelectStatement {
+        with_recursive: stmt.with_recursive,
+        with: stmt.with,
+        from: Some(FromItem::Values { rows: stmt.rows }),
+        targets: vec![SelectItem {
+            output_name: "*".into(),
+            expr: SqlExpr::Column("*".into()),
+        }],
+        where_clause: None,
+        group_by: Vec::new(),
+        having: None,
+        order_by: stmt.order_by,
+        limit: stmt.limit,
+        offset: stmt.offset,
+    }
+}
+
 fn build_cte_clause(pair: Pair<'_, Rule>) -> Result<(bool, Vec<CommonTableExpr>), ParseError> {
     let recursive = pair
         .as_str()
@@ -3957,11 +3975,18 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
             build_expr(pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?)
         }
         Rule::scalar_subquery_expr => {
-            let subquery = build_select(
-                pair.into_inner()
-                    .find(|part| part.as_rule() == Rule::select_stmt)
-                    .ok_or(ParseError::UnexpectedEof)?,
-            )?;
+            let subquery = match pair.into_inner().next().ok_or(ParseError::UnexpectedEof)? {
+                part if part.as_rule() == Rule::select_stmt => build_select(part)?,
+                part if part.as_rule() == Rule::values_stmt => {
+                    wrap_values_as_select(build_values_statement(part)?)
+                }
+                part => {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "SELECT or VALUES subquery",
+                        actual: part.as_str().into(),
+                    });
+                }
+            };
             Ok(SqlExpr::ScalarSubquery(Box::new(subquery)))
         }
         Rule::exists_expr => {
