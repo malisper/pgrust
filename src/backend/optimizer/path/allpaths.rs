@@ -23,10 +23,10 @@ use super::super::optimize_path;
 use super::super::pathnodes::{expr_sql_type, next_synthetic_slot_id, rewrite_expr_against_layout};
 use super::super::plan::{grouping_planner, make_pathtarget_projection_rel};
 use super::super::util::{
-    build_aggregate_output_columns, layout_candidate_for_expr, lower_pathkeys_for_rel,
-    normalize_rte_path, pathkeys_to_order_items, project_to_slot_layout,
+    build_aggregate_output_columns, layout_candidate_for_expr, normalize_rte_path,
+    pathkeys_to_order_items, project_to_slot_layout,
     project_to_slot_layout_internal, rewrite_semantic_expr_for_path,
-    rewrite_semantic_expr_for_path_or_expand_join_vars,
+    rewrite_semantic_expr_for_path_or_expand_join_vars, required_query_pathkeys_for_rel,
 };
 use super::super::{
     JoinBuildSpec, and_exprs, exact_join_rtindex, expand_join_rte_vars, expr_relids,
@@ -285,7 +285,7 @@ fn best_query_path(
     let mut root = PlannerInfo::new(query);
     let scanjoin_rel = query_planner(&mut root, catalog);
     let final_rel = grouping_planner(&mut root, scanjoin_rel, catalog);
-    let required_pathkeys = lower_pathkeys_for_rel(&root, &final_rel, &root.query_pathkeys);
+    let required_pathkeys = required_query_pathkeys_for_rel(&root, &final_rel);
     bestpath::choose_final_path(&final_rel, &required_pathkeys)
         .cloned()
         .unwrap_or(Path::Result {

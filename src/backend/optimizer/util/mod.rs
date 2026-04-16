@@ -65,6 +65,14 @@ pub(super) fn lower_pathkeys_for_rel(
     tlist::lower_pathkeys_for_rel(root, rel, pathkeys)
 }
 
+pub(super) fn required_query_pathkeys_for_path(root: &PlannerInfo, path: &Path) -> Vec<PathKey> {
+    tlist::required_query_pathkeys_for_path(root, path)
+}
+
+pub(super) fn required_query_pathkeys_for_rel(root: &PlannerInfo, rel: &RelOptInfo) -> Vec<PathKey> {
+    tlist::required_query_pathkeys_for_rel(root, rel)
+}
+
 pub(super) fn pathkeys_to_order_items(
     pathkeys: &[PathKey],
 ) -> Vec<crate::include::nodes::primnodes::OrderByEntry> {

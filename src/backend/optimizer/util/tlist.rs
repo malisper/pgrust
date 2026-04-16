@@ -220,6 +220,35 @@ pub(super) fn lower_pathkeys_for_rel(
         .unwrap_or_else(|| pathkeys.to_vec())
 }
 
+fn pathkeys_are_fully_identified(pathkeys: &[PathKey]) -> bool {
+    pathkeys.iter().all(|key| key.ressortgroupref != 0)
+}
+
+fn path_exposes_required_pathkey_identity(path: &Path, pathkeys: &[PathKey]) -> bool {
+    let output_target = path.output_target();
+    pathkeys.iter().all(|key| {
+        key.ressortgroupref != 0 && output_target.sortgrouprefs.contains(&key.ressortgroupref)
+    })
+}
+
+pub(super) fn required_query_pathkeys_for_path(root: &PlannerInfo, path: &Path) -> Vec<PathKey> {
+    if pathkeys_are_fully_identified(&root.query_pathkeys)
+        && path_exposes_required_pathkey_identity(path, &root.query_pathkeys)
+    {
+        root.query_pathkeys.clone()
+    } else {
+        lower_pathkeys_for_path(root, path, &root.query_pathkeys)
+    }
+}
+
+pub(super) fn required_query_pathkeys_for_rel(root: &PlannerInfo, rel: &RelOptInfo) -> Vec<PathKey> {
+    if pathkeys_are_fully_identified(&root.query_pathkeys) {
+        root.query_pathkeys.clone()
+    } else {
+        lower_pathkeys_for_rel(root, rel, &root.query_pathkeys)
+    }
+}
+
 pub(super) fn projection_is_identity(path: &Path, targets: &[TargetEntry]) -> bool {
     let input_columns = path.columns();
     let layout = path.output_vars();
