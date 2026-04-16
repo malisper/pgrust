@@ -63,10 +63,7 @@ pub use paths::BoundModifyRowSource;
 use paths::bind_order_by_items;
 pub(crate) use query::analyze_select_query_with_outer;
 use query::{
-    AnalyzedFrom, analyze_values_query_with_outer, identity_target_list,
-    legacy_identity_target_list, normalize_target_list,
-    rewrite_agg_accums, rewrite_expr_for_outputs, rewrite_order_by_entries,
-    rewrite_project_set_targets, rewrite_target_entries,
+    AnalyzedFrom, analyze_values_query_with_outer, identity_target_list, normalize_target_list,
 };
 pub use scope::BoundRelation;
 use scope::*;
@@ -80,6 +77,36 @@ pub struct BoundIndexRelation {
     pub relation_oid: u32,
     pub desc: RelationDesc,
     pub index_meta: crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+}
+
+fn build_sort_clause(
+    sort_inputs: Vec<OrderByEntry>,
+    target_list: &[TargetEntry],
+) -> Vec<SortGroupClause> {
+    let mut next_sort_group_ref = target_list
+        .iter()
+        .map(|target| target.ressortgroupref.max(target.resno))
+        .max()
+        .unwrap_or(0)
+        + 1;
+    sort_inputs
+        .into_iter()
+        .map(|item| {
+            let tle_sort_group_ref = if item.ressortgroupref != 0 {
+                item.ressortgroupref
+            } else {
+                let next = next_sort_group_ref;
+                next_sort_group_ref += 1;
+                next
+            };
+            SortGroupClause {
+                expr: item.expr,
+                tle_sort_group_ref,
+                descending: item.descending,
+                nulls_first: item.nulls_first,
+            }
+        })
+        .collect()
 }
 
 pub trait CatalogLookup {
@@ -877,23 +904,26 @@ fn bind_ctes(
                 let (anchor_query, desc) =
                     apply_cte_column_names(anchor_query, anchor_desc, &cte.column_names)?;
                 let worktable_id = NEXT_WORKTABLE_ID.fetch_add(1, Ordering::Relaxed);
+                let output_columns = desc
+                    .columns
+                    .iter()
+                    .map(|column| QueryColumn {
+                        name: column.name.clone(),
+                        sql_type: column.sql_type,
+                    })
+                    .collect::<Vec<_>>();
+                let worktable_plan = AnalyzedFrom::worktable(worktable_id, output_columns.clone());
                 let mut recursive_visible = visible.clone();
                 recursive_visible.push(BoundCte {
                     name: cte.name.clone(),
                     cte_id,
                     plan: Query {
                         command_type: crate::include::executor::execdesc::CommandType::Select,
-                        rtable: Vec::new(),
-                        jointree: None,
-                        target_list: legacy_identity_target_list(
-                            &desc
-                                .columns
-                                .iter()
-                                .map(|column| QueryColumn {
-                                    name: column.name.clone(),
-                                    sql_type: column.sql_type,
-                                })
-                                .collect::<Vec<_>>(),
+                        rtable: worktable_plan.rtable.clone(),
+                        jointree: worktable_plan.jointree.clone(),
+                        target_list: identity_target_list(
+                            &output_columns,
+                            &worktable_plan.output_exprs,
                         ),
                         where_qual: None,
                         group_by: Vec::new(),
@@ -946,20 +976,16 @@ fn bind_ctes(
                         });
                     }
                 }
-                let output_columns = desc
-                    .columns
-                    .iter()
-                    .map(|column| QueryColumn {
-                        name: column.name.clone(),
-                        sql_type: column.sql_type,
-                    })
-                    .collect::<Vec<_>>();
-                let target_list = normalize_target_list(legacy_identity_target_list(&output_columns));
+                let recursive_plan = AnalyzedFrom::worktable(worktable_id, output_columns.clone());
+                let target_list = normalize_target_list(identity_target_list(
+                    &output_columns,
+                    &recursive_plan.output_exprs,
+                ));
                 (
                     Query {
                         command_type: crate::include::executor::execdesc::CommandType::Select,
-                        rtable: Vec::new(),
-                        jointree: None,
+                        rtable: recursive_plan.rtable,
+                        jointree: recursive_plan.jointree,
                         target_list,
                         where_qual: None,
                         group_by: Vec::new(),
@@ -1142,16 +1168,7 @@ fn bind_values_query_with_outer(
             )
         })?
     };
-    let sort_clause = rewrite_order_by_entries(sort_inputs, &base.output_exprs)
-        .into_iter()
-        .enumerate()
-        .map(|(index, item)| SortGroupClause {
-            expr: item.expr,
-            tle_sort_group_ref: index + 1,
-            descending: item.descending,
-            nulls_first: item.nulls_first,
-        })
-        .collect();
+    let sort_clause = build_sort_clause(sort_inputs, &target_list);
     let AnalyzedFrom {
         rtable,
         jointree,
@@ -1294,7 +1311,7 @@ fn bind_select_query_with_outer(
     let where_qual = if can_skip_scan_for_degenerate_having {
         None
     } else {
-        bound_where_qual.map(|expr| rewrite_expr_for_outputs(expr, &base.output_exprs))
+        bound_where_qual
     };
 
     if needs_agg {
@@ -1320,11 +1337,7 @@ fn bind_select_query_with_outer(
                 )
             })
             .collect::<Result<_, _>>()?;
-        let rewritten_group_keys = group_keys
-            .iter()
-            .cloned()
-            .map(|expr| rewrite_expr_for_outputs(expr, &base.output_exprs))
-            .collect::<Vec<_>>();
+        let rewritten_group_keys = group_keys.clone();
 
         let accumulators: Vec<AggAccum> = aggs
             .iter()
@@ -1432,8 +1445,7 @@ fn bind_select_query_with_outer(
                     n_keys,
                 )
             })
-            .transpose()?
-            .map(|expr| rewrite_expr_for_outputs(expr, &base.output_exprs));
+            .transpose()?;
 
         let targets: Vec<TargetEntry> = if stmt.targets.len() == 1
             && matches!(stmt.targets[0].expr, SqlExpr::Column(ref name) if name == "*")
@@ -1526,29 +1538,22 @@ fn bind_select_query_with_outer(
                 )
             })?
         };
-        let targets = rewrite_target_entries(targets, &base.output_exprs);
-        let sort_inputs = rewrite_order_by_entries(sort_inputs, &base.output_exprs);
+        let targets = targets;
+        let sort_inputs = sort_inputs;
+        let sort_clause = build_sort_clause(sort_inputs, &targets);
+        let target_list = normalize_target_list(targets);
 
         Ok((
             Query {
                 command_type: crate::include::executor::execdesc::CommandType::Select,
                 rtable: base.rtable,
                 jointree: base.jointree,
-                target_list: normalize_target_list(targets),
+                target_list,
                 where_qual,
                 group_by: rewritten_group_keys,
-                accumulators: rewrite_agg_accums(accumulators, &base.output_exprs),
+                accumulators,
                 having_qual: having,
-                sort_clause: sort_inputs
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, item)| SortGroupClause {
-                        expr: item.expr,
-                        tle_sort_group_ref: index + 1,
-                        descending: item.descending,
-                        nulls_first: item.nulls_first,
-                    })
-                    .collect(),
+                sort_clause,
                 limit_count: stmt.limit,
                 limit_offset: stmt.offset.unwrap_or(0),
                 project_set: None,
@@ -1582,6 +1587,7 @@ fn bind_select_query_with_outer(
                         )
                     })?
                 };
+                let sort_clause = build_sort_clause(sort_inputs, &targets);
 
                 let is_identity = targets.len() == base.output_columns.len()
                     && targets.iter().enumerate().all(|(i, t)| {
@@ -1593,7 +1599,7 @@ fn bind_select_query_with_outer(
                         &base.output_exprs,
                     ))
                 } else {
-                    normalize_target_list(rewrite_target_entries(targets, &base.output_exprs))
+                    normalize_target_list(targets)
                 };
 
                 Ok((
@@ -1606,16 +1612,7 @@ fn bind_select_query_with_outer(
                         group_by: Vec::new(),
                         accumulators: Vec::new(),
                         having_qual: None,
-                        sort_clause: rewrite_order_by_entries(sort_inputs, &base.output_exprs)
-                            .into_iter()
-                            .enumerate()
-                            .map(|(index, item)| SortGroupClause {
-                                expr: item.expr,
-                                tle_sort_group_ref: index + 1,
-                                descending: item.descending,
-                                nulls_first: item.nulls_first,
-                            })
-                            .collect(),
+                        sort_clause,
                         limit_count: stmt.limit,
                         limit_offset: stmt.offset.unwrap_or(0),
                         project_set: None,
@@ -1642,32 +1639,22 @@ fn bind_select_query_with_outer(
                         )
                     })?
                 };
+                let sort_clause = build_sort_clause(sort_inputs, &final_targets);
+                let target_list = normalize_target_list(final_targets);
                 Ok((
                     Query {
                         command_type: crate::include::executor::execdesc::CommandType::Select,
                         rtable: base.rtable,
                         jointree: base.jointree,
-                        target_list: normalize_target_list(final_targets),
+                        target_list,
                         where_qual,
                         group_by: Vec::new(),
                         accumulators: Vec::new(),
                         having_qual: None,
-                        sort_clause: sort_inputs
-                            .into_iter()
-                            .enumerate()
-                            .map(|(index, item)| SortGroupClause {
-                                expr: item.expr,
-                                tle_sort_group_ref: index + 1,
-                                descending: item.descending,
-                                nulls_first: item.nulls_first,
-                            })
-                            .collect(),
+                        sort_clause,
                         limit_count: stmt.limit,
                         limit_offset: stmt.offset.unwrap_or(0),
-                        project_set: Some(rewrite_project_set_targets(
-                            project_targets,
-                            &base.output_exprs,
-                        )),
+                        project_set: Some(project_targets),
                         recursive_union: None,
                     },
                     scope,

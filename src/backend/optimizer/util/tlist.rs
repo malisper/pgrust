@@ -146,28 +146,39 @@ pub(super) fn annotate_targets_for_input(
     targets: &[TargetEntry],
 ) -> Vec<TargetEntry> {
     let input_target = path.output_target();
-    let layout = path.output_vars();
+    let projects_project_set_output = matches!(path, Path::ProjectSet { .. })
+        || matches!(path, Path::OrderBy { input, .. } if matches!(input.as_ref(), Path::ProjectSet { .. }));
     targets
         .iter()
         .cloned()
         .map(|target| {
-            let input_resno = input_target
-                .exprs
-                .iter()
-                .position(|candidate| *candidate == target.expr)
+            let input_resno = if projects_project_set_output
+                && matches!(target.expr, Expr::Const(crate::include::nodes::datum::Value::Null))
+                && target.resno >= 1
+                && target.resno <= input_target.exprs.len()
+            {
+                Some(target.resno)
+            } else {
+                target
+                .input_resno
+                .filter(|input_resno| *input_resno >= 1 && *input_resno <= input_target.exprs.len())
+                .or_else(|| {
+                    input_target
+                        .exprs
+                        .iter()
+                        .position(|candidate| *candidate == target.expr)
+                })
                 .or_else(|| {
                     root.and_then(|root| {
                         let flattened = flatten_join_alias_vars(root, target.expr.clone());
-                        input_target
-                            .exprs
-                            .iter()
-                            .position(|candidate| {
-                                *candidate == flattened
-                                    || flatten_join_alias_vars(root, candidate.clone()) == flattened
-                            })
+                        input_target.exprs.iter().position(|candidate| {
+                            *candidate == flattened
+                                || flatten_join_alias_vars(root, candidate.clone()) == flattened
+                        })
                     })
                 })
-                .map(|index| index + 1);
+                .map(|index| index + 1)
+            };
             TargetEntry {
                 input_resno,
                 ..target

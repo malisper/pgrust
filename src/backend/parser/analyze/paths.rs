@@ -257,11 +257,19 @@ pub(super) fn bind_order_by_items(
     items
         .iter()
         .map(|item| {
-            let expr = match &item.expr {
+            let (expr, ressortgroupref) = match &item.expr {
                 SqlExpr::IntegerLiteral(value) => {
                     if let Ok(ordinal) = value.parse::<usize>() {
                         if ordinal > 0 && ordinal <= targets.len() {
-                            targets[ordinal - 1].expr.clone()
+                            let target = &targets[ordinal - 1];
+                            (
+                                target.expr.clone(),
+                                if target.ressortgroupref != 0 {
+                                    target.ressortgroupref
+                                } else {
+                                    target.resno
+                                },
+                            )
                         } else {
                             return Err(ParseError::UnexpectedToken {
                                 expected: "ORDER BY position in select list",
@@ -269,7 +277,7 @@ pub(super) fn bind_order_by_items(
                             });
                         }
                     } else {
-                        bind_expr(&item.expr)?
+                        (bind_expr(&item.expr)?, 0)
                     }
                 }
                 SqlExpr::Column(name) => {
@@ -277,16 +285,23 @@ pub(super) fn bind_order_by_items(
                         .iter()
                         .find(|target| target.name.eq_ignore_ascii_case(name))
                     {
-                        target.expr.clone()
+                        (
+                            target.expr.clone(),
+                            if target.ressortgroupref != 0 {
+                                target.ressortgroupref
+                            } else {
+                                target.resno
+                            },
+                        )
                     } else {
-                        bind_expr(&item.expr)?
+                        (bind_expr(&item.expr)?, 0)
                     }
                 }
-                _ => bind_expr(&item.expr)?,
+                _ => (bind_expr(&item.expr)?, 0),
             };
             Ok(crate::backend::executor::OrderByEntry {
                 expr,
-                ressortgroupref: 0,
+                ressortgroupref,
                 descending: item.descending,
                 nulls_first: item.nulls_first,
             })

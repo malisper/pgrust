@@ -6,8 +6,6 @@ use super::pathnodes::{
 use super::plan::append_planned_subquery;
 use super::{
     expand_join_rte_vars, flatten_join_alias_vars, planner_with_param_base,
-    rewrite_semantic_expr_for_join_inputs, rewrite_semantic_expr_for_path,
-    rewrite_semantic_expr_for_path_or_expand_join_vars,
 };
 use crate::backend::parser::CatalogLookup;
 use crate::include::nodes::parsenodes::RangeTblEntryKind;
@@ -16,7 +14,7 @@ use crate::include::nodes::plannodes::{ExecParamSource, Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
     AggAccum, Aggref, BoolExpr, Expr, ExprArraySubscript, FuncExpr, OpExpr, OrderByEntry, Param,
     ParamKind, QueryColumn, ScalarArrayOpExpr, SubPlan, TargetEntry, Var, attrno_index,
-    is_executor_special_varno, is_special_varno, is_system_attr, user_attrno, INNER_VAR, OUTER_VAR,
+    is_executor_special_varno, is_system_attr, user_attrno, INNER_VAR, OUTER_VAR,
 };
 
 #[derive(Clone, Debug)]
@@ -787,11 +785,6 @@ fn expr_contains_local_semantic_var(expr: &Expr) -> bool {
     }
 }
 
-fn expr_contains_legacy_layout_ref(expr: &Expr) -> bool {
-    let _ = expr;
-    false
-}
-
 fn path_single_relid(path: &Path) -> Option<usize> {
     match path {
         Path::Append { source_id, .. }
@@ -985,11 +978,7 @@ fn fix_upper_expr_for_input(
             }
         }
     }
-    if expr_contains_legacy_layout_ref(&expr) {
-        fix_upper_expr_for_path(root, expr, input)
-    } else {
-        expr
-    }
+    expr
 }
 
 fn lower_direct_ref(expr: &Expr, mode: LowerMode<'_>) -> Option<Expr> {
@@ -2267,20 +2256,8 @@ fn set_projection_references(
                     &input_tlist,
                 );
                 if expr_contains_local_semantic_var(&lowered) {
-                    let rewritten = match root {
-                        Some(root) => rewrite_semantic_expr_for_path_or_expand_join_vars(
-                            root,
-                            target.expr.clone(),
-                            &input,
-                            &input.output_vars(),
-                        ),
-                        None => rewrite_semantic_expr_for_path(
-                            target.expr.clone(),
-                            &input,
-                            &input.output_vars(),
-                        ),
-                    };
-                    let rewritten = fix_upper_expr_for_input(root, rewritten, &input, &input_tlist);
+                    let rewritten =
+                        fix_upper_expr_for_input(root, target.expr.clone(), &input, &input_tlist);
                     if expr_contains_local_semantic_var(&rewritten) {
                         fix_upper_expr_for_input(
                             root,
@@ -2781,36 +2758,6 @@ fn fix_upper_expr(root: Option<&PlannerInfo>, expr: Expr, tlist: &IndexedTlist) 
     rebuild_setrefs_expr(root, expr, |inner| fix_upper_expr(root, inner, tlist))
 }
 
-fn fix_upper_expr_for_path(root: Option<&PlannerInfo>, expr: Expr, path: &Path) -> Expr {
-    let layout = path.output_vars();
-    let tlist = build_path_tlist(root, path);
-    if let Some(entry) = search_tlist_entry(root, &expr, &tlist) {
-        return special_slot_var(OUTER_VAR, entry.index, entry.sql_type);
-    }
-    let rewritten = match root {
-        Some(root) => rewrite_semantic_expr_for_path_or_expand_join_vars(root, expr.clone(), path, &layout),
-        None => rewrite_semantic_expr_for_path(expr.clone(), path, &layout),
-    };
-    if rewritten != expr {
-        if let Some(entry) = search_tlist_entry(root, &rewritten, &tlist) {
-            return special_slot_var(OUTER_VAR, entry.index, entry.sql_type);
-        }
-        return fix_upper_expr_for_path(root, rewritten, path);
-    }
-    rebuild_setrefs_expr(root, expr, |inner| fix_upper_expr_for_path(root, inner, path))
-}
-
-fn fix_join_expr_for_paths(
-    root: Option<&PlannerInfo>,
-    expr: Expr,
-    left: &Path,
-    right: &Path,
-) -> Expr {
-    let mut join_layout = left.output_vars();
-    join_layout.extend(right.output_vars());
-    rewrite_semantic_expr_for_join_inputs(root, expr, left, right, &join_layout)
-}
-
 fn fix_join_expr_for_inputs(
     root: Option<&PlannerInfo>,
     expr: Expr,
@@ -2823,11 +2770,7 @@ fn fix_join_expr_for_inputs(
     if rewritten != expr {
         return rewritten;
     }
-    if expr_contains_legacy_layout_ref(&expr) {
-        fix_join_expr_for_paths(root, expr, left, right)
-    } else {
-        expr
-    }
+    expr
 }
 
 fn exprs_equivalent(root: Option<&PlannerInfo>, left: &Expr, right: &Expr) -> bool {

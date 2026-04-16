@@ -97,13 +97,25 @@ fn make_processed_tlist(parse: &Query) -> Vec<TargetEntry> {
     let mut next_resno = processed_tlist.len() + 1;
 
     for clause in &parse.sort_clause {
-        if let Some(target) = processed_tlist
-            .iter_mut()
-            .find(|target| target.expr == clause.expr)
-        {
+        let matching_index = processed_tlist
+            .iter()
+            .position(|target| clause.tle_sort_group_ref != 0 && target.resno == clause.tle_sort_group_ref)
+            .or_else(|| {
+                processed_tlist.iter().position(|target| {
+                    clause.tle_sort_group_ref != 0
+                        && target.ressortgroupref == clause.tle_sort_group_ref
+                })
+            })
+            .or_else(|| processed_tlist.iter().position(|target| target.expr == clause.expr));
+        if let Some(target) = matching_index.and_then(|index| processed_tlist.get_mut(index)) {
             if target.ressortgroupref == 0 {
-                target.ressortgroupref = next_sort_group_ref;
-                next_sort_group_ref += 1;
+                target.ressortgroupref = if clause.tle_sort_group_ref != 0 {
+                    clause.tle_sort_group_ref
+                } else {
+                    let next = next_sort_group_ref;
+                    next_sort_group_ref += 1;
+                    next
+                };
             }
             continue;
         }
