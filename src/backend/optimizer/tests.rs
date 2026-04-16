@@ -329,6 +329,87 @@ fn projection_pathkeys_fall_back_to_expr_match_for_non_identity_projection() {
 }
 
 #[test]
+fn into_plan_projection_lowers_via_child_tlist_identity() {
+    let input = Path::Projection {
+        plan_info: PlanEstimate::new(1.0, 1.5, 10.0, 1),
+        slot_id: 20,
+        input: Box::new(values_path(10, 1.0, 1.0)),
+        targets: vec![TargetEntry::new("a", var(10, 1), int4(), 1)],
+    };
+    let plan = Path::Projection {
+        plan_info: PlanEstimate::new(1.0, 1.6, 10.0, 1),
+        slot_id: 21,
+        input: Box::new(input),
+        targets: vec![TargetEntry::new("a", var(10, 1), int4(), 1)],
+    }
+    .into_plan();
+
+    match plan {
+        Plan::Projection { targets, .. } => {
+            assert_eq!(targets.len(), 1);
+            assert!(is_special_user_var(&targets[0].expr, OUTER_VAR, 0));
+        }
+        other => panic!("expected projection plan, got {other:?}"),
+    }
+}
+
+#[test]
+fn into_plan_filter_lowers_via_child_tlist_identity() {
+    let input = Path::Projection {
+        plan_info: PlanEstimate::new(1.0, 1.5, 10.0, 1),
+        slot_id: 20,
+        input: Box::new(values_path(10, 1.0, 1.0)),
+        targets: vec![TargetEntry::new("a", var(10, 1), int4(), 1)],
+    };
+    let plan = Path::Filter {
+        plan_info: PlanEstimate::new(1.0, 1.7, 10.0, 1),
+        input: Box::new(input),
+        predicate: gt(var(10, 1), Expr::Const(Value::Int32(0))),
+    }
+    .into_plan();
+
+    match plan {
+        Plan::Filter { predicate, .. } => match predicate {
+            Expr::Op(op) => {
+                assert!(is_special_user_var(&op.args[0], OUTER_VAR, 0));
+                assert_eq!(op.args[1], Expr::Const(Value::Int32(0)));
+            }
+            other => panic!("expected filter op, got {other:?}"),
+        },
+        other => panic!("expected filter plan, got {other:?}"),
+    }
+}
+
+#[test]
+fn into_plan_order_by_lowers_via_child_sortgroupref() {
+    let input = Path::Projection {
+        plan_info: PlanEstimate::new(1.0, 1.5, 10.0, 1),
+        slot_id: 20,
+        input: Box::new(values_path(10, 1.0, 1.0)),
+        targets: vec![TargetEntry::new("a", var(10, 1), int4(), 1).with_sort_group_ref(17)],
+    };
+    let plan = Path::OrderBy {
+        plan_info: PlanEstimate::new(1.0, 1.7, 10.0, 1),
+        input: Box::new(input),
+        items: vec![OrderByEntry {
+            expr: var(10, 1),
+            ressortgroupref: 17,
+            descending: false,
+            nulls_first: None,
+        }],
+    }
+    .into_plan();
+
+    match plan {
+        Plan::OrderBy { items, .. } => {
+            assert_eq!(items.len(), 1);
+            assert!(is_special_user_var(&items[0].expr, OUTER_VAR, 0));
+        }
+        other => panic!("expected order by plan, got {other:?}"),
+    }
+}
+
+#[test]
 fn required_query_pathkeys_for_path_falls_back_when_input_lacks_sortgroup_identity() {
     let root = planner_info_for_sql("select column1 as a from (values (1)) v order by a");
     let path = Path::Projection {
