@@ -264,6 +264,36 @@ fn planned_stmt_for_sql(sql: &str) -> crate::include::nodes::plannodes::PlannedS
     super::planner(query, &catalog)
 }
 
+fn plan_contains(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> bool {
+    if predicate(plan) {
+        return true;
+    }
+    match plan {
+        Plan::Result { .. }
+        | Plan::SeqScan { .. }
+        | Plan::IndexScan { .. }
+        | Plan::Values { .. }
+        | Plan::FunctionScan { .. }
+        | Plan::WorkTableScan { .. } => false,
+        Plan::Append { children, .. } => children.iter().any(|child| plan_contains(child, predicate)),
+        Plan::Hash { input, .. }
+        | Plan::Filter { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::Aggregate { input, .. }
+        | Plan::ProjectSet { input, .. }
+        | Plan::CteScan { cte_plan: input, .. } => plan_contains(input, predicate),
+        Plan::NestedLoopJoin { left, right, .. }
+        | Plan::HashJoin { left, right, .. }
+        | Plan::RecursiveUnion {
+            anchor: left,
+            recursive: right,
+            ..
+        } => plan_contains(left, predicate) || plan_contains(right, predicate),
+    }
+}
+
 #[test]
 fn required_query_pathkeys_for_path_keeps_sortgroup_identified_keys() {
     let root = planner_info_for_sql("select column1 as a from (values (1)) v order by a");
@@ -487,6 +517,49 @@ fn planner_keeps_function_scan_filter_semantic_until_setrefs() {
         }
         other => panic!("expected filter over function scan, got {other:?}"),
     }
+}
+
+#[test]
+fn planner_keeps_recursive_cte_filter_semantic_until_setrefs() {
+    let planned = planned_stmt_for_sql(
+        "with recursive t(n) as (values (1) union all select n + 1 from t where n < 3) \
+         select * from t where n > 1",
+    );
+
+    assert!(plan_contains(&planned.plan_tree, |plan| matches!(plan, Plan::CteScan { .. })));
+    assert!(plan_contains(&planned.plan_tree, |plan| match plan {
+        Plan::Filter { predicate, .. } => match predicate {
+            Expr::Op(op) => {
+                is_special_user_var(&op.args[0], OUTER_VAR, 0)
+                    && op.args[1] == Expr::Const(Value::Int32(1))
+            }
+            _ => false,
+        },
+        _ => false,
+    }));
+}
+
+#[test]
+fn planner_keeps_recursive_project_set_scalar_semantic_until_setrefs() {
+    let planned = planned_stmt_for_sql(
+        "with recursive t(n) as (values (1) union all select n + 1 from t where n < 2) \
+         select n + 1, generate_series(1, n) from t",
+    );
+
+    assert!(plan_contains(&planned.plan_tree, |plan| matches!(plan, Plan::ProjectSet { .. })));
+    assert!(plan_contains(&planned.plan_tree, |plan| match plan {
+        Plan::ProjectSet { targets, .. } => targets.iter().any(|target| match target {
+            crate::include::nodes::primnodes::ProjectSetTarget::Scalar(entry) => match &entry.expr {
+                Expr::Op(op) => {
+                    is_special_user_var(&op.args[0], OUTER_VAR, 0)
+                        && op.args[1] == Expr::Const(Value::Int32(1))
+                }
+                _ => false,
+            },
+            crate::include::nodes::primnodes::ProjectSetTarget::Set { .. } => false,
+        }),
+        _ => false,
+    }));
 }
 
 #[test]
