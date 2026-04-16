@@ -1,3 +1,4 @@
 target/
 perl5/
 .DS_Store
+web/wasm-demo/pkg/pgrust_bg.wasm
