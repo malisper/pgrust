@@ -1,11 +1,12 @@
 use super::pathnodes::{
-    aggregate_output_vars, expr_sql_type, lower_agg_output_expr, rewrite_expr_against_layout,
-    rewrite_semantic_expr_for_input_path, rte_slot_varno,
+    aggregate_output_vars, expr_sql_type, lower_agg_output_expr, rewrite_semantic_expr_for_input_path,
+    rte_slot_varno,
 };
 use super::plan::append_planned_subquery;
 use super::{
     aggregate_group_by, expand_join_rte_vars, flatten_join_alias_vars, planner_with_param_base,
-    rewrite_semantic_expr_for_path, rewrite_semantic_expr_for_path_or_expand_join_vars,
+    rewrite_semantic_expr_for_join_inputs, rewrite_semantic_expr_for_path,
+    rewrite_semantic_expr_for_path_or_expand_join_vars,
 };
 use crate::backend::parser::CatalogLookup;
 use crate::include::nodes::parsenodes::RangeTblEntryKind;
@@ -13,26 +14,64 @@ use crate::include::nodes::pathnodes::{Path, PlannerInfo, RestrictInfo};
 use crate::include::nodes::plannodes::{ExecParamSource, Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
     Aggref, BoolExpr, Expr, ExprArraySubscript, FuncExpr, OpExpr, OrderByEntry, Param, ParamKind,
-    ScalarArrayOpExpr, SubPlan, TargetEntry, Var, attrno_index, is_system_attr, user_attrno,
-    INNER_VAR, OUTER_VAR,
+    ScalarArrayOpExpr, SubPlan, TargetEntry, Var, attrno_index, is_special_varno, is_system_attr,
+    user_attrno, INNER_VAR, OUTER_VAR,
 };
+
+#[derive(Clone, Debug)]
+struct IndexedTlistEntry {
+    index: usize,
+    sql_type: crate::backend::parser::SqlType,
+    match_exprs: Vec<Expr>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct IndexedTlist {
+    entries: Vec<IndexedTlistEntry>,
+}
+
+impl IndexedTlist {
+    fn search_expr(&self, root: Option<&PlannerInfo>, expr: &Expr) -> Option<&IndexedTlistEntry> {
+        match expr {
+            Expr::Var(var) => self.entries.iter().find(|entry| {
+                entry
+                    .match_exprs
+                    .iter()
+                    .any(|candidate| match candidate {
+                        Expr::Var(candidate_var) => {
+                            candidate_var == var
+                                || root.is_some_and(|root| {
+                                    flatten_join_alias_vars(root, Expr::Var(candidate_var.clone()))
+                                        == flatten_join_alias_vars(root, expr.clone())
+                                })
+                        }
+                        _ => false,
+                    })
+            }),
+            _ => self.entries.iter().find(|entry| {
+                entry
+                    .match_exprs
+                    .iter()
+                    .any(|candidate| exprs_equivalent(root, candidate, expr))
+            }),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 enum LowerMode<'a> {
     Scalar,
     Input {
-        path: &'a Path,
-        layout: &'a [Expr],
+        tlist: &'a IndexedTlist,
     },
     Aggregate {
         group_by: &'a [Expr],
         layout: &'a [Expr],
+        tlist: &'a IndexedTlist,
     },
     Join {
-        left_path: &'a Path,
-        left: &'a [Expr],
-        right_path: &'a Path,
-        right: &'a [Expr],
+        outer_tlist: &'a IndexedTlist,
+        inner_tlist: &'a IndexedTlist,
     },
 }
 
@@ -87,67 +126,201 @@ pub(super) fn create_plan_without_root(path: Path) -> Plan {
     plan
 }
 
-fn layout_index_for_expr(expr: &Expr, layout: &[Expr]) -> Option<usize> {
-    if let Some(index) = layout.iter().position(|candidate| candidate == expr) {
-        return Some(index);
-    }
-    let Expr::Var(var) = expr else {
-        return None;
-    };
-    if var.varlevelsup > 0 || is_system_attr(var.varattno) {
-        return None;
-    }
-    layout.iter().position(|candidate| match candidate {
-        Expr::Var(candidate_var) => {
-            candidate_var.varlevelsup == 0
-                && candidate_var.varattno == var.varattno
-                && rte_slot_varno(candidate_var.varno) == Some(var.varno)
-        }
-        _ => false,
-    })
-}
-
-fn special_slot_var(varno: usize, index: usize, source_expr: &Expr) -> Expr {
+fn special_slot_var(
+    varno: usize,
+    index: usize,
+    sql_type: crate::backend::parser::SqlType,
+) -> Expr {
     Expr::Var(Var {
         varno,
         varattno: user_attrno(index),
         varlevelsup: 0,
-        vartype: expr_sql_type(source_expr),
+        vartype: sql_type,
+    })
+}
+
+fn build_simple_tlist(output_vars: &[Expr]) -> IndexedTlist {
+    IndexedTlist {
+        entries: output_vars
+            .iter()
+            .enumerate()
+            .map(|(index, expr)| IndexedTlistEntry {
+                index,
+                sql_type: expr_sql_type(expr),
+                match_exprs: vec![expr.clone()],
+            })
+            .collect(),
+    }
+}
+
+fn aggregate_output_expr(accum: &crate::include::nodes::primnodes::AggAccum, aggno: usize) -> Expr {
+    Expr::Aggref(Box::new(Aggref {
+        aggfnoid: accum.aggfnoid,
+        aggtype: accum.sql_type,
+        aggvariadic: accum.agg_variadic,
+        aggdistinct: accum.distinct,
+        args: accum.args.clone(),
+        agglevelsup: 0,
+        aggno,
+    }))
+}
+
+fn dedup_match_exprs(exprs: Vec<Expr>) -> Vec<Expr> {
+    let mut deduped = Vec::new();
+    for expr in exprs {
+        if !deduped.contains(&expr) {
+            deduped.push(expr);
+        }
+    }
+    deduped
+}
+
+fn build_projection_tlist(
+    _root: Option<&PlannerInfo>,
+    slot_id: usize,
+    _input: &Path,
+    targets: &[TargetEntry],
+) -> IndexedTlist {
+    IndexedTlist {
+        entries: targets
+            .iter()
+            .enumerate()
+            .map(|(index, target)| IndexedTlistEntry {
+                index,
+                sql_type: target.sql_type,
+                match_exprs: dedup_match_exprs(vec![
+                    slot_var(slot_id, user_attrno(index), target.sql_type),
+                    target.expr.clone(),
+                ]),
+            })
+            .collect(),
+    }
+}
+
+fn build_aggregate_tlist(
+    root: Option<&PlannerInfo>,
+    slot_id: usize,
+    group_by: &[Expr],
+    accumulators: &[crate::include::nodes::primnodes::AggAccum],
+) -> IndexedTlist {
+    let mut entries = Vec::with_capacity(group_by.len() + accumulators.len());
+    for (index, expr) in group_by.iter().enumerate() {
+        let mut match_exprs = vec![
+            slot_var(slot_id, user_attrno(index), expr_sql_type(expr)),
+            expr.clone(),
+        ];
+        if let Some(root) = root {
+            match_exprs.push(flatten_join_alias_vars(root, expr.clone()));
+        }
+        entries.push(IndexedTlistEntry {
+            index,
+            sql_type: expr_sql_type(expr),
+            match_exprs: dedup_match_exprs(match_exprs),
+        });
+    }
+    for (aggno, accum) in accumulators.iter().enumerate() {
+        let index = group_by.len() + aggno;
+        entries.push(IndexedTlistEntry {
+            index,
+            sql_type: accum.sql_type,
+            match_exprs: dedup_match_exprs(vec![
+                slot_var(slot_id, user_attrno(index), accum.sql_type),
+                aggregate_output_expr(accum, aggno),
+            ]),
+        });
+    }
+    IndexedTlist { entries }
+}
+
+fn build_join_tlist(root: Option<&PlannerInfo>, left: &Path, right: &Path) -> IndexedTlist {
+    let left_tlist = build_path_tlist(root, left);
+    let right_tlist = build_path_tlist(root, right);
+    let left_len = left_tlist.entries.len();
+    let mut entries = left_tlist.entries;
+    entries.extend(right_tlist.entries.into_iter().map(|entry| IndexedTlistEntry {
+        index: left_len + entry.index,
+        ..entry
+    }));
+    IndexedTlist { entries }
+}
+
+fn build_path_tlist(root: Option<&PlannerInfo>, path: &Path) -> IndexedTlist {
+    match path {
+        Path::Projection {
+            slot_id,
+            input,
+            targets,
+            ..
+        } => build_projection_tlist(root, *slot_id, input, targets),
+        Path::Filter { input, .. } | Path::OrderBy { input, .. } | Path::Limit { input, .. } => {
+            build_path_tlist(root, input)
+        }
+        Path::Aggregate {
+            slot_id,
+            group_by,
+            accumulators,
+            ..
+        } => build_aggregate_tlist(root, *slot_id, group_by, accumulators),
+        Path::NestedLoopJoin { left, right, .. } | Path::HashJoin { left, right, .. } => {
+            build_join_tlist(root, left, right)
+        }
+        _ => build_simple_tlist(&path.output_vars()),
+    }
+}
+
+fn search_tlist_entry<'a>(
+    root: Option<&PlannerInfo>,
+    expr: &Expr,
+    tlist: &'a IndexedTlist,
+) -> Option<&'a IndexedTlistEntry> {
+    tlist.search_expr(root, expr).or_else(|| {
+        let Expr::Var(var) = expr else {
+            return None;
+        };
+        if var.varlevelsup > 0 || is_system_attr(var.varattno) {
+            return None;
+        }
+        tlist.entries.iter().find(|entry| {
+            entry.match_exprs.iter().any(|candidate| match candidate {
+                Expr::Var(candidate_var) => {
+                    candidate_var.varlevelsup == 0
+                        && candidate_var.varattno == var.varattno
+                        && rte_slot_varno(candidate_var.varno) == Some(var.varno)
+                }
+                _ => false,
+            })
+        })
     })
 }
 
 fn lower_direct_ref(expr: &Expr, mode: LowerMode<'_>) -> Option<Expr> {
     match mode {
         LowerMode::Scalar => None,
-        LowerMode::Input { layout, .. } => match expr {
-            Expr::Column(index) => layout
+        LowerMode::Input { tlist } | LowerMode::Aggregate { tlist, .. } => match expr {
+            Expr::Column(index) => tlist
+                .entries
                 .get(*index)
-                .map(|source| special_slot_var(OUTER_VAR, *index, source)),
-            _ => layout_index_for_expr(expr, layout)
-                .map(|index| special_slot_var(OUTER_VAR, index, &layout[index])),
+                .map(|entry| special_slot_var(OUTER_VAR, entry.index, entry.sql_type)),
+            _ => search_tlist_entry(None, expr, tlist)
+                .map(|entry| special_slot_var(OUTER_VAR, entry.index, entry.sql_type)),
         },
-        LowerMode::Aggregate { layout, .. } => match expr {
-            Expr::Column(index) => layout
+        LowerMode::Join {
+            outer_tlist,
+            inner_tlist,
+        } => match expr {
+            Expr::Column(index) if *index < outer_tlist.entries.len() => outer_tlist
+                .entries
                 .get(*index)
-                .map(|source| special_slot_var(OUTER_VAR, *index, source)),
-            _ => layout_index_for_expr(expr, layout)
-                .map(|index| special_slot_var(OUTER_VAR, index, &layout[index])),
-        },
-        LowerMode::Join { left, right, .. } => match expr {
-            Expr::Column(index) if *index < left.len() => left
-                .get(*index)
-                .map(|source| special_slot_var(OUTER_VAR, *index, source)),
-            Expr::Column(index) => {
-                let right_index = index.saturating_sub(left.len());
-                right
-                    .get(right_index)
-                    .map(|source| special_slot_var(INNER_VAR, right_index, source))
-            }
-            _ => layout_index_for_expr(expr, left)
-                .map(|index| special_slot_var(OUTER_VAR, index, &left[index]))
+                .map(|entry| special_slot_var(OUTER_VAR, entry.index, entry.sql_type)),
+            Expr::Column(index) => inner_tlist
+                .entries
+                .get(index.saturating_sub(outer_tlist.entries.len()))
+                .map(|entry| special_slot_var(INNER_VAR, entry.index, entry.sql_type)),
+            _ => search_tlist_entry(None, expr, outer_tlist)
+                .map(|entry| special_slot_var(OUTER_VAR, entry.index, entry.sql_type))
                 .or_else(|| {
-                    layout_index_for_expr(expr, right)
-                        .map(|index| special_slot_var(INNER_VAR, index, &right[index]))
+                    search_tlist_entry(None, expr, inner_tlist)
+                        .map(|entry| special_slot_var(INNER_VAR, entry.index, entry.sql_type))
                 }),
         },
     }
@@ -302,7 +475,6 @@ fn fix_set_returning_call_upper_exprs(
     root: Option<&PlannerInfo>,
     call: crate::include::nodes::primnodes::SetReturningCall,
     path: &Path,
-    layout: &[Expr],
 ) -> crate::include::nodes::primnodes::SetReturningCall {
     use crate::include::nodes::primnodes::SetReturningCall;
 
@@ -317,9 +489,9 @@ fn fix_set_returning_call_upper_exprs(
         } => SetReturningCall::GenerateSeries {
             func_oid,
             func_variadic,
-            start: fix_upper_expr(root, start, path, layout),
-            stop: fix_upper_expr(root, stop, path, layout),
-            step: fix_upper_expr(root, step, path, layout),
+            start: fix_upper_expr_for_path(root, start, path),
+            stop: fix_upper_expr_for_path(root, stop, path),
+            step: fix_upper_expr_for_path(root, step, path),
             output,
         },
         SetReturningCall::Unnest {
@@ -332,7 +504,7 @@ fn fix_set_returning_call_upper_exprs(
             func_variadic,
             args: args
                 .into_iter()
-                .map(|arg| fix_upper_expr(root, arg, path, layout))
+                .map(|arg| fix_upper_expr_for_path(root, arg, path))
                 .collect(),
             output_columns,
         },
@@ -348,7 +520,7 @@ fn fix_set_returning_call_upper_exprs(
             kind,
             args: args
                 .into_iter()
-                .map(|arg| fix_upper_expr(root, arg, path, layout))
+                .map(|arg| fix_upper_expr_for_path(root, arg, path))
                 .collect(),
             output_columns,
         },
@@ -364,7 +536,7 @@ fn fix_set_returning_call_upper_exprs(
             kind,
             args: args
                 .into_iter()
-                .map(|arg| fix_upper_expr(root, arg, path, layout))
+                .map(|arg| fix_upper_expr_for_path(root, arg, path))
                 .collect(),
             output_columns,
         },
@@ -376,7 +548,7 @@ fn fix_set_returning_call_upper_exprs(
             kind,
             args: args
                 .into_iter()
-                .map(|arg| fix_upper_expr(root, arg, path, layout))
+                .map(|arg| fix_upper_expr_for_path(root, arg, path))
                 .collect(),
             output_columns,
         },
@@ -390,7 +562,7 @@ fn fix_set_returning_call_upper_exprs(
             func_variadic,
             args: args
                 .into_iter()
-                .map(|arg| fix_upper_expr(root, arg, path, layout))
+                .map(|arg| fix_upper_expr_for_path(root, arg, path))
                 .collect(),
             output_columns,
         },
@@ -425,6 +597,7 @@ fn lower_agg_accum(
     accum: crate::include::nodes::primnodes::AggAccum,
     path: &Path,
     layout: &[Expr],
+    input_tlist: &IndexedTlist,
 ) -> crate::include::nodes::primnodes::AggAccum {
     crate::include::nodes::primnodes::AggAccum {
         args: accum
@@ -434,7 +607,7 @@ fn lower_agg_accum(
                 lower_expr(
                     ctx,
                     rewrite_semantic_expr_for_input_path(arg, path, layout),
-                    LowerMode::Input { path, layout },
+                    LowerMode::Input { tlist: input_tlist },
                 )
             })
             .collect(),
@@ -469,10 +642,10 @@ fn lower_sublink(
         .map(|param| {
             let expr = match mode {
                 LowerMode::Scalar => param.expr.clone(),
-                LowerMode::Input { path, layout } => {
-                    fix_upper_expr(ctx.root, param.expr.clone(), path, layout)
-                }
-                LowerMode::Aggregate { group_by, layout } => match ctx.root {
+                LowerMode::Input { tlist } => fix_upper_expr(ctx.root, param.expr.clone(), tlist),
+                LowerMode::Aggregate {
+                    group_by, layout, ..
+                } => match ctx.root {
                     Some(root) => lower_agg_output_expr(
                         expand_join_rte_vars(root, param.expr.clone()),
                         group_by,
@@ -481,11 +654,9 @@ fn lower_sublink(
                     None => lower_agg_output_expr(param.expr.clone(), group_by, layout),
                 },
                 LowerMode::Join {
-                    left_path,
-                    left,
-                    right_path,
-                    right,
-                } => fix_join_expr(ctx.root, param.expr.clone(), left_path, left, right_path, right),
+                    outer_tlist,
+                    inner_tlist,
+                } => fix_join_expr(ctx.root, param.expr.clone(), outer_tlist, inner_tlist),
             };
             lower_expr(ctx, expr, mode)
         })
@@ -509,6 +680,7 @@ fn lower_expr(ctx: &mut SetRefsContext<'_>, expr: Expr, mode: LowerMode<'_>) -> 
     }
     match expr {
         Expr::Var(var) if var.varlevelsup > 0 => exec_param_for_outer_var(ctx, var),
+        Expr::Var(var) if is_special_varno(var.varno) => Expr::Var(var),
         Expr::Var(var) => {
             if is_system_attr(var.varattno) {
                 Expr::Var(var)
@@ -713,16 +885,9 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             input,
             predicate,
         } => {
-            let layout = input.output_vars();
-            let predicate = fix_upper_expr(ctx.root, predicate, &input, &layout);
-            let predicate = lower_expr(
-                ctx,
-                predicate,
-                LowerMode::Input {
-                    path: &input,
-                    layout: &layout,
-                },
-            );
+            let input_tlist = build_path_tlist(ctx.root, &input);
+            let predicate = fix_upper_expr_for_path(ctx.root, predicate, &input);
+            let predicate = lower_expr(ctx, predicate, LowerMode::Input { tlist: &input_tlist });
             let input_plan = Box::new(set_plan_refs(ctx, *input));
             Plan::Filter {
                 plan_info,
@@ -737,26 +902,11 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             kind,
             restrict_clauses,
         } => {
-            let left_layout = left.output_vars();
-            let right_layout = right.output_vars();
+            let left_tlist = build_path_tlist(ctx.root, &left);
             let (join_restrict_clauses, other_restrict_clauses) =
                 split_join_restrict_clauses(kind, &restrict_clauses);
-            let join_qual = lower_join_clause_list(
-                ctx,
-                join_restrict_clauses,
-                &left,
-                &right,
-                &left_layout,
-                &right_layout,
-            );
-            let qual = lower_join_clause_list(
-                ctx,
-                other_restrict_clauses,
-                &left,
-                &right,
-                &left_layout,
-                &right_layout,
-            );
+            let join_qual = lower_join_clause_list(ctx, join_restrict_clauses, &left, &right);
+            let qual = lower_join_clause_list(ctx, other_restrict_clauses, &left, &right);
             let (right_plan, nest_params) = {
                 let mut right_ctx = SetRefsContext {
                     root: ctx.root,
@@ -772,14 +922,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
                     .into_iter()
                     .map(|param| ExecParamSource {
                         paramid: param.paramid,
-                        expr: lower_expr(
-                            ctx,
-                            fix_upper_expr(ctx.root, param.expr, &left, &left_layout),
-                            LowerMode::Input {
-                                path: &left,
-                                layout: &left_layout,
-                            },
-                        ),
+                        expr: lower_expr(ctx, fix_upper_expr_for_path(ctx.root, param.expr, &left), LowerMode::Input { tlist: &left_tlist }),
                     })
                     .collect::<Vec<_>>();
                 (plan, params)
@@ -805,89 +948,39 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             inner_hash_keys,
             restrict_clauses,
         } => {
-            let left_layout = left.output_vars();
-            let right_layout = right.output_vars();
-            let mut join_layout = left_layout.clone();
-            join_layout.extend(right_layout.clone());
+            let left_tlist = build_path_tlist(ctx.root, &left);
+            let right_tlist = build_path_tlist(ctx.root, &right);
             let hash_restrict_clauses = hash_clauses.clone();
 
             let outer_hash_keys = outer_hash_keys
                 .into_iter()
-                .map(|expr| fix_upper_expr(ctx.root, expr, &left, &left_layout))
+                .map(|expr| fix_upper_expr_for_path(ctx.root, expr, &left))
                 .collect::<Vec<_>>();
             let inner_hash_keys = inner_hash_keys
                 .into_iter()
-                .map(|expr| fix_upper_expr(ctx.root, expr, &right, &right_layout))
+                .map(|expr| fix_upper_expr_for_path(ctx.root, expr, &right))
                 .collect::<Vec<_>>();
             let lowered_hash_clauses = hash_clauses
                 .into_iter()
                 .map(|restrict| {
-                    let expr = fix_join_expr(
-                        ctx.root,
-                        restrict.clause,
-                        &left,
-                        &left_layout,
-                        &right,
-                        &right_layout,
-                    );
-                    lower_expr(
-                        ctx,
-                        expr,
-                        LowerMode::Join {
-                            left_path: &left,
-                            left: &left_layout,
-                            right_path: &right,
-                            right: &right_layout,
-                        },
-                    )
+                    let expr = fix_join_expr_for_paths(ctx.root, restrict.clause, &left, &right);
+                    lower_expr(ctx, expr, LowerMode::Join { outer_tlist: &left_tlist, inner_tlist: &right_tlist })
                 })
                 .collect::<Vec<_>>();
             let outer_hash_keys = outer_hash_keys
                 .into_iter()
-                .map(|expr| {
-                    lower_expr(
-                        ctx,
-                        expr,
-                        LowerMode::Input {
-                            path: &left,
-                            layout: &left_layout,
-                        },
-                    )
-                })
+                .map(|expr| lower_expr(ctx, expr, LowerMode::Input { tlist: &left_tlist }))
                 .collect::<Vec<_>>();
             let inner_hash_keys = inner_hash_keys
                 .into_iter()
-                .map(|expr| {
-                    lower_expr(
-                        ctx,
-                        expr,
-                        LowerMode::Input {
-                            path: &right,
-                            layout: &right_layout,
-                        },
-                    )
-                })
+                .map(|expr| lower_expr(ctx, expr, LowerMode::Input { tlist: &right_tlist }))
                 .collect::<Vec<_>>();
             let (join_restrict_clauses, other_restrict_clauses) =
                 split_join_restrict_clauses(kind, &restrict_clauses);
             let join_restrict_clauses =
                 remove_hash_clauses(join_restrict_clauses, &hash_restrict_clauses);
-            let join_qual = lower_join_clause_list(
-                ctx,
-                &join_restrict_clauses,
-                &left,
-                &right,
-                &left_layout,
-                &right_layout,
-            );
-            let qual = lower_join_clause_list(
-                ctx,
-                other_restrict_clauses,
-                &left,
-                &right,
-                &left_layout,
-                &right_layout,
-            );
+            let join_qual = lower_join_clause_list(ctx, &join_restrict_clauses, &left, &right);
+            let qual = lower_join_clause_list(ctx, other_restrict_clauses, &left, &right);
 
             let left_plan = set_plan_refs(ctx, *left);
             let right_plan = set_plan_refs(ctx, *right);
@@ -921,18 +1014,15 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             targets,
             ..
         } => {
-            let layout = input.output_vars();
+            let input_tlist = build_path_tlist(ctx.root, &input);
             let root = ctx.root;
             let mut lowered_targets = Vec::with_capacity(targets.len());
             for target in targets {
-                let expr = fix_upper_expr(root, target.expr, &input, &layout);
+                let expr = fix_upper_expr_for_path(root, target.expr, &input);
                 lowered_targets.push(lower_target_entry(
                     ctx,
                     TargetEntry { expr, ..target },
-                    LowerMode::Input {
-                        path: &input,
-                        layout: &layout,
-                    },
+                    LowerMode::Input { tlist: &input_tlist },
                 ));
             }
             Plan::Projection {
@@ -947,6 +1037,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             items,
         } => {
             let layout = input.output_vars();
+            let input_tlist = build_path_tlist(ctx.root, &input);
             let items = match (ctx.root, aggregate_group_by(&input)) {
                 (Some(root), Some(group_by)) => items
                     .into_iter()
@@ -969,7 +1060,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
                 (_, None) => items
                     .into_iter()
                     .map(|item| OrderByEntry {
-                        expr: fix_upper_expr(ctx.root, item.expr, &input, &layout),
+                        expr: fix_upper_expr_for_path(ctx.root, item.expr, &input),
                         ..item
                     })
                     .collect::<Vec<_>>(),
@@ -977,14 +1068,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             let lowered_items = items
                 .into_iter()
                 .map(|item| {
-                    lower_order_by_entry(
-                        ctx,
-                        item,
-                        LowerMode::Input {
-                            path: &input,
-                            layout: &layout,
-                        },
-                    )
+                    lower_order_by_entry(ctx, item, LowerMode::Input { tlist: &input_tlist })
                 })
                 .collect();
             let input_plan = Box::new(set_plan_refs(ctx, *input));
@@ -1015,25 +1099,18 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             output_columns,
         } => {
             let layout = input.output_vars();
+            let input_tlist = build_path_tlist(ctx.root, &input);
             let aggregate_layout = aggregate_output_vars(slot_id, &group_by, &accumulators);
+            let aggregate_tlist = build_aggregate_tlist(ctx.root, slot_id, &group_by, &accumulators);
             let semantic_group_by = group_by.clone();
             let group_by = group_by
                 .into_iter()
                 .map(|expr| rewrite_semantic_expr_for_input_path(expr, &input, &layout))
-                .map(|expr| {
-                    lower_expr(
-                        ctx,
-                        expr,
-                        LowerMode::Input {
-                            path: &input,
-                            layout: &layout,
-                        },
-                    )
-                })
+                .map(|expr| lower_expr(ctx, expr, LowerMode::Input { tlist: &input_tlist }))
                 .collect();
             let accumulators = accumulators
                 .into_iter()
-                .map(|accum| lower_agg_accum(ctx, accum, &input, &layout))
+                .map(|accum| lower_agg_accum(ctx, accum, &input, &layout, &input_tlist))
                 .collect();
             let having = having.map(|expr| {
                 let expr = match ctx.root {
@@ -1050,6 +1127,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
                     LowerMode::Aggregate {
                         group_by: &semantic_group_by,
                         layout: &aggregate_layout,
+                        tlist: &aggregate_tlist,
                     },
                 )
             });
@@ -1129,14 +1207,14 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             targets,
             ..
         } => {
-            let layout = input.output_vars();
+            let input_tlist = build_path_tlist(ctx.root, &input);
             let lowered_targets = targets
                 .into_iter()
                 .map(|target| {
                     let target = match target {
                         crate::include::nodes::primnodes::ProjectSetTarget::Scalar(entry) => {
                             crate::include::nodes::primnodes::ProjectSetTarget::Scalar(TargetEntry {
-                                expr: fix_upper_expr(ctx.root, entry.expr, &input, &layout),
+                                expr: fix_upper_expr_for_path(ctx.root, entry.expr, &input),
                                 ..entry
                             })
                         }
@@ -1147,17 +1225,12 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
                             column_index,
                         } => crate::include::nodes::primnodes::ProjectSetTarget::Set {
                             name,
-                            call: fix_set_returning_call_upper_exprs(
-                                ctx.root,
-                                call,
-                                &input,
-                                &layout,
-                            ),
+                            call: fix_set_returning_call_upper_exprs(ctx.root, call, &input),
                             sql_type,
                             column_index,
                         },
                     };
-                    lower_project_set_target(ctx, target, LowerMode::Input { path: &input, layout: &layout })
+                    lower_project_set_target(ctx, target, LowerMode::Input { tlist: &input_tlist })
                 })
                 .collect();
             let input_plan = Box::new(set_plan_refs(ctx, *input));
@@ -1208,47 +1281,72 @@ fn lower_join_clause_list(
     restrict_clauses: &[RestrictInfo],
     left: &Path,
     right: &Path,
-    left_layout: &[Expr],
-    right_layout: &[Expr],
 ) -> Vec<Expr> {
     let root = ctx.root;
+    let outer_tlist = build_path_tlist(root, left);
+    let inner_tlist = build_path_tlist(root, right);
     let mut lowered = Vec::with_capacity(restrict_clauses.len());
     for restrict in restrict_clauses {
-        let expr = fix_join_expr(
-            root,
-            restrict.clause.clone(),
-            left,
-            left_layout,
-            right,
-            right_layout,
-        );
+        let expr = fix_join_expr_for_paths(root, restrict.clause.clone(), left, right);
         lowered.push(lower_expr(
             ctx,
             expr,
             LowerMode::Join {
-                left_path: left,
-                left: left_layout,
-                right_path: right,
-                right: right_layout,
+                outer_tlist: &outer_tlist,
+                inner_tlist: &inner_tlist,
             },
         ));
     }
     lowered
 }
 
-fn fix_upper_expr(root: Option<&PlannerInfo>, expr: Expr, path: &Path, layout: &[Expr]) -> Expr {
-    if let Some(rewritten) = find_exposed_output_match(root, &expr, path) {
-        return rewritten;
+fn fix_upper_expr(root: Option<&PlannerInfo>, expr: Expr, tlist: &IndexedTlist) -> Expr {
+    if let Some(entry) = search_tlist_entry(root, &expr, tlist) {
+        return special_slot_var(OUTER_VAR, entry.index, entry.sql_type);
     }
-    match root {
-        Some(root) => rewrite_semantic_expr_for_path_or_expand_join_vars(root, expr, path, layout),
-        None => rewrite_semantic_expr_for_path(expr, path, layout),
+    if let (Expr::Var(var), Some(root)) = (&expr, root)
+        && root
+            .parse
+            .rtable
+            .get(var.varno.saturating_sub(1))
+            .is_some_and(|rte| matches!(rte.kind, RangeTblEntryKind::Join { .. }))
+    {
+        let flattened = flatten_join_alias_vars(root, expr.clone());
+        if flattened != expr {
+            return fix_upper_expr(Some(root), flattened, tlist);
+        }
     }
+    rebuild_setrefs_expr(root, expr, |inner| fix_upper_expr(root, inner, tlist))
 }
 
-#[derive(Debug)]
-struct PathRewrite {
+fn fix_upper_expr_for_path(root: Option<&PlannerInfo>, expr: Expr, path: &Path) -> Expr {
+    let layout = path.output_vars();
+    let tlist = build_path_tlist(root, path);
+    if let Some(entry) = search_tlist_entry(root, &expr, &tlist) {
+        return special_slot_var(OUTER_VAR, entry.index, entry.sql_type);
+    }
+    let rewritten = match root {
+        Some(root) => rewrite_semantic_expr_for_path_or_expand_join_vars(root, expr.clone(), path, &layout),
+        None => rewrite_semantic_expr_for_path(expr.clone(), path, &layout),
+    };
+    if rewritten != expr {
+        if let Some(entry) = search_tlist_entry(root, &rewritten, &tlist) {
+            return special_slot_var(OUTER_VAR, entry.index, entry.sql_type);
+        }
+        return fix_upper_expr_for_path(root, rewritten, path);
+    }
+    rebuild_setrefs_expr(root, expr, |inner| fix_upper_expr_for_path(root, inner, path))
+}
+
+fn fix_join_expr_for_paths(
+    root: Option<&PlannerInfo>,
     expr: Expr,
+    left: &Path,
+    right: &Path,
+) -> Expr {
+    let mut join_layout = left.output_vars();
+    join_layout.extend(right.output_vars());
+    rewrite_semantic_expr_for_join_inputs(root, expr, left, right, &join_layout)
 }
 
 fn exprs_equivalent(root: Option<&PlannerInfo>, left: &Expr, right: &Expr) -> bool {
@@ -1259,6 +1357,118 @@ fn exprs_equivalent(root: Option<&PlannerInfo>, left: &Expr, right: &Expr) -> bo
         return false;
     };
     flatten_join_alias_vars(root, left.clone()) == flatten_join_alias_vars(root, right.clone())
+}
+
+fn rebuild_setrefs_expr(
+    root: Option<&PlannerInfo>,
+    expr: Expr,
+    recurse: impl Copy + Fn(Expr) -> Expr,
+) -> Expr {
+    match expr {
+        Expr::Var(_) | Expr::Column(_) | Expr::OuterColumn { .. } | Expr::Param(_) => expr,
+        Expr::Aggref(aggref) => Expr::Aggref(Box::new(Aggref {
+            args: aggref.args.into_iter().map(recurse).collect(),
+            ..*aggref
+        })),
+        Expr::Op(op) => Expr::Op(Box::new(OpExpr {
+            args: op.args.into_iter().map(recurse).collect(),
+            ..*op
+        })),
+        Expr::Bool(bool_expr) => Expr::Bool(Box::new(BoolExpr {
+            args: bool_expr.args.into_iter().map(recurse).collect(),
+            ..*bool_expr
+        })),
+        Expr::Case(case_expr) => Expr::Case(Box::new(crate::include::nodes::primnodes::CaseExpr {
+            arg: case_expr.arg.map(|arg| Box::new(recurse(*arg))),
+            args: case_expr
+                .args
+                .into_iter()
+                .map(|arm| crate::include::nodes::primnodes::CaseWhen {
+                    expr: recurse(arm.expr),
+                    result: recurse(arm.result),
+                })
+                .collect(),
+            defresult: Box::new(recurse(*case_expr.defresult)),
+            ..*case_expr
+        })),
+        Expr::CaseTest(case_test) => Expr::CaseTest(case_test),
+        Expr::Func(func) => Expr::Func(Box::new(FuncExpr {
+            args: func.args.into_iter().map(recurse).collect(),
+            ..*func
+        })),
+        Expr::SubLink(sublink) => Expr::SubLink(Box::new(crate::include::nodes::primnodes::SubLink {
+            testexpr: sublink.testexpr.map(|expr| Box::new(recurse(*expr))),
+            ..*sublink
+        })),
+        Expr::SubPlan(subplan) => Expr::SubPlan(Box::new(SubPlan {
+            testexpr: subplan.testexpr.map(|expr| Box::new(recurse(*expr))),
+            args: subplan.args.into_iter().map(recurse).collect(),
+            ..*subplan
+        })),
+        Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(ScalarArrayOpExpr {
+            left: Box::new(recurse(*saop.left)),
+            right: Box::new(recurse(*saop.right)),
+            ..*saop
+        })),
+        Expr::Cast(inner, ty) => Expr::Cast(Box::new(recurse(*inner)), ty),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            case_insensitive,
+            negated,
+        } => Expr::Like {
+            expr: Box::new(recurse(*expr)),
+            pattern: Box::new(recurse(*pattern)),
+            escape: escape.map(|expr| Box::new(recurse(*expr))),
+            case_insensitive,
+            negated,
+        },
+        Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            negated,
+        } => Expr::Similar {
+            expr: Box::new(recurse(*expr)),
+            pattern: Box::new(recurse(*pattern)),
+            escape: escape.map(|expr| Box::new(recurse(*expr))),
+            negated,
+        },
+        Expr::IsNull(inner) => Expr::IsNull(Box::new(recurse(*inner))),
+        Expr::IsNotNull(inner) => Expr::IsNotNull(Box::new(recurse(*inner))),
+        Expr::IsDistinctFrom(left, right) => {
+            Expr::IsDistinctFrom(Box::new(recurse(*left)), Box::new(recurse(*right)))
+        }
+        Expr::IsNotDistinctFrom(left, right) => {
+            Expr::IsNotDistinctFrom(Box::new(recurse(*left)), Box::new(recurse(*right)))
+        }
+        Expr::ArrayLiteral {
+            elements,
+            array_type,
+        } => Expr::ArrayLiteral {
+            elements: elements.into_iter().map(recurse).collect(),
+            array_type,
+        },
+        Expr::Coalesce(left, right) => {
+            Expr::Coalesce(Box::new(recurse(*left)), Box::new(recurse(*right)))
+        }
+        Expr::ArraySubscript { array, subscripts } => Expr::ArraySubscript {
+            array: Box::new(recurse(*array)),
+            subscripts: subscripts
+                .into_iter()
+                .map(|subscript| ExprArraySubscript {
+                    is_slice: subscript.is_slice,
+                    lower: subscript.lower.map(recurse),
+                    upper: subscript.upper.map(recurse),
+                })
+                .collect(),
+        },
+        other => {
+            let _ = root;
+            other
+        }
+    }
 }
 
 fn slot_var(
@@ -1418,73 +1628,17 @@ fn expand_output_var(var: Var, path: &Path) -> Expr {
     }
 }
 
-fn find_exposed_output_match(root: Option<&PlannerInfo>, expr: &Expr, path: &Path) -> Option<Expr> {
-    match path {
-        Path::Projection {
-            slot_id,
-            input,
-            targets,
-            ..
-        } => {
-            let input_layout = input.output_vars();
-            targets.iter().enumerate().find_map(|(index, target)| {
-                let semantic = rewrite_expr_against_layout(target.expr.clone(), &input_layout);
-                let rewritten_semantic =
-                    rewrite_semantic_expr_for_path(target.expr.clone(), input, &input_layout);
-                let expanded_semantic =
-                    fully_expand_output_expr_with_root(root, target.expr.clone(), input);
-                (exprs_equivalent(root, expr, &target.expr)
-                    || exprs_equivalent(root, expr, &semantic)
-                    || exprs_equivalent(root, expr, &rewritten_semantic)
-                    || exprs_equivalent(root, expr, &expanded_semantic))
-                .then(|| slot_var(*slot_id, user_attrno(index), target.sql_type))
-            })
-        }
-        Path::Filter { input, .. } | Path::OrderBy { input, .. } | Path::Limit { input, .. } => {
-            find_exposed_output_match(root, expr, input)
-        }
-        _ => None,
-    }
-}
-
-fn match_join_input_output(expr: &Expr, path: &Path, layout: &[Expr]) -> Option<PathRewrite> {
-    if let Some(index) = layout.iter().position(|candidate| candidate == expr) {
-        return Some(PathRewrite {
-            expr: layout[index].clone(),
-        });
-    }
-    match path {
-        Path::Projection {
-            slot_id, targets, ..
-        } => targets.iter().enumerate().find_map(|(index, target)| {
-            (target.expr == *expr).then(|| PathRewrite {
-                expr: slot_var(*slot_id, user_attrno(index), target.sql_type),
-            })
-        }),
-        Path::Filter { input, .. } | Path::OrderBy { input, .. } | Path::Limit { input, .. } => {
-            match_join_input_output(expr, input, layout)
-        }
-        _ => None,
-    }
-}
-
 fn fix_join_expr(
     root: Option<&PlannerInfo>,
     expr: Expr,
-    left: &Path,
-    left_layout: &[Expr],
-    right: &Path,
-    right_layout: &[Expr],
+    outer_tlist: &IndexedTlist,
+    inner_tlist: &IndexedTlist,
 ) -> Expr {
-    if let Some(rewritten) = match_join_input_output(&expr, left, left_layout)
-        .or_else(|| match_join_input_output(&expr, right, right_layout))
-        .map(|rewrite| rewrite.expr)
-    {
-        return if rewritten == expr {
-            rewritten
-        } else {
-            fix_join_expr(root, rewritten, left, left_layout, right, right_layout)
-        };
+    if let Some(entry) = search_tlist_entry(root, &expr, outer_tlist) {
+        return special_slot_var(OUTER_VAR, entry.index, entry.sql_type);
+    }
+    if let Some(entry) = search_tlist_entry(root, &expr, inner_tlist) {
+        return special_slot_var(INNER_VAR, entry.index, entry.sql_type);
     }
     if let (Expr::Var(var), Some(root)) = (&expr, root)
         && root
@@ -1495,294 +1649,8 @@ fn fix_join_expr(
     {
         let flattened = flatten_join_alias_vars(root, expr.clone());
         if flattened != expr {
-            return fix_join_expr(
-                Some(root),
-                flattened,
-                left,
-                left_layout,
-                right,
-                right_layout,
-            );
+            return fix_join_expr(Some(root), flattened, outer_tlist, inner_tlist);
         }
     }
-
-    let rebuilt = match expr {
-        Expr::Var(_) | Expr::Column(_) => expr,
-        Expr::Aggref(aggref) => Expr::Aggref(Box::new(Aggref {
-            args: aggref
-                .args
-                .into_iter()
-                .map(|arg| fix_join_expr(root, arg, left, left_layout, right, right_layout))
-                .collect(),
-            ..*aggref
-        })),
-        Expr::Op(op) => Expr::Op(Box::new(OpExpr {
-            args: op
-                .args
-                .into_iter()
-                .map(|arg| fix_join_expr(root, arg, left, left_layout, right, right_layout))
-                .collect(),
-            ..*op
-        })),
-        Expr::Bool(bool_expr) => Expr::Bool(Box::new(BoolExpr {
-            args: bool_expr
-                .args
-                .into_iter()
-                .map(|arg| fix_join_expr(root, arg, left, left_layout, right, right_layout))
-                .collect(),
-            ..*bool_expr
-        })),
-        Expr::Func(func) => Expr::Func(Box::new(FuncExpr {
-            args: func
-                .args
-                .into_iter()
-                .map(|arg| fix_join_expr(root, arg, left, left_layout, right, right_layout))
-                .collect(),
-            ..*func
-        })),
-        Expr::SubLink(sublink) => {
-            Expr::SubLink(Box::new(crate::include::nodes::primnodes::SubLink {
-                testexpr: sublink.testexpr.map(|expr| {
-                    Box::new(fix_join_expr(
-                        root,
-                        *expr,
-                        left,
-                        left_layout,
-                        right,
-                        right_layout,
-                    ))
-                }),
-                ..*sublink
-            }))
-        }
-        Expr::SubPlan(subplan) => {
-            Expr::SubPlan(Box::new(crate::include::nodes::primnodes::SubPlan {
-                testexpr: subplan.testexpr.map(|expr| {
-                    Box::new(fix_join_expr(
-                        root,
-                        *expr,
-                        left,
-                        left_layout,
-                        right,
-                        right_layout,
-                    ))
-                }),
-                ..*subplan
-            }))
-        }
-        Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(ScalarArrayOpExpr {
-            left: Box::new(fix_join_expr(
-                root,
-                *saop.left,
-                left,
-                left_layout,
-                right,
-                right_layout,
-            )),
-            right: Box::new(fix_join_expr(
-                root,
-                *saop.right,
-                left,
-                left_layout,
-                right,
-                right_layout,
-            )),
-            ..*saop
-        })),
-        Expr::Cast(inner, ty) => Expr::Cast(
-            Box::new(fix_join_expr(
-                root,
-                *inner,
-                left,
-                left_layout,
-                right,
-                right_layout,
-            )),
-            ty,
-        ),
-        Expr::Like {
-            expr,
-            pattern,
-            escape,
-            case_insensitive,
-            negated,
-        } => Expr::Like {
-            expr: Box::new(fix_join_expr(
-                root,
-                *expr,
-                left,
-                left_layout,
-                right,
-                right_layout,
-            )),
-            pattern: Box::new(fix_join_expr(
-                root,
-                *pattern,
-                left,
-                left_layout,
-                right,
-                right_layout,
-            )),
-            escape: escape.map(|expr| {
-                Box::new(fix_join_expr(
-                    root,
-                    *expr,
-                    left,
-                    left_layout,
-                    right,
-                    right_layout,
-                ))
-            }),
-            case_insensitive,
-            negated,
-        },
-        Expr::Similar {
-            expr,
-            pattern,
-            escape,
-            negated,
-        } => Expr::Similar {
-            expr: Box::new(fix_join_expr(
-                root,
-                *expr,
-                left,
-                left_layout,
-                right,
-                right_layout,
-            )),
-            pattern: Box::new(fix_join_expr(
-                root,
-                *pattern,
-                left,
-                left_layout,
-                right,
-                right_layout,
-            )),
-            escape: escape.map(|expr| {
-                Box::new(fix_join_expr(
-                    root,
-                    *expr,
-                    left,
-                    left_layout,
-                    right,
-                    right_layout,
-                ))
-            }),
-            negated,
-        },
-        Expr::IsNull(inner) => Expr::IsNull(Box::new(fix_join_expr(
-            root,
-            *inner,
-            left,
-            left_layout,
-            right,
-            right_layout,
-        ))),
-        Expr::IsNotNull(inner) => Expr::IsNotNull(Box::new(fix_join_expr(
-            root,
-            *inner,
-            left,
-            left_layout,
-            right,
-            right_layout,
-        ))),
-        Expr::IsDistinctFrom(left_expr, right_expr) => Expr::IsDistinctFrom(
-            Box::new(fix_join_expr(
-                root,
-                *left_expr,
-                left,
-                left_layout,
-                right,
-                right_layout,
-            )),
-            Box::new(fix_join_expr(
-                root,
-                *right_expr,
-                left,
-                left_layout,
-                right,
-                right_layout,
-            )),
-        ),
-        Expr::IsNotDistinctFrom(left_expr, right_expr) => Expr::IsNotDistinctFrom(
-            Box::new(fix_join_expr(
-                root,
-                *left_expr,
-                left,
-                left_layout,
-                right,
-                right_layout,
-            )),
-            Box::new(fix_join_expr(
-                root,
-                *right_expr,
-                left,
-                left_layout,
-                right,
-                right_layout,
-            )),
-        ),
-        Expr::ArrayLiteral {
-            elements,
-            array_type,
-        } => Expr::ArrayLiteral {
-            elements: elements
-                .into_iter()
-                .map(|element| fix_join_expr(root, element, left, left_layout, right, right_layout))
-                .collect(),
-            array_type,
-        },
-        Expr::Coalesce(left_expr, right_expr) => Expr::Coalesce(
-            Box::new(fix_join_expr(
-                root,
-                *left_expr,
-                left,
-                left_layout,
-                right,
-                right_layout,
-            )),
-            Box::new(fix_join_expr(
-                root,
-                *right_expr,
-                left,
-                left_layout,
-                right,
-                right_layout,
-            )),
-        ),
-        Expr::ArraySubscript { array, subscripts } => Expr::ArraySubscript {
-            array: Box::new(fix_join_expr(
-                root,
-                *array,
-                left,
-                left_layout,
-                right,
-                right_layout,
-            )),
-            subscripts: subscripts
-                .into_iter()
-                .map(|subscript| ExprArraySubscript {
-                    is_slice: subscript.is_slice,
-                    lower: subscript.lower.map(|expr| {
-                        fix_join_expr(root, expr, left, left_layout, right, right_layout)
-                    }),
-                    upper: subscript.upper.map(|expr| {
-                        fix_join_expr(root, expr, left, left_layout, right, right_layout)
-                    }),
-                })
-                .collect(),
-        },
-        other => other,
-    };
-
-    match match_join_input_output(&rebuilt, left, left_layout)
-        .or_else(|| match_join_input_output(&rebuilt, right, right_layout))
-        .map(|rewrite| rewrite.expr)
-    {
-        Some(rewritten) if rewritten != rebuilt => {
-            fix_join_expr(root, rewritten, left, left_layout, right, right_layout)
-        }
-        Some(rewritten) => rewritten,
-        None => rebuilt,
-    }
+    rebuild_setrefs_expr(root, expr, |inner| fix_join_expr(root, inner, outer_tlist, inner_tlist))
 }
