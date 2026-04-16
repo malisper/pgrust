@@ -1,14 +1,13 @@
 use super::inherit::append_translation;
 use super::pathnodes::{
-    aggregate_output_vars, expr_sql_type, lower_agg_output_expr,
-    rte_slot_varno,
+    aggregate_output_vars, expr_sql_type, lower_agg_output_expr, rte_slot_id, rte_slot_varno,
 };
 use super::plan::append_planned_subquery;
 use super::{
     expand_join_rte_vars, flatten_join_alias_vars, planner_with_param_base,
 };
 use crate::backend::parser::CatalogLookup;
-use crate::include::nodes::parsenodes::RangeTblEntryKind;
+use crate::include::nodes::parsenodes::{Query, RangeTblEntryKind};
 use crate::include::nodes::pathnodes::{Path, PlannerInfo, RestrictInfo};
 use crate::include::nodes::plannodes::{ExecParamSource, Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
@@ -302,6 +301,48 @@ fn build_join_tlist(root: Option<&PlannerInfo>, left: &Path, right: &Path) -> In
     IndexedTlist { entries }
 }
 
+fn build_subquery_tlist(
+    rtindex: usize,
+    query: &Query,
+    output_columns: &[QueryColumn],
+) -> IndexedTlist {
+    let slot_id = rte_slot_id(rtindex);
+    let visible_target_exprs = query
+        .target_list
+        .iter()
+        .filter(|target| !target.resjunk)
+        .map(|target| target.expr.clone())
+        .collect::<Vec<_>>();
+    IndexedTlist {
+        entries: output_columns
+            .iter()
+            .enumerate()
+            .map(|(index, column)| IndexedTlistEntry {
+                index,
+                sql_type: column.sql_type,
+                ressortgroupref: 0,
+                match_exprs: dedup_match_exprs(vec![
+                    slot_var(slot_id, user_attrno(index), column.sql_type),
+                    Expr::Var(Var {
+                        varno: rtindex,
+                        varattno: user_attrno(index),
+                        varlevelsup: 0,
+                        vartype: column.sql_type,
+                    }),
+                    visible_target_exprs
+                        .get(index)
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "subquery target list is shorter than exposed output column count for rtindex {rtindex}"
+                            )
+                        }),
+                ]),
+            })
+            .collect(),
+    }
+}
+
 fn build_path_tlist(root: Option<&PlannerInfo>, path: &Path) -> IndexedTlist {
     match path {
         Path::Projection {
@@ -319,6 +360,12 @@ fn build_path_tlist(root: Option<&PlannerInfo>, path: &Path) -> IndexedTlist {
             accumulators,
             ..
         } => build_aggregate_tlist(root, *slot_id, group_by, accumulators),
+        Path::SubqueryScan {
+            rtindex,
+            query,
+            output_columns,
+            ..
+        } => build_subquery_tlist(*rtindex, query, output_columns),
         Path::NestedLoopJoin { left, right, .. } | Path::HashJoin { left, right, .. } => {
             build_join_tlist(root, left, right)
         }
@@ -1048,6 +1095,126 @@ fn exec_param_for_outer_var(ctx: &mut SetRefsContext<'_>, var: Var) -> Expr {
     })
 }
 
+fn inline_exec_params(
+    expr: Expr,
+    params: &[ExecParamSource],
+    consumed: &mut Vec<usize>,
+) -> Expr {
+    match expr {
+        Expr::Param(param) if matches!(param.paramkind, ParamKind::Exec) => params
+            .iter()
+            .find(|candidate| candidate.paramid == param.paramid)
+            .map(|candidate| {
+                if !consumed.contains(&param.paramid) {
+                    consumed.push(param.paramid);
+                }
+                inline_exec_params(candidate.expr.clone(), params, consumed)
+            })
+            .unwrap_or(Expr::Param(param)),
+        Expr::Op(op) => Expr::Op(Box::new(OpExpr {
+            args: op
+                .args
+                .into_iter()
+                .map(|arg| inline_exec_params(arg, params, consumed))
+                .collect(),
+            ..*op
+        })),
+        Expr::Bool(bool_expr) => Expr::Bool(Box::new(BoolExpr {
+            args: bool_expr
+                .args
+                .into_iter()
+                .map(|arg| inline_exec_params(arg, params, consumed))
+                .collect(),
+            ..*bool_expr
+        })),
+        Expr::Func(func) => Expr::Func(Box::new(FuncExpr {
+            args: func
+                .args
+                .into_iter()
+                .map(|arg| inline_exec_params(arg, params, consumed))
+                .collect(),
+            ..*func
+        })),
+        Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(ScalarArrayOpExpr {
+            left: Box::new(inline_exec_params(*saop.left, params, consumed)),
+            right: Box::new(inline_exec_params(*saop.right, params, consumed)),
+            ..*saop
+        })),
+        Expr::Cast(inner, ty) => Expr::Cast(Box::new(inline_exec_params(*inner, params, consumed)), ty),
+        Expr::Coalesce(left, right) => Expr::Coalesce(
+            Box::new(inline_exec_params(*left, params, consumed)),
+            Box::new(inline_exec_params(*right, params, consumed)),
+        ),
+        Expr::IsNull(inner) => Expr::IsNull(Box::new(inline_exec_params(*inner, params, consumed))),
+        Expr::IsNotNull(inner) => {
+            Expr::IsNotNull(Box::new(inline_exec_params(*inner, params, consumed)))
+        }
+        Expr::IsDistinctFrom(left, right) => Expr::IsDistinctFrom(
+            Box::new(inline_exec_params(*left, params, consumed)),
+            Box::new(inline_exec_params(*right, params, consumed)),
+        ),
+        Expr::IsNotDistinctFrom(left, right) => Expr::IsNotDistinctFrom(
+            Box::new(inline_exec_params(*left, params, consumed)),
+            Box::new(inline_exec_params(*right, params, consumed)),
+        ),
+        other => other,
+    }
+}
+
+fn decrement_outer_var_levels(expr: Expr) -> Expr {
+    match expr {
+        Expr::Var(mut var) if var.varlevelsup > 0 => {
+            var.varlevelsup -= 1;
+            Expr::Var(var)
+        }
+        Expr::Op(op) => Expr::Op(Box::new(OpExpr {
+            args: op
+                .args
+                .into_iter()
+                .map(decrement_outer_var_levels)
+                .collect(),
+            ..*op
+        })),
+        Expr::Bool(bool_expr) => Expr::Bool(Box::new(BoolExpr {
+            args: bool_expr
+                .args
+                .into_iter()
+                .map(decrement_outer_var_levels)
+                .collect(),
+            ..*bool_expr
+        })),
+        Expr::Func(func) => Expr::Func(Box::new(FuncExpr {
+            args: func
+                .args
+                .into_iter()
+                .map(decrement_outer_var_levels)
+                .collect(),
+            ..*func
+        })),
+        Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(ScalarArrayOpExpr {
+            left: Box::new(decrement_outer_var_levels(*saop.left)),
+            right: Box::new(decrement_outer_var_levels(*saop.right)),
+            ..*saop
+        })),
+        Expr::Cast(inner, ty) => Expr::Cast(Box::new(decrement_outer_var_levels(*inner)), ty),
+        Expr::Coalesce(left, right) => Expr::Coalesce(
+            Box::new(decrement_outer_var_levels(*left)),
+            Box::new(decrement_outer_var_levels(*right)),
+        ),
+        Expr::IsNull(inner) => Expr::IsNull(Box::new(decrement_outer_var_levels(*inner))),
+        Expr::IsNotNull(inner) => Expr::IsNotNull(Box::new(decrement_outer_var_levels(*inner))),
+        Expr::IsDistinctFrom(left, right) => Expr::IsDistinctFrom(
+            Box::new(decrement_outer_var_levels(*left)),
+            Box::new(decrement_outer_var_levels(*right)),
+        ),
+        Expr::IsNotDistinctFrom(left, right) => Expr::IsNotDistinctFrom(
+            Box::new(decrement_outer_var_levels(*left)),
+            Box::new(decrement_outer_var_levels(*right)),
+        ),
+        other => other,
+    }
+}
+
 fn lower_target_entry(
     ctx: &mut SetRefsContext<'_>,
     target: TargetEntry,
@@ -1382,6 +1549,16 @@ fn lower_expr(ctx: &mut SetRefsContext<'_>, expr: Expr, mode: LowerMode<'_>) -> 
         Expr::Var(var) => {
             if is_system_attr(var.varattno) {
                 Expr::Var(var)
+            } else if let Some(root) = ctx.root {
+                let flattened = flatten_join_alias_vars(root, Expr::Var(var.clone()));
+                if flattened != Expr::Var(var.clone()) {
+                    lower_expr(ctx, flattened, mode)
+                } else {
+                    panic!(
+                        "unresolved semantic Var {var:?} survived setrefs in mode {mode:?}; \
+                         executable plans should only contain executor-facing refs or allowed scan/system Vars"
+                    )
+                }
             } else {
                 panic!(
                     "unresolved semantic Var {var:?} survived setrefs in mode {mode:?}; \
@@ -1749,6 +1926,7 @@ fn validate_executable_plan(plan: &Plan) {
         Plan::FunctionScan { call, .. } => {
             validate_set_returning_call(call, "FunctionScan", "call");
         }
+        Plan::SubqueryScan { input, .. } => validate_executable_plan(input),
         Plan::CteScan { cte_plan, .. } => validate_executable_plan(cte_plan),
         Plan::WorkTableScan { .. } => {}
         Plan::RecursiveUnion {
@@ -2007,6 +2185,7 @@ fn validate_planner_path(path: &Path) {
         Path::FunctionScan { call, .. } => {
             validate_planner_set_returning_call(call, "FunctionScan", "call");
         }
+        Path::SubqueryScan { input, .. } => validate_planner_path(input),
         Path::CteScan { cte_plan, .. } => validate_planner_path(cte_plan),
         Path::WorkTableScan { .. } => {}
         Path::RecursiveUnion {
@@ -2148,19 +2327,54 @@ fn set_nested_loop_join_references(
         };
         let plan = set_plan_refs(&mut right_ctx, *right);
         ctx.next_param_id = right_ctx.next_param_id;
-        let params = right_ctx
-            .ext_params
-            .into_iter()
-            .map(|param| ExecParamSource {
-                paramid: param.paramid,
-                expr: lower_expr(
-                    ctx,
-                    fix_upper_expr_for_input(ctx.root, param.expr, &left, &left_tlist),
-                    LowerMode::Input { tlist: &left_tlist },
-                ),
-            })
-            .collect::<Vec<_>>();
-        (plan, params)
+        if matches!(
+            kind,
+            crate::include::nodes::primnodes::JoinType::Right
+                | crate::include::nodes::primnodes::JoinType::Full
+        ) {
+            // PostgreSQL does not implement RIGHT/FULL joins as nestloops with the
+            // inner side parameterized by the current outer row. Keep those params
+            // as ancestor-supplied exec params instead of turning them into
+            // immediate nestloop params for this join.
+            ctx.ext_params.extend(right_ctx.ext_params);
+            (plan, Vec::new())
+        } else {
+            let mut consumed_parent_params = Vec::new();
+            let mut propagated_params = Vec::new();
+            let mut params = Vec::new();
+            for param in right_ctx.ext_params {
+                let mut param_consumed_parent_params = Vec::new();
+                let rebased_expr = inline_exec_params(
+                    decrement_outer_var_levels(param.expr),
+                    &ctx.ext_params,
+                    &mut param_consumed_parent_params,
+                );
+                let fixed_expr =
+                    fix_upper_expr_for_input(ctx.root, rebased_expr.clone(), &left, &left_tlist);
+                if expr_contains_local_semantic_var(&rebased_expr)
+                    && !expr_contains_local_semantic_var(&fixed_expr)
+                {
+                    consumed_parent_params.extend(param_consumed_parent_params);
+                    params.push(ExecParamSource {
+                        paramid: param.paramid,
+                        expr: lower_expr(
+                            ctx,
+                            fixed_expr,
+                            LowerMode::Input { tlist: &left_tlist },
+                        ),
+                    });
+                } else {
+                    propagated_params.push(ExecParamSource {
+                        paramid: param.paramid,
+                        expr: rebased_expr,
+                    });
+                }
+            }
+            ctx.ext_params
+                .retain(|param| !consumed_parent_params.contains(&param.paramid));
+            ctx.ext_params.extend(propagated_params);
+            (plan, params)
+        }
     };
     let left_plan = set_plan_refs(ctx, *left);
     Plan::NestedLoopJoin {
@@ -2440,6 +2654,26 @@ fn set_cte_scan_references(
     }
 }
 
+fn set_subquery_scan_references(
+    ctx: &mut SetRefsContext<'_>,
+    plan_info: PlanEstimate,
+    query: Box<crate::include::nodes::parsenodes::Query>,
+    input: Box<Path>,
+    output_columns: Vec<QueryColumn>,
+) -> Plan {
+    let subroot = PlannerInfo::new(*query);
+    let input = recurse_with_root(ctx, Some(&subroot), *input);
+    if input.columns() == output_columns {
+        input
+    } else {
+        Plan::SubqueryScan {
+            plan_info,
+            input: Box::new(input),
+            output_columns,
+        }
+    }
+}
+
 fn set_worktable_scan_references(
     plan_info: PlanEstimate,
     worktable_id: usize,
@@ -2643,6 +2877,13 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
         Path::FunctionScan {
             plan_info, call, ..
         } => set_function_scan_references(ctx, plan_info, call),
+        Path::SubqueryScan {
+            plan_info,
+            query,
+            input,
+            output_columns,
+            ..
+        } => set_subquery_scan_references(ctx, plan_info, query, input, output_columns),
         Path::CteScan {
             plan_info,
             cte_id,
@@ -3047,6 +3288,7 @@ fn expand_output_var(var: Var, path: &Path) -> Expr {
             .filter(|index| *index < targets.len())
             .map(|index| fully_expand_output_expr(targets[index].expr.clone(), input))
             .unwrap_or(Expr::Var(var)),
+        Path::SubqueryScan { .. } => Expr::Var(var),
         Path::Filter { input, .. } | Path::OrderBy { input, .. } | Path::Limit { input, .. } => {
             expand_output_var(var, input)
         }

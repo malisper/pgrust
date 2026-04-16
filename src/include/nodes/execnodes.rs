@@ -491,6 +491,14 @@ pub struct FunctionScanState {
     pub(crate) stats: NodeExecStats,
 }
 
+#[derive(Debug)]
+pub struct SubqueryScanState {
+    pub(crate) input: PlanState,
+    pub(crate) output_columns: Vec<String>,
+    pub(crate) plan_info: PlanEstimate,
+    pub(crate) stats: NodeExecStats,
+}
+
 #[derive(Debug, Default)]
 pub struct RecursiveWorkTable {
     pub(crate) rows: Vec<MaterializedRow>,

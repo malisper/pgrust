@@ -56,6 +56,7 @@ impl Path {
             | Self::OrderBy { plan_info, .. }
             | Self::Limit { plan_info, .. }
             | Self::Aggregate { plan_info, .. }
+            | Self::SubqueryScan { plan_info, .. }
             | Self::CteScan { plan_info, .. }
             | Self::WorkTableScan { plan_info, .. }
             | Self::RecursiveUnion { plan_info, .. }
@@ -95,6 +96,7 @@ impl Path {
                 })
                 .collect(),
             Self::Aggregate { output_columns, .. } => output_columns.clone(),
+            Self::SubqueryScan { output_columns, .. } => output_columns.clone(),
             Self::CteScan { output_columns, .. } => output_columns.clone(),
             Self::WorkTableScan { output_columns, .. }
             | Self::RecursiveUnion { output_columns, .. } => output_columns.clone(),
@@ -172,6 +174,11 @@ impl Path {
             Self::FunctionScan { slot_id, call, .. } => {
                 slot_output_vars(*slot_id, call.output_columns(), |column| column.sql_type)
             }
+            Self::SubqueryScan {
+                rtindex,
+                output_columns,
+                ..
+            } => slot_output_vars(rte_slot_id(*rtindex), output_columns, |column| column.sql_type),
             Self::ProjectSet {
                 slot_id, targets, ..
             } => targets
@@ -234,6 +241,7 @@ impl Path {
             | Self::FunctionScan { .. }
             | Self::ProjectSet { .. } => Vec::new(),
             Self::IndexScan { pathkeys, .. } => pathkeys.clone(),
+            Self::SubqueryScan { pathkeys, .. } => pathkeys.clone(),
             Self::Filter { input, .. } | Self::Limit { input, .. } => input.pathkeys(),
             Self::Projection {
                 slot_id,

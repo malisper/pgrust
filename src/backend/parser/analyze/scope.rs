@@ -684,6 +684,7 @@ pub(super) fn bind_from_item_with_ctes(
                 scope,
                 alias,
                 alias_columns,
+                matches!(source.as_ref(), FromItem::FunctionCall { .. }),
                 *preserve_source_names,
                 matches!(source.as_ref(), FromItem::Alias { .. }),
             )
@@ -1534,6 +1535,7 @@ fn apply_relation_alias(
     scope: BoundScope,
     alias: &str,
     column_aliases: &AliasColumnSpec,
+    alias_single_function_output: bool,
     preserve_source_names: bool,
     source_is_alias: bool,
 ) -> Result<(AnalyzedFrom, BoundScope), ParseError> {
@@ -1591,6 +1593,15 @@ fn apply_relation_alias(
             desc.columns[column_index].name = new_name.clone();
             desc.columns[column_index].storage.name = new_name.clone();
         }
+    }
+
+    if column_aliases.is_empty() && alias_single_function_output && visible_positions.len() == 1 {
+        let column_index = visible_positions[0];
+        let column = &mut columns[column_index];
+        renamed |= column.output_name != alias;
+        column.output_name = alias.to_string();
+        desc.columns[column_index].name = alias.to_string();
+        desc.columns[column_index].storage.name = alias.to_string();
     }
 
     if preserve_source_names {
@@ -1738,6 +1749,7 @@ fn apply_relation_alias(
                         desc.columns[index].sql_type,
                         index + 1,
                     )
+                    .with_input_resno(index + 1)
                 })
                 .collect(),
         );

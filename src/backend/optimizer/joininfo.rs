@@ -114,6 +114,17 @@ pub(super) fn build_special_join_info(query: &Query) -> Vec<SpecialJoinInfo> {
                         }
                     }
 
+                    // PostgreSQL's make_outerjoininfo() never leaves either minimum-hand
+                    // relset empty, even for clauses like ON TRUE. Later join-legal checks
+                    // depend on both sides being populated so the outer join remains visible
+                    // as a SpecialJoinInfo instead of degenerating into an inner join.
+                    if min_lefthand.is_empty() {
+                        min_lefthand = left_relids.clone();
+                    }
+                    if min_righthand.is_empty() {
+                        min_righthand = right_relids.clone();
+                    }
+
                     let (commute_above_l, commute_above_r) =
                         build_commute_above(ancestors, *kind, lhs_strict);
                     joins.push(SpecialJoinInfo {
@@ -762,5 +773,23 @@ mod tests {
         assert_eq!(joins[0].ojrelid, Some(3));
         assert!(joins[0].commute_above_l.is_empty());
         assert!(joins[0].commute_above_r.is_empty());
+    }
+
+    #[test]
+    fn outer_join_true_qual_backfills_empty_min_relsets() {
+        let query = query_for_jointree(
+            JoinTreeNode::JoinExpr {
+                left: Box::new(JoinTreeNode::RangeTblRef(1)),
+                right: Box::new(JoinTreeNode::RangeTblRef(2)),
+                kind: JoinType::Left,
+                rtindex: 3,
+                quals: Expr::Const(crate::include::nodes::datum::Value::Bool(true)),
+            },
+            vec![base_rte(), base_rte(), base_rte()],
+        );
+        let joins = build_special_join_info(&query);
+        assert_eq!(joins.len(), 1);
+        assert_eq!(joins[0].min_lefthand, vec![1]);
+        assert_eq!(joins[0].min_righthand, vec![2]);
     }
 }

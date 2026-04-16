@@ -6,7 +6,7 @@ use crate::include::nodes::execnodes::{
     AggregateState, AppendState, CteScanState, FilterState, FunctionScanState, HashJoinState,
     HashState, IndexScanState, LimitState, NestedLoopJoinState, NodeExecStats, OrderByState,
     ProjectSetState, ProjectionState, RecursiveUnionState, RecursiveWorkTable, ResultState,
-    SeqScanState, ValuesState, WorkTableScanState,
+    SeqScanState, SubqueryScanState, ValuesState, WorkTableScanState,
 };
 use crate::include::nodes::primnodes::{Expr, SetReturningCall};
 
@@ -189,6 +189,7 @@ fn plan_uses_outer_columns(plan: &Plan) -> bool {
                 || having.as_ref().is_some_and(expr_uses_outer_columns)
         }
         Plan::FunctionScan { call, .. } => set_returning_call_uses_outer_columns(call),
+        Plan::SubqueryScan { input, .. } => plan_uses_outer_columns(input),
         Plan::Values { rows, .. } => rows.iter().flatten().any(expr_uses_outer_columns),
         Plan::ProjectSet { input, targets, .. } => {
             plan_uses_outer_columns(input)
@@ -577,6 +578,16 @@ pub fn executor_start(plan: Plan) -> PlanState {
             rows: None,
             next_index: 0,
             current_bindings: Vec::new(),
+            plan_info,
+            stats: NodeExecStats::default(),
+        }),
+        Plan::SubqueryScan {
+            plan_info,
+            input,
+            output_columns,
+        } => Box::new(SubqueryScanState {
+            input: executor_start(*input),
+            output_columns: output_columns.into_iter().map(|c| c.name).collect(),
             plan_info,
             stats: NodeExecStats::default(),
         }),

@@ -293,6 +293,34 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                     output_columns,
                 }
             }
+            Path::SubqueryScan {
+                rtindex,
+                query,
+                input,
+                output_columns,
+                pathkeys,
+                ..
+            } => {
+                let input = optimize_path(*input, catalog);
+                let input_info = input.plan_info();
+                let width = output_columns
+                    .iter()
+                    .map(|col| estimate_sql_type_width(col.sql_type))
+                    .sum();
+                Path::SubqueryScan {
+                    plan_info: PlanEstimate::new(
+                        input_info.startup_cost.as_f64(),
+                        input_info.total_cost.as_f64() + CPU_TUPLE_COST,
+                        input_info.plan_rows.as_f64(),
+                        width,
+                    ),
+                    rtindex,
+                    query,
+                    input: Box::new(input),
+                    output_columns,
+                    pathkeys,
+                }
+            }
             Path::WorkTableScan {
                 slot_id,
                 worktable_id,
@@ -1723,6 +1751,7 @@ fn path_uses_immediate_outer_columns(path: &Path) -> bool {
         }
         Path::Values { rows, .. } => rows.iter().flatten().any(expr_uses_immediate_outer_columns),
         Path::FunctionScan { call, .. } => set_returning_call_uses_immediate_outer_columns(call),
+        Path::SubqueryScan { input, .. } => path_uses_immediate_outer_columns(input),
         Path::CteScan { cte_plan, .. } => path_uses_immediate_outer_columns(cte_plan),
         Path::RecursiveUnion {
             anchor, recursive, ..
