@@ -8964,6 +8964,28 @@ fn concat_text_array_and_jsonb_work() {
 }
 
 #[test]
+fn concat_accepts_jsonb_delete_rhs() {
+    let base = temp_dir("concat_jsonb_delete_rhs");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_build_array('x') || '[10,20,30]'::jsonb - 0, jsonb_build_array('x') || ('[10,20,30]'::jsonb - 0)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            let expected = Value::Jsonb(
+                crate::backend::executor::jsonb::parse_jsonb_text("[\"x\",20,30]").unwrap(),
+            );
+            assert_eq!(rows, vec![vec![expected.clone(), expected]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn concat_rejects_non_text_nonarray_non_jsonb_operands() {
     let base = temp_dir("concat_rejects");
     let txns = TransactionManager::new_durable(&base).unwrap();

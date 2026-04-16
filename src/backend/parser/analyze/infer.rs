@@ -100,7 +100,6 @@ pub(super) fn infer_sql_expr_type_with_ctes(
         SqlExpr::IntegerLiteral(value) => infer_integer_literal_type(value),
         SqlExpr::NumericLiteral(_) => SqlType::new(SqlTypeKind::Numeric),
         SqlExpr::Add(left, right)
-        | SqlExpr::Sub(left, right)
         | SqlExpr::BitAnd(left, right)
         | SqlExpr::BitOr(left, right)
         | SqlExpr::BitXor(left, right)
@@ -113,6 +112,33 @@ pub(super) fn infer_sql_expr_type_with_ctes(
             infer_sql_expr_type_with_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes),
             infer_sql_expr_type_with_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes),
         ),
+        SqlExpr::Sub(left, right) => {
+            let left_type = infer_sql_expr_type_with_ctes(
+                left,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            let right_type = infer_sql_expr_type_with_ctes(
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            if left_type == SqlType::new(SqlTypeKind::Jsonb)
+                && (!right_type.is_array && is_integer_family(right_type)
+                    || (!right_type.is_array && matches!(right_type.kind, SqlTypeKind::Text))
+                    || right_type == SqlType::array_of(SqlType::new(SqlTypeKind::Text)))
+            {
+                SqlType::new(SqlTypeKind::Jsonb)
+            } else {
+                infer_arithmetic_sql_type(expr, left_type, right_type)
+            }
+        }
         SqlExpr::Concat(left, right) => infer_concat_sql_type(
             expr,
             infer_sql_expr_type_with_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes),
