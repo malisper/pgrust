@@ -274,6 +274,61 @@ fn required_query_pathkeys_for_path_keeps_sortgroup_identified_keys() {
 }
 
 #[test]
+fn projection_pathkeys_prefer_sortgroupref_identity() {
+    let ordered = Path::OrderBy {
+        plan_info: PlanEstimate::new(1.0, 1.5, 10.0, 1),
+        input: Box::new(values_path(10, 1.0, 1.0)),
+        items: vec![OrderByEntry {
+            expr: var(10, 2),
+            ressortgroupref: 17,
+            descending: false,
+            nulls_first: None,
+        }],
+    };
+    let projection = Path::Projection {
+        plan_info: PlanEstimate::new(1.0, 1.6, 10.0, 1),
+        slot_id: 20,
+        input: Box::new(ordered),
+        targets: vec![
+            TargetEntry::new("a", var(10, 1), int4(), 1),
+            TargetEntry::new("b", var(10, 2), int4(), 2).with_sort_group_ref(17),
+        ],
+    };
+
+    assert_eq!(projection.pathkeys(), vec![pathkey_with_ref(var(20, 2), 17)]);
+}
+
+#[test]
+fn projection_pathkeys_follow_passthrough_position() {
+    let projection = Path::Projection {
+        plan_info: PlanEstimate::new(1.0, 1.6, 10.0, 1),
+        slot_id: 20,
+        input: Box::new(ordered_path(10, 1.0, 1.0, 2)),
+        targets: vec![
+            TargetEntry::new("a", var(10, 1), int4(), 1),
+            TargetEntry::new("b", var(10, 2), int4(), 2),
+        ],
+    };
+
+    assert_eq!(projection.pathkeys(), vec![pathkey(var(20, 2))]);
+}
+
+#[test]
+fn projection_pathkeys_fall_back_to_expr_match_for_non_identity_projection() {
+    let projection = Path::Projection {
+        plan_info: PlanEstimate::new(1.0, 1.6, 10.0, 1),
+        slot_id: 20,
+        input: Box::new(ordered_path(10, 1.0, 1.0, 1)),
+        targets: vec![
+            TargetEntry::new("b", var(10, 2), int4(), 1),
+            TargetEntry::new("a", var(10, 1), int4(), 2),
+        ],
+    };
+
+    assert_eq!(projection.pathkeys(), vec![pathkey(var(20, 2))]);
+}
+
+#[test]
 fn required_query_pathkeys_for_path_falls_back_when_input_lacks_sortgroup_identity() {
     let root = planner_info_for_sql("select column1 as a from (values (1)) v order by a");
     let path = Path::Projection {

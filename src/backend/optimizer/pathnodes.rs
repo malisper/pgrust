@@ -241,7 +241,7 @@ impl Path {
                 targets,
                 input,
                 ..
-            } => project_pathkeys(*slot_id, targets, &input.pathkeys()),
+            } => project_pathkeys(*slot_id, input, targets, &input.pathkeys()),
             Self::OrderBy { items, .. } => items
                 .iter()
                 .map(|item| PathKey {
@@ -289,9 +289,16 @@ fn slot_var(
 
 fn project_pathkeys(
     slot_id: usize,
+    input: &Path,
     targets: &[TargetEntry],
     input_pathkeys: &[PathKey],
 ) -> Vec<PathKey> {
+    let input_layout = input.output_vars();
+    let passthrough_boundary = targets.len() == input_layout.len()
+        && targets
+            .iter()
+            .zip(input_layout.iter())
+            .all(|(target, expr)| target.expr == *expr);
     input_pathkeys
         .iter()
         .map(|key| {
@@ -299,10 +306,26 @@ fn project_pathkeys(
                 .iter()
                 .enumerate()
                 .find(|(_, target)| {
-                    (key.ressortgroupref != 0 && target.ressortgroupref == key.ressortgroupref)
-                        || target.expr == key.expr
+                    key.ressortgroupref != 0 && target.ressortgroupref == key.ressortgroupref
                 })
                 .map(|(index, target)| slot_var(slot_id, user_attrno(index), target.sql_type))
+                .or_else(|| {
+                    passthrough_boundary.then(|| {
+                        input_layout
+                            .iter()
+                            .position(|expr| *expr == key.expr)
+                            .map(|index| {
+                                slot_var(slot_id, user_attrno(index), targets[index].sql_type)
+                            })
+                    })?
+                })
+                .or_else(|| {
+                    targets
+                        .iter()
+                        .enumerate()
+                        .find(|(_, target)| target.expr == key.expr)
+                        .map(|(index, target)| slot_var(slot_id, user_attrno(index), target.sql_type))
+                })
                 .unwrap_or_else(|| key.expr.clone());
             PathKey {
                 expr,
