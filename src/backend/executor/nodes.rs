@@ -1910,6 +1910,15 @@ impl PlanNode for RecursiveUnionState {
             None
         };
         begin_node(&mut self.stats, ctx);
+        if self.distinct && !self.distinct_hashable {
+            finish_eof(&mut self.stats, start, ctx);
+            return Err(ExecError::DetailedError {
+                message: "could not implement recursive UNION".into(),
+                detail: Some("All column datatypes must be hashable.".into()),
+                hint: None,
+                sqlstate: "0A000",
+            });
+        }
         ctx.recursive_worktables
             .insert(self.worktable_id, self.worktable.clone());
 
