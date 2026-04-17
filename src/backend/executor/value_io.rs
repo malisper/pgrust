@@ -61,7 +61,10 @@ pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<TupleVa
         (ScalarType::Int32, Value::Int64(v))
             if matches!(
                 column.sql_type.kind,
-                SqlTypeKind::Oid | SqlTypeKind::RegConfig | SqlTypeKind::RegDictionary
+                SqlTypeKind::Oid
+                    | SqlTypeKind::Xid
+                    | SqlTypeKind::RegConfig
+                    | SqlTypeKind::RegDictionary
             ) =>
         {
             let oid = u32::try_from(v).map_err(|_| ExecError::OidOutOfRange)?;

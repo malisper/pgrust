@@ -478,6 +478,7 @@ fn array_element_layout(
         SqlTypeKind::Int2 => (2, AttributeAlign::Short),
         SqlTypeKind::Int4
         | SqlTypeKind::Oid
+        | SqlTypeKind::Xid
         | SqlTypeKind::RegConfig
         | SqlTypeKind::RegDictionary
         | SqlTypeKind::Date
@@ -501,6 +502,8 @@ fn array_element_layout(
         | SqlTypeKind::Jsonb
         | SqlTypeKind::JsonPath
         | SqlTypeKind::Text
+        | SqlTypeKind::Tid
+        | SqlTypeKind::Interval
         | SqlTypeKind::Name
         | SqlTypeKind::PgNodeTree
         | SqlTypeKind::InternalChar
@@ -723,6 +726,7 @@ fn decode_array_element_value(
         }
         SqlTypeKind::Int4
         | SqlTypeKind::Oid
+        | SqlTypeKind::Xid
         | SqlTypeKind::RegConfig
         | SqlTypeKind::RegDictionary => {
             if bytes.len() != 4 {
@@ -966,6 +970,8 @@ fn decode_array_element_value(
             Ok(Value::Bool(bytes[0] != 0))
         }
         SqlTypeKind::Text
+        | SqlTypeKind::Tid
+        | SqlTypeKind::Interval
         | SqlTypeKind::Name
         | SqlTypeKind::Int2Vector
         | SqlTypeKind::OidVector

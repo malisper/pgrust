@@ -158,6 +158,188 @@ fn cast_text_to_oid(text: &str) -> Result<Value, ExecError> {
     Ok(Value::Int64(oid as i64))
 }
 
+fn cast_text_to_xid(text: &str) -> Result<Value, ExecError> {
+    let value = parse_pg_integer_text(text, "xid")?;
+    let xid = u32::try_from(value).map_err(|_| ExecError::IntegerOutOfRange {
+        ty: "xid",
+        value: text.to_string(),
+    })?;
+    Ok(Value::Int64(xid as i64))
+}
+
+fn canonicalize_tid_text(text: &str) -> Result<String, ExecError> {
+    let trimmed = text.trim();
+    let inner = trimmed
+        .strip_prefix('(')
+        .and_then(|rest| rest.strip_suffix(')'))
+        .ok_or_else(|| ExecError::DetailedError {
+            message: format!("invalid input syntax for type tid: \"{text}\""),
+            detail: None,
+            hint: None,
+            sqlstate: "22P02",
+        })?;
+    let (block, offset) = inner
+        .split_once(',')
+        .ok_or_else(|| ExecError::DetailedError {
+            message: format!("invalid input syntax for type tid: \"{text}\""),
+            detail: None,
+            hint: None,
+            sqlstate: "22P02",
+        })?;
+    let block_number = block
+        .trim()
+        .parse::<u32>()
+        .map_err(|_| ExecError::DetailedError {
+            message: format!("invalid input syntax for type tid: \"{text}\""),
+            detail: None,
+            hint: None,
+            sqlstate: "22P02",
+        })?;
+    let offset_number = offset
+        .trim()
+        .parse::<u16>()
+        .map_err(|_| ExecError::DetailedError {
+            message: format!("invalid input syntax for type tid: \"{text}\""),
+            detail: None,
+            hint: None,
+            sqlstate: "22P02",
+        })?;
+    Ok(format!("({block_number},{offset_number})"))
+}
+
+fn canonicalize_interval_text(text: &str) -> Result<String, ExecError> {
+    fn invalid(text: &str) -> ExecError {
+        ExecError::DetailedError {
+            message: format!("invalid input syntax for type interval: \"{text}\""),
+            detail: None,
+            hint: None,
+            sqlstate: "22P02",
+        }
+    }
+
+    fn unit_suffix(value: i64, singular: &str, plural: &str) -> String {
+        if value == 1 {
+            format!("{value} {singular}")
+        } else {
+            format!("{value} {plural}")
+        }
+    }
+
+    fn render_interval(months: i32, days: i32, micros: i64, negative: bool) -> String {
+        let mut parts = Vec::new();
+        let years = months / 12;
+        let rem_months = months % 12;
+        if years != 0 {
+            parts.push(unit_suffix(i64::from(years), "year", "years"));
+        }
+        if rem_months != 0 {
+            parts.push(unit_suffix(i64::from(rem_months), "mon", "mons"));
+        }
+        if days != 0 {
+            parts.push(unit_suffix(i64::from(days), "day", "days"));
+        }
+
+        let total_seconds = micros / 1_000_000;
+        let subsec = micros % 1_000_000;
+        let hours = total_seconds / 3600;
+        let minutes = (total_seconds % 3600) / 60;
+        let seconds = total_seconds % 60;
+        if hours != 0 {
+            parts.push(unit_suffix(hours, "hour", "hours"));
+        }
+        if minutes != 0 {
+            parts.push(unit_suffix(minutes, "min", "mins"));
+        }
+        if seconds != 0 || subsec != 0 || parts.is_empty() {
+            let seconds_text = if subsec == 0 {
+                seconds.to_string()
+            } else {
+                let mut rendered = format!("{seconds}.{subsec:06}");
+                while rendered.ends_with('0') {
+                    rendered.pop();
+                }
+                rendered
+            };
+            let label = if seconds_text == "1" { "sec" } else { "secs" };
+            parts.push(format!("{seconds_text} {label}"));
+        }
+
+        let mut out = format!("@ {}", parts.join(" "));
+        if negative && out != "@ 0 secs" {
+            out.push_str(" ago");
+        }
+        out
+    }
+
+    let mut rest = text.trim();
+    if rest.is_empty() {
+        return Err(invalid(text));
+    }
+
+    let mut negative = false;
+    if let Some(stripped) = rest.strip_prefix('-') {
+        negative = true;
+        rest = stripped.trim();
+    } else if let Some(stripped) = rest.strip_prefix('+') {
+        rest = stripped.trim();
+    }
+    if let Some(stripped) = rest.strip_prefix('@') {
+        rest = stripped.trim();
+    }
+    if let Some(stripped) = rest.strip_suffix("ago") {
+        negative = true;
+        rest = stripped.trim();
+    }
+    if rest.is_empty() {
+        return Err(invalid(text));
+    }
+
+    if rest.contains(':') {
+        let parsed = parse_time_text(rest).ok_or_else(|| invalid(text))?;
+        return Ok(render_interval(0, 0, parsed.0, negative));
+    }
+
+    let tokens = rest.split_whitespace().collect::<Vec<_>>();
+    if tokens.len() % 2 != 0 {
+        return Err(invalid(text));
+    }
+
+    let mut months = 0i32;
+    let mut days = 0i32;
+    let mut micros = 0i64;
+    for pair in tokens.chunks(2) {
+        match pair[1].to_ascii_lowercase().as_str() {
+            "year" | "years" => {
+                let value = pair[0].parse::<i64>().map_err(|_| invalid(text))?;
+                months += i32::try_from(value * 12).map_err(|_| invalid(text))?
+            }
+            "mon" | "mons" | "month" | "months" => {
+                let value = pair[0].parse::<i64>().map_err(|_| invalid(text))?;
+                months += i32::try_from(value).map_err(|_| invalid(text))?
+            }
+            "day" | "days" => {
+                let value = pair[0].parse::<i64>().map_err(|_| invalid(text))?;
+                days += i32::try_from(value).map_err(|_| invalid(text))?
+            }
+            "hour" | "hours" => {
+                let value = pair[0].parse::<i64>().map_err(|_| invalid(text))?;
+                micros += value.saturating_mul(3_600_000_000)
+            }
+            "min" | "mins" | "minute" | "minutes" => {
+                let value = pair[0].parse::<i64>().map_err(|_| invalid(text))?;
+                micros += value.saturating_mul(60_000_000)
+            }
+            "sec" | "secs" | "second" | "seconds" => {
+                let value = pair[0].parse::<f64>().map_err(|_| invalid(text))?;
+                micros += (value * 1_000_000.0).round() as i64
+            }
+            _ => return Err(invalid(text)),
+        }
+    }
+
+    Ok(render_interval(months, days, micros, negative))
+}
+
 pub(crate) fn parse_bytea_text(text: &str) -> Result<Vec<u8>, ExecError> {
     if let Some(rest) = text.strip_prefix("\\x") {
         let normalized: String = rest
@@ -972,7 +1154,7 @@ pub(crate) fn cast_value_with_config(
                 ..
             } => Ok(Value::Int64(v as i64)),
             SqlType {
-                kind: SqlTypeKind::Oid,
+                kind: SqlTypeKind::Oid | SqlTypeKind::Xid,
                 ..
             } => {
                 if v < 0 {
@@ -1022,6 +1204,8 @@ pub(crate) fn cast_value_with_config(
                     | SqlTypeKind::JsonPath
                     | SqlTypeKind::TsVector
                     | SqlTypeKind::TsQuery
+                    | SqlTypeKind::Tid
+                    | SqlTypeKind::Interval
                     | SqlTypeKind::RegConfig
                     | SqlTypeKind::RegDictionary,
                 ..
@@ -1063,7 +1247,7 @@ pub(crate) fn cast_value_with_config(
                 ..
             } => Ok(Value::Int64(v as i64)),
             SqlType {
-                kind: SqlTypeKind::Oid,
+                kind: SqlTypeKind::Oid | SqlTypeKind::Xid,
                 ..
             } => {
                 if v < 0 {
@@ -1113,6 +1297,8 @@ pub(crate) fn cast_value_with_config(
                     | SqlTypeKind::JsonPath
                     | SqlTypeKind::TsVector
                     | SqlTypeKind::TsQuery
+                    | SqlTypeKind::Tid
+                    | SqlTypeKind::Interval
                     | SqlTypeKind::RegConfig
                     | SqlTypeKind::RegDictionary,
                 ..
@@ -1172,6 +1358,8 @@ pub(crate) fn cast_value_with_config(
                     | SqlTypeKind::JsonPath
                     | SqlTypeKind::TsVector
                     | SqlTypeKind::TsQuery
+                    | SqlTypeKind::Tid
+                    | SqlTypeKind::Interval
                     | SqlTypeKind::RegConfig
                     | SqlTypeKind::RegDictionary,
                 ..
@@ -1182,6 +1370,7 @@ pub(crate) fn cast_value_with_config(
                     | SqlTypeKind::Int4
                     | SqlTypeKind::Int8
                     | SqlTypeKind::Oid
+                    | SqlTypeKind::Xid
                     | SqlTypeKind::Bytea
                     | SqlTypeKind::Float4
                     | SqlTypeKind::Float8
@@ -1465,7 +1654,7 @@ pub(crate) fn cast_value_with_config(
                 ..
             } => Ok(Value::Int64(v)),
             SqlType {
-                kind: SqlTypeKind::Oid,
+                kind: SqlTypeKind::Oid | SqlTypeKind::Xid,
                 ..
             } => {
                 if !(0..=i32::MAX as i64).contains(&v) {
@@ -1523,6 +1712,8 @@ pub(crate) fn cast_value_with_config(
                     | SqlTypeKind::JsonPath
                     | SqlTypeKind::TsVector
                     | SqlTypeKind::TsQuery
+                    | SqlTypeKind::Tid
+                    | SqlTypeKind::Interval
                     | SqlTypeKind::RegConfig
                     | SqlTypeKind::RegDictionary,
                 ..
@@ -1598,6 +1789,8 @@ pub(crate) fn cast_value_with_config(
                     | SqlTypeKind::JsonPath
                     | SqlTypeKind::TsVector
                     | SqlTypeKind::TsQuery
+                    | SqlTypeKind::Tid
+                    | SqlTypeKind::Interval
                     | SqlTypeKind::RegConfig
                     | SqlTypeKind::RegDictionary,
                 ..
@@ -1615,7 +1808,7 @@ pub(crate) fn cast_value_with_config(
                 ..
             } => cast_float_to_int(v, ty),
             SqlType {
-                kind: SqlTypeKind::Oid,
+                kind: SqlTypeKind::Oid | SqlTypeKind::Xid,
                 ..
             } => cast_float_to_int(v, ty),
             SqlType {
@@ -1723,6 +1916,9 @@ pub(super) fn cast_text_value_with_config(
                 column: "timetz".into(),
                 details: format!("invalid input syntax for type time with time zone: \"{text}\""),
             }),
+        SqlTypeKind::Interval => Ok(Value::Text(CompactString::from_owned(
+            canonicalize_interval_text(text)?,
+        ))),
         SqlTypeKind::Timestamp => parse_timestamp_text(text, config)
             .map(Value::Timestamp)
             .map(|value| apply_time_precision(value, ty.time_precision()))
@@ -1757,6 +1953,10 @@ pub(super) fn cast_text_value_with_config(
             crate::backend::executor::parse_tsquery_text(text).map(Value::TsQuery)
         }
         SqlTypeKind::RegConfig | SqlTypeKind::RegDictionary => cast_text_to_oid(text),
+        SqlTypeKind::Tid => Ok(Value::Text(CompactString::from_owned(
+            canonicalize_tid_text(text)?,
+        ))),
+        SqlTypeKind::Xid => cast_text_to_xid(text),
         SqlTypeKind::Name | SqlTypeKind::Char | SqlTypeKind::Varchar => Ok(Value::Text(
             CompactString::from_owned(coerce_character_string(text, ty, explicit)?),
         )),
@@ -1808,6 +2008,8 @@ pub(super) fn cast_numeric_value(
         | SqlTypeKind::Polygon
         | SqlTypeKind::Line
         | SqlTypeKind::Circle
+        | SqlTypeKind::Tid
+        | SqlTypeKind::Interval
         | SqlTypeKind::PgNodeTree => Ok(Value::Text(CompactString::from_owned(value.render()))),
         SqlTypeKind::Date
         | SqlTypeKind::Time
@@ -1861,7 +2063,7 @@ pub(super) fn cast_numeric_value(
             .and_then(|rounded| rounded.render().parse::<i64>().ok())
             .map(Value::Int64)
             .ok_or(ExecError::Int8OutOfRange),
-        SqlTypeKind::Oid => value
+        SqlTypeKind::Oid | SqlTypeKind::Xid => value
             .round_to_scale(0)
             .and_then(|rounded| rounded.render().parse::<u32>().ok())
             .and_then(|rounded| Some(Value::Int64(rounded as i64)))

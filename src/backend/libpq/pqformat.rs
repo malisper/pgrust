@@ -258,6 +258,8 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
             SqlTypeKind::Int4 => 1007,
             SqlTypeKind::Int8 => 1016,
             SqlTypeKind::Oid => 1028,
+            SqlTypeKind::Tid => 1010,
+            SqlTypeKind::Xid => 1011,
             SqlTypeKind::Bit => 1561,
             SqlTypeKind::VarBit => 1563,
             SqlTypeKind::Bytea => 1001,
@@ -271,6 +273,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
             SqlTypeKind::Date => 1182,
             SqlTypeKind::Time => 1183,
             SqlTypeKind::TimeTz => 1270,
+            SqlTypeKind::Interval => 1187,
             SqlTypeKind::Point
             | SqlTypeKind::Lseg
             | SqlTypeKind::Path
@@ -309,6 +312,8 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
         SqlTypeKind::Int4 => (23, 4, -1),
         SqlTypeKind::Int8 => (20, 8, -1),
         SqlTypeKind::Oid => (26, 4, -1),
+        SqlTypeKind::Tid => (27, 6, -1),
+        SqlTypeKind::Xid => (28, 4, -1),
         SqlTypeKind::Bit => (1560, -1, col.sql_type.typmod),
         SqlTypeKind::VarBit => (1562, -1, col.sql_type.typmod),
         SqlTypeKind::Bytea => (17, -1, -1),
@@ -322,6 +327,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
         SqlTypeKind::Date => (1082, 4, -1),
         SqlTypeKind::Time => (1083, 8, col.sql_type.typmod),
         SqlTypeKind::TimeTz => (1266, 12, col.sql_type.typmod),
+        SqlTypeKind::Interval => (1186, 16, col.sql_type.typmod),
         SqlTypeKind::Point => (600, 16, -1),
         SqlTypeKind::Lseg => (601, 32, -1),
         SqlTypeKind::Path => (602, -1, -1),
