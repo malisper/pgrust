@@ -864,9 +864,7 @@ pub(crate) fn eval_jsonpath_operator(
     if as_match {
         jsonpath_match_result(result, true)
     } else {
-        Ok(Value::Bool(
-            result.map(|items| !items.is_empty()).unwrap_or(false),
-        ))
+        jsonpath_exists_result(result, true)
     }
 }
 
@@ -905,9 +903,7 @@ fn eval_jsonpath_function(
     };
     let result = evaluate_jsonpath(&parsed, &eval_ctx);
     match kind {
-        JsonPathFunctionKind::Exists => Ok(Value::Bool(
-            result.map(|items| !items.is_empty()).unwrap_or(false),
-        )),
+        JsonPathFunctionKind::Exists => jsonpath_exists_result(result, silent),
         JsonPathFunctionKind::Match => jsonpath_match_result(result, silent),
         JsonPathFunctionKind::QueryArray => match result {
             Ok(items) => Ok(Value::Jsonb(encode_jsonb(&JsonbValue::Array(items)))),
@@ -919,6 +915,17 @@ fn eval_jsonpath_function(
             Err(_) if silent => Ok(Value::Null),
             Err(err) => Err(err),
         },
+    }
+}
+
+fn jsonpath_exists_result(
+    result: Result<Vec<JsonbValue>, ExecError>,
+    silent: bool,
+) -> Result<Value, ExecError> {
+    match result {
+        Ok(items) => Ok(Value::Bool(!items.is_empty())),
+        Err(_) if silent => Ok(Value::Null),
+        Err(err) => Err(err),
     }
 }
 
