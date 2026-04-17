@@ -791,6 +791,16 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
                     rel: entry.rel,
                     relation_oid: entry.relation_oid,
                     desc: entry.desc,
+                    index_exprs: relation_entry_by_oid(
+                        self.db,
+                        self.client_id,
+                        self.txn_ctx,
+                        index_meta.indrelid,
+                    )
+                    .and_then(|heap| {
+                        crate::backend::parser::bind_index_exprs(&index_meta, &heap.desc, self).ok()
+                    })
+                    .unwrap_or_default(),
                     index_meta,
                 })
             })

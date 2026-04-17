@@ -238,9 +238,7 @@ pub(crate) fn jsonb_from_value(value: &Value) -> Result<JsonbValue, ExecError> {
         ),
         Value::TsVector(v) => JsonbValue::String(crate::backend::executor::render_tsvector_text(v)),
         Value::TsQuery(v) => JsonbValue::String(crate::backend::executor::render_tsquery_text(v)),
-        Value::Json(text) => {
-            JsonbValue::from_serde(parse_json_text_input(text.as_str())?)?
-        }
+        Value::Json(text) => JsonbValue::from_serde(parse_json_text_input(text.as_str())?)?,
         Value::Jsonb(bytes) => decode_jsonb(bytes)?,
         Value::Record(record) => JsonbValue::Object(
             record

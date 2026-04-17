@@ -369,8 +369,8 @@ impl Database {
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let mut catalog_effects = Vec::new();
-        let result =
-            self.execute_alter_table_rename_constraint_stmt_in_transaction_with_search_path(
+        let result = self
+            .execute_alter_table_rename_constraint_stmt_in_transaction_with_search_path(
                 client_id,
                 alter_stmt,
                 xid,
@@ -398,16 +398,15 @@ impl Database {
         let relation = lookup_heap_relation_for_ddl(&catalog, &alter_stmt.table_name)?;
         ensure_constraint_relation(self, client_id, &relation, &alter_stmt.table_name)?;
         let rows = catalog.constraint_rows_for_relation(relation.relation_oid);
-        find_constraint_row(&rows, &alter_stmt.constraint_name)
-            .ok_or_else(|| {
-                ExecError::Parse(ParseError::UnexpectedToken {
-                    expected: "existing table constraint",
-                    actual: format!(
-                        "constraint \"{}\" does not exist",
-                        alter_stmt.constraint_name
-                    ),
-                })
-            })?;
+        find_constraint_row(&rows, &alter_stmt.constraint_name).ok_or_else(|| {
+            ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "existing table constraint",
+                actual: format!(
+                    "constraint \"{}\" does not exist",
+                    alter_stmt.constraint_name
+                ),
+            })
+        })?;
         let new_constraint_name =
             normalize_constraint_rename_target_name(&alter_stmt.new_constraint_name)?;
         if find_constraint_row(&rows, &new_constraint_name).is_some() {
@@ -691,6 +690,7 @@ impl Database {
                     client_id,
                     &relation,
                     &index_name,
+                    catalog.materialize_visible_catalog(),
                     &index_columns,
                     true,
                     action.primary,
