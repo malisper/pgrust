@@ -15,6 +15,7 @@ pub const PG_READ_SERVER_FILES_OID: u32 = 4569;
 pub const PG_WRITE_SERVER_FILES_OID: u32 = 4570;
 pub const PG_EXECUTE_SERVER_PROGRAM_OID: u32 = 4571;
 pub const PG_SIGNAL_BACKEND_OID: u32 = 4200;
+pub const PG_CHECKPOINT_OID: u32 = 4544;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PgAuthIdRow {
@@ -71,6 +72,7 @@ pub fn bootstrap_pg_authid_rows() -> Vec<PgAuthIdRow> {
         predefined_role(PG_READ_SERVER_FILES_OID, "pg_read_server_files"),
         predefined_role(PG_WRITE_SERVER_FILES_OID, "pg_write_server_files"),
         predefined_role(PG_EXECUTE_SERVER_PROGRAM_OID, "pg_execute_server_program"),
+        predefined_role(PG_CHECKPOINT_OID, "pg_checkpoint"),
         predefined_role(PG_SIGNAL_BACKEND_OID, "pg_signal_backend"),
     ]
 }
@@ -128,5 +130,6 @@ mod tests {
         );
         assert!(rows.iter().any(|row| row.rolname == "pg_database_owner"));
         assert!(rows.iter().any(|row| row.rolname == "pg_monitor"));
+        assert!(rows.iter().any(|row| row.rolname == "pg_checkpoint"));
     }
 }

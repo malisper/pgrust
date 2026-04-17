@@ -139,6 +139,7 @@ fn execute_statement_with_source(
         ),
         Statement::Analyze(stmt) => execute_analyze(stmt, catalog),
         Statement::Show(_)
+        | Statement::Checkpoint(_)
         | Statement::Set(_)
         | Statement::Reset(_)
         // :HACK: ALTER TABLE ... SET (...) is accepted narrowly for numeric.sql and ignored

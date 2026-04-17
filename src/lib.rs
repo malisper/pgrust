@@ -12,6 +12,6 @@ pub use backend::storage::smgr;
 pub use include::storage::buf_internals::{
     BufferUsageStats, ClientId, FlushResult, RequestPageResult,
 };
-pub use pgrust::database::Database;
+pub use pgrust::database::{Database, DatabaseOpenOptions};
 
 pub use smgr::{BLCKSZ, ForkNumber, RelFileLocator};

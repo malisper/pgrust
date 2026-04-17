@@ -52,7 +52,7 @@ fn visible_kinds(scope: CatalogScope) -> Vec<BootstrapCatalogKind> {
 
 fn control_path_for_scope(base_dir: &Path, scope: CatalogScope) -> PathBuf {
     match scope {
-        CatalogScope::Shared => base_dir.join("global").join("pg_control"),
+        CatalogScope::Shared => base_dir.join("global").join("pg_catalog_control"),
         CatalogScope::Database(db_oid) => base_dir
             .join("base")
             .join(db_oid.to_string())
@@ -63,7 +63,7 @@ fn control_path_for_scope(base_dir: &Path, scope: CatalogScope) -> PathBuf {
 fn oid_control_path_for_scope(base_dir: &Path, scope: CatalogScope) -> Option<PathBuf> {
     match scope {
         CatalogScope::Shared => None,
-        CatalogScope::Database(_) => Some(base_dir.join("global").join("pg_control")),
+        CatalogScope::Database(_) => Some(base_dir.join("global").join("pg_catalog_control")),
     }
 }
 

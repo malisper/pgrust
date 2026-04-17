@@ -1395,6 +1395,14 @@ fn parse_reset_statement() {
 }
 
 #[test]
+fn parse_checkpoint_statement() {
+    assert_eq!(
+        parse_statement("checkpoint").unwrap(),
+        Statement::Checkpoint(CheckpointStatement)
+    );
+}
+
+#[test]
 fn parse_statement_ignores_embedded_and_leading_comments() {
     let stmt = parse_statement("/* leading */ select /* embedded */ 'x' as value").unwrap();
     match stmt {

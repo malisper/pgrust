@@ -17,6 +17,10 @@ use crate::backend::access::transam::xact::{
     CommandId, MvccError, TransactionId, TransactionManager,
 };
 use crate::backend::access::transam::xlog::{WalBgWriter, WalError, WalWriter};
+use crate::backend::access::transam::{
+    CheckpointCommitBarrier, CheckpointCommitGuard, CheckpointRequestFlags, Checkpointer,
+    ControlFileError,
+};
 use crate::backend::catalog::catalog::{CatalogIndexBuildOptions, column_desc};
 use crate::backend::catalog::indexing::rebuild_system_catalog_indexes_in_pool;
 use crate::backend::catalog::namespace::effective_search_path as namespace_effective_search_path;
@@ -65,6 +69,7 @@ use crate::backend::utils::cache::syscache::{
     BackendCacheState, backend_catcache as syscache_backend_catcache,
     invalidate_backend_cache_state,
 };
+use crate::backend::utils::misc::checkpoint::{CheckpointConfig, CheckpointStatsSnapshot};
 use crate::backend::utils::misc::interrupts::InterruptState;
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
@@ -95,6 +100,7 @@ use txn::AutoCommitGuard;
 #[derive(Debug)]
 pub enum DatabaseError {
     Catalog(CatalogError),
+    Control(ControlFileError),
     Mvcc(MvccError),
     Wal(WalError),
 }
@@ -111,6 +117,12 @@ impl From<MvccError> for DatabaseError {
     }
 }
 
+impl From<ControlFileError> for DatabaseError {
+    fn from(e: ControlFileError) -> Self {
+        Self::Control(e)
+    }
+}
+
 pub use crate::backend::storage::lmgr::TransactionWaiter;
 pub use crate::pgrust::session::{SelectGuard, Session};
 pub(crate) use ddl::reject_relation_with_referencing_foreign_keys;
@@ -121,12 +133,27 @@ pub(crate) use foreign_keys::{
     table_lock_relations, update_foreign_key_lock_requests,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DatabaseOpenOptions {
+    pub pool_size: usize,
+}
+
+impl DatabaseOpenOptions {
+    pub const fn new(pool_size: usize) -> Self {
+        Self { pool_size }
+    }
+}
+
 #[derive(Clone)]
 pub struct Database {
     pub(crate) cluster: Arc<ClusterShared>,
     pub database_oid: u32,
     pub pool: Arc<BufferPool<SmgrStorageBackend>>,
     pub wal: Option<Arc<WalWriter>>,
+    pub checkpoint_config: Arc<CheckpointConfig>,
+    pub checkpoint_stats: Arc<RwLock<CheckpointStatsSnapshot>>,
+    pub checkpoint_commit_barrier: Arc<CheckpointCommitBarrier>,
+    pub checkpointer: Option<Arc<Checkpointer>>,
     pub txns: Arc<RwLock<TransactionManager>>,
     pub shared_catalog: Arc<RwLock<CatalogStore>>,
     pub catalog: Arc<RwLock<CatalogStore>>,
@@ -208,15 +235,14 @@ pub(crate) enum TempMutationEffect {
 
 impl Database {
     pub fn open(base_dir: impl Into<PathBuf>, pool_size: usize) -> Result<Self, DatabaseError> {
-        Self::open_with_options(base_dir, pool_size, false)
+        Self::open_with_options(base_dir, DatabaseOpenOptions::new(pool_size))
     }
 
     pub fn open_with_options(
         base_dir: impl Into<PathBuf>,
-        pool_size: usize,
-        wal_replay: bool,
+        options: DatabaseOpenOptions,
     ) -> Result<Self, DatabaseError> {
-        Cluster::open_with_options(base_dir.into(), pool_size, wal_replay)?
+        Cluster::open_with_options(base_dir.into(), options)?
             .connect_database("postgres")
             .map_err(|e| match e {
                 ExecError::DetailedError { message, .. } => {
@@ -485,6 +511,35 @@ impl Database {
     pub(crate) fn accept_invalidation_messages(&self, client_id: ClientId) {
         accept_invalidation_messages(self, client_id);
     }
+
+    pub(crate) fn checkpoint_config_value(&self, name: &str) -> Option<String> {
+        self.checkpoint_config.value_for_show(name)
+    }
+
+    pub(crate) fn checkpoint_stats_snapshot(&self) -> CheckpointStatsSnapshot {
+        self.checkpoint_stats.read().clone()
+    }
+
+    pub(crate) fn request_checkpoint(
+        &self,
+        flags: CheckpointRequestFlags,
+    ) -> Result<(), ExecError> {
+        let Some(checkpointer) = self.checkpointer.as_ref() else {
+            return Ok(());
+        };
+        checkpointer
+            .request(flags)
+            .map_err(|message| ExecError::DetailedError {
+                message: "checkpoint failed".into(),
+                detail: Some(message),
+                hint: None,
+                sqlstate: "58000",
+            })
+    }
+
+    pub(crate) fn checkpoint_commit_guard(&self) -> CheckpointCommitGuard {
+        self.checkpoint_commit_barrier.enter()
+    }
 }
 
 fn bootstrap_ephemeral_catalog(
@@ -526,9 +581,7 @@ fn bootstrap_ephemeral_catalog(
 }
 
 impl Drop for Database {
-    fn drop(&mut self) {
-        self.txns.write().flush_clog();
-    }
+    fn drop(&mut self) {}
 }
 
 #[cfg(test)]
