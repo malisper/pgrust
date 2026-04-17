@@ -1,7 +1,9 @@
 use super::*;
 use crate::backend::executor::{ExecError, Value};
 use crate::backend::parser::{CatalogLookup, ParseError, SqlType, SqlTypeKind};
-use crate::include::catalog::{PG_CLASS_RELATION_OID, PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID};
+use crate::include::catalog::{
+    FLOAT8_TYPE_OID, PG_CLASS_RELATION_OID, PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID,
+};
 use crate::include::nodes::primnodes::QueryColumn;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -10588,6 +10590,33 @@ fn create_range_type_exposes_catalog_rows_and_can_back_table_columns() {
     assert_eq!(range_type.typarray, range_array_type.oid);
     assert_eq!(range_array_type.typelem, range_type.oid);
     assert_eq!(range_type.sql_type.kind, SqlTypeKind::Text);
+}
+
+#[test]
+fn create_range_type_exposes_pg_range_metadata() {
+    let dir = temp_dir("create_range_type_pg_range_rows");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create type float8range as range (subtype = float8, subtype_diff = float8mi)",
+    )
+    .unwrap();
+
+    let visible = db.lazy_catalog_lookup(1, None, None);
+    let type_row = visible
+        .type_rows()
+        .into_iter()
+        .find(|row| row.typname == "float8range")
+        .unwrap();
+    let range_row = visible
+        .range_rows()
+        .into_iter()
+        .find(|row| row.rngtypid == type_row.oid)
+        .unwrap();
+
+    assert_eq!(range_row.rngsubtype, FLOAT8_TYPE_OID);
+    assert_eq!(range_row.rngsubdiff.as_deref(), Some("float8mi"));
 }
 
 #[test]
