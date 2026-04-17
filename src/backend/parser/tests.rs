@@ -2297,6 +2297,35 @@ fn parse_select_without_targets_but_with_from() {
 }
 
 #[test]
+fn unquoted_identifiers_fold_to_lowercase_for_relation_lookup() {
+    let mut catalog = Catalog::default();
+    catalog.insert("char_tbl", test_catalog_entry(15030, desc()));
+    catalog.insert("varchar_tbl", test_catalog_entry(15031, desc()));
+    catalog.insert("text_tbl", test_catalog_entry(15032, desc()));
+
+    for sql in [
+        "select id from CHAR_TBL",
+        "select id from VARCHAR_TBL",
+        "select id from TEXT_TBL",
+    ] {
+        let stmt = parse_select(sql).unwrap();
+        assert!(build_plan(&stmt, &catalog).is_ok(), "{sql}");
+    }
+}
+
+#[test]
+fn quoted_identifiers_preserve_case() {
+    let stmt = parse_select("select id from \"CHAR_TBL\"").unwrap();
+    assert_eq!(
+        stmt.from,
+        Some(FromItem::Table {
+            name: "CHAR_TBL".into(),
+            only: false,
+        })
+    );
+}
+
+#[test]
 fn parse_addition_in_where_clause() {
     let stmt =
         parse_select("select * from people, pets where pets.owner_id + 1 = people.id").unwrap();
