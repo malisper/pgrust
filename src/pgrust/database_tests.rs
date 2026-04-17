@@ -5866,40 +5866,6 @@ fn durable_open_bootstraps_control_file_and_clean_shutdown_marks_shutdown() {
 }
 
 #[test]
-fn legacy_durable_cluster_without_control_file_is_rejected() {
-    use crate::backend::access::transam::ControlFileError;
-
-    let base = temp_dir("legacy_cluster_without_control_file");
-    std::fs::create_dir_all(base.join("pg_wal")).unwrap();
-    std::fs::write(base.join("pg_wal").join("wal.log"), b"legacy").unwrap();
-
-    match Database::open(&base, 16) {
-        Err(DatabaseError::Control(ControlFileError::Unsupported(message))) => {
-            assert!(message.contains("legacy durable clusters"));
-        }
-        Ok(_) => panic!("expected legacy control-file rejection, got successful open"),
-        Err(other) => panic!("expected legacy control-file rejection, got {other:?}"),
-    }
-}
-
-#[test]
-fn legacy_json_control_file_is_rejected() {
-    use crate::backend::access::transam::{ControlFileError, ControlFileStore};
-
-    let base = temp_dir("legacy_json_control_file");
-    std::fs::create_dir_all(base.join("global")).unwrap();
-    std::fs::write(ControlFileStore::legacy_json_path(&base), b"{}").unwrap();
-
-    match Database::open(&base, 16) {
-        Err(DatabaseError::Control(ControlFileError::Unsupported(message))) => {
-            assert!(message.contains("pg_control.json"));
-        }
-        Ok(_) => panic!("expected legacy json control-file rejection, got successful open"),
-        Err(other) => panic!("expected legacy json control-file rejection, got {other:?}"),
-    }
-}
-
-#[test]
 fn vacuum_records_recyclable_btree_pages_in_fsm() {
     let base = temp_dir("vacuum_recycles_btree_pages");
     let db = Database::open(&base, 128).unwrap();

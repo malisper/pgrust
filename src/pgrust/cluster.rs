@@ -106,37 +106,18 @@ impl Cluster {
             CheckpointConfig::load_from_data_dir(&base_dir)
                 .map_err(|message| DatabaseError::Catalog(CatalogError::Io(message)))?,
         );
-        if ControlFileStore::legacy_json_path(&base_dir).exists() {
-            return Err(DatabaseError::Control(
-                crate::backend::access::transam::ControlFileError::Unsupported(
-                    "legacy durable clusters with global/pg_control.json are not supported".into(),
-                ),
-            ));
-        }
         let mut txns = TransactionManager::new_durable(&base_dir)?;
-        let control_file = if ControlFileStore::path(&base_dir).exists() {
-            Arc::new(ControlFileStore::load(&base_dir)?)
-        } else if !base_dir_has_cluster_contents {
-            Arc::new(ControlFileStore::bootstrap(
-                &base_dir,
-                txns.next_xid(),
-                checkpoint_config.as_ref(),
-            )?)
-        } else {
-            return Err(DatabaseError::Control(
-                crate::backend::access::transam::ControlFileError::Unsupported(
-                    "legacy durable clusters without global/pg_control are not supported".into(),
-                ),
-            ));
-        };
+        let control_file =
+            if ControlFileStore::path(&base_dir).exists() || base_dir_has_cluster_contents {
+                Arc::new(ControlFileStore::load(&base_dir)?)
+            } else {
+                Arc::new(ControlFileStore::bootstrap(
+                    &base_dir,
+                    txns.next_xid(),
+                    checkpoint_config.as_ref(),
+                )?)
+            };
         let control_snapshot = control_file.snapshot();
-        if wal_dir_is_legacy(&base_dir)? {
-            return Err(DatabaseError::Control(
-                crate::backend::access::transam::ControlFileError::Unsupported(
-                    "legacy pg_wal/wal.log clusters are not supported".into(),
-                ),
-            ));
-        }
 
         let shared_catalog = CatalogStore::load_shared(&base_dir)?;
         ensure_bootstrap_databases(&base_dir, &shared_catalog)?;
@@ -387,10 +368,6 @@ fn base_dir_has_cluster_contents(base_dir: &Path) -> Result<bool, DatabaseError>
         return Ok(true);
     }
     Ok(false)
-}
-
-fn wal_dir_is_legacy(base_dir: &Path) -> Result<bool, DatabaseError> {
-    Ok(base_dir.join("pg_wal").join("wal.log").exists())
 }
 
 fn ensure_bootstrap_databases(
