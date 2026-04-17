@@ -238,6 +238,17 @@ Counts from `/tmp/pgrust_regress_todo_20260417` on 2026-04-17; `test_setup.sql` 
 
 ## Features
 
+- privileges.sql parity:
+  - expose privilege-related system catalogs in SQL, including `pg_auth_members` and `pg_largeobject_metadata`
+  - add parser/analyzer support for role membership `GRANTED BY`
+  - add parser/analyzer/executor support for `CASCADE` in role membership revokes
+  - implement `SET ROLE` and `RESET ROLE`
+  - implement SQL-visible `session_user`, `current_user`, and `current_role` semantics used by the regression
+  - add parser/executor support for `DROP OWNED`
+  - add parser support for `DROP USER`, `CREATE GROUP`, and `ALTER GROUP`
+  - make role membership grant/revoke execution honor explicit grantors and dependent membership chains
+  - align duplicate-role and role-grant error text with PostgreSQL where practical
+
 ## DONE
 
 - int2.sql
