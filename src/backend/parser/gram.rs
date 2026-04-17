@@ -4519,6 +4519,10 @@ fn build_assignment_target(pair: Pair<'_, Rule>) -> Result<AssignmentTarget, Par
 
 fn build_array_subscript(pair: Pair<'_, Rule>) -> Result<ArraySubscript, ParseError> {
     let raw = pair.as_str().to_string();
+    let raw_inner = raw
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(raw.as_str());
     let mut bounds = pair
         .into_inner()
         .filter(|part| part.as_rule() == Rule::subscript_bound)
@@ -4527,7 +4531,11 @@ fn build_array_subscript(pair: Pair<'_, Rule>) -> Result<ArraySubscript, ParseEr
             build_expr(expr).map(Box::new)
         });
     let has_slice = raw.contains(':');
-    let lower = bounds.next().transpose()?;
+    let lower = if has_slice && raw_inner.starts_with(':') {
+        None
+    } else {
+        bounds.next().transpose()?
+    };
     let upper = if has_slice {
         bounds.next().transpose()?
     } else {

@@ -2375,6 +2375,19 @@ fn parse_qualified_array_subscript_uses_base_column_name() {
 }
 
 #[test]
+fn parse_array_subscript_with_omitted_lower_bound_tracks_upper_bound() {
+    let stmt = parse_select("select a[:3] from widgets").unwrap();
+    assert!(matches!(
+        stmt.targets[0].expr,
+        SqlExpr::ArraySubscript { ref subscripts, .. }
+            if subscripts.len() == 1
+                && subscripts[0].is_slice
+                && subscripts[0].lower.is_none()
+                && subscripts[0].upper.is_some()
+    ));
+}
+
+#[test]
 fn parse_unary_plus_numeric_literal_and_new_operators() {
     let stmt =
         parse_select("select +1.5, 5 - 2, 3 * 4, 8 / 2, 9 % 4, 1 <= 2, 3 >= 2, 4 != 5").unwrap();
