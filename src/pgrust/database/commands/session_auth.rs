@@ -140,8 +140,8 @@ mod tests {
     }
 
     #[test]
-    fn parse_error_does_not_hide_previously_created_roles() {
-        let base = temp_dir("parse_error_visibility");
+    fn grant_does_not_hide_previously_created_roles() {
+        let base = temp_dir("grant_visibility");
         let db = Database::open(&base, 16).unwrap();
         let mut session = Session::new(3);
 
@@ -156,13 +156,15 @@ mod tests {
                 .any(|row| row.rolname == "limited_admin")
         );
 
-        let err = session
-            .execute(
-                &db,
-                "grant create on database regression to limited_admin with grant option",
-            )
-            .unwrap_err();
-        assert!(format!("{err:?}").contains("expected statement"));
+        assert_eq!(
+            session
+                .execute(
+                    &db,
+                    "grant create on database regression to limited_admin with grant option",
+                )
+                .unwrap(),
+            StatementResult::AffectedRows(0)
+        );
 
         assert_eq!(
             session

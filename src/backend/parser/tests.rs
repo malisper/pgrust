@@ -980,6 +980,70 @@ fn parse_comment_on_role_statement() {
 }
 
 #[test]
+fn parse_grant_create_on_database_statement() {
+    let stmt =
+        parse_statement("grant create on database regression to regress_role_admin with grant option")
+            .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::GrantObject(GrantObjectStatement {
+            privilege: GrantObjectPrivilege::CreateOnDatabase,
+            object_name: "regression".into(),
+            grantee_names: vec!["regress_role_admin".into()],
+            with_grant_option: true,
+        })
+    );
+}
+
+#[test]
+fn parse_revoke_all_privileges_on_table_from_public_statement() {
+    let stmt = parse_statement("revoke all privileges on tenant_table from public").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::RevokeObject(RevokeObjectStatement {
+            privilege: GrantObjectPrivilege::AllPrivilegesOnTable,
+            object_name: "tenant_table".into(),
+            grantee_names: vec!["public".into()],
+            cascade: false,
+        })
+    );
+}
+
+#[test]
+fn parse_grant_role_membership_with_options_statement() {
+    let stmt =
+        parse_statement("grant regress_tenant2 to regress_createrole with inherit true, set false")
+            .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::GrantRoleMembership(GrantRoleMembershipStatement {
+            role_names: vec!["regress_tenant2".into()],
+            grantee_names: vec!["regress_createrole".into()],
+            admin_option: false,
+            inherit_option: Some(true),
+            set_option: Some(false),
+        })
+    );
+}
+
+#[test]
+fn parse_revoke_role_membership_option_statement() {
+    let stmt =
+        parse_statement("revoke inherit option for regress_tenant2 from regress_createrole")
+            .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::RevokeRoleMembership(RevokeRoleMembershipStatement {
+            role_names: vec!["regress_tenant2".into()],
+            grantee_names: vec!["regress_createrole".into()],
+            admin_option: false,
+            inherit_option: true,
+            set_option: false,
+        })
+    );
+}
+
+#[test]
 fn parse_reassign_owned_statement() {
     let stmt =
         parse_statement("reassign owned by regress_tenant, regress_tenant2 to regress_createrole")

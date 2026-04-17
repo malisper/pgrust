@@ -7,6 +7,7 @@ mod execute;
 mod index;
 mod maintenance;
 mod owner;
+mod privilege;
 mod rename;
 mod role;
 mod schema;

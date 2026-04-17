@@ -62,11 +62,14 @@ impl Database {
             .map_err(map_catalog_error)?
             .namespace_rows();
         let database_owner_oid = current_database_owner_oid(self, client_id, Some((xid, cid)))?;
+        let has_database_create_privilege =
+            self.user_has_database_create_privilege(&auth, &auth_catalog);
         let resolved = resolve_create_schema_stmt(
             stmt,
             &auth,
             &auth_catalog,
             database_owner_oid,
+            has_database_create_privilege,
             &namespace_rows,
         )?;
         let CreateSchemaResolution::Create(resolved) = resolved else {
