@@ -2135,6 +2135,9 @@ impl Session {
             "statement_timeout" => {
                 parse_statement_timeout(value)?;
             }
+            "max_stack_depth" => {
+                self.datetime_config.max_stack_depth_kb = parse_max_stack_depth(value)?;
+            }
             _ => {}
         }
         self.gucs.insert(normalized, value.to_string());
@@ -2592,6 +2595,41 @@ fn parse_statement_timeout(value: &str) -> Result<Option<Duration>, ExecError> {
     Ok(Some(Duration::from_millis(millis.ceil() as u64)))
 }
 
+fn parse_max_stack_depth(value: &str) -> Result<u32, ExecError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+            value.to_string(),
+        )));
+    }
+
+    let split_at = trimmed
+        .find(|ch: char| !ch.is_ascii_digit())
+        .unwrap_or(trimmed.len());
+    let (number, suffix) = trimmed.split_at(split_at);
+    if number.is_empty() {
+        return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+            value.to_string(),
+        )));
+    }
+
+    let amount = number
+        .parse::<u32>()
+        .map_err(|_| ExecError::Parse(ParseError::UnrecognizedParameter(value.to_string())))?;
+    let multiplier_kb = match suffix.trim().to_ascii_lowercase().as_str() {
+        "" | "kb" => 1_u32,
+        "mb" => 1024_u32,
+        _ => {
+            return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+                value.to_string(),
+            )));
+        }
+    };
+    amount
+        .checked_mul(multiplier_kb)
+        .ok_or_else(|| ExecError::Parse(ParseError::UnrecognizedParameter(value.to_string())))
+}
+
 fn parse_startup_options(options: &str) -> Result<Vec<(String, String)>, ExecError> {
     let tokens = split_startup_option_words(options)?;
     let mut gucs = Vec::new();
@@ -2703,7 +2741,7 @@ fn parse_copy_from_file(sql: &str) -> Option<(String, Option<Vec<String>>, Strin
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_startup_options, parse_statement_timeout};
+    use super::{parse_max_stack_depth, parse_startup_options, parse_statement_timeout};
     use crate::backend::executor::ExecError;
     use crate::backend::parser::ParseError;
     use std::time::Duration;
@@ -2738,6 +2776,23 @@ mod tests {
         for value in ["", "-1", "abc", "10fortnights"] {
             assert!(matches!(
                 parse_statement_timeout(value),
+                Err(ExecError::Parse(ParseError::UnrecognizedParameter(_)))
+            ));
+        }
+    }
+
+    #[test]
+    fn parse_max_stack_depth_accepts_postgres_units() {
+        assert_eq!(parse_max_stack_depth("100").unwrap(), 100);
+        assert_eq!(parse_max_stack_depth("100kB").unwrap(), 100);
+        assert_eq!(parse_max_stack_depth("2MB").unwrap(), 2048);
+    }
+
+    #[test]
+    fn parse_max_stack_depth_rejects_invalid_values() {
+        for value in ["", "-1", "abc", "1GB"] {
+            assert!(matches!(
+                parse_max_stack_depth(value),
                 Err(ExecError::Parse(ParseError::UnrecognizedParameter(_)))
             ));
         }

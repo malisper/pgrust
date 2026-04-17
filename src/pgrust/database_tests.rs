@@ -146,6 +146,31 @@ fn ephemeral_database_executes_basic_sql() {
 }
 
 #[test]
+fn jsonb_input_respects_max_stack_depth_setting() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "set max_stack_depth = '100kB'")
+        .expect("set max_stack_depth");
+
+    let err = session
+        .execute(&db, &format!("select '{}'::jsonb", "[".repeat(10_000)))
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError {
+            message,
+            hint: Some(hint),
+            sqlstate,
+            ..
+        } if message == "stack depth limit exceeded"
+            && sqlstate == "54001"
+            && hint.contains("\"max_stack_depth\" (currently 100kB)")
+    ));
+}
+
+#[test]
 fn recursive_cte_union_all_counts_up() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);

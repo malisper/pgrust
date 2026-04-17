@@ -18,6 +18,7 @@ pub struct DateTimeConfig {
     pub date_style_format: DateStyleFormat,
     pub date_order: DateOrder,
     pub time_zone: String,
+    pub max_stack_depth_kb: u32,
 }
 
 impl Default for DateTimeConfig {
@@ -26,6 +27,7 @@ impl Default for DateTimeConfig {
             date_style_format: DateStyleFormat::Iso,
             date_order: DateOrder::Mdy,
             time_zone: "UTC".into(),
+            max_stack_depth_kb: 100,
         }
     }
 }

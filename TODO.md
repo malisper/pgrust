@@ -155,7 +155,7 @@ Counts from `/tmp/pgrust_regress_todo_20260417` on 2026-04-17; `test_setup.sql` 
 - json_encoding.sql: 23/44
 - jsonb.sql: 353/1084
   - PostgreSQL-compatible jsonb input errors with `LINE` / `DETAIL` / `CONTEXT`
-  - stack depth limit handling for deeply nested jsonb input
+  - [done] stack depth limit handling for deeply nested jsonb input
   - aggregate-local `ORDER BY` support for `jsonb_agg` / `jsonb_object_agg`
   - jsonb containment and existence builtin semantics (`@>`, `<@`, `?`, `?|`, `?&`, helper funcs)
   - jsonb object/key construction semantics and SQL-visible errors (`jsonb_object_keys`, `jsonb_build_object`, `jsonb_object`, `jsonb_object_agg`)
@@ -296,7 +296,7 @@ Counts from `/tmp/pgrust_regress_todo_20260417` on 2026-04-17; `test_setup.sql` 
 ## Features
 
 - PostgreSQL-compatible jsonb input errors with `LINE` / `DETAIL` / `CONTEXT`
-- stack depth limit handling for deeply nested jsonb input
+- [done] stack depth limit handling for deeply nested jsonb input
 - aggregate-local `ORDER BY` support for `jsonb_agg` / `jsonb_object_agg`
 - jsonb containment and existence builtin semantics (`@>`, `<@`, `?`, `?|`, `?&`, helper funcs)
 - jsonb object/key construction semantics and SQL-visible errors (`jsonb_object_keys`, `jsonb_build_object`, `jsonb_object`, `jsonb_object_agg`)
