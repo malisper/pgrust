@@ -4,7 +4,7 @@
 # server-side statement timeout.
 #
 # Usage:
-#   scripts/run_regression_one_by_one.sh [--port PORT] [--skip-build]
+#   scripts/run_regression_one_by_one.sh [--port PORT]
 #     [--skip-server] [--test TESTNAME]
 #     [--results-dir DIR] [--upstream-setup]
 #
@@ -58,7 +58,6 @@ setup_pg_regress_env() {
 }
 
 PORT=5433
-SKIP_BUILD=false
 SKIP_SERVER=false
 SINGLE_TEST=""
 RESULTS_DIR="/tmp/pgrust_regress_one_by_one"
@@ -69,7 +68,6 @@ USE_PGRUST_SETUP=true
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --port) PORT="$2"; shift 2 ;;
-        --skip-build) SKIP_BUILD=true; shift ;;
         --skip-server) SKIP_SERVER=true; shift ;;
         --test) SINGLE_TEST="$2"; shift 2 ;;
         --results-dir) RESULTS_DIR="$2"; shift 2 ;;
@@ -176,17 +174,15 @@ restart_server() {
     return 0
 }
 
-if [[ "$SKIP_BUILD" == false ]]; then
-    echo "Building pgrust_server (release)..."
-    (cd "$PGRUST_DIR" && cargo build --release --bin pgrust_server 2>&1) || {
-        echo "ERROR: Build failed"
-        exit 1
-    }
-fi
+echo "Building pgrust_server (release)..."
+(cd "$PGRUST_DIR" && cargo build --release --bin pgrust_server 2>&1) || {
+    echo "ERROR: Build failed"
+    exit 1
+}
 
 SERVER_BIN="$PGRUST_DIR/target/release/pgrust_server"
 if [[ ! -x "$SERVER_BIN" ]]; then
-    echo "ERROR: $SERVER_BIN not found. Run without --skip-build."
+    echo "ERROR: $SERVER_BIN not found after build."
     exit 1
 fi
 
