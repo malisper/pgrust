@@ -211,6 +211,7 @@ fn expr_references_local_cte(expr: &Expr, local_ctes: &HashMap<usize, String>) -
         Expr::Row { fields, .. } => fields
             .iter()
             .find_map(|(_, expr)| expr_references_local_cte(expr, local_ctes)),
+        Expr::FieldSelect { expr, .. } => expr_references_local_cte(expr, local_ctes),
         Expr::ArraySubscript { array, subscripts } => expr_references_local_cte(array, local_ctes)
             .or_else(|| {
                 subscripts.iter().find_map(|subscript| {

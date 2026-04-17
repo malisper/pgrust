@@ -165,6 +165,15 @@ pub(super) fn raise_expr_varlevels(expr: Expr, levels: usize) -> Expr {
                 .map(|(name, expr)| (name, raise_expr_varlevels(expr, levels)))
                 .collect(),
         },
+        Expr::FieldSelect {
+            expr,
+            field,
+            field_type,
+        } => Expr::FieldSelect {
+            expr: Box::new(raise_expr_varlevels(*expr, levels)),
+            field,
+            field_type,
+        },
         Expr::Case(case_expr) => Expr::Case(Box::new(crate::include::nodes::primnodes::CaseExpr {
             arg: case_expr
                 .arg
@@ -1976,12 +1985,15 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             grouped_outer,
             ctes,
         )?,
-        SqlExpr::FieldSelect { field, .. } => {
-            return Err(ParseError::UnexpectedToken {
-                expected: "scalar expression",
-                actual: format!("field selection .{field} is not bound yet"),
-            });
-        }
+        SqlExpr::FieldSelect { expr, field } => bind_field_select_expr(
+            expr,
+            field,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        )?,
         SqlExpr::CurrentDate => Expr::CurrentDate,
         SqlExpr::CurrentTime { precision } => Expr::CurrentTime {
             precision: *precision,
@@ -1995,6 +2007,100 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
         SqlExpr::LocalTimestamp { precision } => Expr::LocalTimestamp {
             precision: *precision,
         },
+    })
+}
+
+fn bind_field_select_expr(
+    expr: &SqlExpr,
+    field: &str,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Expr, ParseError> {
+    let bound_inner = match expr {
+        SqlExpr::Column(name)
+            if resolve_relation_row_expr_with_outer(scope, outer_scopes, name).is_some() =>
+        {
+            let fields = resolve_relation_row_expr_with_outer(scope, outer_scopes, name)
+                .expect("checked above");
+            Expr::Row {
+                descriptor: assign_anonymous_record_descriptor(
+                    fields
+                        .iter()
+                        .map(|(field_name, expr)| {
+                            (
+                                field_name.clone(),
+                                expr_sql_type_hint(expr)
+                                    .unwrap_or(SqlType::new(SqlTypeKind::Text)),
+                            )
+                        })
+                        .collect(),
+                ),
+                fields,
+            }
+        }
+        _ => bind_expr_with_outer_and_ctes(
+            expr,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        )?,
+    };
+    let field_type = resolve_bound_field_select_type(&bound_inner, field, catalog)?;
+    Ok(Expr::FieldSelect {
+        expr: Box::new(bound_inner),
+        field: field.to_string(),
+        field_type,
+    })
+}
+
+fn resolve_bound_field_select_type(
+    expr: &Expr,
+    field: &str,
+    catalog: &dyn CatalogLookup,
+) -> Result<SqlType, ParseError> {
+    if let Expr::Row { descriptor, .. } = expr {
+        if let Some(found) = descriptor
+            .fields
+            .iter()
+            .find(|candidate| candidate.name.eq_ignore_ascii_case(field))
+        {
+            return Ok(found.sql_type);
+        }
+    }
+
+    let Some(row_type) = expr_sql_type_hint(expr) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "record expression",
+            actual: format!("field selection .{field}"),
+        });
+    };
+
+    if matches!(row_type.kind, SqlTypeKind::Composite) && row_type.typrelid != 0 {
+        let relation =
+            catalog
+                .lookup_relation_by_oid(row_type.typrelid)
+                .ok_or_else(|| ParseError::UnexpectedToken {
+                    expected: "named composite type",
+                    actual: format!("type relation {} not found", row_type.typrelid),
+                })?;
+        if let Some(found) = relation
+            .desc
+            .columns
+            .iter()
+            .find(|column| !column.dropped && column.name.eq_ignore_ascii_case(field))
+        {
+            return Ok(found.sql_type);
+        }
+    }
+
+    Err(ParseError::UnexpectedToken {
+        expected: "record field",
+        actual: format!("field selection .{field}"),
     })
 }
 

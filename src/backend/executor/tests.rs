@@ -5816,6 +5816,29 @@ fn qualified_star_target_expands_relation_columns() {
 }
 
 #[test]
+fn qualified_field_select_resolves_relation_alias_columns() {
+    let base = temp_dir("qualified_field_select");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    seed_people_and_pets(&base, &mut txns);
+
+    assert_query_rows(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select p.id, p.name from people p order by p.id",
+            catalog(),
+        )
+        .unwrap(),
+        vec![
+            vec![Value::Int32(1), Value::Text("alice".into())],
+            vec![Value::Int32(2), Value::Text("bob".into())],
+            vec![Value::Int32(3), Value::Text("carol".into())],
+        ],
+    );
+}
+
+#[test]
 fn comparison_operators_work_for_extended_numeric_types() {
     let base = temp_dir("extended_numeric_comparisons");
     let txns = TransactionManager::new_durable(&base).unwrap();

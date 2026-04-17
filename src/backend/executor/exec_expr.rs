@@ -734,6 +734,10 @@ pub fn eval_expr(
                     .collect::<Result<Vec<_>, ExecError>>()?,
             ),
         )),
+        Expr::FieldSelect { expr, field, .. } => {
+            let value = eval_expr(expr, slot, ctx)?;
+            eval_record_field(value, field)
+        }
         Expr::Cast(inner, ty) => cast_value_with_config(eval_expr(inner, slot, ctx)?, *ty, &ctx.datetime_config),
         Expr::Coalesce(left, right) => {
             let left = eval_expr(left, slot, ctx)?;
@@ -1029,6 +1033,10 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
                     .collect::<Result<Vec<_>, ExecError>>()?,
             ),
         )),
+        Expr::FieldSelect { expr, field, .. } => {
+            let value = eval_plpgsql_expr(expr, slot)?;
+            eval_record_field(value, field)
+        }
         Expr::Case(case_expr) => {
             if case_expr.arg.is_some() {
                 return Err(malformed_expr_error("CASE in PL/pgSQL"));
@@ -1128,6 +1136,27 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
             actual: format!("{expr:?}"),
         })),
     }
+}
+
+fn eval_record_field(value: Value, field: &str) -> Result<Value, ExecError> {
+    let Value::Record(record) = value else {
+        return Err(ExecError::DetailedError {
+            message: format!("cannot select field \"{field}\" from non-record value"),
+            detail: None,
+            hint: None,
+            sqlstate: "42809",
+        });
+    };
+    record
+        .iter()
+        .find(|(desc, _)| desc.name.eq_ignore_ascii_case(field))
+        .map(|(_, value)| value.clone())
+        .ok_or_else(|| ExecError::DetailedError {
+            message: format!("record has no field \"{field}\""),
+            detail: None,
+            hint: None,
+            sqlstate: "42703",
+        })
 }
 
 fn eval_plpgsql_builtin_function(

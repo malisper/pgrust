@@ -118,6 +118,7 @@ pub(super) fn collect_rels_from_expr(expr: &Expr, rels: &mut BTreeSet<RelFileLoc
                 collect_rels_from_expr(expr, rels);
             }
         }
+        Expr::FieldSelect { expr, .. } => collect_rels_from_expr(expr, rels),
         Expr::ArraySubscript { array, subscripts } => {
             collect_rels_from_expr(array, rels);
             for subscript in subscripts {

@@ -399,6 +399,7 @@ fn expr_contains_window_func(expr: &Expr) -> bool {
         Expr::Row { fields, .. } => fields
             .iter()
             .any(|(_, expr)| expr_contains_window_func(expr)),
+        Expr::FieldSelect { expr, .. } => expr_contains_window_func(expr),
         Expr::ArraySubscript { array, subscripts } => {
             expr_contains_window_func(array)
                 || subscripts.iter().any(|subscript| {
@@ -515,6 +516,7 @@ fn collect_group_input_exprs(expr: &Expr, group_by: &[Expr], exprs: &mut Vec<Exp
                 collect_group_input_exprs(expr, group_by, exprs);
             }
         }
+        Expr::FieldSelect { expr, .. } => collect_group_input_exprs(expr, group_by, exprs),
         Expr::ArraySubscript { array, subscripts } => {
             collect_group_input_exprs(array, group_by, exprs);
             for subscript in subscripts {
@@ -644,6 +646,7 @@ fn collect_supporting_inputs(expr: &Expr, exprs: &mut Vec<Expr>) {
                 collect_supporting_inputs(expr, exprs);
             }
         }
+        Expr::FieldSelect { expr, .. } => collect_supporting_inputs(expr, exprs),
         Expr::ArraySubscript { array, subscripts } => {
             collect_supporting_inputs(array, exprs);
             for subscript in subscripts {
@@ -802,6 +805,7 @@ fn collect_query_outer_refs_expr(expr: &Expr, levelsup: usize, exprs: &mut Vec<E
         | Expr::CurrentTimestamp { .. }
         | Expr::LocalTime { .. }
         | Expr::LocalTimestamp { .. } => {}
+        Expr::FieldSelect { expr, .. } => collect_query_outer_refs_expr(expr, levelsup, exprs),
         Expr::Aggref(aggref) => {
             for arg in &aggref.args {
                 collect_query_outer_refs_expr(arg, levelsup, exprs);

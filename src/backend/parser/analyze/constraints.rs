@@ -1537,6 +1537,7 @@ fn reject_unsupported_check_expr(expr: &Expr) -> Result<(), ParseError> {
             }
             Ok(())
         }
+        Expr::FieldSelect { expr, .. } => reject_unsupported_check_expr(expr),
         Expr::ArraySubscript { array, subscripts } => {
             reject_unsupported_check_expr(array)?;
             for subscript in subscripts {

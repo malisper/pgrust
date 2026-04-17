@@ -650,6 +650,7 @@ fn collect_expr_relids(expr: &Expr, relids: &mut Vec<usize>) {
                 collect_expr_relids(expr, relids);
             }
         }
+        Expr::FieldSelect { expr, .. } => collect_expr_relids(expr, relids),
         Expr::Param(_)
         | Expr::Const(_)
         | Expr::Random

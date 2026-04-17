@@ -875,6 +875,7 @@ pub(super) fn expr_sql_type(expr: &Expr) -> SqlType {
         Expr::Cast(_, ty) => *ty,
         Expr::ArrayLiteral { array_type, .. } => *array_type,
         Expr::Row { descriptor, .. } => descriptor.sql_type(),
+        Expr::FieldSelect { field_type, .. } => *field_type,
         Expr::Coalesce(left, right) => expr_sql_type_maybe(left)
             .or_else(|| expr_sql_type_maybe(right))
             .unwrap_or(SqlType::new(SqlTypeKind::Text)),

@@ -232,7 +232,18 @@ pub(super) fn infer_sql_expr_type_with_ctes(
         SqlExpr::Cast(_, ty) => {
             resolve_raw_type_name(ty, catalog).unwrap_or_else(|_| raw_type_name_hint(ty))
         }
-        SqlExpr::FieldSelect { .. } => SqlType::new(SqlTypeKind::Text),
+        SqlExpr::FieldSelect { expr, field } => {
+            if let SqlExpr::Column(name) = expr.as_ref()
+                && let Some(fields) = resolve_relation_row_expr_with_outer(scope, outer_scopes, name)
+                && let Some((_, field_expr)) = fields
+                    .iter()
+                    .find(|(candidate, _)| candidate.eq_ignore_ascii_case(field))
+            {
+                expr_sql_type_hint(field_expr).unwrap_or(SqlType::new(SqlTypeKind::Text))
+            } else {
+                SqlType::new(SqlTypeKind::Text)
+            }
+        }
         SqlExpr::Eq(_, _)
         | SqlExpr::NotEq(_, _)
         | SqlExpr::Lt(_, _)
