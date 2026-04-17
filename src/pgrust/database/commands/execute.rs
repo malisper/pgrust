@@ -1,5 +1,6 @@
 use super::super::*;
 use crate::backend::executor::execute_planned_stmt;
+use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 
 impl Database {
     pub(crate) fn execute_truncate_table_in_transaction_with_search_path(
@@ -74,7 +75,12 @@ impl Database {
     }
 
     pub fn execute(&self, client_id: ClientId, sql: &str) -> Result<StatementResult, ExecError> {
-        self.execute_with_search_path(client_id, sql, None)
+        self.execute_with_search_path_and_datetime_config(
+            client_id,
+            sql,
+            None,
+            &DateTimeConfig::default(),
+        )
     }
 
     pub(crate) fn execute_with_search_path(
@@ -83,8 +89,28 @@ impl Database {
         sql: &str,
         configured_search_path: Option<&[String]>,
     ) -> Result<StatementResult, ExecError> {
+        self.execute_with_search_path_and_datetime_config(
+            client_id,
+            sql,
+            configured_search_path,
+            &DateTimeConfig::default(),
+        )
+    }
+
+    pub(crate) fn execute_with_search_path_and_datetime_config(
+        &self,
+        client_id: ClientId,
+        sql: &str,
+        configured_search_path: Option<&[String]>,
+        datetime_config: &DateTimeConfig,
+    ) -> Result<StatementResult, ExecError> {
         let stmt = self.plan_cache.get_statement(sql)?;
-        self.execute_statement_with_search_path(client_id, stmt, configured_search_path)
+        self.execute_statement_with_search_path_and_datetime_config(
+            client_id,
+            stmt,
+            configured_search_path,
+            datetime_config,
+        )
     }
 
     pub(crate) fn execute_statement_with_search_path(
@@ -92,6 +118,21 @@ impl Database {
         client_id: ClientId,
         stmt: Statement,
         configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        self.execute_statement_with_search_path_and_datetime_config(
+            client_id,
+            stmt,
+            configured_search_path,
+            &DateTimeConfig::default(),
+        )
+    }
+
+    pub(crate) fn execute_statement_with_search_path_and_datetime_config(
+        &self,
+        client_id: ClientId,
+        stmt: Statement,
+        configured_search_path: Option<&[String]>,
+        datetime_config: &DateTimeConfig,
     ) -> Result<StatementResult, ExecError> {
         use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
         use crate::backend::commands::tablecmds::{
@@ -359,8 +400,7 @@ impl Database {
                     txn_waiter: Some(self.txn_waiter.clone()),
                     sequences: Some(self.sequences.clone()),
                     checkpoint_stats: self.checkpoint_stats_snapshot(),
-                    datetime_config:
-                        crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+                    datetime_config: datetime_config.clone(),
                     interrupts: Arc::clone(&interrupts),
                     snapshot,
                     client_id,
@@ -407,8 +447,7 @@ impl Database {
                     txn_waiter: Some(self.txn_waiter.clone()),
                     sequences: Some(self.sequences.clone()),
                     checkpoint_stats: self.checkpoint_stats_snapshot(),
-                    datetime_config:
-                        crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+                    datetime_config: datetime_config.clone(),
                     interrupts: Arc::clone(&interrupts),
                     snapshot,
                     client_id,
@@ -453,8 +492,7 @@ impl Database {
                     txn_waiter: Some(self.txn_waiter.clone()),
                     sequences: Some(self.sequences.clone()),
                     checkpoint_stats: self.checkpoint_stats_snapshot(),
-                    datetime_config:
-                        crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+                    datetime_config: datetime_config.clone(),
                     interrupts: Arc::clone(&interrupts),
                     snapshot,
                     client_id,
@@ -506,8 +544,7 @@ impl Database {
                     txn_waiter: Some(self.txn_waiter.clone()),
                     sequences: Some(self.sequences.clone()),
                     checkpoint_stats: self.checkpoint_stats_snapshot(),
-                    datetime_config:
-                        crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+                    datetime_config: datetime_config.clone(),
                     interrupts: Arc::clone(&interrupts),
                     snapshot,
                     client_id,
@@ -723,8 +760,7 @@ impl Database {
                     txn_waiter: Some(self.txn_waiter.clone()),
                     sequences: Some(self.sequences.clone()),
                     checkpoint_stats: self.checkpoint_stats_snapshot(),
-                    datetime_config:
-                        crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+                    datetime_config: datetime_config.clone(),
                     interrupts: Arc::clone(&interrupts),
                     snapshot,
                     client_id,
@@ -783,8 +819,7 @@ impl Database {
                     snapshot,
                     client_id,
                     next_command_id: 0,
-                    datetime_config:
-                        crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+                    datetime_config: datetime_config.clone(),
                     expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
                     case_test_values: Vec::new(),
                     system_bindings: Vec::new(),
@@ -814,7 +849,13 @@ impl Database {
         select_stmt: &crate::backend::parser::SelectStatement,
         txn_ctx: Option<(TransactionId, CommandId)>,
     ) -> Result<SelectGuard<'_>, ExecError> {
-        self.execute_streaming_with_search_path(client_id, select_stmt, txn_ctx, None)
+        self.execute_streaming_with_search_path_and_datetime_config(
+            client_id,
+            select_stmt,
+            txn_ctx,
+            None,
+            &DateTimeConfig::default(),
+        )
     }
 
     pub(crate) fn execute_streaming_with_search_path(
@@ -823,6 +864,23 @@ impl Database {
         select_stmt: &crate::backend::parser::SelectStatement,
         txn_ctx: Option<(TransactionId, CommandId)>,
         configured_search_path: Option<&[String]>,
+    ) -> Result<SelectGuard<'_>, ExecError> {
+        self.execute_streaming_with_search_path_and_datetime_config(
+            client_id,
+            select_stmt,
+            txn_ctx,
+            configured_search_path,
+            &DateTimeConfig::default(),
+        )
+    }
+
+    pub(crate) fn execute_streaming_with_search_path_and_datetime_config(
+        &self,
+        client_id: ClientId,
+        select_stmt: &crate::backend::parser::SelectStatement,
+        txn_ctx: Option<(TransactionId, CommandId)>,
+        configured_search_path: Option<&[String]>,
+        datetime_config: &DateTimeConfig,
     ) -> Result<SelectGuard<'_>, ExecError> {
         use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
         use crate::backend::executor::executor_start;
@@ -855,7 +913,7 @@ impl Database {
             txn_waiter: Some(self.txn_waiter.clone()),
             sequences: Some(self.sequences.clone()),
             checkpoint_stats: self.checkpoint_stats_snapshot(),
-            datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+            datetime_config: datetime_config.clone(),
             interrupts,
             snapshot,
             client_id,

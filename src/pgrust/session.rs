@@ -943,10 +943,11 @@ impl Session {
                     result
                 } else {
                     let search_path = self.configured_search_path();
-                    db.execute_statement_with_search_path(
+                    db.execute_statement_with_search_path_and_datetime_config(
                         self.client_id,
                         stmt,
                         search_path.as_deref(),
+                        &self.datetime_config,
                     )
                 }
             }
@@ -1078,11 +1079,12 @@ impl Session {
             None
         };
         let search_path = self.configured_search_path();
-        let mut guard = db.execute_streaming_with_search_path(
+        let mut guard = db.execute_streaming_with_search_path_and_datetime_config(
             self.client_id,
             select_stmt,
             txn_ctx,
             search_path.as_deref(),
+            &self.datetime_config,
         )?;
         guard.interrupt_guard = Some(interrupt_guard);
         Ok(guard)
