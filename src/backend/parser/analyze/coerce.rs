@@ -113,12 +113,14 @@ pub(super) fn sql_type_name(ty: SqlType) -> String {
         SqlTypeKind::AnyArray => "anyarray",
         SqlTypeKind::Record => "record",
         SqlTypeKind::Composite => "record",
+        SqlTypeKind::Void => "void",
         SqlTypeKind::Int2 => "smallint",
         SqlTypeKind::Int2Vector => "int2vector",
         SqlTypeKind::Int4 => "integer",
         SqlTypeKind::Int8 => "bigint",
         SqlTypeKind::Name => "name",
         SqlTypeKind::Oid => "oid",
+        SqlTypeKind::RegProcedure => "regprocedure",
         SqlTypeKind::Tid => "tid",
         SqlTypeKind::Xid => "xid",
         SqlTypeKind::OidVector => "oidvector",
@@ -246,6 +248,8 @@ pub(super) fn coerce_unknown_string_literal_type(
             SqlTypeKind::InternalChar => return SqlType::new(SqlTypeKind::Text),
             SqlTypeKind::TsQuery => return SqlType::new(SqlTypeKind::TsQuery),
             SqlTypeKind::TsVector => return SqlType::new(SqlTypeKind::TsVector),
+            SqlTypeKind::Void => return SqlType::new(SqlTypeKind::Void),
+            SqlTypeKind::RegProcedure => return SqlType::new(SqlTypeKind::RegProcedure),
             SqlTypeKind::RegConfig => return SqlType::new(SqlTypeKind::RegConfig),
             SqlTypeKind::RegDictionary => return SqlType::new(SqlTypeKind::RegDictionary),
             _ => {}
@@ -257,6 +261,10 @@ pub(super) fn coerce_unknown_string_literal_type(
                 }
                 SqlTypeKind::TsVector => {
                     return SqlType::array_of(SqlType::new(SqlTypeKind::TsVector));
+                }
+                SqlTypeKind::Void => return SqlType::array_of(SqlType::new(SqlTypeKind::Void)),
+                SqlTypeKind::RegProcedure => {
+                    return SqlType::array_of(SqlType::new(SqlTypeKind::RegProcedure));
                 }
                 SqlTypeKind::RegConfig => {
                     return SqlType::array_of(SqlType::new(SqlTypeKind::RegConfig));
