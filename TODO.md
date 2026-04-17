@@ -327,7 +327,6 @@ Targeted reruns on 2026-04-17:
 
 ## Features
 
-<<<<<<< HEAD
 - [done] PostgreSQL-compatible jsonb input errors with `LINE` / `DETAIL` / `CONTEXT`
 - [done] stack depth limit handling for deeply nested jsonb input
 - aggregate-local `ORDER BY` support for `jsonb_agg` / `jsonb_object_agg`
@@ -425,10 +424,18 @@ Targeted reruns on 2026-04-17:
 - Add PostgreSQL-style `DETAIL` output for numeric typmod overflow, including fractional-only numerics and infinite values rejected by typmod constraints
 - Add dedicated numeric-to-integer cast errors for `NaN` and `Infinity` instead of collapsing them into generic `smallint/integer/bigint out of range`
 - Audit the remaining `numeric.sql` formatting mismatches after the display-scale fix; many later hunks appear to be the same root cause repeated across `to_char` cases
-=======
 - Mixed set-operation chains: accept PostgreSQL-style left-associative chains such as `SELECT 1 UNION SELECT 2 UNION ALL SELECT 2` instead of rejecting them in the parser.
 - Shared regression fixture visibility: investigate why bootstrap tables from `scripts/test_setup_pgrust.sql` like `float8_tbl`, `int8_tbl`, and `tenk1` are not consistently resolvable during regression runs.
->>>>>>> malisper/union-regressions
+- privileges.sql parity:
+  - expose privilege-related system catalogs in SQL, including `pg_auth_members` and `pg_largeobject_metadata`
+  - add parser/analyzer support for role membership `GRANTED BY`
+  - add parser/analyzer/executor support for `CASCADE` in role membership revokes
+  - implement `SET ROLE` and `RESET ROLE`
+  - implement SQL-visible `session_user`, `current_user`, and `current_role` semantics used by the regression
+  - add parser/executor support for `DROP OWNED`
+  - add parser support for `DROP USER`, `CREATE GROUP`, and `ALTER GROUP`
+  - make role membership grant/revoke execution honor explicit grantors and dependent membership chains
+  - align duplicate-role and role-grant error text with PostgreSQL where practical
 
 ## DONE
 
