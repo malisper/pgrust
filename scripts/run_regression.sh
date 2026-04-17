@@ -180,6 +180,8 @@ fi
 
 export PGPASSWORD="x"
 export PG_ABS_SRCDIR="$PG_REGRESS_ABS"
+export PGTZ="America/Los_Angeles"
+export PGDATESTYLE="Postgres, MDY"
 setup_pg_regress_env
 export PGOPTIONS="${PGOPTIONS:+$PGOPTIONS }-c statement_timeout=5s"
 PG_ARGS=(-X -h 127.0.0.1 -p "$PORT" -U postgres -v "abs_srcdir=$PG_REGRESS_ABS")
