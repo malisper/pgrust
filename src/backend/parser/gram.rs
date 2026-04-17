@@ -3,8 +3,8 @@ use pest::iterators::Pair;
 use pest_derive::Parser;
 
 use super::comments::{
-    normalize_position_syntax_preserving_layout, normalize_string_continuation_preserving_layout,
-    strip_sql_comments_preserving_layout,
+    find_comment_blocked_string_continuation, normalize_position_syntax_preserving_layout,
+    normalize_string_continuation_preserving_layout, strip_sql_comments_preserving_layout,
 };
 use super::parsenodes::*;
 use crate::backend::executor::{AggFunc, Value};
@@ -49,6 +49,12 @@ fn parse_statement_with_options_inner(
     sql: String,
     options: ParseOptions,
 ) -> Result<Statement, ParseError> {
+    if let Some(token) = find_comment_blocked_string_continuation(&sql) {
+        return Err(ParseError::UnexpectedToken {
+            expected: "statement",
+            actual: format!("syntax error at or near \"{token}\""),
+        });
+    }
     let sql = normalize_string_continuation_preserving_layout(&sql);
     let sql = strip_sql_comments_preserving_layout(&sql);
     validate_unicode_string_literals(&sql, options)?;
