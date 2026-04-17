@@ -972,8 +972,8 @@ fn build_join_paths_internal(
     if allow_swapped_orientation {
         let left_columns = left.columns();
         let right_columns = right.columns();
-        let left_vars = left.output_vars();
-        let right_vars = right.output_vars();
+        let left_vars = left.semantic_output_vars();
+        let right_vars = right.semantic_output_vars();
         let swapped_join = estimate_nested_loop_join_internal(
             root,
             right.clone(),
@@ -1018,8 +1018,8 @@ fn build_join_paths_internal(
     {
         let left_columns = left.columns();
         let right_columns = right.columns();
-        let left_vars = left.output_vars();
-        let right_vars = right.output_vars();
+        let left_vars = left.semantic_output_vars();
+        let right_vars = right.semantic_output_vars();
         let swapped_join = estimate_hash_join_internal(
             root,
             right,
@@ -1256,8 +1256,8 @@ fn hash_join_inputs_rewrite_cleanly(
     right: &Path,
     clauses: &HashJoinClauses,
 ) -> bool {
-    let left_layout = left.output_vars();
-    let right_layout = right.output_vars();
+    let left_layout = left.semantic_output_vars();
+    let right_layout = right.semantic_output_vars();
     let mut join_layout = left_layout.clone();
     join_layout.extend(right_layout.clone());
 
@@ -1678,28 +1678,36 @@ fn rewrite_expr_for_path_output(
         })),
         Expr::SubLink(sublink) => {
             Expr::SubLink(Box::new(crate::include::nodes::primnodes::SubLink {
-                testexpr: sublink.testexpr.map(|expr| {
-                    Box::new(rewrite_expr_for_path_output(root, *expr, path, layout))
-                }),
+                testexpr: sublink
+                    .testexpr
+                    .map(|expr| Box::new(rewrite_expr_for_path_output(root, *expr, path, layout))),
                 ..*sublink
             }))
         }
-        Expr::SubPlan(subplan) => Expr::SubPlan(Box::new(crate::include::nodes::primnodes::SubPlan {
-            testexpr: subplan.testexpr.map(|expr| {
-                Box::new(rewrite_expr_for_path_output(root, *expr, path, layout))
-            }),
-            ..*subplan
-        })),
+        Expr::SubPlan(subplan) => {
+            Expr::SubPlan(Box::new(crate::include::nodes::primnodes::SubPlan {
+                testexpr: subplan
+                    .testexpr
+                    .map(|expr| Box::new(rewrite_expr_for_path_output(root, *expr, path, layout))),
+                ..*subplan
+            }))
+        }
         Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(
             crate::include::nodes::primnodes::ScalarArrayOpExpr {
                 left: Box::new(rewrite_expr_for_path_output(root, *saop.left, path, layout)),
-                right: Box::new(rewrite_expr_for_path_output(root, *saop.right, path, layout)),
+                right: Box::new(rewrite_expr_for_path_output(
+                    root,
+                    *saop.right,
+                    path,
+                    layout,
+                )),
                 ..*saop
             },
         )),
-        Expr::Cast(inner, ty) => {
-            Expr::Cast(Box::new(rewrite_expr_for_path_output(root, *inner, path, layout)), ty)
-        }
+        Expr::Cast(inner, ty) => Expr::Cast(
+            Box::new(rewrite_expr_for_path_output(root, *inner, path, layout)),
+            ty,
+        ),
         Expr::Like {
             expr,
             pattern,
@@ -1726,9 +1734,9 @@ fn rewrite_expr_for_path_output(
                 .map(|expr| Box::new(rewrite_expr_for_path_output(root, *expr, path, layout))),
             negated,
         },
-        Expr::IsNull(inner) => {
-            Expr::IsNull(Box::new(rewrite_expr_for_path_output(root, *inner, path, layout)))
-        }
+        Expr::IsNull(inner) => Expr::IsNull(Box::new(rewrite_expr_for_path_output(
+            root, *inner, path, layout,
+        ))),
         Expr::IsNotNull(inner) => Expr::IsNotNull(Box::new(rewrite_expr_for_path_output(
             root, *inner, path, layout,
         ))),
@@ -2104,8 +2112,8 @@ fn estimate_hash_join_internal(
         "hash join does not support cross joins"
     );
 
-    let left_layout = left.output_vars();
-    let right_layout = right.output_vars();
+    let left_layout = left.semantic_output_vars();
+    let right_layout = right.semantic_output_vars();
     let mut join_layout = left_layout.clone();
     join_layout.extend(right_layout.clone());
     let rewritten_hash_clauses = hash_clauses
@@ -2200,7 +2208,7 @@ pub(super) fn restore_join_output_order(
     right_vars: &[Expr],
 ) -> Path {
     let join_info = join.plan_info();
-    let join_layout = join.output_vars();
+    let join_layout = join.semantic_output_vars();
     let (join_left, join_right) = match &join {
         Path::NestedLoopJoin { left, right, .. } | Path::HashJoin { left, right, .. } => {
             (&**left, &**right)
