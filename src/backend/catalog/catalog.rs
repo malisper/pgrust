@@ -78,6 +78,7 @@ fn default_attribute_storage(sql_type: SqlType, attlen: i16) -> AttributeStorage
     match sql_type.kind {
         SqlTypeKind::AnyArray => AttributeStorage::Extended,
         SqlTypeKind::Name
+        | SqlTypeKind::Void
         | SqlTypeKind::Int2Vector
         | SqlTypeKind::OidVector
         | SqlTypeKind::Date
@@ -117,6 +118,7 @@ fn default_attribute_storage(sql_type: SqlType, attlen: i16) -> AttributeStorage
         | SqlTypeKind::Int8
         | SqlTypeKind::Money
         | SqlTypeKind::Oid
+        | SqlTypeKind::RegProcedure
         | SqlTypeKind::Xid
         | SqlTypeKind::RegConfig
         | SqlTypeKind::RegDictionary
@@ -159,6 +161,7 @@ fn scalar_type_for_sql_type(sql_type: SqlType) -> ScalarType {
     }
     match sql_type.kind {
         SqlTypeKind::AnyArray => ScalarType::Array(Box::new(ScalarType::Text)),
+        SqlTypeKind::Void => ScalarType::Text,
         SqlTypeKind::Int2 => ScalarType::Int16,
         SqlTypeKind::Int2Vector => ScalarType::Text,
         SqlTypeKind::Int4 => ScalarType::Int32,
@@ -169,6 +172,7 @@ fn scalar_type_for_sql_type(sql_type: SqlType) -> ScalarType {
         // dedicated fixed-width runtime representations.
         SqlTypeKind::Name => ScalarType::Text,
         SqlTypeKind::Oid => ScalarType::Int32,
+        SqlTypeKind::RegProcedure => ScalarType::Int32,
         SqlTypeKind::Tid => ScalarType::Text,
         SqlTypeKind::Xid => ScalarType::Int32,
         SqlTypeKind::OidVector => ScalarType::Text,

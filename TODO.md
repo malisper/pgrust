@@ -406,7 +406,7 @@ Counts from `/tmp/pgrust_regress_todo_20260417` on 2026-04-17; `test_setup.sql` 
   - Implement the builtin stats functions used by the test, including `pg_stat_force_next_flush()`, `pg_stat_get_snapshot_timestamp()`, function-call stats accessors, and relation tuple/block counters.
   - Add runtime tracking and transactional accounting for relation stats: seq/index scan counts, tuple read/fetch counts, block read/hit counts, tuple insert/update/delete counts, live/dead tuple counts, and `TRUNCATE` effects across commit/rollback/savepoint boundaries.
   - Add runtime tracking for function execution stats, including xact-local counters and correct visibility/drop behavior across rollback, subtransactions, and committed drops.
-  - Add support for SQL-visible object lookup/types used by the file’s function-stat queries: `void`, `regprocedure`, and the corresponding cast/lookup path for `'func()'::regprocedure::oid`.
+  - [done] Add support for SQL-visible object lookup/types used by the file’s function-stat queries: `void`, `regprocedure`, and the corresponding cast/lookup path for `'func()'::regprocedure::oid`.
   - Extend SELECT/binder support enough for the early stats queries, including querying the new stats relations and handling `ORDER BY ... COLLATE "C"` on projected text columns.
 
 ## DONE

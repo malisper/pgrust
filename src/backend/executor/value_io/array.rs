@@ -1,7 +1,7 @@
 use super::*;
 use crate::backend::storage::page::bufpage::max_align;
 use crate::include::access::htup::AttributeAlign;
-use crate::include::catalog::{RECORD_TYPE_OID, builtin_type_rows, sql_type_for_range_kind};
+use crate::include::catalog::{builtin_type_rows, sql_type_for_range_kind};
 
 pub(crate) fn encode_array_bytes(
     element_type: SqlType,
@@ -469,10 +469,17 @@ fn array_element_layout(
                 details: "anyarray cannot be used as a concrete array element type".into(),
             });
         }
+        SqlTypeKind::Void => {
+            return Err(ExecError::InvalidStorageValue {
+                column: column.into(),
+                details: "void arrays are unsupported".into(),
+            });
+        }
         SqlTypeKind::Record | SqlTypeKind::Composite => (-1, AttributeAlign::Double),
         SqlTypeKind::Int2 => (2, AttributeAlign::Short),
         SqlTypeKind::Int4
         | SqlTypeKind::Oid
+        | SqlTypeKind::RegProcedure
         | SqlTypeKind::Xid
         | SqlTypeKind::RegConfig
         | SqlTypeKind::RegDictionary
@@ -726,6 +733,10 @@ fn decode_array_element_value(
             column: column.into(),
             details: "anyarray cannot be used as a concrete array element type".into(),
         }),
+        SqlTypeKind::Void => Err(ExecError::InvalidStorageValue {
+            column: column.into(),
+            details: "void arrays are unsupported".into(),
+        }),
         SqlTypeKind::Record | SqlTypeKind::Composite => {
             decode_composite_datum(bytes).map(Value::Record)
         }
@@ -740,6 +751,7 @@ fn decode_array_element_value(
         }
         SqlTypeKind::Int4
         | SqlTypeKind::Oid
+        | SqlTypeKind::RegProcedure
         | SqlTypeKind::Xid
         | SqlTypeKind::RegConfig
         | SqlTypeKind::RegDictionary => {
