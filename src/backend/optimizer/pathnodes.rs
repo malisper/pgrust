@@ -943,7 +943,13 @@ fn value_sql_type_hint(value: &Value) -> SqlType {
         Value::Text(_) | Value::TextRef(_, _) => SqlType::new(SqlTypeKind::Text),
         Value::InternalChar(_) => SqlType::new(SqlTypeKind::InternalChar),
         Value::Bool(_) => SqlType::new(SqlTypeKind::Bool),
-        Value::Record(_) => SqlType::record(RECORD_TYPE_OID),
+        Value::Record(record) => {
+            if record.typrelid != 0 {
+                SqlType::named_composite(record.type_oid, record.typrelid)
+            } else {
+                SqlType::record(record.type_oid.max(RECORD_TYPE_OID))
+            }
+        }
         Value::Array(_) | Value::PgArray(_) | Value::Null => SqlType::new(SqlTypeKind::Text),
     }
 }

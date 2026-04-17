@@ -724,12 +724,14 @@ pub fn eval_expr(
             }
         }
         Expr::Const(value) => Ok(value.clone()),
-        Expr::Row { fields } => Ok(Value::Record(crate::include::nodes::datum::RecordValue {
-            fields: fields
-                .iter()
-                .map(|(name, expr)| Ok((name.clone(), eval_expr(expr, slot, ctx)?)))
-                .collect::<Result<Vec<_>, ExecError>>()?,
-        })),
+        Expr::Row { fields } => Ok(Value::Record(
+            crate::include::nodes::datum::RecordValue::anonymous(
+                fields
+                    .iter()
+                    .map(|(name, expr)| Ok((name.clone(), eval_expr(expr, slot, ctx)?)))
+                    .collect::<Result<Vec<_>, ExecError>>()?,
+            ),
+        )),
         Expr::Cast(inner, ty) => cast_value_with_config(eval_expr(inner, slot, ctx)?, *ty, &ctx.datetime_config),
         Expr::Coalesce(left, right) => {
             let left = eval_expr(left, slot, ctx)?;
@@ -1016,12 +1018,14 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
             }
         }
         Expr::Const(value) => Ok(value.clone()),
-        Expr::Row { fields } => Ok(Value::Record(crate::include::nodes::datum::RecordValue {
-            fields: fields
-                .iter()
-                .map(|(name, expr)| Ok((name.clone(), eval_plpgsql_expr(expr, slot)?)))
-                .collect::<Result<Vec<_>, ExecError>>()?,
-        })),
+        Expr::Row { fields } => Ok(Value::Record(
+            crate::include::nodes::datum::RecordValue::anonymous(
+                fields
+                    .iter()
+                    .map(|(name, expr)| Ok((name.clone(), eval_plpgsql_expr(expr, slot)?)))
+                    .collect::<Result<Vec<_>, ExecError>>()?,
+            ),
+        )),
         Expr::Case(case_expr) => {
             if case_expr.arg.is_some() {
                 return Err(malformed_expr_error("CASE in PL/pgSQL"));

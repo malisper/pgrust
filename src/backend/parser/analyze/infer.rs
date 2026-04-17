@@ -97,7 +97,13 @@ pub(super) fn infer_sql_expr_type_with_ctes(
         SqlExpr::Const(Value::TsVector(_)) => SqlType::new(SqlTypeKind::TsVector),
         SqlExpr::Const(Value::TsQuery(_)) => SqlType::new(SqlTypeKind::TsQuery),
         SqlExpr::Const(Value::InternalChar(_)) => SqlType::new(SqlTypeKind::InternalChar),
-        SqlExpr::Const(Value::Record(_)) => SqlType::record(RECORD_TYPE_OID),
+        SqlExpr::Const(Value::Record(record)) => {
+            if record.typrelid != 0 {
+                SqlType::named_composite(record.type_oid, record.typrelid)
+            } else {
+                SqlType::record(record.type_oid.max(RECORD_TYPE_OID))
+            }
+        }
         SqlExpr::Const(Value::Text(_))
         | SqlExpr::Const(Value::TextRef(_, _))
         | SqlExpr::Const(Value::Null) => SqlType::new(SqlTypeKind::Text),
