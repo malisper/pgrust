@@ -8,7 +8,49 @@ Counts from `/tmp/pgrust_regress_todo_20260417` on 2026-04-17; `test_setup.sql` 
 - aggregates.sql: 215/583
 - alter_generic.sql: 54/333
 - alter_operator.sql: 3/65
-- alter_table.sql: 425/1683
+- alter_table.sql: 431/1683
+  - expression indexes and `ALTER INDEX` operations used by `alter_table.sql`
+  - partitioned tables, including `PARTITION OF`, `ATTACH PARTITION`, and `DETACH PARTITION`
+  - `SET ROLE` / `RESET ROLE`
+  - `ALTER VIEW` forms exercised by `alter_table.sql`
+  - `ALTER TABLE ... RENAME CONSTRAINT`
+  - `ALTER TABLE` `NO INHERIT` / `INHERIT`
+  - multi-action `ALTER TABLE` statements
+  - `ALTER TABLE ... ALTER CONSTRAINT` deferrability changes
+  - `ALTER TABLE ... ALTER COLUMN ... SET/DROP DEFAULT`
+  - `ALTER TABLE ... ALTER COLUMN ... SET STORAGE`
+  - `ALTER TABLE ... ALTER COLUMN ... SET STATISTICS`
+  - `ALTER TABLE ... ALTER COLUMN ... SET (...)` / `RESET (...)`
+  - `ALTER TABLE ... SET|RESET WITHOUT/WITH OIDS`
+  - `ALTER TABLE ... SET SCHEMA`
+  - `ALTER TABLE ... SET LOGGED` / `SET UNLOGGED`
+  - `ALTER TABLE ... REPLICA IDENTITY USING INDEX`
+  - `ALTER TABLE ... CLUSTER ON` / `SET WITHOUT CLUSTER`
+  - `ALTER TABLE ONLY ...` variants beyond current support
+  - `ALTER TABLE IF EXISTS ...` variants beyond current support
+  - `CHECK ... NO INHERIT`
+  - `CHECK ENFORCED` / `NOT ENFORCED`
+  - foreign keys with `MATCH FULL`
+  - deferrable foreign keys
+  - `COMMENT ON COLUMN`
+  - `COMMENT ON INDEX`
+  - `COMMENT ON CONSTRAINT`
+  - `CREATE RULE` / `DROP RULE`
+  - `COPY ... TO STDOUT` forms used by `alter_table.sql`
+  - `SELECT ... INTO`
+  - typed tables: `CREATE TABLE OF`, `ALTER TABLE ... OF`, and `ALTER TABLE ... NOT OF`
+  - enum creation forms required by `alter_table.sql`
+  - domain constraints/defaults required by `alter_table.sql`
+  - `CREATE OR REPLACE FUNCTION`
+  - `DROP TABLE ... CASCADE`
+  - `DROP TYPE ... CASCADE`
+  - `CREATE TEMP TABLE ... PARTITION BY ...`
+  - `regtype` support
+  - `inet` and `cidr` type support
+  - composite/type lookup support for user-defined and partitioned relation row types
+  - `trigger` type support
+  - `lseg` input syntax used by `alter_table.sql`
+  - table rename handling for array-type name collisions in `pg_type`
 - amutils.sql: 0/10
 - arrays.sql: 156/526
 - async.sql: 0/11
@@ -237,6 +279,49 @@ Counts from `/tmp/pgrust_regress_todo_20260417` on 2026-04-17; `test_setup.sql` 
 - xmlmap.sql: 3/40
 
 ## Features
+
+- expression indexes and `ALTER INDEX` operations used by `alter_table.sql`
+- partitioned tables, including `PARTITION OF`, `ATTACH PARTITION`, and `DETACH PARTITION`
+- `SET ROLE` / `RESET ROLE`
+- `ALTER VIEW` forms exercised by `alter_table.sql`
+- `ALTER TABLE ... RENAME CONSTRAINT`
+- `ALTER TABLE` `NO INHERIT` / `INHERIT`
+- multi-action `ALTER TABLE` statements
+- `ALTER TABLE ... ALTER CONSTRAINT` deferrability changes
+- `ALTER TABLE ... ALTER COLUMN ... SET/DROP DEFAULT`
+- `ALTER TABLE ... ALTER COLUMN ... SET STORAGE`
+- `ALTER TABLE ... ALTER COLUMN ... SET STATISTICS`
+- `ALTER TABLE ... ALTER COLUMN ... SET (...)` / `RESET (...)`
+- `ALTER TABLE ... SET|RESET WITHOUT/WITH OIDS`
+- `ALTER TABLE ... SET SCHEMA`
+- `ALTER TABLE ... SET LOGGED` / `SET UNLOGGED`
+- `ALTER TABLE ... REPLICA IDENTITY USING INDEX`
+- `ALTER TABLE ... CLUSTER ON` / `SET WITHOUT CLUSTER`
+- `ALTER TABLE ONLY ...` variants beyond current support
+- `ALTER TABLE IF EXISTS ...` variants beyond current support
+- `CHECK ... NO INHERIT`
+- `CHECK ENFORCED` / `NOT ENFORCED`
+- foreign keys with `MATCH FULL`
+- deferrable foreign keys
+- `COMMENT ON COLUMN`
+- `COMMENT ON INDEX`
+- `COMMENT ON CONSTRAINT`
+- `CREATE RULE` / `DROP RULE`
+- `COPY ... TO STDOUT` forms used by `alter_table.sql`
+- `SELECT ... INTO`
+- typed tables: `CREATE TABLE OF`, `ALTER TABLE ... OF`, and `ALTER TABLE ... NOT OF`
+- enum creation forms required by `alter_table.sql`
+- domain constraints/defaults required by `alter_table.sql`
+- `CREATE OR REPLACE FUNCTION`
+- `DROP TABLE ... CASCADE`
+- `DROP TYPE ... CASCADE`
+- `CREATE TEMP TABLE ... PARTITION BY ...`
+- `regtype` support
+- `inet` and `cidr` type support
+- composite/type lookup support for user-defined and partitioned relation row types
+- `trigger` type support
+- `lseg` input syntax used by `alter_table.sql`
+- table rename handling for array-type name collisions in `pg_type`
 
 ## DONE
 
