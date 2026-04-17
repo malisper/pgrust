@@ -271,6 +271,58 @@ fn recursive_union_distinct_rejects_varbit_columns() {
 }
 
 #[test]
+fn pg_typeof_reports_bound_expression_types() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    let result = session
+        .execute(
+            &db,
+            "with q as (select 'foo' as x)
+             select x, pg_typeof(x) from q",
+        )
+        .expect("run pg_typeof over cte column");
+
+    match result {
+        StatementResult::Query { columns, rows, .. } => {
+            assert_eq!(columns[1].sql_type, SqlType::new(SqlTypeKind::Text));
+            assert_eq!(
+                rows,
+                vec![vec![Value::Text("foo".into()), Value::Text("text".into())]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn pg_typeof_tracks_recursive_cte_output_type() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    let result = session
+        .execute(
+            &db,
+            "with recursive t(n) as (
+                select 'foo'
+                union all
+                select n || ' bar' from t where length(n) < 20
+             )
+             select n, pg_typeof(n) from t",
+        )
+        .expect("run pg_typeof over recursive cte");
+
+    match result {
+        StatementResult::Query { columns, rows, .. } => {
+            assert_eq!(columns[1].sql_type, SqlType::new(SqlTypeKind::Text));
+            assert_eq!(rows[0][1], Value::Text("text".into()));
+            assert!(rows.iter().all(|row| row[1] == Value::Text("text".into())));
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn union_all_selects_returns_all_rows() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);
