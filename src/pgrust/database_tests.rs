@@ -5501,6 +5501,123 @@ fn alter_table_add_and_drop_key_constraints_manage_indexes() {
 }
 
 #[test]
+fn alter_table_rename_constraint_updates_catalog_and_enforcement() {
+    let base = temp_dir("alter_table_rename_constraint_check");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4)")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table items add constraint items_id_positive check (id > 0)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table items rename constraint items_id_positive to items_id_guard",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conname \
+             from pg_constraint \
+             where conrelid = (select oid from pg_class where relname = 'items')",
+        ),
+        vec![vec![Value::Text("items_id_guard".into())]]
+    );
+    match db.execute(1, "insert into items values (0)") {
+        Err(ExecError::CheckViolation {
+            relation,
+            constraint,
+        }) if relation == "items" && constraint == "items_id_guard" => {}
+        other => panic!("expected renamed CHECK constraint violation, got {other:?}"),
+    }
+}
+
+#[test]
+fn alter_table_rename_constraint_renames_backing_index() {
+    let base = temp_dir("alter_table_rename_constraint_index");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4, code int4)")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table items add constraint items_pkey primary key (id)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table items rename constraint items_pkey to items_primary",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conname \
+             from pg_constraint \
+             where conrelid = (select oid from pg_class where relname = 'items') \
+             order by conname",
+        ),
+        vec![
+            vec![Value::Text("items_id_not_null".into())],
+            vec![Value::Text("items_primary".into())],
+        ]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relname \
+             from pg_class \
+             where relname in ('items_pkey', 'items_primary') \
+             order by relname",
+        ),
+        vec![vec![Value::Text("items_primary".into())]]
+    );
+}
+
+#[test]
+fn alter_table_rename_not_null_constraint_updates_column_enforcement() {
+    let base = temp_dir("alter_table_rename_constraint_not_null");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4, note text)")
+        .unwrap();
+    db.execute(1, "alter table items alter column note set not null")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table items rename constraint items_note_not_null to items_note_required",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conname \
+             from pg_constraint \
+             where conrelid = (select oid from pg_class where relname = 'items')",
+        ),
+        vec![vec![Value::Text("items_note_required".into())]]
+    );
+    match db.execute(1, "insert into items values (1, null)") {
+        Err(ExecError::NotNullViolation {
+            relation,
+            column,
+            constraint,
+        }) if relation == "items" && column == "note" && constraint == "items_note_required" => {}
+        other => panic!("expected renamed NOT NULL constraint violation, got {other:?}"),
+    }
+}
+
+#[test]
 fn alter_table_drop_primary_key_removes_only_pk_owned_not_null_constraints() {
     let base = temp_dir("alter_table_drop_primary_key_owned_not_null");
     let db = Database::open(&base, 16).unwrap();

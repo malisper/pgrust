@@ -939,6 +939,134 @@ impl Catalog {
         Ok(removed)
     }
 
+    pub fn rename_relation_constraint(
+        &mut self,
+        relation_oid: u32,
+        constraint_name: &str,
+        new_constraint_name: &str,
+    ) -> Result<
+        (
+            PgConstraintRow,
+            PgConstraintRow,
+            Option<(String, CatalogEntry, String, CatalogEntry)>,
+        ),
+        CatalogError,
+    > {
+        let new_constraint_name = new_constraint_name.to_ascii_lowercase();
+        if self.constraints.iter().any(|row| {
+            row.conrelid == relation_oid && row.conname.eq_ignore_ascii_case(&new_constraint_name)
+        }) {
+            return Err(CatalogError::TableAlreadyExists(new_constraint_name.clone()));
+        }
+
+        let row_index = self
+            .constraints
+            .iter()
+            .position(|row| {
+                row.conrelid == relation_oid && row.conname.eq_ignore_ascii_case(constraint_name)
+            })
+            .ok_or_else(|| CatalogError::UnknownTable(constraint_name.to_string()))?;
+
+        let old_row = self.constraints[row_index].clone();
+        let index_rename = if old_row.conindid != 0 {
+            Some(self.rename_index_relation(old_row.conindid, &new_constraint_name)?)
+        } else {
+            None
+        };
+
+        self.constraints[row_index].conname = new_constraint_name.clone();
+        let new_row = self.constraints[row_index].clone();
+        sort_pg_constraint_rows(&mut self.constraints);
+
+        if old_row.contype == CONSTRAINT_NOTNULL {
+            self.rename_not_null_constraint_in_desc(
+                relation_oid,
+                constraint_name,
+                &new_constraint_name,
+            )?;
+        }
+
+        Ok((old_row, new_row, index_rename))
+    }
+
+    fn rename_index_relation(
+        &mut self,
+        relation_oid: u32,
+        new_name: &str,
+    ) -> Result<(String, CatalogEntry, String, CatalogEntry), CatalogError> {
+        self.rename_relation_with_relkind(relation_oid, new_name, 'i')
+    }
+
+    fn rename_relation_with_relkind(
+        &mut self,
+        relation_oid: u32,
+        new_name: &str,
+        relkind: char,
+    ) -> Result<(String, CatalogEntry, String, CatalogEntry), CatalogError> {
+        let old_name = self
+            .tables
+            .iter()
+            .find(|(_, entry)| entry.relation_oid == relation_oid)
+            .map(|(name, _)| name.clone())
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        let old_entry = self
+            .tables
+            .get(&old_name)
+            .cloned()
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        if old_entry.relkind != relkind {
+            return Err(CatalogError::UnknownTable(relation_oid.to_string()));
+        }
+
+        let new_relname = new_name.to_ascii_lowercase();
+        let qualified_new_name = old_name
+            .rsplit_once('.')
+            .map(|(schema, _)| format!("{schema}.{new_relname}"))
+            .unwrap_or_else(|| new_relname.clone());
+        if qualified_new_name != old_name && self.tables.contains_key(&qualified_new_name) {
+            return Err(CatalogError::TableAlreadyExists(new_relname));
+        }
+
+        let entry = self
+            .tables
+            .remove(&old_name)
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        self.tables
+            .insert(qualified_new_name.clone(), entry.clone());
+        self.replace_depend_rows_for_entry(&entry);
+        Ok((old_name, old_entry, qualified_new_name, entry))
+    }
+
+    fn rename_not_null_constraint_in_desc(
+        &mut self,
+        relation_oid: u32,
+        constraint_name: &str,
+        new_constraint_name: &str,
+    ) -> Result<(), CatalogError> {
+        let name = self
+            .tables
+            .iter()
+            .find(|(_, entry)| entry.relation_oid == relation_oid)
+            .map(|(name, _)| name.clone())
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        let mut entry = self
+            .tables
+            .get(&name)
+            .cloned()
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        let column_index = not_null_constraint_column_index(&entry.desc, constraint_name)?;
+        entry.desc.columns[column_index].not_null_constraint_name =
+            Some(new_constraint_name.to_string());
+        let slot = self
+            .tables
+            .get_mut(&name)
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        *slot = entry.clone();
+        self.replace_constraint_rows_for_entry(&name, &entry);
+        self.replace_depend_rows_for_entry(&entry);
+        Ok(())
+    }
+
     fn default_index_build_options(
         &self,
         relation_oid: u32,

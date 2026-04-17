@@ -854,6 +854,18 @@ fn parse_alter_table_constraint_statements() {
         })
     );
 
+    let stmt =
+        parse_statement("alter table items rename constraint items_id_check to items_id_guard")
+            .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableRenameConstraint(AlterTableRenameConstraintStatement {
+            table_name: "items".into(),
+            constraint_name: "items_id_check".into(),
+            new_constraint_name: "items_id_guard".into(),
+        })
+    );
+
     let stmt = parse_statement("alter table items validate constraint items_id_check").unwrap();
     assert_eq!(
         stmt,

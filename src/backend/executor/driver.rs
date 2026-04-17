@@ -169,6 +169,7 @@ fn execute_statement_with_source(
         })),
         Statement::AlterTableAddConstraint(_)
         | Statement::AlterTableDropConstraint(_)
+        | Statement::AlterTableRenameConstraint(_)
         | Statement::AlterTableSetNotNull(_)
         | Statement::AlterTableDropNotNull(_)
         | Statement::AlterTableValidateConstraint(_) => {

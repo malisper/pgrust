@@ -234,6 +234,7 @@ pub enum Statement {
     AlterTableAddConstraint(AlterTableAddConstraintStatement),
     AlterTableDropColumn(AlterTableDropColumnStatement),
     AlterTableDropConstraint(AlterTableDropConstraintStatement),
+    AlterTableRenameConstraint(AlterTableRenameConstraintStatement),
     AlterTableAlterColumnType(AlterTableAlterColumnTypeStatement),
     AlterTableOwner(AlterRelationOwnerStatement),
     AlterTableRenameColumn(AlterTableRenameColumnStatement),
@@ -870,6 +871,13 @@ pub struct AlterTableDropColumnStatement {
 pub struct AlterTableDropConstraintStatement {
     pub table_name: String,
     pub constraint_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableRenameConstraintStatement {
+    pub table_name: String,
+    pub constraint_name: String,
+    pub new_constraint_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

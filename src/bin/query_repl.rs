@@ -469,6 +469,7 @@ fn run_statement(
         | Statement::AlterTableAddColumn(_)
         | Statement::AlterTableAddConstraint(_)
         | Statement::AlterTableDropConstraint(_)
+        | Statement::AlterTableRenameConstraint(_)
         | Statement::AlterTableSetNotNull(_)
         | Statement::AlterTableDropNotNull(_)
         | Statement::AlterTableValidateConstraint(_) => Ok(StatementResult::AffectedRows(0)),
