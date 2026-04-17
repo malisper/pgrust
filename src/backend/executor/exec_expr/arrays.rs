@@ -58,6 +58,8 @@ pub(super) fn eval_array_subscript(
         .map(|subscript| {
             Ok(ResolvedArraySubscript {
                 is_slice: subscript.is_slice,
+                lower_provided: subscript.lower.is_some(),
+                upper_provided: subscript.upper.is_some(),
                 lower: subscript
                     .lower
                     .as_ref()
@@ -84,6 +86,8 @@ pub(super) fn eval_array_subscript_plpgsql(
         .map(|subscript| {
             Ok(ResolvedArraySubscript {
                 is_slice: subscript.is_slice,
+                lower_provided: subscript.lower.is_some(),
+                upper_provided: subscript.upper.is_some(),
                 lower: subscript
                     .lower
                     .as_ref()
@@ -103,6 +107,8 @@ pub(super) fn eval_array_subscript_plpgsql(
 #[derive(Clone)]
 struct ResolvedArraySubscript {
     is_slice: bool,
+    lower_provided: bool,
+    upper_provided: bool,
     lower: Option<Value>,
     upper: Option<Value>,
 }
@@ -111,6 +117,17 @@ fn apply_array_subscripts(
     value: Value,
     subscripts: &[ResolvedArraySubscript],
 ) -> Result<Value, ExecError> {
+    if subscripts.len() > 6 {
+        return Err(ExecError::DetailedError {
+            message: format!(
+                "number of array dimensions ({}) exceeds the maximum allowed (6)",
+                subscripts.len()
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "54000",
+        });
+    }
     if matches!(value, Value::Null) {
         return Ok(Value::Null);
     }
@@ -145,10 +162,22 @@ fn apply_array_subscripts_to_value(
             if any_slice {
                 let (lower, upper) = if subscript.is_slice {
                     (
-                        array_slice_bound_index(subscript.lower.as_ref())?
-                            .unwrap_or(dim.lower_bound),
-                        array_slice_bound_index(subscript.upper.as_ref())?
-                            .unwrap_or(dim.lower_bound + dim.length as i32 - 1),
+                        match array_slice_bound_index(
+                            subscript.lower.as_ref(),
+                            subscript.lower_provided,
+                        )? {
+                            SliceBound::Omitted => dim.lower_bound,
+                            SliceBound::Null => return Ok(Value::Null),
+                            SliceBound::Value(value) => value,
+                        },
+                        match array_slice_bound_index(
+                            subscript.upper.as_ref(),
+                            subscript.upper_provided,
+                        )? {
+                            SliceBound::Omitted => dim.lower_bound + dim.length as i32 - 1,
+                            SliceBound::Null => return Ok(Value::Null),
+                            SliceBound::Value(value) => value,
+                        },
                     )
                 } else {
                     let Some(index) = array_subscript_index(subscript.lower.as_ref())? else {
@@ -167,8 +196,14 @@ fn apply_array_subscripts_to_value(
                     lower: clamped_lower,
                     upper: clamped_upper,
                 });
+                let result_lower_bound =
+                    if subscript.is_slice && (subscript.lower_provided ^ subscript.upper_provided) {
+                        1
+                    } else {
+                        clamped_lower
+                    };
                 result_dimensions.push(ArrayDimension {
-                    lower_bound: clamped_lower,
+                    lower_bound: result_lower_bound,
                     length,
                 });
             } else {
@@ -206,6 +241,12 @@ fn apply_array_subscripts_to_value(
 enum ArraySelector {
     Index(i32),
     Slice { lower: i32, upper: i32 },
+}
+
+enum SliceBound {
+    Omitted,
+    Null,
+    Value(i32),
 }
 
 fn coords_match_selectors(coords: &[i32], selectors: &[ArraySelector]) -> bool {
@@ -865,14 +906,16 @@ fn array_subscript_index(value: Option<&Value>) -> Result<Option<i32>, ExecError
     }
 }
 
-fn array_slice_bound_index(value: Option<&Value>) -> Result<Option<i32>, ExecError> {
+fn array_slice_bound_index(value: Option<&Value>, provided: bool) -> Result<SliceBound, ExecError> {
+    if !provided {
+        return Ok(SliceBound::Omitted);
+    }
     match value {
-        None => Ok(None),
-        Some(Value::Null) => Ok(None),
-        Some(Value::Int16(v)) => Ok(Some(*v as i32)),
-        Some(Value::Int32(v)) => Ok(Some(*v)),
+        None | Some(Value::Null) => Ok(SliceBound::Null),
+        Some(Value::Int16(v)) => Ok(SliceBound::Value(*v as i32)),
+        Some(Value::Int32(v)) => Ok(SliceBound::Value(*v)),
         Some(Value::Int64(v)) => i32::try_from(*v)
-            .map(Some)
+            .map(SliceBound::Value)
             .map_err(|_| ExecError::Int4OutOfRange),
         Some(other) => Err(ExecError::TypeMismatch {
             op: "array subscript",
