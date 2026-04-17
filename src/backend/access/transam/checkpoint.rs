@@ -376,6 +376,14 @@ impl Checkpointer {
                 .map_err(|err| err.to_string())?;
         }
 
+        if let Some(wal) = self.wal.as_ref() {
+            wal.recycle_segments(
+                redo_lsn,
+                self.config.min_wal_size_kb.saturating_mul(1024),
+            )
+            .map_err(|err| err.to_string())?;
+        }
+
         self.stats.write().record_completed_checkpoint(
             match trigger {
                 CheckpointTrigger::Timed => CheckpointCompletionKind::Timed,

@@ -8,7 +8,7 @@ use parking_lot::RwLock;
 use crate::backend::access::transam::checkpoint::{CheckpointCommitBarrier, Checkpointer};
 use crate::backend::access::transam::{ControlFileState, ControlFileStore};
 use crate::backend::access::transam::xact::TransactionManager;
-use crate::backend::access::transam::xlog::{WalBgWriter, WalWriter};
+use crate::backend::access::transam::xlog::{WalBgWriter, WalWriter, has_wal_segments};
 use crate::backend::catalog::{CatalogError, CatalogStore};
 use crate::backend::executor::ExecError;
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
@@ -99,13 +99,16 @@ impl Cluster {
     ) -> Result<Self, DatabaseError> {
         std::fs::create_dir_all(&base_dir)
             .map_err(|e| DatabaseError::Catalog(CatalogError::Io(e.to_string())))?;
-        let base_dir_was_empty = base_dir_is_empty(&base_dir)?;
+        let base_dir_has_cluster_contents = base_dir_has_cluster_contents(&base_dir)?;
 
-        let checkpoint_config = Arc::new(CheckpointConfig::default());
+        let checkpoint_config = Arc::new(
+            CheckpointConfig::load_from_data_dir(&base_dir)
+                .map_err(|message| DatabaseError::Catalog(CatalogError::Io(message)))?,
+        );
         let mut txns = TransactionManager::new_durable(&base_dir)?;
         let control_file = if ControlFileStore::path(&base_dir).exists() {
             Arc::new(ControlFileStore::load(&base_dir)?)
-        } else if base_dir_was_empty {
+        } else if !base_dir_has_cluster_contents {
             Arc::new(ControlFileStore::bootstrap(
                 &base_dir,
                 txns.next_xid(),
@@ -120,13 +123,20 @@ impl Cluster {
             ));
         };
         let control_snapshot = control_file.snapshot();
+        if wal_dir_is_legacy(&base_dir)? {
+            return Err(DatabaseError::Control(
+                crate::backend::access::transam::ControlFileError::Unsupported(
+                    "legacy pg_wal/wal.log clusters are not supported".into(),
+                ),
+            ));
+        }
 
         let shared_catalog = CatalogStore::load_shared(&base_dir)?;
         ensure_bootstrap_databases(&base_dir, &shared_catalog)?;
 
         let wal_dir = base_dir.join("pg_wal");
         let needs_recovery = control_snapshot.state != ControlFileState::ShutDown;
-        if needs_recovery && wal_dir.join("wal.log").exists() {
+        if needs_recovery && has_wal_segments(&wal_dir).map_err(DatabaseError::Wal)? {
             control_file.update(|control| {
                 control.state = ControlFileState::InCrashRecovery;
                 control.next_xid = txns.next_xid();
@@ -138,10 +148,11 @@ impl Cluster {
                 let local_store = CatalogStore::load_database(&base_dir, row.oid)?;
                 create_relfiles_for_store_with_smg(&mut recovery_smgr, &local_store)?;
             }
-            let stats = crate::backend::access::transam::xlog::replay::perform_wal_recovery(
+            let stats = crate::backend::access::transam::xlog::replay::perform_wal_recovery_from(
                 &wal_dir,
                 &mut recovery_smgr,
                 &mut txns,
+                control_snapshot.redo_lsn,
             )
             .map_err(DatabaseError::Wal)?;
             if stats.records_replayed > 0 {
@@ -347,12 +358,25 @@ impl Cluster {
     }
 }
 
-fn base_dir_is_empty(base_dir: &Path) -> Result<bool, DatabaseError> {
-    let mut entries =
-        std::fs::read_dir(base_dir).map_err(|e| DatabaseError::Catalog(CatalogError::Io(e.to_string())))?;
-    Ok(entries.next().transpose().map_err(|e| {
-        DatabaseError::Catalog(CatalogError::Io(e.to_string()))
-    })?.is_none())
+fn base_dir_has_cluster_contents(base_dir: &Path) -> Result<bool, DatabaseError> {
+    let entries = std::fs::read_dir(base_dir)
+        .map_err(|e| DatabaseError::Catalog(CatalogError::Io(e.to_string())))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| DatabaseError::Catalog(CatalogError::Io(e.to_string())))?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            return Ok(true);
+        };
+        if matches!(name, "postgresql.conf" | "postgresql.auto.conf") {
+            continue;
+        }
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+fn wal_dir_is_legacy(base_dir: &Path) -> Result<bool, DatabaseError> {
+    Ok(base_dir.join("pg_wal").join("wal.log").exists())
 }
 
 fn ensure_bootstrap_databases(

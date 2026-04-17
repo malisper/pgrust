@@ -4,14 +4,15 @@
 //! generic record assembly and decoding with block references, then
 //! resource-manager-specific replay during recovery.
 //!
-//! The surrounding storage remains intentionally simpler than PostgreSQL:
-//! one append-only `wal.log`, no segment rotation, and no control file.
+//! The surrounding storage remains intentionally smaller than PostgreSQL's
+//! full WAL manager, but durable WAL now uses PostgreSQL-style segment
+//! files under `pg_wal/` so checkpoints can retain and recycle WAL sanely.
 
 use parking_lot::{Condvar, Mutex};
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -42,9 +43,11 @@ const WAL_RECORD_ALIGN: u64 = 8;
 const WAL_TIMELINE_ID: u32 = 1;
 const WAL_SYSID: u64 = 0;
 pub const WAL_SEG_SIZE_BYTES: u32 = 16 * 1024 * 1024;
+const XLOG_FNAME_LEN: usize = 24;
 
 pub type Lsn = u64;
 pub const INVALID_LSN: Lsn = 0;
+type WalSegNo = u64;
 
 pub const XLOG_FPI: u8 = 0;
 pub const XLOG_HEAP_INSERT: u8 = 1;
@@ -83,8 +86,53 @@ fn page_start(lsn: u64) -> u64 {
     (lsn / WAL_PAGE_SIZE as u64) * WAL_PAGE_SIZE as u64
 }
 
+fn wal_segment_no(lsn: Lsn) -> WalSegNo {
+    lsn / WAL_SEG_SIZE_BYTES as u64
+}
+
+fn wal_segment_offset(lsn: Lsn) -> u64 {
+    lsn % WAL_SEG_SIZE_BYTES as u64
+}
+
+fn wal_segment_contains(lsn: Lsn, segno: WalSegNo) -> bool {
+    wal_segment_no(lsn) == segno
+}
+
+fn wal_segment_start(segno: WalSegNo) -> Lsn {
+    segno * WAL_SEG_SIZE_BYTES as u64
+}
+
+fn wal_segment_file_name(segno: WalSegNo) -> String {
+    let segs_per_logid = 0x1_0000_0000u64 / WAL_SEG_SIZE_BYTES as u64;
+    let log = segno / segs_per_logid;
+    let seg = segno % segs_per_logid;
+    format!("{WAL_TIMELINE_ID:08X}{log:08X}{seg:08X}")
+}
+
+fn parse_wal_segment_file_name(name: &str) -> Option<WalSegNo> {
+    if name.len() != XLOG_FNAME_LEN || !name.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let tli = u32::from_str_radix(&name[0..8], 16).ok()?;
+    if tli != WAL_TIMELINE_ID {
+        return None;
+    }
+    let log = u32::from_str_radix(&name[8..16], 16).ok()? as u64;
+    let seg = u32::from_str_radix(&name[16..24], 16).ok()? as u64;
+    let segs_per_logid = 0x1_0000_0000u64 / WAL_SEG_SIZE_BYTES as u64;
+    Some(log * segs_per_logid + seg)
+}
+
+fn wal_segment_path(wal_dir: &Path, segno: WalSegNo) -> PathBuf {
+    wal_dir.join(wal_segment_file_name(segno))
+}
+
+pub(crate) fn wal_segment_path_for_lsn(wal_dir: &Path, lsn: Lsn) -> PathBuf {
+    wal_segment_path(wal_dir, wal_segment_no(lsn))
+}
+
 fn page_header_size(page_start_lsn: u64) -> usize {
-    if page_start_lsn == 0 {
+    if wal_segment_offset(page_start_lsn) == 0 {
         XLOG_LONG_PHD
     } else {
         XLOG_SHORT_PHD
@@ -95,7 +143,7 @@ fn encode_page_header(page_start_lsn: u64, info: u16, rem_len: u32) -> Vec<u8> {
     let size = page_header_size(page_start_lsn);
     let mut raw = vec![0u8; size];
     let mut page_info = info;
-    if page_start_lsn == 0 {
+    if wal_segment_offset(page_start_lsn) == 0 {
         page_info |= XLP_LONG_HEADER;
     }
     raw[0..2].copy_from_slice(&XLOG_PAGE_MAGIC.to_le_bytes());
@@ -103,12 +151,66 @@ fn encode_page_header(page_start_lsn: u64, info: u16, rem_len: u32) -> Vec<u8> {
     raw[4..8].copy_from_slice(&WAL_TIMELINE_ID.to_le_bytes());
     raw[8..16].copy_from_slice(&page_start_lsn.to_le_bytes());
     raw[16..20].copy_from_slice(&rem_len.to_le_bytes());
-    if page_start_lsn == 0 {
+    if wal_segment_offset(page_start_lsn) == 0 {
         raw[24..32].copy_from_slice(&WAL_SYSID.to_le_bytes());
         raw[32..36].copy_from_slice(&WAL_SEG_SIZE_BYTES.to_le_bytes());
         raw[36..40].copy_from_slice(&(WAL_PAGE_SIZE as u32).to_le_bytes());
     }
     raw
+}
+
+#[derive(Clone, Copy)]
+struct WalSegmentMeta {
+    segno: WalSegNo,
+    size: u64,
+}
+
+fn list_wal_segments(wal_dir: &Path) -> Result<Vec<WalSegmentMeta>, WalError> {
+    if !wal_dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut segments = Vec::new();
+    for entry in std::fs::read_dir(wal_dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(segno) = parse_wal_segment_file_name(name) else {
+            continue;
+        };
+        segments.push(WalSegmentMeta {
+            segno,
+            size: entry.metadata()?.len(),
+        });
+    }
+    segments.sort_by_key(|segment| segment.segno);
+    Ok(segments)
+}
+
+pub(crate) fn has_wal_segments(wal_dir: &Path) -> Result<bool, WalError> {
+    Ok(!list_wal_segments(wal_dir)?.is_empty())
+}
+
+fn truncate_wal_to_lsn(wal_dir: &Path, target_lsn: Lsn) -> Result<(), WalError> {
+    for segment in list_wal_segments(wal_dir)? {
+        let segment_path = wal_segment_path(wal_dir, segment.segno);
+        let segment_start = wal_segment_start(segment.segno);
+        let segment_end = segment_start + WAL_SEG_SIZE_BYTES as u64;
+        if target_lsn <= segment_start {
+            let _ = std::fs::remove_file(&segment_path);
+            continue;
+        }
+        if target_lsn < segment_end {
+            let offset = wal_segment_offset(target_lsn);
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&segment_path)?;
+            file.set_len(offset)?;
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -169,39 +271,96 @@ pub enum WalRecord {
     },
 }
 
-pub struct WalReader {
+struct ReadSegmentState {
+    segno: WalSegNo,
+    size: u64,
     file: std::io::BufReader<File>,
+}
+
+pub struct WalReader {
+    wal_dir: PathBuf,
+    segment: Option<ReadSegmentState>,
     position: u64,
-    file_size: u64,
+    end_lsn: u64,
 }
 
 impl WalReader {
     pub fn open(wal_dir: &Path) -> Result<Self, WalError> {
-        let path = wal_dir.join("wal.log");
-        let file = File::open(&path).map_err(WalError::Io)?;
-        let file_size = file.metadata().map_err(WalError::Io)?.len();
+        let segments = list_wal_segments(wal_dir)?;
+        let start_lsn = segments
+            .first()
+            .map(|segment| wal_segment_start(segment.segno))
+            .unwrap_or(0);
+        Self::open_from_lsn(wal_dir, start_lsn)
+    }
+
+    pub fn open_from_lsn(wal_dir: &Path, start_lsn: Lsn) -> Result<Self, WalError> {
+        let segments = list_wal_segments(wal_dir)?;
+        if segments.is_empty() && start_lsn > 0 {
+            return Err(WalError::Corrupt(format!(
+                "missing WAL segments for redo LSN {start_lsn}"
+            )));
+        }
+        let end_lsn = segments
+            .last()
+            .map(|segment| wal_segment_start(segment.segno) + segment.size)
+            .unwrap_or(0);
+        if start_lsn > 0
+            && start_lsn < end_lsn
+            && !segments
+                .iter()
+                .any(|segment| wal_segment_contains(start_lsn, segment.segno))
+        {
+            return Err(WalError::Corrupt(format!(
+                "missing WAL segment containing LSN {start_lsn}"
+            )));
+        }
         Ok(Self {
-            file: std::io::BufReader::new(file),
-            position: 0,
-            file_size,
+            wal_dir: wal_dir.to_path_buf(),
+            segment: None,
+            position: start_lsn,
+            end_lsn,
         })
     }
 
+    fn open_segment_for_lsn(&mut self, lsn: Lsn) -> Result<Option<&mut ReadSegmentState>, WalError> {
+        let segno = wal_segment_no(lsn);
+        if self.segment.as_ref().map(|segment| segment.segno) == Some(segno) {
+            return Ok(self.segment.as_mut());
+        }
+        let path = wal_segment_path(&self.wal_dir, segno);
+        let file = match File::open(&path) {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                self.segment = None;
+                return Ok(None);
+            }
+            Err(err) => return Err(WalError::Io(err)),
+        };
+        let size = file.metadata().map_err(WalError::Io)?.len();
+        self.segment = Some(ReadSegmentState {
+            segno,
+            size,
+            file: std::io::BufReader::new(file),
+        });
+        Ok(self.segment.as_mut())
+    }
+
     fn read_page_header(&mut self, page_start_lsn: u64) -> Result<Option<WalPageHeader>, WalError> {
-        if page_start_lsn >= self.file_size {
+        if page_start_lsn >= self.end_lsn {
             return Ok(None);
         }
-        let header_len = if page_start_lsn == 0 {
-            XLOG_LONG_PHD
-        } else {
-            XLOG_SHORT_PHD
+        let header_len = page_header_size(page_start_lsn);
+        let seg_offset = wal_segment_offset(page_start_lsn);
+        let Some(segment) = self.open_segment_for_lsn(page_start_lsn)? else {
+            return Ok(None);
         };
-        if page_start_lsn + header_len as u64 > self.file_size {
+        if seg_offset + header_len as u64 > segment.size {
             return Ok(None);
         }
         let mut raw = vec![0u8; header_len];
-        self.file.seek(SeekFrom::Start(page_start_lsn))?;
-        if self.file.read_exact(&mut raw).is_err() {
+        segment.file.seek(SeekFrom::Start(seg_offset))?;
+        if segment.file.read_exact(&mut raw).is_err() {
             return Ok(None);
         }
         let magic = u16::from_le_bytes(raw[0..2].try_into().unwrap());
@@ -232,7 +391,7 @@ impl WalReader {
 
     fn next_record_start(&mut self, mut lsn: u64) -> Result<Option<u64>, WalError> {
         loop {
-            if lsn >= self.file_size {
+            if lsn >= self.end_lsn {
                 return Ok(None);
             }
             let header = match self.read_page_header(page_start(lsn))? {
@@ -285,8 +444,12 @@ impl WalReader {
             let available = (page_end - current) as usize;
             let chunk_len = available.min(remaining);
             let mut chunk = vec![0u8; chunk_len];
-            self.file.seek(SeekFrom::Start(current))?;
-            self.file.read_exact(&mut chunk)?;
+            let seg_offset = wal_segment_offset(current);
+            let segment = self
+                .open_segment_for_lsn(current)?
+                .ok_or_else(|| WalError::Corrupt("missing WAL segment for record payload".into()))?;
+            segment.file.seek(SeekFrom::Start(seg_offset))?;
+            segment.file.read_exact(&mut chunk)?;
             out.extend_from_slice(&chunk);
             current += chunk_len as u64;
             remaining -= chunk_len;
@@ -563,11 +726,11 @@ impl WalReader {
             }
             Ok(None) => Ok(None),
             Err(WalError::Corrupt(_)) => {
-                self.position = self.file_size;
+                self.position = self.end_lsn;
                 Ok(None)
             }
             Err(WalError::Io(err)) if err.kind() == std::io::ErrorKind::UnexpectedEof => {
-                self.position = self.file_size;
+                self.position = self.end_lsn;
                 Ok(None)
             }
             Err(err) => Err(err),
@@ -667,29 +830,30 @@ impl WalReader {
 }
 
 fn scan_existing_wal_state(wal_dir: &Path) -> Result<(u64, u64), WalError> {
-    let path = wal_dir.join("wal.log");
-    if !path.exists() {
+    let segments = list_wal_segments(wal_dir)?;
+    if segments.is_empty() {
         return Ok((0, INVALID_LSN));
     }
-    if std::fs::metadata(&path)?.len() == 0 {
-        return Ok((0, INVALID_LSN));
-    }
-    let mut reader = WalReader::open(wal_dir)?;
+    let mut reader = WalReader::open_from_lsn(wal_dir, wal_segment_start(segments[0].segno))?;
     let mut last_start = INVALID_LSN;
     let mut last_end = 0;
     while let Some(record) = reader.next_decoded_record()? {
         last_start = record.start_lsn;
         last_end = record.end_lsn;
     }
+    truncate_wal_to_lsn(wal_dir, last_end)?;
     Ok((last_end, last_start))
 }
 
 struct WalWriterInner {
-    file: BufWriter<File>,
+    wal_dir: PathBuf,
+    current_segno: Option<WalSegNo>,
+    file: Option<BufWriter<File>>,
     insert_lsn: Lsn,
     written_lsn: Lsn,
     flushed_lsn: Lsn,
     last_record_ptr: Lsn,
+    dirty_segments: BTreeSet<WalSegNo>,
     pages_with_image: HashSet<BufferTag>,
 }
 
@@ -701,35 +865,93 @@ pub struct WalWriter {
 impl Drop for WalWriter {
     fn drop(&mut self) {
         let mut guard = self.inner.lock();
-        let _ = guard.file.flush();
-        let _ = crate::backend::storage::fsync_file(guard.file.get_ref());
+        let _ = Self::flush_inner(&mut guard);
     }
 }
 
 impl WalWriter {
     pub fn new(wal_dir: &Path) -> Result<Self, WalError> {
         std::fs::create_dir_all(wal_dir)?;
-        let path = wal_dir.join("wal.log");
         let (size, last_record_ptr) = scan_existing_wal_state(wal_dir)?;
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .open(&path)?;
-        let mut file = file;
-        file.set_len(size)?;
-        file.seek(SeekFrom::Start(size))?;
         Ok(Self {
             inner: Mutex::new(WalWriterInner {
-                file: BufWriter::with_capacity(WAL_BUF_SIZE, file),
+                wal_dir: wal_dir.to_path_buf(),
+                current_segno: None,
+                file: None,
                 insert_lsn: size,
                 written_lsn: size,
                 flushed_lsn: size,
                 last_record_ptr,
+                dirty_segments: BTreeSet::new(),
                 pages_with_image: HashSet::new(),
             }),
             bg_wake: Condvar::new(),
         })
+    }
+
+    fn open_segment_for_lsn(
+        guard: &mut parking_lot::MutexGuard<'_, WalWriterInner>,
+        lsn: Lsn,
+    ) -> Result<(), WalError> {
+        let segno = wal_segment_no(lsn);
+        if guard.current_segno == Some(segno) && guard.file.is_some() {
+            return Ok(());
+        }
+
+        if let Some(mut file) = guard.file.take() {
+            file.flush()?;
+            guard.written_lsn = guard.insert_lsn;
+        }
+
+        let path = wal_segment_path(&guard.wal_dir, segno);
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&path)?;
+        let offset = wal_segment_offset(lsn);
+        file.set_len(file.metadata()?.len().max(offset))?;
+        let mut writer = BufWriter::with_capacity(WAL_BUF_SIZE, file);
+        writer.seek(SeekFrom::Start(offset))?;
+        guard.current_segno = Some(segno);
+        guard.file = Some(writer);
+        Ok(())
+    }
+
+    fn write_bytes(
+        guard: &mut parking_lot::MutexGuard<'_, WalWriterInner>,
+        bytes: &[u8],
+    ) -> Result<(), WalError> {
+        let current_lsn = guard.insert_lsn;
+        Self::open_segment_for_lsn(guard, current_lsn)?;
+        guard
+            .file
+            .as_mut()
+            .expect("open WAL segment")
+            .write_all(bytes)?;
+        guard.dirty_segments.insert(wal_segment_no(current_lsn));
+        guard.insert_lsn += bytes.len() as u64;
+        Ok(())
+    }
+
+    fn fsync_segment(
+        guard: &mut parking_lot::MutexGuard<'_, WalWriterInner>,
+        segno: WalSegNo,
+    ) -> Result<(), WalError> {
+        if guard.current_segno == Some(segno) {
+            if let Some(file) = guard.file.as_mut() {
+                file.flush()?;
+                crate::backend::storage::fsync_file(file.get_ref())?;
+            }
+            return Ok(());
+        }
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(wal_segment_path(&guard.wal_dir, segno))?;
+        crate::backend::storage::fsync_file(&file)?;
+        Ok(())
     }
 
     pub fn write_record(
@@ -964,8 +1186,7 @@ impl WalWriter {
             let current_page = page_start(guard.insert_lsn);
             if guard.insert_lsn == current_page {
                 let header = encode_page_header(current_page, 0, 0);
-                guard.file.write_all(&header)?;
-                guard.insert_lsn += header.len() as u64;
+                Self::write_bytes(guard, &header)?;
                 continue;
             }
 
@@ -974,16 +1195,14 @@ impl WalWriter {
             if aligned >= current_page_end {
                 let padding_len = (current_page_end - guard.insert_lsn) as usize;
                 if padding_len > 0 {
-                    guard.file.write_all(&vec![0u8; padding_len])?;
+                    Self::write_bytes(guard, &vec![0u8; padding_len])?;
                 }
-                guard.insert_lsn = current_page_end;
                 continue;
             }
 
             let padding_len = (aligned - guard.insert_lsn) as usize;
             if padding_len > 0 {
-                guard.file.write_all(&vec![0u8; padding_len])?;
-                guard.insert_lsn = aligned;
+                Self::write_bytes(guard, &vec![0u8; padding_len])?;
             }
             return Ok(guard.insert_lsn);
         }
@@ -999,8 +1218,7 @@ impl WalWriter {
             let current_page_end = current_page + WAL_PAGE_SIZE as u64;
             let available = (current_page_end - guard.insert_lsn) as usize;
             let chunk_len = available.min(raw.len() - written);
-            guard.file.write_all(&raw[written..written + chunk_len])?;
-            guard.insert_lsn += chunk_len as u64;
+            Self::write_bytes(guard, &raw[written..written + chunk_len])?;
             written += chunk_len;
 
             if written < raw.len() {
@@ -1010,8 +1228,7 @@ impl WalWriter {
                     XLP_FIRST_IS_CONTRECORD,
                     (raw.len() - written) as u32,
                 );
-                guard.file.write_all(&continuation)?;
-                guard.insert_lsn += continuation.len() as u64;
+                Self::write_bytes(guard, &continuation)?;
             }
         }
         Ok(guard.insert_lsn)
@@ -1035,10 +1252,15 @@ impl WalWriter {
     ) -> Result<Lsn, WalError> {
         if guard.flushed_lsn < guard.insert_lsn {
             if guard.written_lsn < guard.insert_lsn {
-                guard.file.flush()?;
+                if let Some(file) = guard.file.as_mut() {
+                    file.flush()?;
+                }
                 guard.written_lsn = guard.insert_lsn;
             }
-            crate::backend::storage::fsync_file(guard.file.get_ref())?;
+            let dirty_segments = std::mem::take(&mut guard.dirty_segments);
+            for segno in dirty_segments {
+                Self::fsync_segment(guard, segno)?;
+            }
             guard.flushed_lsn = guard.insert_lsn;
         }
         Ok(guard.flushed_lsn)
@@ -1047,7 +1269,9 @@ impl WalWriter {
     pub fn bg_flush(&self) -> Result<Lsn, WalError> {
         let mut guard = self.inner.lock();
         if guard.written_lsn < guard.insert_lsn {
-            guard.file.flush()?;
+            if let Some(file) = guard.file.as_mut() {
+                file.flush()?;
+            }
             guard.written_lsn = guard.insert_lsn;
         }
         Ok(guard.written_lsn)
@@ -1077,6 +1301,35 @@ impl WalWriter {
 
     pub fn clear_page_image_tracking(&self) {
         self.inner.lock().pages_with_image.clear();
+    }
+
+    pub fn recycle_segments(&self, redo_lsn: Lsn, min_keep_bytes: u64) -> Result<(), WalError> {
+        let mut guard = self.inner.lock();
+        let latest_segno = if guard.insert_lsn == 0 {
+            return Ok(());
+        } else if wal_segment_offset(guard.insert_lsn) == 0 {
+            wal_segment_no(guard.insert_lsn.saturating_sub(1))
+        } else {
+            wal_segment_no(guard.insert_lsn)
+        };
+        let min_keep_segments = ((min_keep_bytes.saturating_add(WAL_SEG_SIZE_BYTES as u64 - 1))
+            / WAL_SEG_SIZE_BYTES as u64)
+            .max(1);
+        let keep_from_size = latest_segno.saturating_add(1).saturating_sub(min_keep_segments);
+        let keep_from_segno = keep_from_size.min(wal_segment_no(redo_lsn));
+
+        for segment in list_wal_segments(&guard.wal_dir)? {
+            if segment.segno >= keep_from_segno {
+                continue;
+            }
+            guard.dirty_segments.remove(&segment.segno);
+            if guard.current_segno == Some(segment.segno) {
+                guard.file.take();
+                guard.current_segno = None;
+            }
+            let _ = std::fs::remove_file(wal_segment_path(&guard.wal_dir, segment.segno));
+        }
+        Ok(())
     }
 }
 
@@ -1295,5 +1548,55 @@ mod tests {
                 shutdown: true
             }
         ));
+    }
+
+    #[test]
+    fn large_record_spans_multiple_segment_files() {
+        let dir = test_dir("segment_rollover");
+        let wal = WalWriter::new(&dir).unwrap();
+        let payload = vec![7u8; WAL_SEG_SIZE_BYTES as usize + WAL_PAGE_SIZE];
+
+        xlog_begin_insert();
+        xlog_register_data(&payload);
+        let end_lsn = xlog_insert(&wal, 11, RM_XACT_ID, XLOG_XACT_COMMIT).unwrap();
+        wal.flush().unwrap();
+
+        let segments = list_wal_segments(&dir).unwrap();
+        assert!(segments.len() >= 2, "expected multiple WAL segment files");
+        assert!(end_lsn > WAL_SEG_SIZE_BYTES as u64);
+
+        let mut reader = WalReader::open(&dir).unwrap();
+        let record = reader.next_decoded_record().unwrap().unwrap();
+        assert_eq!(record.xid, 11);
+        assert_eq!(record.main_data.len(), payload.len());
+        assert_eq!(record.main_data[0], 7);
+        assert_eq!(record.main_data[payload.len() - 1], 7);
+    }
+
+    #[test]
+    fn recycle_segments_keeps_redo_segment_and_minimum_size() {
+        let dir = test_dir("segment_recycle");
+        let wal = WalWriter::new(&dir).unwrap();
+        let first_payload = vec![1u8; WAL_SEG_SIZE_BYTES as usize + WAL_SEG_SIZE_BYTES as usize / 2];
+        let second_payload = vec![2u8; WAL_SEG_SIZE_BYTES as usize];
+
+        xlog_begin_insert();
+        xlog_register_data(&first_payload);
+        xlog_insert(&wal, 21, RM_XACT_ID, XLOG_XACT_COMMIT).unwrap();
+        xlog_begin_insert();
+        xlog_register_data(&second_payload);
+        xlog_insert(&wal, 22, RM_XACT_ID, XLOG_XACT_COMMIT).unwrap();
+        wal.flush().unwrap();
+
+        assert!(list_wal_segments(&dir).unwrap().len() >= 3);
+        wal.recycle_segments(WAL_SEG_SIZE_BYTES as u64, WAL_SEG_SIZE_BYTES as u64)
+            .unwrap();
+
+        let remaining: Vec<u64> = list_wal_segments(&dir)
+            .unwrap()
+            .into_iter()
+            .map(|segment| segment.segno)
+            .collect();
+        assert_eq!(remaining, vec![1, 2]);
     }
 }

@@ -2,7 +2,11 @@ use crate::backend::utils::time::datetime::current_postgres_timestamp_usecs;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::datetime::TimestampTzADT;
 use crate::include::nodes::primnodes::BuiltinScalarFunction;
+use std::fs;
+use std::path::Path;
 use std::time::Duration;
+
+use crate::backend::utils::misc::guc::normalize_guc_name;
 
 const KB_PER_MB: u64 = 1024;
 const KB_PER_GB: u64 = 1024 * 1024;
@@ -33,6 +37,13 @@ impl Default for CheckpointConfig {
 }
 
 impl CheckpointConfig {
+    pub fn load_from_data_dir(base_dir: &Path) -> Result<Self, String> {
+        let mut config = Self::default();
+        apply_checkpoint_config_file(&mut config, &base_dir.join("postgresql.conf"))?;
+        apply_checkpoint_config_file(&mut config, &base_dir.join("postgresql.auto.conf"))?;
+        Ok(config)
+    }
+
     pub fn value_for_show(&self, name: &str) -> Option<String> {
         match name {
             "checkpoint_timeout" => Some(format_duration(self.checkpoint_timeout)),
@@ -167,6 +178,146 @@ pub fn checkpoint_stats_value(
 
 pub fn default_checkpoint_stats_value(func: BuiltinScalarFunction) -> Option<Value> {
     checkpoint_stats_value(func, &CheckpointStatsSnapshot::default())
+}
+
+fn apply_checkpoint_config_file(config: &mut CheckpointConfig, path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let text = fs::read_to_string(path)
+        .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+    for (index, raw_line) in text.lines().enumerate() {
+        let line = strip_config_comment(raw_line).trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some((name, value)) = line.split_once('=') else {
+            continue;
+        };
+        let name = normalize_guc_name(name);
+        if !is_checkpoint_guc(&name) {
+            continue;
+        }
+        let value = unquote_config_value(value.trim());
+        apply_checkpoint_setting(config, &name, value).map_err(|message| {
+            format!("{}:{}: {message}", path.display(), index + 1)
+        })?;
+    }
+    Ok(())
+}
+
+fn strip_config_comment(line: &str) -> &str {
+    let mut in_single = false;
+    let mut in_double = false;
+    for (idx, ch) in line.char_indices() {
+        match ch {
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            '#' if !in_single && !in_double => return &line[..idx],
+            _ => {}
+        }
+    }
+    line
+}
+
+fn unquote_config_value(value: &str) -> &str {
+    let bytes = value.as_bytes();
+    if bytes.len() >= 2
+        && ((bytes[0] == b'\'' && bytes[bytes.len() - 1] == b'\'')
+            || (bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"'))
+    {
+        &value[1..value.len() - 1]
+    } else {
+        value
+    }
+}
+
+fn apply_checkpoint_setting(
+    config: &mut CheckpointConfig,
+    name: &str,
+    value: &str,
+) -> Result<(), String> {
+    match name {
+        "checkpoint_timeout" => {
+            config.checkpoint_timeout = parse_duration_setting(value)?;
+        }
+        "checkpoint_completion_target" => {
+            config.checkpoint_completion_target = value
+                .trim()
+                .parse::<f64>()
+                .map_err(|_| format!("invalid value for {name}: {value}"))?;
+        }
+        "checkpoint_warning" => {
+            config.checkpoint_warning = parse_duration_setting(value)?;
+        }
+        "max_wal_size" => {
+            config.max_wal_size_kb = parse_size_kb(value)?;
+        }
+        "min_wal_size" => {
+            config.min_wal_size_kb = parse_size_kb(value)?;
+        }
+        "fsync" => {
+            config.fsync = parse_bool_setting(value)?;
+        }
+        "full_page_writes" => {
+            config.full_page_writes = parse_bool_setting(value)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn parse_bool_setting(value: &str) -> Result<bool, String> {
+    match normalize_guc_name(value).as_str() {
+        "on" | "true" | "yes" | "1" => Ok(true),
+        "off" | "false" | "no" | "0" => Ok(false),
+        _ => Err(format!("invalid boolean value: {value}")),
+    }
+}
+
+fn parse_duration_setting(value: &str) -> Result<Duration, String> {
+    let normalized = normalize_guc_name(value);
+    let (amount, unit) = split_numeric_suffix(&normalized)?;
+    let amount = amount
+        .parse::<u64>()
+        .map_err(|_| format!("invalid duration value: {value}"))?;
+    let seconds = match unit {
+        "" | "s" => amount,
+        "ms" => 0,
+        "min" => amount.saturating_mul(60),
+        "h" => amount.saturating_mul(60 * 60),
+        "d" => amount.saturating_mul(60 * 60 * 24),
+        _ => return Err(format!("invalid duration unit in {value}")),
+    };
+    if unit == "ms" {
+        Ok(Duration::from_millis(amount))
+    } else {
+        Ok(Duration::from_secs(seconds))
+    }
+}
+
+fn parse_size_kb(value: &str) -> Result<u64, String> {
+    let normalized = normalize_guc_name(value);
+    let (amount, unit) = split_numeric_suffix(&normalized)?;
+    let amount = amount
+        .parse::<u64>()
+        .map_err(|_| format!("invalid size value: {value}"))?;
+    match unit {
+        "" | "kb" => Ok(amount),
+        "mb" => Ok(amount.saturating_mul(KB_PER_MB)),
+        "gb" => Ok(amount.saturating_mul(KB_PER_GB)),
+        _ => Err(format!("invalid size unit in {value}")),
+    }
+}
+
+fn split_numeric_suffix(value: &str) -> Result<(&str, &str), String> {
+    let idx = value
+        .find(|ch: char| !ch.is_ascii_digit())
+        .unwrap_or(value.len());
+    if idx == 0 {
+        return Err(format!("missing numeric value: {value}"));
+    }
+    Ok((&value[..idx], value[idx..].trim()))
 }
 
 fn format_bool(value: bool) -> String {
