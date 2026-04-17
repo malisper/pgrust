@@ -204,7 +204,9 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 ctes,
             ),
         },
-        SqlExpr::Cast(_, ty) => raw_type_name_hint(ty),
+        SqlExpr::Cast(_, ty) => {
+            resolve_raw_type_name(ty, catalog).unwrap_or_else(|_| raw_type_name_hint(ty))
+        }
         SqlExpr::FieldSelect { .. } => SqlType::new(SqlTypeKind::Text),
         SqlExpr::Eq(_, _)
         | SqlExpr::NotEq(_, _)

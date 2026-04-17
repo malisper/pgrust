@@ -103,6 +103,19 @@ fn pets_entry() -> CatalogEntry {
     )
 }
 
+fn jpop_entry() -> CatalogEntry {
+    test_catalog_entry(
+        15002,
+        RelationDesc {
+            columns: vec![
+                column_desc("a", SqlType::new(SqlTypeKind::Text), true),
+                column_desc("b", SqlType::new(SqlTypeKind::Int4), true),
+                column_desc("c", SqlType::new(SqlTypeKind::Timestamp), true),
+            ],
+        },
+    )
+}
+
 fn people_view_entry() -> CatalogEntry {
     CatalogEntry {
         rel: crate::RelFileLocator {
@@ -140,6 +153,12 @@ fn catalog() -> Catalog {
 fn catalog_with_pets() -> Catalog {
     let mut catalog = catalog();
     catalog.insert("pets", pets_entry());
+    catalog
+}
+
+fn catalog_with_jpop() -> Catalog {
+    let mut catalog = catalog();
+    catalog.insert("jpop", jpop_entry());
     catalog
 }
 
@@ -4382,6 +4401,44 @@ fn analyze_named_composite_returning_function_rejects_typed_column_definitions()
     assert_eq!(
         err,
         "a column definition list is redundant for a function returning a named composite type"
+    );
+}
+
+#[test]
+fn analyze_json_populate_record_from_uses_named_composite_argument_rowtype() {
+    let stmt = parse_select(
+        "select * from json_populate_record(null::jpop, '{\"a\":\"blurfl\",\"x\":43.2}') q",
+    )
+    .unwrap();
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog_with_jpop(), &[], None, &[], &[]).unwrap();
+
+    assert_eq!(
+        query_column_names_and_types(&query),
+        vec![
+            ("a".into(), SqlType::new(SqlTypeKind::Text)),
+            ("b".into(), SqlType::new(SqlTypeKind::Int4)),
+            ("c".into(), SqlType::new(SqlTypeKind::Timestamp)),
+        ]
+    );
+}
+
+#[test]
+fn analyze_json_populate_recordset_from_uses_named_composite_argument_rowtype() {
+    let stmt = parse_select(
+        "select * from json_populate_recordset(null::jpop, '[{\"a\":\"blurfl\"},{\"b\":3}]') q",
+    )
+    .unwrap();
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog_with_jpop(), &[], None, &[], &[]).unwrap();
+
+    assert_eq!(
+        query_column_names_and_types(&query),
+        vec![
+            ("a".into(), SqlType::new(SqlTypeKind::Text)),
+            ("b".into(), SqlType::new(SqlTypeKind::Int4)),
+            ("c".into(), SqlType::new(SqlTypeKind::Timestamp)),
+        ]
     );
 }
 
