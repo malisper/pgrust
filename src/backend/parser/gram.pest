@@ -43,7 +43,7 @@ order_by_item = { expr ~ (kw_asc | kw_desc)? ~ nulls_ordering? }
 nulls_ordering = { kw_nulls ~ (kw_first | kw_last) }
 limit_clause = { kw_limit ~ integer }
 offset_clause = { kw_offset ~ integer }
-locking_clause = { kw_for ~ (kw_update | kw_share) }
+locking_clause = { kw_for ~ ((kw_no ~ kw_key ~ kw_update) | (kw_key ~ kw_share) | kw_update | kw_share) }
 set_stmt = { kw_set ~ set_scope? ~ identifier ~ (("=" | kw_to) ~ set_value_list) }
 reset_stmt = { kw_reset ~ (kw_all | identifier) }
 set_session_authorization_stmt = { kw_set ~ kw_session ~ kw_authorization ~ identifier }

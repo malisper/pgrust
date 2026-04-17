@@ -63,6 +63,7 @@ pub enum ParseError {
     InvalidTableDefinition(String),
     NoSchemaSelectedForCreate,
     FeatureNotSupported(String),
+    FeatureNotSupportedMessage(String),
     InvalidRecursion(String),
     WrongObjectType {
         name: String,
@@ -175,6 +176,7 @@ impl fmt::Display for ParseError {
             ParseError::FeatureNotSupported(feature) => {
                 write!(f, "feature not supported: {feature}")
             }
+            ParseError::FeatureNotSupportedMessage(message) => write!(f, "{message}"),
             ParseError::InvalidRecursion(message) => {
                 write!(f, "{message}")
             }
@@ -561,8 +563,21 @@ pub struct SelectStatement {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SelectLockingClause {
+    ForNoKeyUpdate,
     ForUpdate,
+    ForKeyShare,
     ForShare,
+}
+
+impl SelectLockingClause {
+    pub fn sql(self) -> &'static str {
+        match self {
+            SelectLockingClause::ForNoKeyUpdate => "FOR NO KEY UPDATE",
+            SelectLockingClause::ForUpdate => "FOR UPDATE",
+            SelectLockingClause::ForKeyShare => "FOR KEY SHARE",
+            SelectLockingClause::ForShare => "FOR SHARE",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

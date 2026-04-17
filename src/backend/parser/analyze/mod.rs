@@ -2064,8 +2064,14 @@ fn bind_select_query_with_outer(
     outer_ctes: &[BoundCte],
     expanded_views: &[u32],
 ) -> Result<(Query, BoundScope), ParseError> {
-    if stmt.locking_clause.is_some() {
-        return Err(ParseError::FeatureNotSupported("FOR UPDATE/SHARE".into()));
+    if let Some(locking_clause) = stmt.locking_clause {
+        if stmt.set_operation.is_some() {
+            return Err(ParseError::FeatureNotSupportedMessage(format!(
+                "{} is not allowed with UNION/INTERSECT/EXCEPT",
+                locking_clause.sql()
+            )));
+        }
+        return Err(ParseError::FeatureNotSupported(locking_clause.sql().into()));
     }
     let local_ctes = bind_ctes(
         stmt.with_recursive,

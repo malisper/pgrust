@@ -3394,6 +3394,18 @@ fn parse_select_for_update_clause() {
 }
 
 #[test]
+fn parse_select_for_no_key_update_clause() {
+    match parse_statement("select * from people for no key update").unwrap() {
+        Statement::Select(SelectStatement {
+            from: Some(FromItem::Table { name, only: false }),
+            locking_clause: Some(SelectLockingClause::ForNoKeyUpdate),
+            ..
+        }) => assert_eq!(name, "people"),
+        other => panic!("expected Select with FOR NO KEY UPDATE, got {:?}", other),
+    }
+}
+
+#[test]
 fn parse_with_recursive_cte_union_all() {
     match parse_statement(
         "with recursive t(n) as (values (1) union all select n + 1 from t) select * from t",
