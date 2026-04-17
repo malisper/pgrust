@@ -2,6 +2,403 @@ use super::agg_output_special::*;
 use super::expr::raise_expr_varlevels;
 use super::*;
 use crate::include::nodes::primnodes::{OpExprKind, WindowFuncKind};
+use std::cell::RefCell;
+use std::collections::HashMap;
+
+#[derive(Debug, Clone)]
+struct GroupedAggCteContext {
+    visible_ctes: Vec<BoundCte>,
+    local_ctes: HashMap<usize, String>,
+}
+
+thread_local! {
+    static GROUPED_AGG_CTE_CONTEXT: RefCell<Vec<GroupedAggCteContext>> = const { RefCell::new(Vec::new()) };
+}
+
+pub(super) fn with_grouped_agg_cte_context<T>(
+    visible_ctes: &[BoundCte],
+    local_ctes: &[BoundCte],
+    f: impl FnOnce() -> Result<T, ParseError>,
+) -> Result<T, ParseError> {
+    let context = GroupedAggCteContext {
+        visible_ctes: visible_ctes.to_vec(),
+        local_ctes: local_ctes
+            .iter()
+            .map(|cte| (cte.cte_id, cte.name.clone()))
+            .collect(),
+    };
+    GROUPED_AGG_CTE_CONTEXT.with(|stack| stack.borrow_mut().push(context));
+    let result = f();
+    GROUPED_AGG_CTE_CONTEXT.with(|stack| {
+        let popped = stack.borrow_mut().pop();
+        debug_assert!(popped.is_some(), "grouped aggregate CTE context stack underflow");
+    });
+    result
+}
+
+fn current_grouped_agg_cte_context() -> Option<GroupedAggCteContext> {
+    GROUPED_AGG_CTE_CONTEXT.with(|stack| stack.borrow().last().cloned())
+}
+
+pub(super) fn current_grouped_agg_visible_ctes() -> Vec<BoundCte> {
+    current_grouped_agg_cte_context()
+        .map(|ctx| ctx.visible_ctes)
+        .unwrap_or_default()
+}
+
+pub(super) fn bind_grouped_plain_expr(
+    expr: &SqlExpr,
+    input_scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+) -> Result<Expr, ParseError> {
+    let visible_ctes = current_grouped_agg_visible_ctes();
+    bind_expr_with_outer_and_ctes(
+        expr,
+        input_scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        &visible_ctes,
+    )
+}
+
+pub(super) fn grouped_infer_sql_expr_type(
+    expr: &SqlExpr,
+    input_scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+) -> SqlType {
+    let visible_ctes = current_grouped_agg_visible_ctes();
+    infer_sql_expr_type_with_ctes(
+        expr,
+        input_scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        &visible_ctes,
+    )
+}
+
+pub(super) fn grouped_infer_common_scalar_expr_type(
+    exprs: &[SqlExpr],
+    input_scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    description: &'static str,
+) -> Result<SqlType, ParseError> {
+    let visible_ctes = current_grouped_agg_visible_ctes();
+    infer_common_scalar_expr_type_with_ctes(
+        exprs,
+        input_scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        &visible_ctes,
+        description,
+    )
+}
+
+pub(super) fn reject_nested_local_ctes_in_agg_expr(expr: &Expr) -> Result<(), ParseError> {
+    let Some(context) = current_grouped_agg_cte_context() else {
+        return Ok(());
+    };
+    if let Some(cte_name) = expr_references_local_cte(expr, &context.local_ctes) {
+        return Err(ParseError::OuterLevelAggregateNestedCte(cte_name));
+    }
+    Ok(())
+}
+
+fn expr_references_local_cte(expr: &Expr, local_ctes: &HashMap<usize, String>) -> Option<String> {
+    match expr {
+        Expr::Var(_)
+        | Expr::Param(_)
+        | Expr::Const(_)
+        | Expr::CaseTest(_)
+        | Expr::Random
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => None,
+        Expr::Aggref(agg) => agg
+            .args
+            .iter()
+            .find_map(|arg| expr_references_local_cte(arg, local_ctes))
+            .or_else(|| {
+                agg.aggfilter
+                    .as_ref()
+                    .and_then(|expr| expr_references_local_cte(expr, local_ctes))
+            }),
+        Expr::WindowFunc(window) => window
+            .args
+            .iter()
+            .find_map(|arg| expr_references_local_cte(arg, local_ctes)),
+        Expr::Op(op) => op
+            .args
+            .iter()
+            .find_map(|arg| expr_references_local_cte(arg, local_ctes)),
+        Expr::Bool(bool_expr) => bool_expr
+            .args
+            .iter()
+            .find_map(|arg| expr_references_local_cte(arg, local_ctes)),
+        Expr::Case(case_expr) => case_expr
+            .arg
+            .as_deref()
+            .and_then(|arg| expr_references_local_cte(arg, local_ctes))
+            .or_else(|| {
+                case_expr.args.iter().find_map(|arm| {
+                    expr_references_local_cte(&arm.expr, local_ctes)
+                        .or_else(|| expr_references_local_cte(&arm.result, local_ctes))
+                })
+            })
+            .or_else(|| expr_references_local_cte(&case_expr.defresult, local_ctes)),
+        Expr::Func(func) => func
+            .args
+            .iter()
+            .find_map(|arg| expr_references_local_cte(arg, local_ctes)),
+        Expr::SubLink(sublink) => sublink
+            .testexpr
+            .as_deref()
+            .and_then(|expr| expr_references_local_cte(expr, local_ctes))
+            .or_else(|| query_references_local_cte(&sublink.subselect, local_ctes)),
+        Expr::SubPlan(subplan) => subplan
+            .testexpr
+            .as_deref()
+            .and_then(|expr| expr_references_local_cte(expr, local_ctes))
+            .or_else(|| {
+                subplan
+                    .args
+                    .iter()
+                    .find_map(|arg| expr_references_local_cte(arg, local_ctes))
+            }),
+        Expr::ScalarArrayOp(saop) => expr_references_local_cte(&saop.left, local_ctes)
+            .or_else(|| expr_references_local_cte(&saop.right, local_ctes)),
+        Expr::Cast(inner, _) | Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
+            expr_references_local_cte(inner, local_ctes)
+        }
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => expr_references_local_cte(expr, local_ctes)
+            .or_else(|| expr_references_local_cte(pattern, local_ctes))
+            .or_else(|| {
+                escape
+                    .as_deref()
+                    .and_then(|expr| expr_references_local_cte(expr, local_ctes))
+            }),
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => expr_references_local_cte(left, local_ctes)
+            .or_else(|| expr_references_local_cte(right, local_ctes)),
+        Expr::ArrayLiteral { elements, .. } => elements
+            .iter()
+            .find_map(|expr| expr_references_local_cte(expr, local_ctes)),
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .find_map(|(_, expr)| expr_references_local_cte(expr, local_ctes)),
+        Expr::ArraySubscript { array, subscripts } => expr_references_local_cte(array, local_ctes)
+            .or_else(|| {
+                subscripts.iter().find_map(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .and_then(|expr| expr_references_local_cte(expr, local_ctes))
+                        .or_else(|| {
+                            subscript
+                                .upper
+                                .as_ref()
+                                .and_then(|expr| expr_references_local_cte(expr, local_ctes))
+                        })
+                })
+            }),
+    }
+}
+
+fn query_references_local_cte(
+    query: &Query,
+    local_ctes: &HashMap<usize, String>,
+) -> Option<String> {
+    for rte in &query.rtable {
+        match &rte.kind {
+            RangeTblEntryKind::Cte { cte_id, query } => {
+                if let Some(name) = local_ctes.get(cte_id) {
+                    return Some(name.clone());
+                }
+                if let Some(name) = query_references_local_cte(query, local_ctes) {
+                    return Some(name);
+                }
+            }
+            RangeTblEntryKind::Subquery { query } => {
+                if let Some(name) = query_references_local_cte(query, local_ctes) {
+                    return Some(name);
+                }
+            }
+            RangeTblEntryKind::Join { joinaliasvars, .. } => {
+                if let Some(name) = joinaliasvars
+                    .iter()
+                    .find_map(|expr| expr_references_local_cte(expr, local_ctes))
+                {
+                    return Some(name);
+                }
+            }
+            RangeTblEntryKind::Values { rows, .. } => {
+                if let Some(name) = rows.iter().flatten().find_map(|expr| {
+                    expr_references_local_cte(expr, local_ctes)
+                }) {
+                    return Some(name);
+                }
+            }
+            RangeTblEntryKind::Function { call } => {
+                let args = match call {
+                    SetReturningCall::GenerateSeries {
+                        start, stop, step, ..
+                    } => vec![start, stop, step],
+                    SetReturningCall::Unnest { args, .. }
+                    | SetReturningCall::JsonTableFunction { args, .. }
+                    | SetReturningCall::RegexTableFunction { args, .. }
+                    | SetReturningCall::TextSearchTableFunction { args, .. }
+                    | SetReturningCall::UserDefined { args, .. } => args.iter().collect(),
+                };
+                if let Some(name) = args
+                    .into_iter()
+                    .find_map(|expr| expr_references_local_cte(expr, local_ctes))
+                {
+                    return Some(name);
+                }
+            }
+            RangeTblEntryKind::Result | RangeTblEntryKind::Relation { .. } | RangeTblEntryKind::WorkTable { .. } => {}
+        }
+    }
+    if let Some(name) = query
+        .target_list
+        .iter()
+        .find_map(|target| expr_references_local_cte(&target.expr, local_ctes))
+    {
+        return Some(name);
+    }
+    if let Some(name) = query
+        .where_qual
+        .as_ref()
+        .and_then(|expr| expr_references_local_cte(expr, local_ctes))
+    {
+        return Some(name);
+    }
+    if let Some(name) = query
+        .group_by
+        .iter()
+        .find_map(|expr| expr_references_local_cte(expr, local_ctes))
+    {
+        return Some(name);
+    }
+    if let Some(name) = query
+        .accumulators
+        .iter()
+        .find_map(|accum| {
+            accum
+                .args
+                .iter()
+                .find_map(|expr| expr_references_local_cte(expr, local_ctes))
+                .or_else(|| {
+                    accum
+                        .filter
+                        .as_ref()
+                        .and_then(|expr| expr_references_local_cte(expr, local_ctes))
+                })
+        })
+    {
+        return Some(name);
+    }
+    if let Some(name) = query
+        .window_clauses
+        .iter()
+        .find_map(|clause| {
+            clause
+                .functions
+                .iter()
+                .find_map(|func| {
+                    func.args
+                        .iter()
+                        .find_map(|expr| expr_references_local_cte(expr, local_ctes))
+                })
+                .or_else(|| {
+                    clause
+                        .spec
+                        .partition_by
+                        .iter()
+                        .find_map(|expr| expr_references_local_cte(expr, local_ctes))
+                })
+                .or_else(|| {
+                    clause.spec.order_by.iter().find_map(|item| {
+                        expr_references_local_cte(&item.expr, local_ctes)
+                    })
+                })
+        })
+    {
+        return Some(name);
+    }
+    if let Some(name) = query
+        .having_qual
+        .as_ref()
+        .and_then(|expr| expr_references_local_cte(expr, local_ctes))
+    {
+        return Some(name);
+    }
+    if let Some(name) = query.sort_clause.iter().find_map(|item| {
+        expr_references_local_cte(&item.expr, local_ctes)
+    }) {
+        return Some(name);
+    }
+    if let Some(name) = query.project_set.as_ref().and_then(|targets| {
+        targets.iter().find_map(|target| match target {
+            ProjectSetTarget::Scalar(target) => expr_references_local_cte(&target.expr, local_ctes),
+            ProjectSetTarget::Set { call, .. } => match call {
+                SetReturningCall::GenerateSeries {
+                    start, stop, step, ..
+                } => expr_references_local_cte(start, local_ctes)
+                    .or_else(|| expr_references_local_cte(stop, local_ctes))
+                    .or_else(|| expr_references_local_cte(step, local_ctes)),
+                SetReturningCall::Unnest { args, .. }
+                | SetReturningCall::JsonTableFunction { args, .. }
+                | SetReturningCall::RegexTableFunction { args, .. }
+                | SetReturningCall::TextSearchTableFunction { args, .. }
+                | SetReturningCall::UserDefined { args, .. } => args
+                    .iter()
+                    .find_map(|expr| expr_references_local_cte(expr, local_ctes)),
+            },
+        })
+    }) {
+        return Some(name);
+    }
+    if let Some(recursive_union) = &query.recursive_union {
+        if let Some(name) = query_references_local_cte(&recursive_union.anchor, local_ctes) {
+            return Some(name);
+        }
+        if let Some(name) = query_references_local_cte(&recursive_union.recursive, local_ctes) {
+            return Some(name);
+        }
+    }
+    if let Some(set_operation) = &query.set_operation
+        && let Some(name) = set_operation
+            .inputs
+            .iter()
+            .find_map(|input| query_references_local_cte(input, local_ctes))
+    {
+        return Some(name);
+    }
+    None
+}
 
 fn current_window_state_or_error()
 -> Result<std::rc::Rc<std::cell::RefCell<WindowBindingState>>, ParseError> {
@@ -39,7 +436,9 @@ fn bind_grouped_window_agg_call(
     validate_aggregate_arity(func, &arg_values)?;
     let arg_types = arg_values
         .iter()
-        .map(|expr| infer_sql_expr_type(expr, input_scope, catalog, outer_scopes, grouped_outer))
+        .map(|expr| {
+            grouped_infer_sql_expr_type(expr, input_scope, catalog, outer_scopes, grouped_outer)
+        })
         .collect::<Vec<_>>();
     let resolved = resolve_aggregate_call(catalog, func, &arg_types, func_variadic);
     let bound_args = arg_values
@@ -60,6 +459,9 @@ fn bind_grouped_window_agg_call(
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
+    for arg in &bound_args {
+        reject_nested_local_ctes_in_agg_expr(arg)?;
+    }
     let coerced_args = if let Some(resolved) = &resolved {
         bound_args
             .into_iter()
@@ -147,7 +549,7 @@ fn bind_grouped_window_func_call(
     let actual_types = args
         .iter()
         .map(|arg| {
-            infer_sql_expr_type(
+            grouped_infer_sql_expr_type(
                 &arg.value,
                 input_scope,
                 catalog,
@@ -333,13 +735,12 @@ pub(super) fn bind_agg_output_expr_in_clause(
                     let arg_types = arg_values
                         .iter()
                         .map(|e| {
-                            infer_sql_expr_type_with_ctes(
+                            grouped_infer_sql_expr_type(
                                 e,
                                 input_scope,
                                 catalog,
                                 outer_scopes,
                                 grouped_outer,
-                                &[],
                             )
                         })
                         .collect::<Vec<_>>();
@@ -357,16 +758,18 @@ pub(super) fn bind_agg_output_expr_in_clause(
                     let bound_args = arg_values
                         .iter()
                         .map(|arg| {
-                            bind_expr_with_outer_and_ctes(
+                            bind_grouped_plain_expr(
                                 arg,
                                 input_scope,
                                 catalog,
                                 outer_scopes,
                                 grouped_outer,
-                                &[],
                             )
                         })
                         .collect::<Result<Vec<_>, _>>()?;
+                    for arg in &bound_args {
+                        reject_nested_local_ctes_in_agg_expr(arg)?;
+                    }
                     let coerced_args = if let Some(resolved) = &resolved {
                         bound_args
                             .into_iter()
@@ -382,16 +785,18 @@ pub(super) fn bind_agg_output_expr_in_clause(
                     let bound_filter = filter
                         .as_deref()
                         .map(|expr| {
-                            bind_expr_with_outer_and_ctes(
+                            bind_grouped_plain_expr(
                                 expr,
                                 input_scope,
                                 catalog,
                                 outer_scopes,
                                 grouped_outer,
-                                &[],
                             )
                         })
                         .transpose()?;
+                    if let Some(filter) = &bound_filter {
+                        reject_nested_local_ctes_in_agg_expr(filter)?;
+                    }
                     return Ok(Expr::aggref(
                         aggfnoid,
                         aggregate_sql_type(*func, arg_types.first().copied()),
@@ -1097,13 +1502,12 @@ pub(super) fn bind_agg_output_expr_in_clause(
             let mut result_exprs = Vec::with_capacity(args.len() + 1);
             result_exprs.push(default_expr.clone());
             result_exprs.extend(args.iter().map(|arm| arm.result.clone()));
-            let result_type = infer_common_scalar_expr_type_with_ctes(
+            let result_type = grouped_infer_common_scalar_expr_type(
                 &result_exprs,
                 input_scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
-                &[],
                 "CASE result expressions with a common type",
             )?;
             let (bound_arg, arg_type) = if let Some(arg) = arg {
@@ -1119,13 +1523,12 @@ pub(super) fn bind_agg_output_expr_in_clause(
                         agg_list,
                         n_keys,
                     )?),
-                    Some(infer_sql_expr_type_with_ctes(
+                    Some(grouped_infer_sql_expr_type(
                         arg,
                         input_scope,
                         catalog,
                         outer_scopes,
                         grouped_outer,
-                        &[],
                     )),
                 )
             } else {
@@ -1145,13 +1548,12 @@ pub(super) fn bind_agg_output_expr_in_clause(
                         agg_list,
                         n_keys,
                     )?;
-                    let raw_right_type = infer_sql_expr_type_with_ctes(
+                    let raw_right_type = grouped_infer_sql_expr_type(
                         &arm.expr,
                         input_scope,
                         catalog,
                         outer_scopes,
                         grouped_outer,
-                        &[],
                     );
                     bind_lowered_comparison_expr(
                         "=",
@@ -1167,13 +1569,12 @@ pub(super) fn bind_agg_output_expr_in_clause(
                         catalog,
                     )?
                 } else {
-                    let expr_type = infer_sql_expr_type_with_ctes(
+                    let expr_type = grouped_infer_sql_expr_type(
                         &arm.expr,
                         input_scope,
                         catalog,
                         outer_scopes,
                         grouped_outer,
-                        &[],
                     );
                     if expr_type != SqlType::new(SqlTypeKind::Bool) {
                         return Err(ParseError::UnexpectedToken {
@@ -1193,13 +1594,12 @@ pub(super) fn bind_agg_output_expr_in_clause(
                         n_keys,
                     )?
                 };
-                let raw_result_type = infer_sql_expr_type_with_ctes(
+                let raw_result_type = grouped_infer_sql_expr_type(
                     &arm.result,
                     input_scope,
                     catalog,
                     outer_scopes,
                     grouped_outer,
-                    &[],
                 );
                 let bound_result = bind_agg_output_expr(
                     &arm.result,
@@ -1217,13 +1617,12 @@ pub(super) fn bind_agg_output_expr_in_clause(
                     result: coerce_bound_expr(bound_result, raw_result_type, result_type),
                 });
             }
-            let raw_default_type = infer_sql_expr_type_with_ctes(
+            let raw_default_type = grouped_infer_sql_expr_type(
                 default_expr,
                 input_scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
-                &[],
             );
             let bound_default = bind_agg_output_expr(
                 default_expr,
@@ -1390,22 +1789,10 @@ pub(super) fn bind_agg_output_expr_in_clause(
             n_keys,
         ),
         SqlExpr::ArrayOverlap(l, r) => {
-            let raw_left_type = infer_sql_expr_type_with_ctes(
-                l,
-                input_scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                &[],
-            );
-            let raw_right_type = infer_sql_expr_type_with_ctes(
-                r,
-                input_scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                &[],
-            );
+            let raw_left_type =
+                grouped_infer_sql_expr_type(l, input_scope, catalog, outer_scopes, grouped_outer);
+            let raw_right_type =
+                grouped_infer_sql_expr_type(r, input_scope, catalog, outer_scopes, grouped_outer);
             let left = bind_agg_output_expr(
                 l,
                 group_by_exprs,

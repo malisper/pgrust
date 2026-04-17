@@ -4479,6 +4479,18 @@ fn aggregate_in_where_rejected() {
 }
 
 #[test]
+fn aggregate_rejects_nested_subquery_reference_to_local_cte() {
+    let stmt = parse_select(
+        "select (with cte1(x) as (values (1)) select count((select x from cte1)))",
+    )
+    .unwrap();
+    assert!(matches!(
+        build_plan(&stmt, &catalog()),
+        Err(ParseError::OuterLevelAggregateNestedCte(name)) if name == "cte1"
+    ));
+}
+
+#[test]
 fn window_function_rejected_in_where_group_by_and_having() {
     for sql in [
         "select name from people where row_number() over () > 1",

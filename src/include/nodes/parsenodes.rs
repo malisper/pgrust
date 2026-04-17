@@ -54,6 +54,7 @@ pub enum ParseError {
     UnknownConfigurationParameter(String),
     UnrecognizedParameter(String),
     TablesDeclaredWithOidsNotSupported,
+    OuterLevelAggregateNestedCte(String),
     ActiveSqlTransaction(&'static str),
     OnCommitOnlyForTempTables,
     TempTableInNonTempSchema(String),
@@ -139,6 +140,9 @@ impl fmt::Display for ParseError {
             }
             ParseError::TablesDeclaredWithOidsNotSupported => {
                 write!(f, "tables declared WITH OIDS are not supported")
+            }
+            ParseError::OuterLevelAggregateNestedCte(_) => {
+                write!(f, "outer-level aggregate cannot use a nested CTE")
             }
             ParseError::ActiveSqlTransaction(stmt) => {
                 write!(f, "{stmt} cannot run inside a transaction block")

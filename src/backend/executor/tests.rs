@@ -10473,6 +10473,25 @@ fn select_cte_can_capture_outer_value_through_scalar_subquery() {
 }
 
 #[test]
+fn aggregate_subquery_can_reference_outer_visible_cte() {
+    let base = temp_dir("aggregate_subquery_outer_cte");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "with a(id) as (values (1), (2)),
+                  b as (select max((select sum(id) from a)) as agg)
+             select agg from b",
+        )
+        .unwrap(),
+        vec![vec![Value::Int64(3)]],
+    );
+}
+
+#[test]
 fn insert_values_can_reference_statement_ctes() {
     let base = temp_dir("insert_values_ctes");
     let mut txns = TransactionManager::new_durable(&base).unwrap();

@@ -1851,7 +1851,7 @@ fn bind_values_query_with_outer(
         outer_ctes,
         expanded_views,
     )?;
-    let mut visible_ctes = local_ctes;
+    let mut visible_ctes = local_ctes.clone();
     visible_ctes.extend_from_slice(outer_ctes);
     let (base, scope) = bind_values_rows(
         &stmt.rows,
@@ -1950,7 +1950,7 @@ fn bind_select_query_with_outer(
         outer_ctes,
         expanded_views,
     )?;
-    let mut visible_ctes = local_ctes;
+    let mut visible_ctes = local_ctes.clone();
     visible_ctes.extend_from_slice(outer_ctes);
 
     if stmt.set_operation.is_some() {
@@ -2075,9 +2075,10 @@ fn bind_select_query_with_outer(
             .collect::<Result<_, _>>()?;
         let rewritten_group_keys = group_keys.clone();
 
-        let accumulators: Vec<AggAccum> = aggs
-            .iter()
-            .map(|(func, args, distinct, func_variadic, filter)| {
+        return with_grouped_agg_cte_context(&visible_ctes, &local_ctes, || {
+            let accumulators: Vec<AggAccum> = aggs
+                .iter()
+                .map(|(func, args, distinct, func_variadic, filter)| {
                 if aggregate_args_are_named(args) {
                     return Err(ParseError::UnexpectedToken {
                         expected: "aggregate arguments without names",
@@ -2113,6 +2114,9 @@ fn bind_select_query_with_outer(
                         )
                     })
                     .collect::<Result<Vec<_>, _>>()?;
+                for arg in &bound_args {
+                    reject_nested_local_ctes_in_agg_expr(arg)?;
+                }
                 let bound_filter = filter
                     .as_ref()
                     .map(|expr| {
@@ -2126,6 +2130,9 @@ fn bind_select_query_with_outer(
                         )
                     })
                     .transpose()?;
+                if let Some(filter) = &bound_filter {
+                    reject_nested_local_ctes_in_agg_expr(filter)?;
+                }
                 let coerced_args = if let Some(resolved) = &resolved {
                     bound_args
                         .into_iter()
@@ -2153,46 +2160,46 @@ fn bind_select_query_with_outer(
                     distinct: *distinct,
                     sql_type: aggregate_sql_type(*func, arg_types.first().copied()),
                 })
-            })
-            .collect::<Result<_, _>>()?;
+                })
+                .collect::<Result<_, _>>()?;
 
-        let n_keys = group_keys.len();
-        let mut output_columns: Vec<QueryColumn> = Vec::new();
-        for gk in &stmt.group_by {
-            output_columns.push(QueryColumn {
-                name: sql_expr_name(gk),
-                sql_type: infer_sql_expr_type_with_ctes(
-                    gk,
-                    &scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer.as_ref(),
-                    &visible_ctes,
-                ),
-                wire_type_oid: None,
-            });
-        }
-        for (func, args, _, _, _) in &aggs {
-            output_columns.push(QueryColumn {
-                name: func.name().to_string(),
-                sql_type: aggregate_sql_type(
-                    *func,
-                    args.first().map(|e| {
-                        infer_sql_expr_type_with_ctes(
-                            &e.value,
-                            &scope,
-                            catalog,
-                            outer_scopes,
-                            grouped_outer.as_ref(),
-                            &visible_ctes,
-                        )
-                    }),
-                ),
-                wire_type_oid: None,
-            });
-        }
+            let n_keys = group_keys.len();
+            let mut output_columns: Vec<QueryColumn> = Vec::new();
+            for gk in &stmt.group_by {
+                output_columns.push(QueryColumn {
+                    name: sql_expr_name(gk),
+                    sql_type: infer_sql_expr_type_with_ctes(
+                        gk,
+                        &scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer.as_ref(),
+                        &visible_ctes,
+                    ),
+                    wire_type_oid: None,
+                });
+            }
+            for (func, args, _, _, _) in &aggs {
+                output_columns.push(QueryColumn {
+                    name: func.name().to_string(),
+                    sql_type: aggregate_sql_type(
+                        *func,
+                        args.first().map(|e| {
+                            infer_sql_expr_type_with_ctes(
+                                &e.value,
+                                &scope,
+                                catalog,
+                                outer_scopes,
+                                grouped_outer.as_ref(),
+                                &visible_ctes,
+                            )
+                        }),
+                    ),
+                    wire_type_oid: None,
+                });
+            }
 
-        let having = stmt
+            let having = stmt
             .having
             .as_ref()
             .map(|e| {
@@ -2211,7 +2218,7 @@ fn bind_select_query_with_outer(
             })
             .transpose()?;
 
-        let targets: Vec<TargetEntry> = with_window_binding(window_state.clone(), true, || {
+            let targets: Vec<TargetEntry> = with_window_binding(window_state.clone(), true, || {
             if stmt.targets.len() == 1
                 && matches!(stmt.targets[0].expr, SqlExpr::Column(ref name) if name == "*")
             {
@@ -2285,9 +2292,9 @@ fn bind_select_query_with_outer(
                     })
                     .collect::<Result<_, _>>()
             }
-        })?;
+            })?;
 
-        let sort_inputs = with_window_binding(window_state.clone(), true, || {
+            let sort_inputs = with_window_binding(window_state.clone(), true, || {
             if stmt.order_by.is_empty() {
                 Ok(Vec::new())
             } else {
@@ -2306,33 +2313,34 @@ fn bind_select_query_with_outer(
                     )
                 })
             }
-        })?;
-        let targets = targets;
-        let sort_inputs = sort_inputs;
-        let sort_clause = build_sort_clause(sort_inputs, &targets);
-        let target_list = normalize_target_list(targets);
-        let window_clauses = take_window_clauses(&window_state);
+            })?;
+            let targets = targets;
+            let sort_inputs = sort_inputs;
+            let sort_clause = build_sort_clause(sort_inputs, &targets);
+            let target_list = normalize_target_list(targets);
+            let window_clauses = take_window_clauses(&window_state);
 
-        Ok((
-            Query {
-                command_type: crate::include::executor::execdesc::CommandType::Select,
-                rtable: base.rtable,
-                jointree: base.jointree,
-                target_list,
-                where_qual,
-                group_by: rewritten_group_keys,
-                accumulators,
-                window_clauses,
-                having_qual: having,
-                sort_clause,
-                limit_count: stmt.limit,
-                limit_offset: stmt.offset.unwrap_or(0),
-                project_set: None,
-                recursive_union: None,
-                set_operation: None,
-            },
-            scope,
-        ))
+            Ok((
+                Query {
+                    command_type: crate::include::executor::execdesc::CommandType::Select,
+                    rtable: base.rtable,
+                    jointree: base.jointree,
+                    target_list,
+                    where_qual,
+                    group_by: rewritten_group_keys,
+                    accumulators,
+                    window_clauses,
+                    having_qual: having,
+                    sort_clause,
+                    limit_count: stmt.limit,
+                    limit_offset: stmt.offset.unwrap_or(0),
+                    project_set: None,
+                    recursive_union: None,
+                    set_operation: None,
+                },
+                scope,
+            ))
+        });
     } else {
         let bound_targets = with_window_binding(window_state.clone(), true, || {
             bind_select_targets(
