@@ -621,6 +621,11 @@ fn collect_expr_relids(expr: &Expr, relids: &mut Vec<usize>) {
                 }
             }
         }
+        Expr::Row { fields } => {
+            for (_, expr) in fields {
+                collect_expr_relids(expr, relids);
+            }
+        }
         Expr::Param(_)
         | Expr::Const(_)
         | Expr::Random

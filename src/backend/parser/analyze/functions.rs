@@ -654,7 +654,9 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::Overlay => matches!(args.len(), 3 | 4),
             BuiltinScalarFunction::GetByte => args.len() == 2,
             BuiltinScalarFunction::SetByte => args.len() == 3,
-            BuiltinScalarFunction::ArrayToJson => matches!(args.len(), 1 | 2),
+            BuiltinScalarFunction::ArrayToJson | BuiltinScalarFunction::RowToJson => {
+                matches!(args.len(), 1 | 2)
+            }
             BuiltinScalarFunction::JsonBuildArray | BuiltinScalarFunction::JsonBuildObject => true,
             BuiltinScalarFunction::JsonObject => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::JsonStripNulls => matches!(args.len(), 1 | 2),
