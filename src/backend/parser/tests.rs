@@ -3896,6 +3896,39 @@ fn lower_create_table_resolves_foreign_keys_against_primary_keys() {
     assert_eq!(foreign_key.match_type, ForeignKeyMatchType::Simple);
     assert_eq!(foreign_key.on_delete, ForeignKeyAction::NoAction);
     assert_eq!(foreign_key.on_update, ForeignKeyAction::NoAction);
+    assert!(!foreign_key.self_referential);
+}
+
+#[test]
+fn lower_create_table_resolves_self_referential_foreign_keys_against_pending_primary_key() {
+    let stmt = parse_statement(
+        "create temp table department (id int4 primary key, parent_department int4 references department)",
+    )
+    .unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+    let lowered =
+        lower_create_table(&ct, &crate::backend::parser::analyze::LiteralDefaultCatalog).unwrap();
+    assert_eq!(lowered.foreign_key_actions.len(), 1);
+    let foreign_key = &lowered.foreign_key_actions[0];
+    assert_eq!(foreign_key.columns, vec!["parent_department".to_string()]);
+    assert_eq!(foreign_key.referenced_table, "department");
+    assert_eq!(foreign_key.referenced_columns, vec!["id".to_string()]);
+    assert!(foreign_key.self_referential);
+}
+
+#[test]
+fn lower_create_table_rejects_temp_foreign_keys_to_permanent_tables() {
+    let stmt = parse_statement("create temp table pets (owner_id int4 references people)").unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+    assert!(matches!(
+        lower_create_table(&ct, &catalog_with_people_primary_key()),
+        Err(ParseError::InvalidTableDefinition(message))
+            if message == "constraints on temporary tables may reference only temporary tables"
+    ));
 }
 
 #[test]

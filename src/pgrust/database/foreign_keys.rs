@@ -87,6 +87,7 @@ pub(crate) fn alter_table_add_constraint_lock_requests(
     let normalized = normalize_alter_table_add_constraint(
         relation_basename(&stmt.table_name),
         relation.relation_oid,
+        relation.relpersistence,
         &relation.desc,
         &catalog.constraint_rows_for_relation(relation.relation_oid),
         &stmt.constraint,

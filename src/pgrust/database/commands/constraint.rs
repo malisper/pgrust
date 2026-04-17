@@ -394,6 +394,7 @@ impl Database {
         let normalized = crate::backend::parser::normalize_alter_table_add_constraint(
             &table_name,
             relation.relation_oid,
+            relation.relpersistence,
             &relation.desc,
             &existing_constraints,
             &alter_stmt.constraint,

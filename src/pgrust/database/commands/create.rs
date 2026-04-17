@@ -8,7 +8,7 @@ use crate::include::catalog::{
     PUBLIC_NAMESPACE_OID, PgProcRow, RECORD_TYPE_OID,
 };
 use crate::include::nodes::parsenodes::{ForeignKeyAction, ForeignKeyMatchType};
-use crate::include::nodes::primnodes::QueryColumn;
+use crate::include::nodes::primnodes::{QueryColumn, ToastRelationRef};
 use crate::pgrust::database::{
     SequenceData, SequenceRuntime, default_sequence_name_base, format_nextval_default_oid,
     initial_sequence_state, resolve_sequence_options_spec, sequence_type_oid_for_serial_kind,
@@ -113,6 +113,217 @@ fn column_attnums_for_names(
 }
 
 impl Database {
+    #[allow(clippy::too_many_arguments)]
+    fn install_create_table_constraints_in_transaction(
+        &self,
+        client_id: ClientId,
+        xid: TransactionId,
+        table_cid: CommandId,
+        table_name: &str,
+        relation: &crate::backend::parser::BoundRelation,
+        lowered: &crate::backend::parser::LoweredCreateTable,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<(), ExecError> {
+        let interrupts = self.interrupt_state(client_id);
+        for (index, action) in lowered.constraint_actions.iter().enumerate() {
+            let action_cid = table_cid
+                .saturating_add(1)
+                .saturating_add((index as u32).saturating_mul(3));
+            let constraint_name = action
+                .constraint_name
+                .clone()
+                .expect("normalized key constraint name");
+            let index_name = self.choose_available_relation_name(
+                client_id,
+                xid,
+                action_cid,
+                relation.namespace_oid,
+                &constraint_name,
+            )?;
+            let index_columns = action
+                .columns
+                .iter()
+                .cloned()
+                .map(crate::backend::parser::IndexColumnDef::from)
+                .collect::<Vec<_>>();
+            let build_options = self.resolve_simple_btree_build_options(
+                client_id,
+                Some((xid, action_cid)),
+                relation,
+                &index_columns,
+            )?;
+            let index_entry = self.build_simple_btree_index_in_transaction(
+                client_id,
+                relation,
+                &index_name,
+                &index_columns,
+                true,
+                action.primary,
+                xid,
+                action_cid,
+                build_options.0,
+                build_options.1,
+                &build_options.2,
+                65_536,
+                catalog_effects,
+            )?;
+            let constraint_ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid: action_cid.saturating_add(2),
+                client_id,
+                waiter: None,
+                interrupts: Arc::clone(&interrupts),
+            };
+            let primary_key_owned_not_null_oids = if action.primary {
+                action
+                    .columns
+                    .iter()
+                    .filter_map(|column_name| {
+                        relation.desc.columns.iter().find_map(|column| {
+                            (column.name.eq_ignore_ascii_case(column_name)
+                                && column.not_null_primary_key_owned)
+                                .then_some(column.not_null_constraint_oid)
+                                .flatten()
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+            let constraint_effect = self
+                .catalog
+                .write()
+                .create_index_backed_constraint_mvcc(
+                    relation.relation_oid,
+                    index_entry.relation_oid,
+                    constraint_name,
+                    if action.primary {
+                        crate::include::catalog::CONSTRAINT_PRIMARY
+                    } else {
+                        crate::include::catalog::CONSTRAINT_UNIQUE
+                    },
+                    &primary_key_owned_not_null_oids,
+                    &constraint_ctx,
+                )
+                .map_err(map_catalog_error)?;
+            self.apply_catalog_mutation_effect_immediate(&constraint_effect)?;
+            catalog_effects.push(constraint_effect);
+        }
+
+        let check_base_cid = table_cid
+            .saturating_add(1)
+            .saturating_add((lowered.constraint_actions.len() as u32).saturating_mul(3));
+        for (index, action) in lowered.check_actions.iter().enumerate() {
+            let catalog =
+                self.lazy_catalog_lookup(client_id, Some((xid, check_base_cid)), configured_search_path);
+            crate::backend::parser::bind_check_constraint_expr(
+                &action.expr_sql,
+                Some(table_name),
+                &relation.desc,
+                &catalog,
+            )?;
+            let constraint_ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid: check_base_cid.saturating_add(index as u32),
+                client_id,
+                waiter: None,
+                interrupts: Arc::clone(&interrupts),
+            };
+            let constraint_effect = self
+                .catalog
+                .write()
+                .create_check_constraint_mvcc(
+                    relation.relation_oid,
+                    action.constraint_name.clone(),
+                    !action.not_valid,
+                    action.expr_sql.clone(),
+                    &constraint_ctx,
+                )
+                .map_err(map_catalog_error)?;
+            self.apply_catalog_mutation_effect_immediate(&constraint_effect)?;
+            catalog_effects.push(constraint_effect);
+        }
+
+        let foreign_key_base_cid =
+            check_base_cid.saturating_add(lowered.check_actions.len() as u32);
+        for (index, action) in lowered.foreign_key_actions.iter().enumerate() {
+            let constraint_cid = foreign_key_base_cid.saturating_add(index as u32);
+            let catalog = self.lazy_catalog_lookup(
+                client_id,
+                Some((xid, constraint_cid)),
+                configured_search_path,
+            );
+            let (referenced_relation, referenced_index_oid) = if action.self_referential {
+                let referenced_relation = catalog
+                    .lookup_relation_by_oid(relation.relation_oid)
+                    .unwrap_or_else(|| relation.clone());
+                let referenced_attnums =
+                    column_attnums_for_names(&referenced_relation.desc, &action.referenced_columns);
+                let referenced_index_oid = catalog
+                    .index_relations_for_heap(referenced_relation.relation_oid)
+                    .into_iter()
+                    .find(|index| {
+                        index.index_meta.indisunique && index.index_meta.indkey == referenced_attnums
+                    })
+                    .map(|index| index.relation_oid)
+                    .ok_or_else(|| {
+                        ExecError::Parse(ParseError::UnexpectedToken {
+                            expected: "referenced UNIQUE or PRIMARY KEY index",
+                            actual: format!(
+                                "table \"{table_name}\" lacks an exact matching unique key"
+                            ),
+                        })
+                    })?;
+                (referenced_relation, referenced_index_oid)
+            } else {
+                let referenced_relation = catalog
+                    .lookup_relation_by_oid(action.referenced_relation_oid)
+                    .ok_or_else(|| {
+                        ExecError::Parse(ParseError::UnknownTable(action.referenced_table.clone()))
+                    })?;
+                (referenced_relation, action.referenced_index_oid)
+            };
+            let local_attnums = column_attnums_for_names(&relation.desc, &action.columns);
+            let referenced_attnums =
+                column_attnums_for_names(&referenced_relation.desc, &action.referenced_columns);
+            let constraint_ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid: constraint_cid,
+                client_id,
+                waiter: None,
+                interrupts: Arc::clone(&interrupts),
+            };
+            let constraint_effect = self
+                .catalog
+                .write()
+                .create_foreign_key_constraint_mvcc(
+                    relation.relation_oid,
+                    action.constraint_name.clone(),
+                    !action.not_valid,
+                    &local_attnums,
+                    referenced_relation.relation_oid,
+                    referenced_index_oid,
+                    &referenced_attnums,
+                    foreign_key_action_code(action.on_update),
+                    foreign_key_action_code(action.on_delete),
+                    foreign_key_match_code(action.match_type),
+                    &constraint_ctx,
+                )
+                .map_err(map_catalog_error)?;
+            self.apply_catalog_mutation_effect_immediate(&constraint_effect)?;
+            catalog_effects.push(constraint_effect);
+        }
+
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn create_owned_sequence_for_serial_column(
         &self,
@@ -650,7 +861,6 @@ impl Database {
                         drop(catalog_guard);
                         self.apply_catalog_mutation_effect_immediate(&effect)?;
                         catalog_effects.push(effect);
-                        let inherit_cid_offset = u32::from(!lowered.parent_oids.is_empty());
                         if !lowered.parent_oids.is_empty() {
                             let inherit_ctx = CatalogWriteContext {
                                 pool: self.pool.clone(),
@@ -680,191 +890,32 @@ impl Database {
                             owner_oid: created.entry.owner_oid,
                             relpersistence: created.entry.relpersistence,
                             relkind: created.entry.relkind,
-                            toast: None,
+                            toast: created.toast.as_ref().map(|toast| ToastRelationRef {
+                                rel: toast.toast_entry.rel,
+                                relation_oid: toast.toast_entry.relation_oid,
+                            }),
                             desc: created.entry.desc.clone(),
                         };
-                        for (index, action) in lowered.constraint_actions.iter().enumerate() {
-                            let action_cid = table_cid
-                                .saturating_add(1)
-                                .saturating_add(inherit_cid_offset)
-                                .saturating_add((index as u32).saturating_mul(3));
-                            let constraint_name = action
-                                .constraint_name
-                                .clone()
-                                .expect("normalized key constraint name");
-                            let index_name = self.choose_available_relation_name(
-                                client_id,
-                                xid,
-                                action_cid,
-                                relation.namespace_oid,
-                                &constraint_name,
-                            )?;
-                            let index_columns = action
-                                .columns
-                                .iter()
-                                .cloned()
-                                .map(crate::backend::parser::IndexColumnDef::from)
-                                .collect::<Vec<_>>();
-                            let build_options = self.resolve_simple_btree_build_options(
-                                client_id,
-                                Some((xid, action_cid)),
-                                &relation,
-                                &index_columns,
-                            )?;
-                            let index_entry = self.build_simple_btree_index_in_transaction(
-                                client_id,
-                                &relation,
-                                &index_name,
-                                &index_columns,
-                                true,
-                                action.primary,
-                                xid,
-                                action_cid,
-                                build_options.0,
-                                build_options.1,
-                                &build_options.2,
-                                65_536,
-                                catalog_effects,
-                            )?;
-                            let constraint_ctx = CatalogWriteContext {
-                                pool: self.pool.clone(),
-                                txns: self.txns.clone(),
-                                xid,
-                                cid: action_cid.saturating_add(2),
-                                client_id,
-                                waiter: None,
-                                interrupts: Arc::clone(&interrupts),
-                            };
-                            let primary_key_owned_not_null_oids = if action.primary {
-                                action
-                                    .columns
-                                    .iter()
-                                    .filter_map(|column_name| {
-                                        relation.desc.columns.iter().find_map(|column| {
-                                            (column.name.eq_ignore_ascii_case(column_name)
-                                                && column.not_null_primary_key_owned)
-                                                .then_some(column.not_null_constraint_oid)
-                                                .flatten()
-                                        })
-                                    })
-                                    .collect::<Vec<_>>()
-                            } else {
-                                Vec::new()
-                            };
-                            let constraint_effect = self
-                                .catalog
-                                .write()
-                                .create_index_backed_constraint_mvcc(
-                                    relation.relation_oid,
-                                    index_entry.relation_oid,
-                                    constraint_name,
-                                    if action.primary {
-                                        crate::include::catalog::CONSTRAINT_PRIMARY
-                                    } else {
-                                        crate::include::catalog::CONSTRAINT_UNIQUE
-                                    },
-                                    &primary_key_owned_not_null_oids,
-                                    &constraint_ctx,
-                                )
-                                .map_err(map_catalog_error)?;
-                            self.apply_catalog_mutation_effect_immediate(&constraint_effect)?;
-                            catalog_effects.push(constraint_effect);
-                        }
-                        let check_base_cid = table_cid.saturating_add(1).saturating_add(
-                            (lowered.constraint_actions.len() as u32).saturating_mul(3),
-                        );
-                        for (index, action) in lowered.check_actions.iter().enumerate() {
-                            crate::backend::parser::bind_check_constraint_expr(
-                                &action.expr_sql,
-                                Some(&table_name),
-                                &relation.desc,
-                                &catalog,
-                            )?;
-                            let constraint_ctx = CatalogWriteContext {
-                                pool: self.pool.clone(),
-                                txns: self.txns.clone(),
-                                xid,
-                                cid: check_base_cid.saturating_add(index as u32),
-                                client_id,
-                                waiter: None,
-                                interrupts: Arc::clone(&interrupts),
-                            };
-                            let constraint_effect = self
-                                .catalog
-                                .write()
-                                .create_check_constraint_mvcc(
-                                    relation.relation_oid,
-                                    action.constraint_name.clone(),
-                                    !action.not_valid,
-                                    action.expr_sql.clone(),
-                                    &constraint_ctx,
-                                )
-                                .map_err(map_catalog_error)?;
-                            self.apply_catalog_mutation_effect_immediate(&constraint_effect)?;
-                            catalog_effects.push(constraint_effect);
-                        }
-                        let foreign_key_base_cid =
-                            check_base_cid.saturating_add(lowered.check_actions.len() as u32);
-                        for (index, action) in lowered.foreign_key_actions.iter().enumerate() {
-                            let referenced_relation = catalog
-                                .lookup_relation_by_oid(action.referenced_relation_oid)
-                                .ok_or_else(|| {
-                                    ExecError::Parse(ParseError::UnknownTable(
-                                        action.referenced_table.clone(),
-                                    ))
-                                })?;
-                            let local_attnums =
-                                column_attnums_for_names(&relation.desc, &action.columns);
-                            let referenced_attnums = column_attnums_for_names(
-                                &referenced_relation.desc,
-                                &action.referenced_columns,
-                            );
-                            let constraint_ctx = CatalogWriteContext {
-                                pool: self.pool.clone(),
-                                txns: self.txns.clone(),
-                                xid,
-                                cid: foreign_key_base_cid.saturating_add(index as u32),
-                                client_id,
-                                waiter: None,
-                                interrupts: Arc::clone(&interrupts),
-                            };
-                            let constraint_effect = self
-                                .catalog
-                                .write()
-                                .create_foreign_key_constraint_mvcc(
-                                    relation.relation_oid,
-                                    action.constraint_name.clone(),
-                                    !action.not_valid,
-                                    &local_attnums,
-                                    action.referenced_relation_oid,
-                                    action.referenced_index_oid,
-                                    &referenced_attnums,
-                                    foreign_key_action_code(action.on_update),
-                                    foreign_key_action_code(action.on_delete),
-                                    foreign_key_match_code(action.match_type),
-                                    &constraint_ctx,
-                                )
-                                .map_err(map_catalog_error)?;
-                            self.apply_catalog_mutation_effect_immediate(&constraint_effect)?;
-                            catalog_effects.push(constraint_effect);
-                        }
+                        let constraint_cid_base =
+                            table_cid.saturating_add(u32::from(!lowered.parent_oids.is_empty()));
+                        self.install_create_table_constraints_in_transaction(
+                            client_id,
+                            xid,
+                            constraint_cid_base,
+                            &table_name,
+                            &relation,
+                            &lowered,
+                            configured_search_path,
+                            catalog_effects,
+                        )?;
                         Ok(StatementResult::AffectedRows(0))
                     }
                 }
             }
             TablePersistence::Temporary => {
-                if !lowered.constraint_actions.is_empty()
-                    || !lowered.check_actions.is_empty()
-                    || !lowered.foreign_key_actions.is_empty()
-                {
-                    return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                        expected: "permanent table for PRIMARY KEY/UNIQUE/CHECK/FOREIGN KEY constraints",
-                        actual: "temporary table".into(),
-                    }));
-                }
                 let created = self.create_temp_relation_in_transaction(
                     client_id,
-                    table_name,
+                    table_name.clone(),
                     desc,
                     create_stmt.on_commit,
                     xid,
@@ -894,6 +945,31 @@ impl Database {
                     self.apply_catalog_mutation_effect_immediate(&inherit_effect)?;
                     catalog_effects.push(inherit_effect);
                 }
+                let relation = crate::backend::parser::BoundRelation {
+                    rel: created.entry.rel,
+                    relation_oid: created.entry.relation_oid,
+                    namespace_oid: created.entry.namespace_oid,
+                    owner_oid: created.entry.owner_oid,
+                    relpersistence: created.entry.relpersistence,
+                    relkind: created.entry.relkind,
+                    toast: created.toast.as_ref().map(|toast| ToastRelationRef {
+                        rel: toast.toast_entry.rel,
+                        relation_oid: toast.toast_entry.relation_oid,
+                    }),
+                    desc: created.entry.desc.clone(),
+                };
+                let constraint_cid_base =
+                    table_cid.saturating_add(u32::from(!lowered.parent_oids.is_empty()));
+                self.install_create_table_constraints_in_transaction(
+                    client_id,
+                    xid,
+                    constraint_cid_base,
+                    &table_name,
+                    &relation,
+                    &lowered,
+                    configured_search_path,
+                    catalog_effects,
+                )?;
                 Ok(StatementResult::AffectedRows(0))
             }
         }
