@@ -56,7 +56,7 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_domain_statement(&sql)? {
         return Ok(stmt);
     }
-    if let Some(stmt) = try_parse_create_function_statement(&sql)? {
+    if let Some(stmt) = try_parse_create_type_statement(&sql)? {
         return Ok(stmt);
     }
     if let Some(stmt) = try_parse_grant_revoke_statement(&sql)? {
@@ -234,6 +234,18 @@ fn try_parse_create_function_statement(sql: &str) -> Result<Option<Statement>, P
     Ok(Some(Statement::CreateFunction(
         build_create_function_statement(trimmed)?,
     )))
+}
+
+fn try_parse_create_type_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if lowered.starts_with("create type ") {
+        return build_create_type_statement(trimmed).map(|stmt| Some(Statement::CreateType(stmt)));
+    }
+    if lowered.starts_with("drop type ") {
+        return build_drop_type_statement(trimmed).map(|stmt| Some(Statement::DropType(stmt)));
+    }
+    Ok(None)
 }
 
 fn try_parse_grant_revoke_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
@@ -512,7 +524,6 @@ fn parse_grant_bool(input: &str) -> Result<bool, ParseError> {
         }),
     }
 }
-
 fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement, ParseError> {
     let prefix = "create function";
     let Some(rest) = sql.get(prefix.len()..) else {
@@ -522,7 +533,7 @@ fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement,
         });
     };
     let rest = rest.trim_start();
-    let ((schema_name, function_name), rest) = parse_create_function_name(rest)?;
+    let ((schema_name, function_name), rest) = parse_qualified_sql_name(rest)?;
     let (arg_list, mut rest) = take_parenthesized_segment(rest)?;
     let args = parse_create_function_args(&arg_list)?;
 
@@ -606,7 +617,7 @@ fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement,
     })
 }
 
-fn parse_create_function_name(input: &str) -> Result<((Option<String>, String), &str), ParseError> {
+fn parse_qualified_sql_name(input: &str) -> Result<((Option<String>, String), &str), ParseError> {
     let (first, mut rest) = parse_sql_identifier(input)?;
     rest = rest.trim_start();
     if let Some(after_dot) = rest.strip_prefix('.') {
@@ -614,6 +625,187 @@ fn parse_create_function_name(input: &str) -> Result<((Option<String>, String), 
         return Ok(((Some(first), second), rest));
     }
     Ok(((None, first), rest))
+}
+
+fn build_create_type_statement(sql: &str) -> Result<CreateTypeStatement, ParseError> {
+    let prefix = "create type";
+    let Some(rest) = sql.get(prefix.len()..) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "CREATE TYPE name AS (...)",
+            actual: sql.into(),
+        });
+    };
+    let rest = rest.trim_start();
+    let ((schema_name, type_name), rest) = parse_qualified_sql_name(rest)?;
+    let rest = rest.trim_start();
+    if rest.is_empty() {
+        return Err(ParseError::FeatureNotSupported(
+            "shell types are not supported in CREATE TYPE".into(),
+        ));
+    }
+    if rest.starts_with('(') {
+        return Err(ParseError::FeatureNotSupported(
+            "base type definitions are not supported in CREATE TYPE".into(),
+        ));
+    }
+    if !keyword_at_start(rest, "as") {
+        return Err(ParseError::FeatureNotSupported(
+            "unsupported CREATE TYPE form".into(),
+        ));
+    }
+    let rest = consume_keyword(rest, "as").trim_start();
+    if keyword_at_start(rest, "enum") {
+        return Err(ParseError::FeatureNotSupported(
+            "CREATE TYPE AS ENUM is not supported yet".into(),
+        ));
+    }
+    if keyword_at_start(rest, "range") {
+        return Err(ParseError::FeatureNotSupported(
+            "CREATE TYPE AS RANGE is not supported yet".into(),
+        ));
+    }
+    let (attr_list, rest) = take_parenthesized_segment(rest)?;
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of statement",
+            actual: rest.trim().into(),
+        });
+    }
+    let attributes = parse_create_type_attributes(&attr_list)?;
+    Ok(CreateTypeStatement::Composite(
+        CreateCompositeTypeStatement {
+            schema_name,
+            type_name,
+            attributes,
+        },
+    ))
+}
+
+fn parse_create_type_attributes(input: &str) -> Result<Vec<CompositeTypeAttributeDef>, ParseError> {
+    let items = split_top_level_items(input, ',')?;
+    if items.len() == 1 && items[0].trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    items
+        .into_iter()
+        .filter(|item| !item.trim().is_empty())
+        .map(|item| parse_create_type_attribute(&item))
+        .collect()
+}
+
+fn parse_create_type_attribute(input: &str) -> Result<CompositeTypeAttributeDef, ParseError> {
+    let trimmed = input.trim();
+    let (name, rest) = parse_sql_identifier(trimmed)?;
+    let rest = rest.trim_start();
+    if rest.is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "composite type attribute type",
+            actual: input.into(),
+        });
+    }
+    let lowered = rest.to_ascii_lowercase();
+    if lowered.split_whitespace().any(|tok| {
+        matches!(
+            tok,
+            "collate"
+                | "constraint"
+                | "default"
+                | "check"
+                | "references"
+                | "not"
+                | "null"
+                | "primary"
+                | "unique"
+                | "generated"
+        )
+    }) {
+        return Err(ParseError::FeatureNotSupported(
+            "CREATE TYPE attributes only support name and type".into(),
+        ));
+    }
+    Ok(CompositeTypeAttributeDef {
+        name,
+        ty: parse_type_name(rest)?,
+    })
+}
+
+fn build_drop_type_statement(sql: &str) -> Result<DropTypeStatement, ParseError> {
+    let prefix = "drop type";
+    let Some(rest) = sql.get(prefix.len()..) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "DROP TYPE [IF EXISTS] name",
+            actual: sql.into(),
+        });
+    };
+    let mut rest = rest.trim_start();
+    let mut if_exists = false;
+    if keyword_at_start(rest, "if") {
+        rest = consume_keyword(rest, "if").trim_start();
+        if !keyword_at_start(rest, "exists") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "DROP TYPE IF EXISTS name",
+                actual: sql.into(),
+            });
+        }
+        rest = consume_keyword(rest, "exists").trim_start();
+        if_exists = true;
+    }
+    let split_at =
+        find_next_top_level_keyword(rest, &["cascade", "restrict"]).unwrap_or(rest.len());
+    let names_sql = rest[..split_at].trim();
+    let suffix = rest[split_at..].trim_start();
+    if names_sql.is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "type name",
+            actual: sql.into(),
+        });
+    }
+    let type_names = split_top_level_items(names_sql, ',')?
+        .into_iter()
+        .filter(|item| !item.trim().is_empty())
+        .map(|item| {
+            let ((schema_name, type_name), trailing) = parse_qualified_sql_name(item.trim())?;
+            if !trailing.trim().is_empty() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "type name",
+                    actual: item,
+                });
+            }
+            Ok(match schema_name {
+                Some(schema_name) => format!("{schema_name}.{type_name}"),
+                None => type_name,
+            })
+        })
+        .collect::<Result<Vec<_>, ParseError>>()?;
+    let cascade = if suffix.is_empty() {
+        false
+    } else if keyword_at_start(suffix, "cascade") {
+        if !consume_keyword(suffix, "cascade").trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of statement",
+                actual: suffix.into(),
+            });
+        }
+        true
+    } else if keyword_at_start(suffix, "restrict") {
+        if !consume_keyword(suffix, "restrict").trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of statement",
+                actual: suffix.into(),
+            });
+        }
+        false
+    } else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "CASCADE, RESTRICT, or end of statement",
+            actual: suffix.into(),
+        });
+    };
+    Ok(DropTypeStatement {
+        if_exists,
+        type_names,
+        cascade,
+    })
 }
 
 fn parse_create_function_args(input: &str) -> Result<Vec<CreateFunctionArg>, ParseError> {

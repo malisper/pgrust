@@ -1,6 +1,7 @@
 use super::*;
 use crate::backend::executor::{ExecError, Value};
 use crate::backend::parser::{CatalogLookup, ParseError, SqlType, SqlTypeKind};
+use crate::include::catalog::{PG_CLASS_RELATION_OID, PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID};
 use crate::include::nodes::primnodes::QueryColumn;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -264,9 +265,15 @@ fn recursive_union_distinct_rejects_varbit_columns() {
         }) => {
             assert_eq!(sqlstate, "0A000");
             assert_eq!(message, "could not implement recursive UNION");
-            assert_eq!(detail.as_deref(), Some("All column datatypes must be hashable."));
+            assert_eq!(
+                detail.as_deref(),
+                Some("All column datatypes must be hashable.")
+            );
         }
-        other => panic!("expected recursive union hashability error, got {:?}", other),
+        other => panic!(
+            "expected recursive union hashability error, got {:?}",
+            other
+        ),
     }
 }
 
@@ -7907,10 +7914,7 @@ fn truncate_rollback_restores_relfilenodes_and_rows() {
         .execute(&db, "create table trunc_rb (id int4 not null, note text)")
         .unwrap();
     session
-        .execute(
-            &db,
-            "insert into trunc_rb values (1, 'alpha'), (2, 'beta')",
-        )
+        .execute(&db, "insert into trunc_rb values (1, 'alpha'), (2, 'beta')")
         .unwrap();
     session
         .execute(&db, "create index trunc_rb_idx on trunc_rb (id)")
@@ -8884,6 +8888,209 @@ fn create_function_named_composite_rows_expand_from_relation_rowtype() {
     assert_eq!(
         query_rows(&db, 1, "select * from widget_rows(5)"),
         vec![vec![Value::Int32(5), Value::Text("widget".into())]]
+    );
+}
+
+#[test]
+fn create_type_exposes_catalog_rows_and_function_row_expansion() {
+    let dir = temp_dir("create_type_catalog_rows");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create type widget as (id int4, label text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create function widget_rows(n int4) returns setof widget language plpgsql as $$ begin return query values (n, 'widget'); end $$",
+    )
+    .unwrap();
+
+    let visible = db.lazy_catalog_lookup(1, None, None);
+    let widget_relation = visible.lookup_any_relation("widget").unwrap();
+    let widget_type = visible
+        .type_rows()
+        .into_iter()
+        .find(|row| row.typname == "widget")
+        .unwrap();
+    let widget_proc = visible
+        .proc_rows_by_name("widget_rows")
+        .into_iter()
+        .next()
+        .unwrap();
+
+    assert_eq!(widget_relation.relkind, 'c');
+    assert_eq!(widget_type.typrelid, widget_relation.relation_oid);
+    assert_eq!(widget_proc.prorettype, widget_type.oid);
+    assert!(widget_proc.proretset);
+    assert_eq!(relfilenode_for(&db, 1, "widget"), 0);
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            &format!(
+                "select attname from pg_attribute where attrelid = {} and attnum > 0 order by attnum",
+                widget_relation.relation_oid
+            ),
+        ),
+        vec![
+            vec![Value::Text("id".into())],
+            vec![Value::Text("label".into())],
+        ]
+    );
+    assert!(
+        db.backend_catcache(1, None)
+            .unwrap()
+            .depend_rows()
+            .iter()
+            .any(|row| {
+                row.classid == PG_PROC_RELATION_OID
+                    && row.objid == widget_proc.oid
+                    && row.refclassid == PG_TYPE_RELATION_OID
+                    && row.refobjid == widget_type.oid
+            })
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select * from widget_rows(5)"),
+        vec![vec![Value::Int32(5), Value::Text("widget".into())]]
+    );
+}
+
+#[test]
+fn create_type_nested_dependencies_and_array_restrictions_work() {
+    let dir = temp_dir("create_type_nested_dependencies");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create type complex as (r float8, i float8)")
+        .unwrap();
+
+    match db.execute(1, "create type complex_bucket as (items complex[])") {
+        Err(ExecError::Parse(ParseError::FeatureNotSupported(message)))
+            if message.contains("arrays of named composite types are not supported yet") => {}
+        other => panic!("expected composite-array rejection, got {other:?}"),
+    }
+
+    db.execute(1, "create type holder as (payload complex)")
+        .unwrap();
+
+    let catcache = db.backend_catcache(1, None).unwrap();
+    let complex_type = catcache
+        .type_rows()
+        .into_iter()
+        .find(|row| row.typname == "complex")
+        .unwrap();
+    let holder_relation = db
+        .lazy_catalog_lookup(1, None, None)
+        .lookup_any_relation("holder")
+        .unwrap();
+    assert!(catcache.depend_rows().iter().any(|row| {
+        row.classid == PG_CLASS_RELATION_OID
+            && row.objid == holder_relation.relation_oid
+            && row.refclassid == PG_TYPE_RELATION_OID
+            && row.refobjid == complex_type.oid
+    }));
+
+    match db.execute(1, "drop type complex") {
+        Err(ExecError::DetailedError {
+            sqlstate,
+            message,
+            detail,
+            ..
+        }) => {
+            assert_eq!(sqlstate, "2BP01");
+            assert!(message.contains("cannot drop type complex"));
+            assert!(
+                detail
+                    .unwrap_or_default()
+                    .contains("type holder depends on type complex")
+            );
+        }
+        other => panic!("expected dependent-type drop restriction, got {other:?}"),
+    }
+}
+
+#[test]
+fn drop_type_enforces_restrict_and_if_exists() {
+    let dir = temp_dir("drop_type_restrict");
+    let db = Database::open(&dir, 64).unwrap();
+
+    match db.execute(1, "drop type if exists missing_widget") {
+        Ok(StatementResult::AffectedRows(0)) => {}
+        other => panic!("expected no-op drop type if exists, got {other:?}"),
+    }
+
+    db.execute(1, "create type unused_widget as (id int4)")
+        .unwrap();
+    match db.execute(1, "drop type unused_widget") {
+        Ok(StatementResult::AffectedRows(1)) => {}
+        other => panic!("expected unused drop type success, got {other:?}"),
+    }
+
+    db.execute(1, "create type widget as (id int4, label text)")
+        .unwrap();
+
+    match db.execute(1, "drop type widget cascade") {
+        Err(ExecError::Parse(ParseError::FeatureNotSupported(message)))
+            if message == "DROP TYPE CASCADE is not supported yet" => {}
+        other => panic!("expected drop-type cascade rejection, got {other:?}"),
+    }
+
+    db.execute(
+        1,
+        "create function widget_rows(n int4) returns setof widget language plpgsql as $$ begin return query values (n, 'widget'); end $$",
+    )
+    .unwrap();
+
+    match db.execute(1, "drop type widget") {
+        Err(ExecError::DetailedError {
+            sqlstate,
+            message,
+            detail,
+            ..
+        }) => {
+            assert_eq!(sqlstate, "2BP01");
+            assert!(message.contains("cannot drop type widget"));
+            assert!(
+                detail
+                    .unwrap_or_default()
+                    .contains("function widget_rows depends on type widget")
+            );
+        }
+        other => panic!("expected dependent-function drop restriction, got {other:?}"),
+    }
+}
+
+#[test]
+fn composite_type_persists_across_reopen_without_storage() {
+    let base = temp_dir("composite_type_reopen");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(1, "create type widget as (id int4, label text)")
+        .unwrap();
+    assert_eq!(relfilenode_for(&db, 1, "widget"), 0);
+
+    drop(db);
+
+    let reopened = Database::open(&base, 64).unwrap();
+    let visible = reopened.lazy_catalog_lookup(1, None, None);
+    let widget_relation = visible.lookup_any_relation("widget").unwrap();
+    let widget_type = visible
+        .type_rows()
+        .into_iter()
+        .find(|row| row.typname == "widget")
+        .unwrap();
+
+    assert_eq!(widget_relation.relkind, 'c');
+    assert_eq!(widget_type.typrelid, widget_relation.relation_oid);
+    assert_eq!(relfilenode_for(&reopened, 1, "widget"), 0);
+    assert_eq!(
+        query_rows(
+            &reopened,
+            1,
+            "select attname from pg_attribute where attrelid = (select oid from pg_class where relname = 'widget') and attnum > 0 order by attnum",
+        ),
+        vec![
+            vec![Value::Text("id".into())],
+            vec![Value::Text("label".into())],
+        ]
     );
 }
 

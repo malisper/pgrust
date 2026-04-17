@@ -1,9 +1,10 @@
 use super::{
     Catalog, ExecError, ExecutorContext, ParseError, Plan, PlannedStmt, QueryDesc, Statement,
     StatementResult, TransactionId, TupleSlot, Value, bind_delete, bind_insert, bind_update,
-    create_query_desc, execute_analyze, execute_create_index, execute_create_table, execute_delete,
-    execute_drop_table, execute_explain, execute_insert, execute_truncate_table, execute_update,
-    execute_vacuum, eval_expr, executor_start, parse_statement, pg_plan_query, pg_plan_values_query,
+    create_query_desc, eval_expr, execute_analyze, execute_create_index, execute_create_table,
+    execute_delete, execute_drop_table, execute_explain, execute_insert, execute_truncate_table,
+    execute_update, execute_vacuum, executor_start, parse_statement, pg_plan_query,
+    pg_plan_values_query,
 };
 use crate::backend::parser::CatalogLookup;
 use crate::backend::parser::UnsupportedStatement;
@@ -230,6 +231,10 @@ fn execute_statement_with_source(
             expected: "CREATE DOMAIN handled by database/session layer",
             actual: "CREATE DOMAIN".into(),
         })),
+        Statement::CreateType(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "CREATE TYPE handled by database/session layer",
+            actual: "CREATE TYPE".into(),
+        })),
         Statement::CreateTable(stmt) => execute_create_table(stmt, catalog),
         Statement::CreateTableAs(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "create table handled by database/session layer",
@@ -247,6 +252,10 @@ fn execute_statement_with_source(
         Statement::DropDomain(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "DROP DOMAIN handled by database/session layer",
             actual: "DROP DOMAIN".into(),
+        })),
+        Statement::DropType(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "DROP TYPE handled by database/session layer",
+            actual: "DROP TYPE".into(),
         })),
         Statement::DropView(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "DROP VIEW handled by database/session layer",
@@ -330,6 +339,10 @@ pub fn execute_readonly_statement(
             expected: "read-only statement",
             actual: "CREATE DOMAIN".into(),
         })),
+        Statement::CreateType(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "CREATE TYPE".into(),
+        })),
         Statement::CreateView(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "CREATE VIEW".into(),
@@ -342,6 +355,10 @@ pub fn execute_readonly_statement(
         Statement::DropDomain(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "DROP DOMAIN".into(),
+        })),
+        Statement::DropType(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "DROP TYPE".into(),
         })),
         other => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",

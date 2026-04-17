@@ -1555,6 +1555,18 @@ impl Session {
                     &mut txn.temp_effects,
                 )
             }
+            Statement::CreateType(ref create_stmt) => {
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_create_type_stmt_in_transaction_with_search_path(
+                    client_id,
+                    create_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
             Statement::DropDomain(ref drop_stmt) => {
                 let search_path = self.configured_search_path();
                 db.execute_drop_domain_stmt_with_search_path(
@@ -1586,6 +1598,18 @@ impl Session {
                     search_path.as_deref(),
                     &mut txn.catalog_effects,
                     &mut txn.temp_effects,
+                )
+            }
+            Statement::DropType(ref drop_stmt) => {
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_drop_type_stmt_in_transaction_with_search_path(
+                    client_id,
+                    drop_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
                 )
             }
             Statement::DropView(ref drop_stmt) => {

@@ -9,6 +9,8 @@ use crate::include::catalog::{
 use crate::include::nodes::parsenodes::{
     AliasColumnDef, AliasColumnSpec, ColumnConstraint, ForeignKeyAction, ForeignKeyMatchType,
     JoinTreeNode, RangeTblEntryKind, RawTypeName, TableConstraint,
+    CompositeTypeAttributeDef, CreateCompositeTypeStatement, CreateTypeStatement,
+    DropTypeStatement,
 };
 use crate::include::nodes::primnodes::{AttrNumber, JoinType, Var, is_system_attr};
 
@@ -3844,6 +3846,108 @@ fn parse_create_drop_and_comment_on_domain_statements() {
     };
     assert_eq!(comment.domain_name, "dom_int");
     assert_eq!(comment.comment.as_deref(), Some("hello"));
+}
+
+#[test]
+fn parse_create_and_drop_type_statements() {
+    let Statement::CreateType(CreateTypeStatement::Composite(CreateCompositeTypeStatement {
+        schema_name,
+        type_name,
+        attributes,
+    })) = parse_statement("create type complex as (r float8, i float8)").unwrap()
+    else {
+        panic!("expected create type");
+    };
+    assert_eq!(schema_name, None);
+    assert_eq!(type_name, "complex");
+    assert_eq!(
+        attributes,
+        vec![
+            CompositeTypeAttributeDef {
+                name: "r".into(),
+                ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Float8)),
+            },
+            CompositeTypeAttributeDef {
+                name: "i".into(),
+                ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Float8)),
+            },
+        ]
+    );
+
+    let Statement::DropType(DropTypeStatement {
+        if_exists,
+        type_names,
+        cascade,
+    }) = parse_statement("drop type complex").unwrap()
+    else {
+        panic!("expected drop type");
+    };
+    assert!(!if_exists);
+    assert_eq!(type_names, vec!["complex"]);
+    assert!(!cascade);
+
+    let Statement::DropType(DropTypeStatement {
+        if_exists,
+        type_names,
+        cascade,
+    }) = parse_statement("drop type if exists complex restrict").unwrap()
+    else {
+        panic!("expected drop type restrict");
+    };
+    assert!(if_exists);
+    assert_eq!(type_names, vec!["complex"]);
+    assert!(!cascade);
+
+    let Statement::DropType(DropTypeStatement {
+        if_exists,
+        type_names,
+        cascade,
+    }) = parse_statement("drop type complex cascade").unwrap()
+    else {
+        panic!("expected drop type cascade");
+    };
+    assert!(!if_exists);
+    assert_eq!(type_names, vec!["complex"]);
+    assert!(cascade);
+}
+
+#[test]
+fn parse_create_type_rejects_unsupported_forms() {
+    assert!(matches!(
+        parse_statement("create type myint"),
+        Err(ParseError::FeatureNotSupported(feature))
+            if feature == "shell types are not supported in CREATE TYPE"
+    ));
+    assert!(matches!(
+        parse_statement("create type myint (input = myintin, output = myintout, like = int4)"),
+        Err(ParseError::FeatureNotSupported(feature))
+            if feature == "base type definitions are not supported in CREATE TYPE"
+    ));
+    assert!(matches!(
+        parse_statement("create type mood as enum ('sad', 'ok')"),
+        Err(ParseError::FeatureNotSupported(feature))
+            if feature == "CREATE TYPE AS ENUM is not supported yet"
+    ));
+    assert!(matches!(
+        parse_statement("create type intr as range (subtype = int4)"),
+        Err(ParseError::FeatureNotSupported(feature))
+            if feature == "CREATE TYPE AS RANGE is not supported yet"
+    ));
+}
+
+#[test]
+fn parse_create_type_rejects_extended_attribute_syntax() {
+    for sql in [
+        "create type complex as (r float8 default 0)",
+        "create type complex as (r float8 constraint c check (r > 0))",
+        "create type complex as (label text collate \"C\")",
+    ] {
+        assert!(matches!(
+            parse_statement(sql),
+            Err(ParseError::FeatureNotSupported(feature))
+                if feature == "CREATE TYPE attributes only support name and type"
+        ));
+    }
 }
 
 #[test]
