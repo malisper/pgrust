@@ -401,6 +401,7 @@ mod tests {
             date_style_format: DateStyleFormat::Iso,
             date_order: DateOrder::Mdy,
             time_zone: "UTC".into(),
+            max_stack_depth_kb: 100,
         };
         assert_eq!(format_date_text(value, &iso), "1999-01-08");
 
@@ -408,6 +409,7 @@ mod tests {
             date_style_format: DateStyleFormat::Sql,
             date_order: DateOrder::Dmy,
             time_zone: "UTC".into(),
+            max_stack_depth_kb: 100,
         };
         assert_eq!(format_date_text(value, &sql), "08-01-1999");
 
@@ -415,6 +417,7 @@ mod tests {
             date_style_format: DateStyleFormat::German,
             date_order: DateOrder::Mdy,
             time_zone: "UTC".into(),
+            max_stack_depth_kb: 100,
         };
         assert_eq!(format_date_text(value, &german), "08.01.1999");
     }
@@ -426,6 +429,7 @@ mod tests {
             date_style_format: DateStyleFormat::Iso,
             date_order: DateOrder::Mdy,
             time_zone: "UTC".into(),
+            max_stack_depth_kb: 100,
         };
         assert_eq!(format_date_text(value, &config), "0099-01-08 BC");
     }
@@ -436,6 +440,7 @@ mod tests {
             date_style_format: DateStyleFormat::Iso,
             date_order: DateOrder::Ymd,
             time_zone: "UTC".into(),
+            max_stack_depth_kb: 100,
         };
 
         for input in [
@@ -458,6 +463,7 @@ mod tests {
             date_style_format: DateStyleFormat::Iso,
             date_order: DateOrder::Ymd,
             time_zone: "UTC".into(),
+            max_stack_depth_kb: 100,
         };
 
         assert_eq!(
@@ -478,11 +484,13 @@ mod tests {
             date_style_format: DateStyleFormat::Iso,
             date_order: DateOrder::Ymd,
             time_zone: "UTC".into(),
+            max_stack_depth_kb: 100,
         };
         let dmy = DateTimeConfig {
             date_style_format: DateStyleFormat::Iso,
             date_order: DateOrder::Dmy,
             time_zone: "UTC".into(),
+            max_stack_depth_kb: 100,
         };
 
         assert_eq!(
