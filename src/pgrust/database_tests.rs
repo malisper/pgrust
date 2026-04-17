@@ -10366,6 +10366,37 @@ fn create_enum_type_exposes_catalog_rows_and_can_back_table_columns() {
 }
 
 #[test]
+fn create_range_type_exposes_catalog_rows_and_can_back_table_columns() {
+    let dir = temp_dir("create_range_type_catalog_rows");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create type float8range as range (subtype = float8, subtype_diff = float8mi)",
+    )
+    .unwrap();
+    db.execute(1, "create table measurements(span float8range)")
+        .unwrap();
+
+    let visible = db.lazy_catalog_lookup(1, None, None);
+    let range_type = visible
+        .type_rows()
+        .into_iter()
+        .find(|row| row.typname == "float8range")
+        .unwrap();
+    let range_array_type = visible
+        .type_rows()
+        .into_iter()
+        .find(|row| row.typname == "_float8range")
+        .unwrap();
+
+    assert_eq!(range_type.typelem, 0);
+    assert_eq!(range_type.typarray, range_array_type.oid);
+    assert_eq!(range_array_type.typelem, range_type.oid);
+    assert_eq!(range_type.sql_type.kind, SqlTypeKind::Text);
+}
+
+#[test]
 fn create_type_nested_dependencies_and_named_composite_arrays_work() {
     let dir = temp_dir("create_type_nested_dependencies");
     let db = Database::open(&dir, 64).unwrap();
@@ -10554,6 +10585,47 @@ fn drop_enum_type_enforces_restrict_and_if_exists() {
             );
         }
         other => panic!("expected dependent enum drop restriction, got {other:?}"),
+    }
+}
+
+#[test]
+fn drop_range_type_enforces_restrict_and_if_exists() {
+    let dir = temp_dir("drop_range_type_restrict");
+    let db = Database::open(&dir, 64).unwrap();
+
+    match db.execute(1, "drop type if exists missing_float8range") {
+        Ok(StatementResult::AffectedRows(0)) => {}
+        other => panic!("expected no-op drop type if exists, got {other:?}"),
+    }
+
+    db.execute(1, "create type unused_float8range as range (subtype = float8)")
+        .unwrap();
+    match db.execute(1, "drop type unused_float8range") {
+        Ok(StatementResult::AffectedRows(1)) => {}
+        other => panic!("expected unused range drop success, got {other:?}"),
+    }
+
+    db.execute(1, "create type float8range as range (subtype = float8)")
+        .unwrap();
+    db.execute(1, "create table measurements(span float8range)")
+        .unwrap();
+
+    match db.execute(1, "drop type float8range") {
+        Err(ExecError::DetailedError {
+            sqlstate,
+            message,
+            detail,
+            ..
+        }) => {
+            assert_eq!(sqlstate, "2BP01");
+            assert!(message.contains("cannot drop type float8range"));
+            assert!(
+                detail
+                    .unwrap_or_default()
+                    .contains("table measurements depends on type float8range")
+            );
+        }
+        other => panic!("expected dependent range drop restriction, got {other:?}"),
     }
 }
 

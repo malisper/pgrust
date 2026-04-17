@@ -4104,11 +4104,20 @@ fn parse_create_type_supports_enum_and_rejects_other_unsupported_forms() {
         }
         other => panic!("expected enum create type, got {other:?}"),
     }
-    assert!(matches!(
-        parse_statement("create type intr as range (subtype = int4)"),
-        Err(ParseError::FeatureNotSupported(feature))
-            if feature == "CREATE TYPE AS RANGE is not supported yet"
-    ));
+    match parse_statement(
+        "create type intr as range (subtype = int4, subtype_diff = int4mi, collation = \"C\")",
+    )
+    .unwrap()
+    {
+        Statement::CreateType(CreateTypeStatement::Range(stmt)) => {
+            assert_eq!(stmt.schema_name, None);
+            assert_eq!(stmt.type_name, "intr");
+            assert_eq!(stmt.subtype, RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)));
+            assert_eq!(stmt.subtype_diff.as_deref(), Some("int4mi"));
+            assert_eq!(stmt.collation.as_deref(), Some("C"));
+        }
+        other => panic!("expected range create type, got {other:?}"),
+    }
 }
 
 #[test]
