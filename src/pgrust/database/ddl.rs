@@ -12,8 +12,8 @@ use crate::backend::utils::cache::syscache::{
     ensure_class_rows, ensure_depend_rows, ensure_namespace_rows, ensure_rewrite_rows,
 };
 use crate::include::catalog::{
-    DEPENDENCY_NORMAL, PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID, PG_REWRITE_RELATION_OID,
-    PUBLIC_NAMESPACE_OID,
+    DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID,
+    PG_PROC_RELATION_OID, PG_REWRITE_RELATION_OID, PG_TYPE_RELATION_OID, PUBLIC_NAMESPACE_OID,
 };
 use crate::include::nodes::primnodes::{Var, user_attrno};
 
@@ -54,6 +54,7 @@ fn auth_catalog_for_ddl(
 
 pub(super) fn relation_kind_name(relkind: char) -> &'static str {
     match relkind {
+        'c' => "type",
         'v' => "view",
         'i' => "index",
         _ => "table",
@@ -173,6 +174,77 @@ pub(super) fn reject_relation_with_dependent_views(
             dependent_views.join(", ")
         ),
     }))
+}
+
+pub(super) fn reject_type_with_dependents(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    type_oid: u32,
+    display_name: &str,
+) -> Result<(), ExecError> {
+    let catcache = db.backend_catcache(client_id, txn_ctx).map_err(|err| {
+        ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "catalog lookup",
+            actual: format!("{err:?}"),
+        })
+    })?;
+    let format_name = |namespace_oid: u32, object_name: &str| {
+        let schema_name = catcache
+            .namespace_by_oid(namespace_oid)
+            .map(|row| row.nspname.clone())
+            .unwrap_or_else(|| "public".to_string());
+        match schema_name.as_str() {
+            "public" | "pg_catalog" => object_name.to_string(),
+            _ => format!("{schema_name}.{object_name}"),
+        }
+    };
+
+    let mut dependents = catcache
+        .depend_rows()
+        .into_iter()
+        .filter(|row| {
+            row.refclassid == PG_TYPE_RELATION_OID
+                && row.refobjid == type_oid
+                && row.deptype != DEPENDENCY_INTERNAL
+        })
+        .filter_map(|row| match row.classid {
+            PG_CLASS_RELATION_OID => {
+                let class = catcache.class_by_oid(row.objid)?;
+                Some(format!(
+                    "{} {}",
+                    relation_kind_name(class.relkind),
+                    format_name(class.relnamespace, &class.relname)
+                ))
+            }
+            PG_PROC_RELATION_OID => {
+                let proc_row = catcache.proc_by_oid(row.objid)?;
+                Some(format!(
+                    "function {}",
+                    format_name(proc_row.pronamespace, &proc_row.proname)
+                ))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    dependents.sort();
+    dependents.dedup();
+    if dependents.is_empty() {
+        return Ok(());
+    }
+
+    Err(ExecError::DetailedError {
+        message: format!("cannot drop type {display_name} because other objects depend on it"),
+        detail: Some(
+            dependents
+                .into_iter()
+                .map(|name| format!("{name} depends on type {display_name}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+        hint: None,
+        sqlstate: "2BP01",
+    })
 }
 
 pub(super) fn reject_inheritance_tree_ddl(
