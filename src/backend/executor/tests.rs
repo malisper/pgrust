@@ -4834,11 +4834,39 @@ fn bytea_text_input_and_pg_input_helpers_follow_postgres_rules() {
         )
         .unwrap(),
         vec![vec![
-            Value::Text("invalid input syntax for type bytea: \"\\x123\"".into()),
+            Value::Text("invalid hexadecimal data: odd number of digits".into()),
             Value::Null,
             Value::Null,
-            Value::Text("22P02".into()),
+            Value::Text("22023".into()),
         ]],
+    );
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select * from pg_input_error_info(E'\\\\x12x3', 'bytea')",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Text("invalid hexadecimal digit: \"x\"".into()),
+            Value::Null,
+            Value::Null,
+            Value::Text("22023".into()),
+        ]],
+    );
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select E'foo\\\\99bar'::bytea",
+    )
+    .unwrap_err();
+    assert_eq!(
+        format_exec_error(&err),
+        "invalid input syntax for type bytea"
     );
 }
 

@@ -49,6 +49,9 @@ fn exec_error_sqlstate(e: &ExecError) -> &'static str {
         | ExecError::InvalidBitInput { .. }
         | ExecError::InvalidBooleanInput { .. }
         | ExecError::InvalidFloatInput { .. } => "22P02",
+        ExecError::InvalidByteaHexDigit { .. } | ExecError::InvalidByteaHexOddDigits { .. } => {
+            "22023"
+        }
         ExecError::BitStringLengthMismatch { .. }
         | ExecError::BitStringTooLong { .. }
         | ExecError::BitStringSizeMismatch { .. } => "22026",
@@ -162,6 +165,8 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         ExecError::IntegerOutOfRange { value, .. } => value.as_str(),
         ExecError::InvalidNumericInput(value) => value.as_str(),
         ExecError::InvalidByteaInput { value } => value.as_str(),
+        ExecError::InvalidByteaHexDigit { value, .. } => value.as_str(),
+        ExecError::InvalidByteaHexOddDigits { value } => value.as_str(),
         ExecError::InvalidGeometryInput { value, .. } => value.as_str(),
         ExecError::InvalidBooleanInput { value } => value.as_str(),
         ExecError::InvalidFloatInput { value, .. } => value.as_str(),
