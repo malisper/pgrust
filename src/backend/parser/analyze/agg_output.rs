@@ -31,7 +31,10 @@ pub(super) fn with_grouped_agg_cte_context<T>(
     let result = f();
     GROUPED_AGG_CTE_CONTEXT.with(|stack| {
         let popped = stack.borrow_mut().pop();
-        debug_assert!(popped.is_some(), "grouped aggregate CTE context stack underflow");
+        debug_assert!(
+            popped.is_some(),
+            "grouped aggregate CTE context stack underflow"
+        );
     });
     result
 }
@@ -254,9 +257,11 @@ fn query_references_local_cte(
                 }
             }
             RangeTblEntryKind::Values { rows, .. } => {
-                if let Some(name) = rows.iter().flatten().find_map(|expr| {
-                    expr_references_local_cte(expr, local_ctes)
-                }) {
+                if let Some(name) = rows
+                    .iter()
+                    .flatten()
+                    .find_map(|expr| expr_references_local_cte(expr, local_ctes))
+                {
                     return Some(name);
                 }
             }
@@ -278,7 +283,9 @@ fn query_references_local_cte(
                     return Some(name);
                 }
             }
-            RangeTblEntryKind::Result | RangeTblEntryKind::Relation { .. } | RangeTblEntryKind::WorkTable { .. } => {}
+            RangeTblEntryKind::Result
+            | RangeTblEntryKind::Relation { .. }
+            | RangeTblEntryKind::WorkTable { .. } => {}
         }
     }
     if let Some(name) = query
@@ -302,50 +309,44 @@ fn query_references_local_cte(
     {
         return Some(name);
     }
-    if let Some(name) = query
-        .accumulators
-        .iter()
-        .find_map(|accum| {
-            accum
-                .args
-                .iter()
-                .find_map(|expr| expr_references_local_cte(expr, local_ctes))
-                .or_else(|| {
-                    accum
-                        .filter
-                        .as_ref()
-                        .and_then(|expr| expr_references_local_cte(expr, local_ctes))
-                })
-        })
-    {
+    if let Some(name) = query.accumulators.iter().find_map(|accum| {
+        accum
+            .args
+            .iter()
+            .find_map(|expr| expr_references_local_cte(expr, local_ctes))
+            .or_else(|| {
+                accum
+                    .filter
+                    .as_ref()
+                    .and_then(|expr| expr_references_local_cte(expr, local_ctes))
+            })
+    }) {
         return Some(name);
     }
-    if let Some(name) = query
-        .window_clauses
-        .iter()
-        .find_map(|clause| {
-            clause
-                .functions
-                .iter()
-                .find_map(|func| {
-                    func.args
-                        .iter()
-                        .find_map(|expr| expr_references_local_cte(expr, local_ctes))
-                })
-                .or_else(|| {
-                    clause
-                        .spec
-                        .partition_by
-                        .iter()
-                        .find_map(|expr| expr_references_local_cte(expr, local_ctes))
-                })
-                .or_else(|| {
-                    clause.spec.order_by.iter().find_map(|item| {
-                        expr_references_local_cte(&item.expr, local_ctes)
-                    })
-                })
-        })
-    {
+    if let Some(name) = query.window_clauses.iter().find_map(|clause| {
+        clause
+            .functions
+            .iter()
+            .find_map(|func| {
+                func.args
+                    .iter()
+                    .find_map(|expr| expr_references_local_cte(expr, local_ctes))
+            })
+            .or_else(|| {
+                clause
+                    .spec
+                    .partition_by
+                    .iter()
+                    .find_map(|expr| expr_references_local_cte(expr, local_ctes))
+            })
+            .or_else(|| {
+                clause
+                    .spec
+                    .order_by
+                    .iter()
+                    .find_map(|item| expr_references_local_cte(&item.expr, local_ctes))
+            })
+    }) {
         return Some(name);
     }
     if let Some(name) = query
@@ -355,9 +356,11 @@ fn query_references_local_cte(
     {
         return Some(name);
     }
-    if let Some(name) = query.sort_clause.iter().find_map(|item| {
-        expr_references_local_cte(&item.expr, local_ctes)
-    }) {
+    if let Some(name) = query
+        .sort_clause
+        .iter()
+        .find_map(|item| expr_references_local_cte(&item.expr, local_ctes))
+    {
         return Some(name);
     }
     if let Some(name) = query.project_set.as_ref().and_then(|targets| {

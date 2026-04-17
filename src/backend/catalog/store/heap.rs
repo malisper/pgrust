@@ -1109,11 +1109,11 @@ impl CatalogStore {
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let mut catalog = self.catalog_snapshot_with_control_for_snapshot(ctx)?;
-        let (
-            old_constraint,
-            new_constraint,
-            renamed_index,
-        ) = catalog.rename_relation_constraint(relation_oid, constraint_name, new_constraint_name)?;
+        let (old_constraint, new_constraint, renamed_index) = catalog.rename_relation_constraint(
+            relation_oid,
+            constraint_name,
+            new_constraint_name,
+        )?;
         self.persist_control_state(&catalog)?;
 
         let mut kinds = vec![BootstrapCatalogKind::PgConstraint];

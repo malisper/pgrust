@@ -3840,6 +3840,111 @@ fn array_slice_assignment_requires_full_bounds_for_null_arrays() {
                 && sqlstate == "2202E"
     ));
 }
+
+#[test]
+fn array_slice_assignment_three_dimensional_serial_updates_match_postgres() {
+    let base = temp_dir("array_slice_assignment_three_dimensional");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+
+    let insert_xid = txns.begin();
+    assert_eq!(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            insert_xid,
+            "insert into t values ('{{{0,0},{1,2}}}'::int[])",
+            multidimensional_array_catalog(),
+        )
+        .unwrap(),
+        StatementResult::AffectedRows(1)
+    );
+    txns.commit(insert_xid).unwrap();
+
+    let update_xid = txns.begin();
+    assert_eq!(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            update_xid,
+            "update t set a[1:1][1:1][1:2] = '{113,117}', a[1:1][1:2][2:2] = '{142,147}'",
+            multidimensional_array_catalog(),
+        )
+        .unwrap(),
+        StatementResult::AffectedRows(1)
+    );
+    txns.commit(update_xid).unwrap();
+
+    assert_query_rows(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select a from t",
+            multidimensional_array_catalog(),
+        )
+        .unwrap(),
+        vec![vec![Value::PgArray(
+            ArrayValue::from_dimensions(
+                vec![
+                    ArrayDimension {
+                        lower_bound: 1,
+                        length: 1,
+                    },
+                    ArrayDimension {
+                        lower_bound: 1,
+                        length: 2,
+                    },
+                    ArrayDimension {
+                        lower_bound: 1,
+                        length: 2,
+                    },
+                ],
+                vec![
+                    Value::Int32(113),
+                    Value::Int32(142),
+                    Value::Int32(1),
+                    Value::Int32(147),
+                ],
+            )
+            .with_element_type_oid(crate::include::catalog::INT4_TYPE_OID),
+        )]],
+    );
+}
+
+#[test]
+fn array_slice_assignment_rejects_too_small_multidimensional_sources() {
+    let base = temp_dir("array_slice_assignment_multidimensional_source_too_small");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+
+    let insert_xid = txns.begin();
+    assert_eq!(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            insert_xid,
+            "insert into t values (null, '{{1,2,3},{4,5,6},{7,8,9}}'::int[])",
+            array_subscript_catalog(),
+        )
+        .unwrap(),
+        StatementResult::AffectedRows(1)
+    );
+    txns.commit(insert_xid).unwrap();
+
+    let update_xid = txns.begin();
+    let err = run_sql_with_catalog(
+        &base,
+        &txns,
+        update_xid,
+        "update t set b[1:2][1:2] = '{{11,12,13}}'",
+        array_subscript_catalog(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError { message, sqlstate, .. }
+            if message == "source array too small" && sqlstate == "2202E"
+    ));
+}
 #[test]
 fn any_array_truth_table_and_overlap_work() {
     let base = temp_dir("array_any_overlap");
@@ -5203,11 +5308,39 @@ fn bytea_text_input_and_pg_input_helpers_follow_postgres_rules() {
         )
         .unwrap(),
         vec![vec![
-            Value::Text("invalid input syntax for type bytea: \"\\x123\"".into()),
+            Value::Text("invalid hexadecimal data: odd number of digits".into()),
             Value::Null,
             Value::Null,
-            Value::Text("22P02".into()),
+            Value::Text("22023".into()),
         ]],
+    );
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select * from pg_input_error_info(E'\\\\x12x3', 'bytea')",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Text("invalid hexadecimal digit: \"x\"".into()),
+            Value::Null,
+            Value::Null,
+            Value::Text("22023".into()),
+        ]],
+    );
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select E'foo\\\\99bar'::bytea",
+    )
+    .unwrap_err();
+    assert_eq!(
+        format_exec_error(&err),
+        "invalid input syntax for type bytea"
     );
 }
 
@@ -5791,6 +5924,25 @@ fn sum_and_avg_numeric_preserve_numeric_results() {
 }
 
 #[test]
+fn avg_numeric_drops_display_only_trailing_zeros() {
+    let base = temp_dir("avg_numeric_display_scale");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select avg(x) from unnest(ARRAY[1.1000::numeric, 1.2000::numeric]::numeric[]) as u(x)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Numeric("1.15".into())]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn sum_real_and_avg_real_follow_postgres_result_types() {
     let base = temp_dir("sum_avg_real");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -6261,6 +6413,31 @@ fn numeric_scalar_helpers_follow_postgres_basics() {
             }
             other => panic!("expected query result, got {:?}", other),
         }
+}
+
+#[test]
+fn to_char_numeric_ignores_display_only_trailing_zeros() {
+    let base = temp_dir("to_char_numeric_display_scale");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select to_char(4.31::numeric(210,10), 'FM9999999999999999.999999999999999'), to_char((-34338492.215397047)::numeric(210,10), 'FM9999999999999999.999999999999999PR')",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Text("4.31".into()),
+                    Value::Text("<34338492.215397047>".into()),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
 }
 
 #[test]
@@ -10213,6 +10390,31 @@ fn jsonpath_lax_scalar_index_zero_returns_scalar() {
 }
 
 #[test]
+fn jsonpath_lax_scalar_wildcard_returns_scalar() {
+    let base = temp_dir("jsonpath_lax_scalar_wildcard");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_path_query('1', 'lax $[*]')",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Jsonb(
+                    crate::backend::executor::jsonb::parse_jsonb_text("1").unwrap()
+                )]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn jsonpath_recursive_descent_includes_current_item_at_depth_zero() {
     let base = temp_dir("jsonpath_recursive_depth");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -10331,6 +10533,26 @@ fn jsonpath_is_unknown_treats_predicate_arithmetic_errors_as_unknown() {
     {
         StatementResult::Query { rows, .. } => {
             assert_eq!(rows, vec![vec![Value::Bool(true)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn jsonpath_strict_mixed_type_sequence_compare_returns_false() {
+    let base = temp_dir("jsonpath_strict_mixed_type_compare");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb '{\"a\":[1,2,3],\"b\":[3,4,\"5\"]}' @? 'strict $ ? (@.a[*] >= @.b[*])'",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Bool(false)]]);
         }
         other => panic!("expected query result, got {:?}", other),
     }
