@@ -71,6 +71,7 @@ fn exec_error_sqlstate(e: &ExecError) -> &'static str {
         ExecError::Parse(crate::backend::parser::ParseError::InvalidRecursion(_)) => "42P19",
         ExecError::Parse(crate::backend::parser::ParseError::InvalidTableDefinition(_)) => "42P16",
         ExecError::Parse(crate::backend::parser::ParseError::FeatureNotSupported(_))
+        | ExecError::Parse(crate::backend::parser::ParseError::FeatureNotSupportedMessage(_))
         | ExecError::Parse(crate::backend::parser::ParseError::OuterLevelAggregateNestedCte(_)) => {
             "0A000"
         }
