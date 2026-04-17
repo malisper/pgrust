@@ -247,6 +247,13 @@ pub enum ExecError {
     InvalidByteaInput {
         value: String,
     },
+    InvalidByteaHexDigit {
+        value: String,
+        digit: String,
+    },
+    InvalidByteaHexOddDigits {
+        value: String,
+    },
     InvalidGeometryInput {
         ty: &'static str,
         value: String,
