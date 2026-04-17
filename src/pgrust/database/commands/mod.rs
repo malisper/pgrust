@@ -10,4 +10,5 @@ mod owner;
 mod rename;
 mod role;
 mod schema;
+mod sequence;
 mod session_auth;

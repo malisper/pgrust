@@ -85,6 +85,7 @@ pub enum Plan {
         rel: RelFileLocator,
         relation_name: String,
         relation_oid: u32,
+        relkind: char,
         toast: Option<ToastRelationRef>,
         desc: RelationDesc,
     },

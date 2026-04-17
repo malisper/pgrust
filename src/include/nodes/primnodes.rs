@@ -57,6 +57,7 @@ pub struct ColumnDesc {
     pub not_null_primary_key_owned: bool,
     pub attrdef_oid: Option<u32>,
     pub default_expr: Option<String>,
+    pub default_sequence_oid: Option<u32>,
     pub missing_default_value: Option<Value>,
 }
 
@@ -304,6 +305,10 @@ pub enum BuiltinScalarFunction {
     StatementTimestamp,
     ClockTimestamp,
     TimeOfDay,
+    NextVal,
+    CurrVal,
+    SetVal,
+    PgGetSerialSequence,
     DatePart,
     DateTrunc,
     IsFinite,

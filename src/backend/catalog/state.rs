@@ -908,6 +908,53 @@ impl Catalog {
         Ok((name, old_entry, new_entry))
     }
 
+    pub fn alter_table_set_column_default(
+        &mut self,
+        relation_oid: u32,
+        column_name: &str,
+        default_expr: Option<String>,
+        default_sequence_oid: Option<u32>,
+    ) -> Result<(String, CatalogEntry, CatalogEntry), CatalogError> {
+        let name = self
+            .tables
+            .iter()
+            .find(|(_, entry)| entry.relation_oid == relation_oid)
+            .map(|(name, _)| name.clone())
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        let old_entry = self
+            .tables
+            .get(&name)
+            .cloned()
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        if old_entry.relkind != 'r' {
+            return Err(CatalogError::UnknownTable(relation_oid.to_string()));
+        }
+        let column_index = relation_column_index(&old_entry.desc, column_name)?;
+
+        let mut new_entry = old_entry.clone();
+        let column = &mut new_entry.desc.columns[column_index];
+        column.default_expr = default_expr;
+        column.default_sequence_oid = default_sequence_oid;
+        if column.default_expr.is_some() {
+            if column.attrdef_oid.is_none() {
+                column.attrdef_oid = Some(self.next_oid);
+                self.next_oid = self.next_oid.saturating_add(1);
+            }
+        } else {
+            column.attrdef_oid = None;
+            column.missing_default_value = None;
+        }
+
+        let entry = self
+            .tables
+            .get_mut(&name)
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        *entry = new_entry.clone();
+        self.replace_constraint_rows_for_entry(&name, &new_entry);
+        self.replace_depend_rows_for_entry(&new_entry);
+        Ok((name, old_entry, new_entry))
+    }
+
     pub fn alter_table_drop_column(
         &mut self,
         relation_oid: u32,

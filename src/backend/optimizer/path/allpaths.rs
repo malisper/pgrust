@@ -156,6 +156,7 @@ fn collect_relation_access_paths(
     heap_rel: RelFileLocator,
     relation_name: String,
     relation_oid: u32,
+    relkind: char,
     toast: Option<ToastRelationRef>,
     desc: RelationDesc,
     filter: Option<Expr>,
@@ -169,6 +170,7 @@ fn collect_relation_access_paths(
             heap_rel,
             relation_name.clone(),
             relation_oid,
+            relkind,
             toast,
             desc.clone(),
             &stats,
@@ -184,6 +186,7 @@ fn collect_relation_access_paths(
                 heap_rel,
                 relation_name.clone(),
                 relation_oid,
+                relkind,
                 toast,
                 desc.clone(),
                 &stats,
@@ -192,6 +195,9 @@ fn collect_relation_access_paths(
             )
             .plan,
         );
+    }
+    if relkind != 'r' {
+        return paths;
     }
     for index in catalog
         .index_relations_for_heap(relation_oid)
@@ -247,6 +253,7 @@ fn cheapest_relation_access_path(
     heap_rel: RelFileLocator,
     relation_name: String,
     relation_oid: u32,
+    relkind: char,
     toast: Option<ToastRelationRef>,
     desc: RelationDesc,
     filter: Option<Expr>,
@@ -257,6 +264,7 @@ fn cheapest_relation_access_path(
         heap_rel,
         relation_name,
         relation_oid,
+        relkind,
         toast,
         desc,
         filter,
@@ -415,7 +423,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
         && let RangeTblEntryKind::Relation {
             rel: heap_rel,
             relation_oid,
-            relkind: _,
+            relkind,
             toast,
         } = rte.kind.clone()
     {
@@ -434,6 +442,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                     .clone()
                     .unwrap_or_else(|| format!("rel {}", heap_rel.rel_number)),
                 relation_oid,
+                relkind,
                 toast,
                 rte.desc.clone(),
                 filter,
@@ -502,7 +511,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
         RangeTblEntryKind::Relation {
             rel: heap_rel,
             relation_oid,
-            relkind: _,
+            relkind,
             toast,
         } => rel.pathlist.extend(collect_relation_access_paths(
             rtindex,
@@ -511,6 +520,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                 .clone()
                 .unwrap_or_else(|| format!("rel {}", heap_rel.rel_number)),
             relation_oid,
+            relkind,
             toast,
             rte.desc.clone(),
             base_filter_expr(rel),

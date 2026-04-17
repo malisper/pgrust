@@ -2018,7 +2018,8 @@ fn create_index_and_alter_table_set_are_noops() {
         | Err(ExecError::Parse(ParseError::TableDoesNotExist(name)))
             if name == "num_exp_add_idx" => {}
         Err(ExecError::Parse(ParseError::WrongObjectType { name, expected }))
-            if name == "num_exp_add_idx" && expected == "table" => {}
+            if name == "num_exp_add_idx"
+                && (expected == "table" || expected == "table, view, or sequence") => {}
         other => panic!("expected missing-table or wrong-object-type error, got {other:?}"),
     }
 
@@ -2334,6 +2335,43 @@ fn alter_table_add_column_reads_old_rows_with_null_or_default() {
         vec![
             vec![Value::Int32(1), Value::Null, Value::Int32(3)],
             vec![Value::Int32(2), Value::Null, Value::Int32(3)],
+        ]
+    );
+}
+
+#[test]
+fn alter_table_add_column_serial_backfills_existing_rows_and_keeps_sequence_advancing() {
+    let base = temp_dir("alter_table_add_column_serial");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (note text)").unwrap();
+    db.execute(1, "insert into items values ('a'), ('b')").unwrap();
+    db.execute(1, "alter table items add column id serial")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select id, note from items order by id"),
+        vec![
+            vec![Value::Int32(1), Value::Text("a".into())],
+            vec![Value::Int32(2), Value::Text("b".into())],
+        ]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select pg_get_serial_sequence('items', 'id')"),
+        vec![vec![Value::Text("items_id_seq".into())]]
+    );
+
+    db.execute(1, "insert into items values ('manual', 10)")
+        .unwrap();
+    db.execute(1, "insert into items (note) values ('c')").unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select id, note from items order by id"),
+        vec![
+            vec![Value::Int32(1), Value::Text("a".into())],
+            vec![Value::Int32(2), Value::Text("b".into())],
+            vec![Value::Int32(3), Value::Text("c".into())],
+            vec![Value::Int32(10), Value::Text("manual".into())],
         ]
     );
 }
@@ -3710,6 +3748,206 @@ fn create_table_check_and_named_not_null_constraints_are_enforced_and_persisted(
     reopened
         .execute(1, "insert into items values (null, 'still nullable')")
         .unwrap();
+}
+
+#[test]
+fn create_table_serial_creates_sequence_defaults_and_persists_state() {
+    let base = temp_dir("create_table_serial_defaults");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id serial, note text)")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select pg_get_serial_sequence('items', 'id')"),
+        vec![vec![Value::Text("items_id_seq".into())]]
+    );
+
+    db.execute(1, "insert into items (note) values ('a'), ('b')")
+        .unwrap();
+    db.execute(1, "insert into items values (10, 'manual')")
+        .unwrap();
+    db.execute(1, "insert into items (note) values ('c')")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select id, note from items order by id"),
+        vec![
+            vec![Value::Int32(1), Value::Text("a".into())],
+            vec![Value::Int32(2), Value::Text("b".into())],
+            vec![Value::Int32(3), Value::Text("c".into())],
+            vec![Value::Int32(10), Value::Text("manual".into())],
+        ]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select last_value, log_cnt, is_called from items_id_seq"),
+        vec![vec![Value::Int64(3), Value::Int64(0), Value::Bool(true)]]
+    );
+
+    drop(db);
+    let reopened = Database::open(&base, 16).unwrap();
+    assert_eq!(
+        query_rows(
+            &reopened,
+            1,
+            "select last_value, log_cnt, is_called from items_id_seq",
+        ),
+        vec![vec![Value::Int64(3), Value::Int64(0), Value::Bool(true)]]
+    );
+}
+
+#[test]
+fn create_table_serial_is_visible_inside_same_transaction_before_commit() {
+    let base = temp_dir("txn_create_table_serial_visibility");
+    let db = Database::open(&base, 64).unwrap();
+    let mut writer = Session::new(1);
+    let mut reader = Session::new(2);
+
+    writer.execute(&db, "begin").unwrap();
+    writer
+        .execute(&db, "create table tx_serial (id serial, note text)")
+        .unwrap();
+    writer
+        .execute(&db, "insert into tx_serial (note) values ('a'), ('b')")
+        .unwrap();
+
+    match writer
+        .execute(&db, "select id, note from tx_serial order by id")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(1), Value::Text("a".into())],
+                    vec![Value::Int32(2), Value::Text("b".into())],
+                ]
+            );
+        }
+        other => panic!("expected query, got {:?}", other),
+    }
+    match writer
+        .execute(
+            &db,
+            "select last_value, log_cnt, is_called from tx_serial_id_seq",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(2), Value::Int64(0), Value::Bool(true)]]);
+        }
+        other => panic!("expected query, got {:?}", other),
+    }
+
+    assert!(
+        reader.execute(&db, "select count(*) from tx_serial").is_err(),
+        "other sessions must not see uncommitted serial-backed tables"
+    );
+    assert!(
+        reader
+            .execute(&db, "select last_value from tx_serial_id_seq")
+            .is_err(),
+        "other sessions must not see the implicit sequence before commit"
+    );
+
+    writer.execute(&db, "commit").unwrap();
+
+    match reader.execute(&db, "select count(*) from tx_serial").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(2)]]);
+        }
+        other => panic!("expected query, got {:?}", other),
+    }
+    match reader
+        .execute(
+            &db,
+            "select last_value, log_cnt, is_called from tx_serial_id_seq",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(2), Value::Int64(0), Value::Bool(true)]]);
+        }
+        other => panic!("expected query, got {:?}", other),
+    }
+}
+
+#[test]
+fn create_sequence_supports_functions_and_sequence_scans() {
+    let base = temp_dir("create_sequence_functions");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(1, "create sequence seq start with 5 increment by 2")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select last_value, log_cnt, is_called from seq"),
+        vec![vec![Value::Int64(5), Value::Int64(0), Value::Bool(false)]]
+    );
+
+    match db.execute(1, "select currval('seq')") {
+        Err(ExecError::DetailedError { sqlstate, .. }) => assert_eq!(sqlstate, "55000"),
+        other => panic!("expected currval failure before nextval, got {:?}", other),
+    }
+
+    assert_eq!(
+        query_rows(&db, 1, "select nextval('seq'), currval('seq')"),
+        vec![vec![Value::Int64(5), Value::Int64(5)]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select nextval('seq')"),
+        vec![vec![Value::Int64(7)]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select setval('seq', 20, false)"),
+        vec![vec![Value::Int64(20)]]
+    );
+    match db.execute(1, "select currval('seq')") {
+        Err(ExecError::DetailedError { sqlstate, .. }) => assert_eq!(sqlstate, "55000"),
+        other => panic!(
+            "expected currval reset after setval(..., false), got {:?}",
+            other
+        ),
+    }
+    assert_eq!(
+        query_rows(&db, 1, "select nextval('seq')"),
+        vec![vec![Value::Int64(20)]]
+    );
+    db.execute(1, "alter sequence seq restart with 11").unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select last_value, log_cnt, is_called from seq"),
+        vec![vec![Value::Int64(11), Value::Int64(0), Value::Bool(false)]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select nextval('seq')"),
+        vec![vec![Value::Int64(11)]]
+    );
+}
+
+#[test]
+fn drop_sequence_restrict_and_cascade_respect_serial_dependencies() {
+    let base = temp_dir("drop_sequence_dependencies");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(1, "create table items (id serial, note text)")
+        .unwrap();
+
+    match db.execute(1, "drop sequence items_id_seq") {
+        Err(ExecError::DetailedError { sqlstate, .. }) => assert_eq!(sqlstate, "2BP01"),
+        other => panic!("expected dependent-object error, got {:?}", other),
+    }
+
+    db.execute(1, "drop sequence items_id_seq cascade").unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select pg_get_serial_sequence('items', 'id')"),
+        vec![vec![Value::Null]]
+    );
+
+    match db.execute(1, "insert into items (note) values ('x')") {
+        Err(ExecError::NotNullViolation { column, .. }) => assert_eq!(column, "id"),
+        other => panic!(
+            "expected not-null violation after dropping serial default, got {:?}",
+            other
+        ),
+    }
 }
 
 #[test]

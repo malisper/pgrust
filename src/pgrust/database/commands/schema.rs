@@ -40,7 +40,7 @@ impl Database {
             0,
             &mut catalog_effects,
         );
-        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[]);
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
         guard.disarm();
         result
     }

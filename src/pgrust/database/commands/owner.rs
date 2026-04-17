@@ -52,6 +52,21 @@ impl Database {
         )
     }
 
+    pub(crate) fn execute_alter_sequence_owner_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        alter_stmt: &AlterRelationOwnerStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        self.execute_alter_relation_owner_stmt_with_search_path(
+            client_id,
+            alter_stmt,
+            configured_search_path,
+            'S',
+            "ALTER SEQUENCE OWNER TO",
+        )
+    }
+
     pub(crate) fn execute_alter_table_owner_stmt_in_transaction_with_search_path(
         &self,
         client_id: ClientId,
@@ -94,6 +109,27 @@ impl Database {
         )
     }
 
+    pub(crate) fn execute_alter_sequence_owner_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        alter_stmt: &AlterRelationOwnerStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        self.execute_alter_relation_owner_stmt_in_transaction_with_search_path(
+            client_id,
+            alter_stmt,
+            xid,
+            cid,
+            configured_search_path,
+            catalog_effects,
+            'S',
+            "ALTER SEQUENCE OWNER TO",
+        )
+    }
+
     fn execute_alter_relation_owner_stmt_with_search_path(
         &self,
         client_id: ClientId,
@@ -128,7 +164,7 @@ impl Database {
             expected_relkind,
             clause,
         );
-        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[]);
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
         guard.disarm();
         self.table_locks.unlock_table(relation.rel, client_id);
         result

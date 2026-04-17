@@ -265,6 +265,20 @@ fn bind_insert_column_defaults(
     desc.columns
         .iter()
         .map(|column| {
+            if let Some(sequence_oid) = column.default_sequence_oid {
+                let expr = Expr::builtin_func(
+                    BuiltinScalarFunction::NextVal,
+                    Some(SqlType::new(SqlTypeKind::Int8)),
+                    false,
+                    vec![Expr::Const(Value::Int64(i64::from(sequence_oid)))],
+                );
+                let expr = if column.sql_type.kind == SqlTypeKind::Int8 {
+                    expr
+                } else {
+                    Expr::Cast(Box::new(expr), column.sql_type)
+                };
+                return Ok(expr);
+            }
             column
                 .default_expr
                 .as_ref()

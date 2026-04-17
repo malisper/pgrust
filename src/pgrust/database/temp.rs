@@ -112,6 +112,31 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
         temp_effects: &mut Vec<TempMutationEffect>,
     ) -> Result<CreatedTempRelation, ExecError> {
+        self.create_temp_relation_with_relkind_in_transaction(
+            client_id,
+            table_name,
+            desc,
+            on_commit,
+            xid,
+            cid,
+            'r',
+            catalog_effects,
+            temp_effects,
+        )
+    }
+
+    pub(super) fn create_temp_relation_with_relkind_in_transaction(
+        &self,
+        client_id: ClientId,
+        table_name: String,
+        desc: crate::backend::executor::RelationDesc,
+        on_commit: OnCommitAction,
+        xid: TransactionId,
+        cid: CommandId,
+        relkind: char,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+        temp_effects: &mut Vec<TempMutationEffect>,
+    ) -> Result<CreatedTempRelation, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let normalized = normalize_temp_lookup_name(&table_name);
         let namespace =
@@ -129,21 +154,41 @@ impl Database {
             waiter: None,
             interrupts,
         };
-        let (created, effect) = self
-            .catalog
-            .write()
-            .create_table_mvcc_with_options(
-                format!("{}.{}", namespace.name, normalized),
-                desc,
-                namespace.oid,
-                Self::temp_db_oid(client_id),
-                't',
-                namespace.toast_oid,
-                &namespace.toast_name,
-                self.auth_state(client_id).current_user_oid(),
-                &ctx,
+        let (created, effect) = if relkind == 'r' {
+            self.catalog
+                .write()
+                .create_table_mvcc_with_options(
+                    format!("{}.{}", namespace.name, normalized),
+                    desc,
+                    namespace.oid,
+                    Self::temp_db_oid(client_id),
+                    't',
+                    namespace.toast_oid,
+                    &namespace.toast_name,
+                    self.auth_state(client_id).current_user_oid(),
+                    &ctx,
+                )
+                .map_err(map_catalog_error)?
+        } else {
+            let (entry, effect) = self
+                .catalog
+                .write()
+                .create_relation_mvcc_with_relkind(
+                    format!("{}.{}", namespace.name, normalized),
+                    desc,
+                    namespace.oid,
+                    Self::temp_db_oid(client_id),
+                    't',
+                    relkind,
+                    self.auth_state(client_id).current_user_oid(),
+                    &ctx,
+                )
+                .map_err(map_catalog_error)?;
+            (
+                crate::backend::catalog::store::CreateTableResult { entry, toast: None },
+                effect,
             )
-            .map_err(map_catalog_error)?;
+        };
         self.apply_catalog_mutation_effect_immediate(&effect)?;
         catalog_effects.push(effect);
         let rel_entry = RelCacheEntry {
@@ -356,6 +401,7 @@ impl Database {
                 result.map(|_| StatementResult::AffectedRows(0)),
                 &catalog_effects,
                 &temp_effects,
+                &[],
             );
             guard.disarm();
             let _ = result?;
@@ -386,6 +432,7 @@ impl Database {
                 result.map(|_| StatementResult::AffectedRows(0)),
                 &catalog_effects,
                 &temp_effects,
+                &[],
             );
             guard.disarm();
         }
@@ -423,6 +470,7 @@ impl Database {
                 xid,
                 Ok(StatementResult::AffectedRows(0)),
                 &effects,
+                &[],
                 &[],
             );
             guard.disarm();

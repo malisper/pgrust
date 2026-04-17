@@ -2261,6 +2261,7 @@ fn set_seq_scan_references(
     rel: crate::RelFileLocator,
     relation_name: String,
     relation_oid: u32,
+    relkind: char,
     toast: Option<crate::include::nodes::primnodes::ToastRelationRef>,
     desc: crate::include::nodes::primnodes::RelationDesc,
 ) -> Plan {
@@ -2270,6 +2271,7 @@ fn set_seq_scan_references(
         rel,
         relation_name,
         relation_oid,
+        relkind,
         toast,
         desc,
     }
@@ -2764,6 +2766,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             rel,
             relation_name,
             relation_oid,
+            relkind,
             toast,
             desc,
         } => set_seq_scan_references(
@@ -2772,6 +2775,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             rel,
             relation_name,
             relation_oid,
+            relkind,
             toast,
             desc,
         ),

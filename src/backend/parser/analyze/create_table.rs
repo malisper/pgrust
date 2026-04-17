@@ -2,11 +2,12 @@ use std::collections::BTreeSet;
 
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;
-use crate::backend::parser::SqlTypeKind;
+use crate::backend::parser::{SerialKind, SqlType, SqlTypeKind};
 
 use super::{
     CatalogLookup, CheckConstraintAction, CreateTableStatement, IndexBackedConstraintAction,
-    NotNullConstraintAction, ParseError, normalize_create_table_constraints, resolve_raw_type_name,
+    NotNullConstraintAction, ParseError, normalize_create_table_constraints, raw_type_name_hint,
+    resolve_raw_type_name,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,7 +16,16 @@ pub struct LoweredCreateTable {
     pub not_null_actions: Vec<NotNullConstraintAction>,
     pub check_actions: Vec<CheckConstraintAction>,
     pub constraint_actions: Vec<IndexBackedConstraintAction>,
+    pub owned_sequences: Vec<OwnedSequenceSpec>,
     pub parent_oids: Vec<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedSequenceSpec {
+    pub column_index: usize,
+    pub column_name: String,
+    pub serial_kind: SerialKind,
+    pub sql_type: SqlType,
 }
 
 pub fn create_relation_desc(
@@ -32,6 +42,7 @@ pub fn lower_create_table(
     let columns = stmt.columns().cloned().collect::<Vec<_>>();
     let normalized = normalize_create_table_constraints(stmt)?;
     let constraint_actions = normalized.index_backed.clone();
+    let mut owned_sequences = Vec::new();
 
     let mut seen_keys = BTreeSet::new();
     for action in &constraint_actions {
@@ -60,13 +71,30 @@ pub fn lower_create_table(
     let relation_desc = RelationDesc {
         columns: columns
             .iter()
-            .map(|column| {
-                let sql_type = resolve_raw_type_name(&column.ty, catalog)?;
+            .enumerate()
+            .map(|(index, column)| {
+                let sql_type = match column.ty {
+                    crate::backend::parser::RawTypeName::Serial(_) => raw_type_name_hint(&column.ty),
+                    _ => resolve_raw_type_name(&column.ty, catalog)?,
+                };
                 if sql_type.kind == SqlTypeKind::AnyArray {
                     return Err(ParseError::UnsupportedType("anyarray".into()));
                 }
                 let not_null = not_nulls_by_column.get(&column.name.to_ascii_lowercase());
-                let nullable = not_null.is_none();
+                let serial_kind = match column.ty {
+                    crate::backend::parser::RawTypeName::Serial(kind) => Some(kind),
+                    _ => None,
+                };
+                if serial_kind.is_some() && column.default_expr.is_some() {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "serial column without explicit DEFAULT",
+                        actual: format!(
+                            "multiple default values specified for column \"{}\"",
+                            column.name
+                        ),
+                    });
+                }
+                let nullable = not_null.is_none() && serial_kind.is_none();
                 let mut desc = column_desc(column.name.clone(), sql_type, nullable);
                 if let Some(not_null) = not_null {
                     desc.not_null_constraint_name = Some(not_null.constraint_name.clone());
@@ -78,6 +106,16 @@ pub fn lower_create_table(
                     .default_expr
                     .as_deref()
                     .and_then(|sql| super::derive_literal_default_value(sql, sql_type).ok());
+                if let Some(serial_kind) = serial_kind {
+                    desc.default_expr = None;
+                    desc.missing_default_value = None;
+                    owned_sequences.push(OwnedSequenceSpec {
+                        column_index: index,
+                        column_name: column.name.clone(),
+                        serial_kind,
+                        sql_type,
+                    });
+                }
                 Ok(desc)
             })
             .collect::<Result<Vec<_>, _>>()?,
@@ -88,6 +126,7 @@ pub fn lower_create_table(
         not_null_actions: normalized.not_nulls,
         check_actions: normalized.checks,
         constraint_actions,
+        owned_sequences,
         parent_oids: Vec::new(),
     })
 }
@@ -179,5 +218,64 @@ mod tests {
             Some("items_note_nn")
         );
         assert!(!lowered.relation_desc.columns[1].not_null_constraint_validated);
+    }
+
+    #[test]
+    fn lower_create_table_tracks_serial_columns() {
+        let stmt = CreateTableStatement {
+            schema_name: None,
+            table_name: "items".into(),
+            persistence: TablePersistence::Permanent,
+            on_commit: OnCommitAction::PreserveRows,
+            elements: vec![CreateTableElement::Column(ColumnDef {
+                name: "id".into(),
+                ty: RawTypeName::Serial(SerialKind::Regular),
+                default_expr: None,
+                constraints: vec![],
+            })],
+            inherits: Vec::new(),
+            if_not_exists: false,
+        };
+
+        let lowered = lower_create_table(
+            &stmt,
+            &crate::backend::parser::analyze::LiteralDefaultCatalog,
+        )
+        .unwrap();
+        assert_eq!(lowered.relation_desc.columns[0].sql_type, SqlType::new(SqlTypeKind::Int4));
+        assert!(!lowered.relation_desc.columns[0].storage.nullable);
+        assert_eq!(lowered.owned_sequences.len(), 1);
+        assert_eq!(lowered.owned_sequences[0].column_index, 0);
+        assert_eq!(lowered.owned_sequences[0].column_name, "id");
+        assert_eq!(lowered.owned_sequences[0].serial_kind, SerialKind::Regular);
+    }
+
+    #[test]
+    fn lower_create_table_rejects_explicit_default_on_serial() {
+        let stmt = CreateTableStatement {
+            schema_name: None,
+            table_name: "items".into(),
+            persistence: TablePersistence::Permanent,
+            on_commit: OnCommitAction::PreserveRows,
+            elements: vec![CreateTableElement::Column(ColumnDef {
+                name: "id".into(),
+                ty: RawTypeName::Serial(SerialKind::Regular),
+                default_expr: Some("7".into()),
+                constraints: vec![],
+            })],
+            inherits: Vec::new(),
+            if_not_exists: false,
+        };
+
+        assert_eq!(
+            lower_create_table(
+                &stmt,
+                &crate::backend::parser::analyze::LiteralDefaultCatalog
+            ),
+            Err(ParseError::UnexpectedToken {
+                expected: "serial column without explicit DEFAULT",
+                actual: "multiple default values specified for column \"id\"".into(),
+            })
+        );
     }
 }

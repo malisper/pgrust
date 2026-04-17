@@ -74,6 +74,16 @@ fn build_var_decl(pair: Pair<'_, Rule>) -> Result<VarDecl, ParseError> {
                 let parsed = parse_type_name(part.as_str().trim())?;
                 ty = Some(match parsed {
                     crate::backend::parser::RawTypeName::Builtin(sql_type) => sql_type,
+                    crate::backend::parser::RawTypeName::Serial(kind) => {
+                        return Err(ParseError::FeatureNotSupported(format!(
+                            "{} is only allowed in CREATE TABLE / ALTER TABLE ADD COLUMN",
+                            match kind {
+                                crate::backend::parser::SerialKind::Small => "smallserial",
+                                crate::backend::parser::SerialKind::Regular => "serial",
+                                crate::backend::parser::SerialKind::Big => "bigserial",
+                            }
+                        )));
+                    }
                     crate::backend::parser::RawTypeName::Record => {
                         return Err(ParseError::UnsupportedType("record".into()));
                     }

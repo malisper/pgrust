@@ -1,13 +1,33 @@
 use super::super::*;
 use crate::backend::parser::{
-    CreateFunctionReturnSpec, CreateFunctionStatement, FunctionArgMode, SqlTypeKind,
-    resolve_raw_type_name,
+    CreateFunctionReturnSpec, CreateFunctionStatement, FunctionArgMode, OwnedSequenceSpec,
+    SequenceOptionsSpec, SqlTypeKind, resolve_raw_type_name,
 };
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_PLPGSQL_OID,
     PUBLIC_NAMESPACE_OID, PgProcRow, RECORD_TYPE_OID,
 };
 use crate::include::nodes::primnodes::QueryColumn;
+use crate::pgrust::database::{
+    SequenceData, SequenceRuntime, default_sequence_name_base, format_nextval_default_oid,
+    initial_sequence_state, resolve_sequence_options_spec, sequence_type_oid_for_serial_kind,
+};
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct CreatedOwnedSequence {
+    pub(super) column_index: usize,
+    pub(super) sequence_oid: u32,
+}
+
+fn relation_exists_in_namespace(
+    catalog: &dyn CatalogLookup,
+    name: &str,
+    namespace_oid: u32,
+) -> bool {
+    catalog
+        .lookup_any_relation(name)
+        .is_some_and(|relation| relation.namespace_oid == namespace_oid)
+}
 
 fn normalize_create_function_name_for_search_path(
     stmt: &CreateFunctionStatement,
@@ -55,6 +75,100 @@ fn proc_arg_mode(mode: FunctionArgMode) -> u8 {
 }
 
 impl Database {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn create_owned_sequence_for_serial_column(
+        &self,
+        client_id: ClientId,
+        table_name: &str,
+        namespace_oid: u32,
+        persistence: TablePersistence,
+        column: &OwnedSequenceSpec,
+        xid: TransactionId,
+        cid: CommandId,
+        used_names: &mut std::collections::BTreeSet<String>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+        temp_effects: &mut Vec<TempMutationEffect>,
+        sequence_effects: &mut Vec<SequenceMutationEffect>,
+    ) -> Result<CreatedOwnedSequence, ExecError> {
+        let base_name = default_sequence_name_base(table_name, &column.column_name);
+        let mut sequence_name =
+            self.choose_available_relation_name(client_id, xid, cid, namespace_oid, &base_name)?;
+        if !used_names.insert(sequence_name.to_ascii_lowercase()) {
+            for suffix in 1.. {
+                let candidate = format!("{base_name}{suffix}");
+                if used_names.insert(candidate.to_ascii_lowercase()) {
+                    sequence_name = candidate;
+                    break;
+                }
+            }
+        }
+
+        let options = resolve_sequence_options_spec(
+            &SequenceOptionsSpec::default(),
+            sequence_type_oid_for_serial_kind(column.serial_kind),
+        )
+        .map_err(ExecError::Parse)?;
+        let data = SequenceData {
+            state: initial_sequence_state(&options),
+            options,
+        };
+
+        let sequence_oid = match persistence {
+            TablePersistence::Permanent => {
+                let ctx = CatalogWriteContext {
+                    pool: self.pool.clone(),
+                    txns: self.txns.clone(),
+                    xid,
+                    cid,
+                    client_id,
+                    waiter: None,
+                    interrupts: self.interrupt_state(client_id),
+                };
+                let (entry, effect) = self
+                    .catalog
+                    .write()
+                    .create_relation_mvcc_with_relkind(
+                        sequence_name,
+                        SequenceRuntime::sequence_relation_desc(),
+                        namespace_oid,
+                        1,
+                        'p',
+                        'S',
+                        self.auth_state(client_id).current_user_oid(),
+                        &ctx,
+                    )
+                    .map_err(map_catalog_error)?;
+                self.apply_catalog_mutation_effect_immediate(&effect)?;
+                catalog_effects.push(effect);
+                sequence_effects.push(self.sequences.apply_upsert(entry.relation_oid, data, true));
+                entry.relation_oid
+            }
+            TablePersistence::Temporary => {
+                let created = self.create_temp_relation_with_relkind_in_transaction(
+                    client_id,
+                    sequence_name,
+                    SequenceRuntime::sequence_relation_desc(),
+                    OnCommitAction::PreserveRows,
+                    xid,
+                    cid,
+                    'S',
+                    catalog_effects,
+                    temp_effects,
+                )?;
+                sequence_effects.push(
+                    self.sequences
+                        .apply_upsert(created.entry.relation_oid, data, false),
+                );
+                created.entry.relation_oid
+            }
+        };
+
+        Ok(CreatedOwnedSequence {
+            column_index: column.column_index,
+            sequence_oid,
+        })
+    }
+
     pub(crate) fn execute_create_domain_stmt_with_search_path(
         &self,
         client_id: ClientId,
@@ -114,7 +228,7 @@ impl Database {
             configured_search_path,
             &mut catalog_effects,
         );
-        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[]);
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
         guard.disarm();
         result
     }
@@ -360,6 +474,7 @@ impl Database {
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let mut catalog_effects = Vec::new();
         let mut temp_effects = Vec::new();
+        let mut sequence_effects = Vec::new();
         let result = self.execute_create_table_stmt_in_transaction_with_search_path(
             client_id,
             create_stmt,
@@ -368,8 +483,16 @@ impl Database {
             configured_search_path,
             &mut catalog_effects,
             &mut temp_effects,
+            &mut sequence_effects,
         );
-        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &temp_effects);
+        let result = self.finish_txn(
+            client_id,
+            xid,
+            result,
+            &catalog_effects,
+            &temp_effects,
+            &sequence_effects,
+        );
         guard.disarm();
         result
     }
@@ -391,7 +514,7 @@ impl Database {
             configured_search_path,
             &mut catalog_effects,
         );
-        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[]);
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
         guard.disarm();
         result
     }
@@ -405,6 +528,7 @@ impl Database {
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
         temp_effects: &mut Vec<TempMutationEffect>,
+        sequence_effects: &mut Vec<SequenceMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let (table_name, namespace_oid, persistence) = self
@@ -416,7 +540,44 @@ impl Database {
             )?;
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let lowered = lower_create_table_with_catalog(create_stmt, &catalog, persistence)?;
-        let desc = lowered.relation_desc;
+        if create_stmt.if_not_exists
+            && relation_exists_in_namespace(&catalog, &table_name, namespace_oid)
+        {
+            return Ok(StatementResult::AffectedRows(0));
+        }
+
+        let mut desc = lowered.relation_desc.clone();
+        let mut used_sequence_names = std::collections::BTreeSet::new();
+        let mut created_sequences = Vec::with_capacity(lowered.owned_sequences.len());
+        for serial_column in &lowered.owned_sequences {
+            created_sequences.push(self.create_owned_sequence_for_serial_column(
+                client_id,
+                &table_name,
+                namespace_oid,
+                persistence,
+                serial_column,
+                xid,
+                cid,
+                &mut used_sequence_names,
+                catalog_effects,
+                temp_effects,
+                sequence_effects,
+            )?);
+        }
+        for created in created_sequences {
+            let column = desc
+                .columns
+                .get_mut(created.column_index)
+                .expect("serial column index must exist");
+            column.default_expr = Some(format_nextval_default_oid(
+                created.sequence_oid,
+                column.sql_type,
+            ));
+            column.default_sequence_oid = Some(created.sequence_oid);
+            column.missing_default_value = None;
+        }
+
+        let table_cid = cid;
         match persistence {
             TablePersistence::Permanent => {
                 let mut catalog_guard = self.catalog.write();
@@ -424,7 +585,7 @@ impl Database {
                     pool: self.pool.clone(),
                     txns: self.txns.clone(),
                     xid,
-                    cid,
+                    cid: table_cid,
                     client_id,
                     waiter: None,
                     interrupts: Arc::clone(&interrupts),
@@ -455,7 +616,7 @@ impl Database {
                                 pool: self.pool.clone(),
                                 txns: self.txns.clone(),
                                 xid,
-                                cid: cid.saturating_add(1),
+                                cid: table_cid.saturating_add(1),
                                 client_id,
                                 waiter: None,
                                 interrupts: Arc::clone(&interrupts),
@@ -483,7 +644,7 @@ impl Database {
                             desc: created.entry.desc.clone(),
                         };
                         for (index, action) in lowered.constraint_actions.iter().enumerate() {
-                            let action_cid = cid
+                            let action_cid = table_cid
                                 .saturating_add(1)
                                 .saturating_add(inherit_cid_offset)
                                 .saturating_add((index as u32).saturating_mul(3));
@@ -569,7 +730,7 @@ impl Database {
                             self.apply_catalog_mutation_effect_immediate(&constraint_effect)?;
                             catalog_effects.push(constraint_effect);
                         }
-                        let check_base_cid = cid.saturating_add(1).saturating_add(
+                        let check_base_cid = table_cid.saturating_add(1).saturating_add(
                             (lowered.constraint_actions.len() as u32).saturating_mul(3),
                         );
                         for (index, action) in lowered.check_actions.iter().enumerate() {
@@ -619,7 +780,7 @@ impl Database {
                     desc,
                     create_stmt.on_commit,
                     xid,
-                    cid,
+                    table_cid,
                     catalog_effects,
                     temp_effects,
                 )?;
@@ -628,7 +789,7 @@ impl Database {
                         pool: self.pool.clone(),
                         txns: self.txns.clone(),
                         xid,
-                        cid: cid.saturating_add(1),
+                        cid: table_cid.saturating_add(1),
                         client_id,
                         waiter: None,
                         interrupts,
@@ -737,6 +898,7 @@ impl Database {
             pool: Arc::clone(&self.pool),
             txns: self.txns.clone(),
             txn_waiter: Some(self.txn_waiter.clone()),
+            sequences: Some(self.sequences.clone()),
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
             interrupts: Arc::clone(&interrupts),
             snapshot,
@@ -747,6 +909,7 @@ impl Database {
             system_bindings: Vec::new(),
             subplans: Vec::new(),
             timed: false,
+            allow_side_effects: false,
             catalog: catalog.materialize_visible_catalog(),
             compiled_functions: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),
@@ -861,6 +1024,7 @@ impl Database {
             pool: Arc::clone(&self.pool),
             txns: self.txns.clone(),
             txn_waiter: Some(self.txn_waiter.clone()),
+            sequences: Some(self.sequences.clone()),
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
             interrupts,
             snapshot,
@@ -871,6 +1035,7 @@ impl Database {
             system_bindings: Vec::new(),
             subplans: Vec::new(),
             timed: false,
+            allow_side_effects: true,
             catalog: catalog.materialize_visible_catalog(),
             compiled_functions: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),
@@ -927,7 +1092,7 @@ impl Database {
             &mut catalog_effects,
             &mut temp_effects,
         );
-        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &temp_effects);
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &temp_effects, &[]);
         guard.disarm();
         result
     }

@@ -108,12 +108,19 @@ impl RelCache {
                     {
                         desc.attrdef_oid = Some(attrdef.oid);
                         desc.default_expr = Some(attrdef.adbin.clone());
-                        desc.missing_default_value =
+                        desc.default_sequence_oid =
+                            crate::pgrust::database::default_sequence_oid_from_default_expr(
+                                &attrdef.adbin,
+                            );
+                        desc.missing_default_value = if desc.default_sequence_oid.is_some() {
+                            None
+                        } else {
                             crate::backend::parser::derive_literal_default_value(
                                 &attrdef.adbin,
                                 desc.sql_type,
                             )
-                            .ok();
+                            .ok()
+                        };
                     }
                     Ok(desc)
                 })

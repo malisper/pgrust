@@ -59,6 +59,9 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_create_function_statement(&sql)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_sequence_statement(&sql)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_unsupported_statement(&sql) {
         if matches!(
             stmt,
@@ -231,6 +234,430 @@ fn try_parse_create_function_statement(sql: &str) -> Result<Option<Statement>, P
     Ok(Some(Statement::CreateFunction(
         build_create_function_statement(trimmed)?,
     )))
+}
+
+fn try_parse_sequence_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if lowered.starts_with("create sequence ")
+        || lowered.starts_with("create temp sequence ")
+        || lowered.starts_with("create temporary sequence ")
+    {
+        return build_create_sequence_statement(trimmed).map(|stmt| Some(Statement::CreateSequence(stmt)));
+    }
+    if !lowered.starts_with("alter sequence ") && !lowered.starts_with("drop sequence ") {
+        return Ok(None);
+    }
+    if lowered.starts_with("drop sequence ") {
+        return build_drop_sequence_statement(trimmed).map(|stmt| Some(Statement::DropSequence(stmt)));
+    }
+    if lowered.contains(" owner to ") {
+        return build_alter_sequence_owner_statement(trimmed)
+            .map(|stmt| Some(Statement::AlterSequenceOwner(stmt)));
+    }
+    if lowered.contains(" rename to ") {
+        return build_alter_sequence_rename_statement(trimmed)
+            .map(|stmt| Some(Statement::AlterSequenceRename(stmt)));
+    }
+    build_alter_sequence_statement(trimmed).map(|stmt| Some(Statement::AlterSequence(stmt)))
+}
+
+fn parse_schema_qualified_name(input: &str) -> Result<((Option<String>, String), &str), ParseError> {
+    let (parts, rest) = parse_qualified_identifier_parts(input)?;
+    match parts.as_slice() {
+        [name] => Ok(((None, name.clone()), rest)),
+        [schema, name] => Ok(((Some(schema.clone()), name.clone()), rest)),
+        _ => Err(ParseError::UnsupportedQualifiedName(parts.join("."))),
+    }
+}
+
+fn parse_qualified_identifier_parts(input: &str) -> Result<(Vec<String>, &str), ParseError> {
+    let (first, mut rest) = parse_sql_identifier(input)?;
+    let mut parts = vec![first];
+    loop {
+        let trimmed = rest.trim_start();
+        let Some(after_dot) = trimmed.strip_prefix('.') else {
+            return Ok((parts, rest));
+        };
+        let (next, remaining) = parse_sql_identifier(after_dot.trim_start())?;
+        parts.push(next);
+        rest = remaining;
+    }
+}
+
+fn parse_sequence_owned_by(
+    input: &str,
+) -> Result<(SequenceOwnedByClause, &str), ParseError> {
+    let mut rest = consume_keyword(input.trim_start(), "owned").trim_start();
+    rest = consume_keyword(rest, "by").trim_start();
+    if keyword_at_start(rest, "none") {
+        return Ok((SequenceOwnedByClause::None, consume_keyword(rest, "none")));
+    }
+    let (parts, rest) = parse_qualified_identifier_parts(rest)?;
+    match parts.as_slice() {
+        [table_name, column_name] => Ok((
+            SequenceOwnedByClause::Column {
+                table_name: table_name.clone(),
+                column_name: column_name.clone(),
+            },
+            rest,
+        )),
+        [schema_name, table_name, column_name] => Ok((
+            SequenceOwnedByClause::Column {
+                table_name: format!("{schema_name}.{table_name}"),
+                column_name: column_name.clone(),
+            },
+            rest,
+        )),
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "OWNED BY table.column or OWNED BY NONE",
+            actual: input.into(),
+        }),
+    }
+}
+
+fn parse_signed_i64_token(input: &str) -> Result<(i64, &str), ParseError> {
+    let input = input.trim_start();
+    let mut end = 0usize;
+    for (idx, ch) in input.char_indices() {
+        if idx == 0 && matches!(ch, '+' | '-') {
+            end = ch.len_utf8();
+            continue;
+        }
+        if ch.is_ascii_digit() {
+            end = idx + ch.len_utf8();
+            continue;
+        }
+        break;
+    }
+    if end == 0 || (end == 1 && matches!(input.as_bytes()[0], b'+' | b'-')) {
+        return Err(ParseError::UnexpectedToken {
+            expected: "signed integer",
+            actual: input.into(),
+        });
+    }
+    let token = &input[..end];
+    let value = token.parse::<i64>().map_err(|_| ParseError::UnexpectedToken {
+        expected: "signed integer in i64 range",
+        actual: token.into(),
+    })?;
+    Ok((value, &input[end..]))
+}
+
+fn parse_positive_i64_token<'a>(
+    input: &'a str,
+    context: &'static str,
+) -> Result<(i64, &'a str), ParseError> {
+    let (value, rest) = parse_signed_i64_token(input)?;
+    if value <= 0 {
+        return Err(ParseError::UnexpectedToken {
+            expected: context,
+            actual: value.to_string(),
+        });
+    }
+    Ok((value, rest))
+}
+
+fn parse_sequence_option_spec(
+    input: &str,
+) -> Result<(SequenceOptionsSpec, &str), ParseError> {
+    let mut rest = input;
+    let mut options = SequenceOptionsSpec::default();
+    loop {
+        let trimmed = rest.trim_start();
+        if trimmed.is_empty() {
+            return Ok((options, trimmed));
+        }
+        if keyword_at_start(trimmed, "increment") {
+            let mut next = consume_keyword(trimmed, "increment").trim_start();
+            if keyword_at_start(next, "by") {
+                next = consume_keyword(next, "by").trim_start();
+            }
+            let (value, remainder) = parse_signed_i64_token(next)?;
+            options.increment = Some(value);
+            rest = remainder;
+            continue;
+        }
+        if keyword_at_start(trimmed, "minvalue") {
+            let (value, remainder) = parse_signed_i64_token(consume_keyword(trimmed, "minvalue"))?;
+            options.minvalue = Some(Some(value));
+            rest = remainder;
+            continue;
+        }
+        if keyword_at_start(trimmed, "no minvalue") {
+            options.minvalue = Some(None);
+            rest = consume_keyword(consume_keyword(trimmed, "no").trim_start(), "minvalue");
+            continue;
+        }
+        if keyword_at_start(trimmed, "maxvalue") {
+            let (value, remainder) = parse_signed_i64_token(consume_keyword(trimmed, "maxvalue"))?;
+            options.maxvalue = Some(Some(value));
+            rest = remainder;
+            continue;
+        }
+        if keyword_at_start(trimmed, "no maxvalue") {
+            options.maxvalue = Some(None);
+            rest = consume_keyword(consume_keyword(trimmed, "no").trim_start(), "maxvalue");
+            continue;
+        }
+        if keyword_at_start(trimmed, "start") {
+            let mut next = consume_keyword(trimmed, "start").trim_start();
+            if keyword_at_start(next, "with") {
+                next = consume_keyword(next, "with").trim_start();
+            }
+            let (value, remainder) = parse_signed_i64_token(next)?;
+            options.start = Some(value);
+            rest = remainder;
+            continue;
+        }
+        if keyword_at_start(trimmed, "cache") {
+            let (value, remainder) =
+                parse_positive_i64_token(consume_keyword(trimmed, "cache"), "positive CACHE value")?;
+            options.cache = Some(value);
+            rest = remainder;
+            continue;
+        }
+        if keyword_at_start(trimmed, "cycle") {
+            options.cycle = Some(true);
+            rest = consume_keyword(trimmed, "cycle");
+            continue;
+        }
+        if keyword_at_start(trimmed, "no cycle") {
+            options.cycle = Some(false);
+            rest = consume_keyword(consume_keyword(trimmed, "no").trim_start(), "cycle");
+            continue;
+        }
+        if keyword_at_start(trimmed, "owned") {
+            let (owned_by, remainder) = parse_sequence_owned_by(trimmed)?;
+            options.owned_by = Some(owned_by);
+            rest = remainder;
+            continue;
+        }
+        return Ok((options, trimmed));
+    }
+}
+
+fn parse_sequence_option_patch(
+    input: &str,
+) -> Result<(SequenceOptionsPatchSpec, &str), ParseError> {
+    let mut rest = input;
+    let mut options = SequenceOptionsPatchSpec::default();
+    loop {
+        let trimmed = rest.trim_start();
+        if trimmed.is_empty() {
+            return Ok((options, trimmed));
+        }
+        if keyword_at_start(trimmed, "restart") {
+            let mut next = consume_keyword(trimmed, "restart").trim_start();
+            if keyword_at_start(next, "with") {
+                next = consume_keyword(next, "with").trim_start();
+                let (value, remainder) = parse_signed_i64_token(next)?;
+                options.restart = Some(Some(value));
+                rest = remainder;
+            } else {
+                options.restart = Some(None);
+                rest = next;
+            }
+            continue;
+        }
+        let (base, remainder) = parse_sequence_option_spec(trimmed)?;
+        if remainder == trimmed {
+            return Ok((options, trimmed));
+        }
+        if base.increment.is_some() {
+            options.increment = base.increment;
+        }
+        if base.minvalue.is_some() {
+            options.minvalue = base.minvalue;
+        }
+        if base.maxvalue.is_some() {
+            options.maxvalue = base.maxvalue;
+        }
+        if base.start.is_some() {
+            options.start = base.start;
+        }
+        if base.cache.is_some() {
+            options.cache = base.cache;
+        }
+        if base.cycle.is_some() {
+            options.cycle = base.cycle;
+        }
+        if base.owned_by.is_some() {
+            options.owned_by = base.owned_by;
+        }
+        rest = remainder;
+    }
+}
+
+fn build_create_sequence_statement(sql: &str) -> Result<CreateSequenceStatement, ParseError> {
+    let mut rest = consume_keyword(sql.trim_start(), "create").trim_start();
+    let persistence = if keyword_at_start(rest, "temporary") {
+        rest = consume_keyword(rest, "temporary");
+        TablePersistence::Temporary
+    } else if keyword_at_start(rest, "temp") {
+        rest = consume_keyword(rest, "temp");
+        TablePersistence::Temporary
+    } else {
+        TablePersistence::Permanent
+    };
+    rest = rest.trim_start();
+    rest = consume_keyword(rest, "sequence").trim_start();
+    let mut if_not_exists = false;
+    if keyword_at_start(rest, "if") {
+        let after_if = consume_keyword(rest, "if").trim_start();
+        if !keyword_at_start(after_if, "not") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "IF NOT EXISTS",
+                actual: sql.into(),
+            });
+        }
+        let after_not = consume_keyword(after_if, "not").trim_start();
+        if !keyword_at_start(after_not, "exists") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "IF NOT EXISTS",
+                actual: sql.into(),
+            });
+        }
+        rest = consume_keyword(after_not, "exists").trim_start();
+        if_not_exists = true;
+    }
+    let ((schema_name, sequence_name), rest) = parse_schema_qualified_name(rest)?;
+    let (options, rest) = parse_sequence_option_spec(rest)?;
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of CREATE SEQUENCE statement",
+            actual: rest.trim().into(),
+        });
+    }
+    Ok(CreateSequenceStatement {
+        schema_name,
+        sequence_name,
+        persistence,
+        if_not_exists,
+        options,
+    })
+}
+
+fn build_alter_sequence_statement(sql: &str) -> Result<AlterSequenceStatement, ParseError> {
+    let mut rest = consume_keyword(sql.trim_start(), "alter").trim_start();
+    rest = consume_keyword(rest, "sequence").trim_start();
+    let (parts, rest) = parse_qualified_identifier_parts(rest)?;
+    let sequence_name = parts.join(".");
+    let (options, rest) = parse_sequence_option_patch(rest)?;
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of ALTER SEQUENCE statement",
+            actual: rest.trim().into(),
+        });
+    }
+    Ok(AlterSequenceStatement {
+        sequence_name,
+        options,
+    })
+}
+
+fn build_alter_sequence_owner_statement(
+    sql: &str,
+) -> Result<AlterRelationOwnerStatement, ParseError> {
+    let mut rest = consume_keyword(sql.trim_start(), "alter").trim_start();
+    rest = consume_keyword(rest, "sequence").trim_start();
+    let (parts, rest) = parse_qualified_identifier_parts(rest)?;
+    let relation_name = parts.join(".");
+    let mut rest = rest.trim_start();
+    rest = consume_keyword(rest, "owner").trim_start();
+    rest = consume_keyword(rest, "to").trim_start();
+    let (new_owner, rest) = parse_sql_identifier(rest)?;
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of ALTER SEQUENCE OWNER statement",
+            actual: rest.trim().into(),
+        });
+    }
+    Ok(AlterRelationOwnerStatement {
+        relation_name,
+        new_owner,
+    })
+}
+
+fn build_alter_sequence_rename_statement(
+    sql: &str,
+) -> Result<AlterTableRenameStatement, ParseError> {
+    let mut rest = consume_keyword(sql.trim_start(), "alter").trim_start();
+    rest = consume_keyword(rest, "sequence").trim_start();
+    let (parts, rest) = parse_qualified_identifier_parts(rest)?;
+    let table_name = parts.join(".");
+    let mut rest = rest.trim_start();
+    rest = consume_keyword(rest, "rename").trim_start();
+    rest = consume_keyword(rest, "to").trim_start();
+    let (new_table_name, rest) = parse_sql_identifier(rest)?;
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of ALTER SEQUENCE RENAME statement",
+            actual: rest.trim().into(),
+        });
+    }
+    Ok(AlterTableRenameStatement {
+        table_name,
+        new_table_name,
+    })
+}
+
+fn build_drop_sequence_statement(sql: &str) -> Result<DropSequenceStatement, ParseError> {
+    let mut rest = consume_keyword(sql.trim_start(), "drop").trim_start();
+    rest = consume_keyword(rest, "sequence").trim_start();
+    let mut if_exists = false;
+    if keyword_at_start(rest, "if") {
+        let after_if = consume_keyword(rest, "if").trim_start();
+        if !keyword_at_start(after_if, "exists") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "IF EXISTS",
+                actual: sql.into(),
+            });
+        }
+        rest = consume_keyword(after_if, "exists").trim_start();
+        if_exists = true;
+    }
+    let mut cascade = false;
+    let mut sequence_names = Vec::new();
+    for item in split_top_level_items(rest, ',')? {
+        let trimmed = item.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let boundary = find_next_top_level_keyword(trimmed, &["cascade", "restrict"])
+            .unwrap_or(trimmed.len());
+        let name_sql = trimmed[..boundary].trim();
+        if name_sql.is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "sequence name",
+                actual: sql.into(),
+            });
+        }
+        let (parts, suffix) = parse_qualified_identifier_parts(name_sql)?;
+        if !suffix.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "sequence name",
+                actual: name_sql.into(),
+            });
+        }
+        sequence_names.push(parts.join("."));
+        let tail = trimmed[boundary..].trim();
+        if !tail.is_empty() {
+            if tail.eq_ignore_ascii_case("cascade") {
+                cascade = true;
+            } else if !tail.eq_ignore_ascii_case("restrict") {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "CASCADE or RESTRICT",
+                    actual: tail.into(),
+                });
+            }
+        }
+    }
+    Ok(DropSequenceStatement {
+        if_exists,
+        sequence_names,
+        cascade,
+    })
 }
 
 fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement, ParseError> {
@@ -3055,6 +3482,9 @@ fn sql_type_output_name(ty: SqlType) -> &'static str {
 fn raw_type_output_name(ty: &RawTypeName) -> &str {
     match ty {
         RawTypeName::Builtin(sql_type) => sql_type_output_name(*sql_type),
+        RawTypeName::Serial(SerialKind::Small) => "smallserial",
+        RawTypeName::Serial(SerialKind::Regular) => "serial",
+        RawTypeName::Serial(SerialKind::Big) => "bigserial",
         RawTypeName::Named { name, .. } => name.as_str(),
         RawTypeName::Record => "record",
     }
@@ -3122,7 +3552,9 @@ fn build_array_subscript(pair: Pair<'_, Rule>) -> Result<ArraySubscript, ParseEr
 fn build_column_def(pair: Pair<'_, Rule>) -> Result<ColumnDef, ParseError> {
     let mut inner = pair.into_inner();
     let name = build_identifier(inner.next().ok_or(ParseError::UnexpectedEof)?);
-    let ty = build_type_name(inner.next().ok_or(ParseError::UnexpectedEof)?);
+    let ty = canonicalize_column_type_name(build_type_name(
+        inner.next().ok_or(ParseError::UnexpectedEof)?,
+    ))?;
     let mut default_expr = None;
     let mut constraints = Vec::new();
     for flag in inner {
@@ -3154,6 +3586,32 @@ fn build_column_def(pair: Pair<'_, Rule>) -> Result<ColumnDef, ParseError> {
         default_expr,
         constraints,
     })
+}
+
+fn canonicalize_column_type_name(ty: RawTypeName) -> Result<RawTypeName, ParseError> {
+    match ty {
+        RawTypeName::Named { name, array_bounds: 0 } => match name.to_ascii_lowercase().as_str() {
+            "smallserial" | "serial2" => Ok(RawTypeName::Serial(SerialKind::Small)),
+            "serial" | "serial4" => Ok(RawTypeName::Serial(SerialKind::Regular)),
+            "bigserial" | "serial8" => Ok(RawTypeName::Serial(SerialKind::Big)),
+            _ => Ok(RawTypeName::Named {
+                name,
+                array_bounds: 0,
+            }),
+        },
+        RawTypeName::Named { name, array_bounds } => {
+            if matches!(
+                name.to_ascii_lowercase().as_str(),
+                "smallserial" | "serial2" | "serial" | "serial4" | "bigserial" | "serial8"
+            ) {
+                return Err(ParseError::FeatureNotSupported(
+                    "array of serial is not implemented".into(),
+                ));
+            }
+            Ok(RawTypeName::Named { name, array_bounds })
+        }
+        other => Ok(other),
+    }
 }
 
 fn build_alter_table_add_column(
