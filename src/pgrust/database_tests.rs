@@ -5557,37 +5557,52 @@ fn alter_table_drop_primary_key_removes_only_pk_owned_not_null_constraints() {
 }
 
 #[test]
-fn create_temp_table_primary_key_and_unique_constraints_are_rejected() {
-    let base = temp_dir("temp_table_primary_key_unique_rejected");
+fn create_temp_table_constraints_are_supported_with_postgres_persistence_rules() {
+    let base = temp_dir("temp_table_constraints_supported");
     let db = Database::open(&base, 16).unwrap();
-
-    match db.execute(1, "create temp table temp_items (id int4 primary key)") {
-        Err(ExecError::Parse(ParseError::UnexpectedToken { expected, actual }))
-            if expected
-                == "permanent table for PRIMARY KEY/UNIQUE/CHECK/FOREIGN KEY constraints"
-                && actual == "temporary table" => {}
-        other => panic!("expected temp primary-key rejection, got {other:?}"),
-    }
-
-    match db.execute(1, "create temp table temp_items (id int4, unique (id))") {
-        Err(ExecError::Parse(ParseError::UnexpectedToken { expected, actual }))
-            if expected
-                == "permanent table for PRIMARY KEY/UNIQUE/CHECK/FOREIGN KEY constraints"
-                && actual == "temporary table" => {}
-        other => panic!("expected temp unique rejection, got {other:?}"),
-    }
 
     db.execute(1, "create table parents (id int4 primary key)")
         .unwrap();
+    db.execute(
+        1,
+        "create temp table department (
+            id int4 primary key,
+            parent_department int4 references department,
+            name text,
+            unique (name)
+        )",
+    )
+    .unwrap();
+    db.execute(1, "insert into department values (0, null, 'ROOT')")
+        .unwrap();
+    db.execute(1, "insert into department values (1, 0, 'A')")
+        .unwrap();
+
+    match db.execute(
+        1,
+        "insert into department values (2, 9, 'bad parent')",
+    ) {
+        Err(ExecError::ForeignKeyViolation { constraint, .. })
+            if constraint == "department_parent_department_fkey" => {}
+        other => panic!("expected temp self-reference foreign-key violation, got {other:?}"),
+    }
+
+    match db.execute(
+        1,
+        "insert into department values (2, 0, 'A')",
+    ) {
+        Err(ExecError::UniqueViolation { constraint })
+            if constraint == "department_name_key" => {}
+        other => panic!("expected temp unique violation, got {other:?}"),
+    }
+
     match db.execute(
         1,
         "create temp table temp_children (id int4, parent_id int4 references parents)",
     ) {
-        Err(ExecError::Parse(ParseError::UnexpectedToken { expected, actual }))
-            if expected
-                == "permanent table for PRIMARY KEY/UNIQUE/CHECK/FOREIGN KEY constraints"
-                && actual == "temporary table" => {}
-        other => panic!("expected temp foreign-key rejection, got {other:?}"),
+        Err(ExecError::Parse(ParseError::InvalidTableDefinition(message)))
+            if message == "constraints on temporary tables may reference only temporary tables" => {}
+        other => panic!("expected postgres-style temp foreign-key rejection, got {other:?}"),
     }
 }
 

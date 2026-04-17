@@ -5,7 +5,7 @@ use crate::backend::parser::{SqlExpr, SqlType, SqlTypeKind, parse_expr};
 use crate::include::catalog::PgConstraintRow;
 use crate::include::nodes::parsenodes::{
     ColumnConstraint, ConstraintAttributes, CreateTableStatement, ForeignKeyAction,
-    ForeignKeyMatchType, TableConstraint,
+    ForeignKeyMatchType, TableConstraint, TablePersistence,
 };
 use crate::include::nodes::primnodes::Expr;
 
@@ -40,6 +40,9 @@ pub struct ForeignKeyConstraintAction {
     pub referenced_table: String,
     pub referenced_relation_oid: u32,
     pub referenced_index_oid: u32,
+    // CREATE TABLE self-references are resolved after the table and its key
+    // indexes exist, matching PostgreSQL's post-create FK installation order.
+    pub self_referential: bool,
     pub referenced_columns: Vec<String>,
     pub match_type: ForeignKeyMatchType,
     pub on_delete: ForeignKeyAction,
@@ -155,6 +158,28 @@ struct ResolvedReferencedKey {
     relation: super::BoundRelation,
     columns: Vec<String>,
     index_oid: u32,
+}
+
+fn table_persistence_code(persistence: TablePersistence) -> char {
+    match persistence {
+        TablePersistence::Permanent => 'p',
+        TablePersistence::Temporary => 't',
+    }
+}
+
+fn validate_foreign_key_persistence(
+    child_persistence: char,
+    referenced_persistence: char,
+) -> Result<(), ParseError> {
+    match child_persistence {
+        'p' if referenced_persistence != 'p' => Err(ParseError::InvalidTableDefinition(
+            "constraints on permanent tables may reference only permanent tables".into(),
+        )),
+        't' if referenced_persistence != 't' => Err(ParseError::InvalidTableDefinition(
+            "constraints on temporary tables may reference only temporary tables".into(),
+        )),
+        _ => Ok(()),
+    }
 }
 
 pub fn normalize_create_table_constraints(
@@ -397,7 +422,7 @@ pub fn normalize_create_table_constraints(
         })
         .collect();
 
-    let finalized_index_backed = index_constraints
+    let finalized_index_backed: Vec<IndexBackedConstraintAction> = index_constraints
         .into_iter()
         .map(|constraint| IndexBackedConstraintAction {
             constraint_name: Some(constraint.explicit_name.unwrap_or_else(|| {
@@ -422,27 +447,61 @@ pub fn normalize_create_table_constraints(
                     super::resolve_raw_type_name(&columns[index].ty, catalog)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            let referenced = resolve_referenced_key(
-                &stmt.table_name,
-                None,
-                &constraint.referenced_table,
-                constraint.referenced_columns.as_deref(),
-                &child_types,
-                catalog,
-            )?;
+            let (
+                referenced_table,
+                referenced_relation_oid,
+                referenced_index_oid,
+                self_referential,
+                referenced_columns,
+            ) = if constraint.referenced_table.eq_ignore_ascii_case(&stmt.table_name) {
+                    let referenced_columns = resolve_pending_self_referenced_key(
+                        &stmt.table_name,
+                        &columns,
+                        &column_lookup,
+                        &finalized_index_backed,
+                        constraint.referenced_columns.as_deref(),
+                        &child_types,
+                        catalog,
+                    )?;
+                    (
+                        stmt.table_name.clone(),
+                        0,
+                        0,
+                        true,
+                        referenced_columns,
+                    )
+                } else {
+                    let referenced = resolve_referenced_key(
+                        &stmt.table_name,
+                        None,
+                        table_persistence_code(stmt.persistence),
+                        &constraint.referenced_table,
+                        constraint.referenced_columns.as_deref(),
+                        &child_types,
+                        catalog,
+                    )?;
+                    (
+                        relation_display_name(
+                            catalog,
+                            referenced.relation.relation_oid,
+                            &constraint.referenced_table,
+                        ),
+                        referenced.relation.relation_oid,
+                        referenced.index_oid,
+                        false,
+                        referenced.columns,
+                    )
+                };
             Ok(ForeignKeyConstraintAction {
                 constraint_name: constraint.explicit_name.unwrap_or_else(|| {
                     choose_generated_constraint_name(&constraint.generated_base, &mut used_names)
                 }),
                 columns: local_columns,
-                referenced_table: relation_display_name(
-                    catalog,
-                    referenced.relation.relation_oid,
-                    &constraint.referenced_table,
-                ),
-                referenced_relation_oid: referenced.relation.relation_oid,
-                referenced_index_oid: referenced.index_oid,
-                referenced_columns: referenced.columns,
+                referenced_table,
+                referenced_relation_oid,
+                referenced_index_oid,
+                self_referential,
+                referenced_columns,
                 match_type: constraint.match_type,
                 on_delete: constraint.on_delete,
                 on_update: constraint.on_update,
@@ -522,6 +581,7 @@ pub fn bind_referenced_by_foreign_keys(
 pub fn normalize_alter_table_add_constraint(
     table_name: &str,
     relation_oid: u32,
+    relpersistence: char,
     desc: &RelationDesc,
     existing_constraints: &[PgConstraintRow],
     constraint: &TableConstraint,
@@ -644,6 +704,7 @@ pub fn normalize_alter_table_add_constraint(
             let referenced = resolve_referenced_key(
                 table_name,
                 Some(relation_oid),
+                relpersistence,
                 referenced_table,
                 referenced_columns.as_deref(),
                 &child_types,
@@ -665,6 +726,7 @@ pub fn normalize_alter_table_add_constraint(
                     ),
                     referenced_relation_oid: referenced.relation.relation_oid,
                     referenced_index_oid: referenced.index_oid,
+                    self_referential: false,
                     referenced_columns: referenced.columns,
                     match_type: *match_type,
                     on_delete: *on_delete,
@@ -806,9 +868,88 @@ fn validate_foreign_key_action(clause: &str, action: ForeignKeyAction) -> Result
     )))
 }
 
+fn resolve_pending_self_referenced_key(
+    table_name: &str,
+    column_defs: &[crate::backend::parser::ColumnDef],
+    column_lookup: &BTreeMap<String, usize>,
+    index_constraints: &[IndexBackedConstraintAction],
+    referenced_columns: Option<&[String]>,
+    child_types: &[SqlType],
+    catalog: &dyn super::CatalogLookup,
+) -> Result<Vec<String>, ParseError> {
+    let referenced_columns = if let Some(referenced_columns) = referenced_columns {
+        let referenced_columns =
+            resolve_constraint_columns(referenced_columns, column_defs, column_lookup)?;
+        let referenced_key = referenced_columns
+            .iter()
+            .map(|column| column.to_ascii_lowercase())
+            .collect::<Vec<_>>();
+        let matched = index_constraints.iter().find(|constraint| {
+            constraint
+                .columns
+                .iter()
+                .map(|column| column.to_ascii_lowercase())
+                .collect::<Vec<_>>()
+                == referenced_key
+        });
+        if matched.is_none() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "referenced UNIQUE or PRIMARY KEY index",
+                actual: format!("table \"{table_name}\" lacks an exact matching unique key"),
+            });
+        }
+        referenced_columns
+    } else {
+        let primary = index_constraints
+            .iter()
+            .filter(|constraint| constraint.primary)
+            .collect::<Vec<_>>();
+        if primary.len() != 1 {
+            return Err(ParseError::UnexpectedToken {
+                expected: "referenced PRIMARY KEY",
+                actual: if primary.is_empty() {
+                    format!("table \"{table_name}\" has no PRIMARY KEY")
+                } else {
+                    format!("table \"{table_name}\" has multiple PRIMARY KEY constraints")
+                },
+            });
+        }
+        primary[0].columns.clone()
+    };
+
+    if child_types.len() != referenced_columns.len() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "matching foreign-key column counts",
+            actual: format!(
+                "{} referencing column(s) for {} local column(s)",
+                referenced_columns.len(),
+                child_types.len()
+            ),
+        });
+    }
+
+    let parent_types = referenced_columns
+        .iter()
+        .map(|column| {
+            let index = *column_lookup
+                .get(&column.to_ascii_lowercase())
+                .ok_or_else(|| ParseError::UnknownColumn(column.clone()))?;
+            super::resolve_raw_type_name(&column_defs[index].ty, catalog)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if child_types != parent_types {
+        return Err(ParseError::FeatureNotSupported(
+            "FOREIGN KEY with cross-type columns".into(),
+        ));
+    }
+
+    Ok(referenced_columns)
+}
+
 fn resolve_referenced_key(
     child_relation_name: &str,
     child_relation_oid: Option<u32>,
+    child_persistence: char,
     referenced_table: &str,
     referenced_columns: Option<&[String]>,
     child_types: &[SqlType],
@@ -817,18 +958,9 @@ fn resolve_referenced_key(
     let relation = catalog
         .lookup_relation(referenced_table)
         .ok_or_else(|| ParseError::UnknownTable(referenced_table.to_string()))?;
-    if relation.relation_oid == child_relation_oid.unwrap_or(u32::MAX)
-        || referenced_table.eq_ignore_ascii_case(child_relation_name)
-    {
-        return Err(ParseError::FeatureNotSupported(
-            "self-referential FOREIGN KEY".into(),
-        ));
-    }
-    if relation.relpersistence == 't' {
-        return Err(ParseError::FeatureNotSupported(
-            "FOREIGN KEY referencing temporary tables".into(),
-        ));
-    }
+    let _ = child_relation_name;
+    let _ = child_relation_oid;
+    validate_foreign_key_persistence(child_persistence, relation.relpersistence)?;
 
     let relation_lookup = relation_column_lookup(&relation.desc);
     let (columns, referenced_attnums, index_oid) = if let Some(referenced_columns) =
