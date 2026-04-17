@@ -2508,17 +2508,23 @@ pub(super) fn estimate_sql_type_width(sql_type: SqlType) -> usize {
     match sql_type.kind {
         SqlTypeKind::Bool => 1,
         SqlTypeKind::Int2 => 2,
-        SqlTypeKind::Int4 | SqlTypeKind::Oid | SqlTypeKind::Date | SqlTypeKind::Float4 => 4,
+        SqlTypeKind::Int4
+        | SqlTypeKind::Oid
+        | SqlTypeKind::Xid
+        | SqlTypeKind::Date
+        | SqlTypeKind::Float4 => 4,
         SqlTypeKind::Int8
         | SqlTypeKind::Money
         | SqlTypeKind::Timestamp
         | SqlTypeKind::TimestampTz
         | SqlTypeKind::Time
         | SqlTypeKind::TimeTz
+        | SqlTypeKind::Tid
         | SqlTypeKind::Float8 => 8,
         SqlTypeKind::Numeric => 16,
         SqlTypeKind::Bit | SqlTypeKind::VarBit | SqlTypeKind::Bytea => 16,
         SqlTypeKind::Text
+        | SqlTypeKind::Interval
         | SqlTypeKind::Char
         | SqlTypeKind::Varchar
         | SqlTypeKind::Name

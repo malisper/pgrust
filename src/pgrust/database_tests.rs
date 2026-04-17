@@ -2513,6 +2513,46 @@ fn alter_table_add_column_rejects_unsupported_forms() {
 }
 
 #[test]
+fn alter_table_add_column_supports_tid_xid_and_interval() {
+    let base = temp_dir("alter_table_add_column_tid_xid_interval");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table attmp (initial int4)")
+        .unwrap();
+    session
+        .execute(&db, "alter table attmp add column l tid")
+        .unwrap();
+    session
+        .execute(&db, "alter table attmp add column m xid")
+        .unwrap();
+    session
+        .execute(&db, "alter table attmp add column w interval")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into attmp (l, m, w) values ('(1,1)', '512', '01:00:10')",
+        )
+        .unwrap();
+
+    match session.execute(&db, "select l, m, w from attmp").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Text("(1,1)".into()),
+                    Value::Int64(512),
+                    Value::Text("@ 1 hour 10 secs".into())
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+}
+
+#[test]
 fn alter_table_drop_column_hides_column_and_retargets_inserts() {
     let base = temp_dir("alter_table_drop_column");
     let db = Database::open(&base, 16).unwrap();

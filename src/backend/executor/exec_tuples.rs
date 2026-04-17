@@ -65,6 +65,7 @@ impl CompiledTupleDecoder {
                             is_oid: matches!(
                                 column.sql_type.kind,
                                 crate::backend::parser::SqlTypeKind::Oid
+                                    | crate::backend::parser::SqlTypeKind::Xid
                             ),
                         },
                         (ScalarType::Bool, 1) => DecodeStep::FixedBool {
@@ -78,6 +79,7 @@ impl CompiledTupleDecoder {
                             is_oid: matches!(
                                 column.sql_type.kind,
                                 crate::backend::parser::SqlTypeKind::Oid
+                                    | crate::backend::parser::SqlTypeKind::Xid
                             ),
                         },
                     };
@@ -97,6 +99,7 @@ impl CompiledTupleDecoder {
                             is_oid: matches!(
                                 column.sql_type.kind,
                                 crate::backend::parser::SqlTypeKind::Oid
+                                    | crate::backend::parser::SqlTypeKind::Xid
                             ),
                         },
                     };
@@ -115,6 +118,7 @@ impl CompiledTupleDecoder {
                 is_oid: matches!(
                     column.sql_type.kind,
                     crate::backend::parser::SqlTypeKind::Oid
+                        | crate::backend::parser::SqlTypeKind::Xid
                 ),
             });
             if attr.attlen <= 0 || attr.nullable {

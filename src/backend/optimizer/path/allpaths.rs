@@ -340,7 +340,7 @@ fn build_set_operation_rel(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) 
         .inputs
         .into_iter()
         .map(|query| {
-            let path = best_query_path(query, catalog);
+            let (_, path) = plan_query_path(query, catalog);
             project_to_slot_layout(source_id, &desc, path.clone(), path.output_target(), catalog)
         })
         .collect::<Vec<_>>();
