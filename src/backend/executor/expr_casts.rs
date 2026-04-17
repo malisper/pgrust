@@ -13,7 +13,9 @@ use super::expr_money::{
 };
 use super::expr_range::{parse_range_text, render_range_text};
 use super::node_types::*;
-use crate::backend::executor::jsonb::{parse_json_text_input, parse_jsonb_text, render_jsonb_bytes};
+use crate::backend::executor::jsonb::{
+    parse_json_text_input, parse_jsonb_text, render_jsonb_bytes,
+};
 use crate::backend::parser::{SqlType, SqlTypeKind, parse_type_name};
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::time::date::{
@@ -342,25 +344,29 @@ fn canonicalize_interval_text(text: &str) -> Result<String, ExecError> {
 
 pub(crate) fn parse_bytea_text(text: &str) -> Result<Vec<u8>, ExecError> {
     if let Some(rest) = text.strip_prefix("\\x") {
-        let normalized: String = rest
-            .chars()
-            .filter(|ch| !ch.is_ascii_whitespace())
-            .collect();
-        if normalized.len() % 2 != 0 {
-            return Err(ExecError::InvalidByteaInput {
+        let mut out = Vec::with_capacity(rest.len() / 2);
+        let mut high_nibble = None;
+        for ch in rest.chars() {
+            if ch.is_ascii_whitespace() {
+                continue;
+            }
+            if !ch.is_ascii_hexdigit() {
+                return Err(ExecError::InvalidByteaHexDigit {
+                    value: text.to_string(),
+                    digit: ch.to_string(),
+                });
+            }
+            let nibble = ch.to_digit(16).expect("ASCII hexadecimal digit must parse") as u8;
+            if let Some(high) = high_nibble.take() {
+                out.push((high << 4) | nibble);
+            } else {
+                high_nibble = Some(nibble);
+            }
+        }
+        if high_nibble.is_some() {
+            return Err(ExecError::InvalidByteaHexOddDigits {
                 value: text.to_string(),
             });
-        }
-        let mut out = Vec::with_capacity(normalized.len() / 2);
-        for chunk in normalized.as_bytes().chunks(2) {
-            let hex = std::str::from_utf8(chunk).map_err(|_| ExecError::InvalidByteaInput {
-                value: text.to_string(),
-            })?;
-            out.push(
-                u8::from_str_radix(hex, 16).map_err(|_| ExecError::InvalidByteaInput {
-                    value: text.to_string(),
-                })?,
-            );
         }
         return Ok(out);
     }
@@ -860,8 +866,12 @@ fn input_error_message(err: &ExecError, text: &str) -> String {
             };
             format!("invalid input syntax for type numeric: \"{value}\"")
         }
-        ExecError::InvalidByteaInput { value } => {
-            format!("invalid input syntax for type bytea: \"{value}\"")
+        ExecError::InvalidByteaInput { .. } => "invalid input syntax for type bytea".to_string(),
+        ExecError::InvalidByteaHexDigit { digit, .. } => {
+            format!("invalid hexadecimal digit: \"{digit}\"")
+        }
+        ExecError::InvalidByteaHexOddDigits { .. } => {
+            "invalid hexadecimal data: odd number of digits".to_string()
         }
         ExecError::InvalidGeometryInput { ty, value } => geometry_input_error_message(ty, value)
             .unwrap_or_else(|| format!("invalid input syntax for type {ty}: \"{value}\"")),
@@ -918,6 +928,9 @@ fn input_error_sqlstate(err: &ExecError) -> &'static str {
         | ExecError::DetailedError {
             sqlstate: "22P02", ..
         } => "22P02",
+        ExecError::InvalidByteaHexDigit { .. } | ExecError::InvalidByteaHexOddDigits { .. } => {
+            "22023"
+        }
         ExecError::InvalidStorageValue { column, details }
             if matches!(
                 column.as_str(),

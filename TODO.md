@@ -279,7 +279,7 @@ Counts from `/tmp/pgrust_regress_todo_20260417` on 2026-04-17; `test_setup.sql` 
 
 - Raise a PostgreSQL-style syntax error for illegal string continuation when a comment appears between adjacent string literals across lines.
 - Fold unquoted identifiers consistently so `CHAR_TBL`, `VARCHAR_TBL`, and `TEXT_TBL` resolve like PostgreSQL in `strings.sql`.
-- Match PostgreSQL `bytea` input diagnostics for malformed hex and escape sequences, including `pg_input_error_info()` messages and SQLSTATEs.
+- [done] Match PostgreSQL `bytea` input diagnostics for malformed hex and escape sequences, including `pg_input_error_info()` messages and SQLSTATEs.
 - Tighten `SIMILAR TO` and `SUBSTRING ... SIMILAR` behavior for one-separator patterns, `ESCAPE NULL`, and PostgreSQL-compatible error text.
 - type_sanity.sql: 0/63
 - typed_table.sql: 1/32
