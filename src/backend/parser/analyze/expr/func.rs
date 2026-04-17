@@ -70,8 +70,7 @@ fn bind_row_to_json_arg_expr(
                         .map(|(field_name, expr)| {
                             (
                                 field_name.clone(),
-                                expr_sql_type_hint(expr)
-                                    .unwrap_or(SqlType::new(SqlTypeKind::Text)),
+                                expr_sql_type_hint(expr).unwrap_or(SqlType::new(SqlTypeKind::Text)),
                             )
                         })
                         .collect(),

@@ -325,6 +325,7 @@ fn build_recursive_union_path(
                 .map(|column| QueryColumn {
                     name: column.name.clone(),
                     sql_type: column.sql_type,
+                    wire_type_oid: None,
                 })
                 .collect(),
             anchor: Box::new(anchor_path),
@@ -367,6 +368,7 @@ fn build_set_operation_rel(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) 
                 .map(|column| QueryColumn {
                     name: column.name.clone(),
                     sql_type: column.sql_type,
+                    wire_type_oid: None,
                 })
                 .collect(),
             children,
@@ -411,6 +413,7 @@ fn build_cte_scan_path(
             .map(|column| QueryColumn {
                 name: column.name.clone(),
                 sql_type: column.sql_type,
+                wire_type_oid: None,
             })
             .collect(),
     }
@@ -468,6 +471,7 @@ fn build_subquery_scan_path(
             .map(|column| QueryColumn {
                 name: column.name.clone(),
                 sql_type: column.sql_type,
+                wire_type_oid: None,
             })
             .collect(),
         pathkeys,
@@ -656,6 +660,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                         .map(|column| QueryColumn {
                             name: column.name.clone(),
                             sql_type: column.sql_type,
+                            wire_type_oid: None,
                         })
                         .collect(),
                 },

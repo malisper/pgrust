@@ -326,6 +326,7 @@ impl Database {
                 output_args.push(QueryColumn {
                     name: arg.name.clone(),
                     sql_type,
+                    wire_type_oid: None,
                 });
             }
             all_arg_oids.push(type_oid);

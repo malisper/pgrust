@@ -58,8 +58,7 @@ use crate::include::catalog::{
     bootstrap_pg_opfamily_rows, bootstrap_pg_proc_rows, bootstrap_pg_tablespace_rows,
     bootstrap_pg_ts_config_map_rows, bootstrap_pg_ts_config_rows, bootstrap_pg_ts_dict_rows,
     bootstrap_pg_ts_parser_rows, bootstrap_pg_ts_template_rows, builtin_type_rows,
-    composite_array_type_row, composite_type_row,
-    sort_pg_rewrite_rows,
+    composite_array_type_row, composite_type_row, sort_pg_rewrite_rows,
 };
 
 #[derive(Debug, Clone, Default)]

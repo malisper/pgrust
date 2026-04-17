@@ -270,6 +270,7 @@ impl Plan {
                 .map(|c| QueryColumn {
                     name: c.name.clone(),
                     sql_type: c.sql_type,
+                    wire_type_oid: None,
                 })
                 .collect(),
             Plan::SeqScan { desc, .. } => desc
@@ -278,6 +279,7 @@ impl Plan {
                 .map(|c| QueryColumn {
                     name: c.name.clone(),
                     sql_type: c.sql_type,
+                    wire_type_oid: None,
                 })
                 .collect(),
             Plan::IndexScan { desc, .. } => desc
@@ -286,6 +288,7 @@ impl Plan {
                 .map(|c| QueryColumn {
                     name: c.name.clone(),
                     sql_type: c.sql_type,
+                    wire_type_oid: None,
                 })
                 .collect(),
             Plan::Hash { input, .. } => input.columns(),
@@ -297,6 +300,7 @@ impl Plan {
                 .map(|t| QueryColumn {
                     name: t.name.clone(),
                     sql_type: t.sql_type,
+                    wire_type_oid: None,
                 })
                 .collect(),
             Plan::Aggregate { output_columns, .. } => output_columns.clone(),
@@ -319,10 +323,12 @@ impl Plan {
                     ProjectSetTarget::Scalar(entry) => QueryColumn {
                         name: entry.name.clone(),
                         sql_type: entry.sql_type,
+                        wire_type_oid: None,
                     },
                     ProjectSetTarget::Set { name, sql_type, .. } => QueryColumn {
                         name: name.clone(),
                         sql_type: *sql_type,
+                        wire_type_oid: None,
                     },
                 })
                 .collect(),

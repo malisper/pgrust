@@ -32,12 +32,14 @@ pub(super) fn build_aggregate_output_columns(
         output_columns.push(QueryColumn {
             name: format!("group{}", index + 1),
             sql_type: expr_sql_type(expr),
+            wire_type_oid: None,
         });
     }
     for (index, accum) in accumulators.iter().enumerate() {
         output_columns.push(QueryColumn {
             name: format!("agg{}", index + 1),
             sql_type: accum.sql_type,
+            wire_type_oid: None,
         });
     }
     output_columns

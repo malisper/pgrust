@@ -97,7 +97,9 @@ impl RecordValue {
                 .map(|(name, value)| {
                     (
                         name.clone(),
-                        value.sql_type_hint().unwrap_or(SqlType::new(SqlTypeKind::Text)),
+                        value
+                            .sql_type_hint()
+                            .unwrap_or(SqlType::new(SqlTypeKind::Text)),
                     )
                 })
                 .collect(),
@@ -119,7 +121,9 @@ impl RecordValue {
                 .map(|(name, value)| {
                     (
                         name.clone(),
-                        value.sql_type_hint().unwrap_or(SqlType::new(SqlTypeKind::Text)),
+                        value
+                            .sql_type_hint()
+                            .unwrap_or(SqlType::new(SqlTypeKind::Text)),
                     )
                 })
                 .collect(),
@@ -903,7 +907,9 @@ impl Value {
             Value::Box(_) => Some(SqlType::new(SqlTypeKind::Box)),
             Value::Polygon(_) => Some(SqlType::new(SqlTypeKind::Polygon)),
             Value::Circle(_) => Some(SqlType::new(SqlTypeKind::Circle)),
-            Value::Range(range) => Some(crate::include::catalog::sql_type_for_range_kind(range.kind)),
+            Value::Range(range) => {
+                Some(crate::include::catalog::sql_type_for_range_kind(range.kind))
+            }
             Value::Float64(_) => Some(SqlType::new(SqlTypeKind::Float8)),
             Value::Numeric(_) => Some(SqlType::new(SqlTypeKind::Numeric)),
             Value::Json(_) => Some(SqlType::new(SqlTypeKind::Json)),

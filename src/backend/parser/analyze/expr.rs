@@ -5,8 +5,7 @@ use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::include::catalog::builtin_range_spec_for_sql_type;
 use crate::include::nodes::primnodes::{
     BoolExprType, CaseExpr as BoundCaseExpr, CaseTestExpr as BoundCaseTestExpr,
-    CaseWhen as BoundCaseWhen, ExprArraySubscript, OpExprKind, WindowFuncKind,
-    expr_sql_type_hint,
+    CaseWhen as BoundCaseWhen, ExprArraySubscript, OpExprKind, WindowFuncKind, expr_sql_type_hint,
 };
 
 mod func;

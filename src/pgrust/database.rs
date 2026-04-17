@@ -381,12 +381,14 @@ impl Database {
 
     pub(crate) fn set_session_query_active(&self, client_id: ClientId, query: &str) {
         let mut activity = self.cluster.session_activity.write();
-        let entry = activity.entry(client_id).or_insert_with(|| SessionActivityEntry {
-            client_id,
-            database_oid: self.database_oid,
-            state: SessionActivityState::Idle,
-            query: String::new(),
-        });
+        let entry = activity
+            .entry(client_id)
+            .or_insert_with(|| SessionActivityEntry {
+                client_id,
+                database_oid: self.database_oid,
+                state: SessionActivityState::Idle,
+                query: String::new(),
+            });
         entry.database_oid = self.database_oid;
         entry.state = SessionActivityState::Active;
         entry.query = query.to_string();
@@ -410,7 +412,8 @@ impl Database {
             .read()
             .catcache()
             .map(|cache| {
-                cache.database_rows()
+                cache
+                    .database_rows()
                     .into_iter()
                     .map(|row| (row.oid, row.datname))
                     .collect::<HashMap<_, _>>()
@@ -421,7 +424,8 @@ impl Database {
             .read()
             .catcache()
             .map(|cache| {
-                cache.authid_rows()
+                cache
+                    .authid_rows()
                     .into_iter()
                     .map(|row| (row.oid, row.rolname))
                     .collect::<HashMap<_, _>>()

@@ -1701,7 +1701,8 @@ fn validate_builtin_type_rows(desc: &RelationDesc) -> Result<(), CatalogError> {
         let present = builtin_rows.iter().any(|row| {
             row.sql_type.kind == column.sql_type.kind
                 && row.sql_type.is_array == column.sql_type.is_array
-        }) || (column.sql_type.is_array && matches!(column.sql_type.kind, SqlTypeKind::Composite));
+        }) || (column.sql_type.is_array
+            && matches!(column.sql_type.kind, SqlTypeKind::Composite));
         if !present {
             return Err(CatalogError::UnknownType(format!(
                 "{} (missing builtin pg_type row)",

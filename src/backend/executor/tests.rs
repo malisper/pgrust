@@ -1200,6 +1200,7 @@ fn manual_hash_join_null_hash_keys_do_not_match_each_other() {
     let output_columns = vec![QueryColumn {
         name: "id".into(),
         sql_type: int4,
+        wire_type_oid: None,
     }];
 
     let plan = Plan::HashJoin {

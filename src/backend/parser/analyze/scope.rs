@@ -212,6 +212,7 @@ pub(super) fn bind_values_rows(
                 .cloned()
                 .unwrap_or_else(|| format!("column{}", idx + 1)),
             sql_type: *ty,
+            wire_type_oid: None,
         })
         .collect::<Vec<_>>();
     let desc = RelationDesc {
@@ -529,6 +530,7 @@ pub(super) fn bind_from_item_with_ctes(
                         .map(|column| QueryColumn {
                             name: column.name.clone(),
                             sql_type: column.sql_type,
+                            wire_type_oid: None,
                         })
                         .collect::<Vec<_>>();
                     let plan = AnalyzedFrom::worktable(cte.worktable_id, output_columns);
@@ -876,6 +878,7 @@ fn bind_function_from_item_with_ctes(
                     output: QueryColumn {
                         name: "generate_series".to_string(),
                         sql_type: common,
+                        wire_type_oid: None,
                     },
                 }),
                 scope,
@@ -930,6 +933,7 @@ fn bind_function_from_item_with_ctes(
                 output_columns.push(QueryColumn {
                     name: column_name.clone(),
                     sql_type: element_type,
+                    wire_type_oid: None,
                 });
                 desc_columns.push(column_desc(column_name, element_type, true));
             }
@@ -1085,6 +1089,7 @@ fn bind_function_from_item_with_ctes(
                         QueryColumn {
                             name: "value".into(),
                             sql_type: SqlType::new(SqlTypeKind::Json),
+                            wire_type_oid: None,
                         },
                     ],
                     JsonTableFunction::EachText => {
@@ -1093,6 +1098,7 @@ fn bind_function_from_item_with_ctes(
                     JsonTableFunction::ArrayElements => vec![QueryColumn {
                         name: "json_array_elements".into(),
                         sql_type: SqlType::new(SqlTypeKind::Json),
+                        wire_type_oid: None,
                     }],
                     JsonTableFunction::ArrayElementsText => {
                         vec![QueryColumn::text("json_array_elements_text")]
@@ -1100,6 +1106,7 @@ fn bind_function_from_item_with_ctes(
                     JsonTableFunction::JsonbPathQuery => vec![QueryColumn {
                         name: "jsonb_path_query".into(),
                         sql_type: SqlType::new(SqlTypeKind::Jsonb),
+                        wire_type_oid: None,
                     }],
                     JsonTableFunction::JsonbObjectKeys => {
                         vec![QueryColumn::text("jsonb_object_keys")]
@@ -1109,6 +1116,7 @@ fn bind_function_from_item_with_ctes(
                         QueryColumn {
                             name: "value".into(),
                             sql_type: SqlType::new(SqlTypeKind::Jsonb),
+                            wire_type_oid: None,
                         },
                     ],
                     JsonTableFunction::JsonbEachText => {
@@ -1117,6 +1125,7 @@ fn bind_function_from_item_with_ctes(
                     JsonTableFunction::JsonbArrayElements => vec![QueryColumn {
                         name: "jsonb_array_elements".into(),
                         sql_type: SqlType::new(SqlTypeKind::Jsonb),
+                        wire_type_oid: None,
                     }],
                     JsonTableFunction::JsonbArrayElementsText => {
                         vec![QueryColumn::text("jsonb_array_elements_text")]
@@ -1161,6 +1170,7 @@ fn bind_function_from_item_with_ctes(
                         vec![QueryColumn {
                             name: "regexp_matches".into(),
                             sql_type: SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
+                            wire_type_oid: None,
                         }]
                     }
                     crate::include::nodes::primnodes::RegexTableFunction::SplitToTable => {
@@ -1203,6 +1213,7 @@ fn bind_function_from_item_with_ctes(
                     vec![QueryColumn {
                         name: other.to_string(),
                         sql_type: resolved.result_type,
+                        wire_type_oid: None,
                     }]
                 });
                 let desc = RelationDesc {
@@ -1266,6 +1277,7 @@ fn bind_json_populate_record_from_item(
         .map(|column| QueryColumn {
             name: column.name.clone(),
             sql_type: column.sql_type,
+            wire_type_oid: None,
         })
         .collect::<Vec<_>>();
     let bound_args = args
@@ -1391,6 +1403,7 @@ fn query_columns_from_alias_definitions(
                         .map(|row| row.sql_type)
                         .ok_or_else(|| ParseError::UnsupportedType(name.clone()))?,
                 },
+                wire_type_oid: None,
             })
         })
         .collect()
@@ -1617,6 +1630,7 @@ fn bind_join_using_projection(
         output_columns.push(QueryColumn {
             name: name.clone(),
             sql_type: left_ty,
+            wire_type_oid: None,
         });
         joinleftcols.push(*left_index + 1);
         joinrightcols.push(*right_index + 1);
@@ -1638,6 +1652,7 @@ fn bind_join_using_projection(
         output_columns.push(QueryColumn {
             name: column.output_name.clone(),
             sql_type: left_scope.desc.columns[index].sql_type,
+            wire_type_oid: None,
         });
         joinleftcols.push(index + 1);
         desc_columns.push(left_scope.desc.columns[index].clone());
@@ -1652,6 +1667,7 @@ fn bind_join_using_projection(
         output_columns.push(QueryColumn {
             name: column.output_name.clone(),
             sql_type: right_scope.desc.columns[index].sql_type,
+            wire_type_oid: None,
         });
         joinrightcols.push(index + 1);
         desc_columns.push(right_scope.desc.columns[index].clone());
