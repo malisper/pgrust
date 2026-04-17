@@ -6351,6 +6351,35 @@ fn width_bucket_rejects_invalid_numeric_domains() {
 }
 
 #[test]
+fn width_bucket_float_handles_huge_range_boundaries() {
+    let base = temp_dir("width_bucket_float_huge_ranges");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select width_bucket(0, -1e100::float8, 1, 10), width_bucket(1, 1e100::float8, 0, 10), width_bucket(10.5::float8, -1.797e308::float8, 1.797e308::float8, 2), width_bucket(10.5::float8, -1.797e308::float8, 1.797e308::float8, 3), width_bucket(10.5::float8, 1.797e308::float8, -1.797e308::float8, 2), width_bucket(10.5::float8, 1.797e308::float8, -1.797e308::float8, 3)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Int32(10),
+                    Value::Int32(10),
+                    Value::Int32(2),
+                    Value::Int32(2),
+                    Value::Int32(2),
+                    Value::Int32(2),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn numeric_math_misc_helpers_cover_log_factorial_and_pg_lsn() {
     let base = temp_dir("numeric_misc_helpers");
     let txns = TransactionManager::new_durable(&base).unwrap();
