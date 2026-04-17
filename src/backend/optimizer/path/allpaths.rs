@@ -319,6 +319,37 @@ fn build_recursive_union_path(
     )
 }
 
+fn build_set_operation_rel(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) -> RelOptInfo {
+    let set_operation = root
+        .parse
+        .set_operation
+        .clone()
+        .expect("set-operation rel requested without set_operation query");
+    let source_id = 1usize;
+    let desc = set_operation.output_desc;
+    let children = set_operation
+        .inputs
+        .into_iter()
+        .map(|query| {
+            let path = best_query_path(query, catalog);
+            project_to_slot_layout(source_id, &desc, path.clone(), path.output_target(), catalog)
+        })
+        .collect::<Vec<_>>();
+    let append = optimize_path(
+        Path::Append {
+            plan_info: PlanEstimate::default(),
+            source_id,
+            desc: desc.clone(),
+            children,
+        },
+        catalog,
+    );
+    let mut rel = RelOptInfo::new(Vec::new(), RelOptKind::UpperRel, append.output_target());
+    rel.add_path(append);
+    bestpath::set_cheapest(&mut rel);
+    rel
+}
+
 fn build_cte_scan_path(
     cte_id: usize,
     query: crate::include::nodes::parsenodes::Query,
@@ -1149,5 +1180,8 @@ pub(super) fn make_one_rel(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) 
 }
 
 pub(super) fn query_planner(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) -> RelOptInfo {
+    if root.parse.set_operation.is_some() {
+        return build_set_operation_rel(root, catalog);
+    }
     make_one_rel(root, catalog)
 }

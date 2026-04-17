@@ -33,7 +33,7 @@ use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{
     AggAccum, AggFunc, BuiltinScalarFunction, Expr, JsonTableFunction, OrderByEntry,
     ProjectSetTarget, QueryColumn, RelationDesc, SetReturningCall, SortGroupClause, TargetEntry,
-    ToastRelationRef,
+    ToastRelationRef, Var, user_attrno,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -958,6 +958,7 @@ fn bind_ctes(
                         limit_offset: 0,
                         project_set: None,
                         recursive_union: None,
+                        set_operation: None,
                     },
                     desc: desc.clone(),
                     self_reference: true,
@@ -1026,6 +1027,7 @@ fn bind_ctes(
                             distinct: !*all,
                             worktable_id,
                         })),
+                        set_operation: None,
                     },
                     desc,
                 )
@@ -1214,6 +1216,7 @@ fn bind_values_query_with_outer(
             limit_offset: stmt.offset.unwrap_or(0),
             project_set: None,
             recursive_union: None,
+            set_operation: None,
         },
         scope,
     ))
@@ -1260,6 +1263,17 @@ fn bind_select_query_with_outer(
     )?;
     let mut visible_ctes = local_ctes;
     visible_ctes.extend_from_slice(outer_ctes);
+
+    if stmt.set_operation.is_some() {
+        return bind_set_operation_query_with_outer(
+            stmt,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            &visible_ctes,
+            expanded_views,
+        );
+    }
 
     if stmt.targets.is_empty() && stmt.from.is_none() {
         return Err(ParseError::EmptySelectList);
@@ -1594,6 +1608,7 @@ fn bind_select_query_with_outer(
                 limit_offset: stmt.offset.unwrap_or(0),
                 project_set: None,
                 recursive_union: None,
+                set_operation: None,
             },
             scope,
         ))
@@ -1653,6 +1668,7 @@ fn bind_select_query_with_outer(
                         limit_offset: stmt.offset.unwrap_or(0),
                         project_set: None,
                         recursive_union: None,
+                        set_operation: None,
                     },
                     scope,
                 ))
@@ -1692,12 +1708,169 @@ fn bind_select_query_with_outer(
                         limit_offset: stmt.offset.unwrap_or(0),
                         project_set: Some(project_targets),
                         recursive_union: None,
+                        set_operation: None,
                     },
                     scope,
                 ))
             }
         }
     }
+}
+
+fn bind_set_operation_query_with_outer(
+    stmt: &SelectStatement,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<GroupedOuterScope>,
+    visible_ctes: &[BoundCte],
+    expanded_views: &[u32],
+) -> Result<(Query, BoundScope), ParseError> {
+    let Some(set_operation) = stmt.set_operation.as_ref() else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "set operation",
+            actual: "simple SELECT".into(),
+        });
+    };
+    let SetOperator::Union { all } = set_operation.op;
+
+    let mut inputs = set_operation
+        .inputs
+        .iter()
+        .map(|input| {
+            analyze_select_query_with_outer(
+                input,
+                catalog,
+                outer_scopes,
+                grouped_outer.clone(),
+                visible_ctes,
+                expanded_views,
+            )
+            .map(|(query, _)| query)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let first_query = inputs.first().ok_or(ParseError::UnexpectedEof)?;
+    let width = first_query.target_list.len();
+    let output_names = first_query
+        .target_list
+        .iter()
+        .map(|target| target.name.clone())
+        .collect::<Vec<_>>();
+
+    for query in &inputs[1..] {
+        if query.target_list.len() != width {
+            return Err(ParseError::UnexpectedToken {
+                expected: "set-operation inputs with matching widths",
+                actual: format!(
+                    "set-operation input has {} columns but expected {width}",
+                    query.target_list.len()
+                ),
+            });
+        }
+    }
+
+    let mut output_types = Vec::with_capacity(width);
+    for index in 0..width {
+        let mut common = inputs[0].target_list[index].sql_type;
+        for query in &inputs[1..] {
+            let next = query.target_list[index].sql_type;
+            common = resolve_common_scalar_type(common, next).ok_or_else(|| {
+                ParseError::UnexpectedToken {
+                    expected: "set-operation column types with a common type",
+                    actual: format!(
+                        "set-operation column {} has types {} and {}",
+                        index + 1,
+                        sql_type_name(common),
+                        sql_type_name(next)
+                    ),
+                }
+            })?;
+        }
+        output_types.push(common);
+    }
+
+    for query in &mut inputs {
+        for (index, common_type) in output_types.iter().copied().enumerate() {
+            let target = query
+                .target_list
+                .get_mut(index)
+                .expect("set-operation target width checked earlier");
+            if target.sql_type != common_type {
+                target.expr = coerce_bound_expr(target.expr.clone(), target.sql_type, common_type);
+                target.sql_type = common_type;
+            }
+        }
+    }
+
+    let output_columns = output_names
+        .into_iter()
+        .zip(output_types.iter().copied())
+        .map(|(name, sql_type)| QueryColumn { name, sql_type })
+        .collect::<Vec<_>>();
+    let output_exprs = output_columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| {
+            Expr::Var(Var {
+                varno: 1,
+                varattno: user_attrno(index),
+                varlevelsup: 0,
+                vartype: column.sql_type,
+            })
+        })
+        .collect::<Vec<_>>();
+    let target_list = normalize_target_list(identity_target_list(&output_columns, &output_exprs));
+    let desc = RelationDesc {
+        columns: output_columns
+            .iter()
+            .map(|column| column_desc(column.name.clone(), column.sql_type, true))
+            .collect(),
+    };
+    let scope = scope_for_relation(None, &desc);
+    let sort_inputs = if stmt.order_by.is_empty() {
+        Vec::new()
+    } else {
+        bind_order_by_items(&stmt.order_by, &target_list, |expr| {
+            bind_expr_with_outer_and_ctes(
+                expr,
+                &scope,
+                catalog,
+                outer_scopes,
+                grouped_outer.as_ref(),
+                visible_ctes,
+            )
+        })?
+    };
+    let sort_clause = build_sort_clause(sort_inputs, &target_list);
+    let group_by = if all {
+        Vec::new()
+    } else {
+        output_exprs.clone()
+    };
+
+    Ok((
+        Query {
+            command_type: crate::include::executor::execdesc::CommandType::Select,
+            rtable: Vec::new(),
+            jointree: None,
+            target_list,
+            where_qual: None,
+            group_by,
+            accumulators: Vec::new(),
+            having_qual: None,
+            sort_clause,
+            limit_count: stmt.limit,
+            limit_offset: stmt.offset.unwrap_or(0),
+            project_set: None,
+            recursive_union: None,
+            set_operation: Some(Box::new(SetOperationQuery {
+                output_desc: desc.clone(),
+                all,
+                inputs,
+            })),
+        },
+        scope,
+    ))
 }
 
 fn build_plan_with_outer(
