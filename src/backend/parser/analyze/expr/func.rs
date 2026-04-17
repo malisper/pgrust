@@ -2152,6 +2152,17 @@ pub(super) fn bind_scalar_function_call(
                 ],
             ))
         }
+        BuiltinScalarFunction::PgTypeof => {
+            let arg_type = infer_sql_expr_type_with_ctes(
+                &args[0],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            Ok(Expr::Const(Value::Text(sql_type_name(arg_type).into())))
+        }
         BuiltinScalarFunction::JsonbDeletePath
         | BuiltinScalarFunction::JsonbSet
         | BuiltinScalarFunction::JsonbSetLax
