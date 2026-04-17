@@ -226,6 +226,30 @@ fn recursive_cte_union_deduplicates_and_terminates() {
     }
 }
 
+#[test]
+fn recursive_cte_rejects_self_reference_inside_subquery() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    let err = session
+        .execute(
+            &db,
+            "with recursive x(n) as (
+                select 1
+                union all
+                select n + 1 from x where n in (select * from x)
+            )
+            select * from x",
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        ExecError::Parse(ParseError::InvalidRecursion(message))
+            if message == "recursive reference to query \"x\" must not appear within a subquery"
+    ));
+}
+
 fn assert_single_int_column_rows(result: StatementResult, expected: Vec<Vec<Value>>) {
     match result {
         StatementResult::Query { rows, .. } => assert_eq!(rows, expected),

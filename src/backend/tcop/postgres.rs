@@ -23,7 +23,7 @@ use crate::backend::parser::CatalogLookup;
 use crate::backend::parser::UngroupedColumnClause;
 use crate::backend::parser::comments::sql_is_effectively_empty_after_comments;
 use crate::backend::parser::{SqlType, SqlTypeKind, parse_expr};
-use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
+use crate::backend::utils::misc::guc_datetime::{DateTimeConfig, format_datestyle};
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::include::access::htup::TupleError;
 use crate::include::catalog::RECORD_TYPE_OID;
@@ -63,6 +63,7 @@ fn exec_error_sqlstate(e: &ExecError) -> &'static str {
         }
         ExecError::Parse(crate::backend::parser::ParseError::NoSchemaSelectedForCreate) => "3F000",
         ExecError::Parse(crate::backend::parser::ParseError::WindowingError(_)) => "42P20",
+        ExecError::Parse(crate::backend::parser::ParseError::InvalidRecursion(_)) => "42P19",
         ExecError::Parse(crate::backend::parser::ParseError::FeatureNotSupported(_)) => "0A000",
         ExecError::Parse(crate::backend::parser::ParseError::ActiveSqlTransaction(_)) => "25001",
         ExecError::IntegerOutOfRange { .. }
@@ -585,24 +586,53 @@ where
     };
     cluster.register_connection(db.database_oid);
 
-    send_auth_ok(&mut writer)?;
-    send_parameter_status(&mut writer, "server_version", "16.0")?;
-    send_parameter_status(&mut writer, "server_encoding", "UTF8")?;
-    send_parameter_status(&mut writer, "client_encoding", "UTF8")?;
-    send_parameter_status(&mut writer, "DateStyle", "ISO, MDY")?;
-    send_parameter_status(&mut writer, "TimeZone", "UTC")?;
-    send_parameter_status(&mut writer, "integer_datetimes", "on")?;
-    send_parameter_status(&mut writer, "standard_conforming_strings", "on")?;
-    send_backend_key_data(&mut writer, std::process::id() as i32, client_id as i32)?;
-    send_ready_for_query(&mut writer, b'I')?;
-    writer.flush()?;
-
     let mut state = ConnectionState {
         session: Session::new(client_id),
         prepared: HashMap::new(),
         portals: HashMap::new(),
         copy_in: None,
     };
+    if let Err(err) = state.session.apply_startup_parameters(&startup_params) {
+        cluster.unregister_connection(db.database_oid);
+        send_error(
+            &mut writer,
+            exec_error_sqlstate(&err),
+            &format_exec_error(&err),
+            exec_error_detail(&err),
+            exec_error_hint(&err),
+            None,
+        )?;
+        writer.flush()?;
+        return Ok(());
+    }
+    send_auth_ok(&mut writer)?;
+    send_parameter_status(&mut writer, "server_version", "16.0")?;
+    send_parameter_status(&mut writer, "server_encoding", "UTF8")?;
+    send_parameter_status(&mut writer, "client_encoding", "UTF8")?;
+    send_parameter_status(
+        &mut writer,
+        "DateStyle",
+        &format_datestyle(state.session.datetime_config()),
+    )?;
+    send_parameter_status(
+        &mut writer,
+        "TimeZone",
+        &state.session.datetime_config().time_zone,
+    )?;
+    send_parameter_status(&mut writer, "integer_datetimes", "on")?;
+    send_parameter_status(
+        &mut writer,
+        "standard_conforming_strings",
+        if state.session.standard_conforming_strings() {
+            "on"
+        } else {
+            "off"
+        },
+    )?;
+    send_backend_key_data(&mut writer, std::process::id() as i32, client_id as i32)?;
+    send_ready_for_query(&mut writer, b'I')?;
+    writer.flush()?;
+
     db.register_session_activity(client_id);
     let cleanup = ConnectionCleanupGuard {
         db: &db,

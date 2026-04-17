@@ -935,6 +935,27 @@ impl Session {
             .statement_interrupt_guard(self.statement_timeout_duration()?))
     }
 
+    pub(crate) fn apply_startup_parameters(
+        &mut self,
+        params: &HashMap<String, String>,
+    ) -> Result<(), ExecError> {
+        if let Some(options) = params.get("options") {
+            for (name, value) in parse_startup_options(options)? {
+                self.apply_guc_value(&name, &value)?;
+            }
+        }
+        for (name, value) in params {
+            if name.eq_ignore_ascii_case("options") {
+                continue;
+            }
+            let normalized = normalize_guc_name(name);
+            if is_postgres_guc(&normalized) {
+                self.apply_guc_value(name, value)?;
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn interrupts(&self) -> Arc<InterruptState> {
         Arc::clone(&self.interrupts)
     }
@@ -1942,30 +1963,7 @@ impl Session {
                 name,
             )));
         }
-        match name.as_str() {
-            "datestyle" => {
-                let Some((date_style_format, date_order)) = parse_datestyle(&stmt.value) else {
-                    return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
-                        stmt.value.clone(),
-                    )));
-                };
-                self.datetime_config.date_style_format = date_style_format;
-                self.datetime_config.date_order = date_order;
-            }
-            "timezone" => {
-                let Some(time_zone) = parse_timezone(&stmt.value) else {
-                    return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
-                        stmt.value.clone(),
-                    )));
-                };
-                self.datetime_config.time_zone = time_zone;
-            }
-            "statement_timeout" => {
-                parse_statement_timeout(&stmt.value)?;
-            }
-            _ => {}
-        }
-        self.gucs.insert(name, stmt.value.clone());
+        self.apply_guc_value(&stmt.name, &stmt.value)?;
         Ok(StatementResult::AffectedRows(0))
     }
 
@@ -2051,6 +2049,40 @@ impl Session {
 
     fn guc_reset_timezone(&mut self) {
         self.datetime_config.time_zone = default_timezone().to_string();
+    }
+
+    fn apply_guc_value(&mut self, name: &str, value: &str) -> Result<(), ExecError> {
+        let normalized = normalize_guc_name(name);
+        if !is_postgres_guc(&normalized) {
+            return Err(ExecError::Parse(ParseError::UnknownConfigurationParameter(
+                normalized,
+            )));
+        }
+        match normalized.as_str() {
+            "datestyle" => {
+                let Some((date_style_format, date_order)) = parse_datestyle(value) else {
+                    return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+                        value.to_string(),
+                    )));
+                };
+                self.datetime_config.date_style_format = date_style_format;
+                self.datetime_config.date_order = date_order;
+            }
+            "timezone" => {
+                let Some(time_zone) = parse_timezone(value) else {
+                    return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+                        value.to_string(),
+                    )));
+                };
+                self.datetime_config.time_zone = time_zone;
+            }
+            "statement_timeout" => {
+                parse_statement_timeout(value)?;
+            }
+            _ => {}
+        }
+        self.gucs.insert(normalized, value.to_string());
+        Ok(())
     }
 
     pub fn prepare_insert(
@@ -2501,6 +2533,77 @@ fn parse_statement_timeout(value: &str) -> Result<Option<Duration>, ExecError> {
     Ok(Some(Duration::from_millis(millis.ceil() as u64)))
 }
 
+fn parse_startup_options(options: &str) -> Result<Vec<(String, String)>, ExecError> {
+    let tokens = split_startup_option_words(options)?;
+    let mut gucs = Vec::new();
+    let mut index = 0usize;
+    while index < tokens.len() {
+        let token = &tokens[index];
+        let assignment = if token == "-c" {
+            index += 1;
+            tokens.get(index).ok_or_else(|| {
+                ExecError::Parse(ParseError::UnrecognizedParameter(options.to_string()))
+            })?
+        } else if let Some(assignment) = token.strip_prefix("-c") {
+            assignment
+        } else if let Some(assignment) = token.strip_prefix("--") {
+            assignment
+        } else {
+            index += 1;
+            continue;
+        };
+        let (name, value) = assignment.split_once('=').ok_or_else(|| {
+            ExecError::Parse(ParseError::UnrecognizedParameter(assignment.to_string()))
+        })?;
+        gucs.push((name.to_string(), value.to_string()));
+        index += 1;
+    }
+    Ok(gucs)
+}
+
+fn split_startup_option_words(options: &str) -> Result<Vec<String>, ExecError> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut chars = options.chars().peekable();
+    let mut quote = None::<char>;
+
+    while let Some(ch) = chars.next() {
+        match quote {
+            Some(q) if ch == q => quote = None,
+            Some(_) if ch == '\\' => {
+                let escaped = chars.next().ok_or_else(|| {
+                    ExecError::Parse(ParseError::UnrecognizedParameter(options.to_string()))
+                })?;
+                current.push(escaped);
+            }
+            Some(_) => current.push(ch),
+            None if ch.is_ascii_whitespace() => {
+                if !current.is_empty() {
+                    words.push(std::mem::take(&mut current));
+                }
+            }
+            None if matches!(ch, '\'' | '"') => quote = Some(ch),
+            None if ch == '\\' => {
+                let escaped = chars.next().ok_or_else(|| {
+                    ExecError::Parse(ParseError::UnrecognizedParameter(options.to_string()))
+                })?;
+                current.push(escaped);
+            }
+            None => current.push(ch),
+        }
+    }
+
+    if quote.is_some() {
+        return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+            options.to_string(),
+        )));
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    Ok(words)
+}
+
 fn parse_copy_from_file(sql: &str) -> Option<(String, Option<Vec<String>>, String)> {
     let trimmed = sql.trim().trim_end_matches(';').trim();
     let lower = trimmed.to_ascii_lowercase();
@@ -2541,7 +2644,7 @@ fn parse_copy_from_file(sql: &str) -> Option<(String, Option<Vec<String>>, Strin
 
 #[cfg(test)]
 mod tests {
-    use super::parse_statement_timeout;
+    use super::{parse_startup_options, parse_statement_timeout};
     use crate::backend::executor::ExecError;
     use crate::backend::parser::ParseError;
     use std::time::Duration;
@@ -2579,6 +2682,17 @@ mod tests {
                 Err(ExecError::Parse(ParseError::UnrecognizedParameter(_)))
             ));
         }
+    }
+
+    #[test]
+    fn parse_startup_options_extracts_gucs() {
+        assert_eq!(
+            parse_startup_options("-c statement_timeout=5s --DateStyle='SQL, DMY'").unwrap(),
+            vec![
+                ("statement_timeout".to_string(), "5s".to_string()),
+                ("DateStyle".to_string(), "SQL, DMY".to_string()),
+            ]
+        );
     }
 }
 

@@ -989,6 +989,7 @@ fn bind_ctes(
                 )?;
                 let (anchor_query, desc) =
                     apply_cte_column_names(anchor_query, anchor_desc, &cte.column_names)?;
+                validate_recursive_cte_recursive_term(recursive, &cte.name)?;
                 let recursive_references_worktable =
                     select_statement_references_table(recursive, &cte.name);
                 let worktable_id = NEXT_WORKTABLE_ID.fetch_add(1, Ordering::Relaxed);
@@ -1122,6 +1123,400 @@ fn bind_ctes(
         });
     }
     Ok(bound)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecursiveReferenceContext {
+    Ok,
+    Subquery,
+    OuterJoin,
+    Intersect,
+    Except,
+}
+
+fn recursive_reference_error(
+    context: RecursiveReferenceContext,
+    cte_name: &str,
+) -> Result<(), ParseError> {
+    let message = match context {
+        RecursiveReferenceContext::Ok => return Ok(()),
+        RecursiveReferenceContext::Subquery => {
+            format!("recursive reference to query \"{cte_name}\" must not appear within a subquery")
+        }
+        RecursiveReferenceContext::OuterJoin => {
+            format!(
+                "recursive reference to query \"{cte_name}\" must not appear within an outer join"
+            )
+        }
+        RecursiveReferenceContext::Intersect => {
+            format!("recursive reference to query \"{cte_name}\" must not appear within INTERSECT")
+        }
+        RecursiveReferenceContext::Except => {
+            format!("recursive reference to query \"{cte_name}\" must not appear within EXCEPT")
+        }
+    };
+    Err(ParseError::InvalidRecursion(message))
+}
+
+#[derive(Debug)]
+struct RecursiveReferenceChecker<'a> {
+    cte_name: &'a str,
+    self_refcount: usize,
+}
+
+impl<'a> RecursiveReferenceChecker<'a> {
+    fn new(cte_name: &'a str) -> Self {
+        Self {
+            cte_name,
+            self_refcount: 0,
+        }
+    }
+
+    fn validate_recursive_term(&mut self, stmt: &SelectStatement) -> Result<(), ParseError> {
+        self.visit_select(stmt, RecursiveReferenceContext::Ok)
+    }
+
+    fn visit_cte_body(
+        &mut self,
+        body: &CteBody,
+        context: RecursiveReferenceContext,
+    ) -> Result<(), ParseError> {
+        match body {
+            CteBody::Select(select) => self.visit_select(select, context),
+            CteBody::Values(values) => {
+                for row in &values.rows {
+                    for expr in row {
+                        self.visit_expr(expr, context)?;
+                    }
+                }
+                Ok(())
+            }
+            CteBody::RecursiveUnion {
+                anchor, recursive, ..
+            } => {
+                self.visit_cte_body(anchor, RecursiveReferenceContext::Subquery)?;
+                self.visit_select(recursive, RecursiveReferenceContext::Subquery)
+            }
+        }
+    }
+
+    fn visit_select(
+        &mut self,
+        stmt: &SelectStatement,
+        context: RecursiveReferenceContext,
+    ) -> Result<(), ParseError> {
+        if stmt.with.iter().any(|cte| cte.name == self.cte_name) {
+            return Ok(());
+        }
+
+        for cte in &stmt.with {
+            self.visit_cte_body(&cte.body, RecursiveReferenceContext::Subquery)?;
+        }
+        if let Some(from) = &stmt.from {
+            self.visit_from(from, context)?;
+        }
+        for target in &stmt.targets {
+            self.visit_expr(&target.expr, context)?;
+        }
+        if let Some(where_clause) = &stmt.where_clause {
+            self.visit_expr(where_clause, context)?;
+        }
+        for expr in &stmt.group_by {
+            self.visit_expr(expr, context)?;
+        }
+        if let Some(having) = &stmt.having {
+            self.visit_expr(having, context)?;
+        }
+        for item in &stmt.order_by {
+            self.visit_expr(&item.expr, context)?;
+        }
+        if let Some(set_operation) = &stmt.set_operation {
+            self.visit_set_operation(set_operation, context)?;
+        }
+        Ok(())
+    }
+
+    fn visit_set_operation(
+        &mut self,
+        stmt: &SetOperationStatement,
+        context: RecursiveReferenceContext,
+    ) -> Result<(), ParseError> {
+        let input_context = match stmt.op {
+            SetOperator::Union { .. } => context,
+            SetOperator::Intersect { .. } => RecursiveReferenceContext::Intersect,
+            SetOperator::Except { .. } => RecursiveReferenceContext::Except,
+        };
+        for input in &stmt.inputs {
+            self.visit_select(input, input_context)?;
+        }
+        Ok(())
+    }
+
+    fn visit_from(
+        &mut self,
+        from: &FromItem,
+        context: RecursiveReferenceContext,
+    ) -> Result<(), ParseError> {
+        match from {
+            FromItem::Table { name, .. } => self.note_reference(name, context),
+            FromItem::Values { rows } => {
+                for row in rows {
+                    for expr in row {
+                        self.visit_expr(expr, context)?;
+                    }
+                }
+                Ok(())
+            }
+            FromItem::FunctionCall { args, .. } => {
+                for arg in args {
+                    self.visit_expr(&arg.value, context)?;
+                }
+                Ok(())
+            }
+            FromItem::Lateral(source) | FromItem::Alias { source, .. } => {
+                self.visit_from(source, context)
+            }
+            FromItem::DerivedTable(select) => {
+                self.visit_select(select, RecursiveReferenceContext::Subquery)
+            }
+            FromItem::Join {
+                left,
+                right,
+                kind,
+                constraint,
+            } => {
+                let left_context = match kind {
+                    JoinKind::Right | JoinKind::Full
+                        if context == RecursiveReferenceContext::Ok =>
+                    {
+                        RecursiveReferenceContext::OuterJoin
+                    }
+                    _ => context,
+                };
+                let right_context = match kind {
+                    JoinKind::Left | JoinKind::Full
+                        if context == RecursiveReferenceContext::Ok =>
+                    {
+                        RecursiveReferenceContext::OuterJoin
+                    }
+                    _ => context,
+                };
+                self.visit_from(left, left_context)?;
+                self.visit_from(right, right_context)?;
+                match constraint {
+                    JoinConstraint::None | JoinConstraint::Natural | JoinConstraint::Using(_) => {
+                        Ok(())
+                    }
+                    JoinConstraint::On(expr) => self.visit_expr(expr, context),
+                }
+            }
+        }
+    }
+
+    fn visit_expr(
+        &mut self,
+        expr: &SqlExpr,
+        context: RecursiveReferenceContext,
+    ) -> Result<(), ParseError> {
+        match expr {
+            SqlExpr::Column(_)
+            | SqlExpr::Default
+            | SqlExpr::Const(_)
+            | SqlExpr::IntegerLiteral(_)
+            | SqlExpr::NumericLiteral(_)
+            | SqlExpr::Random
+            | SqlExpr::CurrentDate
+            | SqlExpr::CurrentTime { .. }
+            | SqlExpr::CurrentTimestamp { .. }
+            | SqlExpr::LocalTime { .. }
+            | SqlExpr::LocalTimestamp { .. } => Ok(()),
+            SqlExpr::UnaryPlus(expr)
+            | SqlExpr::Negate(expr)
+            | SqlExpr::BitNot(expr)
+            | SqlExpr::Subscript { expr, .. }
+            | SqlExpr::PrefixOperator { expr, .. }
+            | SqlExpr::Cast(expr, _)
+            | SqlExpr::Not(expr)
+            | SqlExpr::IsNull(expr)
+            | SqlExpr::IsNotNull(expr)
+            | SqlExpr::FieldSelect { expr, .. }
+            | SqlExpr::GeometryUnaryOp { expr, .. } => self.visit_expr(expr, context),
+            SqlExpr::Add(left, right)
+            | SqlExpr::Sub(left, right)
+            | SqlExpr::BitAnd(left, right)
+            | SqlExpr::BitOr(left, right)
+            | SqlExpr::BitXor(left, right)
+            | SqlExpr::Shl(left, right)
+            | SqlExpr::Shr(left, right)
+            | SqlExpr::Mul(left, right)
+            | SqlExpr::Div(left, right)
+            | SqlExpr::Mod(left, right)
+            | SqlExpr::Concat(left, right)
+            | SqlExpr::Eq(left, right)
+            | SqlExpr::NotEq(left, right)
+            | SqlExpr::Lt(left, right)
+            | SqlExpr::LtEq(left, right)
+            | SqlExpr::Gt(left, right)
+            | SqlExpr::GtEq(left, right)
+            | SqlExpr::RegexMatch(left, right)
+            | SqlExpr::And(left, right)
+            | SqlExpr::Or(left, right)
+            | SqlExpr::IsDistinctFrom(left, right)
+            | SqlExpr::IsNotDistinctFrom(left, right)
+            | SqlExpr::ArrayOverlap(left, right)
+            | SqlExpr::JsonbContains(left, right)
+            | SqlExpr::JsonbContained(left, right)
+            | SqlExpr::JsonbExists(left, right)
+            | SqlExpr::JsonbExistsAny(left, right)
+            | SqlExpr::JsonbExistsAll(left, right)
+            | SqlExpr::JsonbPathExists(left, right)
+            | SqlExpr::JsonbPathMatch(left, right)
+            | SqlExpr::JsonGet(left, right)
+            | SqlExpr::JsonGetText(left, right)
+            | SqlExpr::JsonPath(left, right)
+            | SqlExpr::JsonPathText(left, right)
+            | SqlExpr::GeometryBinaryOp { left, right, .. } => {
+                self.visit_expr(left, context)?;
+                self.visit_expr(right, context)
+            }
+            SqlExpr::BinaryOperator { left, right, .. } => {
+                self.visit_expr(left, context)?;
+                self.visit_expr(right, context)
+            }
+            SqlExpr::Like {
+                expr,
+                pattern,
+                escape,
+                ..
+            }
+            | SqlExpr::Similar {
+                expr,
+                pattern,
+                escape,
+                ..
+            } => {
+                self.visit_expr(expr, context)?;
+                self.visit_expr(pattern, context)?;
+                if let Some(escape) = escape {
+                    self.visit_expr(escape, context)?;
+                }
+                Ok(())
+            }
+            SqlExpr::Case {
+                arg,
+                args,
+                defresult,
+            } => {
+                if let Some(arg) = arg {
+                    self.visit_expr(arg, context)?;
+                }
+                for arm in args {
+                    self.visit_expr(&arm.expr, context)?;
+                    self.visit_expr(&arm.result, context)?;
+                }
+                if let Some(defresult) = defresult {
+                    self.visit_expr(defresult, context)?;
+                }
+                Ok(())
+            }
+            SqlExpr::ArrayLiteral(items) | SqlExpr::Row(items) => {
+                for item in items {
+                    self.visit_expr(item, context)?;
+                }
+                Ok(())
+            }
+            SqlExpr::AggCall {
+                args, filter, over, ..
+            } => {
+                for arg in args {
+                    self.visit_expr(&arg.value, context)?;
+                }
+                if let Some(filter) = filter {
+                    self.visit_expr(filter, context)?;
+                }
+                if let Some(over) = over {
+                    for expr in &over.partition_by {
+                        self.visit_expr(expr, context)?;
+                    }
+                    for item in &over.order_by {
+                        self.visit_expr(&item.expr, context)?;
+                    }
+                }
+                Ok(())
+            }
+            SqlExpr::FuncCall { args, over, .. } => {
+                for arg in args {
+                    self.visit_expr(&arg.value, context)?;
+                }
+                if let Some(over) = over {
+                    for expr in &over.partition_by {
+                        self.visit_expr(expr, context)?;
+                    }
+                    for item in &over.order_by {
+                        self.visit_expr(&item.expr, context)?;
+                    }
+                }
+                Ok(())
+            }
+            SqlExpr::ScalarSubquery(subquery) | SqlExpr::Exists(subquery) => {
+                self.visit_select(subquery, RecursiveReferenceContext::Subquery)
+            }
+            SqlExpr::InSubquery {
+                expr,
+                subquery,
+                negated: _,
+            } => {
+                self.visit_expr(expr, context)?;
+                self.visit_select(subquery, RecursiveReferenceContext::Subquery)
+            }
+            SqlExpr::QuantifiedSubquery { left, subquery, .. } => {
+                self.visit_expr(left, context)?;
+                self.visit_select(subquery, RecursiveReferenceContext::Subquery)
+            }
+            SqlExpr::QuantifiedArray { left, array, .. } => {
+                self.visit_expr(left, context)?;
+                self.visit_expr(array, context)
+            }
+            SqlExpr::ArraySubscript { array, subscripts } => {
+                self.visit_expr(array, context)?;
+                for subscript in subscripts {
+                    if let Some(lower) = &subscript.lower {
+                        self.visit_expr(lower, context)?;
+                    }
+                    if let Some(upper) = &subscript.upper {
+                        self.visit_expr(upper, context)?;
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn note_reference(
+        &mut self,
+        table_name: &str,
+        context: RecursiveReferenceContext,
+    ) -> Result<(), ParseError> {
+        if !table_name.eq_ignore_ascii_case(self.cte_name) {
+            return Ok(());
+        }
+        recursive_reference_error(context, self.cte_name)?;
+        self.self_refcount += 1;
+        if self.self_refcount > 1 {
+            return Err(ParseError::InvalidRecursion(format!(
+                "recursive reference to query \"{}\" must not appear more than once",
+                self.cte_name
+            )));
+        }
+        Ok(())
+    }
+}
+
+fn validate_recursive_cte_recursive_term(
+    stmt: &SelectStatement,
+    cte_name: &str,
+) -> Result<(), ParseError> {
+    RecursiveReferenceChecker::new(cte_name).validate_recursive_term(stmt)
 }
 
 fn select_statement_references_table(stmt: &SelectStatement, table_name: &str) -> bool {
