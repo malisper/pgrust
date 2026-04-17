@@ -609,21 +609,56 @@ fn handle_query(
         send_ready_for_query(stream, state.session.ready_status())?;
         return Ok(());
     }
-    let sql = sql.trim().trim_end_matches(';').trim();
-    if sql.is_empty() {
+    let mut executed_any = false;
+    let mut copy_in_started = false;
+    for raw_stmt in split_simple_query_statements(sql) {
+        if sql_is_effectively_empty_after_comments(raw_stmt) {
+            continue;
+        }
+        executed_any = true;
+        match execute_query_statement(stream, db, state, raw_stmt)? {
+            QueryStatementFlow::Continue => {}
+            QueryStatementFlow::Stop => break,
+            QueryStatementFlow::CopyInStarted => {
+                copy_in_started = true;
+                break;
+            }
+        }
+    }
+
+    if !executed_any {
         send_empty_query(stream)?;
-        send_ready_for_query(stream, state.session.ready_status())?;
+    }
+    if copy_in_started {
         return Ok(());
     }
+    send_ready_for_query(stream, state.session.ready_status())?;
+    Ok(())
+}
+
+enum QueryStatementFlow {
+    Continue,
+    Stop,
+    CopyInStarted,
+}
+
+fn execute_query_statement(
+    stream: &mut impl Write,
+    db: &Database,
+    state: &mut ConnectionState,
+    sql: &str,
+) -> io::Result<QueryStatementFlow> {
+    let sql = sql.trim().trim_end_matches(';').trim();
+    if sql.is_empty() {
+        return Ok(QueryStatementFlow::Continue);
+    }
     if try_handle_float_shell_ddl(stream, sql)? {
-        send_ready_for_query(stream, state.session.ready_status())?;
-        return Ok(());
+        return Ok(QueryStatementFlow::Continue);
     }
     let sql = rewrite_regression_sql(sql);
 
     if try_handle_psql_describe_query(stream, db, state, &sql)? {
-        send_ready_for_query(stream, state.session.ready_status())?;
-        return Ok(());
+        return Ok(QueryStatementFlow::Continue);
     }
 
     if let Some((table_name, columns)) = parse_copy_from_stdin(&sql) {
@@ -633,7 +668,7 @@ fn handle_query(
             pending: Vec::new(),
         });
         send_copy_in_response(stream)?;
-        return Ok(());
+        return Ok(QueryStatementFlow::CopyInStarted);
     }
 
     let parsed = if state.session.standard_conforming_strings() {
@@ -703,49 +738,167 @@ fn handle_query(
                 if let Some(e) = err {
                     send_plpgsql_notices(stream, &take_notices())?;
                     send_exec_error(stream, &sql, &e)?;
-                } else {
-                    send_plpgsql_notices(stream, &take_notices())?;
-                    if !header_sent {
-                        send_row_description(stream, &columns)?;
-                    }
-                    send_command_complete(stream, &format!("SELECT {row_count}"))?;
+                    return Ok(QueryStatementFlow::Stop);
                 }
+
+                send_plpgsql_notices(stream, &take_notices())?;
+                if !header_sent {
+                    send_row_description(stream, &columns)?;
+                }
+                send_command_complete(stream, &format!("SELECT {row_count}"))?;
+                return Ok(QueryStatementFlow::Continue);
             }
             Err(e) => {
                 send_plpgsql_notices(stream, &take_notices())?;
                 send_exec_error(stream, &sql, &e)?;
-            }
-        }
-    } else {
-        clear_notices();
-        match state.session.execute(db, &sql) {
-            Ok(StatementResult::Query { columns, rows, .. }) => {
-                send_plpgsql_notices(stream, &take_notices())?;
-                send_query_result(
-                    stream,
-                    &columns,
-                    &rows,
-                    &format!("SELECT {}", rows.len()),
-                    FloatFormatOptions {
-                        extra_float_digits: state.session.extra_float_digits(),
-                        bytea_output: state.session.bytea_output(),
-                        datetime_config: state.session.datetime_config().clone(),
-                    },
-                )?;
-            }
-            Ok(StatementResult::AffectedRows(n)) => {
-                send_plpgsql_notices(stream, &take_notices())?;
-                send_command_complete(stream, &infer_command_tag(&sql, n))?;
-            }
-            Err(e) => {
-                send_plpgsql_notices(stream, &take_notices())?;
-                send_exec_error(stream, &sql, &e)?;
+                return Ok(QueryStatementFlow::Stop);
             }
         }
     }
 
-    send_ready_for_query(stream, state.session.ready_status())?;
-    Ok(())
+    clear_notices();
+    match state.session.execute(db, &sql) {
+        Ok(StatementResult::Query { columns, rows, .. }) => {
+            send_plpgsql_notices(stream, &take_notices())?;
+            send_query_result(
+                stream,
+                &columns,
+                &rows,
+                &format!("SELECT {}", rows.len()),
+                FloatFormatOptions {
+                    extra_float_digits: state.session.extra_float_digits(),
+                    bytea_output: state.session.bytea_output(),
+                    datetime_config: state.session.datetime_config().clone(),
+                },
+            )?;
+            Ok(QueryStatementFlow::Continue)
+        }
+        Ok(StatementResult::AffectedRows(n)) => {
+            send_plpgsql_notices(stream, &take_notices())?;
+            send_command_complete(stream, &infer_command_tag(&sql, n))?;
+            Ok(QueryStatementFlow::Continue)
+        }
+        Err(e) => {
+            send_plpgsql_notices(stream, &take_notices())?;
+            send_exec_error(stream, &sql, &e)?;
+            Ok(QueryStatementFlow::Stop)
+        }
+    }
+}
+
+fn split_simple_query_statements(sql: &str) -> Vec<&str> {
+    let mut statements = Vec::new();
+    let mut start = 0usize;
+    let bytes = sql.as_bytes();
+    let mut i = 0usize;
+    let mut block_comment_depth = 0usize;
+    let mut single_quote = false;
+    let mut double_quote = false;
+    let mut line_comment = false;
+    let mut dollar_quote: Option<String> = None;
+
+    while i < bytes.len() {
+        if line_comment {
+            if bytes[i] == b'\n' {
+                line_comment = false;
+            }
+            i += 1;
+            continue;
+        }
+        if block_comment_depth > 0 {
+            if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                block_comment_depth += 1;
+                i += 2;
+                continue;
+            }
+            if i + 1 < bytes.len() && bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                block_comment_depth -= 1;
+                i += 2;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+        if let Some(tag) = &dollar_quote {
+            if sql[i..].starts_with(tag) {
+                i += tag.len();
+                dollar_quote = None;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        if single_quote {
+            if bytes[i] == b'\'' {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                    i += 2;
+                } else {
+                    single_quote = false;
+                    i += 1;
+                }
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        if double_quote {
+            if bytes[i] == b'"' {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'"' {
+                    i += 2;
+                } else {
+                    double_quote = false;
+                    i += 1;
+                }
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+
+        if i + 1 < bytes.len() && bytes[i] == b'-' && bytes[i + 1] == b'-' {
+            line_comment = true;
+            i += 2;
+            continue;
+        }
+        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+            block_comment_depth = 1;
+            i += 2;
+            continue;
+        }
+        if bytes[i] == b'\'' {
+            single_quote = true;
+            i += 1;
+            continue;
+        }
+        if bytes[i] == b'"' {
+            double_quote = true;
+            i += 1;
+            continue;
+        }
+        if bytes[i] == b'$' {
+            if let Some(tag_end) = sql[i + 1..].find('$') {
+                let delimiter = &sql[i..=i + 1 + tag_end];
+                if delimiter[1..delimiter.len() - 1]
+                    .chars()
+                    .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+                {
+                    dollar_quote = Some(delimiter.to_string());
+                    i += delimiter.len();
+                    continue;
+                }
+            }
+        }
+        if bytes[i] == b';' {
+            statements.push(&sql[start..=i]);
+            start = i + 1;
+        }
+        i += 1;
+    }
+
+    if start < sql.len() {
+        statements.push(&sql[start..]);
+    }
+    statements
 }
 
 fn try_handle_psql_describe_query(
@@ -2442,6 +2595,76 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn simple_query_role_creation_is_visible_to_next_query() {
+        let db = Database::open(temp_dir("role_visibility"), 16).unwrap();
+        let mut state = ConnectionState {
+            session: Session::new(2),
+            prepared: HashMap::new(),
+            portals: HashMap::new(),
+            copy_in: None,
+        };
+        let mut output = Vec::new();
+
+        handle_query(&mut output, &db, &mut state, "create role tenant login;").unwrap();
+        assert!(
+            db.backend_catcache(2, None)
+                .unwrap()
+                .authid_rows()
+                .into_iter()
+                .any(|row| row.rolname == "tenant")
+        );
+
+        output.clear();
+        handle_query(
+            &mut output,
+            &db,
+            &mut state,
+            "set session authorization tenant;",
+        )
+        .unwrap();
+
+        let tenant_oid = db
+            .backend_catcache(2, None)
+            .unwrap()
+            .authid_rows()
+            .into_iter()
+            .find(|row| row.rolname == "tenant")
+            .map(|row| row.oid)
+            .unwrap();
+        assert_eq!(state.session.current_user_oid(), tenant_oid);
+    }
+
+    #[test]
+    fn simple_query_executes_multiple_statements_in_order() {
+        let db = Database::open(temp_dir("multi_statement"), 16).unwrap();
+        let mut state = ConnectionState {
+            session: Session::new(2),
+            prepared: HashMap::new(),
+            portals: HashMap::new(),
+            copy_in: None,
+        };
+        let mut output = Vec::new();
+
+        handle_query(
+            &mut output,
+            &db,
+            &mut state,
+            "create role tenant login; set session authorization tenant;",
+        )
+        .unwrap();
+
+        let tenant_oid = db
+            .backend_catcache(2, None)
+            .unwrap()
+            .authid_rows()
+            .into_iter()
+            .find(|row| row.rolname == "tenant")
+            .map(|row| row.oid)
+            .unwrap();
+        assert_eq!(state.session.current_user_oid(), tenant_oid);
     }
 
     #[test]

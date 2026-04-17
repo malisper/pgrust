@@ -135,4 +135,38 @@ mod tests {
             .unwrap_err();
         assert!(format!("{err:?}").contains("permission denied"));
     }
+
+    #[test]
+    fn parse_error_does_not_hide_previously_created_roles() {
+        let base = temp_dir("parse_error_visibility");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(3);
+
+        session
+            .execute(&db, "create role limited_admin createrole")
+            .unwrap();
+        assert!(
+            db.backend_catcache(3, None)
+                .unwrap()
+                .authid_rows()
+                .into_iter()
+                .any(|row| row.rolname == "limited_admin")
+        );
+
+        let err = session
+            .execute(
+                &db,
+                "grant create on database regression to limited_admin with grant option",
+            )
+            .unwrap_err();
+        assert!(format!("{err:?}").contains("expected statement"));
+
+        assert_eq!(
+            session
+                .execute(&db, "set session authorization limited_admin")
+                .unwrap(),
+            StatementResult::AffectedRows(0)
+        );
+        assert_eq!(session.current_user_oid(), role_oid(&db, "limited_admin"));
+    }
 }
