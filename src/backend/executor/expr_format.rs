@@ -34,19 +34,20 @@ pub(crate) fn to_char_int(value: i128, format: &str) -> Result<String, ExecError
 }
 
 pub(crate) fn to_char_numeric(value: &NumericValue, format: &str) -> Result<String, ExecError> {
+    let value = value.normalize_display_scale();
     let mut parser = FormatParser::new(format);
     let spec = parser.parse()?;
     if spec.roman {
         return Ok(format_roman_numeric(
-            value,
+            &value,
             spec.fill_mode,
             spec.roman_lower,
         ));
     }
     if spec.scientific {
-        return format_scientific_numeric(value, &spec);
+        return format_scientific_numeric(&value, &spec);
     }
-    Ok(format_standard_numeric(value, &spec))
+    Ok(format_standard_numeric(&value, &spec))
 }
 
 pub(crate) fn to_number_numeric(input: &str, format: &str) -> Result<NumericValue, ExecError> {
@@ -1031,22 +1032,6 @@ fn format_standard_numeric(value: &NumericValue, spec: &FormatSpec) -> String {
     {
         out = format!("-{}", out.trim_start());
     }
-    if spec.ordinal && !negative && frac_part.chars().all(|ch| ch == '0') && decimal_idx.is_none() {
-        let ordinal_value = int_part.parse::<i128>().unwrap_or(0);
-        let suffix = if spec.ordinal_lower {
-            ordinal_suffix(ordinal_value).to_ascii_lowercase()
-        } else {
-            ordinal_suffix(ordinal_value).to_string()
-        };
-        out.push_str(&suffix);
-    }
-    if spec.angle_pr {
-        if negative {
-            out = format!("<{}>", out.trim().trim_start_matches('-').trim());
-        } else {
-            out = format!(" {out} ");
-        }
-    }
     if spec.fill_mode {
         out = out.trim().to_string();
         if let Some(dot_idx) = out.find('.') {
@@ -1066,6 +1051,22 @@ fn format_standard_numeric(value: &NumericValue, spec: &FormatSpec) -> String {
             if out.ends_with('.') && frac_pattern.is_empty() {
                 out.pop();
             }
+        }
+    }
+    if spec.ordinal && !negative && frac_part.chars().all(|ch| ch == '0') && decimal_idx.is_none() {
+        let ordinal_value = int_part.parse::<i128>().unwrap_or(0);
+        let suffix = if spec.ordinal_lower {
+            ordinal_suffix(ordinal_value).to_ascii_lowercase()
+        } else {
+            ordinal_suffix(ordinal_value).to_string()
+        };
+        out.push_str(&suffix);
+    }
+    if spec.angle_pr {
+        if negative {
+            out = format!("<{}>", out.trim().trim_start_matches('-').trim());
+        } else {
+            out = format!(" {out} ");
         }
     }
     out
