@@ -308,6 +308,9 @@ Targeted reruns on 2026-04-17:
 - typed_table.sql: 1/32
 - unicode.sql: 0/17
 - union.sql: 75/197
+- union.sql follow-up:
+  - accept PostgreSQL-style mixed set-operation chains such as `SELECT 1 UNION SELECT 2 UNION ALL SELECT 2` instead of rejecting them in the parser
+  - investigate why bootstrap fixture tables from `scripts/test_setup_pgrust.sql` like `float8_tbl`, `int8_tbl`, and `tenk1` are not consistently resolvable during regression runs
 - updatable_views.sql: 109/1139
 - update.sql: 28/300
 - uuid.sql: 0/63
@@ -324,6 +327,7 @@ Targeted reruns on 2026-04-17:
 
 ## Features
 
+<<<<<<< HEAD
 - [done] PostgreSQL-compatible jsonb input errors with `LINE` / `DETAIL` / `CONTEXT`
 - [done] stack depth limit handling for deeply nested jsonb input
 - aggregate-local `ORDER BY` support for `jsonb_agg` / `jsonb_object_agg`
@@ -421,6 +425,10 @@ Targeted reruns on 2026-04-17:
 - Add PostgreSQL-style `DETAIL` output for numeric typmod overflow, including fractional-only numerics and infinite values rejected by typmod constraints
 - Add dedicated numeric-to-integer cast errors for `NaN` and `Infinity` instead of collapsing them into generic `smallint/integer/bigint out of range`
 - Audit the remaining `numeric.sql` formatting mismatches after the display-scale fix; many later hunks appear to be the same root cause repeated across `to_char` cases
+=======
+- Mixed set-operation chains: accept PostgreSQL-style left-associative chains such as `SELECT 1 UNION SELECT 2 UNION ALL SELECT 2` instead of rejecting them in the parser.
+- Shared regression fixture visibility: investigate why bootstrap tables from `scripts/test_setup_pgrust.sql` like `float8_tbl`, `int8_tbl`, and `tenk1` are not consistently resolvable during regression runs.
+>>>>>>> malisper/union-regressions
 
 ## DONE
 
