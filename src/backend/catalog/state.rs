@@ -5,7 +5,8 @@ use crate::backend::catalog::catalog::allocate_relation_object_oids;
 use crate::backend::catalog::indexing::insert_bootstrap_system_indexes;
 use crate::backend::catalog::pg_constraint::{derived_pg_constraint_rows, sort_pg_constraint_rows};
 use crate::backend::catalog::pg_depend::{
-    derived_pg_depend_rows, index_backed_constraint_depend_rows, inheritance_depend_rows,
+    derived_pg_depend_rows, foreign_key_constraint_depend_rows,
+    index_backed_constraint_depend_rows, inheritance_depend_rows,
     primary_key_owned_not_null_depend_rows, relation_constraint_depend_rows, sort_pg_depend_rows,
 };
 use crate::backend::catalog::pg_inherits::sort_pg_inherits_rows;
@@ -652,6 +653,96 @@ impl Catalog {
         Ok(row)
     }
 
+    pub fn create_foreign_key_constraint(
+        &mut self,
+        relation_oid: u32,
+        conname: impl Into<String>,
+        convalidated: bool,
+        local_attnums: &[i16],
+        referenced_relation_oid: u32,
+        referenced_index_oid: u32,
+        referenced_attnums: &[i16],
+        confupdtype: char,
+        confdeltype: char,
+        confmatchtype: char,
+    ) -> Result<PgConstraintRow, CatalogError> {
+        let table = self
+            .get_by_oid(relation_oid)
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        if table.relkind != 'r' {
+            return Err(CatalogError::UnknownTable(relation_oid.to_string()));
+        }
+        let referenced_table = self
+            .get_by_oid(referenced_relation_oid)
+            .ok_or_else(|| CatalogError::UnknownTable(referenced_relation_oid.to_string()))?;
+        if referenced_table.relkind != 'r' {
+            return Err(CatalogError::UnknownTable(
+                referenced_relation_oid.to_string(),
+            ));
+        }
+        let referenced_index = self
+            .get_by_oid(referenced_index_oid)
+            .ok_or_else(|| CatalogError::UnknownTable(referenced_index_oid.to_string()))?;
+        if referenced_index.relkind != 'i' {
+            return Err(CatalogError::UnknownTable(referenced_index_oid.to_string()));
+        }
+
+        let conname = conname.into();
+        if self
+            .constraints
+            .iter()
+            .any(|row| row.conrelid == relation_oid && row.conname.eq_ignore_ascii_case(&conname))
+        {
+            return Err(CatalogError::TableAlreadyExists(conname));
+        }
+
+        let equality_ops = referenced_index
+            .index_meta
+            .as_ref()
+            .and_then(|meta| foreign_key_equality_operators(&meta.indclass));
+        let row = PgConstraintRow {
+            oid: self.next_oid,
+            conname,
+            connamespace: table.namespace_oid,
+            contype: crate::include::catalog::CONSTRAINT_FOREIGN,
+            condeferrable: false,
+            condeferred: false,
+            conenforced: true,
+            convalidated,
+            conrelid: relation_oid,
+            contypid: 0,
+            conindid: referenced_index_oid,
+            conparentid: 0,
+            confrelid: referenced_relation_oid,
+            confupdtype,
+            confdeltype,
+            confmatchtype,
+            conkey: Some(local_attnums.to_vec()),
+            confkey: Some(referenced_attnums.to_vec()),
+            conpfeqop: equality_ops.clone(),
+            conppeqop: equality_ops.clone(),
+            conffeqop: equality_ops,
+            confdelsetcols: None,
+            conexclop: None,
+            conbin: None,
+            conislocal: true,
+            coninhcount: 0,
+            connoinherit: false,
+            conperiod: false,
+        };
+        self.next_oid = self.next_oid.saturating_add(1);
+        self.constraints.push(row.clone());
+        sort_pg_constraint_rows(&mut self.constraints);
+        self.depends.extend(foreign_key_constraint_depend_rows(
+            row.oid,
+            relation_oid,
+            referenced_relation_oid,
+            referenced_index_oid,
+        ));
+        sort_pg_depend_rows(&mut self.depends);
+        Ok(row)
+    }
+
     pub fn drop_relation_entry_by_oid(
         &mut self,
         relation_oid: u32,
@@ -777,6 +868,26 @@ impl Catalog {
             .find(|row| {
                 row.conrelid == relation_oid
                     && row.contype == crate::include::catalog::CONSTRAINT_CHECK
+                    && row.conname.eq_ignore_ascii_case(constraint_name)
+            })
+            .ok_or_else(|| CatalogError::UnknownTable(constraint_name.to_string()))?;
+        let old_row = row.clone();
+        row.convalidated = true;
+        let new_row = row.clone();
+        Ok((old_row, new_row))
+    }
+
+    pub fn validate_foreign_key_constraint(
+        &mut self,
+        relation_oid: u32,
+        constraint_name: &str,
+    ) -> Result<(PgConstraintRow, PgConstraintRow), CatalogError> {
+        let row = self
+            .constraints
+            .iter_mut()
+            .find(|row| {
+                row.conrelid == relation_oid
+                    && row.contype == crate::include::catalog::CONSTRAINT_FOREIGN
                     && row.conname.eq_ignore_ascii_case(constraint_name)
             })
             .ok_or_else(|| CatalogError::UnknownTable(constraint_name.to_string()))?;
@@ -1445,6 +1556,24 @@ impl Catalog {
             })
             .map(|row| row.oid)
     }
+}
+
+fn foreign_key_equality_operators(indclass: &[u32]) -> Option<Vec<u32>> {
+    let opclasses = crate::include::catalog::bootstrap_pg_opclass_rows();
+    let amops = crate::include::catalog::bootstrap_pg_amop_rows();
+    indclass
+        .iter()
+        .map(|opclass_oid| {
+            let family = opclasses
+                .iter()
+                .find(|row| row.oid == *opclass_oid)?
+                .opcfamily;
+            amops
+                .iter()
+                .find(|row| row.amopfamily == family && row.amopstrategy == 3)
+                .map(|row| row.amopopr)
+        })
+        .collect()
 }
 
 fn entry_owned_object_oids(entry: &CatalogEntry) -> BTreeSet<u32> {

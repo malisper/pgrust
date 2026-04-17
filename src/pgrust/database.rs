@@ -7,6 +7,7 @@ use std::time::Duration;
 mod catalog_access;
 mod commands;
 mod ddl;
+pub(crate) mod foreign_keys;
 mod relation_refs;
 mod temp;
 mod toast;
@@ -18,9 +19,7 @@ use crate::backend::access::transam::xact::{
 use crate::backend::access::transam::xlog::{WalBgWriter, WalError, WalWriter};
 use crate::backend::catalog::catalog::{CatalogIndexBuildOptions, column_desc};
 use crate::backend::catalog::indexing::rebuild_system_catalog_indexes_in_pool;
-use crate::backend::catalog::namespace::{
-    effective_search_path as namespace_effective_search_path,
-};
+use crate::backend::catalog::namespace::effective_search_path as namespace_effective_search_path;
 use crate::backend::catalog::rows::physical_catalog_rows_from_catcache;
 use crate::backend::catalog::store::{CatalogMutationEffect, CatalogWriteContext};
 use crate::backend::catalog::toasting::ToastCatalogChanges;
@@ -36,12 +35,11 @@ use crate::backend::parser::Statement;
 use crate::backend::parser::{
     AlterTableAddColumnStatement, AlterTableDropColumnStatement, AlterTableRenameColumnStatement,
     AlterTableRenameStatement, AnalyzeStatement, CatalogLookup, CommentOnDomainStatement,
-    CommentOnTableStatement, CreateDomainStatement, CreateIndexStatement,
-    CreateSchemaStatement, CreateTableAsStatement, CreateTableStatement, CreateViewStatement,
-    DropDomainStatement, DropViewStatement, normalize_create_table_as_name,
-    normalize_create_table_name, normalize_create_view_name,
-    OnCommitAction, ParseError, SqlType, TablePersistence, bind_delete, bind_insert, bind_update,
-    create_relation_desc, lower_create_table_with_catalog,
+    CommentOnTableStatement, CreateDomainStatement, CreateIndexStatement, CreateSchemaStatement,
+    CreateTableAsStatement, CreateTableStatement, CreateViewStatement, DropDomainStatement,
+    DropViewStatement, OnCommitAction, ParseError, SqlType, TablePersistence, bind_delete,
+    bind_insert, bind_update, create_relation_desc, lower_create_table_with_catalog,
+    normalize_create_table_as_name, normalize_create_table_name, normalize_create_view_name,
 };
 use crate::backend::storage::lmgr::{
     TableLockManager, TableLockMode, lock_relations_interruptible, lock_tables_interruptible,
@@ -76,6 +74,7 @@ use crate::pl::plpgsql::execute_do;
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
 use ddl::{
     ensure_can_set_role, ensure_relation_owner, lookup_heap_relation_for_ddl, map_catalog_error,
+    reject_column_with_foreign_key_dependencies, reject_index_with_referencing_foreign_keys,
     reject_inheritance_tree_ddl, reject_relation_with_dependent_views,
     validate_alter_table_add_column,
 };
@@ -104,6 +103,13 @@ impl From<MvccError> for DatabaseError {
 
 pub use crate::backend::storage::lmgr::TransactionWaiter;
 pub use crate::pgrust::session::{SelectGuard, Session};
+pub(crate) use ddl::reject_relation_with_referencing_foreign_keys;
+pub(crate) use foreign_keys::{
+    alter_table_add_constraint_lock_requests, alter_table_validate_constraint_lock_requests,
+    delete_foreign_key_lock_requests, insert_foreign_key_lock_requests,
+    prepared_insert_foreign_key_lock_requests, relation_foreign_key_lock_requests,
+    table_lock_relations, update_foreign_key_lock_requests,
+};
 
 #[derive(Clone)]
 pub struct Database {

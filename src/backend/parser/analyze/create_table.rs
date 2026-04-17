@@ -5,8 +5,9 @@ use crate::backend::executor::RelationDesc;
 use crate::backend::parser::SqlTypeKind;
 
 use super::{
-    CatalogLookup, CheckConstraintAction, CreateTableStatement, IndexBackedConstraintAction,
-    NotNullConstraintAction, ParseError, normalize_create_table_constraints, resolve_raw_type_name,
+    CatalogLookup, CheckConstraintAction, CreateTableStatement, ForeignKeyConstraintAction,
+    IndexBackedConstraintAction, NotNullConstraintAction, ParseError,
+    normalize_create_table_constraints, resolve_raw_type_name,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,6 +16,7 @@ pub struct LoweredCreateTable {
     pub not_null_actions: Vec<NotNullConstraintAction>,
     pub check_actions: Vec<CheckConstraintAction>,
     pub constraint_actions: Vec<IndexBackedConstraintAction>,
+    pub foreign_key_actions: Vec<ForeignKeyConstraintAction>,
     pub parent_oids: Vec<u32>,
 }
 
@@ -30,7 +32,7 @@ pub fn lower_create_table(
     catalog: &dyn CatalogLookup,
 ) -> Result<LoweredCreateTable, ParseError> {
     let columns = stmt.columns().cloned().collect::<Vec<_>>();
-    let normalized = normalize_create_table_constraints(stmt)?;
+    let normalized = normalize_create_table_constraints(stmt, catalog)?;
     let constraint_actions = normalized.index_backed.clone();
 
     let mut seen_keys = BTreeSet::new();
@@ -88,6 +90,7 @@ pub fn lower_create_table(
         not_null_actions: normalized.not_nulls,
         check_actions: normalized.checks,
         constraint_actions,
+        foreign_key_actions: normalized.foreign_keys,
         parent_oids: Vec::new(),
     })
 }

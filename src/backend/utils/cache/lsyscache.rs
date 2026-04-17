@@ -685,6 +685,10 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         constraint_rows_for_relation(self.db, self.client_id, self.txn_ctx, relation_oid)
     }
 
+    fn constraint_rows(&self) -> Vec<PgConstraintRow> {
+        ensure_constraint_rows(self.db, self.client_id, self.txn_ctx)
+    }
+
     fn proc_rows_by_name(&self, name: &str) -> Vec<PgProcRow> {
         proc_rows_by_name(self.db, self.client_id, self.txn_ctx, name)
     }

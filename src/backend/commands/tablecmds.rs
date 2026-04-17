@@ -1126,6 +1126,13 @@ pub fn execute_insert_values(
             values,
             ctx,
         )?;
+        crate::backend::executor::enforce_outbound_foreign_keys(
+            relation_name,
+            &relation_constraints.foreign_keys,
+            None,
+            values,
+            ctx,
+        )?;
         let (tuple, _toasted) =
             toast_tuple_for_write(desc, values, toast, toast_index, ctx, xid, cid)?;
         let heap_tid = heap_insert_mvcc_with_cid(&*ctx.pool, ctx.client_id, rel, xid, cid, &tuple)?;
@@ -1157,6 +1164,13 @@ pub fn execute_prepared_insert_row(
         &prepared.relation_name,
         &prepared.desc,
         &prepared.relation_constraints,
+        &values,
+        ctx,
+    )?;
+    crate::backend::executor::enforce_outbound_foreign_keys(
+        &prepared.relation_name,
+        &prepared.relation_constraints.foreign_keys,
+        None,
         &values,
         ctx,
     )?;
@@ -1238,6 +1252,7 @@ pub fn execute_update_with_waiter(
 
             for (tid, original_values) in target_rows {
                 ctx.check_for_interrupts()?;
+                let mut current_old_values = original_values.clone();
                 let mut eval_slot = TupleSlot::virtual_row(original_values.clone());
                 let mut values = original_values;
                 for assignment in &target.assignments {
@@ -1264,6 +1279,20 @@ pub fn execute_update_with_waiter(
                         &target.relation_name,
                         &target.desc,
                         &target.relation_constraints,
+                        &current_values,
+                        ctx,
+                    )?;
+                    crate::backend::executor::enforce_outbound_foreign_keys(
+                        &target.relation_name,
+                        &target.relation_constraints.foreign_keys,
+                        Some(&current_old_values),
+                        &current_values,
+                        ctx,
+                    )?;
+                    crate::backend::executor::enforce_inbound_foreign_keys_on_update(
+                        &target.relation_name,
+                        &target.referenced_by_foreign_keys,
+                        &current_old_values,
                         &current_values,
                         ctx,
                     )?;
@@ -1328,7 +1357,7 @@ pub fn execute_update_with_waiter(
                             }
                             let new_values_base = new_slot.into_values()?;
                             let mut eval_slot = TupleSlot::virtual_row(new_values_base.clone());
-                            let mut new_values = new_values_base;
+                            let mut new_values = new_values_base.clone();
                             for assignment in &target.assignments {
                                 let value = eval_expr(&assignment.expr, &mut eval_slot, ctx)?;
                                 apply_assignment_target(
@@ -1343,6 +1372,7 @@ pub fn execute_update_with_waiter(
                                     ctx,
                                 )?;
                             }
+                            current_old_values = new_values_base;
                             current_values = new_values.clone();
                             current_tid = new_ctid;
                         }
@@ -1404,10 +1434,7 @@ pub fn execute_delete_with_waiter(
                     target.toast,
                     target.predicate.as_ref(),
                     ctx,
-                )?
-                .into_iter()
-                .map(|(tid, _)| tid)
-                .collect::<Vec<_>>(),
+                )?,
                 BoundModifyRowSource::Index { index, keys } => collect_matching_rows_index(
                     target.rel,
                     &target.desc,
@@ -1416,18 +1443,22 @@ pub fn execute_delete_with_waiter(
                     keys,
                     target.predicate.as_ref(),
                     ctx,
-                )?
-                .into_iter()
-                .map(|(tid, _)| tid)
-                .collect::<Vec<_>>(),
+                )?,
             };
             let snapshot = ctx.snapshot.clone();
 
-            for tid in &targets {
+            for (tid, values) in &targets {
                 ctx.check_for_interrupts()?;
                 let mut current_tid = *tid;
+                let mut current_values = values.clone();
                 loop {
                     ctx.check_for_interrupts()?;
+                    crate::backend::executor::enforce_inbound_foreign_keys_on_delete(
+                        &target.relation_name,
+                        &target.referenced_by_foreign_keys,
+                        &current_values,
+                        ctx,
+                    )?;
                     let old_tuple = if target.toast.is_some() {
                         Some(heap_fetch(
                             &*ctx.pool,
@@ -1483,6 +1514,7 @@ pub fn execute_delete_with_waiter(
                             if !passes {
                                 break;
                             }
+                            current_values = new_slot.into_values()?;
                             current_tid = new_ctid;
                         }
                         Err(e) => return Err(e.into()),

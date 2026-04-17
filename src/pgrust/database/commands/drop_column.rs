@@ -66,12 +66,31 @@ impl Database {
                 actual: drop_stmt.column_name.clone(),
             }));
         }
+        let column_index = relation
+            .desc
+            .columns
+            .iter()
+            .enumerate()
+            .find_map(|(index, column)| {
+                (!column.dropped && column.name.eq_ignore_ascii_case(&drop_stmt.column_name))
+                    .then_some(index)
+            })
+            .ok_or_else(|| {
+                ExecError::Parse(ParseError::UnknownColumn(drop_stmt.column_name.clone()))
+            })?;
         reject_relation_with_dependent_views(
             self,
             client_id,
             Some((xid, cid)),
             relation.relation_oid,
             "ALTER TABLE DROP COLUMN on relation without dependent views",
+        )?;
+        reject_column_with_foreign_key_dependencies(
+            &catalog,
+            relation.relation_oid,
+            &relation.desc.columns[column_index].name,
+            (column_index + 1) as i16,
+            "ALTER TABLE DROP COLUMN on column without foreign key dependencies",
         )?;
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),

@@ -61,6 +61,7 @@ pub(crate) fn format_exec_error(e: &ExecError) -> String {
         } => format!(
             "new row for relation \"{relation}\" violates check constraint \"{constraint}\""
         ),
+        ExecError::ForeignKeyViolation { message, .. } => message.clone(),
         ExecError::StringDataRightTruncation { ty } => format!("value too long for type {ty}"),
         ExecError::ArrayInput { message, .. } => message.clone(),
         ExecError::InvalidIntegerInput { ty, value } => {

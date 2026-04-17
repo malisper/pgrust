@@ -1043,6 +1043,22 @@ impl Default for ConstraintAttributes {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForeignKeyAction {
+    NoAction,
+    Restrict,
+    Cascade,
+    SetNull,
+    SetDefault,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForeignKeyMatchType {
+    Simple,
+    Full,
+    Partial,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ColumnConstraint {
     NotNull {
@@ -1058,6 +1074,14 @@ pub enum ColumnConstraint {
     Unique {
         attributes: ConstraintAttributes,
     },
+    References {
+        attributes: ConstraintAttributes,
+        referenced_table: String,
+        referenced_columns: Option<Vec<String>>,
+        match_type: ForeignKeyMatchType,
+        on_delete: ForeignKeyAction,
+        on_update: ForeignKeyAction,
+    },
 }
 
 impl ColumnConstraint {
@@ -1066,7 +1090,8 @@ impl ColumnConstraint {
             Self::NotNull { attributes }
             | Self::Check { attributes, .. }
             | Self::PrimaryKey { attributes }
-            | Self::Unique { attributes } => attributes,
+            | Self::Unique { attributes }
+            | Self::References { attributes, .. } => attributes,
         }
     }
 }
@@ -1089,6 +1114,15 @@ pub enum TableConstraint {
         attributes: ConstraintAttributes,
         columns: Vec<String>,
     },
+    ForeignKey {
+        attributes: ConstraintAttributes,
+        columns: Vec<String>,
+        referenced_table: String,
+        referenced_columns: Option<Vec<String>>,
+        match_type: ForeignKeyMatchType,
+        on_delete: ForeignKeyAction,
+        on_update: ForeignKeyAction,
+    },
 }
 
 impl TableConstraint {
@@ -1097,7 +1131,8 @@ impl TableConstraint {
             Self::NotNull { attributes, .. }
             | Self::Check { attributes, .. }
             | Self::PrimaryKey { attributes, .. }
-            | Self::Unique { attributes, .. } => attributes,
+            | Self::Unique { attributes, .. }
+            | Self::ForeignKey { attributes, .. } => attributes,
         }
     }
 }

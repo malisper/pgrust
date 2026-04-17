@@ -85,6 +85,45 @@ pub fn relation_constraint_depend_rows(constraint_oid: u32, relation_oid: u32) -
     rows
 }
 
+pub fn foreign_key_constraint_depend_rows(
+    constraint_oid: u32,
+    child_relation_oid: u32,
+    parent_relation_oid: u32,
+    parent_index_oid: u32,
+) -> Vec<PgDependRow> {
+    let mut rows = vec![
+        PgDependRow {
+            classid: PG_CONSTRAINT_RELATION_OID,
+            objid: constraint_oid,
+            objsubid: 0,
+            refclassid: PG_CLASS_RELATION_OID,
+            refobjid: child_relation_oid,
+            refobjsubid: 0,
+            deptype: DEPENDENCY_AUTO,
+        },
+        PgDependRow {
+            classid: PG_CONSTRAINT_RELATION_OID,
+            objid: constraint_oid,
+            objsubid: 0,
+            refclassid: PG_CLASS_RELATION_OID,
+            refobjid: parent_relation_oid,
+            refobjsubid: 0,
+            deptype: DEPENDENCY_NORMAL,
+        },
+        PgDependRow {
+            classid: PG_CONSTRAINT_RELATION_OID,
+            objid: constraint_oid,
+            objsubid: 0,
+            refclassid: PG_CLASS_RELATION_OID,
+            refobjid: parent_index_oid,
+            refobjsubid: 0,
+            deptype: DEPENDENCY_NORMAL,
+        },
+    ];
+    sort_pg_depend_rows(&mut rows);
+    rows
+}
+
 pub fn inheritance_depend_rows(relation_oid: u32, parent_oids: &[u32]) -> Vec<PgDependRow> {
     let mut rows = parent_oids
         .iter()
