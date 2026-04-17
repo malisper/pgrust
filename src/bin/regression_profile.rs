@@ -3,6 +3,7 @@ use mimalloc::MiMalloc;
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
+use std::env;
 use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::Write;
@@ -28,6 +29,7 @@ struct Args {
 }
 
 struct Paths {
+    pg_regress_dir: PathBuf,
     sql_dir: PathBuf,
     expected_dir: PathBuf,
     pgrust_setup_sql: PathBuf,
@@ -179,6 +181,7 @@ fn repo_paths() -> Result<Paths, String> {
     }
 
     Ok(Paths {
+        pg_regress_dir: pg_regress,
         sql_dir,
         expected_dir,
         pgrust_setup_sql,
@@ -206,7 +209,7 @@ fn start_server(data_dir: &Path, port: u16, pool_size: usize) -> Result<(), Stri
     let start = Instant::now();
     let ready_deadline = Duration::from_secs(15);
     while start.elapsed() < ready_deadline {
-        if psql_command(port)
+        if psql_command(port, None)
             .arg("-c")
             .arg("SELECT 1")
             .stdout(Stdio::null())
@@ -234,7 +237,7 @@ fn start_server(data_dir: &Path, port: u16, pool_size: usize) -> Result<(), Stri
     }
 }
 
-fn psql_command(port: u16) -> Command {
+fn psql_command(port: u16, pg_regress_dir: Option<&Path>) -> Command {
     let mut cmd = Command::new("psql");
     cmd.env("PGPASSWORD", "x")
         .arg("-X")
@@ -244,11 +247,28 @@ fn psql_command(port: u16) -> Command {
         .arg(port.to_string())
         .arg("-U")
         .arg("postgres");
+    configure_pg_regress_env(&mut cmd, pg_regress_dir);
     cmd
+}
+
+fn configure_pg_regress_env(cmd: &mut Command, pg_regress_dir: Option<&Path>) {
+    if let Some(pg_regress_dir) = pg_regress_dir {
+        cmd.env("PG_ABS_SRCDIR", pg_regress_dir);
+    }
+    if let Ok(output) = Command::new("pg_config").arg("--pkglibdir").output() {
+        if output.status.success() {
+            let pkglibdir = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !pkglibdir.is_empty() {
+                cmd.env("PG_LIBDIR", pkglibdir);
+            }
+        }
+    }
+    cmd.env("PG_DLSUFFIX", env::consts::DLL_SUFFIX);
 }
 
 fn run_sql_file(
     port: u16,
+    pg_regress_dir: &Path,
     sql_path: &Path,
     output_path: &Path,
     timeout_secs: u64,
@@ -261,7 +281,7 @@ fn run_sql_file(
         .try_clone()
         .map_err(|e| format!("clone {}: {e}", output_path.display()))?;
 
-    let mut cmd = psql_command(port);
+    let mut cmd = psql_command(port, Some(pg_regress_dir));
     if on_error_stop {
         cmd.arg("-v").arg("ON_ERROR_STOP=1");
     }
@@ -466,6 +486,7 @@ fn main() -> Result<(), String> {
         let setup_output = args.results_dir.join("output/test_setup_pgrust.out");
         let setup_status = run_sql_file(
             args.port,
+            &paths.pg_regress_dir,
             &paths.pgrust_setup_sql,
             &setup_output,
             args.timeout_secs,
@@ -510,7 +531,14 @@ fn main() -> Result<(), String> {
             .join(format!("{test_name}.diff"));
 
         summary.total += 1;
-        let _ = run_sql_file(args.port, &sql_file, &output_path, args.timeout_secs, false)?;
+        let _ = run_sql_file(
+            args.port,
+            &paths.pg_regress_dir,
+            &sql_file,
+            &output_path,
+            args.timeout_secs,
+            false,
+        )?;
         match classify_test(&output_path, &diff_path, &paths.expected_dir, test_name)? {
             TestOutcome::Pass => {
                 summary.passed += 1;
