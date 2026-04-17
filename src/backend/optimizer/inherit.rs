@@ -4,9 +4,7 @@ use crate::include::nodes::parsenodes::{RangeTblEntry, RangeTblEntryKind};
 use crate::include::nodes::pathnodes::{
     AppendRelInfo, PlannerInfo, RelOptInfo, RelOptKind, RestrictInfo,
 };
-use crate::include::nodes::primnodes::{Expr, RelationDesc, Var, user_attrno};
-
-use super::rewrite::rewrite_expr_for_append_rel;
+use crate::include::nodes::primnodes::{Expr, ExprArraySubscript, RelationDesc, Var, user_attrno};
 
 pub(super) fn expand_inherited_rtentries(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) {
     let original_len = root.parse.rtable.len();
@@ -72,7 +70,7 @@ pub(super) fn expand_inherited_rtentries(root: &mut PlannerInfo, catalog: &dyn C
                 rel.baserestrictinfo = parent_restrictinfo
                     .iter()
                     .map(|restrict| RestrictInfo {
-                        clause: rewrite_expr_for_append_rel(
+                        clause: translate_append_rel_expr(
                             restrict.clause.clone(),
                             &AppendRelInfo {
                                 parent_relid: parent_rtindex,
@@ -86,6 +84,129 @@ pub(super) fn expand_inherited_rtentries(root: &mut PlannerInfo, catalog: &dyn C
                     .collect();
             }
         }
+    }
+}
+
+pub(super) fn translate_append_rel_expr(expr: Expr, info: &AppendRelInfo) -> Expr {
+    match expr {
+        Expr::Var(var) if var.varlevelsup == 0 && var.varno == info.parent_relid => info
+            .translated_vars
+            .get(crate::include::nodes::primnodes::attrno_index(var.varattno).unwrap_or(usize::MAX))
+            .cloned()
+            .unwrap_or(Expr::Var(var)),
+        Expr::Op(op) => Expr::Op(Box::new(crate::include::nodes::primnodes::OpExpr {
+            args: op
+                .args
+                .into_iter()
+                .map(|arg| translate_append_rel_expr(arg, info))
+                .collect(),
+            ..*op
+        })),
+        Expr::Bool(bool_expr) => Expr::Bool(Box::new(crate::include::nodes::primnodes::BoolExpr {
+            args: bool_expr
+                .args
+                .into_iter()
+                .map(|arg| translate_append_rel_expr(arg, info))
+                .collect(),
+            ..*bool_expr
+        })),
+        Expr::Case(case_expr) => Expr::Case(Box::new(crate::include::nodes::primnodes::CaseExpr {
+            arg: case_expr
+                .arg
+                .map(|arg| Box::new(translate_append_rel_expr(*arg, info))),
+            args: case_expr
+                .args
+                .into_iter()
+                .map(|arm| crate::include::nodes::primnodes::CaseWhen {
+                    expr: translate_append_rel_expr(arm.expr, info),
+                    result: translate_append_rel_expr(arm.result, info),
+                })
+                .collect(),
+            defresult: Box::new(translate_append_rel_expr(*case_expr.defresult, info)),
+            ..*case_expr
+        })),
+        Expr::Func(func) => Expr::Func(Box::new(crate::include::nodes::primnodes::FuncExpr {
+            args: func
+                .args
+                .into_iter()
+                .map(|arg| translate_append_rel_expr(arg, info))
+                .collect(),
+            ..*func
+        })),
+        Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(
+            crate::include::nodes::primnodes::ScalarArrayOpExpr {
+                left: Box::new(translate_append_rel_expr(*saop.left, info)),
+                right: Box::new(translate_append_rel_expr(*saop.right, info)),
+                ..*saop
+            },
+        )),
+        Expr::Cast(inner, ty) => Expr::Cast(Box::new(translate_append_rel_expr(*inner, info)), ty),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            case_insensitive,
+            negated,
+        } => Expr::Like {
+            expr: Box::new(translate_append_rel_expr(*expr, info)),
+            pattern: Box::new(translate_append_rel_expr(*pattern, info)),
+            escape: escape.map(|expr| Box::new(translate_append_rel_expr(*expr, info))),
+            case_insensitive,
+            negated,
+        },
+        Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            negated,
+        } => Expr::Similar {
+            expr: Box::new(translate_append_rel_expr(*expr, info)),
+            pattern: Box::new(translate_append_rel_expr(*pattern, info)),
+            escape: escape.map(|expr| Box::new(translate_append_rel_expr(*expr, info))),
+            negated,
+        },
+        Expr::IsNull(inner) => Expr::IsNull(Box::new(translate_append_rel_expr(*inner, info))),
+        Expr::IsNotNull(inner) => {
+            Expr::IsNotNull(Box::new(translate_append_rel_expr(*inner, info)))
+        }
+        Expr::IsDistinctFrom(left, right) => Expr::IsDistinctFrom(
+            Box::new(translate_append_rel_expr(*left, info)),
+            Box::new(translate_append_rel_expr(*right, info)),
+        ),
+        Expr::IsNotDistinctFrom(left, right) => Expr::IsNotDistinctFrom(
+            Box::new(translate_append_rel_expr(*left, info)),
+            Box::new(translate_append_rel_expr(*right, info)),
+        ),
+        Expr::Coalesce(left, right) => Expr::Coalesce(
+            Box::new(translate_append_rel_expr(*left, info)),
+            Box::new(translate_append_rel_expr(*right, info)),
+        ),
+        Expr::ArrayLiteral {
+            elements,
+            array_type,
+        } => Expr::ArrayLiteral {
+            elements: elements
+                .into_iter()
+                .map(|element| translate_append_rel_expr(element, info))
+                .collect(),
+            array_type,
+        },
+        Expr::ArraySubscript { array, subscripts } => Expr::ArraySubscript {
+            array: Box::new(translate_append_rel_expr(*array, info)),
+            subscripts: subscripts
+                .into_iter()
+                .map(|subscript| ExprArraySubscript {
+                    is_slice: subscript.is_slice,
+                    lower: subscript
+                        .lower
+                        .map(|expr| translate_append_rel_expr(expr, info)),
+                    upper: subscript
+                        .upper
+                        .map(|expr| translate_append_rel_expr(expr, info)),
+                })
+                .collect(),
+        },
+        other => other,
     }
 }
 

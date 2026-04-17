@@ -245,7 +245,7 @@ fn normalize_rte_path_preserves_projection_sortgrouprefs() {
     let normalized = util::normalize_rte_path(1, &desc, ordered_projection, &catalog);
 
     assert_eq!(normalized.output_target().sortgrouprefs, vec![17, 0]);
-    assert_eq!(normalized.pathkeys(), vec![pathkey_with_ref(var(1, 1), 17)]);
+    assert_eq!(normalized.pathkeys(), vec![pathkey_with_ref(var(10, 1), 17)]);
 }
 
 #[test]
@@ -272,7 +272,7 @@ fn normalize_rte_path_records_passthrough_input_positions() {
         30,
         &desc,
         input,
-        PathTarget::new(vec![var(20, 2), var(20, 1)]),
+        PathTarget::new(vec![var(10, 2), var(10, 1)]),
         &catalog,
     );
 
@@ -471,7 +471,7 @@ fn projection_pathkeys_prefer_sortgroupref_identity() {
         ],
     };
 
-    assert_eq!(projection.pathkeys(), vec![pathkey_with_ref(var(20, 2), 17)]);
+    assert_eq!(projection.pathkeys(), vec![pathkey_with_ref(var(10, 2), 17)]);
 }
 
 #[test]
@@ -486,7 +486,7 @@ fn projection_pathkeys_follow_passthrough_position() {
         ],
     };
 
-    assert_eq!(projection.pathkeys(), vec![pathkey(var(20, 2))]);
+    assert_eq!(projection.pathkeys(), vec![pathkey(var(10, 2))]);
 }
 
 #[test]
@@ -501,7 +501,7 @@ fn projection_pathkeys_fall_back_to_expr_match_for_non_identity_projection() {
         ],
     };
 
-    assert_eq!(projection.pathkeys(), vec![pathkey(var(20, 2))]);
+    assert_eq!(projection.pathkeys(), vec![pathkey(var(10, 1))]);
 }
 
 #[test]
@@ -874,7 +874,7 @@ fn required_query_pathkeys_for_path_falls_back_for_zero_ref_keys() {
 
     let required = util::required_query_pathkeys_for_path(&root, &path);
 
-    assert_eq!(required, vec![pathkey(var(20, 1))]);
+    assert_eq!(required, vec![pathkey(var(10, 1))]);
 }
 
 #[test]
@@ -955,7 +955,7 @@ fn join_input_rewrite_keeps_composite_expr_semantic_until_late_rewrite() {
 
     assert_eq!(
         rewritten,
-        Expr::Coalesce(Box::new(var(30, 1)), Box::new(var(1, 2)))
+        Expr::Coalesce(Box::new(var(1, 1)), Box::new(var(1, 2)))
     );
 }
 
@@ -977,7 +977,7 @@ fn projection_rewrite_maps_semantic_var_to_current_projection_slot() {
     let rewritten =
         super::rewrite::rewrite_semantic_expr_for_path(var(1, 1), &outer, &outer.output_vars());
 
-    assert_eq!(rewritten, var(4, 1));
+    assert_eq!(rewritten, var(1_000_100, 1));
 }
 
 #[test]
@@ -1030,7 +1030,7 @@ fn join_input_rewrite_maps_var_through_projected_join_output_slot() {
             opresulttype: bool_ty(),
             args: vec![
                 Expr::Coalesce(
-                    Box::new(var(3, 1)),
+                    Box::new(var(4, 1)),
                     Box::new(crate::include::nodes::primnodes::Expr::Const(Value::Int32(
                         1
                     ))),

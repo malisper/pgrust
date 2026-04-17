@@ -6,9 +6,10 @@ use crate::include::nodes::primnodes::{
 };
 
 use super::super::optimize_path;
-use super::super::pathnodes::{expr_sql_type, lower_agg_output_expr};
-use super::super::rewrite::rewrite_semantic_expr_for_path_or_expand_join_vars;
-use super::super::{expand_join_rte_vars, flatten_join_alias_vars};
+use super::super::pathnodes::{
+    expr_sql_type, layout_candidate_for_expr, lower_agg_output_expr, lower_expr_to_path_output,
+};
+use super::super::expand_join_rte_vars;
 
 pub(super) fn pathkeys_to_order_items(pathkeys: &[PathKey]) -> Vec<OrderByEntry> {
     pathkeys
@@ -115,6 +116,11 @@ pub(super) fn normalize_rte_path(
     input: Path,
     catalog: &dyn CatalogLookup,
 ) -> Path {
+    let names_match = input.columns().iter().map(|column| (&column.name, column.sql_type)).eq(
+        desc.columns
+            .iter()
+            .map(|column| (&column.name, column.sql_type)),
+    );
     let desired_layout = PathTarget::new(
         desc.columns
             .iter()
@@ -129,7 +135,7 @@ pub(super) fn normalize_rte_path(
             })
             .collect(),
     );
-    if input.output_vars() == desired_layout.exprs {
+    if names_match && input.output_vars() == desired_layout.exprs {
         input
     } else {
         project_to_slot_layout(rtindex, desc, input.clone(), input.output_target(), catalog)
@@ -137,7 +143,7 @@ pub(super) fn normalize_rte_path(
 }
 
 pub(super) fn annotate_targets_for_input(
-    root: Option<&PlannerInfo>,
+    _root: Option<&PlannerInfo>,
     path: &Path,
     targets: &[TargetEntry],
 ) -> Vec<TargetEntry> {
@@ -159,15 +165,6 @@ pub(super) fn annotate_targets_for_input(
                     .exprs
                     .iter()
                     .position(|candidate| *candidate == target.expr)
-                    .or_else(|| {
-                        root.and_then(|root| {
-                            let flattened = flatten_join_alias_vars(root, target.expr.clone());
-                            input_target.exprs.iter().position(|candidate| {
-                                *candidate == flattened
-                                    || flatten_join_alias_vars(root, candidate.clone()) == flattened
-                            })
-                        })
-                    })
                     .map(|index| index + 1)
             };
             TargetEntry {
@@ -203,12 +200,9 @@ pub(super) fn lower_pathkeys_for_path(
             .iter()
             .cloned()
             .map(|key| {
-                let expr = rewrite_semantic_expr_for_path_or_expand_join_vars(
-                    root,
-                    key.expr.clone(),
-                    path,
-                    &layout,
-                );
+                let expr = lower_expr_to_path_output(Some(root), path, key.expr.clone(), key.ressortgroupref)
+                    .or_else(|| layout_candidate_for_expr(Some(root), &key.expr, &layout))
+                    .unwrap_or_else(|| key.expr.clone());
                 PathKey {
                     expr,
                     ressortgroupref: key.ressortgroupref,
