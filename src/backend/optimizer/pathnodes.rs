@@ -559,10 +559,17 @@ fn project_pathkeys(
         .map(|key| {
             let expr = targets
                 .iter()
-                .find(|target| {
+                .enumerate()
+                .find(|(_, target)| {
                     key.ressortgroupref != 0 && target.ressortgroupref == key.ressortgroupref
                 })
-                .map(|target| target.expr.clone())
+                .map(|(index, target)| {
+                    if target.input_resno.is_some() {
+                        target.expr.clone()
+                    } else {
+                        slot_var(slot_id, user_attrno(index), target.sql_type)
+                    }
+                })
                 .or_else(|| {
                     input_target
                         .exprs
@@ -578,11 +585,8 @@ fn project_pathkeys(
                 .or_else(|| {
                     targets
                         .iter()
-                        .enumerate()
-                        .find(|(_, target)| target.expr == key.expr)
-                        .map(|(index, target)| {
-                            slot_var(slot_id, user_attrno(index), target.sql_type)
-                        })
+                        .find(|target| target.expr == key.expr)
+                        .map(|target| target.expr.clone())
                 })
                 .unwrap_or_else(|| key.expr.clone());
             PathKey {
