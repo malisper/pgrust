@@ -226,6 +226,7 @@ pub enum BuiltinScalarFunction {
     Random,
     RandomNormal,
     GetDatabaseEncoding,
+    PgRustInternalBinaryCoercible,
     PgTypeof,
     CashLarger,
     CashSmaller,
@@ -1072,12 +1073,13 @@ impl Expr {
         result_type: SqlType,
     ) -> Self {
         let proc_oid = proc_oid_for_builtin_window_function(func).unwrap_or_else(|| {
-            panic!("builtin window function {:?} lacks pg_proc OID mapping", func)
+            panic!(
+                "builtin window function {:?} lacks pg_proc OID mapping",
+                func
+            )
         });
         Self::window_func(
-            WindowFuncKind::Builtin(
-                builtin_window_function_for_proc_oid(proc_oid).unwrap_or(func),
-            ),
+            WindowFuncKind::Builtin(builtin_window_function_for_proc_oid(proc_oid).unwrap_or(func)),
             winref,
             winno,
             args,

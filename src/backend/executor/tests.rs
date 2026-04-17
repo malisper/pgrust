@@ -2884,6 +2884,52 @@ fn oid_comparisons_bind_and_execute_with_unsigned_semantics() {
 }
 
 #[test]
+fn pg_rust_internal_binary_coercible_reports_builtin_compatibility() {
+    let base = temp_dir("pg_rust_internal_binary_coercible");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let xid = txns.begin();
+
+    assert_query_rows(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            xid,
+            "select pg_rust_internal_binary_coercible(1043::oid, 25::oid), pg_rust_internal_binary_coercible(1042::oid, 25::oid), pg_rust_internal_binary_coercible(23::oid, 25::oid)",
+            catalog(),
+        )
+        .unwrap(),
+        vec![vec![Value::Bool(true), Value::Bool(false), Value::Bool(false)]],
+    );
+}
+
+#[test]
+fn pg_rust_internal_binary_coercible_matches_opr_sanity_cast_check() {
+    let base = temp_dir("pg_rust_internal_binary_coercible_opr_sanity");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let xid = txns.begin();
+
+    assert_query_rows(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            xid,
+            "select c.oid \
+             from pg_cast c, pg_proc p \
+             where c.castfunc = p.oid \
+               and c.castsource = 1042::oid \
+               and c.casttarget = 25::oid \
+               and (p.pronargs < 1 or p.pronargs > 3 \
+                    or pg_rust_internal_binary_coercible(c.castsource, c.casttarget) \
+                    or not (c.castsource = 1042::oid and p.oid = 6237::oid) \
+                    or not pg_rust_internal_binary_coercible(p.prorettype, c.casttarget))",
+            catalog(),
+        )
+        .unwrap(),
+        vec![],
+    );
+}
+
+#[test]
 fn sub_values_supports_date_difference() {
     use crate::include::nodes::datetime::DateADT;
 
@@ -6692,17 +6738,27 @@ fn derived_table_can_cross_join_with_generate_series() {
 fn generate_series_sources_can_cross_join_each_other() {
     let base = temp_dir("srf_cross_join");
     let txns = TransactionManager::new_durable(&base).unwrap();
-    match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select g.g, h.h from generate_series(1, 2) g, generate_series(5, 6) h order by g.g, h.h").unwrap() {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select g.g, h.h from generate_series(1, 2) g, generate_series(5, 6) h order by g.g, h.h",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
                     vec![Value::Int32(1), Value::Int32(5)],
                     vec![Value::Int32(1), Value::Int32(6)],
                     vec![Value::Int32(2), Value::Int32(5)],
                     vec![Value::Int32(2), Value::Int32(6)],
-                ]);
-            }
-            other => panic!("expected query result, got {:?}", other),
+                ]
+            );
         }
+        other => panic!("expected query result, got {:?}", other),
+    }
 }
 
 #[test]
@@ -7443,10 +7499,7 @@ from (values (1),(2)) v1(r1)
         StatementResult::Query {
             column_names, rows, ..
         } => {
-            assert_eq!(
-                column_names,
-                vec!["r1", "gs1", "gs2", "gs3", "gs4"]
-            );
+            assert_eq!(column_names, vec!["r1", "gs1", "gs2", "gs3", "gs4"]);
             assert_eq!(
                 rows,
                 vec![
@@ -8040,10 +8093,30 @@ fn window_builtin_functions_handle_peer_groups() {
             assert_eq!(
                 rows,
                 vec![
-                    vec![Value::Int32(1), Value::Int64(1), Value::Int64(1), Value::Int64(1)],
-                    vec![Value::Int32(2), Value::Int64(2), Value::Int64(1), Value::Int64(1)],
-                    vec![Value::Int32(3), Value::Int64(4), Value::Int64(4), Value::Int64(2)],
-                    vec![Value::Int32(4), Value::Int64(3), Value::Int64(1), Value::Int64(1)],
+                    vec![
+                        Value::Int32(1),
+                        Value::Int64(1),
+                        Value::Int64(1),
+                        Value::Int64(1)
+                    ],
+                    vec![
+                        Value::Int32(2),
+                        Value::Int64(2),
+                        Value::Int64(1),
+                        Value::Int64(1)
+                    ],
+                    vec![
+                        Value::Int32(3),
+                        Value::Int64(4),
+                        Value::Int64(4),
+                        Value::Int64(2)
+                    ],
+                    vec![
+                        Value::Int32(4),
+                        Value::Int64(3),
+                        Value::Int64(1),
+                        Value::Int64(1)
+                    ],
                 ]
             );
         }
@@ -8086,10 +8159,30 @@ fn window_aggregate_supports_partitioning_and_running_totals() {
             assert_eq!(
                 rows,
                 vec![
-                    vec![Value::Int32(1), Value::Int64(4), Value::Int64(1), Value::Int64(7)],
-                    vec![Value::Int32(2), Value::Int64(4), Value::Int64(3), Value::Int64(7)],
-                    vec![Value::Int32(3), Value::Int64(4), Value::Int64(3), Value::Int64(10)],
-                    vec![Value::Int32(4), Value::Int64(4), Value::Int64(7), Value::Int64(7)],
+                    vec![
+                        Value::Int32(1),
+                        Value::Int64(4),
+                        Value::Int64(1),
+                        Value::Int64(7)
+                    ],
+                    vec![
+                        Value::Int32(2),
+                        Value::Int64(4),
+                        Value::Int64(3),
+                        Value::Int64(7)
+                    ],
+                    vec![
+                        Value::Int32(3),
+                        Value::Int64(4),
+                        Value::Int64(3),
+                        Value::Int64(10)
+                    ],
+                    vec![
+                        Value::Int32(4),
+                        Value::Int64(4),
+                        Value::Int64(7),
+                        Value::Int64(7)
+                    ],
                 ]
             );
         }

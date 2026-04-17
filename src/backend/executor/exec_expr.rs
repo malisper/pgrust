@@ -40,7 +40,6 @@ use super::expr_numeric::{
     eval_round_function, eval_scale_function, eval_sign_function, eval_sqrt_function,
     eval_trim_scale_function, eval_trunc_function, eval_width_bucket_function,
 };
-use super::expr_range::eval_range_function;
 use super::expr_ops::compare_order_values;
 use super::expr_ops::{
     add_values, bitwise_and_values, bitwise_not_value, bitwise_or_values, bitwise_xor_values,
@@ -49,6 +48,7 @@ use super::expr_ops::{
     sub_values, values_are_distinct,
 };
 pub(crate) use super::expr_ops::{compare_order_by_keys, parse_numeric_text};
+use super::expr_range::eval_range_function;
 use super::expr_string::{
     eval_ascii_function, eval_bit_count_bytes, eval_bpchar_to_text_function, eval_bytea_overlay,
     eval_bytea_position_function, eval_bytea_substring, eval_chr_function, eval_concat_function,
@@ -74,7 +74,10 @@ use super::{ExecError, ExecutorContext, exec_next, executor_start};
 use crate::backend::executor::jsonb::{
     JsonbValue, jsonb_contains, jsonb_exists, jsonb_exists_all, jsonb_exists_any, jsonb_from_value,
 };
-use crate::backend::parser::{CatalogLookup, ParseError, SqlType, SqlTypeKind, SubqueryComparisonOp};
+use crate::backend::parser::analyze::is_binary_coercible_type;
+use crate::backend::parser::{
+    CatalogLookup, ParseError, SqlType, SqlTypeKind, SubqueryComparisonOp,
+};
 use crate::include::catalog::builtin_scalar_function_for_proc_oid;
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue, NumericValue};
 use crate::include::nodes::primnodes::{
@@ -106,6 +109,55 @@ fn malformed_expr_error(kind: &str) -> ExecError {
         detail: None,
         hint: None,
         sqlstate: "XX000",
+    }
+}
+
+fn sql_type_from_builtin_oid(oid: u32) -> Option<SqlType> {
+    crate::include::catalog::builtin_type_rows()
+        .iter()
+        .find(|row| row.oid == oid && row.typrelid == 0)
+        .map(|row| row.sql_type)
+}
+
+fn oid_arg_to_u32(value: &Value, op: &'static str) -> Result<u32, ExecError> {
+    match value {
+        Value::Int32(oid) => u32::try_from(*oid).map_err(|_| ExecError::OidOutOfRange),
+        Value::Int64(oid) => u32::try_from(*oid).map_err(|_| ExecError::OidOutOfRange),
+        _ => Err(ExecError::TypeMismatch {
+            op,
+            left: value.clone(),
+            right: Value::Int64(i64::from(crate::include::catalog::OID_TYPE_OID)),
+        }),
+    }
+}
+
+fn eval_pg_rust_internal_binary_coercible(values: &[Value]) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
+        [left, right] => {
+            let left_oid = oid_arg_to_u32(left, "pg_rust_internal_binary_coercible")?;
+            let right_oid = oid_arg_to_u32(right, "pg_rust_internal_binary_coercible")?;
+            let left_type =
+                sql_type_from_builtin_oid(left_oid).ok_or_else(|| ExecError::DetailedError {
+                    message: format!("type with OID {left_oid} does not exist"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42704",
+                })?;
+            let right_type =
+                sql_type_from_builtin_oid(right_oid).ok_or_else(|| ExecError::DetailedError {
+                    message: format!("type with OID {right_oid} does not exist"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42704",
+                })?;
+            Ok(Value::Bool(is_binary_coercible_type(left_type, right_type)))
+        }
+        _ => Err(ExecError::TypeMismatch {
+            op: "pg_rust_internal_binary_coercible",
+            left: values.first().cloned().unwrap_or(Value::Null),
+            right: values.get(1).cloned().unwrap_or(Value::Null),
+        }),
     }
 }
 
@@ -163,21 +215,27 @@ fn ensure_builtin_side_effects_allowed(
 fn sequence_catalog(
     ctx: &ExecutorContext,
 ) -> Result<&crate::backend::utils::cache::visible_catalog::VisibleCatalog, ExecError> {
-    ctx.catalog.as_ref().ok_or_else(|| ExecError::DetailedError {
-        message: "sequence lookup requires a visible catalog".into(),
-        detail: None,
-        hint: None,
-        sqlstate: "XX000",
-    })
+    ctx.catalog
+        .as_ref()
+        .ok_or_else(|| ExecError::DetailedError {
+            message: "sequence lookup requires a visible catalog".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        })
 }
 
-fn sequence_runtime(ctx: &ExecutorContext) -> Result<&crate::pgrust::database::SequenceRuntime, ExecError> {
-    ctx.sequences.as_deref().ok_or_else(|| ExecError::DetailedError {
-        message: "sequence runtime is not available".into(),
-        detail: None,
-        hint: None,
-        sqlstate: "XX000",
-    })
+fn sequence_runtime(
+    ctx: &ExecutorContext,
+) -> Result<&crate::pgrust::database::SequenceRuntime, ExecError> {
+    ctx.sequences
+        .as_deref()
+        .ok_or_else(|| ExecError::DetailedError {
+            message: "sequence runtime is not available".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        })
 }
 
 fn sequence_name_for_oid(
@@ -199,29 +257,31 @@ fn resolve_sequence_call_target(
     let relation = match value {
         Value::Int32(oid) => {
             let oid = u32::try_from(*oid).map_err(|_| ExecError::OidOutOfRange)?;
-            catalog.relation_by_oid(oid).ok_or_else(|| {
-                ExecError::DetailedError {
+            catalog
+                .relation_by_oid(oid)
+                .ok_or_else(|| ExecError::DetailedError {
                     message: format!("sequence with OID {oid} does not exist"),
                     detail: None,
                     hint: None,
                     sqlstate: "42P01",
-                }
-            })?
+                })?
         }
         Value::Int64(oid) => {
             let oid = u32::try_from(*oid).map_err(|_| ExecError::OidOutOfRange)?;
-            catalog.relation_by_oid(oid).ok_or_else(|| ExecError::DetailedError {
-                message: format!("sequence with OID {oid} does not exist"),
-                detail: None,
-                hint: None,
-                sqlstate: "42P01",
-            })?
+            catalog
+                .relation_by_oid(oid)
+                .ok_or_else(|| ExecError::DetailedError {
+                    message: format!("sequence with OID {oid} does not exist"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42P01",
+                })?
         }
         Value::Text(_) | Value::TextRef(_, _) => {
             let name = value.as_text().expect("text value");
-            catalog.lookup_any_relation(name).ok_or_else(|| {
-                ExecError::Parse(ParseError::TableDoesNotExist(name.to_string()))
-            })?
+            catalog
+                .lookup_any_relation(name)
+                .ok_or_else(|| ExecError::Parse(ParseError::TableDoesNotExist(name.to_string())))?
         }
         other => {
             return Err(ExecError::TypeMismatch {
@@ -252,7 +312,8 @@ fn eval_sequence_builtin_function(
         }
         (BuiltinScalarFunction::NextVal, [target]) => {
             let (relation_oid, persistent) = resolve_sequence_call_target(ctx, target)?;
-            let value = sequence_runtime(ctx)?.next_value(ctx.client_id, relation_oid, persistent)?;
+            let value =
+                sequence_runtime(ctx)?.next_value(ctx.client_id, relation_oid, persistent)?;
             Ok(Value::Int64(value))
         }
         (BuiltinScalarFunction::CurrVal, [target]) => {
@@ -262,8 +323,13 @@ fn eval_sequence_builtin_function(
         }
         (BuiltinScalarFunction::SetVal, [target, Value::Int64(value)]) => {
             let (relation_oid, persistent) = resolve_sequence_call_target(ctx, target)?;
-            let value =
-                sequence_runtime(ctx)?.set_value(ctx.client_id, relation_oid, *value, true, persistent)?;
+            let value = sequence_runtime(ctx)?.set_value(
+                ctx.client_id,
+                relation_oid,
+                *value,
+                true,
+                persistent,
+            )?;
             Ok(Value::Int64(value))
         }
         (BuiltinScalarFunction::SetVal, [target, Value::Int32(value)]) => {
@@ -317,7 +383,9 @@ fn eval_sequence_builtin_function(
             let Some(column) = relation.desc.columns.iter().find(|candidate| {
                 !candidate.dropped && candidate.name.eq_ignore_ascii_case(column_name)
             }) else {
-                return Err(ExecError::Parse(ParseError::UnknownColumn(column_name.to_string())));
+                return Err(ExecError::Parse(ParseError::UnknownColumn(
+                    column_name.to_string(),
+                )));
             };
             let Some(sequence_oid) = column.default_sequence_oid else {
                 return Ok(Value::Null);
@@ -518,16 +586,14 @@ fn eval_func_expr(
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
     match func.implementation {
-        ScalarFunctionImpl::Builtin(builtin) => {
-            eval_builtin_function(
-                builtin,
-                func.funcresulttype,
-                &func.args,
-                func.funcvariadic,
-                slot,
-                ctx,
-            )
-        }
+        ScalarFunctionImpl::Builtin(builtin) => eval_builtin_function(
+            builtin,
+            func.funcresulttype,
+            &func.args,
+            func.funcvariadic,
+            slot,
+            ctx,
+        ),
         ScalarFunctionImpl::UserDefined { proc_oid } => {
             execute_user_defined_scalar_function(proc_oid, &func.args, slot, ctx)
         }
@@ -1620,6 +1686,9 @@ fn eval_builtin_function(
         BuiltinScalarFunction::IsFinite => eval_isfinite_function(&values),
         BuiltinScalarFunction::MakeDate => eval_make_date_function(&values),
         BuiltinScalarFunction::GetDatabaseEncoding => Ok(Value::Text("UTF8".into())),
+        BuiltinScalarFunction::PgRustInternalBinaryCoercible => {
+            eval_pg_rust_internal_binary_coercible(&values)
+        }
         BuiltinScalarFunction::PgInputIsValid => {
             let input = values[0].as_text().ok_or_else(|| ExecError::TypeMismatch {
                 op: "pg_input_is_valid",

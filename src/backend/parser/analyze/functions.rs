@@ -1,7 +1,7 @@
 use super::*;
 use crate::include::catalog::{
-    ANYARRAYOID, ANYOID, TEXT_TYPE_OID, bootstrap_pg_proc_rows,
-    builtin_window_function_for_proc_oid, builtin_type_rows,
+    ANYARRAYOID, ANYOID, TEXT_TYPE_OID, bootstrap_pg_proc_rows, builtin_type_rows,
+    builtin_window_function_for_proc_oid,
 };
 use crate::include::nodes::primnodes::{BuiltinWindowFunction, RegexTableFunction};
 use std::collections::BTreeMap;
@@ -529,6 +529,7 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::IsFinite => args.len() == 1,
             BuiltinScalarFunction::MakeDate => args.len() == 3,
             BuiltinScalarFunction::GetDatabaseEncoding => args.is_empty(),
+            BuiltinScalarFunction::PgRustInternalBinaryCoercible => args.len() == 2,
             BuiltinScalarFunction::PgTypeof => args.len() == 1,
             BuiltinScalarFunction::NextVal | BuiltinScalarFunction::CurrVal => args.len() == 1,
             BuiltinScalarFunction::SetVal => matches!(args.len(), 2 | 3),
@@ -1137,6 +1138,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         (
             "getdatabaseencoding",
             BuiltinScalarFunction::GetDatabaseEncoding,
+        ),
+        (
+            "pg_rust_internal_binary_coercible",
+            BuiltinScalarFunction::PgRustInternalBinaryCoercible,
         ),
         ("nextval", BuiltinScalarFunction::NextVal),
         ("currval", BuiltinScalarFunction::CurrVal),

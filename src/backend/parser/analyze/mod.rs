@@ -48,6 +48,7 @@ use crate::backend::utils::cache::relcache::RelCache;
 use crate::backend::utils::cache::system_views::{build_pg_stats_rows, build_pg_views_rows};
 use agg::*;
 use agg_output::*;
+pub use coerce::is_binary_coercible_type;
 use coerce::*;
 pub(crate) use constraints::*;
 pub use create_table::*;
@@ -69,11 +70,11 @@ use query::{
 };
 pub use scope::BoundRelation;
 use scope::*;
+use std::cell::RefCell;
+use std::rc::Rc;
 use system_views::*;
 pub(crate) use views::analyze_view_rule_sql;
 use window::*;
-use std::cell::RefCell;
-use std::rc::Rc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundIndexRelation {
@@ -1403,8 +1404,7 @@ fn bind_select_query_with_outer(
     let window_state = Rc::new(RefCell::new(WindowBindingState::default()));
 
     if needs_agg {
-        let mut aggs: Vec<(AggFunc, Vec<SqlFunctionArg>, bool, bool, Option<SqlExpr>)> =
-            Vec::new();
+        let mut aggs: Vec<(AggFunc, Vec<SqlFunctionArg>, bool, bool, Option<SqlExpr>)> = Vec::new();
         for target in &stmt.targets {
             collect_aggs(&target.expr, &mut aggs);
         }
