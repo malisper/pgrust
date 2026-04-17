@@ -1,19 +1,17 @@
 use super::inherit::append_translation;
 use super::pathnodes::{
-    aggregate_output_vars, expr_sql_type, lower_agg_output_expr, rte_slot_varno,
+    aggregate_output_vars, expr_sql_type, lower_agg_output_expr, rte_slot_id, rte_slot_varno,
 };
 use super::plan::append_planned_subquery;
-use super::{
-    expand_join_rte_vars, flatten_join_alias_vars, planner_with_param_base,
-};
+use super::{expand_join_rte_vars, flatten_join_alias_vars, planner_with_param_base};
 use crate::backend::parser::CatalogLookup;
 use crate::include::nodes::parsenodes::{Query, RangeTblEntryKind};
 use crate::include::nodes::pathnodes::{Path, PlannerInfo, PlannerSubroot, RestrictInfo};
 use crate::include::nodes::plannodes::{ExecParamSource, Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
-    AggAccum, Aggref, BoolExpr, Expr, ExprArraySubscript, FuncExpr, OpExpr, OrderByEntry, Param,
-    ParamKind, QueryColumn, ScalarArrayOpExpr, SubPlan, TargetEntry, Var, attrno_index,
-    is_executor_special_varno, is_system_attr, user_attrno, INNER_VAR, OUTER_VAR,
+    AggAccum, Aggref, BoolExpr, Expr, ExprArraySubscript, FuncExpr, INNER_VAR, OUTER_VAR, OpExpr,
+    OrderByEntry, Param, ParamKind, QueryColumn, ScalarArrayOpExpr, SubPlan, TargetEntry, Var,
+    attrno_index, is_executor_special_varno, is_system_attr, user_attrno,
 };
 
 #[derive(Clone, Debug)]
@@ -33,19 +31,16 @@ impl IndexedTlist {
     fn search_expr(&self, root: Option<&PlannerInfo>, expr: &Expr) -> Option<&IndexedTlistEntry> {
         match expr {
             Expr::Var(var) => self.entries.iter().find(|entry| {
-                entry
-                    .match_exprs
-                    .iter()
-                    .any(|candidate| match candidate {
-                        Expr::Var(candidate_var) => {
-                            candidate_var == var
-                                || root.is_some_and(|root| {
-                                    flatten_join_alias_vars(root, Expr::Var(candidate_var.clone()))
-                                        == flatten_join_alias_vars(root, expr.clone())
-                                })
-                        }
-                        _ => output_component_matches_expr(candidate, expr),
-                    })
+                entry.match_exprs.iter().any(|candidate| match candidate {
+                    Expr::Var(candidate_var) => {
+                        candidate_var == var
+                            || root.is_some_and(|root| {
+                                flatten_join_alias_vars(root, Expr::Var(candidate_var.clone()))
+                                    == flatten_join_alias_vars(root, expr.clone())
+                            })
+                    }
+                    _ => output_component_matches_expr(candidate, expr),
+                })
             }),
             _ => self.entries.iter().find(|entry| {
                 entry
@@ -129,11 +124,7 @@ pub(super) fn create_plan_without_root(path: Path) -> Plan {
     plan
 }
 
-fn recurse_with_root(
-    ctx: &mut SetRefsContext<'_>,
-    root: Option<&PlannerInfo>,
-    path: Path,
-) -> Plan {
+fn recurse_with_root(ctx: &mut SetRefsContext<'_>, root: Option<&PlannerInfo>, path: Path) -> Plan {
     let ext_params = std::mem::take(&mut ctx.ext_params);
     let mut nested = SetRefsContext {
         root,
@@ -148,11 +139,7 @@ fn recurse_with_root(
     plan
 }
 
-fn special_slot_var(
-    varno: usize,
-    index: usize,
-    sql_type: crate::backend::parser::SqlType,
-) -> Expr {
+fn special_slot_var(varno: usize, index: usize, sql_type: crate::backend::parser::SqlType) -> Expr {
     Expr::Var(Var {
         varno,
         varattno: user_attrno(index),
@@ -201,19 +188,20 @@ fn dedup_match_exprs(exprs: Vec<Expr>) -> Vec<Expr> {
 
 fn build_projection_tlist(
     root: Option<&PlannerInfo>,
-    _slot_id: usize,
+    slot_id: usize,
     input: &Path,
     targets: &[TargetEntry],
 ) -> IndexedTlist {
-    let input_target = input.output_target();
+    let input_target = input.semantic_output_target();
     IndexedTlist {
         entries: targets
             .iter()
             .enumerate()
             .map(|(index, target)| {
-                let mut match_exprs = Vec::new();
+                let mut match_exprs = vec![slot_var(slot_id, user_attrno(index), target.sql_type)];
                 if let Some(input_resno) = target.input_resno {
-                    if let Some(input_expr) = input_target.exprs.get(input_resno.saturating_sub(1)) {
+                    if let Some(input_expr) = input_target.exprs.get(input_resno.saturating_sub(1))
+                    {
                         match_exprs.push(input_expr.clone());
                         match_exprs.push(fully_expand_output_expr_with_root(
                             root,
@@ -234,7 +222,11 @@ fn build_projection_tlist(
                     }
                 }
                 match_exprs.push(target.expr.clone());
-                match_exprs.push(fully_expand_output_expr_with_root(root, target.expr.clone(), input));
+                match_exprs.push(fully_expand_output_expr_with_root(
+                    root,
+                    target.expr.clone(),
+                    input,
+                ));
                 if let Some(root) = root {
                     match_exprs.push(flatten_join_alias_vars(root, target.expr.clone()));
                     match_exprs.push(flatten_join_alias_vars(
@@ -255,13 +247,16 @@ fn build_projection_tlist(
 
 fn build_aggregate_tlist(
     root: Option<&PlannerInfo>,
-    _slot_id: usize,
+    slot_id: usize,
     group_by: &[Expr],
     accumulators: &[crate::include::nodes::primnodes::AggAccum],
 ) -> IndexedTlist {
     let mut entries = Vec::with_capacity(group_by.len() + accumulators.len());
     for (index, expr) in group_by.iter().enumerate() {
-        let mut match_exprs = vec![expr.clone()];
+        let mut match_exprs = vec![
+            slot_var(slot_id, user_attrno(index), expr_sql_type(expr)),
+            expr.clone(),
+        ];
         if let Some(root) = root {
             match_exprs.push(flatten_join_alias_vars(root, expr.clone()));
         }
@@ -278,10 +273,91 @@ fn build_aggregate_tlist(
             index,
             sql_type: accum.sql_type,
             ressortgroupref: 0,
-            match_exprs: dedup_match_exprs(vec![aggregate_output_expr(accum, aggno)]),
+            match_exprs: dedup_match_exprs(vec![
+                slot_var(slot_id, user_attrno(index), accum.sql_type),
+                aggregate_output_expr(accum, aggno),
+            ]),
         });
     }
     IndexedTlist { entries }
+}
+
+fn build_project_set_tlist(
+    root: Option<&PlannerInfo>,
+    slot_id: usize,
+    input: &Path,
+    targets: &[crate::include::nodes::primnodes::ProjectSetTarget],
+) -> IndexedTlist {
+    let input_target = input.semantic_output_target();
+    IndexedTlist {
+        entries: targets
+            .iter()
+            .enumerate()
+            .map(|(index, target)| {
+                let (sql_type, ressortgroupref, mut match_exprs) = match target {
+                    crate::include::nodes::primnodes::ProjectSetTarget::Scalar(entry) => {
+                        let mut match_exprs =
+                            vec![slot_var(slot_id, user_attrno(index), entry.sql_type)];
+                        if let Some(input_resno) = entry.input_resno {
+                            if let Some(input_expr) =
+                                input_target.exprs.get(input_resno.saturating_sub(1))
+                            {
+                                match_exprs.push(input_expr.clone());
+                                match_exprs.push(fully_expand_output_expr_with_root(
+                                    root,
+                                    input_expr.clone(),
+                                    input,
+                                ));
+                                if let Some(root) = root {
+                                    match_exprs
+                                        .push(flatten_join_alias_vars(root, input_expr.clone()));
+                                    match_exprs.push(flatten_join_alias_vars(
+                                        root,
+                                        fully_expand_output_expr_with_root(
+                                            Some(root),
+                                            input_expr.clone(),
+                                            input,
+                                        ),
+                                    ));
+                                }
+                            }
+                        }
+                        match_exprs.push(entry.expr.clone());
+                        match_exprs.push(fully_expand_output_expr_with_root(
+                            root,
+                            entry.expr.clone(),
+                            input,
+                        ));
+                        if let Some(root) = root {
+                            match_exprs.push(flatten_join_alias_vars(root, entry.expr.clone()));
+                            match_exprs.push(flatten_join_alias_vars(
+                                root,
+                                fully_expand_output_expr_with_root(
+                                    Some(root),
+                                    entry.expr.clone(),
+                                    input,
+                                ),
+                            ));
+                        }
+                        (entry.sql_type, entry.ressortgroupref, match_exprs)
+                    }
+                    crate::include::nodes::primnodes::ProjectSetTarget::Set {
+                        sql_type, ..
+                    } => (
+                        *sql_type,
+                        0,
+                        vec![slot_var(slot_id, user_attrno(index), *sql_type)],
+                    ),
+                };
+                IndexedTlistEntry {
+                    index,
+                    sql_type,
+                    ressortgroupref,
+                    match_exprs: dedup_match_exprs(std::mem::take(&mut match_exprs)),
+                }
+            })
+            .collect(),
+    }
 }
 
 fn build_join_tlist(root: Option<&PlannerInfo>, left: &Path, right: &Path) -> IndexedTlist {
@@ -289,10 +365,15 @@ fn build_join_tlist(root: Option<&PlannerInfo>, left: &Path, right: &Path) -> In
     let right_tlist = build_path_tlist(root, right);
     let left_len = left_tlist.entries.len();
     let mut entries = left_tlist.entries;
-    entries.extend(right_tlist.entries.into_iter().map(|entry| IndexedTlistEntry {
-        index: left_len + entry.index,
-        ..entry
-    }));
+    entries.extend(
+        right_tlist
+            .entries
+            .into_iter()
+            .map(|entry| IndexedTlistEntry {
+                index: left_len + entry.index,
+                ..entry
+            }),
+    );
     IndexedTlist { entries }
 }
 
@@ -309,12 +390,15 @@ fn build_subquery_tlist(
                 index,
                 sql_type: column.sql_type,
                 ressortgroupref: 0,
-                match_exprs: vec![Expr::Var(Var {
-                    varno: rtindex,
-                    varattno: user_attrno(index),
-                    varlevelsup: 0,
-                    vartype: column.sql_type,
-                })],
+                match_exprs: dedup_match_exprs(vec![
+                    Expr::Var(Var {
+                        varno: rtindex,
+                        varattno: user_attrno(index),
+                        varlevelsup: 0,
+                        vartype: column.sql_type,
+                    }),
+                    slot_var(rte_slot_id(rtindex), user_attrno(index), column.sql_type),
+                ]),
             })
             .collect(),
     }
@@ -337,6 +421,12 @@ fn build_path_tlist(root: Option<&PlannerInfo>, path: &Path) -> IndexedTlist {
             accumulators,
             ..
         } => build_aggregate_tlist(root, *slot_id, group_by, accumulators),
+        Path::ProjectSet {
+            slot_id,
+            input,
+            targets,
+            ..
+        } => build_project_set_tlist(root, *slot_id, input, targets),
         Path::SubqueryScan {
             rtindex,
             query,
@@ -437,7 +527,8 @@ fn search_tlist_entry_by_sortgroupref(
     if ressortgroupref == 0 {
         return None;
     }
-    tlist.entries
+    tlist
+        .entries
         .iter()
         .find(|entry| entry.ressortgroupref == ressortgroupref)
 }
@@ -682,7 +773,9 @@ fn lower_projection_expr_by_input_target(
         } => Expr::ArrayLiteral {
             elements: elements
                 .into_iter()
-                .map(|element| lower_projection_expr_by_input_target(root, element, input, input_tlist))
+                .map(|element| {
+                    lower_projection_expr_by_input_target(root, element, input, input_tlist)
+                })
                 .collect(),
             array_type,
         },
@@ -768,13 +861,10 @@ fn expr_contains_local_semantic_var(expr: &Expr) -> bool {
                 .arg
                 .as_deref()
                 .is_some_and(expr_contains_local_semantic_var)
-                || case_expr
-                    .args
-                    .iter()
-                    .any(|arm| {
-                        expr_contains_local_semantic_var(&arm.expr)
-                            || expr_contains_local_semantic_var(&arm.result)
-                    })
+                || case_expr.args.iter().any(|arm| {
+                    expr_contains_local_semantic_var(&arm.expr)
+                        || expr_contains_local_semantic_var(&arm.result)
+                })
                 || expr_contains_local_semantic_var(&case_expr.defresult)
         }
         Expr::Func(func) => func.args.iter().any(expr_contains_local_semantic_var),
@@ -822,7 +912,9 @@ fn expr_contains_local_semantic_var(expr: &Expr) -> bool {
         Expr::IsDistinctFrom(left, right) | Expr::IsNotDistinctFrom(left, right) => {
             expr_contains_local_semantic_var(left) || expr_contains_local_semantic_var(right)
         }
-        Expr::ArrayLiteral { elements, .. } => elements.iter().any(expr_contains_local_semantic_var),
+        Expr::ArrayLiteral { elements, .. } => {
+            elements.iter().any(expr_contains_local_semantic_var)
+        }
         Expr::Coalesce(left, right) => {
             expr_contains_local_semantic_var(left) || expr_contains_local_semantic_var(right)
         }
@@ -939,7 +1031,9 @@ fn rewrite_expr_for_append_rel(
             right: Box::new(rewrite_expr_for_append_rel(*saop.right, info)),
             ..*saop
         })),
-        Expr::Cast(inner, ty) => Expr::Cast(Box::new(rewrite_expr_for_append_rel(*inner, info)), ty),
+        Expr::Cast(inner, ty) => {
+            Expr::Cast(Box::new(rewrite_expr_for_append_rel(*inner, info)), ty)
+        }
         Expr::Like {
             expr,
             pattern,
@@ -1009,11 +1103,7 @@ fn rewrite_expr_for_append_rel(
     }
 }
 
-fn rewrite_appendrel_expr_for_input_path(
-    root: &PlannerInfo,
-    expr: Expr,
-    path: &Path,
-) -> Expr {
+fn rewrite_appendrel_expr_for_input_path(root: &PlannerInfo, expr: Expr, path: &Path) -> Expr {
     path_single_relid(path)
         .and_then(|relid| append_translation(root, relid))
         .map(|info| rewrite_expr_for_append_rel(expr.clone(), info))
@@ -1051,13 +1141,8 @@ fn lower_direct_ref(expr: &Expr, mode: LowerMode<'_>) -> Option<Expr> {
             .map(|entry| special_slot_var(OUTER_VAR, entry.index, entry.sql_type))
             .or_else(|| {
                 layout.iter().enumerate().find_map(|(index, candidate)| {
-                    (candidate == expr).then(|| {
-                        special_slot_var(
-                            OUTER_VAR,
-                            index,
-                            expr_sql_type(candidate),
-                        )
-                    })
+                    (candidate == expr)
+                        .then(|| special_slot_var(OUTER_VAR, index, expr_sql_type(candidate)))
                 })
             }),
         LowerMode::Join {
@@ -1077,7 +1162,11 @@ fn exec_param_for_outer_var(ctx: &mut SetRefsContext<'_>, var: Var) -> Expr {
         varlevelsup: var.varlevelsup - 1,
         ..var
     });
-    if let Some(existing) = ctx.ext_params.iter().find(|param| param.expr == parent_expr) {
+    if let Some(existing) = ctx
+        .ext_params
+        .iter()
+        .find(|param| param.expr == parent_expr)
+    {
         return Expr::Param(Param {
             paramkind: ParamKind::Exec,
             paramid: existing.paramid,
@@ -1097,11 +1186,7 @@ fn exec_param_for_outer_var(ctx: &mut SetRefsContext<'_>, var: Var) -> Expr {
     })
 }
 
-fn inline_exec_params(
-    expr: Expr,
-    params: &[ExecParamSource],
-    consumed: &mut Vec<usize>,
-) -> Expr {
+fn inline_exec_params(expr: Expr, params: &[ExecParamSource], consumed: &mut Vec<usize>) -> Expr {
     match expr {
         Expr::Param(param) if matches!(param.paramkind, ParamKind::Exec) => params
             .iter()
@@ -1142,7 +1227,9 @@ fn inline_exec_params(
             right: Box::new(inline_exec_params(*saop.right, params, consumed)),
             ..*saop
         })),
-        Expr::Cast(inner, ty) => Expr::Cast(Box::new(inline_exec_params(*inner, params, consumed)), ty),
+        Expr::Cast(inner, ty) => {
+            Expr::Cast(Box::new(inline_exec_params(*inner, params, consumed)), ty)
+        }
         Expr::Coalesce(left, right) => Expr::Coalesce(
             Box::new(inline_exec_params(*left, params, consumed)),
             Box::new(inline_exec_params(*right, params, consumed)),
@@ -1444,7 +1531,9 @@ fn lower_project_set_target(
     use crate::include::nodes::primnodes::ProjectSetTarget;
 
     match target {
-        ProjectSetTarget::Scalar(entry) => ProjectSetTarget::Scalar(lower_target_entry(ctx, entry, mode)),
+        ProjectSetTarget::Scalar(entry) => {
+            ProjectSetTarget::Scalar(lower_target_entry(ctx, entry, mode))
+        }
         ProjectSetTarget::Set {
             name,
             call,
@@ -1471,11 +1560,7 @@ fn lower_agg_accum(
             .into_iter()
             .map(|arg| {
                 let arg = fix_upper_expr_for_input(ctx.root, arg, path, input_tlist);
-                lower_expr(
-                    ctx,
-                    arg,
-                    LowerMode::Input { tlist: input_tlist },
-                )
+                lower_expr(ctx, arg, LowerMode::Input { tlist: input_tlist })
             })
             .collect(),
         filter: accum.filter.map(|filter| {
@@ -1712,12 +1797,12 @@ fn lower_expr(ctx: &mut SetRefsContext<'_>, expr: Expr, mode: LowerMode<'_>) -> 
 
 fn validate_executable_expr(expr: &Expr, plan_node: &str, field: &str) {
     match expr {
-        Expr::Var(var) if var.varlevelsup > 0 => panic!(
-            "executable plan contains outer-level Var in {plan_node}.{field}: {var:?}"
-        ),
-        Expr::Aggref(aggref) => panic!(
-            "executable plan contains unresolved Aggref in {plan_node}.{field}: {aggref:?}"
-        ),
+        Expr::Var(var) if var.varlevelsup > 0 => {
+            panic!("executable plan contains outer-level Var in {plan_node}.{field}: {var:?}")
+        }
+        Expr::Aggref(aggref) => {
+            panic!("executable plan contains unresolved Aggref in {plan_node}.{field}: {aggref:?}")
+        }
         Expr::SubLink(sublink) => panic!(
             "executable plan contains unresolved SubLink in {plan_node}.{field}: {sublink:?}"
         ),
@@ -1859,7 +1944,9 @@ fn validate_executable_plan(plan: &Plan) {
             }
         }
         Plan::IndexScan { .. } => {}
-        Plan::Hash { input, hash_keys, .. } => {
+        Plan::Hash {
+            input, hash_keys, ..
+        } => {
             hash_keys
                 .iter()
                 .for_each(|expr| validate_executable_expr(expr, "Hash", "hash_keys"));
@@ -1907,7 +1994,9 @@ fn validate_executable_plan(plan: &Plan) {
             validate_executable_plan(left);
             validate_executable_plan(right);
         }
-        Plan::Filter { input, predicate, .. } => {
+        Plan::Filter {
+            input, predicate, ..
+        } => {
             validate_executable_expr(predicate, "Filter", "predicate");
             validate_executable_plan(input);
         }
@@ -1978,9 +2067,9 @@ fn validate_executable_plan(plan: &Plan) {
 
 fn validate_planner_expr(expr: &Expr, path_node: &str, field: &str) {
     match expr {
-        Expr::Var(var) if is_executor_special_varno(var.varno) => panic!(
-            "planner path contains executor-only Var in {path_node}.{field}: {var:?}"
-        ),
+        Expr::Var(var) if is_executor_special_varno(var.varno) => {
+            panic!("planner path contains executor-only Var in {path_node}.{field}: {var:?}")
+        }
         Expr::Param(Param {
             paramkind: ParamKind::Exec,
             ..
@@ -2070,7 +2159,8 @@ fn validate_planner_expr(expr: &Expr, path_node: &str, field: &str) {
                 }
             }
         }
-        Expr::Var(_) | Expr::Const(_)
+        Expr::Var(_)
+        | Expr::Const(_)
         | Expr::Aggref(_)
         | Expr::CaseTest(_)
         | Expr::Random
@@ -2126,7 +2216,9 @@ fn validate_planner_path(path: &Path) {
                 validate_planner_path(child);
             }
         }
-        Path::Filter { input, predicate, .. } => {
+        Path::Filter {
+            input, predicate, ..
+        } => {
             validate_planner_expr(predicate, "Filter", "predicate");
             validate_planner_path(input);
         }
@@ -2250,7 +2342,13 @@ fn set_filter_references(
 ) -> Plan {
     let input_tlist = build_path_tlist(ctx.root, &input);
     let predicate = fix_upper_expr_for_input(ctx.root, predicate, &input, &input_tlist);
-    let predicate = lower_expr(ctx, predicate, LowerMode::Input { tlist: &input_tlist });
+    let predicate = lower_expr(
+        ctx,
+        predicate,
+        LowerMode::Input {
+            tlist: &input_tlist,
+        },
+    );
     let input_plan = Box::new(set_plan_refs(ctx, *input));
     Plan::Filter {
         plan_info,
@@ -2397,11 +2495,7 @@ fn set_nested_loop_join_references(
                     consumed_parent_params.extend(param_consumed_parent_params);
                     params.push(ExecParamSource {
                         paramid: param.paramid,
-                        expr: lower_expr(
-                            ctx,
-                            fixed_expr,
-                            LowerMode::Input { tlist: &left_tlist },
-                        ),
+                        expr: lower_expr(ctx, fixed_expr, LowerMode::Input { tlist: &left_tlist }),
                     });
                 } else {
                     propagated_params.push(ExecParamSource {
@@ -2478,7 +2572,15 @@ fn set_hash_join_references(
         .collect::<Vec<_>>();
     let inner_hash_keys = inner_hash_keys
         .into_iter()
-        .map(|expr| lower_expr(ctx, expr, LowerMode::Input { tlist: &right_tlist }))
+        .map(|expr| {
+            lower_expr(
+                ctx,
+                expr,
+                LowerMode::Input {
+                    tlist: &right_tlist,
+                },
+            )
+        })
         .collect::<Vec<_>>();
     let (join_restrict_clauses, other_restrict_clauses) =
         split_join_restrict_clauses(kind, &restrict_clauses);
@@ -2545,7 +2647,9 @@ fn set_projection_references(
         lowered_targets.push(lower_target_entry(
             ctx,
             TargetEntry { expr, ..target },
-            LowerMode::Input { tlist: &input_tlist },
+            LowerMode::Input {
+                tlist: &input_tlist,
+            },
         ));
     }
     Plan::Projection {
@@ -2568,7 +2672,15 @@ fn set_order_references(
         .collect::<Vec<_>>();
     let lowered_items = items
         .into_iter()
-        .map(|item| lower_order_by_entry(ctx, item, LowerMode::Input { tlist: &input_tlist }))
+        .map(|item| {
+            lower_order_by_entry(
+                ctx,
+                item,
+                LowerMode::Input {
+                    tlist: &input_tlist,
+                },
+            )
+        })
         .collect();
     let input_plan = Box::new(set_plan_refs(ctx, *input));
     Plan::OrderBy {
@@ -2611,7 +2723,15 @@ fn set_aggregate_references(
     let group_by = group_by
         .into_iter()
         .map(|expr| fix_upper_expr_for_input(root, expr, &input, &input_tlist))
-        .map(|expr| lower_expr(ctx, expr, LowerMode::Input { tlist: &input_tlist }))
+        .map(|expr| {
+            lower_expr(
+                ctx,
+                expr,
+                LowerMode::Input {
+                    tlist: &input_tlist,
+                },
+            )
+        })
         .collect();
     let accumulators = accumulators
         .into_iter()
@@ -2741,7 +2861,11 @@ fn set_recursive_union_references(
         distinct,
         output_columns,
         anchor: Box::new(recurse_with_root(ctx, Some(anchor_root.as_ref()), *anchor)),
-        recursive: Box::new(recurse_with_root(ctx, Some(recursive_root.as_ref()), *recursive)),
+        recursive: Box::new(recurse_with_root(
+            ctx,
+            Some(recursive_root.as_ref()),
+            *recursive,
+        )),
     }
 }
 
@@ -2774,7 +2898,13 @@ fn set_project_set_references(
                     column_index,
                 },
             };
-            lower_project_set_target(ctx, target, LowerMode::Input { tlist: &input_tlist })
+            lower_project_set_target(
+                ctx,
+                target,
+                LowerMode::Input {
+                    tlist: &input_tlist,
+                },
+            )
         })
         .collect();
     let input_plan = Box::new(set_plan_refs(ctx, *input));
@@ -3133,10 +3263,12 @@ fn rebuild_setrefs_expr(
             args: func.args.into_iter().map(recurse).collect(),
             ..*func
         })),
-        Expr::SubLink(sublink) => Expr::SubLink(Box::new(crate::include::nodes::primnodes::SubLink {
-            testexpr: sublink.testexpr.map(|expr| Box::new(recurse(*expr))),
-            ..*sublink
-        })),
+        Expr::SubLink(sublink) => {
+            Expr::SubLink(Box::new(crate::include::nodes::primnodes::SubLink {
+                testexpr: sublink.testexpr.map(|expr| Box::new(recurse(*expr))),
+                ..*sublink
+            }))
+        }
         Expr::SubPlan(subplan) => Expr::SubPlan(Box::new(SubPlan {
             testexpr: subplan.testexpr.map(|expr| Box::new(recurse(*expr))),
             args: subplan.args.into_iter().map(recurse).collect(),
@@ -3393,5 +3525,7 @@ fn fix_join_expr(
             return fix_join_expr(Some(root), flattened, outer_tlist, inner_tlist);
         }
     }
-    rebuild_setrefs_expr(root, expr, |inner| fix_join_expr(root, inner, outer_tlist, inner_tlist))
+    rebuild_setrefs_expr(root, expr, |inner| {
+        fix_join_expr(root, inner, outer_tlist, inner_tlist)
+    })
 }

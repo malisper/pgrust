@@ -6302,7 +6302,7 @@ fn generate_series_table_alias_only() {
         StatementResult::Query {
             column_names, rows, ..
         } => {
-            assert_eq!(column_names, vec!["generate_series"]);
+            assert_eq!(column_names, vec!["g"]);
             assert_eq!(
                 rows,
                 vec![
@@ -7404,13 +7404,7 @@ from (values (1),(2)) v1(r1)
         } => {
             assert_eq!(
                 column_names,
-                vec![
-                    "r1",
-                    "generate_series",
-                    "generate_series",
-                    "generate_series",
-                    "generate_series"
-                ]
+                vec!["r1", "gs1", "gs2", "gs3", "gs4"]
             );
             assert_eq!(
                 rows,

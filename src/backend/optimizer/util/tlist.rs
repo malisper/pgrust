@@ -5,11 +5,11 @@ use crate::include::nodes::primnodes::{
     AggAccum, Expr, OrderByEntry, QueryColumn, RelationDesc, TargetEntry, Var, user_attrno,
 };
 
+use super::super::expand_join_rte_vars;
 use super::super::optimize_path;
 use super::super::pathnodes::{
     expr_sql_type, layout_candidate_for_expr, lower_agg_output_expr, lower_expr_to_path_output,
 };
-use super::super::expand_join_rte_vars;
 
 pub(super) fn pathkeys_to_order_items(pathkeys: &[PathKey]) -> Vec<OrderByEntry> {
     pathkeys
@@ -51,7 +51,7 @@ pub(super) fn project_to_slot_layout_internal(
     target: PathTarget,
     catalog: &dyn CatalogLookup,
 ) -> Path {
-    let input_target = input.output_target();
+    let input_target = input.semantic_output_target();
     let layout = input_target.exprs.clone();
     let passthrough_input_resno = |expr: &Expr| {
         input_target
@@ -116,11 +116,14 @@ pub(super) fn normalize_rte_path(
     input: Path,
     catalog: &dyn CatalogLookup,
 ) -> Path {
-    let names_match = input.columns().iter().map(|column| (&column.name, column.sql_type)).eq(
-        desc.columns
+    let names_match = input
+        .columns()
+        .iter()
+        .map(|column| (&column.name, column.sql_type))
+        .eq(desc
+            .columns
             .iter()
-            .map(|column| (&column.name, column.sql_type)),
-    );
+            .map(|column| (&column.name, column.sql_type)));
     let desired_layout = PathTarget::new(
         desc.columns
             .iter()
@@ -135,10 +138,16 @@ pub(super) fn normalize_rte_path(
             })
             .collect(),
     );
-    if names_match && input.output_vars() == desired_layout.exprs {
+    if names_match && input.semantic_output_vars() == desired_layout.exprs {
         input
     } else {
-        project_to_slot_layout(rtindex, desc, input.clone(), input.output_target(), catalog)
+        project_to_slot_layout(
+            rtindex,
+            desc,
+            input.clone(),
+            input.semantic_output_target(),
+            catalog,
+        )
     }
 }
 
@@ -147,7 +156,7 @@ pub(super) fn annotate_targets_for_input(
     path: &Path,
     targets: &[TargetEntry],
 ) -> Vec<TargetEntry> {
-    let input_target = path.output_target();
+    let input_target = path.semantic_output_target();
     let projects_project_set_output = matches!(path, Path::ProjectSet { .. })
         || matches!(path, Path::OrderBy { input, .. } if matches!(input.as_ref(), Path::ProjectSet { .. }));
     targets
@@ -155,7 +164,10 @@ pub(super) fn annotate_targets_for_input(
         .cloned()
         .map(|target| {
             let input_resno = if projects_project_set_output
-                && matches!(target.expr, Expr::Const(crate::include::nodes::datum::Value::Null))
+                && matches!(
+                    target.expr,
+                    Expr::Const(crate::include::nodes::datum::Value::Null)
+                )
                 && target.resno >= 1
                 && target.resno <= input_target.exprs.len()
             {
@@ -180,7 +192,6 @@ pub(super) fn lower_pathkeys_for_path(
     path: &Path,
     pathkeys: &[PathKey],
 ) -> Vec<PathKey> {
-    let layout = path.output_vars();
     match aggregate_group_by(path) {
         Some(group_by) => pathkeys
             .iter()
@@ -189,7 +200,7 @@ pub(super) fn lower_pathkeys_for_path(
                 expr: lower_agg_output_expr(
                     expand_join_rte_vars(root, key.expr),
                     group_by,
-                    &layout,
+                    &path.output_vars(),
                 ),
                 ressortgroupref: key.ressortgroupref,
                 descending: key.descending,
@@ -200,9 +211,15 @@ pub(super) fn lower_pathkeys_for_path(
             .iter()
             .cloned()
             .map(|key| {
-                let expr = lower_expr_to_path_output(Some(root), path, key.expr.clone(), key.ressortgroupref)
-                    .or_else(|| layout_candidate_for_expr(Some(root), &key.expr, &layout))
-                    .unwrap_or_else(|| key.expr.clone());
+                let layout = path.semantic_output_vars();
+                let expr = lower_expr_to_path_output(
+                    Some(root),
+                    path,
+                    key.expr.clone(),
+                    key.ressortgroupref,
+                )
+                .or_else(|| layout_candidate_for_expr(Some(root), &key.expr, &layout))
+                .unwrap_or_else(|| key.expr.clone());
                 PathKey {
                     expr,
                     ressortgroupref: key.ressortgroupref,
@@ -236,7 +253,10 @@ pub(super) fn path_exposes_required_pathkey_identity(path: &Path, pathkeys: &[Pa
     })
 }
 
-pub(super) fn rel_exposes_required_pathkey_identity(rel: &RelOptInfo, pathkeys: &[PathKey]) -> bool {
+pub(super) fn rel_exposes_required_pathkey_identity(
+    rel: &RelOptInfo,
+    pathkeys: &[PathKey],
+) -> bool {
     rel.pathlist
         .iter()
         .any(|path| path_exposes_required_pathkey_identity(path, pathkeys))
@@ -252,7 +272,10 @@ pub(super) fn required_query_pathkeys_for_path(root: &PlannerInfo, path: &Path) 
     }
 }
 
-pub(super) fn required_query_pathkeys_for_rel(root: &PlannerInfo, rel: &RelOptInfo) -> Vec<PathKey> {
+pub(super) fn required_query_pathkeys_for_rel(
+    root: &PlannerInfo,
+    rel: &RelOptInfo,
+) -> Vec<PathKey> {
     if pathkeys_are_fully_identified(&root.query_pathkeys)
         && rel_exposes_required_pathkey_identity(rel, &root.query_pathkeys)
     {
@@ -264,7 +287,7 @@ pub(super) fn required_query_pathkeys_for_rel(root: &PlannerInfo, rel: &RelOptIn
 
 pub(super) fn projection_is_identity(path: &Path, targets: &[TargetEntry]) -> bool {
     let input_columns = path.columns();
-    let layout = path.output_vars();
+    let layout = path.semantic_output_vars();
     targets.len() == input_columns.len()
         && targets.iter().enumerate().all(|(index, target)| {
             (target.expr == layout[index] || target.input_resno == Some(index + 1))

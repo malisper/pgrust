@@ -5,8 +5,8 @@ use crate::backend::parser::CatalogLookup;
 use crate::include::catalog::BTREE_AM_OID;
 use crate::include::nodes::parsenodes::{JoinTreeNode, RangeTblEntryKind};
 use crate::include::nodes::pathnodes::{
-    Path, PathKey, PathTarget, PlannerInfo, PlannerSubroot, RelOptInfo, RelOptKind,
-    RestrictInfo, SpecialJoinInfo,
+    Path, PathKey, PathTarget, PlannerInfo, PlannerSubroot, RelOptInfo, RelOptKind, RestrictInfo,
+    SpecialJoinInfo,
 };
 use crate::include::nodes::plannodes::PlanEstimate;
 use crate::include::nodes::primnodes::{
@@ -20,9 +20,7 @@ use super::super::inherit::{
 };
 use super::super::joininfo;
 use super::super::optimize_path;
-use super::super::pathnodes::{
-    expr_sql_type, layout_candidate_for_expr, next_synthetic_slot_id,
-};
+use super::super::pathnodes::{expr_sql_type, layout_candidate_for_expr, next_synthetic_slot_id};
 use super::super::plan::grouping_planner;
 use super::super::util::{
     annotate_targets_for_input, normalize_rte_path, pathkeys_to_order_items,
@@ -341,7 +339,13 @@ fn build_set_operation_rel(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) 
         .into_iter()
         .map(|query| {
             let (_, path) = plan_query_path(query, catalog);
-            project_to_slot_layout(source_id, &desc, path.clone(), path.output_target(), catalog)
+            project_to_slot_layout(
+                source_id,
+                &desc,
+                path.clone(),
+                path.output_target(),
+                catalog,
+            )
         })
         .collect::<Vec<_>>();
     let set_op = optimize_path(
@@ -361,7 +365,11 @@ fn build_set_operation_rel(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) 
         },
         catalog,
     );
-    let mut rel = RelOptInfo::new(Vec::new(), RelOptKind::UpperRel, set_op.output_target());
+    let mut rel = RelOptInfo::new(
+        Vec::new(),
+        RelOptKind::UpperRel,
+        set_op.semantic_output_target(),
+    );
     rel.add_path(set_op);
     bestpath::set_cheapest(&mut rel);
     rel
@@ -375,7 +383,10 @@ fn build_cte_scan_path(
     catalog: &dyn CatalogLookup,
 ) -> Path {
     let (subroot, cte_path) = if let Some(recursive_union) = query.recursive_union.clone() {
-        (PlannerInfo::new(query.clone()), build_recursive_union_path(*recursive_union, catalog))
+        (
+            PlannerInfo::new(query.clone()),
+            build_recursive_union_path(*recursive_union, catalog),
+        )
     } else {
         plan_query_path(query.clone(), catalog)
     };
@@ -404,11 +415,14 @@ fn build_subquery_scan_path(
     catalog: &dyn CatalogLookup,
 ) -> Path {
     let (subroot, input) = if let Some(recursive_union) = query.recursive_union.clone() {
-        (PlannerInfo::new(query.clone()), build_recursive_union_path(*recursive_union, catalog))
+        (
+            PlannerInfo::new(query.clone()),
+            build_recursive_union_path(*recursive_union, catalog),
+        )
     } else {
         plan_query_path(query.clone(), catalog)
     };
-    let input_vars = input.output_vars();
+    let input_vars = input.semantic_output_vars();
     let pathkeys = input
         .pathkeys()
         .into_iter()
@@ -416,7 +430,11 @@ fn build_subquery_scan_path(
             input_vars
                 .iter()
                 .position(|expr| *expr == key.expr)
-                .and_then(|index| desc.columns.get(index).map(|column| (index, column.sql_type)))
+                .and_then(|index| {
+                    desc.columns
+                        .get(index)
+                        .map(|column| (index, column.sql_type))
+                })
                 .map(|(index, sql_type)| PathKey {
                     expr: Expr::Var(Var {
                         varno: rtindex,
@@ -748,8 +766,8 @@ fn maybe_project_join_alias(
     let RangeTblEntryKind::Join { joinaliasvars, .. } = &rte.kind else {
         return input;
     };
-    let input_target = input.output_target();
-    let layout = input.output_vars();
+    let input_target = input.semantic_output_target();
+    let layout = input.semantic_output_vars();
     let desired_layout = PathTarget::from_rte(rtindex, rte).exprs;
     let alias_target_exprs = joinaliasvars.clone();
     let extra_exprs = reltarget
@@ -1097,8 +1115,8 @@ fn make_join_rel(
                         path,
                         &right_path.columns(),
                         &left_path.columns(),
-                        &right_path.output_vars(),
-                        &left_path.output_vars(),
+                        &right_path.semantic_output_vars(),
+                        &left_path.semantic_output_vars(),
                     )
                 } else {
                     path
