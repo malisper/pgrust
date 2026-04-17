@@ -996,6 +996,7 @@ fn sql_type_display_name(ty: SqlType) -> String {
     let base = match ty.kind {
         SqlTypeKind::AnyArray => "anyarray",
         SqlTypeKind::Record | SqlTypeKind::Composite => "record",
+        SqlTypeKind::Void => "void",
         SqlTypeKind::Int2 => "smallint",
         SqlTypeKind::Int2Vector => "int2vector",
         SqlTypeKind::Int4 => "integer",
@@ -1027,6 +1028,7 @@ fn sql_type_display_name(ty: SqlType) -> String {
         SqlTypeKind::TsQuery => "tsquery",
         SqlTypeKind::RegConfig => "regconfig",
         SqlTypeKind::RegDictionary => "regdictionary",
+        SqlTypeKind::RegProcedure => "regprocedure",
         SqlTypeKind::Text => "text",
         SqlTypeKind::Bool => "boolean",
         SqlTypeKind::Point => "point",
