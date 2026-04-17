@@ -19,7 +19,8 @@ simple_select_stmt = {
     cte_clause? ~ simple_select_core ~ window_clause_unsupported? ~ order_by_clause? ~ limit_clause? ~ offset_clause? ~ locking_clause?
   | cte_clause? ~ simple_select_core ~ window_clause_unsupported? ~ order_by_clause? ~ locking_clause ~ limit_clause? ~ offset_clause?
 }
-simple_select_core = { kw_select ~ (empty_select_list | select_list)? ~ (kw_from ~ from_item)? ~ (kw_where ~ expr)? ~ group_by_clause? ~ having_clause? }
+simple_select_core = { kw_select ~ select_distinct_clause? ~ (empty_select_list | select_list)? ~ (kw_from ~ from_item)? ~ (kw_where ~ expr)? ~ group_by_clause? ~ having_clause? }
+select_distinct_clause = { kw_distinct }
 set_operation_stmt = {
     cte_clause? ~ set_operation_term ~ (set_operation_clause ~ set_operation_term)+ ~ window_clause_unsupported? ~ order_by_clause? ~ limit_clause? ~ offset_clause? ~ locking_clause?
   | cte_clause? ~ set_operation_term ~ (set_operation_clause ~ set_operation_term)+ ~ window_clause_unsupported? ~ order_by_clause? ~ locking_clause ~ limit_clause? ~ offset_clause?

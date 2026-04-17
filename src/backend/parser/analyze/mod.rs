@@ -1001,6 +1001,7 @@ fn cte_body_as_select(body: &CteBody) -> Result<SelectStatement, ParseError> {
         CteBody::Values(values) => Ok(SelectStatement {
             with_recursive: values.with_recursive,
             with: values.with.clone(),
+            distinct: false,
             from: Some(FromItem::Values {
                 rows: values.rows.clone(),
             }),
@@ -1024,6 +1025,7 @@ fn cte_body_as_select(body: &CteBody) -> Result<SelectStatement, ParseError> {
         } => Ok(SelectStatement {
             with_recursive: false,
             with: Vec::new(),
+            distinct: false,
             from: None,
             targets: Vec::new(),
             where_clause: None,
@@ -2088,6 +2090,14 @@ fn bind_select_query_with_outer(
         );
     }
 
+    if stmt.distinct
+        && (!stmt.order_by.is_empty() || stmt.limit.is_some() || stmt.offset.is_some())
+    {
+        return Err(ParseError::FeatureNotSupported(
+            "SELECT DISTINCT with ORDER BY/LIMIT/OFFSET".into(),
+        ));
+    }
+
     if stmt.targets.is_empty() && stmt.from.is_none() {
         return Err(ParseError::EmptySelectList);
     }
@@ -2450,8 +2460,7 @@ fn bind_select_query_with_outer(
             let target_list = normalize_target_list(targets);
             let window_clauses = take_window_clauses(&window_state);
 
-            Ok((
-                Query {
+            let query = Query {
                     command_type: crate::include::executor::execdesc::CommandType::Select,
                     rtable: base.rtable,
                     jointree: base.jointree,
@@ -2467,9 +2476,9 @@ fn bind_select_query_with_outer(
                     project_set: None,
                     recursive_union: None,
                     set_operation: None,
-                },
-                scope,
-            ))
+                };
+            let query = apply_select_distinct(query, stmt.distinct);
+            Ok((query, scope))
         });
     } else {
         let bound_targets = with_window_binding(window_state.clone(), true, || {
@@ -2517,8 +2526,7 @@ fn bind_select_query_with_outer(
                     normalize_target_list(targets)
                 };
 
-                Ok((
-                    Query {
+                let query = Query {
                         command_type: crate::include::executor::execdesc::CommandType::Select,
                         rtable: base.rtable,
                         jointree: base.jointree,
@@ -2534,9 +2542,9 @@ fn bind_select_query_with_outer(
                         project_set: None,
                         recursive_union: None,
                         set_operation: None,
-                    },
-                    scope,
-                ))
+                    };
+                let query = apply_select_distinct(query, stmt.distinct);
+                Ok((query, scope))
             }
             BoundSelectTargets::WithProjectSet {
                 project_targets,
@@ -2567,8 +2575,7 @@ fn bind_select_query_with_outer(
                 }
                 let sort_clause = build_sort_clause(sort_inputs, &final_targets);
                 let target_list = normalize_target_list(final_targets);
-                Ok((
-                    Query {
+                let query = Query {
                         command_type: crate::include::executor::execdesc::CommandType::Select,
                         rtable: base.rtable,
                         jointree: base.jointree,
@@ -2584,11 +2591,60 @@ fn bind_select_query_with_outer(
                         project_set: Some(project_targets),
                         recursive_union: None,
                         set_operation: None,
-                    },
-                    scope,
-                ))
+                    };
+                let query = apply_select_distinct(query, stmt.distinct);
+                Ok((query, scope))
             }
         }
+    }
+}
+
+fn apply_select_distinct(query: Query, distinct: bool) -> Query {
+    if !distinct {
+        return query;
+    }
+
+    let output_columns = query.columns();
+    let output_desc = RelationDesc {
+        columns: output_columns
+            .iter()
+            .map(|column| column_desc(column.name.clone(), column.sql_type, true))
+            .collect(),
+    };
+    let output_exprs = output_columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| {
+            Expr::Var(Var {
+                varno: 1,
+                varattno: user_attrno(index),
+                varlevelsup: 0,
+                vartype: column.sql_type,
+            })
+        })
+        .collect::<Vec<_>>();
+    let target_list = normalize_target_list(identity_target_list(&output_columns, &output_exprs));
+
+    Query {
+        command_type: crate::include::executor::execdesc::CommandType::Select,
+        rtable: Vec::new(),
+        jointree: None,
+        target_list,
+        where_qual: None,
+        group_by: Vec::new(),
+        accumulators: Vec::new(),
+        window_clauses: Vec::new(),
+        having_qual: None,
+        sort_clause: Vec::new(),
+        limit_count: None,
+        limit_offset: 0,
+        project_set: None,
+        recursive_union: None,
+        set_operation: Some(Box::new(SetOperationQuery {
+            output_desc,
+            op: SetOperator::Union { all: false },
+            inputs: vec![query],
+        })),
     }
 }
 
