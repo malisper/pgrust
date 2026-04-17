@@ -1584,6 +1584,29 @@ impl Session {
                     &mut txn.catalog_effects,
                 )
             }
+            Statement::DropIndex(ref drop_stmt) => {
+                let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                let rels = {
+                    drop_stmt
+                        .index_names
+                        .iter()
+                        .filter_map(|name| catalog.lookup_any_relation(name).map(|e| e.rel))
+                        .collect::<Vec<_>>()
+                };
+                for rel in rels {
+                    self.lock_table_if_needed(db, rel, TableLockMode::AccessExclusive)?;
+                }
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_drop_index_stmt_in_transaction_with_search_path(
+                    client_id,
+                    drop_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
             Statement::DropTable(ref drop_stmt) => {
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);
                 let rels = {
@@ -1606,6 +1629,16 @@ impl Session {
                     search_path.as_deref(),
                     &mut txn.catalog_effects,
                     &mut txn.temp_effects,
+                )
+            }
+            Statement::DropSchema(ref drop_stmt) => {
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_drop_schema_stmt_in_transaction_with_search_path(
+                    client_id,
+                    drop_stmt,
+                    xid,
+                    cid,
+                    &mut txn.catalog_effects,
                 )
             }
             Statement::TruncateTable(ref truncate_stmt) => {

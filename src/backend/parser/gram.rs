@@ -1311,7 +1311,9 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::create_view_stmt => Ok(Statement::CreateView(build_create_view(inner)?)),
         Rule::drop_role_stmt => Ok(Statement::DropRole(build_drop_role(inner)?)),
         Rule::drop_table_stmt => Ok(Statement::DropTable(build_drop_table(inner)?)),
+        Rule::drop_index_stmt => Ok(Statement::DropIndex(build_drop_index(inner)?)),
         Rule::drop_view_stmt => Ok(Statement::DropView(build_drop_view(inner)?)),
+        Rule::drop_schema_stmt => Ok(Statement::DropSchema(build_drop_schema(inner)?)),
         Rule::reassign_owned_stmt => Ok(Statement::ReassignOwned(build_reassign_owned(inner)?)),
         Rule::truncate_table_stmt => Ok(Statement::TruncateTable(build_truncate_table(inner)?)),
         Rule::vacuum_stmt => Ok(Statement::Vacuum(build_vacuum(inner)?)),
@@ -3170,6 +3172,26 @@ fn build_drop_role(pair: Pair<'_, Rule>) -> Result<DropRoleStatement, ParseError
     })
 }
 
+fn build_drop_index(pair: Pair<'_, Rule>) -> Result<DropIndexStatement, ParseError> {
+    let mut if_exists = false;
+    let mut index_names = Vec::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::if_exists_clause => if_exists = true,
+            Rule::ident_list => index_names.extend(part.into_inner().map(build_identifier)),
+            Rule::identifier => index_names.push(build_identifier(part)),
+            _ => {}
+        }
+    }
+    if index_names.is_empty() {
+        return Err(ParseError::UnexpectedEof);
+    }
+    Ok(DropIndexStatement {
+        if_exists,
+        index_names,
+    })
+}
+
 fn build_drop_view(pair: Pair<'_, Rule>) -> Result<DropViewStatement, ParseError> {
     let mut if_exists = false;
     let mut view_names = Vec::new();
@@ -3189,6 +3211,26 @@ fn build_drop_view(pair: Pair<'_, Rule>) -> Result<DropViewStatement, ParseError
     Ok(DropViewStatement {
         if_exists,
         view_names,
+    })
+}
+
+fn build_drop_schema(pair: Pair<'_, Rule>) -> Result<DropSchemaStatement, ParseError> {
+    let mut if_exists = false;
+    let mut schema_names = Vec::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::if_exists_clause => if_exists = true,
+            Rule::ident_list => schema_names.extend(part.into_inner().map(build_identifier)),
+            Rule::identifier => schema_names.push(build_identifier(part)),
+            _ => {}
+        }
+    }
+    if schema_names.is_empty() {
+        return Err(ParseError::UnexpectedEof);
+    }
+    Ok(DropSchemaStatement {
+        if_exists,
+        schema_names,
     })
 }
 
