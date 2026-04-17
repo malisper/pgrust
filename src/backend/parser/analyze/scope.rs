@@ -440,6 +440,46 @@ pub(super) fn resolve_column_with_outer(
     Err(ParseError::UnknownColumn(name.to_string()))
 }
 
+pub(super) fn resolve_relation_row_expr_with_outer(
+    scope: &BoundScope,
+    outer_scopes: &[BoundScope],
+    name: &str,
+) -> Option<Vec<(String, Expr)>> {
+    resolve_relation_row_expr_in_scope(scope, name).or_else(|| {
+        outer_scopes.iter().enumerate().find_map(|(depth, scope)| {
+            let exprs = resolve_relation_row_expr_in_scope(scope, name)?;
+            Some(
+                exprs
+                    .into_iter()
+                    .map(|(field, expr)| (field, raise_expr_varlevels(expr, depth + 1)))
+                    .collect(),
+            )
+        })
+    })
+}
+
+fn resolve_relation_row_expr_in_scope(scope: &BoundScope, name: &str) -> Option<Vec<(String, Expr)>> {
+    let mut matched = false;
+    let fields = scope
+        .columns
+        .iter()
+        .zip(scope.output_exprs.iter())
+        .filter_map(|(column, expr)| {
+            if column.hidden
+                || !column
+                    .relation_names
+                    .iter()
+                    .any(|relation| relation.eq_ignore_ascii_case(name))
+            {
+                return None;
+            }
+            matched = true;
+            Some((column.output_name.clone(), expr.clone()))
+        })
+        .collect::<Vec<_>>();
+    matched.then_some(fields)
+}
+
 fn from_item_is_lateral(item: &FromItem) -> bool {
     match item {
         FromItem::Lateral(_) => true,

@@ -8,6 +8,7 @@ use crate::include::nodes::primnodes::{
     AggAccum, Expr, JoinType, OrderByEntry, ProjectSetTarget, QueryColumn, RelationDesc,
     SetReturningCall, SortGroupClause, TargetEntry, ToastRelationRef, Var, user_attrno,
 };
+use crate::include::nodes::parsenodes::SetOperator;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RelOptKind {
@@ -455,6 +456,13 @@ pub enum Path {
         output_columns: Vec<QueryColumn>,
         anchor: Box<Path>,
         recursive: Box<Path>,
+    },
+    SetOp {
+        plan_info: PlanEstimate,
+        slot_id: usize,
+        op: SetOperator,
+        output_columns: Vec<QueryColumn>,
+        children: Vec<Path>,
     },
     ProjectSet {
         plan_info: PlanEstimate,

@@ -330,6 +330,74 @@ fn union_in_derived_subquery_with_cte_executes() {
 }
 
 #[test]
+fn intersect_distinct_returns_shared_rows() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    let result = session
+        .execute(
+            &db,
+            "select x from (select 1 as x union all select 2 as x) a
+             intersect
+             select x from (select 2 as x union all select 3 as x) b",
+        )
+        .expect("run intersect");
+
+    match result {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int32(2)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn intersect_all_preserves_min_multiplicity() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    let result = session
+        .execute(
+            &db,
+            "select x from (select 1 as x union all select 1 as x union all select 2 as x) a
+             intersect all
+             select x from (select 1 as x union all select 2 as x union all select 2 as x) b
+             order by x",
+        )
+        .expect("run intersect all");
+
+    match result {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int32(1)], vec![Value::Int32(2)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn except_all_subtracts_multiplicity() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    let result = session
+        .execute(
+            &db,
+            "select x from (select 1 as x union all select 1 as x union all select 2 as x) a
+             except all
+             select x from (select 1 as x union all select 3 as x) b
+             order by x",
+        )
+        .expect("run except all");
+
+    match result {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int32(1)], vec![Value::Int32(2)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn ephemeral_database_rolls_back_aborted_transaction() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);
@@ -2485,8 +2553,10 @@ fn alter_table_add_column_rejects_unsupported_forms() {
         .unwrap();
 
     match db.execute(1, "alter table items add column xmin int4") {
-        Err(ExecError::Parse(ParseError::UnexpectedToken { expected, actual }))
-            if expected == "non-system column name" && actual == "xmin" => {}
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) if message == "column name \"xmin\" conflicts with a system column name"
+            && sqlstate == "42701" => {}
         other => panic!("expected system-column rejection, got {other:?}"),
     }
 

@@ -1,5 +1,6 @@
 use crate::RelFileLocator;
 use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
+use crate::include::nodes::parsenodes::SetOperator;
 use crate::include::access::relscan::ScanDirection;
 use crate::include::access::scankey::ScanKeyData;
 use crate::include::executor::execdesc::CommandType;
@@ -182,6 +183,12 @@ pub enum Plan {
         anchor: Box<Plan>,
         recursive: Box<Plan>,
     },
+    SetOp {
+        plan_info: PlanEstimate,
+        op: SetOperator,
+        output_columns: Vec<QueryColumn>,
+        children: Vec<Plan>,
+    },
     Values {
         plan_info: PlanEstimate,
         rows: Vec<Vec<Expr>>,
@@ -213,6 +220,7 @@ impl Plan {
             | Plan::CteScan { plan_info, .. }
             | Plan::WorkTableScan { plan_info, .. }
             | Plan::RecursiveUnion { plan_info, .. }
+            | Plan::SetOp { plan_info, .. }
             | Plan::FunctionScan { plan_info, .. }
             | Plan::Values { plan_info, .. }
             | Plan::ProjectSet { plan_info, .. } => *plan_info,
@@ -237,6 +245,7 @@ impl Plan {
             | Plan::CteScan { plan_info, .. }
             | Plan::WorkTableScan { plan_info, .. }
             | Plan::RecursiveUnion { plan_info, .. }
+            | Plan::SetOp { plan_info, .. }
             | Plan::FunctionScan { plan_info, .. }
             | Plan::Values { plan_info, .. }
             | Plan::ProjectSet { plan_info, .. } => *plan_info = value,
@@ -285,7 +294,8 @@ impl Plan {
             Plan::SubqueryScan { output_columns, .. } => output_columns.clone(),
             Plan::CteScan { output_columns, .. } => output_columns.clone(),
             Plan::WorkTableScan { output_columns, .. }
-            | Plan::RecursiveUnion { output_columns, .. } => output_columns.clone(),
+            | Plan::RecursiveUnion { output_columns, .. }
+            | Plan::SetOp { output_columns, .. } => output_columns.clone(),
             Plan::NestedLoopJoin { left, right, .. } | Plan::HashJoin { left, right, .. } => {
                 let mut cols = left.columns();
                 cols.extend(right.columns());

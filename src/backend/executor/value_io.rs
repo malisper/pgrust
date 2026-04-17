@@ -296,6 +296,7 @@ pub(crate) fn coerce_assignment_value(value: &Value, target: SqlType) -> Result<
         | Value::Circle(_) => cast_value(value.clone(), target),
         Value::Array(items) => Ok(Value::Array(items.clone())),
         Value::PgArray(array) => Ok(Value::PgArray(array.clone())),
+        Value::Record(record) => Ok(Value::Record(record.clone())),
     }
 }
 
