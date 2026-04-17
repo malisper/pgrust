@@ -2051,6 +2051,7 @@ fn build_table_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, ParseErro
         order_by: Vec::new(),
         limit: None,
         offset: None,
+        locking_clause: None,
         set_operation: None,
     })
 }
@@ -2566,6 +2567,7 @@ pub(crate) fn build_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, Pars
     let mut order_by = Vec::new();
     let mut limit = None;
     let mut offset = None;
+    let mut locking_clause = None;
     for part in parts {
         match part.as_rule() {
             Rule::cte_clause => {
@@ -2589,6 +2591,9 @@ pub(crate) fn build_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, Pars
                         Rule::order_by_clause => order_by = build_order_by_clause(inner)?,
                         Rule::limit_clause => limit = Some(build_limit_clause(inner)?),
                         Rule::offset_clause => offset = Some(build_offset_clause(inner)?),
+                        Rule::locking_clause => {
+                            locking_clause = Some(build_locking_clause(inner)?)
+                        }
                         _ => {}
                     }
                 }
@@ -2606,6 +2611,7 @@ pub(crate) fn build_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, Pars
             Rule::order_by_clause => order_by = build_order_by_clause(part)?,
             Rule::limit_clause => limit = Some(build_limit_clause(part)?),
             Rule::offset_clause => offset = Some(build_offset_clause(part)?),
+            Rule::locking_clause => locking_clause = Some(build_locking_clause(part)?),
             _ => {}
         }
     }
@@ -2620,6 +2626,7 @@ pub(crate) fn build_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, Pars
         order_by,
         limit,
         offset,
+        locking_clause,
         set_operation: None,
     })
 }
@@ -2652,6 +2659,7 @@ fn build_set_operation_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, P
     let mut order_by = Vec::new();
     let mut limit = None;
     let mut offset = None;
+    let mut locking_clause = None;
     let mut operators = Vec::new();
     let mut inputs = Vec::new();
 
@@ -2683,6 +2691,7 @@ fn build_set_operation_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, P
             Rule::order_by_clause => order_by = build_order_by_clause(part)?,
             Rule::limit_clause => limit = Some(build_limit_clause(part)?),
             Rule::offset_clause => offset = Some(build_offset_clause(part)?),
+            Rule::locking_clause => locking_clause = Some(build_locking_clause(part)?),
             _ => {}
         }
     }
@@ -2718,6 +2727,7 @@ fn build_set_operation_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, P
         order_by,
         limit,
         offset,
+        locking_clause,
         set_operation: Some(Box::new(SetOperationStatement {
             op: op.ok_or(ParseError::UnexpectedEof)?,
             inputs,
@@ -2771,6 +2781,7 @@ fn wrap_values_as_select(stmt: ValuesStatement) -> SelectStatement {
         order_by: stmt.order_by,
         limit: stmt.limit,
         offset: stmt.offset,
+        locking_clause: None,
         set_operation: None,
     }
 }
@@ -2884,6 +2895,17 @@ fn build_order_by_clause(pair: Pair<'_, Rule>) -> Result<Vec<OrderByItem>, Parse
         .filter(|part| part.as_rule() == Rule::order_by_item)
         .map(build_order_by_item)
         .collect()
+}
+
+fn build_locking_clause(pair: Pair<'_, Rule>) -> Result<SelectLockingClause, ParseError> {
+    match pair.as_str().trim().to_ascii_lowercase().as_str() {
+        "for update" => Ok(SelectLockingClause::ForUpdate),
+        "for share" => Ok(SelectLockingClause::ForShare),
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "FOR UPDATE or FOR SHARE",
+            actual: pair.as_str().into(),
+        }),
+    }
 }
 
 fn build_order_by_item(pair: Pair<'_, Rule>) -> Result<OrderByItem, ParseError> {
