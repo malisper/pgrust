@@ -3037,14 +3037,20 @@ fn set_recursive_union_references(
     distinct: bool,
     anchor_root: PlannerSubroot,
     recursive_root: PlannerSubroot,
+    recursive_references_worktable: bool,
+    anchor_query: Box<crate::include::nodes::parsenodes::Query>,
+    recursive_query: Box<crate::include::nodes::parsenodes::Query>,
     output_columns: Vec<QueryColumn>,
     anchor: Box<Path>,
     recursive: Box<Path>,
 ) -> Plan {
+    let _ = anchor_query;
+    let _ = recursive_query;
     Plan::RecursiveUnion {
         plan_info,
         worktable_id,
         distinct,
+        recursive_references_worktable,
         output_columns,
         anchor: Box::new(recurse_with_root(ctx, Some(anchor_root.as_ref()), *anchor)),
         recursive: Box::new(recurse_with_root(
@@ -3280,6 +3286,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             distinct,
             anchor_root,
             recursive_root,
+            recursive_references_worktable,
             anchor_query,
             recursive_query,
             output_columns,
@@ -3291,14 +3298,11 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             plan_info,
             worktable_id,
             distinct,
-            {
-                let _ = anchor_query;
-                anchor_root
-            },
-            {
-                let _ = recursive_query;
-                recursive_root
-            },
+            anchor_root,
+            recursive_root,
+            recursive_references_worktable,
+            anchor_query,
+            recursive_query,
             output_columns,
             anchor,
             recursive,

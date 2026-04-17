@@ -2109,6 +2109,7 @@ impl PlanNode for CteScanState {
             .or_insert_with(|| Rc::new(RefCell::new(Default::default())))
             .clone();
         loop {
+            ctx.check_for_interrupts()?;
             if let Some(row) = table.borrow().rows.get(self.next_index).cloned() {
                 self.next_index += 1;
                 load_materialized_row(&mut self.slot, &row, &mut self.current_bindings, ctx);
@@ -2186,6 +2187,7 @@ impl PlanNode for RecursiveUnionState {
             .insert(self.worktable_id, self.worktable.clone());
 
         loop {
+            ctx.check_for_interrupts()?;
             if !self.anchor_done {
                 match self.anchor.exec_proc_node(ctx)? {
                     Some(slot) => {
@@ -2233,6 +2235,11 @@ impl PlanNode for RecursiveUnionState {
                 }
                 None => {
                     if self.intermediate_rows.is_empty() {
+                        ctx.recursive_worktables.remove(&self.worktable_id);
+                        finish_eof(&mut self.stats, start, ctx);
+                        return Ok(None);
+                    }
+                    if !self.recursive_references_worktable {
                         ctx.recursive_worktables.remove(&self.worktable_id);
                         finish_eof(&mut self.stats, start, ctx);
                         return Ok(None);

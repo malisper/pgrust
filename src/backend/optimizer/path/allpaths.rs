@@ -318,6 +318,7 @@ fn build_recursive_union_path(
             recursive_root: PlannerSubroot::new(recursive_root),
             anchor_query: Box::new(anchor_query),
             recursive_query: Box::new(recursive_query),
+            recursive_references_worktable: recursive_union.recursive_references_worktable,
             output_columns: recursive_union
                 .output_desc
                 .columns

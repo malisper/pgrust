@@ -989,6 +989,8 @@ fn bind_ctes(
                 )?;
                 let (anchor_query, desc) =
                     apply_cte_column_names(anchor_query, anchor_desc, &cte.column_names)?;
+                let recursive_references_worktable =
+                    select_statement_references_table(recursive, &cte.name);
                 let worktable_id = NEXT_WORKTABLE_ID.fetch_add(1, Ordering::Relaxed);
                 let output_columns = desc
                     .columns
@@ -1090,6 +1092,7 @@ fn bind_ctes(
                             anchor: anchor_query,
                             recursive: recursive_query,
                             distinct: !*all,
+                            recursive_references_worktable,
                             worktable_id,
                         })),
                         set_operation: None,
@@ -1119,6 +1122,188 @@ fn bind_ctes(
         });
     }
     Ok(bound)
+}
+
+fn select_statement_references_table(stmt: &SelectStatement, table_name: &str) -> bool {
+    stmt.from
+        .as_ref()
+        .is_some_and(|from| from_item_references_table(from, table_name))
+        || stmt
+            .targets
+            .iter()
+            .any(|target| sql_expr_references_table(&target.expr, table_name))
+        || stmt
+            .where_clause
+            .as_ref()
+            .is_some_and(|expr| sql_expr_references_table(expr, table_name))
+        || stmt
+            .group_by
+            .iter()
+            .any(|expr| sql_expr_references_table(expr, table_name))
+        || stmt
+            .having
+            .as_ref()
+            .is_some_and(|expr| sql_expr_references_table(expr, table_name))
+        || stmt
+            .order_by
+            .iter()
+            .any(|item| sql_expr_references_table(&item.expr, table_name))
+}
+
+fn from_item_references_table(item: &FromItem, table_name: &str) -> bool {
+    match item {
+        FromItem::Table { name, .. } => name.eq_ignore_ascii_case(table_name),
+        FromItem::Lateral(source) | FromItem::Alias { source, .. } => {
+            from_item_references_table(source, table_name)
+        }
+        FromItem::DerivedTable(select) => select_statement_references_table(select, table_name),
+        FromItem::Join { left, right, .. } => {
+            from_item_references_table(left, table_name)
+                || from_item_references_table(right, table_name)
+        }
+        FromItem::Values { .. } | FromItem::FunctionCall { .. } => false,
+    }
+}
+
+fn sql_expr_references_table(expr: &SqlExpr, table_name: &str) -> bool {
+    match expr {
+        SqlExpr::Column(_)
+        | SqlExpr::Default
+        | SqlExpr::Const(_)
+        | SqlExpr::IntegerLiteral(_)
+        | SqlExpr::NumericLiteral(_)
+        | SqlExpr::Random
+        | SqlExpr::CurrentDate
+        | SqlExpr::CurrentTime { .. }
+        | SqlExpr::CurrentTimestamp { .. }
+        | SqlExpr::LocalTime { .. }
+        | SqlExpr::LocalTimestamp { .. } => false,
+        SqlExpr::UnaryPlus(inner)
+        | SqlExpr::Negate(inner)
+        | SqlExpr::BitNot(inner)
+        | SqlExpr::PrefixOperator { expr: inner, .. }
+        | SqlExpr::Cast(inner, _)
+        | SqlExpr::IsNull(inner)
+        | SqlExpr::IsNotNull(inner)
+        | SqlExpr::Not(inner)
+        | SqlExpr::FieldSelect { expr: inner, .. } => sql_expr_references_table(inner, table_name),
+        SqlExpr::Add(left, right)
+        | SqlExpr::Sub(left, right)
+        | SqlExpr::BitAnd(left, right)
+        | SqlExpr::BitOr(left, right)
+        | SqlExpr::BitXor(left, right)
+        | SqlExpr::Shl(left, right)
+        | SqlExpr::Shr(left, right)
+        | SqlExpr::Mul(left, right)
+        | SqlExpr::Div(left, right)
+        | SqlExpr::Mod(left, right)
+        | SqlExpr::Concat(left, right)
+        | SqlExpr::Eq(left, right)
+        | SqlExpr::NotEq(left, right)
+        | SqlExpr::Lt(left, right)
+        | SqlExpr::LtEq(left, right)
+        | SqlExpr::Gt(left, right)
+        | SqlExpr::GtEq(left, right)
+        | SqlExpr::RegexMatch(left, right)
+        | SqlExpr::And(left, right)
+        | SqlExpr::Or(left, right)
+        | SqlExpr::IsDistinctFrom(left, right)
+        | SqlExpr::IsNotDistinctFrom(left, right)
+        | SqlExpr::ArrayOverlap(left, right)
+        | SqlExpr::JsonbContains(left, right)
+        | SqlExpr::JsonbContained(left, right)
+        | SqlExpr::JsonbExists(left, right)
+        | SqlExpr::JsonbExistsAny(left, right)
+        | SqlExpr::JsonbExistsAll(left, right)
+        | SqlExpr::JsonbPathExists(left, right)
+        | SqlExpr::JsonbPathMatch(left, right)
+        | SqlExpr::JsonGet(left, right)
+        | SqlExpr::JsonGetText(left, right)
+        | SqlExpr::JsonPath(left, right)
+        | SqlExpr::JsonPathText(left, right)
+        | SqlExpr::GeometryBinaryOp { left, right, .. } => {
+            sql_expr_references_table(left, table_name)
+                || sql_expr_references_table(right, table_name)
+        }
+        SqlExpr::BinaryOperator { left, right, .. } => {
+            sql_expr_references_table(left, table_name)
+                || sql_expr_references_table(right, table_name)
+        }
+        SqlExpr::Subscript { expr, .. } | SqlExpr::GeometryUnaryOp { expr, .. } => {
+            sql_expr_references_table(expr, table_name)
+        }
+        SqlExpr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | SqlExpr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            sql_expr_references_table(expr, table_name)
+                || sql_expr_references_table(pattern, table_name)
+                || escape
+                    .as_ref()
+                    .is_some_and(|expr| sql_expr_references_table(expr, table_name))
+        }
+        SqlExpr::Case {
+            arg,
+            args,
+            defresult,
+        } => {
+            arg.as_ref()
+                .is_some_and(|expr| sql_expr_references_table(expr, table_name))
+                || args.iter().any(|arm| {
+                    sql_expr_references_table(&arm.expr, table_name)
+                        || sql_expr_references_table(&arm.result, table_name)
+                })
+                || defresult
+                    .as_ref()
+                    .is_some_and(|expr| sql_expr_references_table(expr, table_name))
+        }
+        SqlExpr::ArrayLiteral(items) | SqlExpr::Row(items) => items
+            .iter()
+            .any(|item| sql_expr_references_table(item, table_name)),
+        SqlExpr::AggCall { args, .. } | SqlExpr::FuncCall { args, .. } => args
+            .iter()
+            .any(|arg| sql_expr_references_table(&arg.value, table_name)),
+        SqlExpr::ScalarSubquery(subquery) | SqlExpr::Exists(subquery) => {
+            select_statement_references_table(subquery, table_name)
+        }
+        SqlExpr::InSubquery {
+            expr,
+            subquery,
+            negated: _,
+        } => {
+            sql_expr_references_table(expr, table_name)
+                || select_statement_references_table(subquery, table_name)
+        }
+        SqlExpr::QuantifiedSubquery { left, subquery, .. } => {
+            sql_expr_references_table(left, table_name)
+                || select_statement_references_table(subquery, table_name)
+        }
+        SqlExpr::QuantifiedArray { left, array, .. } => {
+            sql_expr_references_table(left, table_name)
+                || sql_expr_references_table(array, table_name)
+        }
+        SqlExpr::ArraySubscript { array, subscripts } => {
+            sql_expr_references_table(array, table_name)
+                || subscripts.iter().any(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .is_some_and(|expr| sql_expr_references_table(expr, table_name))
+                        || subscript
+                            .upper
+                            .as_ref()
+                            .is_some_and(|expr| sql_expr_references_table(expr, table_name))
+                })
+        }
+    }
 }
 
 pub fn bind_create_table(

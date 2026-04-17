@@ -462,6 +462,7 @@ pub enum Path {
         distinct: bool,
         anchor_root: PlannerSubroot,
         recursive_root: PlannerSubroot,
+        recursive_references_worktable: bool,
         anchor_query: Box<Query>,
         recursive_query: Box<Query>,
         output_columns: Vec<QueryColumn>,

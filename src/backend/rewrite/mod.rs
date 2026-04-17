@@ -79,6 +79,8 @@ fn rewrite_query(
                             expanded_views,
                         )?,
                         distinct: recursive_union.distinct,
+                        recursive_references_worktable: recursive_union
+                            .recursive_references_worktable,
                         worktable_id: recursive_union.worktable_id,
                     },
                 ))
