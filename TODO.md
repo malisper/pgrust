@@ -238,6 +238,16 @@ Counts from `/tmp/pgrust_regress_todo_20260417` on 2026-04-17; `test_setup.sql` 
 
 ## Features
 
+- test_setup.sql: emit PostgreSQL-compatible inheritance merge notices for multi-parent `INHERITS` merges like `stud_emp`
+- test_setup.sql: support `CREATE TYPE ... AS ENUM`
+- test_setup.sql: support `CREATE TYPE ... AS RANGE`
+- test_setup.sql: extend `CREATE FUNCTION` parsing to accept unnamed arguments such as `binary_coercible(oid, oid)` and `fipshash(bytea)`
+- test_setup.sql: extend `CREATE FUNCTION` parsing/catalog writes for routine attributes used by upstream setup: `STRICT`, `IMMUTABLE`, `STABLE`, `PARALLEL SAFE`, and `LEAKPROOF`
+- test_setup.sql: support `LANGUAGE sql` functions in addition to the current `LANGUAGE plpgsql` path
+- test_setup.sql: support SQL-standard function bodies like `RETURN substr(...)` without requiring `AS $$...$$`
+- test_setup.sql: add either real `LANGUAGE C` function registration or a narrow compatibility shim for upstream `binary_coercible`
+- test_setup.sql: support `CREATE OPERATOR CLASS` for the hash opclass forms used by upstream setup
+
 ## DONE
 
 - int2.sql
