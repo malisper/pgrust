@@ -301,10 +301,11 @@ Targeted reruns on 2026-04-17:
 ## JSONPath follow-ups
 
 - Done: `jsonb_jsonpath.sql` and `jsonpath.sql` `@?` / `jsonb_path_exists` semantics now return `NULL` for silent evaluation errors and propagate non-silent strict errors.
-- Add missing jsonpath parser support for index lists and computed subscripts:
-  `$[0,1]`, `$[last - 1]`, `$[2.5 - 1 to $.size() - 2]`, `$[last ? (...)]`.
-- Add missing jsonpath expression/forms support:
-  `exists(...)`, method calls like `.size()` and `.type()`, and other currently-rejected valid jsonpath syntax.
+- Done: jsonpath parser/runtime now supports index lists and computed subscripts for
+  `$[0,1]`, `$[last - 1]`, `$[2.5 - 1 to $.size() - 2]`, and `$[last ? (...)]`.
+- In progress: jsonpath expression/forms support.
+  Done: `exists(...)`, `.size()`, and `.type()`.
+  Remaining: other currently-rejected valid jsonpath syntax.
 - In progress: PostgreSQL lax-mode auto-unwrapping for array/scalar access.
   Done: `lax $[0]` on scalar values now matches upstream behavior.
   Done: `lax $[*]` on scalar values now matches upstream behavior.
