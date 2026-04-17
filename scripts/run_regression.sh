@@ -47,6 +47,21 @@ SQL_DIR="$PG_REGRESS/sql"
 EXPECTED_DIR="$PG_REGRESS/expected"
 PG_REGRESS_ABS="$(cd "$PG_REGRESS" && pwd)"
 
+setup_pg_regress_env() {
+    if command -v pg_config >/dev/null 2>&1; then
+        export PG_LIBDIR
+        PG_LIBDIR="$(pg_config --pkglibdir)"
+    fi
+
+    if [[ -z "${PG_DLSUFFIX:-}" ]]; then
+        case "$(uname -s)" in
+            Darwin) export PG_DLSUFFIX=".dylib" ;;
+            MINGW*|MSYS*|CYGWIN*) export PG_DLSUFFIX=".dll" ;;
+            *) export PG_DLSUFFIX=".so" ;;
+        esac
+    fi
+}
+
 PORT=5433
 SKIP_BUILD=false
 SKIP_SERVER=false
@@ -165,6 +180,7 @@ fi
 
 export PGPASSWORD="x"
 export PG_ABS_SRCDIR="$PG_REGRESS_ABS"
+setup_pg_regress_env
 export PGOPTIONS="${PGOPTIONS:+$PGOPTIONS }-c statement_timeout=5s"
 PG_ARGS=(-X -h 127.0.0.1 -p "$PORT" -U postgres -v "abs_srcdir=$PG_REGRESS_ABS")
 
