@@ -40,6 +40,7 @@ use super::expr_numeric::{
     eval_round_function, eval_scale_function, eval_sign_function, eval_sqrt_function,
     eval_trim_scale_function, eval_trunc_function, eval_width_bucket_function,
 };
+use super::expr_range::eval_range_function;
 use super::expr_ops::compare_order_values;
 use super::expr_ops::{
     add_values, bitwise_and_values, bitwise_not_value, bitwise_or_values, bitwise_xor_values,
@@ -308,7 +309,14 @@ fn eval_func_expr(
 ) -> Result<Value, ExecError> {
     match func.implementation {
         ScalarFunctionImpl::Builtin(builtin) => {
-            eval_builtin_function(builtin, &func.args, func.funcvariadic, slot, ctx)
+            eval_builtin_function(
+                builtin,
+                func.funcresulttype,
+                &func.args,
+                func.funcvariadic,
+                slot,
+                ctx,
+            )
         }
         ScalarFunctionImpl::UserDefined { proc_oid } => {
             execute_user_defined_scalar_function(proc_oid, &func.args, slot, ctx)
@@ -678,7 +686,13 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
         },
         Expr::Func(func) => {
             let builtin = builtin_function_for_expr(func.funcid)?;
-            eval_plpgsql_builtin_function(builtin, &func.args, func.funcvariadic, slot)
+            eval_plpgsql_builtin_function(
+                builtin,
+                func.funcresulttype,
+                &func.args,
+                func.funcvariadic,
+                slot,
+            )
         }
         Expr::ScalarArrayOp(saop) => {
             let left_value = eval_plpgsql_expr(&saop.left, slot)?;
@@ -824,6 +838,7 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
 
 fn eval_plpgsql_builtin_function(
     func: BuiltinScalarFunction,
+    result_type: Option<SqlType>,
     args: &[Expr],
     func_variadic: bool,
     slot: &mut TupleSlot,
@@ -833,6 +848,9 @@ fn eval_plpgsql_builtin_function(
         .map(|arg| eval_plpgsql_expr(arg, slot))
         .collect::<Result<Vec<_>, _>>()?;
     if let Some(result) = eval_geometry_function(func, &values) {
+        return result;
+    }
+    if let Some(result) = eval_range_function(func, &values, result_type) {
         return result;
     }
     match func {
@@ -1288,6 +1306,7 @@ fn eval_text_search_builtin_function(
 
 fn eval_builtin_function(
     func: BuiltinScalarFunction,
+    result_type: Option<SqlType>,
     args: &[Expr],
     func_variadic: bool,
     slot: &mut TupleSlot,
@@ -1298,6 +1317,9 @@ fn eval_builtin_function(
         .map(|arg| eval_expr(arg, slot, ctx))
         .collect::<Result<Vec<_>, _>>()?;
     if let Some(result) = eval_geometry_function(func, &values) {
+        return result;
+    }
+    if let Some(result) = eval_range_function(func, &values, result_type) {
         return result;
     }
     if let Some(result) = eval_json_builtin_function(func, &values, func_variadic) {

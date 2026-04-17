@@ -1,0 +1,1104 @@
+use std::cmp::Ordering;
+
+use super::ExecError;
+use super::expr_casts::cast_value;
+use super::expr_datetime::render_datetime_value_text;
+use super::expr_ops::compare_order_values;
+use super::node_types::{BuiltinScalarFunction, RangeBound, RangeTypeId, RangeValue, Value};
+use crate::backend::parser::{SqlType, SqlTypeKind};
+use crate::include::catalog::{
+    RangeCanonicalization, builtin_range_spec, builtin_range_spec_for_sql_type, range_kind_for_sql_type,
+};
+use crate::include::nodes::datetime::{DateADT, TimestampADT, TimestampTzADT};
+
+const RANGE_EMPTY_FLAG: u8 = 0x01;
+const RANGE_LOWER_INC_FLAG: u8 = 0x02;
+const RANGE_UPPER_INC_FLAG: u8 = 0x04;
+const RANGE_LOWER_PRESENT_FLAG: u8 = 0x08;
+const RANGE_UPPER_PRESENT_FLAG: u8 = 0x10;
+
+pub(crate) fn parse_range_text(text: &str, ty: SqlTypeKind) -> Result<Value, ExecError> {
+    let Some(spec) = builtin_range_spec_for_sql_type(SqlType::new(ty)) else {
+        return Err(ExecError::TypeMismatch {
+            op: "::range",
+            left: Value::Text(text.into()),
+            right: Value::Null,
+        });
+    };
+    let trimmed = text.trim();
+    if trimmed.eq_ignore_ascii_case("empty") {
+        return Ok(Value::Range(empty_range(spec.kind)));
+    }
+    if trimmed.len() < 2 {
+        return Err(invalid_range_input(spec.name, text));
+    }
+    let lower_ch = trimmed.as_bytes()[0] as char;
+    let upper_ch = trimmed.as_bytes()[trimmed.len() - 1] as char;
+    if !matches!(lower_ch, '[' | '(') || !matches!(upper_ch, ']' | ')') {
+        return Err(invalid_range_input(spec.name, text));
+    }
+    let (lower_raw, upper_raw) = split_range_body(&trimmed[1..trimmed.len() - 1], spec.name, text)?;
+    let lower = if lower_raw.is_empty() {
+        None
+    } else {
+        Some(parse_range_bound_text(lower_raw, spec.subtype)?)
+    };
+    let upper = if upper_raw.is_empty() {
+        None
+    } else {
+        Some(parse_range_bound_text(upper_raw, spec.subtype)?)
+    };
+    Ok(Value::Range(normalize_range(
+        spec.kind,
+        lower.map(|value| RangeBound {
+            value: Box::new(value),
+            inclusive: lower_ch == '[',
+        }),
+        upper.map(|value| RangeBound {
+            value: Box::new(value),
+            inclusive: upper_ch == ']',
+        }),
+    )?))
+}
+
+pub fn render_range_text(value: &Value) -> Option<String> {
+    let Value::Range(range) = value else {
+        return None;
+    };
+    Some(render_range_value(range))
+}
+
+pub(crate) fn render_range_value(range: &RangeValue) -> String {
+    if range.empty {
+        return "empty".to_string();
+    }
+    let mut out = String::new();
+    out.push(if range.lower.as_ref().is_some_and(|bound| bound.inclusive) {
+        '['
+    } else {
+        '('
+    });
+    if let Some(lower) = &range.lower {
+        out.push_str(&render_bound_text(lower.value.as_ref()));
+    }
+    out.push(',');
+    if let Some(upper) = &range.upper {
+        out.push_str(&render_bound_text(upper.value.as_ref()));
+    }
+    out.push(if range.upper.as_ref().is_some_and(|bound| bound.inclusive) {
+        ']'
+    } else {
+        ')'
+    });
+    out
+}
+
+pub(crate) fn compare_range_values(left: &RangeValue, right: &RangeValue) -> Ordering {
+    match left.kind.cmp(&right.kind) {
+        Ordering::Equal => {}
+        other => return other,
+    }
+    match (left.empty, right.empty) {
+        (true, true) => return Ordering::Equal,
+        (true, false) => return Ordering::Less,
+        (false, true) => return Ordering::Greater,
+        (false, false) => {}
+    }
+    match compare_lower_bounds(left.lower.as_ref(), right.lower.as_ref()) {
+        Ordering::Equal => compare_upper_bounds(left.upper.as_ref(), right.upper.as_ref()),
+        other => other,
+    }
+}
+
+pub(crate) fn encode_range_bytes(range: &RangeValue) -> Result<Vec<u8>, ExecError> {
+    let mut flags = 0u8;
+    if range.empty {
+        flags |= RANGE_EMPTY_FLAG;
+    }
+    if range.lower.as_ref().is_some_and(|bound| bound.inclusive) {
+        flags |= RANGE_LOWER_INC_FLAG;
+    }
+    if range.upper.as_ref().is_some_and(|bound| bound.inclusive) {
+        flags |= RANGE_UPPER_INC_FLAG;
+    }
+    if range.lower.is_some() {
+        flags |= RANGE_LOWER_PRESENT_FLAG;
+    }
+    if range.upper.is_some() {
+        flags |= RANGE_UPPER_PRESENT_FLAG;
+    }
+    let mut out = vec![flags];
+    if let Some(lower) = &range.lower {
+        append_bound_bytes(&mut out, range.kind, lower.value.as_ref())?;
+    }
+    if let Some(upper) = &range.upper {
+        append_bound_bytes(&mut out, range.kind, upper.value.as_ref())?;
+    }
+    Ok(out)
+}
+
+pub(crate) fn decode_range_bytes(kind: RangeTypeId, bytes: &[u8]) -> Result<RangeValue, ExecError> {
+    let Some((&flags, mut rest)) = bytes.split_first() else {
+        return Err(ExecError::InvalidStorageValue {
+            column: "<range>".into(),
+            details: "range payload too short".into(),
+        });
+    };
+    if flags & RANGE_EMPTY_FLAG != 0 {
+        return Ok(empty_range(kind));
+    }
+    let lower = if flags & RANGE_LOWER_PRESENT_FLAG != 0 {
+        let (value, remaining) = take_bound_bytes(kind, rest)?;
+        rest = remaining;
+        Some(RangeBound {
+            value: Box::new(value),
+            inclusive: flags & RANGE_LOWER_INC_FLAG != 0,
+        })
+    } else {
+        None
+    };
+    let upper = if flags & RANGE_UPPER_PRESENT_FLAG != 0 {
+        let (value, remaining) = take_bound_bytes(kind, rest)?;
+        rest = remaining;
+        Some(RangeBound {
+            value: Box::new(value),
+            inclusive: flags & RANGE_UPPER_INC_FLAG != 0,
+        })
+    } else {
+        None
+    };
+    if !rest.is_empty() {
+        return Err(ExecError::InvalidStorageValue {
+            column: "<range>".into(),
+            details: "range payload has trailing bytes".into(),
+        });
+    }
+    normalize_range(kind, lower, upper)
+}
+
+pub(crate) fn eval_range_function(
+    func: BuiltinScalarFunction,
+    values: &[Value],
+    result_type: Option<SqlType>,
+) -> Option<Result<Value, ExecError>> {
+    use BuiltinScalarFunction::*;
+
+    let result = match func {
+        RangeConstructor => eval_range_constructor(values, result_type),
+        RangeIsEmpty => unary_range_bool(values, "isempty", |range| Ok(Value::Bool(range.empty))),
+        RangeLower => unary_range_value(values, "lower", range_lower_value),
+        RangeUpper => unary_range_value(values, "upper", range_upper_value),
+        RangeLowerInc => unary_range_bool(values, "lower_inc", |range| {
+            Ok(Value::Bool(
+                !range.empty && range.lower.as_ref().is_some_and(|bound| bound.inclusive),
+            ))
+        }),
+        RangeUpperInc => unary_range_bool(values, "upper_inc", |range| {
+            Ok(Value::Bool(
+                !range.empty && range.upper.as_ref().is_some_and(|bound| bound.inclusive),
+            ))
+        }),
+        RangeLowerInf => unary_range_bool(values, "lower_inf", |range| {
+            Ok(Value::Bool(!range.empty && range.lower.is_none()))
+        }),
+        RangeUpperInf => unary_range_bool(values, "upper_inf", |range| {
+            Ok(Value::Bool(!range.empty && range.upper.is_none()))
+        }),
+        RangeContains => eval_range_contains(values),
+        RangeContainedBy => eval_range_contained_by(values),
+        RangeOverlap => binary_range_bool(values, "&&", |left, right| {
+            Ok(Value::Bool(range_overlap(left, right)))
+        }),
+        RangeStrictLeft => binary_range_bool(values, "<<", |left, right| {
+            Ok(Value::Bool(range_strict_left(left, right)))
+        }),
+        RangeStrictRight => binary_range_bool(values, ">>", |left, right| {
+            Ok(Value::Bool(range_strict_right(left, right)))
+        }),
+        RangeOverLeft => binary_range_bool(values, "&<", |left, right| {
+            Ok(Value::Bool(compare_upper_bounds(left.upper.as_ref(), right.upper.as_ref()) != Ordering::Greater))
+        }),
+        RangeOverRight => binary_range_bool(values, "&>", |left, right| {
+            Ok(Value::Bool(compare_lower_bounds(left.lower.as_ref(), right.lower.as_ref()) != Ordering::Less))
+        }),
+        RangeAdjacent => binary_range_bool(values, "-|-", |left, right| {
+            Ok(Value::Bool(range_adjacent(left, right)))
+        }),
+        RangeUnion => binary_range_range(values, "+", range_union),
+        RangeIntersect => binary_range_range(values, "*", |left, right| {
+            Ok(range_intersection(left, right))
+        }),
+        RangeDifference => binary_range_range(values, "-", range_difference),
+        RangeMerge => binary_range_range(values, "range_merge", |left, right| {
+            Ok(range_merge(left, right))
+        }),
+        _ => return None,
+    };
+    Some(result)
+}
+
+pub(crate) fn range_intersection_agg_transition(
+    current: Option<Value>,
+    input: &Value,
+) -> Result<Option<Value>, ExecError> {
+    if matches!(input, Value::Null) {
+        return Ok(current);
+    }
+    match current {
+        None => Ok(Some(input.to_owned_value())),
+        Some(existing) => match (&existing, input) {
+            (Value::Range(left), Value::Range(right)) if left.kind == right.kind => {
+                Ok(Some(Value::Range(range_intersection(left, right))))
+            }
+            _ => Err(ExecError::TypeMismatch {
+                op: "range_intersect_agg",
+                left: existing,
+                right: input.clone(),
+            }),
+        },
+    }
+}
+
+fn eval_range_constructor(values: &[Value], result_type: Option<SqlType>) -> Result<Value, ExecError> {
+    let kind = if let Some(kind) = result_type.and_then(range_kind_for_sql_type) {
+        kind
+    } else {
+        values
+            .iter()
+            .find_map(|value| range_kind_for_scalar_value(value))
+            .ok_or_else(|| ExecError::DetailedError {
+                message: "could not determine range type".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42804",
+            })?
+    };
+    let (lower_inc, upper_inc) = match values {
+        [_, _] => (true, false),
+        [_, _, Value::Null] => {
+            return Err(ExecError::DetailedError {
+                message: "range constructor flags argument must not be null".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "22004",
+            });
+        }
+        [_, _, flags] => parse_range_flags(flags)?,
+        _ => {
+            return Err(ExecError::TypeMismatch {
+                op: "range constructor",
+                left: values.first().cloned().unwrap_or(Value::Null),
+                right: values.get(1).cloned().unwrap_or(Value::Null),
+            });
+        }
+    };
+    let lower = values.first().and_then(value_to_constructor_bound).map(|value| RangeBound {
+        value: Box::new(value),
+        inclusive: lower_inc,
+    });
+    let upper = values.get(1).and_then(value_to_constructor_bound).map(|value| RangeBound {
+        value: Box::new(value),
+        inclusive: upper_inc,
+    });
+    Ok(Value::Range(normalize_range(kind, lower, upper)?))
+}
+
+fn value_to_constructor_bound(value: &Value) -> Option<Value> {
+    (!matches!(value, Value::Null)).then(|| value.to_owned_value())
+}
+
+fn range_lower_value(range: &RangeValue) -> Result<Value, ExecError> {
+    Ok(match &range.lower {
+        Some(bound) if !range.empty => bound.value.to_owned_value(),
+        _ => Value::Null,
+    })
+}
+
+fn range_upper_value(range: &RangeValue) -> Result<Value, ExecError> {
+    Ok(match &range.upper {
+        Some(bound) if !range.empty => bound.value.to_owned_value(),
+        _ => Value::Null,
+    })
+}
+
+fn eval_range_contains(values: &[Value]) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
+        [Value::Range(left), Value::Range(right)] => {
+            ensure_same_range_kind("@>", left, right)?;
+            Ok(Value::Bool(range_contains_range(left, right)))
+        }
+        [Value::Range(range), value] => Ok(Value::Bool(range_contains_element(range, value)?)),
+        [left, right] => Err(ExecError::TypeMismatch {
+            op: "@>",
+            left: left.clone(),
+            right: right.clone(),
+        }),
+        _ => unreachable!(),
+    }
+}
+
+fn eval_range_contained_by(values: &[Value]) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
+        [Value::Range(left), Value::Range(right)] => {
+            ensure_same_range_kind("<@", left, right)?;
+            Ok(Value::Bool(range_contains_range(right, left)))
+        }
+        [value, Value::Range(range)] => Ok(Value::Bool(range_contains_element(range, value)?)),
+        [left, right] => Err(ExecError::TypeMismatch {
+            op: "<@",
+            left: left.clone(),
+            right: right.clone(),
+        }),
+        _ => unreachable!(),
+    }
+}
+
+fn unary_range_bool(
+    values: &[Value],
+    op: &'static str,
+    f: impl FnOnce(&RangeValue) -> Result<Value, ExecError>,
+) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null] => Ok(Value::Null),
+        [Value::Range(range)] => f(range),
+        [value] => Err(ExecError::TypeMismatch {
+            op,
+            left: value.clone(),
+            right: Value::Null,
+        }),
+        _ => unreachable!(),
+    }
+}
+
+fn unary_range_value(
+    values: &[Value],
+    op: &'static str,
+    f: impl FnOnce(&RangeValue) -> Result<Value, ExecError>,
+) -> Result<Value, ExecError> {
+    unary_range_bool(values, op, f)
+}
+
+fn binary_range_bool(
+    values: &[Value],
+    op: &'static str,
+    f: impl FnOnce(&RangeValue, &RangeValue) -> Result<Value, ExecError>,
+) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
+        [Value::Range(left), Value::Range(right)] => {
+            ensure_same_range_kind(op, left, right)?;
+            f(left, right)
+        }
+        [left, right] => Err(ExecError::TypeMismatch {
+            op,
+            left: left.clone(),
+            right: right.clone(),
+        }),
+        _ => unreachable!(),
+    }
+}
+
+fn binary_range_range(
+    values: &[Value],
+    op: &'static str,
+    f: impl FnOnce(&RangeValue, &RangeValue) -> Result<RangeValue, ExecError>,
+) -> Result<Value, ExecError> {
+    binary_range_bool(values, op, |left, right| Ok(Value::Range(f(left, right)?)))
+}
+
+pub(crate) fn normalize_range(
+    kind: RangeTypeId,
+    mut lower: Option<RangeBound>,
+    mut upper: Option<RangeBound>,
+) -> Result<RangeValue, ExecError> {
+    if lower.is_none() {
+        if let Some(bound) = &mut lower {
+            bound.inclusive = false;
+        }
+    }
+    if upper.is_none() {
+        if let Some(bound) = &mut upper {
+            bound.inclusive = false;
+        }
+    }
+    let spec = builtin_range_spec(kind);
+    if matches!(spec.canonicalization, RangeCanonicalization::Discrete) {
+        if let Some(bound) = &mut lower
+            && !bound.inclusive
+        {
+            *bound.value = successor_value(kind, bound.value.as_ref())?;
+            bound.inclusive = true;
+        }
+        if let Some(bound) = &mut upper
+            && bound.inclusive
+        {
+            *bound.value = successor_value(kind, bound.value.as_ref())?;
+            bound.inclusive = false;
+        }
+    }
+    if let (Some(lower_bound), Some(upper_bound)) = (&lower, &upper) {
+        match compare_scalar_values(lower_bound.value.as_ref(), upper_bound.value.as_ref()) {
+            Ordering::Greater => return Err(range_bounds_error(spec.name)),
+            Ordering::Equal => {
+                let non_empty = match spec.canonicalization {
+                    RangeCanonicalization::Discrete => false,
+                    RangeCanonicalization::Continuous => {
+                        lower_bound.inclusive && upper_bound.inclusive
+                    }
+                };
+                if !non_empty {
+                    return Ok(empty_range(kind));
+                }
+            }
+            Ordering::Less => {}
+        }
+    }
+    Ok(RangeValue {
+        kind,
+        empty: false,
+        lower,
+        upper,
+    })
+}
+
+pub(crate) fn empty_range(kind: RangeTypeId) -> RangeValue {
+    RangeValue {
+        kind,
+        empty: true,
+        lower: None,
+        upper: None,
+    }
+}
+
+fn range_contains_range(left: &RangeValue, right: &RangeValue) -> bool {
+    if right.empty {
+        return true;
+    }
+    if left.empty {
+        return false;
+    }
+    compare_lower_bounds(left.lower.as_ref(), right.lower.as_ref()) != Ordering::Greater
+        && compare_upper_bounds(left.upper.as_ref(), right.upper.as_ref()) != Ordering::Less
+}
+
+fn range_contains_element(range: &RangeValue, value: &Value) -> Result<bool, ExecError> {
+    ensure_range_subtype(range, value)?;
+    if range.empty {
+        return Ok(false);
+    }
+    if let Some(lower) = &range.lower {
+        match compare_scalar_values(value, lower.value.as_ref()) {
+            Ordering::Less => return Ok(false),
+            Ordering::Equal if !lower.inclusive => return Ok(false),
+            _ => {}
+        }
+    }
+    if let Some(upper) = &range.upper {
+        match compare_scalar_values(value, upper.value.as_ref()) {
+            Ordering::Greater => return Ok(false),
+            Ordering::Equal if !upper.inclusive => return Ok(false),
+            _ => {}
+        }
+    }
+    Ok(true)
+}
+
+fn range_overlap(left: &RangeValue, right: &RangeValue) -> bool {
+    if left.empty || right.empty {
+        return false;
+    }
+    cmp_upper_to_lower(left.upper.as_ref(), right.lower.as_ref()) != Ordering::Less
+        && cmp_upper_to_lower(right.upper.as_ref(), left.lower.as_ref()) != Ordering::Less
+}
+
+fn range_adjacent(left: &RangeValue, right: &RangeValue) -> bool {
+    if left.empty || right.empty {
+        return false;
+    }
+    bounds_adjacent(left.upper.as_ref(), right.lower.as_ref())
+        || bounds_adjacent(right.upper.as_ref(), left.lower.as_ref())
+}
+
+fn range_strict_left(left: &RangeValue, right: &RangeValue) -> bool {
+    !left.empty && !right.empty && cmp_upper_to_lower(left.upper.as_ref(), right.lower.as_ref()) == Ordering::Less
+}
+
+fn range_strict_right(left: &RangeValue, right: &RangeValue) -> bool {
+    range_strict_left(right, left)
+}
+
+fn range_intersection(left: &RangeValue, right: &RangeValue) -> RangeValue {
+    if !range_overlap(left, right) {
+        return empty_range(left.kind);
+    }
+    let lower = max_lower_bound(left.lower.as_ref(), right.lower.as_ref());
+    let upper = min_upper_bound(left.upper.as_ref(), right.upper.as_ref());
+    normalize_range(left.kind, lower, upper).unwrap_or_else(|_| empty_range(left.kind))
+}
+
+fn range_merge(left: &RangeValue, right: &RangeValue) -> RangeValue {
+    if left.empty {
+        return right.clone();
+    }
+    if right.empty {
+        return left.clone();
+    }
+    RangeValue {
+        kind: left.kind,
+        empty: false,
+        lower: min_lower_bound(left.lower.as_ref(), right.lower.as_ref()),
+        upper: max_upper_bound(left.upper.as_ref(), right.upper.as_ref()),
+    }
+}
+
+fn range_union(left: &RangeValue, right: &RangeValue) -> Result<RangeValue, ExecError> {
+    if !range_overlap(left, right) && !range_adjacent(left, right) {
+        return Err(ExecError::DetailedError {
+            message: "result of range union would not be contiguous".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22000",
+        });
+    }
+    Ok(range_merge(left, right))
+}
+
+fn range_difference(left: &RangeValue, right: &RangeValue) -> Result<RangeValue, ExecError> {
+    if left.empty || right.empty || !range_overlap(left, right) {
+        return Ok(left.clone());
+    }
+    if range_contains_range(right, left) {
+        return Ok(empty_range(left.kind));
+    }
+    let left_piece = if compare_lower_bounds(left.lower.as_ref(), right.lower.as_ref()) == Ordering::Less
+    {
+        Some(normalize_range(
+            left.kind,
+            left.lower.clone(),
+            right.lower.as_ref().map(toggle_lower_to_upper_bound),
+        )?)
+    } else {
+        None
+    };
+    let right_piece = if compare_upper_bounds(left.upper.as_ref(), right.upper.as_ref()) == Ordering::Greater
+    {
+        Some(normalize_range(
+            left.kind,
+            right.upper.as_ref().map(toggle_upper_to_lower_bound),
+            left.upper.clone(),
+        )?)
+    } else {
+        None
+    };
+    let left_non_empty = left_piece.as_ref().is_some_and(|range| !range.empty);
+    let right_non_empty = right_piece.as_ref().is_some_and(|range| !range.empty);
+    if left_non_empty && right_non_empty {
+        return Err(ExecError::DetailedError {
+            message: "result of range difference would not be contiguous".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22000",
+        });
+    }
+    if let Some(range) = left_piece
+        && !range.empty
+    {
+        return Ok(range);
+    }
+    if let Some(range) = right_piece
+        && !range.empty
+    {
+        return Ok(range);
+    }
+    Ok(empty_range(left.kind))
+}
+
+fn toggle_lower_to_upper_bound(bound: &RangeBound) -> RangeBound {
+    RangeBound {
+        value: bound.value.clone(),
+        inclusive: !bound.inclusive,
+    }
+}
+
+fn toggle_upper_to_lower_bound(bound: &RangeBound) -> RangeBound {
+    RangeBound {
+        value: bound.value.clone(),
+        inclusive: !bound.inclusive,
+    }
+}
+
+fn min_lower_bound(left: Option<&RangeBound>, right: Option<&RangeBound>) -> Option<RangeBound> {
+    match compare_lower_bounds(left, right) {
+        Ordering::Greater => right.cloned(),
+        _ => left.cloned(),
+    }
+}
+
+fn max_lower_bound(left: Option<&RangeBound>, right: Option<&RangeBound>) -> Option<RangeBound> {
+    match compare_lower_bounds(left, right) {
+        Ordering::Less => right.cloned(),
+        _ => left.cloned(),
+    }
+}
+
+fn min_upper_bound(left: Option<&RangeBound>, right: Option<&RangeBound>) -> Option<RangeBound> {
+    match compare_upper_bounds(left, right) {
+        Ordering::Greater => right.cloned(),
+        _ => left.cloned(),
+    }
+}
+
+fn max_upper_bound(left: Option<&RangeBound>, right: Option<&RangeBound>) -> Option<RangeBound> {
+    match compare_upper_bounds(left, right) {
+        Ordering::Less => right.cloned(),
+        _ => left.cloned(),
+    }
+}
+
+fn compare_lower_bounds(left: Option<&RangeBound>, right: Option<&RangeBound>) -> Ordering {
+    match (left, right) {
+        (None, None) => Ordering::Equal,
+        (None, Some(_)) => Ordering::Less,
+        (Some(_), None) => Ordering::Greater,
+        (Some(left), Some(right)) => match compare_scalar_values(left.value.as_ref(), right.value.as_ref()) {
+            Ordering::Equal => match (left.inclusive, right.inclusive) {
+                (true, false) => Ordering::Less,
+                (false, true) => Ordering::Greater,
+                _ => Ordering::Equal,
+            },
+            other => other,
+        },
+    }
+}
+
+fn compare_upper_bounds(left: Option<&RangeBound>, right: Option<&RangeBound>) -> Ordering {
+    match (left, right) {
+        (None, None) => Ordering::Equal,
+        (None, Some(_)) => Ordering::Greater,
+        (Some(_), None) => Ordering::Less,
+        (Some(left), Some(right)) => match compare_scalar_values(left.value.as_ref(), right.value.as_ref()) {
+            Ordering::Equal => match (left.inclusive, right.inclusive) {
+                (true, false) => Ordering::Greater,
+                (false, true) => Ordering::Less,
+                _ => Ordering::Equal,
+            },
+            other => other,
+        },
+    }
+}
+
+fn cmp_upper_to_lower(upper: Option<&RangeBound>, lower: Option<&RangeBound>) -> Ordering {
+    match (upper, lower) {
+        (None, _) => Ordering::Greater,
+        (Some(_), None) => Ordering::Greater,
+        (Some(upper), Some(lower)) => {
+            match compare_scalar_values(upper.value.as_ref(), lower.value.as_ref()) {
+                Ordering::Equal => {
+                    if upper.inclusive && lower.inclusive {
+                        Ordering::Greater
+                    } else {
+                        Ordering::Less
+                    }
+                }
+                other => other,
+            }
+        }
+    }
+}
+
+fn bounds_adjacent(upper: Option<&RangeBound>, lower: Option<&RangeBound>) -> bool {
+    match (upper, lower) {
+        (Some(upper), Some(lower))
+            if compare_scalar_values(upper.value.as_ref(), lower.value.as_ref()) == Ordering::Equal =>
+        {
+            upper.inclusive != lower.inclusive
+        }
+        _ => false,
+    }
+}
+
+fn compare_scalar_values(left: &Value, right: &Value) -> Ordering {
+    compare_order_values(left, right, Some(false), false)
+}
+
+fn ensure_same_range_kind(
+    op: &'static str,
+    left: &RangeValue,
+    right: &RangeValue,
+) -> Result<(), ExecError> {
+    if left.kind == right.kind {
+        Ok(())
+    } else {
+        Err(ExecError::TypeMismatch {
+            op,
+            left: Value::Range(left.clone()),
+            right: Value::Range(right.clone()),
+        })
+    }
+}
+
+fn ensure_range_subtype(range: &RangeValue, value: &Value) -> Result<(), ExecError> {
+    let matches = match (range.kind, value) {
+        (RangeTypeId::Int4Range, Value::Int32(_)) => true,
+        (RangeTypeId::Int8Range, Value::Int64(_)) => true,
+        (RangeTypeId::NumericRange, Value::Numeric(_)) => true,
+        (RangeTypeId::DateRange, Value::Date(_)) => true,
+        (RangeTypeId::TimestampRange, Value::Timestamp(_)) => true,
+        (RangeTypeId::TimestampTzRange, Value::TimestampTz(_)) => true,
+        _ => false,
+    };
+    if matches {
+        Ok(())
+    } else {
+        Err(ExecError::TypeMismatch {
+            op: "range subtype",
+            left: Value::Range(range.clone()),
+            right: value.clone(),
+        })
+    }
+}
+
+fn range_kind_for_scalar_value(value: &Value) -> Option<RangeTypeId> {
+    match value {
+        Value::Range(range) => Some(range.kind),
+        Value::Int32(_) => Some(RangeTypeId::Int4Range),
+        Value::Int64(_) => Some(RangeTypeId::Int8Range),
+        Value::Numeric(_) => Some(RangeTypeId::NumericRange),
+        Value::Date(_) => Some(RangeTypeId::DateRange),
+        Value::Timestamp(_) => Some(RangeTypeId::TimestampRange),
+        Value::TimestampTz(_) => Some(RangeTypeId::TimestampTzRange),
+        _ => None,
+    }
+}
+
+fn successor_value(kind: RangeTypeId, value: &Value) -> Result<Value, ExecError> {
+    match (kind, value) {
+        (RangeTypeId::Int4Range, Value::Int32(v)) => v
+            .checked_add(1)
+            .map(Value::Int32)
+            .ok_or_else(range_bound_overflow),
+        (RangeTypeId::Int8Range, Value::Int64(v)) => v
+            .checked_add(1)
+            .map(Value::Int64)
+            .ok_or_else(range_bound_overflow),
+        (RangeTypeId::DateRange, Value::Date(v)) => v
+            .0
+            .checked_add(1)
+            .map(|days| Value::Date(DateADT(days)))
+            .ok_or_else(range_bound_overflow),
+        _ => Err(ExecError::TypeMismatch {
+            op: "range canonicalization",
+            left: value.clone(),
+            right: Value::Null,
+        }),
+    }
+}
+
+fn append_bound_bytes(out: &mut Vec<u8>, kind: RangeTypeId, value: &Value) -> Result<(), ExecError> {
+    let bytes = encode_bound_value(kind, value)?;
+    out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+    out.extend_from_slice(&bytes);
+    Ok(())
+}
+
+fn take_bound_bytes<'a>(
+    kind: RangeTypeId,
+    bytes: &'a [u8],
+) -> Result<(Value, &'a [u8]), ExecError> {
+    if bytes.len() < 4 {
+        return Err(ExecError::InvalidStorageValue {
+            column: "<range>".into(),
+            details: "range bound length missing".into(),
+        });
+    }
+    let len = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
+    if bytes.len() < 4 + len {
+        return Err(ExecError::InvalidStorageValue {
+            column: "<range>".into(),
+            details: "range bound payload truncated".into(),
+        });
+    }
+    let value = decode_bound_value(kind, &bytes[4..4 + len])?;
+    Ok((value, &bytes[4 + len..]))
+}
+
+fn encode_bound_value(kind: RangeTypeId, value: &Value) -> Result<Vec<u8>, ExecError> {
+    ensure_range_subtype(
+        &RangeValue {
+            kind,
+            empty: false,
+            lower: None,
+            upper: None,
+        },
+        value,
+    )?;
+    Ok(match value {
+        Value::Int32(v) => v.to_le_bytes().to_vec(),
+        Value::Int64(v) => v.to_le_bytes().to_vec(),
+        Value::Numeric(v) => v.render().into_bytes(),
+        Value::Date(v) => v.0.to_le_bytes().to_vec(),
+        Value::Timestamp(v) => v.0.to_le_bytes().to_vec(),
+        Value::TimestampTz(v) => v.0.to_le_bytes().to_vec(),
+        other => {
+            return Err(ExecError::TypeMismatch {
+                op: "range encoding",
+                left: other.clone(),
+                right: Value::Null,
+            });
+        }
+    })
+}
+
+fn decode_bound_value(kind: RangeTypeId, bytes: &[u8]) -> Result<Value, ExecError> {
+    match kind {
+        RangeTypeId::Int4Range if bytes.len() == 4 => {
+            Ok(Value::Int32(i32::from_le_bytes(bytes.try_into().unwrap())))
+        }
+        RangeTypeId::Int8Range if bytes.len() == 8 => {
+            Ok(Value::Int64(i64::from_le_bytes(bytes.try_into().unwrap())))
+        }
+        RangeTypeId::NumericRange => {
+            let text = std::str::from_utf8(bytes).map_err(|_| ExecError::InvalidStorageValue {
+                column: "<range>".into(),
+                details: "numeric range bound is not utf8".into(),
+            })?;
+            Ok(cast_value(Value::Text(text.into()), SqlType::new(SqlTypeKind::Numeric))?)
+        }
+        RangeTypeId::DateRange if bytes.len() == 4 => {
+            Ok(Value::Date(DateADT(i32::from_le_bytes(bytes.try_into().unwrap()))))
+        }
+        RangeTypeId::TimestampRange if bytes.len() == 8 => Ok(Value::Timestamp(TimestampADT(
+            i64::from_le_bytes(bytes.try_into().unwrap()),
+        ))),
+        RangeTypeId::TimestampTzRange if bytes.len() == 8 => Ok(Value::TimestampTz(
+            TimestampTzADT(i64::from_le_bytes(bytes.try_into().unwrap())),
+        )),
+        _ => Err(ExecError::InvalidStorageValue {
+            column: "<range>".into(),
+            details: "range bound payload has wrong length".into(),
+        }),
+    }
+}
+
+fn split_range_body<'a>(
+    body: &'a str,
+    ty: &'static str,
+    original: &str,
+) -> Result<(&'a str, &'a str), ExecError> {
+    let bytes = body.as_bytes();
+    let mut idx = 0usize;
+    let mut in_quotes = false;
+    while idx < bytes.len() {
+        match bytes[idx] as char {
+            '\\' => idx += 2,
+            '"' => {
+                in_quotes = !in_quotes;
+                idx += 1;
+            }
+            ',' if !in_quotes => return Ok((&body[..idx], &body[idx + 1..])),
+            _ => idx += 1,
+        }
+    }
+    Err(invalid_range_input(ty, original))
+}
+
+fn parse_range_bound_text(text: &str, subtype: SqlType) -> Result<Value, ExecError> {
+    let decoded = decode_range_bound_text(text);
+    cast_value(Value::Text(decoded.into()), subtype)
+}
+
+fn decode_range_bound_text(text: &str) -> String {
+    let trimmed = text.trim();
+    if !trimmed.starts_with('"') {
+        return trimmed.to_string();
+    }
+    let inner = &trimmed[1..trimmed.len().saturating_sub(1)];
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            if let Some(next) = chars.next() {
+                out.push(next);
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn render_bound_text(value: &Value) -> String {
+    let raw = match value {
+        Value::Int32(v) => v.to_string(),
+        Value::Int64(v) => v.to_string(),
+        Value::Numeric(v) => v.render(),
+        Value::Date(_)
+        | Value::Timestamp(_)
+        | Value::TimestampTz(_) => render_datetime_value_text(value).unwrap_or_default(),
+        other => other.as_text().unwrap_or_default().to_string(),
+    };
+    if needs_range_quotes(&raw) {
+        let escaped = raw.replace('\\', "\\\\").replace('"', "\\\"");
+        format!("\"{escaped}\"")
+    } else {
+        raw
+    }
+}
+
+fn needs_range_quotes(text: &str) -> bool {
+    text.is_empty()
+        || text
+            .chars()
+            .any(|ch| matches!(ch, '"' | '\\' | '[' | ']' | '(' | ')' | ',' | ' ') || ch.is_ascii_whitespace())
+}
+
+fn parse_range_flags(value: &Value) -> Result<(bool, bool), ExecError> {
+    let text = value.as_text().ok_or_else(|| ExecError::TypeMismatch {
+        op: "range flags",
+        left: value.clone(),
+        right: Value::Text("".into()),
+    })?;
+    match text {
+        "[)" => Ok((true, false)),
+        "[]" => Ok((true, true)),
+        "(]" => Ok((false, true)),
+        "()" => Ok((false, false)),
+        _ => Err(ExecError::DetailedError {
+            message: "range constructor flags argument must be one of \"()\", \"(]\", \"[)\", or \"[]\"".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22023",
+        }),
+    }
+}
+
+fn invalid_range_input(ty: &'static str, value: &str) -> ExecError {
+    ExecError::InvalidRangeInput {
+        ty,
+        value: value.to_string(),
+    }
+}
+
+fn range_bounds_error(_ty: &'static str) -> ExecError {
+    ExecError::DetailedError {
+        message: "range lower bound must be less than or equal to range upper bound".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "22000",
+    }
+}
+
+fn range_bound_overflow() -> ExecError {
+    ExecError::DetailedError {
+        message: "range bound value out of range".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "22003",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::include::nodes::datum::NumericValue;
+
+    #[test]
+    fn int4_range_canonicalizes_closed_upper() {
+        let range = normalize_range(
+            RangeTypeId::Int4Range,
+            Some(RangeBound {
+                value: Box::new(Value::Int32(1)),
+                inclusive: true,
+            }),
+            Some(RangeBound {
+                value: Box::new(Value::Int32(10)),
+                inclusive: true,
+            }),
+        )
+        .unwrap();
+        assert_eq!(render_range_value(&range), "[1,11)");
+    }
+
+    #[test]
+    fn numrange_equal_closed_bounds_is_non_empty() {
+        let range = normalize_range(
+            RangeTypeId::NumericRange,
+            Some(RangeBound {
+                value: Box::new(Value::Numeric(NumericValue::from("1.7"))),
+                inclusive: true,
+            }),
+            Some(RangeBound {
+                value: Box::new(Value::Numeric(NumericValue::from("1.7"))),
+                inclusive: true,
+            }),
+        )
+        .unwrap();
+        assert!(!range.empty);
+    }
+
+    #[test]
+    fn numrange_equal_half_open_bounds_is_empty() {
+        let range = normalize_range(
+            RangeTypeId::NumericRange,
+            Some(RangeBound {
+                value: Box::new(Value::Numeric(NumericValue::from("1.7"))),
+                inclusive: true,
+            }),
+            Some(RangeBound {
+                value: Box::new(Value::Numeric(NumericValue::from("1.7"))),
+                inclusive: false,
+            }),
+        )
+        .unwrap();
+        assert!(range.empty);
+    }
+
+    #[test]
+    fn parse_and_render_timestamp_range_quotes_bounds() {
+        let value = parse_range_text("[\"2000-01-01 00:00:00\",\"2000-01-02 00:00:00\")", SqlTypeKind::TimestampRange)
+            .unwrap();
+        assert_eq!(
+            render_range_text(&value).unwrap(),
+            "[\"2000-01-01 00:00:00\",\"2000-01-02 00:00:00\")"
+        );
+    }
+
+    #[test]
+    fn empty_range_sorts_before_non_empty() {
+        let empty = empty_range(RangeTypeId::Int4Range);
+        let non_empty = normalize_range(
+            RangeTypeId::Int4Range,
+            Some(RangeBound {
+                value: Box::new(Value::Int32(1)),
+                inclusive: true,
+            }),
+            Some(RangeBound {
+                value: Box::new(Value::Int32(4)),
+                inclusive: false,
+            }),
+        )
+        .unwrap();
+        assert_eq!(compare_range_values(&empty, &non_empty), Ordering::Less);
+    }
+
+    #[test]
+    fn range_binary_storage_round_trips() {
+        let range = normalize_range(
+            RangeTypeId::Int4Range,
+            Some(RangeBound {
+                value: Box::new(Value::Int32(1)),
+                inclusive: true,
+            }),
+            Some(RangeBound {
+                value: Box::new(Value::Int32(10)),
+                inclusive: true,
+            }),
+        )
+        .unwrap();
+        let encoded = encode_range_bytes(&range).unwrap();
+        let decoded = decode_range_bytes(RangeTypeId::Int4Range, &encoded).unwrap();
+        assert_eq!(decoded, range);
+    }
+}

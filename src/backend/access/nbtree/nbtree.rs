@@ -145,7 +145,8 @@ fn encode_index_value(
         | Value::Line(_)
         | Value::Box(_)
         | Value::Polygon(_)
-        | Value::Circle(_) => Err(CatalogError::Io(format!(
+        | Value::Circle(_)
+        | Value::Range(_) => Err(CatalogError::Io(format!(
             "unsupported index key type {:?}",
             sql_type.kind
         ))),

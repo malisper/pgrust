@@ -1,5 +1,5 @@
 use super::*;
-use crate::include::catalog::{ANYOID, RECORD_TYPE_OID};
+use crate::include::catalog::{ANYOID, RECORD_TYPE_OID, builtin_range_spec_for_sql_type};
 
 pub(super) fn bind_row_to_json_call(
     name: &str,
@@ -2248,6 +2248,53 @@ pub(super) fn bind_scalar_function_call(
                     ),
                 ],
             ))
+        }
+        BuiltinScalarFunction::RangeConstructor
+        | BuiltinScalarFunction::RangeIsEmpty
+        | BuiltinScalarFunction::RangeLower
+        | BuiltinScalarFunction::RangeUpper
+        | BuiltinScalarFunction::RangeLowerInc
+        | BuiltinScalarFunction::RangeUpperInc
+        | BuiltinScalarFunction::RangeLowerInf
+        | BuiltinScalarFunction::RangeUpperInf
+        | BuiltinScalarFunction::RangeContains
+        | BuiltinScalarFunction::RangeContainedBy
+        | BuiltinScalarFunction::RangeOverlap
+        | BuiltinScalarFunction::RangeStrictLeft
+        | BuiltinScalarFunction::RangeStrictRight
+        | BuiltinScalarFunction::RangeOverLeft
+        | BuiltinScalarFunction::RangeOverRight
+        | BuiltinScalarFunction::RangeAdjacent
+        | BuiltinScalarFunction::RangeUnion
+        | BuiltinScalarFunction::RangeIntersect
+        | BuiltinScalarFunction::RangeDifference
+        | BuiltinScalarFunction::RangeMerge => {
+            let fallback_declared = if !declared_arg_types.is_empty() {
+                declared_arg_types.to_vec()
+            } else if matches!(func, BuiltinScalarFunction::RangeConstructor) {
+                let spec = result_type
+                    .and_then(builtin_range_spec_for_sql_type)
+                    .ok_or_else(|| ParseError::UnexpectedToken {
+                        expected: "range constructor with a concrete range return type",
+                        actual: format!("{func:?}"),
+                    })?;
+                let mut types = vec![spec.subtype, spec.subtype];
+                if args.len() == 3 {
+                    types.push(SqlType::new(SqlTypeKind::Text));
+                }
+                types
+            } else {
+                arg_types.clone()
+            };
+            let coerced = bound_args
+                .into_iter()
+                .zip(arg_types)
+                .zip(fallback_declared.into_iter())
+                .map(|((arg, actual_type), declared_type)| {
+                    coerce_bound_expr(arg, actual_type, declared_type)
+                })
+                .collect();
+            Ok(build_func(func_variadic, coerced))
         }
         _ => Ok(build_func(func_variadic, rewritten_bound_args)),
     }

@@ -43,6 +43,7 @@ fn type_maximum_size(column: &crate::backend::executor::ColumnDesc) -> Option<us
         crate::backend::parser::SqlTypeKind::Name => Some(64 + crate::include::varatt::VARHDRSZ),
         crate::backend::parser::SqlTypeKind::InternalChar => Some(2),
         crate::backend::parser::SqlTypeKind::Date
+        | crate::backend::parser::SqlTypeKind::DateRange
         | crate::backend::parser::SqlTypeKind::Time
         | crate::backend::parser::SqlTypeKind::TimeTz
         | crate::backend::parser::SqlTypeKind::Timestamp
@@ -78,6 +79,11 @@ fn type_maximum_size(column: &crate::backend::executor::ColumnDesc) -> Option<us
         | crate::backend::parser::SqlTypeKind::Path
         | crate::backend::parser::SqlTypeKind::Polygon
         | crate::backend::parser::SqlTypeKind::Numeric
+        | crate::backend::parser::SqlTypeKind::Int4Range
+        | crate::backend::parser::SqlTypeKind::Int8Range
+        | crate::backend::parser::SqlTypeKind::NumericRange
+        | crate::backend::parser::SqlTypeKind::TimestampRange
+        | crate::backend::parser::SqlTypeKind::TimestampTzRange
         | crate::backend::parser::SqlTypeKind::Json
         | crate::backend::parser::SqlTypeKind::Jsonb
         | crate::backend::parser::SqlTypeKind::JsonPath

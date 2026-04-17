@@ -726,6 +726,7 @@ fn render_raise_value(value: &Value) -> String {
             crate::backend::executor::render_geometry_text(value, Default::default())
                 .unwrap_or_default()
         }
+        Value::Range(_) => crate::backend::executor::render_range_text(value).unwrap_or_default(),
         Value::Array(values) => {
             let elems = values.iter().map(render_raise_value).collect::<Vec<_>>();
             format!("{{{}}}", elems.join(","))

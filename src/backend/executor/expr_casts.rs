@@ -11,6 +11,7 @@ use super::expr_json::{canonicalize_jsonpath_text, validate_json_text};
 use super::expr_money::{
     money_format_text, money_from_float, money_numeric_text, money_parse_text,
 };
+use super::expr_range::{parse_range_text, render_range_text};
 use super::node_types::*;
 use crate::backend::executor::jsonb::{parse_jsonb_text, render_jsonb_bytes};
 use crate::backend::parser::{SqlType, SqlTypeKind, parse_type_name};
@@ -1179,9 +1180,13 @@ pub(crate) fn cast_value_with_config(
                 kind:
                     SqlTypeKind::Text
                     | SqlTypeKind::Name
+                    | SqlTypeKind::Int4Range
+                    | SqlTypeKind::Int8Range
                     | SqlTypeKind::Int2Vector
+                    | SqlTypeKind::NumericRange
                     | SqlTypeKind::OidVector
                     | SqlTypeKind::Date
+                    | SqlTypeKind::DateRange
                     | SqlTypeKind::Time
                     | SqlTypeKind::TimeTz
                     | SqlTypeKind::Point
@@ -1192,7 +1197,9 @@ pub(crate) fn cast_value_with_config(
                     | SqlTypeKind::Line
                     | SqlTypeKind::Circle
                     | SqlTypeKind::Timestamp
+                    | SqlTypeKind::TimestampRange
                     | SqlTypeKind::TimestampTz
+                    | SqlTypeKind::TimestampTzRange
                     | SqlTypeKind::PgNodeTree
                     | SqlTypeKind::InternalChar
                     | SqlTypeKind::Bit
@@ -1272,9 +1279,13 @@ pub(crate) fn cast_value_with_config(
                 kind:
                     SqlTypeKind::Text
                     | SqlTypeKind::Name
+                    | SqlTypeKind::Int4Range
+                    | SqlTypeKind::Int8Range
                     | SqlTypeKind::Int2Vector
+                    | SqlTypeKind::NumericRange
                     | SqlTypeKind::OidVector
                     | SqlTypeKind::Date
+                    | SqlTypeKind::DateRange
                     | SqlTypeKind::Time
                     | SqlTypeKind::TimeTz
                     | SqlTypeKind::Point
@@ -1285,7 +1296,9 @@ pub(crate) fn cast_value_with_config(
                     | SqlTypeKind::Line
                     | SqlTypeKind::Circle
                     | SqlTypeKind::Timestamp
+                    | SqlTypeKind::TimestampRange
                     | SqlTypeKind::TimestampTz
+                    | SqlTypeKind::TimestampTzRange
                     | SqlTypeKind::PgNodeTree
                     | SqlTypeKind::InternalChar
                     | SqlTypeKind::Bit
@@ -1333,9 +1346,13 @@ pub(crate) fn cast_value_with_config(
                 kind:
                     SqlTypeKind::Text
                     | SqlTypeKind::Name
+                    | SqlTypeKind::Int4Range
+                    | SqlTypeKind::Int8Range
                     | SqlTypeKind::Int2Vector
+                    | SqlTypeKind::NumericRange
                     | SqlTypeKind::OidVector
                     | SqlTypeKind::Date
+                    | SqlTypeKind::DateRange
                     | SqlTypeKind::Time
                     | SqlTypeKind::TimeTz
                     | SqlTypeKind::Point
@@ -1346,7 +1363,9 @@ pub(crate) fn cast_value_with_config(
                     | SqlTypeKind::Line
                     | SqlTypeKind::Circle
                     | SqlTypeKind::Timestamp
+                    | SqlTypeKind::TimestampRange
                     | SqlTypeKind::TimestampTz
+                    | SqlTypeKind::TimestampTzRange
                     | SqlTypeKind::PgNodeTree
                     | SqlTypeKind::InternalChar
                     | SqlTypeKind::Bit
@@ -1519,6 +1538,42 @@ pub(crate) fn cast_value_with_config(
             };
             cast_text_value_with_config(text, ty, true, config)
         }
+        Value::Range(range) => match ty.kind {
+            SqlTypeKind::Int4Range
+            | SqlTypeKind::Int8Range
+            | SqlTypeKind::NumericRange
+            | SqlTypeKind::DateRange
+            | SqlTypeKind::TimestampRange
+            | SqlTypeKind::TimestampTzRange => {
+                if ty == crate::include::catalog::sql_type_for_range_kind(range.kind) {
+                    Ok(Value::Range(range))
+                } else {
+                    cast_text_value_with_config(
+                        &render_range_text(&Value::Range(range.clone())).unwrap_or_default(),
+                        ty,
+                        true,
+                        config,
+                    )
+                }
+            }
+            SqlTypeKind::Text
+            | SqlTypeKind::Name
+            | SqlTypeKind::Char
+            | SqlTypeKind::Varchar
+            | SqlTypeKind::Json
+            | SqlTypeKind::Jsonb
+            | SqlTypeKind::JsonPath => cast_text_value_with_config(
+                &render_range_text(&Value::Range(range.clone())).unwrap_or_default(),
+                ty,
+                true,
+                config,
+            ),
+            _ => Err(ExecError::TypeMismatch {
+                op: "::range",
+                left: Value::Range(range),
+                right: Value::Null,
+            }),
+        },
         Value::InternalChar(byte) => match ty.kind {
             SqlTypeKind::InternalChar => Ok(Value::InternalChar(byte)),
             SqlTypeKind::Text
@@ -1687,9 +1742,13 @@ pub(crate) fn cast_value_with_config(
                 kind:
                     SqlTypeKind::Text
                     | SqlTypeKind::Name
+                    | SqlTypeKind::Int4Range
+                    | SqlTypeKind::Int8Range
                     | SqlTypeKind::Int2Vector
+                    | SqlTypeKind::NumericRange
                     | SqlTypeKind::OidVector
                     | SqlTypeKind::Date
+                    | SqlTypeKind::DateRange
                     | SqlTypeKind::Time
                     | SqlTypeKind::TimeTz
                     | SqlTypeKind::Point
@@ -1700,7 +1759,9 @@ pub(crate) fn cast_value_with_config(
                     | SqlTypeKind::Line
                     | SqlTypeKind::Circle
                     | SqlTypeKind::Timestamp
+                    | SqlTypeKind::TimestampRange
                     | SqlTypeKind::TimestampTz
+                    | SqlTypeKind::TimestampTzRange
                     | SqlTypeKind::PgNodeTree
                     | SqlTypeKind::InternalChar
                     | SqlTypeKind::Bit
@@ -1764,9 +1825,13 @@ pub(crate) fn cast_value_with_config(
                 kind:
                     SqlTypeKind::Text
                     | SqlTypeKind::Name
+                    | SqlTypeKind::Int4Range
+                    | SqlTypeKind::Int8Range
                     | SqlTypeKind::Int2Vector
+                    | SqlTypeKind::NumericRange
                     | SqlTypeKind::OidVector
                     | SqlTypeKind::Date
+                    | SqlTypeKind::DateRange
                     | SqlTypeKind::Time
                     | SqlTypeKind::TimeTz
                     | SqlTypeKind::Point
@@ -1777,7 +1842,9 @@ pub(crate) fn cast_value_with_config(
                     | SqlTypeKind::Line
                     | SqlTypeKind::Circle
                     | SqlTypeKind::Timestamp
+                    | SqlTypeKind::TimestampRange
                     | SqlTypeKind::TimestampTz
+                    | SqlTypeKind::TimestampTzRange
                     | SqlTypeKind::PgNodeTree
                     | SqlTypeKind::InternalChar
                     | SqlTypeKind::Bit
@@ -1952,6 +2019,12 @@ pub(super) fn cast_text_value_with_config(
         SqlTypeKind::TsQuery => {
             crate::backend::executor::parse_tsquery_text(text).map(Value::TsQuery)
         }
+        SqlTypeKind::Int4Range
+        | SqlTypeKind::Int8Range
+        | SqlTypeKind::NumericRange
+        | SqlTypeKind::DateRange
+        | SqlTypeKind::TimestampRange
+        | SqlTypeKind::TimestampTzRange => parse_range_text(text, ty.kind),
         SqlTypeKind::RegConfig | SqlTypeKind::RegDictionary => cast_text_to_oid(text),
         SqlTypeKind::Tid => Ok(Value::Text(CompactString::from_owned(
             canonicalize_tid_text(text)?,
@@ -2012,10 +2085,16 @@ pub(super) fn cast_numeric_value(
         | SqlTypeKind::Interval
         | SqlTypeKind::PgNodeTree => Ok(Value::Text(CompactString::from_owned(value.render()))),
         SqlTypeKind::Date
+        | SqlTypeKind::Int4Range
+        | SqlTypeKind::Int8Range
+        | SqlTypeKind::NumericRange
+        | SqlTypeKind::DateRange
         | SqlTypeKind::Time
         | SqlTypeKind::TimeTz
         | SqlTypeKind::Timestamp
-        | SqlTypeKind::TimestampTz => cast_text_value(&value.render(), ty, explicit),
+        | SqlTypeKind::TimestampTz
+        | SqlTypeKind::TimestampRange
+        | SqlTypeKind::TimestampTzRange => cast_text_value(&value.render(), ty, explicit),
         SqlTypeKind::Json => {
             let rendered = value.render();
             validate_json_text(&rendered)?;

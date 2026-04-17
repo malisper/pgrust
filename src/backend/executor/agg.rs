@@ -12,6 +12,7 @@ use std::cmp::Ordering;
 use std::collections::HashSet;
 
 use super::jsonb::{JsonbValue, encode_jsonb, jsonb_from_value, render_jsonb_bytes};
+use super::expr_range::{range_intersection_agg_transition, render_range_text};
 
 #[derive(Debug, Clone)]
 pub(crate) enum NumericAccum {
@@ -65,6 +66,9 @@ pub(crate) enum AccumState {
     },
     Max {
         max: Option<Value>,
+    },
+    RangeIntersect {
+        current: Option<Value>,
     },
 }
 
@@ -122,6 +126,7 @@ impl AccumState {
             },
             (AggFunc::Min, _) => AccumState::Min { min: None },
             (AggFunc::Max, _) => AccumState::Max { max: None },
+            (AggFunc::RangeIntersectAgg, _) => AccumState::RangeIntersect { current: None },
         }
     }
 
@@ -262,6 +267,13 @@ impl AccumState {
                     }
                 }
             },
+            (AggFunc::RangeIntersectAgg, _, _) => |state, values| {
+                if let AccumState::RangeIntersect { current } = state {
+                    let value = values.first().unwrap_or(&Value::Null);
+                    *current = range_intersection_agg_transition(current.take(), value)
+                        .expect("range_intersect_agg inputs should be typechecked");
+                }
+            },
         }
     }
 
@@ -393,6 +405,7 @@ impl AccumState {
             }
             AccumState::Min { min } => min.clone().unwrap_or(Value::Null),
             AccumState::Max { max } => max.clone().unwrap_or(Value::Null),
+            AccumState::RangeIntersect { current } => current.clone().unwrap_or(Value::Null),
         }
     }
 }
@@ -524,6 +537,7 @@ fn json_object_agg_key(key: &Value) -> String {
             crate::backend::executor::render_geometry_text(key, Default::default())
                 .unwrap_or_default()
         }
+        Value::Range(_) => render_range_text(key).unwrap_or_default(),
         Value::TsVector(v) => crate::backend::executor::render_tsvector_text(v),
         Value::TsQuery(v) => crate::backend::executor::render_tsquery_text(v),
         Value::Array(_) | Value::PgArray(_) | Value::Record(_) => value_to_json_text(key),
@@ -578,6 +592,7 @@ fn value_to_json_text(value: &Value) -> String {
                 .unwrap_or_default(),
         )
         .unwrap(),
+        Value::Range(_) => serde_json::to_string(&render_range_text(value).unwrap_or_default()).unwrap(),
         Value::TsVector(v) => {
             serde_json::to_string(&crate::backend::executor::render_tsvector_text(v)).unwrap()
         }

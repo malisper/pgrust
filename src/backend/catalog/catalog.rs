@@ -3,6 +3,7 @@ pub use crate::backend::catalog::state::{
 };
 use crate::backend::executor::{ColumnDesc, RelationDesc, ScalarType};
 use crate::backend::parser::{SqlType, SqlTypeKind};
+use crate::include::catalog::range_kind_for_sql_type;
 use crate::include::access::htup::{AttributeAlign, AttributeCompression, AttributeStorage};
 
 pub fn column_desc(name: impl Into<String>, sql_type: SqlType, nullable: bool) -> ColumnDesc {
@@ -27,6 +28,7 @@ pub fn column_desc(name: impl Into<String>, sql_type: SqlType, nullable: bool) -
         ScalarType::Box => (32, AttributeAlign::Double),
         ScalarType::Polygon => (-1, AttributeAlign::Int),
         ScalarType::Circle => (24, AttributeAlign::Double),
+        ScalarType::Range(_) => (-1, AttributeAlign::Int),
         ScalarType::Float32 => (4, AttributeAlign::Int),
         ScalarType::Float64 => (8, AttributeAlign::Double),
         ScalarType::Numeric => (-1, AttributeAlign::Int),
@@ -92,6 +94,12 @@ fn default_attribute_storage(sql_type: SqlType, attlen: i16) -> AttributeStorage
         | SqlTypeKind::Varchar
         | SqlTypeKind::Char
         | SqlTypeKind::Numeric
+        | SqlTypeKind::Int4Range
+        | SqlTypeKind::Int8Range
+        | SqlTypeKind::NumericRange
+        | SqlTypeKind::DateRange
+        | SqlTypeKind::TimestampRange
+        | SqlTypeKind::TimestampTzRange
         | SqlTypeKind::Path
         | SqlTypeKind::Polygon
         | SqlTypeKind::Json
@@ -145,6 +153,9 @@ fn scalar_type_for_sql_type(sql_type: SqlType) -> ScalarType {
     if sql_type.is_array {
         return ScalarType::Array(Box::new(scalar_type_for_sql_type(sql_type.element_type())));
     }
+    if let Some(kind) = range_kind_for_sql_type(sql_type) {
+        return ScalarType::Range(kind);
+    }
     match sql_type.kind {
         SqlTypeKind::AnyArray => ScalarType::Array(Box::new(ScalarType::Text)),
         SqlTypeKind::Int2 => ScalarType::Int16,
@@ -172,6 +183,12 @@ fn scalar_type_for_sql_type(sql_type: SqlType) -> ScalarType {
         SqlTypeKind::Float4 => ScalarType::Float32,
         SqlTypeKind::Float8 => ScalarType::Float64,
         SqlTypeKind::Numeric => ScalarType::Numeric,
+        SqlTypeKind::Int4Range
+        | SqlTypeKind::Int8Range
+        | SqlTypeKind::NumericRange
+        | SqlTypeKind::DateRange
+        | SqlTypeKind::TimestampRange
+        | SqlTypeKind::TimestampTzRange => unreachable!("range handled above"),
         SqlTypeKind::Json => ScalarType::Json,
         SqlTypeKind::Jsonb => ScalarType::Jsonb,
         SqlTypeKind::JsonPath => ScalarType::JsonPath,

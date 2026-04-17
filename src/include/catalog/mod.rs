@@ -1,4 +1,5 @@
 pub mod bootstrap;
+pub mod builtin_ranges;
 pub mod indexing;
 pub mod pg_am;
 pub mod pg_amop;
@@ -34,6 +35,7 @@ pub mod pg_type;
 pub mod toasting;
 
 pub use bootstrap::*;
+pub use builtin_ranges::*;
 pub use indexing::*;
 pub use pg_am::*;
 pub use pg_amop::*;

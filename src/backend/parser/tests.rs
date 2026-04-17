@@ -2483,6 +2483,125 @@ fn build_plan_rejects_missing_visible_catalog_comparison_operator() {
 }
 
 #[test]
+fn build_plan_resolves_lower_for_range_type() {
+    let plan = build_plan(&parse_select("select lower(int4range(1, 10))").unwrap(), &catalog())
+        .unwrap();
+    let Plan::Projection { targets, .. } = plan else {
+        panic!("expected projection plan");
+    };
+    assert!(matches!(
+        &targets[0].expr,
+        Expr::Func(func)
+            if func.implementation
+                == crate::include::nodes::primnodes::ScalarFunctionImpl::Builtin(
+                    crate::include::nodes::primnodes::BuiltinScalarFunction::RangeLower
+                )
+                && func.funcresulttype == Some(SqlType::new(SqlTypeKind::Int4))
+    ));
+}
+
+#[test]
+fn build_plan_dispatches_jsonb_and_range_contains_independently() {
+    let json_plan = build_plan(
+        &parse_select("select '{\"a\":1}'::jsonb @> '{\"a\":1}'::jsonb").unwrap(),
+        &catalog(),
+    )
+    .unwrap();
+    let Plan::Projection {
+        targets: json_targets, ..
+    } = json_plan
+    else {
+        panic!("expected projection plan");
+    };
+    assert!(matches!(
+        &json_targets[0].expr,
+        Expr::Op(op)
+            if op.op == crate::include::nodes::primnodes::OpExprKind::JsonbContains
+    ));
+
+    let range_plan = build_plan(
+        &parse_select("select int4range(1, 4) @> 2").unwrap(),
+        &catalog(),
+    )
+    .unwrap();
+    let Plan::Projection {
+        targets: range_targets,
+        ..
+    } = range_plan
+    else {
+        panic!("expected projection plan");
+    };
+    assert!(matches!(
+        &range_targets[0].expr,
+        Expr::Func(func)
+            if func.implementation
+                == crate::include::nodes::primnodes::ScalarFunctionImpl::Builtin(
+                    crate::include::nodes::primnodes::BuiltinScalarFunction::RangeContains
+                )
+                && func.funcresulttype == Some(SqlType::new(SqlTypeKind::Bool))
+    ));
+}
+
+#[test]
+fn build_plan_dispatches_geometry_and_range_position_operators_independently() {
+    let geometry_plan = build_plan(
+        &parse_select("select '(0,0),(1,1)'::box &< '(2,2),(3,3)'::box").unwrap(),
+        &catalog(),
+    )
+    .unwrap();
+    let Plan::Projection {
+        targets: geometry_targets,
+        ..
+    } = geometry_plan
+    else {
+        panic!("expected projection plan");
+    };
+    assert!(matches!(
+        &geometry_targets[0].expr,
+        Expr::Func(func)
+            if func.implementation
+                == crate::include::nodes::primnodes::ScalarFunctionImpl::Builtin(
+                    crate::include::nodes::primnodes::BuiltinScalarFunction::GeoOverLeft
+                )
+    ));
+
+    let range_plan = build_plan(
+        &parse_select("select int4range(1, 4) &< int4range(2, 10)").unwrap(),
+        &catalog(),
+    )
+    .unwrap();
+    let Plan::Projection {
+        targets: range_targets,
+        ..
+    } = range_plan
+    else {
+        panic!("expected projection plan");
+    };
+    assert!(matches!(
+        &range_targets[0].expr,
+        Expr::Func(func)
+            if func.implementation
+                == crate::include::nodes::primnodes::ScalarFunctionImpl::Builtin(
+                    crate::include::nodes::primnodes::BuiltinScalarFunction::RangeOverLeft
+                )
+    ));
+}
+
+#[test]
+fn build_plan_rejects_mixed_range_kinds() {
+    let err = build_plan(
+        &parse_select("select int4range(1, 4) = numrange(1.0, 4.0)").unwrap(),
+        &catalog(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ParseError::UndefinedOperator { op, left_type, right_type }
+            if op == "=" && left_type == "int4range" && right_type == "numrange"
+    ));
+}
+
+#[test]
 fn parse_select_with_order_limit_offset() {
     let stmt = parse_select("select name from people order by id desc limit 2 offset 1").unwrap();
     assert_eq!(stmt.order_by.len(), 1);
@@ -3921,6 +4040,21 @@ fn parse_aggregate_filter_clause() {
                 SqlExpr::IsNotNull(inner) if matches!(inner.as_ref(), SqlExpr::Column(name) if name == "note")
             )
     ));
+}
+
+#[test]
+fn parse_range_intersect_agg_select() {
+    let stmt = parse_select("select range_intersect_agg(id::int4range) from people").unwrap();
+    assert!(matches!(
+        &stmt.targets[0].expr,
+        SqlExpr::AggCall {
+            func: AggFunc::RangeIntersectAgg,
+            args,
+            distinct: false,
+            ..
+        } if args.len() == 1
+    ));
+    assert_eq!(stmt.targets[0].output_name, "range_intersect_agg");
 }
 
 #[test]

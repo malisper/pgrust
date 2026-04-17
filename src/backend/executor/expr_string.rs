@@ -4,6 +4,7 @@ use super::expr_casts::{cast_value, parse_bytea_text, render_internal_char_text}
 use super::expr_datetime::render_datetime_value_text;
 use super::expr_format::{to_char_int, to_char_numeric, to_number_numeric};
 use super::expr_ops::parse_numeric_text;
+use super::expr_range::render_range_text;
 use super::node_types::Value;
 use super::value_io::format_array_text;
 use crate::backend::executor::jsonb::render_jsonb_bytes;
@@ -113,6 +114,7 @@ fn value_output_text(value: &Value) -> Result<String, ExecError> {
             crate::backend::executor::render_geometry_text(value, Default::default())
                 .unwrap_or_default()
         }
+        Value::Range(_) => render_range_text(value).unwrap_or_default(),
         Value::InternalChar(byte) => render_internal_char_text(*byte),
         Value::Date(_)
         | Value::Time(_)

@@ -1,5 +1,8 @@
 use super::functions::{resolve_function_call, resolve_scalar_function};
+use super::ranges::infer_range_special_expr_type_with_ctes;
 use super::*;
+use crate::include::catalog::builtin_range_spec_for_sql_type;
+use crate::include::catalog::sql_type_for_range_kind;
 use crate::include::catalog::RECORD_TYPE_OID;
 
 pub(super) fn infer_sql_expr_type(
@@ -21,6 +24,17 @@ pub(super) fn infer_sql_expr_type_with_ctes(
     ctes: &[BoundCte],
 ) -> SqlType {
     if let Some(sql_type) = infer_geometry_special_expr_type_with_ctes(
+        expr,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    ) {
+        return sql_type;
+    }
+
+    if let Some(sql_type) = infer_range_special_expr_type_with_ctes(
         expr,
         scope,
         catalog,
@@ -64,6 +78,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
         SqlExpr::Const(Value::TimeTz(_)) => SqlType::new(SqlTypeKind::TimeTz),
         SqlExpr::Const(Value::Timestamp(_)) => SqlType::new(SqlTypeKind::Timestamp),
         SqlExpr::Const(Value::TimestampTz(_)) => SqlType::new(SqlTypeKind::TimestampTz),
+        SqlExpr::Const(Value::Range(range)) => sql_type_for_range_kind(range.kind),
         SqlExpr::Const(Value::Bit(v)) => SqlType::with_bit_len(SqlTypeKind::VarBit, v.bit_len),
         SqlExpr::Const(Value::Bytea(_)) => SqlType::new(SqlTypeKind::Bytea),
         SqlExpr::Const(Value::Bool(_)) => SqlType::new(SqlTypeKind::Bool),
@@ -364,6 +379,12 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 return resolved.result_type;
             }
             let resolved = resolve_scalar_function(name);
+            if let Some(BuiltinScalarFunction::RangeConstructor) = resolved
+                && let Some(target_type) = resolve_function_cast_type(catalog, name)
+                && builtin_range_spec_for_sql_type(target_type).is_some()
+            {
+                return target_type;
+            }
             if let Some(func) = resolved
                 && let Some(sql_type) = fixed_scalar_return_type(func)
             {
