@@ -196,6 +196,24 @@ impl Database {
                 self.execute_alter_role_stmt(client_id, alter_stmt)
             }
             Statement::DropRole(ref drop_stmt) => self.execute_drop_role_stmt(client_id, drop_stmt),
+            Statement::GrantObject(ref grant_stmt) => self
+                .execute_grant_object_stmt_with_search_path(
+                    client_id,
+                    grant_stmt,
+                    configured_search_path,
+                ),
+            Statement::RevokeObject(ref revoke_stmt) => self
+                .execute_revoke_object_stmt_with_search_path(
+                    client_id,
+                    revoke_stmt,
+                    configured_search_path,
+                ),
+            Statement::GrantRoleMembership(ref grant_stmt) => {
+                self.execute_grant_role_membership_stmt(client_id, grant_stmt)
+            }
+            Statement::RevokeRoleMembership(ref revoke_stmt) => {
+                self.execute_revoke_role_membership_stmt(client_id, revoke_stmt)
+            }
             Statement::ReassignOwned(ref reassign_stmt) => {
                 self.execute_reassign_owned_stmt(client_id, reassign_stmt)
             }

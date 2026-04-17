@@ -18,6 +18,7 @@ pub(crate) fn resolve_create_schema_stmt(
     auth: &AuthState,
     auth_catalog: &AuthCatalog,
     database_owner_oid: u32,
+    has_database_create_privilege: bool,
     namespace_rows: &[PgNamespaceRow],
 ) -> Result<CreateSchemaResolution, ExecError> {
     let current_user = auth_catalog
@@ -50,7 +51,10 @@ pub(crate) fn resolve_create_schema_stmt(
         });
     }
 
-    if !current_user.rolsuper && auth.current_user_oid() != database_owner_oid {
+    if !current_user.rolsuper
+        && auth.current_user_oid() != database_owner_oid
+        && !has_database_create_privilege
+    {
         return Err(ExecError::DetailedError {
             message: "permission denied for database postgres".into(),
             detail: None,

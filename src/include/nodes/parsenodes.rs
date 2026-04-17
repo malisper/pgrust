@@ -223,6 +223,10 @@ pub enum Statement {
     CommentOnDomain(CommentOnDomainStatement),
     CreateDomain(CreateDomainStatement),
     CommentOnRole(CommentOnRoleStatement),
+    GrantObject(GrantObjectStatement),
+    RevokeObject(RevokeObjectStatement),
+    GrantRoleMembership(GrantRoleMembershipStatement),
+    RevokeRoleMembership(RevokeRoleMembershipStatement),
     DropTable(DropTableStatement),
     DropDomain(DropDomainStatement),
     DropView(DropViewStatement),
@@ -837,6 +841,46 @@ pub struct ResetSessionAuthorizationStatement;
 pub struct CommentOnRoleStatement {
     pub role_name: String,
     pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GrantObjectPrivilege {
+    CreateOnDatabase,
+    AllPrivilegesOnTable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrantObjectStatement {
+    pub privilege: GrantObjectPrivilege,
+    pub object_name: String,
+    pub grantee_names: Vec<String>,
+    pub with_grant_option: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevokeObjectStatement {
+    pub privilege: GrantObjectPrivilege,
+    pub object_name: String,
+    pub grantee_names: Vec<String>,
+    pub cascade: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrantRoleMembershipStatement {
+    pub role_names: Vec<String>,
+    pub grantee_names: Vec<String>,
+    pub admin_option: bool,
+    pub inherit_option: Option<bool>,
+    pub set_option: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevokeRoleMembershipStatement {
+    pub role_names: Vec<String>,
+    pub grantee_names: Vec<String>,
+    pub admin_option: bool,
+    pub inherit_option: bool,
+    pub set_option: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
