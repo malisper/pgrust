@@ -12,3 +12,4 @@ mod rename;
 mod role;
 mod schema;
 mod session_auth;
+mod tablespace;

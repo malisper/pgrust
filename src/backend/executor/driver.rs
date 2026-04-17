@@ -226,6 +226,10 @@ fn execute_statement_with_source(
             expected: "CREATE SCHEMA handled by database/session layer",
             actual: "CREATE SCHEMA".into(),
         })),
+        Statement::CreateTablespace(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "CREATE TABLESPACE handled by database/session layer",
+            actual: "CREATE TABLESPACE".into(),
+        })),
         Statement::CreateDomain(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "CREATE DOMAIN handled by database/session layer",
             actual: "CREATE DOMAIN".into(),
@@ -313,6 +317,10 @@ pub fn execute_readonly_statement(
         Statement::CreateSchema(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "CREATE SCHEMA".into(),
+        })),
+        Statement::CreateTablespace(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "CREATE TABLESPACE".into(),
         })),
         Statement::AlterSchemaOwner(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",

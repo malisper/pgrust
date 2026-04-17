@@ -8785,6 +8785,29 @@ fn grant_all_on_schema_public_is_accepted() {
 }
 
 #[test]
+fn create_tablespace_adds_pg_tablespace_row() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    match session
+        .execute(&db, "create tablespace regress_tblspace location ''")
+        .unwrap()
+    {
+        StatementResult::AffectedRows(0) => {}
+        other => panic!("expected create tablespace affected rows, got {other:?}"),
+    }
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select spcname from pg_tablespace where spcname = 'regress_tblspace'",
+        ),
+        vec![vec![Value::Text("regress_tblspace".into())]]
+    );
+}
+
+#[test]
 fn create_function_scalar_elsif_branches_work() {
     let dir = temp_dir("create_function_scalar_elsif");
     let db = Database::open(&dir, 64).unwrap();
