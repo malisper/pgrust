@@ -101,7 +101,6 @@ Counts from `/tmp/pgrust_regress_todo_20260417` on 2026-04-17; `test_setup.sql` 
 - init_privs.sql: 0/4
 - insert.sql: 7/390
 - insert_conflict.sql: 15/266
-- int2.sql: 40/76
 - int4.sql: 57/94
 - int8.sql: 87/174
 - interval.sql: 23/450
@@ -238,3 +237,7 @@ Counts from `/tmp/pgrust_regress_todo_20260417` on 2026-04-17; `test_setup.sql` 
 - xmlmap.sql: 3/40
 
 ## Features
+
+## DONE
+
+- int2.sql
