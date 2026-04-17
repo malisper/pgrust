@@ -196,7 +196,7 @@ impl Session {
     }
 
     pub(crate) fn set_session_authorization_oid(&mut self, role_oid: u32) {
-        self.auth.set_session_authorization(role_oid);
+        self.auth.assume_authenticated_user(role_oid);
     }
 
     pub(crate) fn reset_session_authorization(&mut self) {
