@@ -351,7 +351,7 @@ Counts from `/tmp/pgrust_regress_todo_20260417` on 2026-04-17; `test_setup.sql` 
   - PL/pgSQL trigger runtime support for row triggers (`NEW`/`OLD`, trigger invocation)
 
 - test_setup.sql: emit PostgreSQL-compatible inheritance merge notices for multi-parent `INHERITS` merges like `stud_emp`
-- test_setup.sql: support `CREATE TYPE ... AS ENUM`
+- test_setup.sql: done - support `CREATE TYPE ... AS ENUM`
 - test_setup.sql: support `CREATE TYPE ... AS RANGE`
 - test_setup.sql: extend `CREATE FUNCTION` parsing to accept unnamed arguments such as `binary_coercible(oid, oid)` and `fipshash(bytea)`
 - test_setup.sql: extend `CREATE FUNCTION` parsing/catalog writes for routine attributes used by upstream setup: `STRICT`, `IMMUTABLE`, `STABLE`, `PARALLEL SAFE`, and `LEAKPROOF`

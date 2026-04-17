@@ -4046,7 +4046,7 @@ fn parse_create_and_drop_type_statements() {
 }
 
 #[test]
-fn parse_create_type_rejects_unsupported_forms() {
+fn parse_create_type_supports_enum_and_rejects_other_unsupported_forms() {
     assert!(matches!(
         parse_statement("create type myint"),
         Err(ParseError::FeatureNotSupported(feature))
@@ -4057,11 +4057,14 @@ fn parse_create_type_rejects_unsupported_forms() {
         Err(ParseError::FeatureNotSupported(feature))
             if feature == "base type definitions are not supported in CREATE TYPE"
     ));
-    assert!(matches!(
-        parse_statement("create type mood as enum ('sad', 'ok')"),
-        Err(ParseError::FeatureNotSupported(feature))
-            if feature == "CREATE TYPE AS ENUM is not supported yet"
-    ));
+    match parse_statement("create type mood as enum ('sad', 'ok')").unwrap() {
+        Statement::CreateType(CreateTypeStatement::Enum(stmt)) => {
+            assert_eq!(stmt.schema_name, None);
+            assert_eq!(stmt.type_name, "mood");
+            assert_eq!(stmt.labels, vec!["sad", "ok"]);
+        }
+        other => panic!("expected enum create type, got {other:?}"),
+    }
     assert!(matches!(
         parse_statement("create type intr as range (subtype = int4)"),
         Err(ParseError::FeatureNotSupported(feature))
