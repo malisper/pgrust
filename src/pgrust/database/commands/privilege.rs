@@ -5,9 +5,11 @@ use crate::backend::commands::rolecmds::{
 };
 use crate::backend::parser::{
     GrantObjectPrivilege, GrantObjectStatement, GrantRoleMembershipStatement,
-    RevokeObjectStatement, RevokeRoleMembershipStatement,
+    RevokeObjectStatement, RevokeRoleMembershipStatement, RoleGrantorSpec,
 };
-use crate::include::catalog::{CURRENT_DATABASE_NAME, CURRENT_DATABASE_OID, PgAuthIdRow};
+use crate::include::catalog::{
+    BOOTSTRAP_SUPERUSER_OID, CURRENT_DATABASE_NAME, CURRENT_DATABASE_OID, PgAuthIdRow,
+};
 
 impl Database {
     pub(crate) fn execute_grant_object_stmt_with_search_path(
@@ -83,11 +85,16 @@ impl Database {
         let auth_catalog = self
             .auth_catalog(client_id, None)
             .map_err(map_role_grant_error)?;
-        let current_user_oid = auth.current_user_oid();
         let mut touched = false;
 
         for role_name in &stmt.role_names {
-            let role = authorize_grant_membership(&auth, &auth_catalog, role_name)?;
+            let role = if stmt.granted_by.is_some() {
+                lookup_membership_role(&auth_catalog, role_name)?
+            } else {
+                authorize_grant_membership(&auth, &auth_catalog, role_name)?
+            };
+            let grantor_oid =
+                resolve_role_grantor(&auth, &auth_catalog, &role, stmt.granted_by.as_ref(), true)?;
             for grantee_name in &stmt.grantee_names {
                 let grantee = lookup_membership_grantee(&auth_catalog, grantee_name)?;
                 let admin_option = stmt.admin_option;
@@ -98,7 +105,7 @@ impl Database {
                     &auth_catalog,
                     role.oid,
                     grantee.oid,
-                    current_user_oid,
+                    grantor_oid,
                     admin_option,
                     inherit_option,
                     set_option,
@@ -122,11 +129,12 @@ impl Database {
         let auth_catalog = self
             .auth_catalog(client_id, None)
             .map_err(map_role_grant_error)?;
-        let current_user_oid = auth.current_user_oid();
         let mut touched = false;
 
         for role_name in &stmt.role_names {
-            let role = authorize_grant_membership(&auth, &auth_catalog, role_name)?;
+            let role = lookup_membership_role(&auth_catalog, role_name)?;
+            let grantor_oid =
+                resolve_role_grantor(&auth, &auth_catalog, &role, stmt.granted_by.as_ref(), false)?;
             for grantee_name in &stmt.grantee_names {
                 let grantee = lookup_membership_grantee(&auth_catalog, grantee_name)?;
                 let existing = auth_catalog
@@ -135,7 +143,7 @@ impl Database {
                     .find(|row| {
                         row.roleid == role.oid
                             && row.member == grantee.oid
-                            && row.grantor == current_user_oid
+                            && row.grantor == grantor_oid
                     })
                     .cloned()
                     .ok_or_else(|| {
@@ -149,7 +157,7 @@ impl Database {
                     .update_role_membership_options(
                         role.oid,
                         grantee.oid,
-                        current_user_oid,
+                        grantor_oid,
                         if stmt.admin_option {
                             false
                         } else {
@@ -425,11 +433,7 @@ fn lookup_membership_grantee(
     catalog: &AuthCatalog,
     role_name: &str,
 ) -> Result<PgAuthIdRow, ExecError> {
-    let role = catalog.role_by_name(role_name).cloned().ok_or_else(|| {
-        ExecError::Parse(role_management_error(format!(
-            "role \"{role_name}\" does not exist"
-        )))
-    })?;
+    let role = lookup_membership_role_by_name(catalog, role_name)?;
     if role.oid == crate::include::catalog::PG_DATABASE_OWNER_OID {
         return Err(ExecError::Parse(role_management_error(format!(
             "role \"{}\" cannot be a member of any role",
@@ -437,6 +441,112 @@ fn lookup_membership_grantee(
         ))));
     }
     Ok(role)
+}
+
+fn lookup_membership_role(catalog: &AuthCatalog, role_name: &str) -> Result<PgAuthIdRow, ExecError> {
+    let role = lookup_membership_role_by_name(catalog, role_name)?;
+    if role.oid == crate::include::catalog::PG_DATABASE_OWNER_OID {
+        return Err(ExecError::Parse(role_management_error(format!(
+            "role \"{}\" cannot have explicit members",
+            role.rolname
+        ))));
+    }
+    Ok(role)
+}
+
+fn lookup_membership_role_by_name(
+    catalog: &AuthCatalog,
+    role_name: &str,
+) -> Result<PgAuthIdRow, ExecError> {
+    catalog.role_by_name(role_name).cloned().ok_or_else(|| {
+        ExecError::Parse(role_management_error(format!(
+            "role \"{role_name}\" does not exist"
+        )))
+    })
+}
+
+fn resolve_role_grantor(
+    auth: &AuthState,
+    catalog: &AuthCatalog,
+    role: &PgAuthIdRow,
+    grantor: Option<&RoleGrantorSpec>,
+    is_grant: bool,
+) -> Result<u32, ExecError> {
+    let Some(grantor) = grantor else {
+        return Ok(auth.current_user_oid());
+    };
+    let grantor = resolve_role_grantor_spec(auth, catalog, grantor)?;
+
+    if is_grant {
+        if !auth.has_effective_membership(grantor.oid, catalog) {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "permission denied to grant privileges as role \"{}\"",
+                    grantor.rolname
+                ),
+                detail: Some(format!(
+                    "Only roles with privileges of role \"{}\" may grant privileges as this role.",
+                    grantor.rolname
+                )),
+                hint: None,
+                sqlstate: "42501",
+            });
+        }
+        if grantor.oid != BOOTSTRAP_SUPERUSER_OID
+            && !catalog.memberships().iter().any(|row| {
+                row.roleid == role.oid && row.member == grantor.oid && row.admin_option
+            })
+        {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "permission denied to grant privileges as role \"{}\"",
+                    grantor.rolname
+                ),
+                detail: Some(format!(
+                    "The grantor must have the ADMIN option on role \"{}\".",
+                    role.rolname
+                )),
+                hint: None,
+                sqlstate: "42501",
+            });
+        }
+    } else if !auth.has_effective_membership(grantor.oid, catalog) {
+        return Err(ExecError::DetailedError {
+            message: format!(
+                "permission denied to revoke privileges granted by role \"{}\"",
+                grantor.rolname
+            ),
+            detail: Some(format!(
+                "Only roles with privileges of role \"{}\" may revoke privileges granted by this role.",
+                grantor.rolname
+            )),
+            hint: None,
+            sqlstate: "42501",
+        });
+    }
+
+    Ok(grantor.oid)
+}
+
+fn resolve_role_grantor_spec(
+    auth: &AuthState,
+    catalog: &AuthCatalog,
+    grantor: &RoleGrantorSpec,
+) -> Result<PgAuthIdRow, ExecError> {
+    match grantor {
+        RoleGrantorSpec::CurrentUser | RoleGrantorSpec::CurrentRole => catalog
+            .role_by_oid(auth.current_user_oid())
+            .cloned()
+            .ok_or_else(|| ExecError::Parse(role_management_error("current role does not exist"))),
+        RoleGrantorSpec::RoleName(role_name) => catalog.role_by_name(role_name).cloned().ok_or_else(
+            || {
+                ExecError::Parse(role_management_error(format!(
+                    "role \"{}\" does not exist",
+                    role_name
+                )))
+            },
+        ),
+    }
 }
 
 fn map_role_grant_error(err: crate::backend::catalog::CatalogError) -> ExecError {
@@ -604,5 +714,63 @@ mod tests {
             .unwrap();
         assert!(membership.inherit_option);
         assert!(!membership.set_option);
+    }
+
+    #[test]
+    fn grant_role_membership_records_explicit_grantor() {
+        let base = temp_dir("grant_role_grantor");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session.execute(&db, "create role parent").unwrap();
+        session.execute(&db, "create role grantor").unwrap();
+        session.execute(&db, "create role grantee").unwrap();
+        session
+            .execute(&db, "grant parent to grantor with admin option")
+            .unwrap();
+        session
+            .execute(&db, "grant parent to grantee granted by grantor")
+            .unwrap();
+
+        let parent_oid = role_oid(&db, "parent");
+        let grantor_oid = role_oid(&db, "grantor");
+        let grantee_oid = role_oid(&db, "grantee");
+        let membership = db
+            .catalog
+            .read()
+            .catcache()
+            .unwrap()
+            .auth_members_rows()
+            .into_iter()
+            .find(|row| {
+                row.roleid == parent_oid && row.member == grantee_oid && row.grantor == grantor_oid
+            })
+            .unwrap();
+        assert!(!membership.admin_option);
+    }
+
+    #[test]
+    fn explicit_role_grantor_must_have_admin_option() {
+        let base = temp_dir("grant_role_grantor_admin");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session.execute(&db, "create role parent").unwrap();
+        session.execute(&db, "create role grantor").unwrap();
+        session.execute(&db, "create role grantee").unwrap();
+
+        let err = session
+            .execute(&db, "grant parent to grantee granted by grantor")
+            .unwrap_err();
+        match err {
+            ExecError::DetailedError {
+                message, detail, ..
+            } => {
+                assert_eq!(message, "permission denied to grant privileges as role \"grantor\"");
+                assert_eq!(
+                    detail.as_deref(),
+                    Some("The grantor must have the ADMIN option on role \"parent\".")
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 }

@@ -465,14 +465,17 @@ fn build_grant_role_membership(sql: &str) -> Result<GrantRoleMembershipStatement
         .ok_or(ParseError::UnexpectedEof)?
         .trim_start();
     let (role_names, rest) = split_once_keyword(rest, "to")?;
+    let (grant_body, granted_by_clause) =
+        split_optional_keyword(rest, "granted by").unwrap_or((rest.trim(), None));
     let (grantee_names_text, with_clause) =
-        split_optional_keyword(rest, "with").unwrap_or((rest.trim(), None));
+        split_optional_keyword(grant_body, "with").unwrap_or((grant_body.trim(), None));
     let mut stmt = GrantRoleMembershipStatement {
         role_names: parse_identifier_list(role_names)?,
         grantee_names: parse_identifier_list(grantee_names_text)?,
         admin_option: false,
         inherit_option: None,
         set_option: None,
+        granted_by: granted_by_clause.map(parse_role_grantor_spec).transpose()?,
     };
     if let Some(with_clause) = with_clause {
         let lowered = with_clause.to_ascii_lowercase();
@@ -513,11 +516,14 @@ fn build_revoke_role_membership(sql: &str) -> Result<RevokeRoleMembershipStateme
         .get(prefix.len()..)
         .ok_or(ParseError::UnexpectedEof)?
         .trim_start();
-    let (flags, rest) = if let Some(stripped) = strip_keyword_prefix(rest, "admin option for") {
+    let (revoke_body, granted_by_clause) =
+        split_optional_keyword(rest, "granted by").unwrap_or((rest.trim(), None));
+    let (flags, rest) = if let Some(stripped) = strip_keyword_prefix(revoke_body, "admin option for")
+    {
         ((true, false, false), stripped)
-    } else if let Some(stripped) = strip_keyword_prefix(rest, "inherit option for") {
+    } else if let Some(stripped) = strip_keyword_prefix(revoke_body, "inherit option for") {
         ((false, true, false), stripped)
-    } else if let Some(stripped) = strip_keyword_prefix(rest, "set option for") {
+    } else if let Some(stripped) = strip_keyword_prefix(revoke_body, "set option for") {
         ((false, false, true), stripped)
     } else {
         return Err(ParseError::UnexpectedToken {
@@ -532,7 +538,19 @@ fn build_revoke_role_membership(sql: &str) -> Result<RevokeRoleMembershipStateme
         admin_option: flags.0,
         inherit_option: flags.1,
         set_option: flags.2,
+        granted_by: granted_by_clause.map(parse_role_grantor_spec).transpose()?,
     })
+}
+
+fn parse_role_grantor_spec(input: &str) -> Result<RoleGrantorSpec, ParseError> {
+    let trimmed = input.trim();
+    match trimmed.to_ascii_lowercase().as_str() {
+        "current_user" => Ok(RoleGrantorSpec::CurrentUser),
+        "current_role" => Ok(RoleGrantorSpec::CurrentRole),
+        _ => Ok(RoleGrantorSpec::RoleName(normalize_simple_identifier(
+            trimmed,
+        )?)),
+    }
 }
 
 fn split_once_keyword<'a>(input: &'a str, keyword: &str) -> Result<(&'a str, &'a str), ParseError> {
