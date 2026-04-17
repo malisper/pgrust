@@ -132,6 +132,12 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         }) if matches!(*expected, "valid binary digit" | "valid hexadecimal digit") => {
             return find_bit_literal_position(sql);
         }
+        ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken { actual, .. })
+            if actual.starts_with("syntax error at or near \"") =>
+        {
+            return extract_syntax_error_token(actual)
+                .and_then(|token| sql.rfind(token).map(|index| index + 1));
+        }
         ExecError::Parse(crate::backend::parser::ParseError::UngroupedColumn {
             token,
             clause,
@@ -182,6 +188,13 @@ fn extract_quoted_error_value(message: &str) -> Option<&str> {
     let rest = &message[start..];
     let end = rest.find('"')?;
     Some(&rest[..end])
+}
+
+fn extract_syntax_error_token(message: &str) -> Option<&str> {
+    let prefix = "syntax error at or near \"";
+    let start = message.strip_prefix(prefix)?;
+    let end = start.rfind('"')?;
+    Some(&start[..end])
 }
 
 struct ExecErrorResponse {
