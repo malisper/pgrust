@@ -227,7 +227,7 @@ Counts from `/tmp/pgrust_regress_todo_20260417` on 2026-04-17; `test_setup.sql` 
 - uuid.sql: 0/63
 - vacuum.sql: 26/328
 - vacuum_parallel.sql: 4/14
-- varchar.sql: 3/22
+- varchar.sql: DONE
 - window.sql: 7/388
 - with.sql: 31/312
 - without_overlaps.sql: 24/643

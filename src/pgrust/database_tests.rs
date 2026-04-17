@@ -7410,6 +7410,31 @@ fn temp_catalog_rows_appear_with_pg_temp_namespace() {
             other => panic!("expected query result, got {:?}", other),
         }
 
+    match session_a
+        .execute(
+            &db,
+            "select n.nspname, t.typname from pg_type t join pg_namespace n on n.oid = t.typnamespace where t.typname in ('temp_items', '_temp_items') order by t.typname",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![
+                        Value::Text("pg_temp_1".into()),
+                        Value::Text("_temp_items".into()),
+                    ],
+                    vec![
+                        Value::Text("pg_temp_1".into()),
+                        Value::Text("temp_items".into()),
+                    ],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
     match session_b
         .execute(
             &db,
