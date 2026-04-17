@@ -203,6 +203,7 @@ impl Database {
             txns: self.txns.clone(),
             txn_waiter: Some(self.txn_waiter.clone()),
             sequences: Some(self.sequences.clone()),
+            checkpoint_stats: self.checkpoint_stats_snapshot(),
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
             interrupts: Arc::clone(&interrupts),
             snapshot,
@@ -359,6 +360,7 @@ impl Database {
                 txns: self.txns.clone(),
                 txn_waiter: Some(self.txn_waiter.clone()),
                 sequences: Some(self.sequences.clone()),
+                checkpoint_stats: self.checkpoint_stats_snapshot(),
                 datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(
                 ),
                 interrupts: Arc::clone(&interrupts),

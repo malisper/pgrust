@@ -1949,6 +1949,7 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::values_stmt => Ok(Statement::Values(build_values_statement(inner)?)),
         Rule::copy_stmt => Ok(Statement::CopyFrom(build_copy_from(inner)?)),
         Rule::analyze_stmt => Ok(Statement::Analyze(build_analyze(inner)?)),
+        Rule::checkpoint_stmt => Ok(Statement::Checkpoint(CheckpointStatement)),
         Rule::show_stmt => Ok(Statement::Show(build_show(inner)?)),
         Rule::set_session_authorization_stmt => Ok(Statement::SetSessionAuthorization(
             build_set_session_authorization(inner)?,

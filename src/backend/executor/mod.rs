@@ -91,6 +91,7 @@ use crate::backend::parser::{
 };
 use crate::backend::storage::lmgr::TableLockError;
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
+use crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot;
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::misc::interrupts::{
     InterruptReason, InterruptState, check_for_interrupts,
@@ -128,6 +129,7 @@ pub struct ExecutorContext {
     pub txns: std::sync::Arc<parking_lot::RwLock<TransactionManager>>,
     pub txn_waiter: Option<std::sync::Arc<TransactionWaiter>>,
     pub sequences: Option<std::sync::Arc<SequenceRuntime>>,
+    pub checkpoint_stats: CheckpointStatsSnapshot,
     pub datetime_config: DateTimeConfig,
     pub interrupts: std::sync::Arc<InterruptState>,
     pub snapshot: Snapshot,

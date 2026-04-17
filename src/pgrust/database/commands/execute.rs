@@ -102,6 +102,31 @@ impl Database {
 
         match stmt {
             Statement::Do(ref do_stmt) => execute_do(do_stmt),
+            Statement::Checkpoint(_) => {
+                let auth = self.auth_state(client_id);
+                let auth_catalog = self.auth_catalog(client_id, None).map_err(|err| {
+                    ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "authorization catalog",
+                        actual: format!("{err:?}"),
+                    })
+                })?;
+                if !auth.has_effective_membership(
+                    crate::include::catalog::PG_CHECKPOINT_OID,
+                    &auth_catalog,
+                ) {
+                    return Err(ExecError::DetailedError {
+                        message: "permission denied to execute CHECKPOINT command".into(),
+                        detail: Some(
+                            "Only roles with privileges of the \"pg_checkpoint\" role may execute this command."
+                                .into(),
+                        ),
+                        hint: None,
+                        sqlstate: "42501",
+                    });
+                }
+                self.record_manual_checkpoint();
+                Ok(StatementResult::AffectedRows(0))
+            }
             Statement::Analyze(ref analyze_stmt) => self.execute_analyze_stmt_with_search_path(
                 client_id,
                 analyze_stmt,
@@ -325,6 +350,7 @@ impl Database {
                     txns: self.txns.clone(),
                     txn_waiter: Some(self.txn_waiter.clone()),
                     sequences: Some(self.sequences.clone()),
+                    checkpoint_stats: self.checkpoint_stats_snapshot(),
                     datetime_config:
                         crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                     interrupts: Arc::clone(&interrupts),
@@ -372,6 +398,7 @@ impl Database {
                     txns: self.txns.clone(),
                     txn_waiter: Some(self.txn_waiter.clone()),
                     sequences: Some(self.sequences.clone()),
+                    checkpoint_stats: self.checkpoint_stats_snapshot(),
                     datetime_config:
                         crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                     interrupts: Arc::clone(&interrupts),
@@ -417,6 +444,7 @@ impl Database {
                     txns: self.txns.clone(),
                     txn_waiter: Some(self.txn_waiter.clone()),
                     sequences: Some(self.sequences.clone()),
+                    checkpoint_stats: self.checkpoint_stats_snapshot(),
                     datetime_config:
                         crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                     interrupts: Arc::clone(&interrupts),
@@ -469,6 +497,7 @@ impl Database {
                     txns: self.txns.clone(),
                     txn_waiter: Some(self.txn_waiter.clone()),
                     sequences: Some(self.sequences.clone()),
+                    checkpoint_stats: self.checkpoint_stats_snapshot(),
                     datetime_config:
                         crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                     interrupts: Arc::clone(&interrupts),
@@ -685,6 +714,7 @@ impl Database {
                     txns: self.txns.clone(),
                     txn_waiter: Some(self.txn_waiter.clone()),
                     sequences: Some(self.sequences.clone()),
+                    checkpoint_stats: self.checkpoint_stats_snapshot(),
                     datetime_config:
                         crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                     interrupts: Arc::clone(&interrupts),
@@ -740,6 +770,7 @@ impl Database {
                     txns: self.txns.clone(),
                     txn_waiter: Some(self.txn_waiter.clone()),
                     sequences: Some(self.sequences.clone()),
+                    checkpoint_stats: self.checkpoint_stats_snapshot(),
                     interrupts: Arc::clone(&interrupts),
                     snapshot,
                     client_id,
@@ -815,6 +846,7 @@ impl Database {
             txns: self.txns.clone(),
             txn_waiter: Some(self.txn_waiter.clone()),
             sequences: Some(self.sequences.clone()),
+            checkpoint_stats: self.checkpoint_stats_snapshot(),
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
             interrupts,
             snapshot,

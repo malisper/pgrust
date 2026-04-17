@@ -163,6 +163,7 @@ fn main() -> Result<(), ExecError> {
         txns: txns.clone(),
         txn_waiter: None,
         sequences: None,
+        checkpoint_stats: pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
         datetime_config: pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
         interrupts: Arc::new(InterruptState::new()),
         snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID).unwrap(),

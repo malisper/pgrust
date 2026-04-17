@@ -1,13 +1,14 @@
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 
 statement = { SOI ~ stmt ~ EOI }
-stmt = _{ do_stmt | explain_stmt | table_stmt | select_stmt | values_stmt | copy_stmt | analyze_stmt | show_stmt | set_session_authorization_stmt | reset_session_authorization_stmt | set_stmt | reset_stmt | create_role_stmt | alter_role_stmt | create_database_stmt | create_schema_stmt | create_index_stmt | alter_table_add_column_stmt | alter_table_add_constraint_stmt | alter_table_drop_constraint_stmt | alter_table_drop_column_stmt | alter_table_alter_column_type_stmt | alter_table_owner_stmt | alter_table_rename_column_stmt | alter_table_rename_stmt | alter_view_owner_stmt | alter_schema_owner_stmt | alter_table_set_stmt | alter_table_set_not_null_stmt | alter_table_drop_not_null_stmt | alter_table_validate_constraint_stmt | comment_on_role_stmt | comment_on_table_stmt | create_table_stmt | create_view_stmt | drop_role_stmt | drop_database_stmt | drop_table_stmt | drop_index_stmt | drop_view_stmt | drop_schema_stmt | reassign_owned_stmt | truncate_table_stmt | vacuum_stmt | insert_stmt | update_stmt | delete_stmt | begin_stmt | commit_stmt | rollback_stmt }
+stmt = _{ do_stmt | explain_stmt | table_stmt | select_stmt | values_stmt | copy_stmt | analyze_stmt | checkpoint_stmt | show_stmt | set_session_authorization_stmt | reset_session_authorization_stmt | set_stmt | reset_stmt | create_role_stmt | alter_role_stmt | create_database_stmt | create_schema_stmt | create_index_stmt | alter_table_add_column_stmt | alter_table_add_constraint_stmt | alter_table_drop_constraint_stmt | alter_table_drop_column_stmt | alter_table_alter_column_type_stmt | alter_table_owner_stmt | alter_table_rename_column_stmt | alter_table_rename_stmt | alter_view_owner_stmt | alter_schema_owner_stmt | alter_table_set_stmt | alter_table_set_not_null_stmt | alter_table_drop_not_null_stmt | alter_table_validate_constraint_stmt | comment_on_role_stmt | comment_on_table_stmt | create_table_stmt | create_view_stmt | drop_role_stmt | drop_database_stmt | drop_table_stmt | drop_index_stmt | drop_view_stmt | drop_schema_stmt | reassign_owned_stmt | truncate_table_stmt | vacuum_stmt | insert_stmt | update_stmt | delete_stmt | begin_stmt | commit_stmt | rollback_stmt }
 
 do_stmt = { kw_do ~ do_body ~ do_language_clause? | kw_do ~ do_language_clause ~ do_body }
 do_body = { quoted_string_literal }
 do_language_clause = { kw_language ~ identifier }
 
 analyze_stmt = { kw_analyze ~ analyze_option_block? ~ maintenance_target_list? }
+checkpoint_stmt = { kw_checkpoint }
 show_stmt = { kw_show ~ identifier }
 explain_stmt = { kw_explain ~ (kw_analyze | "(" ~ explain_option ~ ("," ~ explain_option)* ~ ")")? ~ select_stmt }
 explain_option = { explain_option_name ~ explain_option_value? }
@@ -390,6 +391,7 @@ kw_buffer_usage_limit = _{ kw_buffer_usage_limit_atom }
 kw_tables = _{ kw_tables_atom }
 kw_explain = _{ kw_explain_atom }
 kw_analyze = { kw_analyze_atom }
+kw_checkpoint = _{ kw_checkpoint_atom }
 kw_buffers = { kw_buffers_atom }
 kw_timing = { kw_timing_atom }
 kw_costs = { kw_costs_atom }
@@ -638,6 +640,7 @@ kw_buffer_usage_limit_atom = @{ ^"buffer_usage_limit" ~ keyword_end }
 kw_tables_atom = @{ ^"tables" ~ keyword_end }
 kw_explain_atom = @{ ^"explain" ~ keyword_end }
 kw_analyze_atom = @{ ^"analyze" ~ keyword_end }
+kw_checkpoint_atom = @{ ^"checkpoint" ~ keyword_end }
 kw_buffers_atom = @{ ^"buffers" ~ keyword_end }
 kw_timing_atom = @{ ^"timing" ~ keyword_end }
 kw_costs_atom = @{ ^"costs" ~ keyword_end }

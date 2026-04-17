@@ -53,6 +53,7 @@ pub enum ParseError {
     SubqueryMustReturnOneColumn,
     UnknownConfigurationParameter(String),
     UnrecognizedParameter(String),
+    CantChangeRuntimeParam(String),
     TablesDeclaredWithOidsNotSupported,
     ActiveSqlTransaction(&'static str),
     OnCommitOnlyForTempTables,
@@ -136,6 +137,9 @@ impl fmt::Display for ParseError {
             ParseError::UnrecognizedParameter(name) => {
                 write!(f, "unrecognized parameter \"{name}\"")
             }
+            ParseError::CantChangeRuntimeParam(name) => {
+                write!(f, "parameter \"{name}\" cannot be changed now")
+            }
             ParseError::TablesDeclaredWithOidsNotSupported => {
                 write!(f, "tables declared WITH OIDS are not supported")
             }
@@ -200,6 +204,7 @@ pub enum Statement {
     Values(ValuesStatement),
     CopyFrom(CopyFromStatement),
     Analyze(AnalyzeStatement),
+    Checkpoint(CheckpointStatement),
     Set(SetStatement),
     Reset(ResetStatement),
     CreateFunction(CreateFunctionStatement),
@@ -467,6 +472,9 @@ pub struct ResetStatement {
 pub struct ShowStatement {
     pub name: String,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckpointStatement;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExplainStatement {

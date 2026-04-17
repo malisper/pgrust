@@ -78,6 +78,7 @@ use crate::backend::parser::analyze::is_binary_coercible_type;
 use crate::backend::parser::{
     CatalogLookup, ParseError, SqlType, SqlTypeKind, SubqueryComparisonOp,
 };
+use crate::backend::utils::misc::checkpoint::checkpoint_stats_value;
 use crate::include::catalog::builtin_scalar_function_for_proc_oid;
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue, NumericValue};
 use crate::include::nodes::primnodes::{
@@ -1688,6 +1689,17 @@ fn eval_builtin_function(
         BuiltinScalarFunction::GetDatabaseEncoding => Ok(Value::Text("UTF8".into())),
         BuiltinScalarFunction::PgRustInternalBinaryCoercible => {
             eval_pg_rust_internal_binary_coercible(&values)
+        }
+        BuiltinScalarFunction::PgStatGetCheckpointerNumTimed
+        | BuiltinScalarFunction::PgStatGetCheckpointerNumRequested
+        | BuiltinScalarFunction::PgStatGetCheckpointerNumPerformed
+        | BuiltinScalarFunction::PgStatGetCheckpointerBuffersWritten
+        | BuiltinScalarFunction::PgStatGetCheckpointerSlruWritten
+        | BuiltinScalarFunction::PgStatGetCheckpointerWriteTime
+        | BuiltinScalarFunction::PgStatGetCheckpointerSyncTime
+        | BuiltinScalarFunction::PgStatGetCheckpointerStatResetTime => {
+            Ok(checkpoint_stats_value(func, &ctx.checkpoint_stats)
+                .expect("checkpoint stats builtin must map to a value"))
         }
         BuiltinScalarFunction::PgInputIsValid => {
             let input = values[0].as_text().ok_or_else(|| ExecError::TypeMismatch {

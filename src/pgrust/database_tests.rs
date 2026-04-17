@@ -106,6 +106,18 @@ fn temp_dir(label: &str) -> PathBuf {
     p
 }
 
+fn role_oid(db: &Database, role_name: &str) -> u32 {
+    db.catalog
+        .read()
+        .catcache()
+        .unwrap()
+        .authid_rows()
+        .into_iter()
+        .find(|row| row.rolname.eq_ignore_ascii_case(role_name))
+        .map(|row| row.oid)
+        .unwrap()
+}
+
 #[test]
 fn ephemeral_database_executes_basic_sql() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
@@ -5957,6 +5969,145 @@ fn create_index_respects_maintenance_work_mem_budget() {
             "expected maintenance_work_mem build failure, got {:?}",
             other
         ),
+    }
+}
+
+#[test]
+fn checkpoint_gucs_show_defaults_and_reject_runtime_set() {
+    let base = temp_dir("checkpoint_gucs");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    match session.execute(&db, "show checkpoint_timeout").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Text("5min".into())]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match session.execute(&db, "show max_wal_size").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Text("1GB".into())]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match session.execute(&db, "set checkpoint_timeout = '10min'") {
+        Err(ExecError::Parse(ParseError::CantChangeRuntimeParam(name))) => {
+            assert_eq!(name, "checkpoint_timeout");
+        }
+        other => panic!("expected checkpoint_timeout runtime change error, got {other:?}"),
+    }
+
+    match session.execute(&db, "reset checkpoint_timeout") {
+        Err(ExecError::Parse(ParseError::CantChangeRuntimeParam(name))) => {
+            assert_eq!(name, "checkpoint_timeout");
+        }
+        other => panic!("expected checkpoint_timeout reset error, got {other:?}"),
+    }
+}
+
+#[test]
+fn checkpoint_requires_pg_checkpoint_membership() {
+    let base = temp_dir("checkpoint_privileges");
+    let db = Database::open(&base, 16).unwrap();
+    let mut bootstrap = Session::new(1);
+
+    bootstrap
+        .execute(&db, "create role tenant login")
+        .unwrap();
+    bootstrap.execute(&db, "create role outsider login").unwrap();
+    let tenant_oid = role_oid(&db, "tenant");
+    db.catalog
+        .write()
+        .grant_role_membership(&crate::backend::catalog::role_memberships::NewRoleMembership {
+            roleid: crate::include::catalog::PG_CHECKPOINT_OID,
+            member: tenant_oid,
+            grantor: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+            admin_option: false,
+            inherit_option: true,
+            set_option: true,
+        })
+        .unwrap();
+
+    let mut session = Session::new(2);
+    session
+        .execute(&db, "set session authorization tenant")
+        .unwrap();
+    assert_eq!(
+        session.execute(&db, "checkpoint").unwrap(),
+        StatementResult::AffectedRows(0)
+    );
+
+    session
+        .execute(&db, "set session authorization outsider")
+        .unwrap();
+    match session.execute(&db, "checkpoint") {
+        Err(ExecError::DetailedError {
+            message,
+            detail,
+            sqlstate,
+            ..
+        }) => {
+            assert_eq!(message, "permission denied to execute CHECKPOINT command");
+            assert_eq!(sqlstate, "42501");
+            assert_eq!(
+                detail.as_deref(),
+                Some(
+                    "Only roles with privileges of the \"pg_checkpoint\" role may execute this command."
+                )
+            );
+        }
+        other => panic!("expected checkpoint privilege error, got {other:?}"),
+    }
+}
+
+#[test]
+fn checkpoint_updates_placeholder_checkpointer_stats() {
+    let base = temp_dir("checkpoint_stats");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    match session
+        .execute(
+            &db,
+            "select pg_stat_get_checkpointer_num_requested(), \
+             pg_stat_get_checkpointer_num_performed(), \
+             pg_stat_get_checkpointer_num_timed()",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Int64(0), Value::Int64(0), Value::Int64(0)]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    session.execute(&db, "checkpoint").unwrap();
+
+    match session
+        .execute(
+            &db,
+            "select pg_stat_get_checkpointer_num_requested(), \
+             pg_stat_get_checkpointer_num_performed(), \
+             pg_stat_get_checkpointer_write_time(), \
+             pg_stat_get_checkpointer_sync_time(), \
+             pg_stat_get_checkpointer_stat_reset_time()",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0][0], Value::Int64(1));
+            assert_eq!(rows[0][1], Value::Int64(1));
+            assert_eq!(rows[0][2], Value::Float64(0.0));
+            assert_eq!(rows[0][3], Value::Float64(0.0));
+            assert!(matches!(rows[0][4], Value::TimestampTz(_)));
+        }
+        other => panic!("expected query result, got {:?}", other),
     }
 }
 
