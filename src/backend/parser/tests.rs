@@ -967,6 +967,18 @@ fn parse_alter_role_option_statement() {
 }
 
 #[test]
+fn parse_alter_schema_owner_statement() {
+    let stmt = parse_statement("alter schema tenant owner to app_owner").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterSchemaOwner(AlterSchemaOwnerStatement {
+            schema_name: "tenant".into(),
+            new_owner: "app_owner".into(),
+        })
+    );
+}
+
+#[test]
 fn parse_set_session_authorization_statement() {
     let stmt = parse_statement("set session authorization regress_tenant").unwrap();
     assert_eq!(

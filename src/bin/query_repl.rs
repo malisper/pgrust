@@ -475,6 +475,12 @@ fn run_statement(
                 stmt.relation_name, stmt.new_owner
             ))))
         }
+        Statement::AlterSchemaOwner(stmt) => {
+            Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
+                "ALTER SCHEMA OWNER in query_repl: {} -> {}",
+                stmt.schema_name, stmt.new_owner
+            ))))
+        }
         Statement::CommentOnRole(_)
         | Statement::CreateRole(_)
         | Statement::AlterRole(_)
