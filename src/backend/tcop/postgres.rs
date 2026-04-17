@@ -2668,6 +2668,54 @@ mod tests {
     }
 
     #[test]
+    fn simple_query_handles_multiline_create_role_membership_clause() {
+        let db = Database::open(temp_dir("multiline_create_role"), 16).unwrap();
+        let mut state = ConnectionState {
+            session: Session::new(2),
+            prepared: HashMap::new(),
+            portals: HashMap::new(),
+            copy_in: None,
+        };
+        let mut output = Vec::new();
+
+        handle_query(
+            &mut output,
+            &db,
+            &mut state,
+            "create role regress_role_admin createrole;\n\
+             create role regress_role_super superuser;\n\
+             create role regress_createdb createdb;\n\
+             create role regress_createrole createrole;\n\
+             create role regress_login login;\n\
+             create role regress_inherit inherit;\n\
+             create role regress_connection_limit connection limit 5;\n\
+             create role regress_encrypted_password encrypted password 'foo';\n\
+             create role regress_password_null password null;\n\
+             set session authorization regress_role_admin;",
+        )
+        .unwrap();
+
+        output.clear();
+        handle_query(
+            &mut output,
+            &db,
+            &mut state,
+            "create role regress_inroles role\n\
+\tregress_role_super, regress_createdb, regress_createrole, regress_login,\n\
+\tregress_inherit, regress_connection_limit, regress_encrypted_password, regress_password_null;",
+        )
+        .unwrap();
+
+        assert!(
+            db.backend_catcache(2, None)
+                .unwrap()
+                .authid_rows()
+                .into_iter()
+                .any(|row| row.rolname == "regress_inroles")
+        );
+    }
+
+    #[test]
     fn substitute_params_resolves_regclass_parameters_to_relation_oids() {
         let mut catalog = Catalog::default();
         let entry = catalog
