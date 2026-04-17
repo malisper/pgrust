@@ -65,6 +65,7 @@ use crate::backend::utils::cache::syscache::{
     BackendCacheState, backend_catcache as syscache_backend_catcache,
     invalidate_backend_cache_state,
 };
+use crate::backend::utils::misc::checkpoint::{CheckpointConfig, CheckpointStatsSnapshot};
 use crate::backend::utils::misc::interrupts::InterruptState;
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
@@ -127,6 +128,8 @@ pub struct Database {
     pub database_oid: u32,
     pub pool: Arc<BufferPool<SmgrStorageBackend>>,
     pub wal: Option<Arc<WalWriter>>,
+    pub checkpoint_config: Arc<CheckpointConfig>,
+    pub checkpoint_stats: Arc<RwLock<CheckpointStatsSnapshot>>,
     pub txns: Arc<RwLock<TransactionManager>>,
     pub shared_catalog: Arc<RwLock<CatalogStore>>,
     pub catalog: Arc<RwLock<CatalogStore>>,
@@ -367,6 +370,18 @@ impl Database {
 
     pub(crate) fn accept_invalidation_messages(&self, client_id: ClientId) {
         accept_invalidation_messages(self, client_id);
+    }
+
+    pub(crate) fn checkpoint_config_value(&self, name: &str) -> Option<String> {
+        self.checkpoint_config.value_for_show(name)
+    }
+
+    pub(crate) fn checkpoint_stats_snapshot(&self) -> CheckpointStatsSnapshot {
+        self.checkpoint_stats.read().clone()
+    }
+
+    pub(crate) fn record_manual_checkpoint(&self) {
+        self.checkpoint_stats.write().record_manual_checkpoint();
     }
 }
 

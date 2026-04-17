@@ -14,6 +14,7 @@ use crate::backend::storage::lmgr::{TableLockManager, TransactionWaiter};
 use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, StorageManager};
 use crate::backend::utils::cache::plancache::PlanCache;
 use crate::backend::utils::cache::syscache::BackendCacheState;
+use crate::backend::utils::misc::checkpoint::{CheckpointConfig, CheckpointStatsSnapshot};
 use crate::backend::utils::misc::interrupts::InterruptState;
 use crate::pgrust::auth::AuthState;
 use crate::pgrust::database::{
@@ -186,6 +187,8 @@ impl Cluster {
             database_oid: row.oid,
             pool: Arc::clone(&self.shared.pool),
             wal: self.shared.wal.clone(),
+            checkpoint_config: Arc::new(CheckpointConfig::default()),
+            checkpoint_stats: Arc::new(RwLock::new(CheckpointStatsSnapshot::default())),
             txns: Arc::clone(&self.shared.txns),
             shared_catalog: Arc::clone(&self.shared.shared_catalog),
             catalog: Arc::clone(&state.catalog),

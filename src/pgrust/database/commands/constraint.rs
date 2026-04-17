@@ -47,6 +47,7 @@ fn ddl_executor_context(
         txns: db.txns.clone(),
         txn_waiter: Some(db.txn_waiter.clone()),
         sequences: Some(db.sequences.clone()),
+        checkpoint_stats: db.checkpoint_stats_snapshot(),
         datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
         interrupts,
         snapshot,
