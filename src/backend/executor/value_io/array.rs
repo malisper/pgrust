@@ -707,7 +707,11 @@ fn infer_sql_type_from_value(value: &Value) -> Option<SqlType> {
         Value::Box(_) => Some(SqlType::new(SqlTypeKind::Box)),
         Value::Polygon(_) => Some(SqlType::new(SqlTypeKind::Polygon)),
         Value::Circle(_) => Some(SqlType::new(SqlTypeKind::Circle)),
-        Value::Record(_) => Some(SqlType::record(RECORD_TYPE_OID)),
+        Value::Record(record) => Some(if record.typrelid != 0 {
+            SqlType::named_composite(record.type_oid, record.typrelid)
+        } else {
+            SqlType::record(record.type_oid.max(RECORD_TYPE_OID))
+        }),
         Value::Range(range) => Some(sql_type_for_range_kind(range.kind)),
     }
 }

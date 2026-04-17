@@ -248,6 +248,9 @@ fn decode_internal_array(bytes: &[u8]) -> Result<crate::include::nodes::datum::A
 
 fn encode_internal_record(record: &crate::include::nodes::datum::RecordValue) -> Result<Vec<u8>, ExecError> {
     let mut out = Vec::new();
+    out.extend_from_slice(&record.type_oid.to_le_bytes());
+    out.extend_from_slice(&record.typrelid.to_le_bytes());
+    out.extend_from_slice(&record.typmod.to_le_bytes());
     out.extend_from_slice(&(record.fields.len() as u32).to_le_bytes());
     for (name, value) in &record.fields {
         encode_internal_text(name.as_bytes(), &mut out);
@@ -259,6 +262,18 @@ fn encode_internal_record(record: &crate::include::nodes::datum::RecordValue) ->
 
 fn decode_internal_record(bytes: &[u8]) -> Result<crate::include::nodes::datum::RecordValue, ExecError> {
     let mut offset = 0usize;
+    if offset + 12 > bytes.len() {
+        return Err(ExecError::InvalidStorageValue {
+            column: "<record>".into(),
+            details: "truncated internal record header".into(),
+        });
+    }
+    let type_oid = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+    offset += 4;
+    let typrelid = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+    offset += 4;
+    let typmod = i32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+    offset += 4;
     if offset + 4 > bytes.len() {
         return Err(ExecError::InvalidStorageValue {
             column: "<record>".into(),
@@ -275,7 +290,12 @@ fn decode_internal_record(bytes: &[u8]) -> Result<crate::include::nodes::datum::
         let payload = decode_internal_text(bytes, &mut offset)?;
         fields.push((name, decode_internal_value(payload)?));
     }
-    Ok(crate::include::nodes::datum::RecordValue { fields })
+    Ok(crate::include::nodes::datum::RecordValue {
+        type_oid,
+        typrelid,
+        typmod,
+        fields,
+    })
 }
 
 fn encode_internal_value(value: &Value) -> Result<Vec<u8>, ExecError> {
@@ -733,9 +753,6 @@ pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<TupleVa
             Ok(TupleValue::Bytes(render_internal_char_text(v).into_bytes()))
         }
         (ScalarType::Text, value) => Ok(TupleValue::Bytes(value.as_text().unwrap().as_bytes().to_vec())),
-        (ScalarType::Record, Value::Record(record)) => {
-            Ok(TupleValue::Bytes(encode_internal_record(&record)?))
-        }
         (ScalarType::Record, value) => Ok(TupleValue::Bytes(encode_internal_value(&value)?)),
         (ScalarType::Bool, Value::Bool(v)) => Ok(TupleValue::Bytes(vec![u8::from(v)])),
         (ScalarType::Array(_), Value::Array(items))
@@ -1371,7 +1388,7 @@ pub(crate) fn missing_column_value(column: &ColumnDesc) -> Value {
 mod tests {
     use super::*;
     use crate::backend::catalog::catalog::column_desc;
-    use crate::include::nodes::datum::ArrayDimension;
+    use crate::include::nodes::datum::{ArrayDimension, RecordValue};
 
     #[test]
     fn anyarray_value_roundtrips_through_tuple_storage() {
@@ -1420,6 +1437,28 @@ mod tests {
             decode_array_bytes(SqlType::with_char_len(SqlTypeKind::Varchar, 4), &bytes).unwrap();
 
         assert_eq!(decoded, Value::PgArray(array));
+    }
+
+    #[test]
+    fn record_storage_roundtrip_preserves_identity() {
+        let desc = RelationDesc {
+            columns: vec![column_desc("v", SqlType::record(crate::include::catalog::RECORD_TYPE_OID), true)],
+        };
+        let value = Value::Record(RecordValue::named(
+            4242,
+            3131,
+            7,
+            vec![
+                ("a".into(), Value::Int32(1)),
+                ("b".into(), Value::Text("x".into())),
+            ],
+        ));
+
+        let tuple = tuple_from_values(&desc, std::slice::from_ref(&value)).unwrap();
+        let raw = tuple.deform(&desc.attribute_descs()).unwrap();
+        let decoded = decode_value(&desc.columns[0], raw[0]).unwrap();
+
+        assert_eq!(decoded, value);
     }
 
     #[test]

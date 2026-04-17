@@ -766,12 +766,7 @@ fn compare_record_values(
     left: &crate::include::nodes::datum::RecordValue,
     right: &crate::include::nodes::datum::RecordValue,
 ) -> Ordering {
-    for ((left_name, left_value), (right_name, right_value)) in left.fields.iter().zip(&right.fields)
-    {
-        let name_ordering = left_name.cmp(right_name);
-        if name_ordering != Ordering::Equal {
-            return name_ordering;
-        }
+    for ((_, left_value), (_, right_value)) in left.fields.iter().zip(&right.fields) {
         let value_ordering = compare_order_values(left_value, right_value, None, false);
         if value_ordering != Ordering::Equal {
             return value_ordering;

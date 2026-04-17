@@ -25,9 +25,54 @@ pub struct ArrayValue {
     pub elements: Vec<Value>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone)]
 pub struct RecordValue {
+    pub type_oid: u32,
+    pub typrelid: u32,
+    pub typmod: i32,
     pub fields: Vec<(String, Value)>,
+}
+
+impl RecordValue {
+    pub fn anonymous(fields: Vec<(String, Value)>) -> Self {
+        Self {
+            type_oid: crate::include::catalog::RECORD_TYPE_OID,
+            typrelid: 0,
+            typmod: -1,
+            fields,
+        }
+    }
+
+    pub fn named(type_oid: u32, typrelid: u32, typmod: i32, fields: Vec<(String, Value)>) -> Self {
+        Self {
+            type_oid,
+            typrelid,
+            typmod,
+            fields,
+        }
+    }
+}
+
+impl PartialEq for RecordValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.fields.len() == other.fields.len()
+            && self
+                .fields
+                .iter()
+                .zip(&other.fields)
+                .all(|((_, left), (_, right))| left == right)
+    }
+}
+
+impl Eq for RecordValue {}
+
+impl Hash for RecordValue {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.fields.len().hash(state);
+        for (_, value) in &self.fields {
+            value.hash(state);
+        }
+    }
 }
 
 impl ArrayValue {
@@ -699,6 +744,9 @@ impl Value {
             }
             Value::PgArray(array) => Value::PgArray(array.to_owned_value()),
             Value::Record(record) => Value::Record(RecordValue {
+                type_oid: record.type_oid,
+                typrelid: record.typrelid,
+                typmod: record.typmod,
                 fields: record
                     .fields
                     .iter()
@@ -994,7 +1042,9 @@ impl std::hash::Hash for Value {
 
 #[cfg(test)]
 mod tests {
-    use super::NumericValue;
+    use super::{NumericValue, RecordValue, Value};
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
 
     #[test]
     fn numeric_zero_preserves_display_scale() {
@@ -1006,6 +1056,31 @@ mod tests {
     fn numeric_zero_equality_ignores_scale() {
         assert_eq!(NumericValue::from("0"), NumericValue::from("0.0"));
         assert_eq!(NumericValue::from("0.0"), NumericValue::from("0.00"));
+    }
+
+    #[test]
+    fn record_equality_ignores_field_names_and_identity() {
+        let anonymous = RecordValue::anonymous(vec![
+            ("f1".into(), Value::Int32(1)),
+            ("f2".into(), Value::Text("x".into())),
+        ]);
+        let named = RecordValue::named(
+            12345,
+            67890,
+            42,
+            vec![
+                ("left".into(), Value::Int32(1)),
+                ("right".into(), Value::Text("x".into())),
+            ],
+        );
+
+        assert_eq!(anonymous, named);
+
+        let mut left_hasher = DefaultHasher::new();
+        anonymous.hash(&mut left_hasher);
+        let mut right_hasher = DefaultHasher::new();
+        named.hash(&mut right_hasher);
+        assert_eq!(left_hasher.finish(), right_hasher.finish());
     }
 }
 

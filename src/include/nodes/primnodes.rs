@@ -1204,7 +1204,11 @@ fn value_sql_type_hint(value: &Value) -> Option<SqlType> {
         Value::Text(_) | Value::TextRef(_, _) => Some(SqlType::new(SqlTypeKind::Text)),
         Value::InternalChar(_) => Some(SqlType::new(SqlTypeKind::InternalChar)),
         Value::Bool(_) => Some(SqlType::new(SqlTypeKind::Bool)),
-        Value::Record(_) => Some(SqlType::record(RECORD_TYPE_OID)),
+        Value::Record(record) => Some(if record.typrelid != 0 {
+            SqlType::named_composite(record.type_oid, record.typrelid)
+        } else {
+            SqlType::record(record.type_oid.max(RECORD_TYPE_OID))
+        }),
         Value::Array(_) | Value::PgArray(_) | Value::Null => None,
     }
 }
