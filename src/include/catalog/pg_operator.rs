@@ -8,15 +8,17 @@ use crate::include::catalog::{
     BOOL_CMP_NE_PROC_OID, BOOL_TYPE_OID, BOOTSTRAP_SUPERUSER_OID, BOX_TYPE_OID,
     BYTEA_CMP_EQ_PROC_OID, BYTEA_CMP_GE_PROC_OID, BYTEA_CMP_GT_PROC_OID, BYTEA_CMP_LE_PROC_OID,
     BYTEA_CMP_LT_PROC_OID, BYTEA_CMP_NE_PROC_OID, BYTEA_TYPE_OID, CIRCLE_TYPE_OID, FLOAT8_TYPE_OID,
-    INT4_CMP_EQ_PROC_OID, INT4_CMP_GE_PROC_OID, INT4_CMP_GT_PROC_OID, INT4_CMP_LE_PROC_OID,
-    INT4_CMP_LT_PROC_OID, INT4_CMP_NE_PROC_OID, INT4_TYPE_OID, JSONB_CMP_EQ_PROC_OID,
+    DATERANGE_TYPE_OID, DATE_TYPE_OID, INT4_CMP_EQ_PROC_OID, INT4_CMP_GE_PROC_OID,
+    INT4_CMP_GT_PROC_OID, INT4_CMP_LE_PROC_OID, INT4_CMP_LT_PROC_OID, INT4_CMP_NE_PROC_OID,
+    INT4_TYPE_OID, INT4RANGE_TYPE_OID, INT8RANGE_TYPE_OID, INT8_TYPE_OID, JSONB_CMP_EQ_PROC_OID,
     JSONB_CMP_GE_PROC_OID, JSONB_CMP_GT_PROC_OID, JSONB_CMP_LE_PROC_OID, JSONB_CMP_LT_PROC_OID,
     JSONB_CMP_NE_PROC_OID, JSONB_TYPE_OID, LINE_TYPE_OID, LSEG_TYPE_OID, PATH_TYPE_OID,
-    PG_CATALOG_NAMESPACE_OID, POINT_TYPE_OID, POLYGON_TYPE_OID, TEXT_CMP_EQ_PROC_OID,
-    TEXT_CMP_GE_PROC_OID, TEXT_CMP_GT_PROC_OID, TEXT_CMP_LE_PROC_OID, TEXT_CMP_LT_PROC_OID,
-    TEXT_CMP_NE_PROC_OID, TEXT_STARTS_WITH_PROC_OID, TEXT_TYPE_OID, VARBIT_CMP_EQ_PROC_OID,
-    VARBIT_CMP_GE_PROC_OID, VARBIT_CMP_GT_PROC_OID, VARBIT_CMP_LE_PROC_OID, VARBIT_CMP_LT_PROC_OID,
-    VARBIT_CMP_NE_PROC_OID, VARBIT_TYPE_OID,
+    NUMERIC_TYPE_OID, NUMRANGE_TYPE_OID, PG_CATALOG_NAMESPACE_OID, POINT_TYPE_OID,
+    POLYGON_TYPE_OID, TEXT_CMP_EQ_PROC_OID, TEXT_CMP_GE_PROC_OID, TEXT_CMP_GT_PROC_OID,
+    TEXT_CMP_LE_PROC_OID, TEXT_CMP_LT_PROC_OID, TEXT_CMP_NE_PROC_OID, TEXT_STARTS_WITH_PROC_OID,
+    TEXT_TYPE_OID, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID, TSRANGE_TYPE_OID,
+    TSTZRANGE_TYPE_OID, VARBIT_CMP_EQ_PROC_OID, VARBIT_CMP_GE_PROC_OID, VARBIT_CMP_GT_PROC_OID,
+    VARBIT_CMP_LE_PROC_OID, VARBIT_CMP_LT_PROC_OID, VARBIT_CMP_NE_PROC_OID, VARBIT_TYPE_OID,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -537,6 +539,7 @@ pub fn bootstrap_pg_operator_rows() -> Vec<PgOperatorRow> {
         ),
     ];
     rows.extend(geometry_operator_rows());
+    rows.extend(range_operator_rows());
     rows
 }
 
@@ -2610,6 +2613,181 @@ fn geometry_operator_rows() -> Vec<PgOperatorRow> {
             false,
         ),
     ]
+}
+
+fn range_operator_rows() -> Vec<PgOperatorRow> {
+    let specs = [
+        (INT4RANGE_TYPE_OID, INT4_TYPE_OID),
+        (INT8RANGE_TYPE_OID, INT8_TYPE_OID),
+        (NUMRANGE_TYPE_OID, NUMERIC_TYPE_OID),
+        (DATERANGE_TYPE_OID, DATE_TYPE_OID),
+        (TSRANGE_TYPE_OID, TIMESTAMP_TYPE_OID),
+        (TSTZRANGE_TYPE_OID, TIMESTAMPTZ_TYPE_OID),
+    ];
+    let mut next_oid = 72_000u32;
+    let mut next_proc_oid = 62_117u32;
+    let mut rows = Vec::new();
+    for (range_oid, subtype_oid) in specs {
+        let eq = next_oid;
+        let ne = next_oid + 1;
+        let lt = next_oid + 2;
+        let le = next_oid + 3;
+        let gt = next_oid + 4;
+        let ge = next_oid + 5;
+        let overlap = next_oid + 6;
+        let left = next_oid + 7;
+        let right = next_oid + 8;
+        let overleft = next_oid + 9;
+        let overright = next_oid + 10;
+        let adjacent = next_oid + 11;
+        let contains_range = next_oid + 12;
+        let contained_range = next_oid + 13;
+        let contains_elem = next_oid + 14;
+        let contained_elem = next_oid + 15;
+        let union = next_oid + 16;
+        let intersect = next_oid + 17;
+        let difference = next_oid + 18;
+        rows.extend([
+            operator_row(eq, "=", range_oid, range_oid, eq, ne, next_proc_oid, true, true),
+            operator_row(ne, "<>", range_oid, range_oid, ne, eq, next_proc_oid + 1, false, false),
+            operator_row(lt, "<", range_oid, range_oid, gt, ge, next_proc_oid + 2, false, false),
+            operator_row(le, "<=", range_oid, range_oid, ge, gt, next_proc_oid + 3, false, false),
+            operator_row(gt, ">", range_oid, range_oid, lt, le, next_proc_oid + 4, false, false),
+            operator_row(ge, ">=", range_oid, range_oid, le, lt, next_proc_oid + 5, false, false),
+            operator_row(
+                overlap,
+                "&&",
+                range_oid,
+                range_oid,
+                overlap,
+                0,
+                next_proc_oid + 6,
+                false,
+                false,
+            ),
+            operator_row(left, "<<", range_oid, range_oid, right, 0, next_proc_oid + 7, false, false),
+            operator_row(right, ">>", range_oid, range_oid, left, 0, next_proc_oid + 8, false, false),
+            operator_row(
+                overleft,
+                "&<",
+                range_oid,
+                range_oid,
+                overright,
+                0,
+                next_proc_oid + 9,
+                false,
+                false,
+            ),
+            operator_row(
+                overright,
+                "&>",
+                range_oid,
+                range_oid,
+                overleft,
+                0,
+                next_proc_oid + 10,
+                false,
+                false,
+            ),
+            operator_row(
+                adjacent,
+                "-|-",
+                range_oid,
+                range_oid,
+                adjacent,
+                0,
+                next_proc_oid + 11,
+                false,
+                false,
+            ),
+            operator_row(
+                contains_range,
+                "@>",
+                range_oid,
+                range_oid,
+                contained_range,
+                0,
+                next_proc_oid + 12,
+                false,
+                false,
+            ),
+            operator_row(
+                contained_range,
+                "<@",
+                range_oid,
+                range_oid,
+                contains_range,
+                0,
+                next_proc_oid + 13,
+                false,
+                false,
+            ),
+            operator_row(
+                contains_elem,
+                "@>",
+                range_oid,
+                subtype_oid,
+                contained_elem,
+                0,
+                next_proc_oid + 12,
+                false,
+                false,
+            ),
+            operator_row(
+                contained_elem,
+                "<@",
+                subtype_oid,
+                range_oid,
+                contains_elem,
+                0,
+                next_proc_oid + 13,
+                false,
+                false,
+            ),
+            operator_row_full(
+                union,
+                "+",
+                'b',
+                range_oid,
+                range_oid,
+                range_oid,
+                union,
+                0,
+                next_proc_oid + 16,
+                false,
+                false,
+            ),
+            operator_row_full(
+                intersect,
+                "*",
+                'b',
+                range_oid,
+                range_oid,
+                range_oid,
+                intersect,
+                0,
+                next_proc_oid + 17,
+                false,
+                false,
+            ),
+            operator_row_full(
+                difference,
+                "-",
+                'b',
+                range_oid,
+                range_oid,
+                range_oid,
+                difference,
+                0,
+                next_proc_oid + 18,
+                false,
+                false,
+            ),
+        ]);
+        next_oid += 19;
+        next_proc_oid += 32;
+    }
+    rows
 }
 
 fn operator_row_full(

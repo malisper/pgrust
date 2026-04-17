@@ -16,6 +16,7 @@ mod expr_math;
 mod expr_money;
 mod expr_numeric;
 mod expr_ops;
+mod expr_range;
 mod expr_string;
 pub(crate) mod hashjoin;
 pub(crate) mod jsonb;
@@ -58,6 +59,11 @@ pub use expr_casts::render_internal_char_text;
 pub use expr_datetime::{render_datetime_value_text, render_datetime_value_text_with_config};
 pub(crate) use expr_geometry::geometry_input_error_message;
 pub(crate) use expr_geometry::render_geometry_text;
+pub use expr_range::render_range_text;
+pub(crate) use expr_range::{
+    compare_range_values, decode_range_bytes, encode_range_bytes, eval_range_function,
+    parse_range_text,
+};
 pub use expr_money::money_format_text;
 pub(crate) use expr_money::money_parse_text;
 pub use startup::executor_start;
@@ -220,6 +226,10 @@ pub enum ExecError {
         value: String,
     },
     InvalidGeometryInput {
+        ty: &'static str,
+        value: String,
+    },
+    InvalidRangeInput {
         ty: &'static str,
         value: String,
     },

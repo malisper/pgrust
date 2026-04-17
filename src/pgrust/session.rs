@@ -1823,6 +1823,7 @@ impl Session {
                                 | ScalarType::TimeTz
                                 | ScalarType::Timestamp
                                 | ScalarType::TimestampTz
+                                | ScalarType::Range(_)
                                 | ScalarType::Point
                                 | ScalarType::Lseg
                                 | ScalarType::Path

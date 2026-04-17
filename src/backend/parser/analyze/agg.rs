@@ -482,6 +482,7 @@ pub(super) fn aggregate_sql_type(func: AggFunc, arg_type: Option<SqlType>) -> Sq
         | AggFunc::JsonbAgg
         | AggFunc::JsonObjectAgg
         | AggFunc::JsonbObjectAgg => unreachable!("fixed aggregate return types handled above"),
+        AggFunc::RangeIntersectAgg => arg_type.unwrap_or(SqlType::new(Text)),
     }
 }
 

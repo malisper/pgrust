@@ -736,6 +736,8 @@ pub fn sql_type_oid(sql_type: SqlType) -> u32 {
         (SqlTypeKind::Int2Vector, true) => unreachable!("int2vector arrays are unsupported"),
         (SqlTypeKind::Int4, false) => INT4_TYPE_OID,
         (SqlTypeKind::Int4, true) => INT4_ARRAY_TYPE_OID,
+        (SqlTypeKind::Int4Range, false) => crate::include::catalog::INT4RANGE_TYPE_OID,
+        (SqlTypeKind::Int4Range, true) => unreachable!("range arrays are unsupported"),
         (SqlTypeKind::Text, false) => TEXT_TYPE_OID,
         (SqlTypeKind::Text, true) => TEXT_ARRAY_TYPE_OID,
         (SqlTypeKind::Oid, false) => OID_TYPE_OID,
@@ -754,16 +756,26 @@ pub fn sql_type_oid(sql_type: SqlType) -> u32 {
         (SqlTypeKind::Char, true) => BPCHAR_ARRAY_TYPE_OID,
         (SqlTypeKind::Date, false) => crate::include::catalog::DATE_TYPE_OID,
         (SqlTypeKind::Date, true) => crate::include::catalog::DATE_ARRAY_TYPE_OID,
+        (SqlTypeKind::DateRange, false) => crate::include::catalog::DATERANGE_TYPE_OID,
+        (SqlTypeKind::DateRange, true) => unreachable!("range arrays are unsupported"),
         (SqlTypeKind::Time, false) => crate::include::catalog::TIME_TYPE_OID,
         (SqlTypeKind::Time, true) => crate::include::catalog::TIME_ARRAY_TYPE_OID,
         (SqlTypeKind::TimeTz, false) => crate::include::catalog::TIMETZ_TYPE_OID,
         (SqlTypeKind::TimeTz, true) => crate::include::catalog::TIMETZ_ARRAY_TYPE_OID,
         (SqlTypeKind::Timestamp, false) => TIMESTAMP_TYPE_OID,
         (SqlTypeKind::Timestamp, true) => TIMESTAMP_ARRAY_TYPE_OID,
+        (SqlTypeKind::TimestampRange, false) => crate::include::catalog::TSRANGE_TYPE_OID,
+        (SqlTypeKind::TimestampRange, true) => unreachable!("range arrays are unsupported"),
         (SqlTypeKind::TimestampTz, false) => crate::include::catalog::TIMESTAMPTZ_TYPE_OID,
         (SqlTypeKind::TimestampTz, true) => crate::include::catalog::TIMESTAMPTZ_ARRAY_TYPE_OID,
+        (SqlTypeKind::TimestampTzRange, false) => crate::include::catalog::TSTZRANGE_TYPE_OID,
+        (SqlTypeKind::TimestampTzRange, true) => unreachable!("range arrays are unsupported"),
         (SqlTypeKind::Numeric, false) => NUMERIC_TYPE_OID,
         (SqlTypeKind::Numeric, true) => NUMERIC_ARRAY_TYPE_OID,
+        (SqlTypeKind::NumericRange, false) => crate::include::catalog::NUMRANGE_TYPE_OID,
+        (SqlTypeKind::NumericRange, true) => unreachable!("range arrays are unsupported"),
+        (SqlTypeKind::Int8Range, false) => crate::include::catalog::INT8RANGE_TYPE_OID,
+        (SqlTypeKind::Int8Range, true) => unreachable!("range arrays are unsupported"),
         (SqlTypeKind::Json, false) => JSON_TYPE_OID,
         (SqlTypeKind::Json, true) => JSON_ARRAY_TYPE_OID,
         (SqlTypeKind::Jsonb, false) => JSONB_TYPE_OID,
@@ -1230,9 +1242,11 @@ mod tests {
         let cache = CatCache::from_catalog(&Catalog::default());
 
         let lower = cache.proc_rows_by_name("pg_catalog.lower");
-        assert_eq!(lower.len(), 1);
-        assert_eq!(lower[0].proname, "lower");
-        assert_eq!(lower[0].pronargs, 1);
+        assert!(!lower.is_empty());
+        assert!(lower.iter().all(|row| row.proname == "lower" && row.pronargs == 1));
+        assert!(lower
+            .iter()
+            .any(|row| row.proargtypes == TEXT_TYPE_OID.to_string()));
 
         assert_eq!(
             cache

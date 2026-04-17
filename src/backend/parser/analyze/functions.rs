@@ -737,6 +737,26 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::GeoDiv
             | BuiltinScalarFunction::GeoIsVertical
             | BuiltinScalarFunction::GeoIsHorizontal => matches!(args.len(), 1 | 2),
+            BuiltinScalarFunction::RangeConstructor => matches!(args.len(), 2 | 3),
+            BuiltinScalarFunction::RangeIsEmpty
+            | BuiltinScalarFunction::RangeLower
+            | BuiltinScalarFunction::RangeUpper
+            | BuiltinScalarFunction::RangeLowerInc
+            | BuiltinScalarFunction::RangeUpperInc
+            | BuiltinScalarFunction::RangeLowerInf
+            | BuiltinScalarFunction::RangeUpperInf => args.len() == 1,
+            BuiltinScalarFunction::RangeContains
+            | BuiltinScalarFunction::RangeContainedBy
+            | BuiltinScalarFunction::RangeOverlap
+            | BuiltinScalarFunction::RangeStrictLeft
+            | BuiltinScalarFunction::RangeStrictRight
+            | BuiltinScalarFunction::RangeOverLeft
+            | BuiltinScalarFunction::RangeOverRight
+            | BuiltinScalarFunction::RangeAdjacent
+            | BuiltinScalarFunction::RangeUnion
+            | BuiltinScalarFunction::RangeIntersect
+            | BuiltinScalarFunction::RangeDifference
+            | BuiltinScalarFunction::RangeMerge => args.len() == 2,
         });
 
     if valid {
@@ -790,7 +810,8 @@ pub(super) fn validate_aggregate_arity(func: AggFunc, args: &[SqlExpr]) -> Resul
             | AggFunc::Max
             | AggFunc::ArrayAgg
             | AggFunc::JsonAgg
-            | AggFunc::JsonbAgg => args.len() == 1,
+            | AggFunc::JsonbAgg
+            | AggFunc::RangeIntersectAgg => args.len() == 1,
             AggFunc::StringAgg | AggFunc::JsonObjectAgg | AggFunc::JsonbObjectAgg => {
                 args.len() == 2
             }
@@ -867,7 +888,9 @@ fn scalar_functions_by_name() -> &'static BTreeMap<String, BuiltinScalarFunction
                 continue;
             }
             if let Some(func) = builtin_scalar_function_for_proc_src(&row.prosrc) {
-                by_name.insert(row.proname.to_ascii_lowercase(), func);
+                by_name
+                    .entry(row.proname.to_ascii_lowercase())
+                    .or_insert(func);
             }
         }
         for (name, func) in legacy_scalar_function_entries() {
@@ -1295,6 +1318,26 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::BitcastBigintToFloat8,
         ),
         ("pg_input_is_valid", BuiltinScalarFunction::PgInputIsValid),
+        ("range_constructor", BuiltinScalarFunction::RangeConstructor),
+        ("range_isempty", BuiltinScalarFunction::RangeIsEmpty),
+        ("range_lower", BuiltinScalarFunction::RangeLower),
+        ("range_upper", BuiltinScalarFunction::RangeUpper),
+        ("range_lower_inc", BuiltinScalarFunction::RangeLowerInc),
+        ("range_upper_inc", BuiltinScalarFunction::RangeUpperInc),
+        ("range_lower_inf", BuiltinScalarFunction::RangeLowerInf),
+        ("range_upper_inf", BuiltinScalarFunction::RangeUpperInf),
+        ("range_contains", BuiltinScalarFunction::RangeContains),
+        ("range_contained_by", BuiltinScalarFunction::RangeContainedBy),
+        ("range_overlap", BuiltinScalarFunction::RangeOverlap),
+        ("range_strict_left", BuiltinScalarFunction::RangeStrictLeft),
+        ("range_strict_right", BuiltinScalarFunction::RangeStrictRight),
+        ("range_over_left", BuiltinScalarFunction::RangeOverLeft),
+        ("range_over_right", BuiltinScalarFunction::RangeOverRight),
+        ("range_adjacent", BuiltinScalarFunction::RangeAdjacent),
+        ("range_union", BuiltinScalarFunction::RangeUnion),
+        ("range_intersect", BuiltinScalarFunction::RangeIntersect),
+        ("range_difference", BuiltinScalarFunction::RangeDifference),
+        ("range_merge", BuiltinScalarFunction::RangeMerge),
     ]
 }
 
@@ -1719,6 +1762,7 @@ fn aggregate_func_for_proname(name: &str) -> Option<AggFunc> {
         "jsonb_agg" => Some(AggFunc::JsonbAgg),
         "json_object_agg" => Some(AggFunc::JsonObjectAgg),
         "jsonb_object_agg" => Some(AggFunc::JsonbObjectAgg),
+        "range_intersect_agg" => Some(AggFunc::RangeIntersectAgg),
         _ => None,
     }
 }
