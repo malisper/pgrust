@@ -701,6 +701,7 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         let mut rows = ensure_type_rows(self.db, self.client_id, self.txn_ctx);
         rows.extend(self.db.domain_type_rows_for_search_path(&self.search_path));
         rows.extend(self.db.enum_type_rows_for_search_path(&self.search_path));
+        rows.extend(self.db.range_type_rows_for_search_path(&self.search_path));
         rows
     }
 

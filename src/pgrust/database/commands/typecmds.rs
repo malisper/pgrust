@@ -3,10 +3,11 @@ use crate::backend::catalog::CatalogError;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::{ColumnDesc, RelationDesc, StatementResult};
 use crate::backend::parser::{
-    CatalogLookup, CreateCompositeTypeStatement, CreateEnumTypeStatement, CreateTypeStatement,
-    DropTypeStatement, ParseError, resolve_raw_type_name,
+    CatalogLookup, CreateCompositeTypeStatement, CreateEnumTypeStatement,
+    CreateRangeTypeStatement, CreateTypeStatement, DropTypeStatement, ParseError,
+    resolve_raw_type_name,
 };
-use crate::pgrust::database::EnumTypeEntry;
+use crate::pgrust::database::{EnumTypeEntry, RangeTypeEntry};
 use crate::pgrust::database::ddl::{
     ensure_relation_owner, is_system_column_name, map_catalog_error, reject_type_with_dependents,
 };
@@ -18,6 +19,11 @@ enum ResolvedDropTypeTarget {
         display_name: String,
     },
     Enum {
+        type_oid: u32,
+        normalized_name: String,
+        display_name: String,
+    },
+    Range {
         type_oid: u32,
         normalized_name: String,
         display_name: String,
@@ -97,6 +103,13 @@ impl Database {
                 }
             }
             CreateTypeStatement::Enum(stmt) => self.execute_create_enum_type_stmt(
+                client_id,
+                stmt,
+                xid,
+                cid,
+                configured_search_path,
+            ),
+            CreateTypeStatement::Range(stmt) => self.execute_create_range_type_stmt(
                 client_id,
                 stmt,
                 xid,
@@ -227,6 +240,26 @@ impl Database {
                         return Err(type_does_not_exist_error(type_name));
                     }
                 }
+                Some(ResolvedDropTypeTarget::Range {
+                    type_oid,
+                    normalized_name,
+                    display_name,
+                }) => {
+                    reject_type_with_dependents(
+                        self,
+                        client_id,
+                        Some((xid, cid)),
+                        type_oid,
+                        &display_name,
+                    )?;
+                    let removed = self.range_types.write().remove(&normalized_name);
+                    if removed.is_some() {
+                        self.plan_cache.invalidate_all();
+                        dropped += 1;
+                    } else if !drop_stmt.if_exists {
+                        return Err(type_does_not_exist_error(type_name));
+                    }
+                }
                 None if drop_stmt.if_exists => {}
                 None => return Err(type_does_not_exist_error(type_name)),
             }
@@ -318,6 +351,30 @@ impl Database {
                     display_name: format_name(row.typnamespace, &row.typname),
                 }));
             }
+            let range_row = if let Some((schema_name, object_name)) = type_name.split_once('.') {
+                let Some(namespace_oid) = resolve_namespace_oid(schema_name) else {
+                    return Ok(None);
+                };
+                self.range_type_rows_for_search_path(&search_path)
+                    .into_iter()
+                    .find(|row| {
+                        row.typnamespace == namespace_oid
+                            && row.typelem == 0
+                            && row.typname.eq_ignore_ascii_case(object_name)
+                    })
+            } else {
+                self.range_type_rows_for_search_path(&search_path)
+                    .into_iter()
+                    .find(|row| row.typelem == 0 && row.typname.eq_ignore_ascii_case(type_name))
+            };
+            if let Some(row) = range_row {
+                let normalized_name = format_name(row.typnamespace, &row.typname);
+                return Ok(Some(ResolvedDropTypeTarget::Range {
+                    type_oid: row.oid,
+                    normalized_name,
+                    display_name: format_name(row.typnamespace, &row.typname),
+                }));
+            }
             return Ok(None);
         };
         let Some(class_row) = catcache.class_by_oid(type_row.typrelid) else {
@@ -401,26 +458,7 @@ impl Database {
         }) {
             return Err(type_already_exists_error(&enum_type_display_name(stmt)));
         }
-
-        let next_catalog_oid = {
-            let catalog = self.catalog.write();
-            let snapshot = catalog.catalog_snapshot().map_err(map_catalog_error)?;
-            snapshot.next_oid()
-        };
-        let next_dynamic_oid = self
-            .domains
-            .read()
-            .values()
-            .map(|domain| domain.oid.saturating_add(1))
-            .chain(
-                enum_types
-                    .values()
-                    .map(|entry| entry.array_oid.saturating_add(1)),
-            )
-            .max()
-            .unwrap_or(next_catalog_oid)
-            .max(next_catalog_oid);
-        let oid = next_dynamic_oid;
+        let oid = self.next_dynamic_type_oid(Some(&enum_types), None)?;
         let array_oid = oid.saturating_add(1);
         enum_types.insert(
             normalized,
@@ -430,6 +468,58 @@ impl Database {
                 name: object_name,
                 namespace_oid,
                 labels: stmt.labels.clone(),
+                comment: None,
+            },
+        );
+        self.plan_cache.invalidate_all();
+        Ok(StatementResult::AffectedRows(0))
+    }
+
+    fn execute_create_range_type_stmt(
+        &self,
+        client_id: ClientId,
+        stmt: &CreateRangeTypeStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let (normalized, object_name, namespace_oid) = self.normalize_range_type_name_for_create(
+            client_id,
+            Some((xid, cid)),
+            stmt,
+            configured_search_path,
+        )?;
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let subtype = resolve_raw_type_name(&stmt.subtype, &catalog).map_err(ExecError::Parse)?;
+        if catalog.type_rows().into_iter().any(|row| {
+            row.typelem == 0
+                && row.typnamespace == namespace_oid
+                && row.typname.eq_ignore_ascii_case(&object_name)
+        }) {
+            return Err(type_already_exists_error(&range_type_display_name(stmt)));
+        }
+        let mut range_types = self.range_types.write();
+        if range_types.contains_key(&normalized) {
+            return Err(type_already_exists_error(&range_type_display_name(stmt)));
+        }
+        if range_types.values().any(|entry| {
+            entry.namespace_oid == namespace_oid && entry.name.eq_ignore_ascii_case(&object_name)
+        }) {
+            return Err(type_already_exists_error(&range_type_display_name(stmt)));
+        }
+
+        let oid = self.next_dynamic_type_oid(None, Some(&range_types))?;
+        let array_oid = oid.saturating_add(1);
+        range_types.insert(
+            normalized,
+            RangeTypeEntry {
+                oid,
+                array_oid,
+                name: object_name,
+                namespace_oid,
+                subtype,
+                subtype_diff: stmt.subtype_diff.clone(),
+                collation: stmt.collation.clone(),
                 comment: None,
             },
         );
@@ -461,6 +551,88 @@ impl Database {
             .to_string();
         Ok((normalized.0, object_name, normalized.1))
     }
+
+    fn normalize_range_type_name_for_create(
+        &self,
+        client_id: ClientId,
+        txn_ctx: CatalogTxnContext,
+        stmt: &CreateRangeTypeStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<(String, String, u32), ExecError> {
+        let normalized = self
+            .normalize_create_type_name_with_search_path(
+                client_id,
+                txn_ctx,
+                stmt.schema_name.as_deref(),
+                &stmt.type_name,
+                configured_search_path,
+            )
+            .map_err(ExecError::Parse)?;
+        let object_name = normalized
+            .0
+            .rsplit('.')
+            .next()
+            .unwrap_or(&normalized.0)
+            .to_string();
+        Ok((normalized.0, object_name, normalized.1))
+    }
+
+    fn next_dynamic_type_oid(
+        &self,
+        existing_enum_types: Option<&std::collections::BTreeMap<String, EnumTypeEntry>>,
+        existing_range_types: Option<&std::collections::BTreeMap<String, RangeTypeEntry>>,
+    ) -> Result<u32, ExecError> {
+        let next_catalog_oid = {
+            let catalog = self.catalog.write();
+            let snapshot = catalog.catalog_snapshot().map_err(map_catalog_error)?;
+            snapshot.next_oid()
+        };
+        let next_dynamic_oid = self
+            .domains
+            .read()
+            .values()
+            .map(|domain| domain.oid.saturating_add(1))
+            .chain(
+                existing_enum_types
+                    .into_iter()
+                    .flat_map(|enum_types| enum_types.values())
+                    .map(|entry| entry.array_oid.saturating_add(1)),
+            )
+            .chain(
+                existing_enum_types
+                    .is_none()
+                    .then(|| self.enum_types.read())
+                    .into_iter()
+                    .flat_map(|enum_types| {
+                        enum_types
+                            .values()
+                            .map(|entry| entry.array_oid.saturating_add(1))
+                            .collect::<Vec<_>>()
+                    }),
+            )
+            .chain(
+                existing_range_types
+                    .into_iter()
+                    .flat_map(|range_types| range_types.values())
+                    .map(|entry| entry.array_oid.saturating_add(1)),
+            )
+            .chain(
+                existing_range_types
+                    .is_none()
+                    .then(|| self.range_types.read())
+                    .into_iter()
+                    .flat_map(|range_types| {
+                        range_types
+                            .values()
+                            .map(|entry| entry.array_oid.saturating_add(1))
+                            .collect::<Vec<_>>()
+                    }),
+            )
+            .max()
+            .unwrap_or(next_catalog_oid)
+            .max(next_catalog_oid);
+        Ok(next_dynamic_oid)
+    }
 }
 
 fn composite_type_display_name(stmt: &CreateCompositeTypeStatement) -> String {
@@ -471,6 +643,13 @@ fn composite_type_display_name(stmt: &CreateCompositeTypeStatement) -> String {
 }
 
 fn enum_type_display_name(stmt: &CreateEnumTypeStatement) -> String {
+    match &stmt.schema_name {
+        Some(schema_name) => format!("{schema_name}.{}", stmt.type_name),
+        None => stmt.type_name.clone(),
+    }
+}
+
+fn range_type_display_name(stmt: &CreateRangeTypeStatement) -> String {
     match &stmt.schema_name {
         Some(schema_name) => format!("{schema_name}.{}", stmt.type_name),
         None => stmt.type_name.clone(),
