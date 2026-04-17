@@ -21,7 +21,7 @@ use crate::backend::utils::misc::checkpoint::{CheckpointConfig, CheckpointStatsS
 use crate::backend::utils::misc::interrupts::InterruptState;
 use crate::pgrust::auth::AuthState;
 use crate::pgrust::database::{
-    Database, DatabaseCreateGrant, DatabaseError, DatabaseOpenOptions, DomainEntry,
+    ConversionEntry, Database, DatabaseCreateGrant, DatabaseError, DatabaseOpenOptions, DomainEntry,
     SequenceRuntime, TempNamespace,
 };
 use crate::{BufferPool, ClientId};
@@ -82,6 +82,7 @@ pub(crate) struct OpenDatabaseState {
     pub database_create_grants: Arc<RwLock<Vec<DatabaseCreateGrant>>>,
     pub temp_relations: Arc<RwLock<HashMap<ClientId, TempNamespace>>>,
     pub domains: Arc<RwLock<BTreeMap<String, DomainEntry>>>,
+    pub conversions: Arc<RwLock<BTreeMap<String, ConversionEntry>>>,
     pub sequences: Arc<SequenceRuntime>,
 }
 
@@ -98,6 +99,7 @@ impl OpenDatabaseState {
             database_create_grants: Arc::new(RwLock::new(Vec::new())),
             temp_relations: Arc::new(RwLock::new(HashMap::new())),
             domains: Arc::new(RwLock::new(BTreeMap::new())),
+            conversions: Arc::new(RwLock::new(BTreeMap::new())),
             sequences,
         })
     }
@@ -312,6 +314,7 @@ impl Cluster {
             database_create_grants: Arc::clone(&state.database_create_grants),
             temp_relations: Arc::clone(&state.temp_relations),
             domains: Arc::clone(&state.domains),
+            conversions: Arc::clone(&state.conversions),
             sequences: Arc::clone(&state.sequences),
             _wal_bg_writer: self.shared.wal_bg_writer.clone(),
         })

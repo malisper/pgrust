@@ -204,6 +204,10 @@ fn execute_statement_with_source(
             expected: "COMMENT ON DOMAIN handled by database/session layer",
             actual: "COMMENT ON DOMAIN".into(),
         })),
+        Statement::CommentOnConversion(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "COMMENT ON CONVERSION handled by database/session layer",
+            actual: "COMMENT ON CONVERSION".into(),
+        })),
         Statement::CommentOnRole(_)
         | Statement::CreateRole(_)
         | Statement::AlterRole(_)
@@ -238,6 +242,10 @@ fn execute_statement_with_source(
             expected: "CREATE DOMAIN handled by database/session layer",
             actual: "CREATE DOMAIN".into(),
         })),
+        Statement::CreateConversion(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "CREATE CONVERSION handled by database/session layer",
+            actual: "CREATE CONVERSION".into(),
+        })),
         Statement::CreateType(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "CREATE TYPE handled by database/session layer",
             actual: "CREATE TYPE".into(),
@@ -263,6 +271,10 @@ fn execute_statement_with_source(
         Statement::DropDomain(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "DROP DOMAIN handled by database/session layer",
             actual: "DROP DOMAIN".into(),
+        })),
+        Statement::DropConversion(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "DROP CONVERSION handled by database/session layer",
+            actual: "DROP CONVERSION".into(),
         })),
         Statement::DropType(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "DROP TYPE handled by database/session layer",
@@ -346,6 +358,10 @@ pub fn execute_readonly_statement(
             expected: "read-only statement",
             actual: "COMMENT ON DOMAIN".into(),
         })),
+        Statement::CommentOnConversion(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "COMMENT ON CONVERSION".into(),
+        })),
         Statement::CommentOnRole(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "COMMENT ON ROLE".into(),
@@ -365,6 +381,10 @@ pub fn execute_readonly_statement(
         Statement::CreateSchema(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "CREATE SCHEMA".into(),
+        })),
+        Statement::CreateConversion(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "CREATE CONVERSION".into(),
         })),
         Statement::CreateTablespace(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
@@ -394,6 +414,10 @@ pub fn execute_readonly_statement(
         Statement::DropDomain(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "DROP DOMAIN".into(),
+        })),
+        Statement::DropConversion(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "DROP CONVERSION".into(),
         })),
         Statement::DropType(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
