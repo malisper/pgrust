@@ -1478,6 +1478,27 @@ fn select_sql_varchar_cast_truncates() {
     }
 }
 #[test]
+fn setop_join_branch_executes_with_child_local_vars() {
+    let base = temp_dir("setop_join_branch_child_roots");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select x
+             from (values (1)) base(x)
+             union all
+             select l.x + r.y
+             from (values (1)) l(x)
+             join (values (2)) r(y) on true",
+        )
+        .unwrap(),
+        vec![vec![Value::Int32(1)], vec![Value::Int32(3)]],
+    );
+}
+#[test]
 fn select_sql_plain_varchar_cast_preserves_text() {
     let base = temp_dir("select_sql_plain_varchar_cast");
     let txns = TransactionManager::new_durable(&base).unwrap();

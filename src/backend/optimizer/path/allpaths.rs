@@ -344,20 +344,23 @@ fn build_set_operation_rel(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) 
         .expect("set-operation rel requested without set_operation query");
     let source_id = 1usize;
     let desc = set_operation.output_desc;
-    let children = set_operation
+    let (child_roots, children) = set_operation
         .inputs
         .into_iter()
         .map(|query| {
-            let (_, path) = plan_query_path(query, catalog);
-            project_to_slot_layout(
-                source_id,
-                &desc,
-                path.clone(),
-                path.output_target(),
-                catalog,
+            let (child_root, path) = plan_query_path(query, catalog);
+            (
+                Some(PlannerSubroot::new(child_root)),
+                project_to_slot_layout(
+                    source_id,
+                    &desc,
+                    path.clone(),
+                    path.output_target(),
+                    catalog,
+                ),
             )
         })
-        .collect::<Vec<_>>();
+        .unzip::<_, _, Vec<_>, Vec<_>>();
     let set_op = optimize_path(
         Path::SetOp {
             plan_info: PlanEstimate::default(),
@@ -372,6 +375,7 @@ fn build_set_operation_rel(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) 
                     wire_type_oid: None,
                 })
                 .collect(),
+            child_roots,
             children,
         },
         catalog,

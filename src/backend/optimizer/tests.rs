@@ -840,6 +840,20 @@ fn planner_keeps_recursive_project_set_scalar_semantic_until_setrefs() {
 }
 
 #[test]
+fn planner_lowers_setop_children_with_their_own_roots() {
+    let planned = planned_stmt_for_sql(
+        "select x
+         from (values (1)) base(x)
+         union all
+         select l.x + r.y
+         from (values (1)) l(x)
+         join (values (2)) r(y) on true",
+    );
+
+    assert!(matches!(planned.plan_tree, Plan::SetOp { .. }));
+}
+
+#[test]
 fn planned_lockstep_project_set_keeps_both_visible_targets_as_sets() {
     let catalog = LiteralDefaultCatalog;
     let stmt = parse_select(
