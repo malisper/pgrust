@@ -1746,11 +1746,17 @@ fn apply_relation_alias(
         );
     }
 
+    let output_exprs = if renamed {
+        plan.output_exprs.clone()
+    } else {
+        scope.output_exprs
+    };
+
     Ok((
         plan,
         BoundScope {
             desc,
-            output_exprs: scope.output_exprs,
+            output_exprs,
             columns,
             relations,
         },

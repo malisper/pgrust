@@ -113,7 +113,12 @@ impl PathTarget {
     }
 
     pub fn add_column_to_pathtarget(&mut self, expr: Expr, sortgroupref: usize) {
-        if let Some(index) = self.exprs.iter().position(|existing| *existing == expr) {
+        if let Some(index) = self.exprs.iter().enumerate().find_map(|(index, existing)| {
+            let existing_ref = self.sortgrouprefs.get(index).copied().unwrap_or(0);
+            (*existing == expr
+                && (existing_ref == sortgroupref || existing_ref == 0 || sortgroupref == 0))
+                .then_some(index)
+        }) {
             if self.sortgrouprefs[index] == 0 && sortgroupref != 0 {
                 self.sortgrouprefs[index] = sortgroupref;
             }
@@ -300,6 +305,27 @@ impl PlannerInfo {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct PlannerSubroot(pub Box<PlannerInfo>);
+
+impl PlannerSubroot {
+    pub fn new(root: PlannerInfo) -> Self {
+        Self(Box::new(root))
+    }
+
+    pub fn as_ref(&self) -> &PlannerInfo {
+        self.0.as_ref()
+    }
+}
+
+impl PartialEq for PlannerSubroot {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.parse == other.0.parse
+    }
+}
+
+impl Eq for PlannerSubroot {}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Path {
     Result {
@@ -396,6 +422,7 @@ pub enum Path {
     SubqueryScan {
         plan_info: PlanEstimate,
         rtindex: usize,
+        subroot: PlannerSubroot,
         query: Box<Query>,
         input: Box<Path>,
         output_columns: Vec<QueryColumn>,
@@ -405,6 +432,7 @@ pub enum Path {
         plan_info: PlanEstimate,
         slot_id: usize,
         cte_id: usize,
+        subroot: PlannerSubroot,
         query: Box<Query>,
         cte_plan: Box<Path>,
         output_columns: Vec<QueryColumn>,
@@ -420,6 +448,8 @@ pub enum Path {
         slot_id: usize,
         worktable_id: usize,
         distinct: bool,
+        anchor_root: PlannerSubroot,
+        recursive_root: PlannerSubroot,
         anchor_query: Box<Query>,
         recursive_query: Box<Query>,
         output_columns: Vec<QueryColumn>,
