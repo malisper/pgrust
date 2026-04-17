@@ -8,8 +8,8 @@ pub mod xlogreader;
 pub mod xlogrecovery;
 
 pub use checkpoint::*;
-pub use xact::*;
 pub use controlfile::*;
+pub use xact::*;
 pub use xlog::*;
 pub use xloginsert::*;
 pub use xlogreader::*;

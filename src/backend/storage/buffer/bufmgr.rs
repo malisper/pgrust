@@ -1022,6 +1022,7 @@ impl<S: StorageBackend + Send> BufferPool<S> {
 
 impl BufferPool<SmgrStorageBackend> {
     pub fn checkpoint_flush_all(&self, fsync: bool) -> Result<CheckpointFlushResult, Error> {
+        let direct_fsync = fsync && self.wal.is_none();
         let mut synced_forks = BTreeSet::new();
         let mut buffers_written = 0u64;
 
@@ -1049,7 +1050,8 @@ impl BufferPool<SmgrStorageBackend> {
                 if let Some(wal) = self.wal.as_ref() {
                     let page_lsn = u64::from_le_bytes(page[0..8].try_into().unwrap());
                     if page_lsn > 0 {
-                        wal.flush_to(page_lsn).map_err(|e| Error::Wal(e.to_string()))?;
+                        wal.flush_to(page_lsn)
+                            .map_err(|e| Error::Wal(e.to_string()))?;
                     }
                 }
                 {
@@ -1067,12 +1069,12 @@ impl BufferPool<SmgrStorageBackend> {
             }
             self.stats_written.fetch_add(1, Ordering::Relaxed);
             buffers_written = buffers_written.saturating_add(1);
-            if fsync {
+            if direct_fsync {
                 synced_forks.insert((tag.rel, tag.fork));
             }
         }
 
-        if fsync {
+        if direct_fsync {
             let mut storage = self.storage.lock();
             for (rel, fork) in synced_forks {
                 storage

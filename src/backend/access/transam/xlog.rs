@@ -17,8 +17,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use crate::backend::access::transam::xloginsert::RegisteredXLogRecord;
 use crate::backend::access::transam::CheckpointRecord;
+use crate::backend::access::transam::xloginsert::RegisteredXLogRecord;
 use crate::backend::access::transam::xlogreader::{
     BKPBLOCK_FORK_MASK, BKPBLOCK_HAS_DATA, BKPBLOCK_HAS_IMAGE, BKPBLOCK_SAME_REL,
     BKPBLOCK_WILL_INIT, BKPIMAGE_APPLY, BKPIMAGE_HAS_HOLE, CRC_OFFSET, DecodedBkpBlock,
@@ -323,7 +323,10 @@ impl WalReader {
         })
     }
 
-    fn open_segment_for_lsn(&mut self, lsn: Lsn) -> Result<Option<&mut ReadSegmentState>, WalError> {
+    fn open_segment_for_lsn(
+        &mut self,
+        lsn: Lsn,
+    ) -> Result<Option<&mut ReadSegmentState>, WalError> {
         let segno = wal_segment_no(lsn);
         if self.segment.as_ref().map(|segment| segment.segno) == Some(segno) {
             return Ok(self.segment.as_mut());
@@ -445,9 +448,9 @@ impl WalReader {
             let chunk_len = available.min(remaining);
             let mut chunk = vec![0u8; chunk_len];
             let seg_offset = wal_segment_offset(current);
-            let segment = self
-                .open_segment_for_lsn(current)?
-                .ok_or_else(|| WalError::Corrupt("missing WAL segment for record payload".into()))?;
+            let segment = self.open_segment_for_lsn(current)?.ok_or_else(|| {
+                WalError::Corrupt("missing WAL segment for record payload".into())
+            })?;
             segment.file.seek(SeekFrom::Start(seg_offset))?;
             segment.file.read_exact(&mut chunk)?;
             out.extend_from_slice(&chunk);
@@ -810,7 +813,9 @@ impl WalReader {
             (RM_XACT_ID, XLOG_XACT_COMMIT) => WalRecord::XactCommit { xid: decoded.xid },
             (RM_XLOG_ID, XLOG_CHECKPOINT_ONLINE | XLOG_CHECKPOINT_SHUTDOWN) => {
                 if decoded.main_data.len() < 8 {
-                    return Err(WalError::Corrupt("checkpoint record missing redo LSN".into()));
+                    return Err(WalError::Corrupt(
+                        "checkpoint record missing redo LSN".into(),
+                    ));
                 }
                 let redo_lsn = u64::from_le_bytes(decoded.main_data[0..8].try_into().unwrap());
                 WalRecord::Checkpoint {
@@ -1315,10 +1320,17 @@ impl WalWriter {
         let min_keep_segments = ((min_keep_bytes.saturating_add(WAL_SEG_SIZE_BYTES as u64 - 1))
             / WAL_SEG_SIZE_BYTES as u64)
             .max(1);
-        let keep_from_size = latest_segno.saturating_add(1).saturating_sub(min_keep_segments);
+        let keep_from_size = latest_segno
+            .saturating_add(1)
+            .saturating_sub(min_keep_segments);
         let keep_from_segno = keep_from_size.min(wal_segment_no(redo_lsn));
 
-        for segment in list_wal_segments(&guard.wal_dir)? {
+        let segments = list_wal_segments(&guard.wal_dir)?;
+        let mut next_recycled_segno = segments
+            .last()
+            .map(|segment| segment.segno.saturating_add(1))
+            .unwrap_or(latest_segno.saturating_add(1));
+        for segment in segments {
             if segment.segno >= keep_from_segno {
                 continue;
             }
@@ -1327,7 +1339,16 @@ impl WalWriter {
                 guard.file.take();
                 guard.current_segno = None;
             }
-            let _ = std::fs::remove_file(wal_segment_path(&guard.wal_dir, segment.segno));
+            let source_path = wal_segment_path(&guard.wal_dir, segment.segno);
+            let target_segno = next_recycled_segno;
+            next_recycled_segno = next_recycled_segno.saturating_add(1);
+            let target_path = wal_segment_path(&guard.wal_dir, target_segno);
+            std::fs::rename(&source_path, &target_path)?;
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&target_path)?
+                .set_len(0)?;
         }
         Ok(())
     }
@@ -1574,10 +1595,11 @@ mod tests {
     }
 
     #[test]
-    fn recycle_segments_keeps_redo_segment_and_minimum_size() {
+    fn recycle_segments_renames_old_segments_for_reuse() {
         let dir = test_dir("segment_recycle");
         let wal = WalWriter::new(&dir).unwrap();
-        let first_payload = vec![1u8; WAL_SEG_SIZE_BYTES as usize + WAL_SEG_SIZE_BYTES as usize / 2];
+        let first_payload =
+            vec![1u8; WAL_SEG_SIZE_BYTES as usize + WAL_SEG_SIZE_BYTES as usize / 2];
         let second_payload = vec![2u8; WAL_SEG_SIZE_BYTES as usize];
 
         xlog_begin_insert();
@@ -1597,6 +1619,11 @@ mod tests {
             .into_iter()
             .map(|segment| segment.segno)
             .collect();
-        assert_eq!(remaining, vec![1, 2]);
+        assert_eq!(remaining, vec![1, 2, 3]);
+        assert_eq!(
+            std::fs::metadata(wal_segment_path(&dir, 3)).unwrap().len(),
+            0,
+            "expected recycled segment to be renamed into a zero-length future segment"
+        );
     }
 }

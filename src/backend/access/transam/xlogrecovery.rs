@@ -13,8 +13,7 @@ use crate::backend::storage::smgr::{ForkNumber, StorageManager};
 
 use super::{
     INVALID_LSN, Lsn, RM_BTREE_ID, RM_HEAP_ID, RM_XACT_ID, RM_XLOG_ID, WalError, WalReader,
-    XLOG_CHECKPOINT_ONLINE, XLOG_CHECKPOINT_SHUTDOWN, XLOG_FPI, XLOG_HEAP_INSERT,
-    XLOG_XACT_COMMIT,
+    XLOG_CHECKPOINT_ONLINE, XLOG_CHECKPOINT_SHUTDOWN, XLOG_FPI, XLOG_HEAP_INSERT, XLOG_XACT_COMMIT,
 };
 
 /// Statistics from WAL recovery, printed at startup.
@@ -161,8 +160,9 @@ pub fn perform_wal_recovery_from(
     }
 
     // Persist the updated CLOG to disk.
-    txns.flush_clog()
-        .map_err(|err| WalError::Corrupt(format!("failed to flush clog after recovery: {err:?}")))?;
+    txns.flush_clog().map_err(|err| {
+        WalError::Corrupt(format!("failed to flush clog after recovery: {err:?}"))
+    })?;
 
     Ok(stats)
 }
@@ -1077,7 +1077,8 @@ mod tests {
         let stats = perform_wal_recovery_from(&wal_dir, &mut smgr, &mut txns, redo_lsn).unwrap();
 
         let mut recovered = [0u8; BLCKSZ];
-        smgr.read_block(rel, ForkNumber::Main, 0, &mut recovered).unwrap();
+        smgr.read_block(rel, ForkNumber::Main, 0, &mut recovered)
+            .unwrap();
         assert_eq!(stats.records_replayed, 3);
         assert_eq!(page_get_item(&recovered, 1).unwrap(), tuple1);
         assert_eq!(page_get_item(&recovered, 2).unwrap(), tuple2);

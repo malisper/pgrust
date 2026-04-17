@@ -6,14 +6,15 @@ use std::time::Duration;
 use parking_lot::RwLock;
 
 use crate::backend::access::transam::checkpoint::{CheckpointCommitBarrier, Checkpointer};
-use crate::backend::access::transam::{ControlFileState, ControlFileStore};
 use crate::backend::access::transam::xact::TransactionManager;
 use crate::backend::access::transam::xlog::{WalBgWriter, WalWriter, has_wal_segments};
+use crate::backend::access::transam::{ControlFileState, ControlFileStore};
 use crate::backend::catalog::{CatalogError, CatalogStore};
 use crate::backend::executor::ExecError;
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
 use crate::backend::storage::lmgr::{TableLockManager, TransactionWaiter};
 use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, StorageManager};
+use crate::backend::storage::sync::SyncQueue;
 use crate::backend::utils::cache::plancache::PlanCache;
 use crate::backend::utils::cache::syscache::BackendCacheState;
 use crate::backend::utils::misc::checkpoint::{CheckpointConfig, CheckpointStatsSnapshot};
@@ -105,6 +106,13 @@ impl Cluster {
             CheckpointConfig::load_from_data_dir(&base_dir)
                 .map_err(|message| DatabaseError::Catalog(CatalogError::Io(message)))?,
         );
+        if ControlFileStore::legacy_json_path(&base_dir).exists() {
+            return Err(DatabaseError::Control(
+                crate::backend::access::transam::ControlFileError::Unsupported(
+                    "legacy durable clusters with global/pg_control.json are not supported".into(),
+                ),
+            ));
+        }
         let mut txns = TransactionManager::new_durable(&base_dir)?;
         let control_file = if ControlFileStore::path(&base_dir).exists() {
             Arc::new(ControlFileStore::load(&base_dir)?)
@@ -117,8 +125,7 @@ impl Cluster {
         } else {
             return Err(DatabaseError::Control(
                 crate::backend::access::transam::ControlFileError::Unsupported(
-                    "legacy durable clusters without global/pg_control.json are not supported"
-                        .into(),
+                    "legacy durable clusters without global/pg_control are not supported".into(),
                 ),
             ));
         };
@@ -164,8 +171,12 @@ impl Cluster {
         }
 
         let wal = Arc::new(WalWriter::new(&wal_dir).map_err(DatabaseError::Wal)?);
+        let sync_queue = Arc::new(SyncQueue::default());
         let pool = Arc::new(BufferPool::new_with_wal(
-            SmgrStorageBackend::new(MdStorageManager::new(&base_dir)),
+            SmgrStorageBackend::new(MdStorageManager::new_with_sync_queue(
+                &base_dir,
+                Arc::clone(&sync_queue),
+            )),
             options.pool_size,
             Arc::clone(&wal),
         ));
@@ -192,13 +203,16 @@ impl Cluster {
             Some(Arc::clone(&control_file)),
             Arc::clone(&checkpoint_config),
             Arc::clone(&checkpoint_stats),
+            Arc::clone(&sync_queue),
             Arc::clone(&checkpoint_commit_barrier),
         ));
 
         if needs_recovery {
             if let Some(checkpointer) = checkpointer.as_ref() {
                 checkpointer
-                    .request(crate::backend::access::transam::CheckpointRequestFlags::sql())
+                    .request(
+                        crate::backend::access::transam::CheckpointRequestFlags::end_of_recovery(),
+                    )
                     .map_err(|message| {
                         DatabaseError::Control(
                             crate::backend::access::transam::ControlFileError::Io(message),

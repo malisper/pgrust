@@ -142,10 +142,7 @@ fn main() -> Result<(), String> {
     }
     std::fs::create_dir_all(&args.base_dir).map_err(|e| e.to_string())?;
 
-    let db = Database::open_with_options(
-        &args.base_dir,
-        DatabaseOpenOptions::new(args.pool_size),
-    )
+    let db = Database::open_with_options(&args.base_dir, DatabaseOpenOptions::new(args.pool_size))
         .map_err(|e| format!("{e:?}"))?;
 
     if !args.skip_load {

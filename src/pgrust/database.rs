@@ -16,11 +16,11 @@ mod txn;
 use crate::backend::access::transam::xact::{
     CommandId, MvccError, TransactionId, TransactionManager,
 };
+use crate::backend::access::transam::xlog::{WalBgWriter, WalError, WalWriter};
 use crate::backend::access::transam::{
     CheckpointCommitBarrier, CheckpointCommitGuard, CheckpointRequestFlags, Checkpointer,
     ControlFileError,
 };
-use crate::backend::access::transam::xlog::{WalBgWriter, WalError, WalWriter};
 use crate::backend::catalog::catalog::{CatalogIndexBuildOptions, column_desc};
 use crate::backend::catalog::indexing::rebuild_system_catalog_indexes_in_pool;
 use crate::backend::catalog::namespace::effective_search_path as namespace_effective_search_path;
