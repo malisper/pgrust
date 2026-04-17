@@ -539,6 +539,14 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::NextVal | BuiltinScalarFunction::CurrVal => args.len() == 1,
             BuiltinScalarFunction::SetVal => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::PgGetSerialSequence => args.len() == 2,
+            BuiltinScalarFunction::PgStatGetCheckpointerNumTimed
+            | BuiltinScalarFunction::PgStatGetCheckpointerNumRequested
+            | BuiltinScalarFunction::PgStatGetCheckpointerNumPerformed
+            | BuiltinScalarFunction::PgStatGetCheckpointerBuffersWritten
+            | BuiltinScalarFunction::PgStatGetCheckpointerSlruWritten
+            | BuiltinScalarFunction::PgStatGetCheckpointerWriteTime
+            | BuiltinScalarFunction::PgStatGetCheckpointerSyncTime
+            | BuiltinScalarFunction::PgStatGetCheckpointerStatResetTime => args.is_empty(),
             BuiltinScalarFunction::ToJson | BuiltinScalarFunction::ToJsonb => args.len() == 1,
             BuiltinScalarFunction::ArrayLength
             | BuiltinScalarFunction::ArrayLower
@@ -1156,6 +1164,38 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::PgGetSerialSequence,
         ),
         ("pg_typeof", BuiltinScalarFunction::PgTypeof),
+        (
+            "pg_stat_get_checkpointer_num_timed",
+            BuiltinScalarFunction::PgStatGetCheckpointerNumTimed,
+        ),
+        (
+            "pg_stat_get_checkpointer_num_requested",
+            BuiltinScalarFunction::PgStatGetCheckpointerNumRequested,
+        ),
+        (
+            "pg_stat_get_checkpointer_num_performed",
+            BuiltinScalarFunction::PgStatGetCheckpointerNumPerformed,
+        ),
+        (
+            "pg_stat_get_checkpointer_buffers_written",
+            BuiltinScalarFunction::PgStatGetCheckpointerBuffersWritten,
+        ),
+        (
+            "pg_stat_get_checkpointer_slru_written",
+            BuiltinScalarFunction::PgStatGetCheckpointerSlruWritten,
+        ),
+        (
+            "pg_stat_get_checkpointer_write_time",
+            BuiltinScalarFunction::PgStatGetCheckpointerWriteTime,
+        ),
+        (
+            "pg_stat_get_checkpointer_sync_time",
+            BuiltinScalarFunction::PgStatGetCheckpointerSyncTime,
+        ),
+        (
+            "pg_stat_get_checkpointer_stat_reset_time",
+            BuiltinScalarFunction::PgStatGetCheckpointerStatResetTime,
+        ),
         ("to_json", BuiltinScalarFunction::ToJson),
         ("to_jsonb", BuiltinScalarFunction::ToJsonb),
         ("to_tsvector", BuiltinScalarFunction::ToTsVector),
@@ -1587,6 +1627,14 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::SetVal
             | BuiltinScalarFunction::PgGetSerialSequence
             | BuiltinScalarFunction::GetDatabaseEncoding
+            | BuiltinScalarFunction::PgStatGetCheckpointerNumTimed
+            | BuiltinScalarFunction::PgStatGetCheckpointerNumRequested
+            | BuiltinScalarFunction::PgStatGetCheckpointerNumPerformed
+            | BuiltinScalarFunction::PgStatGetCheckpointerBuffersWritten
+            | BuiltinScalarFunction::PgStatGetCheckpointerSlruWritten
+            | BuiltinScalarFunction::PgStatGetCheckpointerWriteTime
+            | BuiltinScalarFunction::PgStatGetCheckpointerSyncTime
+            | BuiltinScalarFunction::PgStatGetCheckpointerStatResetTime
             | BuiltinScalarFunction::ToJson
             | BuiltinScalarFunction::ToJsonb
             | BuiltinScalarFunction::ArrayToJson

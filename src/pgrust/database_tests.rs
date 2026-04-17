@@ -106,6 +106,18 @@ fn temp_dir(label: &str) -> PathBuf {
     p
 }
 
+fn role_oid(db: &Database, role_name: &str) -> u32 {
+    db.catalog
+        .read()
+        .catcache()
+        .unwrap()
+        .authid_rows()
+        .into_iter()
+        .find(|row| row.rolname.eq_ignore_ascii_case(role_name))
+        .map(|row| row.oid)
+        .unwrap()
+}
+
 #[test]
 fn ephemeral_database_executes_basic_sql() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
@@ -6150,7 +6162,7 @@ fn concurrent_indexed_updates_and_deletes_keep_index_results_correct() {
 fn reopening_database_replays_btree_wal() {
     let base = temp_dir("reopening_database_replays_btree_wal");
     {
-        let db = Database::open_with_options(&base, 256, true).unwrap();
+        let db = Database::open_with_options(&base, DatabaseOpenOptions::new(256)).unwrap();
         db.execute(1, "create table items (id int4 not null, note text)")
             .unwrap();
         for i in 0..400 {
@@ -6171,7 +6183,7 @@ fn reopening_database_replays_btree_wal() {
         );
     }
 
-    let reopened = Database::open_with_options(&base, 256, true).unwrap();
+    let reopened = Database::open_with_options(&base, DatabaseOpenOptions::new(256)).unwrap();
     assert_explain_uses_index(
         &reopened,
         1,
@@ -6186,6 +6198,27 @@ fn reopening_database_replays_btree_wal() {
         query_rows(&reopened, 1, "select count(*) from items where id >= 890"),
         vec![vec![Value::Int64(10)]]
     );
+}
+
+#[test]
+fn durable_open_bootstraps_control_file_and_clean_shutdown_marks_shutdown() {
+    use crate::backend::access::transam::{ControlFileState, ControlFileStore};
+
+    let base = temp_dir("control_file_bootstrap");
+    let control_path = ControlFileStore::path(&base);
+
+    {
+        let db = Database::open(&base, 32).unwrap();
+        assert!(control_path.exists(), "expected control file to be created");
+        let raw = std::fs::read(&control_path).unwrap();
+        assert_ne!(raw.first(), Some(&b'{'));
+        let control = ControlFileStore::load(&base).unwrap().snapshot();
+        assert_eq!(control.state, ControlFileState::InProduction);
+        assert_eq!(control.next_xid, db.txns.read().next_xid());
+    }
+
+    let control = ControlFileStore::load(&base).unwrap().snapshot();
+    assert_eq!(control.state, ControlFileState::ShutDown);
 }
 
 #[test]
@@ -6314,6 +6347,266 @@ fn create_index_respects_maintenance_work_mem_budget() {
             other
         ),
     }
+}
+
+#[test]
+fn checkpoint_gucs_show_defaults_and_reject_runtime_set() {
+    let base = temp_dir("checkpoint_gucs");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    match session.execute(&db, "show checkpoint_timeout").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Text("5min".into())]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match session.execute(&db, "show max_wal_size").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Text("1GB".into())]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match session.execute(&db, "set checkpoint_timeout = '10min'") {
+        Err(ExecError::Parse(ParseError::CantChangeRuntimeParam(name))) => {
+            assert_eq!(name, "checkpoint_timeout");
+        }
+        other => panic!("expected checkpoint_timeout runtime change error, got {other:?}"),
+    }
+
+    match session.execute(&db, "reset checkpoint_timeout") {
+        Err(ExecError::Parse(ParseError::CantChangeRuntimeParam(name))) => {
+            assert_eq!(name, "checkpoint_timeout");
+        }
+        other => panic!("expected checkpoint_timeout reset error, got {other:?}"),
+    }
+}
+
+#[test]
+fn checkpoint_gucs_load_from_postgresql_conf_and_auto_conf() {
+    use crate::backend::access::transam::ControlFileStore;
+
+    let base = temp_dir("checkpoint_guc_files");
+    std::fs::write(
+        base.join("postgresql.conf"),
+        "checkpoint_timeout = '7min'\nmax_wal_size = '64MB'\nfull_page_writes = off\n",
+    )
+    .unwrap();
+    std::fs::write(
+        base.join("postgresql.auto.conf"),
+        "checkpoint_timeout = '9min'\nmin_wal_size = '16MB'\n",
+    )
+    .unwrap();
+
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    match session.execute(&db, "show checkpoint_timeout").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Text("9min".into())]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match session.execute(&db, "show max_wal_size").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Text("64MB".into())]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match session.execute(&db, "show min_wal_size").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Text("16MB".into())]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match session.execute(&db, "show full_page_writes").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Text("off".into())]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    let control = ControlFileStore::load(&base).unwrap().snapshot();
+    assert!(!control.full_page_writes);
+}
+
+#[test]
+fn checkpoint_requires_pg_checkpoint_membership() {
+    let base = temp_dir("checkpoint_privileges");
+    let db = Database::open(&base, 16).unwrap();
+    let mut bootstrap = Session::new(1);
+
+    bootstrap.execute(&db, "create role tenant login").unwrap();
+    bootstrap
+        .execute(&db, "create role outsider login")
+        .unwrap();
+    let tenant_oid = role_oid(&db, "tenant");
+    db.catalog
+        .write()
+        .grant_role_membership(
+            &crate::backend::catalog::role_memberships::NewRoleMembership {
+                roleid: crate::include::catalog::PG_CHECKPOINT_OID,
+                member: tenant_oid,
+                grantor: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+                admin_option: false,
+                inherit_option: true,
+                set_option: true,
+            },
+        )
+        .unwrap();
+
+    let mut session = Session::new(2);
+    session
+        .execute(&db, "set session authorization tenant")
+        .unwrap();
+    assert_eq!(
+        session.execute(&db, "checkpoint").unwrap(),
+        StatementResult::AffectedRows(0)
+    );
+
+    session
+        .execute(&db, "set session authorization outsider")
+        .unwrap();
+    match session.execute(&db, "checkpoint") {
+        Err(ExecError::DetailedError {
+            message,
+            detail,
+            sqlstate,
+            ..
+        }) => {
+            assert_eq!(message, "permission denied to execute CHECKPOINT command");
+            assert_eq!(sqlstate, "42501");
+            assert_eq!(
+                detail.as_deref(),
+                Some(
+                    "Only roles with privileges of the \"pg_checkpoint\" role may execute this command."
+                )
+            );
+        }
+        other => panic!("expected checkpoint privilege error, got {other:?}"),
+    }
+}
+
+#[test]
+fn checkpoint_updates_checkpointer_stats() {
+    let base = temp_dir("checkpoint_stats");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    match session
+        .execute(
+            &db,
+            "select pg_stat_get_checkpointer_num_requested(), \
+             pg_stat_get_checkpointer_num_performed(), \
+             pg_stat_get_checkpointer_num_timed()",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Int64(0), Value::Int64(0), Value::Int64(0)]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    session.execute(&db, "checkpoint").unwrap();
+
+    match session
+        .execute(
+            &db,
+            "select pg_stat_get_checkpointer_num_requested(), \
+             pg_stat_get_checkpointer_num_performed(), \
+             pg_stat_get_checkpointer_write_time(), \
+             pg_stat_get_checkpointer_sync_time(), \
+             pg_stat_get_checkpointer_stat_reset_time()",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0][0], Value::Int64(1));
+            assert_eq!(rows[0][1], Value::Int64(1));
+            assert!(matches!(rows[0][2], Value::Float64(value) if value >= 0.0));
+            assert!(matches!(rows[0][3], Value::Float64(value) if value >= 0.0));
+            assert!(matches!(rows[0][4], Value::TimestampTz(_)));
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn checkpoint_flushes_dirty_pages_and_clog_to_disk() {
+    use crate::backend::access::transam::xact::{
+        INVALID_TRANSACTION_ID, TransactionManager, TransactionStatus,
+    };
+    use crate::backend::storage::smgr::ForkNumber;
+
+    let base = temp_dir("checkpoint_flushes_dirty_pages");
+    let committed_xid;
+    let rel;
+    let buffer_page;
+
+    {
+        let db = Database::open(&base, 64).unwrap();
+        let mut session = Session::new(1);
+
+        session
+            .execute(&db, "create table items (id int4, note text)")
+            .unwrap();
+        session
+            .execute(&db, "insert into items values (1, 'alpha')")
+            .unwrap();
+
+        rel = relation_locator_for(&db, 1, "items");
+        let pinned = db
+            .pool
+            .pin_existing_block(1, rel, ForkNumber::Main, 0)
+            .unwrap();
+        buffer_page = db.pool.read_page(pinned.buffer_id()).unwrap();
+        drop(pinned);
+
+        let disk_page_before = read_relation_block(&db, rel, 0);
+        assert_ne!(
+            disk_page_before, buffer_page,
+            "expected heap page to remain dirty in shared buffers before CHECKPOINT"
+        );
+
+        committed_xid = db
+            .txns
+            .read()
+            .snapshot(INVALID_TRANSACTION_ID)
+            .unwrap()
+            .xmax
+            - 1;
+
+        session.execute(&db, "checkpoint").unwrap();
+
+        let disk_page_after = read_relation_block(&db, rel, 0);
+        assert_eq!(
+            disk_page_after, buffer_page,
+            "expected CHECKPOINT to flush the dirty heap page to disk"
+        );
+    }
+
+    let durable_txns = TransactionManager::new_durable(&base).unwrap();
+    assert_eq!(
+        durable_txns.status(committed_xid),
+        Some(TransactionStatus::Committed),
+        "expected CHECKPOINT to persist committed CLOG state"
+    );
+
+    let reopened = Database::open_with_options(&base, DatabaseOpenOptions::new(64)).unwrap();
+    assert_eq!(
+        query_rows(&reopened, 1, "select id, note from items"),
+        vec![vec![Value::Int32(1), Value::Text("alpha".into())]]
+    );
 }
 
 #[test]

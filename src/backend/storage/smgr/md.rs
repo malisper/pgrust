@@ -10,7 +10,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Seek, SeekFrom, Write};
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use crate::backend::storage::sync::SyncQueue;
 use crate::include::catalog::GLOBAL_TABLESPACE_OID;
 
 #[cfg(unix)]
@@ -78,34 +80,45 @@ pub struct MdStorageManager {
     created_forks: HashSet<(RelFileLocator, ForkNumber)>,
     /// Cache of block counts — avoids stat() per insert. Updated on extend.
     nblocks_cache: HashMap<(RelFileLocator, ForkNumber), BlockNumber>,
+    sync_queue: Option<Arc<SyncQueue>>,
 }
 
 impl MdStorageManager {
     pub fn new(base_dir: impl Into<PathBuf>) -> Self {
-        MdStorageManager {
-            base_dir: base_dir.into(),
-            open_segs: HashMap::new(),
-            lru_order: VecDeque::new(),
-            max_open_fds: DEFAULT_MAX_OPEN_FDS,
-            external_fds: 0,
-            in_recovery: false,
-            opened_rels: HashSet::new(),
-            created_forks: HashSet::new(),
-            nblocks_cache: HashMap::new(),
-        }
+        Self::new_internal(base_dir.into(), false, None)
+    }
+
+    pub fn new_with_sync_queue(base_dir: impl Into<PathBuf>, sync_queue: Arc<SyncQueue>) -> Self {
+        Self::new_internal(base_dir.into(), false, Some(sync_queue))
     }
 
     pub fn new_in_recovery(base_dir: impl Into<PathBuf>) -> Self {
+        Self::new_internal(base_dir.into(), true, None)
+    }
+
+    pub fn new_in_recovery_with_sync_queue(
+        base_dir: impl Into<PathBuf>,
+        sync_queue: Arc<SyncQueue>,
+    ) -> Self {
+        Self::new_internal(base_dir.into(), true, Some(sync_queue))
+    }
+
+    fn new_internal(
+        base_dir: PathBuf,
+        in_recovery: bool,
+        sync_queue: Option<Arc<SyncQueue>>,
+    ) -> Self {
         MdStorageManager {
-            base_dir: base_dir.into(),
+            base_dir,
             open_segs: HashMap::new(),
             lru_order: VecDeque::new(),
             max_open_fds: DEFAULT_MAX_OPEN_FDS,
             external_fds: 0,
-            in_recovery: true,
+            in_recovery,
             opened_rels: HashSet::new(),
             created_forks: HashSet::new(),
             nblocks_cache: HashMap::new(),
+            sync_queue,
         }
     }
 
@@ -401,6 +414,9 @@ impl StorageManager for MdStorageManager {
     }
 
     fn unlink(&mut self, rel: RelFileLocator, fork: Option<ForkNumber>, _is_redo: bool) {
+        if let Some(sync_queue) = self.sync_queue.as_ref() {
+            sync_queue.cancel_relation(rel, fork);
+        }
         let forks: Vec<ForkNumber> = match fork {
             Some(f) => vec![f],
             None => vec![
@@ -470,6 +486,8 @@ impl StorageManager for MdStorageManager {
 
         if !skip_fsync {
             crate::backend::storage::fsync_file(&seg.file)?;
+        } else if let Some(sync_queue) = self.sync_queue.as_ref() {
+            sync_queue.register(rel, fork);
         }
 
         Ok(())
@@ -583,6 +601,8 @@ impl StorageManager for MdStorageManager {
 
         if !skip_fsync {
             crate::backend::storage::fsync_file(&seg.file)?;
+        } else if let Some(sync_queue) = self.sync_queue.as_ref() {
+            sync_queue.register(rel, fork);
         }
 
         // Update nblocks cache.
@@ -661,6 +681,10 @@ impl StorageManager for MdStorageManager {
 
         // Update nblocks cache.
         self.nblocks_cache.insert((rel, fork), nblocks);
+
+        if let Some(sync_queue) = self.sync_queue.as_ref() {
+            sync_queue.register_truncated_relation(rel, fork);
+        }
 
         Ok(())
     }

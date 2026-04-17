@@ -5,19 +5,24 @@ use std::time::Duration;
 
 use parking_lot::RwLock;
 
+use crate::backend::access::transam::checkpoint::{CheckpointCommitBarrier, Checkpointer};
 use crate::backend::access::transam::xact::TransactionManager;
-use crate::backend::access::transam::xlog::{WalBgWriter, WalWriter};
+use crate::backend::access::transam::xlog::{WalBgWriter, WalWriter, has_wal_segments};
+use crate::backend::access::transam::{ControlFileState, ControlFileStore};
 use crate::backend::catalog::{CatalogError, CatalogStore};
 use crate::backend::executor::ExecError;
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
 use crate::backend::storage::lmgr::{TableLockManager, TransactionWaiter};
 use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, StorageManager};
+use crate::backend::storage::sync::SyncQueue;
 use crate::backend::utils::cache::plancache::PlanCache;
 use crate::backend::utils::cache::syscache::BackendCacheState;
+use crate::backend::utils::misc::checkpoint::{CheckpointConfig, CheckpointStatsSnapshot};
 use crate::backend::utils::misc::interrupts::InterruptState;
 use crate::pgrust::auth::AuthState;
 use crate::pgrust::database::{
-    Database, DatabaseCreateGrant, DatabaseError, DomainEntry, SequenceRuntime, TempNamespace,
+    Database, DatabaseCreateGrant, DatabaseError, DatabaseOpenOptions, DomainEntry,
+    SequenceRuntime, TempNamespace,
 };
 use crate::{BufferPool, ClientId};
 
@@ -38,6 +43,11 @@ pub(crate) struct ClusterShared {
     pub open_databases: Arc<RwLock<HashMap<u32, Arc<OpenDatabaseState>>>>,
     pub active_connections: Arc<RwLock<HashMap<u32, usize>>>,
     pub session_activity: Arc<RwLock<HashMap<ClientId, SessionActivityEntry>>>,
+    pub checkpoint_config: Arc<CheckpointConfig>,
+    pub checkpoint_stats: Arc<RwLock<CheckpointStatsSnapshot>>,
+    pub control_file: Arc<ControlFileStore>,
+    pub checkpoint_commit_barrier: Arc<CheckpointCommitBarrier>,
+    pub checkpointer: Option<Arc<Checkpointer>>,
     pub wal_bg_writer: Option<Arc<WalBgWriter>>,
 }
 
@@ -93,35 +103,68 @@ impl OpenDatabaseState {
     }
 }
 
+impl Drop for ClusterShared {
+    fn drop(&mut self) {
+        if let Some(checkpointer) = self.checkpointer.as_ref() {
+            let _ = checkpointer.shutdown_and_join();
+        } else {
+            let _ = self.txns.write().flush_clog();
+        }
+    }
+}
+
 impl Cluster {
     pub fn open(base_dir: impl Into<PathBuf>, pool_size: usize) -> Result<Self, DatabaseError> {
-        Self::open_with_options(base_dir.into(), pool_size, false)
+        Self::open_with_options(base_dir.into(), DatabaseOpenOptions::new(pool_size))
     }
 
     pub(crate) fn open_with_options(
         base_dir: PathBuf,
-        pool_size: usize,
-        wal_replay: bool,
+        options: DatabaseOpenOptions,
     ) -> Result<Self, DatabaseError> {
         std::fs::create_dir_all(&base_dir)
             .map_err(|e| DatabaseError::Catalog(CatalogError::Io(e.to_string())))?;
+        let base_dir_has_cluster_contents = base_dir_has_cluster_contents(&base_dir)?;
+
+        let checkpoint_config = Arc::new(
+            CheckpointConfig::load_from_data_dir(&base_dir)
+                .map_err(|message| DatabaseError::Catalog(CatalogError::Io(message)))?,
+        );
+        let mut txns = TransactionManager::new_durable(&base_dir)?;
+        let control_file =
+            if ControlFileStore::path(&base_dir).exists() || base_dir_has_cluster_contents {
+                Arc::new(ControlFileStore::load(&base_dir)?)
+            } else {
+                Arc::new(ControlFileStore::bootstrap(
+                    &base_dir,
+                    txns.next_xid(),
+                    checkpoint_config.as_ref(),
+                )?)
+            };
+        let control_snapshot = control_file.snapshot();
 
         let shared_catalog = CatalogStore::load_shared(&base_dir)?;
         ensure_bootstrap_databases(&base_dir, &shared_catalog)?;
 
-        let mut txns = TransactionManager::new_durable(&base_dir)?;
         let wal_dir = base_dir.join("pg_wal");
-        if wal_replay && wal_dir.join("wal.log").exists() {
+        let needs_recovery = control_snapshot.state != ControlFileState::ShutDown;
+        if needs_recovery && has_wal_segments(&wal_dir).map_err(DatabaseError::Wal)? {
+            control_file.update(|control| {
+                control.state = ControlFileState::InCrashRecovery;
+                control.next_xid = txns.next_xid();
+                control.full_page_writes = checkpoint_config.full_page_writes;
+            })?;
             let mut recovery_smgr = MdStorageManager::new_in_recovery(&base_dir);
             create_relfiles_for_store_with_smg(&mut recovery_smgr, &shared_catalog)?;
             for row in shared_catalog.catcache()?.database_rows() {
                 let local_store = CatalogStore::load_database(&base_dir, row.oid)?;
                 create_relfiles_for_store_with_smg(&mut recovery_smgr, &local_store)?;
             }
-            let stats = crate::backend::access::transam::xlog::replay::perform_wal_recovery(
+            let stats = crate::backend::access::transam::xlog::replay::perform_wal_recovery_from(
                 &wal_dir,
                 &mut recovery_smgr,
                 &mut txns,
+                control_snapshot.redo_lsn,
             )
             .map_err(DatabaseError::Wal)?;
             if stats.records_replayed > 0 {
@@ -133,9 +176,13 @@ impl Cluster {
         }
 
         let wal = Arc::new(WalWriter::new(&wal_dir).map_err(DatabaseError::Wal)?);
+        let sync_queue = Arc::new(SyncQueue::default());
         let pool = Arc::new(BufferPool::new_with_wal(
-            SmgrStorageBackend::new(MdStorageManager::new(&base_dir)),
-            pool_size,
+            SmgrStorageBackend::new(MdStorageManager::new_with_sync_queue(
+                &base_dir,
+                Arc::clone(&sync_queue),
+            )),
+            options.pool_size,
             Arc::clone(&wal),
         ));
 
@@ -151,12 +198,45 @@ impl Cluster {
         }
 
         let wal_bg_writer = WalBgWriter::start(Arc::clone(&wal), Duration::from_millis(200));
+        let txns = Arc::new(RwLock::new(txns));
+        let checkpoint_stats = Arc::new(RwLock::new(CheckpointStatsSnapshot::default()));
+        let checkpoint_commit_barrier = Arc::new(CheckpointCommitBarrier::new());
+        let checkpointer = Some(Checkpointer::start(
+            Arc::clone(&pool),
+            Some(Arc::clone(&wal)),
+            Arc::clone(&txns),
+            Some(Arc::clone(&control_file)),
+            Arc::clone(&checkpoint_config),
+            Arc::clone(&checkpoint_stats),
+            Arc::clone(&sync_queue),
+            Arc::clone(&checkpoint_commit_barrier),
+        ));
+
+        if needs_recovery {
+            if let Some(checkpointer) = checkpointer.as_ref() {
+                checkpointer
+                    .request(
+                        crate::backend::access::transam::CheckpointRequestFlags::end_of_recovery(),
+                    )
+                    .map_err(|message| {
+                        DatabaseError::Control(
+                            crate::backend::access::transam::ControlFileError::Io(message),
+                        )
+                    })?;
+            }
+        } else {
+            control_file.update(|control| {
+                control.state = ControlFileState::InProduction;
+                control.next_xid = txns.read().next_xid();
+                control.full_page_writes = checkpoint_config.full_page_writes;
+            })?;
+        }
         Ok(Self {
             shared: Arc::new(ClusterShared {
                 base_dir,
                 pool,
                 wal: Some(wal),
-                txns: Arc::new(RwLock::new(txns)),
+                txns,
                 shared_catalog: Arc::new(RwLock::new(shared_catalog)),
                 txn_waiter: Arc::new(TransactionWaiter::new()),
                 table_locks: Arc::new(TableLockManager::new()),
@@ -164,6 +244,11 @@ impl Cluster {
                 open_databases: Arc::new(RwLock::new(open_databases)),
                 active_connections: Arc::new(RwLock::new(HashMap::new())),
                 session_activity: Arc::new(RwLock::new(HashMap::new())),
+                checkpoint_config,
+                checkpoint_stats,
+                control_file,
+                checkpoint_commit_barrier,
+                checkpointer,
                 wal_bg_writer: Some(Arc::new(wal_bg_writer)),
             }),
         })
@@ -211,6 +296,10 @@ impl Cluster {
             database_oid: row.oid,
             pool: Arc::clone(&self.shared.pool),
             wal: self.shared.wal.clone(),
+            checkpoint_config: Arc::clone(&self.shared.checkpoint_config),
+            checkpoint_stats: Arc::clone(&self.shared.checkpoint_stats),
+            checkpoint_commit_barrier: Arc::clone(&self.shared.checkpoint_commit_barrier),
+            checkpointer: self.shared.checkpointer.clone(),
             txns: Arc::clone(&self.shared.txns),
             shared_catalog: Arc::clone(&self.shared.shared_catalog),
             catalog: Arc::clone(&state.catalog),
@@ -287,6 +376,23 @@ impl Cluster {
             .insert(db_oid, Arc::clone(&state));
         Ok(state)
     }
+}
+
+fn base_dir_has_cluster_contents(base_dir: &Path) -> Result<bool, DatabaseError> {
+    let entries = std::fs::read_dir(base_dir)
+        .map_err(|e| DatabaseError::Catalog(CatalogError::Io(e.to_string())))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| DatabaseError::Catalog(CatalogError::Io(e.to_string())))?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            return Ok(true);
+        };
+        if matches!(name, "postgresql.conf" | "postgresql.auto.conf") {
+            continue;
+        }
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 fn ensure_bootstrap_databases(

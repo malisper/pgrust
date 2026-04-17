@@ -4,6 +4,7 @@ use mimalloc::MiMalloc;
 static GLOBAL: MiMalloc = MiMalloc;
 
 use pgrust::ClientId;
+use pgrust::DatabaseOpenOptions;
 use pgrust::executor::StatementResult;
 use pgrust::pgrust::database::Database;
 use std::path::PathBuf;
@@ -141,7 +142,7 @@ fn main() -> Result<(), String> {
     }
     std::fs::create_dir_all(&args.base_dir).map_err(|e| e.to_string())?;
 
-    let db = Database::open_with_options(&args.base_dir, args.pool_size, true)
+    let db = Database::open_with_options(&args.base_dir, DatabaseOpenOptions::new(args.pool_size))
         .map_err(|e| format!("{e:?}"))?;
 
     if !args.skip_load {

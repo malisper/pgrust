@@ -463,6 +463,7 @@ fn run_statement(
         Statement::Show(_) => Ok(StatementResult::AffectedRows(0)),
         Statement::Set(_)
         | Statement::Reset(_)
+        | Statement::Checkpoint(_)
         | Statement::CopyFrom(_)
         | Statement::AlterTableSet(_)
         | Statement::AlterTableAddColumn(_)
@@ -625,6 +626,8 @@ fn run_statement(
                 txns: txns.clone(),
                 txn_waiter: None,
                 sequences: None,
+                checkpoint_stats:
+                    pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
                 datetime_config:
                     pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                 interrupts: Arc::clone(&interrupts),
@@ -651,6 +654,8 @@ fn run_statement(
                 txns: txns.clone(),
                 txn_waiter: None,
                 sequences: None,
+                checkpoint_stats:
+                    pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
                 datetime_config:
                     pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                 interrupts: Arc::clone(&interrupts),
@@ -677,6 +682,8 @@ fn run_statement(
                 txns: txns.clone(),
                 txn_waiter: None,
                 sequences: None,
+                checkpoint_stats:
+                    pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
                 datetime_config:
                     pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                 interrupts: Arc::clone(&interrupts),
@@ -703,6 +710,8 @@ fn run_statement(
                 txns: txns.clone(),
                 txn_waiter: None,
                 sequences: None,
+                checkpoint_stats:
+                    pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
                 datetime_config:
                     pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                 interrupts: Arc::clone(&interrupts),
@@ -805,6 +814,8 @@ fn run_statement(
                 txns: txns.clone(),
                 txn_waiter: None,
                 sequences: None,
+                checkpoint_stats:
+                    pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
                 datetime_config:
                     pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                 interrupts: Arc::clone(&interrupts),
@@ -831,6 +842,8 @@ fn run_statement(
                 txns: txns.clone(),
                 txn_waiter: None,
                 sequences: None,
+                checkpoint_stats:
+                    pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
                 datetime_config:
                     pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                 interrupts: Arc::clone(&interrupts),
@@ -860,6 +873,8 @@ fn run_statement(
                     txns: txns.clone(),
                     txn_waiter: None,
                     sequences: None,
+                    checkpoint_stats:
+                        pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
                     datetime_config:
                         pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                     interrupts: Arc::clone(&interrupts),
@@ -900,6 +915,8 @@ fn run_statement(
                     txns: txns.clone(),
                     txn_waiter: None,
                     sequences: None,
+                    checkpoint_stats:
+                        pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
                     datetime_config:
                         pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                     interrupts: Arc::clone(&interrupts),
@@ -940,6 +957,8 @@ fn run_statement(
                     txns: txns.clone(),
                     txn_waiter: None,
                     sequences: None,
+                    checkpoint_stats:
+                        pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
                     datetime_config:
                         pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                     interrupts: Arc::clone(&interrupts),

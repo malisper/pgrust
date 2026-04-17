@@ -23,12 +23,14 @@ use crate::backend::parser::{
 use crate::backend::storage::lmgr::{TableLockManager, TableLockMode, unlock_relations};
 use crate::backend::utils::cache::inval::CatalogInvalidation;
 use crate::backend::utils::cache::lsyscache::LazyCatalogLookup;
+use crate::backend::utils::misc::checkpoint::is_checkpoint_guc;
 use crate::backend::utils::misc::guc::{is_postgres_guc, normalize_guc_name};
 use crate::backend::utils::misc::guc_datetime::{
     DateTimeConfig, default_datestyle, default_timezone, format_datestyle, parse_datestyle,
     parse_timezone,
 };
 use crate::backend::utils::misc::interrupts::{InterruptState, StatementInterruptGuard};
+use crate::include::catalog::PG_CHECKPOINT_OID;
 use crate::include::nodes::execnodes::ScalarType;
 use crate::pgrust::auth::AuthState;
 use crate::pgrust::database::{
@@ -304,9 +306,10 @@ impl Session {
 
         match stmt {
             Statement::Do(ref do_stmt) => execute_do(do_stmt),
-            Statement::Show(ref show_stmt) => self.apply_show(show_stmt),
-            Statement::Set(ref set_stmt) => self.apply_set(set_stmt),
-            Statement::Reset(ref reset_stmt) => self.apply_reset(reset_stmt),
+            Statement::Show(ref show_stmt) => self.apply_show(db, show_stmt),
+            Statement::Set(ref set_stmt) => self.apply_set(db, set_stmt),
+            Statement::Reset(ref reset_stmt) => self.apply_reset(db, reset_stmt),
+            Statement::Checkpoint(_) => self.apply_checkpoint(db),
             Statement::CopyFrom(ref copy_stmt) => self.execute_copy_from_file(db, copy_stmt),
             Statement::CreateFunction(ref create_stmt) => {
                 if self.active_txn.is_some() {
@@ -829,6 +832,7 @@ impl Session {
                 };
                 let held_locks = txn.held_table_locks.keys().copied().collect::<Vec<_>>();
                 let result = (|| {
+                    let _checkpoint_guard = db.checkpoint_commit_guard();
                     db.pool.write_wal_commit(txn.xid).map_err(|e| {
                         ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Storage(
                             crate::backend::storage::smgr::SmgrError::Io(std::io::Error::new(
@@ -1078,9 +1082,10 @@ impl Session {
 
         let result = match stmt {
             Statement::Do(ref do_stmt) => execute_do(do_stmt),
-            Statement::Show(ref show_stmt) => self.apply_show(show_stmt),
-            Statement::Set(ref set_stmt) => self.apply_set(set_stmt),
-            Statement::Reset(ref reset_stmt) => self.apply_reset(reset_stmt),
+            Statement::Show(ref show_stmt) => self.apply_show(db, show_stmt),
+            Statement::Set(ref set_stmt) => self.apply_set(db, set_stmt),
+            Statement::Reset(ref reset_stmt) => self.apply_reset(db, reset_stmt),
+            Statement::Checkpoint(_) => self.apply_checkpoint(db),
             Statement::CommentOnDomain(ref comment_stmt) => {
                 let search_path = self.configured_search_path();
                 db.execute_comment_on_domain_stmt_with_search_path(
@@ -1564,6 +1569,7 @@ impl Session {
                     txns: db.txns.clone(),
                     txn_waiter: Some(db.txn_waiter.clone()),
                     sequences: Some(db.sequences.clone()),
+                    checkpoint_stats: db.checkpoint_stats_snapshot(),
                     datetime_config: self.datetime_config.clone(),
                     interrupts: self.interrupts(),
                     snapshot,
@@ -1595,6 +1601,7 @@ impl Session {
                     txns: db.txns.clone(),
                     txn_waiter: Some(db.txn_waiter.clone()),
                     sequences: Some(db.sequences.clone()),
+                    checkpoint_stats: db.checkpoint_stats_snapshot(),
                     datetime_config: self.datetime_config.clone(),
                     interrupts,
                     snapshot,
@@ -1626,6 +1633,7 @@ impl Session {
                     txns: db.txns.clone(),
                     txn_waiter: Some(db.txn_waiter.clone()),
                     sequences: Some(db.sequences.clone()),
+                    checkpoint_stats: db.checkpoint_stats_snapshot(),
                     datetime_config: self.datetime_config.clone(),
                     interrupts: Arc::clone(&interrupts),
                     snapshot,
@@ -1664,6 +1672,7 @@ impl Session {
                     txns: db.txns.clone(),
                     txn_waiter: Some(db.txn_waiter.clone()),
                     sequences: Some(db.sequences.clone()),
+                    checkpoint_stats: db.checkpoint_stats_snapshot(),
                     datetime_config: self.datetime_config.clone(),
                     interrupts: Arc::clone(&interrupts),
                     snapshot,
@@ -1955,6 +1964,7 @@ impl Session {
 
     fn apply_set(
         &mut self,
+        _db: &Database,
         stmt: &crate::backend::parser::SetStatement,
     ) -> Result<StatementResult, ExecError> {
         let name = normalize_guc_name(&stmt.name);
@@ -1963,18 +1973,27 @@ impl Session {
                 name,
             )));
         }
+        if is_checkpoint_guc(&name) {
+            return Err(ExecError::Parse(ParseError::CantChangeRuntimeParam(name)));
+        }
         self.apply_guc_value(&stmt.name, &stmt.value)?;
         Ok(StatementResult::AffectedRows(0))
     }
 
     fn apply_reset(
         &mut self,
+        _db: &Database,
         stmt: &crate::backend::parser::ResetStatement,
     ) -> Result<StatementResult, ExecError> {
         if let Some(name) = &stmt.name {
             let normalized = normalize_guc_name(name);
             if !is_postgres_guc(&normalized) {
                 return Err(ExecError::Parse(ParseError::UnknownConfigurationParameter(
+                    normalized,
+                )));
+            }
+            if is_checkpoint_guc(&normalized) {
+                return Err(ExecError::Parse(ParseError::CantChangeRuntimeParam(
                     normalized,
                 )));
             }
@@ -1994,6 +2013,7 @@ impl Session {
 
     fn apply_show(
         &mut self,
+        db: &Database,
         stmt: &crate::backend::parser::ShowStatement,
     ) -> Result<StatementResult, ExecError> {
         let name = normalize_guc_name(&stmt.name);
@@ -2018,6 +2038,11 @@ impl Session {
                 "TimeZone".to_string(),
                 self.datetime_config.time_zone.clone(),
             ),
+            _ if is_checkpoint_guc(&name) => (
+                stmt.name.clone(),
+                db.checkpoint_config_value(&name)
+                    .unwrap_or_else(|| "default".to_string()),
+            ),
             _ => (
                 stmt.name.clone(),
                 self.gucs
@@ -2038,6 +2063,37 @@ impl Session {
             column_names: vec![column_name],
             rows: vec![vec![Value::Text(value.into())]],
         })
+    }
+
+    fn apply_checkpoint(&mut self, db: &Database) -> Result<StatementResult, ExecError> {
+        if self.active_txn.as_ref().is_some_and(|txn| txn.failed) {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "ROLLBACK",
+                actual: "current transaction is aborted, commands ignored until end of transaction block".into(),
+            }));
+        }
+        let auth_catalog = db.auth_catalog(self.client_id, None).map_err(|err| {
+            ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "authorization catalog",
+                actual: format!("{err:?}"),
+            })
+        })?;
+        if !self
+            .auth
+            .has_effective_membership(PG_CHECKPOINT_OID, &auth_catalog)
+        {
+            return Err(ExecError::DetailedError {
+                message: "permission denied to execute CHECKPOINT command".into(),
+                detail: Some(
+                    "Only roles with privileges of the \"pg_checkpoint\" role may execute this command."
+                        .into(),
+                ),
+                hint: None,
+                sqlstate: "42501",
+            });
+        }
+        db.request_checkpoint(crate::backend::access::transam::CheckpointRequestFlags::sql())?;
+        Ok(StatementResult::AffectedRows(0))
     }
 
     fn guc_reset_datestyle(&mut self) {
@@ -2126,6 +2182,7 @@ impl Session {
             txns: db.txns.clone(),
             txn_waiter: Some(db.txn_waiter.clone()),
             sequences: Some(db.sequences.clone()),
+            checkpoint_stats: db.checkpoint_stats_snapshot(),
             datetime_config: self.datetime_config.clone(),
             interrupts,
             snapshot,
@@ -2364,6 +2421,7 @@ impl Session {
                 txns: db.txns.clone(),
                 txn_waiter: Some(db.txn_waiter.clone()),
                 sequences: Some(db.sequences.clone()),
+                checkpoint_stats: db.checkpoint_stats_snapshot(),
                 datetime_config: self.datetime_config.clone(),
                 interrupts,
                 snapshot,
@@ -2401,6 +2459,7 @@ impl Session {
             let held_locks = txn.held_table_locks.keys().copied().collect::<Vec<_>>();
             match result {
                 Ok(n) => {
+                    let _checkpoint_guard = db.checkpoint_commit_guard();
                     let commit_result = db.pool.write_wal_commit(txn.xid).map_err(|e| {
                         ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Storage(
                             crate::backend::storage::smgr::SmgrError::Io(std::io::Error::new(
