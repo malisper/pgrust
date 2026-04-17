@@ -40,6 +40,8 @@ enum Expr {
         op: UnaryOp,
         inner: Box<Expr>,
     },
+    Exists(Box<Expr>),
+    Last,
     And(Box<Expr>, Box<Expr>),
     Or(Box<Expr>, Box<Expr>),
     Not(Box<Expr>),
@@ -61,9 +63,9 @@ enum Step {
         min_depth: RecursiveBound,
         max_depth: RecursiveBound,
     },
-    Index(SubscriptExpr),
+    Subscripts(Vec<SubscriptSelection>),
     IndexWildcard,
-    Range(SubscriptExpr, SubscriptExpr),
+    Method(MethodKind),
     Filter(Box<Expr>),
 }
 
@@ -90,9 +92,23 @@ enum RecursiveBound {
 
 #[derive(Debug, Clone)]
 enum SubscriptExpr {
-    Int(i32),
-    Fractional(NumericValue),
-    Last,
+    Expr(Box<Expr>),
+    Filter {
+        expr: Box<Expr>,
+        predicate: Box<Expr>,
+    },
+}
+
+#[derive(Debug, Clone)]
+enum SubscriptSelection {
+    Index(SubscriptExpr),
+    Range(Expr, Expr),
+}
+
+#[derive(Debug, Clone, Copy)]
+enum MethodKind {
+    Size,
+    Type,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -123,6 +139,7 @@ struct RuntimeContext<'a> {
     global: &'a EvaluationContext<'a>,
     current: &'a JsonbValue,
     mode: PathMode,
+    last_index: Option<i32>,
 }
 
 pub(crate) fn validate_jsonpath(text: &str) -> Result<(), ExecError> {
@@ -146,6 +163,7 @@ pub(crate) fn evaluate_jsonpath(
         global: ctx,
         current: ctx.root,
         mode: path.mode,
+        last_index: None,
     };
     eval_expr(&path.expr, &runtime)
 }
@@ -153,6 +171,11 @@ pub(crate) fn evaluate_jsonpath(
 fn eval_expr(expr: &Expr, ctx: &RuntimeContext<'_>) -> Result<Vec<JsonbValue>, ExecError> {
     match expr {
         Expr::Literal(value) => Ok(vec![value.clone()]),
+        Expr::Last => Ok(ctx
+            .last_index
+            .map(numeric_jsonb_from_i32)
+            .into_iter()
+            .collect()),
         Expr::Path { base, steps } => {
             let mut values = match base {
                 Base::Root => vec![ctx.global.root.clone()],
@@ -167,6 +190,7 @@ fn eval_expr(expr: &Expr, ctx: &RuntimeContext<'_>) -> Result<Vec<JsonbValue>, E
         Expr::Compare { .. } | Expr::And(..) | Expr::Or(..) | Expr::Not(..) | Expr::IsUnknown(..) => {
             Ok(vec![predicate_value_to_jsonb(eval_predicate(expr, ctx)?)])
         }
+        Expr::Exists(..) => Ok(vec![predicate_value_to_jsonb(eval_predicate(expr, ctx)?)]),
         Expr::Arithmetic { op, left, right } => {
             let left_values = eval_expr(left, ctx)?;
             let right_values = eval_expr(right, ctx)?;
@@ -184,6 +208,11 @@ fn eval_expr(expr: &Expr, ctx: &RuntimeContext<'_>) -> Result<Vec<JsonbValue>, E
 
 fn eval_predicate(expr: &Expr, ctx: &RuntimeContext<'_>) -> Result<PredicateValue, ExecError> {
     match expr {
+        Expr::Exists(inner) => Ok(match eval_expr(inner, ctx) {
+            Ok(values) if values.is_empty() => PredicateValue::False,
+            Ok(_) => PredicateValue::True,
+            Err(_) => PredicateValue::Unknown,
+        }),
         Expr::Compare { op, left, right } => {
             let left_values = match eval_expr(left, ctx) {
                 Ok(values) => values,
@@ -341,20 +370,12 @@ fn apply_step_single(
             let max_depth = resolve_recursive_bound(value, *max_depth);
             collect_recursive_values(value, min_depth, max_depth, 0, out);
         }
-        Step::Index(index) => match value {
+        Step::Subscripts(selections) => match value {
             JsonbValue::Array(items) => {
-                let index = resolve_subscript_expr(index.clone(), items.len())?;
-                if let Some(found) = array_index(items, index) {
-                    out.push(found.clone());
-                } else if matches!(ctx.mode, PathMode::Strict) {
-                    return Err(exec_jsonpath_error("jsonpath array index out of range"));
-                }
+                apply_subscript_selections(value, items, selections, ctx, out)?;
             }
             _ if matches!(ctx.mode, PathMode::Lax) => {
-                let index = resolve_subscript_expr(index.clone(), 1)?;
-                if index == 0 || index == -1 {
-                    out.push(value.clone());
-                }
+                apply_scalar_subscript_selections(value, selections, ctx, out)?;
             }
             _ if matches!(ctx.mode, PathMode::Strict) => {
                 return Err(exec_jsonpath_error(
@@ -373,24 +394,7 @@ fn apply_step_single(
             }
             _ => {}
         },
-        Step::Range(start, end) => match value {
-            JsonbValue::Array(items) => {
-                let start = resolve_subscript_expr(start.clone(), items.len())?;
-                let end = resolve_subscript_expr(end.clone(), items.len())?;
-                for index in start..=end {
-                    if let Some(found) = array_index(items, index) {
-                        out.push(found.clone());
-                    }
-                }
-                if out.is_empty() && matches!(ctx.mode, PathMode::Strict) {
-                    return Err(exec_jsonpath_error("jsonpath array range is out of bounds"));
-                }
-            }
-            _ if matches!(ctx.mode, PathMode::Strict) => {
-                return Err(exec_jsonpath_error("jsonpath array range requires array"));
-            }
-            _ => {}
-        },
+        Step::Method(kind) => out.push(apply_method(value, *kind, ctx.mode)?),
         Step::Filter(expr) => match value {
             JsonbValue::Array(items) if matches!(ctx.mode, PathMode::Lax) => {
                 for item in items {
@@ -398,6 +402,7 @@ fn apply_step_single(
                         global: ctx.global,
                         current: item,
                         mode: ctx.mode,
+                        last_index: ctx.last_index,
                     };
                     if eval_predicate(expr, &nested)? == PredicateValue::True {
                         out.push(item.clone());
@@ -409,6 +414,7 @@ fn apply_step_single(
                     global: ctx.global,
                     current: value,
                     mode: ctx.mode,
+                    last_index: ctx.last_index,
                 };
                 if eval_predicate(expr, &nested)? == PredicateValue::True {
                     out.push(value.clone());
@@ -426,6 +432,114 @@ fn array_index(items: &[JsonbValue], index: i32) -> Option<&JsonbValue> {
         None
     } else {
         items.get(normalized as usize)
+    }
+}
+
+fn apply_subscript_selections(
+    value: &JsonbValue,
+    items: &[JsonbValue],
+    selections: &[SubscriptSelection],
+    ctx: &RuntimeContext<'_>,
+    out: &mut Vec<JsonbValue>,
+) -> Result<(), ExecError> {
+    let subscript_ctx = RuntimeContext {
+        global: ctx.global,
+        current: value,
+        mode: ctx.mode,
+        last_index: items
+            .len()
+            .checked_sub(1)
+            .and_then(|last| i32::try_from(last).ok()),
+    };
+    let mut matched = false;
+    let mut had_range = false;
+    for selection in selections {
+        match selection {
+            SubscriptSelection::Index(expr) => match resolve_subscript_expr(expr, &subscript_ctx)? {
+                Some(index) => {
+                    if let Some(found) = array_index(items, index) {
+                        out.push(found.clone());
+                        matched = true;
+                    } else if matches!(ctx.mode, PathMode::Strict) {
+                        return Err(exec_jsonpath_error("jsonpath array subscript is out of bounds"));
+                    }
+                }
+                None => {
+                    if matches!(ctx.mode, PathMode::Strict) {
+                        return Err(exec_jsonpath_error("jsonpath array subscript is out of bounds"));
+                    }
+                }
+            },
+            SubscriptSelection::Range(start, end) => {
+                had_range = true;
+                let start = resolve_bound_expr(start, &subscript_ctx)?;
+                let end = resolve_bound_expr(end, &subscript_ctx)?;
+                match (start, end) {
+                    (Some(start), Some(end)) => {
+                        for index in start..=end {
+                            if let Some(found) = array_index(items, index) {
+                                out.push(found.clone());
+                                matched = true;
+                            }
+                        }
+                    }
+                    _ if matches!(ctx.mode, PathMode::Strict) => {
+                        return Err(exec_jsonpath_error("jsonpath array subscript is out of bounds"));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    if had_range && !matched && matches!(ctx.mode, PathMode::Strict) {
+        return Err(exec_jsonpath_error("jsonpath array range is out of bounds"));
+    }
+    Ok(())
+}
+
+fn apply_scalar_subscript_selections(
+    value: &JsonbValue,
+    selections: &[SubscriptSelection],
+    ctx: &RuntimeContext<'_>,
+    out: &mut Vec<JsonbValue>,
+) -> Result<(), ExecError> {
+    let subscript_ctx = RuntimeContext {
+        global: ctx.global,
+        current: value,
+        mode: ctx.mode,
+        last_index: Some(0),
+    };
+    for selection in selections {
+        match selection {
+            SubscriptSelection::Index(expr) => {
+                if matches!(resolve_subscript_expr(expr, &subscript_ctx)?, Some(0) | Some(-1)) {
+                    out.push(value.clone());
+                }
+            }
+            SubscriptSelection::Range(start, end) => {
+                let start = resolve_bound_expr(start, &subscript_ctx)?;
+                let end = resolve_bound_expr(end, &subscript_ctx)?;
+                if let (Some(start), Some(end)) = (start, end) {
+                    if (start..=end).any(|index| index == 0 || index == -1) {
+                        out.push(value.clone());
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn apply_method(value: &JsonbValue, kind: MethodKind, mode: PathMode) -> Result<JsonbValue, ExecError> {
+    match kind {
+        MethodKind::Type => Ok(JsonbValue::String(jsonb_type_name(value).to_string())),
+        MethodKind::Size => match value {
+            JsonbValue::Array(items) => Ok(numeric_jsonb_from_i32(items.len() as i32)),
+            _ if matches!(mode, PathMode::Lax) => Ok(numeric_jsonb_from_i32(1)),
+            _ => Err(exec_jsonpath_error(
+                "jsonpath item method .size() can only be applied to an array",
+            )),
+        },
     }
 }
 
@@ -552,11 +666,53 @@ fn numeric_from_jsonb(value: &JsonbValue) -> Result<NumericValue, ExecError> {
     }
 }
 
-fn resolve_subscript_expr(expr: SubscriptExpr, array_len: usize) -> Result<i32, ExecError> {
+fn resolve_bound_expr(expr: &Expr, ctx: &RuntimeContext<'_>) -> Result<Option<i32>, ExecError> {
+    resolve_expr_numeric(expr, ctx)
+}
+
+fn resolve_subscript_expr(
+    expr: &SubscriptExpr,
+    ctx: &RuntimeContext<'_>,
+) -> Result<Option<i32>, ExecError> {
     match expr {
-        SubscriptExpr::Int(value) => Ok(value),
-        SubscriptExpr::Fractional(value) => truncate_numeric_to_i32(&value),
-        SubscriptExpr::Last => Ok((array_len as i32) - 1),
+        SubscriptExpr::Expr(expr) => resolve_expr_numeric(expr, ctx),
+        SubscriptExpr::Filter { expr, predicate } => {
+            let Some(index) = resolve_expr_numeric(expr, ctx)? else {
+                return Ok(None);
+            };
+            let current = numeric_jsonb_from_i32(index);
+            let nested = RuntimeContext {
+                global: ctx.global,
+                current: &current,
+                mode: ctx.mode,
+                last_index: ctx.last_index,
+            };
+            if eval_predicate(predicate, &nested)? == PredicateValue::True {
+                Ok(Some(index))
+            } else {
+                Err(exec_jsonpath_error(
+                    "jsonpath array subscript is not a single numeric value",
+                ))
+            }
+        }
+    }
+}
+
+fn resolve_expr_numeric(expr: &Expr, ctx: &RuntimeContext<'_>) -> Result<Option<i32>, ExecError> {
+    let values = eval_expr(expr, ctx)?;
+    if values.is_empty() {
+        return Ok(None);
+    }
+    if values.len() != 1 {
+        return Err(exec_jsonpath_error(
+            "jsonpath array subscript is not a single numeric value",
+        ));
+    }
+    match &values[0] {
+        JsonbValue::Numeric(numeric) => truncate_numeric_to_i32(numeric).map(Some),
+        _ => Err(exec_jsonpath_error(
+            "jsonpath array subscript is not a single numeric value",
+        )),
     }
 }
 
@@ -573,6 +729,21 @@ fn truncate_numeric_to_i32(value: &NumericValue) -> Result<i32, ExecError> {
                 .map_err(|_| exec_jsonpath_error("jsonpath subscript is out of range"))
         }
         _ => Err(exec_jsonpath_error("jsonpath subscript is out of range")),
+    }
+}
+
+fn numeric_jsonb_from_i32(value: i32) -> JsonbValue {
+    JsonbValue::Numeric(NumericValue::finite(num_bigint::BigInt::from(value), 0))
+}
+
+fn jsonb_type_name(value: &JsonbValue) -> &'static str {
+    match value {
+        JsonbValue::Null => "null",
+        JsonbValue::Bool(_) => "boolean",
+        JsonbValue::Numeric(_) => "number",
+        JsonbValue::String(_) => "string",
+        JsonbValue::Array(_) => "array",
+        JsonbValue::Object(_) => "object",
     }
 }
 
@@ -679,6 +850,7 @@ fn render_jsonpath(path: &JsonPath) -> String {
 fn render_expr(expr: &Expr, out: &mut String) {
     match expr {
         Expr::Literal(value) => render_literal(value, out),
+        Expr::Last => out.push_str("last"),
         Expr::Path { base, steps } => {
             render_base(base, out);
             for step in steps {
@@ -714,6 +886,11 @@ fn render_expr(expr: &Expr, out: &mut String) {
                 UnaryOp::Minus => '-',
             });
             render_operand(inner, out);
+        }
+        Expr::Exists(inner) => {
+            out.push_str("exists(");
+            render_expr(inner, out);
+            out.push(')');
         }
         Expr::And(left, right) => {
             render_operand(left, out);
@@ -783,19 +960,21 @@ fn render_step(step: &Step, out: &mut String) {
                 out.push('}');
             }
         }
-        Step::Index(index) => {
+        Step::Subscripts(selections) => {
             out.push('[');
-            render_subscript_expr(index.clone(), out);
+            for (idx, selection) in selections.iter().enumerate() {
+                if idx > 0 {
+                    out.push_str(", ");
+                }
+                render_subscript_selection(selection, out);
+            }
             out.push(']');
         }
         Step::IndexWildcard => out.push_str("[*]"),
-        Step::Range(start, end) => {
-            out.push('[');
-            render_subscript_expr(start.clone(), out);
-            out.push_str(" to ");
-            render_subscript_expr(end.clone(), out);
-            out.push(']');
-        }
+        Step::Method(kind) => out.push_str(match kind {
+            MethodKind::Size => ".size()",
+            MethodKind::Type => ".type()",
+        }),
         Step::Filter(expr) => {
             out.push_str(" ? (");
             render_expr(expr, out);
@@ -811,11 +990,26 @@ fn render_recursive_bound(bound: RecursiveBound, out: &mut String) {
     }
 }
 
-fn render_subscript_expr(expr: SubscriptExpr, out: &mut String) {
+fn render_subscript_selection(selection: &SubscriptSelection, out: &mut String) {
+    match selection {
+        SubscriptSelection::Index(expr) => render_subscript_expr(expr, out),
+        SubscriptSelection::Range(start, end) => {
+            render_expr(start, out);
+            out.push_str(" to ");
+            render_expr(end, out);
+        }
+    }
+}
+
+fn render_subscript_expr(expr: &SubscriptExpr, out: &mut String) {
     match expr {
-        SubscriptExpr::Int(value) => out.push_str(&value.to_string()),
-        SubscriptExpr::Fractional(value) => out.push_str(&value.render()),
-        SubscriptExpr::Last => out.push_str("last"),
+        SubscriptExpr::Expr(expr) => render_expr(expr, out),
+        SubscriptExpr::Filter { expr, predicate } => {
+            render_expr(expr, out);
+            out.push_str(" ? (");
+            render_expr(predicate, out);
+            out.push(')');
+        }
     }
 }
 
@@ -826,6 +1020,15 @@ fn render_literal(value: &JsonbValue, out: &mut String) {
         JsonbValue::Numeric(n) => out.push_str(&n.render()),
         JsonbValue::String(s) => render_quoted_string(s, out),
         JsonbValue::Array(_) | JsonbValue::Object(_) => out.push_str("null"),
+    }
+}
+
+fn subscript_expr_to_expr(expr: SubscriptExpr) -> Result<Expr, ExecError> {
+    match expr {
+        SubscriptExpr::Expr(expr) => Ok(*expr),
+        SubscriptExpr::Filter { .. } => Err(exec_jsonpath_error(
+            "jsonpath subscript range bound cannot be filtered",
+        )),
     }
 }
 
@@ -1043,6 +1246,17 @@ impl<'a> Parser<'a> {
             self.bump();
             return self.parse_path(Base::Current);
         }
+        if self.consume_keyword("exists") {
+            self.skip_ws();
+            self.expect("(")?;
+            let expr = self.parse_or_expr()?;
+            self.skip_ws();
+            self.expect(")")?;
+            return Ok(Expr::Exists(Box::new(expr)));
+        }
+        if self.consume_keyword("last") {
+            return Ok(Expr::Last);
+        }
         if self.consume_keyword("true") {
             return Ok(Expr::Literal(JsonbValue::Bool(true)));
         }
@@ -1077,11 +1291,29 @@ impl<'a> Parser<'a> {
                         steps.push(Step::MemberWildcard);
                     }
                 } else {
-                    let key = self
-                        .parse_ident()
-                        .or_else(|| self.parse_string().ok().flatten())
-                        .ok_or_else(|| exec_jsonpath_error("expected jsonpath member name"))?;
-                    steps.push(Step::Member(key));
+                    if let Some(ident) = self.parse_ident() {
+                        if self.consume("(") {
+                            self.skip_ws();
+                            self.expect(")")?;
+                            let kind = match ident.as_str() {
+                                "size" => MethodKind::Size,
+                                "type" => MethodKind::Type,
+                                _ => {
+                                    return Err(exec_jsonpath_error(
+                                        "unsupported jsonpath item method",
+                                    ))
+                                }
+                            };
+                            steps.push(Step::Method(kind));
+                        } else {
+                            steps.push(Step::Member(ident));
+                        }
+                    } else {
+                        let key = self
+                            .parse_string()?
+                            .ok_or_else(|| exec_jsonpath_error("expected jsonpath member name"))?;
+                        steps.push(Step::Member(key));
+                    }
                 }
             } else if self.consume("[") {
                 self.skip_ws();
@@ -1090,19 +1322,28 @@ impl<'a> Parser<'a> {
                     self.expect("]")?;
                     steps.push(Step::IndexWildcard);
                 } else {
-                    let start = self.parse_subscript_expr()?;
-                    self.skip_ws();
-                    if self.consume_keyword("to") {
+                    let mut selections = Vec::new();
+                    loop {
+                        let start = self.parse_subscript_expr()?;
                         self.skip_ws();
-                        let end = self.parse_subscript_expr()?;
+                        if self.consume_keyword("to") {
+                            self.skip_ws();
+                            let end = self.parse_additive_expr()?;
+                            selections.push(SubscriptSelection::Range(
+                                subscript_expr_to_expr(start)?,
+                                end,
+                            ));
+                        } else {
+                            selections.push(SubscriptSelection::Index(start));
+                        }
                         self.skip_ws();
-                        self.expect("]")?;
-                        steps.push(Step::Range(start, end));
-                    } else {
+                        if !self.consume(",") {
+                            break;
+                        }
                         self.skip_ws();
-                        self.expect("]")?;
-                        steps.push(Step::Index(start));
                     }
+                    self.expect("]")?;
+                    steps.push(Step::Subscripts(selections));
                 }
             } else if self.consume("?") {
                 self.skip_ws();
@@ -1147,24 +1388,20 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_subscript_expr(&mut self) -> Result<SubscriptExpr, ExecError> {
+        let expr = self.parse_additive_expr()?;
         self.skip_ws();
-        if self.consume_keyword("last") {
-            return Ok(SubscriptExpr::Last);
+        if self.consume("?") {
+            self.skip_ws();
+            self.expect("(")?;
+            let predicate = self.parse_or_expr()?;
+            self.skip_ws();
+            self.expect(")")?;
+            return Ok(SubscriptExpr::Filter {
+                expr: Box::new(expr),
+                predicate: Box::new(predicate),
+            });
         }
-        let saved = self.offset;
-        if let Some(number) = self.parse_number()? {
-            let JsonbValue::Numeric(numeric) = number else {
-                unreachable!();
-            };
-            return match &numeric {
-                NumericValue::Finite { scale: 0, .. } => {
-                    Ok(SubscriptExpr::Int(truncate_numeric_to_i32(&numeric)?))
-                }
-                _ => Ok(SubscriptExpr::Fractional(numeric)),
-            };
-        }
-        self.offset = saved;
-        Ok(SubscriptExpr::Int(self.parse_signed_int()?))
+        Ok(SubscriptExpr::Expr(Box::new(expr)))
     }
 
     fn parse_signed_int(&mut self) -> Result<i32, ExecError> {
