@@ -280,6 +280,59 @@ fn recursive_cte_intermediate_setop_with_can_read_worktable() {
 }
 
 #[test]
+fn recursive_cte_nested_union_ctes_inside_recursive_term_execute() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    let result = session
+        .execute(
+            &db,
+            "with recursive outermost(x) as (
+             select 1
+             union (with innermost1 as (
+              select 2
+              union (with innermost2 as (
+               select 3
+               union (with innermost3 as (
+                select 4
+                union (with innermost4 as (
+                 select 5
+                 union (with innermost5 as (
+                  select 6
+                  union (with innermost6 as
+                   (select 7)
+                   select * from innermost6))
+                  select * from innermost5))
+                 select * from innermost4))
+                select * from innermost3))
+               select * from innermost2))
+              select * from outermost
+              union select * from innermost1)
+            )
+            select * from outermost order by 1",
+        )
+        .expect("execute recursive CTE");
+
+    match result {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(1)],
+                    vec![Value::Int32(2)],
+                    vec![Value::Int32(3)],
+                    vec![Value::Int32(4)],
+                    vec![Value::Int32(5)],
+                    vec![Value::Int32(6)],
+                    vec![Value::Int32(7)],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn recursive_cte_rejects_unsupported_term_decorations() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);

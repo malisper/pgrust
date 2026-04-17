@@ -4506,6 +4506,37 @@ fn recursive_cte_allows_self_reference_inside_intermediate_setop_with() {
 }
 
 #[test]
+fn recursive_cte_allows_non_recursive_union_ctes_inside_recursive_term() {
+    let stmt = parse_select(
+        "with recursive outermost(x) as (
+         select 1
+         union (with innermost1 as (
+          select 2
+          union (with innermost2 as (
+           select 3
+           union (with innermost3 as (
+            select 4
+            union (with innermost4 as (
+             select 5
+             union (with innermost5 as (
+              select 6
+              union (with innermost6 as
+               (select 7)
+               select * from innermost6))
+              select * from innermost5))
+             select * from innermost4))
+            select * from innermost3))
+           select * from innermost2))
+          select * from outermost
+          union select * from innermost1)
+        )
+        select * from outermost order by 1",
+    )
+    .unwrap();
+    assert!(build_plan(&stmt, &catalog()).is_ok());
+}
+
+#[test]
 fn recursive_cte_rejects_self_reference_inside_subquery_cte_of_recursive_term() {
     let stmt = parse_select(
         "with recursive outermost(x) as (

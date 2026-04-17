@@ -10,6 +10,7 @@ use crate::include::nodes::primnodes::{
     SetReturningCall, SortGroupClause, TargetEntry, ToastRelationRef, Var, WindowClause,
     user_attrno,
 };
+use std::rc::Rc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RelOptKind {
@@ -310,11 +311,11 @@ impl PlannerInfo {
 }
 
 #[derive(Debug, Clone)]
-pub struct PlannerSubroot(pub Box<PlannerInfo>);
+pub struct PlannerSubroot(pub Rc<PlannerInfo>);
 
 impl PlannerSubroot {
     pub fn new(root: PlannerInfo) -> Self {
-        Self(Box::new(root))
+        Self(Rc::new(root))
     }
 
     pub fn as_ref(&self) -> &PlannerInfo {
