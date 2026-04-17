@@ -390,6 +390,14 @@ impl Session {
                     search_path.as_deref(),
                 )
             }
+            Statement::CreateConversion(ref create_stmt) => {
+                let search_path = self.configured_search_path();
+                db.execute_create_conversion_stmt_with_search_path(
+                    self.client_id,
+                    create_stmt,
+                    search_path.as_deref(),
+                )
+            }
             Statement::CreateIndex(ref create_stmt) => {
                 let search_path = self.configured_search_path();
                 db.execute_create_index_stmt_with_search_path(
@@ -831,6 +839,24 @@ impl Session {
                     db.execute_comment_on_role_stmt(self.client_id, comment_stmt)
                 }
             }
+            Statement::CommentOnConversion(ref comment_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_comment_on_conversion_stmt_with_search_path(
+                        self.client_id,
+                        comment_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
             Statement::Begin => {
                 if self.active_txn.is_some() {
                     return Err(ExecError::Parse(ParseError::UnexpectedToken {
@@ -1121,10 +1147,26 @@ impl Session {
                     search_path.as_deref(),
                 )
             }
+            Statement::CommentOnConversion(ref comment_stmt) => {
+                let search_path = self.configured_search_path();
+                db.execute_comment_on_conversion_stmt_with_search_path(
+                    client_id,
+                    comment_stmt,
+                    search_path.as_deref(),
+                )
+            }
             Statement::CopyFrom(ref copy_stmt) => self.execute_copy_from_file(db, copy_stmt),
             Statement::CreateDomain(ref create_stmt) => {
                 let search_path = self.configured_search_path();
                 db.execute_create_domain_stmt_with_search_path(
+                    client_id,
+                    create_stmt,
+                    search_path.as_deref(),
+                )
+            }
+            Statement::CreateConversion(ref create_stmt) => {
+                let search_path = self.configured_search_path();
+                db.execute_create_conversion_stmt_with_search_path(
                     client_id,
                     create_stmt,
                     search_path.as_deref(),
@@ -1545,6 +1587,14 @@ impl Session {
                     xid,
                     cid,
                     &mut txn.catalog_effects,
+                )
+            }
+            Statement::DropConversion(ref drop_stmt) => {
+                let search_path = self.configured_search_path();
+                db.execute_drop_conversion_stmt_with_search_path(
+                    client_id,
+                    drop_stmt,
+                    search_path.as_deref(),
                 )
             }
             Statement::SetSessionAuthorization(ref set_stmt) => {
