@@ -216,7 +216,8 @@ pub(super) fn finalize_expr_subqueries(
                 .collect(),
             array_type,
         },
-        Expr::Row { fields } => Expr::Row {
+        Expr::Row { descriptor, fields } => Expr::Row {
+            descriptor,
             fields: fields
                 .into_iter()
                 .map(|(name, expr)| (name, finalize_expr_subqueries(expr, catalog, subplans)))
@@ -525,7 +526,8 @@ fn rebase_expr_subplan_ids(expr: Expr, base: usize) -> Expr {
                 .collect(),
             array_type,
         },
-        Expr::Row { fields } => Expr::Row {
+        Expr::Row { descriptor, fields } => Expr::Row {
+            descriptor,
             fields: fields
                 .into_iter()
                 .map(|(name, expr)| (name, rebase_expr_subplan_ids(expr, base)))

@@ -1373,7 +1373,7 @@ fn reject_unsupported_check_expr(expr: &Expr) -> Result<(), ParseError> {
             }
             Ok(())
         }
-        Expr::Row { fields } => {
+        Expr::Row { fields, .. } => {
             for (_, field) in fields {
                 reject_unsupported_check_expr(field)?;
             }

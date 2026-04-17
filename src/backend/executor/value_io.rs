@@ -12,9 +12,11 @@ use super::expr_geometry::{
 };
 use super::expr_range::{decode_range_bytes, encode_range_bytes, render_range_text};
 use super::node_types::*;
+use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::expr_json::{canonicalize_jsonpath_text, validate_json_text};
 use crate::backend::executor::jsonb::{decode_jsonb, render_jsonb_bytes};
 use crate::backend::parser::{SqlType, SqlTypeKind};
+use crate::backend::utils::record::register_anonymous_record_descriptor;
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::include::access::htup::{HeapTuple, TupleValue};
 use crate::include::nodes::execnodes::ToastFetchContext;
@@ -61,10 +63,11 @@ const INTERNAL_VALUE_TAG_INTERNAL_CHAR: u8 = 28;
 const INTERNAL_VALUE_TAG_BOOL: u8 = 29;
 const INTERNAL_VALUE_TAG_ARRAY: u8 = 30;
 const INTERNAL_VALUE_TAG_RECORD: u8 = 31;
+const COMPOSITE_DATUM_VERSION: u8 = 1;
 
 pub(crate) fn format_record_text(record: &crate::include::nodes::datum::RecordValue) -> String {
     let mut out = String::from("(");
-    for (index, (_, value)) in record.fields.iter().enumerate() {
+    for (index, value) in record.fields.iter().enumerate() {
         if index > 0 {
             out.push(',');
         }
@@ -160,6 +163,254 @@ fn decode_internal_text<'a>(bytes: &'a [u8], offset: &mut usize) -> Result<&'a [
     Ok(slice)
 }
 
+fn sql_type_kind_tag(kind: SqlTypeKind) -> u8 {
+    match kind {
+        SqlTypeKind::AnyArray => 0,
+        SqlTypeKind::Record => 1,
+        SqlTypeKind::Composite => 2,
+        SqlTypeKind::Int2 => 3,
+        SqlTypeKind::Int2Vector => 4,
+        SqlTypeKind::Int4 => 5,
+        SqlTypeKind::Int8 => 6,
+        SqlTypeKind::Name => 7,
+        SqlTypeKind::Oid => 8,
+        SqlTypeKind::Tid => 9,
+        SqlTypeKind::Xid => 10,
+        SqlTypeKind::OidVector => 11,
+        SqlTypeKind::Bit => 12,
+        SqlTypeKind::VarBit => 13,
+        SqlTypeKind::Bytea => 14,
+        SqlTypeKind::Float4 => 15,
+        SqlTypeKind::Float8 => 16,
+        SqlTypeKind::Money => 17,
+        SqlTypeKind::Numeric => 18,
+        SqlTypeKind::Int4Range => 19,
+        SqlTypeKind::Int8Range => 20,
+        SqlTypeKind::NumericRange => 21,
+        SqlTypeKind::DateRange => 22,
+        SqlTypeKind::TimestampRange => 23,
+        SqlTypeKind::TimestampTzRange => 24,
+        SqlTypeKind::Json => 25,
+        SqlTypeKind::Jsonb => 26,
+        SqlTypeKind::JsonPath => 27,
+        SqlTypeKind::Date => 28,
+        SqlTypeKind::Time => 29,
+        SqlTypeKind::TimeTz => 30,
+        SqlTypeKind::Interval => 31,
+        SqlTypeKind::TsVector => 32,
+        SqlTypeKind::TsQuery => 33,
+        SqlTypeKind::RegConfig => 34,
+        SqlTypeKind::RegDictionary => 35,
+        SqlTypeKind::Text => 36,
+        SqlTypeKind::Bool => 37,
+        SqlTypeKind::Point => 38,
+        SqlTypeKind::Lseg => 39,
+        SqlTypeKind::Path => 40,
+        SqlTypeKind::Box => 41,
+        SqlTypeKind::Polygon => 42,
+        SqlTypeKind::Line => 43,
+        SqlTypeKind::Circle => 44,
+        SqlTypeKind::Varchar => 45,
+        SqlTypeKind::Char => 46,
+        SqlTypeKind::Timestamp => 47,
+        SqlTypeKind::TimestampTz => 48,
+        SqlTypeKind::InternalChar => 49,
+        SqlTypeKind::PgNodeTree => 50,
+    }
+}
+
+fn sql_type_kind_from_tag(tag: u8) -> Result<SqlTypeKind, ExecError> {
+    Ok(match tag {
+        0 => SqlTypeKind::AnyArray,
+        1 => SqlTypeKind::Record,
+        2 => SqlTypeKind::Composite,
+        3 => SqlTypeKind::Int2,
+        4 => SqlTypeKind::Int2Vector,
+        5 => SqlTypeKind::Int4,
+        6 => SqlTypeKind::Int8,
+        7 => SqlTypeKind::Name,
+        8 => SqlTypeKind::Oid,
+        9 => SqlTypeKind::Tid,
+        10 => SqlTypeKind::Xid,
+        11 => SqlTypeKind::OidVector,
+        12 => SqlTypeKind::Bit,
+        13 => SqlTypeKind::VarBit,
+        14 => SqlTypeKind::Bytea,
+        15 => SqlTypeKind::Float4,
+        16 => SqlTypeKind::Float8,
+        17 => SqlTypeKind::Money,
+        18 => SqlTypeKind::Numeric,
+        19 => SqlTypeKind::Int4Range,
+        20 => SqlTypeKind::Int8Range,
+        21 => SqlTypeKind::NumericRange,
+        22 => SqlTypeKind::DateRange,
+        23 => SqlTypeKind::TimestampRange,
+        24 => SqlTypeKind::TimestampTzRange,
+        25 => SqlTypeKind::Json,
+        26 => SqlTypeKind::Jsonb,
+        27 => SqlTypeKind::JsonPath,
+        28 => SqlTypeKind::Date,
+        29 => SqlTypeKind::Time,
+        30 => SqlTypeKind::TimeTz,
+        31 => SqlTypeKind::Interval,
+        32 => SqlTypeKind::TsVector,
+        33 => SqlTypeKind::TsQuery,
+        34 => SqlTypeKind::RegConfig,
+        35 => SqlTypeKind::RegDictionary,
+        36 => SqlTypeKind::Text,
+        37 => SqlTypeKind::Bool,
+        38 => SqlTypeKind::Point,
+        39 => SqlTypeKind::Lseg,
+        40 => SqlTypeKind::Path,
+        41 => SqlTypeKind::Box,
+        42 => SqlTypeKind::Polygon,
+        43 => SqlTypeKind::Line,
+        44 => SqlTypeKind::Circle,
+        45 => SqlTypeKind::Varchar,
+        46 => SqlTypeKind::Char,
+        47 => SqlTypeKind::Timestamp,
+        48 => SqlTypeKind::TimestampTz,
+        49 => SqlTypeKind::InternalChar,
+        50 => SqlTypeKind::PgNodeTree,
+        _ => {
+            return Err(ExecError::InvalidStorageValue {
+                column: "<record>".into(),
+                details: format!("unknown composite sql type tag {tag}"),
+            });
+        }
+    })
+}
+
+fn encode_sql_type_identity(sql_type: SqlType, out: &mut Vec<u8>) {
+    out.push(sql_type_kind_tag(sql_type.kind));
+    out.extend_from_slice(&sql_type.typmod.to_le_bytes());
+    out.push(u8::from(sql_type.is_array));
+    out.extend_from_slice(&sql_type.type_oid.to_le_bytes());
+    out.extend_from_slice(&sql_type.typrelid.to_le_bytes());
+}
+
+fn decode_sql_type_identity(bytes: &[u8], offset: &mut usize) -> Result<SqlType, ExecError> {
+    if *offset + 14 > bytes.len() {
+        return Err(ExecError::InvalidStorageValue {
+            column: "<record>".into(),
+            details: "truncated composite field type".into(),
+        });
+    }
+    let kind = sql_type_kind_from_tag(bytes[*offset])?;
+    *offset += 1;
+    let typmod = i32::from_le_bytes(bytes[*offset..*offset + 4].try_into().unwrap());
+    *offset += 4;
+    let is_array = bytes[*offset] != 0;
+    *offset += 1;
+    let type_oid = u32::from_le_bytes(bytes[*offset..*offset + 4].try_into().unwrap());
+    *offset += 4;
+    let typrelid = u32::from_le_bytes(bytes[*offset..*offset + 4].try_into().unwrap());
+    *offset += 4;
+    Ok(SqlType {
+        kind,
+        typmod,
+        is_array,
+        type_oid,
+        typrelid,
+    })
+}
+
+fn record_relation_desc(
+    descriptor: &crate::include::nodes::datum::RecordDescriptor,
+) -> RelationDesc {
+    RelationDesc {
+        columns: descriptor
+            .fields
+            .iter()
+            .map(|field| column_desc(field.name.clone(), field.sql_type, true))
+            .collect(),
+    }
+}
+
+fn encode_composite_datum(
+    record: &crate::include::nodes::datum::RecordValue,
+) -> Result<Vec<u8>, ExecError> {
+    let desc = record_relation_desc(&record.descriptor);
+    let tuple = tuple_from_values(&desc, &record.fields)?;
+    let tuple_bytes = tuple.serialize();
+
+    let mut out = Vec::new();
+    out.push(COMPOSITE_DATUM_VERSION);
+    out.extend_from_slice(&record.type_oid().to_le_bytes());
+    out.extend_from_slice(&record.typrelid().to_le_bytes());
+    out.extend_from_slice(&record.typmod().to_le_bytes());
+    out.extend_from_slice(&(record.descriptor.fields.len() as u32).to_le_bytes());
+    for field in &record.descriptor.fields {
+        encode_internal_text(field.name.as_bytes(), &mut out);
+        encode_sql_type_identity(field.sql_type, &mut out);
+    }
+    encode_internal_text(&tuple_bytes, &mut out);
+    Ok(out)
+}
+
+fn decode_composite_datum(
+    bytes: &[u8],
+) -> Result<crate::include::nodes::datum::RecordValue, ExecError> {
+    let mut offset = 0usize;
+    let version = *bytes.get(offset).ok_or_else(|| ExecError::InvalidStorageValue {
+        column: "<record>".into(),
+        details: "missing composite datum version".into(),
+    })?;
+    if version != COMPOSITE_DATUM_VERSION {
+        return Err(ExecError::InvalidStorageValue {
+            column: "<record>".into(),
+            details: format!("unsupported composite datum version {version}"),
+        });
+    }
+    offset += 1;
+    if offset + 16 > bytes.len() {
+        return Err(ExecError::InvalidStorageValue {
+            column: "<record>".into(),
+            details: "truncated composite datum header".into(),
+        });
+    }
+    let type_oid = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+    offset += 4;
+    let typrelid = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+    offset += 4;
+    let typmod = i32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+    offset += 4;
+    let field_count = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+    offset += 4;
+    let mut fields = Vec::with_capacity(field_count);
+    for _ in 0..field_count {
+        let name = std::str::from_utf8(decode_internal_text(bytes, &mut offset)?)
+            .unwrap_or_default()
+            .to_string();
+        let sql_type = decode_sql_type_identity(bytes, &mut offset)?;
+        fields.push((name, sql_type));
+    }
+    let tuple_payload = decode_internal_text(bytes, &mut offset)?;
+    let descriptor = if typrelid != 0 {
+        crate::include::nodes::datum::RecordDescriptor::named(type_oid, typrelid, typmod, fields)
+    } else {
+        crate::include::nodes::datum::RecordDescriptor::anonymous(fields, typmod)
+    };
+    if descriptor.typrelid == 0 {
+        register_anonymous_record_descriptor(&descriptor);
+    }
+
+    let relation_desc = record_relation_desc(&descriptor);
+    let tuple = HeapTuple::parse(tuple_payload).map_err(ExecError::from)?;
+    let raw_values = tuple
+        .deform(&relation_desc.attribute_descs())
+        .map_err(ExecError::from)?;
+    let values = relation_desc
+        .columns
+        .iter()
+        .zip(raw_values.iter())
+        .map(|(column, raw)| decode_value(column, *raw))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(crate::include::nodes::datum::RecordValue::from_descriptor(
+        descriptor, values,
+    ))
+}
+
 fn encode_internal_array(array: &crate::include::nodes::datum::ArrayValue) -> Result<Vec<u8>, ExecError> {
     let mut out = Vec::new();
     match array.element_type_oid {
@@ -246,56 +497,16 @@ fn decode_internal_array(bytes: &[u8]) -> Result<crate::include::nodes::datum::A
     })
 }
 
-fn encode_internal_record(record: &crate::include::nodes::datum::RecordValue) -> Result<Vec<u8>, ExecError> {
-    let mut out = Vec::new();
-    out.extend_from_slice(&record.type_oid.to_le_bytes());
-    out.extend_from_slice(&record.typrelid.to_le_bytes());
-    out.extend_from_slice(&record.typmod.to_le_bytes());
-    out.extend_from_slice(&(record.fields.len() as u32).to_le_bytes());
-    for (name, value) in &record.fields {
-        encode_internal_text(name.as_bytes(), &mut out);
-        let payload = encode_internal_value(value)?;
-        encode_internal_text(&payload, &mut out);
-    }
-    Ok(out)
+fn encode_internal_record(
+    record: &crate::include::nodes::datum::RecordValue,
+) -> Result<Vec<u8>, ExecError> {
+    encode_composite_datum(record)
 }
 
-fn decode_internal_record(bytes: &[u8]) -> Result<crate::include::nodes::datum::RecordValue, ExecError> {
-    let mut offset = 0usize;
-    if offset + 12 > bytes.len() {
-        return Err(ExecError::InvalidStorageValue {
-            column: "<record>".into(),
-            details: "truncated internal record header".into(),
-        });
-    }
-    let type_oid = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
-    offset += 4;
-    let typrelid = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
-    offset += 4;
-    let typmod = i32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
-    offset += 4;
-    if offset + 4 > bytes.len() {
-        return Err(ExecError::InvalidStorageValue {
-            column: "<record>".into(),
-            details: "truncated internal record field count".into(),
-        });
-    }
-    let count = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
-    offset += 4;
-    let mut fields = Vec::with_capacity(count);
-    for _ in 0..count {
-        let name = std::str::from_utf8(decode_internal_text(bytes, &mut offset)?)
-            .unwrap_or_default()
-            .to_string();
-        let payload = decode_internal_text(bytes, &mut offset)?;
-        fields.push((name, decode_internal_value(payload)?));
-    }
-    Ok(crate::include::nodes::datum::RecordValue {
-        type_oid,
-        typrelid,
-        typmod,
-        fields,
-    })
+fn decode_internal_record(
+    bytes: &[u8],
+) -> Result<crate::include::nodes::datum::RecordValue, ExecError> {
+    decode_composite_datum(bytes)
 }
 
 fn encode_internal_value(value: &Value) -> Result<Vec<u8>, ExecError> {
@@ -749,11 +960,13 @@ pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<TupleVa
         (ScalarType::TsQuery, Value::TsQuery(query)) => Ok(TupleValue::Bytes(
             crate::backend::executor::encode_tsquery_bytes(&query),
         )),
-        (ScalarType::Text | ScalarType::Record, Value::InternalChar(v)) => {
+        (ScalarType::Text, Value::InternalChar(v)) => {
             Ok(TupleValue::Bytes(render_internal_char_text(v).into_bytes()))
         }
         (ScalarType::Text, value) => Ok(TupleValue::Bytes(value.as_text().unwrap().as_bytes().to_vec())),
-        (ScalarType::Record, value) => Ok(TupleValue::Bytes(encode_internal_value(&value)?)),
+        (ScalarType::Record, Value::Record(record)) => {
+            Ok(TupleValue::Bytes(encode_composite_datum(&record)?))
+        }
         (ScalarType::Bool, Value::Bool(v)) => Ok(TupleValue::Bytes(vec![u8::from(v)])),
         (ScalarType::Array(_), Value::Array(items))
             if column.sql_type.kind == SqlTypeKind::AnyArray =>
@@ -1303,7 +1516,7 @@ pub(crate) fn decode_value_with_toast(
                     attlen: column.storage.attlen,
                 });
             }
-            decode_internal_value(bytes)
+            decode_composite_datum(bytes).map(Value::Record)
         }
         ScalarType::Path => {
             if column.storage.attlen != -1 && column.storage.attlen != -2 {

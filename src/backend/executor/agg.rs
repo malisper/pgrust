@@ -604,9 +604,8 @@ fn value_to_json_text(value: &Value) -> String {
         Value::Array(items) => render_json_array(items),
         Value::Record(record) => render_json_object(
             &record
-                .fields
                 .iter()
-                .map(|(key, value)| (Value::Text(key.clone().into()), value.clone()))
+                .map(|(field, value)| (Value::Text(field.name.clone().into()), value.clone()))
                 .collect::<Vec<_>>(),
         ),
         Value::PgArray(array) => render_json_array(&array.to_nested_values()),

@@ -29,7 +29,11 @@ mod tests {
 
     fn temp_dir(label: &str) -> std::path::PathBuf {
         let id = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("pgrust_server_test_{label}_{id}"));
+        let path = std::env::temp_dir().join(format!(
+            "pgrust_server_test_{label}_{}_{}",
+            std::process::id(),
+            id
+        ));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).unwrap();
         path
@@ -132,6 +136,15 @@ mod tests {
     }
 
     fn send_bind(stream: &mut impl Write, portal_name: &str, statement_name: &str) {
+        send_bind_with_result_formats(stream, portal_name, statement_name, &[]);
+    }
+
+    fn send_bind_with_result_formats(
+        stream: &mut impl Write,
+        portal_name: &str,
+        statement_name: &str,
+        result_formats: &[i16],
+    ) {
         let mut body = Vec::new();
         body.extend_from_slice(portal_name.as_bytes());
         body.push(0);
@@ -139,7 +152,10 @@ mod tests {
         body.push(0);
         body.extend_from_slice(&0i16.to_be_bytes());
         body.extend_from_slice(&0i16.to_be_bytes());
-        body.extend_from_slice(&0i16.to_be_bytes());
+        body.extend_from_slice(&(result_formats.len() as i16).to_be_bytes());
+        for format in result_formats {
+            body.extend_from_slice(&format.to_be_bytes());
+        }
         send_typed_message(stream, b'B', &body);
     }
 
@@ -153,6 +169,14 @@ mod tests {
 
     fn send_sync(stream: &mut impl Write) {
         send_typed_message(stream, b'S', &[]);
+    }
+
+    fn send_describe(stream: &mut impl Write, target_type: u8, name: &str) {
+        let mut body = Vec::new();
+        body.push(target_type);
+        body.extend_from_slice(name.as_bytes());
+        body.push(0);
+        send_typed_message(stream, b'D', &body);
     }
 
     fn send_copy_data(stream: &mut impl Write, data: &[u8]) {
@@ -219,6 +243,13 @@ mod tests {
     }
 
     fn row_description_fields(body: &[u8]) -> Vec<(String, i32, i16, i32)> {
+        row_description_fields_with_formats(body)
+            .into_iter()
+            .map(|(name, type_oid, typlen, typmod, _format)| (name, type_oid, typlen, typmod))
+            .collect()
+    }
+
+    fn row_description_fields_with_formats(body: &[u8]) -> Vec<(String, i32, i16, i32, i16)> {
         let mut offset = 0;
         let ncols = read_i16_bytes(body, &mut offset).unwrap() as usize;
         let mut fields = Vec::with_capacity(ncols);
@@ -234,8 +265,43 @@ mod tests {
             let type_oid = read_i32_bytes(body, &mut offset).unwrap();
             let typlen = read_i16_bytes(body, &mut offset).unwrap();
             let typmod = read_i32_bytes(body, &mut offset).unwrap();
-            let _format = read_i16_bytes(body, &mut offset).unwrap();
-            fields.push((name, type_oid, typlen, typmod));
+            let format = read_i16_bytes(body, &mut offset).unwrap();
+            fields.push((name, type_oid, typlen, typmod, format));
+        }
+        fields
+    }
+
+    fn data_row_binary_values(body: &[u8]) -> Vec<Option<Vec<u8>>> {
+        let mut offset = 0;
+        let ncols = read_i16_bytes(body, &mut offset).unwrap() as usize;
+        let mut values = Vec::with_capacity(ncols);
+        for _ in 0..ncols {
+            let len = read_i32_bytes(body, &mut offset).unwrap();
+            if len < 0 {
+                values.push(None);
+            } else {
+                let end = offset + len as usize;
+                values.push(Some(body[offset..end].to_vec()));
+                offset = end;
+            }
+        }
+        values
+    }
+
+    fn decode_binary_record_fields(body: &[u8]) -> Vec<(u32, Option<Vec<u8>>)> {
+        let mut offset = 0;
+        let field_count = read_i32_bytes(body, &mut offset).unwrap() as usize;
+        let mut fields = Vec::with_capacity(field_count);
+        for _ in 0..field_count {
+            let oid = read_i32_bytes(body, &mut offset).unwrap() as u32;
+            let len = read_i32_bytes(body, &mut offset).unwrap();
+            if len < 0 {
+                fields.push((oid, None));
+            } else {
+                let end = offset + len as usize;
+                fields.push((oid, Some(body[offset..end].to_vec())));
+                offset = end;
+            }
         }
         fields
     }
@@ -932,6 +998,101 @@ mod tests {
         }));
 
         let _ = stream.shutdown(Shutdown::Both);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn row_description_reports_anonymous_record_typmod() {
+        let (mut stream, server) = start_test_connection();
+        send_startup(&mut stream);
+        let _ = read_until_ready(&mut stream, "startup");
+
+        send_query(&mut stream, "select row(1, 'x'), row(2, 'y')");
+        let response = read_until_ready(&mut stream, "anonymous_record_row_description");
+        let fields = response
+            .iter()
+            .find(|(kind, _)| *kind == b'T')
+            .map(|(_, body)| row_description_fields(body))
+            .unwrap();
+
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].1, 2249);
+        assert_eq!(fields[1].1, 2249);
+        assert!(fields[0].3 > 0);
+        assert_eq!(fields[0].3, fields[1].3);
+
+        stream.shutdown(Shutdown::Both).unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn extended_protocol_binary_record_output_uses_portal_formats() {
+        let (mut stream, server) = start_test_connection();
+        send_startup(&mut stream);
+        let _ = read_until_ready(&mut stream, "startup");
+
+        send_parse(&mut stream, "record_stmt", "select row(1, 'x')");
+        send_bind_with_result_formats(&mut stream, "record_portal", "record_stmt", &[1]);
+        send_describe(&mut stream, b'P', "record_portal");
+        send_execute(&mut stream, "record_portal");
+        send_sync(&mut stream);
+
+        let response = read_until_ready(&mut stream, "binary_record_execute");
+        let describe = response
+            .iter()
+            .find(|(kind, _)| *kind == b'T')
+            .map(|(_, body)| row_description_fields_with_formats(body))
+            .unwrap();
+        assert_eq!(describe.len(), 1);
+        assert_eq!(describe[0].1, 2249);
+        assert!(describe[0].3 > 0);
+        assert_eq!(describe[0].4, 1);
+
+        let data_row = response
+            .iter()
+            .find(|(kind, _)| *kind == b'D')
+            .map(|(_, body)| data_row_binary_values(body))
+            .unwrap();
+        let payload = data_row[0].as_ref().expect("binary record payload");
+        let fields = decode_binary_record_fields(payload);
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].0, 23);
+        assert_eq!(i32::from_be_bytes(fields[0].1.clone().unwrap().try_into().unwrap()), 1);
+        assert_eq!(fields[1].0, 25);
+        assert_eq!(fields[1].1.as_deref(), Some(b"x".as_slice()));
+
+        stream.shutdown(Shutdown::Both).unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn extended_protocol_binary_output_rejects_unsupported_scalar_types() {
+        let (mut stream, server) = start_test_connection();
+        send_startup(&mut stream);
+        let _ = read_until_ready(&mut stream, "startup");
+
+        send_parse(&mut stream, "numeric_stmt", "select 1.25::numeric");
+        send_bind_with_result_formats(&mut stream, "numeric_portal", "numeric_stmt", &[1]);
+        send_execute(&mut stream, "numeric_portal");
+        send_sync(&mut stream);
+
+        let response = read_until_ready(&mut stream, "binary_numeric_execute");
+        let error = response
+            .iter()
+            .find(|(kind, _)| *kind == b'E')
+            .map(|(_, body)| error_fields(body))
+            .expect("binary numeric execute should error");
+        assert!(
+            error
+                .iter()
+                .any(|(code, value)| *code == b'C' && value == "0A000")
+        );
+        assert!(error.iter().any(|(code, value)| {
+            *code == b'M' && value.contains("binary output for")
+        }));
+        assert!(!response.iter().any(|(kind, _)| *kind == b'D'));
+
+        stream.shutdown(Shutdown::Both).unwrap();
         server.join().unwrap();
     }
 }

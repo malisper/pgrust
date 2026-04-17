@@ -520,7 +520,8 @@ pub(super) fn shift_expr_rtindexes(expr: Expr, offset: usize) -> Expr {
                 .collect(),
             array_type,
         },
-        Expr::Row { fields } => Expr::Row {
+        Expr::Row { descriptor, fields } => Expr::Row {
+            descriptor,
             fields: fields
                 .into_iter()
                 .map(|(name, expr)| (name, shift_expr_rtindexes(expr, offset)))
@@ -782,7 +783,8 @@ pub(super) fn rewrite_local_vars_for_output_exprs(
                 .collect(),
             array_type,
         },
-        Expr::Row { fields } => Expr::Row {
+        Expr::Row { descriptor, fields } => Expr::Row {
+            descriptor,
             fields: fields
                 .into_iter()
                 .map(|(name, expr)| {
