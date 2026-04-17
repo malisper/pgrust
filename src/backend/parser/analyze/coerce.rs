@@ -1,4 +1,5 @@
 use super::*;
+use crate::include::catalog::bootstrap_pg_cast_rows;
 
 pub(super) fn coerce_bound_expr(expr: Expr, from: SqlType, to: SqlType) -> Expr {
     if from == to {
@@ -8,6 +9,32 @@ pub(super) fn coerce_bound_expr(expr: Expr, from: SqlType, to: SqlType) -> Expr 
         return expr;
     }
     Expr::Cast(Box::new(expr), to)
+}
+
+pub fn is_binary_coercible_type(from: SqlType, to: SqlType) -> bool {
+    let from = from.element_type();
+    let to = to.element_type();
+
+    if from == to {
+        return true;
+    }
+
+    let from_oid = crate::include::catalog::builtin_type_rows()
+        .iter()
+        .find(|row| row.sql_type == from && row.typrelid == 0)
+        .map(|row| row.oid);
+    let to_oid = crate::include::catalog::builtin_type_rows()
+        .iter()
+        .find(|row| row.sql_type == to && row.typrelid == 0)
+        .map(|row| row.oid);
+
+    let (Some(from_oid), Some(to_oid)) = (from_oid, to_oid) else {
+        return false;
+    };
+
+    bootstrap_pg_cast_rows()
+        .into_iter()
+        .any(|row| row.castsource == from_oid && row.casttarget == to_oid && row.castmethod == 'b')
 }
 
 fn lower_special_cast(expr: &Expr, from: SqlType, to: SqlType) -> Option<Expr> {

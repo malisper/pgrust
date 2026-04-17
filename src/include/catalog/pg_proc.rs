@@ -171,6 +171,18 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'v',
         ),
         proc_row(
+            6400,
+            "pg_rust_internal_binary_coercible",
+            BOOL_TYPE_OID,
+            &oid_argtypes(&[OID_TYPE_OID, OID_TYPE_OID]),
+            "pg_rust_internal_binary_coercible",
+            2,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
             3100,
             "row_number",
             INT8_TYPE_OID,
@@ -1829,6 +1841,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         (
             "getdatabaseencoding",
             BuiltinScalarFunction::GetDatabaseEncoding,
+        ),
+        (
+            "pg_rust_internal_binary_coercible",
+            BuiltinScalarFunction::PgRustInternalBinaryCoercible,
         ),
         ("nextval", BuiltinScalarFunction::NextVal),
         ("currval", BuiltinScalarFunction::CurrVal),
