@@ -1303,6 +1303,26 @@ fn parse_grant_role_membership_with_options_statement() {
             admin_option: false,
             inherit_option: Some(true),
             set_option: Some(false),
+            granted_by: None,
+        })
+    );
+}
+
+#[test]
+fn parse_grant_role_membership_granted_by_statement() {
+    let stmt = parse_statement(
+        "grant regress_tenant2 to regress_createrole with admin option granted by current_role",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::GrantRoleMembership(GrantRoleMembershipStatement {
+            role_names: vec!["regress_tenant2".into()],
+            grantee_names: vec!["regress_createrole".into()],
+            admin_option: true,
+            inherit_option: None,
+            set_option: None,
+            granted_by: Some(RoleGrantorSpec::CurrentRole),
         })
     );
 }
@@ -1319,6 +1339,26 @@ fn parse_revoke_role_membership_option_statement() {
             admin_option: false,
             inherit_option: true,
             set_option: false,
+            granted_by: None,
+        })
+    );
+}
+
+#[test]
+fn parse_revoke_role_membership_granted_by_statement() {
+    let stmt = parse_statement(
+        "revoke inherit option for regress_tenant2 from regress_createrole granted by current_user",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::RevokeRoleMembership(RevokeRoleMembershipStatement {
+            role_names: vec!["regress_tenant2".into()],
+            grantee_names: vec!["regress_createrole".into()],
+            admin_option: false,
+            inherit_option: true,
+            set_option: false,
+            granted_by: Some(RoleGrantorSpec::CurrentUser),
         })
     );
 }

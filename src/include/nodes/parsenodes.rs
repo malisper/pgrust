@@ -1030,6 +1030,7 @@ pub struct GrantRoleMembershipStatement {
     pub admin_option: bool,
     pub inherit_option: Option<bool>,
     pub set_option: Option<bool>,
+    pub granted_by: Option<RoleGrantorSpec>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1039,6 +1040,14 @@ pub struct RevokeRoleMembershipStatement {
     pub admin_option: bool,
     pub inherit_option: bool,
     pub set_option: bool,
+    pub granted_by: Option<RoleGrantorSpec>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RoleGrantorSpec {
+    RoleName(String),
+    CurrentUser,
+    CurrentRole,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
