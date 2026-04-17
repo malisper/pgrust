@@ -228,6 +228,75 @@ impl Database {
         Ok((storage_name, namespace_oid))
     }
 
+    pub(super) fn normalize_create_type_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        txn_ctx: CatalogTxnContext,
+        stmt: &CreateCompositeTypeStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<(String, u32), ParseError> {
+        let lowered_name = stmt.type_name.to_ascii_lowercase();
+        let temp_namespace = self.owned_temp_namespace(client_id);
+        let is_temp_schema_name = |schema: &str| {
+            schema.eq_ignore_ascii_case("pg_temp")
+                || temp_namespace
+                    .as_ref()
+                    .is_some_and(|ns| ns.name.eq_ignore_ascii_case(schema))
+        };
+
+        if let Some(schema_name) = stmt.schema_name.as_deref() {
+            let normalized_schema = schema_name.to_ascii_lowercase();
+            if normalized_schema == "pg_catalog" {
+                return Err(ParseError::UnsupportedQualifiedName(format!(
+                    "{normalized_schema}.{lowered_name}"
+                )));
+            }
+            if is_temp_schema_name(&normalized_schema) {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "permanent type",
+                    actual: "temporary type".into(),
+                });
+            }
+            let namespace = self
+                .visible_namespace_by_name(client_id, txn_ctx, &normalized_schema)
+                .ok_or_else(|| ParseError::UnexpectedToken {
+                    expected: "existing schema",
+                    actual: format!("schema \"{normalized_schema}\" does not exist"),
+                })?;
+            let storage_name = if namespace.oid == PUBLIC_NAMESPACE_OID {
+                lowered_name
+            } else {
+                format!("{}.{}", namespace.nspname, lowered_name)
+            };
+            return Ok((storage_name, namespace.oid));
+        }
+
+        let search_path = self.effective_search_path(client_id, configured_search_path);
+        for schema_name in search_path {
+            if schema_name.is_empty() || schema_name == "$user" || schema_name == "pg_catalog" {
+                continue;
+            }
+            if is_temp_schema_name(&schema_name) {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "permanent type",
+                    actual: "temporary type".into(),
+                });
+            }
+            if let Some(namespace) =
+                self.visible_namespace_by_name(client_id, txn_ctx, &schema_name)
+            {
+                let storage_name = if namespace.oid == PUBLIC_NAMESPACE_OID {
+                    lowered_name.clone()
+                } else {
+                    format!("{}.{}", namespace.nspname, lowered_name)
+                };
+                return Ok((storage_name, namespace.oid));
+            }
+        }
+
+        Err(ParseError::NoSchemaSelectedForCreate)
+    }
+
     pub(crate) fn lazy_catalog_lookup(
         &self,
         client_id: ClientId,

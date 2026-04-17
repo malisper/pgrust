@@ -201,6 +201,7 @@ pub enum Statement {
     Set(SetStatement),
     Reset(ResetStatement),
     CreateFunction(CreateFunctionStatement),
+    CreateType(CreateTypeStatement),
     CreateSchema(CreateSchemaStatement),
     CreateTable(CreateTableStatement),
     CreateTableAs(CreateTableAsStatement),
@@ -223,6 +224,7 @@ pub enum Statement {
     CommentOnDomain(CommentOnDomainStatement),
     CreateDomain(CreateDomainStatement),
     CommentOnRole(CommentOnRoleStatement),
+    DropType(DropTypeStatement),
     DropTable(DropTableStatement),
     DropDomain(DropDomainStatement),
     DropView(DropViewStatement),
@@ -390,6 +392,24 @@ pub struct CreateFunctionStatement {
     pub return_spec: CreateFunctionReturnSpec,
     pub language: String,
     pub body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CreateTypeStatement {
+    Composite(CreateCompositeTypeStatement),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateCompositeTypeStatement {
+    pub schema_name: Option<String>,
+    pub type_name: String,
+    pub attributes: Vec<CompositeTypeAttributeDef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompositeTypeAttributeDef {
+    pub name: String,
+    pub ty: RawTypeName,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -879,6 +899,13 @@ pub struct DropTableStatement {
 pub struct DropDomainStatement {
     pub if_exists: bool,
     pub domain_name: String,
+    pub cascade: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropTypeStatement {
+    pub if_exists: bool,
+    pub type_names: Vec<String>,
     pub cascade: bool,
 }
 

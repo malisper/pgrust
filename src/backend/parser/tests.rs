@@ -7,7 +7,8 @@ use crate::include::catalog::{
     PgTypeRow, RECORD_TYPE_OID, bootstrap_pg_proc_rows, sort_pg_rewrite_rows,
 };
 use crate::include::nodes::parsenodes::{
-    AliasColumnDef, AliasColumnSpec, JoinTreeNode, RangeTblEntryKind, RawTypeName,
+    AliasColumnDef, AliasColumnSpec, CompositeTypeAttributeDef, CreateCompositeTypeStatement,
+    CreateTypeStatement, DropTypeStatement, JoinTreeNode, RangeTblEntryKind, RawTypeName,
 };
 use crate::include::nodes::primnodes::{AttrNumber, JoinType, Var, is_system_attr};
 
@@ -3341,6 +3342,108 @@ fn parse_create_drop_and_comment_on_domain_statements() {
 }
 
 #[test]
+fn parse_create_and_drop_type_statements() {
+    let Statement::CreateType(CreateTypeStatement::Composite(CreateCompositeTypeStatement {
+        schema_name,
+        type_name,
+        attributes,
+    })) = parse_statement("create type complex as (r float8, i float8)").unwrap()
+    else {
+        panic!("expected create type");
+    };
+    assert_eq!(schema_name, None);
+    assert_eq!(type_name, "complex");
+    assert_eq!(
+        attributes,
+        vec![
+            CompositeTypeAttributeDef {
+                name: "r".into(),
+                ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Float8)),
+            },
+            CompositeTypeAttributeDef {
+                name: "i".into(),
+                ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Float8)),
+            },
+        ]
+    );
+
+    let Statement::DropType(DropTypeStatement {
+        if_exists,
+        type_names,
+        cascade,
+    }) = parse_statement("drop type complex").unwrap()
+    else {
+        panic!("expected drop type");
+    };
+    assert!(!if_exists);
+    assert_eq!(type_names, vec!["complex"]);
+    assert!(!cascade);
+
+    let Statement::DropType(DropTypeStatement {
+        if_exists,
+        type_names,
+        cascade,
+    }) = parse_statement("drop type if exists complex restrict").unwrap()
+    else {
+        panic!("expected drop type restrict");
+    };
+    assert!(if_exists);
+    assert_eq!(type_names, vec!["complex"]);
+    assert!(!cascade);
+
+    let Statement::DropType(DropTypeStatement {
+        if_exists,
+        type_names,
+        cascade,
+    }) = parse_statement("drop type complex cascade").unwrap()
+    else {
+        panic!("expected drop type cascade");
+    };
+    assert!(!if_exists);
+    assert_eq!(type_names, vec!["complex"]);
+    assert!(cascade);
+}
+
+#[test]
+fn parse_create_type_rejects_unsupported_forms() {
+    assert!(matches!(
+        parse_statement("create type myint"),
+        Err(ParseError::FeatureNotSupported(feature))
+            if feature == "shell types are not supported in CREATE TYPE"
+    ));
+    assert!(matches!(
+        parse_statement("create type myint (input = myintin, output = myintout, like = int4)"),
+        Err(ParseError::FeatureNotSupported(feature))
+            if feature == "base type definitions are not supported in CREATE TYPE"
+    ));
+    assert!(matches!(
+        parse_statement("create type mood as enum ('sad', 'ok')"),
+        Err(ParseError::FeatureNotSupported(feature))
+            if feature == "CREATE TYPE AS ENUM is not supported yet"
+    ));
+    assert!(matches!(
+        parse_statement("create type intr as range (subtype = int4)"),
+        Err(ParseError::FeatureNotSupported(feature))
+            if feature == "CREATE TYPE AS RANGE is not supported yet"
+    ));
+}
+
+#[test]
+fn parse_create_type_rejects_extended_attribute_syntax() {
+    for sql in [
+        "create type complex as (r float8 default 0)",
+        "create type complex as (r float8 constraint c check (r > 0))",
+        "create type complex as (label text collate \"C\")",
+    ] {
+        assert!(matches!(
+            parse_statement(sql),
+            Err(ParseError::FeatureNotSupported(feature))
+                if feature == "CREATE TYPE attributes only support name and type"
+        ));
+    }
+}
+
+#[test]
 fn parse_create_domain_preserves_array_base_type() {
     let Statement::CreateDomain(create) =
         parse_statement("create domain domainchar4arr varchar(4)[2][3]").unwrap()
@@ -4300,10 +4403,9 @@ fn build_plan_partial_derived_table_column_aliases_preserve_suffix() {
 
 #[test]
 fn build_plan_cross_join_derived_table_column_aliases() {
-    let stmt = parse_select(
-        "select ii, tt, kk from (people cross join pets) as tx (ii, jj, tt, ii2, kk)",
-    )
-    .unwrap();
+    let stmt =
+        parse_select("select ii, tt, kk from (people cross join pets) as tx (ii, jj, tt, ii2, kk)")
+            .unwrap();
     let plan = build_plan(&stmt, &catalog_with_pets()).unwrap();
     match plan {
         Plan::Projection { targets, .. } => {

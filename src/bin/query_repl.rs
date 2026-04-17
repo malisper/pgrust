@@ -690,8 +690,10 @@ fn run_statement(
         | Statement::CreateFunction(_)
         | Statement::CreateSchema(_)
         | Statement::CreateDomain(_)
-        | Statement::DropDomain(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
-            "domain/function statements are not supported in query_repl".into(),
+        | Statement::CreateType(_)
+        | Statement::DropDomain(_)
+        | Statement::DropType(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
+            "domain/function/type statements are not supported in query_repl".into(),
         ))),
         Statement::CreateTable(stmt) => {
             let (table_name, _) = normalize_create_table_name(&stmt)?;

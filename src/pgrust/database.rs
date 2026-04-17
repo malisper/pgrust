@@ -18,9 +18,7 @@ use crate::backend::access::transam::xact::{
 use crate::backend::access::transam::xlog::{WalBgWriter, WalError, WalWriter};
 use crate::backend::catalog::catalog::{CatalogIndexBuildOptions, column_desc};
 use crate::backend::catalog::indexing::rebuild_system_catalog_indexes_in_pool;
-use crate::backend::catalog::namespace::{
-    effective_search_path as namespace_effective_search_path,
-};
+use crate::backend::catalog::namespace::effective_search_path as namespace_effective_search_path;
 use crate::backend::catalog::rows::physical_catalog_rows_from_catcache;
 use crate::backend::catalog::store::{CatalogMutationEffect, CatalogWriteContext};
 use crate::backend::catalog::toasting::ToastCatalogChanges;
@@ -36,12 +34,12 @@ use crate::backend::parser::Statement;
 use crate::backend::parser::{
     AlterTableAddColumnStatement, AlterTableDropColumnStatement, AlterTableRenameColumnStatement,
     AlterTableRenameStatement, AnalyzeStatement, CatalogLookup, CommentOnDomainStatement,
-    CommentOnTableStatement, CreateDomainStatement, CreateIndexStatement,
-    CreateSchemaStatement, CreateTableAsStatement, CreateTableStatement, CreateViewStatement,
-    DropDomainStatement, DropViewStatement, normalize_create_table_as_name,
-    normalize_create_table_name, normalize_create_view_name,
-    OnCommitAction, ParseError, SqlType, TablePersistence, bind_delete, bind_insert, bind_update,
-    create_relation_desc, lower_create_table_with_catalog,
+    CommentOnTableStatement, CreateCompositeTypeStatement, CreateDomainStatement,
+    CreateIndexStatement, CreateSchemaStatement, CreateTableAsStatement, CreateTableStatement,
+    CreateViewStatement, DropDomainStatement, DropViewStatement, OnCommitAction, ParseError,
+    SqlType, TablePersistence, bind_delete, bind_insert, bind_update, create_relation_desc,
+    lower_create_table_with_catalog, normalize_create_table_as_name, normalize_create_table_name,
+    normalize_create_view_name,
 };
 use crate::backend::storage::lmgr::{
     TableLockManager, TableLockMode, lock_relations_interruptible, lock_tables_interruptible,
@@ -68,7 +66,7 @@ use crate::backend::utils::cache::syscache::{
 use crate::backend::utils::misc::interrupts::InterruptState;
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, PUBLIC_NAMESPACE_OID, PgConstraintRow, PgTypeRow,
+    BOOTSTRAP_SUPERUSER_OID, PUBLIC_NAMESPACE_OID, PgConstraintRow, PgTypeRow, relkind_has_storage,
     system_catalog_indexes,
 };
 use crate::pgrust::auth::{AuthCatalog, AuthState};
@@ -202,6 +200,9 @@ impl Database {
                 use crate::backend::storage::smgr::{ForkNumber, StorageManager};
                 let relcache = catalog.relcache()?;
                 for (_, entry) in relcache.entries() {
+                    if !relkind_has_storage(entry.relkind) {
+                        continue;
+                    }
                     let _ = recovery_smgr.open(entry.rel);
                     let _ = recovery_smgr.create(entry.rel, ForkNumber::Main, false);
                 }
@@ -230,6 +231,9 @@ impl Database {
             use crate::backend::storage::smgr::{ForkNumber, StorageManager};
             let relcache = catalog.relcache()?;
             for (_, entry) in relcache.entries() {
+                if !relkind_has_storage(entry.relkind) {
+                    continue;
+                }
                 let rel = entry.rel;
                 pool.with_storage_mut(|s| {
                     let _ = s.smgr.open(rel);

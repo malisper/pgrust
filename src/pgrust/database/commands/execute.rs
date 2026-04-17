@@ -472,6 +472,12 @@ impl Database {
                     create_stmt,
                     configured_search_path,
                 ),
+            Statement::CreateType(ref create_stmt) => self
+                .execute_create_type_stmt_with_search_path(
+                    client_id,
+                    create_stmt,
+                    configured_search_path,
+                ),
             Statement::CreateView(ref create_stmt) => self
                 .execute_create_view_stmt_with_search_path(
                     client_id,
@@ -506,6 +512,11 @@ impl Database {
                 result
             }
             Statement::DropDomain(ref drop_stmt) => self.execute_drop_domain_stmt_with_search_path(
+                client_id,
+                drop_stmt,
+                configured_search_path,
+            ),
+            Statement::DropType(ref drop_stmt) => self.execute_drop_type_stmt_with_search_path(
                 client_id,
                 drop_stmt,
                 configured_search_path,

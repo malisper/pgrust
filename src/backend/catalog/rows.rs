@@ -93,6 +93,15 @@ pub(crate) fn create_view_sync_kinds() -> Vec<BootstrapCatalogKind> {
     ]
 }
 
+pub(crate) fn create_composite_type_sync_kinds() -> Vec<BootstrapCatalogKind> {
+    vec![
+        BootstrapCatalogKind::PgClass,
+        BootstrapCatalogKind::PgType,
+        BootstrapCatalogKind::PgAttribute,
+        BootstrapCatalogKind::PgDepend,
+    ]
+}
+
 pub(crate) fn drop_relation_sync_kinds() -> Vec<BootstrapCatalogKind> {
     vec![
         BootstrapCatalogKind::PgClass,
