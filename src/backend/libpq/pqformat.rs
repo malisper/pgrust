@@ -47,6 +47,7 @@ pub(crate) fn format_exec_error(e: &ExecError) -> String {
         }
         ExecError::Parse(p) => p.to_string(),
         ExecError::Regex(err) => err.message.clone(),
+        ExecError::JsonInput { message, .. } => message.clone(),
         ExecError::DetailedError { message, .. } => message.clone(),
         ExecError::RaiseException(message) => message.clone(),
         ExecError::InvalidRegex(message) => message.clone(),
@@ -945,7 +946,7 @@ pub(crate) fn send_error(
     hint: Option<&str>,
     position: Option<usize>,
 ) -> io::Result<()> {
-    send_error_with_fields(w, sqlstate, message, detail, hint, position)
+    send_error_with_fields(w, sqlstate, message, detail, hint, None, position)
 }
 
 pub(crate) fn send_error_with_hint(
@@ -955,7 +956,7 @@ pub(crate) fn send_error_with_hint(
     hint: Option<&str>,
     position: Option<usize>,
 ) -> io::Result<()> {
-    send_error_with_fields(w, sqlstate, message, None, hint, position)
+    send_error_with_fields(w, sqlstate, message, None, hint, None, position)
 }
 
 pub(crate) fn send_error_with_fields(
@@ -964,6 +965,7 @@ pub(crate) fn send_error_with_fields(
     message: &str,
     detail: Option<&str>,
     hint: Option<&str>,
+    context: Option<&str>,
     position: Option<usize>,
 ) -> io::Result<()> {
     let mut body = Vec::new();
@@ -985,6 +987,11 @@ pub(crate) fn send_error_with_fields(
     if let Some(hint) = hint {
         body.push(b'H');
         body.extend_from_slice(hint.as_bytes());
+        body.push(0);
+    }
+    if let Some(context) = context {
+        body.push(b'W');
+        body.extend_from_slice(context.as_bytes());
         body.push(0);
     }
     if let Some(position) = position {
@@ -1463,7 +1470,10 @@ fn trim_fractional_zeros(text: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{FloatFormatOptions, format_bytea_text, format_float4_text, format_float8_text};
+    use super::{
+        FloatFormatOptions, format_bytea_text, format_float4_text, format_float8_text,
+        send_error_with_fields,
+    };
     use crate::pgrust::session::ByteaOutputFormat;
 
     #[test]
@@ -1606,5 +1616,24 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn error_response_can_include_context_field() {
+        let mut out = Vec::new();
+        send_error_with_fields(
+            &mut out,
+            "22P02",
+            "invalid input syntax for type json",
+            Some("The input string ended unexpectedly."),
+            None,
+            Some("JSON data, line 1: {\"a\":true"),
+            Some(8),
+        )
+        .unwrap();
+
+        assert!(out.windows("WJSON data, line 1: {\"a\":true\0".len()).any(|window| {
+            window == b"WJSON data, line 1: {\"a\":true\0"
+        }));
     }
 }
