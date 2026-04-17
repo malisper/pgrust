@@ -612,7 +612,7 @@ fn visit_nested_srfs(
                 );
             }
         }
-        SqlExpr::AggCall { args, .. } => {
+        SqlExpr::AggCall { args, filter, .. } => {
             for arg in args {
                 visit_nested_srfs(
                     &arg.value,
@@ -623,6 +623,9 @@ fn visit_nested_srfs(
                     grouped_outer,
                     ctes,
                 );
+            }
+            if let Some(filter) = filter.as_deref() {
+                visit_nested_srfs(filter, info, scope, catalog, outer_scopes, grouped_outer, ctes);
             }
         }
         SqlExpr::InSubquery { expr, .. } => visit_nested_srfs(

@@ -1481,6 +1481,7 @@ pub enum SqlExpr {
         args: Vec<SqlFunctionArg>,
         distinct: bool,
         func_variadic: bool,
+        filter: Option<Box<SqlExpr>>,
     },
     ScalarSubquery(Box<SelectStatement>),
     Exists(Box<SelectStatement>),

@@ -94,6 +94,7 @@ fn make_aggregate_rel(
                     .into_iter()
                     .map(|arg| expand_join_rte_vars(root, arg))
                     .collect();
+                accum.filter = accum.filter.map(|filter| expand_join_rte_vars(root, filter));
                 accum
             })
             .collect::<Vec<_>>();

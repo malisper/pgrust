@@ -225,6 +225,10 @@ fn rewrite_agg_accum(
             .into_iter()
             .map(|expr| rewrite_semantic_expr(expr, catalog, expanded_views))
             .collect::<Result<Vec<_>, _>>()?,
+        filter: accum
+            .filter
+            .map(|expr| rewrite_semantic_expr(expr, catalog, expanded_views))
+            .transpose()?,
         ..accum
     })
 }
@@ -370,6 +374,10 @@ fn rewrite_semantic_expr(
                 .into_iter()
                 .map(|arg| rewrite_semantic_expr(arg, catalog, expanded_views))
                 .collect::<Result<Vec<_>, _>>()?,
+            aggfilter: aggref
+                .aggfilter
+                .map(|expr| rewrite_semantic_expr(expr, catalog, expanded_views))
+                .transpose()?,
             ..*aggref
         })),
         Expr::SubLink(sublink) => Expr::SubLink(Box::new(SubLink {

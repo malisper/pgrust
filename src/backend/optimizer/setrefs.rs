@@ -183,6 +183,7 @@ fn aggregate_output_expr(accum: &crate::include::nodes::primnodes::AggAccum, agg
         aggvariadic: accum.agg_variadic,
         aggdistinct: accum.distinct,
         args: accum.args.clone(),
+        aggfilter: accum.filter.clone(),
         agglevelsup: 0,
         aggno,
     }))
@@ -494,6 +495,9 @@ fn lower_projection_expr_by_input_target(
                 .into_iter()
                 .map(|arg| lower_projection_expr_by_input_target(root, arg, input, input_tlist))
                 .collect(),
+            aggfilter: aggref.aggfilter.map(|expr| {
+                lower_projection_expr_by_input_target(root, expr, input, input_tlist)
+            }),
             ..*aggref
         })),
         Expr::Op(op) => Expr::Op(Box::new(OpExpr {
@@ -750,7 +754,13 @@ fn expr_contains_local_semantic_var(expr: &Expr) -> bool {
                 && !is_executor_special_varno(var.varno)
                 && !is_system_attr(var.varattno)
         }
-        Expr::Aggref(aggref) => aggref.args.iter().any(expr_contains_local_semantic_var),
+        Expr::Aggref(aggref) => {
+            aggref.args.iter().any(expr_contains_local_semantic_var)
+                || aggref
+                    .aggfilter
+                    .as_ref()
+                    .is_some_and(expr_contains_local_semantic_var)
+        }
         Expr::Op(op) => op.args.iter().any(expr_contains_local_semantic_var),
         Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_contains_local_semantic_var),
         Expr::Case(case_expr) => {
@@ -864,6 +874,9 @@ fn rewrite_expr_for_append_rel(
                 .into_iter()
                 .map(|arg| rewrite_expr_for_append_rel(arg, info))
                 .collect(),
+            aggfilter: aggref
+                .aggfilter
+                .map(|expr| rewrite_expr_for_append_rel(expr, info)),
             ..*aggref
         })),
         Expr::Op(op) => Expr::Op(Box::new(OpExpr {
@@ -1465,6 +1478,14 @@ fn lower_agg_accum(
                 )
             })
             .collect(),
+        filter: accum.filter.map(|filter| {
+            let filter = fix_upper_expr_for_input(ctx.root, filter, path, input_tlist);
+            lower_expr(
+                ctx,
+                filter,
+                LowerMode::Input { tlist: input_tlist },
+            )
+        }),
         ..accum
     }
 }
@@ -3083,6 +3104,7 @@ fn rebuild_setrefs_expr(
         Expr::Var(_) | Expr::Param(_) => expr,
         Expr::Aggref(aggref) => Expr::Aggref(Box::new(Aggref {
             args: aggref.args.into_iter().map(recurse).collect(),
+            aggfilter: aggref.aggfilter.map(recurse),
             ..*aggref
         })),
         Expr::Op(op) => Expr::Op(Box::new(OpExpr {
@@ -3208,6 +3230,9 @@ fn fully_expand_output_expr(expr: Expr, path: &Path) -> Expr {
                 .into_iter()
                 .map(|arg| fully_expand_output_expr(arg, path))
                 .collect(),
+            aggfilter: aggref
+                .aggfilter
+                .map(|expr| fully_expand_output_expr(expr, path)),
             ..*aggref
         })),
         Expr::Op(op) => Expr::Op(Box::new(OpExpr {

@@ -314,6 +314,9 @@ pub(super) fn rewrite_semantic_expr_for_path(expr: Expr, path: &Path, layout: &[
                 .into_iter()
                 .map(|arg| rewrite_semantic_expr_for_path(arg, path, layout))
                 .collect(),
+            aggfilter: aggref
+                .aggfilter
+                .map(|expr| rewrite_semantic_expr_for_path(expr, path, layout)),
             ..*aggref
         })),
         Expr::Op(op) => Expr::Op(Box::new(crate::include::nodes::primnodes::OpExpr {

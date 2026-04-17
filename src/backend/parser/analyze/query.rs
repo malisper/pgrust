@@ -432,6 +432,9 @@ pub(super) fn shift_expr_rtindexes(expr: Expr, offset: usize) -> Expr {
                 .into_iter()
                 .map(|arg| shift_expr_rtindexes(arg, offset))
                 .collect(),
+            aggfilter: aggref
+                .aggfilter
+                .map(|expr| shift_expr_rtindexes(expr, offset)),
             ..*aggref
         })),
         Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(ScalarArrayOpExpr {
@@ -623,6 +626,11 @@ pub(super) fn rewrite_local_vars_for_output_exprs(
                 .into_iter()
                 .map(|arg| rewrite_local_vars_for_output_exprs(arg, source_varno, output_exprs))
                 .collect(),
+            aggfilter: aggref
+                .aggfilter
+                .map(|expr| {
+                    rewrite_local_vars_for_output_exprs(expr, source_varno, output_exprs)
+                }),
             ..*aggref
         })),
         Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(ScalarArrayOpExpr {
