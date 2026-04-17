@@ -579,6 +579,17 @@ impl NumericValue {
         }
     }
 
+    pub fn normalize_display_scale(&self) -> Self {
+        match self.clone().normalize() {
+            Self::Finite { coeff, scale, .. } => Self::Finite {
+                coeff,
+                scale,
+                dscale: scale,
+            },
+            other => other,
+        }
+    }
+
     fn canonical_eq(&self) -> Self {
         match self {
             Self::PosInf | Self::NegInf => self.clone(),

@@ -4,6 +4,11 @@
 
 Counts from `/tmp/pgrust_regress_todo_20260417` on 2026-04-17; `test_setup.sql` comes from `/tmp/pgrust_regress_test_setup_todo_20260417` with `--upstream-setup`.
 
+Targeted reruns on 2026-04-17:
+
+- numeric.sql: FAIL, 957/1057 queries matched from `/tmp/pgrust_numeric_regress_55433`
+- numeric.sql first mismatch is unordered cross-join row order; substantive mismatches are `width_bucket(float8, ...)`, numeric display scale/rendering, and PostgreSQL-specific error text/detail for numeric overflow and numeric-to-int casts
+
 - advisory_lock.sql: 8/38
 - aggregates.sql: 215/583
 - alter_generic.sql: 54/333
@@ -238,6 +243,16 @@ Counts from `/tmp/pgrust_regress_todo_20260417` on 2026-04-17; `test_setup.sql` 
 
 ## Features
 
+- numeric.sql:
+  Retest source: `/tmp/pgrust_numeric_regress_55433/diff/numeric.diff`
+- Preserve PostgreSQL-compatible row order for the unordered `WITH v AS (VALUES ...) FROM v1, v2` cross-join cases in `numeric.sql`, or otherwise make the planner/executor match upstream join/input ordering closely enough for regression parity
+- Fix `width_bucket(float8, low, high, count)` boundary behavior for huge ranges; current float math can round into bucket `count + 1` or the wrong descending bucket near the upper edge
+- Make `to_char(numeric, ...)` formatting match PostgreSQL more closely when the input numeric carries excess display scale
+- Add PostgreSQL-style `DETAIL` output for numeric typmod overflow, including fractional-only numerics and infinite values rejected by typmod constraints
+- Add dedicated numeric-to-integer cast errors for `NaN` and `Infinity` instead of collapsing them into generic `smallint/integer/bigint out of range`
+- Audit the remaining `numeric.sql` formatting mismatches after the display-scale fix; many later hunks appear to be the same root cause repeated across `to_char` cases
+
 ## DONE
 
 - int2.sql
+- Normalize numeric display scale before result rendering so aggregates and scalar outputs do not keep extra trailing zeros; this affects `AVG(val)` output and many `to_char(numeric, ...)` cases
