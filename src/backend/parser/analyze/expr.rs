@@ -919,6 +919,12 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 )?
             };
             let target_type = resolve_raw_type_name(ty, catalog)?;
+            if target_type.kind == SqlTypeKind::RegProcedure
+                && let Some(bound_regprocedure) =
+                    bind_regprocedure_literal_cast(inner, target_type, catalog)?
+            {
+                return Ok(bound_regprocedure);
+            }
             if !matches!(inner.as_ref(), SqlExpr::Const(Value::Null)) {
                 validate_catalog_backed_explicit_cast(source_type, target_type, catalog)?;
             }
@@ -2205,4 +2211,99 @@ fn validate_catalog_backed_explicit_cast(
             sql_type_name(target_type)
         ),
     })
+}
+
+fn bind_regprocedure_literal_cast(
+    expr: &SqlExpr,
+    target_type: SqlType,
+    catalog: &dyn CatalogLookup,
+) -> Result<Option<Expr>, ParseError> {
+    let Some(signature) = regprocedure_literal_text(expr) else {
+        return Ok(None);
+    };
+    let proc_oid = resolve_regprocedure_signature(signature, catalog)?;
+    Ok(Some(Expr::Cast(
+        Box::new(Expr::Const(Value::Int64(proc_oid as i64))),
+        target_type,
+    )))
+}
+
+fn regprocedure_literal_text(expr: &SqlExpr) -> Option<&str> {
+    match expr {
+        SqlExpr::Const(Value::Text(text)) => Some(text.as_str()),
+        SqlExpr::Const(Value::TextRef(_, _)) => None,
+        _ => None,
+    }
+}
+
+fn resolve_regprocedure_signature(
+    signature: &str,
+    catalog: &dyn CatalogLookup,
+) -> Result<u32, ParseError> {
+    let Some(open_paren) = signature.rfind('(') else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "function signature",
+            actual: signature.to_string(),
+        });
+    };
+    let Some(arg_sql) = signature.get(open_paren + 1..signature.len().saturating_sub(1)) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "function signature",
+            actual: signature.to_string(),
+        });
+    };
+    if !signature.ends_with(')') {
+        return Err(ParseError::UnexpectedToken {
+            expected: "function signature",
+            actual: signature.to_string(),
+        });
+    }
+    let proc_name = signature[..open_paren].trim();
+    if proc_name.is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "function name",
+            actual: signature.to_string(),
+        });
+    }
+    let arg_type_oids = if arg_sql.trim().is_empty() {
+        Vec::new()
+    } else {
+        arg_sql
+            .split(',')
+            .map(|arg| {
+                let raw_type = crate::backend::parser::parse_type_name(arg.trim())?;
+                let sql_type = resolve_raw_type_name(&raw_type, catalog)?;
+                catalog.type_oid_for_sql_type(sql_type).ok_or_else(|| {
+                    ParseError::UnsupportedType(sql_type_name(sql_type))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let normalized_name = normalize_catalog_lookup_name(proc_name);
+    let matches = catalog
+        .proc_rows_by_name(normalized_name)
+        .into_iter()
+        .filter(|row| parse_proc_argtype_oids(&row.proargtypes) == Some(arg_type_oids.clone()))
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [row] => Ok(row.oid),
+        [] => Err(ParseError::UnexpectedToken {
+            expected: "existing function signature",
+            actual: signature.to_string(),
+        }),
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "unambiguous function signature",
+            actual: signature.to_string(),
+        }),
+    }
+}
+
+fn parse_proc_argtype_oids(argtypes: &str) -> Option<Vec<u32>> {
+    if argtypes.trim().is_empty() {
+        return Some(Vec::new());
+    }
+    argtypes
+        .split_whitespace()
+        .map(|oid| oid.parse::<u32>().ok())
+        .collect()
 }

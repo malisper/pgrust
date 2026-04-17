@@ -201,7 +201,9 @@ fn execute_compiled_function(
             output_slot,
         } => {
             if state.scalar_return.is_none() {
-                if let Some(slot) = output_slot {
+                if ty.kind == SqlTypeKind::Void {
+                    state.scalar_return = Some(Value::Null);
+                } else if let Some(slot) = output_slot {
                     state.scalar_return = Some(cast_value(state.values[*slot].clone(), *ty)?);
                 } else {
                     return Err(function_runtime_error(
@@ -486,6 +488,7 @@ fn exec_function_return(
         } => {
             state.scalar_return = Some(match expr {
                 Some(expr) => cast_value(eval_function_expr(expr, &state.values, ctx)?, *ty)?,
+                None if ty.kind == SqlTypeKind::Void => Value::Null,
                 None => cast_value(
                     state.values[output_slot.ok_or_else(|| {
                         function_runtime_error(

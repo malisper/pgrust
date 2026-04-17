@@ -477,10 +477,12 @@ fn compile_return_stmt(
         }
         (
             FunctionReturnContract::Scalar {
-                output_slot, setof, ..
+                ty, output_slot, setof, ..
             },
             None,
-        ) if output_slot.is_some() || *setof => Ok(CompiledStmt::Return { expr: None }),
+        ) if output_slot.is_some() || *setof || ty.kind == SqlTypeKind::Void => {
+            Ok(CompiledStmt::Return { expr: None })
+        }
         (FunctionReturnContract::FixedRow { .. }, None)
         | (FunctionReturnContract::AnonymousRecord { .. }, None) => {
             Ok(CompiledStmt::Return { expr: None })

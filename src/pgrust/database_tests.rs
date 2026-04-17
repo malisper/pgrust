@@ -10213,6 +10213,42 @@ fn create_function_setof_scalar_works_in_from_and_project_set() {
 }
 
 #[test]
+fn create_function_supports_void_returns_and_regprocedure_oid_lookup() {
+    let dir = temp_dir("create_function_void_regprocedure");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function stats_test_func1() returns void language plpgsql as $$ begin return; end $$",
+    )
+    .unwrap();
+
+    let visible = db.lazy_catalog_lookup(1, None, None);
+    let proc = visible
+        .proc_rows_by_name("stats_test_func1")
+        .into_iter()
+        .next()
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select p.proname, t.typname from pg_proc p join pg_type t on t.oid = p.prorettype where p.proname = 'stats_test_func1'",
+        ),
+        vec![vec![
+            Value::Text("stats_test_func1".into()),
+            Value::Text("void".into()),
+        ]]
+    );
+    assert_eq!(query_rows(&db, 1, "select stats_test_func1()"), vec![vec![Value::Null]]);
+    assert_eq!(
+        query_rows(&db, 1, "select 'stats_test_func1()'::regprocedure::oid"),
+        vec![vec![Value::Int64(proc.oid as i64)]]
+    );
+}
+
+#[test]
 fn create_function_row_returns_work_for_table_and_record() {
     let dir = temp_dir("create_function_row_returns");
     let db = Database::open(&dir, 64).unwrap();
