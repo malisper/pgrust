@@ -6,7 +6,7 @@ use crate::include::nodes::execnodes::{
     AggregateState, AppendState, CteScanState, FilterState, FunctionScanState, HashJoinState,
     HashState, IndexScanState, LimitState, NestedLoopJoinState, NodeExecStats, OrderByState,
     ProjectSetState, ProjectionState, RecursiveUnionState, RecursiveWorkTable, ResultState,
-    SeqScanState, SubqueryScanState, ValuesState, WorkTableScanState,
+    SeqScanState, SetOpState, SubqueryScanState, ValuesState, WorkTableScanState,
 };
 use crate::backend::parser::SqlType;
 use crate::include::nodes::parsenodes::SqlTypeKind;
@@ -139,7 +139,9 @@ fn plan_uses_outer_columns(plan: &Plan) -> bool {
         | Plan::SeqScan { .. }
         | Plan::IndexScan { .. }
         | Plan::WorkTableScan { .. } => false,
-        Plan::Append { children, .. } => children.iter().any(plan_uses_outer_columns),
+        Plan::Append { children, .. } | Plan::SetOp { children, .. } => {
+            children.iter().any(plan_uses_outer_columns)
+        }
         Plan::Hash {
             input, hash_keys, ..
         } => plan_uses_outer_columns(input) || hash_keys.iter().any(expr_uses_outer_columns),
@@ -658,6 +660,25 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 intermediate_rows: Vec::new(),
                 seen_rows: std::collections::HashSet::new(),
                 anchor_done: false,
+                slot: TupleSlot::empty(width),
+                current_bindings: Vec::new(),
+                plan_info,
+                stats: NodeExecStats::default(),
+            })
+        }
+        Plan::SetOp {
+            plan_info,
+            op,
+            output_columns,
+            children,
+        } => {
+            let width = output_columns.len();
+            Box::new(SetOpState {
+                op,
+                children: children.into_iter().map(executor_start).collect(),
+                output_columns: output_columns.into_iter().map(|c| c.name).collect(),
+                result_rows: None,
+                next_index: 0,
                 slot: TupleSlot::empty(width),
                 current_bindings: Vec::new(),
                 plan_info,

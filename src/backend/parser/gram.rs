@@ -1910,7 +1910,7 @@ fn build_set_operation_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, P
     let mut order_by = Vec::new();
     let mut limit = None;
     let mut offset = None;
-    let mut all_flags = Vec::new();
+    let mut operators = Vec::new();
     let mut inputs = Vec::new();
 
     for part in pair.into_inner() {
@@ -1921,7 +1921,18 @@ fn build_set_operation_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, P
                 with = ctes;
             }
             Rule::set_operation_term => inputs.push(build_set_operation_term(part)?),
-            Rule::set_union_clause => all_flags.push(contains_union_all(part.as_str())),
+            Rule::set_operation_clause => {
+                let raw = part.as_str().trim_start().to_ascii_lowercase();
+                let all = raw.split_ascii_whitespace().nth(1) == Some("all");
+                let op = if raw.starts_with("union") {
+                    SetOperator::Union { all }
+                } else if raw.starts_with("intersect") {
+                    SetOperator::Intersect { all }
+                } else {
+                    SetOperator::Except { all }
+                };
+                operators.push(op);
+            }
             Rule::order_by_clause => order_by = build_order_by_clause(part)?,
             Rule::limit_clause => limit = Some(build_limit_clause(part)?),
             Rule::offset_clause => offset = Some(build_offset_clause(part)?),
@@ -1937,13 +1948,13 @@ fn build_set_operation_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, P
     }
 
     let mut op = None;
-    for all in all_flags {
+    for next_op in operators {
         match op {
-            None => op = Some(SetOperator::Union { all }),
-            Some(SetOperator::Union { all: first_all }) if first_all == all => {}
+            None => op = Some(next_op),
+            Some(current) if current == next_op => {}
             Some(_) => {
                 return Err(ParseError::FeatureNotSupported(
-                    "mixed UNION and UNION ALL chains".into(),
+                    "mixed set-operation chains".into(),
                 ));
             }
         }
