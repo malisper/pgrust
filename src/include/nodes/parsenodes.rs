@@ -334,6 +334,7 @@ pub struct RecursiveUnionQuery {
     pub anchor: Query,
     pub recursive: Query,
     pub distinct: bool,
+    pub recursive_references_worktable: bool,
     pub worktable_id: usize,
 }
 

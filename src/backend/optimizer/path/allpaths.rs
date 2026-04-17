@@ -301,6 +301,7 @@ fn build_recursive_union_path(
             slot_id: next_synthetic_slot_id(),
             worktable_id: recursive_union.worktable_id,
             distinct: recursive_union.distinct,
+            recursive_references_worktable: recursive_union.recursive_references_worktable,
             anchor_query: Box::new(recursive_union.anchor.clone()),
             recursive_query: Box::new(recursive_union.recursive.clone()),
             output_columns: recursive_union

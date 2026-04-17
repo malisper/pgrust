@@ -420,6 +420,7 @@ pub enum Path {
         slot_id: usize,
         worktable_id: usize,
         distinct: bool,
+        recursive_references_worktable: bool,
         anchor_query: Box<Query>,
         recursive_query: Box<Query>,
         output_columns: Vec<QueryColumn>,
