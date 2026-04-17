@@ -3460,6 +3460,13 @@ fn parse_union_all_select_chain() {
 }
 
 #[test]
+fn parse_select_distinct_clause() {
+    let stmt = parse_select("select distinct x from items").unwrap();
+    assert!(stmt.distinct);
+    assert!(matches!(stmt.from, Some(FromItem::Table { ref name, .. }) if name == "items"));
+}
+
+#[test]
 fn parse_mixed_union_chain_preserves_left_associativity() {
     let stmt = parse_select("select 1 as x union select 2 as x union all select 2 as x").unwrap();
     let outer = stmt.set_operation.expect("outer set operation");

@@ -705,6 +705,33 @@ fn mixed_union_chain_uses_postgres_left_associativity() {
 }
 
 #[test]
+fn except_all_with_distinct_right_input_executes() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table items (x int4)")
+        .expect("create table");
+    session
+        .execute(&db, "insert into items values (1), (1), (2)")
+        .expect("insert rows");
+
+    let result = session
+        .execute(
+            &db,
+            "select x from items except all select distinct x from items where x = 1 order by x",
+        )
+        .expect("run except all with distinct input");
+
+    match result {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int32(1)], vec![Value::Int32(2)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn union_in_derived_subquery_with_cte_executes() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);

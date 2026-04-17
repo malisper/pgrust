@@ -546,6 +546,7 @@ pub struct AnalyzeStatement {
 pub struct SelectStatement {
     pub with_recursive: bool,
     pub with: Vec<CommonTableExpr>,
+    pub distinct: bool,
     pub from: Option<FromItem>,
     pub targets: Vec<SelectItem>,
     pub where_clause: Option<SqlExpr>,
