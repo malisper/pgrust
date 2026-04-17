@@ -506,6 +506,7 @@ fn aggregate_output_expr(accum: &AggAccum, aggno: usize) -> Expr {
         aggtype: accum.sql_type,
         aggvariadic: accum.agg_variadic,
         aggdistinct: accum.distinct,
+        aggfilter: accum.filter.clone(),
         args: accum.args.clone(),
         agglevelsup: 0,
         aggno,

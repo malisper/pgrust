@@ -8020,6 +8020,96 @@ fn random_returns_float_in_range() {
 }
 
 #[test]
+fn bounded_random_uses_requested_result_types_and_ranges() {
+    let base = temp_dir("bounded_random_ranges");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select random(1, 2), random(1000000000001, 1000000000002), random(-0.5, 0.49), random(101, 101), random(1000000000001, 1000000000001), random(3.14, 3.14)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows.len(), 1);
+            assert!(matches!(rows[0][0], Value::Int32(v) if (1..=2).contains(&v)));
+            assert!(matches!(
+                rows[0][1],
+                Value::Int64(v) if (1_000_000_000_001..=1_000_000_000_002).contains(&v)
+            ));
+            assert!(matches!(rows[0][2], Value::Numeric(_)));
+            assert_eq!(rows[0][3], Value::Int32(101));
+            assert_eq!(rows[0][4], Value::Int64(1_000_000_000_001));
+            assert_eq!(rows[0][5], Value::Numeric("3.14".into()));
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn bounded_random_reports_invalid_ranges() {
+    let base = temp_dir("bounded_random_errors");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    let err = run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select random(1, 0)").unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError { message, sqlstate, .. }
+            if message == "lower bound must be less than or equal to upper bound"
+                && sqlstate == "22023"
+    ));
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select random('NaN'::numeric, 10)",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError { message, sqlstate, .. }
+            if message == "lower bound cannot be NaN" && sqlstate == "22023"
+    ));
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select random(0, 'Inf'::numeric)",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError { message, sqlstate, .. }
+            if message == "upper bound cannot be infinity" && sqlstate == "22023"
+    ));
+}
+
+#[test]
+fn random_normal_supports_defaults_named_args_and_zero_stddev() {
+    let base = temp_dir("random_normal_func");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select random_normal(), random_normal(10, 0), random_normal(mean => 1, stddev => 0)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows.len(), 1);
+            assert!(matches!(rows[0][0], Value::Float64(_)));
+            assert_eq!(rows[0][1], Value::Float64(10.0));
+            assert_eq!(rows[0][2], Value::Float64(1.0));
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn json_cast_and_extract_operators_work() {
     let base = temp_dir("json_extract_ops");
     let txns = TransactionManager::new_durable(&base).unwrap();

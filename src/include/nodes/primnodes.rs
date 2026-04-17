@@ -201,6 +201,7 @@ impl AggFunc {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinScalarFunction {
     Random,
+    RandomNormal,
     GetDatabaseEncoding,
     CashLarger,
     CashSmaller,

@@ -144,7 +144,7 @@ pub(super) fn bind_scalar_function_call(
     func_variadic: bool,
     nvargs: usize,
     vatype_oid: u32,
-    _declared_arg_types: &[SqlType],
+    declared_arg_types: &[SqlType],
     args: &[SqlExpr],
     scope: &BoundScope,
     catalog: &dyn CatalogLookup,
@@ -176,6 +176,44 @@ pub(super) fn bind_scalar_function_call(
         Expr::resolved_builtin_func(func, func_oid, result_type, funcvariadic, args)
     };
     match func {
+        BuiltinScalarFunction::Random | BuiltinScalarFunction::RandomNormal => {
+            if bound_args.is_empty() {
+                return Ok(build_func(false, bound_args));
+            }
+
+            let target_types = if matches!(func, BuiltinScalarFunction::RandomNormal) {
+                vec![SqlType::new(SqlTypeKind::Float8); bound_args.len()]
+            } else if bound_args.len() == 2 {
+                let left_type = arg_types[0];
+                let right_type = arg_types[1];
+                let target = if matches!(left_type.kind, SqlTypeKind::Numeric)
+                    || matches!(right_type.kind, SqlTypeKind::Numeric)
+                {
+                    SqlType::new(SqlTypeKind::Numeric)
+                } else if matches!(left_type.kind, SqlTypeKind::Int8)
+                    || matches!(right_type.kind, SqlTypeKind::Int8)
+                {
+                    SqlType::new(SqlTypeKind::Int8)
+                } else {
+                    SqlType::new(SqlTypeKind::Int4)
+                };
+                vec![target; 2]
+            } else if declared_arg_types.len() == bound_args.len() {
+                declared_arg_types.to_vec()
+            } else {
+                arg_types.clone()
+            };
+
+            let coerced = bound_args
+                .into_iter()
+                .zip(arg_types)
+                .zip(target_types)
+                .map(|((arg, actual_type), declared_type)| {
+                    coerce_bound_expr(arg, actual_type, declared_type)
+                })
+                .collect();
+            Ok(build_func(false, coerced))
+        }
         BuiltinScalarFunction::CashLarger | BuiltinScalarFunction::CashSmaller => {
             let money = SqlType::new(SqlTypeKind::Money);
             let coerced = bound_args
