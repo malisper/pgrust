@@ -456,19 +456,17 @@ fn authorize_grant_membership(
     catalog: &AuthCatalog,
     role_name: &str,
 ) -> Result<PgAuthIdRow, ExecError> {
-    grant_membership_authorized_with_detail(auth, catalog, role_name).map_err(
-        |err| match err {
-            GrantMembershipAuthorizationError::Parse(err) => ExecError::Parse(err),
-            GrantMembershipAuthorizationError::PermissionDenied { role_name, detail } => {
-                ExecError::DetailedError {
-                    message: format!("permission denied to grant role \"{role_name}\""),
-                    detail,
-                    hint: None,
-                    sqlstate: "42501",
-                }
+    grant_membership_authorized_with_detail(auth, catalog, role_name).map_err(|err| match err {
+        GrantMembershipAuthorizationError::Parse(err) => ExecError::Parse(err),
+        GrantMembershipAuthorizationError::PermissionDenied { role_name, detail } => {
+            ExecError::DetailedError {
+                message: format!("permission denied to grant role \"{role_name}\""),
+                detail,
+                hint: None,
+                sqlstate: "42501",
             }
-        },
-    )
+        }
+    })
 }
 
 fn map_named_role_membership_error(
@@ -480,8 +478,7 @@ fn map_named_role_membership_error(
 ) -> ExecError {
     match err {
         crate::backend::catalog::CatalogError::UniqueViolation(message)
-            if message
-                == format!("role membership cycle: {member_oid} -> {role_oid}") =>
+            if message == format!("role membership cycle: {member_oid} -> {role_oid}") =>
         {
             ExecError::Parse(role_management_error(format!(
                 "role \"{member_name}\" is a member of role \"{role_name}\""
@@ -504,11 +501,13 @@ fn member_name(db: &Database, auth_catalog: &AuthCatalog, member_oid: u32) -> St
 
 fn publish_direct_auth_members_invalidation(db: &Database, client_id: ClientId) {
     let kind = crate::include::catalog::BootstrapCatalogKind::PgAuthMembers;
-    let _ = db.pool.invalidate_relation(crate::backend::storage::smgr::RelFileLocator {
-        spc_oid: 0,
-        db_oid: 1,
-        rel_number: kind.relation_oid(),
-    });
+    let _ = db
+        .pool
+        .invalidate_relation(crate::backend::storage::smgr::RelFileLocator {
+            spc_oid: 0,
+            db_oid: 1,
+            rel_number: kind.relation_oid(),
+        });
     let invalidation = crate::backend::utils::cache::inval::CatalogInvalidation {
         touched_catalogs: [kind].into_iter().collect(),
         ..Default::default()

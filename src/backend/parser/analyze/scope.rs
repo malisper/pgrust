@@ -552,10 +552,10 @@ pub(super) fn bind_from_item_with_ctes(
             let entry = catalog
                 .lookup_any_relation(name)
                 .ok_or_else(|| ParseError::UnknownTable(name.to_string()))?;
-            if !matches!(entry.relkind, 'r' | 'v') {
+            if !matches!(entry.relkind, 'r' | 'v' | 'S') {
                 return Err(ParseError::WrongObjectType {
                     name: name.to_string(),
-                    expected: "table",
+                    expected: "table, view, or sequence",
                 });
             }
             let desc = entry.desc.clone();
@@ -1285,6 +1285,16 @@ fn query_columns_from_alias_definitions(
                 name: definition.name.clone(),
                 sql_type: match &definition.ty {
                     RawTypeName::Builtin(sql_type) => *sql_type,
+                    RawTypeName::Serial(kind) => {
+                        return Err(ParseError::FeatureNotSupported(format!(
+                            "{} is only allowed in CREATE TABLE / ALTER TABLE ADD COLUMN",
+                            match kind {
+                                crate::backend::parser::SerialKind::Small => "smallserial",
+                                crate::backend::parser::SerialKind::Regular => "serial",
+                                crate::backend::parser::SerialKind::Big => "bigserial",
+                            }
+                        )));
+                    }
                     RawTypeName::Record => SqlType::record(RECORD_TYPE_OID),
                     RawTypeName::Named { name, .. } => catalog
                         .type_rows()

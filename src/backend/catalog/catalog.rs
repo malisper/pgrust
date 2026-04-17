@@ -61,6 +61,7 @@ pub fn column_desc(name: impl Into<String>, sql_type: SqlType, nullable: bool) -
         not_null_primary_key_owned: false,
         attrdef_oid: None,
         default_expr: None,
+        default_sequence_oid: None,
         missing_default_value: None,
     }
 }

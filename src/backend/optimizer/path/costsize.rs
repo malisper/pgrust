@@ -112,6 +112,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                 rel,
                 relation_name,
                 relation_oid,
+                relkind,
                 toast,
                 desc,
                 ..
@@ -124,6 +125,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                     rel,
                     relation_name,
                     relation_oid,
+                    relkind,
                     toast,
                     desc,
                 }
@@ -533,13 +535,14 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
 }
 
 fn try_optimize_access_subtree(plan: Path, catalog: &dyn CatalogLookup) -> Result<Path, Path> {
-    let (source_id, rel, relation_name, relation_oid, toast, desc, filter, order_items) = match plan
-    {
+    let (source_id, rel, relation_name, relation_oid, relkind, toast, desc, filter, order_items) =
+        match plan {
         Path::SeqScan {
             source_id,
             rel,
             relation_name,
             relation_oid,
+            relkind,
             toast,
             desc,
             ..
@@ -548,6 +551,7 @@ fn try_optimize_access_subtree(plan: Path, catalog: &dyn CatalogLookup) -> Resul
             rel,
             relation_name,
             relation_oid,
+            relkind,
             toast,
             desc,
             None,
@@ -561,6 +565,7 @@ fn try_optimize_access_subtree(plan: Path, catalog: &dyn CatalogLookup) -> Resul
                 rel,
                 relation_name,
                 relation_oid,
+                relkind,
                 toast,
                 desc,
                 ..
@@ -569,6 +574,7 @@ fn try_optimize_access_subtree(plan: Path, catalog: &dyn CatalogLookup) -> Resul
                 rel,
                 relation_name,
                 relation_oid,
+                relkind,
                 toast,
                 desc,
                 Some(predicate),
@@ -588,6 +594,7 @@ fn try_optimize_access_subtree(plan: Path, catalog: &dyn CatalogLookup) -> Resul
                 rel,
                 relation_name,
                 relation_oid,
+                relkind,
                 toast,
                 desc,
                 ..
@@ -596,6 +603,7 @@ fn try_optimize_access_subtree(plan: Path, catalog: &dyn CatalogLookup) -> Resul
                 rel,
                 relation_name,
                 relation_oid,
+                relkind,
                 toast,
                 desc,
                 None,
@@ -609,6 +617,7 @@ fn try_optimize_access_subtree(plan: Path, catalog: &dyn CatalogLookup) -> Resul
                     rel,
                     relation_name,
                     relation_oid,
+                    relkind,
                     toast,
                     desc,
                     ..
@@ -617,6 +626,7 @@ fn try_optimize_access_subtree(plan: Path, catalog: &dyn CatalogLookup) -> Resul
                     rel,
                     relation_name,
                     relation_oid,
+                    relkind,
                     toast,
                     desc,
                     Some(predicate),
@@ -654,12 +664,16 @@ fn try_optimize_access_subtree(plan: Path, catalog: &dyn CatalogLookup) -> Resul
         rel,
         relation_name,
         relation_oid,
+        relkind,
         toast,
         desc.clone(),
         &stats,
         filter.clone(),
         order_items.clone(),
     );
+    if relkind != 'r' {
+        return Ok(best.plan);
+    }
     let indexes = catalog.index_relations_for_heap(relation_oid);
     for index in indexes.iter().filter(|index| {
         index.index_meta.indisvalid
@@ -695,6 +709,14 @@ pub(super) fn relation_stats(
     desc: &RelationDesc,
 ) -> RelationStats {
     let class_row = catalog.class_row_by_oid(relation_oid);
+    if class_row.as_ref().is_some_and(|row| row.relkind == 'S') {
+        return RelationStats {
+            relpages: 1.0,
+            reltuples: 1.0,
+            width: estimate_relation_width(desc, &HashMap::new()),
+            stats_by_attnum: HashMap::new(),
+        };
+    }
     let relpages = class_row
         .as_ref()
         .map(|row| row.relpages.max(1) as f64)
@@ -728,6 +750,7 @@ pub(super) fn estimate_seqscan_candidate(
     rel: RelFileLocator,
     relation_name: String,
     relation_oid: u32,
+    relkind: char,
     toast: Option<ToastRelationRef>,
     desc: RelationDesc,
     stats: &RelationStats,
@@ -742,6 +765,7 @@ pub(super) fn estimate_seqscan_candidate(
         rel,
         relation_name,
         relation_oid,
+        relkind,
         toast,
         desc,
     };

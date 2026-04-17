@@ -1,7 +1,5 @@
 use super::super::*;
-use crate::backend::commands::schemacmds::{
-    CreateSchemaResolution, resolve_create_schema_stmt,
-};
+use crate::backend::commands::schemacmds::{CreateSchemaResolution, resolve_create_schema_stmt};
 use crate::include::catalog::CURRENT_DATABASE_OID;
 
 fn current_database_owner_oid(
@@ -40,7 +38,7 @@ impl Database {
             0,
             &mut catalog_effects,
         );
-        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[]);
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
         guard.disarm();
         result
     }

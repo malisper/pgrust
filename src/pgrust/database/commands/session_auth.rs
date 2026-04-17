@@ -183,7 +183,9 @@ mod tests {
         session
             .execute(&db, "create role limited_admin createrole")
             .unwrap();
-        session.execute(&db, "create role role_admin createrole").unwrap();
+        session
+            .execute(&db, "create role role_admin createrole")
+            .unwrap();
 
         assert_eq!(
             session

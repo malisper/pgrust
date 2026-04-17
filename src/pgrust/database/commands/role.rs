@@ -25,7 +25,11 @@ impl Database {
             .map_err(map_role_catalog_error)?;
         let spec = build_create_role_spec(stmt).map_err(ExecError::Parse)?;
         if !auth.can_create_role_with_attrs(&spec.attrs, &auth_catalog) {
-            return Err(create_role_permission_error(&auth, &auth_catalog, &spec.attrs));
+            return Err(create_role_permission_error(
+                &auth,
+                &auth_catalog,
+                &spec.attrs,
+            ));
         }
         let mut touched_catalogs = vec![crate::include::catalog::BootstrapCatalogKind::PgAuthId];
         self.catalog
@@ -222,9 +226,14 @@ impl Database {
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let mut catalog_effects = Vec::new();
-        let result =
-            self.execute_comment_on_role_stmt_in_transaction(client_id, stmt, xid, 0, &mut catalog_effects);
-        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[]);
+        let result = self.execute_comment_on_role_stmt_in_transaction(
+            client_id,
+            stmt,
+            xid,
+            0,
+            &mut catalog_effects,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
         guard.disarm();
         result
     }
@@ -244,7 +253,9 @@ impl Database {
         let target = lookup_role(&auth_catalog, &stmt.role_name)?;
         let current = auth_catalog
             .role_by_oid(auth.current_user_oid())
-            .ok_or_else(|| ExecError::Parse(role_management_error("current role does not exist")))?;
+            .ok_or_else(|| {
+                ExecError::Parse(role_management_error("current role does not exist"))
+            })?;
         if !current.rolsuper && !auth.has_admin_option(target.oid, &auth_catalog) {
             return Err(ExecError::DetailedError {
                 message: "permission denied".into(),
@@ -358,7 +369,7 @@ impl Database {
             0,
             &mut catalog_effects,
         );
-        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[]);
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
         guard.disarm();
         result
     }
@@ -461,8 +472,7 @@ fn map_named_role_membership_error(
 ) -> ExecError {
     match err {
         crate::backend::catalog::CatalogError::UniqueViolation(message)
-            if message
-                == format!("role membership cycle: {member_oid} -> {role_oid}") =>
+            if message == format!("role membership cycle: {member_oid} -> {role_oid}") =>
         {
             ExecError::Parse(role_management_error(format!(
                 "role \"{member_name}\" is a member of role \"{role_name}\""
@@ -477,19 +487,17 @@ fn authorize_grant_membership(
     catalog: &crate::pgrust::auth::AuthCatalog,
     role_name: &str,
 ) -> Result<crate::include::catalog::PgAuthIdRow, ExecError> {
-    grant_membership_authorized_with_detail(auth, catalog, role_name).map_err(
-        |err| match err {
-            GrantMembershipAuthorizationError::Parse(err) => ExecError::Parse(err),
-            GrantMembershipAuthorizationError::PermissionDenied { role_name, detail } => {
-                ExecError::DetailedError {
-                    message: format!("permission denied to grant role \"{role_name}\""),
-                    detail,
-                    hint: None,
-                    sqlstate: "42501",
-                }
+    grant_membership_authorized_with_detail(auth, catalog, role_name).map_err(|err| match err {
+        GrantMembershipAuthorizationError::Parse(err) => ExecError::Parse(err),
+        GrantMembershipAuthorizationError::PermissionDenied { role_name, detail } => {
+            ExecError::DetailedError {
+                message: format!("permission denied to grant role \"{role_name}\""),
+                detail,
+                hint: None,
+                sqlstate: "42501",
             }
-        },
-    )
+        }
+    })
 }
 
 fn publish_direct_catalog_invalidation(
@@ -610,9 +618,7 @@ fn alter_role_permission_error(
     }
 }
 
-fn rename_role_permission_error(
-    existing: &crate::include::catalog::PgAuthIdRow,
-) -> ExecError {
+fn rename_role_permission_error(existing: &crate::include::catalog::PgAuthIdRow) -> ExecError {
     ExecError::DetailedError {
         message: "permission denied to rename role".into(),
         detail: Some(format!(
@@ -624,9 +630,7 @@ fn rename_role_permission_error(
     }
 }
 
-fn drop_role_permission_error(
-    existing: &crate::include::catalog::PgAuthIdRow,
-) -> ExecError {
+fn drop_role_permission_error(existing: &crate::include::catalog::PgAuthIdRow) -> ExecError {
     let detail = if existing.rolsuper {
         "Only roles with the SUPERUSER attribute may drop roles with the SUPERUSER attribute."
             .to_string()
@@ -811,8 +815,15 @@ mod tests {
             .write()
             .alter_relation_owner_mvcc(relation_oid, owner_oid, &ctx)
             .unwrap();
-        db.finish_txn(1, xid, Ok(StatementResult::AffectedRows(0)), &[effect], &[])
-            .unwrap();
+        db.finish_txn(
+            1,
+            xid,
+            Ok(StatementResult::AffectedRows(0)),
+            &[effect],
+            &[],
+            &[],
+        )
+        .unwrap();
     }
 
     fn update_membership_options(
@@ -911,7 +922,9 @@ mod tests {
         let db = Database::open(&base, 16).unwrap();
         let mut session = Session::new(1);
 
-        session.execute(&db, "create role app_role createrole").unwrap();
+        session
+            .execute(&db, "create role app_role createrole")
+            .unwrap();
         session
             .execute(&db, "comment on role app_role is 'hello role'")
             .unwrap();

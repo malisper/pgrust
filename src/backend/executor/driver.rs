@@ -235,6 +235,10 @@ fn execute_statement_with_source(
             expected: "CREATE TYPE handled by database/session layer",
             actual: "CREATE TYPE".into(),
         })),
+        Statement::CreateSequence(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "CREATE SEQUENCE handled by database/session layer",
+            actual: "CREATE SEQUENCE".into(),
+        })),
         Statement::CreateTable(stmt) => execute_create_table(stmt, catalog),
         Statement::CreateTableAs(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "create table handled by database/session layer",
@@ -257,6 +261,10 @@ fn execute_statement_with_source(
             expected: "DROP TYPE handled by database/session layer",
             actual: "DROP TYPE".into(),
         })),
+        Statement::DropSequence(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "DROP SEQUENCE handled by database/session layer",
+            actual: "DROP SEQUENCE".into(),
+        })),
         Statement::DropView(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "DROP VIEW handled by database/session layer",
             actual: "DROP VIEW".into(),
@@ -264,6 +272,18 @@ fn execute_statement_with_source(
         Statement::DropSchema(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "DROP SCHEMA handled by database/session layer",
             actual: "DROP SCHEMA".into(),
+        })),
+        Statement::AlterSequence(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "ALTER SEQUENCE handled by database/session layer",
+            actual: "ALTER SEQUENCE".into(),
+        })),
+        Statement::AlterSequenceOwner(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "ALTER SEQUENCE OWNER handled by database/session layer",
+            actual: "ALTER SEQUENCE OWNER".into(),
+        })),
+        Statement::AlterSequenceRename(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "ALTER SEQUENCE RENAME handled by database/session layer",
+            actual: "ALTER SEQUENCE RENAME".into(),
         })),
         Statement::TruncateTable(stmt) => execute_truncate_table(stmt, catalog, ctx, xid),
         Statement::Vacuum(stmt) => execute_vacuum(stmt, catalog, ctx),

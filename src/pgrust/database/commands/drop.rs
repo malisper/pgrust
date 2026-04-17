@@ -124,7 +124,9 @@ impl Database {
             };
             if schema.oid == crate::include::catalog::PG_CATALOG_NAMESPACE_OID {
                 return Err(ExecError::DetailedError {
-                    message: format!("cannot drop schema {schema_name} because it is required by the database system"),
+                    message: format!(
+                        "cannot drop schema {schema_name} because it is required by the database system"
+                    ),
                     detail: None,
                     hint: None,
                     sqlstate: "2BP01",
@@ -151,7 +153,9 @@ impl Database {
                 .any(|row| row.relnamespace == schema.oid);
             if has_relations {
                 return Err(ExecError::DetailedError {
-                    message: format!("cannot drop schema {schema_name} because other objects depend on it"),
+                    message: format!(
+                        "cannot drop schema {schema_name} because other objects depend on it"
+                    ),
                     detail: Some("schema is not empty".into()),
                     hint: None,
                     sqlstate: "2BP01",
@@ -371,7 +375,9 @@ mod tests {
         let base = temp_dir("index");
         let db = Database::open(&base, 16).unwrap();
         let mut session = Session::new(1);
-        session.execute(&db, "create table widgets (id int4)").unwrap();
+        session
+            .execute(&db, "create table widgets (id int4)")
+            .unwrap();
         session
             .execute(&db, "create index widgets_id_idx on widgets(id)")
             .unwrap();

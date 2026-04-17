@@ -214,6 +214,7 @@ fn people_scan_plan() -> Plan {
         rel: rel(),
         relation_name: "people".into(),
         relation_oid: 0,
+        relkind: 'r',
         toast: None,
         desc: relation_desc(),
     }
@@ -226,6 +227,7 @@ fn pets_scan_plan() -> Plan {
         rel: pets_rel(),
         relation_name: "pets".into(),
         relation_oid: 0,
+        relkind: 'r',
         toast: None,
         desc: pets_relation_desc(),
     }
@@ -598,6 +600,9 @@ fn empty_executor_context(base: &PathBuf) -> ExecutorContext {
         pool: test_pool(base),
         txns: std::sync::Arc::new(parking_lot::RwLock::new(txns)),
         txn_waiter: None,
+        sequences: Some(std::sync::Arc::new(
+            crate::pgrust::database::SequenceRuntime::new_ephemeral(),
+        )),
         datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
         interrupts: std::sync::Arc::new(
             crate::backend::utils::misc::interrupts::InterruptState::new(),
@@ -610,6 +615,7 @@ fn empty_executor_context(base: &PathBuf) -> ExecutorContext {
         system_bindings: Vec::new(),
         subplans: Vec::new(),
         timed: false,
+        allow_side_effects: true,
         catalog: None,
         compiled_functions: std::collections::HashMap::new(),
         cte_tables: std::collections::HashMap::new(),
@@ -630,6 +636,9 @@ fn run_plan(
         pool,
         txns: txns_arc,
         txn_waiter: None,
+        sequences: Some(std::sync::Arc::new(
+            crate::pgrust::database::SequenceRuntime::new_ephemeral(),
+        )),
         datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
         interrupts: std::sync::Arc::new(
             crate::backend::utils::misc::interrupts::InterruptState::new(),
@@ -642,6 +651,7 @@ fn run_plan(
         system_bindings: Vec::new(),
         subplans: Vec::new(),
         timed: false,
+        allow_side_effects: true,
         catalog: None,
         compiled_functions: std::collections::HashMap::new(),
         cte_tables: std::collections::HashMap::new(),
@@ -700,6 +710,9 @@ fn run_sql_with_catalog(
             pool,
             txns: txns_arc,
             txn_waiter: None,
+            sequences: Some(std::sync::Arc::new(
+                crate::pgrust::database::SequenceRuntime::new_ephemeral(),
+            )),
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
             interrupts: std::sync::Arc::new(
                 crate::backend::utils::misc::interrupts::InterruptState::new(),
@@ -712,6 +725,7 @@ fn run_sql_with_catalog(
             system_bindings: Vec::new(),
             subplans: Vec::new(),
             timed: false,
+            allow_side_effects: true,
             catalog: catalog.materialize_visible_catalog(),
             compiled_functions: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),
@@ -896,6 +910,7 @@ fn seqscan_filter_projection_returns_expected_rows() {
                 rel: rel(),
                 relation_name: "people".into(),
                 relation_oid: 0,
+                relkind: 'r',
                 toast: None,
                 desc: relation_desc(),
             }),
@@ -973,6 +988,7 @@ fn seqscan_skips_superseded_versions() {
         rel: rel(),
         relation_name: "people".into(),
         relation_oid: 0,
+        relkind: 'r',
         toast: None,
         desc: relation_desc(),
     };
@@ -5063,6 +5079,9 @@ fn prepared_insert_uses_defaults_for_omitted_columns() {
         pool,
         txns: txns_arc,
         txn_waiter: None,
+        sequences: Some(std::sync::Arc::new(
+            crate::pgrust::database::SequenceRuntime::new_ephemeral(),
+        )),
         datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
         interrupts: std::sync::Arc::new(
             crate::backend::utils::misc::interrupts::InterruptState::new(),
@@ -5075,6 +5094,7 @@ fn prepared_insert_uses_defaults_for_omitted_columns() {
         system_bindings: Vec::new(),
         subplans: Vec::new(),
         timed: false,
+        allow_side_effects: true,
         catalog: catalog.materialize_visible_catalog(),
         compiled_functions: std::collections::HashMap::new(),
         cte_tables: std::collections::HashMap::new(),

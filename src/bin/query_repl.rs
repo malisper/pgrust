@@ -502,6 +502,21 @@ fn run_statement(
                 stmt.relation_name, stmt.new_owner
             ))))
         }
+        Statement::AlterSequence(stmt) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
+            format!("ALTER SEQUENCE in query_repl: {}", stmt.sequence_name),
+        ))),
+        Statement::AlterSequenceOwner(stmt) => {
+            Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
+                "ALTER SEQUENCE OWNER in query_repl: {} -> {}",
+                stmt.relation_name, stmt.new_owner
+            ))))
+        }
+        Statement::AlterSequenceRename(stmt) => {
+            Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
+                "ALTER SEQUENCE RENAME in query_repl: {} -> {}",
+                stmt.table_name, stmt.new_table_name
+            ))))
+        }
         Statement::AlterTableRenameColumn(stmt) => {
             Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
                 "ALTER TABLE RENAME COLUMN in query_repl: {}.{} -> {}",
@@ -607,6 +622,7 @@ fn run_statement(
                 pool: std::sync::Arc::clone(pool),
                 txns: txns.clone(),
                 txn_waiter: None,
+                sequences: None,
                 datetime_config:
                     pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                 interrupts: Arc::clone(&interrupts),
@@ -618,6 +634,7 @@ fn run_statement(
                 system_bindings: Vec::new(),
                 subplans: Vec::new(),
                 timed: false,
+                allow_side_effects: false,
                 catalog: relcache.materialize_visible_catalog(),
                 compiled_functions: std::collections::HashMap::new(),
                 cte_tables: std::collections::HashMap::new(),
@@ -631,6 +648,7 @@ fn run_statement(
                 pool: std::sync::Arc::clone(pool),
                 txns: txns.clone(),
                 txn_waiter: None,
+                sequences: None,
                 datetime_config:
                     pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                 interrupts: Arc::clone(&interrupts),
@@ -642,6 +660,7 @@ fn run_statement(
                 system_bindings: Vec::new(),
                 subplans: Vec::new(),
                 timed: false,
+                allow_side_effects: false,
                 catalog: relcache.materialize_visible_catalog(),
                 compiled_functions: std::collections::HashMap::new(),
                 cte_tables: std::collections::HashMap::new(),
@@ -655,6 +674,7 @@ fn run_statement(
                 pool: std::sync::Arc::clone(pool),
                 txns: txns.clone(),
                 txn_waiter: None,
+                sequences: None,
                 datetime_config:
                     pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                 interrupts: Arc::clone(&interrupts),
@@ -666,6 +686,7 @@ fn run_statement(
                 system_bindings: Vec::new(),
                 subplans: Vec::new(),
                 timed: false,
+                allow_side_effects: false,
                 catalog: relcache.materialize_visible_catalog(),
                 compiled_functions: std::collections::HashMap::new(),
                 cte_tables: std::collections::HashMap::new(),
@@ -679,6 +700,7 @@ fn run_statement(
                 pool: std::sync::Arc::clone(pool),
                 txns: txns.clone(),
                 txn_waiter: None,
+                sequences: None,
                 datetime_config:
                     pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                 interrupts: Arc::clone(&interrupts),
@@ -690,6 +712,7 @@ fn run_statement(
                 system_bindings: Vec::new(),
                 subplans: Vec::new(),
                 timed: false,
+                allow_side_effects: false,
                 catalog: relcache.materialize_visible_catalog(),
                 compiled_functions: std::collections::HashMap::new(),
                 cte_tables: std::collections::HashMap::new(),
@@ -703,9 +726,11 @@ fn run_statement(
         | Statement::CreateSchema(_)
         | Statement::CreateDomain(_)
         | Statement::CreateType(_)
+        | Statement::CreateSequence(_)
         | Statement::DropDomain(_)
-        | Statement::DropType(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
-            "domain/function/type statements are not supported in query_repl".into(),
+        | Statement::DropType(_)
+        | Statement::DropSequence(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
+            "domain/function/type/sequence statements are not supported in query_repl".into(),
         ))),
         Statement::CreateTable(stmt) => {
             let (table_name, _) = normalize_create_table_name(&stmt)?;
@@ -774,6 +799,7 @@ fn run_statement(
                 pool: std::sync::Arc::clone(pool),
                 txns: txns.clone(),
                 txn_waiter: None,
+                sequences: None,
                 datetime_config:
                     pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                 interrupts: Arc::clone(&interrupts),
@@ -785,6 +811,7 @@ fn run_statement(
                 system_bindings: Vec::new(),
                 subplans: Vec::new(),
                 timed: false,
+                allow_side_effects: true,
                 catalog: relcache.materialize_visible_catalog(),
                 compiled_functions: std::collections::HashMap::new(),
                 cte_tables: std::collections::HashMap::new(),
@@ -798,6 +825,7 @@ fn run_statement(
                 pool: std::sync::Arc::clone(pool),
                 txns: txns.clone(),
                 txn_waiter: None,
+                sequences: None,
                 datetime_config:
                     pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                 interrupts: Arc::clone(&interrupts),
@@ -809,6 +837,7 @@ fn run_statement(
                 system_bindings: Vec::new(),
                 subplans: Vec::new(),
                 timed: false,
+                allow_side_effects: false,
                 catalog: relcache.materialize_visible_catalog(),
                 compiled_functions: std::collections::HashMap::new(),
                 cte_tables: std::collections::HashMap::new(),
@@ -825,6 +854,7 @@ fn run_statement(
                     pool: std::sync::Arc::clone(pool),
                     txns: txns.clone(),
                     txn_waiter: None,
+                    sequences: None,
                     datetime_config:
                         pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                     interrupts: Arc::clone(&interrupts),
@@ -836,6 +866,7 @@ fn run_statement(
                     system_bindings: Vec::new(),
                     subplans: Vec::new(),
                     timed: false,
+                    allow_side_effects: true,
                     catalog: relcache.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
@@ -863,6 +894,7 @@ fn run_statement(
                     pool: std::sync::Arc::clone(pool),
                     txns: txns.clone(),
                     txn_waiter: None,
+                    sequences: None,
                     datetime_config:
                         pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                     interrupts: Arc::clone(&interrupts),
@@ -874,6 +906,7 @@ fn run_statement(
                     system_bindings: Vec::new(),
                     subplans: Vec::new(),
                     timed: false,
+                    allow_side_effects: true,
                     catalog: relcache.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
@@ -901,6 +934,7 @@ fn run_statement(
                     pool: std::sync::Arc::clone(pool),
                     txns: txns.clone(),
                     txn_waiter: None,
+                    sequences: None,
                     datetime_config:
                         pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                     interrupts: Arc::clone(&interrupts),
@@ -912,6 +946,7 @@ fn run_statement(
                     system_bindings: Vec::new(),
                     subplans: Vec::new(),
                     timed: false,
+                    allow_side_effects: true,
                     catalog: relcache.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),

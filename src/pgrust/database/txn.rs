@@ -81,6 +81,13 @@ impl Database {
     ) {
     }
 
+    pub(crate) fn finalize_committed_sequence_effects(
+        &self,
+        effects: &[SequenceMutationEffect],
+    ) -> Result<(), ExecError> {
+        self.sequences.finalize_committed_effects(effects)
+    }
+
     pub(crate) fn finalize_aborted_temp_effects(
         &self,
         client_id: ClientId,
@@ -133,6 +140,10 @@ impl Database {
         self.invalidate_backend_cache_state(client_id);
     }
 
+    pub(crate) fn finalize_aborted_sequence_effects(&self, effects: &[SequenceMutationEffect]) {
+        self.sequences.finalize_aborted_effects(effects);
+    }
+
     pub(super) fn finish_txn(
         &self,
         client_id: ClientId,
@@ -140,6 +151,7 @@ impl Database {
         result: Result<StatementResult, ExecError>,
         catalog_effects: &[CatalogMutationEffect],
         temp_effects: &[TempMutationEffect],
+        sequence_effects: &[SequenceMutationEffect],
     ) -> Result<StatementResult, ExecError> {
         match result {
             Ok(r) => {
@@ -170,6 +182,7 @@ impl Database {
                 self.finalize_command_end_local_catalog_invalidations(client_id, &invalidations);
                 self.finalize_committed_catalog_effects(client_id, catalog_effects, &invalidations);
                 self.finalize_committed_temp_effects(client_id, temp_effects);
+                self.finalize_committed_sequence_effects(sequence_effects)?;
                 self.apply_temp_on_commit(client_id)?;
                 self.txn_waiter.notify();
                 Ok(r)
@@ -184,6 +197,7 @@ impl Database {
                 self.finalize_aborted_local_catalog_invalidations(client_id, &[], &invalidations);
                 self.finalize_aborted_catalog_effects(catalog_effects);
                 self.finalize_aborted_temp_effects(client_id, temp_effects);
+                self.finalize_aborted_sequence_effects(sequence_effects);
                 self.txn_waiter.notify();
                 Err(e)
             }

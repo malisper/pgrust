@@ -205,8 +205,12 @@ pub enum Statement {
     CreateSchema(CreateSchemaStatement),
     CreateTable(CreateTableStatement),
     CreateTableAs(CreateTableAsStatement),
+    CreateSequence(CreateSequenceStatement),
     CreateView(CreateViewStatement),
     CreateIndex(CreateIndexStatement),
+    AlterSequence(AlterSequenceStatement),
+    AlterSequenceOwner(AlterRelationOwnerStatement),
+    AlterSequenceRename(AlterTableRenameStatement),
     AlterTableAddColumn(AlterTableAddColumnStatement),
     AlterTableAddConstraint(AlterTableAddConstraintStatement),
     AlterTableDropColumn(AlterTableDropColumnStatement),
@@ -230,6 +234,7 @@ pub enum Statement {
     GrantRoleMembership(GrantRoleMembershipStatement),
     RevokeRoleMembership(RevokeRoleMembershipStatement),
     DropType(DropTypeStatement),
+    DropSequence(DropSequenceStatement),
     DropTable(DropTableStatement),
     DropIndex(DropIndexStatement),
     DropDomain(DropDomainStatement),
@@ -725,6 +730,15 @@ pub struct CreateTableAsStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateSequenceStatement {
+    pub schema_name: Option<String>,
+    pub sequence_name: String,
+    pub persistence: TablePersistence,
+    pub if_not_exists: bool,
+    pub options: SequenceOptionsSpec,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateViewStatement {
     pub schema_name: Option<String>,
     pub view_name: String,
@@ -776,6 +790,12 @@ impl From<String> for IndexColumnDef {
 pub struct AlterTableSetStatement {
     pub table_name: String,
     pub options: Vec<RelOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterSequenceStatement {
+    pub sequence_name: String,
+    pub options: SequenceOptionsPatchSpec,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -985,6 +1005,13 @@ pub struct DropTableStatement {
 pub struct DropIndexStatement {
     pub if_exists: bool,
     pub index_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropSequenceStatement {
+    pub if_exists: bool,
+    pub sequence_names: Vec<String>,
+    pub cascade: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1242,6 +1269,13 @@ pub enum SqlTypeKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SerialKind {
+    Small,
+    Regular,
+    Big,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GeometryUnaryOp {
     Center,
     Length,
@@ -1405,6 +1439,7 @@ impl SqlType {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RawTypeName {
     Builtin(SqlType),
+    Serial(SerialKind),
     Named { name: String, array_bounds: usize },
     Record,
 }
@@ -1417,9 +1452,41 @@ impl RawTypeName {
     pub fn as_builtin(&self) -> Option<SqlType> {
         match self {
             Self::Builtin(ty) => Some(*ty),
-            Self::Named { .. } | Self::Record => None,
+            Self::Serial(_) | Self::Named { .. } | Self::Record => None,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SequenceOptionsSpec {
+    pub increment: Option<i64>,
+    pub minvalue: Option<Option<i64>>,
+    pub maxvalue: Option<Option<i64>>,
+    pub start: Option<i64>,
+    pub cache: Option<i64>,
+    pub cycle: Option<bool>,
+    pub owned_by: Option<SequenceOwnedByClause>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SequenceOptionsPatchSpec {
+    pub increment: Option<i64>,
+    pub minvalue: Option<Option<i64>>,
+    pub maxvalue: Option<Option<i64>>,
+    pub start: Option<i64>,
+    pub restart: Option<Option<i64>>,
+    pub cache: Option<i64>,
+    pub cycle: Option<bool>,
+    pub owned_by: Option<SequenceOwnedByClause>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SequenceOwnedByClause {
+    None,
+    Column {
+        table_name: String,
+        column_name: String,
+    },
 }
 
 impl PartialEq<SqlType> for RawTypeName {
