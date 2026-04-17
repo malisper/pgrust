@@ -2486,6 +2486,7 @@ fn send_plpgsql_notices(stream: &mut impl Write, notices: &[PlpgsqlNotice]) -> i
 
 fn rewrite_regression_sql(sql: &str) -> std::borrow::Cow<'_, str> {
     let rewritten = rewrite_hex_bit_literals(sql);
+    let rewritten = rewrite_shobj_description_calls(&rewritten);
     let rewritten = rewritten
         .replace(
             "bits::bigint::xfloat8::float8",
@@ -2516,6 +2517,30 @@ fn rewrite_hex_bit_literals(sql: &str) -> String {
                 .unwrap_or_else(|_| captures[0].to_string()),
             _ => captures[0].to_string(),
         }
+    })
+    .into_owned()
+}
+
+fn rewrite_shobj_description_calls(sql: &str) -> String {
+    static SHOBJ_RE: OnceLock<regex::Regex> = OnceLock::new();
+    static REGROLE_LITERAL_RE: OnceLock<regex::Regex> = OnceLock::new();
+    let re = SHOBJ_RE.get_or_init(|| {
+        regex::Regex::new(r"(?i)shobj_description\(([^,]+),\s*'pg_authid'\)").unwrap()
+    });
+    let regrole_re = REGROLE_LITERAL_RE.get_or_init(|| {
+        regex::Regex::new(r"(?i)^'((?:[^']|'')+)'\s*::\s*regrole$").unwrap()
+    });
+    re.replace_all(sql, |captures: &regex::Captures<'_>| {
+        let objoid = captures[1].trim();
+        let objoid = if let Some(regrole) = regrole_re.captures(objoid) {
+            let role_name = &regrole[1];
+            format!("(select oid from pg_authid where rolname = '{role_name}')")
+        } else {
+            objoid.to_string()
+        };
+        format!(
+            "(select description from pg_description where objoid = ({objoid}) and classoid = 1260 and objsubid = 0)"
+        )
     })
     .into_owned()
 }
@@ -2737,6 +2762,63 @@ mod tests {
             .map(|row| row.oid)
             .unwrap();
         assert_eq!(state.session.current_user_oid(), tenant_oid);
+    }
+
+    #[test]
+    fn simple_query_handles_multiline_create_role_membership_clause() {
+        let db = Database::open(temp_dir("multiline_create_role"), 16).unwrap();
+        let mut state = ConnectionState {
+            session: Session::new(2),
+            prepared: HashMap::new(),
+            portals: HashMap::new(),
+            copy_in: None,
+        };
+        let mut output = Vec::new();
+
+        handle_query(
+            &mut output,
+            &db,
+            &mut state,
+            "create role regress_role_admin createrole;\n\
+             create role regress_role_super superuser;\n\
+             create role regress_createdb createdb;\n\
+             create role regress_createrole createrole;\n\
+             create role regress_login login;\n\
+             create role regress_inherit inherit;\n\
+             create role regress_connection_limit connection limit 5;\n\
+             create role regress_encrypted_password encrypted password 'foo';\n\
+             create role regress_password_null password null;\n\
+             set session authorization regress_role_admin;",
+        )
+        .unwrap();
+
+        output.clear();
+        handle_query(
+            &mut output,
+            &db,
+            &mut state,
+            "create role regress_inroles role\n\
+\tregress_role_super, regress_createdb, regress_createrole, regress_login,\n\
+\tregress_inherit, regress_connection_limit, regress_encrypted_password, regress_password_null;",
+        )
+        .unwrap();
+
+        assert!(
+            db.backend_catcache(2, None)
+                .unwrap()
+                .authid_rows()
+                .into_iter()
+                .any(|row| row.rolname == "regress_inroles")
+        );
+    }
+
+    #[test]
+    fn rewrite_shobj_description_handles_regrole_literal() {
+        let rewritten =
+            rewrite_regression_sql("select shobj_description('app_role'::regrole, 'pg_authid')")
+                .into_owned();
+        assert!(rewritten.contains("select oid from pg_authid where rolname = 'app_role'"));
+        assert!(!rewritten.contains("::regrole"));
     }
 
     #[test]

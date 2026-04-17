@@ -215,6 +215,7 @@ pub enum Statement {
     AlterTableRenameColumn(AlterTableRenameColumnStatement),
     AlterTableRename(AlterTableRenameStatement),
     AlterViewOwner(AlterRelationOwnerStatement),
+    AlterSchemaOwner(AlterSchemaOwnerStatement),
     AlterTableSet(AlterTableSetStatement),
     AlterTableSetNotNull(AlterTableSetNotNullStatement),
     AlterTableDropNotNull(AlterTableDropNotNullStatement),
@@ -790,6 +791,12 @@ pub struct AlterTableAlterColumnTypeStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterRelationOwnerStatement {
     pub relation_name: String,
+    pub new_owner: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterSchemaOwnerStatement {
+    pub schema_name: String,
     pub new_owner: String,
 }
 

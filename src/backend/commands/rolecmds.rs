@@ -141,32 +141,67 @@ pub fn grant_membership_authorized(
     catalog: &AuthCatalog,
     role_name: &str,
 ) -> Result<PgAuthIdRow, ParseError> {
+    grant_membership_authorized_with_detail(auth, catalog, role_name).map_err(|err| match err {
+        GrantMembershipAuthorizationError::Parse(err) => err,
+        GrantMembershipAuthorizationError::PermissionDenied { role_name, .. } => {
+            role_management_error(format!("permission denied to grant role \"{role_name}\""))
+        }
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GrantMembershipAuthorizationError {
+    Parse(ParseError),
+    PermissionDenied {
+        role_name: String,
+        detail: Option<String>,
+    },
+}
+
+pub fn grant_membership_authorized_with_detail(
+    auth: &AuthState,
+    catalog: &AuthCatalog,
+    role_name: &str,
+) -> Result<PgAuthIdRow, GrantMembershipAuthorizationError> {
     let role = find_role_by_name(catalog.roles(), role_name)
         .cloned()
-        .ok_or_else(|| role_management_error(format!("role \"{role_name}\" does not exist")))?;
+        .ok_or_else(|| {
+            GrantMembershipAuthorizationError::Parse(role_management_error(format!(
+                "role \"{role_name}\" does not exist"
+            )))
+        })?;
     if role.oid == PG_DATABASE_OWNER_OID {
-        return Err(role_management_error(format!(
-            "role \"{}\" cannot have explicit members",
-            role.rolname
-        )));
+        return Err(GrantMembershipAuthorizationError::Parse(
+            role_management_error(format!(
+                "role \"{}\" cannot have explicit members",
+                role.rolname
+            )),
+        ));
     }
     if role.rolsuper {
-        let current = catalog
-            .role_by_oid(auth.current_user_oid())
-            .ok_or_else(|| role_management_error("permission denied to grant role"))?;
+        let current = catalog.role_by_oid(auth.current_user_oid()).ok_or_else(|| {
+            GrantMembershipAuthorizationError::Parse(role_management_error(
+                "permission denied to grant role",
+            ))
+        })?;
         if !current.rolsuper {
-            return Err(role_management_error(format!(
-                "permission denied to grant role \"{}\"",
-                role.rolname
-            )));
+            return Err(GrantMembershipAuthorizationError::PermissionDenied {
+                role_name: role.rolname.clone(),
+                detail: Some(
+                    "Only roles with the SUPERUSER attribute may grant roles with the SUPERUSER attribute.".into(),
+                ),
+            });
         }
         return Ok(role);
     }
     if !auth.has_admin_option(role.oid, catalog) {
-        return Err(role_management_error(format!(
-            "permission denied to grant role \"{}\"",
-            role.rolname
-        )));
+        return Err(GrantMembershipAuthorizationError::PermissionDenied {
+            role_name: role.rolname.clone(),
+            detail: Some(format!(
+                "Only roles with the ADMIN option on role \"{}\" may grant this role.",
+                role.rolname
+            )),
+        });
     }
     Ok(role)
 }

@@ -1289,6 +1289,9 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::alter_view_owner_stmt => Ok(Statement::AlterViewOwner(build_alter_relation_owner(
             inner,
         )?)),
+        Rule::alter_schema_owner_stmt => {
+            Ok(Statement::AlterSchemaOwner(build_alter_schema_owner(inner)?))
+        }
         Rule::alter_table_set_stmt => Ok(Statement::AlterTableSet(build_alter_table_set(inner)?)),
         Rule::alter_table_set_not_null_stmt => Ok(Statement::AlterTableSetNotNull(
             build_alter_table_set_not_null(inner)?,
@@ -1684,18 +1687,16 @@ fn build_role_attr_option(pair: Pair<'_, Rule>) -> Result<RoleOption, ParseError
 }
 
 fn build_role_membership_option(pair: Pair<'_, Rule>) -> Result<RoleOption, ParseError> {
-    let lowered = pair.as_str().to_ascii_lowercase();
-    let option_name = if lowered.starts_with("in role ") {
-        "in role"
-    } else if lowered.starts_with("role ") {
-        "role"
-    } else if lowered.starts_with("admin ") {
-        "admin"
+    let actual = pair.as_str().to_string();
+    let trimmed = actual.trim_start();
+    let option_name = if strip_keyword_prefix(trimmed, "in role").is_some() {
+        Some("in role")
+    } else if strip_keyword_prefix(trimmed, "role").is_some() {
+        Some("role")
+    } else if strip_keyword_prefix(trimmed, "admin").is_some() {
+        Some("admin")
     } else {
-        return Err(ParseError::UnexpectedToken {
-            expected: "role membership option",
-            actual: pair.as_str().to_string(),
-        });
+        None
     };
     let mut roles = Vec::new();
 
@@ -1707,7 +1708,10 @@ fn build_role_membership_option(pair: Pair<'_, Rule>) -> Result<RoleOption, Pars
         }
     }
 
-    Ok(match option_name {
+    Ok(match option_name.ok_or_else(|| ParseError::UnexpectedToken {
+        expected: "role membership option",
+        actual: actual.clone(),
+    })? {
         "role" => RoleOption::Role(roles),
         "admin" => RoleOption::Admin(roles),
         "in role" => RoleOption::InRole(roles),
@@ -3886,6 +3890,17 @@ fn build_alter_relation_owner(
         .map(build_identifier);
     Ok(AlterRelationOwnerStatement {
         relation_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
+        new_owner: parts.next().ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
+fn build_alter_schema_owner(pair: Pair<'_, Rule>) -> Result<AlterSchemaOwnerStatement, ParseError> {
+    let mut parts = pair
+        .into_inner()
+        .filter(|part| part.as_rule() == Rule::identifier)
+        .map(build_identifier);
+    Ok(AlterSchemaOwnerStatement {
+        schema_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
         new_owner: parts.next().ok_or(ParseError::UnexpectedEof)?,
     })
 }

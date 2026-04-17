@@ -217,9 +217,9 @@ impl Database {
             Statement::ReassignOwned(ref reassign_stmt) => {
                 self.execute_reassign_owned_stmt(client_id, reassign_stmt)
             }
-            Statement::CommentOnRole(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                "role management".into(),
-            ))),
+            Statement::CommentOnRole(ref comment_stmt) => {
+                self.execute_comment_on_role_stmt(client_id, comment_stmt)
+            }
             Statement::SetSessionAuthorization(ref set_stmt) => {
                 self.execute_set_session_authorization_stmt(client_id, set_stmt)?;
                 Ok(StatementResult::AffectedRows(0))
@@ -248,6 +248,12 @@ impl Database {
                 .execute_create_schema_stmt_with_search_path(
                     client_id,
                     create_stmt,
+                    configured_search_path,
+                ),
+            Statement::AlterSchemaOwner(ref alter_stmt) => self
+                .execute_alter_schema_owner_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
                     configured_search_path,
                 ),
             Statement::CommentOnTable(ref comment_stmt) => self
