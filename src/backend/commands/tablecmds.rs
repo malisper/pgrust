@@ -38,10 +38,12 @@ use crate::backend::executor::{
     executor_start,
 };
 use crate::backend::storage::page::bufpage::MAX_HEAP_TUPLE_SIZE;
+use crate::include::access::amapi::IndexUniqueCheck;
 use crate::include::access::detoast::is_ondisk_toast_pointer;
 use crate::include::access::htup::{HeapTuple, TupleValue};
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue, array_value_from_value};
+use crate::include::nodes::execnodes::TupleSlot;
 use crate::include::nodes::execnodes::*;
 
 fn finalize_bound_insert(
@@ -247,48 +249,106 @@ pub(crate) fn maintain_indexes_for_row(
     heap_tid: ItemPointerData,
     ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
-    for index in indexes
-        .iter()
-        .filter(|index| index.index_meta.indisvalid && index.index_meta.indisready)
-    {
-        crate::backend::access::index::indexam::index_insert_stub(
-            &crate::include::access::amapi::IndexInsertContext {
-                pool: ctx.pool.clone(),
-                txns: ctx.txns.clone(),
-                txn_waiter: ctx.txn_waiter.clone(),
-                client_id: ctx.client_id,
-                interrupts: ctx.interrupts.clone(),
-                snapshot: ctx.snapshot.clone(),
-                heap_relation: heap_rel,
-                heap_desc: heap_desc.clone(),
-                index_relation: index.rel,
-                index_name: index.name.clone(),
-                index_desc: index.desc.clone(),
-                index_meta: index.index_meta.clone(),
-                values: values.to_vec(),
-                heap_tid,
-                unique_check: if index.index_meta.indisunique {
-                    crate::include::access::amapi::IndexUniqueCheck::Yes
-                } else {
-                    crate::include::access::amapi::IndexUniqueCheck::No
+    stacker::maybe_grow(32 * 1024, 32 * 1024 * 1024, || {
+        for index in indexes
+            .iter()
+            .filter(|index| index.index_meta.indisvalid && index.index_meta.indisready)
+        {
+            let key_values = index_key_values_for_row(index, heap_desc, values, ctx)?;
+            let mut index_meta = index.index_meta.clone();
+            index_meta.indkey = (1..=key_values.len())
+                .map(|attnum| attnum as i16)
+                .collect::<Vec<_>>();
+            index_meta.indexprs = None;
+            crate::backend::access::index::indexam::index_insert_stub(
+                &crate::include::access::amapi::IndexInsertContext {
+                    pool: ctx.pool.clone(),
+                    txns: ctx.txns.clone(),
+                    txn_waiter: ctx.txn_waiter.clone(),
+                    client_id: ctx.client_id,
+                    interrupts: ctx.interrupts.clone(),
+                    snapshot: ctx.snapshot.clone(),
+                    heap_relation: heap_rel,
+                    heap_desc: index.desc.clone(),
+                    index_relation: index.rel,
+                    index_name: index.name.clone(),
+                    index_desc: index.desc.clone(),
+                    index_meta,
+                    values: key_values,
+                    heap_tid,
+                    unique_check: if index.index_meta.indisunique {
+                        IndexUniqueCheck::Yes
+                    } else {
+                        IndexUniqueCheck::No
+                    },
                 },
-            },
-            index.index_meta.am_oid,
-        )
-        .map_err(|err| match err {
-            crate::backend::catalog::CatalogError::UniqueViolation(constraint) => {
-                ExecError::UniqueViolation { constraint }
+                index.index_meta.am_oid,
+            )
+            .map_err(|err| match err {
+                crate::backend::catalog::CatalogError::UniqueViolation(constraint) => {
+                    ExecError::UniqueViolation { constraint }
+                }
+                crate::backend::catalog::CatalogError::Interrupted(reason) => {
+                    ExecError::Interrupted(reason)
+                }
+                other => ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "index insertion",
+                    actual: format!("{other:?}"),
+                }),
+            })?;
+        }
+        Ok(())
+    })
+}
+
+pub(crate) fn index_key_values_for_row(
+    index: &BoundIndexRelation,
+    heap_desc: &RelationDesc,
+    values: &[Value],
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<Value>, ExecError> {
+    stacker::maybe_grow(32 * 1024, 32 * 1024 * 1024, || {
+        let mut slot = TupleSlot::virtual_row(values.to_vec());
+        let fallback_exprs;
+        let mut exprs = if !index.index_exprs.is_empty() {
+            index.index_exprs.iter()
+        } else if index.index_meta.indexprs.is_some() {
+            let catalog = ctx.catalog.as_ref().ok_or_else(|| {
+                ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "catalog for expression index evaluation",
+                    actual: "missing visible catalog".into(),
+                })
+            })?;
+            fallback_exprs =
+                crate::backend::parser::bind_index_exprs(&index.index_meta, heap_desc, catalog)
+                    .map_err(ExecError::Parse)?;
+            fallback_exprs.iter()
+        } else {
+            [].iter()
+        };
+
+        let mut key_values = Vec::with_capacity(index.index_meta.indkey.len());
+        for attnum in &index.index_meta.indkey {
+            if *attnum > 0 {
+                let idx = attnum.saturating_sub(1) as usize;
+                key_values.push(values.get(idx).cloned().ok_or_else(|| {
+                    ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "index key column",
+                        actual: "index key attnum out of range".into(),
+                    })
+                })?);
+            } else {
+                let expr = exprs.next().ok_or_else(|| {
+                    ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "index expression",
+                        actual: "missing expression for index key".into(),
+                    })
+                })?;
+                key_values.push(eval_expr(expr, &mut slot, ctx)?);
             }
-            crate::backend::catalog::CatalogError::Interrupted(reason) => {
-                ExecError::Interrupted(reason)
-            }
-            other => ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "index insertion",
-                actual: format!("{other:?}"),
-            }),
-        })?;
-    }
-    Ok(())
+        }
+        Ok(key_values)
+    })
 }
 
 fn slot_toast_context(
@@ -1078,7 +1138,9 @@ fn assign_array_slice_value(
         return Err(array_assignment_error("source array too small"));
     }
 
-    let element_type_oid = current_array.element_type_oid.or(source_array.element_type_oid);
+    let element_type_oid = current_array
+        .element_type_oid
+        .or(source_array.element_type_oid);
     if ndim == 1 {
         let mut elements = vec![Value::Null; dimensions[0].length];
         let original_lower = current_array.lower_bound(0).unwrap_or(1);
@@ -1087,7 +1149,12 @@ fn assign_array_slice_value(
             elements[target_idx] = value.clone();
         }
         let start_idx = (lower_bounds[0] - dimensions[0].lower_bound) as usize;
-        for (offset, value) in source_array.elements.into_iter().take(target_items).enumerate() {
+        for (offset, value) in source_array
+            .elements
+            .into_iter()
+            .take(target_items)
+            .enumerate()
+        {
             elements[start_idx + offset] = value;
         }
         return Ok(Value::PgArray(array_with_element_type(
@@ -1097,7 +1164,12 @@ fn assign_array_slice_value(
     }
 
     let mut elements = current_array.elements.clone();
-    for (offset, value) in source_array.elements.into_iter().take(target_items).enumerate() {
+    for (offset, value) in source_array
+        .elements
+        .into_iter()
+        .take(target_items)
+        .enumerate()
+    {
         let coords = linear_index_to_assignment_coords(offset, &lower_bounds, &span_lengths);
         let target_idx = assignment_coords_to_linear_index(&coords, &dimensions);
         elements[target_idx] = value;
@@ -1166,7 +1238,11 @@ fn assign_array_slice_into_empty(
     Ok(Value::PgArray(array_with_element_type(
         ArrayValue::from_dimensions(
             dimensions,
-            source_array.elements.into_iter().take(target_items).collect(),
+            source_array
+                .elements
+                .into_iter()
+                .take(target_items)
+                .collect(),
         ),
         source_array.element_type_oid,
     )))

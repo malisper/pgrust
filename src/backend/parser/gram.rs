@@ -2632,9 +2632,7 @@ pub(crate) fn build_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, Pars
                         Rule::order_by_clause => order_by = build_order_by_clause(inner)?,
                         Rule::limit_clause => limit = Some(build_limit_clause(inner)?),
                         Rule::offset_clause => offset = Some(build_offset_clause(inner)?),
-                        Rule::locking_clause => {
-                            locking_clause = Some(build_locking_clause(inner)?)
-                        }
+                        Rule::locking_clause => locking_clause = Some(build_locking_clause(inner)?),
                         _ => {}
                     }
                 }
@@ -3912,12 +3910,26 @@ fn build_create_index(pair: Pair<'_, Rule>) -> Result<CreateIndexStatement, Pars
 
 fn build_create_index_item(pair: Pair<'_, Rule>) -> Result<IndexColumnDef, ParseError> {
     let mut name = None;
+    let mut expr_sql = None;
     let mut opclass = None;
     let mut descending = false;
     let mut nulls_first = None;
     for part in pair.into_inner() {
         match part.as_rule() {
-            Rule::identifier if name.is_none() => name = Some(build_identifier(part)),
+            Rule::create_index_target => {
+                let inner = part.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+                match inner.as_rule() {
+                    Rule::identifier if name.is_none() => name = Some(build_identifier(inner)),
+                    Rule::create_index_expression if expr_sql.is_none() => {
+                        let expr = inner
+                            .into_inner()
+                            .find(|inner| inner.as_rule() == Rule::expr)
+                            .ok_or(ParseError::UnexpectedEof)?;
+                        expr_sql = Some(expr.as_str().to_string());
+                    }
+                    _ => {}
+                }
+            }
             Rule::create_index_opclass if opclass.is_none() => {
                 opclass = Some(build_identifier(
                     part.into_inner().next().ok_or(ParseError::UnexpectedEof)?,
@@ -3932,7 +3944,9 @@ fn build_create_index_item(pair: Pair<'_, Rule>) -> Result<IndexColumnDef, Parse
         }
     }
     Ok(IndexColumnDef {
-        name: name.ok_or(ParseError::UnexpectedEof)?,
+        name: name.unwrap_or_default(),
+        expr_sql,
+        expr_type: None,
         collation: None,
         opclass,
         descending,

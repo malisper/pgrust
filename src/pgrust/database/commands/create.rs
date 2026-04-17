@@ -126,6 +126,8 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<(), ExecError> {
         let interrupts = self.interrupt_state(client_id);
+        let catalog =
+            self.lazy_catalog_lookup(client_id, Some((xid, table_cid)), configured_search_path);
         for (index, action) in lowered.constraint_actions.iter().enumerate() {
             let action_cid = table_cid
                 .saturating_add(1)
@@ -157,6 +159,7 @@ impl Database {
                 client_id,
                 relation,
                 &index_name,
+                catalog.materialize_visible_catalog(),
                 &index_columns,
                 true,
                 action.primary,
@@ -217,8 +220,11 @@ impl Database {
             .saturating_add(1)
             .saturating_add((lowered.constraint_actions.len() as u32).saturating_mul(3));
         for (index, action) in lowered.check_actions.iter().enumerate() {
-            let catalog =
-                self.lazy_catalog_lookup(client_id, Some((xid, check_base_cid)), configured_search_path);
+            let catalog = self.lazy_catalog_lookup(
+                client_id,
+                Some((xid, check_base_cid)),
+                configured_search_path,
+            );
             crate::backend::parser::bind_check_constraint_expr(
                 &action.expr_sql,
                 Some(table_name),
@@ -268,7 +274,8 @@ impl Database {
                     .index_relations_for_heap(referenced_relation.relation_oid)
                     .into_iter()
                     .find(|index| {
-                        index.index_meta.indisunique && index.index_meta.indkey == referenced_attnums
+                        index.index_meta.indisunique
+                            && index.index_meta.indkey == referenced_attnums
                     })
                     .map(|index| index.relation_oid)
                     .ok_or_else(|| {

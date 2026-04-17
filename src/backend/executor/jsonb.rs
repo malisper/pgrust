@@ -208,7 +208,9 @@ pub(crate) fn json_input_error(text: &str, err: SerdeJsonError) -> ExecError {
             let rendered = err.to_string();
             let detail = match err.classify() {
                 serde_json::error::Category::Io => None,
-                serde_json::error::Category::Eof => Some("The input string ended unexpectedly.".into()),
+                serde_json::error::Category::Eof => {
+                    Some("The input string ended unexpectedly.".into())
+                }
                 _ => Some(
                     rendered
                         .strip_suffix(&suffix)
@@ -492,7 +494,10 @@ impl<'a> JsonDiagnosticParser<'a> {
     }
 
     fn error_expected_json_value(&self) -> JsonInputDiagnostic {
-        if self.peek().is_some_and(|ch| !matches!(ch, ':' | ',' | ']' | '}')) {
+        if self
+            .peek()
+            .is_some_and(|ch| !matches!(ch, ':' | ',' | ']' | '}'))
+        {
             return self.error_invalid_token();
         }
         self.error_expected_found("JSON value")
@@ -703,9 +708,7 @@ pub(crate) fn jsonb_from_value(value: &Value) -> Result<JsonbValue, ExecError> {
         ),
         Value::TsVector(v) => JsonbValue::String(crate::backend::executor::render_tsvector_text(v)),
         Value::TsQuery(v) => JsonbValue::String(crate::backend::executor::render_tsquery_text(v)),
-        Value::Json(text) => {
-            JsonbValue::from_serde(parse_json_text_input(text.as_str())?)?
-        }
+        Value::Json(text) => JsonbValue::from_serde(parse_json_text_input(text.as_str())?)?,
         Value::Jsonb(bytes) => decode_jsonb(bytes)?,
         Value::Record(record) => JsonbValue::Object(
             record
@@ -1723,11 +1726,7 @@ mod tests {
     #[test]
     fn json_input_error_uses_postgres_style_detail_messages() {
         let cases = [
-            (
-                "''",
-                "Token \"'\" is invalid.",
-                "JSON data, line 1: ''",
-            ),
+            ("''", "Token \"'\" is invalid.", "JSON data, line 1: ''"),
             (
                 "\"abc",
                 "Token \"\"abc\" is invalid.",
@@ -1783,23 +1782,22 @@ mod tests {
                 "Token \"trues\" is invalid.",
                 "JSON data, line 1: trues",
             ),
-            (
-                "01",
-                "Token \"01\" is invalid.",
-                "JSON data, line 1: 01",
-            ),
+            ("01", "Token \"01\" is invalid.", "JSON data, line 1: 01"),
         ];
 
         for (input, expected_detail, expected_context) in cases {
             let err = parse_json_text_input(input).unwrap_err();
-            assert!(matches!(
-                err,
-                ExecError::JsonInput {
-                    detail: Some(ref detail),
-                    context: Some(ref context),
-                    ..
-                } if detail == expected_detail && context == expected_context
-            ), "unexpected diagnostic for input {input:?}: {err:?}");
+            assert!(
+                matches!(
+                    err,
+                    ExecError::JsonInput {
+                        detail: Some(ref detail),
+                        context: Some(ref context),
+                        ..
+                    } if detail == expected_detail && context == expected_context
+                ),
+                "unexpected diagnostic for input {input:?}: {err:?}"
+            );
         }
     }
 
