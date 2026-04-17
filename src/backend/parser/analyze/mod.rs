@@ -27,9 +27,10 @@ use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, PgCastRow, PgClassRow, PgConstraintRow, PgInheritsRow, PgLanguageRow,
-    PgOperatorRow, PgProcRow, PgRewriteRow, PgStatisticRow, PgTypeRow, RECORD_TYPE_OID,
+    PgOperatorRow, PgProcRow, PgRangeRow, PgRewriteRow, PgStatisticRow, PgTypeRow, RECORD_TYPE_OID,
     bootstrap_pg_cast_rows, bootstrap_pg_language_rows, bootstrap_pg_operator_rows,
-    bootstrap_pg_proc_rows, builtin_type_rows, proc_oid_for_builtin_aggregate_function,
+    bootstrap_pg_proc_rows, builtin_range_rows, builtin_type_rows,
+    proc_oid_for_builtin_aggregate_function,
 };
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{
@@ -235,6 +236,14 @@ pub trait CatalogLookup {
 
     fn type_by_oid(&self, oid: u32) -> Option<PgTypeRow> {
         self.type_rows().into_iter().find(|row| row.oid == oid)
+    }
+
+    fn range_rows(&self) -> Vec<PgRangeRow> {
+        builtin_range_rows()
+    }
+
+    fn range_row_by_type_oid(&self, oid: u32) -> Option<PgRangeRow> {
+        self.range_rows().into_iter().find(|row| row.rngtypid == oid)
     }
 
     fn type_oid_for_sql_type(&self, sql_type: SqlType) -> Option<u32> {
