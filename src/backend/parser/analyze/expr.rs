@@ -66,6 +66,9 @@ pub(super) fn raise_expr_varlevels(expr: Expr, levels: usize) -> Expr {
                     .into_iter()
                     .map(|arg| raise_expr_varlevels(arg, levels))
                     .collect(),
+                aggfilter: aggref
+                    .aggfilter
+                    .map(|expr| raise_expr_varlevels(expr, levels)),
                 ..*aggref
             }))
         }

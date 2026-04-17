@@ -64,6 +64,9 @@ pub(super) fn finalize_expr_subqueries(
                 .into_iter()
                 .map(|arg| finalize_expr_subqueries(arg, catalog, subplans))
                 .collect(),
+            aggfilter: aggref
+                .aggfilter
+                .map(|expr| finalize_expr_subqueries(expr, catalog, subplans)),
             ..*aggref
         })),
         Expr::Op(op) => Expr::Op(Box::new(crate::include::nodes::primnodes::OpExpr {
@@ -314,6 +317,7 @@ fn finalize_agg_accum(
         aggfnoid,
         agg_variadic,
         args,
+        filter,
         distinct,
         sql_type,
     } = accum;
@@ -324,6 +328,7 @@ fn finalize_agg_accum(
             .into_iter()
             .map(|arg| finalize_expr_subqueries(arg, catalog, subplans))
             .collect(),
+        filter: filter.map(|expr| finalize_expr_subqueries(expr, catalog, subplans)),
         distinct,
         sql_type,
     }
@@ -346,6 +351,9 @@ fn rebase_expr_subplan_ids(expr: Expr, base: usize) -> Expr {
                 .into_iter()
                 .map(|arg| rebase_expr_subplan_ids(arg, base))
                 .collect(),
+            aggfilter: aggref
+                .aggfilter
+                .map(|expr| rebase_expr_subplan_ids(expr, base)),
             ..*aggref
         })),
         Expr::Op(op) => Expr::Op(Box::new(crate::include::nodes::primnodes::OpExpr {
@@ -587,6 +595,7 @@ fn rebase_agg_accum_subplan_ids(accum: AggAccum, base: usize) -> AggAccum {
             .into_iter()
             .map(|arg| rebase_expr_subplan_ids(arg, base))
             .collect(),
+        filter: accum.filter.map(|expr| rebase_expr_subplan_ids(expr, base)),
         ..accum
     }
 }

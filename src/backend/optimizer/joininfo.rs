@@ -305,6 +305,9 @@ pub(super) fn flatten_join_alias_vars_query(query: &Query, expr: Expr) -> Expr {
                 .into_iter()
                 .map(|arg| flatten_join_alias_vars_query(query, arg))
                 .collect(),
+            aggfilter: aggref
+                .aggfilter
+                .map(|expr| flatten_join_alias_vars_query(query, expr)),
             ..*aggref
         })),
         Expr::Op(op) => Expr::Op(Box::new(crate::include::nodes::primnodes::OpExpr {
@@ -445,7 +448,13 @@ pub(super) fn flatten_join_alias_vars_query(query: &Query, expr: Expr) -> Expr {
 pub(super) fn strict_relids(expr: &Expr) -> Vec<usize> {
     match expr {
         Expr::Var(var) if var.varlevelsup == 0 => vec![var.varno],
-        Expr::Aggref(aggref) => strict_relids_union(&aggref.args),
+        Expr::Aggref(aggref) => {
+            let mut relids = strict_relids_union(&aggref.args);
+            if let Some(filter) = aggref.aggfilter.as_ref() {
+                relids = relids_union(&relids, &strict_relids(filter));
+            }
+            relids
+        }
         Expr::Op(op) => strict_relids_union(&op.args),
         Expr::Bool(bool_expr) => match bool_expr.boolop {
             BoolExprType::And => strict_relids_union(&bool_expr.args),
@@ -536,6 +545,9 @@ fn collect_expr_relids(expr: &Expr, relids: &mut Vec<usize>) {
         Expr::Aggref(aggref) => {
             for arg in &aggref.args {
                 collect_expr_relids(arg, relids);
+            }
+            if let Some(filter) = aggref.aggfilter.as_ref() {
+                collect_expr_relids(filter, relids);
             }
         }
         Expr::Op(op) => {

@@ -3653,6 +3653,25 @@ fn parse_string_agg_select() {
 }
 
 #[test]
+fn parse_aggregate_filter_clause() {
+    let stmt = parse_select("select count(*) filter (where note is not null) from people").unwrap();
+    assert!(matches!(
+        &stmt.targets[0].expr,
+        SqlExpr::AggCall {
+            func: AggFunc::Count,
+            args,
+            distinct: false,
+            filter: Some(filter),
+            ..
+        } if args.is_empty()
+            && matches!(
+                filter.as_ref(),
+                SqlExpr::IsNotNull(inner) if matches!(inner.as_ref(), SqlExpr::Column(name) if name == "note")
+            )
+    ));
+}
+
+#[test]
 fn parse_variadic_aggregate_call_marks_call_level_flag() {
     std::thread::Builder::new()
         .name("parse_variadic_aggregate_call_marks_call_level_flag".into())
@@ -3681,6 +3700,14 @@ fn parse_group_by_and_having() {
     assert_eq!(stmt.group_by.len(), 1);
     assert!(matches!(stmt.group_by[0], SqlExpr::Column(ref name) if name == "name"));
     assert!(stmt.having.is_some());
+}
+
+#[test]
+fn parse_select_target_with_bare_alias() {
+    let stmt = parse_select("select id user_id from people").unwrap();
+    assert_eq!(stmt.targets.len(), 1);
+    assert_eq!(stmt.targets[0].output_name, "user_id");
+    assert!(matches!(stmt.targets[0].expr, SqlExpr::Column(ref name) if name == "id"));
 }
 
 #[test]

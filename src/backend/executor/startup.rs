@@ -18,7 +18,13 @@ fn expr_uses_outer_columns(expr: &Expr) -> bool {
     match expr {
         Expr::Var(var) => var.varlevelsup > 0,
         Expr::Param(_) => true,
-        Expr::Aggref(aggref) => aggref.args.iter().any(expr_uses_outer_columns),
+        Expr::Aggref(aggref) => {
+            aggref.args.iter().any(expr_uses_outer_columns)
+                || aggref
+                    .aggfilter
+                    .as_ref()
+                    .is_some_and(expr_uses_outer_columns)
+        }
         Expr::Op(op) => op.args.iter().any(expr_uses_outer_columns),
         Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_uses_outer_columns),
         Expr::Case(case_expr) => {
@@ -121,6 +127,10 @@ fn set_returning_call_uses_outer_columns(call: &SetReturningCall) -> bool {
 
 fn agg_accum_uses_outer_columns(accum: &crate::include::nodes::primnodes::AggAccum) -> bool {
     accum.args.iter().any(expr_uses_outer_columns)
+        || accum
+            .filter
+            .as_ref()
+            .is_some_and(expr_uses_outer_columns)
 }
 
 fn project_set_target_uses_outer_columns(

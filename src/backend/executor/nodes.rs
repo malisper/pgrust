@@ -1575,6 +1575,13 @@ impl PlanNode for AggregateState {
 
                 let group = &mut groups[group_idx];
                 for (i, accum) in self.accumulators.iter().enumerate() {
+                    if let Some(filter) = accum.filter.as_ref() {
+                        match eval_expr(filter, slot, ctx)? {
+                            Value::Bool(true) => {}
+                            Value::Bool(false) | Value::Null => continue,
+                            other => return Err(ExecError::NonBoolQual(other)),
+                        }
+                    }
                     let values = accum
                         .args
                         .iter()
