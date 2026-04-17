@@ -4,12 +4,17 @@
 
 Counts from `/tmp/pgrust_regress_todo_20260417` on 2026-04-17; `test_setup.sql` comes from `/tmp/pgrust_regress_test_setup_todo_20260417` with `--upstream-setup`.
 
+Targeted reruns on 2026-04-17:
+
+- numeric.sql: FAIL, 957/1057 queries matched from `/tmp/pgrust_numeric_regress_55433`
+- numeric.sql first mismatch is unordered cross-join row order; substantive mismatches are `width_bucket(float8, ...)`, numeric display scale/rendering, and PostgreSQL-specific error text/detail for numeric overflow and numeric-to-int casts
+
 - advisory_lock.sql: 8/38
 - aggregates.sql: 215/583
 - alter_generic.sql: 54/333
 - alter_operator.sql: 3/65
 - alter_table.sql: 433/1683
-  - expression indexes and `ALTER INDEX` operations used by `alter_table.sql`
+  - [done] expression indexes and `ALTER INDEX` operations used by `alter_table.sql`
   - partitioned tables, including `PARTITION OF`, `ATTACH PARTITION`, and `DETACH PARTITION`
   - `SET ROLE` / `RESET ROLE`
   - `ALTER VIEW` forms exercised by `alter_table.sql`
@@ -56,7 +61,7 @@ Counts from `/tmp/pgrust_regress_todo_20260417` on 2026-04-17; `test_setup.sql` 
   - [done] array read semantics need executor fixes for slice/subscript edge cases
   - [done] widen verification for array read semantics against more `arrays.sql` slice/subscript cases
   - [done] array write semantics need slice-assignment fixes, especially for multidimensional arrays
-  - correct multidimensional slice shape/extent checks during assignment in `src/backend/commands/tablecmds.rs`
+  - [done] correct multidimensional slice shape/extent checks during assignment in `src/backend/commands/tablecmds.rs`
 - async.sql: 0/11
 - bit.sql: 74/132
 - bitmapops.sql: 3/12
@@ -155,7 +160,7 @@ Counts from `/tmp/pgrust_regress_todo_20260417` on 2026-04-17; `test_setup.sql` 
 - json.sql: 138/470
 - json_encoding.sql: 23/44
 - jsonb.sql: 353/1084
-  - PostgreSQL-compatible jsonb input errors with `LINE` / `DETAIL` / `CONTEXT`
+  - [done] PostgreSQL-compatible jsonb input errors with `LINE` / `DETAIL` / `CONTEXT`
   - [done] stack depth limit handling for deeply nested jsonb input
   - aggregate-local `ORDER BY` support for `jsonb_agg` / `jsonb_object_agg`
   - jsonb containment and existence builtin semantics (`@>`, `<@`, `?`, `?|`, `?&`, helper funcs)
@@ -281,7 +286,7 @@ Counts from `/tmp/pgrust_regress_todo_20260417` on 2026-04-17; `test_setup.sql` 
 
 - Raise a PostgreSQL-style syntax error for illegal string continuation when a comment appears between adjacent string literals across lines.
 - Fold unquoted identifiers consistently so `CHAR_TBL`, `VARCHAR_TBL`, and `TEXT_TBL` resolve like PostgreSQL in `strings.sql`.
-- Match PostgreSQL `bytea` input diagnostics for malformed hex and escape sequences, including `pg_input_error_info()` messages and SQLSTATEs.
+- [done] Match PostgreSQL `bytea` input diagnostics for malformed hex and escape sequences, including `pg_input_error_info()` messages and SQLSTATEs.
 - Tighten `SIMILAR TO` and `SUBSTRING ... SIMILAR` behavior for one-separator patterns, `ESCAPE NULL`, and PostgreSQL-compatible error text.
 
 ## JSONPath follow-ups
@@ -293,15 +298,19 @@ Counts from `/tmp/pgrust_regress_todo_20260417` on 2026-04-17; `test_setup.sql` 
   `exists(...)`, method calls like `.size()` and `.type()`, and other currently-rejected valid jsonpath syntax.
 - In progress: PostgreSQL lax-mode auto-unwrapping for array/scalar access.
   Done: `lax $[0]` on scalar values now matches upstream behavior.
-  Remaining: `lax $[*]` and related scalar/array unwrapping cases.
+  Done: `lax $[*]` on scalar values now matches upstream behavior.
+  Remaining: related scalar/array unwrapping cases.
 - Done: jsonpath three-valued predicate semantics now preserve `unknown` for comparisons, `is unknown`, and filter evaluation instead of reducing everything to Rust `bool`.
-- Fix jsonpath comparison semantics for mixed types and multi-item sequences so strict comparisons do not incorrectly return `true`.
+- Done: jsonpath comparison semantics for mixed types and multi-item sequences no longer incorrectly return `true` in strict comparisons.
 - Done: recursive descent depth handling for `**` now includes the current item at depth `0`, matching `$.**`, `$.**{0}`, and `$.**{0 to last}`.
 - Align jsonpath runtime error behavior and messages with PostgreSQL where possible, especially around structural errors, out-of-range subscripts, and numeric/arithmetic failures.
 - type_sanity.sql: 0/63
 - typed_table.sql: 1/32
 - unicode.sql: 0/17
 - union.sql: 75/197
+- union.sql follow-up:
+  - [done] accept PostgreSQL-style mixed set-operation chains such as `SELECT 1 UNION SELECT 2 UNION ALL SELECT 2` instead of rejecting them in the parser
+  - investigate why bootstrap fixture tables from `scripts/test_setup_pgrust.sql` like `float8_tbl`, `int8_tbl`, and `tenk1` are not consistently resolvable during regression runs
 - updatable_views.sql: 109/1139
 - update.sql: 28/300
 - uuid.sql: 0/63
@@ -318,7 +327,8 @@ Counts from `/tmp/pgrust_regress_todo_20260417` on 2026-04-17; `test_setup.sql` 
 
 ## Features
 
-- PostgreSQL-compatible jsonb input errors with `LINE` / `DETAIL` / `CONTEXT`
+<<<<<<< HEAD
+- [done] PostgreSQL-compatible jsonb input errors with `LINE` / `DETAIL` / `CONTEXT`
 - [done] stack depth limit handling for deeply nested jsonb input
 - aggregate-local `ORDER BY` support for `jsonb_agg` / `jsonb_object_agg`
 - jsonb containment and existence builtin semantics (`@>`, `<@`, `?`, `?|`, `?&`, helper funcs)
@@ -326,7 +336,6 @@ Counts from `/tmp/pgrust_regress_todo_20260417` on 2026-04-17; `test_setup.sql` 
 - jsonb subscripting semantics
 - record-expansion semantics for `jsonb_to_record` / `jsonb_populate_record`
 
-- expression indexes and `ALTER INDEX` operations used by `alter_table.sql`
 - partitioned tables, including `PARTITION OF`, `ATTACH PARTITION`, and `DETACH PARTITION`
 - `SET ROLE` / `RESET ROLE`
 - `ALTER VIEW` forms exercised by `alter_table.sql`
@@ -408,8 +417,22 @@ Counts from `/tmp/pgrust_regress_todo_20260417` on 2026-04-17; `test_setup.sql` 
   - Add runtime tracking for function execution stats, including xact-local counters and correct visibility/drop behavior across rollback, subtransactions, and committed drops.
   - [done] Add support for SQL-visible object lookup/types used by the file’s function-stat queries: `void`, `regprocedure`, and the corresponding cast/lookup path for `'func()'::regprocedure::oid`.
   - Extend SELECT/binder support enough for the early stats queries, including querying the new stats relations and handling `ORDER BY ... COLLATE "C"` on projected text columns.
+- numeric.sql:
+  Retest source: `/tmp/pgrust_numeric_regress_55433/diff/numeric.diff`
+- Preserve PostgreSQL-compatible row order for the unordered `WITH v AS (VALUES ...) FROM v1, v2` cross-join cases in `numeric.sql`, or otherwise make the planner/executor match upstream join/input ordering closely enough for regression parity
+- Fix `width_bucket(float8, low, high, count)` boundary behavior for huge ranges; current float math can round into bucket `count + 1` or the wrong descending bucket near the upper edge
+- Make `to_char(numeric, ...)` formatting match PostgreSQL more closely when the input numeric carries excess display scale
+- Add PostgreSQL-style `DETAIL` output for numeric typmod overflow, including fractional-only numerics and infinite values rejected by typmod constraints
+- Add dedicated numeric-to-integer cast errors for `NaN` and `Infinity` instead of collapsing them into generic `smallint/integer/bigint out of range`
+- Audit the remaining `numeric.sql` formatting mismatches after the display-scale fix; many later hunks appear to be the same root cause repeated across `to_char` cases
+=======
+- Mixed set-operation chains: accept PostgreSQL-style left-associative chains such as `SELECT 1 UNION SELECT 2 UNION ALL SELECT 2` instead of rejecting them in the parser.
+- Shared regression fixture visibility: investigate why bootstrap tables from `scripts/test_setup_pgrust.sql` like `float8_tbl`, `int8_tbl`, and `tenk1` are not consistently resolvable during regression runs.
+>>>>>>> malisper/union-regressions
 
 ## DONE
 
+- expression indexes and `ALTER INDEX` operations used by `alter_table.sql`
 - `ALTER TABLE ... RENAME CONSTRAINT`
 - int2.sql
+- Normalize numeric display scale before result rendering so aggregates and scalar outputs do not keep extra trailing zeros; this affects `AVG(val)` output and many `to_char(numeric, ...)` cases

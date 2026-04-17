@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::backend::catalog::bootstrap::{bootstrap_catalog_entry, bootstrap_catalog_kinds};
 use crate::backend::catalog::catalog::allocate_relation_object_oids;
+use crate::backend::catalog::catalog::column_desc;
 use crate::backend::catalog::indexing::insert_bootstrap_system_indexes;
 use crate::backend::catalog::pg_constraint::{derived_pg_constraint_rows, sort_pg_constraint_rows};
 use crate::backend::catalog::pg_depend::{
@@ -464,7 +465,22 @@ impl Catalog {
         }
         let mut indkey = Vec::with_capacity(columns.len());
         let mut index_columns = Vec::with_capacity(columns.len());
-        for column_name in columns {
+        let mut expr_sqls = Vec::new();
+        for (position, column_name) in columns.iter().enumerate() {
+            if let Some(expr_sql) = column_name.expr_sql.as_deref() {
+                indkey.push(0);
+                expr_sqls.push(expr_sql.to_string());
+                let expr_type = column_name
+                    .expr_type
+                    .ok_or(CatalogError::Corrupt("missing expression index sql type"))?;
+                index_columns.push(column_desc(
+                    format!("expr{}", position + 1),
+                    expr_type,
+                    true,
+                ));
+                continue;
+            }
+
             let (attnum, column) = table
                 .desc
                 .columns
@@ -521,7 +537,10 @@ impl Catalog {
                 indclass: options.indclass.clone(),
                 indcollation: options.indcollation.clone(),
                 indoption: options.indoption.clone(),
-                indexprs: None,
+                indexprs: (!expr_sqls.is_empty())
+                    .then(|| serde_json::to_string(&expr_sqls))
+                    .transpose()
+                    .map_err(|_| CatalogError::Corrupt("invalid index expression metadata"))?,
                 indpred: None,
             }),
         };
@@ -956,7 +975,9 @@ impl Catalog {
         if self.constraints.iter().any(|row| {
             row.conrelid == relation_oid && row.conname.eq_ignore_ascii_case(&new_constraint_name)
         }) {
-            return Err(CatalogError::TableAlreadyExists(new_constraint_name.clone()));
+            return Err(CatalogError::TableAlreadyExists(
+                new_constraint_name.clone(),
+            ));
         }
 
         let row_index = self

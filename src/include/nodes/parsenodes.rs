@@ -821,6 +821,8 @@ pub struct CreateIndexStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexColumnDef {
     pub name: String,
+    pub expr_sql: Option<String>,
+    pub expr_type: Option<SqlType>,
     pub collation: Option<String>,
     pub opclass: Option<String>,
     pub descending: bool,
@@ -831,6 +833,8 @@ impl From<&str> for IndexColumnDef {
     fn from(value: &str) -> Self {
         Self {
             name: value.to_string(),
+            expr_sql: None,
+            expr_type: None,
             collation: None,
             opclass: None,
             descending: false,

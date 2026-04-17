@@ -636,6 +636,8 @@ fn parse_create_unique_index_statement() {
             columns: vec![
                 IndexColumnDef {
                     name: "id1".into(),
+                    expr_sql: None,
+                    expr_type: None,
                     collation: None,
                     opclass: None,
                     descending: false,
@@ -643,6 +645,8 @@ fn parse_create_unique_index_statement() {
                 },
                 IndexColumnDef {
                     name: "id2".into(),
+                    expr_sql: None,
+                    expr_type: None,
                     collation: None,
                     opclass: None,
                     descending: false,
@@ -697,6 +701,8 @@ fn parse_create_index_with_method_and_ordering() {
             columns: vec![
                 IndexColumnDef {
                     name: "id1".into(),
+                    expr_sql: None,
+                    expr_type: None,
                     collation: None,
                     opclass: None,
                     descending: true,
@@ -704,6 +710,8 @@ fn parse_create_index_with_method_and_ordering() {
                 },
                 IndexColumnDef {
                     name: "id2".into(),
+                    expr_sql: None,
+                    expr_type: None,
                     collation: None,
                     opclass: None,
                     descending: false,
@@ -733,6 +741,8 @@ fn parse_create_index_with_if_not_exists_and_opclass() {
             using_method: Some("btree".into()),
             columns: vec![IndexColumnDef {
                 name: "unique1".into(),
+                expr_sql: None,
+                expr_type: None,
                 collation: None,
                 opclass: Some("int4_ops".into()),
                 descending: false,
@@ -759,6 +769,8 @@ fn parse_create_index_without_name() {
             columns: vec![
                 IndexColumnDef {
                     name: "thousand".into(),
+                    expr_sql: None,
+                    expr_type: None,
                     collation: None,
                     opclass: None,
                     descending: false,
@@ -766,6 +778,8 @@ fn parse_create_index_without_name() {
                 },
                 IndexColumnDef {
                     name: "tenthous".into(),
+                    expr_sql: None,
+                    expr_type: None,
                     collation: None,
                     opclass: None,
                     descending: false,
@@ -783,6 +797,53 @@ fn parse_create_index_without_name() {
 fn parse_create_index_if_not_exists_requires_name() {
     let err = parse_statement("create index if not exists on tenk1 (thousand)").unwrap_err();
     assert_eq!(err.to_string(), "syntax error at or near \"ON\"");
+}
+
+#[test]
+fn parse_create_index_with_expression_item() {
+    let stmt = parse_statement("create index attmp_idx on attmp (a, (d + e), b)").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateIndex(CreateIndexStatement {
+            unique: false,
+            if_not_exists: false,
+            index_name: "attmp_idx".into(),
+            table_name: "attmp".into(),
+            using_method: None,
+            columns: vec![
+                IndexColumnDef {
+                    name: "a".into(),
+                    expr_sql: None,
+                    expr_type: None,
+                    collation: None,
+                    opclass: None,
+                    descending: false,
+                    nulls_first: None,
+                },
+                IndexColumnDef {
+                    name: String::new(),
+                    expr_sql: Some("d + e".into()),
+                    expr_type: None,
+                    collation: None,
+                    opclass: None,
+                    descending: false,
+                    nulls_first: None,
+                },
+                IndexColumnDef {
+                    name: "b".into(),
+                    expr_sql: None,
+                    expr_type: None,
+                    collation: None,
+                    opclass: None,
+                    descending: false,
+                    nulls_first: None,
+                },
+            ],
+            include_columns: Vec::new(),
+            predicate: None,
+            options: Vec::new(),
+        })
+    );
 }
 
 #[test]
@@ -3370,6 +3431,34 @@ fn parse_union_all_select_chain() {
 }
 
 #[test]
+fn parse_mixed_union_chain_preserves_left_associativity() {
+    let stmt = parse_select("select 1 as x union select 2 as x union all select 2 as x").unwrap();
+    let outer = stmt.set_operation.expect("outer set operation");
+    assert!(matches!(outer.op, SetOperator::Union { all: true }));
+    assert_eq!(outer.inputs.len(), 2);
+    let inner = outer.inputs[0]
+        .set_operation
+        .as_ref()
+        .expect("left-nested set operation");
+    assert!(matches!(inner.op, SetOperator::Union { all: false }));
+    assert_eq!(inner.inputs.len(), 2);
+}
+
+#[test]
+fn parse_intersect_precedence_over_union() {
+    let stmt = parse_select("select 1 union select 2 intersect select 3").unwrap();
+    let outer = stmt.set_operation.expect("outer set operation");
+    assert!(matches!(outer.op, SetOperator::Union { all: false }));
+    assert_eq!(outer.inputs.len(), 2);
+    let right = outer.inputs[1]
+        .set_operation
+        .as_ref()
+        .expect("right-nested set operation");
+    assert!(matches!(right.op, SetOperator::Intersect { all: false }));
+    assert_eq!(right.inputs.len(), 2);
+}
+
+#[test]
 fn parse_union_with_top_level_cte_and_order_by() {
     let stmt =
         parse_select("with q(x) as (select 1) select * from q union select * from q order by 1")
@@ -4563,10 +4652,9 @@ fn aggregate_in_where_rejected() {
 
 #[test]
 fn aggregate_rejects_nested_subquery_reference_to_local_cte() {
-    let stmt = parse_select(
-        "select (with cte1(x) as (values (1)) select count((select x from cte1)))",
-    )
-    .unwrap();
+    let stmt =
+        parse_select("select (with cte1(x) as (values (1)) select count((select x from cte1)))")
+            .unwrap();
     assert!(matches!(
         build_plan(&stmt, &catalog()),
         Err(ParseError::OuterLevelAggregateNestedCte(name)) if name == "cte1"

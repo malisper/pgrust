@@ -307,10 +307,7 @@ fn recursive_cte_intermediate_setop_with_can_read_worktable() {
 
     match result {
         StatementResult::Query { rows, .. } => {
-            assert_eq!(
-                rows,
-                vec![vec![Value::Int32(1)], vec![Value::Int32(2)]]
-            );
+            assert_eq!(rows, vec![vec![Value::Int32(1)], vec![Value::Int32(2)]]);
         }
         other => panic!("expected query result, got {:?}", other),
     }
@@ -675,6 +672,33 @@ fn union_distinct_deduplicates_rows() {
     match result {
         StatementResult::Query { rows, .. } => {
             assert_eq!(rows, vec![vec![Value::Int32(1)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn mixed_union_chain_uses_postgres_left_associativity() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    let result = session
+        .execute(
+            &db,
+            "select 1 as x union select 2 as x union all select 2 as x order by x",
+        )
+        .expect("run mixed union chain");
+
+    match result {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(1)],
+                    vec![Value::Int32(2)],
+                    vec![Value::Int32(2)]
+                ]
+            );
         }
         other => panic!("expected query result, got {:?}", other),
     }
@@ -1101,7 +1125,6 @@ fn disconnect_cleanup_aborts_open_transaction_and_releases_table_locks() {
         }
         other => panic!("expected query result, got {other:?}"),
     }
-
 }
 
 #[test]
@@ -3684,6 +3707,52 @@ fn create_index_builds_ready_valid_btree_and_explain_uses_it() {
 }
 
 #[test]
+fn create_index_supports_expression_keys() {
+    let base = temp_dir("create_index_expression_keys");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (a int4, d float8, e float8, b text)")
+        .unwrap();
+    db.execute(1, "insert into items values (1, 2.5, 3.5, 'x')")
+        .unwrap();
+    db.execute(1, "create index items_expr_idx on items (a, (d + e), b)")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select indkey, indexprs \
+             from pg_index \
+             where indexrelid = (select oid from pg_class where relname = 'items_expr_idx')",
+        ),
+        vec![vec![
+            Value::Text("1 0 4".into()),
+            Value::Text("[\"d + e\"]".into()),
+        ]]
+    );
+}
+
+#[test]
+fn unique_expression_index_rejects_duplicate_expression_value() {
+    let base = temp_dir("unique_expression_index");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (name text)").unwrap();
+    db.execute(
+        1,
+        "create unique index items_name_lower_key on items ((lower(name)))",
+    )
+    .unwrap();
+    db.execute(1, "insert into items values ('Alpha')").unwrap();
+
+    match db.execute(1, "insert into items values ('alpha')") {
+        Err(ExecError::UniqueViolation { constraint }) if constraint == "items_name_lower_key" => {}
+        other => panic!("expected unique expression violation, got {other:?}"),
+    }
+}
+
+#[test]
 fn explain_bootstrap_seqscan_shows_relation_name_and_filter() {
     let base = temp_dir("explain_bootstrap_seqscan");
     let db = Database::open(&base, 16).unwrap();
@@ -5530,8 +5599,7 @@ fn alter_table_rename_constraint_updates_catalog_and_enforcement() {
     let base = temp_dir("alter_table_rename_constraint_check");
     let db = Database::open(&base, 16).unwrap();
 
-    db.execute(1, "create table items (id int4)")
-        .unwrap();
+    db.execute(1, "create table items (id int4)").unwrap();
     db.execute(
         1,
         "alter table items add constraint items_id_positive check (id > 0)",
@@ -5732,21 +5800,14 @@ fn create_temp_table_constraints_are_supported_with_postgres_persistence_rules()
     db.execute(1, "insert into department values (1, 0, 'A')")
         .unwrap();
 
-    match db.execute(
-        1,
-        "insert into department values (2, 9, 'bad parent')",
-    ) {
+    match db.execute(1, "insert into department values (2, 9, 'bad parent')") {
         Err(ExecError::ForeignKeyViolation { constraint, .. })
             if constraint == "department_parent_department_fkey" => {}
         other => panic!("expected temp self-reference foreign-key violation, got {other:?}"),
     }
 
-    match db.execute(
-        1,
-        "insert into department values (2, 0, 'A')",
-    ) {
-        Err(ExecError::UniqueViolation { constraint })
-            if constraint == "department_name_key" => {}
+    match db.execute(1, "insert into department values (2, 0, 'A')") {
+        Err(ExecError::UniqueViolation { constraint }) if constraint == "department_name_key" => {}
         other => panic!("expected temp unique violation, got {other:?}"),
     }
 
@@ -5755,7 +5816,8 @@ fn create_temp_table_constraints_are_supported_with_postgres_persistence_rules()
         "create temp table temp_children (id int4, parent_id int4 references parents)",
     ) {
         Err(ExecError::Parse(ParseError::InvalidTableDefinition(message)))
-            if message == "constraints on temporary tables may reference only temporary tables" => {}
+            if message == "constraints on temporary tables may reference only temporary tables" => {
+        }
         other => panic!("expected postgres-style temp foreign-key rejection, got {other:?}"),
     }
 }
@@ -6546,7 +6608,10 @@ fn stats_gucs_show_postgres_like_defaults_and_runtime_values() {
         other => panic!("expected query result, got {:?}", other),
     }
 
-    match session.execute(&db, "show stats_fetch_consistency").unwrap() {
+    match session
+        .execute(&db, "show stats_fetch_consistency")
+        .unwrap()
+    {
         StatementResult::Query { rows, .. } => {
             assert_eq!(rows, vec![vec![Value::Text("cache".into())]]);
         }
@@ -6565,7 +6630,10 @@ fn stats_gucs_show_postgres_like_defaults_and_runtime_values() {
         other => panic!("expected query result, got {:?}", other),
     }
 
-    match session.execute(&db, "show stats_fetch_consistency").unwrap() {
+    match session
+        .execute(&db, "show stats_fetch_consistency")
+        .unwrap()
+    {
         StatementResult::Query { rows, .. } => {
             assert_eq!(rows, vec![vec![Value::Text("snapshot".into())]]);
         }

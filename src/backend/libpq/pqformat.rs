@@ -79,8 +79,12 @@ pub(crate) fn format_exec_error(e: &ExecError) -> String {
         ExecError::InvalidNumericInput(value) => {
             format!("invalid input syntax for type numeric: \"{value}\"")
         }
-        ExecError::InvalidByteaInput { value } => {
-            format!("invalid input syntax for type bytea: \"{value}\"")
+        ExecError::InvalidByteaInput { .. } => "invalid input syntax for type bytea".to_string(),
+        ExecError::InvalidByteaHexDigit { digit, .. } => {
+            format!("invalid hexadecimal digit: \"{digit}\"")
+        }
+        ExecError::InvalidByteaHexOddDigits { .. } => {
+            "invalid hexadecimal data: odd number of digits".to_string()
         }
         ExecError::InvalidGeometryInput { ty, value } => geometry_input_error_message(ty, value)
             .unwrap_or_else(|| format!("invalid input syntax for type {ty}: \"{value}\"")),
@@ -1636,8 +1640,9 @@ mod tests {
         )
         .unwrap();
 
-        assert!(out.windows("WJSON data, line 1: {\"a\":true\0".len()).any(|window| {
-            window == b"WJSON data, line 1: {\"a\":true\0"
-        }));
+        assert!(
+            out.windows("WJSON data, line 1: {\"a\":true\0".len())
+                .any(|window| { window == b"WJSON data, line 1: {\"a\":true\0" })
+        );
     }
 }
