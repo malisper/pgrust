@@ -596,6 +596,20 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
                 .map(|child| rebase_plan_subplan_ids(child, base))
                 .collect(),
         },
+        Plan::SetOp {
+            plan_info,
+            op,
+            output_columns,
+            children,
+        } => Plan::SetOp {
+            plan_info,
+            op,
+            output_columns,
+            children: children
+                .into_iter()
+                .map(|child| rebase_plan_subplan_ids(child, base))
+                .collect(),
+        },
         Plan::Hash {
             plan_info,
             input,
@@ -857,6 +871,20 @@ pub(super) fn finalize_plan_subqueries(
             plan_info,
             source_id,
             desc,
+            children: children
+                .into_iter()
+                .map(|child| finalize_plan_subqueries(child, catalog, subplans))
+                .collect(),
+        },
+        Plan::SetOp {
+            plan_info,
+            op,
+            output_columns,
+            children,
+        } => Plan::SetOp {
+            plan_info,
+            op,
+            output_columns,
             children: children
                 .into_iter()
                 .map(|child| finalize_plan_subqueries(child, catalog, subplans))
