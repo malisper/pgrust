@@ -1851,9 +1851,8 @@ fn value_to_json_serde(value: &Value) -> SerdeJsonValue {
         }
         Value::Record(record) => SerdeJsonValue::Object(
             record
-                .fields
                 .iter()
-                .map(|(name, value)| (name.clone(), value_to_json_serde(value)))
+                .map(|(field, value)| (field.name.clone(), value_to_json_serde(value)))
                 .collect(),
         ),
         Value::PgArray(array) => SerdeJsonValue::Array(

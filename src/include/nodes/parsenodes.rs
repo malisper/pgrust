@@ -1242,7 +1242,7 @@ impl TableConstraint {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SqlTypeKind {
     AnyArray,
     Record,
@@ -1331,7 +1331,7 @@ pub enum GeometryBinaryOp {
     OverAbove,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SqlType {
     pub kind: SqlTypeKind,
     pub typmod: i32,
@@ -1397,6 +1397,11 @@ impl SqlType {
     pub const fn with_identity(mut self, type_oid: u32, typrelid: u32) -> Self {
         self.type_oid = type_oid;
         self.typrelid = typrelid;
+        self
+    }
+
+    pub const fn with_typmod(mut self, typmod: i32) -> Self {
+        self.typmod = typmod;
         self
     }
 

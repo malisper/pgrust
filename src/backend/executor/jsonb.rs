@@ -217,9 +217,8 @@ pub(crate) fn jsonb_from_value(value: &Value) -> Result<JsonbValue, ExecError> {
         Value::Jsonb(bytes) => decode_jsonb(bytes)?,
         Value::Record(record) => JsonbValue::Object(
             record
-                .fields
                 .iter()
-                .map(|(name, value)| Ok((name.clone(), jsonb_from_value(value)?)))
+                .map(|(field, value)| Ok((field.name.clone(), jsonb_from_value(value)?)))
                 .collect::<Result<Vec<_>, ExecError>>()?,
         ),
         Value::Array(items) => JsonbValue::Array(
@@ -478,9 +477,8 @@ pub(crate) fn jsonb_builder_key(value: &Value) -> Result<String, ExecError> {
         )),
         Value::Record(record) => Ok(JsonbValue::Object(
             record
-                .fields
                 .iter()
-                .map(|(name, value)| Ok((name.clone(), jsonb_from_value(value)?)))
+                .map(|(field, value)| Ok((field.name.clone(), jsonb_from_value(value)?)))
                 .collect::<Result<Vec<_>, ExecError>>()?,
         )
         .to_serde()

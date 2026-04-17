@@ -1,10 +1,12 @@
 use super::functions::*;
 use super::infer::*;
 use super::*;
+use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::include::catalog::builtin_range_spec_for_sql_type;
 use crate::include::nodes::primnodes::{
     BoolExprType, CaseExpr as BoundCaseExpr, CaseTestExpr as BoundCaseTestExpr,
     CaseWhen as BoundCaseWhen, ExprArraySubscript, OpExprKind, WindowFuncKind,
+    expr_sql_type_hint,
 };
 
 mod func;
@@ -157,7 +159,8 @@ pub(super) fn raise_expr_varlevels(expr: Expr, levels: usize) -> Expr {
                 .collect(),
             array_type,
         },
-        Expr::Row { fields } => Expr::Row {
+        Expr::Row { descriptor, fields } => Expr::Row {
+            descriptor,
             fields: fields
                 .into_iter()
                 .map(|(name, expr)| (name, raise_expr_varlevels(expr, levels)))
@@ -403,7 +406,21 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 let fields =
                     resolve_relation_row_expr_with_outer(scope, outer_scopes, relation_name)
                         .ok_or_else(|| ParseError::UnknownColumn(name.clone()))?;
-                Expr::Row { fields }
+                Expr::Row {
+                    descriptor: assign_anonymous_record_descriptor(
+                        fields
+                            .iter()
+                            .map(|(field_name, expr)| {
+                                (
+                                    field_name.clone(),
+                                    expr_sql_type_hint(expr)
+                                        .unwrap_or(SqlType::new(SqlTypeKind::Text)),
+                                )
+                            })
+                            .collect(),
+                    ),
+                    fields,
+                }
             } else if let Some(system_column) =
                 resolve_system_column_with_outer(scope, outer_scopes, name)?
             {
@@ -450,24 +467,34 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     let fields =
                         resolve_relation_row_expr_with_outer(scope, outer_scopes, relation_name)
                             .ok_or_else(|| ParseError::UnknownColumn(name.clone()))?;
-                    field_exprs.extend(fields.into_iter().map(|(_, expr)| expr));
+                    field_exprs.extend(fields);
                     continue;
                 }
-                field_exprs.push(bind_expr_with_outer_and_ctes(
+                let expr = bind_expr_with_outer_and_ctes(
                     item,
                     scope,
                     catalog,
                     outer_scopes,
                     grouped_outer,
                     ctes,
-                )?);
+                )?;
+                let field_name = format!("f{}", field_exprs.len() + 1);
+                field_exprs.push((field_name, expr));
             }
-            Expr::Row {
-                fields: field_exprs
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, expr)| (format!("f{}", index + 1), expr))
+            let descriptor = assign_anonymous_record_descriptor(
+                field_exprs
+                    .iter()
+                    .map(|(name, expr)| {
+                        (
+                            name.clone(),
+                            expr_sql_type_hint(expr).unwrap_or(SqlType::new(SqlTypeKind::Text)),
+                        )
+                    })
                     .collect(),
+            );
+            Expr::Row {
+                descriptor,
+                fields: field_exprs,
             }
         }
         SqlExpr::BinaryOperator { op, left, right } => match op.as_str() {

@@ -535,7 +535,8 @@ fn rewrite_semantic_expr(
                 .collect::<Result<Vec<_>, _>>()?,
             array_type,
         },
-        Expr::Row { fields } => Expr::Row {
+        Expr::Row { descriptor, fields } => Expr::Row {
+            descriptor,
             fields: fields
                 .into_iter()
                 .map(|(name, expr)| {

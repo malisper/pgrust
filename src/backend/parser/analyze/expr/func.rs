@@ -1,5 +1,7 @@
 use super::*;
-use crate::include::catalog::{ANYOID, RECORD_TYPE_OID, builtin_range_spec_for_sql_type};
+use crate::backend::utils::record::assign_anonymous_record_descriptor;
+use crate::include::catalog::{ANYOID, builtin_range_spec_for_sql_type};
+use crate::include::nodes::primnodes::expr_sql_type_hint;
 
 pub(super) fn bind_row_to_json_call(
     name: &str,
@@ -62,7 +64,25 @@ fn bind_row_to_json_arg_expr(
     match arg {
         SqlExpr::Column(name) => {
             if let Some(fields) = resolve_relation_row_expr_with_outer(scope, outer_scopes, name) {
-                Ok((Expr::Row { fields }, SqlType::record(RECORD_TYPE_OID)))
+                let descriptor = assign_anonymous_record_descriptor(
+                    fields
+                        .iter()
+                        .map(|(field_name, expr)| {
+                            (
+                                field_name.clone(),
+                                expr_sql_type_hint(expr)
+                                    .unwrap_or(SqlType::new(SqlTypeKind::Text)),
+                            )
+                        })
+                        .collect(),
+                );
+                Ok((
+                    Expr::Row {
+                        descriptor: descriptor.clone(),
+                        fields,
+                    },
+                    descriptor.sql_type(),
+                ))
             } else {
                 let sql_type = infer_sql_expr_type_with_ctes(
                     arg,

@@ -16,7 +16,8 @@ use crate::backend::libpq::pqformat::{
     send_copy_in_response, send_empty_query, send_error, send_error_with_fields,
     send_error_with_hint, send_no_data, send_notice, send_notice_with_severity,
     send_parameter_description, send_parameter_status, send_parse_complete, send_query_result,
-    send_ready_for_query, send_row_description, send_typed_data_row,
+    send_ready_for_query, send_row_description, send_row_description_with_formats,
+    send_typed_data_row, validate_binary_result_formats,
 };
 use crate::backend::parser::CatalogLookup;
 use crate::backend::parser::UngroupedColumnClause;
@@ -422,6 +423,7 @@ struct PreparedStatement {
 struct BoundPortal {
     sql: String,
     params: Vec<Option<String>>,
+    result_formats: Vec<i16>,
 }
 
 struct ConnectionState {
@@ -786,6 +788,7 @@ fn execute_query_statement(
                                         stream,
                                         values,
                                         &columns,
+                                        &[],
                                         &mut row_buf,
                                         FloatFormatOptions {
                                             extra_float_digits: state.session.extra_float_digits(),
@@ -2379,7 +2382,9 @@ fn handle_bind(
     let portal_name = read_cstr(body, &mut offset)?;
     let statement_name = read_cstr(body, &mut offset)?;
     let n_format_codes = read_i16_bytes(body, &mut offset)? as usize;
-    offset += n_format_codes * 2;
+    for _ in 0..n_format_codes {
+        let _ = read_i16_bytes(body, &mut offset)?;
+    }
     let nparams = read_i16_bytes(body, &mut offset)? as usize;
     let mut params = Vec::with_capacity(nparams);
     for _ in 0..nparams {
@@ -2394,8 +2399,20 @@ fn handle_bind(
         }
     }
     let n_result_codes = read_i16_bytes(body, &mut offset)? as usize;
+    let mut result_formats = Vec::with_capacity(n_result_codes);
     for _ in 0..n_result_codes {
-        let _ = read_i16_bytes(body, &mut offset)?;
+        result_formats.push(read_i16_bytes(body, &mut offset)?);
+    }
+    if result_formats.iter().any(|code| !matches!(*code, 0 | 1)) {
+        send_error(
+            stream,
+            "0A000",
+            "unsupported result format code",
+            None,
+            None,
+            None,
+        )?;
+        return Ok(());
     }
 
     let Some(stmt) = state.prepared.get(&statement_name) else {
@@ -2414,6 +2431,7 @@ fn handle_bind(
         BoundPortal {
             sql: stmt.sql.clone(),
             params,
+            result_formats,
         },
     );
     send_bind_complete(stream)
@@ -2449,7 +2467,10 @@ fn handle_describe(
             .get(&name)
             .and_then(|portal| describe_sql(db, &state.session, &portal.sql, &portal.params))
         {
-            Some(cols) => send_row_description(stream, &cols),
+            Some(cols) => {
+                let portal = state.portals.get(&name).expect("portal still exists");
+                send_row_description_with_formats(stream, &cols, &portal.result_formats)
+            }
             None => send_no_data(stream),
         },
         _ => send_no_data(stream),
@@ -2514,11 +2535,25 @@ fn execute_portal(
     match session.execute(db, &sql) {
         Ok(StatementResult::Query { rows, columns, .. }) => {
             send_plpgsql_notices(stream, &take_notices())?;
+            if let Err(e) = validate_binary_result_formats(&rows, &columns, &portal.result_formats)
+            {
+                let message = format_exec_error(&e);
+                let hint = format_exec_error_hint(&e);
+                send_error_with_hint(
+                    stream,
+                    exec_error_sqlstate(&e),
+                    &message,
+                    hint.as_deref(),
+                    None,
+                )?;
+                return Ok(());
+            }
             for row in &rows {
                 send_typed_data_row(
                     stream,
                     row,
                     &columns,
+                    &portal.result_formats,
                     &mut row_buf,
                     FloatFormatOptions {
                         extra_float_digits: session.extra_float_digits(),

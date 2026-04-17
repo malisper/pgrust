@@ -868,7 +868,7 @@ pub(super) fn expr_sql_type(expr: &Expr) -> SqlType {
         | Expr::ScalarArrayOp(_) => SqlType::new(SqlTypeKind::Bool),
         Expr::Cast(_, ty) => *ty,
         Expr::ArrayLiteral { array_type, .. } => *array_type,
-        Expr::Row { .. } => SqlType::record(RECORD_TYPE_OID),
+        Expr::Row { descriptor, .. } => descriptor.sql_type(),
         Expr::Coalesce(left, right) => expr_sql_type_maybe(left)
             .or_else(|| expr_sql_type_maybe(right))
             .unwrap_or(SqlType::new(SqlTypeKind::Text)),
@@ -913,43 +913,5 @@ fn expr_sql_type_maybe(expr: &Expr) -> Option<SqlType> {
 }
 
 fn value_sql_type_hint(value: &Value) -> SqlType {
-    match value {
-        Value::Int16(_) => SqlType::new(SqlTypeKind::Int2),
-        Value::Int32(_) => SqlType::new(SqlTypeKind::Int4),
-        Value::Int64(_) => SqlType::new(SqlTypeKind::Int8),
-        Value::Money(_) => SqlType::new(SqlTypeKind::Money),
-        Value::Date(_) => SqlType::new(SqlTypeKind::Date),
-        Value::Time(_) => SqlType::new(SqlTypeKind::Time),
-        Value::TimeTz(_) => SqlType::new(SqlTypeKind::TimeTz),
-        Value::Timestamp(_) => SqlType::new(SqlTypeKind::Timestamp),
-        Value::TimestampTz(_) => SqlType::new(SqlTypeKind::TimestampTz),
-        Value::Bit(_) => SqlType::new(SqlTypeKind::Bit),
-        Value::Bytea(_) => SqlType::new(SqlTypeKind::Bytea),
-        Value::Point(_) => SqlType::new(SqlTypeKind::Point),
-        Value::Lseg(_) => SqlType::new(SqlTypeKind::Lseg),
-        Value::Path(_) => SqlType::new(SqlTypeKind::Path),
-        Value::Line(_) => SqlType::new(SqlTypeKind::Line),
-        Value::Box(_) => SqlType::new(SqlTypeKind::Box),
-        Value::Polygon(_) => SqlType::new(SqlTypeKind::Polygon),
-        Value::Circle(_) => SqlType::new(SqlTypeKind::Circle),
-        Value::Range(range) => sql_type_for_range_kind(range.kind),
-        Value::Float64(_) => SqlType::new(SqlTypeKind::Float8),
-        Value::Numeric(_) => SqlType::new(SqlTypeKind::Numeric),
-        Value::Json(_) => SqlType::new(SqlTypeKind::Json),
-        Value::Jsonb(_) => SqlType::new(SqlTypeKind::Jsonb),
-        Value::JsonPath(_) => SqlType::new(SqlTypeKind::JsonPath),
-        Value::TsVector(_) => SqlType::new(SqlTypeKind::TsVector),
-        Value::TsQuery(_) => SqlType::new(SqlTypeKind::TsQuery),
-        Value::Text(_) | Value::TextRef(_, _) => SqlType::new(SqlTypeKind::Text),
-        Value::InternalChar(_) => SqlType::new(SqlTypeKind::InternalChar),
-        Value::Bool(_) => SqlType::new(SqlTypeKind::Bool),
-        Value::Record(record) => {
-            if record.typrelid != 0 {
-                SqlType::named_composite(record.type_oid, record.typrelid)
-            } else {
-                SqlType::record(record.type_oid.max(RECORD_TYPE_OID))
-            }
-        }
-        Value::Array(_) | Value::PgArray(_) | Value::Null => SqlType::new(SqlTypeKind::Text),
-    }
+    value.sql_type_hint().unwrap_or(SqlType::new(SqlTypeKind::Text))
 }

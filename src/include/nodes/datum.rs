@@ -1,4 +1,5 @@
 use crate::include::nodes::datetime::{DateADT, TimeADT, TimeTzADT, TimestampADT, TimestampTzADT};
+use crate::include::nodes::parsenodes::{SqlType, SqlTypeKind};
 use crate::include::nodes::tsearch::{TsQuery, TsVector};
 use crate::pgrust::compact_string::CompactString;
 use num_bigint::BigInt;
@@ -25,42 +26,139 @@ pub struct ArrayValue {
     pub elements: Vec<Value>,
 }
 
-#[derive(Debug, Clone)]
-pub struct RecordValue {
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RecordFieldDesc {
+    pub name: String,
+    pub sql_type: SqlType,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RecordDescriptor {
     pub type_oid: u32,
     pub typrelid: u32,
     pub typmod: i32,
-    pub fields: Vec<(String, Value)>,
+    pub fields: Vec<RecordFieldDesc>,
 }
 
-impl RecordValue {
-    pub fn anonymous(fields: Vec<(String, Value)>) -> Self {
+impl RecordDescriptor {
+    pub fn anonymous(fields: Vec<(String, SqlType)>, typmod: i32) -> Self {
         Self {
             type_oid: crate::include::catalog::RECORD_TYPE_OID,
             typrelid: 0,
-            typmod: -1,
-            fields,
+            typmod,
+            fields: fields
+                .into_iter()
+                .map(|(name, sql_type)| RecordFieldDesc { name, sql_type })
+                .collect(),
         }
     }
 
-    pub fn named(type_oid: u32, typrelid: u32, typmod: i32, fields: Vec<(String, Value)>) -> Self {
+    pub fn named(
+        type_oid: u32,
+        typrelid: u32,
+        typmod: i32,
+        fields: Vec<(String, SqlType)>,
+    ) -> Self {
         Self {
             type_oid,
             typrelid,
             typmod,
-            fields,
+            fields: fields
+                .into_iter()
+                .map(|(name, sql_type)| RecordFieldDesc { name, sql_type })
+                .collect(),
         }
+    }
+
+    pub fn sql_type(&self) -> SqlType {
+        let base = if self.typrelid != 0 {
+            SqlType::named_composite(self.type_oid, self.typrelid)
+        } else {
+            SqlType::record(self.type_oid.max(crate::include::catalog::RECORD_TYPE_OID))
+        };
+        SqlType {
+            typmod: self.typmod,
+            ..base
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RecordValue {
+    pub descriptor: RecordDescriptor,
+    pub fields: Vec<Value>,
+}
+
+impl RecordValue {
+    pub fn anonymous(fields: Vec<(String, Value)>) -> Self {
+        let descriptor = RecordDescriptor::anonymous(
+            fields
+                .iter()
+                .map(|(name, value)| {
+                    (
+                        name.clone(),
+                        value.sql_type_hint().unwrap_or(SqlType::new(SqlTypeKind::Text)),
+                    )
+                })
+                .collect(),
+            -1,
+        );
+        Self {
+            descriptor,
+            fields: fields.into_iter().map(|(_, value)| value).collect(),
+        }
+    }
+
+    pub fn named(type_oid: u32, typrelid: u32, typmod: i32, fields: Vec<(String, Value)>) -> Self {
+        let descriptor = RecordDescriptor::named(
+            type_oid,
+            typrelid,
+            typmod,
+            fields
+                .iter()
+                .map(|(name, value)| {
+                    (
+                        name.clone(),
+                        value.sql_type_hint().unwrap_or(SqlType::new(SqlTypeKind::Text)),
+                    )
+                })
+                .collect(),
+        );
+        Self {
+            descriptor,
+            fields: fields.into_iter().map(|(_, value)| value).collect(),
+        }
+    }
+
+    pub fn from_descriptor(descriptor: RecordDescriptor, fields: Vec<Value>) -> Self {
+        debug_assert_eq!(descriptor.fields.len(), fields.len());
+        Self { descriptor, fields }
+    }
+
+    pub fn type_oid(&self) -> u32 {
+        self.descriptor.type_oid
+    }
+
+    pub fn typrelid(&self) -> u32 {
+        self.descriptor.typrelid
+    }
+
+    pub fn typmod(&self) -> i32 {
+        self.descriptor.typmod
+    }
+
+    pub fn sql_type(&self) -> SqlType {
+        self.descriptor.sql_type()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&RecordFieldDesc, &Value)> {
+        self.descriptor.fields.iter().zip(self.fields.iter())
     }
 }
 
 impl PartialEq for RecordValue {
     fn eq(&self, other: &Self) -> bool {
-        self.fields.len() == other.fields.len()
-            && self
-                .fields
-                .iter()
-                .zip(&other.fields)
-                .all(|((_, left), (_, right))| left == right)
+        self.fields == other.fields
     }
 }
 
@@ -69,7 +167,7 @@ impl Eq for RecordValue {}
 impl Hash for RecordValue {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.fields.len().hash(state);
-        for (_, value) in &self.fields {
+        for value in &self.fields {
             value.hash(state);
         }
     }
@@ -744,14 +842,8 @@ impl Value {
             }
             Value::PgArray(array) => Value::PgArray(array.to_owned_value()),
             Value::Record(record) => Value::Record(RecordValue {
-                type_oid: record.type_oid,
-                typrelid: record.typrelid,
-                typmod: record.typmod,
-                fields: record
-                    .fields
-                    .iter()
-                    .map(|(name, value)| (name.clone(), value.to_owned_value()))
-                    .collect(),
+                descriptor: record.descriptor.clone(),
+                fields: record.fields.iter().map(Value::to_owned_value).collect(),
             }),
             Value::Null => Value::Null,
         }
@@ -773,7 +865,7 @@ impl Value {
                     *item = item.to_owned_value();
                 }
             } else if let Value::Record(record) = v {
-                for (_, value) in record.fields.iter_mut() {
+                for value in record.fields.iter_mut() {
                     *value = value.to_owned_value();
                 }
             } else if let Value::Range(range) = v {
@@ -789,6 +881,59 @@ impl Value {
 
     pub fn as_array_value(&self) -> Option<ArrayValue> {
         array_value_from_value(self)
+    }
+
+    pub fn sql_type_hint(&self) -> Option<SqlType> {
+        match self {
+            Value::Int16(_) => Some(SqlType::new(SqlTypeKind::Int2)),
+            Value::Int32(_) => Some(SqlType::new(SqlTypeKind::Int4)),
+            Value::Int64(_) => Some(SqlType::new(SqlTypeKind::Int8)),
+            Value::Money(_) => Some(SqlType::new(SqlTypeKind::Money)),
+            Value::Date(_) => Some(SqlType::new(SqlTypeKind::Date)),
+            Value::Time(_) => Some(SqlType::new(SqlTypeKind::Time)),
+            Value::TimeTz(_) => Some(SqlType::new(SqlTypeKind::TimeTz)),
+            Value::Timestamp(_) => Some(SqlType::new(SqlTypeKind::Timestamp)),
+            Value::TimestampTz(_) => Some(SqlType::new(SqlTypeKind::TimestampTz)),
+            Value::Bit(bits) => Some(SqlType::with_bit_len(SqlTypeKind::VarBit, bits.bit_len)),
+            Value::Bytea(_) => Some(SqlType::new(SqlTypeKind::Bytea)),
+            Value::Point(_) => Some(SqlType::new(SqlTypeKind::Point)),
+            Value::Lseg(_) => Some(SqlType::new(SqlTypeKind::Lseg)),
+            Value::Path(_) => Some(SqlType::new(SqlTypeKind::Path)),
+            Value::Line(_) => Some(SqlType::new(SqlTypeKind::Line)),
+            Value::Box(_) => Some(SqlType::new(SqlTypeKind::Box)),
+            Value::Polygon(_) => Some(SqlType::new(SqlTypeKind::Polygon)),
+            Value::Circle(_) => Some(SqlType::new(SqlTypeKind::Circle)),
+            Value::Range(range) => Some(crate::include::catalog::sql_type_for_range_kind(range.kind)),
+            Value::Float64(_) => Some(SqlType::new(SqlTypeKind::Float8)),
+            Value::Numeric(_) => Some(SqlType::new(SqlTypeKind::Numeric)),
+            Value::Json(_) => Some(SqlType::new(SqlTypeKind::Json)),
+            Value::Jsonb(_) => Some(SqlType::new(SqlTypeKind::Jsonb)),
+            Value::JsonPath(_) => Some(SqlType::new(SqlTypeKind::JsonPath)),
+            Value::TsVector(_) => Some(SqlType::new(SqlTypeKind::TsVector)),
+            Value::TsQuery(_) => Some(SqlType::new(SqlTypeKind::TsQuery)),
+            Value::Text(_) | Value::TextRef(_, _) => Some(SqlType::new(SqlTypeKind::Text)),
+            Value::InternalChar(_) => Some(SqlType::new(SqlTypeKind::InternalChar)),
+            Value::Bool(_) => Some(SqlType::new(SqlTypeKind::Bool)),
+            Value::Array(items) => items
+                .iter()
+                .find_map(Value::sql_type_hint)
+                .map(SqlType::array_of)
+                .or_else(|| Some(SqlType::array_of(SqlType::new(SqlTypeKind::Text)))),
+            Value::PgArray(array) => {
+                let element_type = array
+                    .element_type_oid
+                    .and_then(|oid| {
+                        crate::include::catalog::builtin_type_rows()
+                            .into_iter()
+                            .find(|row| row.oid == oid)
+                            .map(|row| row.sql_type)
+                    })
+                    .or_else(|| array.elements.iter().find_map(Value::sql_type_hint));
+                element_type.map(SqlType::array_of)
+            }
+            Value::Record(record) => Some(record.sql_type()),
+            Value::Null => None,
+        }
     }
 }
 

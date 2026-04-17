@@ -396,7 +396,7 @@ fn expr_contains_window_func(expr: &Expr) -> bool {
             expr_contains_window_func(left) || expr_contains_window_func(right)
         }
         Expr::ArrayLiteral { elements, .. } => elements.iter().any(expr_contains_window_func),
-        Expr::Row { fields } => fields
+        Expr::Row { fields, .. } => fields
             .iter()
             .any(|(_, expr)| expr_contains_window_func(expr)),
         Expr::ArraySubscript { array, subscripts } => {
@@ -510,7 +510,7 @@ fn collect_group_input_exprs(expr: &Expr, group_by: &[Expr], exprs: &mut Vec<Exp
                 collect_group_input_exprs(element, group_by, exprs);
             }
         }
-        Expr::Row { fields } => {
+        Expr::Row { fields, .. } => {
             for (_, expr) in fields {
                 collect_group_input_exprs(expr, group_by, exprs);
             }
@@ -639,7 +639,7 @@ fn collect_supporting_inputs(expr: &Expr, exprs: &mut Vec<Expr>) {
                 collect_supporting_inputs(element, exprs);
             }
         }
-        Expr::Row { fields } => {
+        Expr::Row { fields, .. } => {
             for (_, expr) in fields {
                 collect_supporting_inputs(expr, exprs);
             }
@@ -895,7 +895,7 @@ fn collect_query_outer_refs_expr(expr: &Expr, levelsup: usize, exprs: &mut Vec<E
                 collect_query_outer_refs_expr(element, levelsup, exprs);
             }
         }
-        Expr::Row { fields } => {
+        Expr::Row { fields, .. } => {
             for (_, expr) in fields {
                 collect_query_outer_refs_expr(expr, levelsup, exprs);
             }

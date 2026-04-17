@@ -6,7 +6,7 @@ use crate::include::catalog::{
     proc_oid_for_builtin_scalar_function, proc_oid_for_builtin_window_function,
     sql_type_for_range_kind,
 };
-use crate::include::nodes::datum::{RangeTypeId, Value};
+use crate::include::nodes::datum::{RangeTypeId, RecordDescriptor, Value};
 use crate::include::nodes::parsenodes::Query;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -851,6 +851,7 @@ pub enum Expr {
         array_type: SqlType,
     },
     Row {
+        descriptor: RecordDescriptor,
         fields: Vec<(String, Expr)>,
     },
     Coalesce(Box<Expr>, Box<Expr>),
@@ -1112,7 +1113,7 @@ fn binary_result_type(left: &Expr, right: &Expr) -> SqlType {
         .unwrap_or(SqlType::new(SqlTypeKind::Text))
 }
 
-fn expr_sql_type_hint(expr: &Expr) -> Option<SqlType> {
+pub fn expr_sql_type_hint(expr: &Expr) -> Option<SqlType> {
     match expr {
         Expr::Var(var) => Some(var.vartype),
         Expr::Param(param) => Some(param.paramtype),
@@ -1121,7 +1122,7 @@ fn expr_sql_type_hint(expr: &Expr) -> Option<SqlType> {
         Expr::WindowFunc(window_func) => Some(window_func.result_type),
         Expr::Cast(_, ty) => Some(*ty),
         Expr::ArrayLiteral { array_type, .. } => Some(*array_type),
-        Expr::Row { .. } => Some(SqlType::record(RECORD_TYPE_OID)),
+        Expr::Row { descriptor, .. } => Some(descriptor.sql_type()),
         Expr::Coalesce(left, right) => {
             expr_sql_type_hint(left).or_else(|| expr_sql_type_hint(right))
         }
@@ -1174,43 +1175,7 @@ fn expr_sql_type_hint(expr: &Expr) -> Option<SqlType> {
 }
 
 fn value_sql_type_hint(value: &Value) -> Option<SqlType> {
-    match value {
-        Value::Int16(_) => Some(SqlType::new(SqlTypeKind::Int2)),
-        Value::Int32(_) => Some(SqlType::new(SqlTypeKind::Int4)),
-        Value::Int64(_) => Some(SqlType::new(SqlTypeKind::Int8)),
-        Value::Money(_) => Some(SqlType::new(SqlTypeKind::Money)),
-        Value::Date(_) => Some(SqlType::new(SqlTypeKind::Date)),
-        Value::Time(_) => Some(SqlType::new(SqlTypeKind::Time)),
-        Value::TimeTz(_) => Some(SqlType::new(SqlTypeKind::TimeTz)),
-        Value::Timestamp(_) => Some(SqlType::new(SqlTypeKind::Timestamp)),
-        Value::TimestampTz(_) => Some(SqlType::new(SqlTypeKind::TimestampTz)),
-        Value::Bit(_) => Some(SqlType::new(SqlTypeKind::Bit)),
-        Value::Bytea(_) => Some(SqlType::new(SqlTypeKind::Bytea)),
-        Value::Point(_) => Some(SqlType::new(SqlTypeKind::Point)),
-        Value::Lseg(_) => Some(SqlType::new(SqlTypeKind::Lseg)),
-        Value::Path(_) => Some(SqlType::new(SqlTypeKind::Path)),
-        Value::Line(_) => Some(SqlType::new(SqlTypeKind::Line)),
-        Value::Box(_) => Some(SqlType::new(SqlTypeKind::Box)),
-        Value::Polygon(_) => Some(SqlType::new(SqlTypeKind::Polygon)),
-        Value::Circle(_) => Some(SqlType::new(SqlTypeKind::Circle)),
-        Value::Range(range) => Some(sql_type_for_range_kind(range.kind)),
-        Value::Float64(_) => Some(SqlType::new(SqlTypeKind::Float8)),
-        Value::Numeric(_) => Some(SqlType::new(SqlTypeKind::Numeric)),
-        Value::Json(_) => Some(SqlType::new(SqlTypeKind::Json)),
-        Value::Jsonb(_) => Some(SqlType::new(SqlTypeKind::Jsonb)),
-        Value::JsonPath(_) => Some(SqlType::new(SqlTypeKind::JsonPath)),
-        Value::TsVector(_) => Some(SqlType::new(SqlTypeKind::TsVector)),
-        Value::TsQuery(_) => Some(SqlType::new(SqlTypeKind::TsQuery)),
-        Value::Text(_) | Value::TextRef(_, _) => Some(SqlType::new(SqlTypeKind::Text)),
-        Value::InternalChar(_) => Some(SqlType::new(SqlTypeKind::InternalChar)),
-        Value::Bool(_) => Some(SqlType::new(SqlTypeKind::Bool)),
-        Value::Record(record) => Some(if record.typrelid != 0 {
-            SqlType::named_composite(record.type_oid, record.typrelid)
-        } else {
-            SqlType::record(record.type_oid.max(RECORD_TYPE_OID))
-        }),
-        Value::Array(_) | Value::PgArray(_) | Value::Null => None,
-    }
+    value.sql_type_hint()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

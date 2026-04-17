@@ -1,9 +1,10 @@
 use super::functions::{resolve_function_call, resolve_scalar_function};
 use super::ranges::infer_range_special_expr_type_with_ctes;
 use super::*;
-use crate::include::catalog::RECORD_TYPE_OID;
+use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::include::catalog::builtin_range_spec_for_sql_type;
 use crate::include::catalog::sql_type_for_range_kind;
+use crate::include::nodes::primnodes::expr_sql_type_hint;
 
 pub(super) fn infer_sql_expr_type(
     expr: &SqlExpr,
@@ -48,7 +49,14 @@ pub(super) fn infer_sql_expr_type_with_ctes(
     match expr {
         SqlExpr::Column(name) => {
             if name.ends_with(".*") {
-                SqlType::record(RECORD_TYPE_OID)
+                infer_sql_row_expr_type(
+                    std::slice::from_ref(expr),
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )
             } else {
                 resolve_system_column_with_outer(scope, outer_scopes, name)
                     .ok()
@@ -82,7 +90,9 @@ pub(super) fn infer_sql_expr_type_with_ctes(
         SqlExpr::Const(Value::Bit(v)) => SqlType::with_bit_len(SqlTypeKind::VarBit, v.bit_len),
         SqlExpr::Const(Value::Bytea(_)) => SqlType::new(SqlTypeKind::Bytea),
         SqlExpr::Const(Value::Bool(_)) => SqlType::new(SqlTypeKind::Bool),
-        SqlExpr::Row(_) => SqlType::record(RECORD_TYPE_OID),
+        SqlExpr::Row(items) => {
+            infer_sql_row_expr_type(items, scope, catalog, outer_scopes, grouped_outer, ctes)
+        }
         SqlExpr::Const(Value::Numeric(_)) => SqlType::new(SqlTypeKind::Numeric),
         SqlExpr::Const(Value::Json(_)) => SqlType::new(SqlTypeKind::Json),
         SqlExpr::Const(Value::Jsonb(_)) => SqlType::new(SqlTypeKind::Jsonb),
@@ -97,13 +107,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
         SqlExpr::Const(Value::TsVector(_)) => SqlType::new(SqlTypeKind::TsVector),
         SqlExpr::Const(Value::TsQuery(_)) => SqlType::new(SqlTypeKind::TsQuery),
         SqlExpr::Const(Value::InternalChar(_)) => SqlType::new(SqlTypeKind::InternalChar),
-        SqlExpr::Const(Value::Record(record)) => {
-            if record.typrelid != 0 {
-                SqlType::named_composite(record.type_oid, record.typrelid)
-            } else {
-                SqlType::record(record.type_oid.max(RECORD_TYPE_OID))
-            }
-        }
+        SqlExpr::Const(Value::Record(record)) => record.sql_type(),
         SqlExpr::Const(Value::Text(_))
         | SqlExpr::Const(Value::TextRef(_, _))
         | SqlExpr::Const(Value::Null) => SqlType::new(SqlTypeKind::Text),
@@ -885,6 +889,42 @@ pub(super) fn infer_sql_expr_type_with_ctes(
             .map(|precision| SqlType::with_time_precision(SqlTypeKind::Timestamp, precision))
             .unwrap_or_else(|| SqlType::new(SqlTypeKind::Timestamp)),
     }
+}
+
+fn infer_sql_row_expr_type(
+    items: &[SqlExpr],
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> SqlType {
+    let mut fields = Vec::new();
+    let mut next_index = 1usize;
+    for item in items {
+        if let SqlExpr::Column(name) = item
+            && let Some(relation_name) = name.strip_suffix(".*")
+            && let Some(relation_fields) =
+                resolve_relation_row_expr_with_outer(scope, outer_scopes, relation_name)
+        {
+            for (field_name, expr) in relation_fields {
+                fields.push((
+                    field_name,
+                    expr_sql_type_hint(&expr).unwrap_or(SqlType::new(SqlTypeKind::Text)),
+                ));
+            }
+            next_index = fields.len() + 1;
+            continue;
+        }
+
+        fields.push((
+            format!("f{next_index}"),
+            infer_sql_expr_type_with_ctes(item, scope, catalog, outer_scopes, grouped_outer, ctes),
+        ));
+        next_index += 1;
+    }
+
+    assign_anonymous_record_descriptor(fields).sql_type()
 }
 
 pub(super) fn infer_common_scalar_expr_type_with_ctes(

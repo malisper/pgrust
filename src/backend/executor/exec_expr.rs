@@ -724,11 +724,12 @@ pub fn eval_expr(
             }
         }
         Expr::Const(value) => Ok(value.clone()),
-        Expr::Row { fields } => Ok(Value::Record(
-            crate::include::nodes::datum::RecordValue::anonymous(
+        Expr::Row { descriptor, fields } => Ok(Value::Record(
+            crate::include::nodes::datum::RecordValue::from_descriptor(
+                descriptor.clone(),
                 fields
                     .iter()
-                    .map(|(name, expr)| Ok((name.clone(), eval_expr(expr, slot, ctx)?)))
+                    .map(|(_, expr)| eval_expr(expr, slot, ctx))
                     .collect::<Result<Vec<_>, ExecError>>()?,
             ),
         )),
@@ -1018,11 +1019,12 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
             }
         }
         Expr::Const(value) => Ok(value.clone()),
-        Expr::Row { fields } => Ok(Value::Record(
-            crate::include::nodes::datum::RecordValue::anonymous(
+        Expr::Row { descriptor, fields } => Ok(Value::Record(
+            crate::include::nodes::datum::RecordValue::from_descriptor(
+                descriptor.clone(),
                 fields
                     .iter()
-                    .map(|(name, expr)| Ok((name.clone(), eval_plpgsql_expr(expr, slot)?)))
+                    .map(|(_, expr)| eval_plpgsql_expr(expr, slot))
                     .collect::<Result<Vec<_>, ExecError>>()?,
             ),
         )),

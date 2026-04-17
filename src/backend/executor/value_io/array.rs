@@ -188,7 +188,7 @@ fn encode_array_element_payload(
             right: Value::Null,
         }),
         Value::Jsonb(bytes) => Ok(bytes),
-        Value::Record(_) => encode_internal_value(&coerced),
+        Value::Record(record) => encode_composite_datum(&record),
     }
 }
 
@@ -707,10 +707,10 @@ fn infer_sql_type_from_value(value: &Value) -> Option<SqlType> {
         Value::Box(_) => Some(SqlType::new(SqlTypeKind::Box)),
         Value::Polygon(_) => Some(SqlType::new(SqlTypeKind::Polygon)),
         Value::Circle(_) => Some(SqlType::new(SqlTypeKind::Circle)),
-        Value::Record(record) => Some(if record.typrelid != 0 {
-            SqlType::named_composite(record.type_oid, record.typrelid)
+        Value::Record(record) => Some(if record.typrelid() != 0 {
+            SqlType::named_composite(record.type_oid(), record.typrelid())
         } else {
-            SqlType::record(record.type_oid.max(RECORD_TYPE_OID))
+            record.sql_type()
         }),
         Value::Range(range) => Some(sql_type_for_range_kind(range.kind)),
     }
@@ -726,7 +726,9 @@ fn decode_array_element_value(
             column: column.into(),
             details: "anyarray cannot be used as a concrete array element type".into(),
         }),
-        SqlTypeKind::Record | SqlTypeKind::Composite => decode_internal_value(bytes),
+        SqlTypeKind::Record | SqlTypeKind::Composite => {
+            decode_composite_datum(bytes).map(Value::Record)
+        }
         SqlTypeKind::Int2 => {
             if bytes.len() != 2 {
                 return Err(ExecError::InvalidStorageValue {

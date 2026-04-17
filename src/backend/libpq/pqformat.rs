@@ -8,7 +8,7 @@ use crate::backend::executor::{
     render_datetime_value_text_with_config, render_geometry_text, render_internal_char_text,
     render_range_text,
 };
-use crate::backend::parser::SqlTypeKind;
+use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::include::access::htup::TupleError;
 use crate::include::catalog::{
@@ -196,7 +196,7 @@ pub(crate) fn send_query_result(
     send_row_description(stream, columns)?;
     let mut row_buf = Vec::new();
     for row in rows {
-        send_typed_data_row(stream, row, columns, &mut row_buf, float_format.clone())?;
+        send_typed_data_row(stream, row, columns, &[], &mut row_buf, float_format.clone())?;
     }
     send_command_complete(stream, tag)
 }
@@ -235,9 +235,17 @@ pub(crate) fn send_ready_for_query(w: &mut impl Write, status: u8) -> io::Result
 }
 
 pub(crate) fn send_row_description(w: &mut impl Write, columns: &[QueryColumn]) -> io::Result<()> {
+    send_row_description_with_formats(w, columns, &[])
+}
+
+pub(crate) fn send_row_description_with_formats(
+    w: &mut impl Write,
+    columns: &[QueryColumn],
+    result_formats: &[i16],
+) -> io::Result<()> {
     let mut body = Vec::new();
     body.extend_from_slice(&(columns.len() as i16).to_be_bytes());
-    for col in columns {
+    for (index, col) in columns.iter().enumerate() {
         body.extend_from_slice(col.name.as_bytes());
         body.push(0);
         body.extend_from_slice(&0_i32.to_be_bytes());
@@ -246,13 +254,101 @@ pub(crate) fn send_row_description(w: &mut impl Write, columns: &[QueryColumn]) 
         body.extend_from_slice(&oid.to_be_bytes());
         body.extend_from_slice(&typlen.to_be_bytes());
         body.extend_from_slice(&typmod.to_be_bytes());
-        body.extend_from_slice(&0_i16.to_be_bytes());
+        body.extend_from_slice(&result_format_code(result_formats, index).to_be_bytes());
     }
 
     w.write_all(&[b'T'])?;
     w.write_all(&((body.len() + 4) as i32).to_be_bytes())?;
     w.write_all(&body)?;
     Ok(())
+}
+
+fn result_format_code(result_formats: &[i16], index: usize) -> i16 {
+    match result_formats {
+        [] => 0,
+        [single] => *single,
+        many => many.get(index).copied().unwrap_or(0),
+    }
+}
+
+pub(crate) fn validate_binary_result_formats(
+    rows: &[Vec<Value>],
+    columns: &[QueryColumn],
+    result_formats: &[i16],
+) -> Result<(), ExecError> {
+    for (index, column) in columns.iter().enumerate() {
+        match result_format_code(result_formats, index) {
+            0 => {}
+            1 => {
+                validate_binary_output_type(column.sql_type)?;
+                for row in rows {
+                    let Some(value) = row.get(index) else {
+                        continue;
+                    };
+                    if matches!(value, Value::Null) {
+                        continue;
+                    }
+                    let _ = encode_binary_data_row_value(value, column.sql_type)?;
+                }
+            }
+            code => {
+                return Err(ExecError::Parse(
+                    crate::backend::parser::ParseError::FeatureNotSupported(format!(
+                        "result format code {code}"
+                    )),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_binary_output_type(sql_type: SqlType) -> Result<(), ExecError> {
+    let supported = if sql_type.is_array {
+        matches!(sql_type.kind, SqlTypeKind::Record | SqlTypeKind::Composite)
+    } else {
+        matches!(
+            sql_type.kind,
+            SqlTypeKind::Int2
+                | SqlTypeKind::Int4
+                | SqlTypeKind::Int8
+                | SqlTypeKind::Tid
+                | SqlTypeKind::Oid
+                | SqlTypeKind::Xid
+                | SqlTypeKind::Money
+                | SqlTypeKind::RegConfig
+                | SqlTypeKind::RegDictionary
+                | SqlTypeKind::Bool
+                | SqlTypeKind::Bytea
+                | SqlTypeKind::Text
+                | SqlTypeKind::Varchar
+                | SqlTypeKind::Char
+                | SqlTypeKind::Name
+                | SqlTypeKind::PgNodeTree
+                | SqlTypeKind::Json
+                | SqlTypeKind::JsonPath
+                | SqlTypeKind::InternalChar
+                | SqlTypeKind::Float4
+                | SqlTypeKind::Float8
+                | SqlTypeKind::Date
+                | SqlTypeKind::Time
+                | SqlTypeKind::TimeTz
+                | SqlTypeKind::Timestamp
+                | SqlTypeKind::TimestampTz
+                | SqlTypeKind::Record
+                | SqlTypeKind::Composite
+        )
+    };
+    if supported {
+        Ok(())
+    } else {
+        Err(ExecError::Parse(
+            crate::backend::parser::ParseError::FeatureNotSupported(format!(
+                "binary output for {:?}",
+                sql_type
+            )),
+        ))
+    }
 }
 
 fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
@@ -376,6 +472,7 @@ pub(crate) fn send_typed_data_row(
     w: &mut impl Write,
     values: &[Value],
     columns: &[QueryColumn],
+    result_formats: &[i16],
     buf: &mut Vec<u8>,
     float_format: FloatFormatOptions,
 ) -> io::Result<()> {
@@ -383,6 +480,25 @@ pub(crate) fn send_typed_data_row(
     buf.extend_from_slice(&(values.len() as i16).to_be_bytes());
     for (idx, val) in values.iter().enumerate() {
         let sql_type = columns.get(idx).map(|col| col.sql_type);
+        let format_code = result_format_code(result_formats, idx);
+        if format_code == 1 {
+            if matches!(val, Value::Null) {
+                buf.extend_from_slice(&(-1_i32).to_be_bytes());
+                continue;
+            }
+            let sql_type = sql_type.ok_or_else(|| io::Error::other("missing column type"))?;
+            let payload = encode_binary_data_row_value(val, sql_type)
+                .map_err(|e| io::Error::other(format!("{e:?}")))?;
+            buf.extend_from_slice(&(payload.len() as i32).to_be_bytes());
+            buf.extend_from_slice(&payload);
+            continue;
+        }
+        if format_code != 0 {
+            return Err(io::Error::other(format!(
+                "unsupported result format code {}",
+                format_code
+            )));
+        }
         match val {
             Value::Null => buf.extend_from_slice(&(-1_i32).to_be_bytes()),
             Value::Int16(v) => {
@@ -537,6 +653,179 @@ pub(crate) fn send_typed_data_row(
     w.write_all(&((buf.len() + 4) as i32).to_be_bytes())?;
     w.write_all(buf)?;
     Ok(())
+}
+
+fn encode_binary_data_row_value(value: &Value, sql_type: SqlType) -> Result<Vec<u8>, ExecError> {
+    match value {
+        Value::Null => Ok(Vec::new()),
+        Value::Int16(v) if matches!(sql_type.kind, SqlTypeKind::Int2) => Ok(v.to_be_bytes().to_vec()),
+        Value::Int32(v)
+            if matches!(
+                sql_type.kind,
+                SqlTypeKind::Int4 | SqlTypeKind::Tid
+            ) =>
+        {
+            Ok(v.to_be_bytes().to_vec())
+        }
+        Value::Int64(v)
+            if matches!(
+                sql_type.kind,
+                SqlTypeKind::Int8 | SqlTypeKind::Money
+            ) =>
+        {
+            Ok(v.to_be_bytes().to_vec())
+        }
+        Value::Int64(v)
+            if matches!(
+                sql_type.kind,
+                SqlTypeKind::Oid | SqlTypeKind::Xid | SqlTypeKind::RegConfig | SqlTypeKind::RegDictionary
+            ) =>
+        {
+            let oid = u32::try_from(*v).map_err(|_| ExecError::OidOutOfRange)?;
+            Ok(oid.to_be_bytes().to_vec())
+        }
+        Value::Bool(v) => Ok(vec![u8::from(*v)]),
+        Value::Bytea(bytes) => Ok(bytes.clone()),
+        Value::Text(text)
+            if matches!(
+                sql_type.kind,
+                SqlTypeKind::Text
+                    | SqlTypeKind::Varchar
+                    | SqlTypeKind::Char
+                    | SqlTypeKind::Name
+                    | SqlTypeKind::PgNodeTree
+                    | SqlTypeKind::Json
+                    | SqlTypeKind::JsonPath
+            ) =>
+        {
+            Ok(text.as_bytes().to_vec())
+        }
+        Value::TextRef(_, _)
+            if matches!(
+                sql_type.kind,
+                SqlTypeKind::Text
+                    | SqlTypeKind::Varchar
+                    | SqlTypeKind::Char
+                    | SqlTypeKind::Name
+                    | SqlTypeKind::PgNodeTree
+                    | SqlTypeKind::Json
+                    | SqlTypeKind::JsonPath
+            ) =>
+        {
+            Ok(value.as_text().unwrap_or_default().as_bytes().to_vec())
+        }
+        Value::InternalChar(byte) => Ok(vec![*byte]),
+        Value::Float64(v) if matches!(sql_type.kind, SqlTypeKind::Float4) => {
+            Ok((*v as f32).to_bits().to_be_bytes().to_vec())
+        }
+        Value::Float64(v) if matches!(sql_type.kind, SqlTypeKind::Float8) => {
+            Ok(v.to_bits().to_be_bytes().to_vec())
+        }
+        Value::Date(v) => Ok(v.0.to_be_bytes().to_vec()),
+        Value::Time(v) => Ok(v.0.to_be_bytes().to_vec()),
+        Value::TimeTz(v) => {
+            let mut out = Vec::with_capacity(12);
+            out.extend_from_slice(&v.time.0.to_be_bytes());
+            out.extend_from_slice(&v.offset_seconds.to_be_bytes());
+            Ok(out)
+        }
+        Value::Timestamp(v) => Ok(v.0.to_be_bytes().to_vec()),
+        Value::TimestampTz(v) => Ok(v.0.to_be_bytes().to_vec()),
+        Value::Record(record)
+            if matches!(sql_type.kind, SqlTypeKind::Record | SqlTypeKind::Composite) =>
+        {
+            encode_binary_record(record)
+        }
+        Value::Array(items)
+            if sql_type.is_array
+                && matches!(sql_type.kind, SqlTypeKind::Record | SqlTypeKind::Composite) =>
+        {
+            encode_binary_record_array(
+                &crate::include::nodes::datum::ArrayValue::from_1d(items.clone()),
+                sql_type.element_type(),
+            )
+        }
+        Value::PgArray(array)
+            if sql_type.is_array
+                && matches!(sql_type.kind, SqlTypeKind::Record | SqlTypeKind::Composite) =>
+        {
+            encode_binary_record_array(array, sql_type.element_type())
+        }
+        other => Err(ExecError::Parse(crate::backend::parser::ParseError::FeatureNotSupported(
+            format!("binary output for {:?}", other.sql_type_hint().unwrap_or(sql_type)),
+        ))),
+    }
+}
+
+fn encode_binary_record(
+    record: &crate::include::nodes::datum::RecordValue,
+) -> Result<Vec<u8>, ExecError> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&(record.fields.len() as i32).to_be_bytes());
+    for (field, value) in record.iter() {
+        let field_oid = if !field.sql_type.is_array && field.sql_type.type_oid != 0 {
+            field.sql_type.type_oid
+        } else {
+            wire_type_info(&QueryColumn {
+                name: field.name.clone(),
+                sql_type: field.sql_type,
+            })
+            .0 as u32
+        };
+        out.extend_from_slice(&field_oid.to_be_bytes());
+        if matches!(value, Value::Null) {
+            out.extend_from_slice(&(-1_i32).to_be_bytes());
+            continue;
+        }
+        let payload = encode_binary_data_row_value(value, field.sql_type)?;
+        out.extend_from_slice(&(payload.len() as i32).to_be_bytes());
+        out.extend_from_slice(&payload);
+    }
+    Ok(out)
+}
+
+fn encode_binary_record_array(
+    array: &crate::include::nodes::datum::ArrayValue,
+    element_sql_type: SqlType,
+) -> Result<Vec<u8>, ExecError> {
+    let element_oid = if element_sql_type.type_oid != 0 {
+        element_sql_type.type_oid
+    } else {
+        array.elements
+            .iter()
+            .find_map(|value| match value {
+                Value::Record(record) => Some(record.type_oid()),
+                _ => None,
+            })
+            .unwrap_or(crate::include::catalog::RECORD_TYPE_OID)
+    };
+    let mut out = Vec::new();
+    out.extend_from_slice(&(array.dimensions.len() as i32).to_be_bytes());
+    out.extend_from_slice(&(array.elements.iter().any(|v| matches!(v, Value::Null)) as i32).to_be_bytes());
+    out.extend_from_slice(&element_oid.to_be_bytes());
+    for dim in &array.dimensions {
+        out.extend_from_slice(&(dim.length as i32).to_be_bytes());
+        out.extend_from_slice(&dim.lower_bound.to_be_bytes());
+    }
+    for value in &array.elements {
+        match value {
+            Value::Null => out.extend_from_slice(&(-1_i32).to_be_bytes()),
+            Value::Record(record) => {
+                let payload = encode_binary_record(record)?;
+                out.extend_from_slice(&(payload.len() as i32).to_be_bytes());
+                out.extend_from_slice(&payload);
+            }
+            other => {
+                return Err(ExecError::Parse(
+                    crate::backend::parser::ParseError::FeatureNotSupported(format!(
+                        "binary composite array element {:?}",
+                        other.sql_type_hint()
+                    )),
+                ));
+            }
+        }
+    }
+    Ok(out)
 }
 
 pub fn format_bytea_text(bytes: &[u8], output: ByteaOutputFormat) -> String {
