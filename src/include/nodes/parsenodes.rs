@@ -442,6 +442,7 @@ pub struct CreateFunctionStatement {
 pub enum CreateTypeStatement {
     Composite(CreateCompositeTypeStatement),
     Enum(CreateEnumTypeStatement),
+    Range(CreateRangeTypeStatement),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -462,6 +463,15 @@ pub struct CreateEnumTypeStatement {
     pub schema_name: Option<String>,
     pub type_name: String,
     pub labels: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateRangeTypeStatement {
+    pub schema_name: Option<String>,
+    pub type_name: String,
+    pub subtype: RawTypeName,
+    pub subtype_diff: Option<String>,
+    pub collation: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
