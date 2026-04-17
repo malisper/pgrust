@@ -5101,7 +5101,7 @@ fn build_identifier(pair: Pair<'_, Rule>) -> String {
     if raw.starts_with('"') && raw.ends_with('"') {
         raw[1..raw.len() - 1].replace("\"\"", "\"")
     } else {
-        raw.to_string()
+        raw.to_ascii_lowercase()
     }
 }
 
