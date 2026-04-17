@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use parking_lot::{Condvar, Mutex, RwLock};
 
 use crate::backend::access::transam::xact::TransactionManager;
+use crate::backend::access::transam::{ControlFileState, ControlFileStore};
 use crate::backend::access::transam::xlog::{INVALID_LSN, Lsn, WalWriter};
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
 use crate::backend::storage::buffer::{BufferPool, Error as BufferError};
@@ -161,6 +162,7 @@ pub struct Checkpointer {
     pool: Arc<BufferPool<SmgrStorageBackend>>,
     wal: Option<Arc<WalWriter>>,
     txns: Arc<RwLock<TransactionManager>>,
+    control_file: Option<Arc<ControlFileStore>>,
     config: Arc<CheckpointConfig>,
     stats: Arc<RwLock<CheckpointStatsSnapshot>>,
     commit_barrier: Arc<CheckpointCommitBarrier>,
@@ -174,6 +176,7 @@ impl Checkpointer {
         pool: Arc<BufferPool<SmgrStorageBackend>>,
         wal: Option<Arc<WalWriter>>,
         txns: Arc<RwLock<TransactionManager>>,
+        control_file: Option<Arc<ControlFileStore>>,
         config: Arc<CheckpointConfig>,
         stats: Arc<RwLock<CheckpointStatsSnapshot>>,
         commit_barrier: Arc<CheckpointCommitBarrier>,
@@ -183,6 +186,7 @@ impl Checkpointer {
             pool,
             wal,
             txns,
+            control_file,
             config,
             stats,
             commit_barrier,
@@ -337,8 +341,9 @@ impl Checkpointer {
             txns.flush_clog().map_err(|err| format!("{err:?}"))?;
             1
         };
+        let next_xid = self.txns.read().next_xid();
 
-        let end_lsn = if let Some(wal) = self.wal.as_ref() {
+        let (redo_lsn, end_lsn) = if let Some(wal) = self.wal.as_ref() {
             let redo_lsn = wal.insert_lsn();
             let checkpoint_record = CheckpointRecord { redo_lsn };
             let end_lsn = wal
@@ -349,11 +354,27 @@ impl Checkpointer {
                 .map_err(|err| err.to_string())?;
             wal.flush().map_err(|err| err.to_string())?;
             wal.clear_page_image_tracking();
-            end_lsn
+            (redo_lsn, end_lsn)
         } else {
-            INVALID_LSN
+            (INVALID_LSN, INVALID_LSN)
         };
         let sync_time = sync_start.elapsed();
+
+        if let Some(control_file) = self.control_file.as_ref() {
+            control_file
+                .update(|control| {
+                    control.state = if matches!(trigger, CheckpointTrigger::Shutdown) {
+                        ControlFileState::ShutDown
+                    } else {
+                        ControlFileState::InProduction
+                    };
+                    control.latest_checkpoint_lsn = end_lsn;
+                    control.redo_lsn = redo_lsn;
+                    control.next_xid = next_xid;
+                    control.full_page_writes = self.config.full_page_writes;
+                })
+                .map_err(|err| err.to_string())?;
+        }
 
         self.stats.write().record_completed_checkpoint(
             match trigger {

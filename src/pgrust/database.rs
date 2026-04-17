@@ -18,6 +18,7 @@ use crate::backend::access::transam::xact::{
 };
 use crate::backend::access::transam::{
     CheckpointCommitBarrier, CheckpointCommitGuard, CheckpointRequestFlags, Checkpointer,
+    ControlFileError,
 };
 use crate::backend::access::transam::xlog::{WalBgWriter, WalError, WalWriter};
 use crate::backend::catalog::catalog::{CatalogIndexBuildOptions, column_desc};
@@ -99,6 +100,7 @@ use txn::AutoCommitGuard;
 #[derive(Debug)]
 pub enum DatabaseError {
     Catalog(CatalogError),
+    Control(ControlFileError),
     Mvcc(MvccError),
     Wal(WalError),
 }
@@ -115,6 +117,12 @@ impl From<MvccError> for DatabaseError {
     }
 }
 
+impl From<ControlFileError> for DatabaseError {
+    fn from(e: ControlFileError) -> Self {
+        Self::Control(e)
+    }
+}
+
 pub use crate::backend::storage::lmgr::TransactionWaiter;
 pub use crate::pgrust::session::{SelectGuard, Session};
 pub(crate) use ddl::reject_relation_with_referencing_foreign_keys;
@@ -124,6 +132,17 @@ pub(crate) use foreign_keys::{
     prepared_insert_foreign_key_lock_requests, relation_foreign_key_lock_requests,
     table_lock_relations, update_foreign_key_lock_requests,
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DatabaseOpenOptions {
+    pub pool_size: usize,
+}
+
+impl DatabaseOpenOptions {
+    pub const fn new(pool_size: usize) -> Self {
+        Self { pool_size }
+    }
+}
 
 #[derive(Clone)]
 pub struct Database {
@@ -216,15 +235,14 @@ pub(crate) enum TempMutationEffect {
 
 impl Database {
     pub fn open(base_dir: impl Into<PathBuf>, pool_size: usize) -> Result<Self, DatabaseError> {
-        Self::open_with_options(base_dir, pool_size, false)
+        Self::open_with_options(base_dir, DatabaseOpenOptions::new(pool_size))
     }
 
     pub fn open_with_options(
         base_dir: impl Into<PathBuf>,
-        pool_size: usize,
-        wal_replay: bool,
+        options: DatabaseOpenOptions,
     ) -> Result<Self, DatabaseError> {
-        Cluster::open_with_options(base_dir.into(), pool_size, wal_replay)?
+        Cluster::open_with_options(base_dir.into(), options)?
             .connect_database("postgres")
             .map_err(|e| match e {
                 ExecError::DetailedError { message, .. } => {

@@ -5806,7 +5806,7 @@ fn concurrent_indexed_updates_and_deletes_keep_index_results_correct() {
 fn reopening_database_replays_btree_wal() {
     let base = temp_dir("reopening_database_replays_btree_wal");
     {
-        let db = Database::open_with_options(&base, 256, true).unwrap();
+        let db = Database::open_with_options(&base, DatabaseOpenOptions::new(256)).unwrap();
         db.execute(1, "create table items (id int4 not null, note text)")
             .unwrap();
         for i in 0..400 {
@@ -5827,7 +5827,7 @@ fn reopening_database_replays_btree_wal() {
         );
     }
 
-    let reopened = Database::open_with_options(&base, 256, true).unwrap();
+    let reopened = Database::open_with_options(&base, DatabaseOpenOptions::new(256)).unwrap();
     assert_explain_uses_index(
         &reopened,
         1,
@@ -5842,6 +5842,42 @@ fn reopening_database_replays_btree_wal() {
         query_rows(&reopened, 1, "select count(*) from items where id >= 890"),
         vec![vec![Value::Int64(10)]]
     );
+}
+
+#[test]
+fn durable_open_bootstraps_control_file_and_clean_shutdown_marks_shutdown() {
+    use crate::backend::access::transam::{ControlFileState, ControlFileStore};
+
+    let base = temp_dir("control_file_bootstrap");
+    let control_path = ControlFileStore::path(&base);
+
+    {
+        let db = Database::open(&base, 32).unwrap();
+        assert!(control_path.exists(), "expected control file to be created");
+        let control = ControlFileStore::load(&base).unwrap().snapshot();
+        assert_eq!(control.state, ControlFileState::InProduction);
+        assert_eq!(control.next_xid, db.txns.read().next_xid());
+    }
+
+    let control = ControlFileStore::load(&base).unwrap().snapshot();
+    assert_eq!(control.state, ControlFileState::ShutDown);
+}
+
+#[test]
+fn legacy_durable_cluster_without_control_file_is_rejected() {
+    use crate::backend::access::transam::ControlFileError;
+
+    let base = temp_dir("legacy_cluster_without_control_file");
+    std::fs::create_dir_all(base.join("pg_wal")).unwrap();
+    std::fs::write(base.join("pg_wal").join("wal.log"), b"legacy").unwrap();
+
+    match Database::open(&base, 16) {
+        Err(DatabaseError::Control(ControlFileError::Unsupported(message))) => {
+            assert!(message.contains("legacy durable clusters"));
+        }
+        Ok(_) => panic!("expected legacy control-file rejection, got successful open"),
+        Err(other) => panic!("expected legacy control-file rejection, got {other:?}"),
+    }
 }
 
 #[test]
@@ -6172,7 +6208,7 @@ fn checkpoint_flushes_dirty_pages_and_clog_to_disk() {
         "expected CHECKPOINT to persist committed CLOG state"
     );
 
-    let reopened = Database::open_with_options(&base, 64, true).unwrap();
+    let reopened = Database::open_with_options(&base, DatabaseOpenOptions::new(64)).unwrap();
     assert_eq!(
         query_rows(&reopened, 1, "select id, note from items"),
         vec![vec![Value::Int32(1), Value::Text("alpha".into())]]
