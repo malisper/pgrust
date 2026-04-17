@@ -98,7 +98,7 @@ impl Database {
                 configured_search_path,
                 &mut catalog_effects,
             );
-        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[]);
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
         guard.disarm();
         self.table_locks.unlock_table(relation.rel, client_id);
         result
@@ -160,6 +160,7 @@ impl Database {
             pool: std::sync::Arc::clone(&self.pool),
             txns: self.txns.clone(),
             txn_waiter: Some(self.txn_waiter.clone()),
+            sequences: Some(self.sequences.clone()),
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
             interrupts: std::sync::Arc::clone(&interrupts),
             snapshot,
@@ -170,6 +171,7 @@ impl Database {
             system_bindings: Vec::new(),
             subplans: Vec::new(),
             timed: false,
+            allow_side_effects: true,
             catalog: catalog.materialize_visible_catalog(),
             compiled_functions: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),

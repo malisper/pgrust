@@ -526,6 +526,9 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::MakeDate => args.len() == 3,
             BuiltinScalarFunction::GetDatabaseEncoding => args.is_empty(),
             BuiltinScalarFunction::PgTypeof => args.len() == 1,
+            BuiltinScalarFunction::NextVal | BuiltinScalarFunction::CurrVal => args.len() == 1,
+            BuiltinScalarFunction::SetVal => matches!(args.len(), 2 | 3),
+            BuiltinScalarFunction::PgGetSerialSequence => args.len() == 2,
             BuiltinScalarFunction::ToJson | BuiltinScalarFunction::ToJsonb => args.len() == 1,
             BuiltinScalarFunction::ArrayLength
             | BuiltinScalarFunction::ArrayLower
@@ -1013,7 +1016,10 @@ fn scalar_named_arg_signature(func: BuiltinScalarFunction) -> Option<NamedArgSig
         BuiltinScalarFunction::RandomNormal => Some(NamedArgSignature {
             params: &["mean", "stddev"],
             required: 0,
-            defaults: &[Some(NamedArgDefault::Float8(0.0)), Some(NamedArgDefault::Float8(1.0))],
+            defaults: &[
+                Some(NamedArgDefault::Float8(0.0)),
+                Some(NamedArgDefault::Float8(1.0)),
+            ],
         }),
         BuiltinScalarFunction::JsonbPathExists
         | BuiltinScalarFunction::JsonbPathMatch
@@ -1127,6 +1133,13 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         (
             "getdatabaseencoding",
             BuiltinScalarFunction::GetDatabaseEncoding,
+        ),
+        ("nextval", BuiltinScalarFunction::NextVal),
+        ("currval", BuiltinScalarFunction::CurrVal),
+        ("setval", BuiltinScalarFunction::SetVal),
+        (
+            "pg_get_serial_sequence",
+            BuiltinScalarFunction::PgGetSerialSequence,
         ),
         ("pg_typeof", BuiltinScalarFunction::PgTypeof),
         ("to_json", BuiltinScalarFunction::ToJson),
@@ -1346,10 +1359,16 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("range_lower_inf", BuiltinScalarFunction::RangeLowerInf),
         ("range_upper_inf", BuiltinScalarFunction::RangeUpperInf),
         ("range_contains", BuiltinScalarFunction::RangeContains),
-        ("range_contained_by", BuiltinScalarFunction::RangeContainedBy),
+        (
+            "range_contained_by",
+            BuiltinScalarFunction::RangeContainedBy,
+        ),
         ("range_overlap", BuiltinScalarFunction::RangeOverlap),
         ("range_strict_left", BuiltinScalarFunction::RangeStrictLeft),
-        ("range_strict_right", BuiltinScalarFunction::RangeStrictRight),
+        (
+            "range_strict_right",
+            BuiltinScalarFunction::RangeStrictRight,
+        ),
         ("range_over_left", BuiltinScalarFunction::RangeOverLeft),
         ("range_over_right", BuiltinScalarFunction::RangeOverRight),
         ("range_adjacent", BuiltinScalarFunction::RangeAdjacent),
@@ -1549,6 +1568,10 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::StatementTimestamp
             | BuiltinScalarFunction::ClockTimestamp
             | BuiltinScalarFunction::TimeOfDay
+            | BuiltinScalarFunction::NextVal
+            | BuiltinScalarFunction::CurrVal
+            | BuiltinScalarFunction::SetVal
+            | BuiltinScalarFunction::PgGetSerialSequence
             | BuiltinScalarFunction::GetDatabaseEncoding
             | BuiltinScalarFunction::ToJson
             | BuiltinScalarFunction::ToJsonb

@@ -255,6 +255,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
             rel,
             relation_name,
             relation_oid,
+            relkind,
             toast,
             desc,
         } => {
@@ -271,11 +272,13 @@ pub fn executor_start(plan: Plan) -> PlanState {
             Box::new(SeqScanState {
                 rel,
                 relation_name,
+                relkind,
                 toast_relation: toast,
                 column_names,
                 desc,
                 attr_descs,
                 scan: None,
+                sequence_emitted: false,
                 slot,
                 qual: None,
                 qual_expr: None,
@@ -461,6 +464,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 rel,
                 relation_name,
                 relation_oid,
+                relkind,
                 toast,
                 desc,
             } = *input
@@ -481,11 +485,13 @@ pub fn executor_start(plan: Plan) -> PlanState {
             Box::new(SeqScanState {
                 rel,
                 relation_name,
+                relkind,
                 toast_relation: toast,
                 column_names,
                 desc,
                 attr_descs,
                 scan: None,
+                sequence_emitted: false,
                 slot,
                 qual: Some(qual),
                 qual_expr: Some(predicate),

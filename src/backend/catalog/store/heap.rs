@@ -32,6 +32,42 @@ const PG_NAMESPACE_OID_INDEX_OID: u32 = 2685;
 const PG_STATISTIC_RELID_ATT_INH_INDEX_OID: u32 = 2696;
 
 impl CatalogStore {
+    pub fn create_relation_mvcc_with_relkind(
+        &mut self,
+        name: impl Into<String>,
+        desc: RelationDesc,
+        namespace_oid: u32,
+        db_oid: u32,
+        relpersistence: char,
+        relkind: char,
+        owner_oid: u32,
+        ctx: &CatalogWriteContext,
+    ) -> Result<(CatalogEntry, CatalogMutationEffect), CatalogError> {
+        let name = name.into();
+        let mut catalog = self.catalog_snapshot_with_control_for_snapshot(ctx)?;
+        let entry = catalog.create_table_with_relkind(
+            name.clone(),
+            desc,
+            namespace_oid,
+            db_oid,
+            relpersistence,
+            relkind,
+            owner_oid,
+        )?;
+        let kinds = create_table_sync_kinds(&entry);
+        self.persist_control_state(&catalog)?;
+        let rows = physical_catalog_rows_for_catalog_entry(&catalog, &name, &entry);
+        insert_catalog_rows_subset_mvcc(ctx, &rows, 1, &kinds)?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_rel(&mut effect.created_rels, entry.rel);
+        effect_record_oid(&mut effect.relation_oids, entry.relation_oid);
+        effect_record_oid(&mut effect.namespace_oids, entry.namespace_oid);
+        effect_record_oid(&mut effect.type_oids, entry.row_type_oid);
+        Ok((entry, effect))
+    }
+
     pub fn create_table(
         &mut self,
         name: impl Into<String>,
@@ -1287,6 +1323,50 @@ impl CatalogStore {
         Ok(effect)
     }
 
+    pub fn alter_table_set_column_default_mvcc(
+        &mut self,
+        relation_oid: u32,
+        column_name: &str,
+        default_expr: Option<String>,
+        default_sequence_oid: Option<u32>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let mut catalog = self.catalog_snapshot_with_control_for_snapshot(ctx)?;
+        let old_catalog = catalog.clone();
+        let (name, old_entry, new_entry) = catalog.alter_table_set_column_default(
+            relation_oid,
+            column_name,
+            default_expr,
+            default_sequence_oid,
+        )?;
+        self.persist_control_state(&catalog)?;
+
+        let mut kinds = vec![BootstrapCatalogKind::PgDepend];
+        if old_entry
+            .desc
+            .columns
+            .iter()
+            .any(|column| column.attrdef_oid.is_some())
+            || new_entry
+                .desc
+                .columns
+                .iter()
+                .any(|column| column.attrdef_oid.is_some())
+        {
+            kinds.push(BootstrapCatalogKind::PgAttrdef);
+        }
+        let old_rows = physical_catalog_rows_for_catalog_entry(&old_catalog, &name, &old_entry);
+        let new_rows = physical_catalog_rows_for_catalog_entry(&catalog, &name, &new_entry);
+        delete_catalog_rows_subset_mvcc(ctx, &old_rows, 1, &kinds)?;
+        insert_catalog_rows_subset_mvcc(ctx, &new_rows, 1, &kinds)?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        effect_record_oid(&mut effect.type_oids, new_entry.row_type_oid);
+        Ok(effect)
+    }
+
     pub fn alter_table_alter_column_type_mvcc(
         &mut self,
         relation_oid: u32,
@@ -1699,7 +1779,7 @@ fn drop_relation_oids_by_oid(
     let entry = catalog
         .get_by_oid(relation_oid)
         .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
-    if entry.relkind != 'r' {
+    if !matches!(entry.relkind, 'r' | 'S') {
         return Err(CatalogError::UnknownTable(relation_oid.to_string()));
     }
     let mut seen = BTreeSet::new();
@@ -1734,7 +1814,7 @@ fn collect_relation_drop_oids(
             continue;
         }
         if let Some(dependent) = catalog.get_by_oid(row.objid) {
-            if dependent.relkind != 'r' && dependent.relkind != 'i' && dependent.relkind != 't' {
+            if !matches!(dependent.relkind, 'r' | 'i' | 't' | 'S') {
                 continue;
             }
             collect_relation_drop_oids(catalog, depend_rows, dependent.relation_oid, seen, order);

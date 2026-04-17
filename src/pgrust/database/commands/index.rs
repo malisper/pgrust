@@ -287,7 +287,7 @@ impl Database {
             maintenance_work_mem_kb,
             &mut catalog_effects,
         );
-        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[]);
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
         guard.disarm();
         result
     }

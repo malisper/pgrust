@@ -225,18 +225,30 @@ pub(crate) fn catalog_from_physical_rows(
                 if let Some(attrdef) = attrdefs_by_key.get(&(row.oid, attr.attnum)) {
                     desc.attrdef_oid = Some(attrdef.oid);
                     desc.default_expr = Some(attrdef.adbin.clone());
-                    desc.missing_default_value =
+                    desc.default_sequence_oid =
+                        crate::pgrust::database::default_sequence_oid_from_default_expr(
+                            &attrdef.adbin,
+                        );
+                    desc.missing_default_value = if desc.default_sequence_oid.is_some() {
+                        None
+                    } else {
                         crate::backend::parser::derive_literal_default_value(
                             &attrdef.adbin,
                             desc.sql_type,
                         )
-                        .ok();
+                        .ok()
+                    };
                 } else if let Some(expr) = legacy_default_exprs.get(&(row.oid, attr.attnum)) {
                     desc.default_expr = Some(expr.clone());
                     desc.attrdef_oid = Some(catalog.next_oid);
-                    desc.missing_default_value =
+                    desc.default_sequence_oid =
+                        crate::pgrust::database::default_sequence_oid_from_default_expr(expr);
+                    desc.missing_default_value = if desc.default_sequence_oid.is_some() {
+                        None
+                    } else {
                         crate::backend::parser::derive_literal_default_value(expr, desc.sql_type)
-                            .ok();
+                            .ok()
+                    };
                     catalog.next_oid = catalog.next_oid.saturating_add(1);
                 }
                 if let Some(constraint) = not_null_constraints.get(&(row.oid, attr.attnum)) {

@@ -3,14 +3,13 @@ use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::{
     ANYARRAYOID, ANYOID, BIT_TYPE_OID, BOOL_TYPE_OID, BOOTSTRAP_SUPERUSER_OID, BOX_TYPE_OID,
-    BPCHAR_TYPE_OID, BYTEA_TYPE_OID, CIRCLE_TYPE_OID, DATERANGE_TYPE_OID, DATE_TYPE_OID,
+    BPCHAR_TYPE_OID, BYTEA_TYPE_OID, CIRCLE_TYPE_OID, DATE_TYPE_OID, DATERANGE_TYPE_OID,
     FLOAT8_TYPE_OID, INT2_TYPE_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID, INT8_TYPE_OID,
     INT8RANGE_TYPE_OID, JSON_TYPE_OID, JSONB_TYPE_OID, JSONPATH_TYPE_OID, LINE_TYPE_OID,
     LSEG_TYPE_OID, MONEY_TYPE_OID, NUMERIC_TYPE_OID, NUMRANGE_TYPE_OID, OID_TYPE_OID,
     PATH_TYPE_OID, PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_INTERNAL_OID, POINT_TYPE_OID,
-    POLYGON_TYPE_OID, RECORD_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID,
-    TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID, TSRANGE_TYPE_OID, TSQUERY_TYPE_OID,
-    TSTZRANGE_TYPE_OID, VARBIT_TYPE_OID,
+    POLYGON_TYPE_OID, RECORD_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIMESTAMP_TYPE_OID,
+    TIMESTAMPTZ_TYPE_OID, TSQUERY_TYPE_OID, TSRANGE_TYPE_OID, TSTZRANGE_TYPE_OID, VARBIT_TYPE_OID,
 };
 use crate::include::nodes::primnodes::{AggFunc, BuiltinScalarFunction};
 use std::sync::OnceLock;
@@ -253,6 +252,114 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             0,
             false,
             false,
+            'f',
+            's',
+        ),
+        proc_row(
+            6301,
+            "nextval",
+            INT8_TYPE_OID,
+            &oid_argtypes(&[OID_TYPE_OID]),
+            "nextval",
+            1,
+            false,
+            true,
+            'f',
+            'v',
+        ),
+        proc_row(
+            6302,
+            "nextval",
+            INT8_TYPE_OID,
+            &oid_argtypes(&[TEXT_TYPE_OID]),
+            "nextval",
+            1,
+            false,
+            true,
+            'f',
+            'v',
+        ),
+        proc_row(
+            6303,
+            "currval",
+            INT8_TYPE_OID,
+            &oid_argtypes(&[OID_TYPE_OID]),
+            "currval",
+            1,
+            false,
+            true,
+            'f',
+            'v',
+        ),
+        proc_row(
+            6304,
+            "currval",
+            INT8_TYPE_OID,
+            &oid_argtypes(&[TEXT_TYPE_OID]),
+            "currval",
+            1,
+            false,
+            true,
+            'f',
+            'v',
+        ),
+        proc_row(
+            6305,
+            "setval",
+            INT8_TYPE_OID,
+            &oid_argtypes(&[OID_TYPE_OID, INT8_TYPE_OID]),
+            "setval",
+            2,
+            false,
+            true,
+            'f',
+            'v',
+        ),
+        proc_row(
+            6306,
+            "setval",
+            INT8_TYPE_OID,
+            &oid_argtypes(&[TEXT_TYPE_OID, INT8_TYPE_OID]),
+            "setval",
+            2,
+            false,
+            true,
+            'f',
+            'v',
+        ),
+        proc_row(
+            6307,
+            "setval",
+            INT8_TYPE_OID,
+            &oid_argtypes(&[OID_TYPE_OID, INT8_TYPE_OID, BOOL_TYPE_OID]),
+            "setval",
+            3,
+            false,
+            true,
+            'f',
+            'v',
+        ),
+        proc_row(
+            6308,
+            "setval",
+            INT8_TYPE_OID,
+            &oid_argtypes(&[TEXT_TYPE_OID, INT8_TYPE_OID, BOOL_TYPE_OID]),
+            "setval",
+            3,
+            false,
+            true,
+            'f',
+            'v',
+        ),
+        proc_row(
+            6309,
+            "pg_get_serial_sequence",
+            TEXT_TYPE_OID,
+            &oid_argtypes(&[TEXT_TYPE_OID, TEXT_TYPE_OID]),
+            "pg_get_serial_sequence",
+            2,
+            false,
+            true,
             'f',
             's',
         ),
@@ -1637,6 +1744,13 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "getdatabaseencoding",
             BuiltinScalarFunction::GetDatabaseEncoding,
         ),
+        ("nextval", BuiltinScalarFunction::NextVal),
+        ("currval", BuiltinScalarFunction::CurrVal),
+        ("setval", BuiltinScalarFunction::SetVal),
+        (
+            "pg_get_serial_sequence",
+            BuiltinScalarFunction::PgGetSerialSequence,
+        ),
         ("pg_typeof", BuiltinScalarFunction::PgTypeof),
         ("to_json", BuiltinScalarFunction::ToJson),
         ("to_jsonb", BuiltinScalarFunction::ToJsonb),
@@ -1895,10 +2009,16 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("range_lower_inf", BuiltinScalarFunction::RangeLowerInf),
         ("range_upper_inf", BuiltinScalarFunction::RangeUpperInf),
         ("range_contains", BuiltinScalarFunction::RangeContains),
-        ("range_contained_by", BuiltinScalarFunction::RangeContainedBy),
+        (
+            "range_contained_by",
+            BuiltinScalarFunction::RangeContainedBy,
+        ),
         ("range_overlap", BuiltinScalarFunction::RangeOverlap),
         ("range_strict_left", BuiltinScalarFunction::RangeStrictLeft),
-        ("range_strict_right", BuiltinScalarFunction::RangeStrictRight),
+        (
+            "range_strict_right",
+            BuiltinScalarFunction::RangeStrictRight,
+        ),
         ("range_over_left", BuiltinScalarFunction::RangeOverLeft),
         ("range_over_right", BuiltinScalarFunction::RangeOverRight),
         ("range_adjacent", BuiltinScalarFunction::RangeAdjacent),
@@ -2521,8 +2641,10 @@ fn range_proc_rows() -> Vec<PgProcRow> {
             ("range_adjacent", "range_adjacent", BOOL_TYPE_OID),
             ("range_minus", "range_difference", range_oid),
         ] {
-            let arg_oids = if matches!(prosrc, "range_merge" | "range_adjacent" | "range_difference")
-            {
+            let arg_oids = if matches!(
+                prosrc,
+                "range_merge" | "range_adjacent" | "range_difference"
+            ) {
                 vec![range_oid, range_oid]
             } else {
                 vec![range_oid]
@@ -2533,7 +2655,10 @@ fn range_proc_rows() -> Vec<PgProcRow> {
                 rettype,
                 &oid_argtypes(&arg_oids),
                 prosrc,
-                if matches!(prosrc, "range_merge" | "range_adjacent" | "range_difference") {
+                if matches!(
+                    prosrc,
+                    "range_merge" | "range_adjacent" | "range_difference"
+                ) {
                     2
                 } else {
                     1
@@ -2546,10 +2671,26 @@ fn range_proc_rows() -> Vec<PgProcRow> {
             next_oid += 1;
         }
         for (proname, prosrc, argtypes) in [
-            ("range_contains", "range_contains", vec![range_oid, range_oid]),
-            ("range_contained_by", "range_contained_by", vec![range_oid, range_oid]),
-            ("range_contains", "range_contains", vec![range_oid, subtype_oid]),
-            ("range_contained_by", "range_contained_by", vec![subtype_oid, range_oid]),
+            (
+                "range_contains",
+                "range_contains",
+                vec![range_oid, range_oid],
+            ),
+            (
+                "range_contained_by",
+                "range_contained_by",
+                vec![range_oid, range_oid],
+            ),
+            (
+                "range_contains",
+                "range_contains",
+                vec![range_oid, subtype_oid],
+            ),
+            (
+                "range_contained_by",
+                "range_contained_by",
+                vec![subtype_oid, range_oid],
+            ),
         ] {
             rows.push(proc_row(
                 next_oid,
@@ -2593,7 +2734,10 @@ fn range_proc_rows() -> Vec<PgProcRow> {
             rows.push(proc_row(
                 next_oid,
                 proname,
-                if matches!(prosrc, "range_union" | "range_intersect" | "range_difference") {
+                if matches!(
+                    prosrc,
+                    "range_union" | "range_intersect" | "range_difference"
+                ) {
                     range_oid
                 } else {
                     BOOL_TYPE_OID

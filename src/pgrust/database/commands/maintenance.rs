@@ -1,4 +1,51 @@
 use super::super::*;
+use crate::backend::access::heap::heapam::heap_update_with_waiter;
+use crate::backend::commands::tablecmds::{collect_matching_rows_heap, maintain_indexes_for_row};
+use crate::backend::executor::value_io::{coerce_assignment_value, tuple_from_values};
+use crate::backend::executor::{ExecutorContext, RelationDesc};
+use crate::include::nodes::datum::Value;
+
+fn rewrite_heap_rows_for_added_serial_column(
+    db: &Database,
+    relation: &crate::backend::parser::BoundRelation,
+    new_desc: &RelationDesc,
+    indexes: &[crate::backend::parser::BoundIndexRelation],
+    sequence_oid: u32,
+    ctx: &mut ExecutorContext,
+    xid: TransactionId,
+    cid: CommandId,
+) -> Result<(), ExecError> {
+    let target_rows =
+        collect_matching_rows_heap(relation.rel, &relation.desc, relation.toast, None, ctx)?;
+    let new_column = new_desc
+        .columns
+        .last()
+        .expect("serial add-column rewrite requires appended column");
+    for (tid, mut values) in target_rows {
+        ctx.check_for_interrupts()?;
+        let next = db
+            .sequences
+            .allocate_value(sequence_oid, relation.relpersistence != 't')?;
+        values.push(coerce_assignment_value(
+            &Value::Int64(next),
+            new_column.sql_type,
+        )?);
+        let replacement = tuple_from_values(new_desc, &values)?;
+        let new_tid = heap_update_with_waiter(
+            &*ctx.pool,
+            ctx.client_id,
+            relation.rel,
+            &ctx.txns,
+            xid,
+            cid,
+            tid,
+            &replacement,
+            None,
+        )?;
+        maintain_indexes_for_row(relation.rel, new_desc, indexes, &values, new_tid, ctx)?;
+    }
+    Ok(())
+}
 
 impl Database {
     pub(crate) fn execute_comment_on_domain_stmt_with_search_path(
@@ -45,7 +92,7 @@ impl Database {
             configured_search_path,
             &mut catalog_effects,
         );
-        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[]);
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
         guard.disarm();
         self.table_locks.unlock_table(relation.rel, client_id);
         result
@@ -69,6 +116,8 @@ impl Database {
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let mut catalog_effects = Vec::new();
+        let mut temp_effects = Vec::new();
+        let mut sequence_effects = Vec::new();
         let result = self.execute_alter_table_add_column_stmt_in_transaction_with_search_path(
             client_id,
             alter_stmt,
@@ -76,8 +125,17 @@ impl Database {
             0,
             configured_search_path,
             &mut catalog_effects,
+            &mut temp_effects,
+            &mut sequence_effects,
         );
-        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[]);
+        let result = self.finish_txn(
+            client_id,
+            xid,
+            result,
+            &catalog_effects,
+            &temp_effects,
+            &sequence_effects,
+        );
         guard.disarm();
         self.table_locks.unlock_table(relation.rel, client_id);
         result
@@ -120,7 +178,7 @@ impl Database {
             configured_search_path,
             &mut catalog_effects,
         );
-        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[]);
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
         guard.disarm();
         for rel in rel_locs {
             self.table_locks.unlock_table(rel, client_id);
@@ -144,12 +202,14 @@ impl Database {
             pool: Arc::clone(&self.pool),
             txns: self.txns.clone(),
             txn_waiter: Some(self.txn_waiter.clone()),
+            sequences: Some(self.sequences.clone()),
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
             interrupts: Arc::clone(&interrupts),
             snapshot,
             client_id,
             next_command_id: cid,
             timed: false,
+            allow_side_effects: false,
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
             case_test_values: Vec::new(),
             system_bindings: Vec::new(),
@@ -241,6 +301,8 @@ impl Database {
         cid: CommandId,
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
+        temp_effects: &mut Vec<TempMutationEffect>,
+        sequence_effects: &mut Vec<SequenceMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
@@ -264,7 +326,68 @@ impl Database {
             relation.relation_oid,
             "ALTER TABLE on relation without dependent views",
         )?;
-        let column = validate_alter_table_add_column(&relation.desc, &alter_stmt.column, &catalog)?;
+        let plan = validate_alter_table_add_column(&relation.desc, &alter_stmt.column, &catalog)?;
+        let mut column = plan.column;
+        if let Some(serial_column) = plan.owned_sequence.as_ref() {
+            let mut used_names = std::collections::BTreeSet::new();
+            let created = self.create_owned_sequence_for_serial_column(
+                client_id,
+                &alter_stmt.table_name,
+                relation.namespace_oid,
+                TablePersistence::Permanent,
+                serial_column,
+                xid,
+                cid,
+                &mut used_names,
+                catalog_effects,
+                temp_effects,
+                sequence_effects,
+            )?;
+            column.default_expr = Some(format_nextval_default_oid(
+                created.sequence_oid,
+                serial_column.sql_type,
+            ));
+            column.default_sequence_oid = Some(created.sequence_oid);
+        }
+        let mut new_desc = relation.desc.clone();
+        new_desc.columns.push(column.clone());
+        let indexes = catalog.index_relations_for_heap(relation.relation_oid);
+        if let Some(sequence_oid) = column.default_sequence_oid {
+            let snapshot = self.txns.read().snapshot_for_command(xid, cid)?;
+            let mut ctx = ExecutorContext {
+                pool: Arc::clone(&self.pool),
+                txns: self.txns.clone(),
+                txn_waiter: Some(self.txn_waiter.clone()),
+                sequences: Some(self.sequences.clone()),
+                datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(
+                ),
+                interrupts: Arc::clone(&interrupts),
+                snapshot,
+                client_id,
+                next_command_id: cid,
+                timed: false,
+                allow_side_effects: false,
+                expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
+                case_test_values: Vec::new(),
+                system_bindings: Vec::new(),
+                subplans: Vec::new(),
+                catalog: catalog.materialize_visible_catalog(),
+                compiled_functions: std::collections::HashMap::new(),
+                cte_tables: std::collections::HashMap::new(),
+                cte_producers: std::collections::HashMap::new(),
+                recursive_worktables: std::collections::HashMap::new(),
+            };
+            rewrite_heap_rows_for_added_serial_column(
+                self,
+                &relation,
+                &new_desc,
+                &indexes,
+                sequence_oid,
+                &mut ctx,
+                xid,
+                cid,
+            )?;
+        }
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
             txns: self.txns.clone(),

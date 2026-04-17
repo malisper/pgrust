@@ -276,11 +276,13 @@ pub struct AppendState {
 pub struct SeqScanState {
     pub(crate) rel: RelFileLocator,
     pub(crate) relation_name: String,
+    pub(crate) relkind: char,
     pub(crate) toast_relation: Option<ToastRelationRef>,
     pub(crate) column_names: Vec<String>,
     pub(crate) desc: Rc<RelationDesc>,
     pub(crate) attr_descs: Rc<[AttributeDesc]>,
     pub(crate) scan: Option<VisibleHeapScan>,
+    pub(crate) sequence_emitted: bool,
     /// Reusable slot, like PG's ss_ScanTupleSlot. Holds BufferHeapTuple
     /// with lazy decode into tts_values. The slot's `decoder` field holds
     /// the compiled tuple decoder (set once at plan start).

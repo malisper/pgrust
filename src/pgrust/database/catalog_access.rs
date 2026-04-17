@@ -349,6 +349,24 @@ impl Database {
         )
     }
 
+    pub(super) fn normalize_create_sequence_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        txn_ctx: CatalogTxnContext,
+        stmt: &CreateSequenceStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<(String, u32, TablePersistence), ParseError> {
+        self.resolve_create_relation_target(
+            client_id,
+            txn_ctx,
+            stmt.schema_name.as_deref(),
+            &stmt.sequence_name,
+            stmt.persistence,
+            configured_search_path,
+            true,
+        )
+    }
+
     pub(crate) fn has_index_on_relation(
         &self,
         client_id: ClientId,

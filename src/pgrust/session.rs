@@ -32,7 +32,7 @@ use crate::backend::utils::misc::interrupts::{InterruptState, StatementInterrupt
 use crate::include::nodes::execnodes::ScalarType;
 use crate::pgrust::auth::AuthState;
 use crate::pgrust::database::{
-    Database, TempMutationEffect, alter_table_add_constraint_lock_requests,
+    Database, SequenceMutationEffect, TempMutationEffect, alter_table_add_constraint_lock_requests,
     alter_table_validate_constraint_lock_requests, delete_foreign_key_lock_requests,
     insert_foreign_key_lock_requests, prepared_insert_foreign_key_lock_requests,
     reject_relation_with_referencing_foreign_keys, relation_foreign_key_lock_requests,
@@ -67,6 +67,7 @@ struct ActiveTransaction {
     current_cmd_catalog_invalidations: Vec<CatalogInvalidation>,
     prior_cmd_catalog_invalidations: Vec<CatalogInvalidation>,
     temp_effects: Vec<TempMutationEffect>,
+    sequence_effects: Vec<SequenceMutationEffect>,
 }
 
 pub struct Session {
@@ -778,6 +779,7 @@ impl Session {
                     current_cmd_catalog_invalidations: Vec::new(),
                     prior_cmd_catalog_invalidations: Vec::new(),
                     temp_effects: Vec::new(),
+                    sequence_effects: Vec::new(),
                 });
                 Ok(StatementResult::AffectedRows(0))
             }
@@ -820,6 +822,7 @@ impl Session {
                 for rel in held_locks {
                     db.table_locks.unlock_table(rel, self.client_id);
                 }
+                db.finalize_committed_sequence_effects(&txn.sequence_effects)?;
                 result
             }
             Statement::Rollback => {
@@ -843,6 +846,7 @@ impl Session {
                 for rel in held_locks {
                     db.table_locks.unlock_table(rel, self.client_id);
                 }
+                db.finalize_aborted_sequence_effects(&txn.sequence_effects);
                 result
             }
             _ => {
@@ -1087,6 +1091,70 @@ impl Session {
                     &mut txn.catalog_effects,
                 )
             }
+            Statement::AlterSequence(ref alter_stmt) => {
+                let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                let relation = catalog
+                    .lookup_any_relation(&alter_stmt.sequence_name)
+                    .ok_or_else(|| {
+                        ExecError::Parse(ParseError::TableDoesNotExist(
+                            alter_stmt.sequence_name.clone(),
+                        ))
+                    })?;
+                self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_alter_sequence_stmt_in_transaction_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.sequence_effects,
+                )
+            }
+            Statement::AlterSequenceOwner(ref alter_stmt) => {
+                let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                let relation = catalog
+                    .lookup_any_relation(&alter_stmt.relation_name)
+                    .ok_or_else(|| {
+                        ExecError::Parse(ParseError::TableDoesNotExist(
+                            alter_stmt.relation_name.clone(),
+                        ))
+                    })?;
+                self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_alter_sequence_owner_stmt_in_transaction_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
+            Statement::AlterSequenceRename(ref rename_stmt) => {
+                let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                let relation = catalog
+                    .lookup_any_relation(&rename_stmt.table_name)
+                    .ok_or_else(|| {
+                        ExecError::Parse(ParseError::TableDoesNotExist(
+                            rename_stmt.table_name.clone(),
+                        ))
+                    })?;
+                self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_alter_sequence_rename_stmt_in_transaction_with_search_path(
+                    client_id,
+                    rename_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                    &mut txn.temp_effects,
+                )
+            }
             Statement::AlterTableRenameColumn(ref rename_stmt) => {
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);
                 let relation = catalog
@@ -1128,6 +1196,8 @@ impl Session {
                     cid,
                     search_path.as_deref(),
                     &mut txn.catalog_effects,
+                    &mut txn.temp_effects,
+                    &mut txn.sequence_effects,
                 )
             }
             Statement::AlterTableDropColumn(ref drop_stmt) => {
@@ -1402,12 +1472,14 @@ impl Session {
                     pool: Arc::clone(&db.pool),
                     txns: db.txns.clone(),
                     txn_waiter: Some(db.txn_waiter.clone()),
+                    sequences: Some(db.sequences.clone()),
                     datetime_config: self.datetime_config.clone(),
                     interrupts: self.interrupts(),
                     snapshot,
                     client_id,
                     next_command_id: cid,
                     timed: false,
+                    allow_side_effects: true,
                     expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
                     case_test_values: Vec::new(),
                     system_bindings: Vec::new(),
@@ -1431,12 +1503,14 @@ impl Session {
                     pool: Arc::clone(&db.pool),
                     txns: db.txns.clone(),
                     txn_waiter: Some(db.txn_waiter.clone()),
+                    sequences: Some(db.sequences.clone()),
                     datetime_config: self.datetime_config.clone(),
                     interrupts,
                     snapshot,
                     client_id,
                     next_command_id: cid,
                     timed: false,
+                    allow_side_effects: true,
                     expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
                     case_test_values: Vec::new(),
                     system_bindings: Vec::new(),
@@ -1460,12 +1534,14 @@ impl Session {
                     pool: Arc::clone(&db.pool),
                     txns: db.txns.clone(),
                     txn_waiter: Some(db.txn_waiter.clone()),
+                    sequences: Some(db.sequences.clone()),
                     datetime_config: self.datetime_config.clone(),
                     interrupts: Arc::clone(&interrupts),
                     snapshot,
                     client_id,
                     next_command_id: cid,
                     timed: false,
+                    allow_side_effects: true,
                     expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
                     case_test_values: Vec::new(),
                     system_bindings: Vec::new(),
@@ -1496,12 +1572,14 @@ impl Session {
                     pool: Arc::clone(&db.pool),
                     txns: db.txns.clone(),
                     txn_waiter: Some(db.txn_waiter.clone()),
+                    sequences: Some(db.sequences.clone()),
                     datetime_config: self.datetime_config.clone(),
                     interrupts: Arc::clone(&interrupts),
                     snapshot,
                     client_id,
                     next_command_id: cid,
                     timed: false,
+                    allow_side_effects: true,
                     expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
                     case_test_values: Vec::new(),
                     system_bindings: Vec::new(),
@@ -1542,6 +1620,20 @@ impl Session {
                     &mut txn.catalog_effects,
                 )
             }
+            Statement::CreateSequence(ref create_stmt) => {
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_create_sequence_stmt_in_transaction_with_search_path(
+                    client_id,
+                    create_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                    &mut txn.temp_effects,
+                    &mut txn.sequence_effects,
+                )
+            }
             Statement::CreateTable(ref create_stmt) => {
                 let search_path = self.configured_search_path();
                 let txn = self.active_txn.as_mut().unwrap();
@@ -1553,6 +1645,7 @@ impl Session {
                     search_path.as_deref(),
                     &mut txn.catalog_effects,
                     &mut txn.temp_effects,
+                    &mut txn.sequence_effects,
                 )
             }
             Statement::CreateType(ref create_stmt) => {
@@ -1690,6 +1783,31 @@ impl Session {
                     xid,
                     cid,
                     &mut txn.catalog_effects,
+                )
+            }
+            Statement::DropSequence(ref drop_stmt) => {
+                let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                let rels = {
+                    drop_stmt
+                        .sequence_names
+                        .iter()
+                        .filter_map(|name| catalog.lookup_any_relation(name).map(|entry| entry.rel))
+                        .collect::<Vec<_>>()
+                };
+                for rel in rels {
+                    self.lock_table_if_needed(db, rel, TableLockMode::AccessExclusive)?;
+                }
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_drop_sequence_stmt_in_transaction_with_search_path(
+                    client_id,
+                    drop_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                    &mut txn.temp_effects,
+                    &mut txn.sequence_effects,
                 )
             }
             Statement::TruncateTable(ref truncate_stmt) => {
@@ -1895,12 +2013,14 @@ impl Session {
             pool: Arc::clone(&db.pool),
             txns: db.txns.clone(),
             txn_waiter: Some(db.txn_waiter.clone()),
+            sequences: Some(db.sequences.clone()),
             datetime_config: self.datetime_config.clone(),
             interrupts,
             snapshot,
             client_id,
             next_command_id: cid,
             timed: false,
+            allow_side_effects: true,
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
             case_test_values: Vec::new(),
             system_bindings: Vec::new(),
@@ -1954,6 +2074,7 @@ impl Session {
                 current_cmd_catalog_invalidations: Vec::new(),
                 prior_cmd_catalog_invalidations: Vec::new(),
                 temp_effects: Vec::new(),
+                sequence_effects: Vec::new(),
             });
             true
         } else {
@@ -2130,12 +2251,14 @@ impl Session {
                 pool: Arc::clone(&db.pool),
                 txns: db.txns.clone(),
                 txn_waiter: Some(db.txn_waiter.clone()),
+                sequences: Some(db.sequences.clone()),
                 datetime_config: self.datetime_config.clone(),
                 interrupts,
                 snapshot,
                 client_id: self.client_id,
                 next_command_id: cid,
                 timed: false,
+                allow_side_effects: true,
                 expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
                 case_test_values: Vec::new(),
                 system_bindings: Vec::new(),
