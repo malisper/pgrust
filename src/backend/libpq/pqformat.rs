@@ -494,6 +494,15 @@ pub(crate) fn send_typed_data_row(
                 buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
                 buf.extend_from_slice(rendered.as_bytes());
             }
+            Value::Record(record) => {
+                let rendered = crate::backend::executor::jsonb::jsonb_from_value(&Value::Record(
+                    record.clone(),
+                ))
+                .map(|value| value.to_serde().to_string())
+                .unwrap_or_default();
+                buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
+                buf.extend_from_slice(rendered.as_bytes());
+            }
         }
     }
 

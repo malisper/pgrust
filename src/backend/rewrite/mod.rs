@@ -456,6 +456,14 @@ fn rewrite_semantic_expr(
                 .collect::<Result<Vec<_>, _>>()?,
             array_type,
         },
+        Expr::Row { fields } => Expr::Row {
+            fields: fields
+                .into_iter()
+                .map(|(name, expr)| {
+                    Ok((name, rewrite_semantic_expr(expr, catalog, expanded_views)?))
+                })
+                .collect::<Result<Vec<_>, ParseError>>()?,
+        },
         Expr::Coalesce(left, right) => Expr::Coalesce(
             Box::new(rewrite_semantic_expr(*left, catalog, expanded_views)?),
             Box::new(rewrite_semantic_expr(*right, catalog, expanded_views)?),

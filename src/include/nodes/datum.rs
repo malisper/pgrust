@@ -25,6 +25,11 @@ pub struct ArrayValue {
     pub elements: Vec<Value>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RecordValue {
+    pub fields: Vec<(String, Value)>,
+}
+
 impl ArrayValue {
     pub fn empty() -> Self {
         Self {
@@ -316,6 +321,7 @@ pub enum Value {
     Bool(bool),
     Array(Vec<Value>),
     PgArray(ArrayValue),
+    Record(RecordValue),
     Null,
 }
 
@@ -666,6 +672,13 @@ impl Value {
                 Value::Array(values.iter().map(Value::to_owned_value).collect())
             }
             Value::PgArray(array) => Value::PgArray(array.to_owned_value()),
+            Value::Record(record) => Value::Record(RecordValue {
+                fields: record
+                    .fields
+                    .iter()
+                    .map(|(name, value)| (name.clone(), value.to_owned_value()))
+                    .collect(),
+            }),
             Value::Null => Value::Null,
         }
     }
@@ -684,6 +697,10 @@ impl Value {
             } else if let Value::PgArray(array) = v {
                 for item in array.elements.iter_mut() {
                     *item = item.to_owned_value();
+                }
+            } else if let Value::Record(record) = v {
+                for (_, value) in record.fields.iter_mut() {
+                    *value = value.to_owned_value();
                 }
             }
         }
@@ -764,6 +781,7 @@ impl PartialEq for Value {
             (Value::TsQuery(a), Value::TsQuery(b)) => a == b,
             (Value::InternalChar(a), Value::InternalChar(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
+            (Value::Record(a), Value::Record(b)) => a == b,
             (Value::Null, Value::Null) => true,
             (a, b) if a.as_text().is_some() && b.as_text().is_some() => {
                 a.as_text().unwrap() == b.as_text().unwrap()
@@ -922,6 +940,10 @@ impl std::hash::Hash for Value {
             }
             Value::Bool(v) => {
                 6u8.hash(state);
+                v.hash(state);
+            }
+            Value::Record(v) => {
+                23u8.hash(state);
                 v.hash(state);
             }
             Value::Array(_) | Value::PgArray(_) => unreachable!("array values hashed above"),
