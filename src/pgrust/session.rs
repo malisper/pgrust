@@ -991,6 +991,7 @@ impl Session {
         select_stmt: &SelectStatement,
     ) -> Result<SelectGuard<'a>, ExecError> {
         let interrupt_guard = self.statement_interrupt_guard()?;
+        db.install_auth_state(self.client_id, self.auth.clone());
         db.install_interrupt_state(self.client_id, self.interrupts());
         let txn_ctx = if let Some(ref mut txn) = self.active_txn {
             let xid = txn.xid;

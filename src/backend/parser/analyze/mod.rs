@@ -313,6 +313,10 @@ pub trait CatalogLookup {
     fn pg_stats_rows(&self) -> Vec<Vec<Value>> {
         Vec::new()
     }
+
+    fn pg_stat_activity_rows(&self) -> Vec<Vec<Value>> {
+        Vec::new()
+    }
 }
 
 impl CatalogLookup for Catalog {
@@ -454,6 +458,10 @@ impl CatalogLookup for Catalog {
             catcache.attribute_rows(),
             catcache.statistic_rows(),
         )
+    }
+
+    fn pg_stat_activity_rows(&self) -> Vec<Vec<Value>> {
+        Vec::new()
     }
 
     fn materialize_visible_catalog(&self) -> Option<VisibleCatalog> {

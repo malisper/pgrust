@@ -29,7 +29,7 @@ use crate::backend::catalog::{
 };
 use crate::backend::commands::analyze::collect_analyze_stats;
 use crate::backend::executor::{
-    ExecError, ExecutorContext, StatementResult, execute_readonly_statement,
+    ExecError, ExecutorContext, StatementResult, Value, execute_readonly_statement,
 };
 use crate::backend::parser::Statement;
 use crate::backend::parser::{
@@ -72,7 +72,7 @@ use crate::include::catalog::{
     system_catalog_indexes,
 };
 use crate::pgrust::auth::{AuthCatalog, AuthState};
-use crate::pgrust::cluster::{Cluster, ClusterShared};
+use crate::pgrust::cluster::{Cluster, ClusterShared, SessionActivityEntry, SessionActivityState};
 use crate::pl::plpgsql::execute_do;
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
 use ddl::{
@@ -363,6 +363,117 @@ impl Database {
         self.session_interrupt_states.write().remove(&client_id);
         self.clear_auth_state(client_id);
         self.sequences.clear_currvals_for_client(client_id);
+    }
+
+    pub(crate) fn register_session_activity(&self, client_id: ClientId) {
+        self.cluster.session_activity.write().insert(
+            client_id,
+            SessionActivityEntry {
+                client_id,
+                database_oid: self.database_oid,
+                state: SessionActivityState::Idle,
+                query: String::new(),
+            },
+        );
+    }
+
+    pub(crate) fn set_session_query_active(&self, client_id: ClientId, query: &str) {
+        let mut activity = self.cluster.session_activity.write();
+        let entry = activity.entry(client_id).or_insert_with(|| SessionActivityEntry {
+            client_id,
+            database_oid: self.database_oid,
+            state: SessionActivityState::Idle,
+            query: String::new(),
+        });
+        entry.database_oid = self.database_oid;
+        entry.state = SessionActivityState::Active;
+        entry.query = query.to_string();
+    }
+
+    pub(crate) fn set_session_query_idle(&self, client_id: ClientId) {
+        if let Some(entry) = self.cluster.session_activity.write().get_mut(&client_id) {
+            entry.database_oid = self.database_oid;
+            entry.state = SessionActivityState::Idle;
+            entry.query.clear();
+        }
+    }
+
+    pub(crate) fn clear_session_activity(&self, client_id: ClientId) {
+        self.cluster.session_activity.write().remove(&client_id);
+    }
+
+    pub(crate) fn pg_stat_activity_rows(&self) -> Vec<Vec<Value>> {
+        let database_names = self
+            .shared_catalog
+            .read()
+            .catcache()
+            .map(|cache| {
+                cache.database_rows()
+                    .into_iter()
+                    .map(|row| (row.oid, row.datname))
+                    .collect::<HashMap<_, _>>()
+            })
+            .unwrap_or_default();
+        let role_names = self
+            .shared_catalog
+            .read()
+            .catcache()
+            .map(|cache| {
+                cache.authid_rows()
+                    .into_iter()
+                    .map(|row| (row.oid, row.rolname))
+                    .collect::<HashMap<_, _>>()
+            })
+            .unwrap_or_default();
+        let sessions_by_db = self
+            .cluster
+            .open_databases
+            .read()
+            .iter()
+            .map(|(db_oid, state)| (*db_oid, Arc::clone(state)))
+            .collect::<Vec<_>>();
+        let activity = self
+            .cluster
+            .session_activity
+            .read()
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut rows = activity
+            .into_iter()
+            .map(|entry| {
+                let usename = sessions_by_db
+                    .iter()
+                    .find(|(db_oid, _)| *db_oid == entry.database_oid)
+                    .and_then(|(_, state)| {
+                        state
+                            .session_auth_states
+                            .read()
+                            .get(&entry.client_id)
+                            .map(|auth| auth.current_user_oid())
+                    })
+                    .and_then(|role_oid| role_names.get(&role_oid).cloned())
+                    .unwrap_or_else(|| "unknown".to_string());
+                vec![
+                    Value::Int32(entry.client_id as i32),
+                    Value::Text(
+                        database_names
+                            .get(&entry.database_oid)
+                            .cloned()
+                            .unwrap_or_else(|| "unknown".to_string())
+                            .into(),
+                    ),
+                    Value::Text(usename.into()),
+                    Value::Text(entry.state.as_str().into()),
+                    Value::Text(entry.query.into()),
+                ]
+            })
+            .collect::<Vec<_>>();
+        rows.sort_by_key(|row| match row.first() {
+            Some(Value::Int32(pid)) => *pid,
+            _ => i32::MAX,
+        });
+        rows
     }
 
     pub(crate) fn accept_invalidation_messages(&self, client_id: ClientId) {

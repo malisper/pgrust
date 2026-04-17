@@ -165,6 +165,24 @@ struct ExecErrorResponse {
     position: Option<usize>,
 }
 
+struct SessionActivityGuard<'a> {
+    db: &'a Database,
+    client_id: ClientId,
+}
+
+impl<'a> SessionActivityGuard<'a> {
+    fn new(db: &'a Database, client_id: ClientId, query: &str) -> Self {
+        db.set_session_query_active(client_id, query);
+        Self { db, client_id }
+    }
+}
+
+impl Drop for SessionActivityGuard<'_> {
+    fn drop(&mut self) {
+        self.db.set_session_query_idle(self.client_id);
+    }
+}
+
 fn exec_error_response(sql: &str, e: &ExecError) -> ExecErrorResponse {
     let message = format_exec_error(e);
     let mut response = ExecErrorResponse {
@@ -551,6 +569,7 @@ where
         portals: HashMap::new(),
         copy_in: None,
     };
+    db.register_session_activity(client_id);
 
     let result = loop {
         let msg_type = match read_byte(&mut reader) {
@@ -627,6 +646,7 @@ where
         }
     };
     db.cleanup_client_temp_relations(client_id);
+    db.clear_session_activity(client_id);
     db.clear_interrupt_state(client_id);
     cluster.unregister_connection(db.database_oid);
     result
@@ -709,6 +729,7 @@ fn execute_query_statement(
     if sql.is_empty() {
         return Ok(QueryStatementFlow::Continue);
     }
+    let _activity_guard = SessionActivityGuard::new(db, state.session.client_id, sql);
     if try_handle_float_shell_ddl(stream, sql)? {
         return Ok(QueryStatementFlow::Continue);
     }
@@ -2482,6 +2503,7 @@ fn execute_portal(
     portal: &BoundPortal,
 ) -> io::Result<()> {
     let mut row_buf = Vec::new();
+    let _activity_guard = SessionActivityGuard::new(db, session.client_id, &portal.sql);
     if try_handle_float_shell_ddl(stream, &portal.sql)? {
         return Ok(());
     }

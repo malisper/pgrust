@@ -21,6 +21,7 @@ mod tests {
     use std::time::Duration;
 
     static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
+    static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
     #[cfg(unix)]
     type TestStream = UnixStream;
     #[cfg(not(unix))]
@@ -45,10 +46,11 @@ mod tests {
         cluster: Cluster,
     ) -> (TestStream, thread::JoinHandle<()>) {
         let (server_stream, client_stream) = UnixStream::pair().unwrap();
+        let client_id = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed) as u32;
 
         let server = thread::spawn(move || {
             let reader = server_stream.try_clone().unwrap();
-            handle_connection_with_io(reader, server_stream, &cluster, 1).unwrap();
+            handle_connection_with_io(reader, server_stream, &cluster, client_id).unwrap();
         });
 
         client_stream
@@ -69,10 +71,11 @@ mod tests {
     ) -> (TestStream, thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
+        let client_id = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed) as u32;
 
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
-            handle_connection(stream, &cluster, 1).unwrap();
+            handle_connection(stream, &cluster, client_id).unwrap();
         });
 
         let stream = TcpStream::connect(addr).unwrap();
@@ -780,6 +783,53 @@ mod tests {
 
         stream.shutdown(Shutdown::Both).unwrap();
         server.join().unwrap();
+    }
+
+    #[test]
+    fn pg_stat_activity_reports_running_query() {
+        let cluster = Cluster::open(temp_dir("wire_pg_stat_activity"), 16).unwrap();
+        let (mut busy_stream, busy_server) = start_test_connection_with_cluster(cluster.clone());
+        let (mut admin_stream, admin_server) = start_test_connection_with_cluster(cluster);
+
+        send_startup(&mut busy_stream);
+        let _ = read_until_ready(&mut busy_stream, "busy_startup");
+        send_query(&mut busy_stream, "set statement_timeout = '200ms'");
+        let _ = read_until_ready(&mut busy_stream, "busy_set_timeout");
+
+        send_startup(&mut admin_stream);
+        let _ = read_until_ready(&mut admin_stream, "admin_startup");
+
+        send_query(&mut busy_stream, "select * from generate_series(1, 1000000000)");
+        thread::sleep(Duration::from_millis(20));
+
+        send_query(
+            &mut admin_stream,
+            "select pid, datname, usename, state, query \
+             from pg_stat_activity \
+             where query = 'select * from generate_series(1, 1000000000)'",
+        );
+        let response = read_until_ready(&mut admin_stream, "pg_stat_activity");
+        let rows = response
+            .iter()
+            .filter(|(kind, _)| *kind == b'D')
+            .map(|(_, body)| data_row_values(body))
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][1], Some("postgres".into()));
+        assert_eq!(rows[0][2], Some("postgres".into()));
+        assert_eq!(rows[0][3], Some("active".into()));
+        assert_eq!(
+            rows[0][4],
+            Some("select * from generate_series(1, 1000000000)".into())
+        );
+        assert!(rows[0][0].as_deref().is_some_and(|pid| pid.parse::<u32>().is_ok()));
+
+        let _ = read_until_ready(&mut busy_stream, "busy_timeout");
+
+        busy_stream.shutdown(Shutdown::Both).unwrap();
+        admin_stream.shutdown(Shutdown::Both).unwrap();
+        busy_server.join().unwrap();
+        admin_server.join().unwrap();
     }
 
     #[test]

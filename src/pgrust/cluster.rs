@@ -37,7 +37,31 @@ pub(crate) struct ClusterShared {
     pub plan_cache: Arc<PlanCache>,
     pub open_databases: Arc<RwLock<HashMap<u32, Arc<OpenDatabaseState>>>>,
     pub active_connections: Arc<RwLock<HashMap<u32, usize>>>,
+    pub session_activity: Arc<RwLock<HashMap<ClientId, SessionActivityEntry>>>,
     pub wal_bg_writer: Option<Arc<WalBgWriter>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SessionActivityState {
+    Idle,
+    Active,
+}
+
+impl SessionActivityState {
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Active => "active",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SessionActivityEntry {
+    pub client_id: ClientId,
+    pub database_oid: u32,
+    pub state: SessionActivityState,
+    pub query: String,
 }
 
 pub(crate) struct OpenDatabaseState {
@@ -139,6 +163,7 @@ impl Cluster {
                 plan_cache: Arc::new(PlanCache::new()),
                 open_databases: Arc::new(RwLock::new(open_databases)),
                 active_connections: Arc::new(RwLock::new(HashMap::new())),
+                session_activity: Arc::new(RwLock::new(HashMap::new())),
                 wal_bg_writer: Some(Arc::new(wal_bg_writer)),
             }),
         })
