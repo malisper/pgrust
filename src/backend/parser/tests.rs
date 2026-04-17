@@ -2315,6 +2315,10 @@ fn parse_unary_minus_in_expression() {
 #[test]
 fn parse_array_subscript_expressions_and_targets() {
     let stmt = parse_select("select a[1], b[1:2], c[:], d[2:] from widgets").unwrap();
+    assert_eq!(stmt.targets[0].output_name, "a");
+    assert_eq!(stmt.targets[1].output_name, "b");
+    assert_eq!(stmt.targets[2].output_name, "c");
+    assert_eq!(stmt.targets[3].output_name, "d");
     assert!(matches!(
         stmt.targets[0].expr,
         SqlExpr::ArraySubscript { ref subscripts, .. }
@@ -2358,6 +2362,16 @@ fn parse_array_subscript_expressions_and_targets() {
         }
         other => panic!("expected insert, got {:?}", other),
     }
+}
+
+#[test]
+fn parse_qualified_array_subscript_uses_base_column_name() {
+    let stmt = parse_select("select w.data[1] from widgets w").unwrap();
+    assert_eq!(stmt.targets[0].output_name, "data");
+    assert!(matches!(
+        stmt.targets[0].expr,
+        SqlExpr::ArraySubscript { .. }
+    ));
 }
 
 #[test]
