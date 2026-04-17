@@ -3945,6 +3945,68 @@ fn array_slice_assignment_rejects_too_small_multidimensional_sources() {
             if message == "source array too small" && sqlstate == "2202E"
     ));
 }
+
+#[test]
+fn array_subscript_assignment_type_mismatch_uses_postgres_message() {
+    let base = temp_dir("array_subscript_assignment_type_mismatch");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+
+    let xid = txns.begin();
+    let err = run_sql_with_catalog(
+        &base,
+        &txns,
+        xid,
+        "insert into t (b[2]) values(now())",
+        array_subscript_catalog(),
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        err,
+        ExecError::DetailedError {
+            message,
+            hint,
+            sqlstate,
+            ..
+        }
+            if message
+                == "subscripted assignment to \"b\" requires type integer but expression is of type timestamp with time zone"
+                && hint.as_deref()
+                    == Some("You will need to rewrite or cast the expression.")
+                && sqlstate == "42804"
+    ));
+}
+
+#[test]
+fn array_slice_assignment_type_mismatch_uses_postgres_message() {
+    let base = temp_dir("array_slice_assignment_type_mismatch");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+
+    let xid = txns.begin();
+    let err = run_sql_with_catalog(
+        &base,
+        &txns,
+        xid,
+        "insert into t (b[1:2]) values(now())",
+        array_subscript_catalog(),
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        err,
+        ExecError::DetailedError {
+            message,
+            hint,
+            sqlstate,
+            ..
+        }
+            if message
+                == "subscripted assignment to \"b\" requires type integer[] but expression is of type timestamp with time zone"
+                && hint.as_deref()
+                    == Some("You will need to rewrite or cast the expression.")
+                && sqlstate == "42804"
+    ));
+}
 #[test]
 fn any_array_truth_table_and_overlap_work() {
     let base = temp_dir("array_any_overlap");
@@ -6484,6 +6546,35 @@ fn width_bucket_rejects_invalid_numeric_domains() {
 }
 
 #[test]
+fn width_bucket_float_handles_huge_range_boundaries() {
+    let base = temp_dir("width_bucket_float_huge_ranges");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select width_bucket(0, -1e100::float8, 1, 10), width_bucket(1, 1e100::float8, 0, 10), width_bucket(10.5::float8, -1.797e308::float8, 1.797e308::float8, 2), width_bucket(10.5::float8, -1.797e308::float8, 1.797e308::float8, 3), width_bucket(10.5::float8, 1.797e308::float8, -1.797e308::float8, 2), width_bucket(10.5::float8, 1.797e308::float8, -1.797e308::float8, 3)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Int32(10),
+                    Value::Int32(10),
+                    Value::Int32(2),
+                    Value::Int32(2),
+                    Value::Int32(2),
+                    Value::Int32(2),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn numeric_math_misc_helpers_cover_log_factorial_and_pg_lsn() {
     let base = temp_dir("numeric_misc_helpers");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -8529,9 +8620,7 @@ fn array_subscript_rejects_more_than_max_dimensions() {
         "select ('{}'::int[])[1][2][3][4][5][6][7]",
     ) {
         Err(ExecError::DetailedError {
-            message,
-            sqlstate,
-            ..
+            message, sqlstate, ..
         }) => {
             assert_eq!(
                 message,

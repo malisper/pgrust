@@ -1168,9 +1168,19 @@ fn build_create_type_statement(sql: &str) -> Result<CreateTypeStatement, ParseEr
         }));
     }
     if keyword_at_start(rest, "range") {
-        return Err(ParseError::FeatureNotSupported(
-            "CREATE TYPE AS RANGE is not supported yet".into(),
-        ));
+        let rest = consume_keyword(rest, "range").trim_start();
+        let (option_list, rest) = take_parenthesized_segment(rest)?;
+        if !rest.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of statement",
+                actual: rest.trim().into(),
+            });
+        }
+        return Ok(CreateTypeStatement::Range(parse_create_range_type_statement(
+            schema_name,
+            type_name,
+            &option_list,
+        )?));
     }
     let (attr_list, rest) = take_parenthesized_segment(rest)?;
     if !rest.trim().is_empty() {
@@ -1220,6 +1230,71 @@ fn parse_create_enum_labels(input: &str) -> Result<Vec<String>, ParseError> {
             decode_string_literal(trimmed)
         })
         .collect()
+}
+
+fn parse_create_range_type_statement(
+    schema_name: Option<String>,
+    type_name: String,
+    input: &str,
+) -> Result<CreateRangeTypeStatement, ParseError> {
+    let mut subtype = None;
+    let mut subtype_diff = None;
+    let mut collation = None;
+    for item in split_top_level_items(input, ',')? {
+        let item = item.trim();
+        if item.is_empty() {
+            continue;
+        }
+        let Some((name, value)) = item.split_once('=') else {
+            return Err(ParseError::UnexpectedToken {
+                expected: "range option assignment",
+                actual: item.into(),
+            });
+        };
+        let option_name = name.trim().to_ascii_lowercase();
+        let value = value.trim();
+        match option_name.as_str() {
+            "subtype" => subtype = Some(parse_type_name(value)?),
+            "subtype_diff" => {
+                let ((schema_name, function_name), rest) = parse_qualified_sql_name(value)?;
+                if !rest.trim().is_empty() {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "range function name",
+                        actual: value.into(),
+                    });
+                }
+                subtype_diff = Some(match schema_name {
+                    Some(schema_name) => format!("{schema_name}.{function_name}"),
+                    None => function_name,
+                });
+            }
+            "collation" => {
+                let (name, rest) = parse_sql_identifier(value)?;
+                if !rest.trim().is_empty() {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "collation name",
+                        actual: value.into(),
+                    });
+                }
+                collation = Some(name);
+            }
+            _ => {
+                return Err(ParseError::FeatureNotSupported(format!(
+                    "CREATE TYPE AS RANGE option {option_name} is not supported yet"
+                )));
+            }
+        }
+    }
+    Ok(CreateRangeTypeStatement {
+        schema_name,
+        type_name,
+        subtype: subtype.ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "subtype option",
+            actual: input.trim().into(),
+        })?,
+        subtype_diff,
+        collation,
+    })
 }
 
 fn parse_create_type_attribute(input: &str) -> Result<CompositeTypeAttributeDef, ParseError> {
@@ -5166,7 +5241,7 @@ fn build_identifier(pair: Pair<'_, Rule>) -> String {
     if raw.starts_with('"') && raw.ends_with('"') {
         raw[1..raw.len() - 1].replace("\"\"", "\"")
     } else {
-        raw.to_string()
+        raw.to_ascii_lowercase()
     }
 }
 
