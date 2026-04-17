@@ -3518,6 +3518,25 @@ fn parse_string_agg_select() {
 }
 
 #[test]
+fn parse_aggregate_filter_clause() {
+    let stmt = parse_select("select count(*) filter (where note is not null) from people").unwrap();
+    assert!(matches!(
+        &stmt.targets[0].expr,
+        SqlExpr::AggCall {
+            func: AggFunc::Count,
+            args,
+            distinct: false,
+            filter: Some(filter),
+            ..
+        } if args.is_empty()
+            && matches!(
+                filter.as_ref(),
+                SqlExpr::IsNotNull(inner) if matches!(inner.as_ref(), SqlExpr::Column(name) if name == "note")
+            )
+    ));
+}
+
+#[test]
 fn parse_variadic_aggregate_call_marks_call_level_flag() {
     std::thread::Builder::new()
         .name("parse_variadic_aggregate_call_marks_call_level_flag".into())

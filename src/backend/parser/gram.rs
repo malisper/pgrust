@@ -4309,6 +4309,7 @@ fn build_agg_call(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
     let mut parsed_args = ParsedFunctionArgs::default();
     let mut is_star = false;
     let mut distinct = false;
+    let mut filter = None;
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::agg_func => {
@@ -4340,6 +4341,9 @@ fn build_agg_call(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
             Rule::function_arg_list => {
                 parsed_args = build_function_arg_list(part)?;
             }
+            Rule::agg_filter_clause => {
+                filter = Some(build_agg_filter_clause(part)?);
+            }
             _ => {}
         }
     }
@@ -4352,7 +4356,16 @@ fn build_agg_call(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         },
         distinct,
         func_variadic: !is_star && parsed_args.func_variadic,
+        filter: filter.map(Box::new),
     })
+}
+
+fn build_agg_filter_clause(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
+    let expr = pair
+        .into_inner()
+        .find(|part| part.as_rule() == Rule::expr)
+        .ok_or(ParseError::UnexpectedEof)?;
+    build_expr(expr)
 }
 
 #[derive(Default)]

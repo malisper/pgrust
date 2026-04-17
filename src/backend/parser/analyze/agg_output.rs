@@ -24,7 +24,7 @@ pub(super) fn bind_agg_output_expr(
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
-    agg_list: &[(AggFunc, Vec<SqlFunctionArg>, bool, bool)],
+    agg_list: &[(AggFunc, Vec<SqlFunctionArg>, bool, bool, Option<SqlExpr>)],
     n_keys: usize,
 ) -> Result<Expr, ParseError> {
     bind_agg_output_expr_in_clause(
@@ -50,7 +50,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
-    agg_list: &[(AggFunc, Vec<SqlFunctionArg>, bool, bool)],
+    agg_list: &[(AggFunc, Vec<SqlFunctionArg>, bool, bool, Option<SqlExpr>)],
     n_keys: usize,
 ) -> Result<Expr, ParseError> {
     for (i, gk) in group_by_exprs.iter().enumerate() {
@@ -73,8 +73,15 @@ pub(super) fn bind_agg_output_expr_in_clause(
             args,
             distinct,
             func_variadic,
+            filter,
         } => {
-            let entry = (*func, args.clone(), *distinct, *func_variadic);
+            let entry = (
+                *func,
+                args.clone(),
+                *distinct,
+                *func_variadic,
+                filter.as_deref().cloned(),
+            );
             for (i, agg) in agg_list.iter().enumerate() {
                 if *agg == entry {
                     let arg_values: Vec<SqlExpr> =
@@ -127,12 +134,26 @@ pub(super) fn bind_agg_output_expr_in_clause(
                     } else {
                         bound_args
                     };
+                    let bound_filter = filter
+                        .as_deref()
+                        .map(|expr| {
+                            bind_expr_with_outer_and_ctes(
+                                expr,
+                                input_scope,
+                                catalog,
+                                outer_scopes,
+                                grouped_outer,
+                                &[],
+                            )
+                        })
+                        .transpose()?;
                     return Ok(Expr::aggref(
                         aggfnoid,
                         aggregate_sql_type(*func, arg_types.first().copied()),
                         agg_variadic,
                         *distinct,
                         coerced_args,
+                        bound_filter,
                         i,
                     ));
                 }

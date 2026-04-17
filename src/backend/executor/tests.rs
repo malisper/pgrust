@@ -2327,6 +2327,29 @@ fn count_star_on_empty_table() {
         other => panic!("expected query result, got {:?}", other),
     }
 }
+
+#[test]
+fn aggregate_filter_clause_counts_matching_rows() {
+    let base = temp_dir("aggregate_filter_clause");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let xid = txns.begin();
+    run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', null), (3, 'carol', 'c')").unwrap();
+    txns.commit(xid).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select count(*) filter (where note is not null) from people",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(2)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
 #[test]
 fn group_by_with_count() {
     let base = temp_dir("group_by_count");
