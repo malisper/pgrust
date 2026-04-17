@@ -187,6 +187,40 @@ CREATE TABLE tenk2 (
 INSERT INTO tenk2 SELECT * FROM tenk1;
 
 --
+-- Regression helper functions pgrust can express today.
+--
+-- Keep this block aligned with the subset of upstream test_setup.sql helpers
+-- that map cleanly onto pgrust's current builtin and PL/pgSQL support.
+--
+
+CREATE FUNCTION binary_coercible(source oid, target oid)
+RETURNS bool
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RETURN pg_rust_internal_binary_coercible(source, target);
+END
+$$;
+
+CREATE FUNCTION fipshash(input bytea)
+RETURNS text
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RETURN substr(encode(sha256(input), 'hex'), 1, 32);
+END
+$$;
+
+CREATE FUNCTION fipshash(input text)
+RETURNS text
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RETURN substr(encode(sha256(input::bytea), 'hex'), 1, 32);
+END
+$$;
+
+--
 -- Shared index-capable fixtures for pgrust regression coverage.
 --
 -- Keep these separate from PostgreSQL's canonical create_index.sql object
