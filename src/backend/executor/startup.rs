@@ -113,6 +113,7 @@ fn set_returning_call_uses_outer_columns(call: &SetReturningCall) -> bool {
         }
         SetReturningCall::Unnest { args, .. }
         | SetReturningCall::JsonTableFunction { args, .. }
+        | SetReturningCall::JsonPopulateRecordSet { args, .. }
         | SetReturningCall::RegexTableFunction { args, .. }
         | SetReturningCall::TextSearchTableFunction { args, .. }
         | SetReturningCall::UserDefined { args, .. } => args.iter().any(expr_uses_outer_columns),

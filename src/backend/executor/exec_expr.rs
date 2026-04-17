@@ -21,7 +21,8 @@ use super::expr_datetime::{
 };
 use super::expr_geometry::eval_geometry_function;
 use super::expr_json::{
-    eval_json_builtin_function, eval_json_get, eval_json_path, eval_jsonpath_operator,
+    eval_json_builtin_function, eval_json_get, eval_json_path, eval_json_populate_record,
+    eval_jsonpath_operator,
 };
 use super::expr_math::{
     cosd, cotd, eval_abs_function, eval_acosd, eval_acosh, eval_asind, eval_atanh,
@@ -1056,6 +1057,7 @@ fn eval_plpgsql_builtin_function(
         | BuiltinScalarFunction::ToJsonb
         | BuiltinScalarFunction::ArrayToJson
         | BuiltinScalarFunction::RowToJson
+        | BuiltinScalarFunction::JsonPopulateRecord
         | BuiltinScalarFunction::JsonBuildArray
         | BuiltinScalarFunction::JsonBuildObject
         | BuiltinScalarFunction::JsonObject
@@ -1288,6 +1290,10 @@ fn eval_builtin_function(
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
+    if func == BuiltinScalarFunction::JsonPopulateRecord {
+        let result_type = args.first().and_then(populate_record_base_type);
+        return eval_json_populate_record(args, None, result_type, slot, ctx);
+    }
     let values = args
         .iter()
         .map(|arg| eval_expr(arg, slot, ctx))
@@ -1739,5 +1745,18 @@ fn render_current_timestamp() -> String {
     match SystemTime::now().duration_since(UNIX_EPOCH) {
         Ok(dur) => format!("{}.{:06}+00", dur.as_secs(), dur.subsec_micros()),
         Err(_) => "0.000000+00".to_string(),
+    }
+}
+
+fn populate_record_base_type(expr: &Expr) -> Option<SqlType> {
+    match expr {
+        Expr::Var(var) => Some(var.vartype),
+        Expr::Func(func) => func.funcresulttype,
+        Expr::Cast(_, ty) => Some(*ty),
+        Expr::Row { .. } => Some(SqlType::record(crate::include::catalog::RECORD_TYPE_OID)),
+        Expr::Const(Value::Record(_)) => {
+            Some(SqlType::record(crate::include::catalog::RECORD_TYPE_OID))
+        }
+        _ => None,
     }
 }

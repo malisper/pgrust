@@ -209,6 +209,7 @@ pub enum BuiltinScalarFunction {
     ToJsonb,
     ArrayToJson,
     RowToJson,
+    JsonPopulateRecord,
     JsonBuildArray,
     JsonBuildObject,
     JsonObject,
@@ -482,6 +483,15 @@ pub enum SetReturningCall {
         args: Vec<Expr>,
         output_columns: Vec<QueryColumn>,
     },
+    JsonPopulateRecordSet {
+        func_oid: u32,
+        func_variadic: bool,
+        args: Vec<Expr>,
+        row_columns: Option<Vec<QueryColumn>>,
+        output_columns: Vec<QueryColumn>,
+        recordset: bool,
+        return_record_value: bool,
+    },
     RegexTableFunction {
         func_oid: u32,
         func_variadic: bool,
@@ -508,6 +518,7 @@ impl SetReturningCall {
             SetReturningCall::GenerateSeries { output, .. } => std::slice::from_ref(output),
             SetReturningCall::Unnest { output_columns, .. }
             | SetReturningCall::JsonTableFunction { output_columns, .. }
+            | SetReturningCall::JsonPopulateRecordSet { output_columns, .. }
             | SetReturningCall::RegexTableFunction { output_columns, .. }
             | SetReturningCall::TextSearchTableFunction { output_columns, .. }
             | SetReturningCall::UserDefined { output_columns, .. } => output_columns,

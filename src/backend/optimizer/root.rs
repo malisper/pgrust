@@ -161,6 +161,7 @@ fn collect_set_returning_call_supporting_inputs(call: &SetReturningCall, exprs: 
         }
         SetReturningCall::Unnest { args, .. }
         | SetReturningCall::JsonTableFunction { args, .. }
+        | SetReturningCall::JsonPopulateRecordSet { args, .. }
         | SetReturningCall::RegexTableFunction { args, .. }
         | SetReturningCall::TextSearchTableFunction { args, .. }
         | SetReturningCall::UserDefined { args, .. } => {
@@ -592,6 +593,7 @@ fn collect_set_returning_call_outer_refs(
         }
         SetReturningCall::Unnest { args, .. }
         | SetReturningCall::JsonTableFunction { args, .. }
+        | SetReturningCall::JsonPopulateRecordSet { args, .. }
         | SetReturningCall::RegexTableFunction { args, .. }
         | SetReturningCall::TextSearchTableFunction { args, .. }
         | SetReturningCall::UserDefined { args, .. } => {

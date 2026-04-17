@@ -889,7 +889,45 @@ fn bind_select_list_srf_call(
             ))
         }
         other => {
-            if let Some(kind) = resolve_json_table_function(other) {
+            if matches!(
+                resolved.as_ref().and_then(|call| call.srf_impl),
+                Some(ResolvedSrfImpl::JsonPopulateRecordSet)
+            ) {
+                let resolved = resolved.as_ref().expect("resolved json_populate_recordset");
+                let bound_args = bind_user_defined_srf_args(
+                    &args,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                    &resolved.declared_arg_types,
+                )?;
+                let output_columns = vec![QueryColumn {
+                    name: other.to_string(),
+                    sql_type: resolved.result_type,
+                }];
+                let row_columns = match &resolved.row_shape {
+                    ResolvedFunctionRowShape::OutParameters(columns)
+                    | ResolvedFunctionRowShape::NamedComposite { columns, .. } => {
+                        Some(columns.clone())
+                    }
+                    ResolvedFunctionRowShape::AnonymousRecord
+                    | ResolvedFunctionRowShape::None => None,
+                };
+                Ok((
+                    SetReturningCall::JsonPopulateRecordSet {
+                        func_oid: resolved.proc_oid,
+                        func_variadic: resolved.func_variadic,
+                        args: bound_args,
+                        row_columns,
+                        output_columns: output_columns.clone(),
+                        recordset: true,
+                        return_record_value: true,
+                    },
+                    output_columns[0].sql_type,
+                ))
+            } else if let Some(kind) = resolve_json_table_function(other) {
                 let bound_args = args
                     .iter()
                     .map(|arg| {
