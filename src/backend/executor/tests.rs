@@ -4472,6 +4472,50 @@ fn convert_from_decodes_utf8_and_euc_kr_hex_text() {
 }
 
 #[test]
+fn pg_rust_test_enc_conversion_validates_utf8_prefixes() {
+    let base = temp_dir("pg_rust_test_enc_conversion_validates_utf8_prefixes");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    let result = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select pg_rust_test_enc_conversion('\\x66006f'::bytea, 'utf8', 'utf8', true)",
+    )
+    .unwrap();
+    assert_query_rows(
+        result,
+        vec![vec![Value::Record(crate::include::nodes::datum::RecordValue::anonymous(
+            vec![
+                ("validlen".into(), Value::Int32(1)),
+                ("result".into(), Value::Bytea(vec![0x66])),
+            ],
+        ))]],
+    );
+}
+
+#[test]
+fn pg_rust_test_enc_conversion_converts_euc_kr_to_utf8() {
+    let base = temp_dir("pg_rust_test_enc_conversion_converts_euc_kr_to_utf8");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    let result = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select pg_rust_test_enc_conversion('\\xbcf6c7d0'::bytea, 'euc_kr', 'utf8', false)",
+    )
+    .unwrap();
+    assert_query_rows(
+        result,
+        vec![vec![Value::Record(crate::include::nodes::datum::RecordValue::anonymous(
+            vec![
+                ("validlen".into(), Value::Int32(4)),
+                ("result".into(), Value::Bytea("수학".as_bytes().to_vec())),
+            ],
+        ))]],
+    );
+}
+
+#[test]
 fn pg_input_is_valid_reports_varchar_typmod_results() {
     let base = temp_dir("pg_input_is_valid_varchar");
     let txns = TransactionManager::new_durable(&base).unwrap();

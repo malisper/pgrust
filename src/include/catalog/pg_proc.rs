@@ -6,10 +6,11 @@ use crate::include::catalog::{
     BPCHAR_TYPE_OID, BYTEA_TYPE_OID, CIRCLE_TYPE_OID, DATE_TYPE_OID, DATERANGE_TYPE_OID,
     FLOAT8_TYPE_OID, INT2_TYPE_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID, INT8_TYPE_OID,
     INT8RANGE_TYPE_OID, JSON_TYPE_OID, JSONB_TYPE_OID, JSONPATH_TYPE_OID, LINE_TYPE_OID,
-    LSEG_TYPE_OID, MONEY_TYPE_OID, NUMERIC_TYPE_OID, NUMRANGE_TYPE_OID, OID_TYPE_OID,
-    PATH_TYPE_OID, PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_INTERNAL_OID, POINT_TYPE_OID,
-    POLYGON_TYPE_OID, RECORD_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIMESTAMP_TYPE_OID,
-    TIMESTAMPTZ_TYPE_OID, TSQUERY_TYPE_OID, TSRANGE_TYPE_OID, TSTZRANGE_TYPE_OID, VARBIT_TYPE_OID,
+    LSEG_TYPE_OID, MONEY_TYPE_OID, NAME_TYPE_OID, NUMERIC_TYPE_OID, NUMRANGE_TYPE_OID,
+    OID_TYPE_OID, PATH_TYPE_OID, PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_INTERNAL_OID,
+    POINT_TYPE_OID, POLYGON_TYPE_OID, RECORD_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID,
+    TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID, TSQUERY_TYPE_OID, TSRANGE_TYPE_OID,
+    TSTZRANGE_TYPE_OID, VARBIT_TYPE_OID,
 };
 use crate::include::nodes::primnodes::{AggFunc, BuiltinScalarFunction, BuiltinWindowFunction};
 use std::sync::OnceLock;
@@ -181,6 +182,26 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             true,
             'f',
             'i',
+        ),
+        proc_row(
+            6401,
+            "pg_rust_test_enc_setup",
+            VOID_TYPE_OID,
+            "",
+            "pg_rust_test_enc_setup",
+            0,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        scalar_record_out_proc_row(
+            6402,
+            "pg_rust_test_enc_conversion",
+            &oid_argtypes(&[BYTEA_TYPE_OID, NAME_TYPE_OID, NAME_TYPE_OID, BOOL_TYPE_OID]),
+            "pg_rust_test_enc_conversion",
+            4,
+            &[("validlen", INT4_TYPE_OID), ("result", BYTEA_TYPE_OID)],
         ),
         proc_row(
             3100,
@@ -1941,6 +1962,14 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         (
             "pg_rust_internal_binary_coercible",
             BuiltinScalarFunction::PgRustInternalBinaryCoercible,
+        ),
+        (
+            "pg_rust_test_enc_setup",
+            BuiltinScalarFunction::PgRustTestEncSetup,
+        ),
+        (
+            "pg_rust_test_enc_conversion",
+            BuiltinScalarFunction::PgRustTestEncConversion,
         ),
         ("nextval", BuiltinScalarFunction::NextVal),
         ("currval", BuiltinScalarFunction::CurrVal),
@@ -4981,6 +5010,46 @@ fn record_out_proc_row(
 ) -> PgProcRow {
     let mut row =
         set_returning_proc_row(oid, proname, RECORD_TYPE_OID, proargtypes, prosrc, pronargs);
+    row.proallargtypes = Some(
+        parse_proc_argtype_oids(proargtypes)
+            .unwrap_or_default()
+            .into_iter()
+            .chain(out_args.iter().map(|(_, oid)| *oid))
+            .collect(),
+    );
+    row.proargmodes = Some(
+        std::iter::repeat_n(b'i', pronargs as usize)
+            .chain(std::iter::repeat_n(b'o', out_args.len()))
+            .collect(),
+    );
+    row.proargnames = Some(
+        std::iter::repeat_n(String::new(), pronargs as usize)
+            .chain(out_args.iter().map(|(name, _)| (*name).to_string()))
+            .collect(),
+    );
+    row
+}
+
+fn scalar_record_out_proc_row(
+    oid: u32,
+    proname: &str,
+    proargtypes: &str,
+    prosrc: &str,
+    pronargs: i16,
+    out_args: &[(&str, u32)],
+) -> PgProcRow {
+    let mut row = proc_row(
+        oid,
+        proname,
+        RECORD_TYPE_OID,
+        proargtypes,
+        prosrc,
+        pronargs,
+        false,
+        true,
+        'f',
+        'i',
+    );
     row.proallargtypes = Some(
         parse_proc_argtype_oids(proargtypes)
             .unwrap_or_default()
