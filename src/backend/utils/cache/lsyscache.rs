@@ -705,6 +705,12 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         rows
     }
 
+    fn range_rows(&self) -> Vec<crate::include::catalog::PgRangeRow> {
+        let mut rows = crate::include::catalog::builtin_range_rows();
+        rows.extend(self.db.range_rows());
+        rows
+    }
+
     fn language_rows(&self) -> Vec<PgLanguageRow> {
         language_rows(self.db, self.client_id, self.txn_ctx)
     }

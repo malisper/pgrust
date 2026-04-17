@@ -1,4 +1,5 @@
 use crate::backend::parser::{SqlType, SqlTypeKind};
+use crate::include::catalog::PgRangeRow;
 use crate::include::catalog::{
     DATERANGE_TYPE_OID, INT4RANGE_TYPE_OID, INT8RANGE_TYPE_OID, NUMRANGE_TYPE_OID,
     TSRANGE_TYPE_OID, TSTZRANGE_TYPE_OID,
@@ -74,6 +75,24 @@ const BUILTIN_RANGE_SPECS: [BuiltinRangeSpec; 6] = [
 
 pub fn builtin_range_specs() -> &'static [BuiltinRangeSpec] {
     &BUILTIN_RANGE_SPECS
+}
+
+pub fn builtin_range_rows() -> Vec<PgRangeRow> {
+    builtin_range_specs()
+        .iter()
+        .map(|spec| PgRangeRow {
+            rngtypid: spec.oid,
+            rngsubtype: crate::include::catalog::builtin_type_rows()
+                .into_iter()
+                .find(|row| row.sql_type == spec.subtype)
+                .map(|row| row.oid)
+                .unwrap_or(0),
+            rngcollation: 0,
+            rngcanonical: None,
+            rngsubdiff: None,
+            canonicalization: spec.canonicalization,
+        })
+        .collect()
 }
 
 pub fn builtin_range_spec(kind: RangeTypeId) -> &'static BuiltinRangeSpec {

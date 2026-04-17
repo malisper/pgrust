@@ -73,8 +73,8 @@ use crate::backend::utils::misc::checkpoint::{CheckpointConfig, CheckpointStatsS
 use crate::backend::utils::misc::interrupts::InterruptState;
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, PUBLIC_NAMESPACE_OID, PgConstraintRow, PgTypeRow, relkind_has_storage,
-    system_catalog_indexes,
+    BOOTSTRAP_SUPERUSER_OID, PUBLIC_NAMESPACE_OID, PgConstraintRow, PgRangeRow, PgTypeRow,
+    RangeCanonicalization, relkind_has_storage, system_catalog_indexes,
 };
 use crate::pgrust::auth::{AuthCatalog, AuthState};
 use crate::pgrust::cluster::{Cluster, ClusterShared, SessionActivityEntry, SessionActivityState};
@@ -513,6 +513,26 @@ impl Database {
             (schema_rank, row.typname.clone())
         });
         rows
+    }
+
+    pub(crate) fn range_rows(&self) -> Vec<PgRangeRow> {
+        self.range_types
+            .read()
+            .values()
+            .map(|entry| PgRangeRow {
+                rngtypid: entry.oid,
+                rngsubtype: entry.subtype.type_oid,
+                rngcollation: 0,
+                rngcanonical: None,
+                rngsubdiff: entry.subtype_diff.clone(),
+                canonicalization: match entry.subtype.kind {
+                    SqlTypeKind::Int4 | SqlTypeKind::Int8 | SqlTypeKind::Date => {
+                        RangeCanonicalization::Discrete
+                    }
+                    _ => RangeCanonicalization::Continuous,
+                },
+            })
+            .collect()
     }
 
     pub(crate) fn clear_interrupt_state(&self, client_id: ClientId) {

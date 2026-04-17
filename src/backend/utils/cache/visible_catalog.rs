@@ -5,9 +5,9 @@ use crate::backend::utils::cache::relcache::RelCache;
 use crate::backend::utils::cache::system_views::{build_pg_stats_rows, build_pg_views_rows};
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, PgCastRow, PgClassRow, PgConstraintRow, PgInheritsRow, PgLanguageRow,
-    PgOperatorRow, PgProcRow, PgRewriteRow, PgStatisticRow, PgTypeRow, bootstrap_pg_cast_rows,
-    bootstrap_pg_language_rows, bootstrap_pg_operator_rows, bootstrap_pg_proc_rows,
-    builtin_type_rows,
+    PgOperatorRow, PgProcRow, PgRangeRow, PgRewriteRow, PgStatisticRow, PgTypeRow,
+    bootstrap_pg_cast_rows, bootstrap_pg_language_rows, bootstrap_pg_operator_rows,
+    bootstrap_pg_proc_rows, builtin_range_rows, builtin_type_rows,
 };
 
 #[derive(Debug, Clone)]
@@ -169,6 +169,10 @@ impl CatalogLookup for VisibleCatalog {
             }
         }
         rows
+    }
+
+    fn range_rows(&self) -> Vec<PgRangeRow> {
+        builtin_range_rows()
     }
 
     fn language_rows(&self) -> Vec<PgLanguageRow> {
