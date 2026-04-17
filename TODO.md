@@ -290,7 +290,9 @@ Counts from `/tmp/pgrust_regress_todo_20260417` on 2026-04-17; `test_setup.sql` 
   `$[0,1]`, `$[last - 1]`, `$[2.5 - 1 to $.size() - 2]`, `$[last ? (...)]`.
 - Add missing jsonpath expression/forms support:
   `exists(...)`, method calls like `.size()` and `.type()`, and other currently-rejected valid jsonpath syntax.
-- Implement PostgreSQL lax-mode auto-unwrapping for array/scalar access so queries like `lax $[0]` and `lax $[*]` on scalar values match upstream behavior.
+- In progress: PostgreSQL lax-mode auto-unwrapping for array/scalar access.
+  Done: `lax $[0]` on scalar values now matches upstream behavior.
+  Remaining: `lax $[*]` and related scalar/array unwrapping cases.
 - Implement jsonpath three-valued predicate semantics:
   comparisons, `is unknown`, and filter evaluation should preserve `unknown` instead of reducing everything to Rust `bool`.
 - Fix jsonpath comparison semantics for mixed types and multi-item sequences so strict comparisons do not incorrectly return `true`.
