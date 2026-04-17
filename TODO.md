@@ -304,7 +304,8 @@ Targeted reruns on 2026-04-17:
 - Done: jsonpath parser/runtime now supports index lists and computed subscripts for
   `$[0,1]`, `$[last - 1]`, `$[2.5 - 1 to $.size() - 2]`, and `$[last ? (...)]`.
 - In progress: jsonpath expression/forms support.
-  Done: `exists(...)`, `.size()`, and `.type()`.
+  Done: `exists(...)`, `.size()`, `.type()`, and expression-level method chaining for
+  `.abs()`, `.ceiling()`, and `.floor()`.
   Remaining: other currently-rejected valid jsonpath syntax.
 - In progress: PostgreSQL lax-mode auto-unwrapping for array/scalar access.
   Done: `lax $[0]` on scalar values now matches upstream behavior.
