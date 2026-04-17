@@ -197,7 +197,12 @@ Counts from `/tmp/pgrust_regress_todo_20260417` on 2026-04-17; `test_setup.sql` 
 - path.sql: 4/23
 - pg_lsn.sql: 0/31
 - plancache.sql: 23/113
-- plpgsql.sql: 1347/2271
+- plpgsql.sql: 1589/2271
+  - typmod-aware `bpchar`/`char(n)` type resolution during index creation
+  - explicit index opclass handling for `CREATE INDEX ... (col bpchar_ops)`
+  - `trigger` pseudotype support in `CREATE FUNCTION ... RETURNS trigger`
+  - `CREATE TRIGGER` parser, binder, catalog, and execution support
+  - PL/pgSQL trigger runtime support for row triggers (`NEW`/`OLD`, trigger invocation)
 - point.sql: 12/43
 - polygon.sql: 15/62
 - polymorphism.sql: 37/455
@@ -337,6 +342,13 @@ Counts from `/tmp/pgrust_regress_todo_20260417` on 2026-04-17; `test_setup.sql` 
 - `trigger` type support
 - `lseg` input syntax used by `alter_table.sql`
 - table rename handling for array-type name collisions in `pg_type`
+
+- plpgsql.sql
+  - typmod-aware `bpchar`/`char(n)` type resolution during index creation
+  - explicit index opclass handling for `CREATE INDEX ... (col bpchar_ops)`
+  - `trigger` pseudotype support in `CREATE FUNCTION ... RETURNS trigger`
+  - `CREATE TRIGGER` parser, binder, catalog, and execution support
+  - PL/pgSQL trigger runtime support for row triggers (`NEW`/`OLD`, trigger invocation)
 
 ## DONE
 
