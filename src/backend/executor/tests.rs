@@ -9972,6 +9972,46 @@ fn jsonpath_recursive_descent_includes_current_item_at_depth_zero() {
 }
 
 #[test]
+fn jsonpath_is_unknown_treats_mixed_type_compare_as_unknown() {
+    let base = temp_dir("jsonpath_is_unknown_compare");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb '1' @? '$ ? ((@ == \"1\") is unknown)'",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Bool(true)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn jsonpath_is_unknown_treats_predicate_arithmetic_errors_as_unknown() {
+    let base = temp_dir("jsonpath_is_unknown_arithmetic");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb '[1,2,0,3]' @? '$[*] ? ((2 / @ > 0) is unknown)'",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Bool(true)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn getdatabaseencoding_and_jsonpath_unicode_work() {
     let base = temp_dir("jsonpath_unicode");
     let txns = TransactionManager::new_durable(&base).unwrap();
