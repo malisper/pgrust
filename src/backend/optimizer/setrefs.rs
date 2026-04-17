@@ -1279,6 +1279,26 @@ fn lower_set_returning_call(
                 .collect(),
             output_columns,
         },
+        SetReturningCall::JsonPopulateRecordSet {
+            func_oid,
+            func_variadic,
+            args,
+            row_columns,
+            output_columns,
+            recordset,
+            return_record_value,
+        } => SetReturningCall::JsonPopulateRecordSet {
+            func_oid,
+            func_variadic,
+            args: args
+                .into_iter()
+                .map(|arg| lower_expr(ctx, arg, mode))
+                .collect(),
+            row_columns,
+            output_columns,
+            recordset,
+            return_record_value,
+        },
         SetReturningCall::RegexTableFunction {
             func_oid,
             func_variadic,
@@ -1377,6 +1397,26 @@ fn fix_set_returning_call_upper_exprs(
                 .map(|arg| fix_upper_expr_for_input(root, arg, path, input_tlist))
                 .collect(),
             output_columns,
+        },
+        SetReturningCall::JsonPopulateRecordSet {
+            func_oid,
+            func_variadic,
+            args,
+            row_columns,
+            output_columns,
+            recordset,
+            return_record_value,
+        } => SetReturningCall::JsonPopulateRecordSet {
+            func_oid,
+            func_variadic,
+            args: args
+                .into_iter()
+                .map(|arg| fix_upper_expr_for_input(root, arg, path, input_tlist))
+                .collect(),
+            row_columns,
+            output_columns,
+            recordset,
+            return_record_value,
         },
         SetReturningCall::RegexTableFunction {
             func_oid,
@@ -1810,6 +1850,7 @@ fn validate_set_returning_call(
         }
         SetReturningCall::Unnest { args, .. }
         | SetReturningCall::JsonTableFunction { args, .. }
+        | SetReturningCall::JsonPopulateRecordSet { args, .. }
         | SetReturningCall::RegexTableFunction { args, .. }
         | SetReturningCall::TextSearchTableFunction { args, .. }
         | SetReturningCall::UserDefined { args, .. } => args
@@ -2078,6 +2119,7 @@ fn validate_planner_set_returning_call(
         }
         SetReturningCall::Unnest { args, .. }
         | SetReturningCall::JsonTableFunction { args, .. }
+        | SetReturningCall::JsonPopulateRecordSet { args, .. }
         | SetReturningCall::RegexTableFunction { args, .. }
         | SetReturningCall::TextSearchTableFunction { args, .. }
         | SetReturningCall::UserDefined { args, .. } => args

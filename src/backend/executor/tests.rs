@@ -2,7 +2,7 @@ use super::*;
 use crate::RelFileLocator;
 use crate::backend::access::heap::heapam::{heap_flush, heap_insert_mvcc, heap_update};
 use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
-use crate::backend::libpq::pqformat::format_exec_error;
+use crate::backend::libpq::pqformat::{format_exec_error, format_exec_error_hint};
 use crate::backend::parser::{Catalog, CatalogEntry, CatalogLookup};
 use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, StorageManager};
 use crate::include::access::htup::TupleValue;
@@ -8081,6 +8081,172 @@ fn row_to_json_supports_qualified_star_inside_row_constructor() {
         }
         other => panic!("expected query result, got {other:?}"),
     }
+}
+
+#[test]
+fn json_populate_record_supports_anonymous_record_values() {
+    let base = temp_dir("json_populate_record_scalar");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select json_populate_record(row(1,2), '{\"f1\": 0, \"f2\": 1}')",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Record(crate::include::nodes::datum::RecordValue {
+                    fields: vec![
+                        ("f1".into(), Value::Int32(0)),
+                        ("f2".into(), Value::Int32(1)),
+                    ],
+                })]]
+            );
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+}
+
+#[test]
+fn json_populate_record_requires_row_shape_for_null_record() {
+    let base = temp_dir("json_populate_record_null_record");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select json_populate_record(null::record, '{\"x\": 0, \"y\": 1}')",
+    )
+    .unwrap_err();
+    assert_eq!(
+        format_exec_error(&err),
+        "could not determine row type for result of json_populate_record"
+    );
+    assert_eq!(
+        format_exec_error_hint(&err).as_deref(),
+        Some(
+            "Provide a non-null record argument, or call the function in the FROM clause using a column definition list."
+        )
+    );
+}
+
+#[test]
+fn json_populate_record_supports_from_column_definition_lists() {
+    let base = temp_dir("json_populate_record_from");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select * from json_populate_record(null::record, '{\"x\": 776}') as (x int, y int)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int32(776), Value::Null]]);
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+}
+
+#[test]
+fn json_populate_recordset_supports_select_list_and_from() {
+    let base = temp_dir("json_populate_recordset");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select i, json_populate_recordset(row(i,50), '[{\"f1\":\"42\"},{\"f2\":\"43\"}]') \
+         from (values (1),(2)) v(i)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![
+                        Value::Int32(1),
+                        Value::Record(crate::include::nodes::datum::RecordValue {
+                            fields: vec![
+                                ("f1".into(), Value::Int32(42)),
+                                ("f2".into(), Value::Int32(50)),
+                            ],
+                        }),
+                    ],
+                    vec![
+                        Value::Int32(1),
+                        Value::Record(crate::include::nodes::datum::RecordValue {
+                            fields: vec![
+                                ("f1".into(), Value::Int32(1)),
+                                ("f2".into(), Value::Int32(43)),
+                            ],
+                        }),
+                    ],
+                    vec![
+                        Value::Int32(2),
+                        Value::Record(crate::include::nodes::datum::RecordValue {
+                            fields: vec![
+                                ("f1".into(), Value::Int32(42)),
+                                ("f2".into(), Value::Int32(50)),
+                            ],
+                        }),
+                    ],
+                    vec![
+                        Value::Int32(2),
+                        Value::Record(crate::include::nodes::datum::RecordValue {
+                            fields: vec![
+                                ("f1".into(), Value::Int32(2)),
+                                ("f2".into(), Value::Int32(43)),
+                            ],
+                        }),
+                    ],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select * from json_populate_recordset(null::record, '[{\"x\": 776}]') as (x int, y int)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int32(776), Value::Null]]);
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+}
+
+#[test]
+fn json_populate_recordset_reports_its_own_row_type_error() {
+    let base = temp_dir("json_populate_recordset_null_record");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select json_populate_recordset(null::record, '[{\"x\": 0, \"y\": 1}]')",
+    )
+    .unwrap_err();
+    assert_eq!(
+        format_exec_error(&err),
+        "could not determine row type for result of json_populate_recordset"
+    );
+    assert_eq!(
+        format_exec_error_hint(&err).as_deref(),
+        Some(
+            "Provide a non-null record argument, or call the function in the FROM clause using a column definition list."
+        )
+    );
 }
 
 #[test]

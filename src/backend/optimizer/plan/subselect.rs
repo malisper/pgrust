@@ -260,6 +260,26 @@ fn finalize_set_returning_call(
                 .collect(),
             output_columns,
         },
+        SetReturningCall::JsonPopulateRecordSet {
+            func_oid,
+            func_variadic,
+            args,
+            row_columns,
+            output_columns,
+            recordset,
+            return_record_value,
+        } => SetReturningCall::JsonPopulateRecordSet {
+            func_oid,
+            func_variadic,
+            args: args
+                .into_iter()
+                .map(|arg| finalize_expr_subqueries(arg, catalog, subplans))
+                .collect(),
+            row_columns,
+            output_columns,
+            recordset,
+            return_record_value,
+        },
         SetReturningCall::RegexTableFunction {
             func_oid,
             func_variadic,
@@ -534,6 +554,26 @@ fn rebase_set_returning_call_subplan_ids(call: SetReturningCall, base: usize) ->
                 .map(|arg| rebase_expr_subplan_ids(arg, base))
                 .collect(),
             output_columns,
+        },
+        SetReturningCall::JsonPopulateRecordSet {
+            func_oid,
+            func_variadic,
+            args,
+            row_columns,
+            output_columns,
+            recordset,
+            return_record_value,
+        } => SetReturningCall::JsonPopulateRecordSet {
+            func_oid,
+            func_variadic,
+            args: args
+                .into_iter()
+                .map(|arg| rebase_expr_subplan_ids(arg, base))
+                .collect(),
+            row_columns,
+            output_columns,
+            recordset,
+            return_record_value,
         },
         SetReturningCall::RegexTableFunction {
             func_oid,
