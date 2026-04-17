@@ -271,6 +271,65 @@ fn recursive_union_distinct_rejects_varbit_columns() {
 }
 
 #[test]
+fn union_all_selects_returns_all_rows() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    let result = session
+        .execute(&db, "select 1 as x union all select 2 as x order by x")
+        .expect("run union all");
+
+    match result {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int32(1)], vec![Value::Int32(2)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn union_distinct_deduplicates_rows() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    let result = session
+        .execute(&db, "select 1 as x union select 1 as x")
+        .expect("run union distinct");
+
+    match result {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int32(1)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn union_in_derived_subquery_with_cte_executes() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    let result = session
+        .execute(
+            &db,
+            "select count(*) from (
+                with q1(x) as (select random() from generate_series(1, 5))
+                select * from q1
+                union
+                select * from q1
+            ) ss",
+        )
+        .expect("run union in derived subquery");
+
+    match result {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(5)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn ephemeral_database_rolls_back_aborted_transaction() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);

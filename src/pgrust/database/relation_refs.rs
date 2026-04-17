@@ -434,6 +434,17 @@ pub(super) fn collect_direct_relation_oids_from_select(
         visible_ctes.push(cte.name.to_ascii_lowercase());
     }
 
+    if let Some(set_operation) = &select.set_operation {
+        for input in &set_operation.inputs {
+            collect_direct_relation_oids_from_select(input, catalog, visible_ctes, rels);
+        }
+        for item in &select.order_by {
+            collect_direct_relation_oids_from_sql_expr(&item.expr, catalog, visible_ctes, rels);
+        }
+        visible_ctes.truncate(cte_base);
+        return;
+    }
+
     if let Some(from) = &select.from {
         collect_direct_relation_oids_from_from_item(from, catalog, visible_ctes, rels);
     }

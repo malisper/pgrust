@@ -264,6 +264,7 @@ pub struct Query {
     pub limit_offset: usize,
     pub project_set: Option<Vec<ProjectSetTarget>>,
     pub recursive_union: Option<Box<RecursiveUnionQuery>>,
+    pub set_operation: Option<Box<SetOperationQuery>>,
 }
 
 impl Query {
@@ -335,6 +336,13 @@ pub struct RecursiveUnionQuery {
     pub recursive: Query,
     pub distinct: bool,
     pub worktable_id: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetOperationQuery {
+    pub output_desc: RelationDesc,
+    pub all: bool,
+    pub inputs: Vec<Query>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -469,6 +477,18 @@ pub struct SelectStatement {
     pub order_by: Vec<OrderByItem>,
     pub limit: Option<usize>,
     pub offset: Option<usize>,
+    pub set_operation: Option<Box<SetOperationStatement>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetOperator {
+    Union { all: bool },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetOperationStatement {
+    pub op: SetOperator,
+    pub inputs: Vec<SelectStatement>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1084,6 +1084,7 @@ fn build_table_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, ParseErro
         order_by: Vec::new(),
         limit: None,
         offset: None,
+        set_operation: None,
     })
 }
 
@@ -1528,6 +1529,41 @@ fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
 }
 
 pub(crate) fn build_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, ParseError> {
+    let raw = pair.as_str().to_string();
+    let parts: Vec<Pair<'_, Rule>> = match pair.as_rule() {
+        Rule::select_stmt => {
+            let mut with_recursive = false;
+            let mut with = Vec::new();
+            let mut nested = None;
+            for part in pair.into_inner() {
+                match part.as_rule() {
+                    Rule::cte_clause => {
+                        let (recursive, ctes) = build_cte_clause(part)?;
+                        with_recursive = recursive;
+                        with = ctes;
+                    }
+                    Rule::set_operation_stmt
+                    | Rule::simple_select_stmt
+                    | Rule::simple_select_core => nested = Some(build_select(part)?),
+                    _ => {}
+                }
+            }
+            let mut stmt = nested.ok_or(ParseError::UnexpectedEof)?;
+            if !with.is_empty() || with_recursive {
+                stmt.with_recursive = with_recursive;
+                stmt.with = with;
+            }
+            return Ok(stmt);
+        }
+        Rule::set_operation_stmt => return build_set_operation_select(pair),
+        Rule::simple_select_stmt | Rule::simple_select_core => pair.into_inner().collect(),
+        _ => {
+            return Err(ParseError::UnexpectedToken {
+                expected: "SELECT statement",
+                actual: raw,
+            });
+        }
+    };
     let mut with_recursive = false;
     let mut with = Vec::new();
     let mut targets = None;
@@ -1538,12 +1574,27 @@ pub(crate) fn build_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, Pars
     let mut order_by = Vec::new();
     let mut limit = None;
     let mut offset = None;
-    for part in pair.into_inner() {
+    for part in parts {
         match part.as_rule() {
             Rule::cte_clause => {
                 let (recursive, ctes) = build_cte_clause(part)?;
                 with_recursive = recursive;
                 with = ctes;
+            }
+            Rule::simple_select_core => {
+                for inner in part.into_inner() {
+                    match inner.as_rule() {
+                        Rule::select_list => targets = Some(build_select_list(inner)?),
+                        Rule::from_item => from = Some(build_from_item(inner)?),
+                        Rule::expr => where_clause = Some(build_expr(inner)?),
+                        Rule::group_by_clause => group_by = build_group_by_clause(inner)?,
+                        Rule::having_clause => having = Some(build_having_clause(inner)?),
+                        Rule::order_by_clause => order_by = build_order_by_clause(inner)?,
+                        Rule::limit_clause => limit = Some(build_limit_clause(inner)?),
+                        Rule::offset_clause => offset = Some(build_offset_clause(inner)?),
+                        _ => {}
+                    }
+                }
             }
             Rule::select_list => targets = Some(build_select_list(part)?),
             Rule::from_item => from = Some(build_from_item(part)?),
@@ -1567,6 +1618,91 @@ pub(crate) fn build_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, Pars
         order_by,
         limit,
         offset,
+        set_operation: None,
+    })
+}
+
+fn build_set_operation_term(pair: Pair<'_, Rule>) -> Result<SelectStatement, ParseError> {
+    match pair.as_rule() {
+        Rule::set_operation_term => {
+            build_set_operation_term(pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?)
+        }
+        Rule::parenthesized_set_operation_term => build_select(
+            pair.into_inner()
+                .find(|part| matches!(part.as_rule(), Rule::select_stmt))
+                .ok_or(ParseError::UnexpectedEof)?,
+        ),
+        Rule::simple_select_core | Rule::simple_select_stmt | Rule::set_operation_stmt | Rule::select_stmt => {
+            build_select(pair)
+        }
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "set-operation term",
+            actual: pair.as_str().into(),
+        }),
+    }
+}
+
+fn build_set_operation_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, ParseError> {
+    let raw = pair.as_str().to_string();
+    let mut with_recursive = false;
+    let mut with = Vec::new();
+    let mut order_by = Vec::new();
+    let mut limit = None;
+    let mut offset = None;
+    let mut all_flags = Vec::new();
+    let mut inputs = Vec::new();
+
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::cte_clause => {
+                let (recursive, ctes) = build_cte_clause(part)?;
+                with_recursive = recursive;
+                with = ctes;
+            }
+            Rule::set_operation_term => inputs.push(build_set_operation_term(part)?),
+            Rule::set_union_clause => all_flags.push(contains_union_all(part.as_str())),
+            Rule::order_by_clause => order_by = build_order_by_clause(part)?,
+            Rule::limit_clause => limit = Some(build_limit_clause(part)?),
+            Rule::offset_clause => offset = Some(build_offset_clause(part)?),
+            _ => {}
+        }
+    }
+
+    if inputs.len() < 2 {
+        return Err(ParseError::UnexpectedToken {
+            expected: "set operation with at least two inputs",
+            actual: raw,
+        });
+    }
+
+    let mut op = None;
+    for all in all_flags {
+        match op {
+            None => op = Some(SetOperator::Union { all }),
+            Some(SetOperator::Union { all: first_all }) if first_all == all => {}
+            Some(_) => {
+                return Err(ParseError::FeatureNotSupported(
+                    "mixed UNION and UNION ALL chains".into(),
+                ));
+            }
+        }
+    }
+
+    Ok(SelectStatement {
+        with_recursive,
+        with,
+        from: None,
+        targets: Vec::new(),
+        where_clause: None,
+        group_by: Vec::new(),
+        having: None,
+        order_by,
+        limit,
+        offset,
+        set_operation: Some(Box::new(SetOperationStatement {
+            op: op.ok_or(ParseError::UnexpectedEof)?,
+            inputs,
+        })),
     })
 }
 
@@ -1616,6 +1752,7 @@ fn wrap_values_as_select(stmt: ValuesStatement) -> SelectStatement {
         order_by: stmt.order_by,
         limit: stmt.limit,
         offset: stmt.offset,
+        set_operation: None,
     }
 }
 
@@ -1667,7 +1804,9 @@ fn build_common_table_expr(pair: Pair<'_, Rule>) -> Result<CommonTableExpr, Pars
 
 fn build_cte_body(pair: Pair<'_, Rule>) -> Result<CteBody, ParseError> {
     match pair.as_rule() {
-        Rule::select_stmt => Ok(CteBody::Select(Box::new(build_select(pair)?))),
+        Rule::select_stmt | Rule::simple_select_stmt | Rule::simple_select_core => {
+            Ok(CteBody::Select(Box::new(build_select(pair)?)))
+        }
         Rule::values_stmt => Ok(CteBody::Values(build_values_statement(pair)?)),
         Rule::recursive_union_cte_body => {
             let all = contains_union_all(pair.as_str());
@@ -1676,7 +1815,9 @@ fn build_cte_body(pair: Pair<'_, Rule>) -> Result<CteBody, ParseError> {
             let mut recursive = None;
             for part in inner {
                 match part.as_rule() {
-                    Rule::select_stmt => recursive = Some(build_select(part)?),
+                    Rule::select_stmt | Rule::simple_select_stmt | Rule::simple_select_core => {
+                        recursive = Some(build_select(part)?)
+                    }
                     _ => {}
                 }
             }
