@@ -182,6 +182,7 @@ fn render_value(value: &Value) -> String {
                 .join(", ")
         ),
         Value::PgArray(array) => pgrust::backend::executor::format_array_value_text(array),
+        Value::Record(record) => format!("{:?}", record.fields),
         Value::Null => "NULL".into(),
     }
 }

@@ -8011,6 +8011,79 @@ fn json_scalar_functions_work() {
 }
 
 #[test]
+fn row_to_json_supports_row_constructor_and_whole_row_alias() {
+    let base = temp_dir("row_to_json");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select row_to_json(row(1, 'foo')), \
+                row_to_json(q), \
+                row_to_json(row((select array_agg(x) from generate_series(5,10) x)), false) \
+         from (select 7 as a, 'bar'::text as b) q",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Json("{\"f1\":1,\"f2\":\"foo\"}".into()),
+                    Value::Json("{\"a\":7,\"b\":\"bar\"}".into()),
+                    Value::Json("{\"f1\":[5,6,7,8,9,10]}".into()),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+}
+
+#[test]
+fn row_to_json_supports_qualified_star_inside_row_constructor() {
+    let base = temp_dir("row_to_json_qualified_star");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "SELECT row_to_json(q) \
+         FROM (SELECT $$a$$ || x AS b, \
+                      y AS c, \
+                      ARRAY[ROW(x.*, ARRAY[1,2,3]), ROW(y.*, ARRAY[4,5,6])] AS z \
+               FROM generate_series(1,2) x, \
+                    generate_series(4,5) y) q",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Json(
+                        "{\"b\":\"a1\",\"c\":4,\"z\":[{\"f1\":1,\"f2\":[1,2,3]},{\"f1\":4,\"f2\":[4,5,6]}]}"
+                            .into(),
+                    )],
+                    vec![Value::Json(
+                        "{\"b\":\"a1\",\"c\":5,\"z\":[{\"f1\":1,\"f2\":[1,2,3]},{\"f1\":5,\"f2\":[4,5,6]}]}"
+                            .into(),
+                    )],
+                    vec![Value::Json(
+                        "{\"b\":\"a2\",\"c\":4,\"z\":[{\"f1\":2,\"f2\":[1,2,3]},{\"f1\":4,\"f2\":[4,5,6]}]}"
+                            .into(),
+                    )],
+                    vec![Value::Json(
+                        "{\"b\":\"a2\",\"c\":5,\"z\":[{\"f1\":2,\"f2\":[1,2,3]},{\"f1\":5,\"f2\":[4,5,6]}]}"
+                            .into(),
+                    )],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+}
+
+#[test]
 fn json_strip_nulls_functions_work() {
     let base = temp_dir("json_strip_nulls");
     let txns = TransactionManager::new_durable(&base).unwrap();
