@@ -307,6 +307,15 @@ fn find_constraint_row<'a>(rows: &'a [PgConstraintRow], name: &str) -> Option<&'
         .find(|row| row.conname.eq_ignore_ascii_case(name))
 }
 
+fn normalize_constraint_rename_target_name(name: &str) -> Result<String, ExecError> {
+    if name.contains('.') {
+        return Err(ExecError::Parse(ParseError::UnsupportedQualifiedName(
+            name.to_string(),
+        )));
+    }
+    Ok(name.to_ascii_lowercase())
+}
+
 fn ensure_constraint_relation(
     db: &Database,
     client_id: ClientId,
@@ -342,6 +351,94 @@ fn primary_constraint_for_attnum<'a>(
 }
 
 impl Database {
+    pub(crate) fn execute_alter_table_rename_constraint_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        alter_stmt: &crate::backend::parser::AlterTableRenameConstraintStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let interrupts = self.interrupt_state(client_id);
+        let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+        let relation = lookup_heap_relation_for_ddl(&catalog, &alter_stmt.table_name)?;
+        self.table_locks.lock_table_interruptible(
+            relation.rel,
+            TableLockMode::AccessExclusive,
+            client_id,
+            interrupts.as_ref(),
+        )?;
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result =
+            self.execute_alter_table_rename_constraint_stmt_in_transaction_with_search_path(
+                client_id,
+                alter_stmt,
+                xid,
+                0,
+                configured_search_path,
+                &mut catalog_effects,
+            );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        self.table_locks.unlock_table(relation.rel, client_id);
+        result
+    }
+
+    pub(crate) fn execute_alter_table_rename_constraint_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        alter_stmt: &crate::backend::parser::AlterTableRenameConstraintStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let interrupts = self.interrupt_state(client_id);
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let relation = lookup_heap_relation_for_ddl(&catalog, &alter_stmt.table_name)?;
+        ensure_constraint_relation(self, client_id, &relation, &alter_stmt.table_name)?;
+        let rows = catalog.constraint_rows_for_relation(relation.relation_oid);
+        find_constraint_row(&rows, &alter_stmt.constraint_name)
+            .ok_or_else(|| {
+                ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "existing table constraint",
+                    actual: format!(
+                        "constraint \"{}\" does not exist",
+                        alter_stmt.constraint_name
+                    ),
+                })
+            })?;
+        let new_constraint_name =
+            normalize_constraint_rename_target_name(&alter_stmt.new_constraint_name)?;
+        if find_constraint_row(&rows, &new_constraint_name).is_some() {
+            return Err(ExecError::Parse(ParseError::TableAlreadyExists(
+                new_constraint_name,
+            )));
+        }
+
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+            interrupts,
+        };
+        let effect = self
+            .catalog
+            .write()
+            .rename_relation_constraint_mvcc(
+                relation.relation_oid,
+                &alter_stmt.constraint_name,
+                &alter_stmt.new_constraint_name,
+                &ctx,
+            )
+            .map_err(map_catalog_error)?;
+        catalog_effects.push(effect);
+        Ok(StatementResult::AffectedRows(0))
+    }
+
     pub(crate) fn execute_alter_table_add_constraint_stmt_with_search_path(
         &self,
         client_id: ClientId,

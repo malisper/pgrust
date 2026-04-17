@@ -1972,6 +1972,9 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::alter_table_drop_constraint_stmt => Ok(Statement::AlterTableDropConstraint(
             build_alter_table_drop_constraint(inner)?,
         )),
+        Rule::alter_table_rename_constraint_stmt => Ok(Statement::AlterTableRenameConstraint(
+            build_alter_table_rename_constraint(inner)?,
+        )),
         Rule::alter_table_drop_column_stmt => Ok(Statement::AlterTableDropColumn(
             build_alter_table_drop_column(inner)?,
         )),
@@ -4670,6 +4673,20 @@ fn build_alter_table_drop_constraint(
     Ok(AlterTableDropConstraintStatement {
         table_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
         constraint_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
+fn build_alter_table_rename_constraint(
+    pair: Pair<'_, Rule>,
+) -> Result<AlterTableRenameConstraintStatement, ParseError> {
+    let mut parts = pair
+        .into_inner()
+        .filter(|part| part.as_rule() == Rule::identifier)
+        .map(build_identifier);
+    Ok(AlterTableRenameConstraintStatement {
+        table_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
+        constraint_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
+        new_constraint_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
     })
 }
 

@@ -1101,6 +1101,59 @@ impl CatalogStore {
         Ok(effect)
     }
 
+    pub fn rename_relation_constraint_mvcc(
+        &mut self,
+        relation_oid: u32,
+        constraint_name: &str,
+        new_constraint_name: &str,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let mut catalog = self.catalog_snapshot_with_control_for_snapshot(ctx)?;
+        let (
+            old_constraint,
+            new_constraint,
+            renamed_index,
+        ) = catalog.rename_relation_constraint(relation_oid, constraint_name, new_constraint_name)?;
+        self.persist_control_state(&catalog)?;
+
+        let mut kinds = vec![BootstrapCatalogKind::PgConstraint];
+        delete_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                constraints: vec![old_constraint],
+                ..PhysicalCatalogRows::default()
+            },
+            1,
+            &kinds,
+        )?;
+        insert_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                constraints: vec![new_constraint],
+                ..PhysicalCatalogRows::default()
+            },
+            1,
+            &kinds,
+        )?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+
+        if let Some((old_name, old_entry, new_name, new_entry)) = renamed_index {
+            let old_rows = physical_catalog_rows_for_catalog_entry(&catalog, &old_name, &old_entry);
+            let new_rows = physical_catalog_rows_for_catalog_entry(&catalog, &new_name, &new_entry);
+            let index_kinds = create_index_sync_kinds();
+            delete_catalog_rows_subset_mvcc(ctx, &old_rows, self.scope_db_oid(), &index_kinds)?;
+            insert_catalog_rows_subset_mvcc(ctx, &new_rows, self.scope_db_oid(), &index_kinds)?;
+            merge_catalog_kinds(&mut kinds, &index_kinds);
+            effect_record_catalog_kinds(&mut effect, &index_kinds);
+            effect_record_oid(&mut effect.relation_oids, new_entry.relation_oid);
+        }
+
+        Ok(effect)
+    }
+
     pub fn drop_relation_constraint_mvcc(
         &mut self,
         relation_oid: u32,
