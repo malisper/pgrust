@@ -4,16 +4,13 @@ use super::*;
 use crate::include::nodes::primnodes::OpExprKind;
 
 fn grouped_key_expr(group_key_exprs: &[Expr], index: usize) -> Expr {
-    group_key_exprs
-        .get(index)
-        .cloned()
-        .unwrap_or_else(|| {
-            panic!(
-                "grouped aggregate output missing group key expr for position {}; \
+    group_key_exprs.get(index).cloned().unwrap_or_else(|| {
+        panic!(
+            "grouped aggregate output missing group key expr for position {}; \
                  parser/analyze should provide explicit grouped key identity",
-                index + 1
-            )
-        })
+            index + 1
+        )
+    })
 }
 
 pub(super) fn bind_agg_output_expr(
@@ -99,7 +96,8 @@ pub(super) fn bind_agg_output_expr_in_clause(
                             )
                         })
                         .collect::<Vec<_>>();
-                    let resolved = resolve_aggregate_call(catalog, *func, &arg_types, *func_variadic);
+                    let resolved =
+                        resolve_aggregate_call(catalog, *func, &arg_types, *func_variadic);
                     let aggfnoid = resolved
                         .as_ref()
                         .map(|call| call.proc_oid)

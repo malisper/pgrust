@@ -166,9 +166,13 @@ impl CatCache {
         sort_pg_cast_rows(&mut cache.cast_rows);
         cache.collation_rows.extend(bootstrap_pg_collation_rows());
         sort_pg_collation_rows(&mut cache.collation_rows);
-        cache.database_rows.extend(bootstrap_pg_database_rows());
+        cache
+            .database_rows
+            .extend(catalog.database_rows().iter().cloned());
         sort_pg_database_rows(&mut cache.database_rows);
-        cache.tablespace_rows.extend(bootstrap_pg_tablespace_rows());
+        cache
+            .tablespace_rows
+            .extend(catalog.tablespace_rows().iter().cloned());
         sort_pg_tablespace_rows(&mut cache.tablespace_rows);
 
         for (name, entry) in catalog.entries() {

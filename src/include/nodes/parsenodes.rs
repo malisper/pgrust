@@ -202,6 +202,7 @@ pub enum Statement {
     Reset(ResetStatement),
     CreateFunction(CreateFunctionStatement),
     CreateType(CreateTypeStatement),
+    CreateDatabase(CreateDatabaseStatement),
     CreateSchema(CreateSchemaStatement),
     CreateTable(CreateTableStatement),
     CreateTableAs(CreateTableAsStatement),
@@ -235,6 +236,7 @@ pub enum Statement {
     RevokeRoleMembership(RevokeRoleMembershipStatement),
     DropType(DropTypeStatement),
     DropSequence(DropSequenceStatement),
+    DropDatabase(DropDatabaseStatement),
     DropTable(DropTableStatement),
     DropIndex(DropIndexStatement),
     DropDomain(DropDomainStatement),
@@ -712,6 +714,11 @@ impl CreateTableStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateDatabaseStatement {
+    pub database_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateSchemaStatement {
     pub schema_name: Option<String>,
     pub auth_role: Option<String>,
@@ -908,6 +915,12 @@ pub enum AlterRoleAction {
 pub struct DropRoleStatement {
     pub if_exists: bool,
     pub role_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropDatabaseStatement {
+    pub if_exists: bool,
+    pub database_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

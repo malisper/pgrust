@@ -1910,6 +1910,7 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::reset_stmt => Ok(Statement::Reset(build_reset(inner)?)),
         Rule::create_role_stmt => Ok(Statement::CreateRole(build_create_role(inner)?)),
         Rule::alter_role_stmt => Ok(Statement::AlterRole(build_alter_role(inner)?)),
+        Rule::create_database_stmt => Ok(Statement::CreateDatabase(build_create_database(inner)?)),
         Rule::create_index_stmt => Ok(Statement::CreateIndex(build_create_index(inner)?)),
         Rule::alter_table_add_column_stmt => Ok(Statement::AlterTableAddColumn(
             build_alter_table_add_column(inner)?,
@@ -1959,6 +1960,7 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::create_table_stmt => build_create_table(inner),
         Rule::create_view_stmt => Ok(Statement::CreateView(build_create_view(inner)?)),
         Rule::drop_role_stmt => Ok(Statement::DropRole(build_drop_role(inner)?)),
+        Rule::drop_database_stmt => Ok(Statement::DropDatabase(build_drop_database(inner)?)),
         Rule::drop_table_stmt => Ok(Statement::DropTable(build_drop_table(inner)?)),
         Rule::drop_index_stmt => Ok(Statement::DropIndex(build_drop_index(inner)?)),
         Rule::drop_view_stmt => Ok(Statement::DropView(build_drop_view(inner)?)),
@@ -2236,6 +2238,28 @@ fn build_alter_role_rename(pair: Pair<'_, Rule>) -> Result<String, ParseError> {
         .find(|part| part.as_rule() == Rule::identifier)
         .map(build_identifier)
         .ok_or(ParseError::UnexpectedEof)
+}
+
+fn build_create_database(pair: Pair<'_, Rule>) -> Result<CreateDatabaseStatement, ParseError> {
+    let mut database_name = None;
+    let mut has_options = false;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier if database_name.is_none() => {
+                database_name = Some(build_identifier(part))
+            }
+            Rule::create_database_options => has_options = true,
+            _ => {}
+        }
+    }
+    if has_options {
+        return Err(ParseError::FeatureNotSupported(
+            "CREATE DATABASE options".into(),
+        ));
+    }
+    Ok(CreateDatabaseStatement {
+        database_name: database_name.ok_or(ParseError::UnexpectedEof)?,
+    })
 }
 
 fn build_role_option(pair: Pair<'_, Rule>) -> Result<RoleOption, ParseError> {
@@ -3978,6 +4002,24 @@ fn build_drop_role(pair: Pair<'_, Rule>) -> Result<DropRoleStatement, ParseError
     Ok(DropRoleStatement {
         if_exists,
         role_names,
+    })
+}
+
+fn build_drop_database(pair: Pair<'_, Rule>) -> Result<DropDatabaseStatement, ParseError> {
+    let mut if_exists = false;
+    let mut database_name = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::if_exists_clause => if_exists = true,
+            Rule::identifier if database_name.is_none() => {
+                database_name = Some(build_identifier(part));
+            }
+            _ => {}
+        }
+    }
+    Ok(DropDatabaseStatement {
+        if_exists,
+        database_name: database_name.ok_or(ParseError::UnexpectedEof)?,
     })
 }
 

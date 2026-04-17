@@ -6,7 +6,10 @@ use crate::include::nodes::primnodes::{
 
 use super::planner::planner;
 
-pub(super) fn append_planned_subquery(planned_stmt: PlannedStmt, subplans: &mut Vec<Plan>) -> usize {
+pub(super) fn append_planned_subquery(
+    planned_stmt: PlannedStmt,
+    subplans: &mut Vec<Plan>,
+) -> usize {
     let base = subplans.len();
     subplans.extend(
         planned_stmt

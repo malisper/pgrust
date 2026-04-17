@@ -1137,14 +1137,16 @@ fn lower_direct_ref(expr: &Expr, mode: LowerMode<'_>) -> Option<Expr> {
         LowerMode::Scalar => None,
         LowerMode::Input { tlist } => search_tlist_entry(None, expr, tlist)
             .map(|entry| special_slot_var(OUTER_VAR, entry.index, entry.sql_type)),
-        LowerMode::Aggregate { layout, tlist, .. } => search_tlist_entry(None, expr, tlist)
-            .map(|entry| special_slot_var(OUTER_VAR, entry.index, entry.sql_type))
-            .or_else(|| {
-                layout.iter().enumerate().find_map(|(index, candidate)| {
-                    (candidate == expr)
-                        .then(|| special_slot_var(OUTER_VAR, index, expr_sql_type(candidate)))
+        LowerMode::Aggregate { layout, tlist, .. } => {
+            search_tlist_entry(None, expr, tlist)
+                .map(|entry| special_slot_var(OUTER_VAR, entry.index, entry.sql_type))
+                .or_else(|| {
+                    layout.iter().enumerate().find_map(|(index, candidate)| {
+                        (candidate == expr)
+                            .then(|| special_slot_var(OUTER_VAR, index, expr_sql_type(candidate)))
+                    })
                 })
-            }),
+        }
         LowerMode::Join {
             outer_tlist,
             inner_tlist,

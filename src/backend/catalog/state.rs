@@ -17,8 +17,9 @@ use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::misc::interrupts::InterruptReason;
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_NOTNULL, PUBLIC_NAMESPACE_OID, PgAuthIdRow,
-    PgAuthMembersRow, PgConstraintRow, PgDependRow, PgInheritsRow, PgRewriteRow,
-    bootstrap_pg_auth_members_rows, bootstrap_pg_authid_rows, builtin_type_rows,
+    PgAuthMembersRow, PgConstraintRow, PgDatabaseRow, PgDependRow, PgInheritsRow, PgRewriteRow,
+    PgTablespaceRow, bootstrap_pg_auth_members_rows, bootstrap_pg_authid_rows,
+    bootstrap_pg_database_rows, bootstrap_pg_tablespace_rows, builtin_type_rows,
     relkind_has_storage, sort_pg_rewrite_rows,
 };
 
@@ -92,6 +93,8 @@ pub struct Catalog {
     pub(crate) rewrites: Vec<PgRewriteRow>,
     pub(crate) authids: Vec<PgAuthIdRow>,
     pub(crate) auth_members: Vec<PgAuthMembersRow>,
+    pub(crate) databases: Vec<PgDatabaseRow>,
+    pub(crate) tablespaces: Vec<PgTablespaceRow>,
     pub(crate) next_rel_number: u32,
     pub(crate) next_oid: u32,
 }
@@ -106,6 +109,8 @@ impl Default for Catalog {
             rewrites: Vec::new(),
             authids: bootstrap_pg_authid_rows(),
             auth_members: bootstrap_pg_auth_members_rows().into(),
+            databases: bootstrap_pg_database_rows().into(),
+            tablespaces: bootstrap_pg_tablespace_rows().into(),
             next_rel_number: DEFAULT_FIRST_REL_NUMBER,
             next_oid: DEFAULT_FIRST_USER_OID,
         };
@@ -265,6 +270,14 @@ impl Catalog {
 
     pub fn auth_members_rows(&self) -> &[PgAuthMembersRow] {
         &self.auth_members
+    }
+
+    pub fn database_rows(&self) -> &[PgDatabaseRow] {
+        &self.databases
+    }
+
+    pub fn tablespace_rows(&self) -> &[PgTablespaceRow] {
+        &self.tablespaces
     }
 
     pub fn create_table(
@@ -471,7 +484,7 @@ impl Catalog {
         let entry = CatalogEntry {
             rel: RelFileLocator {
                 spc_oid: DEFAULT_SPC_OID,
-                db_oid: DEFAULT_DB_OID,
+                db_oid: table.rel.db_oid,
                 rel_number: self.next_rel_number,
             },
             relation_oid: self.next_oid,

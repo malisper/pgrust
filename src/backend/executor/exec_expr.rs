@@ -78,8 +78,8 @@ use crate::backend::parser::{CatalogLookup, ParseError, SqlType, SqlTypeKind, Su
 use crate::include::catalog::builtin_scalar_function_for_proc_oid;
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue, NumericValue};
 use crate::include::nodes::primnodes::{
-    BoolExpr, BoolExprType, FuncExpr, OpExpr, OpExprKind, ScalarArrayOpExpr, ScalarFunctionImpl,
-    SubLinkType, INDEX_VAR, INNER_VAR, OUTER_VAR, TABLE_OID_ATTR_NO, attrno_index,
+    BoolExpr, BoolExprType, FuncExpr, INDEX_VAR, INNER_VAR, OUTER_VAR, OpExpr, OpExprKind,
+    ScalarArrayOpExpr, ScalarFunctionImpl, SubLinkType, TABLE_OID_ATTR_NO, attrno_index,
 };
 use crate::pl::plpgsql::execute_user_defined_scalar_function;
 
@@ -566,18 +566,20 @@ fn eval_bound_tuple_var(
         hint: None,
         sqlstate: "XX000",
     })?;
-    row.get(index).cloned().ok_or_else(|| ExecError::DetailedError {
-        message: "special executor Var referenced beyond the bound tuple width".into(),
-        detail: Some(format!(
-            "varno={}, varattno={}, index={}, tuple_width={}",
-            var.varno,
-            var.varattno,
-            index,
-            row.len()
-        )),
-        hint: None,
-        sqlstate: "XX000",
-    })
+    row.get(index)
+        .cloned()
+        .ok_or_else(|| ExecError::DetailedError {
+            message: "special executor Var referenced beyond the bound tuple width".into(),
+            detail: Some(format!(
+                "varno={}, varattno={}, index={}, tuple_width={}",
+                var.varno,
+                var.varattno,
+                index,
+                row.len()
+            )),
+            hint: None,
+            sqlstate: "XX000",
+        })
 }
 
 pub fn eval_expr(

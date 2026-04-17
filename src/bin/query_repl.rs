@@ -485,8 +485,10 @@ fn run_statement(
         }
         Statement::CommentOnRole(_)
         | Statement::CreateRole(_)
+        | Statement::CreateDatabase(_)
         | Statement::AlterRole(_)
         | Statement::DropRole(_)
+        | Statement::DropDatabase(_)
         | Statement::GrantObject(_)
         | Statement::RevokeObject(_)
         | Statement::GrantRoleMembership(_)
@@ -723,13 +725,15 @@ fn run_statement(
         }
         Statement::CommentOnDomain(_)
         | Statement::CreateFunction(_)
+        | Statement::CreateDatabase(_)
         | Statement::CreateSchema(_)
         | Statement::CreateDomain(_)
         | Statement::CreateType(_)
         | Statement::CreateSequence(_)
         | Statement::DropDomain(_)
         | Statement::DropType(_)
-        | Statement::DropSequence(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
+        | Statement::DropSequence(_)
+        | Statement::DropDatabase(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
             "domain/function/type/sequence statements are not supported in query_repl".into(),
         ))),
         Statement::CreateTable(stmt) => {

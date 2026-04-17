@@ -30,18 +30,21 @@ pub(crate) fn resolve_create_schema_stmt(
             sqlstate: "42704",
         })?;
     let target_owner = match stmt.auth_role.as_deref() {
-        Some(role_name) => auth_catalog.role_by_name(role_name).ok_or_else(|| {
-            ExecError::DetailedError {
-                message: format!("role \"{role_name}\" does not exist"),
-                detail: None,
-                hint: None,
-                sqlstate: "42704",
-            }
-        })?,
+        Some(role_name) => {
+            auth_catalog
+                .role_by_name(role_name)
+                .ok_or_else(|| ExecError::DetailedError {
+                    message: format!("role \"{role_name}\" does not exist"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42704",
+                })?
+        }
         None => current_user,
     };
 
-    if target_owner.oid != auth.current_user_oid() && !auth.can_set_role(target_owner.oid, auth_catalog)
+    if target_owner.oid != auth.current_user_oid()
+        && !auth.can_set_role(target_owner.oid, auth_catalog)
     {
         return Err(ExecError::DetailedError {
             message: format!("must be able to SET ROLE \"{}\"", target_owner.rolname),
@@ -72,9 +75,7 @@ pub(crate) fn resolve_create_schema_stmt(
     if schema_name.starts_with("pg_") {
         return Err(ExecError::DetailedError {
             message: format!("unacceptable schema name \"{schema_name}\""),
-            detail: Some(
-                "The prefix \"pg_\" is reserved for system schemas.".into(),
-            ),
+            detail: Some("The prefix \"pg_\" is reserved for system schemas.".into()),
             hint: None,
             sqlstate: "42939",
         });

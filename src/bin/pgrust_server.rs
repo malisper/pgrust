@@ -5,7 +5,7 @@ static GLOBAL: MiMalloc = MiMalloc;
 
 use std::path::PathBuf;
 
-use pgrust::pgrust::database::Database;
+use pgrust::pgrust::cluster::Cluster;
 use pgrust::pgrust::server::serve;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,9 +134,10 @@ fn main() -> Result<(), String> {
     eprintln!("pgrust: data directory: {}", config.base_dir.display());
     eprintln!("pgrust: buffer pool size: {}", config.pool_size);
 
-    let db = Database::open(&config.base_dir, config.pool_size).map_err(|e| format!("{e:?}"))?;
+    let cluster =
+        Cluster::open(&config.base_dir, config.pool_size).map_err(|e| format!("{e:?}"))?;
 
-    serve(&format!("0.0.0.0:{}", config.port), db).map_err(|e| e.to_string())
+    serve(&format!("0.0.0.0:{}", config.port), cluster).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

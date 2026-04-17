@@ -7,8 +7,9 @@ use crate::include::nodes::datum::Value;
 use crate::include::nodes::pathnodes::{Path, PathKey, PathTarget, PlannerInfo};
 use crate::include::nodes::plannodes::{Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
-    AggAccum, Aggref, BoolExpr, Expr, ExprArraySubscript, FuncExpr, JoinType, OpExpr,
-    ProjectSetTarget, QueryColumn, ScalarArrayOpExpr, SubLinkType, TargetEntry, Var, user_attrno,
+    AggAccum, BoolExpr, Expr, ExprArraySubscript, FuncExpr, JoinType, OpExpr, ProjectSetTarget,
+    QueryColumn, ScalarArrayOpExpr, SubLinkType, TargetEntry, Var, user_attrno,
+    Aggref,
 };
 
 use super::flatten_join_alias_vars;
@@ -324,8 +325,13 @@ impl Path {
             Self::IndexScan { pathkeys, .. } => pathkeys.clone(),
             Self::SubqueryScan { pathkeys, .. } => pathkeys.clone(),
             Self::Filter { input, .. } | Self::Limit { input, .. } => input.pathkeys(),
-            Self::Projection { targets, input, .. } => {
-                project_pathkeys(input, targets, &input.pathkeys())
+            Self::Projection {
+                slot_id,
+                targets,
+                input,
+                ..
+            } => {
+                project_pathkeys(*slot_id, input, targets, &input.pathkeys())
             }
             Self::OrderBy { items, .. } => items
                 .iter()
@@ -542,6 +548,7 @@ fn slot_var(
 }
 
 fn project_pathkeys(
+    slot_id: usize,
     input: &Path,
     targets: &[TargetEntry],
     input_pathkeys: &[PathKey],
@@ -571,8 +578,11 @@ fn project_pathkeys(
                 .or_else(|| {
                     targets
                         .iter()
-                        .find(|target| target.expr == key.expr)
-                        .map(|target| target.expr.clone())
+                        .enumerate()
+                        .find(|(_, target)| target.expr == key.expr)
+                        .map(|(index, target)| {
+                            slot_var(slot_id, user_attrno(index), target.sql_type)
+                        })
                 })
                 .unwrap_or_else(|| key.expr.clone());
             PathKey {

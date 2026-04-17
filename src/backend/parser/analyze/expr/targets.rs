@@ -8,7 +8,11 @@ pub(crate) enum BoundSelectTargets {
 }
 
 fn input_resno_for_scope_expr(scope: &BoundScope, expr: &Expr) -> Option<usize> {
-    scope.output_exprs.iter().position(|candidate| candidate == expr).map(|index| index + 1)
+    scope
+        .output_exprs
+        .iter()
+        .position(|candidate| candidate == expr)
+        .map(|index| index + 1)
 }
 
 pub(crate) fn bind_select_targets(
@@ -54,15 +58,17 @@ pub(crate) fn bind_select_targets(
         .iter()
         .enumerate()
         .map(|(index, column)| {
-            ProjectSetTarget::Scalar(TargetEntry::new(
-                column.output_name.clone(),
-                scope.output_exprs.get(index).cloned().unwrap_or_else(|| {
-                    panic!("bound scope output_exprs missing project-set base column {index}")
-                }),
-                scope.desc.columns[index].sql_type,
-                index + 1,
+            ProjectSetTarget::Scalar(
+                TargetEntry::new(
+                    column.output_name.clone(),
+                    scope.output_exprs.get(index).cloned().unwrap_or_else(|| {
+                        panic!("bound scope output_exprs missing project-set base column {index}")
+                    }),
+                    scope.desc.columns[index].sql_type,
+                    index + 1,
+                )
+                .with_input_resno(index + 1),
             )
-            .with_input_resno(index + 1))
         })
         .collect::<Vec<_>>();
 
@@ -96,13 +102,15 @@ pub(crate) fn bind_select_targets(
                 sql_type,
                 column_index: 0,
             });
-            final_targets.push(TargetEntry::new(
-                output_name,
-                Expr::Const(Value::Null),
-                sql_type,
-                final_targets.len() + 1,
-            )
-            .with_input_resno(base_width + srf_index + 1));
+            final_targets.push(
+                TargetEntry::new(
+                    output_name,
+                    Expr::Const(Value::Null),
+                    sql_type,
+                    final_targets.len() + 1,
+                )
+                .with_input_resno(base_width + srf_index + 1),
+            );
             srf_index += 1;
             continue;
         }
