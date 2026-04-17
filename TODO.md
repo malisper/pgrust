@@ -320,6 +320,7 @@ Targeted reruns on 2026-04-17:
 - union.sql: 75/197
 - union.sql follow-up:
   - [done] accept PostgreSQL-style mixed set-operation chains such as `SELECT 1 UNION SELECT 2 UNION ALL SELECT 2` instead of rejecting them in the parser
+  - [done] support `SELECT DISTINCT` in set-operation inputs such as `EXCEPT ALL SELECT DISTINCT ...`
   - investigate why bootstrap fixture tables from `scripts/test_setup_pgrust.sql` like `float8_tbl`, `int8_tbl`, and `tenk1` are not consistently resolvable during regression runs
 - updatable_views.sql: 109/1139
 - update.sql: 28/300
