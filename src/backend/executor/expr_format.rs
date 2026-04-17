@@ -853,6 +853,16 @@ fn format_standard_numeric(value: &NumericValue, spec: &FormatSpec) -> String {
         .take(int_end)
         .filter(|token| matches!(token, Token::Digit9 | Token::Digit0))
         .count();
+    let has_integer_zero_placeholder = spec
+        .tokens
+        .iter()
+        .take(int_end)
+        .any(|token| matches!(token, Token::Digit0));
+    let leftmost_integer_zero_idx = spec
+        .tokens
+        .iter()
+        .take(int_end)
+        .position(|token| matches!(token, Token::Digit0));
     let frac_slots = spec
         .tokens
         .iter()
@@ -878,12 +888,7 @@ fn format_standard_numeric(value: &NumericValue, spec: &FormatSpec) -> String {
 
     let suppress_zero_integer = decimal_idx.is_some()
         && int_part.chars().all(|ch| ch == '0')
-        && !spec.fill_mode
-        && !spec
-            .tokens
-            .iter()
-            .take(int_end)
-            .any(|token| matches!(token, Token::Digit0));
+        && !has_integer_zero_placeholder;
     let int_render = if suppress_zero_integer {
         String::new()
     } else {
@@ -898,7 +903,11 @@ fn format_standard_numeric(value: &NumericValue, spec: &FormatSpec) -> String {
                     .map(|ch| ch.to_string())
                     .unwrap_or_else(|| {
                         if spec.fill_mode {
-                            String::new()
+                            if leftmost_integer_zero_idx.is_some_and(|zero_idx| idx >= zero_idx) {
+                                "0".into()
+                            } else {
+                                String::new()
+                            }
                         } else {
                             " ".into()
                         }
@@ -912,19 +921,6 @@ fn format_standard_numeric(value: &NumericValue, spec: &FormatSpec) -> String {
             }
             _ => {}
         }
-    }
-
-    if spec.fill_mode
-        && decimal_idx.is_some()
-        && int_part.chars().all(|ch| ch == '0')
-        && !rendered[..int_end]
-            .iter()
-            .any(|cell| cell.chars().any(|ch| ch.is_ascii_digit()))
-        && let Some(zero_idx) = (0..int_end)
-            .rev()
-            .find(|idx| matches!(spec.tokens[*idx], Token::Digit9 | Token::Digit0))
-    {
-        rendered[zero_idx] = "0".into();
     }
 
     let mut seen_digit = false;
@@ -1050,6 +1046,12 @@ fn format_standard_numeric(value: &NumericValue, spec: &FormatSpec) -> String {
             out = rebuilt;
             if out.ends_with('.') && frac_pattern.is_empty() {
                 out.pop();
+            }
+        }
+        if out.starts_with('.') || out.starts_with("-.") || out.starts_with("+.") {
+            let dot_idx = out.find('.').unwrap_or(0);
+            if dot_idx + 1 == out.len() {
+                out.insert(dot_idx, '0');
             }
         }
     }
@@ -1424,6 +1426,30 @@ mod tests {
         assert_eq!(
             to_char_numeric(&NumericValue::from("100"), "f\\\\\"oo999").unwrap(),
             "f\\\"oo 100"
+        );
+        assert_eq!(
+            to_char_numeric(
+                &NumericValue::from("0"),
+                "FM0999999999999999.999999999999999"
+            )
+            .unwrap(),
+            "0000000000000000."
+        );
+        assert_eq!(
+            to_char_numeric(
+                &NumericValue::from("0"),
+                "FM9999999999990999.990999999999999"
+            )
+            .unwrap(),
+            "0000.000"
+        );
+        assert_eq!(
+            to_char_numeric(
+                &NumericValue::from("0"),
+                "FM9999999999999999.099999999999999"
+            )
+            .unwrap(),
+            ".0"
         );
     }
 
