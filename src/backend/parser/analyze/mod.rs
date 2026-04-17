@@ -949,9 +949,65 @@ fn analyze_non_recursive_cte_body(
             let desc = cte_query_desc(&query);
             Ok((query, desc))
         }
-        CteBody::RecursiveUnion { .. } => Err(ParseError::FeatureNotSupported(
-            "nested recursive UNION CTE bodies".into(),
-        )),
+        CteBody::RecursiveUnion { .. } => {
+            let stmt = cte_body_as_select(body)?;
+            let (query, _) = analyze_select_query_with_outer(
+                &stmt,
+                catalog,
+                &cte_outer_scopes,
+                grouped_outer,
+                visible_ctes,
+                expanded_views,
+            )?;
+            let desc = cte_query_desc(&query);
+            Ok((query, desc))
+        }
+    }
+}
+
+fn cte_body_as_select(body: &CteBody) -> Result<SelectStatement, ParseError> {
+    match body {
+        CteBody::Select(select) => Ok((**select).clone()),
+        CteBody::Values(values) => Ok(SelectStatement {
+            with_recursive: values.with_recursive,
+            with: values.with.clone(),
+            from: Some(FromItem::Values {
+                rows: values.rows.clone(),
+            }),
+            targets: vec![SelectItem {
+                output_name: "*".into(),
+                expr: SqlExpr::Column("*".into()),
+            }],
+            where_clause: None,
+            group_by: Vec::new(),
+            having: None,
+            order_by: values.order_by.clone(),
+            limit: values.limit,
+            offset: values.offset,
+            locking_clause: None,
+            set_operation: None,
+        }),
+        CteBody::RecursiveUnion {
+            all,
+            anchor,
+            recursive,
+        } => Ok(SelectStatement {
+            with_recursive: false,
+            with: Vec::new(),
+            from: None,
+            targets: Vec::new(),
+            where_clause: None,
+            group_by: Vec::new(),
+            having: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+            locking_clause: None,
+            set_operation: Some(Box::new(SetOperationStatement {
+                op: SetOperator::Union { all: *all },
+                inputs: vec![cte_body_as_select(anchor)?, (**recursive).clone()],
+            })),
+        }),
     }
 }
 
@@ -980,12 +1036,13 @@ fn bind_ctes(
         let cte_id = NEXT_CTE_ID.fetch_add(1, Ordering::Relaxed);
         let mut visible = bound.clone();
         visible.extend_from_slice(outer_ctes);
+        let self_references_cte = cte_body_references_table(&cte.body, &cte.name);
         let (plan, desc) = match &cte.body {
             CteBody::RecursiveUnion {
                 all,
                 anchor,
                 recursive,
-            } => {
+            } if self_references_cte => {
                 if !with_recursive {
                     return Err(ParseError::FeatureNotSupported(
                         "recursive CTE requires WITH RECURSIVE".into(),
@@ -1137,6 +1194,23 @@ fn bind_ctes(
         });
     }
     Ok(bound)
+}
+
+fn cte_body_references_table(body: &CteBody, table_name: &str) -> bool {
+    match body {
+        CteBody::Select(select) => select_statement_references_table(select, table_name),
+        CteBody::Values(values) => values
+            .rows
+            .iter()
+            .flatten()
+            .any(|expr| sql_expr_references_table(expr, table_name)),
+        CteBody::RecursiveUnion {
+            anchor, recursive, ..
+        } => {
+            cte_body_references_table(anchor, table_name)
+                || select_statement_references_table(recursive, table_name)
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
