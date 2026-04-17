@@ -179,11 +179,13 @@ pub fn grant_membership_authorized_with_detail(
         ));
     }
     if role.rolsuper {
-        let current = catalog.role_by_oid(auth.current_user_oid()).ok_or_else(|| {
-            GrantMembershipAuthorizationError::Parse(role_management_error(
-                "permission denied to grant role",
-            ))
-        })?;
+        let current = catalog
+            .role_by_oid(auth.current_user_oid())
+            .ok_or_else(|| {
+                GrantMembershipAuthorizationError::Parse(role_management_error(
+                    "permission denied to grant role",
+                ))
+            })?;
         if !current.rolsuper {
             return Err(GrantMembershipAuthorizationError::PermissionDenied {
                 role_name: role.rolname.clone(),

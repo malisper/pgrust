@@ -156,6 +156,9 @@ mod tests {
         assert_eq!(block.declarations[0].name, "n");
         assert_eq!(block.declarations[0].default_expr.as_deref(), Some("1000"));
         assert_eq!(block.declarations[1].name, "c");
-        assert_eq!(block.declarations[1].default_expr.as_deref(), Some("1.94947"));
+        assert_eq!(
+            block.declarations[1].default_expr.as_deref(),
+            Some("1.94947")
+        );
     }
 }

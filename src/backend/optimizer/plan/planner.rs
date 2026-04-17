@@ -94,7 +94,9 @@ fn make_aggregate_rel(
                     .into_iter()
                     .map(|arg| expand_join_rte_vars(root, arg))
                     .collect();
-                accum.filter = accum.filter.map(|filter| expand_join_rte_vars(root, filter));
+                accum.filter = accum
+                    .filter
+                    .map(|filter| expand_join_rte_vars(root, filter));
                 accum
             })
             .collect::<Vec<_>>();
@@ -218,13 +220,21 @@ fn window_target(input_target: &PathTarget, clause: &WindowClause) -> PathTarget
 }
 
 fn window_pathkeys(clause: &WindowClause) -> Vec<PathKey> {
-    let mut pathkeys = Vec::with_capacity(clause.spec.partition_by.len() + clause.spec.order_by.len());
-    pathkeys.extend(clause.spec.partition_by.iter().cloned().map(|expr| PathKey {
-        expr,
-        ressortgroupref: 0,
-        descending: false,
-        nulls_first: None,
-    }));
+    let mut pathkeys =
+        Vec::with_capacity(clause.spec.partition_by.len() + clause.spec.order_by.len());
+    pathkeys.extend(
+        clause
+            .spec
+            .partition_by
+            .iter()
+            .cloned()
+            .map(|expr| PathKey {
+                expr,
+                ressortgroupref: 0,
+                descending: false,
+                nulls_first: None,
+            }),
+    );
     pathkeys.extend(clause.spec.order_by.iter().cloned().map(|item| PathKey {
         expr: item.expr,
         ressortgroupref: item.ressortgroupref,

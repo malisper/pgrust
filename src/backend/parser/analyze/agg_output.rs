@@ -3,7 +3,8 @@ use super::expr::raise_expr_varlevels;
 use super::*;
 use crate::include::nodes::primnodes::{OpExprKind, WindowFuncKind};
 
-fn current_window_state_or_error() -> Result<std::rc::Rc<std::cell::RefCell<WindowBindingState>>, ParseError> {
+fn current_window_state_or_error()
+-> Result<std::rc::Rc<std::cell::RefCell<WindowBindingState>>, ParseError> {
     match current_window_state() {
         Some(state) if windows_allowed() => Ok(state),
         Some(_) => Err(nested_window_error()),
@@ -38,15 +39,7 @@ fn bind_grouped_window_agg_call(
     validate_aggregate_arity(func, &arg_values)?;
     let arg_types = arg_values
         .iter()
-        .map(|expr| {
-            infer_sql_expr_type(
-                expr,
-                input_scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-            )
-        })
+        .map(|expr| infer_sql_expr_type(expr, input_scope, catalog, outer_scopes, grouped_outer))
         .collect::<Vec<_>>();
     let resolved = resolve_aggregate_call(catalog, func, &arg_types, func_variadic);
     let bound_args = arg_values

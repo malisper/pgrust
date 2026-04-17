@@ -1,9 +1,9 @@
 use super::functions::{resolve_function_call, resolve_scalar_function};
 use super::ranges::infer_range_special_expr_type_with_ctes;
 use super::*;
+use crate::include::catalog::RECORD_TYPE_OID;
 use crate::include::catalog::builtin_range_spec_for_sql_type;
 use crate::include::catalog::sql_type_for_range_kind;
-use crate::include::catalog::RECORD_TYPE_OID;
 
 pub(super) fn infer_sql_expr_type(
     expr: &SqlExpr,
@@ -54,8 +54,8 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                     .ok()
                     .flatten()
                     .map(|resolved| resolved.sql_type)
-                    .or_else(
-                        || match resolve_column_with_outer(scope, outer_scopes, name, grouped_outer) {
+                    .or_else(|| {
+                        match resolve_column_with_outer(scope, outer_scopes, name, grouped_outer) {
                             Ok(ResolvedColumn::Local(idx)) => {
                                 scope.desc.columns.get(idx).map(|c| c.sql_type)
                             }
@@ -63,8 +63,8 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                                 .get(depth)
                                 .and_then(|s| s.desc.columns.get(index).map(|c| c.sql_type)),
                             Err(_) => None,
-                        },
-                    )
+                        }
+                    })
                     .unwrap_or(SqlType::new(SqlTypeKind::Text))
             }
         }

@@ -565,58 +565,6 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
 fn try_optimize_access_subtree(plan: Path, catalog: &dyn CatalogLookup) -> Result<Path, Path> {
     let (source_id, rel, relation_name, relation_oid, relkind, toast, desc, filter, order_items) =
         match plan {
-        Path::SeqScan {
-            source_id,
-            rel,
-            relation_name,
-            relation_oid,
-            relkind,
-            toast,
-            desc,
-            ..
-        } => (
-            source_id,
-            rel,
-            relation_name,
-            relation_oid,
-            relkind,
-            toast,
-            desc,
-            None,
-            None,
-        ),
-        Path::Filter {
-            input, predicate, ..
-        } => match *input {
-            Path::SeqScan {
-                source_id,
-                rel,
-                relation_name,
-                relation_oid,
-                relkind,
-                toast,
-                desc,
-                ..
-            } => (
-                source_id,
-                rel,
-                relation_name,
-                relation_oid,
-                relkind,
-                toast,
-                desc,
-                Some(predicate),
-                None,
-            ),
-            other => {
-                return Err(Path::Filter {
-                    plan_info: PlanEstimate::default(),
-                    input: Box::new(other),
-                    predicate,
-                });
-            }
-        },
-        Path::OrderBy { input, items, .. } => match *input {
             Path::SeqScan {
                 source_id,
                 rel,
@@ -635,7 +583,7 @@ fn try_optimize_access_subtree(plan: Path, catalog: &dyn CatalogLookup) -> Resul
                 toast,
                 desc,
                 None,
-                Some(items),
+                None,
             ),
             Path::Filter {
                 input, predicate, ..
@@ -658,30 +606,82 @@ fn try_optimize_access_subtree(plan: Path, catalog: &dyn CatalogLookup) -> Resul
                     toast,
                     desc,
                     Some(predicate),
+                    None,
+                ),
+                other => {
+                    return Err(Path::Filter {
+                        plan_info: PlanEstimate::default(),
+                        input: Box::new(other),
+                        predicate,
+                    });
+                }
+            },
+            Path::OrderBy { input, items, .. } => match *input {
+                Path::SeqScan {
+                    source_id,
+                    rel,
+                    relation_name,
+                    relation_oid,
+                    relkind,
+                    toast,
+                    desc,
+                    ..
+                } => (
+                    source_id,
+                    rel,
+                    relation_name,
+                    relation_oid,
+                    relkind,
+                    toast,
+                    desc,
+                    None,
                     Some(items),
                 ),
+                Path::Filter {
+                    input, predicate, ..
+                } => match *input {
+                    Path::SeqScan {
+                        source_id,
+                        rel,
+                        relation_name,
+                        relation_oid,
+                        relkind,
+                        toast,
+                        desc,
+                        ..
+                    } => (
+                        source_id,
+                        rel,
+                        relation_name,
+                        relation_oid,
+                        relkind,
+                        toast,
+                        desc,
+                        Some(predicate),
+                        Some(items),
+                    ),
+                    other => {
+                        return Err(Path::OrderBy {
+                            plan_info: PlanEstimate::default(),
+                            input: Box::new(Path::Filter {
+                                plan_info: PlanEstimate::default(),
+                                input: Box::new(other),
+                                predicate,
+                            }),
+                            items,
+                        });
+                    }
+                },
                 other => {
                     return Err(Path::OrderBy {
                         plan_info: PlanEstimate::default(),
-                        input: Box::new(Path::Filter {
-                            plan_info: PlanEstimate::default(),
-                            input: Box::new(other),
-                            predicate,
-                        }),
+                        input: Box::new(other),
                         items,
                     });
                 }
             },
-            other => {
-                return Err(Path::OrderBy {
-                    plan_info: PlanEstimate::default(),
-                    input: Box::new(other),
-                    items,
-                });
-            }
-        },
-        other => return Err(other),
-    };
+            other => return Err(other),
+        };
 
     let filter = filter;
     let order_items = order_items;
@@ -1851,7 +1851,10 @@ fn expr_uses_immediate_outer_columns(expr: &Expr) -> bool {
                     .is_some_and(expr_uses_immediate_outer_columns)
         }
         Expr::WindowFunc(window_func) => {
-            window_func.args.iter().any(expr_uses_immediate_outer_columns)
+            window_func
+                .args
+                .iter()
+                .any(expr_uses_immediate_outer_columns)
                 || match &window_func.kind {
                     crate::include::nodes::primnodes::WindowFuncKind::Aggregate(aggref) => aggref
                         .aggfilter
@@ -2022,15 +2025,13 @@ fn path_uses_immediate_outer_columns(path: &Path) -> bool {
         } => {
             path_uses_immediate_outer_columns(input)
                 || group_by.iter().any(expr_uses_immediate_outer_columns)
-                || accumulators
-                    .iter()
-                    .any(|accum| {
-                        accum.args.iter().any(expr_uses_immediate_outer_columns)
-                            || accum
-                                .filter
-                                .as_ref()
-                                .is_some_and(expr_uses_immediate_outer_columns)
-                    })
+                || accumulators.iter().any(|accum| {
+                    accum.args.iter().any(expr_uses_immediate_outer_columns)
+                        || accum
+                            .filter
+                            .as_ref()
+                            .is_some_and(expr_uses_immediate_outer_columns)
+                })
                 || having
                     .as_ref()
                     .is_some_and(expr_uses_immediate_outer_columns)
@@ -2050,12 +2051,12 @@ fn path_uses_immediate_outer_columns(path: &Path) -> bool {
                 || clause.functions.iter().any(|func| {
                     func.args.iter().any(expr_uses_immediate_outer_columns)
                         || match &func.kind {
-                            crate::include::nodes::primnodes::WindowFuncKind::Aggregate(
-                                aggref,
-                            ) => aggref
-                                .aggfilter
-                                .as_ref()
-                                .is_some_and(expr_uses_immediate_outer_columns),
+                            crate::include::nodes::primnodes::WindowFuncKind::Aggregate(aggref) => {
+                                aggref
+                                    .aggfilter
+                                    .as_ref()
+                                    .is_some_and(expr_uses_immediate_outer_columns)
+                            }
                             crate::include::nodes::primnodes::WindowFuncKind::Builtin(_) => false,
                         }
                 })

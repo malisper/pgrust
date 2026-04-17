@@ -458,7 +458,10 @@ pub(super) fn resolve_relation_row_expr_with_outer(
     })
 }
 
-fn resolve_relation_row_expr_in_scope(scope: &BoundScope, name: &str) -> Option<Vec<(String, Expr)>> {
+fn resolve_relation_row_expr_in_scope(
+    scope: &BoundScope,
+    name: &str,
+) -> Option<Vec<(String, Expr)>> {
     let mut matched = false;
     let fields = scope
         .columns
@@ -696,31 +699,31 @@ pub(super) fn bind_from_item_with_ctes(
             };
             let (plan, scope, alias_single_function_output) =
                 if let Some((name, args, func_variadic)) = function_source {
-                let typed_defs = match column_aliases {
-                    AliasColumnSpec::Definitions(defs) => Some(defs.as_slice()),
-                    AliasColumnSpec::None | AliasColumnSpec::Names(_) => None,
+                    let typed_defs = match column_aliases {
+                        AliasColumnSpec::Definitions(defs) => Some(defs.as_slice()),
+                        AliasColumnSpec::None | AliasColumnSpec::Names(_) => None,
+                    };
+                    bind_function_from_item_with_ctes(
+                        name,
+                        args,
+                        func_variadic,
+                        typed_defs,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )?
+                } else {
+                    let (plan, scope) = bind_from_item_with_ctes(
+                        source,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                        expanded_views,
+                    )?;
+                    (plan, scope, false)
                 };
-                bind_function_from_item_with_ctes(
-                    name,
-                    args,
-                    func_variadic,
-                    typed_defs,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    ctes,
-                )?
-            } else {
-                let (plan, scope) = bind_from_item_with_ctes(
-                    source,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    ctes,
-                    expanded_views,
-                )?;
-                (plan, scope, false)
-            };
             let alias_columns = match column_aliases {
                 AliasColumnSpec::Definitions(_) => &AliasColumnSpec::None,
                 _ => column_aliases,

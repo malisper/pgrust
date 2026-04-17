@@ -2,6 +2,7 @@ use crate::RelFileLocator;
 use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
 use crate::include::access::relscan::ScanDirection;
 use crate::include::access::scankey::ScanKeyData;
+use crate::include::nodes::parsenodes::SetOperator;
 use crate::include::nodes::parsenodes::{Query, RangeTblEntry, RangeTblEntryKind};
 use crate::include::nodes::plannodes::PlanEstimate;
 use crate::include::nodes::primnodes::{
@@ -9,7 +10,6 @@ use crate::include::nodes::primnodes::{
     SetReturningCall, SortGroupClause, TargetEntry, ToastRelationRef, Var, WindowClause,
     user_attrno,
 };
-use crate::include::nodes::parsenodes::SetOperator;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RelOptKind {

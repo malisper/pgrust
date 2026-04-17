@@ -19,7 +19,16 @@ pub(super) fn bind_row_to_json_call(
 
     let bound_args = args
         .iter()
-        .map(|arg| bind_row_to_json_arg_expr(&arg.value, scope, catalog, outer_scopes, grouped_outer, ctes))
+        .map(|arg| {
+            bind_row_to_json_arg_expr(
+                &arg.value,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )
+        })
         .collect::<Result<Vec<_>, _>>()?;
     let actual_types = bound_args
         .iter()
@@ -29,7 +38,9 @@ pub(super) fn bind_row_to_json_call(
     let coerced_args = bound_args
         .into_iter()
         .zip(resolved.declared_arg_types.iter().copied())
-        .map(|((arg, actual_type), declared_type)| coerce_bound_expr(arg, actual_type, declared_type))
+        .map(|((arg, actual_type), declared_type)| {
+            coerce_bound_expr(arg, actual_type, declared_type)
+        })
         .collect::<Vec<_>>();
     Ok(Expr::resolved_builtin_func(
         BuiltinScalarFunction::RowToJson,
@@ -53,8 +64,14 @@ fn bind_row_to_json_arg_expr(
             if let Some(fields) = resolve_relation_row_expr_with_outer(scope, outer_scopes, name) {
                 Ok((Expr::Row { fields }, SqlType::record(RECORD_TYPE_OID)))
             } else {
-                let sql_type =
-                    infer_sql_expr_type_with_ctes(arg, scope, catalog, outer_scopes, grouped_outer, ctes);
+                let sql_type = infer_sql_expr_type_with_ctes(
+                    arg,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                );
                 Ok((
                     bind_expr_with_outer_and_ctes(
                         arg,
@@ -69,10 +86,23 @@ fn bind_row_to_json_arg_expr(
             }
         }
         _ => {
-            let sql_type =
-                infer_sql_expr_type_with_ctes(arg, scope, catalog, outer_scopes, grouped_outer, ctes);
+            let sql_type = infer_sql_expr_type_with_ctes(
+                arg,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
             Ok((
-                bind_expr_with_outer_and_ctes(arg, scope, catalog, outer_scopes, grouped_outer, ctes)?,
+                bind_expr_with_outer_and_ctes(
+                    arg,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?,
                 sql_type,
             ))
         }

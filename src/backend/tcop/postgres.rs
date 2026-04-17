@@ -2582,9 +2582,8 @@ fn rewrite_shobj_description_calls(sql: &str) -> String {
     let re = SHOBJ_RE.get_or_init(|| {
         regex::Regex::new(r"(?i)shobj_description\(([^,]+),\s*'pg_authid'\)").unwrap()
     });
-    let regrole_re = REGROLE_LITERAL_RE.get_or_init(|| {
-        regex::Regex::new(r"(?i)^'((?:[^']|'')+)'\s*::\s*regrole$").unwrap()
-    });
+    let regrole_re = REGROLE_LITERAL_RE
+        .get_or_init(|| regex::Regex::new(r"(?i)^'((?:[^']|'')+)'\s*::\s*regrole$").unwrap());
     re.replace_all(sql, |captures: &regex::Captures<'_>| {
         let objoid = captures[1].trim();
         let objoid = if let Some(regrole) = regrole_re.captures(objoid) {

@@ -8,8 +8,8 @@ use crate::include::nodes::pathnodes::{Path, PathKey, PathTarget, PlannerInfo};
 use crate::include::nodes::plannodes::{Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
     AggAccum, Aggref, BoolExpr, Expr, ExprArraySubscript, FuncExpr, JoinType, OpExpr,
-    ProjectSetTarget, QueryColumn, ScalarArrayOpExpr, SubLinkType, TargetEntry, Var,
-    WindowClause, user_attrno,
+    ProjectSetTarget, QueryColumn, ScalarArrayOpExpr, SubLinkType, TargetEntry, Var, WindowClause,
+    user_attrno,
 };
 
 use super::flatten_join_alias_vars;
@@ -287,9 +287,7 @@ impl Path {
                 accumulators,
                 ..
             } => aggregate_output_target(group_by, accumulators),
-            Self::WindowAgg { input, clause, .. } => {
-                window_semantic_output_target(input, clause)
-            }
+            Self::WindowAgg { input, clause, .. } => window_semantic_output_target(input, clause),
             Self::Values {
                 slot_id,
                 output_columns,
@@ -353,9 +351,7 @@ impl Path {
                 targets,
                 input,
                 ..
-            } => {
-                project_pathkeys(*slot_id, input, targets, &input.pathkeys())
-            }
+            } => project_pathkeys(*slot_id, input, targets, &input.pathkeys()),
             Self::WindowAgg { input, .. } => input.pathkeys(),
             Self::OrderBy { items, .. } => items
                 .iter()

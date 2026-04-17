@@ -11,8 +11,8 @@ use num_traits::Zero;
 use std::cmp::Ordering;
 use std::collections::HashSet;
 
-use super::jsonb::{JsonbValue, encode_jsonb, jsonb_from_value, render_jsonb_bytes};
 use super::expr_range::{range_intersection_agg_transition, render_range_text};
+use super::jsonb::{JsonbValue, encode_jsonb, jsonb_from_value, render_jsonb_bytes};
 
 #[derive(Debug, Clone)]
 pub(crate) enum NumericAccum {
@@ -592,7 +592,9 @@ fn value_to_json_text(value: &Value) -> String {
                 .unwrap_or_default(),
         )
         .unwrap(),
-        Value::Range(_) => serde_json::to_string(&render_range_text(value).unwrap_or_default()).unwrap(),
+        Value::Range(_) => {
+            serde_json::to_string(&render_range_text(value).unwrap_or_default()).unwrap()
+        }
         Value::TsVector(v) => {
             serde_json::to_string(&crate::backend::executor::render_tsvector_text(v)).unwrap()
         }

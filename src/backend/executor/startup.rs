@@ -1,6 +1,7 @@
 use super::agg::AccumState;
 use super::{Plan, PlanState, TupleSlot, expr, tuple_decoder};
 use crate::backend::executor::hashjoin::HashJoinPhase;
+use crate::backend::parser::SqlType;
 use crate::include::catalog::builtin_aggregate_function_for_proc_oid;
 use crate::include::nodes::execnodes::{
     AggregateState, AppendState, CteScanState, FilterState, FunctionScanState, HashJoinState,
@@ -8,7 +9,6 @@ use crate::include::nodes::execnodes::{
     ProjectSetState, ProjectionState, RecursiveUnionState, RecursiveWorkTable, ResultState,
     SeqScanState, SetOpState, SubqueryScanState, ValuesState, WindowAggState, WorkTableScanState,
 };
-use crate::backend::parser::SqlType;
 use crate::include::nodes::parsenodes::SqlTypeKind;
 use crate::include::nodes::primnodes::{Expr, SetReturningCall};
 
@@ -85,9 +85,7 @@ fn expr_uses_outer_columns(expr: &Expr) -> bool {
             expr_uses_outer_columns(left) || expr_uses_outer_columns(right)
         }
         Expr::ArrayLiteral { elements, .. } => elements.iter().any(expr_uses_outer_columns),
-        Expr::Row { fields } => fields
-            .iter()
-            .any(|(_, expr)| expr_uses_outer_columns(expr)),
+        Expr::Row { fields } => fields.iter().any(|(_, expr)| expr_uses_outer_columns(expr)),
         Expr::ArraySubscript { array, subscripts } => {
             expr_uses_outer_columns(array)
                 || subscripts.iter().any(|subscript| {
@@ -137,10 +135,7 @@ fn set_returning_call_uses_outer_columns(call: &SetReturningCall) -> bool {
 
 fn agg_accum_uses_outer_columns(accum: &crate::include::nodes::primnodes::AggAccum) -> bool {
     accum.args.iter().any(expr_uses_outer_columns)
-        || accum
-            .filter
-            .as_ref()
-            .is_some_and(expr_uses_outer_columns)
+        || accum.filter.as_ref().is_some_and(expr_uses_outer_columns)
 }
 
 fn project_set_target_uses_outer_columns(
@@ -233,9 +228,12 @@ fn plan_uses_outer_columns(plan: &Plan) -> bool {
                 || clause.functions.iter().any(|func| {
                     func.args.iter().any(expr_uses_outer_columns)
                         || match &func.kind {
-                            crate::include::nodes::primnodes::WindowFuncKind::Aggregate(
-                                aggref,
-                            ) => aggref.aggfilter.as_ref().is_some_and(expr_uses_outer_columns),
+                            crate::include::nodes::primnodes::WindowFuncKind::Aggregate(aggref) => {
+                                aggref
+                                    .aggfilter
+                                    .as_ref()
+                                    .is_some_and(expr_uses_outer_columns)
+                            }
                             crate::include::nodes::primnodes::WindowFuncKind::Builtin(_) => false,
                         }
                 })

@@ -235,8 +235,11 @@ fn rewrite_window_func_expr(
     Ok(WindowFuncExpr {
         kind: match func.kind {
             WindowFuncKind::Aggregate(aggref) => WindowFuncKind::Aggregate(
-                match rewrite_semantic_expr(Expr::Aggref(Box::new(aggref)), catalog, expanded_views)?
-                {
+                match rewrite_semantic_expr(
+                    Expr::Aggref(Box::new(aggref)),
+                    catalog,
+                    expanded_views,
+                )? {
                     Expr::Aggref(aggref) => *aggref,
                     other => unreachable!("aggregate rewrite returned non-Aggref: {other:?}"),
                 },

@@ -81,9 +81,7 @@ pub(super) fn window_not_allowed_error() -> ParseError {
 }
 
 pub(super) fn window_function_requires_over_error(name: &str) -> ParseError {
-    ParseError::WindowingError(format!(
-        "window function {name} requires an OVER clause"
-    ))
+    ParseError::WindowingError(format!("window function {name} requires an OVER clause"))
 }
 
 pub(super) fn reject_window_clause(expr: &SqlExpr, clause: &'static str) -> Result<(), ParseError> {
@@ -99,10 +97,7 @@ pub(super) fn reject_window_clause(expr: &SqlExpr, clause: &'static str) -> Resu
 pub(super) fn expr_contains_window(expr: &SqlExpr) -> bool {
     match expr {
         SqlExpr::AggCall {
-            args,
-            filter,
-            over,
-            ..
+            args, filter, over, ..
         } => {
             over.is_some()
                 || args.iter().any(|arg| expr_contains_window(&arg.value))
@@ -144,9 +139,7 @@ pub(super) fn expr_contains_window(expr: &SqlExpr) -> bool {
         }
         SqlExpr::ArrayOverlap(left, right)
         | SqlExpr::QuantifiedArray {
-            left,
-            array: right,
-            ..
+            left, array: right, ..
         }
         | SqlExpr::JsonGet(left, right)
         | SqlExpr::JsonGetText(left, right)
@@ -205,9 +198,9 @@ pub(super) fn expr_contains_window(expr: &SqlExpr) -> bool {
             defresult,
         } => {
             arg.as_deref().is_some_and(expr_contains_window)
-                || args.iter().any(|arm| {
-                    expr_contains_window(&arm.expr) || expr_contains_window(&arm.result)
-                })
+                || args
+                    .iter()
+                    .any(|arm| expr_contains_window(&arm.expr) || expr_contains_window(&arm.result))
                 || defresult.as_deref().is_some_and(expr_contains_window)
         }
         SqlExpr::Cast(inner, _)

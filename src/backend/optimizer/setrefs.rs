@@ -373,7 +373,11 @@ fn build_window_tlist(
     let mut entries = Vec::with_capacity(output_columns.len());
     for (index, column) in output_columns.iter().enumerate() {
         let mut match_exprs = vec![slot_var(slot_id, user_attrno(index), column.sql_type)];
-        let ressortgroupref = input_output_target.sortgrouprefs.get(index).copied().unwrap_or(0);
+        let ressortgroupref = input_output_target
+            .sortgrouprefs
+            .get(index)
+            .copied()
+            .unwrap_or(0);
         if let Some(input_expr) = input_target.exprs.get(index) {
             match_exprs.push(input_expr.clone());
             match_exprs.push(fully_expand_output_expr_with_root(
@@ -630,9 +634,9 @@ fn lower_projection_expr_by_input_target(
                 .into_iter()
                 .map(|arg| lower_projection_expr_by_input_target(root, arg, input, input_tlist))
                 .collect(),
-            aggfilter: aggref.aggfilter.map(|expr| {
-                lower_projection_expr_by_input_target(root, expr, input, input_tlist)
-            }),
+            aggfilter: aggref
+                .aggfilter
+                .map(|expr| lower_projection_expr_by_input_target(root, expr, input, input_tlist)),
             ..*aggref
         })),
         Expr::Op(op) => Expr::Op(Box::new(OpExpr {
@@ -1181,16 +1185,14 @@ fn lower_direct_ref(expr: &Expr, mode: LowerMode<'_>) -> Option<Expr> {
         LowerMode::Scalar => None,
         LowerMode::Input { tlist } => search_tlist_entry(None, expr, tlist)
             .map(|entry| special_slot_var(OUTER_VAR, entry.index, entry.sql_type)),
-        LowerMode::Aggregate { layout, tlist, .. } => {
-            search_tlist_entry(None, expr, tlist)
-                .map(|entry| special_slot_var(OUTER_VAR, entry.index, entry.sql_type))
-                .or_else(|| {
-                    layout.iter().enumerate().find_map(|(index, candidate)| {
-                        (candidate == expr)
-                            .then(|| special_slot_var(OUTER_VAR, index, expr_sql_type(candidate)))
-                    })
+        LowerMode::Aggregate { layout, tlist, .. } => search_tlist_entry(None, expr, tlist)
+            .map(|entry| special_slot_var(OUTER_VAR, entry.index, entry.sql_type))
+            .or_else(|| {
+                layout.iter().enumerate().find_map(|(index, candidate)| {
+                    (candidate == expr)
+                        .then(|| special_slot_var(OUTER_VAR, index, expr_sql_type(candidate)))
                 })
-        }
+            }),
         LowerMode::Join {
             outer_tlist,
             inner_tlist,
@@ -1611,11 +1613,7 @@ fn lower_agg_accum(
             .collect(),
         filter: accum.filter.map(|filter| {
             let filter = fix_upper_expr_for_input(ctx.root, filter, path, input_tlist);
-            lower_expr(
-                ctx,
-                filter,
-                LowerMode::Input { tlist: input_tlist },
-            )
+            lower_expr(ctx, filter, LowerMode::Input { tlist: input_tlist })
         }),
         ..accum
     }
@@ -2092,9 +2090,10 @@ fn validate_executable_plan(plan: &Plan) {
                     validate_executable_expr(arg, "WindowAgg", "functions");
                 }
                 if let WindowFuncKind::Aggregate(aggref) = &func.kind {
-                    aggref.args.iter().for_each(|arg| {
-                        validate_executable_expr(arg, "WindowAgg", "functions")
-                    });
+                    aggref
+                        .args
+                        .iter()
+                        .for_each(|arg| validate_executable_expr(arg, "WindowAgg", "functions"));
                     if let Some(filter) = aggref.aggfilter.as_ref() {
                         validate_executable_expr(filter, "WindowAgg", "functions");
                     }
@@ -2387,9 +2386,10 @@ fn validate_planner_path(path: &Path) {
                     validate_planner_expr(arg, "WindowAgg", "functions");
                 }
                 if let WindowFuncKind::Aggregate(aggref) = &func.kind {
-                    aggref.args.iter().for_each(|arg| {
-                        validate_planner_expr(arg, "WindowAgg", "functions")
-                    });
+                    aggref
+                        .args
+                        .iter()
+                        .for_each(|arg| validate_planner_expr(arg, "WindowAgg", "functions"));
                     if let Some(filter) = aggref.aggfilter.as_ref() {
                         validate_planner_expr(filter, "WindowAgg", "functions");
                     }
@@ -2885,13 +2885,7 @@ fn lower_window_clause_for_input(
     let root = ctx.root;
     let lower_expr_for_input = |ctx: &mut SetRefsContext<'_>, expr: Expr| {
         let fixed = fix_upper_expr_for_input(root, expr, input, input_tlist);
-        lower_expr(
-            ctx,
-            fixed,
-            LowerMode::Input {
-                tlist: input_tlist,
-            },
-        )
+        lower_expr(ctx, fixed, LowerMode::Input { tlist: input_tlist })
     };
     WindowClause {
         spec: crate::include::nodes::primnodes::WindowSpec {
