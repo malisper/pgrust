@@ -4398,6 +4398,7 @@ fn select_item_name(expr: &SqlExpr, index: usize) -> String {
     let _ = index;
     match expr {
         SqlExpr::Column(name) => name.rsplit('.').next().unwrap_or(name).to_string(),
+        SqlExpr::ArraySubscript { array, .. } => select_item_name(array, index),
         SqlExpr::Cast(inner, ty) => match inner.as_ref() {
             SqlExpr::Column(_) => select_item_name(inner, index),
             SqlExpr::Cast(grand_inner, _) if matches!(grand_inner.as_ref(), SqlExpr::Column(_)) => {
