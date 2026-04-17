@@ -10539,6 +10539,26 @@ fn jsonpath_is_unknown_treats_predicate_arithmetic_errors_as_unknown() {
 }
 
 #[test]
+fn jsonpath_strict_mixed_type_sequence_compare_returns_false() {
+    let base = temp_dir("jsonpath_strict_mixed_type_compare");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb '{\"a\":[1,2,3],\"b\":[3,4,\"5\"]}' @? 'strict $ ? (@.a[*] >= @.b[*])'",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Bool(false)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn getdatabaseencoding_and_jsonpath_unicode_work() {
     let base = temp_dir("jsonpath_unicode");
     let txns = TransactionManager::new_durable(&base).unwrap();
