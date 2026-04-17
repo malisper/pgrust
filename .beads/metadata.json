@@ -2,6 +2,7 @@
   "database": "dolt",
   "backend": "dolt",
   "dolt_mode": "server",
+  "dolt_server_port": 62029,
   "dolt_database": "pgrust",
   "project_id": "5b4f939f-c1b8-4521-a4c0-ad5f79c03e24"
 }
