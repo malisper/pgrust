@@ -62,6 +62,7 @@ Targeted reruns on 2026-04-17:
   - [done] widen verification for array read semantics against more `arrays.sql` slice/subscript cases
   - [done] array write semantics need slice-assignment fixes, especially for multidimensional arrays
   - [done] correct multidimensional slice shape/extent checks during assignment in `src/backend/commands/tablecmds.rs`
+  - [done] PostgreSQL-compatible SQL-visible error text for array assignment/type mismatches instead of leaking raw internal `TypeMismatch` formatting
 - async.sql: 0/11
 - bit.sql: 74/132
 - bitmapops.sql: 3/12
@@ -285,7 +286,7 @@ Targeted reruns on 2026-04-17:
 ## strings.sql follow-up
 
 - Raise a PostgreSQL-style syntax error for illegal string continuation when a comment appears between adjacent string literals across lines.
-- Fold unquoted identifiers consistently so `CHAR_TBL`, `VARCHAR_TBL`, and `TEXT_TBL` resolve like PostgreSQL in `strings.sql`.
+- [done] Fold unquoted identifiers consistently so `CHAR_TBL`, `VARCHAR_TBL`, and `TEXT_TBL` resolve like PostgreSQL in `strings.sql`.
 - [done] Match PostgreSQL `bytea` input diagnostics for malformed hex and escape sequences, including `pg_input_error_info()` messages and SQLSTATEs.
 - Tighten `SIMILAR TO` and `SUBSTRING ... SIMILAR` behavior for one-separator patterns, `ESCAPE NULL`, and PostgreSQL-compatible error text.
 
@@ -419,7 +420,7 @@ Targeted reruns on 2026-04-17:
 - numeric.sql:
   Retest source: `/tmp/pgrust_numeric_regress_55433/diff/numeric.diff`
 - Preserve PostgreSQL-compatible row order for the unordered `WITH v AS (VALUES ...) FROM v1, v2` cross-join cases in `numeric.sql`, or otherwise make the planner/executor match upstream join/input ordering closely enough for regression parity
-- Fix `width_bucket(float8, low, high, count)` boundary behavior for huge ranges; current float math can round into bucket `count + 1` or the wrong descending bucket near the upper edge
+- [x] Fix `width_bucket(float8, low, high, count)` boundary behavior for huge ranges; current float math can round into bucket `count + 1` or the wrong descending bucket near the upper edge
 - Make `to_char(numeric, ...)` formatting match PostgreSQL more closely when the input numeric carries excess display scale
 - Add PostgreSQL-style `DETAIL` output for numeric typmod overflow, including fractional-only numerics and infinite values rejected by typmod constraints
 - Add dedicated numeric-to-integer cast errors for `NaN` and `Infinity` instead of collapsing them into generic `smallint/integer/bigint out of range`

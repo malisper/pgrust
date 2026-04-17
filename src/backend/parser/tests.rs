@@ -2358,6 +2358,35 @@ fn parse_select_without_targets_but_with_from() {
 }
 
 #[test]
+fn unquoted_identifiers_fold_to_lowercase_for_relation_lookup() {
+    let mut catalog = Catalog::default();
+    catalog.insert("char_tbl", test_catalog_entry(15030, desc()));
+    catalog.insert("varchar_tbl", test_catalog_entry(15031, desc()));
+    catalog.insert("text_tbl", test_catalog_entry(15032, desc()));
+
+    for sql in [
+        "select id from CHAR_TBL",
+        "select id from VARCHAR_TBL",
+        "select id from TEXT_TBL",
+    ] {
+        let stmt = parse_select(sql).unwrap();
+        assert!(build_plan(&stmt, &catalog).is_ok(), "{sql}");
+    }
+}
+
+#[test]
+fn quoted_identifiers_preserve_case() {
+    let stmt = parse_select("select id from \"CHAR_TBL\"").unwrap();
+    assert_eq!(
+        stmt.from,
+        Some(FromItem::Table {
+            name: "CHAR_TBL".into(),
+            only: false,
+        })
+    );
+}
+
+#[test]
 fn parse_addition_in_where_clause() {
     let stmt =
         parse_select("select * from people, pets where pets.owner_id + 1 = people.id").unwrap();
@@ -4193,11 +4222,20 @@ fn parse_create_type_supports_enum_and_rejects_other_unsupported_forms() {
         }
         other => panic!("expected enum create type, got {other:?}"),
     }
-    assert!(matches!(
-        parse_statement("create type intr as range (subtype = int4)"),
-        Err(ParseError::FeatureNotSupported(feature))
-            if feature == "CREATE TYPE AS RANGE is not supported yet"
-    ));
+    match parse_statement(
+        "create type intr as range (subtype = int4, subtype_diff = int4mi, collation = \"C\")",
+    )
+    .unwrap()
+    {
+        Statement::CreateType(CreateTypeStatement::Range(stmt)) => {
+            assert_eq!(stmt.schema_name, None);
+            assert_eq!(stmt.type_name, "intr");
+            assert_eq!(stmt.subtype, RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)));
+            assert_eq!(stmt.subtype_diff.as_deref(), Some("int4mi"));
+            assert_eq!(stmt.collation.as_deref(), Some("C"));
+        }
+        other => panic!("expected range create type, got {other:?}"),
+    }
 }
 
 #[test]
