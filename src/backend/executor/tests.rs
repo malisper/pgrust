@@ -8756,6 +8756,28 @@ fn array_subscript_mixed_slice_scalar_queries_match_postgres() {
             &base,
             &txns,
             INVALID_TRANSACTION_ID,
+            "select ('{{3,4},{4,5}}'::int[])[1:1][1:2][1:2]",
+        )
+        .unwrap(),
+        vec![vec![Value::PgArray(ArrayValue::empty())]],
+    );
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select ('{{3,4},{4,5}}'::int[])[1:1][2][2]",
+        )
+        .unwrap(),
+        vec![vec![Value::PgArray(ArrayValue::empty())]],
+    );
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
             "select ('[0:2][0:2]={{1,2,3},{4,5,6},{7,8,9}}'::int[])[1:2][2]",
         )
         .unwrap(),
