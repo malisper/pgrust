@@ -167,6 +167,7 @@ pub struct Database {
     pub(crate) temp_relations: Arc<RwLock<HashMap<ClientId, TempNamespace>>>,
     pub(crate) domains: Arc<RwLock<BTreeMap<String, DomainEntry>>>,
     pub(crate) enum_types: Arc<RwLock<BTreeMap<String, EnumTypeEntry>>>,
+    pub(crate) range_types: Arc<RwLock<BTreeMap<String, RangeTypeEntry>>>,
     pub(crate) sequences: Arc<SequenceRuntime>,
     pub(crate) _wal_bg_writer: Option<Arc<WalBgWriter>>,
 }
@@ -214,6 +215,18 @@ pub(crate) struct EnumTypeEntry {
     pub name: String,
     pub namespace_oid: u32,
     pub labels: Vec<String>,
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RangeTypeEntry {
+    pub oid: u32,
+    pub array_oid: u32,
+    pub name: String,
+    pub namespace_oid: u32,
+    pub subtype: SqlType,
+    pub subtype_diff: Option<String>,
+    pub collation: Option<String>,
     pub comment: Option<String>,
 }
 
@@ -419,6 +432,58 @@ impl Database {
                         // :HACK: User-defined enums are text-backed for now. This unlocks
                         // catalog/type resolution and basic storage flow, but does not yet
                         // enforce label membership or enum ordering semantics.
+                        sql_type: base_sql_type,
+                    },
+                    PgTypeRow {
+                        oid: entry.array_oid,
+                        typname: format!("_{}", entry.name),
+                        typnamespace: entry.namespace_oid,
+                        typowner: BOOTSTRAP_SUPERUSER_OID,
+                        typlen: -1,
+                        typalign: AttributeAlign::Int,
+                        typstorage: AttributeStorage::Extended,
+                        typrelid: 0,
+                        typelem: entry.oid,
+                        typarray: 0,
+                        sql_type: SqlType::array_of(base_sql_type),
+                    },
+                ]
+            })
+            .collect::<Vec<_>>();
+        rows.sort_by_key(|row| {
+            let schema_rank = search_path
+                .iter()
+                .position(|schema| {
+                    (schema == "public" && row.typnamespace == PUBLIC_NAMESPACE_OID)
+                        || (schema == "pg_catalog" && row.typnamespace == 11)
+                })
+                .unwrap_or(usize::MAX);
+            (schema_rank, row.typname.clone())
+        });
+        rows
+    }
+
+    pub(crate) fn range_type_rows_for_search_path(&self, search_path: &[String]) -> Vec<PgTypeRow> {
+        let range_types = self.range_types.read();
+        let mut rows = range_types
+            .values()
+            .flat_map(|entry| {
+                let base_sql_type = SqlType::new(SqlTypeKind::Text).with_identity(entry.oid, 0);
+                [
+                    PgTypeRow {
+                        oid: entry.oid,
+                        typname: entry.name.clone(),
+                        typnamespace: entry.namespace_oid,
+                        typowner: BOOTSTRAP_SUPERUSER_OID,
+                        typlen: -1,
+                        typalign: AttributeAlign::Int,
+                        typstorage: AttributeStorage::Extended,
+                        typrelid: 0,
+                        typelem: 0,
+                        typarray: entry.array_oid,
+                        // :HACK: User-defined ranges are currently text-backed. This is enough
+                        // for parser/catalog visibility and later DDL type resolution, but it
+                        // does not implement PostgreSQL's arbitrary-subtype range semantics yet.
                         sql_type: base_sql_type,
                     },
                     PgTypeRow {
