@@ -2489,15 +2489,30 @@ fn set_set_op_references(
     plan_info: PlanEstimate,
     op: crate::include::nodes::parsenodes::SetOperator,
     output_columns: Vec<QueryColumn>,
+    child_roots: Vec<Option<PlannerSubroot>>,
     children: Vec<Path>,
 ) -> Plan {
+    assert!(
+        child_roots.is_empty() || child_roots.len() == children.len(),
+        "set-op child root count {} did not match child count {}",
+        child_roots.len(),
+        children.len()
+    );
     Plan::SetOp {
         plan_info,
         op,
         output_columns,
         children: children
             .into_iter()
-            .map(|child| set_plan_refs(ctx, child))
+            .enumerate()
+            .map(|(index, child)| {
+                let child_root = child_roots
+                    .get(index)
+                    .and_then(Option::as_ref)
+                    .map(PlannerSubroot::as_ref)
+                    .or(ctx.root);
+                recurse_with_root(ctx, child_root, child)
+            })
             .collect(),
     }
 }
@@ -3120,9 +3135,10 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             plan_info,
             op,
             output_columns,
+            child_roots,
             children,
             ..
-        } => set_set_op_references(ctx, plan_info, op, output_columns, children),
+        } => set_set_op_references(ctx, plan_info, op, output_columns, child_roots, children),
         Path::SeqScan {
             plan_info,
             source_id,

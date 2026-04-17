@@ -474,6 +474,7 @@ pub enum Path {
         slot_id: usize,
         op: SetOperator,
         output_columns: Vec<QueryColumn>,
+        child_roots: Vec<Option<PlannerSubroot>>,
         children: Vec<Path>,
     },
     ProjectSet {

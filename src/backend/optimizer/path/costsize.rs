@@ -74,6 +74,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                 slot_id,
                 op,
                 output_columns,
+                child_roots,
                 children,
                 ..
             } => {
@@ -104,6 +105,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                     slot_id,
                     op,
                     output_columns,
+                    child_roots,
                     children,
                 }
             }
