@@ -150,13 +150,21 @@ pub(super) fn build_join_paths(
 }
 
 pub(super) fn restore_join_output_order(
+    root: Option<&PlannerInfo>,
     join: Path,
     left_columns: &[QueryColumn],
     right_columns: &[QueryColumn],
     left_vars: &[Expr],
     right_vars: &[Expr],
 ) -> Path {
-    costsize::restore_join_output_order(join, left_columns, right_columns, left_vars, right_vars)
+    costsize::restore_join_output_order(
+        root,
+        join,
+        left_columns,
+        right_columns,
+        left_vars,
+        right_vars,
+    )
 }
 
 pub(super) fn extract_hash_join_clauses(

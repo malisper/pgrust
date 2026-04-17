@@ -2,13 +2,16 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::nodes::datum::Value;
-use crate::include::nodes::pathnodes::{Path, PathKey, PathTarget};
+use crate::include::nodes::pathnodes::{Path, PathKey, PathTarget, PlannerInfo};
 use crate::include::nodes::plannodes::{Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
-    AggAccum, BoolExpr, Expr, ExprArraySubscript, FuncExpr, JoinType, OpExpr,
+    AggAccum, Aggref, BoolExpr, Expr, ExprArraySubscript, FuncExpr, JoinType, OpExpr,
     ProjectSetTarget, QueryColumn, ScalarArrayOpExpr, SubLinkType, TargetEntry, Var,
     user_attrno,
 };
+
+use super::inherit::{append_translation, translate_append_rel_expr};
+use super::flatten_join_alias_vars;
 
 // :HACK: Planner-generated slot Vars still share the same Var identity space as parse-time
 // rtindex Vars, so keep synthetic slots in a disjoint high range until slot identity is split
@@ -124,107 +127,66 @@ impl Path {
     }
 
     pub fn output_vars(&self) -> Vec<Expr> {
+        self.output_target().exprs
+    }
+
+    pub fn output_target(&self) -> PathTarget {
         match self {
-            Self::Result { .. } => Vec::new(),
+            Self::Result { .. } => PathTarget::new(Vec::new()),
             Self::Append {
                 source_id, desc, ..
-            } => slot_output_vars(*source_id, &desc.columns, |column| column.sql_type),
+            } => slot_output_target(*source_id, &desc.columns, |column| column.sql_type),
             Self::SeqScan {
                 source_id, desc, ..
             }
             | Self::IndexScan {
                 source_id, desc, ..
-            } => slot_output_vars(*source_id, &desc.columns, |column| column.sql_type),
-            Self::Filter { input, .. }
-            | Self::OrderBy { input, .. }
-            | Self::Limit { input, .. } => input.output_vars(),
-            Self::Projection {
-                slot_id, targets, ..
-            } => targets
-                .iter()
-                .enumerate()
-                .map(|(index, target)| slot_var(*slot_id, user_attrno(index), target.sql_type))
-                .collect(),
-            Self::Aggregate {
-                slot_id,
-                group_by,
-                accumulators,
-                ..
-            } => aggregate_output_vars(*slot_id, group_by, accumulators),
-            Self::Values {
-                slot_id,
-                output_columns,
-                ..
-            } => slot_output_vars(*slot_id, output_columns, |column| column.sql_type),
-            Self::CteScan {
-                slot_id,
-                output_columns,
-                ..
-            } => slot_output_vars(*slot_id, output_columns, |column| column.sql_type),
-            Self::WorkTableScan {
-                slot_id,
-                output_columns,
-                ..
-            }
-            | Self::RecursiveUnion {
-                slot_id,
-                output_columns,
-                ..
-            } => slot_output_vars(*slot_id, output_columns, |column| column.sql_type),
-            Self::FunctionScan { slot_id, call, .. } => {
-                slot_output_vars(*slot_id, call.output_columns(), |column| column.sql_type)
-            }
-            Self::SubqueryScan {
-                rtindex,
-                output_columns,
-                ..
-            } => slot_output_vars(rte_slot_id(*rtindex), output_columns, |column| column.sql_type),
-            Self::ProjectSet {
-                slot_id, targets, ..
-            } => targets
-                .iter()
-                .enumerate()
-                .map(|(index, target)| match target {
-                    ProjectSetTarget::Scalar(entry) => {
-                        slot_var(*slot_id, user_attrno(index), entry.sql_type)
-                    }
-                    ProjectSetTarget::Set { sql_type, .. } => {
-                        slot_var(*slot_id, user_attrno(index), *sql_type)
-                    }
-                })
-                .collect(),
-            Self::NestedLoopJoin { left, right, .. } => {
-                let mut vars = left.output_vars();
-                vars.extend(right.output_vars());
-                vars
-            }
-            Self::HashJoin { left, right, .. } => {
-                let mut vars = left.output_vars();
-                vars.extend(right.output_vars());
-                vars
-            }
-        }
-    }
-
-    pub fn output_target(&self) -> PathTarget {
-        match self {
+            } => slot_output_target(*source_id, &desc.columns, |column| column.sql_type),
             Self::Filter { input, .. } | Self::OrderBy { input, .. } | Self::Limit { input, .. } => {
                 input.output_target()
             }
-            Self::Projection {
-                slot_id, targets, ..
-            } => PathTarget::with_sortgrouprefs(
-                targets
-                    .iter()
-                    .enumerate()
-                    .map(|(index, target)| slot_var(*slot_id, user_attrno(index), target.sql_type))
-                    .collect(),
+            Self::Projection { targets, .. } => PathTarget::with_sortgrouprefs(
+                targets.iter().map(|target| target.expr.clone()).collect(),
                 targets
                     .iter()
                     .map(|target| target.ressortgroupref)
                     .collect(),
             ),
-            _ => PathTarget::new(self.output_vars()),
+            Self::Aggregate {
+                group_by,
+                accumulators,
+                ..
+            } => aggregate_output_target(group_by, accumulators),
+            Self::Values {
+                slot_id,
+                output_columns,
+                ..
+            }
+            | Self::CteScan {
+                slot_id,
+                output_columns,
+                ..
+            }
+            | Self::WorkTableScan {
+                slot_id,
+                output_columns,
+                ..
+            } => slot_output_target(*slot_id, output_columns, |column| column.sql_type),
+            Self::RecursiveUnion { anchor, .. } => anchor.output_target(),
+            Self::FunctionScan { slot_id, call, .. } => {
+                slot_output_target(*slot_id, call.output_columns(), |column| column.sql_type)
+            }
+            Self::SubqueryScan {
+                rtindex,
+                output_columns,
+                ..
+            } => slot_output_target(*rtindex, output_columns, |column| column.sql_type),
+            Self::ProjectSet { targets, .. } => project_set_output_target(targets),
+            Self::NestedLoopJoin { left, right, .. } | Self::HashJoin { left, right, .. } => {
+                let mut exprs = left.output_target().exprs;
+                exprs.extend(right.output_target().exprs);
+                PathTarget::new(exprs)
+            }
         }
     }
 
@@ -243,12 +205,9 @@ impl Path {
             Self::IndexScan { pathkeys, .. } => pathkeys.clone(),
             Self::SubqueryScan { pathkeys, .. } => pathkeys.clone(),
             Self::Filter { input, .. } | Self::Limit { input, .. } => input.pathkeys(),
-            Self::Projection {
-                slot_id,
-                targets,
-                input,
-                ..
-            } => project_pathkeys(*slot_id, input, targets, &input.pathkeys()),
+            Self::Projection { targets, input, .. } => {
+                project_pathkeys(input, targets, &input.pathkeys())
+            }
             Self::OrderBy { items, .. } => items
                 .iter()
                 .map(|item| PathKey {
@@ -267,6 +226,159 @@ impl Path {
             Self::NestedLoopJoin { .. } => Vec::new(),
         }
     }
+}
+
+pub(super) fn layout_candidate_for_expr(
+    root: Option<&PlannerInfo>,
+    expr: &Expr,
+    layout: &[Expr],
+) -> Option<Expr> {
+    layout
+        .iter()
+        .find(|candidate| **candidate == *expr)
+        .cloned()
+        .or_else(|| {
+            root.and_then(|root| {
+                let flattened_expr = flatten_join_alias_vars(root, expr.clone());
+                layout.iter().find_map(|candidate| {
+                    let flattened_candidate = flatten_join_alias_vars(root, candidate.clone());
+                    (flattened_candidate == *expr || flattened_candidate == flattened_expr)
+                        .then(|| candidate.clone())
+                })
+            })
+        })
+}
+
+pub(super) fn lower_expr_to_path_output(
+    root: Option<&PlannerInfo>,
+    path: &Path,
+    expr: Expr,
+    ressortgroupref: usize,
+) -> Option<Expr> {
+    lower_expr_to_path_output_internal(root, path, &expr, ressortgroupref).or_else(|| {
+        root.and_then(|root| {
+            let translated = appendrel_expr_for_path(root, path, expr.clone());
+            (translated != expr)
+                .then_some(translated)
+                .and_then(|translated| {
+                    lower_expr_to_path_output_internal(Some(root), path, &translated, ressortgroupref)
+                })
+        })
+    })
+}
+
+fn lower_expr_to_path_output_internal(
+    root: Option<&PlannerInfo>,
+    path: &Path,
+    expr: &Expr,
+    ressortgroupref: usize,
+) -> Option<Expr> {
+    match path {
+        Path::Projection { input, targets, .. } => {
+            if let Some(candidate) =
+                projection_output_match(root, targets, &input.output_target(), expr, ressortgroupref)
+            {
+                return Some(candidate);
+            }
+        }
+        Path::ProjectSet { input, targets, .. } => {
+            if let Some(candidate) =
+                project_set_output_match(root, targets, &input.output_target(), expr, ressortgroupref)
+            {
+                return Some(candidate);
+            }
+        }
+        _ => {}
+    }
+    let output_target = path.output_target();
+    if ressortgroupref != 0
+        && let Some(index) = output_target
+            .sortgrouprefs
+            .iter()
+            .position(|candidate| *candidate == ressortgroupref)
+    {
+        return output_target.exprs.get(index).cloned();
+    }
+    layout_candidate_for_expr(root, expr, &output_target.exprs)
+}
+
+fn projection_output_match(
+    root: Option<&PlannerInfo>,
+    targets: &[TargetEntry],
+    input_target: &PathTarget,
+    expr: &Expr,
+    ressortgroupref: usize,
+) -> Option<Expr> {
+    targets
+        .iter()
+        .find(|target| {
+            target.input_resno.and_then(|input_resno| {
+                input_target.exprs.get(input_resno.saturating_sub(1)).cloned()
+            }) == Some(expr.clone())
+        })
+        .map(|target| target.expr.clone())
+        .or_else(|| {
+            (ressortgroupref != 0)
+                .then(|| {
+                    targets
+                        .iter()
+                        .find(|target| target.ressortgroupref == ressortgroupref)
+                        .map(|target| target.expr.clone())
+                })
+                .flatten()
+        })
+        .or_else(|| {
+            targets
+                .iter()
+                .find(|target| target.expr == *expr)
+                .map(|target| target.expr.clone())
+        })
+        .or_else(|| {
+            root.and_then(|root| {
+                let flattened_expr = flatten_join_alias_vars(root, expr.clone());
+                targets.iter().find_map(|target| {
+                    (flatten_join_alias_vars(root, target.expr.clone()) == flattened_expr)
+                        .then(|| target.expr.clone())
+                })
+            })
+        })
+}
+
+fn project_set_output_match(
+    root: Option<&PlannerInfo>,
+    targets: &[ProjectSetTarget],
+    input_target: &PathTarget,
+    expr: &Expr,
+    ressortgroupref: usize,
+) -> Option<Expr> {
+    targets.iter().find_map(|target| match target {
+        ProjectSetTarget::Scalar(entry) => projection_output_match(
+            root,
+            std::slice::from_ref(entry),
+            input_target,
+            expr,
+            ressortgroupref,
+        ),
+        ProjectSetTarget::Set { .. } => None,
+    })
+}
+
+fn appendrel_expr_for_path(root: &PlannerInfo, path: &Path, expr: Expr) -> Expr {
+    let relids = super::path_relids(path);
+    if relids.len() != 1 {
+        return expr;
+    }
+    append_translation(root, relids[0])
+        .map(|info| translate_append_rel_expr(expr.clone(), info))
+        .unwrap_or(expr)
+}
+
+fn slot_output_target<T>(
+    varno: usize,
+    columns: &[T],
+    sql_type: impl Fn(&T) -> SqlType,
+) -> PathTarget {
+    PathTarget::new(slot_output_vars(varno, columns, sql_type))
 }
 
 fn slot_output_vars<T>(
@@ -295,42 +407,37 @@ fn slot_var(
 }
 
 fn project_pathkeys(
-    slot_id: usize,
     input: &Path,
     targets: &[TargetEntry],
     input_pathkeys: &[PathKey],
 ) -> Vec<PathKey> {
-    let input_layout = input.output_vars();
+    let input_target = input.output_target();
     input_pathkeys
         .iter()
         .map(|key| {
             let expr = targets
                 .iter()
-                .enumerate()
-                .find(|(_, target)| {
+                .find(|target| {
                     key.ressortgroupref != 0 && target.ressortgroupref == key.ressortgroupref
                 })
-                .map(|(index, target)| slot_var(slot_id, user_attrno(index), target.sql_type))
+                .map(|target| target.expr.clone())
                 .or_else(|| {
-                    input_layout
+                    input_target
+                        .exprs
                         .iter()
                         .position(|expr| *expr == key.expr)
                         .and_then(|input_index| {
                             targets
                                 .iter()
-                                .enumerate()
-                                .find(|(_, target)| target.input_resno == Some(input_index + 1))
-                                .map(|(target_index, target)| {
-                                    slot_var(slot_id, user_attrno(target_index), target.sql_type)
-                                })
+                                .find(|target| target.input_resno == Some(input_index + 1))
+                                .map(|target| target.expr.clone())
                         })
                 })
                 .or_else(|| {
                     targets
                         .iter()
-                        .enumerate()
-                        .find(|(_, target)| target.expr == key.expr)
-                        .map(|(index, target)| slot_var(slot_id, user_attrno(index), target.sql_type))
+                        .find(|target| target.expr == key.expr)
+                        .map(|target| target.expr.clone())
                 })
                 .unwrap_or_else(|| key.expr.clone());
             PathKey {
@@ -341,6 +448,49 @@ fn project_pathkeys(
             }
         })
         .collect()
+}
+
+fn aggregate_output_expr(accum: &AggAccum, aggno: usize) -> Expr {
+    Expr::Aggref(Box::new(Aggref {
+        aggfnoid: accum.aggfnoid,
+        aggtype: accum.sql_type,
+        aggvariadic: accum.agg_variadic,
+        aggdistinct: accum.distinct,
+        args: accum.args.clone(),
+        agglevelsup: 0,
+        aggno,
+    }))
+}
+
+fn aggregate_output_target(group_by: &[Expr], accumulators: &[AggAccum]) -> PathTarget {
+    let mut exprs = Vec::with_capacity(group_by.len() + accumulators.len());
+    exprs.extend(group_by.iter().cloned());
+    exprs.extend(
+        accumulators
+            .iter()
+            .enumerate()
+            .map(|(aggno, accum)| aggregate_output_expr(accum, aggno)),
+    );
+    PathTarget::new(exprs)
+}
+
+fn project_set_output_target(targets: &[ProjectSetTarget]) -> PathTarget {
+    PathTarget::with_sortgrouprefs(
+        targets
+            .iter()
+            .map(|target| match target {
+                ProjectSetTarget::Scalar(entry) => entry.expr.clone(),
+                ProjectSetTarget::Set { .. } => Expr::Const(Value::Null),
+            })
+            .collect(),
+        targets
+            .iter()
+            .map(|target| match target {
+                ProjectSetTarget::Scalar(entry) => entry.ressortgroupref,
+                ProjectSetTarget::Set { .. } => 0,
+            })
+            .collect(),
+    )
 }
 
 pub(super) fn aggregate_output_vars(

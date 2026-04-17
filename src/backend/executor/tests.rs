@@ -6580,7 +6580,7 @@ fn derived_table_can_cross_join_with_generate_series() {
     )
     .unwrap();
     txns.commit(xid).unwrap();
-    match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select p.id, g.generate_series from (select id from people) p, generate_series(1, 2) g order by p.id, g.generate_series").unwrap() {
+    match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select p.id, g.g from (select id from people) p, generate_series(1, 2) g order by p.id, g.g").unwrap() {
             StatementResult::Query { rows, .. } => {
                 assert_eq!(rows, vec![
                     vec![Value::Int32(1), Value::Int32(1)],
@@ -6596,7 +6596,7 @@ fn derived_table_can_cross_join_with_generate_series() {
 fn generate_series_sources_can_cross_join_each_other() {
     let base = temp_dir("srf_cross_join");
     let txns = TransactionManager::new_durable(&base).unwrap();
-    match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select g.generate_series, h.generate_series from generate_series(1, 2) g, generate_series(5, 6) h order by g.generate_series, h.generate_series").unwrap() {
+    match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select g.g, h.h from generate_series(1, 2) g, generate_series(5, 6) h order by g.g, h.h").unwrap() {
             StatementResult::Query { rows, .. } => {
                 assert_eq!(rows, vec![
                     vec![Value::Int32(1), Value::Int32(5)],
