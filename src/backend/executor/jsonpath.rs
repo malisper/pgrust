@@ -3,9 +3,12 @@ use std::cmp::Ordering;
 use num_traits::Zero;
 
 use crate::backend::executor::ExecError;
+use crate::backend::executor::expr_bool::parse_pg_bool_text;
+use crate::backend::executor::expr_casts::parse_pg_float;
 use crate::backend::executor::expr_ops::parse_numeric_text;
 use crate::backend::executor::jsonb::{JsonbValue, compare_jsonb};
 use crate::include::nodes::datum::NumericValue;
+use crate::include::nodes::parsenodes::SqlTypeKind;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PathMode {
@@ -112,9 +115,12 @@ enum SubscriptSelection {
 #[derive(Debug, Clone, Copy)]
 enum MethodKind {
     Abs,
+    Boolean,
     Ceiling,
+    Double,
     Floor,
     Size,
+    String,
     Type,
 }
 
@@ -549,12 +555,14 @@ fn apply_method(value: &JsonbValue, kind: MethodKind, mode: PathMode) -> Result<
                 "jsonpath item method .abs() can only be applied to a numeric value",
             )),
         },
+        MethodKind::Boolean => apply_boolean_method(value),
         MethodKind::Ceiling => match value {
             JsonbValue::Numeric(numeric) => Ok(JsonbValue::Numeric(numeric_ceiling(numeric))),
             _ => Err(exec_jsonpath_error(
                 "jsonpath item method .ceiling() can only be applied to a numeric value",
             )),
         },
+        MethodKind::Double => apply_double_method(value),
         MethodKind::Floor => match value {
             JsonbValue::Numeric(numeric) => Ok(JsonbValue::Numeric(numeric_floor(numeric))),
             _ => Err(exec_jsonpath_error(
@@ -569,7 +577,72 @@ fn apply_method(value: &JsonbValue, kind: MethodKind, mode: PathMode) -> Result<
                 "jsonpath item method .size() can only be applied to an array",
             )),
         },
+        MethodKind::String => apply_string_method(value),
     }
+}
+
+fn apply_double_method(value: &JsonbValue) -> Result<JsonbValue, ExecError> {
+    let text = match value {
+        JsonbValue::Numeric(numeric) => numeric.render(),
+        JsonbValue::String(text) => text.clone(),
+        _ => {
+            return Err(exec_jsonpath_error(
+                "jsonpath item method .double() can only be applied to a string or numeric value",
+            ));
+        }
+    };
+    let parsed = parse_pg_float(&text, SqlTypeKind::Float8).map_err(|_| {
+        exec_jsonpath_error(&format!(
+            "argument \"{text}\" of jsonpath item method .double() is invalid for type double precision"
+        ))
+    })?;
+    if parsed.is_nan() || parsed.is_infinite() {
+        return Err(exec_jsonpath_error(
+            "NaN or Infinity is not allowed for jsonpath item method .double()",
+        ));
+    }
+    Ok(JsonbValue::Numeric(NumericValue::from(parsed.to_string())))
+}
+
+fn apply_boolean_method(value: &JsonbValue) -> Result<JsonbValue, ExecError> {
+    let result = match value {
+        JsonbValue::Bool(value) => *value,
+        JsonbValue::Numeric(numeric) => {
+            let text = numeric.render();
+            let parsed = text.parse::<i32>().map_err(|_| {
+                exec_jsonpath_error(&format!(
+                    "argument \"{text}\" of jsonpath item method .boolean() is invalid for type boolean"
+                ))
+            })?;
+            parsed != 0
+        }
+        JsonbValue::String(text) => parse_pg_bool_text(text).map_err(|_| {
+            exec_jsonpath_error(&format!(
+                "argument \"{text}\" of jsonpath item method .boolean() is invalid for type boolean"
+            ))
+        })?,
+        _ => {
+            return Err(exec_jsonpath_error(
+                "jsonpath item method .boolean() can only be applied to a boolean, string, or numeric value",
+            ));
+        }
+    };
+    Ok(JsonbValue::Bool(result))
+}
+
+fn apply_string_method(value: &JsonbValue) -> Result<JsonbValue, ExecError> {
+    let text = match value {
+        JsonbValue::String(text) => text.clone(),
+        JsonbValue::Numeric(numeric) => numeric.render(),
+        JsonbValue::Bool(true) => "true".to_string(),
+        JsonbValue::Bool(false) => "false".to_string(),
+        _ => {
+            return Err(exec_jsonpath_error(
+                "jsonpath item method .string() can only be applied to a boolean, string, numeric, or datetime value",
+            ));
+        }
+    };
+    Ok(JsonbValue::String(text))
 }
 
 fn compare_any_pair(
@@ -968,9 +1041,12 @@ fn render_expr(expr: &Expr, out: &mut String) {
             render_operand(inner, out);
             out.push_str(match kind {
                 MethodKind::Abs => ".abs()",
+                MethodKind::Boolean => ".boolean()",
                 MethodKind::Ceiling => ".ceiling()",
+                MethodKind::Double => ".double()",
                 MethodKind::Floor => ".floor()",
                 MethodKind::Size => ".size()",
+                MethodKind::String => ".string()",
                 MethodKind::Type => ".type()",
             });
         }
@@ -1060,9 +1136,12 @@ fn render_step(step: &Step, out: &mut String) {
         Step::IndexWildcard => out.push_str("[*]"),
         Step::Method(kind) => out.push_str(match kind {
             MethodKind::Abs => ".abs()",
+            MethodKind::Boolean => ".boolean()",
             MethodKind::Ceiling => ".ceiling()",
+            MethodKind::Double => ".double()",
             MethodKind::Floor => ".floor()",
             MethodKind::Size => ".size()",
+            MethodKind::String => ".string()",
             MethodKind::Type => ".type()",
         }),
         Step::Filter(expr) => {
@@ -1516,9 +1595,12 @@ impl<'a> Parser<'a> {
     fn method_kind(&self, ident: &str) -> Result<MethodKind, ExecError> {
         match ident {
             "abs" => Ok(MethodKind::Abs),
+            "boolean" => Ok(MethodKind::Boolean),
             "ceiling" => Ok(MethodKind::Ceiling),
+            "double" => Ok(MethodKind::Double),
             "floor" => Ok(MethodKind::Floor),
             "size" => Ok(MethodKind::Size),
+            "string" => Ok(MethodKind::String),
             "type" => Ok(MethodKind::Type),
             _ => Err(exec_jsonpath_error("unsupported jsonpath item method")),
         }
