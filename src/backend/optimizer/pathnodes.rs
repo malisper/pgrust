@@ -60,6 +60,7 @@ impl Path {
             | Self::CteScan { plan_info, .. }
             | Self::WorkTableScan { plan_info, .. }
             | Self::RecursiveUnion { plan_info, .. }
+            | Self::SetOp { plan_info, .. }
             | Self::Values { plan_info, .. }
             | Self::FunctionScan { plan_info, .. }
             | Self::ProjectSet { plan_info, .. } => *plan_info,
@@ -99,7 +100,8 @@ impl Path {
             Self::SubqueryScan { output_columns, .. } => output_columns.clone(),
             Self::CteScan { output_columns, .. } => output_columns.clone(),
             Self::WorkTableScan { output_columns, .. }
-            | Self::RecursiveUnion { output_columns, .. } => output_columns.clone(),
+            | Self::RecursiveUnion { output_columns, .. }
+            | Self::SetOp { output_columns, .. } => output_columns.clone(),
             Self::NestedLoopJoin { left, right, .. } | Self::HashJoin { left, right, .. } => {
                 let mut cols = left.columns();
                 cols.extend(right.columns());
@@ -170,6 +172,11 @@ impl Path {
                 slot_id,
                 output_columns,
                 ..
+            }
+            | Self::SetOp {
+                slot_id,
+                output_columns,
+                ..
             } => slot_output_vars(*slot_id, output_columns, |column| column.sql_type),
             Self::FunctionScan { slot_id, call, .. } => {
                 slot_output_vars(*slot_id, call.output_columns(), |column| column.sql_type)
@@ -237,6 +244,7 @@ impl Path {
             | Self::CteScan { .. }
             | Self::WorkTableScan { .. }
             | Self::RecursiveUnion { .. }
+            | Self::SetOp { .. }
             | Self::Values { .. }
             | Self::FunctionScan { .. }
             | Self::ProjectSet { .. } => Vec::new(),

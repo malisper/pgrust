@@ -312,7 +312,9 @@ fn plan_contains(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> bool 
         | Plan::Values { .. }
         | Plan::FunctionScan { .. }
         | Plan::WorkTableScan { .. } => false,
-        Plan::Append { children, .. } => children.iter().any(|child| plan_contains(child, predicate)),
+        Plan::Append { children, .. } | Plan::SetOp { children, .. } => {
+            children.iter().any(|child| plan_contains(child, predicate))
+        }
         Plan::Hash { input, .. }
         | Plan::Filter { input, .. }
         | Plan::Projection { input, .. }
@@ -716,7 +718,9 @@ fn planned_lockstep_project_set_keeps_both_visible_targets_as_sets() {
             | Plan::OrderBy { input, .. }
             | Plan::Limit { input, .. }
             | Plan::Aggregate { input, .. } => find_project_set(input),
-            Plan::Append { children, .. } => children.iter().find_map(find_project_set),
+            Plan::Append { children, .. } | Plan::SetOp { children, .. } => {
+                children.iter().find_map(find_project_set)
+            }
             Plan::NestedLoopJoin { left, right, .. } | Plan::HashJoin { left, right, .. } => {
                 find_project_set(left).or_else(|| find_project_set(right))
             }

@@ -341,7 +341,7 @@ pub struct RecursiveUnionQuery {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetOperationQuery {
     pub output_desc: RelationDesc,
-    pub all: bool,
+    pub op: SetOperator,
     pub inputs: Vec<Query>,
 }
 
@@ -483,6 +483,18 @@ pub struct SelectStatement {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SetOperator {
     Union { all: bool },
+    Intersect { all: bool },
+    Except { all: bool },
+}
+
+impl SetOperator {
+    pub fn all(self) -> bool {
+        match self {
+            SetOperator::Union { all }
+            | SetOperator::Intersect { all }
+            | SetOperator::Except { all } => all,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

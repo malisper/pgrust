@@ -224,7 +224,7 @@ fn collect_rels_from_set_returning_call(
 pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLocator>) {
     match plan {
         Plan::Result { .. } | Plan::WorkTableScan { .. } => {}
-        Plan::Append { children, .. } => {
+        Plan::Append { children, .. } | Plan::SetOp { children, .. } => {
             for child in children {
                 collect_rels_from_plan(child, rels);
             }

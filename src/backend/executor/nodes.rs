@@ -16,8 +16,8 @@ use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::{
     AggregateState, AppendState, CteScanState, FilterState, FunctionScanState, IndexScanState,
     LimitState, MaterializedRow, NestedLoopJoinState, NodeExecStats, OrderByState, PlanNode,
-    ProjectSetState, ProjectionState, RecursiveUnionState, ResultState, SeqScanState, SlotKind,
-    SubqueryScanState, SystemVarBinding, ToastRelationRef, TupleSlot, ValuesState,
+    PlanState, ProjectSetState, ProjectionState, RecursiveUnionState, ResultState, SeqScanState,
+    SetOpState, SlotKind, SubqueryScanState, SystemVarBinding, ToastRelationRef, TupleSlot, ValuesState,
     WorkTableScanState,
 };
 use crate::include::nodes::primnodes::{Expr, JoinType, Var, attrno_index, INDEX_VAR, INNER_VAR, OUTER_VAR};
@@ -197,6 +197,85 @@ fn materialize_cte_row(slot: &mut TupleSlot) -> Result<MaterializedRow, ExecErro
         TupleSlot::virtual_row(values),
         Vec::new(),
     ))
+}
+
+fn set_op_result_rows(
+    op: crate::include::nodes::parsenodes::SetOperator,
+    children: &mut [PlanState],
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<MaterializedRow>, ExecError> {
+    #[derive(Clone)]
+    struct Bucket {
+        row: MaterializedRow,
+        counts: Vec<usize>,
+    }
+
+    let child_count = children.len();
+    let mut child_rows = Vec::with_capacity(children.len());
+    let mut buckets: Vec<Bucket> = Vec::new();
+
+    for (child_index, child) in children.iter_mut().enumerate() {
+        let mut rows = Vec::new();
+        while let Some(slot) = child.exec_proc_node(ctx)? {
+            let mut values = slot.values()?.to_vec();
+            Value::materialize_all(&mut values);
+            let row = MaterializedRow::new(TupleSlot::virtual_row(values.clone()), Vec::new());
+            rows.push(row.clone());
+
+            if let Some(bucket) = buckets
+                .iter_mut()
+                .find(|bucket| bucket.row.slot.tts_values == values)
+            {
+                bucket.counts[child_index] += 1;
+            } else {
+                let mut counts = vec![0; child_count];
+                counts[child_index] = 1;
+                buckets.push(Bucket { row, counts });
+            }
+        }
+        child_rows.push(rows);
+    }
+
+    let mut result = Vec::new();
+    match op {
+        crate::include::nodes::parsenodes::SetOperator::Union { all: true } => {
+            for rows in child_rows {
+                result.extend(rows);
+            }
+        }
+        crate::include::nodes::parsenodes::SetOperator::Union { all: false } => {
+            for bucket in buckets {
+                result.push(bucket.row);
+            }
+        }
+        crate::include::nodes::parsenodes::SetOperator::Intersect { all } => {
+            for bucket in buckets {
+                let repeats = if all {
+                    bucket.counts.iter().copied().min().unwrap_or(0)
+                } else if bucket.counts.iter().all(|count| *count > 0) {
+                    1
+                } else {
+                    0
+                };
+                result.extend(std::iter::repeat_n(bucket.row, repeats));
+            }
+        }
+        crate::include::nodes::parsenodes::SetOperator::Except { all } => {
+            for bucket in buckets {
+                let repeats = if all {
+                    bucket.counts[0].saturating_sub(bucket.counts.iter().skip(1).sum::<usize>())
+                } else if bucket.counts[0] > 0 && bucket.counts.iter().skip(1).all(|count| *count == 0)
+                {
+                    1
+                } else {
+                    0
+                };
+                result.extend(std::iter::repeat_n(bucket.row, repeats));
+            }
+        }
+    }
+
+    Ok(result)
 }
 
 fn load_materialized_row(
@@ -2011,6 +2090,87 @@ impl PlanNode for RecursiveUnionState {
         } else {
             let recursive_state = executor_start(self.recursive_plan.clone());
             format_explain_lines(&*recursive_state, indent + 1, analyze, lines);
+        }
+    }
+}
+
+impl PlanNode for SetOpState {
+    fn exec_proc_node<'a>(
+        &'a mut self,
+        ctx: &mut ExecutorContext,
+    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        let start = if ctx.timed { Some(Instant::now()) } else { None };
+        begin_node(&mut self.stats, ctx);
+
+        if self.result_rows.is_none() {
+            self.result_rows = Some(set_op_result_rows(self.op, &mut self.children, ctx)?);
+        }
+
+        let Some(rows) = self.result_rows.as_ref() else {
+            finish_eof(&mut self.stats, start, ctx);
+            return Ok(None);
+        };
+        if self.next_index >= rows.len() {
+            finish_eof(&mut self.stats, start, ctx);
+            return Ok(None);
+        }
+        let row = rows[self.next_index].clone();
+        self.next_index += 1;
+        load_materialized_row(&mut self.slot, &row, &mut self.current_bindings, ctx);
+        finish_row(&mut self.stats, start);
+        Ok(Some(&mut self.slot))
+    }
+
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
+        Some(&mut self.slot)
+    }
+
+    fn current_system_bindings(&self) -> &[SystemVarBinding] {
+        &self.current_bindings
+    }
+
+    fn column_names(&self) -> &[String] {
+        &self.output_columns
+    }
+
+    fn node_stats(&self) -> &NodeExecStats {
+        &self.stats
+    }
+
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
+        &mut self.stats
+    }
+
+    fn plan_info(&self) -> crate::include::nodes::plannodes::PlanEstimate {
+        self.plan_info
+    }
+
+    fn node_label(&self) -> String {
+        match self.op {
+            crate::include::nodes::parsenodes::SetOperator::Union { all: true } => {
+                "SetOp Union All".into()
+            }
+            crate::include::nodes::parsenodes::SetOperator::Union { all: false } => {
+                "SetOp Union".into()
+            }
+            crate::include::nodes::parsenodes::SetOperator::Intersect { all: true } => {
+                "SetOp Intersect All".into()
+            }
+            crate::include::nodes::parsenodes::SetOperator::Intersect { all: false } => {
+                "SetOp Intersect".into()
+            }
+            crate::include::nodes::parsenodes::SetOperator::Except { all: true } => {
+                "SetOp Except All".into()
+            }
+            crate::include::nodes::parsenodes::SetOperator::Except { all: false } => {
+                "SetOp Except".into()
+            }
+        }
+    }
+
+    fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
+        for child in &self.children {
+            format_explain_lines(child.as_ref(), indent, analyze, lines);
         }
     }
 }
