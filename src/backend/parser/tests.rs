@@ -2857,6 +2857,29 @@ fn parse_scalar_values_subquery_expr() {
 }
 
 #[test]
+fn parse_union_all_select_chain() {
+    let stmt = parse_select("select 1 as x union all select 2 as x").unwrap();
+    let set_operation = stmt.set_operation.expect("set operation");
+    assert!(matches!(set_operation.op, SetOperator::Union { all: true }));
+    assert_eq!(set_operation.inputs.len(), 2);
+    assert!(stmt.targets.is_empty());
+    assert!(stmt.from.is_none());
+}
+
+#[test]
+fn parse_union_with_top_level_cte_and_order_by() {
+    let stmt = parse_select(
+        "with q(x) as (select 1) select * from q union select * from q order by 1",
+    )
+    .unwrap();
+    assert_eq!(stmt.with.len(), 1);
+    assert_eq!(stmt.order_by.len(), 1);
+    let set_operation = stmt.set_operation.expect("set operation");
+    assert!(matches!(set_operation.op, SetOperator::Union { all: false }));
+    assert_eq!(set_operation.inputs.len(), 2);
+}
+
+#[test]
 fn parse_with_recursive_mixed_ctes_and_exists_case() {
     let sql = "with recursive points as (
   select r, c from generate_series(-2, 2, 0.05) a(r)
