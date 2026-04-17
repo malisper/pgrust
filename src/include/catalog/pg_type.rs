@@ -10,6 +10,7 @@ use crate::include::catalog::{
     FLOAT4_ARRAY_TYPE_OID, FLOAT4_TYPE_OID, FLOAT8_ARRAY_TYPE_OID, FLOAT8_TYPE_OID,
     INT2_ARRAY_TYPE_OID, INT2_TYPE_OID, INT2VECTOR_TYPE_OID, INT4_ARRAY_TYPE_OID, INT4_TYPE_OID,
     INT8_ARRAY_TYPE_OID, INT8_TYPE_OID, INTERNAL_CHAR_ARRAY_TYPE_OID, INTERNAL_CHAR_TYPE_OID,
+    INTERVAL_ARRAY_TYPE_OID, INTERVAL_TYPE_OID,
     JSON_ARRAY_TYPE_OID, JSON_TYPE_OID, JSONB_ARRAY_TYPE_OID, JSONB_TYPE_OID,
     JSONPATH_ARRAY_TYPE_OID, JSONPATH_TYPE_OID, LINE_TYPE_OID, LSEG_TYPE_OID, MONEY_ARRAY_TYPE_OID,
     MONEY_TYPE_OID, NAME_ARRAY_TYPE_OID, NAME_TYPE_OID, NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID,
@@ -20,9 +21,11 @@ use crate::include::catalog::{
     PG_PROC_RELATION_OID, PG_PROC_ROWTYPE_OID, PG_TYPE_RELATION_OID, PG_TYPE_ROWTYPE_OID,
     POINT_TYPE_OID, POLYGON_TYPE_OID, RECORD_TYPE_OID, REGCONFIG_ARRAY_TYPE_OID,
     REGCONFIG_TYPE_OID, REGDICTIONARY_ARRAY_TYPE_OID, REGDICTIONARY_TYPE_OID, TEXT_ARRAY_TYPE_OID,
-    TEXT_TYPE_OID, TIME_ARRAY_TYPE_OID, TIME_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID,
+    TEXT_TYPE_OID, TID_ARRAY_TYPE_OID, TID_TYPE_OID, TIME_ARRAY_TYPE_OID, TIME_TYPE_OID,
+    TIMESTAMP_ARRAY_TYPE_OID,
     TIMESTAMP_TYPE_OID, TIMESTAMPTZ_ARRAY_TYPE_OID, TIMESTAMPTZ_TYPE_OID, TIMETZ_ARRAY_TYPE_OID,
     TIMETZ_TYPE_OID, TSQUERY_ARRAY_TYPE_OID, TSQUERY_TYPE_OID, TSVECTOR_ARRAY_TYPE_OID,
+    XID_ARRAY_TYPE_OID, XID_TYPE_OID,
     TSVECTOR_TYPE_OID, VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID,
     VARCHAR_TYPE_OID,
 };
@@ -129,6 +132,18 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
             SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
         ),
         builtin_type_row("oid", OID_TYPE_OID, SqlType::new(SqlTypeKind::Oid)),
+        builtin_type_row("tid", TID_TYPE_OID, SqlType::new(SqlTypeKind::Tid)),
+        builtin_type_row(
+            "_tid",
+            TID_ARRAY_TYPE_OID,
+            SqlType::array_of(SqlType::new(SqlTypeKind::Tid)),
+        ),
+        builtin_type_row("xid", XID_TYPE_OID, SqlType::new(SqlTypeKind::Xid)),
+        builtin_type_row(
+            "_xid",
+            XID_ARRAY_TYPE_OID,
+            SqlType::array_of(SqlType::new(SqlTypeKind::Xid)),
+        ),
         builtin_type_row(
             "oidvector",
             OIDVECTOR_TYPE_OID,
@@ -221,6 +236,16 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
             "_timestamptz",
             TIMESTAMPTZ_ARRAY_TYPE_OID,
             SqlType::array_of(SqlType::new(SqlTypeKind::TimestampTz)),
+        ),
+        builtin_type_row(
+            "interval",
+            INTERVAL_TYPE_OID,
+            SqlType::new(SqlTypeKind::Interval),
+        ),
+        builtin_type_row(
+            "_interval",
+            INTERVAL_ARRAY_TYPE_OID,
+            SqlType::array_of(SqlType::new(SqlTypeKind::Interval)),
         ),
         builtin_type_row(
             "numeric",
@@ -405,6 +430,18 @@ mod tests {
                 "_time",
                 SqlType::array_of(SqlType::new(SqlTypeKind::Time)),
             ),
+            (TID_TYPE_OID, "tid", SqlType::new(SqlTypeKind::Tid)),
+            (
+                TID_ARRAY_TYPE_OID,
+                "_tid",
+                SqlType::array_of(SqlType::new(SqlTypeKind::Tid)),
+            ),
+            (XID_TYPE_OID, "xid", SqlType::new(SqlTypeKind::Xid)),
+            (
+                XID_ARRAY_TYPE_OID,
+                "_xid",
+                SqlType::array_of(SqlType::new(SqlTypeKind::Xid)),
+            ),
             (TIMETZ_TYPE_OID, "timetz", SqlType::new(SqlTypeKind::TimeTz)),
             (
                 TIMETZ_ARRAY_TYPE_OID,
@@ -430,6 +467,16 @@ mod tests {
                 TIMESTAMPTZ_ARRAY_TYPE_OID,
                 "_timestamptz",
                 SqlType::array_of(SqlType::new(SqlTypeKind::TimestampTz)),
+            ),
+            (
+                INTERVAL_TYPE_OID,
+                "interval",
+                SqlType::new(SqlTypeKind::Interval),
+            ),
+            (
+                INTERVAL_ARRAY_TYPE_OID,
+                "_interval",
+                SqlType::array_of(SqlType::new(SqlTypeKind::Interval)),
             ),
         ] {
             assert!(

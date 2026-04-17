@@ -97,6 +97,8 @@ fn default_attribute_storage(sql_type: SqlType, attlen: i16) -> AttributeStorage
         | SqlTypeKind::Json
         | SqlTypeKind::Jsonb
         | SqlTypeKind::JsonPath
+        | SqlTypeKind::Tid
+        | SqlTypeKind::Interval
         | SqlTypeKind::TsVector
         | SqlTypeKind::TsQuery
         | SqlTypeKind::Text => AttributeStorage::Extended,
@@ -106,6 +108,7 @@ fn default_attribute_storage(sql_type: SqlType, attlen: i16) -> AttributeStorage
         | SqlTypeKind::Int8
         | SqlTypeKind::Money
         | SqlTypeKind::Oid
+        | SqlTypeKind::Xid
         | SqlTypeKind::RegConfig
         | SqlTypeKind::RegDictionary
         | SqlTypeKind::Point
@@ -149,8 +152,13 @@ fn scalar_type_for_sql_type(sql_type: SqlType) -> ScalarType {
         SqlTypeKind::Int4 => ScalarType::Int32,
         SqlTypeKind::Int8 => ScalarType::Int64,
         SqlTypeKind::Money => ScalarType::Money,
+        // :HACK: tid and interval are currently routed through the text storage
+        // path so ALTER TABLE ADD COLUMN and basic I/O work before we add
+        // dedicated fixed-width runtime representations.
         SqlTypeKind::Name => ScalarType::Text,
         SqlTypeKind::Oid => ScalarType::Int32,
+        SqlTypeKind::Tid => ScalarType::Text,
+        SqlTypeKind::Xid => ScalarType::Int32,
         SqlTypeKind::OidVector => ScalarType::Text,
         SqlTypeKind::Bit | SqlTypeKind::VarBit => ScalarType::BitString,
         SqlTypeKind::Bytea => ScalarType::Bytea,
@@ -170,6 +178,7 @@ fn scalar_type_for_sql_type(sql_type: SqlType) -> ScalarType {
         SqlTypeKind::Date => ScalarType::Date,
         SqlTypeKind::Time => ScalarType::Time,
         SqlTypeKind::TimeTz => ScalarType::TimeTz,
+        SqlTypeKind::Interval => ScalarType::Text,
         SqlTypeKind::TsVector => ScalarType::TsVector,
         SqlTypeKind::TsQuery => ScalarType::TsQuery,
         SqlTypeKind::RegConfig | SqlTypeKind::RegDictionary => ScalarType::Int32,
