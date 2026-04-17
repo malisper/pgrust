@@ -117,6 +117,7 @@ pub struct Database {
     pub(crate) backend_cache_states: Arc<RwLock<HashMap<ClientId, BackendCacheState>>>,
     pub(crate) session_interrupt_states: Arc<RwLock<HashMap<ClientId, Arc<InterruptState>>>>,
     pub(crate) session_auth_states: Arc<RwLock<HashMap<ClientId, AuthState>>>,
+    pub(crate) database_create_grants: Arc<RwLock<Vec<DatabaseCreateGrant>>>,
     pub(crate) temp_relations: Arc<RwLock<HashMap<ClientId, TempNamespace>>>,
     pub(crate) domains: Arc<RwLock<BTreeMap<String, DomainEntry>>>,
     _wal_bg_writer: Option<Arc<WalBgWriter>>,
@@ -156,6 +157,13 @@ pub(crate) struct DomainEntry {
     pub namespace_oid: u32,
     pub sql_type: SqlType,
     pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DatabaseCreateGrant {
+    pub grantee_oid: u32,
+    pub grantor_oid: u32,
+    pub grant_option: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -251,6 +259,7 @@ impl Database {
             backend_cache_states: Arc::new(RwLock::new(HashMap::new())),
             session_interrupt_states: Arc::new(RwLock::new(HashMap::new())),
             session_auth_states: Arc::new(RwLock::new(HashMap::new())),
+            database_create_grants: Arc::new(RwLock::new(Vec::new())),
             temp_relations: Arc::new(RwLock::new(HashMap::new())),
             domains: Arc::new(RwLock::new(BTreeMap::new())),
             _wal_bg_writer: Some(Arc::new(wal_bg_writer)),
@@ -274,6 +283,7 @@ impl Database {
             backend_cache_states: Arc::new(RwLock::new(HashMap::new())),
             session_interrupt_states: Arc::new(RwLock::new(HashMap::new())),
             session_auth_states: Arc::new(RwLock::new(HashMap::new())),
+            database_create_grants: Arc::new(RwLock::new(Vec::new())),
             temp_relations: Arc::new(RwLock::new(HashMap::new())),
             domains: Arc::new(RwLock::new(BTreeMap::new())),
             _wal_bg_writer: None,
