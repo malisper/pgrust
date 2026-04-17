@@ -8771,6 +8771,20 @@ fn create_function_scalar_calls_work_in_select_and_where() {
 }
 
 #[test]
+fn grant_all_on_schema_public_is_accepted() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    match session
+        .execute(&db, "grant all on schema public to public")
+        .unwrap()
+    {
+        StatementResult::AffectedRows(0) => {}
+        other => panic!("expected grant affected rows, got {other:?}"),
+    }
+}
+
+#[test]
 fn create_function_scalar_elsif_branches_work() {
     let dir = temp_dir("create_function_scalar_elsif");
     let db = Database::open(&dir, 64).unwrap();
