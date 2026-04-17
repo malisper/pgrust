@@ -58,6 +58,7 @@ use crate::include::catalog::{
     bootstrap_pg_opfamily_rows, bootstrap_pg_proc_rows, bootstrap_pg_tablespace_rows,
     bootstrap_pg_ts_config_map_rows, bootstrap_pg_ts_config_rows, bootstrap_pg_ts_dict_rows,
     bootstrap_pg_ts_parser_rows, bootstrap_pg_ts_template_rows, builtin_type_rows,
+    composite_array_type_row, composite_type_row,
     sort_pg_rewrite_rows,
 };
 
@@ -99,6 +100,27 @@ pub struct CatCache {
 }
 
 impl CatCache {
+    fn normalize_composite_array_types(&mut self) {
+        let composite_rows = self
+            .types_by_oid
+            .values()
+            .filter(|row| row.typrelid != 0)
+            .cloned()
+            .collect::<Vec<_>>();
+        for row in composite_rows {
+            if row.typarray == 0 {
+                continue;
+            }
+            let Some(array_row) = self.types_by_oid.get_mut(&row.typarray) else {
+                continue;
+            };
+            array_row.sql_type = SqlType::array_of(SqlType::named_composite(row.oid, row.typrelid));
+            let updated = array_row.clone();
+            self.types_by_name
+                .insert(updated.typname.to_ascii_lowercase(), updated);
+        }
+    }
+
     pub fn from_catalog(catalog: &Catalog) -> Self {
         let mut cache = Self::default();
 
@@ -219,23 +241,30 @@ impl CatCache {
             cache.classes_by_oid.insert(class_row.oid, class_row);
 
             if entry.row_type_oid != 0 {
-                let composite_type = PgTypeRow {
-                    oid: entry.row_type_oid,
-                    typname: relname.to_string(),
-                    typnamespace: entry.namespace_oid,
-                    typowner: entry.owner_oid,
-                    typlen: -1,
-                    typalign: crate::include::access::htup::AttributeAlign::Double,
-                    typstorage: crate::include::access::htup::AttributeStorage::Extended,
-                    typrelid: entry.relation_oid,
-                    sql_type: SqlType::named_composite(entry.row_type_oid, entry.relation_oid),
-                };
+                let composite_type = composite_type_row(
+                    relname,
+                    entry.row_type_oid,
+                    entry.relation_oid,
+                    entry.array_type_oid,
+                );
                 cache
                     .types_by_name
                     .insert(relname.to_ascii_lowercase(), composite_type.clone());
                 cache
                     .types_by_oid
                     .insert(composite_type.oid, composite_type);
+                if entry.array_type_oid != 0 {
+                    let array_type = composite_array_type_row(
+                        relname,
+                        entry.array_type_oid,
+                        entry.row_type_oid,
+                        entry.relation_oid,
+                    );
+                    cache
+                        .types_by_name
+                        .insert(array_type.typname.to_ascii_lowercase(), array_type.clone());
+                    cache.types_by_oid.insert(array_type.oid, array_type);
+                }
             }
 
             let mut attrs = entry
@@ -246,7 +275,7 @@ impl CatCache {
                 .map(|(idx, column)| PgAttributeRow {
                     attrelid: entry.relation_oid,
                     attname: column.name.clone(),
-                    atttypid: sql_type_oid(column.sql_type),
+                    atttypid: catalog_entry_sql_type_oid(catalog, column.sql_type),
                     attlen: column.storage.attlen,
                     attnum: idx.saturating_add(1) as i16,
                     attnotnull: !column.storage.nullable,
@@ -328,6 +357,7 @@ impl CatCache {
         sort_pg_rewrite_rows(&mut cache.rewrite_rows);
         sort_pg_index_rows(&mut cache.index_rows);
 
+        cache.normalize_composite_array_types();
         cache
     }
 
@@ -480,6 +510,7 @@ impl CatCache {
         cache.tablespace_rows = tablespace_rows;
         sort_pg_tablespace_rows(&mut cache.tablespace_rows);
         cache.statistic_rows = statistic_rows;
+        cache.normalize_composite_array_types();
         cache
     }
 
@@ -695,6 +726,20 @@ impl CatCache {
 }
 pub fn normalize_catalog_name(name: &str) -> &str {
     name.strip_prefix("pg_catalog.").unwrap_or(name)
+}
+
+fn catalog_entry_sql_type_oid(catalog: &Catalog, sql_type: SqlType) -> u32 {
+    if sql_type.is_array
+        && matches!(sql_type.kind, SqlTypeKind::Composite | SqlTypeKind::Record)
+        && sql_type.type_oid != 0
+        && let Some(entry) = catalog
+            .entries()
+            .find_map(|(_, entry)| (entry.row_type_oid == sql_type.type_oid).then_some(entry))
+        && entry.array_type_oid != 0
+    {
+        return entry.array_type_oid;
+    }
+    sql_type_oid(sql_type)
 }
 
 pub fn format_indkey(indkey: &[i16]) -> String {

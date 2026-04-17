@@ -135,6 +135,7 @@ fn test_catalog_entry(rel: RelFileLocator, desc: RelationDesc) -> CatalogEntry {
         namespace_oid: crate::include::catalog::PUBLIC_NAMESPACE_OID,
         owner_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         row_type_oid: 60_000u32.saturating_add(rel.rel_number),
+        array_type_oid: 61_000u32.saturating_add(rel.rel_number),
         reltoastrelid: 0,
         relpersistence: 'p',
         relkind: 'r',

@@ -9,7 +9,7 @@ use crate::include::catalog::{
     PgDatabaseRow, PgDependRow, PgDescriptionRow, PgIndexRow, PgInheritsRow, PgLanguageRow,
     PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow, PgRewriteRow,
     PgStatisticRow, PgTablespaceRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow,
-    PgTsTemplateRow, PgTypeRow,
+    PgTsTemplateRow, PgTypeRow, composite_array_type_row, composite_type_row,
 };
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -236,17 +236,20 @@ pub(crate) fn physical_catalog_rows_for_catalog_entry(
     });
 
     if entry.row_type_oid != 0 {
-        rows.types.push(PgTypeRow {
-            oid: entry.row_type_oid,
-            typname: relname.to_string(),
-            typnamespace: entry.namespace_oid,
-            typowner: entry.owner_oid,
-            typlen: -1,
-            typalign: crate::include::access::htup::AttributeAlign::Double,
-            typstorage: crate::include::access::htup::AttributeStorage::Extended,
-            typrelid: entry.relation_oid,
-            sql_type: SqlType::named_composite(entry.row_type_oid, entry.relation_oid),
-        });
+        rows.types.push(composite_type_row(
+            relname,
+            entry.row_type_oid,
+            entry.relation_oid,
+            entry.array_type_oid,
+        ));
+    }
+    if entry.array_type_oid != 0 {
+        rows.types.push(composite_array_type_row(
+            relname,
+            entry.array_type_oid,
+            entry.row_type_oid,
+            entry.relation_oid,
+        ));
     }
 
     rows.attributes
@@ -259,7 +262,7 @@ pub(crate) fn physical_catalog_rows_for_catalog_entry(
                 .map(|(idx, column)| PgAttributeRow {
                     attrelid: entry.relation_oid,
                     attname: column.name.clone(),
-                    atttypid: sql_type_oid(column.sql_type),
+                    atttypid: catalog_sql_type_oid(catalog, column.sql_type),
                     attlen: column.storage.attlen,
                     attnum: idx.saturating_add(1) as i16,
                     attnotnull: !column.storage.nullable,
@@ -358,10 +361,30 @@ pub(crate) fn physical_catalog_rows_for_catalog_entry(
     rows
 }
 
+fn catalog_sql_type_oid(catalog: &Catalog, sql_type: SqlType) -> u32 {
+    if sql_type.is_array
+        && matches!(
+            sql_type.kind,
+            crate::backend::parser::SqlTypeKind::Composite | crate::backend::parser::SqlTypeKind::Record
+        )
+        && sql_type.type_oid != 0
+        && let Some(entry) = catalog
+            .entries()
+            .find_map(|(_, entry)| (entry.row_type_oid == sql_type.type_oid).then_some(entry))
+        && entry.array_type_oid != 0
+    {
+        return entry.array_type_oid;
+    }
+    sql_type_oid(sql_type)
+}
+
 fn entry_object_oids(entry: &CatalogEntry) -> BTreeSet<u32> {
     let mut oids = BTreeSet::from([entry.relation_oid]);
     if entry.row_type_oid != 0 {
         oids.insert(entry.row_type_oid);
+    }
+    if entry.array_type_oid != 0 {
+        oids.insert(entry.array_type_oid);
     }
     for column in &entry.desc.columns {
         if let Some(oid) = column.attrdef_oid {

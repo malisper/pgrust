@@ -40,6 +40,8 @@ pub struct PgTypeRow {
     pub typalign: AttributeAlign,
     pub typstorage: AttributeStorage,
     pub typrelid: u32,
+    pub typelem: u32,
+    pub typarray: u32,
     pub sql_type: SqlType,
 }
 
@@ -54,12 +56,14 @@ pub fn pg_type_desc() -> RelationDesc {
             column_desc("typalign", SqlType::new(SqlTypeKind::InternalChar), false),
             column_desc("typstorage", SqlType::new(SqlTypeKind::InternalChar), false),
             column_desc("typrelid", SqlType::new(SqlTypeKind::Oid), false),
+            column_desc("typelem", SqlType::new(SqlTypeKind::Oid), false),
+            column_desc("typarray", SqlType::new(SqlTypeKind::Oid), false),
         ],
     }
 }
 
 pub fn builtin_type_rows() -> Vec<PgTypeRow> {
-    vec![
+    let mut rows = vec![
         builtin_type_row("anyarray", ANYARRAYOID, SqlType::new(SqlTypeKind::AnyArray)),
         builtin_type_row("record", RECORD_TYPE_OID, SqlType::record(RECORD_TYPE_OID)),
         builtin_type_row(
@@ -359,28 +363,33 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
             JSONPATH_ARRAY_TYPE_OID,
             SqlType::array_of(SqlType::new(SqlTypeKind::JsonPath)),
         ),
-    ]
+    ];
+    annotate_array_type_links(&mut rows);
+    rows
 }
 
-pub fn bootstrap_composite_type_rows() -> [PgTypeRow; 6] {
-    [
+pub fn bootstrap_composite_type_rows() -> Vec<PgTypeRow> {
+    vec![
         composite_type_row(
             "pg_namespace",
             PG_NAMESPACE_ROWTYPE_OID,
             PG_NAMESPACE_RELATION_OID,
+            0,
         ),
-        composite_type_row("pg_type", PG_TYPE_ROWTYPE_OID, PG_TYPE_RELATION_OID),
-        composite_type_row("pg_proc", PG_PROC_ROWTYPE_OID, PG_PROC_RELATION_OID),
+        composite_type_row("pg_type", PG_TYPE_ROWTYPE_OID, PG_TYPE_RELATION_OID, 0),
+        composite_type_row("pg_proc", PG_PROC_ROWTYPE_OID, PG_PROC_RELATION_OID, 0),
         composite_type_row(
             "pg_attribute",
             PG_ATTRIBUTE_ROWTYPE_OID,
             PG_ATTRIBUTE_RELATION_OID,
+            0,
         ),
-        composite_type_row("pg_class", PG_CLASS_ROWTYPE_OID, PG_CLASS_RELATION_OID),
+        composite_type_row("pg_class", PG_CLASS_ROWTYPE_OID, PG_CLASS_RELATION_OID, 0),
         composite_type_row(
             "pg_database",
             PG_DATABASE_ROWTYPE_OID,
             PG_DATABASE_RELATION_OID,
+            0,
         ),
     ]
 }
@@ -396,11 +405,13 @@ fn builtin_type_row(name: &str, oid: u32, sql_type: SqlType) -> PgTypeRow {
         typalign: storage.attalign,
         typstorage: storage.attstorage,
         typrelid: 0,
+        typelem: 0,
+        typarray: 0,
         sql_type,
     }
 }
 
-fn composite_type_row(name: &str, oid: u32, relid: u32) -> PgTypeRow {
+pub fn composite_type_row(name: &str, oid: u32, relid: u32, array_oid: u32) -> PgTypeRow {
     PgTypeRow {
         oid,
         typname: name.to_string(),
@@ -410,7 +421,40 @@ fn composite_type_row(name: &str, oid: u32, relid: u32) -> PgTypeRow {
         typalign: AttributeAlign::Double,
         typstorage: AttributeStorage::Extended,
         typrelid: relid,
+        typelem: 0,
+        typarray: array_oid,
         sql_type: SqlType::named_composite(oid, relid),
+    }
+}
+
+pub fn composite_array_type_row(name: &str, oid: u32, elem_oid: u32, relid: u32) -> PgTypeRow {
+    PgTypeRow {
+        oid,
+        typname: format!("_{name}"),
+        typnamespace: PG_CATALOG_NAMESPACE_OID,
+        typowner: BOOTSTRAP_SUPERUSER_OID,
+        typlen: -1,
+        typalign: AttributeAlign::Double,
+        typstorage: AttributeStorage::Extended,
+        typrelid: 0,
+        typelem: elem_oid,
+        typarray: 0,
+        sql_type: SqlType::array_of(SqlType::named_composite(elem_oid, relid)),
+    }
+}
+
+fn annotate_array_type_links(rows: &mut [PgTypeRow]) {
+    let snapshot = rows.to_vec();
+    for row in rows.iter_mut() {
+        if row.sql_type.is_array {
+            row.typelem = row.sql_type.type_oid;
+        } else if let Some(array_oid) = snapshot
+            .iter()
+            .find(|array_row| array_row.sql_type == SqlType::array_of(row.sql_type))
+            .map(|array_row| array_row.oid)
+        {
+            row.typarray = array_oid;
+        }
     }
 }
 

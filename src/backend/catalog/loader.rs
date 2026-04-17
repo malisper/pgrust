@@ -141,9 +141,13 @@ pub(crate) fn catalog_from_physical_rows_scoped(
         .iter()
         .map(|row| (row.oid, row.nspname.as_str()))
         .collect::<BTreeMap<_, _>>();
-    let type_by_oid = type_rows
+    let type_sql_by_oid = type_rows
         .iter()
         .map(|row| (row.oid, row.sql_type))
+        .collect::<BTreeMap<_, _>>();
+    let type_rows_by_oid = type_rows
+        .iter()
+        .map(|row| (row.oid, row))
         .collect::<BTreeMap<_, _>>();
     let mut attrs_by_relid = BTreeMap::<u32, Vec<PgAttributeRow>>::new();
     for row in attribute_rows {
@@ -257,7 +261,7 @@ pub(crate) fn catalog_from_physical_rows_scoped(
         let columns = attrs
             .iter()
             .map(|attr| {
-                let sql_type = *type_by_oid
+                let sql_type = *type_sql_by_oid
                     .get(&attr.atttypid)
                     .ok_or(CatalogError::Corrupt("unknown atttypid"))?;
                 let mut desc = column_desc(
@@ -329,6 +333,10 @@ pub(crate) fn catalog_from_physical_rows_scoped(
                 namespace_oid: row.relnamespace,
                 owner_oid: row.relowner,
                 row_type_oid: row.reltype,
+                array_type_oid: type_rows_by_oid
+                    .get(&row.reltype)
+                    .map(|type_row| type_row.typarray)
+                    .unwrap_or(0),
                 reltoastrelid: row.reltoastrelid,
                 relpersistence: row.relpersistence,
                 relkind: row.relkind,
