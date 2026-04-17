@@ -10213,6 +10213,31 @@ fn jsonpath_lax_scalar_index_zero_returns_scalar() {
 }
 
 #[test]
+fn jsonpath_lax_scalar_wildcard_returns_scalar() {
+    let base = temp_dir("jsonpath_lax_scalar_wildcard");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_path_query('1', 'lax $[*]')",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Jsonb(
+                    crate::backend::executor::jsonb::parse_jsonb_text("1").unwrap()
+                )]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn jsonpath_recursive_descent_includes_current_item_at_depth_zero() {
     let base = temp_dir("jsonpath_recursive_depth");
     let txns = TransactionManager::new_durable(&base).unwrap();
