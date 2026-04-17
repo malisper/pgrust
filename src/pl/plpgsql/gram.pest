@@ -1,4 +1,8 @@
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
+COMMENT = _{ line_comment | block_comment }
+
+line_comment = _{ "--" ~ (!"\n" ~ ANY)* }
+block_comment = _{ "/*" ~ (!"*/" ~ ANY)* ~ "*/" }
 
 pl_block = { SOI ~ block ~ EOI }
 block = { declare_section? ~ kw_begin ~ stmt* ~ kw_end }

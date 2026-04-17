@@ -9,6 +9,7 @@ use std::sync::OnceLock;
 #[derive(Clone, Copy)]
 enum NamedArgDefault {
     Bool(bool),
+    Float8(f64),
     Text(&'static str),
     JsonbEmptyObject,
 }
@@ -512,7 +513,9 @@ pub(super) fn validate_scalar_function_arity(
                 args.len() == 2
             }
             BuiltinScalarFunction::CashWords => args.len() == 1,
-            BuiltinScalarFunction::Random => args.is_empty(),
+            BuiltinScalarFunction::Random | BuiltinScalarFunction::RandomNormal => {
+                matches!(args.len(), 0 | 2)
+            }
             BuiltinScalarFunction::Now
             | BuiltinScalarFunction::TransactionTimestamp
             | BuiltinScalarFunction::StatementTimestamp
@@ -973,6 +976,7 @@ fn lower_named_function_args(
 fn default_sql_expr(default: NamedArgDefault) -> SqlExpr {
     match default {
         NamedArgDefault::Bool(value) => SqlExpr::Const(Value::Bool(value)),
+        NamedArgDefault::Float8(value) => SqlExpr::Const(Value::Float64(value)),
         NamedArgDefault::Text(value) => SqlExpr::Const(Value::Text(value.into())),
         NamedArgDefault::JsonbEmptyObject => SqlExpr::Cast(
             Box::new(SqlExpr::Const(Value::Text("{}".into()))),
@@ -983,6 +987,11 @@ fn default_sql_expr(default: NamedArgDefault) -> SqlExpr {
 
 fn scalar_named_arg_signature(func: BuiltinScalarFunction) -> Option<NamedArgSignature> {
     match func {
+        BuiltinScalarFunction::RandomNormal => Some(NamedArgSignature {
+            params: &["mean", "stddev"],
+            required: 0,
+            defaults: &[Some(NamedArgDefault::Float8(0.0)), Some(NamedArgDefault::Float8(1.0))],
+        }),
         BuiltinScalarFunction::JsonbPathExists
         | BuiltinScalarFunction::JsonbPathMatch
         | BuiltinScalarFunction::JsonbPathQueryArray
@@ -1068,6 +1077,12 @@ fn builtin_scalar_function_for_proc_src(proc_src: &str) -> Option<BuiltinScalarF
 fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFunction)] {
     &[
         ("random", BuiltinScalarFunction::Random),
+        ("drandom", BuiltinScalarFunction::Random),
+        ("int4random", BuiltinScalarFunction::Random),
+        ("int8random", BuiltinScalarFunction::Random),
+        ("numeric_random", BuiltinScalarFunction::Random),
+        ("random_normal", BuiltinScalarFunction::RandomNormal),
+        ("drandom_normal", BuiltinScalarFunction::RandomNormal),
         ("cashlarger", BuiltinScalarFunction::CashLarger),
         ("cashsmaller", BuiltinScalarFunction::CashSmaller),
         ("cash_words", BuiltinScalarFunction::CashWords),
@@ -1482,7 +1497,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::TsQueryOr
             | BuiltinScalarFunction::TsQueryNot
             | BuiltinScalarFunction::TsVectorConcat
-            | BuiltinScalarFunction::Random
+            | BuiltinScalarFunction::RandomNormal
             | BuiltinScalarFunction::CashLarger
             | BuiltinScalarFunction::CashSmaller
             | BuiltinScalarFunction::CashWords
@@ -1941,6 +1956,21 @@ mod tests {
         );
         assert!(
             validate_scalar_function_arity(
+                BuiltinScalarFunction::Random,
+                &[SqlExpr::Default, SqlExpr::Default]
+            )
+            .is_ok()
+        );
+        assert!(validate_scalar_function_arity(BuiltinScalarFunction::RandomNormal, &[]).is_ok());
+        assert!(
+            validate_scalar_function_arity(
+                BuiltinScalarFunction::RandomNormal,
+                &[SqlExpr::Default, SqlExpr::Default]
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_scalar_function_arity(
                 BuiltinScalarFunction::JsonBuildArray,
                 &[SqlExpr::Default, SqlExpr::Default]
             )
@@ -2023,7 +2053,7 @@ mod tests {
     #[test]
     fn fixed_scalar_return_type_uses_pg_proc_for_type_invariant_rows() {
         assert_eq!(
-            fixed_scalar_return_type(BuiltinScalarFunction::Random),
+            fixed_scalar_return_type(BuiltinScalarFunction::RandomNormal),
             Some(SqlType::new(SqlTypeKind::Float8))
         );
         assert_eq!(
