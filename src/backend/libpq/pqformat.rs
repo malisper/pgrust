@@ -311,7 +311,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
             SqlTypeKind::Varchar => 1015,
             SqlTypeKind::AnyArray => unreachable!("anyarray is not a concrete SQL array type"),
             SqlTypeKind::Record | SqlTypeKind::Composite => {
-                unreachable!("record arrays are unsupported")
+                crate::include::catalog::RECORD_ARRAY_TYPE_OID as i32
             }
         };
         return (oid, -1, -1);
@@ -526,11 +526,7 @@ pub(crate) fn send_typed_data_row(
                 buf.extend_from_slice(rendered.as_bytes());
             }
             Value::Record(record) => {
-                let rendered = crate::backend::executor::jsonb::jsonb_from_value(&Value::Record(
-                    record.clone(),
-                ))
-                .map(|value| value.to_serde().to_string())
-                .unwrap_or_default();
+                let rendered = crate::backend::executor::value_io::format_record_text(record);
                 buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
                 buf.extend_from_slice(rendered.as_bytes());
             }

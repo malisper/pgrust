@@ -188,11 +188,7 @@ fn encode_array_element_payload(
             right: Value::Null,
         }),
         Value::Jsonb(bytes) => Ok(bytes),
-        Value::Record(_) => Err(ExecError::TypeMismatch {
-            op: "array element",
-            left: coerced,
-            right: Value::Null,
-        }),
+        Value::Record(_) => encode_internal_value(&coerced),
     }
 }
 
@@ -473,12 +469,7 @@ fn array_element_layout(
                 details: "anyarray cannot be used as a concrete array element type".into(),
             });
         }
-        SqlTypeKind::Record | SqlTypeKind::Composite => {
-            return Err(ExecError::InvalidStorageValue {
-                column: column.into(),
-                details: "record cannot be used as a concrete array element type".into(),
-            });
-        }
+        SqlTypeKind::Record | SqlTypeKind::Composite => (-1, AttributeAlign::Double),
         SqlTypeKind::Int2 => (2, AttributeAlign::Short),
         SqlTypeKind::Int4
         | SqlTypeKind::Oid
@@ -665,6 +656,9 @@ fn decode_embedded_varlena<'a>(
 }
 
 fn builtin_type_oid_for_sql_type(sql_type: SqlType) -> Option<u32> {
+    if sql_type.type_oid != 0 {
+        return Some(sql_type.type_oid);
+    }
     builtin_type_rows().into_iter().find_map(|row| {
         (!row.sql_type.is_array
             && row.sql_type.kind == sql_type.kind
@@ -677,6 +671,7 @@ fn sql_type_for_builtin_oid(oid: u32) -> Option<SqlType> {
     builtin_type_rows()
         .into_iter()
         .find_map(|row| (row.oid == oid).then_some(row.sql_type))
+        .or_else(|| (oid != 0).then_some(SqlType::record(oid)))
 }
 
 fn infer_sql_type_from_value(value: &Value) -> Option<SqlType> {
@@ -727,10 +722,7 @@ fn decode_array_element_value(
             column: column.into(),
             details: "anyarray cannot be used as a concrete array element type".into(),
         }),
-        SqlTypeKind::Record | SqlTypeKind::Composite => Err(ExecError::InvalidStorageValue {
-            column: column.into(),
-            details: "record cannot be used as a concrete array element type".into(),
-        }),
+        SqlTypeKind::Record | SqlTypeKind::Composite => decode_internal_value(bytes),
         SqlTypeKind::Int2 => {
             if bytes.len() != 2 {
                 return Err(ExecError::InvalidStorageValue {
@@ -1179,21 +1171,7 @@ fn format_array_values_nested(array: &ArrayValue, depth: usize, offset: &mut usi
             Value::Array(nested) => out.push_str(&format_array_text(nested)),
             Value::PgArray(nested) => out.push_str(&format_array_value_text(nested)),
             Value::Record(record) => {
-                let rendered = serde_json::Value::Object(
-                    record
-                        .fields
-                        .iter()
-                        .map(|(name, value)| {
-                            (
-                                name.clone(),
-                                crate::backend::executor::jsonb::jsonb_from_value(value)
-                                    .map(|value| value.to_serde())
-                                    .unwrap_or(serde_json::Value::Null),
-                            )
-                        })
-                        .collect(),
-                )
-                .to_string();
+                let rendered = format_record_text(record);
                 push_array_text_element(&mut out, &rendered);
             }
         }

@@ -296,11 +296,6 @@ fn lower_create_composite_type_desc(
         }
 
         let sql_type = resolve_raw_type_name(&attribute.ty, catalog).map_err(ExecError::Parse)?;
-        if matches!(sql_type.kind, SqlTypeKind::Composite) && sql_type.is_array {
-            return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                "arrays of named composite types are not supported yet".into(),
-            )));
-        }
         columns.push(column_desc(attribute.name.clone(), sql_type, true));
     }
     Ok(RelationDesc { columns })
