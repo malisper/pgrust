@@ -267,6 +267,16 @@ impl Database {
                 }
             }
             if expected_relkind != 'i' {
+                if expected_relkind == 'r' {
+                    if let Err(err) = reject_relation_with_referencing_foreign_keys(
+                        &catalog,
+                        relation_oid,
+                        "DROP TABLE on table without referencing foreign keys",
+                    ) {
+                        result = Err(err);
+                        break;
+                    }
+                }
                 if let Err(err) = reject_relation_with_dependent_views(
                     self,
                     client_id,

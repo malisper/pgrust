@@ -56,6 +56,9 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_domain_statement(&sql)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_create_function_statement(&sql)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_create_type_statement(&sql)? {
         return Ok(stmt);
     }
