@@ -1,5 +1,6 @@
 use super::subquery::compare_subquery_values;
 use super::*;
+use crate::backend::parser::{SqlType, SqlTypeKind};
 
 pub(super) fn eval_quantified_array(
     left_value: &Value,
@@ -131,12 +132,22 @@ fn apply_array_subscripts(
     if matches!(value, Value::Null) {
         return Ok(Value::Null);
     }
-    let array = normalize_array_value(&value).ok_or_else(|| ExecError::TypeMismatch {
-        op: "array subscript",
-        left: value.clone(),
-        right: Value::Null,
-    })?;
     let any_slice = subscripts.iter().any(|subscript| subscript.is_slice);
+    if any_slice && matches!(value, Value::Point(_)) {
+        return Err(ExecError::DetailedError {
+            message: "slices of fixed-length arrays not implemented".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
+    }
+    let array = normalize_array_value(&value).ok_or_else(|| {
+        non_subscriptable_type_error(&value).unwrap_or_else(|| ExecError::TypeMismatch {
+            op: "array subscript",
+            left: value.clone(),
+            right: Value::Null,
+        })
+    })?;
     if array.dimensions.is_empty() {
         return if any_slice {
             Ok(Value::PgArray(ArrayValue::empty()))
@@ -152,6 +163,82 @@ fn apply_array_subscripts(
         };
     }
     apply_array_subscripts_to_value(&array, subscripts, any_slice)
+}
+
+fn non_subscriptable_type_error(value: &Value) -> Option<ExecError> {
+    let ty = value.sql_type_hint()?;
+    Some(ExecError::DetailedError {
+        message: format!(
+            "cannot subscript type {} because it does not support subscripting",
+            sql_type_display_name(ty)
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "42804",
+    })
+}
+
+fn sql_type_display_name(ty: SqlType) -> String {
+    let base = match ty.kind {
+        SqlTypeKind::AnyArray => "anyarray",
+        SqlTypeKind::Record | SqlTypeKind::Composite => "record",
+        SqlTypeKind::Void => "void",
+        SqlTypeKind::Int2 => "smallint",
+        SqlTypeKind::Int2Vector => "int2vector",
+        SqlTypeKind::Int4 => "integer",
+        SqlTypeKind::Int8 => "bigint",
+        SqlTypeKind::Name => "name",
+        SqlTypeKind::Oid => "oid",
+        SqlTypeKind::RegProcedure => "regprocedure",
+        SqlTypeKind::Tid => "tid",
+        SqlTypeKind::Xid => "xid",
+        SqlTypeKind::OidVector => "oidvector",
+        SqlTypeKind::Bit => "bit",
+        SqlTypeKind::VarBit => "bit varying",
+        SqlTypeKind::Bytea => "bytea",
+        SqlTypeKind::Float4 => "real",
+        SqlTypeKind::Float8 => "double precision",
+        SqlTypeKind::Money => "money",
+        SqlTypeKind::Numeric => "numeric",
+        SqlTypeKind::Int4Range => "int4range",
+        SqlTypeKind::Int8Range => "int8range",
+        SqlTypeKind::NumericRange => "numrange",
+        SqlTypeKind::Json => "json",
+        SqlTypeKind::Jsonb => "jsonb",
+        SqlTypeKind::JsonPath => "jsonpath",
+        SqlTypeKind::Date => "date",
+        SqlTypeKind::DateRange => "daterange",
+        SqlTypeKind::Time => "time without time zone",
+        SqlTypeKind::TimeTz => "time with time zone",
+        SqlTypeKind::Interval => "interval",
+        SqlTypeKind::TsVector => "tsvector",
+        SqlTypeKind::TsQuery => "tsquery",
+        SqlTypeKind::RegConfig => "regconfig",
+        SqlTypeKind::RegDictionary => "regdictionary",
+        SqlTypeKind::Text => "text",
+        SqlTypeKind::Bool => "boolean",
+        SqlTypeKind::Point => "point",
+        SqlTypeKind::Lseg => "lseg",
+        SqlTypeKind::Path => "path",
+        SqlTypeKind::Box => "box",
+        SqlTypeKind::Polygon => "polygon",
+        SqlTypeKind::Line => "line",
+        SqlTypeKind::Circle => "circle",
+        SqlTypeKind::Timestamp => "timestamp without time zone",
+        SqlTypeKind::TimestampRange => "tsrange",
+        SqlTypeKind::TimestampTz => "timestamp with time zone",
+        SqlTypeKind::TimestampTzRange => "tstzrange",
+        SqlTypeKind::PgNodeTree => "pg_node_tree",
+        SqlTypeKind::InternalChar => "\"char\"",
+        SqlTypeKind::Char => "character",
+        SqlTypeKind::Varchar => "character varying",
+    };
+
+    if ty.is_array {
+        format!("{base}[]")
+    } else {
+        base.to_string()
+    }
 }
 
 fn apply_array_subscripts_to_value(

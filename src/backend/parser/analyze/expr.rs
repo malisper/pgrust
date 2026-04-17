@@ -1386,11 +1386,15 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 grouped_outer,
                 ctes,
             );
+            if array_type.kind == SqlTypeKind::Point
+                && subscripts.iter().any(|subscript| subscript.is_slice)
+            {
+                return Err(ParseError::FixedLengthArraySliceNotImplemented);
+            }
             if !array_type.is_array {
-                return Err(ParseError::UnexpectedToken {
-                    expected: "array expression",
-                    actual: sql_type_name(array_type).into(),
-                });
+                return Err(ParseError::NonSubscriptableType(
+                    sql_type_name(array_type).into(),
+                ));
             }
             Expr::ArraySubscript {
                 array: Box::new(bind_expr_with_outer_and_ctes(
