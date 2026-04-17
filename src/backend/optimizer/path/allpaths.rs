@@ -340,21 +340,29 @@ fn build_set_operation_rel(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) 
         .inputs
         .into_iter()
         .map(|query| {
-            let path = best_query_path(query, catalog);
+            let (_, path) = plan_query_path(query, catalog);
             project_to_slot_layout(source_id, &desc, path.clone(), path.output_target(), catalog)
         })
         .collect::<Vec<_>>();
-    let append = optimize_path(
-        Path::Append {
+    let set_op = optimize_path(
+        Path::SetOp {
             plan_info: PlanEstimate::default(),
-            source_id,
-            desc: desc.clone(),
+            slot_id: source_id,
+            op: set_operation.op,
+            output_columns: desc
+                .columns
+                .iter()
+                .map(|column| QueryColumn {
+                    name: column.name.clone(),
+                    sql_type: column.sql_type,
+                })
+                .collect(),
             children,
         },
         catalog,
     );
-    let mut rel = RelOptInfo::new(Vec::new(), RelOptKind::UpperRel, append.output_target());
-    rel.add_path(append);
+    let mut rel = RelOptInfo::new(Vec::new(), RelOptKind::UpperRel, set_op.output_target());
+    rel.add_path(set_op);
     bestpath::set_cheapest(&mut rel);
     rel
 }

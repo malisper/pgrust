@@ -1823,7 +1823,7 @@ fn validate_agg_accum(
 fn validate_executable_plan(plan: &Plan) {
     match plan {
         Plan::Result { .. } | Plan::SeqScan { .. } => {}
-        Plan::Append { children, .. } => {
+        Plan::Append { children, .. } | Plan::SetOp { children, .. } => {
             for child in children {
                 validate_executable_plan(child);
             }
@@ -2088,7 +2088,7 @@ fn validate_planner_agg_accum(
 fn validate_planner_path(path: &Path) {
     match path {
         Path::Result { .. } | Path::SeqScan { .. } | Path::IndexScan { .. } => {}
-        Path::Append { children, .. } => {
+        Path::Append { children, .. } | Path::SetOp { children, .. } => {
             for child in children {
                 validate_planner_path(child);
             }
@@ -2237,6 +2237,24 @@ fn set_append_references(
         plan_info,
         source_id,
         desc,
+        children: children
+            .into_iter()
+            .map(|child| set_plan_refs(ctx, child))
+            .collect(),
+    }
+}
+
+fn set_set_op_references(
+    ctx: &mut SetRefsContext<'_>,
+    plan_info: PlanEstimate,
+    op: crate::include::nodes::parsenodes::SetOperator,
+    output_columns: Vec<QueryColumn>,
+    children: Vec<Path>,
+) -> Plan {
+    Plan::SetOp {
+        plan_info,
+        op,
+        output_columns,
         children: children
             .into_iter()
             .map(|child| set_plan_refs(ctx, child))
@@ -2743,6 +2761,13 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             desc,
             children,
         } => set_append_references(ctx, plan_info, source_id, desc, children),
+        Path::SetOp {
+            plan_info,
+            op,
+            output_columns,
+            children,
+            ..
+        } => set_set_op_references(ctx, plan_info, op, output_columns, children),
         Path::SeqScan {
             plan_info,
             source_id,

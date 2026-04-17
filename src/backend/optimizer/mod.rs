@@ -168,6 +168,7 @@ fn path_relids(path: &Path) -> Vec<usize> {
     match path {
         Path::Result { .. } => Vec::new(),
         Path::Append { source_id, .. } => vec![*source_id],
+        Path::SetOp { slot_id, .. } => vec![*slot_id],
         Path::SeqScan { source_id, .. } | Path::IndexScan { source_id, .. } => vec![*source_id],
         Path::Filter { input, .. }
         | Path::Projection { input, .. }

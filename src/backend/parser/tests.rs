@@ -2944,6 +2944,38 @@ fn parse_union_with_top_level_cte_and_order_by() {
 }
 
 #[test]
+fn parse_intersect_all_select_chain() {
+    let stmt = parse_select("select 1 intersect all select 1").unwrap();
+    let set_operation = stmt.set_operation.expect("set operation");
+    assert!(matches!(set_operation.op, SetOperator::Intersect { all: true }));
+    assert_eq!(set_operation.inputs.len(), 2);
+}
+
+#[test]
+fn parse_except_select_chain() {
+    let stmt = parse_select("select 1 except select 2").unwrap();
+    let set_operation = stmt.set_operation.expect("set operation");
+    assert!(matches!(set_operation.op, SetOperator::Except { all: false }));
+    assert_eq!(set_operation.inputs.len(), 2);
+}
+
+#[test]
+fn parse_intersect_with_derived_union_inputs() {
+    let stmt = parse_select(
+        "select x from (select 1 as x union all select 2 as x) a
+         intersect
+         select x from (select 2 as x union all select 3 as x) b",
+    )
+    .unwrap();
+    let set_operation = stmt.set_operation.expect("set operation");
+    assert!(matches!(
+        set_operation.op,
+        SetOperator::Intersect { all: false }
+    ));
+    assert_eq!(set_operation.inputs.len(), 2);
+}
+
+#[test]
 fn parse_with_recursive_mixed_ctes_and_exists_case() {
     let sql = "with recursive points as (
   select r, c from generate_series(-2, 2, 0.05) a(r)
@@ -3017,7 +3049,9 @@ fn build_plan_for_recursive_mixed_cte_query() {
     fn plan_contains_cte_scan(plan: &Plan) -> bool {
         match plan {
             Plan::CteScan { .. } => true,
-            Plan::Append { children, .. } => children.iter().any(plan_contains_cte_scan),
+            Plan::Append { children, .. } | Plan::SetOp { children, .. } => {
+                children.iter().any(plan_contains_cte_scan)
+            }
             Plan::Hash { input, .. }
             | Plan::Filter { input, .. }
             | Plan::OrderBy { input, .. }

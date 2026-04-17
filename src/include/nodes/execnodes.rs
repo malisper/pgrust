@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use crate::backend::executor::{AccumState, ExecError, ExecutorContext};
 pub use crate::include::nodes::datum::{NumericValue, Value};
-pub use crate::include::nodes::parsenodes::SqlType;
+pub use crate::include::nodes::parsenodes::{SetOperator, SqlType};
 pub use crate::include::nodes::plannodes::Plan;
 pub use crate::include::nodes::primnodes::{
     AggAccum, AggFunc, BuiltinScalarFunction, ColumnDesc, Expr, JoinType, JsonTableFunction,
@@ -546,6 +546,19 @@ pub struct RecursiveUnionState {
     pub(crate) intermediate_rows: Vec<MaterializedRow>,
     pub(crate) seen_rows: HashSet<Vec<Value>>,
     pub(crate) anchor_done: bool,
+    pub(crate) slot: TupleSlot,
+    pub(crate) current_bindings: Vec<SystemVarBinding>,
+    pub(crate) plan_info: PlanEstimate,
+    pub(crate) stats: NodeExecStats,
+}
+
+#[derive(Debug)]
+pub struct SetOpState {
+    pub(crate) op: SetOperator,
+    pub(crate) children: Vec<PlanState>,
+    pub(crate) output_columns: Vec<String>,
+    pub(crate) result_rows: Option<Vec<MaterializedRow>>,
+    pub(crate) next_index: usize,
     pub(crate) slot: TupleSlot,
     pub(crate) current_bindings: Vec<SystemVarBinding>,
     pub(crate) plan_info: PlanEstimate,

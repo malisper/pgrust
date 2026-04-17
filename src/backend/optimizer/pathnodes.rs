@@ -63,6 +63,7 @@ impl Path {
             | Self::CteScan { plan_info, .. }
             | Self::WorkTableScan { plan_info, .. }
             | Self::RecursiveUnion { plan_info, .. }
+            | Self::SetOp { plan_info, .. }
             | Self::Values { plan_info, .. }
             | Self::FunctionScan { plan_info, .. }
             | Self::ProjectSet { plan_info, .. } => *plan_info,
@@ -102,7 +103,8 @@ impl Path {
             Self::SubqueryScan { output_columns, .. } => output_columns.clone(),
             Self::CteScan { output_columns, .. } => output_columns.clone(),
             Self::WorkTableScan { output_columns, .. }
-            | Self::RecursiveUnion { output_columns, .. } => output_columns.clone(),
+            | Self::RecursiveUnion { output_columns, .. }
+            | Self::SetOp { output_columns, .. } => output_columns.clone(),
             Self::NestedLoopJoin { left, right, .. } | Self::HashJoin { left, right, .. } => {
                 let mut cols = left.columns();
                 cols.extend(right.columns());
@@ -127,66 +129,112 @@ impl Path {
     }
 
     pub fn output_vars(&self) -> Vec<Expr> {
-        self.output_target().exprs
-    }
-
-    pub fn output_target(&self) -> PathTarget {
         match self {
-            Self::Result { .. } => PathTarget::new(Vec::new()),
+            Self::Result { .. } => Vec::new(),
             Self::Append {
                 source_id, desc, ..
-            } => slot_output_target(*source_id, &desc.columns, |column| column.sql_type),
+            } => slot_output_vars(*source_id, &desc.columns, |column| column.sql_type),
             Self::SeqScan {
                 source_id, desc, ..
             }
             | Self::IndexScan {
                 source_id, desc, ..
-            } => slot_output_target(*source_id, &desc.columns, |column| column.sql_type),
-            Self::Filter { input, .. } | Self::OrderBy { input, .. } | Self::Limit { input, .. } => {
-                input.output_target()
-            }
-            Self::Projection { targets, .. } => PathTarget::with_sortgrouprefs(
-                targets.iter().map(|target| target.expr.clone()).collect(),
-                targets
-                    .iter()
-                    .map(|target| target.ressortgroupref)
-                    .collect(),
-            ),
+            } => slot_output_vars(*source_id, &desc.columns, |column| column.sql_type),
+            Self::Filter { input, .. }
+            | Self::OrderBy { input, .. }
+            | Self::Limit { input, .. } => input.output_vars(),
+            Self::Projection {
+                slot_id, targets, ..
+            } => targets
+                .iter()
+                .enumerate()
+                .map(|(index, target)| slot_var(*slot_id, user_attrno(index), target.sql_type))
+                .collect(),
             Self::Aggregate {
+                slot_id,
                 group_by,
                 accumulators,
                 ..
-            } => aggregate_output_target(group_by, accumulators),
+            } => aggregate_output_vars(*slot_id, group_by, accumulators),
             Self::Values {
                 slot_id,
                 output_columns,
                 ..
-            }
-            | Self::CteScan {
+            } => slot_output_vars(*slot_id, output_columns, |column| column.sql_type),
+            Self::CteScan {
+                slot_id,
+                output_columns,
+                ..
+            } => slot_output_vars(*slot_id, output_columns, |column| column.sql_type),
+            Self::WorkTableScan {
                 slot_id,
                 output_columns,
                 ..
             }
-            | Self::WorkTableScan {
+            | Self::RecursiveUnion {
                 slot_id,
                 output_columns,
                 ..
-            } => slot_output_target(*slot_id, output_columns, |column| column.sql_type),
-            Self::RecursiveUnion { anchor, .. } => anchor.output_target(),
+            }
+            | Self::SetOp {
+                slot_id,
+                output_columns,
+                ..
+            } => slot_output_vars(*slot_id, output_columns, |column| column.sql_type),
             Self::FunctionScan { slot_id, call, .. } => {
-                slot_output_target(*slot_id, call.output_columns(), |column| column.sql_type)
+                slot_output_vars(*slot_id, call.output_columns(), |column| column.sql_type)
             }
             Self::SubqueryScan {
                 rtindex,
                 output_columns,
                 ..
-            } => slot_output_target(*rtindex, output_columns, |column| column.sql_type),
-            Self::ProjectSet { targets, .. } => project_set_output_target(targets),
-            Self::NestedLoopJoin { left, right, .. } | Self::HashJoin { left, right, .. } => {
-                let mut exprs = left.output_target().exprs;
-                exprs.extend(right.output_target().exprs);
-                PathTarget::new(exprs)
+            } => slot_output_vars(rte_slot_id(*rtindex), output_columns, |column| column.sql_type),
+            Self::ProjectSet {
+                slot_id, targets, ..
+            } => targets
+                .iter()
+                .enumerate()
+                .map(|(index, target)| match target {
+                    ProjectSetTarget::Scalar(entry) => {
+                        slot_var(*slot_id, user_attrno(index), entry.sql_type)
+                    }
+                    ProjectSetTarget::Set { sql_type, .. } => {
+                        slot_var(*slot_id, user_attrno(index), *sql_type)
+                    }
+                })
+                .collect(),
+            Self::NestedLoopJoin { left, right, .. } => {
+                let mut vars = left.output_vars();
+                vars.extend(right.output_vars());
+                vars
             }
+            Self::HashJoin { left, right, .. } => {
+                let mut vars = left.output_vars();
+                vars.extend(right.output_vars());
+                vars
+            }
+        }
+    }
+
+    pub fn output_target(&self) -> PathTarget {
+        match self {
+            Self::Filter { input, .. } | Self::OrderBy { input, .. } | Self::Limit { input, .. } => {
+                input.output_target()
+            }
+            Self::Projection {
+                slot_id, targets, ..
+            } => PathTarget::with_sortgrouprefs(
+                targets
+                    .iter()
+                    .enumerate()
+                    .map(|(index, target)| slot_var(*slot_id, user_attrno(index), target.sql_type))
+                    .collect(),
+                targets
+                    .iter()
+                    .map(|target| target.ressortgroupref)
+                    .collect(),
+            ),
+            _ => PathTarget::new(self.output_vars()),
         }
     }
 
@@ -199,6 +247,7 @@ impl Path {
             | Self::CteScan { .. }
             | Self::WorkTableScan { .. }
             | Self::RecursiveUnion { .. }
+            | Self::SetOp { .. }
             | Self::Values { .. }
             | Self::FunctionScan { .. }
             | Self::ProjectSet { .. } => Vec::new(),
