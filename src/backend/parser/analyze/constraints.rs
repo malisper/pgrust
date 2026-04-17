@@ -453,45 +453,42 @@ pub fn normalize_create_table_constraints(
                 referenced_index_oid,
                 self_referential,
                 referenced_columns,
-            ) = if constraint.referenced_table.eq_ignore_ascii_case(&stmt.table_name) {
-                    let referenced_columns = resolve_pending_self_referenced_key(
-                        &stmt.table_name,
-                        &columns,
-                        &column_lookup,
-                        &finalized_index_backed,
-                        constraint.referenced_columns.as_deref(),
-                        &child_types,
+            ) = if constraint
+                .referenced_table
+                .eq_ignore_ascii_case(&stmt.table_name)
+            {
+                let referenced_columns = resolve_pending_self_referenced_key(
+                    &stmt.table_name,
+                    &columns,
+                    &column_lookup,
+                    &finalized_index_backed,
+                    constraint.referenced_columns.as_deref(),
+                    &child_types,
+                    catalog,
+                )?;
+                (stmt.table_name.clone(), 0, 0, true, referenced_columns)
+            } else {
+                let referenced = resolve_referenced_key(
+                    &stmt.table_name,
+                    None,
+                    table_persistence_code(stmt.persistence),
+                    &constraint.referenced_table,
+                    constraint.referenced_columns.as_deref(),
+                    &child_types,
+                    catalog,
+                )?;
+                (
+                    relation_display_name(
                         catalog,
-                    )?;
-                    (
-                        stmt.table_name.clone(),
-                        0,
-                        0,
-                        true,
-                        referenced_columns,
-                    )
-                } else {
-                    let referenced = resolve_referenced_key(
-                        &stmt.table_name,
-                        None,
-                        table_persistence_code(stmt.persistence),
-                        &constraint.referenced_table,
-                        constraint.referenced_columns.as_deref(),
-                        &child_types,
-                        catalog,
-                    )?;
-                    (
-                        relation_display_name(
-                            catalog,
-                            referenced.relation.relation_oid,
-                            &constraint.referenced_table,
-                        ),
                         referenced.relation.relation_oid,
-                        referenced.index_oid,
-                        false,
-                        referenced.columns,
-                    )
-                };
+                        &constraint.referenced_table,
+                    ),
+                    referenced.relation.relation_oid,
+                    referenced.index_oid,
+                    false,
+                    referenced.columns,
+                )
+            };
             Ok(ForeignKeyConstraintAction {
                 constraint_name: constraint.explicit_name.unwrap_or_else(|| {
                     choose_generated_constraint_name(&constraint.generated_base, &mut used_names)
@@ -778,6 +775,35 @@ pub fn bind_check_constraint_sql_expr(
     let bound = super::bind_expr_with_outer_and_ctes(expr, &scope, catalog, &[], None, &[])?;
     reject_unsupported_check_expr(&bound)?;
     Ok(bound)
+}
+
+pub(crate) fn infer_relation_expr_sql_type(
+    expr_sql: &str,
+    relation_name: Option<&str>,
+    desc: &RelationDesc,
+    catalog: &dyn super::CatalogLookup,
+) -> Result<SqlType, ParseError> {
+    let parsed = parse_expr(expr_sql)?;
+    let scope = super::scope_for_relation(relation_name, desc);
+    Ok(super::infer_sql_expr_type_with_ctes(
+        &parsed,
+        &scope,
+        catalog,
+        &[],
+        None,
+        &[],
+    ))
+}
+
+pub(crate) fn bind_relation_expr(
+    expr_sql: &str,
+    relation_name: Option<&str>,
+    desc: &RelationDesc,
+    catalog: &dyn super::CatalogLookup,
+) -> Result<Expr, ParseError> {
+    let parsed = parse_expr(expr_sql)?;
+    let scope = super::scope_for_relation(relation_name, desc);
+    super::bind_expr_with_outer_and_ctes(&parsed, &scope, catalog, &[], None, &[])
 }
 
 fn validate_not_null_or_check_attributes(

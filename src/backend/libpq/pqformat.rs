@@ -1632,8 +1632,9 @@ mod tests {
         )
         .unwrap();
 
-        assert!(out.windows("WJSON data, line 1: {\"a\":true\0".len()).any(|window| {
-            window == b"WJSON data, line 1: {\"a\":true\0"
-        }));
+        assert!(
+            out.windows("WJSON data, line 1: {\"a\":true\0".len())
+                .any(|window| { window == b"WJSON data, line 1: {\"a\":true\0" })
+        );
     }
 }

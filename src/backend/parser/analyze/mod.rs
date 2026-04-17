@@ -83,6 +83,26 @@ pub struct BoundIndexRelation {
     pub relation_oid: u32,
     pub desc: RelationDesc,
     pub index_meta: crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+    pub index_exprs: Vec<Expr>,
+}
+
+pub(crate) fn bind_index_exprs(
+    index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+    heap_desc: &RelationDesc,
+    catalog: &dyn CatalogLookup,
+) -> Result<Vec<Expr>, ParseError> {
+    let Some(indexprs) = index_meta.indexprs.as_deref() else {
+        return Ok(Vec::new());
+    };
+    let expr_sqls =
+        serde_json::from_str::<Vec<String>>(indexprs).map_err(|_| ParseError::UnexpectedToken {
+            expected: "serialized index expressions",
+            actual: "invalid index expression metadata".into(),
+        })?;
+    expr_sqls
+        .into_iter()
+        .map(|expr_sql| bind_relation_expr(&expr_sql, None, heap_desc, catalog))
+        .collect()
 }
 
 fn build_sort_clause(
@@ -360,6 +380,10 @@ impl CatalogLookup for Catalog {
                     relation_oid: entry.relation_oid,
                     desc: entry.desc.clone(),
                     index_meta: index_meta.clone(),
+                    index_exprs: self
+                        .relation_by_oid(index_meta.indrelid)
+                        .and_then(|heap| bind_index_exprs(index_meta, &heap.desc, self).ok())
+                        .unwrap_or_default(),
                 })
             })
             .collect()
@@ -541,6 +565,10 @@ impl CatalogLookup for RelCache {
                     relation_oid: entry.relation_oid,
                     desc: entry.desc.clone(),
                     index_meta: index_meta.clone(),
+                    index_exprs: self
+                        .relation_by_oid(index_meta.indrelid)
+                        .and_then(|heap| bind_index_exprs(index_meta, &heap.desc, self).ok())
+                        .unwrap_or_default(),
                 })
             })
             .collect()
@@ -1392,9 +1420,7 @@ impl<'a> RecursiveReferenceChecker<'a> {
                     _ => context,
                 };
                 let right_context = match kind {
-                    JoinKind::Left | JoinKind::Full
-                        if context == RecursiveReferenceContext::Ok =>
-                    {
+                    JoinKind::Left | JoinKind::Full if context == RecursiveReferenceContext::Ok => {
                         RecursiveReferenceContext::OuterJoin
                     }
                     _ => context,
@@ -1655,14 +1681,12 @@ fn select_statement_references_table(stmt: &SelectStatement, table_name: &str) -
     stmt.from
         .as_ref()
         .is_some_and(|from| from_item_references_table(from, table_name))
-        || stmt
-            .set_operation
-            .as_ref()
-            .is_some_and(|setop| {
-                setop.inputs
-                    .iter()
-                    .any(|input| select_statement_references_table(input, table_name))
-            })
+        || stmt.set_operation.as_ref().is_some_and(|setop| {
+            setop
+                .inputs
+                .iter()
+                .any(|input| select_statement_references_table(input, table_name))
+        })
         || stmt
             .targets
             .iter()
@@ -2179,87 +2203,89 @@ fn bind_select_query_with_outer(
             let accumulators: Vec<AggAccum> = aggs
                 .iter()
                 .map(|(func, args, distinct, func_variadic, filter)| {
-                if aggregate_args_are_named(args) {
-                    return Err(ParseError::UnexpectedToken {
-                        expected: "aggregate arguments without names",
-                        actual: func.name().into(),
-                    });
-                }
-                let arg_values: Vec<SqlExpr> = args.iter().map(|arg| arg.value.clone()).collect();
-                validate_aggregate_arity(*func, &arg_values)?;
-                let arg_types = arg_values
-                    .iter()
-                    .map(|e| {
-                        infer_sql_expr_type_with_ctes(
-                            e,
-                            &scope,
-                            catalog,
-                            outer_scopes,
-                            grouped_outer.as_ref(),
-                            &visible_ctes,
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                let resolved = resolve_aggregate_call(catalog, *func, &arg_types, *func_variadic);
-                let bound_args = arg_values
-                    .iter()
-                    .map(|e| {
-                        bind_expr_with_outer_and_ctes(
-                            e,
-                            &scope,
-                            catalog,
-                            outer_scopes,
-                            grouped_outer.as_ref(),
-                            &visible_ctes,
-                        )
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                for arg in &bound_args {
-                    reject_nested_local_ctes_in_agg_expr(arg)?;
-                }
-                let bound_filter = filter
-                    .as_ref()
-                    .map(|expr| {
-                        bind_expr_with_outer_and_ctes(
-                            expr,
-                            &scope,
-                            catalog,
-                            outer_scopes,
-                            grouped_outer.as_ref(),
-                            &visible_ctes,
-                        )
-                    })
-                    .transpose()?;
-                if let Some(filter) = &bound_filter {
-                    reject_nested_local_ctes_in_agg_expr(filter)?;
-                }
-                let coerced_args = if let Some(resolved) = &resolved {
-                    bound_args
-                        .into_iter()
-                        .zip(arg_types.iter().copied())
-                        .zip(resolved.declared_arg_types.iter().copied())
-                        .map(|((arg, actual_type), declared_type)| {
-                            coerce_bound_expr(arg, actual_type, declared_type)
+                    if aggregate_args_are_named(args) {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "aggregate arguments without names",
+                            actual: func.name().into(),
+                        });
+                    }
+                    let arg_values: Vec<SqlExpr> =
+                        args.iter().map(|arg| arg.value.clone()).collect();
+                    validate_aggregate_arity(*func, &arg_values)?;
+                    let arg_types = arg_values
+                        .iter()
+                        .map(|e| {
+                            infer_sql_expr_type_with_ctes(
+                                e,
+                                &scope,
+                                catalog,
+                                outer_scopes,
+                                grouped_outer.as_ref(),
+                                &visible_ctes,
+                            )
                         })
-                        .collect()
-                } else {
-                    bound_args
-                };
-                Ok(AggAccum {
-                    aggfnoid: resolved
+                        .collect::<Vec<_>>();
+                    let resolved =
+                        resolve_aggregate_call(catalog, *func, &arg_types, *func_variadic);
+                    let bound_args = arg_values
+                        .iter()
+                        .map(|e| {
+                            bind_expr_with_outer_and_ctes(
+                                e,
+                                &scope,
+                                catalog,
+                                outer_scopes,
+                                grouped_outer.as_ref(),
+                                &visible_ctes,
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    for arg in &bound_args {
+                        reject_nested_local_ctes_in_agg_expr(arg)?;
+                    }
+                    let bound_filter = filter
                         .as_ref()
-                        .map(|call| call.proc_oid)
-                        .or_else(|| proc_oid_for_builtin_aggregate_function(*func))
-                        .unwrap_or(0),
-                    agg_variadic: resolved
-                        .as_ref()
-                        .map(|call| call.func_variadic)
-                        .unwrap_or(*func_variadic),
-                    args: coerced_args,
-                    filter: bound_filter,
-                    distinct: *distinct,
-                    sql_type: aggregate_sql_type(*func, arg_types.first().copied()),
-                })
+                        .map(|expr| {
+                            bind_expr_with_outer_and_ctes(
+                                expr,
+                                &scope,
+                                catalog,
+                                outer_scopes,
+                                grouped_outer.as_ref(),
+                                &visible_ctes,
+                            )
+                        })
+                        .transpose()?;
+                    if let Some(filter) = &bound_filter {
+                        reject_nested_local_ctes_in_agg_expr(filter)?;
+                    }
+                    let coerced_args = if let Some(resolved) = &resolved {
+                        bound_args
+                            .into_iter()
+                            .zip(arg_types.iter().copied())
+                            .zip(resolved.declared_arg_types.iter().copied())
+                            .map(|((arg, actual_type), declared_type)| {
+                                coerce_bound_expr(arg, actual_type, declared_type)
+                            })
+                            .collect()
+                    } else {
+                        bound_args
+                    };
+                    Ok(AggAccum {
+                        aggfnoid: resolved
+                            .as_ref()
+                            .map(|call| call.proc_oid)
+                            .or_else(|| proc_oid_for_builtin_aggregate_function(*func))
+                            .unwrap_or(0),
+                        agg_variadic: resolved
+                            .as_ref()
+                            .map(|call| call.func_variadic)
+                            .unwrap_or(*func_variadic),
+                        args: coerced_args,
+                        filter: bound_filter,
+                        distinct: *distinct,
+                        sql_type: aggregate_sql_type(*func, arg_types.first().copied()),
+                    })
                 })
                 .collect::<Result<_, _>>()?;
 
@@ -2300,31 +2326,34 @@ fn bind_select_query_with_outer(
             }
 
             let having = stmt
-            .having
-            .as_ref()
-            .map(|e| {
-                bind_agg_output_expr_in_clause(
-                    e,
-                    UngroupedColumnClause::Having,
-                    &stmt.group_by,
-                    &group_keys,
-                    &scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer.as_ref(),
-                    &aggs,
-                    n_keys,
-                )
-            })
-            .transpose()?;
+                .having
+                .as_ref()
+                .map(|e| {
+                    bind_agg_output_expr_in_clause(
+                        e,
+                        UngroupedColumnClause::Having,
+                        &stmt.group_by,
+                        &group_keys,
+                        &scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer.as_ref(),
+                        &aggs,
+                        n_keys,
+                    )
+                })
+                .transpose()?;
 
-            let targets: Vec<TargetEntry> = with_window_binding(window_state.clone(), true, || {
-            if stmt.targets.len() == 1
-                && matches!(stmt.targets[0].expr, SqlExpr::Column(ref name) if name == "*")
-            {
-                let mut targets = Vec::with_capacity(output_columns.len());
-                for (i, name) in output_columns.iter().enumerate().take(n_keys) {
-                    targets.push(TargetEntry::new(
+            let targets: Vec<TargetEntry> = with_window_binding(
+                window_state.clone(),
+                true,
+                || {
+                    if stmt.targets.len() == 1
+                        && matches!(stmt.targets[0].expr, SqlExpr::Column(ref name) if name == "*")
+                    {
+                        let mut targets = Vec::with_capacity(output_columns.len());
+                        for (i, name) in output_columns.iter().enumerate().take(n_keys) {
+                            targets.push(TargetEntry::new(
                         name.name.clone(),
                         group_keys.get(i).cloned().unwrap_or_else(|| {
                             panic!(
@@ -2336,83 +2365,84 @@ fn bind_select_query_with_outer(
                         i + 1,
                     )
                     .with_input_resno(i + 1));
-                }
-                for (i, accum) in accumulators.iter().enumerate() {
-                    let target_index = n_keys + i;
-                    let name = output_columns
-                        .get(target_index)
-                        .expect("aggregate output column")
-                        .name
-                        .clone();
-                    targets.push(TargetEntry::new(
-                        name,
-                        Expr::aggref(
-                            accum.aggfnoid,
-                            accum.sql_type,
-                            accum.agg_variadic,
-                            accum.distinct,
-                            accum.args.clone(),
-                            accum.filter.clone(),
-                            i,
-                        ),
-                        accum.sql_type,
-                        target_index + 1,
-                    ));
-                }
-                Ok(targets)
-            } else {
-                stmt.targets
-                    .iter()
-                    .enumerate()
-                    .map(|(index, item)| {
-                        Ok(TargetEntry::new(
-                            item.output_name.clone(),
-                            bind_agg_output_expr_in_clause(
-                                &item.expr,
-                                UngroupedColumnClause::SelectTarget,
-                                &stmt.group_by,
-                                &group_keys,
-                                &scope,
-                                catalog,
-                                outer_scopes,
-                                grouped_outer.as_ref(),
-                                &aggs,
-                                n_keys,
-                            )?,
-                            infer_sql_expr_type_with_ctes(
-                                &item.expr,
-                                &scope,
-                                catalog,
-                                outer_scopes,
-                                grouped_outer.as_ref(),
-                                &visible_ctes,
-                            ),
-                            index + 1,
-                        ))
-                    })
-                    .collect::<Result<_, _>>()
-            }
-            })?;
+                        }
+                        for (i, accum) in accumulators.iter().enumerate() {
+                            let target_index = n_keys + i;
+                            let name = output_columns
+                                .get(target_index)
+                                .expect("aggregate output column")
+                                .name
+                                .clone();
+                            targets.push(TargetEntry::new(
+                                name,
+                                Expr::aggref(
+                                    accum.aggfnoid,
+                                    accum.sql_type,
+                                    accum.agg_variadic,
+                                    accum.distinct,
+                                    accum.args.clone(),
+                                    accum.filter.clone(),
+                                    i,
+                                ),
+                                accum.sql_type,
+                                target_index + 1,
+                            ));
+                        }
+                        Ok(targets)
+                    } else {
+                        stmt.targets
+                            .iter()
+                            .enumerate()
+                            .map(|(index, item)| {
+                                Ok(TargetEntry::new(
+                                    item.output_name.clone(),
+                                    bind_agg_output_expr_in_clause(
+                                        &item.expr,
+                                        UngroupedColumnClause::SelectTarget,
+                                        &stmt.group_by,
+                                        &group_keys,
+                                        &scope,
+                                        catalog,
+                                        outer_scopes,
+                                        grouped_outer.as_ref(),
+                                        &aggs,
+                                        n_keys,
+                                    )?,
+                                    infer_sql_expr_type_with_ctes(
+                                        &item.expr,
+                                        &scope,
+                                        catalog,
+                                        outer_scopes,
+                                        grouped_outer.as_ref(),
+                                        &visible_ctes,
+                                    ),
+                                    index + 1,
+                                ))
+                            })
+                            .collect::<Result<_, _>>()
+                    }
+                },
+            )?;
 
             let sort_inputs = with_window_binding(window_state.clone(), true, || {
-            if stmt.order_by.is_empty() {
-                Ok(Vec::new())
-            } else {
-                bind_order_by_items(&stmt.order_by, &targets, |expr| {
-                    bind_agg_output_expr_in_clause(
-                        expr,
-                        UngroupedColumnClause::SelectTarget,
-                        &stmt.group_by,
-                        &group_keys,
-                        &scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer.as_ref(),
-                        &aggs,
-                        n_keys,
-                    )
-                })
-            }
+                if stmt.order_by.is_empty() {
+                    Ok(Vec::new())
+                } else {
+                    bind_order_by_items(&stmt.order_by, &targets, |expr| {
+                        bind_agg_output_expr_in_clause(
+                            expr,
+                            UngroupedColumnClause::SelectTarget,
+                            &stmt.group_by,
+                            &group_keys,
+                            &scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer.as_ref(),
+                            &aggs,
+                            n_keys,
+                        )
+                    })
+                }
             })?;
             let targets = targets;
             let sort_inputs = sort_inputs;
