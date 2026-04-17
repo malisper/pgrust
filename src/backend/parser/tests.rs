@@ -3549,6 +3549,14 @@ fn parse_group_by_and_having() {
 }
 
 #[test]
+fn parse_select_target_with_bare_alias() {
+    let stmt = parse_select("select id user_id from people").unwrap();
+    assert_eq!(stmt.targets.len(), 1);
+    assert_eq!(stmt.targets[0].output_name, "user_id");
+    assert!(matches!(stmt.targets[0].expr, SqlExpr::Column(ref name) if name == "id"));
+}
+
+#[test]
 fn build_plan_with_aggregate() {
     let stmt = parse_select("select name, count(*) from people group by name").unwrap();
     let plan = build_plan(&stmt, &catalog()).unwrap();

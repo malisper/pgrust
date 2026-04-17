@@ -6379,6 +6379,38 @@ fn select_from_derived_table() {
         other => panic!("expected query result, got {:?}", other),
     }
 }
+
+#[test]
+fn select_from_derived_table_with_bare_target_alias() {
+    let base = temp_dir("derived_table_bare_target_alias");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let xid = txns.begin();
+    run_sql(
+        &base,
+        &txns,
+        xid,
+        "insert into people (id, name, note) values (1, 'alice', 'alpha'), (2, 'bob', null)",
+    )
+    .unwrap();
+    txns.commit(xid).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select p.user_id from (select id user_id from people) p order by p.user_id",
+    )
+    .unwrap()
+    {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(column_names, vec!["user_id"]);
+            assert_eq!(rows, vec![vec![Value::Int32(1)], vec![Value::Int32(2)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
 #[test]
 fn select_from_aliasless_derived_table() {
     let base = temp_dir("derived_table_no_alias");
