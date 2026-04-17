@@ -20,8 +20,8 @@ use crate::backend::parser::{
     AnalyzeStatement, BoundArraySubscript, BoundAssignment, BoundAssignmentTarget,
     BoundDeleteStatement, BoundIndexRelation, BoundInsertSource, BoundInsertStatement,
     BoundModifyRowSource, BoundUpdateStatement, Catalog, CatalogLookup, DropTableStatement,
-    ExplainStatement, MaintenanceTarget, ParseError, Statement, TruncateTableStatement,
-    VacuumStatement, bind_create_table,
+    ExplainStatement, MaintenanceTarget, ParseError, SqlType, SqlTypeKind, Statement,
+    TruncateTableStatement, VacuumStatement, bind_create_table,
 };
 use crate::backend::rewrite::pg_rewrite_query;
 use crate::backend::storage::smgr::ForkNumber;
@@ -934,7 +934,9 @@ fn apply_assignment_target(
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
-    let value = coerce_assignment_value(&value, assignment_target_sql_type(desc, target))?;
+    let assignment_type = assignment_target_sql_type(desc, target);
+    let value = coerce_assignment_value(&value, assignment_type)
+        .map_err(|err| rewrite_subscripted_assignment_error(desc, target, &value, err))?;
     if target.subscripts.is_empty() {
         values[target.column_index] = value;
         return Ok(());
@@ -961,6 +963,94 @@ fn apply_assignment_target(
     let current = values[target.column_index].clone();
     values[target.column_index] = assign_array_value(current, &resolved, value)?;
     Ok(())
+}
+
+fn rewrite_subscripted_assignment_error(
+    desc: &RelationDesc,
+    target: &BoundAssignmentTarget,
+    value: &Value,
+    err: ExecError,
+) -> ExecError {
+    if target.subscripts.is_empty() || !matches!(err, ExecError::TypeMismatch { .. }) {
+        return err;
+    }
+
+    let Some(actual_type) = value.sql_type_hint() else {
+        return err;
+    };
+
+    ExecError::DetailedError {
+        message: format!(
+            "subscripted assignment to \"{}\" requires type {} but expression is of type {}",
+            desc.columns[target.column_index].name,
+            sql_type_display_name(assignment_target_sql_type(desc, target)),
+            sql_type_display_name(actual_type),
+        ),
+        detail: None,
+        hint: Some("You will need to rewrite or cast the expression.".into()),
+        sqlstate: "42804",
+    }
+}
+
+fn sql_type_display_name(ty: SqlType) -> String {
+    let base = match ty.kind {
+        SqlTypeKind::AnyArray => "anyarray",
+        SqlTypeKind::Record | SqlTypeKind::Composite => "record",
+        SqlTypeKind::Int2 => "smallint",
+        SqlTypeKind::Int2Vector => "int2vector",
+        SqlTypeKind::Int4 => "integer",
+        SqlTypeKind::Int8 => "bigint",
+        SqlTypeKind::Name => "name",
+        SqlTypeKind::Oid => "oid",
+        SqlTypeKind::Tid => "tid",
+        SqlTypeKind::Xid => "xid",
+        SqlTypeKind::OidVector => "oidvector",
+        SqlTypeKind::Bit => "bit",
+        SqlTypeKind::VarBit => "bit varying",
+        SqlTypeKind::Bytea => "bytea",
+        SqlTypeKind::Float4 => "real",
+        SqlTypeKind::Float8 => "double precision",
+        SqlTypeKind::Money => "money",
+        SqlTypeKind::Numeric => "numeric",
+        SqlTypeKind::Int4Range => "int4range",
+        SqlTypeKind::Int8Range => "int8range",
+        SqlTypeKind::NumericRange => "numrange",
+        SqlTypeKind::Json => "json",
+        SqlTypeKind::Jsonb => "jsonb",
+        SqlTypeKind::JsonPath => "jsonpath",
+        SqlTypeKind::Date => "date",
+        SqlTypeKind::DateRange => "daterange",
+        SqlTypeKind::Time => "time without time zone",
+        SqlTypeKind::TimeTz => "time with time zone",
+        SqlTypeKind::Interval => "interval",
+        SqlTypeKind::TsVector => "tsvector",
+        SqlTypeKind::TsQuery => "tsquery",
+        SqlTypeKind::RegConfig => "regconfig",
+        SqlTypeKind::RegDictionary => "regdictionary",
+        SqlTypeKind::Text => "text",
+        SqlTypeKind::Bool => "boolean",
+        SqlTypeKind::Point => "point",
+        SqlTypeKind::Lseg => "lseg",
+        SqlTypeKind::Path => "path",
+        SqlTypeKind::Box => "box",
+        SqlTypeKind::Polygon => "polygon",
+        SqlTypeKind::Line => "line",
+        SqlTypeKind::Circle => "circle",
+        SqlTypeKind::Timestamp => "timestamp without time zone",
+        SqlTypeKind::TimestampRange => "tsrange",
+        SqlTypeKind::TimestampTz => "timestamp with time zone",
+        SqlTypeKind::TimestampTzRange => "tstzrange",
+        SqlTypeKind::PgNodeTree => "pg_node_tree",
+        SqlTypeKind::InternalChar => "\"char\"",
+        SqlTypeKind::Char => "character",
+        SqlTypeKind::Varchar => "character varying",
+    };
+
+    if ty.is_array {
+        format!("{base}[]")
+    } else {
+        base.to_string()
+    }
 }
 
 fn assignment_target_sql_type(desc: &RelationDesc, target: &BoundAssignmentTarget) -> SqlType {
