@@ -62,6 +62,7 @@ Targeted reruns on 2026-04-17:
   - [done] widen verification for array read semantics against more `arrays.sql` slice/subscript cases
   - [done] array write semantics need slice-assignment fixes, especially for multidimensional arrays
   - [done] correct multidimensional slice shape/extent checks during assignment in `src/backend/commands/tablecmds.rs`
+  - [done] PostgreSQL-compatible SQL-visible error text for array assignment/type mismatches instead of leaking raw internal `TypeMismatch` formatting
 - async.sql: 0/11
 - bit.sql: 74/132
 - bitmapops.sql: 3/12
