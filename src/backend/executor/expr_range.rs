@@ -7,7 +7,8 @@ use super::expr_ops::compare_order_values;
 use super::node_types::{BuiltinScalarFunction, RangeBound, RangeTypeId, RangeValue, Value};
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::{
-    RangeCanonicalization, builtin_range_spec, builtin_range_spec_for_sql_type, range_kind_for_sql_type,
+    RangeCanonicalization, builtin_range_spec, builtin_range_spec_for_sql_type,
+    range_kind_for_sql_type,
 };
 use crate::include::nodes::datetime::{DateADT, TimestampADT, TimestampTzADT};
 
@@ -73,11 +74,13 @@ pub(crate) fn render_range_value(range: &RangeValue) -> String {
         return "empty".to_string();
     }
     let mut out = String::new();
-    out.push(if range.lower.as_ref().is_some_and(|bound| bound.inclusive) {
-        '['
-    } else {
-        '('
-    });
+    out.push(
+        if range.lower.as_ref().is_some_and(|bound| bound.inclusive) {
+            '['
+        } else {
+            '('
+        },
+    );
     if let Some(lower) = &range.lower {
         out.push_str(&render_bound_text(lower.value.as_ref()));
     }
@@ -85,11 +88,13 @@ pub(crate) fn render_range_value(range: &RangeValue) -> String {
     if let Some(upper) = &range.upper {
         out.push_str(&render_bound_text(upper.value.as_ref()));
     }
-    out.push(if range.upper.as_ref().is_some_and(|bound| bound.inclusive) {
-        ']'
-    } else {
-        ')'
-    });
+    out.push(
+        if range.upper.as_ref().is_some_and(|bound| bound.inclusive) {
+            ']'
+        } else {
+            ')'
+        },
+    );
     out
 }
 
@@ -216,10 +221,15 @@ pub(crate) fn eval_range_function(
             Ok(Value::Bool(range_strict_right(left, right)))
         }),
         RangeOverLeft => binary_range_bool(values, "&<", |left, right| {
-            Ok(Value::Bool(compare_upper_bounds(left.upper.as_ref(), right.upper.as_ref()) != Ordering::Greater))
+            Ok(Value::Bool(
+                compare_upper_bounds(left.upper.as_ref(), right.upper.as_ref())
+                    != Ordering::Greater,
+            ))
         }),
         RangeOverRight => binary_range_bool(values, "&>", |left, right| {
-            Ok(Value::Bool(compare_lower_bounds(left.lower.as_ref(), right.lower.as_ref()) != Ordering::Less))
+            Ok(Value::Bool(
+                compare_lower_bounds(left.lower.as_ref(), right.lower.as_ref()) != Ordering::Less,
+            ))
         }),
         RangeAdjacent => binary_range_bool(values, "-|-", |left, right| {
             Ok(Value::Bool(range_adjacent(left, right)))
@@ -259,7 +269,10 @@ pub(crate) fn range_intersection_agg_transition(
     }
 }
 
-fn eval_range_constructor(values: &[Value], result_type: Option<SqlType>) -> Result<Value, ExecError> {
+fn eval_range_constructor(
+    values: &[Value],
+    result_type: Option<SqlType>,
+) -> Result<Value, ExecError> {
     let kind = if let Some(kind) = result_type.and_then(range_kind_for_sql_type) {
         kind
     } else {
@@ -292,14 +305,20 @@ fn eval_range_constructor(values: &[Value], result_type: Option<SqlType>) -> Res
             });
         }
     };
-    let lower = values.first().and_then(value_to_constructor_bound).map(|value| RangeBound {
-        value: Box::new(value),
-        inclusive: lower_inc,
-    });
-    let upper = values.get(1).and_then(value_to_constructor_bound).map(|value| RangeBound {
-        value: Box::new(value),
-        inclusive: upper_inc,
-    });
+    let lower = values
+        .first()
+        .and_then(value_to_constructor_bound)
+        .map(|value| RangeBound {
+            value: Box::new(value),
+            inclusive: lower_inc,
+        });
+    let upper = values
+        .get(1)
+        .and_then(value_to_constructor_bound)
+        .map(|value| RangeBound {
+            value: Box::new(value),
+            inclusive: upper_inc,
+        });
     Ok(Value::Range(normalize_range(kind, lower, upper)?))
 }
 
@@ -522,7 +541,9 @@ fn range_adjacent(left: &RangeValue, right: &RangeValue) -> bool {
 }
 
 fn range_strict_left(left: &RangeValue, right: &RangeValue) -> bool {
-    !left.empty && !right.empty && cmp_upper_to_lower(left.upper.as_ref(), right.lower.as_ref()) == Ordering::Less
+    !left.empty
+        && !right.empty
+        && cmp_upper_to_lower(left.upper.as_ref(), right.lower.as_ref()) == Ordering::Less
 }
 
 fn range_strict_right(left: &RangeValue, right: &RangeValue) -> bool {
@@ -572,26 +593,26 @@ fn range_difference(left: &RangeValue, right: &RangeValue) -> Result<RangeValue,
     if range_contains_range(right, left) {
         return Ok(empty_range(left.kind));
     }
-    let left_piece = if compare_lower_bounds(left.lower.as_ref(), right.lower.as_ref()) == Ordering::Less
-    {
-        Some(normalize_range(
-            left.kind,
-            left.lower.clone(),
-            right.lower.as_ref().map(toggle_lower_to_upper_bound),
-        )?)
-    } else {
-        None
-    };
-    let right_piece = if compare_upper_bounds(left.upper.as_ref(), right.upper.as_ref()) == Ordering::Greater
-    {
-        Some(normalize_range(
-            left.kind,
-            right.upper.as_ref().map(toggle_upper_to_lower_bound),
-            left.upper.clone(),
-        )?)
-    } else {
-        None
-    };
+    let left_piece =
+        if compare_lower_bounds(left.lower.as_ref(), right.lower.as_ref()) == Ordering::Less {
+            Some(normalize_range(
+                left.kind,
+                left.lower.clone(),
+                right.lower.as_ref().map(toggle_lower_to_upper_bound),
+            )?)
+        } else {
+            None
+        };
+    let right_piece =
+        if compare_upper_bounds(left.upper.as_ref(), right.upper.as_ref()) == Ordering::Greater {
+            Some(normalize_range(
+                left.kind,
+                right.upper.as_ref().map(toggle_upper_to_lower_bound),
+                left.upper.clone(),
+            )?)
+        } else {
+            None
+        };
     let left_non_empty = left_piece.as_ref().is_some_and(|range| !range.empty);
     let right_non_empty = right_piece.as_ref().is_some_and(|range| !range.empty);
     if left_non_empty && right_non_empty {
@@ -662,14 +683,16 @@ fn compare_lower_bounds(left: Option<&RangeBound>, right: Option<&RangeBound>) -
         (None, None) => Ordering::Equal,
         (None, Some(_)) => Ordering::Less,
         (Some(_), None) => Ordering::Greater,
-        (Some(left), Some(right)) => match compare_scalar_values(left.value.as_ref(), right.value.as_ref()) {
-            Ordering::Equal => match (left.inclusive, right.inclusive) {
-                (true, false) => Ordering::Less,
-                (false, true) => Ordering::Greater,
-                _ => Ordering::Equal,
-            },
-            other => other,
-        },
+        (Some(left), Some(right)) => {
+            match compare_scalar_values(left.value.as_ref(), right.value.as_ref()) {
+                Ordering::Equal => match (left.inclusive, right.inclusive) {
+                    (true, false) => Ordering::Less,
+                    (false, true) => Ordering::Greater,
+                    _ => Ordering::Equal,
+                },
+                other => other,
+            }
+        }
     }
 }
 
@@ -678,14 +701,16 @@ fn compare_upper_bounds(left: Option<&RangeBound>, right: Option<&RangeBound>) -
         (None, None) => Ordering::Equal,
         (None, Some(_)) => Ordering::Greater,
         (Some(_), None) => Ordering::Less,
-        (Some(left), Some(right)) => match compare_scalar_values(left.value.as_ref(), right.value.as_ref()) {
-            Ordering::Equal => match (left.inclusive, right.inclusive) {
-                (true, false) => Ordering::Greater,
-                (false, true) => Ordering::Less,
-                _ => Ordering::Equal,
-            },
-            other => other,
-        },
+        (Some(left), Some(right)) => {
+            match compare_scalar_values(left.value.as_ref(), right.value.as_ref()) {
+                Ordering::Equal => match (left.inclusive, right.inclusive) {
+                    (true, false) => Ordering::Greater,
+                    (false, true) => Ordering::Less,
+                    _ => Ordering::Equal,
+                },
+                other => other,
+            }
+        }
     }
 }
 
@@ -711,7 +736,8 @@ fn cmp_upper_to_lower(upper: Option<&RangeBound>, lower: Option<&RangeBound>) ->
 fn bounds_adjacent(upper: Option<&RangeBound>, lower: Option<&RangeBound>) -> bool {
     match (upper, lower) {
         (Some(upper), Some(lower))
-            if compare_scalar_values(upper.value.as_ref(), lower.value.as_ref()) == Ordering::Equal =>
+            if compare_scalar_values(upper.value.as_ref(), lower.value.as_ref())
+                == Ordering::Equal =>
         {
             upper.inclusive != lower.inclusive
         }
@@ -783,11 +809,11 @@ fn successor_value(kind: RangeTypeId, value: &Value) -> Result<Value, ExecError>
             .checked_add(1)
             .map(Value::Int64)
             .ok_or_else(range_bound_overflow),
-        (RangeTypeId::DateRange, Value::Date(v)) => v
-            .0
-            .checked_add(1)
-            .map(|days| Value::Date(DateADT(days)))
-            .ok_or_else(range_bound_overflow),
+        (RangeTypeId::DateRange, Value::Date(v)) => {
+            v.0.checked_add(1)
+                .map(|days| Value::Date(DateADT(days)))
+                .ok_or_else(range_bound_overflow)
+        }
         _ => Err(ExecError::TypeMismatch {
             op: "range canonicalization",
             left: value.clone(),
@@ -796,7 +822,11 @@ fn successor_value(kind: RangeTypeId, value: &Value) -> Result<Value, ExecError>
     }
 }
 
-fn append_bound_bytes(out: &mut Vec<u8>, kind: RangeTypeId, value: &Value) -> Result<(), ExecError> {
+fn append_bound_bytes(
+    out: &mut Vec<u8>,
+    kind: RangeTypeId,
+    value: &Value,
+) -> Result<(), ExecError> {
     let bytes = encode_bound_value(kind, value)?;
     out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
     out.extend_from_slice(&bytes);
@@ -864,11 +894,14 @@ fn decode_bound_value(kind: RangeTypeId, bytes: &[u8]) -> Result<Value, ExecErro
                 column: "<range>".into(),
                 details: "numeric range bound is not utf8".into(),
             })?;
-            Ok(cast_value(Value::Text(text.into()), SqlType::new(SqlTypeKind::Numeric))?)
+            Ok(cast_value(
+                Value::Text(text.into()),
+                SqlType::new(SqlTypeKind::Numeric),
+            )?)
         }
-        RangeTypeId::DateRange if bytes.len() == 4 => {
-            Ok(Value::Date(DateADT(i32::from_le_bytes(bytes.try_into().unwrap()))))
-        }
+        RangeTypeId::DateRange if bytes.len() == 4 => Ok(Value::Date(DateADT(i32::from_le_bytes(
+            bytes.try_into().unwrap(),
+        )))),
         RangeTypeId::TimestampRange if bytes.len() == 8 => Ok(Value::Timestamp(TimestampADT(
             i64::from_le_bytes(bytes.try_into().unwrap()),
         ))),
@@ -934,9 +967,9 @@ fn render_bound_text(value: &Value) -> String {
         Value::Int32(v) => v.to_string(),
         Value::Int64(v) => v.to_string(),
         Value::Numeric(v) => v.render(),
-        Value::Date(_)
-        | Value::Timestamp(_)
-        | Value::TimestampTz(_) => render_datetime_value_text(value).unwrap_or_default(),
+        Value::Date(_) | Value::Timestamp(_) | Value::TimestampTz(_) => {
+            render_datetime_value_text(value).unwrap_or_default()
+        }
         other => other.as_text().unwrap_or_default().to_string(),
     };
     if needs_range_quotes(&raw) {
@@ -949,9 +982,9 @@ fn render_bound_text(value: &Value) -> String {
 
 fn needs_range_quotes(text: &str) -> bool {
     text.is_empty()
-        || text
-            .chars()
-            .any(|ch| matches!(ch, '"' | '\\' | '[' | ']' | '(' | ')' | ',' | ' ') || ch.is_ascii_whitespace())
+        || text.chars().any(|ch| {
+            matches!(ch, '"' | '\\' | '[' | ']' | '(' | ')' | ',' | ' ') || ch.is_ascii_whitespace()
+        })
 }
 
 fn parse_range_flags(value: &Value) -> Result<(bool, bool), ExecError> {
@@ -966,7 +999,9 @@ fn parse_range_flags(value: &Value) -> Result<(bool, bool), ExecError> {
         "(]" => Ok((false, true)),
         "()" => Ok((false, false)),
         _ => Err(ExecError::DetailedError {
-            message: "range constructor flags argument must be one of \"()\", \"(]\", \"[)\", or \"[]\"".into(),
+            message:
+                "range constructor flags argument must be one of \"()\", \"(]\", \"[)\", or \"[]\""
+                    .into(),
             detail: None,
             hint: None,
             sqlstate: "22023",
@@ -1057,8 +1092,11 @@ mod tests {
 
     #[test]
     fn parse_and_render_timestamp_range_quotes_bounds() {
-        let value = parse_range_text("[\"2000-01-01 00:00:00\",\"2000-01-02 00:00:00\")", SqlTypeKind::TimestampRange)
-            .unwrap();
+        let value = parse_range_text(
+            "[\"2000-01-01 00:00:00\",\"2000-01-02 00:00:00\")",
+            SqlTypeKind::TimestampRange,
+        )
+        .unwrap();
         assert_eq!(
             render_range_text(&value).unwrap(),
             "[\"2000-01-01 00:00:00\",\"2000-01-02 00:00:00\")"

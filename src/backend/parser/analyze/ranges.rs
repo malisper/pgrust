@@ -1,5 +1,7 @@
 use super::*;
-use crate::include::catalog::{builtin_range_spec, range_kind_for_sql_type, sql_type_for_range_kind};
+use crate::include::catalog::{
+    builtin_range_spec, range_kind_for_sql_type, sql_type_for_range_kind,
+};
 use crate::include::nodes::datum::RangeTypeId;
 
 fn infer_arg_type(
@@ -73,7 +75,12 @@ fn bind_range_call(
             coerce_bound_expr(arg, actual_type, declared_type)
         })
         .collect();
-    Ok(Expr::builtin_func(func, Some(result_type), false, coerced_args))
+    Ok(Expr::builtin_func(
+        func,
+        Some(result_type),
+        false,
+        coerced_args,
+    ))
 }
 
 fn bind_same_kind_range_binary(
@@ -183,7 +190,8 @@ pub(super) fn bind_maybe_range_comparison(
         infer_sql_expr_type_with_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes);
     let left_type = coerce_unknown_string_literal_type(left, raw_left_type, raw_right_type);
     let right_type = coerce_unknown_string_literal_type(right, raw_right_type, raw_left_type);
-    if range_kind_for_sql_type(left_type).is_none() && range_kind_for_sql_type(right_type).is_none() {
+    if range_kind_for_sql_type(left_type).is_none() && range_kind_for_sql_type(right_type).is_none()
+    {
         return None;
     }
     let Some(left_kind) = range_kind_for_sql_type(left_type) else {
@@ -238,11 +246,13 @@ pub(super) fn bind_maybe_range_comparison(
             "<=" => crate::include::nodes::primnodes::OpExprKind::LtEq,
             ">" => crate::include::nodes::primnodes::OpExprKind::Gt,
             ">=" => crate::include::nodes::primnodes::OpExprKind::GtEq,
-            _ => return Some(Err(ParseError::UndefinedOperator {
-                op,
-                left_type: sql_type_name(left_type),
-                right_type: sql_type_name(right_type),
-            })),
+            _ => {
+                return Some(Err(ParseError::UndefinedOperator {
+                    op,
+                    left_type: sql_type_name(left_type),
+                    right_type: sql_type_name(right_type),
+                }));
+            }
         },
         vec![
             coerce_bound_expr(left_bound, raw_left_type, range_type),
@@ -365,11 +375,12 @@ pub(super) fn bind_maybe_range_contains(
         }),
         (Some(kind), None) if op == "@>" => {
             let spec = builtin_range_spec(kind);
-            let target_type = if is_string_literal_expr(right) && looks_like_range_literal_expr(right) {
-                spec.sql_type
-            } else {
-                spec.subtype
-            };
+            let target_type =
+                if is_string_literal_expr(right) && looks_like_range_literal_expr(right) {
+                    spec.sql_type
+                } else {
+                    spec.subtype
+                };
             Some(bind_range_call(
                 BuiltinScalarFunction::RangeContains,
                 &[left, right],
@@ -384,7 +395,8 @@ pub(super) fn bind_maybe_range_contains(
         }
         (None, Some(kind)) if op == "<@" => {
             let spec = builtin_range_spec(kind);
-            let target_type = if is_string_literal_expr(left) && looks_like_range_literal_expr(left) {
+            let target_type = if is_string_literal_expr(left) && looks_like_range_literal_expr(left)
+            {
                 spec.sql_type
             } else {
                 spec.subtype
@@ -474,7 +486,9 @@ pub(super) fn infer_range_special_expr_type_with_ctes(
             let left_type = infer_arg_type(left, scope, catalog, outer_scopes, grouped_outer, ctes);
             let right_type =
                 infer_arg_type(right, scope, catalog, outer_scopes, grouped_outer, ctes);
-            if range_kind_for_sql_type(left_type).is_some() || range_kind_for_sql_type(right_type).is_some() {
+            if range_kind_for_sql_type(left_type).is_some()
+                || range_kind_for_sql_type(right_type).is_some()
+            {
                 Some(SqlType::new(SqlTypeKind::Bool))
             } else {
                 None
@@ -484,7 +498,9 @@ pub(super) fn infer_range_special_expr_type_with_ctes(
             let left_type = infer_arg_type(left, scope, catalog, outer_scopes, grouped_outer, ctes);
             let right_type =
                 infer_arg_type(right, scope, catalog, outer_scopes, grouped_outer, ctes);
-            if range_kind_for_sql_type(left_type).is_some() || range_kind_for_sql_type(right_type).is_some() {
+            if range_kind_for_sql_type(left_type).is_some()
+                || range_kind_for_sql_type(right_type).is_some()
+            {
                 Some(SqlType::new(SqlTypeKind::Bool))
             } else {
                 None
@@ -496,7 +512,9 @@ pub(super) fn infer_range_special_expr_type_with_ctes(
             let left_type = infer_arg_type(left, scope, catalog, outer_scopes, grouped_outer, ctes);
             let right_type =
                 infer_arg_type(right, scope, catalog, outer_scopes, grouped_outer, ctes);
-            if range_kind_for_sql_type(left_type).is_some() || range_kind_for_sql_type(right_type).is_some() {
+            if range_kind_for_sql_type(left_type).is_some()
+                || range_kind_for_sql_type(right_type).is_some()
+            {
                 Some(SqlType::new(SqlTypeKind::Bool))
             } else {
                 None

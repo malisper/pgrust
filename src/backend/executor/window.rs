@@ -195,9 +195,12 @@ pub(crate) fn execute_window_clause(
         for func in &clause.functions {
             function_values.push(match &func.kind {
                 WindowFuncKind::Builtin(kind) => evaluate_builtin_window(*kind, partition),
-                WindowFuncKind::Aggregate(aggref) => {
-                    evaluate_aggregate_window(ctx, aggref, partition, !clause.spec.order_by.is_empty())?
-                }
+                WindowFuncKind::Aggregate(aggref) => evaluate_aggregate_window(
+                    ctx,
+                    aggref,
+                    partition,
+                    !clause.spec.order_by.is_empty(),
+                )?,
             });
         }
 

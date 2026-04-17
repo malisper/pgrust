@@ -3,8 +3,7 @@ use crate::backend::catalog::roles::find_role_by_name;
 use crate::backend::commands::rolecmds::{
     GrantMembershipAuthorizationError, build_alter_role_spec, build_create_role_spec,
     can_rename_role, grant_membership_authorized, grant_membership_authorized_with_detail,
-    membership_row,
-    normalize_drop_role_names, parse_createrole_self_grant, role_management_error,
+    membership_row, normalize_drop_role_names, parse_createrole_self_grant, role_management_error,
 };
 use crate::backend::parser::{
     AlterRoleAction, AlterRoleStatement, CommentOnRoleStatement, CreateRoleStatement,

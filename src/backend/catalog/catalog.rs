@@ -3,8 +3,8 @@ pub use crate::backend::catalog::state::{
 };
 use crate::backend::executor::{ColumnDesc, RelationDesc, ScalarType};
 use crate::backend::parser::{SqlType, SqlTypeKind};
-use crate::include::catalog::range_kind_for_sql_type;
 use crate::include::access::htup::{AttributeAlign, AttributeCompression, AttributeStorage};
+use crate::include::catalog::range_kind_for_sql_type;
 
 pub fn column_desc(name: impl Into<String>, sql_type: SqlType, nullable: bool) -> ColumnDesc {
     let name = name.into();

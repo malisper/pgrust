@@ -280,7 +280,8 @@ fn set_op_result_rows(
             for bucket in buckets {
                 let repeats = if all {
                     bucket.counts[0].saturating_sub(bucket.counts.iter().skip(1).sum::<usize>())
-                } else if bucket.counts[0] > 0 && bucket.counts.iter().skip(1).all(|count| *count == 0)
+                } else if bucket.counts[0] > 0
+                    && bucket.counts.iter().skip(1).all(|count| *count == 0)
                 {
                     1
                 } else {
@@ -2282,7 +2283,11 @@ impl PlanNode for SetOpState {
         &'a mut self,
         ctx: &mut ExecutorContext,
     ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
-        let start = if ctx.timed { Some(Instant::now()) } else { None };
+        let start = if ctx.timed {
+            Some(Instant::now())
+        } else {
+            None
+        };
         begin_node(&mut self.stats, ctx);
 
         if self.result_rows.is_none() {

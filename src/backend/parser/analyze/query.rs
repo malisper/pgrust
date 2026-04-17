@@ -438,8 +438,8 @@ pub(super) fn shift_expr_rtindexes(expr: Expr, offset: usize) -> Expr {
                 .map(|expr| shift_expr_rtindexes(expr, offset)),
             ..*aggref
         })),
-        Expr::WindowFunc(window_func) => Expr::WindowFunc(Box::new(
-            crate::include::nodes::primnodes::WindowFuncExpr {
+        Expr::WindowFunc(window_func) => {
+            Expr::WindowFunc(Box::new(crate::include::nodes::primnodes::WindowFuncExpr {
                 kind: match window_func.kind {
                     crate::include::nodes::primnodes::WindowFuncKind::Aggregate(aggref) => {
                         crate::include::nodes::primnodes::WindowFuncKind::Aggregate(
@@ -461,8 +461,8 @@ pub(super) fn shift_expr_rtindexes(expr: Expr, offset: usize) -> Expr {
                     .map(|arg| shift_expr_rtindexes(arg, offset))
                     .collect(),
                 ..*window_func
-            },
-        )),
+            }))
+        }
         Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(ScalarArrayOpExpr {
             left: Box::new(shift_expr_rtindexes(*saop.left, offset)),
             right: Box::new(shift_expr_rtindexes(*saop.right, offset)),

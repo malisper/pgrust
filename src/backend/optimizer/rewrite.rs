@@ -225,7 +225,10 @@ pub(super) fn rewrite_expr_for_append_rel(expr: Expr, info: &AppendRelInfo) -> E
 pub(super) fn rewrite_expr_for_path(expr: Expr, path: &Path, layout: &[Expr]) -> Expr {
     if !matches!(
         path,
-        Path::Projection { .. } | Path::ProjectSet { .. } | Path::NestedLoopJoin { .. } | Path::HashJoin { .. }
+        Path::Projection { .. }
+            | Path::ProjectSet { .. }
+            | Path::NestedLoopJoin { .. }
+            | Path::HashJoin { .. }
     ) && layout.contains(&expr)
     {
         return expr;

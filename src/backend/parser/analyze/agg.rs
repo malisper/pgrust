@@ -139,10 +139,9 @@ pub(super) fn expr_references_input_scope(expr: &SqlExpr) -> bool {
             expr_references_input_scope(left) || expr_references_input_scope(right)
         }
         SqlExpr::AggCall { args, filter, .. } => {
-            args.iter().any(|arg| expr_references_input_scope(&arg.value))
-                || filter
-                    .as_deref()
-                    .is_some_and(expr_references_input_scope)
+            args.iter()
+                .any(|arg| expr_references_input_scope(&arg.value))
+                || filter.as_deref().is_some_and(expr_references_input_scope)
         }
         SqlExpr::FuncCall { args, .. } => args
             .iter()

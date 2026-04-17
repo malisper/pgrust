@@ -1165,7 +1165,8 @@ fn format_array_values_nested(array: &ArrayValue, depth: usize, offset: &mut usi
                 out.push('"');
             }
             Value::Range(_) => {
-                let rendered = crate::backend::executor::render_range_text(item).unwrap_or_default();
+                let rendered =
+                    crate::backend::executor::render_range_text(item).unwrap_or_default();
                 push_array_text_element(&mut out, &rendered);
             }
             Value::Text(_) | Value::TextRef(_, _) => {

@@ -7,10 +7,9 @@ use crate::include::catalog::{
     PgRewriteRow, PgTypeRow, RECORD_TYPE_OID, bootstrap_pg_proc_rows, sort_pg_rewrite_rows,
 };
 use crate::include::nodes::parsenodes::{
-    AliasColumnDef, AliasColumnSpec, ColumnConstraint, ForeignKeyAction, ForeignKeyMatchType,
-    JoinTreeNode, RangeTblEntryKind, RawTypeName, TableConstraint,
-    CompositeTypeAttributeDef, CreateCompositeTypeStatement, CreateTypeStatement,
-    DropTypeStatement,
+    AliasColumnDef, AliasColumnSpec, ColumnConstraint, CompositeTypeAttributeDef,
+    CreateCompositeTypeStatement, CreateTypeStatement, DropTypeStatement, ForeignKeyAction,
+    ForeignKeyMatchType, JoinTreeNode, RangeTblEntryKind, RawTypeName, TableConstraint,
 };
 use crate::include::nodes::primnodes::{AttrNumber, JoinType, Var, is_system_attr};
 
@@ -1158,9 +1157,10 @@ fn parse_comment_on_role_statement() {
 
 #[test]
 fn parse_grant_create_on_database_statement() {
-    let stmt =
-        parse_statement("grant create on database regression to regress_role_admin with grant option")
-            .unwrap();
+    let stmt = parse_statement(
+        "grant create on database regression to regress_role_admin with grant option",
+    )
+    .unwrap();
     assert_eq!(
         stmt,
         Statement::GrantObject(GrantObjectStatement {
@@ -1231,9 +1231,8 @@ fn parse_grant_role_membership_with_options_statement() {
 
 #[test]
 fn parse_revoke_role_membership_option_statement() {
-    let stmt =
-        parse_statement("revoke inherit option for regress_tenant2 from regress_createrole")
-            .unwrap();
+    let stmt = parse_statement("revoke inherit option for regress_tenant2 from regress_createrole")
+        .unwrap();
     assert_eq!(
         stmt,
         Statement::RevokeRoleMembership(RevokeRoleMembershipStatement {
@@ -2534,8 +2533,11 @@ fn build_plan_rejects_missing_visible_catalog_comparison_operator() {
 
 #[test]
 fn build_plan_resolves_lower_for_range_type() {
-    let plan = build_plan(&parse_select("select lower(int4range(1, 10))").unwrap(), &catalog())
-        .unwrap();
+    let plan = build_plan(
+        &parse_select("select lower(int4range(1, 10))").unwrap(),
+        &catalog(),
+    )
+    .unwrap();
     let Plan::Projection { targets, .. } = plan else {
         panic!("expected projection plan");
     };
@@ -2558,7 +2560,8 @@ fn build_plan_dispatches_jsonb_and_range_contains_independently() {
     )
     .unwrap();
     let Plan::Projection {
-        targets: json_targets, ..
+        targets: json_targets,
+        ..
     } = json_plan
     else {
         panic!("expected projection plan");
@@ -3304,14 +3307,16 @@ fn parse_union_all_select_chain() {
 
 #[test]
 fn parse_union_with_top_level_cte_and_order_by() {
-    let stmt = parse_select(
-        "with q(x) as (select 1) select * from q union select * from q order by 1",
-    )
-    .unwrap();
+    let stmt =
+        parse_select("with q(x) as (select 1) select * from q union select * from q order by 1")
+            .unwrap();
     assert_eq!(stmt.with.len(), 1);
     assert_eq!(stmt.order_by.len(), 1);
     let set_operation = stmt.set_operation.expect("set operation");
-    assert!(matches!(set_operation.op, SetOperator::Union { all: false }));
+    assert!(matches!(
+        set_operation.op,
+        SetOperator::Union { all: false }
+    ));
     assert_eq!(set_operation.inputs.len(), 2);
 }
 
@@ -3319,7 +3324,10 @@ fn parse_union_with_top_level_cte_and_order_by() {
 fn parse_intersect_all_select_chain() {
     let stmt = parse_select("select 1 intersect all select 1").unwrap();
     let set_operation = stmt.set_operation.expect("set operation");
-    assert!(matches!(set_operation.op, SetOperator::Intersect { all: true }));
+    assert!(matches!(
+        set_operation.op,
+        SetOperator::Intersect { all: true }
+    ));
     assert_eq!(set_operation.inputs.len(), 2);
 }
 
@@ -3327,7 +3335,10 @@ fn parse_intersect_all_select_chain() {
 fn parse_except_select_chain() {
     let stmt = parse_select("select 1 except select 2").unwrap();
     let set_operation = stmt.set_operation.expect("set operation");
-    assert!(matches!(set_operation.op, SetOperator::Except { all: false }));
+    assert!(matches!(
+        set_operation.op,
+        SetOperator::Except { all: false }
+    ));
     assert_eq!(set_operation.inputs.len(), 2);
 }
 

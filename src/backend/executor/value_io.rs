@@ -775,8 +775,7 @@ pub(crate) fn missing_column_value(column: &ColumnDesc) -> Value {
                 .then_some(column.default_expr.as_deref())
                 .flatten()
                 .and_then(|sql| {
-                    crate::backend::parser::derive_literal_default_value(sql, column.sql_type)
-                        .ok()
+                    crate::backend::parser::derive_literal_default_value(sql, column.sql_type).ok()
                 })
         })
         .unwrap_or(Value::Null)

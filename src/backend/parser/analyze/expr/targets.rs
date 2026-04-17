@@ -636,7 +636,15 @@ fn visit_nested_srfs(
                 );
             }
             if let Some(filter) = filter.as_deref() {
-                visit_nested_srfs(filter, info, scope, catalog, outer_scopes, grouped_outer, ctes);
+                visit_nested_srfs(
+                    filter,
+                    info,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                );
             }
         }
         SqlExpr::InSubquery { expr, .. } => visit_nested_srfs(

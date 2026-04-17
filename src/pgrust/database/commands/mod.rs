@@ -14,5 +14,5 @@ mod role;
 mod schema;
 mod sequence;
 mod session_auth;
-mod typecmds;
 mod tablespace;
+mod typecmds;

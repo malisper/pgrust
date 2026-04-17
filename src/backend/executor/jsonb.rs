@@ -201,9 +201,9 @@ pub(crate) fn jsonb_from_value(value: &Value) -> Result<JsonbValue, ExecError> {
             crate::backend::executor::render_geometry_text(value, Default::default())
                 .unwrap_or_default(),
         ),
-        Value::Range(_) => {
-            JsonbValue::String(crate::backend::executor::render_range_text(value).unwrap_or_default())
-        }
+        Value::Range(_) => JsonbValue::String(
+            crate::backend::executor::render_range_text(value).unwrap_or_default(),
+        ),
         Value::TsVector(v) => JsonbValue::String(crate::backend::executor::render_tsvector_text(v)),
         Value::TsQuery(v) => JsonbValue::String(crate::backend::executor::render_tsquery_text(v)),
         Value::Json(text) => {
@@ -467,7 +467,9 @@ pub(crate) fn jsonb_builder_key(value: &Value) -> Result<String, ExecError> {
             Default::default(),
         )
         .unwrap_or_default()),
-        Value::Range(_) => Ok(crate::backend::executor::render_range_text(value).unwrap_or_default()),
+        Value::Range(_) => {
+            Ok(crate::backend::executor::render_range_text(value).unwrap_or_default())
+        }
         Value::TsVector(v) => Ok(crate::backend::executor::render_tsvector_text(v)),
         Value::TsQuery(v) => Ok(crate::backend::executor::render_tsquery_text(v)),
         Value::Array(items) => Ok(format_array_text(items)),

@@ -21,10 +21,6 @@ use self::json::{
     bind_jsonb_exists_all_expr, bind_jsonb_exists_any_expr, bind_jsonb_exists_expr,
     bind_jsonb_path_binary_expr, bind_maybe_jsonb_delete,
 };
-use super::ranges::{
-    bind_maybe_range_arithmetic, bind_maybe_range_comparison, bind_maybe_range_contains,
-    bind_maybe_range_over_position, bind_maybe_range_shift,
-};
 pub(crate) use self::ops::bind_concat_operands;
 pub(super) use self::ops::bind_lowered_comparison_expr;
 use self::ops::{
@@ -37,6 +33,10 @@ use self::subquery::{
 };
 pub(crate) use self::targets::{
     BoundSelectTargets, bind_select_targets, select_targets_contain_set_returning_call,
+};
+use super::ranges::{
+    bind_maybe_range_arithmetic, bind_maybe_range_comparison, bind_maybe_range_contains,
+    bind_maybe_range_over_position, bind_maybe_range_shift,
 };
 
 #[allow(dead_code)]
@@ -197,7 +197,8 @@ pub(super) fn raise_expr_varlevels(expr: Expr, levels: usize) -> Expr {
     }
 }
 
-fn current_window_state_or_error() -> Result<std::rc::Rc<std::cell::RefCell<WindowBindingState>>, ParseError> {
+fn current_window_state_or_error()
+-> Result<std::rc::Rc<std::cell::RefCell<WindowBindingState>>, ParseError> {
     match current_window_state() {
         Some(state) if windows_allowed() => Ok(state),
         Some(_) => Err(nested_window_error()),
@@ -1837,24 +1838,23 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 })
                 .collect::<Vec<_>>();
             validate_scalar_function_arity(legacy_func, &lowered_args)?;
-            let legacy_result_type = if matches!(legacy_func, BuiltinScalarFunction::RangeConstructor)
-            {
-                resolve_function_cast_type(catalog, name)
-                    .filter(|ty| builtin_range_spec_for_sql_type(*ty).is_some())
-            } else {
-                None
-            };
-            let legacy_declared_arg_types = if let Some(spec) =
-                legacy_result_type.and_then(builtin_range_spec_for_sql_type)
-            {
-                let mut declared = vec![spec.subtype, spec.subtype];
-                if lowered_args.len() == 3 {
-                    declared.push(SqlType::new(SqlTypeKind::Text));
-                }
-                declared
-            } else {
-                actual_types.clone()
-            };
+            let legacy_result_type =
+                if matches!(legacy_func, BuiltinScalarFunction::RangeConstructor) {
+                    resolve_function_cast_type(catalog, name)
+                        .filter(|ty| builtin_range_spec_for_sql_type(*ty).is_some())
+                } else {
+                    None
+                };
+            let legacy_declared_arg_types =
+                if let Some(spec) = legacy_result_type.and_then(builtin_range_spec_for_sql_type) {
+                    let mut declared = vec![spec.subtype, spec.subtype];
+                    if lowered_args.len() == 3 {
+                        declared.push(SqlType::new(SqlTypeKind::Text));
+                    }
+                    declared
+                } else {
+                    actual_types.clone()
+                };
             bind_scalar_function_call(
                 legacy_func,
                 0,
