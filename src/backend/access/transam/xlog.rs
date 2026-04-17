@@ -41,7 +41,7 @@ const BG_FLUSH_THRESHOLD: u64 = 1024 * 1024;
 const WAL_RECORD_ALIGN: u64 = 8;
 const WAL_TIMELINE_ID: u32 = 1;
 const WAL_SYSID: u64 = 0;
-const WAL_SEG_SIZE: u32 = 16 * 1024 * 1024;
+pub const WAL_SEG_SIZE_BYTES: u32 = 16 * 1024 * 1024;
 
 pub type Lsn = u64;
 pub const INVALID_LSN: Lsn = 0;
@@ -105,7 +105,7 @@ fn encode_page_header(page_start_lsn: u64, info: u16, rem_len: u32) -> Vec<u8> {
     raw[16..20].copy_from_slice(&rem_len.to_le_bytes());
     if page_start_lsn == 0 {
         raw[24..32].copy_from_slice(&WAL_SYSID.to_le_bytes());
-        raw[32..36].copy_from_slice(&WAL_SEG_SIZE.to_le_bytes());
+        raw[32..36].copy_from_slice(&WAL_SEG_SIZE_BYTES.to_le_bytes());
         raw[36..40].copy_from_slice(&(WAL_PAGE_SIZE as u32).to_le_bytes());
     }
     raw

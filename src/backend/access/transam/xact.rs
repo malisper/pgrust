@@ -239,6 +239,10 @@ impl TransactionManager {
             .unwrap_or_else(|| self.next_xid.saturating_add(1).max(1))
     }
 
+    pub fn next_xid(&self) -> TransactionId {
+        self.next_xid
+    }
+
     fn status_path(base_dir: PathBuf) -> PathBuf {
         base_dir.join("pg_xact").join("status")
     }
