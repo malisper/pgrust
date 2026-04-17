@@ -301,7 +301,7 @@ Targeted reruns on 2026-04-17:
   Done: `lax $[*]` on scalar values now matches upstream behavior.
   Remaining: related scalar/array unwrapping cases.
 - Done: jsonpath three-valued predicate semantics now preserve `unknown` for comparisons, `is unknown`, and filter evaluation instead of reducing everything to Rust `bool`.
-- Fix jsonpath comparison semantics for mixed types and multi-item sequences so strict comparisons do not incorrectly return `true`.
+- Done: jsonpath comparison semantics for mixed types and multi-item sequences no longer incorrectly return `true` in strict comparisons.
 - Done: recursive descent depth handling for `**` now includes the current item at depth `0`, matching `$.**`, `$.**{0}`, and `$.**{0 to last}`.
 - Align jsonpath runtime error behavior and messages with PostgreSQL where possible, especially around structural errors, out-of-range subscripts, and numeric/arithmetic failures.
 - type_sanity.sql: 0/63
