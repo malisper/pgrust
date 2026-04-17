@@ -7,13 +7,14 @@ use super::expr_ops::parse_numeric_text;
 use super::expr_range::render_range_text;
 use super::node_types::Value;
 use super::value_io::format_array_text;
+use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::backend::executor::jsonb::render_jsonb_bytes;
 use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::backend::parser::{ParseError, SqlType, SqlTypeKind};
 use crate::pgrust::compact_string::CompactString;
 use crate::pgrust::session::ByteaOutputFormat;
 use base64::Engine as _;
-use encoding_rs::Encoding;
+use encoding_rs::{DecoderResult, EncoderResult, Encoding};
 use md5::{Digest, Md5};
 use sha2::{Sha224, Sha256, Sha384, Sha512};
 
@@ -1661,6 +1662,242 @@ fn like_match_bytes(text: &[u8], pattern: &[u8], escape: Option<&[u8]>) -> Resul
 
 fn normalize_encoding_label(name: &str) -> String {
     name.trim().to_ascii_lowercase().replace('_', "-")
+}
+
+pub(super) fn eval_pg_rust_test_enc_setup(values: &[Value]) -> Result<Value, ExecError> {
+    if values.iter().any(|value| matches!(value, Value::Null)) {
+        return Ok(Value::Null);
+    }
+    if !values.is_empty() {
+        return Err(ExecError::TypeMismatch {
+            op: "pg_rust_test_enc_setup",
+            left: values.first().cloned().unwrap_or(Value::Null),
+            right: Value::Null,
+        });
+    }
+    Ok(Value::Null)
+}
+
+pub(super) fn eval_pg_rust_test_enc_conversion(values: &[Value]) -> Result<Value, ExecError> {
+    let [string, src_encoding, dst_encoding, no_error] = values else {
+        return Err(ExecError::TypeMismatch {
+            op: "pg_rust_test_enc_conversion",
+            left: values.first().cloned().unwrap_or(Value::Null),
+            right: values.get(1).cloned().unwrap_or(Value::Null),
+        });
+    };
+    if matches!(string, Value::Null)
+        || matches!(src_encoding, Value::Null)
+        || matches!(dst_encoding, Value::Null)
+        || matches!(no_error, Value::Null)
+    {
+        return Ok(Value::Null);
+    }
+
+    let bytes = match string {
+        Value::Bytea(bytes) => bytes.as_slice(),
+        _ => {
+            return Err(ExecError::TypeMismatch {
+                op: "pg_rust_test_enc_conversion",
+                left: string.clone(),
+                right: src_encoding.clone(),
+            });
+        }
+    };
+    let src_name = src_encoding.as_text().ok_or_else(|| ExecError::TypeMismatch {
+        op: "pg_rust_test_enc_conversion",
+        left: src_encoding.clone(),
+        right: dst_encoding.clone(),
+    })?;
+    let dst_name = dst_encoding.as_text().ok_or_else(|| ExecError::TypeMismatch {
+        op: "pg_rust_test_enc_conversion",
+        left: dst_encoding.clone(),
+        right: no_error.clone(),
+    })?;
+    let no_error = match no_error {
+        Value::Bool(value) => *value,
+        _ => {
+            return Err(ExecError::TypeMismatch {
+                op: "pg_rust_test_enc_conversion",
+                left: no_error.clone(),
+                right: Value::Bool(false),
+            });
+        }
+    };
+
+    let src = lookup_pg_encoding(src_name).ok_or_else(|| invalid_encoding_name("source", src_name))?;
+    let dst = lookup_pg_encoding(dst_name).ok_or_else(|| invalid_encoding_name("destination", dst_name))?;
+
+    let prefix = decode_valid_prefix(bytes, src);
+    match prefix.status {
+        DecodePrefixStatus::InvalidSource => {
+            if !no_error {
+                return Err(ExecError::DetailedError {
+                    message: format!(
+                        "invalid byte sequence for encoding \"{}\"",
+                        src_name.to_ascii_uppercase()
+                    ),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "22021",
+                });
+            }
+            return Ok(build_test_enc_conversion_record(
+                prefix.valid_bytes,
+                prefix.encoded_prefix,
+            ));
+        }
+        DecodePrefixStatus::Valid => {}
+    }
+
+    if std::ptr::eq(src, dst) {
+        return Ok(build_test_enc_conversion_record(bytes.len(), bytes.to_vec()));
+    }
+
+    match encode_without_replacement(&prefix.decoded, dst) {
+        Ok(encoded) => Ok(build_test_enc_conversion_record(bytes.len(), encoded)),
+        Err(EncodeFailure::Unmappable { utf8_bytes_read }) if no_error => {
+            let converted_bytes = if src == encoding_rs::UTF_8 {
+                utf8_bytes_read
+            } else {
+                return Err(ExecError::DetailedError {
+                    message: format!(
+                        "unsupported partial conversion from encoding \"{}\"",
+                        src_name.to_ascii_uppercase()
+                    ),
+                    detail: Some(
+                        "pgrust currently only reports partial progress for unmappable output when the source encoding is UTF8"
+                            .into(),
+                    ),
+                    hint: None,
+                    sqlstate: "0A000",
+                });
+            };
+            Ok(build_test_enc_conversion_record(
+                converted_bytes,
+                encode_without_replacement(&prefix.decoded[..utf8_bytes_read], dst)
+                    .expect("prefix must remain encodable"),
+            ))
+        }
+        Err(EncodeFailure::Unmappable { .. }) => Err(ExecError::DetailedError {
+            message: format!(
+                "character is not representable in encoding \"{}\"",
+                dst_name.to_ascii_uppercase()
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "22P05",
+        }),
+    }
+}
+
+fn invalid_encoding_name(kind: &str, name: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("invalid {kind} encoding name \"{name}\""),
+        detail: None,
+        hint: None,
+        sqlstate: "22023",
+    }
+}
+
+fn lookup_pg_encoding(name: &str) -> Option<&'static Encoding> {
+    let normalized = normalize_encoding_label(name);
+    let canonical = match normalized.as_str() {
+        "utf8" | "utf-8" => "utf-8",
+        "euc-kr" => "euc-kr",
+        "big5" => "big5",
+        "gb18030" => "gb18030",
+        "euc-jp" => "euc-jp",
+        "sjis" | "shift-jis" | "shiftjis" | "shiftjis2004" => "shift_jis",
+        "latin2" => "iso-8859-2",
+        "latin5" => "iso-8859-9",
+        "iso8859-5" | "iso-8859-5" | "iso8859_5" => "iso-8859-5",
+        "koi8r" | "koi8-r" => "koi8-r",
+        _ => normalized.as_str(),
+    };
+    Encoding::for_label(canonical.as_bytes())
+}
+
+enum DecodePrefixStatus {
+    Valid,
+    InvalidSource,
+}
+
+struct DecodePrefix {
+    status: DecodePrefixStatus,
+    valid_bytes: usize,
+    decoded: String,
+    encoded_prefix: Vec<u8>,
+}
+
+fn decode_valid_prefix(input: &[u8], encoding: &'static Encoding) -> DecodePrefix {
+    let nul_index = input.iter().position(|byte| *byte == 0);
+    let candidate = nul_index.map_or(input, |index| &input[..index]);
+    let mut decoder = encoding.new_decoder_without_bom_handling();
+    let mut decoded = String::new();
+    let max_len = candidate.len().saturating_mul(4).max(4);
+    let mut buffer = vec![0; max_len.max(4)];
+    let (result, read, written) =
+        decoder.decode_to_utf8_without_replacement(candidate, &mut buffer, true);
+    decoded.push_str(std::str::from_utf8(&buffer[..written]).expect("decoder emitted utf8"));
+    match result {
+        DecoderResult::InputEmpty if nul_index.is_none() => DecodePrefix {
+            status: DecodePrefixStatus::Valid,
+            valid_bytes: input.len(),
+            decoded,
+            encoded_prefix: input.to_vec(),
+        },
+        DecoderResult::InputEmpty => DecodePrefix {
+            status: DecodePrefixStatus::InvalidSource,
+            valid_bytes: nul_index.expect("nul exists"),
+            decoded,
+            encoded_prefix: input[..nul_index.expect("nul exists")].to_vec(),
+        },
+        DecoderResult::Malformed(_, _) => DecodePrefix {
+            status: DecodePrefixStatus::InvalidSource,
+            valid_bytes: read,
+            decoded,
+            encoded_prefix: input[..read].to_vec(),
+        },
+        DecoderResult::OutputFull => unreachable!("buffer sized from max_utf8_buffer_length"),
+    }
+}
+
+#[derive(Debug)]
+enum EncodeFailure {
+    Unmappable { utf8_bytes_read: usize },
+}
+
+fn encode_without_replacement(
+    input: &str,
+    encoding: &'static Encoding,
+) -> Result<Vec<u8>, EncodeFailure> {
+    let mut encoder = encoding.new_encoder();
+    let max_len = input.len().saturating_mul(4).max(4);
+    let mut buffer = vec![0; max_len.max(4)];
+    let (result, read, written) =
+        encoder.encode_from_utf8_without_replacement(input, &mut buffer, true);
+    match result {
+        EncoderResult::InputEmpty => {
+            buffer.truncate(written);
+            Ok(buffer)
+        }
+        EncoderResult::Unmappable(_) => Err(EncodeFailure::Unmappable {
+            utf8_bytes_read: read,
+        }),
+        EncoderResult::OutputFull => unreachable!("buffer sized from max_buffer_length"),
+    }
+}
+
+fn build_test_enc_conversion_record(validlen: usize, result: Vec<u8>) -> Value {
+    let descriptor = assign_anonymous_record_descriptor(vec![
+        ("validlen".into(), SqlType::new(SqlTypeKind::Int4)),
+        ("result".into(), SqlType::new(SqlTypeKind::Bytea)),
+    ]);
+    Value::Record(crate::include::nodes::datum::RecordValue::from_descriptor(
+        descriptor,
+        vec![Value::Int32(validlen as i32), Value::Bytea(result)],
+    ))
 }
 fn eval_pad_function(op: &'static str, values: &[Value], left: bool) -> Result<Value, ExecError> {
     let Some(text_value) = values.first() else {
