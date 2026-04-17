@@ -1684,18 +1684,16 @@ fn build_role_attr_option(pair: Pair<'_, Rule>) -> Result<RoleOption, ParseError
 }
 
 fn build_role_membership_option(pair: Pair<'_, Rule>) -> Result<RoleOption, ParseError> {
-    let lowered = pair.as_str().to_ascii_lowercase();
-    let option_name = if lowered.starts_with("in role ") {
-        "in role"
-    } else if lowered.starts_with("role ") {
-        "role"
-    } else if lowered.starts_with("admin ") {
-        "admin"
+    let actual = pair.as_str().to_string();
+    let trimmed = actual.trim_start();
+    let option_name = if strip_keyword_prefix(trimmed, "in role").is_some() {
+        Some("in role")
+    } else if strip_keyword_prefix(trimmed, "role").is_some() {
+        Some("role")
+    } else if strip_keyword_prefix(trimmed, "admin").is_some() {
+        Some("admin")
     } else {
-        return Err(ParseError::UnexpectedToken {
-            expected: "role membership option",
-            actual: pair.as_str().to_string(),
-        });
+        None
     };
     let mut roles = Vec::new();
 
@@ -1707,7 +1705,10 @@ fn build_role_membership_option(pair: Pair<'_, Rule>) -> Result<RoleOption, Pars
         }
     }
 
-    Ok(match option_name {
+    Ok(match option_name.ok_or_else(|| ParseError::UnexpectedToken {
+        expected: "role membership option",
+        actual: actual.clone(),
+    })? {
         "role" => RoleOption::Role(roles),
         "admin" => RoleOption::Admin(roles),
         "in role" => RoleOption::InRole(roles),
