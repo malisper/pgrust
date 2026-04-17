@@ -13,7 +13,9 @@ use super::expr_money::{
 };
 use super::expr_range::{parse_range_text, render_range_text};
 use super::node_types::*;
-use crate::backend::executor::jsonb::{parse_json_text_input, parse_jsonb_text, render_jsonb_bytes};
+use crate::backend::executor::jsonb::{
+    parse_json_text_input, parse_jsonb_text, parse_jsonb_text_with_limit, render_jsonb_bytes,
+};
 use crate::backend::parser::{SqlType, SqlTypeKind, parse_type_name};
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::time::date::{
@@ -1066,7 +1068,7 @@ pub(crate) fn soft_input_error_info_with_config(
         match parse_json_text_input(text) {
             Ok(_) => {
                 if matches!(ty.kind, SqlTypeKind::Jsonb) {
-                    match parse_jsonb_text(text) {
+                    match parse_jsonb_text_with_limit(text, config.max_stack_depth_kb) {
                         Ok(_) => return Ok(None),
                         Err(err) => return Ok(Some(input_error_info(err, text))),
                     }
@@ -1593,7 +1595,10 @@ pub(crate) fn cast_value_with_config(
             }
             SqlTypeKind::Jsonb => {
                 let rendered = render_internal_char_text(byte);
-                Ok(Value::Jsonb(parse_jsonb_text(&rendered)?))
+                Ok(Value::Jsonb(parse_jsonb_text_with_limit(
+                    &rendered,
+                    config.max_stack_depth_kb,
+                )?))
             }
             SqlTypeKind::JsonPath => {
                 let rendered = render_internal_char_text(byte);
@@ -1626,7 +1631,10 @@ pub(crate) fn cast_value_with_config(
             }
             SqlTypeKind::Jsonb => {
                 let rendered = crate::backend::executor::render_tsvector_text(&vector);
-                Ok(Value::Jsonb(parse_jsonb_text(&rendered)?))
+                Ok(Value::Jsonb(parse_jsonb_text_with_limit(
+                    &rendered,
+                    config.max_stack_depth_kb,
+                )?))
             }
             _ => Err(ExecError::TypeMismatch {
                 op: "::tsvector",
@@ -1650,7 +1658,10 @@ pub(crate) fn cast_value_with_config(
             }
             SqlTypeKind::Jsonb => {
                 let rendered = crate::backend::executor::render_tsquery_text(&query);
-                Ok(Value::Jsonb(parse_jsonb_text(&rendered)?))
+                Ok(Value::Jsonb(parse_jsonb_text_with_limit(
+                    &rendered,
+                    config.max_stack_depth_kb,
+                )?))
             }
             _ => Err(ExecError::TypeMismatch {
                 op: "::tsquery",
@@ -2011,7 +2022,10 @@ pub(super) fn cast_text_value_with_config(
             validate_json_text(text)?;
             Ok(Value::Json(CompactString::new(text)))
         }
-        SqlTypeKind::Jsonb => Ok(Value::Jsonb(parse_jsonb_text(text)?)),
+        SqlTypeKind::Jsonb => Ok(Value::Jsonb(parse_jsonb_text_with_limit(
+            text,
+            config.max_stack_depth_kb,
+        )?)),
         SqlTypeKind::JsonPath => Ok(Value::JsonPath(canonicalize_jsonpath_text(text)?)),
         SqlTypeKind::TsVector => {
             crate::backend::executor::parse_tsvector_text(text).map(Value::TsVector)

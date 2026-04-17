@@ -47,6 +47,7 @@ const NUMERIC_SHORT_WEIGHT_MIN: i16 = -((NUMERIC_SHORT_WEIGHT_MASK as i16) + 1);
 const NUMERIC_SHORT_DSCALE_MAX: u16 = NUMERIC_SHORT_DSCALE_MASK >> NUMERIC_SHORT_DSCALE_SHIFT;
 const NBASE: u16 = 10000;
 const DEC_DIGITS: usize = 4;
+const APPROX_STACK_BYTES_PER_JSON_LEVEL: u32 = 100;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum JsonbValue {
@@ -122,12 +123,79 @@ impl JsonbValue {
 }
 
 pub(crate) fn parse_jsonb_text(text: &str) -> Result<Vec<u8>, ExecError> {
-    let value = parse_json_text_input(text)?;
+    let value = parse_json_text_input_with_stack_limit(text, 100)?;
+    Ok(encode_jsonb(&JsonbValue::from_serde(value)?))
+}
+
+pub(crate) fn parse_jsonb_text_with_limit(
+    text: &str,
+    max_stack_depth_kb: u32,
+) -> Result<Vec<u8>, ExecError> {
+    let value = parse_json_text_input_with_stack_limit(text, max_stack_depth_kb)?;
     Ok(encode_jsonb(&JsonbValue::from_serde(value)?))
 }
 
 pub(crate) fn parse_json_text_input(text: &str) -> Result<SerdeJsonValue, ExecError> {
     serde_json::from_str::<SerdeJsonValue>(text).map_err(|err| json_input_error(text, err))
+}
+
+fn parse_json_text_input_with_stack_limit(
+    text: &str,
+    max_stack_depth_kb: u32,
+) -> Result<SerdeJsonValue, ExecError> {
+    enforce_json_stack_limit(text, max_stack_depth_kb)?;
+    parse_json_text_input(text)
+}
+
+fn enforce_json_stack_limit(text: &str, max_stack_depth_kb: u32) -> Result<(), ExecError> {
+    let max_depth = max_stack_depth_kb
+        .saturating_mul(1024)
+        .checked_div(APPROX_STACK_BYTES_PER_JSON_LEVEL)
+        .unwrap_or(u32::MAX)
+        .max(1);
+    let mut depth = 0_u32;
+    let mut in_string = false;
+    let mut escaping = false;
+
+    for ch in text.chars() {
+        if in_string {
+            if escaping {
+                escaping = false;
+                continue;
+            }
+            match ch {
+                '\\' => escaping = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => in_string = true,
+            '[' | '{' => {
+                depth = depth.saturating_add(1);
+                if depth > max_depth {
+                    return Err(stack_depth_limit_error(max_stack_depth_kb));
+                }
+            }
+            ']' | '}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+
+    Ok(())
+}
+
+fn stack_depth_limit_error(max_stack_depth_kb: u32) -> ExecError {
+    ExecError::DetailedError {
+        message: "stack depth limit exceeded".into(),
+        detail: None,
+        hint: Some(format!(
+            "Increase the configuration parameter \"max_stack_depth\" (currently {max_stack_depth_kb}kB), after ensuring the platform's stack depth limit is adequate."
+        )),
+        sqlstate: "54001",
+    }
 }
 
 pub(crate) fn json_input_error(text: &str, err: SerdeJsonError) -> ExecError {
@@ -1252,6 +1320,22 @@ mod tests {
             } if message == "invalid input syntax for type json"
                 && detail == "The input string ended unexpectedly."
                 && context == "JSON data, line 1: {\"a\":true"
+        ));
+    }
+
+    #[test]
+    fn jsonb_input_enforces_stack_depth_limit() {
+        let err = parse_jsonb_text_with_limit(&"[".repeat(10_000), 100).unwrap_err();
+        assert!(matches!(
+            err,
+            ExecError::DetailedError {
+                message,
+                hint: Some(hint),
+                sqlstate,
+                ..
+            } if message == "stack depth limit exceeded"
+                && sqlstate == "54001"
+                && hint.contains("\"max_stack_depth\" (currently 100kB)")
         ));
     }
 
