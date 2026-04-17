@@ -1,5 +1,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use num_bigint::{BigInt, Sign};
+use rand::{Rng, RngCore};
+
 use super::expr_bit::{
     bit_count as eval_bit_count, bit_length as eval_bit_length, get_bit as eval_get_bit,
     overlay as eval_bit_overlay, position as eval_bit_position, set_bit as eval_set_bit,
@@ -72,7 +75,7 @@ use crate::backend::executor::jsonb::{
 };
 use crate::backend::parser::{ParseError, SqlType, SqlTypeKind, SubqueryComparisonOp};
 use crate::include::catalog::builtin_scalar_function_for_proc_oid;
-use crate::include::nodes::datum::{ArrayDimension, ArrayValue};
+use crate::include::nodes::datum::{ArrayDimension, ArrayValue, NumericValue};
 use crate::include::nodes::primnodes::{
     BoolExpr, BoolExprType, FuncExpr, OpExpr, OpExprKind, ScalarArrayOpExpr, ScalarFunctionImpl,
     SubLinkType, INDEX_VAR, INNER_VAR, OUTER_VAR, TABLE_OID_ATTR_NO, attrno_index,
@@ -93,6 +96,8 @@ use arrays::{
 use subquery::{eval_exists_subquery, eval_quantified_subquery, eval_scalar_subquery};
 
 extern crate rand;
+
+const INVALID_PARAMETER_VALUE_SQLSTATE: &str = "22023";
 
 fn malformed_expr_error(kind: &str) -> ExecError {
     ExecError::DetailedError {
@@ -1305,7 +1310,8 @@ fn eval_builtin_function(
         | BuiltinScalarFunction::PhraseToTsQuery
         | BuiltinScalarFunction::WebSearchToTsQuery
         | BuiltinScalarFunction::TsLexize => eval_text_search_builtin_function(func, &values),
-        BuiltinScalarFunction::Random => Ok(Value::Float64(rand::random::<f64>())),
+        BuiltinScalarFunction::Random => eval_random_function(&values),
+        BuiltinScalarFunction::RandomNormal => eval_random_normal_function(&values),
         BuiltinScalarFunction::CashLarger => match values.as_slice() {
             [Value::Money(left), Value::Money(right)] => {
                 Ok(Value::Money(money_larger(*left, *right)))
@@ -1739,5 +1745,172 @@ fn render_current_timestamp() -> String {
     match SystemTime::now().duration_since(UNIX_EPOCH) {
         Ok(dur) => format!("{}.{:06}+00", dur.as_secs(), dur.subsec_micros()),
         Err(_) => "0.000000+00".to_string(),
+    }
+}
+
+fn eval_random_function(values: &[Value]) -> Result<Value, ExecError> {
+    match values {
+        [] => Ok(Value::Float64(rand::random::<f64>())),
+        [Value::Int32(min), Value::Int32(max)] => {
+            if min > max {
+                return Err(invalid_random_bound_error(
+                    "lower bound must be less than or equal to upper bound",
+                ));
+            }
+            Ok(Value::Int32(rand::thread_rng().gen_range(*min..=*max)))
+        }
+        [Value::Int64(min), Value::Int64(max)] => {
+            if min > max {
+                return Err(invalid_random_bound_error(
+                    "lower bound must be less than or equal to upper bound",
+                ));
+            }
+            Ok(Value::Int64(rand::thread_rng().gen_range(*min..=*max)))
+        }
+        [Value::Numeric(min), Value::Numeric(max)] => eval_random_numeric_range(min, max),
+        [left, right] => Err(ExecError::TypeMismatch {
+            op: "random",
+            left: left.clone(),
+            right: right.clone(),
+        }),
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "valid builtin function arity",
+            actual: format!("Random({} args)", values.len()),
+        })),
+    }
+}
+
+fn eval_random_normal_function(values: &[Value]) -> Result<Value, ExecError> {
+    let (mean, stddev) = match values {
+        [] => (0.0, 1.0),
+        [Value::Float64(mean), Value::Float64(stddev)] => (*mean, *stddev),
+        [left, right] => {
+            return Err(ExecError::TypeMismatch {
+                op: "random_normal",
+                left: left.clone(),
+                right: right.clone(),
+            });
+        }
+        _ => {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "valid builtin function arity",
+                actual: format!("RandomNormal({} args)", values.len()),
+            }));
+        }
+    };
+
+    if stddev == 0.0 {
+        return Ok(Value::Float64(mean));
+    }
+
+    Ok(Value::Float64((sample_standard_normal() * stddev) + mean))
+}
+
+fn eval_random_numeric_range(min: &NumericValue, max: &NumericValue) -> Result<Value, ExecError> {
+    match min {
+        NumericValue::NaN => return Err(invalid_random_bound_error("lower bound cannot be NaN")),
+        NumericValue::PosInf | NumericValue::NegInf => {
+            return Err(invalid_random_bound_error("lower bound cannot be infinity"));
+        }
+        NumericValue::Finite { .. } => {}
+    }
+    match max {
+        NumericValue::NaN => return Err(invalid_random_bound_error("upper bound cannot be NaN")),
+        NumericValue::PosInf | NumericValue::NegInf => {
+            return Err(invalid_random_bound_error("upper bound cannot be infinity"));
+        }
+        NumericValue::Finite { .. } => {}
+    }
+    if min.cmp(max).is_gt() {
+        return Err(invalid_random_bound_error(
+            "lower bound must be less than or equal to upper bound",
+        ));
+    }
+
+    let (
+        NumericValue::Finite {
+            coeff: min_coeff,
+            scale: min_scale,
+            ..
+        },
+        NumericValue::Finite {
+            coeff: max_coeff,
+            scale: max_scale,
+            ..
+        },
+    ) = (min, max)
+    else {
+        unreachable!();
+    };
+
+    let scale = (*min_scale).max(*max_scale);
+    let min_aligned = align_numeric_coeff(min_coeff.clone(), *min_scale, scale);
+    let max_aligned = align_numeric_coeff(max_coeff.clone(), *max_scale, scale);
+
+    if min_aligned == max_aligned {
+        return Ok(Value::Numeric(min.clone()));
+    }
+
+    let span = (&max_aligned - &min_aligned) + BigInt::from(1u8);
+    let offset = random_bigint_below(&span, &mut rand::thread_rng());
+    Ok(Value::Numeric(
+        NumericValue::finite(min_aligned + offset, scale)
+            .with_dscale(scale)
+            .normalize(),
+    ))
+}
+
+fn invalid_random_bound_error(message: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: message.into(),
+        detail: None,
+        hint: None,
+        sqlstate: INVALID_PARAMETER_VALUE_SQLSTATE,
+    }
+}
+
+fn sample_standard_normal() -> f64 {
+    let mut rng = rand::thread_rng();
+    loop {
+        let u1 = rng.r#gen::<f64>();
+        if u1 == 0.0 {
+            continue;
+        }
+        let u2 = rng.r#gen::<f64>();
+        let radius = (-2.0 * u1.ln()).sqrt();
+        let theta = 2.0 * std::f64::consts::PI * u2;
+        return radius * theta.cos();
+    }
+}
+
+fn align_numeric_coeff(coeff: BigInt, from_scale: u32, to_scale: u32) -> BigInt {
+    coeff * pow10_bigint(to_scale.saturating_sub(from_scale))
+}
+
+fn pow10_bigint(exp: u32) -> BigInt {
+    let mut value = BigInt::from(1u8);
+    for _ in 0..exp {
+        value *= 10u8;
+    }
+    value
+}
+
+fn random_bigint_below(upper_exclusive: &BigInt, rng: &mut impl RngCore) -> BigInt {
+    debug_assert!(*upper_exclusive > BigInt::from(0u8));
+    let (_, upper_bytes) = upper_exclusive.to_bytes_be();
+    let mut candidate_bytes = vec![0u8; upper_bytes.len().max(1)];
+    let high_mask = if upper_bytes.is_empty() {
+        0xff
+    } else {
+        0xff_u8 >> upper_bytes[0].leading_zeros()
+    };
+
+    loop {
+        rng.fill_bytes(&mut candidate_bytes);
+        candidate_bytes[0] &= high_mask;
+        let candidate = BigInt::from_bytes_be(Sign::Plus, &candidate_bytes);
+        if candidate < *upper_exclusive {
+            return candidate;
+        }
     }
 }

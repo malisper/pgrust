@@ -137,4 +137,25 @@ mod tests {
             ExecError::RaiseException(message) if message == "boom 42"
         ));
     }
+
+    #[test]
+    fn parse_block_accepts_comments_in_declare_section() {
+        let block = parse_block(
+            r#"
+                declare
+                    n int4 := 1000;        -- sample count
+                    c float8 := 1.94947;   /* critical value */
+                begin
+                    null;
+                end
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(block.declarations.len(), 2);
+        assert_eq!(block.declarations[0].name, "n");
+        assert_eq!(block.declarations[0].default_expr.as_deref(), Some("1000"));
+        assert_eq!(block.declarations[1].name, "c");
+        assert_eq!(block.declarations[1].default_expr.as_deref(), Some("1.94947"));
+    }
 }
