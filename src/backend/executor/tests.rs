@@ -10448,6 +10448,31 @@ fn select_ctes_bind_values_and_shadow_catalog_tables() {
 }
 
 #[test]
+fn select_cte_can_capture_outer_value_through_scalar_subquery() {
+    let base = temp_dir("select_cte_outer_value_scalar_subquery");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select (
+                with cte(foo) as (values (x))
+                select (select foo from cte)
+             )
+             from (values (0), (123456), (-123456)) as t(x)",
+        )
+        .unwrap(),
+        vec![
+            vec![Value::Int32(0)],
+            vec![Value::Int32(123456)],
+            vec![Value::Int32(-123456)],
+        ],
+    );
+}
+
+#[test]
 fn insert_values_can_reference_statement_ctes() {
     let base = temp_dir("insert_values_ctes");
     let mut txns = TransactionManager::new_durable(&base).unwrap();
