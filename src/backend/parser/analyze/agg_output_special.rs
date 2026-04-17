@@ -1,6 +1,9 @@
-use super::agg_output::bind_agg_output_expr;
+use super::agg_output::{
+    bind_agg_output_expr, current_grouped_agg_visible_ctes, grouped_infer_common_scalar_expr_type,
+    grouped_infer_sql_expr_type,
+};
 use super::functions::{resolve_scalar_function, validate_scalar_function_arity};
-use super::infer::{infer_array_literal_type, infer_sql_expr_type};
+use super::infer::infer_array_literal_type_with_ctes;
 use super::*;
 use crate::include::nodes::primnodes::{SubLink, SubLinkType};
 
@@ -38,8 +41,10 @@ pub(super) fn bind_grouped_concat_expr(
         agg_list,
         n_keys,
     )?;
-    let left_type = infer_sql_expr_type(left, input_scope, catalog, outer_scopes, grouped_outer);
-    let right_type = infer_sql_expr_type(right, input_scope, catalog, outer_scopes, grouped_outer);
+    let left_type =
+        grouped_infer_sql_expr_type(left, input_scope, catalog, outer_scopes, grouped_outer);
+    let right_type =
+        grouped_infer_sql_expr_type(right, input_scope, catalog, outer_scopes, grouped_outer);
     bind_concat_operands(left, left_type, left_expr, right, right_type, right_expr)
 }
 
@@ -175,15 +180,9 @@ pub(super) fn bind_grouped_quantified_array(
     n_keys: usize,
 ) -> Result<Expr, ParseError> {
     let raw_left_type =
-        infer_sql_expr_type_with_ctes(left, input_scope, catalog, outer_scopes, grouped_outer, &[]);
-    let raw_array_type = infer_sql_expr_type_with_ctes(
-        array,
-        input_scope,
-        catalog,
-        outer_scopes,
-        grouped_outer,
-        &[],
-    );
+        grouped_infer_sql_expr_type(left, input_scope, catalog, outer_scopes, grouped_outer);
+    let raw_array_type =
+        grouped_infer_sql_expr_type(array, input_scope, catalog, outer_scopes, grouped_outer);
     let left_type =
         coerce_unknown_string_literal_type(left, raw_left_type, raw_array_type.element_type());
     let array_type = if raw_array_type.is_array {
@@ -273,14 +272,14 @@ pub(super) fn bind_grouped_func_call(
         .collect::<Result<Vec<_>, _>>()?;
     match func {
         BuiltinScalarFunction::Left | BuiltinScalarFunction::Repeat => {
-            let left_type = infer_sql_expr_type(
+            let left_type = grouped_infer_sql_expr_type(
                 &lowered_args[0],
                 input_scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
             );
-            let right_type = infer_sql_expr_type(
+            let right_type = grouped_infer_sql_expr_type(
                 &lowered_args[1],
                 input_scope,
                 catalog,
@@ -318,7 +317,7 @@ pub(super) fn bind_grouped_func_call(
             ))
         }
         BuiltinScalarFunction::Lower => {
-            let arg_type = infer_sql_expr_type(
+            let arg_type = grouped_infer_sql_expr_type(
                 &lowered_args[0],
                 input_scope,
                 catalog,
@@ -364,18 +363,18 @@ fn bind_grouped_coalesce_call(
         });
     }
     let lowered_args = args.iter().map(|arg| arg.value.clone()).collect::<Vec<_>>();
-    let common_type = infer_common_scalar_expr_type_with_ctes(
+    let common_type = grouped_infer_common_scalar_expr_type(
         &lowered_args,
         input_scope,
         catalog,
         outer_scopes,
         grouped_outer,
-        &[],
         "COALESCE arguments with a common type",
     )?;
     let mut bound_args = Vec::with_capacity(lowered_args.len());
     for arg in &lowered_args {
-        let arg_type = infer_sql_expr_type(arg, input_scope, catalog, outer_scopes, grouped_outer);
+        let arg_type =
+            grouped_infer_sql_expr_type(arg, input_scope, catalog, outer_scopes, grouped_outer);
         let bound = bind_agg_output_expr(
             arg,
             group_by_exprs,
@@ -425,13 +424,18 @@ pub(super) fn bind_grouped_array_literal(
                 )
             })
             .collect::<Result<_, _>>()?,
-        array_type: infer_array_literal_type(
+        array_type: infer_array_literal_type_with_ctes(
             elements,
             input_scope,
             catalog,
             outer_scopes,
             grouped_outer,
-        )?,
+            &current_grouped_agg_visible_ctes(),
+        )
+        .ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "array literal elements with a common type",
+            actual: "ARRAY[...]".into(),
+        })?,
     })
 }
 
@@ -445,6 +449,7 @@ fn build_grouped_subquery_plan(
     let mut child_outer = Vec::with_capacity(outer_scopes.len() + 1);
     child_outer.push(input_scope.clone());
     child_outer.extend_from_slice(outer_scopes);
+    let visible_ctes = current_grouped_agg_visible_ctes();
     let (query, _) = analyze_select_query_with_outer(
         select,
         catalog,
@@ -453,7 +458,7 @@ fn build_grouped_subquery_plan(
             scope: input_scope.clone(),
             group_by_exprs: group_by_exprs.to_vec(),
         }),
-        &[],
+        &visible_ctes,
         &[],
     )?;
     Ok(query)
