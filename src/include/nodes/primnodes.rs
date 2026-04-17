@@ -202,6 +202,7 @@ impl AggFunc {
 pub enum BuiltinScalarFunction {
     Random,
     GetDatabaseEncoding,
+    PgTypeof,
     CashLarger,
     CashSmaller,
     CashWords,
