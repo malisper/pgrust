@@ -10338,6 +10338,34 @@ fn create_type_exposes_catalog_rows_and_function_row_expansion() {
 }
 
 #[test]
+fn create_enum_type_exposes_catalog_rows_and_can_back_table_columns() {
+    let dir = temp_dir("create_enum_type_catalog_rows");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create type mood as enum ('sad', 'ok')")
+        .unwrap();
+    db.execute(1, "create table feelings(current_mood mood)")
+        .unwrap();
+
+    let visible = db.lazy_catalog_lookup(1, None, None);
+    let mood_type = visible
+        .type_rows()
+        .into_iter()
+        .find(|row| row.typname == "mood")
+        .unwrap();
+    let mood_array_type = visible
+        .type_rows()
+        .into_iter()
+        .find(|row| row.typname == "_mood")
+        .unwrap();
+
+    assert_eq!(mood_type.typelem, 0);
+    assert_eq!(mood_type.typarray, mood_array_type.oid);
+    assert_eq!(mood_array_type.typelem, mood_type.oid);
+    assert_eq!(mood_type.sql_type.kind, SqlTypeKind::Text);
+}
+
+#[test]
 fn create_type_nested_dependencies_and_named_composite_arrays_work() {
     let dir = temp_dir("create_type_nested_dependencies");
     let db = Database::open(&dir, 64).unwrap();
@@ -10485,6 +10513,47 @@ fn drop_type_enforces_restrict_and_if_exists() {
             );
         }
         other => panic!("expected dependent-function drop restriction, got {other:?}"),
+    }
+}
+
+#[test]
+fn drop_enum_type_enforces_restrict_and_if_exists() {
+    let dir = temp_dir("drop_enum_type_restrict");
+    let db = Database::open(&dir, 64).unwrap();
+
+    match db.execute(1, "drop type if exists missing_mood") {
+        Ok(StatementResult::AffectedRows(0)) => {}
+        other => panic!("expected no-op drop type if exists, got {other:?}"),
+    }
+
+    db.execute(1, "create type unused_mood as enum ('sad')")
+        .unwrap();
+    match db.execute(1, "drop type unused_mood") {
+        Ok(StatementResult::AffectedRows(1)) => {}
+        other => panic!("expected unused enum drop success, got {other:?}"),
+    }
+
+    db.execute(1, "create type mood as enum ('sad', 'ok')")
+        .unwrap();
+    db.execute(1, "create table feelings(current_mood mood)")
+        .unwrap();
+
+    match db.execute(1, "drop type mood") {
+        Err(ExecError::DetailedError {
+            sqlstate,
+            message,
+            detail,
+            ..
+        }) => {
+            assert_eq!(sqlstate, "2BP01");
+            assert!(message.contains("cannot drop type mood"));
+            assert!(
+                detail
+                    .unwrap_or_default()
+                    .contains("table feelings depends on type mood")
+            );
+        }
+        other => panic!("expected dependent enum drop restriction, got {other:?}"),
     }
 }
 

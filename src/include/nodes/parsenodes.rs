@@ -441,6 +441,7 @@ pub struct CreateFunctionStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CreateTypeStatement {
     Composite(CreateCompositeTypeStatement),
+    Enum(CreateEnumTypeStatement),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -454,6 +455,13 @@ pub struct CreateCompositeTypeStatement {
 pub struct CompositeTypeAttributeDef {
     pub name: String,
     pub ty: RawTypeName,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateEnumTypeStatement {
+    pub schema_name: Option<String>,
+    pub type_name: String,
+    pub labels: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

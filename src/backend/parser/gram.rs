@@ -1149,9 +1149,19 @@ fn build_create_type_statement(sql: &str) -> Result<CreateTypeStatement, ParseEr
     }
     let rest = consume_keyword(rest, "as").trim_start();
     if keyword_at_start(rest, "enum") {
-        return Err(ParseError::FeatureNotSupported(
-            "CREATE TYPE AS ENUM is not supported yet".into(),
-        ));
+        let rest = consume_keyword(rest, "enum").trim_start();
+        let (label_list, rest) = take_parenthesized_segment(rest)?;
+        if !rest.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of statement",
+                actual: rest.trim().into(),
+            });
+        }
+        return Ok(CreateTypeStatement::Enum(CreateEnumTypeStatement {
+            schema_name,
+            type_name,
+            labels: parse_create_enum_labels(&label_list)?,
+        }));
     }
     if keyword_at_start(rest, "range") {
         return Err(ParseError::FeatureNotSupported(
@@ -1184,6 +1194,27 @@ fn parse_create_type_attributes(input: &str) -> Result<Vec<CompositeTypeAttribut
         .into_iter()
         .filter(|item| !item.trim().is_empty())
         .map(|item| parse_create_type_attribute(&item))
+        .collect()
+}
+
+fn parse_create_enum_labels(input: &str) -> Result<Vec<String>, ParseError> {
+    split_top_level_items(input, ',')?
+        .into_iter()
+        .map(|item| {
+            let trimmed = item.trim();
+            let token_len =
+                scan_string_literal_token_len(trimmed).ok_or(ParseError::UnexpectedToken {
+                    expected: "enum label string literal",
+                    actual: trimmed.to_string(),
+                })?;
+            if token_len != trimmed.len() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "enum label string literal",
+                    actual: trimmed[token_len..].trim().to_string(),
+                });
+            }
+            decode_string_literal(trimmed)
+        })
         .collect()
 }
 
