@@ -538,6 +538,7 @@ pub struct RecursiveUnionState {
     pub(crate) worktable_id: usize,
     pub(crate) distinct: bool,
     pub(crate) distinct_hashable: bool,
+    pub(crate) recursive_references_worktable: bool,
     pub(crate) anchor: PlanState,
     pub(crate) recursive_plan: Plan,
     pub(crate) recursive_state: Option<PlanState>,
