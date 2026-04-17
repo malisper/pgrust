@@ -285,7 +285,7 @@ Targeted reruns on 2026-04-17:
 ## strings.sql follow-up
 
 - Raise a PostgreSQL-style syntax error for illegal string continuation when a comment appears between adjacent string literals across lines.
-- Fold unquoted identifiers consistently so `CHAR_TBL`, `VARCHAR_TBL`, and `TEXT_TBL` resolve like PostgreSQL in `strings.sql`.
+- [done] Fold unquoted identifiers consistently so `CHAR_TBL`, `VARCHAR_TBL`, and `TEXT_TBL` resolve like PostgreSQL in `strings.sql`.
 - [done] Match PostgreSQL `bytea` input diagnostics for malformed hex and escape sequences, including `pg_input_error_info()` messages and SQLSTATEs.
 - Tighten `SIMILAR TO` and `SUBSTRING ... SIMILAR` behavior for one-separator patterns, `ESCAPE NULL`, and PostgreSQL-compatible error text.
 
