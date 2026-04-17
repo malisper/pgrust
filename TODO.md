@@ -382,6 +382,20 @@ Counts from `/tmp/pgrust_regress_todo_20260417` on 2026-04-17; `test_setup.sql` 
 - test_setup.sql: support SQL-standard function bodies like `RETURN substr(...)` without requiring `AS $$...$$`
 - test_setup.sql: add either real `LANGUAGE C` function registration or a narrow compatibility shim for upstream `binary_coercible`
 - test_setup.sql: support `CREATE OPERATOR CLASS` for the hash opclass forms used by upstream setup
+- date.sql:
+  fix durable `CREATE TABLE ... (date)` catalog writes so `DATE_TBL` creation succeeds instead of surfacing a generic `catalog error`
+- date.sql:
+  preserve the underlying catalog/store error for failed table creation instead of collapsing it to `catalog error`
+- date.sql:
+  make ambiguous numeric date parsing respect `DateStyle` the way PostgreSQL does, especially for `YMD`
+- date.sql:
+  reject ambiguous slash-separated inputs that PostgreSQL rejects under `SET datestyle TO ymd`, such as `1/8/1999` and `1/18/1999`
+- date.sql:
+  parse ambiguous short numeric dates like `01/02/03` with PostgreSQL-compatible field ordering and two-digit year rules
+- date.sql:
+  reject ambiguous named-month forms that PostgreSQL rejects, such as `08-Jan-99`, `Jan-08-99`, `99-08-Jan`, and related variants
+- date.sql:
+  match PostgreSQL BC-date acceptance rules for forms like `January 8, 99 BC`
 
 ## DONE
 
