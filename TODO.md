@@ -49,6 +49,7 @@ Counts from `/tmp/pgrust_regress_todo_20260417` on 2026-04-17; `test_setup.sql` 
   - `inet` and `cidr` type support
   - composite/type lookup support for user-defined and partitioned relation row types
   - `trigger` type support
+  - `lseg` input syntax used by `alter_table.sql`
   - table rename handling for array-type name collisions in `pg_type`
 - amutils.sql: 0/10
 - arrays.sql: 156/526
@@ -291,8 +292,6 @@ Counts from `/tmp/pgrust_regress_todo_20260417` on 2026-04-17; `test_setup.sql` 
 
 ## Features
 
-- done: `lseg` input syntax used by `alter_table.sql`
-
 - PostgreSQL-compatible jsonb input errors with `LINE` / `DETAIL` / `CONTEXT`
 - stack depth limit handling for deeply nested jsonb input
 - aggregate-local `ORDER BY` support for `jsonb_agg` / `jsonb_object_agg`
@@ -341,6 +340,7 @@ Counts from `/tmp/pgrust_regress_todo_20260417` on 2026-04-17; `test_setup.sql` 
 - `inet` and `cidr` type support
 - composite/type lookup support for user-defined and partitioned relation row types
 - `trigger` type support
+- `lseg` input syntax used by `alter_table.sql`
 - table rename handling for array-type name collisions in `pg_type`
 
 - plpgsql.sql
@@ -349,6 +349,16 @@ Counts from `/tmp/pgrust_regress_todo_20260417` on 2026-04-17; `test_setup.sql` 
   - `trigger` pseudotype support in `CREATE FUNCTION ... RETURNS trigger`
   - `CREATE TRIGGER` parser, binder, catalog, and execution support
   - PL/pgSQL trigger runtime support for row triggers (`NEW`/`OLD`, trigger invocation)
+
+- test_setup.sql: emit PostgreSQL-compatible inheritance merge notices for multi-parent `INHERITS` merges like `stud_emp`
+- test_setup.sql: support `CREATE TYPE ... AS ENUM`
+- test_setup.sql: support `CREATE TYPE ... AS RANGE`
+- test_setup.sql: extend `CREATE FUNCTION` parsing to accept unnamed arguments such as `binary_coercible(oid, oid)` and `fipshash(bytea)`
+- test_setup.sql: extend `CREATE FUNCTION` parsing/catalog writes for routine attributes used by upstream setup: `STRICT`, `IMMUTABLE`, `STABLE`, `PARALLEL SAFE`, and `LEAKPROOF`
+- test_setup.sql: support `LANGUAGE sql` functions in addition to the current `LANGUAGE plpgsql` path
+- test_setup.sql: support SQL-standard function bodies like `RETURN substr(...)` without requiring `AS $$...$$`
+- test_setup.sql: add either real `LANGUAGE C` function registration or a narrow compatibility shim for upstream `binary_coercible`
+- test_setup.sql: support `CREATE OPERATOR CLASS` for the hash opclass forms used by upstream setup
 
 ## DONE
 
