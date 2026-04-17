@@ -633,7 +633,9 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 )?
             };
             let target_type = resolve_raw_type_name(ty, catalog)?;
-            validate_catalog_backed_explicit_cast(source_type, target_type, catalog)?;
+            if !matches!(inner.as_ref(), SqlExpr::Const(Value::Null)) {
+                validate_catalog_backed_explicit_cast(source_type, target_type, catalog)?;
+            }
             Expr::Cast(Box::new(bound_inner), target_type)
         }
         SqlExpr::Eq(left, right) => {

@@ -24,6 +24,7 @@ pub(super) enum ResolvedSrfImpl {
     GenerateSeries,
     Unnest,
     JsonTable(JsonTableFunction),
+    JsonPopulateRecordSet,
     RegexTable(RegexTableFunction),
 }
 
@@ -203,6 +204,7 @@ fn builtin_srf_impl_for_proc_row(row: &PgProcRow) -> Option<ResolvedSrfImpl> {
     match row.proname.to_ascii_lowercase().as_str() {
         "generate_series" => Some(ResolvedSrfImpl::GenerateSeries),
         "unnest" => Some(ResolvedSrfImpl::Unnest),
+        "json_populate_recordset" => Some(ResolvedSrfImpl::JsonPopulateRecordSet),
         other => resolve_json_table_function(other)
             .map(ResolvedSrfImpl::JsonTable)
             .or_else(|| resolve_regex_table_function(other).map(ResolvedSrfImpl::RegexTable)),
@@ -480,6 +482,14 @@ fn arg_type_match_cost(actual_type: SqlType, target_type: SqlType) -> Option<usi
     if is_text_like_type(actual_type) && is_text_like_type(target_type) {
         return Some(1);
     }
+    if is_text_like_type(actual_type)
+        && matches!(
+            target_type.kind,
+            SqlTypeKind::Json | SqlTypeKind::Jsonb | SqlTypeKind::JsonPath
+        )
+    {
+        return Some(2);
+    }
     if is_bit_string_type(actual_type) && is_bit_string_type(target_type) {
         return Some(1);
     }
@@ -658,6 +668,7 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::ArrayToJson | BuiltinScalarFunction::RowToJson => {
                 matches!(args.len(), 1 | 2)
             }
+            BuiltinScalarFunction::JsonPopulateRecord => args.len() == 2,
             BuiltinScalarFunction::JsonBuildArray | BuiltinScalarFunction::JsonBuildObject => true,
             BuiltinScalarFunction::JsonObject => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::JsonStripNulls => matches!(args.len(), 1 | 2),
@@ -1103,6 +1114,11 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ),
         ("ts_lexize", BuiltinScalarFunction::TsLexize),
         ("array_to_json", BuiltinScalarFunction::ArrayToJson),
+        ("row_to_json", BuiltinScalarFunction::RowToJson),
+        (
+            "json_populate_record",
+            BuiltinScalarFunction::JsonPopulateRecord,
+        ),
         ("json_build_array", BuiltinScalarFunction::JsonBuildArray),
         ("json_build_object", BuiltinScalarFunction::JsonBuildObject),
         ("json_object", BuiltinScalarFunction::JsonObject),

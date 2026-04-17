@@ -1,6 +1,8 @@
 use super::exec_expr::eval_expr;
 use super::node_types::*;
 use super::{ExecError, ExecutorContext};
+use crate::backend::parser::CatalogLookup;
+use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::executor::jsonb::{
     JsonbValue, decode_jsonb, encode_jsonb, jsonb_builder_key, jsonb_from_value, jsonb_get,
     jsonb_object_from_pairs, jsonb_path, jsonb_to_text_value, jsonb_to_value, parse_jsonb_text,
@@ -1870,6 +1872,393 @@ fn value_to_json_text(value: &Value, pretty: bool) -> String {
     } else {
         serde_json::to_string(&json).unwrap()
     }
+}
+
+pub(crate) fn eval_json_populate_record(
+    args: &[Expr],
+    row_columns: Option<&[QueryColumn]>,
+    result_type: Option<SqlType>,
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    let base = args
+        .first()
+        .map(|arg| eval_expr(arg, slot, ctx))
+        .transpose()?
+        .unwrap_or(Value::Null);
+    let json = args
+        .get(1)
+        .map(|arg| eval_expr(arg, slot, ctx))
+        .transpose()?
+        .unwrap_or(Value::Null);
+    let row_columns = row_columns_for_populate_record_value(
+        "json_populate_record",
+        &base,
+        row_columns,
+        result_type,
+        ctx.catalog.as_ref(),
+    )?;
+    populate_record_from_json_value(
+        "json_populate_record",
+        base,
+        result_type,
+        &json,
+        row_columns.as_deref(),
+        Some(ctx),
+    )
+}
+
+pub(crate) fn eval_json_populate_recordset(
+    args: &[Expr],
+    row_columns: Option<&[QueryColumn]>,
+    result_type: Option<SqlType>,
+    recordset: bool,
+    return_record_value: bool,
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<TupleSlot>, ExecError> {
+    let base = args
+        .first()
+        .map(|arg| eval_expr(arg, slot, ctx))
+        .transpose()?
+        .unwrap_or(Value::Null);
+    let json = args
+        .get(1)
+        .map(|arg| eval_expr(arg, slot, ctx))
+        .transpose()?
+        .unwrap_or(Value::Null);
+    let row_columns = row_columns_for_populate_record_value(
+        if recordset {
+            "json_populate_recordset"
+        } else {
+            "json_populate_record"
+        },
+        &base,
+        row_columns,
+        result_type,
+        ctx.catalog.as_ref(),
+    )?;
+    let parsed = ParsedJsonValue::from_value(&json)?;
+    let ParsedJsonValue::Json(json) = parsed else {
+        return Err(ExecError::TypeMismatch {
+            op: if recordset {
+                "json_populate_recordset"
+            } else {
+                "json_populate_record"
+            },
+            left: json,
+            right: Value::Null,
+        });
+    };
+    let mut rows = Vec::new();
+    let items: Vec<&SerdeJsonValue> = if recordset {
+        let Some(items) = json.as_array() else {
+            return Err(ExecError::TypeMismatch {
+                op: "json_populate_recordset",
+                left: Value::Json(CompactString::from_owned(json.to_string())),
+                right: Value::Null,
+            });
+        };
+        items.iter().collect()
+    } else {
+        vec![&json]
+    };
+    rows.reserve(items.len());
+    for item in items {
+        let populated = populate_record_from_json(
+            if recordset {
+                "json_populate_recordset"
+            } else {
+                "json_populate_record"
+            },
+            base.clone(),
+            result_type,
+            item,
+            row_columns.as_deref(),
+            Some(ctx),
+        )?;
+        if return_record_value {
+            rows.push(TupleSlot::virtual_row(vec![populated]));
+        } else {
+            let Value::Record(record) = populated else {
+                return Err(ExecError::TypeMismatch {
+                    op: "json_populate_recordset",
+                    left: populated,
+                    right: Value::Null,
+                });
+            };
+            rows.push(TupleSlot::virtual_row(
+                record.fields.into_iter().map(|(_, value)| value).collect(),
+            ));
+        }
+    }
+    Ok(rows)
+}
+
+fn row_columns_for_populate_record_value(
+    func_name: &'static str,
+    base: &Value,
+    row_columns: Option<&[QueryColumn]>,
+    result_type: Option<SqlType>,
+    catalog: Option<&crate::backend::utils::cache::visible_catalog::VisibleCatalog>,
+) -> Result<Option<Vec<QueryColumn>>, ExecError> {
+    if let Some(row_columns) = row_columns {
+        return Ok(Some(row_columns.to_vec()));
+    }
+    if let Some(sql_type) = result_type
+        && sql_type.kind == SqlTypeKind::Composite
+    {
+        let catalog = catalog.ok_or_else(|| could_not_determine_row_type(func_name))?;
+        let relation = catalog
+            .lookup_relation_by_oid(sql_type.typrelid)
+            .ok_or_else(|| could_not_determine_row_type(func_name))?;
+        return Ok(Some(
+            relation
+                .desc
+                .columns
+                .into_iter()
+                .filter(|column| !column.dropped)
+                .map(|column| QueryColumn {
+                    name: column.name,
+                    sql_type: column.sql_type,
+                })
+                .collect(),
+        ));
+    }
+    match base {
+        Value::Record(record) if !record.fields.is_empty() => Ok(Some(
+            record
+                .fields
+                .iter()
+                .map(|(name, value)| QueryColumn {
+                    name: name.clone(),
+                    sql_type: value_sql_type_hint(value)
+                        .unwrap_or(SqlType::new(SqlTypeKind::Text)),
+                })
+                .collect(),
+        )),
+        _ => {
+            if matches!(result_type, Some(SqlType { kind: SqlTypeKind::Record, .. }) | None) {
+                Ok(None)
+            } else {
+                Ok(Some(Vec::new()))
+            }
+        }
+    }
+}
+
+fn could_not_determine_row_type(func_name: &'static str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("could not determine row type for result of {func_name}").into(),
+        detail: None,
+        hint: Some(
+            "Provide a non-null record argument, or call the function in the FROM clause using a column definition list."
+                .into(),
+        ),
+        sqlstate: "42804",
+    }
+}
+
+fn populate_record_from_json_value(
+    func_name: &'static str,
+    base: Value,
+    result_type: Option<SqlType>,
+    json: &Value,
+    row_columns: Option<&[QueryColumn]>,
+    ctx: Option<&ExecutorContext>,
+) -> Result<Value, ExecError> {
+    let parsed = ParsedJsonValue::from_value(json)?;
+    let ParsedJsonValue::Json(json) = parsed else {
+        return Err(ExecError::TypeMismatch {
+            op: func_name,
+            left: json.clone(),
+            right: Value::Null,
+        });
+    };
+    populate_record_from_json(func_name, base, result_type, &json, row_columns, ctx)
+}
+
+fn populate_record_from_json(
+    func_name: &'static str,
+    base: Value,
+    result_type: Option<SqlType>,
+    json: &SerdeJsonValue,
+    row_columns: Option<&[QueryColumn]>,
+    ctx: Option<&ExecutorContext>,
+) -> Result<Value, ExecError> {
+    let row_columns = row_columns.ok_or_else(|| could_not_determine_row_type(func_name))?;
+    let object = json.as_object().ok_or_else(|| ExecError::TypeMismatch {
+        op: func_name,
+        left: Value::Json(CompactString::from_owned(json.to_string())),
+        right: Value::Null,
+    })?;
+    let base_fields = match base {
+        Value::Record(record) => record.fields,
+        Value::Null => row_columns
+            .iter()
+            .map(|column| (column.name.clone(), Value::Null))
+            .collect(),
+        other => {
+            return Err(ExecError::TypeMismatch {
+                op: func_name,
+                left: other,
+                right: Value::Null,
+            });
+        }
+    };
+    let mut fields = Vec::with_capacity(row_columns.len());
+    for column in row_columns {
+        let current = base_fields
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(&column.name))
+            .map(|(_, value)| value.to_owned_value())
+            .unwrap_or(Value::Null);
+        let value = if let Some((_, json_value)) = object
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(&column.name))
+        {
+            json_value_to_typed_value(json_value, column.sql_type, ctx)?
+        } else {
+            current
+        };
+        fields.push((column.name.clone(), value));
+    }
+    let _ = result_type;
+    Ok(Value::Record(RecordValue { fields }))
+}
+
+fn json_value_to_typed_value(
+    value: &SerdeJsonValue,
+    target: SqlType,
+    ctx: Option<&ExecutorContext>,
+) -> Result<Value, ExecError> {
+    if value.is_null() {
+        return Ok(Value::Null);
+    }
+    if target.is_array {
+        let nested = json_value_to_nested_array_values(value, target.element_type(), ctx)?;
+        let array = ArrayValue::from_nested_values(nested, vec![1]).map_err(|details| {
+            ExecError::ArrayInput {
+                message: "malformed array literal".into(),
+                value: value.to_string(),
+                detail: Some(details),
+                sqlstate: "22P02",
+            }
+        })?;
+        return Ok(Value::PgArray(array));
+    }
+    match target.kind {
+        SqlTypeKind::Json => Ok(Value::Json(CompactString::from_owned(value.to_string()))),
+        SqlTypeKind::Jsonb => Ok(Value::Jsonb(parse_jsonb_text(&value.to_string())?)),
+        SqlTypeKind::Record | SqlTypeKind::Composite => {
+            let row_columns = row_columns_for_nested_type(target, ctx)?;
+            populate_record_from_json(
+                "json_populate_record",
+                Value::Null,
+                Some(target),
+                value,
+                row_columns.as_deref(),
+                ctx,
+            )
+        }
+        _ => {
+            let text = match value {
+                SerdeJsonValue::String(text) => text.clone(),
+                _ => value.to_string(),
+            };
+            super::cast_value(Value::Text(CompactString::from(text.as_str())), target)
+        }
+    }
+}
+
+fn row_columns_for_nested_type(
+    target: SqlType,
+    ctx: Option<&ExecutorContext>,
+) -> Result<Option<Vec<QueryColumn>>, ExecError> {
+    if target.kind != SqlTypeKind::Composite {
+        return Ok(None);
+    }
+    let catalog = ctx
+        .and_then(|ctx| ctx.catalog.as_ref())
+        .ok_or_else(|| could_not_determine_row_type("json_populate_record"))?;
+    let relation = catalog
+        .lookup_relation_by_oid(target.typrelid)
+        .ok_or_else(|| could_not_determine_row_type("json_populate_record"))?;
+    Ok(Some(
+        relation
+            .desc
+            .columns
+            .into_iter()
+            .filter(|column| !column.dropped)
+            .map(|column| QueryColumn {
+                name: column.name,
+                sql_type: column.sql_type,
+            })
+            .collect(),
+    ))
+}
+
+fn json_value_to_nested_array_values(
+    value: &SerdeJsonValue,
+    element_type: SqlType,
+    ctx: Option<&ExecutorContext>,
+) -> Result<Vec<Value>, ExecError> {
+    let Some(items) = value.as_array() else {
+        return Err(ExecError::TypeMismatch {
+            op: "json array",
+            left: Value::Json(CompactString::from_owned(value.to_string())),
+            right: Value::Null,
+        });
+    };
+    items
+        .iter()
+        .map(|item| {
+            if item.is_array() {
+                Ok(Value::Array(json_value_to_nested_array_values(
+                    item,
+                    element_type,
+                    ctx,
+                )?))
+            } else {
+                json_value_to_typed_value(item, element_type, ctx)
+            }
+        })
+        .collect()
+}
+
+fn value_sql_type_hint(value: &Value) -> Option<SqlType> {
+    Some(match value {
+        Value::Int16(_) => SqlType::new(SqlTypeKind::Int2),
+        Value::Int32(_) => SqlType::new(SqlTypeKind::Int4),
+        Value::Int64(_) => SqlType::new(SqlTypeKind::Int8),
+        Value::Money(_) => SqlType::new(SqlTypeKind::Money),
+        Value::Date(_) => SqlType::new(SqlTypeKind::Date),
+        Value::Time(_) => SqlType::new(SqlTypeKind::Time),
+        Value::TimeTz(_) => SqlType::new(SqlTypeKind::TimeTz),
+        Value::Timestamp(_) => SqlType::new(SqlTypeKind::Timestamp),
+        Value::TimestampTz(_) => SqlType::new(SqlTypeKind::TimestampTz),
+        Value::Bit(_) => SqlType::new(SqlTypeKind::Bit),
+        Value::Bytea(_) => SqlType::new(SqlTypeKind::Bytea),
+        Value::Point(_) => SqlType::new(SqlTypeKind::Point),
+        Value::Lseg(_) => SqlType::new(SqlTypeKind::Lseg),
+        Value::Path(_) => SqlType::new(SqlTypeKind::Path),
+        Value::Line(_) => SqlType::new(SqlTypeKind::Line),
+        Value::Box(_) => SqlType::new(SqlTypeKind::Box),
+        Value::Polygon(_) => SqlType::new(SqlTypeKind::Polygon),
+        Value::Circle(_) => SqlType::new(SqlTypeKind::Circle),
+        Value::Float64(_) => SqlType::new(SqlTypeKind::Float8),
+        Value::Numeric(_) => SqlType::new(SqlTypeKind::Numeric),
+        Value::Json(_) => SqlType::new(SqlTypeKind::Json),
+        Value::Jsonb(_) => SqlType::new(SqlTypeKind::Jsonb),
+        Value::JsonPath(_) => SqlType::new(SqlTypeKind::JsonPath),
+        Value::TsVector(_) => SqlType::new(SqlTypeKind::TsVector),
+        Value::TsQuery(_) => SqlType::new(SqlTypeKind::TsQuery),
+        Value::Text(_) | Value::TextRef(_, _) => SqlType::new(SqlTypeKind::Text),
+        Value::InternalChar(_) => SqlType::new(SqlTypeKind::InternalChar),
+        Value::Bool(_) => SqlType::new(SqlTypeKind::Bool),
+        Value::Record(_) => SqlType::record(crate::include::catalog::RECORD_TYPE_OID),
+        Value::Array(_) | Value::PgArray(_) | Value::Null => return None,
+    })
 }
 
 pub(crate) fn eval_json_table_function(
