@@ -143,6 +143,13 @@ impl Database {
             &alter_stmt.ty,
             alter_stmt.using_expr.as_ref(),
         )?;
+        reject_column_with_foreign_key_dependencies(
+            &catalog,
+            relation.relation_oid,
+            &relation.desc.columns[plan.column_index].name,
+            (plan.column_index + 1) as i16,
+            "ALTER TABLE ALTER COLUMN TYPE on column without foreign key dependencies",
+        )?;
         let indexes = catalog.index_relations_for_heap(relation.relation_oid);
         reject_unsupported_alter_column_type_indexes(&indexes, plan.column_index)?;
 

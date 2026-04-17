@@ -49,6 +49,7 @@ fn exec_error_sqlstate(e: &ExecError) -> &'static str {
         ExecError::UniqueViolation { .. } => "23505",
         ExecError::NotNullViolation { .. } => "23502",
         ExecError::CheckViolation { .. } => "23514",
+        ExecError::ForeignKeyViolation { .. } => "23503",
         ExecError::Parse(crate::backend::parser::ParseError::UnknownConfigurationParameter(_)) => {
             "42704"
         }
@@ -81,6 +82,7 @@ fn exec_error_detail(e: &ExecError) -> Option<&str> {
     match e {
         ExecError::Regex(err) => err.detail.as_deref(),
         ExecError::DetailedError { detail, .. } => detail.as_deref(),
+        ExecError::ForeignKeyViolation { detail, .. } => detail.as_deref(),
         ExecError::ArrayInput { detail, .. } => detail.as_deref(),
         _ => None,
     }
@@ -1333,7 +1335,16 @@ fn constraint_def_for_row(
                 row,
             )
         }
-        crate::include::catalog::CONSTRAINT_FOREIGN => Some("FOREIGN KEY".to_string()),
+        crate::include::catalog::CONSTRAINT_FOREIGN => {
+            let relation = relation.cloned().or_else(|| {
+                db.describe_relation_by_oid(
+                    session.client_id,
+                    session.catalog_txn_ctx(),
+                    row.conrelid,
+                )
+            })?;
+            foreign_key_constraint_def(db, session, &relation, row)
+        }
         _ => None,
     }
 }
@@ -1369,6 +1380,67 @@ fn index_backed_constraint_def(
         "UNIQUE"
     };
     Some(format!("{prefix} ({})", columns.join(", ")))
+}
+
+fn foreign_key_constraint_def(
+    db: &Database,
+    session: &Session,
+    relation: &crate::backend::utils::cache::relcache::RelCacheEntry,
+    row: &crate::include::catalog::PgConstraintRow,
+) -> Option<String> {
+    let local_columns = row
+        .conkey
+        .as_ref()?
+        .iter()
+        .map(|attnum| {
+            (*attnum > 0)
+                .then(|| {
+                    relation
+                        .desc
+                        .columns
+                        .get((*attnum as usize).saturating_sub(1))
+                })
+                .flatten()
+                .map(|column| column.name.clone())
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let referenced_relation =
+        db.describe_relation_by_oid(session.client_id, session.catalog_txn_ctx(), row.confrelid)?;
+    let referenced_relation_name = db.relation_display_name(
+        session.client_id,
+        session.catalog_txn_ctx(),
+        None,
+        row.confrelid,
+    )?;
+    let referenced_columns = row
+        .confkey
+        .as_ref()?
+        .iter()
+        .map(|attnum| {
+            (*attnum > 0)
+                .then(|| {
+                    referenced_relation
+                        .desc
+                        .columns
+                        .get((*attnum as usize).saturating_sub(1))
+                })
+                .flatten()
+                .map(|column| column.name.clone())
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let mut def = format!(
+        "FOREIGN KEY ({}) REFERENCES {}({})",
+        local_columns.join(", "),
+        referenced_relation_name,
+        referenced_columns.join(", ")
+    );
+    if row.confdeltype == 'r' {
+        def.push_str(" ON DELETE RESTRICT");
+    }
+    if row.confupdtype == 'r' {
+        def.push_str(" ON UPDATE RESTRICT");
+    }
+    Some(def)
 }
 
 fn psql_describe_indexes_query(

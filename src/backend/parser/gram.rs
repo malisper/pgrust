@@ -2265,6 +2265,15 @@ fn build_table_constraint(pair: Pair<'_, Rule>) -> Result<TableConstraint, Parse
     build_table_constraint_inner(inner)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedReferencesClause {
+    referenced_table: String,
+    referenced_columns: Option<Vec<String>>,
+    match_type: ForeignKeyMatchType,
+    on_delete: ForeignKeyAction,
+    on_update: ForeignKeyAction,
+}
+
 fn build_table_constraint_inner(pair: Pair<'_, Rule>) -> Result<TableConstraint, ParseError> {
     let rule = pair.as_rule();
     if rule == Rule::named_table_constraint {
@@ -2276,7 +2285,8 @@ fn build_table_constraint_inner(pair: Pair<'_, Rule>) -> Result<TableConstraint,
                 Rule::primary_key_table_constraint
                 | Rule::unique_table_constraint
                 | Rule::check_table_constraint
-                | Rule::not_null_table_constraint => {
+                | Rule::not_null_table_constraint
+                | Rule::foreign_key_table_constraint => {
                     constraint = Some(build_table_constraint_inner(part)?)
                 }
                 _ => {}
@@ -2344,6 +2354,33 @@ fn build_table_constraint_inner(pair: Pair<'_, Rule>) -> Result<TableConstraint,
                 .ok_or(ParseError::UnexpectedEof)?;
             Ok(TableConstraint::NotNull { attributes, column })
         }
+        Rule::foreign_key_table_constraint => {
+            let body = pair
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::foreign_key_table_constraint_body)
+                .ok_or(ParseError::UnexpectedEof)?;
+            let mut columns = None;
+            let mut references = None;
+            for part in body.into_inner() {
+                match part.as_rule() {
+                    Rule::ident_list if columns.is_none() => {
+                        columns = Some(part.into_inner().map(build_identifier).collect())
+                    }
+                    Rule::references_clause => references = Some(build_references_clause(part)?),
+                    _ => {}
+                }
+            }
+            let references = references.ok_or(ParseError::UnexpectedEof)?;
+            Ok(TableConstraint::ForeignKey {
+                attributes,
+                columns: columns.ok_or(ParseError::UnexpectedEof)?,
+                referenced_table: references.referenced_table,
+                referenced_columns: references.referenced_columns,
+                match_type: references.match_type,
+                on_delete: references.on_delete,
+                on_update: references.on_update,
+            })
+        }
         _ => Err(ParseError::UnexpectedToken {
             expected: "table constraint",
             actual: pair.as_str().to_string(),
@@ -2384,7 +2421,8 @@ fn set_table_constraint_name(constraint: &mut TableConstraint, name: String) {
         TableConstraint::NotNull { attributes, .. }
         | TableConstraint::Check { attributes, .. }
         | TableConstraint::PrimaryKey { attributes, .. }
-        | TableConstraint::Unique { attributes, .. } => attributes.name = Some(name),
+        | TableConstraint::Unique { attributes, .. }
+        | TableConstraint::ForeignKey { attributes, .. } => attributes.name = Some(name),
     }
 }
 
@@ -2399,7 +2437,8 @@ fn build_column_constraint(pair: Pair<'_, Rule>) -> Result<ColumnConstraint, Par
                 Rule::not_null_column_constraint
                 | Rule::check_column_constraint
                 | Rule::primary_key_column_constraint
-                | Rule::unique_column_constraint => {
+                | Rule::unique_column_constraint
+                | Rule::references_column_constraint => {
                     constraint = Some(build_column_constraint(part)?)
                 }
                 _ => {}
@@ -2430,10 +2469,116 @@ fn build_column_constraint(pair: Pair<'_, Rule>) -> Result<ColumnConstraint, Par
         }
         Rule::primary_key_column_constraint => Ok(ColumnConstraint::PrimaryKey { attributes }),
         Rule::unique_column_constraint => Ok(ColumnConstraint::Unique { attributes }),
+        Rule::references_column_constraint => {
+            let body = pair
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::references_column_constraint_body)
+                .ok_or(ParseError::UnexpectedEof)?;
+            let references = body
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::references_clause)
+                .map(build_references_clause)
+                .transpose()?
+                .ok_or(ParseError::UnexpectedEof)?;
+            Ok(ColumnConstraint::References {
+                attributes,
+                referenced_table: references.referenced_table,
+                referenced_columns: references.referenced_columns,
+                match_type: references.match_type,
+                on_delete: references.on_delete,
+                on_update: references.on_update,
+            })
+        }
         _ => Err(ParseError::UnexpectedToken {
             expected: "column constraint",
             actual: pair.as_str().to_string(),
         }),
+    }
+}
+
+fn build_references_clause(pair: Pair<'_, Rule>) -> Result<ParsedReferencesClause, ParseError> {
+    let mut referenced_table = None;
+    let mut referenced_columns = None;
+    let mut match_type = ForeignKeyMatchType::Simple;
+    let mut on_delete = ForeignKeyAction::NoAction;
+    let mut on_update = ForeignKeyAction::NoAction;
+
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier if referenced_table.is_none() => {
+                referenced_table = Some(build_identifier(part));
+            }
+            Rule::referenced_columns_clause => {
+                referenced_columns = Some(
+                    part.into_inner()
+                        .find(|inner| inner.as_rule() == Rule::ident_list)
+                        .map(|inner| inner.into_inner().map(build_identifier).collect())
+                        .unwrap_or_default(),
+                );
+            }
+            Rule::match_clause => {
+                let text = part.as_str();
+                let lower = text.to_ascii_lowercase();
+                match_type = if lower.ends_with("full") {
+                    ForeignKeyMatchType::Full
+                } else if lower.ends_with("partial") {
+                    ForeignKeyMatchType::Partial
+                } else if lower.ends_with("simple") {
+                    ForeignKeyMatchType::Simple
+                } else {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "foreign-key match type",
+                        actual: text.to_string(),
+                    });
+                };
+            }
+            Rule::reference_action_clause => {
+                let text = part.as_str().trim();
+                let lower = text.to_ascii_lowercase();
+                if let Some(action) = lower.strip_prefix("on delete ") {
+                    on_delete = build_reference_action_text(action)?;
+                } else if let Some(action) = lower.strip_prefix("on update ") {
+                    on_update = build_reference_action_text(action)?;
+                } else {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "foreign-key action clause",
+                        actual: text.to_string(),
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok(ParsedReferencesClause {
+        referenced_table: referenced_table.ok_or(ParseError::UnexpectedEof)?,
+        referenced_columns,
+        match_type,
+        on_delete,
+        on_update,
+    })
+}
+
+fn build_reference_action(pair: Pair<'_, Rule>) -> Result<ForeignKeyAction, ParseError> {
+    build_reference_action_text(pair.as_str())
+}
+
+fn build_reference_action_text(text: &str) -> Result<ForeignKeyAction, ParseError> {
+    if text.eq_ignore_ascii_case("no action") {
+        Ok(ForeignKeyAction::NoAction)
+    } else if text.eq_ignore_ascii_case("restrict") {
+        Ok(ForeignKeyAction::Restrict)
+    } else if text.eq_ignore_ascii_case("cascade") {
+        Ok(ForeignKeyAction::Cascade)
+    } else if text.eq_ignore_ascii_case("set null") {
+        Ok(ForeignKeyAction::SetNull)
+    } else if text.eq_ignore_ascii_case("set default") {
+        Ok(ForeignKeyAction::SetDefault)
+    } else {
+        Err(ParseError::UnexpectedToken {
+            expected: "foreign-key action",
+            actual: text.to_string(),
+        })
     }
 }
 
@@ -2442,7 +2587,8 @@ fn set_column_constraint_name(constraint: &mut ColumnConstraint, name: String) {
         ColumnConstraint::NotNull { attributes }
         | ColumnConstraint::Check { attributes, .. }
         | ColumnConstraint::PrimaryKey { attributes }
-        | ColumnConstraint::Unique { attributes } => attributes.name = Some(name),
+        | ColumnConstraint::Unique { attributes }
+        | ColumnConstraint::References { attributes, .. } => attributes.name = Some(name),
     }
 }
 
@@ -3144,7 +3290,10 @@ fn build_column_def(pair: Pair<'_, Rule>) -> Result<ColumnDef, ParseError> {
             | Rule::not_null_column_constraint
             | Rule::check_column_constraint
             | Rule::primary_key_column_constraint
-            | Rule::unique_column_constraint => constraints.push(build_column_constraint(flag)?),
+            | Rule::unique_column_constraint
+            | Rule::references_column_constraint => {
+                constraints.push(build_column_constraint(flag)?)
+            }
             _ => {}
         }
     }

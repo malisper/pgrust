@@ -245,6 +245,10 @@ pub trait CatalogLookup {
         Vec::new()
     }
 
+    fn constraint_rows(&self) -> Vec<PgConstraintRow> {
+        Vec::new()
+    }
+
     fn class_row_by_oid(&self, _relation_oid: u32) -> Option<PgClassRow> {
         None
     }
@@ -385,6 +389,11 @@ impl CatalogLookup for Catalog {
         catcache.constraint_rows_for_relation(relation_oid)
     }
 
+    fn constraint_rows(&self) -> Vec<PgConstraintRow> {
+        let catcache = crate::backend::utils::cache::catcache::CatCache::from_catalog(self);
+        catcache.constraint_rows()
+    }
+
     fn class_row_by_oid(&self, relation_oid: u32) -> Option<PgClassRow> {
         let catcache = crate::backend::utils::cache::catcache::CatCache::from_catalog(self);
         catcache.class_by_oid(relation_oid).cloned()
@@ -467,6 +476,19 @@ impl CatalogLookup for RelCache {
             entry.namespace_oid,
             &entry.desc,
         )
+    }
+
+    fn constraint_rows(&self) -> Vec<PgConstraintRow> {
+        self.entries()
+            .flat_map(|(name, entry)| {
+                crate::backend::catalog::pg_constraint::derived_pg_constraint_rows(
+                    entry.relation_oid,
+                    name.rsplit('.').next().unwrap_or(name),
+                    entry.namespace_oid,
+                    &entry.desc,
+                )
+            })
+            .collect()
     }
 
     fn relation_by_oid(&self, relation_oid: u32) -> Option<BoundRelation> {

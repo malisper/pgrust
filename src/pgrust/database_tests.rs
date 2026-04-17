@@ -2086,8 +2086,10 @@ fn create_schema_creates_namespace_row_and_allows_qualified_create_table() {
 fn create_schema_supports_authorization_and_if_not_exists() {
     let db = Database::open_ephemeral(16).unwrap();
 
-    db.execute(1, "create schema authorization postgres").unwrap();
-    db.execute(1, "create schema if not exists postgres").unwrap();
+    db.execute(1, "create schema authorization postgres")
+        .unwrap();
+    db.execute(1, "create schema if not exists postgres")
+        .unwrap();
 
     match db
         .execute(
@@ -2116,7 +2118,9 @@ fn create_schema_reports_duplicate_and_reserved_name_errors() {
     db.execute(1, "create schema tenant").unwrap();
 
     match db.execute(1, "create schema tenant") {
-        Err(ExecError::DetailedError { sqlstate, message, .. }) => {
+        Err(ExecError::DetailedError {
+            sqlstate, message, ..
+        }) => {
             assert_eq!(sqlstate, "42P06");
             assert!(message.contains("schema \"tenant\" already exists"));
         }
@@ -2124,7 +2128,9 @@ fn create_schema_reports_duplicate_and_reserved_name_errors() {
     }
 
     match db.execute(1, "create schema pg_custom") {
-        Err(ExecError::DetailedError { sqlstate, message, .. }) => {
+        Err(ExecError::DetailedError {
+            sqlstate, message, ..
+        }) => {
             assert_eq!(sqlstate, "42939");
             assert!(message.contains("unacceptable schema name"));
         }
@@ -2139,7 +2145,9 @@ fn create_schema_respects_search_path_for_unqualified_create_table() {
 
     session.execute(&db, "create schema tenant").unwrap();
     session.execute(&db, "set search_path to tenant").unwrap();
-    session.execute(&db, "create table items (id int4)").unwrap();
+    session
+        .execute(&db, "create table items (id int4)")
+        .unwrap();
 
     match session
         .execute(
@@ -2171,7 +2179,10 @@ fn create_view_uses_created_schema_namespace() {
         .execute(&db, "create table tenant.items (id int4)")
         .unwrap();
     session
-        .execute(&db, "create view tenant.item_view as select id from tenant.items")
+        .execute(
+            &db,
+            "create view tenant.item_view as select id from tenant.items",
+        )
         .unwrap();
 
     match session
@@ -3713,6 +3724,73 @@ fn create_table_check_and_named_not_null_constraints_are_enforced_and_persisted(
 }
 
 #[test]
+fn create_table_foreign_keys_are_enforced_and_persisted() {
+    let base = temp_dir("create_table_foreign_keys");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table parents (id int4 primary key, code int4 unique)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table children (
+            id int4 primary key,
+            parent_id int4 references parents,
+            parent_code int4,
+            constraint children_parent_code_fkey foreign key (parent_code) references parents(code) on delete restrict
+        )",
+    )
+    .unwrap();
+    db.execute(1, "insert into parents values (1, 10), (2, 20)")
+        .unwrap();
+    db.execute(1, "insert into children values (1, 1, 10)")
+        .unwrap();
+    db.execute(1, "insert into children values (2, null, null)")
+        .unwrap();
+
+    match db.execute(1, "insert into children values (3, 3, 10)") {
+        Err(ExecError::ForeignKeyViolation { constraint, .. }) => {
+            assert_eq!(constraint, "children_parent_id_fkey");
+        }
+        other => panic!("expected foreign-key violation, got {other:?}"),
+    }
+
+    match db.execute(1, "insert into children values (3, 1, 30)") {
+        Err(ExecError::ForeignKeyViolation { constraint, .. }) => {
+            assert_eq!(constraint, "children_parent_code_fkey");
+        }
+        other => panic!("expected second foreign-key violation, got {other:?}"),
+    }
+
+    let rows = query_rows(
+        &db,
+        1,
+        "select conname, contype, convalidated, confupdtype, confdeltype, confmatchtype, conindid \
+         from pg_constraint \
+         where conrelid = (select oid from pg_class where relname = 'children') \
+           and contype = 'f' \
+         order by conname",
+    );
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0][0], Value::Text("children_parent_code_fkey".into()));
+    assert_eq!(rows[0][1], Value::Text("f".into()));
+    assert_eq!(rows[0][2], Value::Bool(true));
+    assert_eq!(rows[0][3], Value::Text("a".into()));
+    assert_eq!(rows[0][4], Value::Text("r".into()));
+    assert_eq!(rows[0][5], Value::Text("s".into()));
+    assert!(int_value(&rows[0][6]) > 0);
+    assert_eq!(rows[1][0], Value::Text("children_parent_id_fkey".into()));
+    assert_eq!(rows[1][1], Value::Text("f".into()));
+    assert_eq!(rows[1][2], Value::Bool(true));
+    assert_eq!(rows[1][3], Value::Text("a".into()));
+    assert_eq!(rows[1][4], Value::Text("a".into()));
+    assert_eq!(rows[1][5], Value::Text("s".into()));
+    assert!(int_value(&rows[1][6]) > 0);
+}
+
+#[test]
 fn update_and_copy_from_enforce_check_and_not_null_constraints() {
     let base = temp_dir("update_and_copy_constraint_checks");
     let db = Database::open(&base, 16).unwrap();
@@ -3815,6 +3893,47 @@ fn prepared_insert_enforces_check_and_not_null_constraints() {
     assert_eq!(
         query_rows(&db, 1, "select id, note from items"),
         vec![vec![Value::Int32(3), Value::Text("ok".into())]]
+    );
+}
+
+#[test]
+fn prepared_insert_and_copy_from_enforce_foreign_keys() {
+    let base = temp_dir("prepared_insert_copy_foreign_keys");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    db.execute(1, "create table parents (id int4 primary key)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table children (id int4 primary key, parent_id int4 references parents)",
+    )
+    .unwrap();
+    db.execute(1, "insert into parents values (1)").unwrap();
+
+    match session.copy_from_rows(&db, "children", &[vec!["1".into(), "2".into()]]) {
+        Err(ExecError::ForeignKeyViolation { constraint, .. }) => {
+            assert_eq!(constraint, "children_parent_id_fkey");
+        }
+        other => panic!("expected COPY foreign-key violation, got {other:?}"),
+    }
+
+    let prepared = session.prepare_insert(&db, "children", None, 2).unwrap();
+    session.execute(&db, "begin").unwrap();
+    match session.execute_prepared_insert(&db, &prepared, &[Value::Int32(1), Value::Int32(2)]) {
+        Err(ExecError::ForeignKeyViolation { constraint, .. }) => {
+            assert_eq!(constraint, "children_parent_id_fkey");
+        }
+        other => panic!("expected prepared foreign-key violation, got {other:?}"),
+    }
+    session
+        .execute_prepared_insert(&db, &prepared, &[Value::Int32(1), Value::Int32(1)])
+        .unwrap();
+    session.execute(&db, "commit").unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select id, parent_id from children"),
+        vec![vec![Value::Int32(1), Value::Int32(1)]]
     );
 }
 
@@ -3922,6 +4041,209 @@ fn alter_table_add_constraints_support_not_valid_and_validate() {
             vec![Value::Text("items_id_positive".into()), Value::Bool(true)],
             vec![Value::Text("items_note_required".into()), Value::Bool(true)],
         ]
+    );
+}
+
+#[test]
+fn alter_table_add_validate_and_drop_foreign_keys() {
+    let base = temp_dir("alter_table_foreign_keys");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table parents (id int4 primary key)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table children (id int4 primary key, parent_id int4)",
+    )
+    .unwrap();
+    db.execute(1, "insert into parents values (1)").unwrap();
+    db.execute(1, "insert into children values (1, 1), (2, 2)")
+        .unwrap();
+
+    db.execute(
+        1,
+        "alter table children add constraint children_parent_fk foreign key (parent_id) references parents(id) not valid",
+    )
+    .unwrap();
+
+    match db.execute(1, "insert into children values (3, 3)") {
+        Err(ExecError::ForeignKeyViolation { constraint, .. }) => {
+            assert_eq!(constraint, "children_parent_fk");
+        }
+        other => panic!("expected ALTER TABLE foreign-key violation, got {other:?}"),
+    }
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select convalidated from pg_constraint where conname = 'children_parent_fk'",
+        ),
+        vec![vec![Value::Bool(false)]]
+    );
+
+    match db.execute(
+        1,
+        "alter table children validate constraint children_parent_fk",
+    ) {
+        Err(ExecError::ForeignKeyViolation { constraint, .. }) => {
+            assert_eq!(constraint, "children_parent_fk");
+        }
+        other => panic!("expected foreign-key validate failure, got {other:?}"),
+    }
+
+    db.execute(1, "update children set parent_id = 1 where id = 2")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table children validate constraint children_parent_fk",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select convalidated from pg_constraint where conname = 'children_parent_fk'",
+        ),
+        vec![vec![Value::Bool(true)]]
+    );
+
+    db.execute(1, "alter table children drop constraint children_parent_fk")
+        .unwrap();
+    db.execute(1, "delete from parents where id = 1").unwrap();
+}
+
+#[test]
+fn foreign_keys_restrict_parent_updates_and_deletes() {
+    let base = temp_dir("foreign_key_parent_restrict");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table parents (id int4 primary key)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table children (id int4 primary key, parent_id int4 references parents)",
+    )
+    .unwrap();
+    db.execute(1, "insert into parents values (1), (2)")
+        .unwrap();
+    db.execute(1, "insert into children values (1, 1)").unwrap();
+
+    match db.execute(1, "delete from parents where id = 1") {
+        Err(ExecError::ForeignKeyViolation { constraint, .. }) => {
+            assert_eq!(constraint, "children_parent_id_fkey");
+        }
+        other => panic!("expected delete foreign-key restriction, got {other:?}"),
+    }
+
+    match db.execute(1, "update parents set id = 3 where id = 1") {
+        Err(ExecError::ForeignKeyViolation { constraint, .. }) => {
+            assert_eq!(constraint, "children_parent_id_fkey");
+        }
+        other => panic!("expected update foreign-key restriction, got {other:?}"),
+    }
+
+    match db.execute(1, "update children set parent_id = 9 where id = 1") {
+        Err(ExecError::ForeignKeyViolation { constraint, .. }) => {
+            assert_eq!(constraint, "children_parent_id_fkey");
+        }
+        other => panic!("expected child update foreign-key violation, got {other:?}"),
+    }
+
+    db.execute(1, "update children set parent_id = 2 where id = 1")
+        .unwrap();
+    db.execute(1, "delete from parents where id = 1").unwrap();
+}
+
+#[test]
+fn foreign_keys_block_parent_ddl_and_allow_child_drop() {
+    let base = temp_dir("foreign_key_ddl_blockers");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table parents (id int4 primary key)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table children (id int4 primary key, parent_id int4 references parents)",
+    )
+    .unwrap();
+    db.execute(1, "insert into parents values (1)").unwrap();
+    db.execute(1, "insert into children values (1, 1)").unwrap();
+
+    for sql in [
+        "drop table parents",
+        "truncate parents",
+        "alter table parents drop column id",
+        "alter table children drop column parent_id",
+        "alter table parents alter column id type int8",
+        "alter table children alter column parent_id type int8",
+        "alter table parents drop constraint parents_pkey",
+    ] {
+        match db.execute(1, sql) {
+            Err(ExecError::Parse(ParseError::UnexpectedToken { actual, .. }))
+                if actual.contains("foreign key constraint")
+                    || actual.contains("referenced by foreign key")
+                    || actual.contains("used by foreign key") => {}
+            other => panic!("expected foreign-key DDL blocker for `{sql}`, got {other:?}"),
+        }
+    }
+
+    db.execute(1, "drop table children").unwrap();
+    db.execute(1, "drop table parents").unwrap();
+}
+
+#[test]
+fn foreign_key_locking_blocks_parent_delete_until_child_insert_finishes() {
+    use std::sync::mpsc;
+
+    let base = temp_dir("foreign_key_locking_delete_block");
+    let db = Database::open(&base, 64).unwrap();
+    let mut session_a = Session::new(1);
+
+    db.execute(1, "create table parents (id int4 primary key)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table children (id int4 primary key, parent_id int4 references parents)",
+    )
+    .unwrap();
+    db.execute(1, "insert into parents values (1)").unwrap();
+
+    session_a.execute(&db, "begin").unwrap();
+    session_a
+        .execute(&db, "insert into children values (1, 1)")
+        .unwrap();
+
+    let db2 = db.clone();
+    let (started_tx, started_rx) = mpsc::channel();
+    let (done_tx, done_rx) = mpsc::channel();
+    let worker = thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        let result = db2.execute(2, "delete from parents where id = 1");
+        done_tx.send(result).unwrap();
+    });
+
+    started_rx.recv().unwrap();
+    assert!(
+        done_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+        "parent delete should block while the child insert holds foreign-key partner locks"
+    );
+
+    session_a.execute(&db, "commit").unwrap();
+
+    match done_rx.recv_timeout(TEST_TIMEOUT).unwrap() {
+        Err(ExecError::ForeignKeyViolation { constraint, .. }) => {
+            assert_eq!(constraint, "children_parent_id_fkey");
+        }
+        other => {
+            panic!("expected blocked delete to fail with foreign-key violation, got {other:?}")
+        }
+    }
+    worker.join().unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select id from parents"),
+        vec![vec![Value::Int32(1)]]
     );
 }
 
@@ -4166,16 +4488,31 @@ fn create_temp_table_primary_key_and_unique_constraints_are_rejected() {
 
     match db.execute(1, "create temp table temp_items (id int4 primary key)") {
         Err(ExecError::Parse(ParseError::UnexpectedToken { expected, actual }))
-            if expected == "permanent table for PRIMARY KEY/UNIQUE/CHECK constraints"
+            if expected
+                == "permanent table for PRIMARY KEY/UNIQUE/CHECK/FOREIGN KEY constraints"
                 && actual == "temporary table" => {}
         other => panic!("expected temp primary-key rejection, got {other:?}"),
     }
 
     match db.execute(1, "create temp table temp_items (id int4, unique (id))") {
         Err(ExecError::Parse(ParseError::UnexpectedToken { expected, actual }))
-            if expected == "permanent table for PRIMARY KEY/UNIQUE/CHECK constraints"
+            if expected
+                == "permanent table for PRIMARY KEY/UNIQUE/CHECK/FOREIGN KEY constraints"
                 && actual == "temporary table" => {}
         other => panic!("expected temp unique rejection, got {other:?}"),
+    }
+
+    db.execute(1, "create table parents (id int4 primary key)")
+        .unwrap();
+    match db.execute(
+        1,
+        "create temp table temp_children (id int4, parent_id int4 references parents)",
+    ) {
+        Err(ExecError::Parse(ParseError::UnexpectedToken { expected, actual }))
+            if expected
+                == "permanent table for PRIMARY KEY/UNIQUE/CHECK/FOREIGN KEY constraints"
+                && actual == "temporary table" => {}
+        other => panic!("expected temp foreign-key rejection, got {other:?}"),
     }
 }
 

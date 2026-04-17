@@ -686,6 +686,59 @@ impl CatalogStore {
         Ok(effect)
     }
 
+    pub fn create_foreign_key_constraint_mvcc(
+        &mut self,
+        relation_oid: u32,
+        conname: impl Into<String>,
+        convalidated: bool,
+        local_attnums: &[i16],
+        referenced_relation_oid: u32,
+        referenced_index_oid: u32,
+        referenced_attnums: &[i16],
+        confupdtype: char,
+        confdeltype: char,
+        confmatchtype: char,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let mut catalog = self.catalog_snapshot_with_control_for_snapshot(ctx)?;
+        let constraint = catalog.create_foreign_key_constraint(
+            relation_oid,
+            conname.into(),
+            convalidated,
+            local_attnums,
+            referenced_relation_oid,
+            referenced_index_oid,
+            referenced_attnums,
+            confupdtype,
+            confdeltype,
+            confmatchtype,
+        )?;
+        self.persist_control_state(&catalog)?;
+
+        let rows = PhysicalCatalogRows {
+            constraints: vec![constraint.clone()],
+            depends: catalog
+                .depend_rows()
+                .iter()
+                .filter(|row| row.objid == constraint.oid || row.refobjid == constraint.oid)
+                .cloned()
+                .collect(),
+            ..PhysicalCatalogRows::default()
+        };
+        let kinds = vec![
+            BootstrapCatalogKind::PgConstraint,
+            BootstrapCatalogKind::PgDepend,
+        ];
+        insert_catalog_rows_subset_mvcc(ctx, &rows, 1, &kinds)?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        effect_record_oid(&mut effect.relation_oids, referenced_relation_oid);
+        effect_record_oid(&mut effect.relation_oids, referenced_index_oid);
+        Ok(effect)
+    }
+
     pub fn drop_relation_entry_by_oid_mvcc(
         &mut self,
         relation_oid: u32,
@@ -816,6 +869,43 @@ impl CatalogStore {
         let mut catalog = self.catalog_snapshot_with_control_for_snapshot(ctx)?;
         let (old_row, new_row) =
             catalog.validate_check_constraint(relation_oid, constraint_name)?;
+        self.persist_control_state(&catalog)?;
+
+        let kinds = vec![BootstrapCatalogKind::PgConstraint];
+        delete_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                constraints: vec![old_row],
+                ..PhysicalCatalogRows::default()
+            },
+            1,
+            &kinds,
+        )?;
+        insert_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                constraints: vec![new_row],
+                ..PhysicalCatalogRows::default()
+            },
+            1,
+            &kinds,
+        )?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        Ok(effect)
+    }
+
+    pub fn validate_foreign_key_constraint_mvcc(
+        &mut self,
+        relation_oid: u32,
+        constraint_name: &str,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let mut catalog = self.catalog_snapshot_with_control_for_snapshot(ctx)?;
+        let (old_row, new_row) =
+            catalog.validate_foreign_key_constraint(relation_oid, constraint_name)?;
         self.persist_control_state(&catalog)?;
 
         let kinds = vec![BootstrapCatalogKind::PgConstraint];

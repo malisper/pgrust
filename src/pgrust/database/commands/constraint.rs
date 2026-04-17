@@ -1,13 +1,16 @@
 use super::super::*;
 use crate::backend::commands::tablecmds::collect_matching_rows_heap;
 use crate::backend::executor::{ExecutorContext, eval_expr};
-use crate::backend::parser::BoundCheckConstraint;
+use crate::backend::parser::{
+    BoundCheckConstraint, BoundForeignKeyConstraint, ForeignKeyConstraintAction,
+};
 use crate::include::catalog::{
-    CONSTRAINT_CHECK, CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE,
-    PG_CATALOG_NAMESPACE_OID, PgConstraintRow,
+    CONSTRAINT_CHECK, CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY,
+    CONSTRAINT_UNIQUE, PG_CATALOG_NAMESPACE_OID, PgConstraintRow,
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::TupleSlot;
+use crate::include::nodes::parsenodes::{ForeignKeyAction, ForeignKeyMatchType};
 use crate::pgrust::database::ddl::is_system_column_name;
 
 fn relation_basename(name: &str) -> &str {
@@ -141,6 +144,125 @@ fn validate_check_rows(
     Ok(())
 }
 
+fn foreign_key_action_code(action: ForeignKeyAction) -> char {
+    match action {
+        ForeignKeyAction::NoAction => 'a',
+        ForeignKeyAction::Restrict => 'r',
+        ForeignKeyAction::Cascade => 'c',
+        ForeignKeyAction::SetNull => 'n',
+        ForeignKeyAction::SetDefault => 'd',
+    }
+}
+
+fn foreign_key_match_code(match_type: ForeignKeyMatchType) -> char {
+    match match_type {
+        ForeignKeyMatchType::Simple => 's',
+        ForeignKeyMatchType::Full => 'f',
+        ForeignKeyMatchType::Partial => 'p',
+    }
+}
+
+fn column_attnums_for_names(
+    desc: &crate::backend::executor::RelationDesc,
+    columns: &[String],
+) -> Result<Vec<i16>, ExecError> {
+    columns
+        .iter()
+        .map(|column_name| {
+            desc.columns
+                .iter()
+                .enumerate()
+                .find_map(|(index, column)| {
+                    (!column.dropped && column.name.eq_ignore_ascii_case(column_name))
+                        .then_some(index as i16 + 1)
+                })
+                .ok_or_else(|| ExecError::Parse(ParseError::UnknownColumn(column_name.clone())))
+        })
+        .collect()
+}
+
+fn validate_foreign_key_rows(
+    db: &Database,
+    relation: &crate::backend::parser::BoundRelation,
+    relation_name: &str,
+    action: &ForeignKeyConstraintAction,
+    catalog: &dyn CatalogLookup,
+    client_id: ClientId,
+    xid: TransactionId,
+    cid: CommandId,
+    interrupts: std::sync::Arc<crate::backend::utils::misc::interrupts::InterruptState>,
+) -> Result<(), ExecError> {
+    let referenced_relation = catalog
+        .lookup_relation_by_oid(action.referenced_relation_oid)
+        .ok_or_else(|| {
+            ExecError::Parse(ParseError::UnknownTable(action.referenced_table.clone()))
+        })?;
+    let referenced_index = catalog
+        .index_relations_for_heap(referenced_relation.relation_oid)
+        .into_iter()
+        .find(|index| index.relation_oid == action.referenced_index_oid)
+        .ok_or_else(|| {
+            ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "referenced foreign-key index",
+                actual: format!("missing referenced index {}", action.referenced_index_oid),
+            })
+        })?;
+    let constraint = BoundForeignKeyConstraint {
+        constraint_name: action.constraint_name.clone(),
+        column_names: action.columns.clone(),
+        column_indexes: action
+            .columns
+            .iter()
+            .map(|column_name| {
+                relation
+                    .desc
+                    .columns
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, column)| {
+                        (!column.dropped && column.name.eq_ignore_ascii_case(column_name))
+                            .then_some(index)
+                    })
+                    .ok_or_else(|| ExecError::Parse(ParseError::UnknownColumn(column_name.clone())))
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        referenced_relation_name: action.referenced_table.clone(),
+        referenced_relation_oid: referenced_relation.relation_oid,
+        referenced_rel: referenced_relation.rel,
+        referenced_desc: referenced_relation.desc.clone(),
+        referenced_column_indexes: action
+            .referenced_columns
+            .iter()
+            .map(|column_name| {
+                referenced_relation
+                    .desc
+                    .columns
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, column)| {
+                        (!column.dropped && column.name.eq_ignore_ascii_case(column_name))
+                            .then_some(index)
+                    })
+                    .ok_or_else(|| ExecError::Parse(ParseError::UnknownColumn(column_name.clone())))
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        referenced_index,
+    };
+    let mut ctx = ddl_executor_context(db, catalog, client_id, xid, cid, interrupts)?;
+    let rows =
+        collect_matching_rows_heap(relation.rel, &relation.desc, relation.toast, None, &mut ctx)?;
+    for (_, values) in rows {
+        crate::backend::executor::enforce_outbound_foreign_keys(
+            relation_name,
+            std::slice::from_ref(&constraint),
+            None,
+            &values,
+            &mut ctx,
+        )?;
+    }
+    Ok(())
+}
+
 fn attnums_from_constraint(row: &PgConstraintRow) -> Result<Vec<i16>, ExecError> {
     row.conkey
         .clone()
@@ -226,12 +348,15 @@ impl Database {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
         let relation = lookup_heap_relation_for_ddl(&catalog, &alter_stmt.table_name)?;
-        self.table_locks.lock_table_interruptible(
-            relation.rel,
-            TableLockMode::AccessExclusive,
+        let lock_requests =
+            alter_table_add_constraint_lock_requests(&relation, alter_stmt, &catalog)?;
+        crate::backend::storage::lmgr::lock_table_requests_interruptible(
+            &self.table_locks,
             client_id,
+            &lock_requests,
             interrupts.as_ref(),
         )?;
+        let locked_rels = table_lock_relations(&lock_requests);
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let mut catalog_effects = Vec::new();
@@ -245,7 +370,7 @@ impl Database {
         );
         let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[]);
         guard.disarm();
-        self.table_locks.unlock_table(relation.rel, client_id);
+        unlock_relations(&self.table_locks, client_id, &locked_rels);
         result
     }
 
@@ -266,9 +391,11 @@ impl Database {
         let existing_constraints = catalog.constraint_rows_for_relation(relation.relation_oid);
         let normalized = crate::backend::parser::normalize_alter_table_add_constraint(
             &table_name,
+            relation.relation_oid,
             &relation.desc,
             &existing_constraints,
             &alter_stmt.constraint,
+            &catalog,
         )
         .map_err(ExecError::Parse)?;
 
@@ -502,6 +629,58 @@ impl Database {
                 self.apply_catalog_mutation_effect_immediate(&effect)?;
                 catalog_effects.push(effect);
             }
+            crate::backend::parser::NormalizedAlterTableConstraint::ForeignKey(action) => {
+                if !action.not_valid {
+                    validate_foreign_key_rows(
+                        self,
+                        &relation,
+                        &table_name,
+                        &action,
+                        &catalog,
+                        client_id,
+                        xid,
+                        cid,
+                        std::sync::Arc::clone(&interrupts),
+                    )?;
+                }
+                let referenced_relation = catalog
+                    .lookup_relation_by_oid(action.referenced_relation_oid)
+                    .ok_or_else(|| {
+                        ExecError::Parse(ParseError::UnknownTable(action.referenced_table.clone()))
+                    })?;
+                let local_attnums = column_attnums_for_names(&relation.desc, &action.columns)?;
+                let referenced_attnums = column_attnums_for_names(
+                    &referenced_relation.desc,
+                    &action.referenced_columns,
+                )?;
+                let ctx = CatalogWriteContext {
+                    pool: self.pool.clone(),
+                    txns: self.txns.clone(),
+                    xid,
+                    cid,
+                    client_id,
+                    waiter: None,
+                    interrupts,
+                };
+                let effect = self
+                    .catalog
+                    .write()
+                    .create_foreign_key_constraint_mvcc(
+                        relation.relation_oid,
+                        action.constraint_name,
+                        !action.not_valid,
+                        &local_attnums,
+                        action.referenced_relation_oid,
+                        action.referenced_index_oid,
+                        &referenced_attnums,
+                        foreign_key_action_code(action.on_update),
+                        foreign_key_action_code(action.on_delete),
+                        foreign_key_match_code(action.match_type),
+                        &ctx,
+                    )
+                    .map_err(map_catalog_error)?;
+                catalog_effects.push(effect);
+            }
         }
 
         Ok(StatementResult::AffectedRows(0))
@@ -566,7 +745,7 @@ impl Database {
             })?;
 
         match row.contype {
-            CONSTRAINT_CHECK => {
+            CONSTRAINT_CHECK | CONSTRAINT_FOREIGN => {
                 let ctx = CatalogWriteContext {
                     pool: self.pool.clone(),
                     txns: self.txns.clone(),
@@ -622,6 +801,13 @@ impl Database {
                 catalog_effects.push(effect);
             }
             CONSTRAINT_PRIMARY | CONSTRAINT_UNIQUE => {
+                if row.conindid != 0 {
+                    reject_index_with_referencing_foreign_keys(
+                        &catalog,
+                        row.conindid,
+                        "ALTER TABLE DROP CONSTRAINT on unreferenced key",
+                    )?;
+                }
                 let mut next_cid = cid;
                 if row.contype == CONSTRAINT_PRIMARY {
                     let pk_owned_not_null_oids =
@@ -942,12 +1128,15 @@ impl Database {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
         let relation = lookup_heap_relation_for_ddl(&catalog, &alter_stmt.table_name)?;
-        self.table_locks.lock_table_interruptible(
-            relation.rel,
-            TableLockMode::AccessExclusive,
+        let lock_requests =
+            alter_table_validate_constraint_lock_requests(&relation, alter_stmt, &catalog)?;
+        crate::backend::storage::lmgr::lock_table_requests_interruptible(
+            &self.table_locks,
             client_id,
+            &lock_requests,
             interrupts.as_ref(),
         )?;
+        let locked_rels = table_lock_relations(&lock_requests);
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let mut catalog_effects = Vec::new();
@@ -962,7 +1151,7 @@ impl Database {
             );
         let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[]);
         guard.disarm();
-        self.table_locks.unlock_table(relation.rel, client_id);
+        unlock_relations(&self.table_locks, client_id, &locked_rels);
         result
     }
 
@@ -1065,6 +1254,72 @@ impl Database {
                     .catalog
                     .write()
                     .validate_check_constraint_mvcc(
+                        relation.relation_oid,
+                        &alter_stmt.constraint_name,
+                        &ctx,
+                    )
+                    .map_err(map_catalog_error)?;
+                catalog_effects.push(effect);
+            }
+            CONSTRAINT_FOREIGN => {
+                let constraints = crate::backend::parser::bind_relation_constraints(
+                    Some(relation_basename(&alter_stmt.table_name)),
+                    relation.relation_oid,
+                    &relation.desc,
+                    &catalog,
+                )
+                .map_err(ExecError::Parse)?;
+                let constraint = constraints
+                    .foreign_keys
+                    .into_iter()
+                    .find(|constraint| {
+                        constraint
+                            .constraint_name
+                            .eq_ignore_ascii_case(&row.conname)
+                    })
+                    .ok_or_else(|| {
+                        ExecError::Parse(ParseError::UnexpectedToken {
+                            expected: "bound foreign key constraint",
+                            actual: format!("missing foreign key binding for {}", row.conname),
+                        })
+                    })?;
+                let mut ctx = ddl_executor_context(
+                    self,
+                    &catalog,
+                    client_id,
+                    xid,
+                    cid,
+                    std::sync::Arc::clone(&interrupts),
+                )?;
+                let rows = collect_matching_rows_heap(
+                    relation.rel,
+                    &relation.desc,
+                    relation.toast,
+                    None,
+                    &mut ctx,
+                )?;
+                for (_, values) in rows {
+                    crate::backend::executor::enforce_outbound_foreign_keys(
+                        relation_basename(&alter_stmt.table_name),
+                        std::slice::from_ref(&constraint),
+                        None,
+                        &values,
+                        &mut ctx,
+                    )?;
+                }
+                let ctx = CatalogWriteContext {
+                    pool: self.pool.clone(),
+                    txns: self.txns.clone(),
+                    xid,
+                    cid,
+                    client_id,
+                    waiter: None,
+                    interrupts,
+                };
+                let effect = self
+                    .catalog
+                    .write()
+                    .validate_foreign_key_constraint_mvcc(
                         relation.relation_oid,
                         &alter_stmt.constraint_name,
                         &ctx,
