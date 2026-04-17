@@ -189,6 +189,10 @@ fn execute_statement_with_source(
             expected: "ALTER VIEW OWNER handled by database/session layer",
             actual: "ALTER VIEW OWNER".into(),
         })),
+        Statement::AlterSchemaOwner(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "ALTER SCHEMA OWNER handled by database/session layer",
+            actual: "ALTER SCHEMA OWNER".into(),
+        })),
         Statement::CommentOnTable(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "COMMENT ON TABLE handled by database/session layer",
             actual: "COMMENT ON TABLE".into(),
@@ -197,8 +201,11 @@ fn execute_statement_with_source(
             expected: "COMMENT ON DOMAIN handled by database/session layer",
             actual: "COMMENT ON DOMAIN".into(),
         })),
-        Statement::CommentOnRole(_)
-        | Statement::CreateRole(_)
+        Statement::CommentOnRole(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "COMMENT ON ROLE handled by database/session layer",
+            actual: "COMMENT ON ROLE".into(),
+        })),
+        Statement::CreateRole(_)
         | Statement::AlterRole(_)
         | Statement::DropRole(_)
         | Statement::GrantObject(_)
@@ -291,6 +298,10 @@ pub fn execute_readonly_statement(
             expected: "read-only statement",
             actual: "COMMENT ON DOMAIN".into(),
         })),
+        Statement::CommentOnRole(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "COMMENT ON ROLE".into(),
+        })),
         Statement::CreateIndex(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "CREATE INDEX".into(),
@@ -302,6 +313,10 @@ pub fn execute_readonly_statement(
         Statement::CreateSchema(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "CREATE SCHEMA".into(),
+        })),
+        Statement::AlterSchemaOwner(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "ALTER SCHEMA OWNER".into(),
         })),
         Statement::CreateDomain(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",

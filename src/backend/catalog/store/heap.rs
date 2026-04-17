@@ -19,14 +19,15 @@ use crate::backend::catalog::rows::{
 use crate::backend::catalog::toasting::{ToastCatalogChanges, new_relation_create_toast_table};
 use crate::backend::executor::{ColumnDesc, RelationDesc};
 use crate::include::catalog::{
-    BootstrapCatalogKind, PG_CLASS_RELATION_OID, PgConstraintRow, PgDependRow, PgDescriptionRow,
-    PgNamespaceRow, PgRewriteRow, PgStatisticRow,
+    BootstrapCatalogKind, PG_AUTHID_RELATION_OID, PG_CLASS_RELATION_OID, PgConstraintRow,
+    PgDependRow, PgDescriptionRow, PgNamespaceRow, PgRewriteRow, PgStatisticRow,
 };
 use crate::include::nodes::datum::Value;
 
 use super::{CatalogMutationEffect, CatalogStore, CatalogWriteContext, CreateTableResult};
 
 const PG_DESCRIPTION_O_C_O_INDEX_OID: u32 = 2675;
+const PG_NAMESPACE_OID_INDEX_OID: u32 = 2685;
 const PG_STATISTIC_RELID_ATT_INH_INDEX_OID: u32 = 2696;
 
 impl CatalogStore {
@@ -1442,6 +1443,25 @@ impl CatalogStore {
         comment: Option<&str>,
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
+        self.comment_shared_object_mvcc(relation_oid, PG_CLASS_RELATION_OID, comment, ctx)
+    }
+
+    pub fn comment_role_mvcc(
+        &mut self,
+        role_oid: u32,
+        comment: Option<&str>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        self.comment_shared_object_mvcc(role_oid, PG_AUTHID_RELATION_OID, comment, ctx)
+    }
+
+    fn comment_shared_object_mvcc(
+        &mut self,
+        object_oid: u32,
+        classoid: u32,
+        comment: Option<&str>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
         let snapshot = ctx
             .txns
             .read()
@@ -1457,12 +1477,12 @@ impl CatalogStore {
                 crate::include::access::scankey::ScanKeyData {
                     attribute_number: 1,
                     strategy: crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER,
-                    argument: Value::Int64(i64::from(relation_oid)),
+                    argument: Value::Int64(i64::from(object_oid)),
                 },
                 crate::include::access::scankey::ScanKeyData {
                     attribute_number: 2,
                     strategy: crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER,
-                    argument: Value::Int64(i64::from(PG_CLASS_RELATION_OID)),
+                    argument: Value::Int64(i64::from(classoid)),
                 },
                 crate::include::access::scankey::ScanKeyData {
                     attribute_number: 3,
@@ -1491,8 +1511,8 @@ impl CatalogStore {
                     ctx,
                     &PhysicalCatalogRows {
                         descriptions: vec![PgDescriptionRow {
-                            objoid: relation_oid,
-                            classoid: PG_CLASS_RELATION_OID,
+                            objoid: object_oid,
+                            classoid,
                             objsubid: 0,
                             description: text.to_string(),
                         }],
@@ -1507,8 +1527,8 @@ impl CatalogStore {
                 ctx,
                 &PhysicalCatalogRows {
                     descriptions: vec![PgDescriptionRow {
-                        objoid: relation_oid,
-                        classoid: PG_CLASS_RELATION_OID,
+                        objoid: object_oid,
+                        classoid,
                         objsubid: 0,
                         description: text.to_string(),
                     }],
@@ -1521,7 +1541,66 @@ impl CatalogStore {
 
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &[BootstrapCatalogKind::PgDescription]);
-        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        effect_record_oid(&mut effect.relation_oids, object_oid);
+        Ok(effect)
+    }
+
+    pub fn alter_namespace_owner_mvcc(
+        &mut self,
+        namespace_oid: u32,
+        new_owner_oid: u32,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let snapshot = ctx
+            .txns
+            .read()
+            .snapshot_for_command(ctx.xid, ctx.cid)
+            .map_err(|e| CatalogError::Io(format!("catalog snapshot failed: {e:?}")))?;
+        let existing = probe_system_catalog_rows_visible(
+            &ctx.pool,
+            &ctx.txns,
+            &snapshot,
+            ctx.client_id,
+            PG_NAMESPACE_OID_INDEX_OID,
+            vec![crate::include::access::scankey::ScanKeyData {
+                attribute_number: 1,
+                strategy: crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER,
+                argument: Value::Int64(i64::from(namespace_oid)),
+            }],
+        )?
+        .into_iter()
+        .map(crate::backend::catalog::rowcodec::namespace_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?;
+        let existing_row = existing
+            .first()
+            .cloned()
+            .ok_or_else(|| CatalogError::UnknownTable(namespace_oid.to_string()))?;
+
+        delete_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                namespaces: vec![existing_row.clone()],
+                ..PhysicalCatalogRows::default()
+            },
+            1,
+            &[BootstrapCatalogKind::PgNamespace],
+        )?;
+        insert_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                namespaces: vec![PgNamespaceRow {
+                    nspowner: new_owner_oid,
+                    ..existing_row
+                }],
+                ..PhysicalCatalogRows::default()
+            },
+            1,
+            &[BootstrapCatalogKind::PgNamespace],
+        )?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &[BootstrapCatalogKind::PgNamespace]);
+        effect_record_oid(&mut effect.namespace_oids, namespace_oid);
         Ok(effect)
     }
 }

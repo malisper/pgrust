@@ -1019,6 +1019,25 @@ fn parse_create_role_membership_options() {
 }
 
 #[test]
+fn parse_multiline_create_role_membership_options() {
+    let stmt = parse_statement(
+        "create role regress_inroles role\n\tregress_createdb, regress_login\nadmin regress_role_super",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateRole(CreateRoleStatement {
+            role_name: "regress_inroles".into(),
+            is_user: false,
+            options: vec![
+                RoleOption::Role(vec!["regress_createdb".into(), "regress_login".into()]),
+                RoleOption::Admin(vec!["regress_role_super".into()]),
+            ],
+        })
+    );
+}
+
+#[test]
 fn parse_alter_role_rename_statement() {
     let stmt = parse_statement("alter role regress_hasprivs rename to regress_tenant").unwrap();
     assert_eq!(
@@ -1045,6 +1064,18 @@ fn parse_alter_role_option_statement() {
                 RoleOption::Login(false),
                 RoleOption::ConnectionLimit(7),
             ]),
+        })
+    );
+}
+
+#[test]
+fn parse_alter_schema_owner_statement() {
+    let stmt = parse_statement("alter schema tenant owner to app_owner").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterSchemaOwner(AlterSchemaOwnerStatement {
+            schema_name: "tenant".into(),
+            new_owner: "app_owner".into(),
         })
     );
 }
