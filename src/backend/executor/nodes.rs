@@ -10,6 +10,7 @@ use crate::backend::executor::srf::{
     eval_scalar_set_returning_call, eval_set_returning_call, set_returning_call_label,
 };
 use crate::backend::executor::value_io::{decode_value_with_toast, missing_column_value};
+use crate::backend::executor::window::execute_window_clause;
 use crate::backend::utils::time::instant::Instant;
 use crate::include::catalog::builtin_aggregate_function_for_proc_oid;
 use crate::include::nodes::datum::Value;
@@ -17,8 +18,8 @@ use crate::include::nodes::execnodes::{
     AggregateState, AppendState, CteScanState, FilterState, FunctionScanState, IndexScanState,
     LimitState, MaterializedRow, NestedLoopJoinState, NodeExecStats, OrderByState, PlanNode,
     PlanState, ProjectSetState, ProjectionState, RecursiveUnionState, ResultState, SeqScanState,
-    SetOpState, SlotKind, SubqueryScanState, SystemVarBinding, ToastRelationRef, TupleSlot, ValuesState,
-    WorkTableScanState,
+    SetOpState, SlotKind, SubqueryScanState, SystemVarBinding, ToastRelationRef, TupleSlot,
+    ValuesState, WindowAggState, WorkTableScanState,
 };
 use crate::include::nodes::primnodes::{
     Expr, INDEX_VAR, INNER_VAR, JoinType, OUTER_VAR, Var, attrno_index,
@@ -1756,6 +1757,101 @@ impl PlanNode for AggregateState {
     fn node_label(&self) -> String {
         "Aggregate".into()
     }
+    fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
+        format_explain_lines(&*self.input, indent + 1, analyze, lines);
+    }
+}
+
+impl PlanNode for WindowAggState {
+    fn exec_proc_node<'a>(
+        &'a mut self,
+        ctx: &mut ExecutorContext,
+    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        let start = if ctx.timed {
+            Some(Instant::now())
+        } else {
+            None
+        };
+        begin_node(&mut self.stats, ctx);
+        if self.result_rows.is_none() {
+            let mut input_rows = Vec::new();
+            while self.input.exec_proc_node(ctx)?.is_some() {
+                ctx.check_for_interrupts()?;
+                input_rows.push(self.input.materialize_current_row()?);
+            }
+            self.result_rows = Some(execute_window_clause(ctx, &self.clause, input_rows)?);
+        }
+
+        let rows = self.result_rows.as_mut().unwrap();
+        if self.next_index >= rows.len() {
+            finish_eof(&mut self.stats, start, ctx);
+            return Ok(None);
+        }
+
+        let idx = self.next_index;
+        self.next_index += 1;
+        self.current_bindings = rows[idx].system_bindings.clone();
+        set_active_system_bindings(ctx, &self.current_bindings);
+        finish_row(&mut self.stats, start);
+        Ok(Some(&mut rows[idx].slot))
+    }
+
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
+        let rows = self.result_rows.as_mut()?;
+        let idx = self.next_index.checked_sub(1)?;
+        rows.get_mut(idx).map(|row| &mut row.slot)
+    }
+
+    fn current_system_bindings(&self) -> &[SystemVarBinding] {
+        &self.current_bindings
+    }
+
+    fn column_names(&self) -> &[String] {
+        &self.output_columns
+    }
+
+    fn node_stats(&self) -> &NodeExecStats {
+        &self.stats
+    }
+
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
+        &mut self.stats
+    }
+
+    fn plan_info(&self) -> crate::include::nodes::plannodes::PlanEstimate {
+        self.plan_info
+    }
+
+    fn node_label(&self) -> String {
+        "WindowAgg".into()
+    }
+
+    fn explain_details(&self, indent: usize, _analyze: bool, lines: &mut Vec<String>) {
+        let prefix = "  ".repeat(indent + 1);
+        if !self.clause.spec.partition_by.is_empty() {
+            let partition_by = self
+                .clause
+                .spec
+                .partition_by
+                .iter()
+                .map(|expr| render_explain_expr(expr, self.input.column_names()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            lines.push(format!("{prefix}Partition By: {partition_by}"));
+        }
+        if !self.clause.spec.order_by.is_empty() {
+            let order_by = self
+                .clause
+                .spec
+                .order_by
+                .iter()
+                .map(|item| render_explain_expr(&item.expr, self.input.column_names()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            lines.push(format!("{prefix}Order By: {order_by}"));
+        }
+    }
+
     fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
         format_explain_lines(&*self.input, indent + 1, analyze, lines);
     }

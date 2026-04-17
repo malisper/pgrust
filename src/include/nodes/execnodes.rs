@@ -23,7 +23,7 @@ pub use crate::include::nodes::plannodes::Plan;
 pub use crate::include::nodes::primnodes::{
     AggAccum, AggFunc, BuiltinScalarFunction, ColumnDesc, Expr, JoinType, JsonTableFunction,
     OrderByEntry, ProjectSetTarget, QueryColumn, RelationDesc, ScalarType, SetReturningCall,
-    TargetEntry, ToastRelationRef,
+    TargetEntry, ToastRelationRef, WindowClause,
 };
 
 pub struct TupleSlot {
@@ -466,6 +466,18 @@ pub struct AggregateState {
     /// Compiled transition functions resolved at plan time, like PG's
     /// aggregate transfn pointers. Avoids per-tuple enum dispatch.
     pub(crate) trans_fns: Vec<fn(&mut AccumState, &[Value])>,
+    pub(crate) current_bindings: Vec<SystemVarBinding>,
+    pub(crate) plan_info: PlanEstimate,
+    pub(crate) stats: NodeExecStats,
+}
+
+#[derive(Debug)]
+pub struct WindowAggState {
+    pub(crate) input: PlanState,
+    pub(crate) clause: WindowClause,
+    pub(crate) output_columns: Vec<String>,
+    pub(crate) result_rows: Option<Vec<MaterializedRow>>,
+    pub(crate) next_index: usize,
     pub(crate) current_bindings: Vec<SystemVarBinding>,
     pub(crate) plan_info: PlanEstimate,
     pub(crate) stats: NodeExecStats,

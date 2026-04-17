@@ -8004,6 +8004,127 @@ fn explain_shows_aggregate_node() {
         other => panic!("expected query result, got {:?}", other),
     }
 }
+
+#[test]
+fn window_builtin_functions_handle_peer_groups() {
+    let base = temp_dir("window_builtin_peer_groups");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let xid = txns.begin();
+    run_sql(
+        &base,
+        &txns,
+        xid,
+        "insert into people (id, name, note) values
+            (1, 'alice', 'x'),
+            (2, 'bob', 'x'),
+            (3, 'carol', 'y'),
+            (4, 'dave', 'x')",
+    )
+    .unwrap();
+    txns.commit(xid).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select id,
+                row_number() over (order by note, id),
+                rank() over (order by note),
+                dense_rank() over (order by note)
+         from people
+         order by id",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(1), Value::Int64(1), Value::Int64(1), Value::Int64(1)],
+                    vec![Value::Int32(2), Value::Int64(2), Value::Int64(1), Value::Int64(1)],
+                    vec![Value::Int32(3), Value::Int64(4), Value::Int64(4), Value::Int64(2)],
+                    vec![Value::Int32(4), Value::Int64(3), Value::Int64(1), Value::Int64(1)],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn window_aggregate_supports_partitioning_and_running_totals() {
+    let base = temp_dir("window_partition_running_sum");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let xid = txns.begin();
+    run_sql(
+        &base,
+        &txns,
+        xid,
+        "insert into people (id, name, note) values
+            (1, 'alice', 'x'),
+            (2, 'bob', 'x'),
+            (3, 'carol', 'y'),
+            (4, 'dave', 'x')",
+    )
+    .unwrap();
+    txns.commit(xid).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select id,
+                count(*) over (),
+                sum(id) over (partition by note order by id),
+                sum(id) over (order by note)
+         from people
+         order by id",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(1), Value::Int64(4), Value::Int64(1), Value::Int64(7)],
+                    vec![Value::Int32(2), Value::Int64(4), Value::Int64(3), Value::Int64(7)],
+                    vec![Value::Int32(3), Value::Int64(4), Value::Int64(3), Value::Int64(10)],
+                    vec![Value::Int32(4), Value::Int64(4), Value::Int64(7), Value::Int64(7)],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn explain_shows_windowagg_node_details() {
+    let base = temp_dir("explain_windowagg");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "explain select row_number() over (partition by note order by id) from people",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            let rendered = rows
+                .into_iter()
+                .map(|row| match &row[0] {
+                    Value::Text(text) => text.clone(),
+                    other => panic!("expected text, got {:?}", other),
+                })
+                .collect::<Vec<_>>();
+            assert!(rendered.iter().any(|line| line.contains("WindowAgg")));
+            assert!(rendered.iter().any(|line| line.contains("Partition By:")));
+            assert!(rendered.iter().any(|line| line.contains("Order By:")));
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
 #[test]
 fn group_by_with_order_by_and_limit() {
     let base = temp_dir("group_by_order_limit");

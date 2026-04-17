@@ -550,6 +550,18 @@ fn collect_expr_relids(expr: &Expr, relids: &mut Vec<usize>) {
                 collect_expr_relids(filter, relids);
             }
         }
+        Expr::WindowFunc(window_func) => {
+            for arg in &window_func.args {
+                collect_expr_relids(arg, relids);
+            }
+            if let crate::include::nodes::primnodes::WindowFuncKind::Aggregate(aggref) =
+                &window_func.kind
+            {
+                if let Some(filter) = aggref.aggfilter.as_ref() {
+                    collect_expr_relids(filter, relids);
+                }
+            }
+        }
         Expr::Op(op) => {
             for arg in &op.args {
                 collect_expr_relids(arg, relids);
@@ -682,6 +694,7 @@ mod tests {
             where_qual: None,
             group_by: Vec::new(),
             accumulators: Vec::new(),
+            window_clauses: Vec::new(),
             having_qual: None,
             sort_clause: Vec::new(),
             limit_count: None,

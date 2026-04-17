@@ -239,6 +239,7 @@ fn classify_select_target_srf(
             name,
             args,
             func_variadic,
+            ..
         } if func_call_is_set_returning(
             name,
             args,
@@ -284,6 +285,7 @@ fn top_level_set_returning_call(
             name,
             args,
             func_variadic,
+            ..
         } if func_call_is_set_returning(
             name,
             args,
@@ -315,6 +317,7 @@ fn visit_nested_srfs(
             name,
             args,
             func_variadic,
+            ..
         } => {
             if func_call_is_set_returning(
                 name,

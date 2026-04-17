@@ -305,6 +305,14 @@ fn planned_stmt_for_sql(sql: &str) -> crate::include::nodes::plannodes::PlannedS
     super::planner(query, &catalog)
 }
 
+fn planned_stmt_for_values_sql(sql: &str) -> crate::include::nodes::plannodes::PlannedStmt {
+    let catalog = LiteralDefaultCatalog;
+    let stmt = parse_select(sql).expect("parse");
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog, &[], None, &[], &[]).expect("analyze");
+    super::planner(query, &catalog)
+}
+
 fn plan_contains(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> bool {
     if predicate(plan) {
         return true;
@@ -325,6 +333,7 @@ fn plan_contains(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> bool 
         | Plan::OrderBy { input, .. }
         | Plan::Limit { input, .. }
         | Plan::Aggregate { input, .. }
+        | Plan::WindowAgg { input, .. }
         | Plan::ProjectSet { input, .. }
         | Plan::SubqueryScan { input, .. }
         | Plan::CteScan {
@@ -338,6 +347,40 @@ fn plan_contains(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> bool 
             ..
         } => plan_contains(left, predicate) || plan_contains(right, predicate),
     }
+}
+
+fn count_plan_nodes(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> usize {
+    let here = usize::from(predicate(plan));
+    here
+        + match plan {
+            Plan::Result { .. }
+            | Plan::SeqScan { .. }
+            | Plan::IndexScan { .. }
+            | Plan::Values { .. }
+            | Plan::FunctionScan { .. }
+            | Plan::WorkTableScan { .. } => 0,
+            Plan::Append { children, .. } | Plan::SetOp { children, .. } => children
+                .iter()
+                .map(|child| count_plan_nodes(child, predicate))
+                .sum(),
+            Plan::Hash { input, .. }
+            | Plan::Filter { input, .. }
+            | Plan::Projection { input, .. }
+            | Plan::OrderBy { input, .. }
+            | Plan::Limit { input, .. }
+            | Plan::Aggregate { input, .. }
+            | Plan::WindowAgg { input, .. }
+            | Plan::ProjectSet { input, .. }
+            | Plan::SubqueryScan { input, .. }
+            | Plan::CteScan { cte_plan: input, .. } => count_plan_nodes(input, predicate),
+            Plan::NestedLoopJoin { left, right, .. }
+            | Plan::HashJoin { left, right, .. }
+            | Plan::RecursiveUnion {
+                anchor: left,
+                recursive: right,
+                ..
+            } => count_plan_nodes(left, predicate) + count_plan_nodes(right, predicate),
+        }
 }
 
 fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
@@ -391,6 +434,51 @@ from (values (1),(2)) v1(r1)
             } if !nest_params.is_empty()
         )
     }));
+}
+
+#[test]
+fn planned_window_query_uses_projection_windowagg_orderby() {
+    let planned =
+        planned_stmt_for_values_sql("select row_number() over (order by x) from (values (1), (2)) as t(x)");
+    match planned.plan_tree {
+        Plan::Projection { input, .. } => match *input {
+            Plan::WindowAgg { input, .. } => assert!(matches!(*input, Plan::OrderBy { .. })),
+            other => panic!("expected WindowAgg below projection, got {other:?}"),
+        },
+        other => panic!("expected final projection, got {other:?}"),
+    }
+}
+
+#[test]
+fn planned_grouped_window_query_keeps_aggregate_below_windowagg() {
+    let planned = planned_stmt_for_values_sql(
+        "select x, sum(count(*)) over () from (values (1), (2)) as t(x) group by x order by x",
+    );
+    assert!(plan_contains(&planned.plan_tree, |plan| matches!(plan, Plan::Aggregate { .. })));
+    assert!(plan_contains(&planned.plan_tree, |plan| matches!(plan, Plan::WindowAgg { .. })));
+    match planned.plan_tree {
+        Plan::Projection { input, .. } => match *input {
+            Plan::OrderBy { input, .. } => match *input {
+                Plan::WindowAgg { input, .. } => {
+                    assert!(plan_contains(&input, |plan| matches!(plan, Plan::Aggregate { .. })));
+                }
+                other => panic!("expected WindowAgg under final order by, got {other:?}"),
+            },
+            other => panic!("expected final order by, got {other:?}"),
+        },
+        other => panic!("expected final projection, got {other:?}"),
+    }
+}
+
+#[test]
+fn planned_distinct_window_specs_stack_windowagg_nodes() {
+    let planned = planned_stmt_for_values_sql(
+        "select row_number() over (order by x), rank() over (partition by x order by x) from (values (1), (2)) as t(x)",
+    );
+    assert_eq!(
+        count_plan_nodes(&planned.plan_tree, |plan| matches!(plan, Plan::WindowAgg { .. })),
+        2
+    );
 }
 
 #[test]
@@ -751,7 +839,8 @@ fn planned_lockstep_project_set_keeps_both_visible_targets_as_sets() {
             | Plan::Projection { input, .. }
             | Plan::OrderBy { input, .. }
             | Plan::Limit { input, .. }
-            | Plan::Aggregate { input, .. } => find_project_set(input),
+            | Plan::Aggregate { input, .. }
+            | Plan::WindowAgg { input, .. } => find_project_set(input),
             Plan::Append { children, .. } | Plan::SetOp { children, .. } => {
                 children.iter().find_map(find_project_set)
             }

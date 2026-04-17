@@ -2,7 +2,8 @@ use crate::RelFileLocator;
 use crate::backend::parser::{SqlType, SqlTypeKind, SubqueryComparisonOp};
 use crate::include::access::htup::AttributeDesc;
 use crate::include::catalog::{
-    RECORD_TYPE_OID, builtin_scalar_function_for_proc_oid, proc_oid_for_builtin_scalar_function,
+    RECORD_TYPE_OID, builtin_scalar_function_for_proc_oid, builtin_window_function_for_proc_oid,
+    proc_oid_for_builtin_scalar_function, proc_oid_for_builtin_window_function,
     sql_type_for_range_kind,
 };
 use crate::include::nodes::datum::{RangeTypeId, Value};
@@ -199,6 +200,23 @@ impl AggFunc {
             AggFunc::JsonObjectAgg => "json_object_agg",
             AggFunc::JsonbObjectAgg => "jsonb_object_agg",
             AggFunc::RangeIntersectAgg => "range_intersect_agg",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinWindowFunction {
+    RowNumber,
+    Rank,
+    DenseRank,
+}
+
+impl BuiltinWindowFunction {
+    pub fn name(&self) -> &'static str {
+        match self {
+            BuiltinWindowFunction::RowNumber => "row_number",
+            BuiltinWindowFunction::Rank => "rank",
+            BuiltinWindowFunction::DenseRank => "dense_rank",
         }
     }
 }
@@ -579,6 +597,33 @@ pub struct Aggref {
     pub aggno: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowSpec {
+    pub partition_by: Vec<Expr>,
+    pub order_by: Vec<OrderByEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WindowFuncKind {
+    Aggregate(Aggref),
+    Builtin(BuiltinWindowFunction),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowFuncExpr {
+    pub kind: WindowFuncKind,
+    pub winref: usize,
+    pub winno: usize,
+    pub args: Vec<Expr>,
+    pub result_type: SqlType,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowClause {
+    pub spec: WindowSpec,
+    pub functions: Vec<WindowFuncExpr>,
+}
+
 pub type AttrNumber = i32;
 
 pub const SELF_ITEM_POINTER_ATTR_NO: AttrNumber = -1;
@@ -773,6 +818,7 @@ pub enum Expr {
     Param(Param),
     Const(Value),
     Aggref(Box<Aggref>),
+    WindowFunc(Box<WindowFuncExpr>),
     Op(Box<OpExpr>),
     Bool(Box<BoolExpr>),
     Case(Box<CaseExpr>),
@@ -946,6 +992,22 @@ impl Expr {
         }))
     }
 
+    pub fn window_func(
+        kind: WindowFuncKind,
+        winref: usize,
+        winno: usize,
+        args: Vec<Expr>,
+        result_type: SqlType,
+    ) -> Self {
+        Expr::WindowFunc(Box::new(WindowFuncExpr {
+            kind,
+            winref,
+            winno,
+            args,
+            result_type,
+        }))
+    }
+
     pub fn builtin_func(
         func: BuiltinScalarFunction,
         funcresulttype: Option<SqlType>,
@@ -1002,6 +1064,27 @@ impl Expr {
         )
     }
 
+    pub fn builtin_window_func(
+        func: BuiltinWindowFunction,
+        winref: usize,
+        winno: usize,
+        args: Vec<Expr>,
+        result_type: SqlType,
+    ) -> Self {
+        let proc_oid = proc_oid_for_builtin_window_function(func).unwrap_or_else(|| {
+            panic!("builtin window function {:?} lacks pg_proc OID mapping", func)
+        });
+        Self::window_func(
+            WindowFuncKind::Builtin(
+                builtin_window_function_for_proc_oid(proc_oid).unwrap_or(func),
+            ),
+            winref,
+            winno,
+            args,
+            result_type,
+        )
+    }
+
     pub fn scalar_array_op(
         op: SubqueryComparisonOp,
         use_or: bool,
@@ -1033,6 +1116,7 @@ fn expr_sql_type_hint(expr: &Expr) -> Option<SqlType> {
         Expr::Param(param) => Some(param.paramtype),
         Expr::Const(value) => value_sql_type_hint(value),
         Expr::Aggref(aggref) => Some(aggref.aggtype),
+        Expr::WindowFunc(window_func) => Some(window_func.result_type),
         Expr::Cast(_, ty) => Some(*ty),
         Expr::ArrayLiteral { array_type, .. } => Some(*array_type),
         Expr::Row { .. } => Some(SqlType::record(RECORD_TYPE_OID)),

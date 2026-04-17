@@ -1297,6 +1297,9 @@ fn reject_unsupported_check_expr(expr: &Expr) -> Result<(), ParseError> {
         Expr::Aggref(_) => Err(ParseError::FeatureNotSupported(
             "aggregate functions in CHECK constraints".into(),
         )),
+        Expr::WindowFunc(_) => Err(ParseError::FeatureNotSupported(
+            "window functions in CHECK constraints".into(),
+        )),
         Expr::SubLink(_) | Expr::SubPlan(_) => Err(ParseError::FeatureNotSupported(
             "subqueries in CHECK constraints".into(),
         )),

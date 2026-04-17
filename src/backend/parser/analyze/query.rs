@@ -343,6 +343,7 @@ pub(super) fn query_from_from_projection(input: AnalyzedFrom, targets: Vec<Targe
         where_qual: None,
         group_by: Vec::new(),
         accumulators: Vec::new(),
+        window_clauses: Vec::new(),
         having_qual: None,
         sort_clause: Vec::new(),
         limit_count: None,
@@ -437,6 +438,31 @@ pub(super) fn shift_expr_rtindexes(expr: Expr, offset: usize) -> Expr {
                 .map(|expr| shift_expr_rtindexes(expr, offset)),
             ..*aggref
         })),
+        Expr::WindowFunc(window_func) => Expr::WindowFunc(Box::new(
+            crate::include::nodes::primnodes::WindowFuncExpr {
+                kind: match window_func.kind {
+                    crate::include::nodes::primnodes::WindowFuncKind::Aggregate(aggref) => {
+                        crate::include::nodes::primnodes::WindowFuncKind::Aggregate(
+                            match shift_expr_rtindexes(Expr::Aggref(Box::new(aggref)), offset) {
+                                Expr::Aggref(aggref) => *aggref,
+                                other => unreachable!(
+                                    "window aggregate shift returned non-Aggref: {other:?}"
+                                ),
+                            },
+                        )
+                    }
+                    crate::include::nodes::primnodes::WindowFuncKind::Builtin(kind) => {
+                        crate::include::nodes::primnodes::WindowFuncKind::Builtin(kind)
+                    }
+                },
+                args: window_func
+                    .args
+                    .into_iter()
+                    .map(|arg| shift_expr_rtindexes(arg, offset))
+                    .collect(),
+                ..*window_func
+            },
+        )),
         Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(ScalarArrayOpExpr {
             left: Box::new(shift_expr_rtindexes(*saop.left, offset)),
             right: Box::new(shift_expr_rtindexes(*saop.right, offset)),
@@ -639,6 +665,37 @@ pub(super) fn rewrite_local_vars_for_output_exprs(
                 }),
             ..*aggref
         })),
+        Expr::WindowFunc(window_func) => Expr::WindowFunc(Box::new(
+            crate::include::nodes::primnodes::WindowFuncExpr {
+                kind: match window_func.kind {
+                    crate::include::nodes::primnodes::WindowFuncKind::Aggregate(aggref) => {
+                        crate::include::nodes::primnodes::WindowFuncKind::Aggregate(
+                            match rewrite_local_vars_for_output_exprs(
+                                Expr::Aggref(Box::new(aggref)),
+                                source_varno,
+                                output_exprs,
+                            ) {
+                                Expr::Aggref(aggref) => *aggref,
+                                other => unreachable!(
+                                    "window aggregate rewrite returned non-Aggref: {other:?}"
+                                ),
+                            },
+                        )
+                    }
+                    crate::include::nodes::primnodes::WindowFuncKind::Builtin(kind) => {
+                        crate::include::nodes::primnodes::WindowFuncKind::Builtin(kind)
+                    }
+                },
+                args: window_func
+                    .args
+                    .into_iter()
+                    .map(|arg| {
+                        rewrite_local_vars_for_output_exprs(arg, source_varno, output_exprs)
+                    })
+                    .collect(),
+                ..*window_func
+            },
+        )),
         Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(ScalarArrayOpExpr {
             left: Box::new(rewrite_local_vars_for_output_exprs(
                 *saop.left,

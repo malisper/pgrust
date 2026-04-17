@@ -4,7 +4,7 @@ use super::*;
 use crate::include::catalog::builtin_range_spec_for_sql_type;
 use crate::include::nodes::primnodes::{
     BoolExprType, CaseExpr as BoundCaseExpr, CaseTestExpr as BoundCaseTestExpr,
-    CaseWhen as BoundCaseWhen, ExprArraySubscript, OpExprKind,
+    CaseWhen as BoundCaseWhen, ExprArraySubscript, OpExprKind, WindowFuncKind,
 };
 
 mod func;
@@ -195,6 +195,197 @@ pub(super) fn raise_expr_varlevels(expr: Expr, levels: usize) -> Expr {
         },
         other => other,
     }
+}
+
+fn current_window_state_or_error() -> Result<std::rc::Rc<std::cell::RefCell<WindowBindingState>>, ParseError> {
+    match current_window_state() {
+        Some(state) if windows_allowed() => Ok(state),
+        Some(_) => Err(nested_window_error()),
+        None => Err(window_not_allowed_error()),
+    }
+}
+
+fn bind_window_agg_call(
+    func: AggFunc,
+    args: &[SqlFunctionArg],
+    distinct: bool,
+    func_variadic: bool,
+    filter: Option<&SqlExpr>,
+    over: &RawWindowSpec,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Expr, ParseError> {
+    let state = current_window_state_or_error()?;
+    if aggregate_args_are_named(args) {
+        return Err(ParseError::UnexpectedToken {
+            expected: "aggregate arguments without names",
+            actual: func.name().into(),
+        });
+    }
+    let arg_values = args.iter().map(|arg| arg.value.clone()).collect::<Vec<_>>();
+    validate_aggregate_arity(func, &arg_values)?;
+    let arg_types = arg_values
+        .iter()
+        .map(|expr| {
+            infer_sql_expr_type_with_ctes(expr, scope, catalog, outer_scopes, grouped_outer, ctes)
+        })
+        .collect::<Vec<_>>();
+    let resolved = resolve_aggregate_call(catalog, func, &arg_types, func_variadic);
+    let bound_args = arg_values
+        .iter()
+        .map(|expr| {
+            with_windows_disallowed(|| {
+                bind_expr_with_outer_and_ctes(
+                    expr,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let coerced_args = if let Some(resolved) = &resolved {
+        bound_args
+            .into_iter()
+            .zip(arg_types.iter().copied())
+            .zip(resolved.declared_arg_types.iter().copied())
+            .map(|((arg, actual_type), declared_type)| {
+                coerce_bound_expr(arg, actual_type, declared_type)
+            })
+            .collect()
+    } else {
+        bound_args
+    };
+    let bound_filter = filter
+        .map(|expr| {
+            with_windows_disallowed(|| {
+                bind_expr_with_outer_and_ctes(
+                    expr,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )
+            })
+        })
+        .transpose()?;
+    let spec = bind_window_spec(over, |expr| {
+        bind_expr_with_outer_and_ctes(expr, scope, catalog, outer_scopes, grouped_outer, ctes)
+    })?;
+    let kind = WindowFuncKind::Aggregate(crate::include::nodes::primnodes::Aggref {
+        aggfnoid: resolved
+            .as_ref()
+            .map(|call| call.proc_oid)
+            .or_else(|| proc_oid_for_builtin_aggregate_function(func))
+            .unwrap_or(0),
+        aggtype: aggregate_sql_type(func, arg_types.first().copied()),
+        aggvariadic: resolved
+            .as_ref()
+            .map(|call| call.func_variadic)
+            .unwrap_or(func_variadic),
+        aggdistinct: distinct,
+        args: coerced_args.clone(),
+        aggfilter: bound_filter,
+        agglevelsup: 0,
+        aggno: 0,
+    });
+    Ok(register_window_expr(
+        &state,
+        spec,
+        kind,
+        coerced_args,
+        aggregate_sql_type(func, arg_types.first().copied()),
+    ))
+}
+
+fn bind_window_func_call(
+    name: &str,
+    args: &[SqlFunctionArg],
+    func_variadic: bool,
+    over: &RawWindowSpec,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Expr, ParseError> {
+    let state = current_window_state_or_error()?;
+    let actual_types = args
+        .iter()
+        .map(|arg| {
+            infer_sql_expr_type_with_ctes(
+                &arg.value,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )
+        })
+        .collect::<Vec<_>>();
+    let resolved = resolve_function_call(catalog, name, &actual_types, func_variadic)?;
+    if resolved.proretset || !matches!(resolved.prokind, 'w' | 'a') {
+        return Err(ParseError::UnexpectedToken {
+            expected: "window or aggregate function",
+            actual: name.to_string(),
+        });
+    }
+    let spec = bind_window_spec(over, |expr| {
+        bind_expr_with_outer_and_ctes(expr, scope, catalog, outer_scopes, grouped_outer, ctes)
+    })?;
+    if let Some(window_impl) = resolved.window_impl {
+        if args.iter().any(|arg| arg.name.is_some()) {
+            return Err(ParseError::FeatureNotSupported(
+                "named arguments are not supported for window functions".into(),
+            ));
+        }
+        let bound_args = args
+            .iter()
+            .map(|arg| {
+                with_windows_disallowed(|| {
+                    bind_expr_with_outer_and_ctes(
+                        &arg.value,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        return Ok(register_window_expr(
+            &state,
+            spec,
+            WindowFuncKind::Builtin(window_impl),
+            bound_args,
+            resolved.result_type,
+        ));
+    }
+    if let Some(agg_impl) = resolved.agg_impl {
+        return bind_window_agg_call(
+            agg_impl,
+            args,
+            false,
+            resolved.func_variadic,
+            None,
+            over,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        );
+    }
+    Err(ParseError::FeatureNotSupported(format!(
+        "window function {name}"
+    )))
 }
 
 pub(crate) fn bind_expr_with_outer_and_ctes(
@@ -1291,7 +1482,29 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 Expr::op_auto(OpExprKind::ArrayOverlap, vec![left_expr, right_expr])
             }
         }
-        SqlExpr::AggCall { .. } => {
+        SqlExpr::AggCall {
+            func,
+            args,
+            distinct,
+            func_variadic,
+            filter,
+            over,
+        } => {
+            if let Some(raw_over) = over {
+                return bind_window_agg_call(
+                    *func,
+                    args,
+                    *distinct,
+                    *func_variadic,
+                    filter.as_deref(),
+                    raw_over,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                );
+            }
             return Err(ParseError::UnexpectedToken {
                 expected: "non-aggregate expression",
                 actual: "aggregate function".into(),
@@ -1489,7 +1702,21 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             name,
             args,
             func_variadic,
+            over,
         } => {
+            if let Some(raw_over) = over {
+                return bind_window_func_call(
+                    name,
+                    args,
+                    *func_variadic,
+                    raw_over,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                );
+            }
             if name.eq_ignore_ascii_case("row_to_json") {
                 return bind_row_to_json_call(
                     name,
@@ -1551,6 +1778,9 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             if let Ok(resolved) =
                 resolve_function_call(catalog, name, &actual_types, *func_variadic)
             {
+                if resolved.window_impl.is_some() {
+                    return Err(window_function_requires_over_error(name));
+                }
                 if resolved.prokind != 'f' || resolved.proretset {
                     return Err(ParseError::UnexpectedToken {
                         expected: "supported scalar function",

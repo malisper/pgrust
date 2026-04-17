@@ -3,7 +3,7 @@ use crate::backend::parser::{CatalogLookup, ParseError};
 use crate::include::nodes::parsenodes::{Query, RangeTblEntry, RangeTblEntryKind};
 use crate::include::nodes::primnodes::{
     AggAccum, Expr, ExprArraySubscript, ProjectSetTarget, SetReturningCall, SortGroupClause,
-    SubLink, TargetEntry,
+    SubLink, TargetEntry, WindowClause, WindowFuncExpr, WindowFuncKind, WindowSpec,
 };
 
 pub(crate) fn pg_rewrite_query(
@@ -37,6 +37,11 @@ fn rewrite_query(
             .accumulators
             .into_iter()
             .map(|accum| rewrite_agg_accum(accum, catalog, expanded_views))
+            .collect::<Result<Vec<_>, _>>()?,
+        window_clauses: query
+            .window_clauses
+            .into_iter()
+            .map(|clause| rewrite_window_clause(clause, catalog, expanded_views))
             .collect::<Result<Vec<_>, _>>()?,
         having_qual: query
             .having_qual
@@ -186,6 +191,64 @@ fn rewrite_sort_group_clause(
     Ok(SortGroupClause {
         expr: rewrite_semantic_expr(clause.expr, catalog, expanded_views)?,
         ..clause
+    })
+}
+
+fn rewrite_window_clause(
+    clause: WindowClause,
+    catalog: &dyn CatalogLookup,
+    expanded_views: &[u32],
+) -> Result<WindowClause, ParseError> {
+    Ok(WindowClause {
+        spec: WindowSpec {
+            partition_by: clause
+                .spec
+                .partition_by
+                .into_iter()
+                .map(|expr| rewrite_semantic_expr(expr, catalog, expanded_views))
+                .collect::<Result<Vec<_>, _>>()?,
+            order_by: clause
+                .spec
+                .order_by
+                .into_iter()
+                .map(|item| {
+                    Ok(crate::include::nodes::primnodes::OrderByEntry {
+                        expr: rewrite_semantic_expr(item.expr, catalog, expanded_views)?,
+                        ..item
+                    })
+                })
+                .collect::<Result<Vec<_>, ParseError>>()?,
+        },
+        functions: clause
+            .functions
+            .into_iter()
+            .map(|func| rewrite_window_func_expr(func, catalog, expanded_views))
+            .collect::<Result<Vec<_>, _>>()?,
+    })
+}
+
+fn rewrite_window_func_expr(
+    func: WindowFuncExpr,
+    catalog: &dyn CatalogLookup,
+    expanded_views: &[u32],
+) -> Result<WindowFuncExpr, ParseError> {
+    Ok(WindowFuncExpr {
+        kind: match func.kind {
+            WindowFuncKind::Aggregate(aggref) => WindowFuncKind::Aggregate(
+                match rewrite_semantic_expr(Expr::Aggref(Box::new(aggref)), catalog, expanded_views)?
+                {
+                    Expr::Aggref(aggref) => *aggref,
+                    other => unreachable!("aggregate rewrite returned non-Aggref: {other:?}"),
+                },
+            ),
+            WindowFuncKind::Builtin(kind) => WindowFuncKind::Builtin(kind),
+        },
+        args: func
+            .args
+            .into_iter()
+            .map(|arg| rewrite_semantic_expr(arg, catalog, expanded_views))
+            .collect::<Result<Vec<_>, _>>()?,
+        ..func
     })
 }
 
@@ -380,6 +443,11 @@ fn rewrite_semantic_expr(
                 .transpose()?,
             ..*aggref
         })),
+        Expr::WindowFunc(window_func) => Expr::WindowFunc(Box::new(rewrite_window_func_expr(
+            *window_func,
+            catalog,
+            expanded_views,
+        )?)),
         Expr::SubLink(sublink) => Expr::SubLink(Box::new(SubLink {
             testexpr: sublink
                 .testexpr
