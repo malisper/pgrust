@@ -55,7 +55,8 @@ Counts from `/tmp/pgrust_regress_todo_20260417` on 2026-04-17; `test_setup.sql` 
   - [done] array subscript result names should inherit the base column name instead of defaulting to `?column?`
   - [done] array read semantics need executor fixes for slice/subscript edge cases
   - [done] widen verification for array read semantics against more `arrays.sql` slice/subscript cases
-  - array write semantics need slice-assignment fixes, especially for multidimensional arrays
+  - [done] array write semantics need slice-assignment fixes, especially for multidimensional arrays
+  - correct multidimensional slice shape/extent checks during assignment in `src/backend/commands/tablecmds.rs`
 - async.sql: 0/11
 - bit.sql: 74/132
 - bitmapops.sql: 3/12
