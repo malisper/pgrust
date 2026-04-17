@@ -383,19 +383,19 @@ Counts from `/tmp/pgrust_regress_todo_20260417` on 2026-04-17; `test_setup.sql` 
 - test_setup.sql: add either real `LANGUAGE C` function registration or a narrow compatibility shim for upstream `binary_coercible`
 - test_setup.sql: support `CREATE OPERATOR CLASS` for the hash opclass forms used by upstream setup
 - date.sql:
-  fix durable `CREATE TABLE ... (date)` catalog writes so `DATE_TBL` creation succeeds instead of surfacing a generic `catalog error`
+  make ambiguous date input parsing respect PostgreSQL `DateStyle` semantics across `YMD`, `DMY`, and `MDY`
 - date.sql:
-  preserve the underlying catalog/store error for failed table creation instead of collapsing it to `catalog error`
+  reject ambiguous slash-, dash-, and space-separated date forms that PostgreSQL rejects, and parse accepted forms with PostgreSQL-compatible field ordering and two-digit year rules
 - date.sql:
-  make ambiguous numeric date parsing respect `DateStyle` the way PostgreSQL does, especially for `YMD`
+  tighten named-month and BC-date acceptance rules to match PostgreSQL for forms like `99-Jan-08`, `08-Jan-99`, `99-08-Jan`, and `January 8, 99 BC`
 - date.sql:
-  reject ambiguous slash-separated inputs that PostgreSQL rejects under `SET datestyle TO ymd`, such as `1/8/1999` and `1/18/1999`
+  preserve PostgreSQL-style `LINE`/caret context for date input range and syntax errors in simple-query output
 - date.sql:
-  parse ambiguous short numeric dates like `01/02/03` with PostgreSQL-compatible field ordering and two-digit year rules
+  make `EXTRACT(... FROM date)` use PostgreSQL-compatible default column labels and unsupported-unit diagnostics
 - date.sql:
-  reject ambiguous named-month forms that PostgreSQL rejects, such as `08-Jan-99`, `Jan-08-99`, `99-08-Jan`, and related variants
+  support `date_trunc(text, timestamp)` and match PostgreSQL `date_trunc` output semantics for date and timestamp inputs
 - date.sql:
-  match PostgreSQL BC-date acceptance rules for forms like `January 8, 99 BC`
+  fix `make_date` / `make_time` SQL-visible behavior, including overflow handling and proper error messages for invalid arguments
 
 ## DONE
 
