@@ -291,6 +291,12 @@ fn apply_step_single(
                     return Err(exec_jsonpath_error("jsonpath array index out of range"));
                 }
             }
+            _ if matches!(ctx.mode, PathMode::Lax) => {
+                let index = resolve_subscript_expr(index.clone(), 1)?;
+                if index == 0 || index == -1 {
+                    out.push(value.clone());
+                }
+            }
             _ if matches!(ctx.mode, PathMode::Strict) => {
                 return Err(exec_jsonpath_error(
                     "jsonpath array subscript requires array",
