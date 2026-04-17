@@ -100,10 +100,6 @@ impl ControlFileStore {
         base_dir.join("global").join("pg_control")
     }
 
-    pub fn legacy_json_path(base_dir: &Path) -> PathBuf {
-        base_dir.join("global").join("pg_control.json")
-    }
-
     pub fn load(base_dir: &Path) -> Result<Self, ControlFileError> {
         let path = Self::path(base_dir);
         let bytes = fs::read(&path).map_err(|err| ControlFileError::Io(err.to_string()))?;
