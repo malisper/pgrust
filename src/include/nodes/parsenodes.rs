@@ -60,6 +60,7 @@ pub enum ParseError {
     OnlyTemporaryRelationsInTemporarySchemas(String),
     NoSchemaSelectedForCreate,
     FeatureNotSupported(String),
+    InvalidRecursion(String),
     WrongObjectType {
         name: String,
         expected: &'static str,
@@ -163,6 +164,9 @@ impl fmt::Display for ParseError {
             }
             ParseError::FeatureNotSupported(feature) => {
                 write!(f, "feature not supported: {feature}")
+            }
+            ParseError::InvalidRecursion(message) => {
+                write!(f, "{message}")
             }
             ParseError::WrongObjectType { name, expected } => {
                 write!(f, "\"{name}\" is not a {expected}")

@@ -860,6 +860,40 @@ mod tests {
     }
 
     #[test]
+    fn startup_options_statement_timeout_returns_57014() {
+        let (mut stream, server) = start_test_connection();
+        send_startup_params(
+            &mut stream,
+            &[
+                ("user", "postgres"),
+                ("database", "postgres"),
+                ("options", "-c statement_timeout=50ms"),
+            ],
+        );
+        let _ = read_until_ready(&mut stream, "startup_with_options");
+
+        send_query(&mut stream, "select * from generate_series(1, 1000000000)");
+        let response = read_until_ready(&mut stream, "statement_timeout_startup_options");
+        let error = response
+            .iter()
+            .find(|(kind, _)| *kind == b'E')
+            .map(|(_, body)| error_fields(body))
+            .expect("timeout should return an error");
+        assert!(
+            error
+                .iter()
+                .any(|(code, value)| *code == b'C' && value == "57014")
+        );
+        assert!(error.iter().any(|(code, value)| {
+            *code == b'M' && value == "canceling statement due to statement timeout"
+        }));
+        assert!(matches!(response.last(), Some((b'Z', _))));
+
+        stream.shutdown(Shutdown::Both).unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
     fn extended_protocol_execute_statement_timeout_returns_57014() {
         let (mut stream, server) = start_test_connection();
         send_startup(&mut stream);
