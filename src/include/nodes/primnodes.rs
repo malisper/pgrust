@@ -2,7 +2,7 @@ use crate::RelFileLocator;
 use crate::backend::parser::{SqlType, SqlTypeKind, SubqueryComparisonOp};
 use crate::include::access::htup::AttributeDesc;
 use crate::include::catalog::{
-    builtin_scalar_function_for_proc_oid, proc_oid_for_builtin_scalar_function,
+    RECORD_TYPE_OID, builtin_scalar_function_for_proc_oid, proc_oid_for_builtin_scalar_function,
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::Query;
@@ -208,6 +208,7 @@ pub enum BuiltinScalarFunction {
     ToJson,
     ToJsonb,
     ArrayToJson,
+    RowToJson,
     JsonBuildArray,
     JsonBuildObject,
     JsonObject,
@@ -769,6 +770,9 @@ pub enum Expr {
         elements: Vec<Expr>,
         array_type: SqlType,
     },
+    Row {
+        fields: Vec<(String, Expr)>,
+    },
     Coalesce(Box<Expr>, Box<Expr>),
     ArraySubscript {
         array: Box<Expr>,
@@ -996,6 +1000,7 @@ fn expr_sql_type_hint(expr: &Expr) -> Option<SqlType> {
         Expr::Aggref(aggref) => Some(aggref.aggtype),
         Expr::Cast(_, ty) => Some(*ty),
         Expr::ArrayLiteral { array_type, .. } => Some(*array_type),
+        Expr::Row { .. } => Some(SqlType::record(RECORD_TYPE_OID)),
         Expr::Coalesce(left, right) => {
             expr_sql_type_hint(left).or_else(|| expr_sql_type_hint(right))
         }
@@ -1077,6 +1082,7 @@ fn value_sql_type_hint(value: &Value) -> Option<SqlType> {
         Value::Text(_) | Value::TextRef(_, _) => Some(SqlType::new(SqlTypeKind::Text)),
         Value::InternalChar(_) => Some(SqlType::new(SqlTypeKind::InternalChar)),
         Value::Bool(_) => Some(SqlType::new(SqlTypeKind::Bool)),
+        Value::Record(_) => Some(SqlType::record(RECORD_TYPE_OID)),
         Value::Array(_) | Value::PgArray(_) | Value::Null => None,
     }
 }

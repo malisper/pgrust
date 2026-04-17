@@ -4470,6 +4470,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                 })
             }
         }
+        Rule::qualified_star => Ok(SqlExpr::Column(pair.as_str().to_string())),
         Rule::position_expr => {
             let mut args = pair
                 .into_inner()

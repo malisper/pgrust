@@ -181,6 +181,12 @@ pub(super) fn finalize_expr_subqueries(
                 .collect(),
             array_type,
         },
+        Expr::Row { fields } => Expr::Row {
+            fields: fields
+                .into_iter()
+                .map(|(name, expr)| (name, finalize_expr_subqueries(expr, catalog, subplans)))
+                .collect(),
+        },
         Expr::Coalesce(left, right) => Expr::Coalesce(
             Box::new(finalize_expr_subqueries(*left, catalog, subplans)),
             Box::new(finalize_expr_subqueries(*right, catalog, subplans)),
@@ -453,6 +459,12 @@ fn rebase_expr_subplan_ids(expr: Expr, base: usize) -> Expr {
                 .map(|expr| rebase_expr_subplan_ids(expr, base))
                 .collect(),
             array_type,
+        },
+        Expr::Row { fields } => Expr::Row {
+            fields: fields
+                .into_iter()
+                .map(|(name, expr)| (name, rebase_expr_subplan_ids(expr, base)))
+                .collect(),
         },
         Expr::Coalesce(left, right) => Expr::Coalesce(
             Box::new(rebase_expr_subplan_ids(*left, base)),
