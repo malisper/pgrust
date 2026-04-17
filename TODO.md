@@ -116,7 +116,7 @@ Counts from `/tmp/pgrust_regress_todo_20260417` on 2026-04-17; `test_setup.sql` 
 - limit.sql: 3/80
 - line.sql: 11/35
 - lock.sql: 42/131
-- lseg.sql: 2/16
+- lseg.sql: 16/16
 - macaddr.sql: 0/35
 - macaddr8.sql: 0/71
 - maintain_every.sql: 5/16
