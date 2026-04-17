@@ -879,6 +879,7 @@ pub struct CommentOnRoleStatement {
 pub enum GrantObjectPrivilege {
     CreateOnDatabase,
     AllPrivilegesOnTable,
+    AllPrivilegesOnSchema,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
