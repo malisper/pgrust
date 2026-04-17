@@ -1,6 +1,7 @@
 use crate::backend::catalog::catalog::CatalogError;
 use crate::backend::catalog::role_memberships::{
     NewRoleMembership, grant_membership as grant_role_membership_row,
+    revoke_role_membership as delete_role_membership_row,
     revoke_role_membership_option as update_role_membership_row,
 };
 use crate::backend::catalog::roles::{
@@ -113,6 +114,19 @@ impl CatalogStore {
             inherit_option,
             set_option,
         )?;
+        self.persist_catalog_kinds(&catalog, &[BootstrapCatalogKind::PgAuthMembers])?;
+        self.catalog = catalog.clone();
+        Ok(row)
+    }
+
+    pub fn revoke_role_membership(
+        &mut self,
+        roleid: u32,
+        member: u32,
+        grantor: u32,
+    ) -> Result<PgAuthMembersRow, CatalogError> {
+        let mut catalog = self.catalog_snapshot_with_control()?;
+        let row = delete_role_membership_row(&mut catalog.auth_members, roleid, member, grantor)?;
         self.persist_catalog_kinds(&catalog, &[BootstrapCatalogKind::PgAuthMembers])?;
         self.catalog = catalog.clone();
         Ok(row)

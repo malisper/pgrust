@@ -1073,9 +1073,11 @@ pub struct GrantRoleMembershipStatement {
 pub struct RevokeRoleMembershipStatement {
     pub role_names: Vec<String>,
     pub grantee_names: Vec<String>,
+    pub revoke_membership: bool,
     pub admin_option: bool,
     pub inherit_option: bool,
     pub set_option: bool,
+    pub cascade: bool,
     pub granted_by: Option<RoleGrantorSpec>,
 }
 
