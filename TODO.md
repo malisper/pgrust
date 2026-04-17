@@ -400,7 +400,7 @@ Counts from `/tmp/pgrust_regress_todo_20260417` on 2026-04-17; `test_setup.sql` 
   match PostgreSQL BC-date acceptance rules for forms like `January 8, 99 BC`
 
 - stats.sql
-  - Teach `SHOW`/stats GUC handling to return PostgreSQL-like values for `track_counts`, `track_functions`, and `stats_fetch_consistency` instead of the generic `"default"` fallback.
+  - [done] Teach `SHOW`/stats GUC handling to return PostgreSQL-like values for `track_counts`, `track_functions`, and `stats_fetch_consistency` instead of the generic `"default"` fallback.
   - Add parser support for transaction savepoint statements: `SAVEPOINT`, `RELEASE SAVEPOINT`, and `ROLLBACK TO SAVEPOINT`.
   - Add SQL-visible stats relations/views needed by the test: `pg_stat_io`, `pg_stat_user_tables`, `pg_statio_user_tables`, and `pg_stat_user_functions`.
   - Implement the builtin stats functions used by the test, including `pg_stat_force_next_flush()`, `pg_stat_get_snapshot_timestamp()`, function-call stats accessors, and relation tuple/block counters.
