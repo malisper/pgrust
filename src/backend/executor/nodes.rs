@@ -20,7 +20,9 @@ use crate::include::nodes::execnodes::{
     SetOpState, SlotKind, SubqueryScanState, SystemVarBinding, ToastRelationRef, TupleSlot, ValuesState,
     WorkTableScanState,
 };
-use crate::include::nodes::primnodes::{Expr, JoinType, Var, attrno_index, INDEX_VAR, INNER_VAR, OUTER_VAR};
+use crate::include::nodes::primnodes::{
+    Expr, INDEX_VAR, INNER_VAR, JoinType, OUTER_VAR, Var, attrno_index,
+};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -740,8 +742,9 @@ fn render_explain_var_name(var: &Var, column_names: &[String]) -> Option<String>
 
 fn render_explain_expr_inner(expr: &Expr, column_names: &[String]) -> String {
     match expr {
-        Expr::Var(var) => render_explain_var_name(var, column_names)
-            .unwrap_or_else(|| format!("{expr:?}")),
+        Expr::Var(var) => {
+            render_explain_var_name(var, column_names).unwrap_or_else(|| format!("{expr:?}"))
+        }
         Expr::Const(value) => render_explain_const(value),
         Expr::Op(op) => match op.op {
             crate::include::nodes::primnodes::OpExprKind::Eq
@@ -821,12 +824,15 @@ fn render_explain_join_expr_inner(
     inner_names: &[String],
 ) -> String {
     match expr {
-        Expr::Var(var) if var.varno == OUTER_VAR => render_explain_var_name(var, outer_names)
-            .unwrap_or_else(|| format!("{expr:?}")),
-        Expr::Var(var) if var.varno == INNER_VAR => render_explain_var_name(var, inner_names)
-            .unwrap_or_else(|| format!("{expr:?}")),
-        Expr::Var(var) if var.varno == INDEX_VAR => render_explain_var_name(var, inner_names)
-            .unwrap_or_else(|| format!("{expr:?}")),
+        Expr::Var(var) if var.varno == OUTER_VAR => {
+            render_explain_var_name(var, outer_names).unwrap_or_else(|| format!("{expr:?}"))
+        }
+        Expr::Var(var) if var.varno == INNER_VAR => {
+            render_explain_var_name(var, inner_names).unwrap_or_else(|| format!("{expr:?}"))
+        }
+        Expr::Var(var) if var.varno == INDEX_VAR => {
+            render_explain_var_name(var, inner_names).unwrap_or_else(|| format!("{expr:?}"))
+        }
         Expr::Var(var) => {
             let mut combined_names = outer_names.to_vec();
             combined_names.extend_from_slice(inner_names);
@@ -896,7 +902,10 @@ fn render_explain_join_expr_inner(
             render_explain_join_expr_inner(right, outer_names, inner_names)
         ),
         Expr::IsNull(inner) => {
-            format!("{} IS NULL", render_explain_join_expr_inner(inner, outer_names, inner_names))
+            format!(
+                "{} IS NULL",
+                render_explain_join_expr_inner(inner, outer_names, inner_names)
+            )
         }
         Expr::IsNotNull(inner) => format!(
             "{} IS NOT NULL",
@@ -1139,7 +1148,11 @@ impl PlanNode for NestedLoopJoinState {
             let (left_names, right_names) = self.combined_names.split_at(self.left_width);
             lines.push(format!(
                 "{prefix}Join Filter: {}",
-                render_explain_join_expr(&format_qual_list(&self.join_qual), left_names, right_names)
+                render_explain_join_expr(
+                    &format_qual_list(&self.join_qual),
+                    left_names,
+                    right_names
+                )
             ));
         }
         if !self.qual.is_empty() {
@@ -1193,7 +1206,11 @@ fn exec_lateral_join<'a>(
                     state.right_rows = Some(rows);
                     state.right_matched = Some(vec![
                         false;
-                        state.right_rows.as_ref().expect("lateral right rows").len()
+                        state
+                            .right_rows
+                            .as_ref()
+                            .expect("lateral right rows")
+                            .len()
                     ]);
                     state.right_index = 0;
                     state.unmatched_right_index = 0;

@@ -2,12 +2,16 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::backend::catalog::CatalogError;
+use crate::backend::catalog::bootstrap::bootstrap_catalog_rel;
 use crate::backend::catalog::catalog::{Catalog, CatalogEntry, column_desc};
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::SqlType;
 use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::cache::catcache::{CatCache, normalize_catalog_name};
-use crate::include::catalog::{PG_CATALOG_NAMESPACE_OID, relam_for_relkind};
+use crate::include::catalog::{
+    PG_CATALOG_NAMESPACE_OID, bootstrap_catalog_kinds, relam_for_relkind,
+    system_catalog_index_by_oid,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexRelCacheEntry {
@@ -78,6 +82,13 @@ impl RelCache {
     }
 
     pub fn from_catcache(catcache: &CatCache) -> Result<Self, CatalogError> {
+        Self::from_catcache_in_db(catcache, 1)
+    }
+
+    pub fn from_catcache_in_db(
+        catcache: &CatCache,
+        current_db_oid: u32,
+    ) -> Result<Self, CatalogError> {
         let mut cache = Self::default();
         for class in catcache.class_rows() {
             let attrs = catcache.attributes_by_relid(class.oid).unwrap_or(&[]);
@@ -126,11 +137,7 @@ impl RelCache {
                 })
                 .collect::<Result<Vec<_>, CatalogError>>()?;
             let entry = RelCacheEntry {
-                rel: RelFileLocator {
-                    spc_oid: 0,
-                    db_oid: 1,
-                    rel_number: class.relfilenode,
-                },
+                rel: relation_locator_for_class_row(class.oid, class.relfilenode, current_db_oid),
                 relation_oid: class.oid,
                 namespace_oid: class.relnamespace,
                 owner_oid: class.relowner,
@@ -285,6 +292,32 @@ impl RelCache {
         self.by_name
             .iter()
             .map(|(name, entry)| (name.as_str(), entry))
+    }
+}
+
+fn relation_locator_for_class_row(
+    relation_oid: u32,
+    relfilenode: u32,
+    current_db_oid: u32,
+) -> RelFileLocator {
+    if let Some(kind) = bootstrap_catalog_kinds()
+        .into_iter()
+        .find(|kind| kind.relation_oid() == relation_oid)
+    {
+        return bootstrap_catalog_rel(kind, current_db_oid);
+    }
+    if let Some(descriptor) = system_catalog_index_by_oid(relation_oid) {
+        let heap_rel = bootstrap_catalog_rel(descriptor.heap_kind, current_db_oid);
+        return RelFileLocator {
+            spc_oid: heap_rel.spc_oid,
+            db_oid: heap_rel.db_oid,
+            rel_number: relfilenode,
+        };
+    }
+    RelFileLocator {
+        spc_oid: 0,
+        db_oid: current_db_oid,
+        rel_number: relfilenode,
     }
 }
 

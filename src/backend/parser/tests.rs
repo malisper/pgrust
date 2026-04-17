@@ -943,6 +943,29 @@ fn parse_drop_role_statement() {
 }
 
 #[test]
+fn parse_create_database_statement() {
+    let stmt = parse_statement("create database analytics").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateDatabase(CreateDatabaseStatement {
+            database_name: "analytics".into(),
+        })
+    );
+}
+
+#[test]
+fn parse_drop_database_statement() {
+    let stmt = parse_statement("drop database if exists analytics").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::DropDatabase(DropDatabaseStatement {
+            if_exists: true,
+            database_name: "analytics".into(),
+        })
+    );
+}
+
+#[test]
 fn parse_alter_table_alter_column_type_statement() {
     let stmt = parse_statement(
         "alter table items alter column note set data type varchar(10) using note::varchar(10)",

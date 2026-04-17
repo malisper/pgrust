@@ -11,6 +11,8 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
+use crate::include::catalog::GLOBAL_TABLESPACE_OID;
+
 #[cfg(unix)]
 use std::os::unix::fs::FileExt;
 #[cfg(unix)]
@@ -154,7 +156,11 @@ impl MdStorageManager {
     }
 
     fn db_dir(&self, rel: RelFileLocator) -> PathBuf {
-        self.base_dir.join(rel.db_oid.to_string())
+        if rel.db_oid == 0 && rel.spc_oid == GLOBAL_TABLESPACE_OID {
+            self.base_dir.join("global")
+        } else {
+            self.base_dir.join("base").join(rel.db_oid.to_string())
+        }
     }
 
     /// Open (or retrieve from cache) a specific segment file.
@@ -958,7 +964,7 @@ mod tests {
 
     #[test]
     fn test_path_construction() {
-        let base = PathBuf::from("/pgdata/base");
+        let base = PathBuf::from("/pgdata");
         let rel = RelFileLocator {
             spc_oid: 0,
             db_oid: 5,
@@ -1103,8 +1109,8 @@ mod tests {
         smgr.open(rel).unwrap();
         smgr.create(rel, ForkNumber::Main, false).unwrap();
 
-        let seg1_path = base.join("1").join("13000.1");
-        fs::create_dir_all(base.join("1")).unwrap();
+        let seg1_path = segment_path(&base, rel, ForkNumber::Main, 1);
+        fs::create_dir_all(seg1_path.parent().unwrap()).unwrap();
         let mut f = fs::File::create(&seg1_path).unwrap();
         f.write_all(&vec![0u8; BLCKSZ * 3]).unwrap();
         drop(f);
@@ -1131,8 +1137,8 @@ mod tests {
         smgr.open(rel).unwrap();
         smgr.create(rel, ForkNumber::Main, false).unwrap();
 
-        let seg1_path = base.join("1").join("13001.1");
-        fs::create_dir_all(base.join("1")).unwrap();
+        let seg1_path = segment_path(&base, rel, ForkNumber::Main, 1);
+        fs::create_dir_all(seg1_path.parent().unwrap()).unwrap();
         let mut f = fs::File::create(&seg1_path).unwrap();
         f.write_all(&vec![0u8; BLCKSZ]).unwrap();
         drop(f);
@@ -1279,7 +1285,7 @@ mod tests {
         }
         drop(smgr);
 
-        let seg_path = base.join("1").join("20001");
+        let seg_path = segment_path(&base, rel, ForkNumber::Main, 0);
         let partial_size = 3 * BLCKSZ as u64 + 100;
         {
             let f = fs::OpenOptions::new().write(true).open(&seg_path).unwrap();
@@ -1322,8 +1328,9 @@ mod tests {
                 .unwrap();
         }
 
-        let seg1_path = base.join("1").join("20002.1");
+        let seg1_path = segment_path(&base, rel, ForkNumber::Main, 1);
         {
+            fs::create_dir_all(seg1_path.parent().unwrap()).unwrap();
             let mut f = fs::File::create(&seg1_path).unwrap();
             f.write_all(&page_pattern(99).repeat(3)).unwrap();
         }

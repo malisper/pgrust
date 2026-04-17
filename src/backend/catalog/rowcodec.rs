@@ -509,9 +509,18 @@ pub(crate) fn pg_database_row_from_values(
         oid: expect_oid(&values[0])?,
         datname: expect_text(&values[1])?,
         datdba: expect_oid(&values[2])?,
-        dattablespace: expect_oid(&values[3])?,
-        datistemplate: expect_bool(&values[4])?,
-        datallowconn: expect_bool(&values[5])?,
+        encoding: expect_int32(&values[3])?,
+        datlocprovider: expect_char(&values[4], "datlocprovider")?,
+        dattablespace: expect_oid(&values[5])?,
+        datistemplate: expect_bool(&values[6])?,
+        datallowconn: expect_bool(&values[7])?,
+        datconnlimit: expect_int32(&values[8])?,
+        datcollate: expect_text(&values[9])?,
+        datctype: expect_text(&values[10])?,
+        datlocale: expect_nullable_text(&values[11])?,
+        daticurules: expect_nullable_text(&values[12])?,
+        datcollversion: expect_nullable_text(&values[13])?,
+        datacl: nullable_text_array(&values[14])?,
     })
 }
 
@@ -1037,9 +1046,28 @@ fn pg_database_row_values(row: PgDatabaseRow) -> Vec<Value> {
         Value::Int32(row.oid as i32),
         Value::Text(row.datname.into()),
         Value::Int32(row.datdba as i32),
+        Value::Int32(row.encoding),
+        Value::InternalChar(row.datlocprovider as u8),
         Value::Int32(row.dattablespace as i32),
         Value::Bool(row.datistemplate),
         Value::Bool(row.datallowconn),
+        Value::Int32(row.datconnlimit),
+        Value::Text(row.datcollate.into()),
+        Value::Text(row.datctype.into()),
+        row.datlocale
+            .map_or(Value::Null, |value| Value::Text(value.into())),
+        row.daticurules
+            .map_or(Value::Null, |value| Value::Text(value.into())),
+        row.datcollversion
+            .map_or(Value::Null, |value| Value::Text(value.into())),
+        row.datacl.map_or(Value::Null, |values| {
+            Value::PgArray(ArrayValue::from_1d(
+                values
+                    .into_iter()
+                    .map(|value| Value::Text(value.into()))
+                    .collect(),
+            ))
+        }),
     ]
 }
 
@@ -1351,6 +1379,21 @@ fn nullable_int16_array(value: &Value) -> Result<Option<Vec<i16>>, CatalogError>
         .map(Some)
 }
 
+fn nullable_text_array(value: &Value) -> Result<Option<Vec<String>>, CatalogError> {
+    let Some(array) = expect_nullable_array(value)? else {
+        return Ok(None);
+    };
+    array
+        .elements
+        .into_iter()
+        .map(|value| match value {
+            Value::Text(text) => Ok(text.to_string()),
+            _ => Err(CatalogError::Corrupt("expected text array value")),
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
+}
+
 fn nullable_char_array(value: &Value) -> Result<Option<Vec<u8>>, CatalogError> {
     let Some(array) = expect_nullable_array(value)? else {
         return Ok(None);
@@ -1362,21 +1405,6 @@ fn nullable_char_array(value: &Value) -> Result<Option<Vec<u8>>, CatalogError> {
             Value::InternalChar(v) => Ok(v),
             Value::Text(text) if text.len() == 1 => Ok(text.as_bytes()[0]),
             _ => Err(CatalogError::Corrupt("expected char array value")),
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .map(Some)
-}
-
-fn nullable_text_array(value: &Value) -> Result<Option<Vec<String>>, CatalogError> {
-    let Some(array) = expect_nullable_array(value)? else {
-        return Ok(None);
-    };
-    array
-        .elements
-        .into_iter()
-        .map(|value| match value {
-            Value::Text(text) => Ok(text.to_string()),
-            _ => Err(CatalogError::Corrupt("expected text array value")),
         })
         .collect::<Result<Vec<_>, _>>()
         .map(Some)

@@ -1,6 +1,7 @@
 mod alter_column_type;
 mod constraint;
 mod create;
+mod database_cmds;
 mod drop;
 mod drop_column;
 mod execute;

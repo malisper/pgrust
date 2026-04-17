@@ -667,7 +667,8 @@ pub(super) fn bind_from_item_with_ctes(
                 grouped_outer,
                 ctes,
             )?;
-            let plan = AnalyzedFrom::join(left_plan, right_plan, plan_join_type(*kind), on, alias_info);
+            let plan =
+                AnalyzedFrom::join(left_plan, right_plan, plan_join_type(*kind), on, alias_info);
             let scope = scope_with_output_exprs(scope.unwrap_or(raw_scope), &plan.output_exprs);
             Ok((plan, scope))
         }
@@ -749,6 +750,19 @@ fn bind_function_from_item_with_ctes(
     ctes: &[BoundCte],
 ) -> Result<(AnalyzedFrom, BoundScope, bool), ParseError> {
     let args = lower_named_table_function_args(name, args)?;
+    if name.eq_ignore_ascii_case("json_populate_record")
+        || name.eq_ignore_ascii_case("json_populate_recordset")
+    {
+        let bound = bind_json_populate_record_from_item(
+            name,
+            &args,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        )?;
+        return Ok(bound);
+    }
     let call_scope = empty_scope();
     let actual_types = args
         .iter()
@@ -1210,6 +1224,77 @@ fn bind_function_from_item_with_ctes(
             }
         }
     }
+}
+
+fn bind_json_populate_record_from_item(
+    name: &str,
+    args: &[SqlExpr],
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<(AnalyzedFrom, BoundScope, bool), ParseError> {
+    if args.is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "json_populate_record(record, json) or json_populate_recordset(record, json)",
+            actual: format!("{name}()"),
+        });
+    }
+    let call_scope = empty_scope();
+    let row_type = infer_sql_expr_type_with_ctes(
+        &args[0],
+        &call_scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    );
+    if row_type.kind != SqlTypeKind::Composite || row_type.typrelid == 0 {
+        return Err(ParseError::UnknownTable(name.to_string()));
+    }
+    let relation = catalog
+        .lookup_relation_by_oid(row_type.typrelid)
+        .ok_or_else(|| ParseError::UnknownTable(name.to_string()))?;
+    let output_columns = relation
+        .desc
+        .columns
+        .iter()
+        .filter(|column| !column.dropped)
+        .map(|column| QueryColumn {
+            name: column.name.clone(),
+            sql_type: column.sql_type,
+        })
+        .collect::<Vec<_>>();
+    let bound_args = args
+        .iter()
+        .map(|arg| {
+            bind_expr_with_outer_and_ctes(
+                arg,
+                &call_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let desc = RelationDesc {
+        columns: output_columns
+            .iter()
+            .map(|col| column_desc(col.name.clone(), col.sql_type, true))
+            .collect(),
+    };
+    let scope = scope_for_relation(Some(name), &desc);
+    Ok((
+        AnalyzedFrom::function(SetReturningCall::UserDefined {
+            proc_oid: 0,
+            func_variadic: false,
+            args: bound_args,
+            output_columns,
+        }),
+        scope,
+        false,
+    ))
 }
 
 fn bind_user_defined_table_function_args(

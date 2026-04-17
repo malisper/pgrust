@@ -1,7 +1,7 @@
 use crate::backend::catalog::catalog::CatalogEntry;
 use crate::backend::storage::smgr::RelFileLocator;
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, BootstrapCatalogKind,
+    BOOTSTRAP_SUPERUSER_OID, BootstrapCatalogKind, CatalogScope, GLOBAL_TABLESPACE_OID,
     bootstrap_catalog_kinds as shared_bootstrap_catalog_kinds, bootstrap_namespace_oid,
     bootstrap_relation_desc,
 };
@@ -10,13 +10,24 @@ pub fn bootstrap_catalog_kinds() -> [BootstrapCatalogKind; 31] {
     shared_bootstrap_catalog_kinds()
 }
 
-pub fn bootstrap_catalog_entry(kind: BootstrapCatalogKind) -> CatalogEntry {
-    CatalogEntry {
-        rel: RelFileLocator {
-            spc_oid: 0,
-            db_oid: 1,
+pub fn bootstrap_catalog_rel(kind: BootstrapCatalogKind, db_oid: u32) -> RelFileLocator {
+    match kind.scope() {
+        CatalogScope::Shared => RelFileLocator {
+            spc_oid: GLOBAL_TABLESPACE_OID,
+            db_oid: 0,
             rel_number: kind.relation_oid(),
         },
+        CatalogScope::Database(_) => RelFileLocator {
+            spc_oid: 0,
+            db_oid,
+            rel_number: kind.relation_oid(),
+        },
+    }
+}
+
+pub fn bootstrap_catalog_entry(kind: BootstrapCatalogKind) -> CatalogEntry {
+    CatalogEntry {
+        rel: bootstrap_catalog_rel(kind, 1),
         relation_oid: kind.relation_oid(),
         namespace_oid: bootstrap_namespace_oid(),
         owner_oid: BOOTSTRAP_SUPERUSER_OID,

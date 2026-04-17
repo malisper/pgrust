@@ -49,6 +49,8 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::include::catalog::GLOBAL_TABLESPACE_OID;
+
 // ---------------------------------------------------------------------------
 // Public constants
 // ---------------------------------------------------------------------------
@@ -297,14 +299,20 @@ pub trait StorageManager {
 /// Build the filesystem path for a specific segment of a relation fork.
 ///
 /// Maps onto the same naming convention as PostgreSQL's `relpath()`:
-///   `<base_dir>/<db_oid>/<rel_number>[<fork_suffix>][.<segno>]`
+///   `<base_dir>/base/<db_oid>/<rel_number>[<fork_suffix>][.<segno>]`
+/// or for shared relations:
+///   `<base_dir>/global/<rel_number>[<fork_suffix>][.<segno>]`
 pub(crate) fn segment_path(
     base_dir: &Path,
     rel: RelFileLocator,
     fork: ForkNumber,
     segno: u32,
 ) -> PathBuf {
-    let db_dir = base_dir.join(rel.db_oid.to_string());
+    let db_dir = if rel.db_oid == 0 && rel.spc_oid == GLOBAL_TABLESPACE_OID {
+        base_dir.join("global")
+    } else {
+        base_dir.join("base").join(rel.db_oid.to_string())
+    };
     let fork_suffix = fork.suffix();
 
     let filename = if segno == 0 {

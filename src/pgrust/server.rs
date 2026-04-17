@@ -8,7 +8,8 @@ mod tests {
     use crate::backend::tcop::postgres::handle_connection;
     #[cfg(unix)]
     use crate::backend::tcop::postgres::handle_connection_with_io;
-    use crate::pgrust::database::Database;
+    use crate::pgrust::cluster::Cluster;
+    use crate::pgrust::database::Session;
     use std::io::{Read, Write};
     use std::net::Shutdown;
     #[cfg(not(unix))]
@@ -35,12 +36,19 @@ mod tests {
 
     #[cfg(unix)]
     fn start_test_connection() -> (TestStream, thread::JoinHandle<()>) {
-        let db = Database::open(temp_dir("wire_copy"), 16).unwrap();
+        let cluster = Cluster::open(temp_dir("wire_copy"), 16).unwrap();
+        start_test_connection_with_cluster(cluster)
+    }
+
+    #[cfg(unix)]
+    fn start_test_connection_with_cluster(
+        cluster: Cluster,
+    ) -> (TestStream, thread::JoinHandle<()>) {
         let (server_stream, client_stream) = UnixStream::pair().unwrap();
 
         let server = thread::spawn(move || {
             let reader = server_stream.try_clone().unwrap();
-            handle_connection_with_io(reader, server_stream, &db, 1).unwrap();
+            handle_connection_with_io(reader, server_stream, &cluster, 1).unwrap();
         });
 
         client_stream
@@ -51,13 +59,20 @@ mod tests {
 
     #[cfg(not(unix))]
     fn start_test_connection() -> (TestStream, thread::JoinHandle<()>) {
-        let db = Database::open(temp_dir("wire_copy"), 16).unwrap();
+        let cluster = Cluster::open(temp_dir("wire_copy"), 16).unwrap();
+        start_test_connection_with_cluster(cluster)
+    }
+
+    #[cfg(not(unix))]
+    fn start_test_connection_with_cluster(
+        cluster: Cluster,
+    ) -> (TestStream, thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
 
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
-            handle_connection(stream, &db, 1).unwrap();
+            handle_connection(stream, &cluster, 1).unwrap();
         });
 
         let stream = TcpStream::connect(addr).unwrap();
@@ -68,9 +83,19 @@ mod tests {
     }
 
     fn send_startup(stream: &mut impl Write) {
+        send_startup_params(stream, &[("user", "postgres"), ("database", "postgres")]);
+    }
+
+    fn send_startup_params(stream: &mut impl Write, params: &[(&str, &str)]) {
         let mut body = Vec::new();
         body.extend_from_slice(&PROTOCOL_VERSION_3_0.to_be_bytes());
-        body.extend_from_slice(b"user\0postgres\0database\0postgres\0\0");
+        for (key, value) in params {
+            body.extend_from_slice(key.as_bytes());
+            body.push(0);
+            body.extend_from_slice(value.as_bytes());
+            body.push(0);
+        }
+        body.push(0);
         stream
             .write_all(&((body.len() + 4) as i32).to_be_bytes())
             .unwrap();
@@ -275,7 +300,7 @@ mod tests {
                 .map(|(_, body)| command_tag(body)),
             Some("SELECT 1".to_string())
         );
-        stream.shutdown(Shutdown::Both).unwrap();
+        let _ = stream.shutdown(Shutdown::Both);
         server.join().unwrap();
     }
 
@@ -308,7 +333,7 @@ mod tests {
             .map(|(_, body)| data_row_values(body))
             .collect::<Vec<_>>();
         assert_eq!(rows, vec![vec![Some("1".into()), Some("alice".into())]]);
-        stream.shutdown(Shutdown::Both).unwrap();
+        let _ = stream.shutdown(Shutdown::Both);
         server.join().unwrap();
     }
 
@@ -349,7 +374,7 @@ mod tests {
             .map(|(_, body)| data_row_values(body))
             .collect::<Vec<_>>();
         assert_eq!(rows, vec![vec![Some("5.5".into()), Some("t".into())]]);
-        stream.shutdown(Shutdown::Both).unwrap();
+        let _ = stream.shutdown(Shutdown::Both);
         server.join().unwrap();
     }
 
@@ -383,7 +408,7 @@ mod tests {
                 .map(|(_, body)| command_tag(body)),
             Some("SELECT 1".to_string())
         );
-        stream.shutdown(Shutdown::Both).unwrap();
+        let _ = stream.shutdown(Shutdown::Both);
         server.join().unwrap();
     }
 
@@ -403,7 +428,7 @@ mod tests {
         assert_eq!(fields[0].1, 1043);
         assert_eq!(fields[0].2, -1);
         assert_eq!(fields[0].3, 8);
-        stream.shutdown(Shutdown::Both).unwrap();
+        let _ = stream.shutdown(Shutdown::Both);
         server.join().unwrap();
     }
 
@@ -450,7 +475,7 @@ mod tests {
                 vec![Some("3".into()), Some("0".into())]
             ]
         );
-        stream.shutdown(Shutdown::Both).unwrap();
+        let _ = stream.shutdown(Shutdown::Both);
         server.join().unwrap();
     }
 
@@ -754,6 +779,109 @@ mod tests {
         );
 
         stream.shutdown(Shutdown::Both).unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn startup_packet_uses_requested_database() {
+        let cluster = Cluster::open(temp_dir("wire_startup_db"), 16).unwrap();
+        let postgres = cluster.connect_database("postgres").unwrap();
+        let mut admin = Session::new(1);
+        admin
+            .execute(&postgres, "create database analytics")
+            .unwrap();
+
+        let analytics = cluster.connect_database("analytics").unwrap();
+        let mut seed = Session::new(2);
+        seed.execute(&analytics, "create table startup_only (id int4)")
+            .unwrap();
+        seed.execute(&analytics, "insert into startup_only values (9)")
+            .unwrap();
+        drop(seed);
+        drop(analytics);
+        drop(admin);
+        drop(postgres);
+
+        let (mut stream, server) = start_test_connection_with_cluster(cluster);
+        send_startup_params(
+            &mut stream,
+            &[("user", "postgres"), ("database", "analytics")],
+        );
+        let startup = read_until_ready(&mut stream, "startup_requested_database");
+        assert!(startup.iter().any(|(kind, _)| *kind == b'R'));
+
+        send_query(&mut stream, "select id from startup_only");
+        let response = read_until_ready(&mut stream, "startup_only_query");
+        let rows = response
+            .iter()
+            .filter(|(kind, _)| *kind == b'D')
+            .map(|(_, body)| data_row_values(body))
+            .collect::<Vec<_>>();
+        assert_eq!(rows, vec![vec![Some("9".into())]]);
+
+        stream.shutdown(Shutdown::Both).unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn startup_packet_defaults_database_to_user_name() {
+        let cluster = Cluster::open(temp_dir("wire_startup_user_default"), 16).unwrap();
+        let (mut stream, server) = start_test_connection_with_cluster(cluster);
+        send_startup_params(&mut stream, &[("user", "postgres")]);
+        let startup = read_until_ready(&mut stream, "startup_user_default");
+        assert!(startup.iter().any(|(kind, _)| *kind == b'R'));
+        assert!(matches!(startup.last(), Some((b'Z', _))));
+
+        stream.shutdown(Shutdown::Both).unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn startup_packet_rejects_missing_database() {
+        let cluster = Cluster::open(temp_dir("wire_missing_db"), 16).unwrap();
+        let (mut stream, server) = start_test_connection_with_cluster(cluster);
+        send_startup_params(
+            &mut stream,
+            &[("user", "postgres"), ("database", "missingdb")],
+        );
+        let error = read_message(&mut stream, "startup_missing_database");
+        assert_eq!(error.0, b'E');
+        let fields = error_fields(&error.1);
+        assert!(
+            fields
+                .iter()
+                .any(|(code, value)| *code == b'C' && value == "3D000")
+        );
+        assert!(fields.iter().any(|(code, value)| {
+            *code == b'M' && value.contains("database \"missingdb\" does not exist")
+        }));
+
+        let _ = stream.shutdown(Shutdown::Both);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn startup_packet_rejects_template0_connections() {
+        let cluster = Cluster::open(temp_dir("wire_template0_db"), 16).unwrap();
+        let (mut stream, server) = start_test_connection_with_cluster(cluster);
+        send_startup_params(
+            &mut stream,
+            &[("user", "postgres"), ("database", "template0")],
+        );
+        let error = read_message(&mut stream, "startup_template0");
+        assert_eq!(error.0, b'E');
+        let fields = error_fields(&error.1);
+        assert!(
+            fields
+                .iter()
+                .any(|(code, value)| *code == b'C' && value == "55000")
+        );
+        assert!(fields.iter().any(|(code, value)| {
+            *code == b'M'
+                && value.contains("database \"template0\" is not currently accepting connections")
+        }));
+
+        let _ = stream.shutdown(Shutdown::Both);
         server.join().unwrap();
     }
 }

@@ -6,9 +6,10 @@ use crate::backend::access::heap::heapam::{
     heap_scan_next, heap_update_with_waiter,
 };
 use crate::backend::access::transam::xact::Snapshot;
+use crate::backend::catalog::bootstrap::bootstrap_catalog_rel;
 use crate::backend::catalog::catalog::{Catalog, CatalogEntry, CatalogError};
 use crate::backend::catalog::indexing::{
-    maintain_catalog_indexes_for_insert, rebuild_system_catalog_indexes,
+    maintain_catalog_indexes_for_insert_in_db, rebuild_system_catalog_indexes_for_db,
 };
 use crate::backend::catalog::rowcodec::{catalog_row_values_for_kind, decode_catalog_tuple_values};
 use crate::backend::catalog::rows::{PhysicalCatalogRows, physical_catalog_rows_for_catalog_entry};
@@ -41,11 +42,7 @@ pub(crate) fn sync_catalog_rows_subset(
 ) -> Result<(), CatalogError> {
     let mut smgr = MdStorageManager::new(base_dir);
     for &kind in kinds {
-        let rel = RelFileLocator {
-            spc_oid: 0,
-            db_oid,
-            rel_number: kind.relation_oid(),
-        };
+        let rel = bootstrap_catalog_rel(kind, db_oid);
         smgr.open(rel)
             .map_err(|e| CatalogError::Io(e.to_string()))?;
         smgr.unlink(rel, Some(ForkNumber::Main), false);
@@ -55,7 +52,7 @@ pub(crate) fn sync_catalog_rows_subset(
 
     let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 16);
     sync_catalog_rows_subset_in_pool(&pool, rows, db_oid, kinds)?;
-    rebuild_system_catalog_indexes(base_dir)?;
+    rebuild_system_catalog_indexes_for_db(base_dir, db_oid)?;
     Ok(())
 }
 
@@ -68,11 +65,7 @@ pub(crate) fn sync_catalog_rows_subset_in_pool(
     for &kind in kinds {
         insert_catalog_rows(
             pool,
-            RelFileLocator {
-                spc_oid: 0,
-                db_oid,
-                rel_number: kind.relation_oid(),
-            },
+            bootstrap_catalog_rel(kind, db_oid),
             &bootstrap_relation_desc(kind),
             catalog_row_values_for_kind(rows, kind),
         )?;
@@ -88,7 +81,7 @@ pub(crate) fn append_catalog_entry_rows(
     kinds: &[BootstrapCatalogKind],
 ) -> Result<(), CatalogError> {
     let rows = physical_catalog_rows_for_catalog_entry(catalog, relation_name, entry);
-    append_catalog_rows_subset(base_dir, &rows, 1, kinds)
+    append_catalog_rows_subset(base_dir, &rows, entry.rel.db_oid, kinds)
 }
 
 pub(crate) fn insert_catalog_rows_subset_mvcc(
@@ -100,17 +93,9 @@ pub(crate) fn insert_catalog_rows_subset_mvcc(
     for &kind in kinds {
         let desc = bootstrap_relation_desc(kind);
         for values in catalog_row_values_for_kind(rows, kind) {
-            let tid = catalog_tuple_insert(
-                ctx,
-                RelFileLocator {
-                    spc_oid: 0,
-                    db_oid,
-                    rel_number: kind.relation_oid(),
-                },
-                &desc,
-                &values,
-            )?;
-            maintain_catalog_indexes_for_insert(ctx, kind, tid, &values)?;
+            let tid =
+                catalog_tuple_insert(ctx, bootstrap_catalog_rel(kind, db_oid), &desc, &values)?;
+            maintain_catalog_indexes_for_insert_in_db(ctx, kind, db_oid, tid, &values)?;
         }
     }
     Ok(())
@@ -129,11 +114,7 @@ pub(crate) fn delete_catalog_rows_subset_mvcc(
         .map_err(|e| CatalogError::Io(format!("catalog snapshot failed: {e:?}")))?;
     for &kind in kinds {
         let desc = bootstrap_relation_desc(kind);
-        let rel = RelFileLocator {
-            spc_oid: 0,
-            db_oid,
-            rel_number: kind.relation_oid(),
-        };
+        let rel = bootstrap_catalog_rel(kind, db_oid);
         for values in catalog_row_values_for_kind(rows, kind) {
             catalog_tuple_delete_matching(ctx, kind, rel, &desc, &values, &snapshot).map_err(
                 |err| CatalogError::Io(format!("catalog delete for {kind:?} failed: {err:?}")),
@@ -151,11 +132,7 @@ fn append_catalog_rows_subset(
 ) -> Result<(), CatalogError> {
     let mut smgr = MdStorageManager::new(base_dir);
     for &kind in kinds {
-        let rel = RelFileLocator {
-            spc_oid: 0,
-            db_oid,
-            rel_number: kind.relation_oid(),
-        };
+        let rel = bootstrap_catalog_rel(kind, db_oid);
         smgr.open(rel)
             .map_err(|e| CatalogError::Io(e.to_string()))?;
         smgr.create(rel, ForkNumber::Main, true)
@@ -166,16 +143,12 @@ fn append_catalog_rows_subset(
     for &kind in kinds {
         insert_catalog_rows(
             &pool,
-            RelFileLocator {
-                spc_oid: 0,
-                db_oid,
-                rel_number: kind.relation_oid(),
-            },
+            bootstrap_catalog_rel(kind, db_oid),
             &bootstrap_relation_desc(kind),
             catalog_row_values_for_kind(rows, kind),
         )?;
     }
-    rebuild_system_catalog_indexes(base_dir)?;
+    rebuild_system_catalog_indexes_for_db(base_dir, db_oid)?;
     Ok(())
 }
 

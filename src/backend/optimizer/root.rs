@@ -99,14 +99,20 @@ fn make_processed_tlist(parse: &Query) -> Vec<TargetEntry> {
     for clause in &parse.sort_clause {
         let matching_index = processed_tlist
             .iter()
-            .position(|target| clause.tle_sort_group_ref != 0 && target.resno == clause.tle_sort_group_ref)
+            .position(|target| {
+                clause.tle_sort_group_ref != 0 && target.resno == clause.tle_sort_group_ref
+            })
             .or_else(|| {
                 processed_tlist.iter().position(|target| {
                     clause.tle_sort_group_ref != 0
                         && target.ressortgroupref == clause.tle_sort_group_ref
                 })
             })
-            .or_else(|| processed_tlist.iter().position(|target| target.expr == clause.expr));
+            .or_else(|| {
+                processed_tlist
+                    .iter()
+                    .position(|target| target.expr == clause.expr)
+            });
         if let Some(target) = matching_index.and_then(|index| processed_tlist.get_mut(index)) {
             if target.ressortgroupref == 0 {
                 target.ressortgroupref = if clause.tle_sort_group_ref != 0 {
@@ -144,7 +150,10 @@ pub(super) fn project_set_base_width(project_set: &[ProjectSetTarget]) -> usize 
         .count()
 }
 
-pub(super) fn target_references_project_set_output(target: &TargetEntry, base_width: usize) -> bool {
+pub(super) fn target_references_project_set_output(
+    target: &TargetEntry,
+    base_width: usize,
+) -> bool {
     target
         .input_resno
         .is_some_and(|input_resno| input_resno > base_width)
@@ -624,10 +633,7 @@ fn collect_query_outer_refs_expr(expr: &Expr, levelsup: usize, exprs: &mut Vec<E
                 ..*var
             }),
         ),
-        Expr::Var(_)
-        | Expr::Param(_)
-        | Expr::Const(_)
-        | Expr::Random => {}
+        Expr::Var(_) | Expr::Param(_) | Expr::Const(_) | Expr::Random => {}
         Expr::CurrentDate
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
