@@ -6044,6 +6044,57 @@ fn checkpoint_gucs_show_defaults_and_reject_runtime_set() {
 }
 
 #[test]
+fn checkpoint_gucs_load_from_postgresql_conf_and_auto_conf() {
+    use crate::backend::access::transam::ControlFileStore;
+
+    let base = temp_dir("checkpoint_guc_files");
+    std::fs::write(
+        base.join("postgresql.conf"),
+        "checkpoint_timeout = '7min'\nmax_wal_size = '64MB'\nfull_page_writes = off\n",
+    )
+    .unwrap();
+    std::fs::write(
+        base.join("postgresql.auto.conf"),
+        "checkpoint_timeout = '9min'\nmin_wal_size = '16MB'\n",
+    )
+    .unwrap();
+
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    match session.execute(&db, "show checkpoint_timeout").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Text("9min".into())]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match session.execute(&db, "show max_wal_size").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Text("64MB".into())]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match session.execute(&db, "show min_wal_size").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Text("16MB".into())]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match session.execute(&db, "show full_page_writes").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Text("off".into())]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    let control = ControlFileStore::load(&base).unwrap().snapshot();
+    assert!(!control.full_page_writes);
+}
+
+#[test]
 fn checkpoint_requires_pg_checkpoint_membership() {
     let base = temp_dir("checkpoint_privileges");
     let db = Database::open(&base, 16).unwrap();

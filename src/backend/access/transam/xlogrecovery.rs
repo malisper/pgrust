@@ -12,7 +12,7 @@ use crate::backend::storage::smgr::md::MdStorageManager;
 use crate::backend::storage::smgr::{ForkNumber, StorageManager};
 
 use super::{
-    RM_BTREE_ID, RM_HEAP_ID, RM_XACT_ID, RM_XLOG_ID, WalError, WalReader,
+    INVALID_LSN, Lsn, RM_BTREE_ID, RM_HEAP_ID, RM_XACT_ID, RM_XLOG_ID, WalError, WalReader,
     XLOG_CHECKPOINT_ONLINE, XLOG_CHECKPOINT_SHUTDOWN, XLOG_FPI, XLOG_HEAP_INSERT,
     XLOG_XACT_COMMIT,
 };
@@ -34,7 +34,20 @@ pub fn perform_wal_recovery(
     smgr: &mut MdStorageManager,
     txns: &mut TransactionManager,
 ) -> Result<RecoveryStats, WalError> {
-    let mut reader = WalReader::open(wal_dir)?;
+    perform_wal_recovery_from(wal_dir, smgr, txns, INVALID_LSN)
+}
+
+pub fn perform_wal_recovery_from(
+    wal_dir: &Path,
+    smgr: &mut MdStorageManager,
+    txns: &mut TransactionManager,
+    start_lsn: Lsn,
+) -> Result<RecoveryStats, WalError> {
+    let mut reader = if start_lsn == INVALID_LSN {
+        WalReader::open(wal_dir)?
+    } else {
+        WalReader::open_from_lsn(wal_dir, start_lsn)?
+    };
     let mut stats = RecoveryStats {
         records_replayed: 0,
         fpis: 0,
@@ -184,8 +197,11 @@ fn smgr_to_wal(e: crate::backend::storage::smgr::SmgrError) -> WalError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::access::transam::CheckpointRecord;
     use crate::backend::access::transam::xact::{TransactionManager, TransactionStatus};
-    use crate::backend::access::transam::xlog::{WalReader, WalRecord, WalWriter};
+    use crate::backend::access::transam::xlog::{
+        WalReader, WalRecord, WalWriter, wal_segment_path_for_lsn,
+    };
     use crate::backend::storage::buffer::{BufferTag, PAGE_SIZE};
     use crate::backend::storage::page::bufpage::{
         page_add_item, page_get_item, page_get_max_offset_number,
@@ -408,7 +424,7 @@ mod tests {
         let wal_dir = dir.join("pg_wal");
         fs::create_dir_all(&wal_dir).unwrap();
         // Write less than 24 bytes (the header size).
-        fs::write(wal_dir.join("wal.log"), &[0u8; 10]).unwrap();
+        fs::write(wal_segment_path_for_lsn(&wal_dir, 0), &[0u8; 10]).unwrap();
 
         let mut reader = WalReader::open(&wal_dir).unwrap();
         assert!(reader.next_record().unwrap().is_none());
@@ -426,7 +442,7 @@ mod tests {
         drop(wal);
 
         // Truncate the file mid-record by removing last 100 bytes.
-        let path = wal_dir.join("wal.log");
+        let path = wal_segment_path_for_lsn(&wal_dir, 0);
         let data = fs::read(&path).unwrap();
         fs::write(&path, &data[..data.len() - 100]).unwrap();
 
@@ -449,7 +465,7 @@ mod tests {
         drop(wal);
 
         // Corrupt one byte in the record.
-        let path = wal_dir.join("wal.log");
+        let path = wal_segment_path_for_lsn(&wal_dir, 0);
         let mut data = fs::read(&path).unwrap();
         data[50] ^= 0xFF;
         fs::write(&path, &data).unwrap();
@@ -468,11 +484,13 @@ mod tests {
         wal.write_record(1, test_tag(1, 0), &page).unwrap();
         wal.write_record(2, test_tag(1, 1), &page).unwrap();
         wal.flush().unwrap();
-        let file_len = fs::metadata(wal_dir.join("wal.log")).unwrap().len();
+        let file_len = fs::metadata(wal_segment_path_for_lsn(&wal_dir, 0))
+            .unwrap()
+            .len();
         drop(wal);
 
         // Corrupt the second record (byte in the middle of record 2).
-        let path = wal_dir.join("wal.log");
+        let path = wal_segment_path_for_lsn(&wal_dir, 0);
         let mut data = fs::read(&path).unwrap();
         let mid_rec2 = (file_len / 2) as usize + 100;
         data[mid_rec2] ^= 0xFF;
@@ -861,7 +879,7 @@ mod tests {
         drop(wal);
 
         // Truncate the file to lose the second FPI + commit.
-        let path = wal_dir.join("wal.log");
+        let path = wal_segment_path_for_lsn(&wal_dir, 0);
         let data = fs::read(&path).unwrap();
         let truncate_at =
             first_commit_end as usize + ((second_fpi_end - first_commit_end) as usize / 2);
@@ -1023,5 +1041,47 @@ mod tests {
         assert_eq!(stats.commits, 1);
         assert_eq!(stats.fpis, 0);
         assert_eq!(txns.status(42), Some(TransactionStatus::Committed));
+    }
+
+    #[test]
+    fn recovery_from_redo_lsn_skips_precheckpoint_records() {
+        let (dir, wal_dir) = setup_recovery("recovery_from_redo_lsn");
+        let rel = test_rel(1500);
+        let tag = test_tag(1500, 0);
+        let tuple1 = [0x11; 20];
+        let tuple2 = [0x22; 20];
+
+        let page1 = make_page_with_tuples(&[&tuple1]);
+        let mut page2 = page1;
+        let second_offset = page_add_item(&mut page2, &tuple2).unwrap();
+        assert_eq!(second_offset, 2);
+
+        let wal = WalWriter::new(&wal_dir).unwrap();
+        wal.write_record(1, tag, &page1).unwrap();
+        wal.write_commit(1).unwrap();
+        let redo_lsn = wal.insert_lsn();
+        wal.write_checkpoint_record(CheckpointRecord { redo_lsn }, false)
+            .unwrap();
+        wal.write_insert(2, tag, &page2, second_offset, &tuple2)
+            .unwrap();
+        wal.write_commit(2).unwrap();
+        wal.flush().unwrap();
+        drop(wal);
+
+        let mut smgr = MdStorageManager::new_in_recovery(&dir);
+        setup_relation(&mut smgr, rel);
+        smgr.extend(rel, ForkNumber::Main, 0, &page1, true).unwrap();
+
+        let mut txns = TransactionManager::default();
+        txns.replay_commit(1);
+        let stats = perform_wal_recovery_from(&wal_dir, &mut smgr, &mut txns, redo_lsn).unwrap();
+
+        let mut recovered = [0u8; BLCKSZ];
+        smgr.read_block(rel, ForkNumber::Main, 0, &mut recovered).unwrap();
+        assert_eq!(stats.records_replayed, 3);
+        assert_eq!(page_get_item(&recovered, 1).unwrap(), tuple1);
+        assert_eq!(page_get_item(&recovered, 2).unwrap(), tuple2);
+        assert_eq!(txns.status(1), Some(TransactionStatus::Committed));
+        assert_eq!(txns.status(2), Some(TransactionStatus::Committed));
     }
 }

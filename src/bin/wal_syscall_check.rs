@@ -33,7 +33,7 @@ fn main() {
     let _ = std::fs::remove_dir_all(&base);
 
     eprintln!("DB_PATH: {}", base.display());
-    eprintln!("WAL_PATH: {}/pg_wal/wal.log", base.display());
+    eprintln!("WAL_DIR: {}/pg_wal", base.display());
 
     let db = Database::open(&base, 64).expect("open failed");
 
@@ -42,7 +42,7 @@ fn main() {
     exec(&db, "CREATE TABLE t (id INT, name TEXT)");
 
     // 5 auto-commit DML statements — each calls finish_txn → flush_wal
-    // → fdatasync on pg_wal/wal.log.  Exactly 5 fdatasync calls expected.
+    // → fsync on WAL segment files under pg_wal.  Exactly 5 WAL fsync calls expected.
     eprintln!("--- DML: 5 statements, 5 fdatasync expected ---");
     exec(&db, "INSERT INTO t VALUES (1, 'alpha')");
     exec(&db, "INSERT INTO t VALUES (2, 'beta')");
