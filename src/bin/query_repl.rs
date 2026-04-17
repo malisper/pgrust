@@ -754,9 +754,17 @@ fn run_statement(
             }
             Ok(StatementResult::AffectedRows(dropped))
         }
+        Statement::DropIndex(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "DROP INDEX through Database/session path",
+            actual: "DROP INDEX".into(),
+        })),
         Statement::DropView(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "DROP VIEW through Database/session path",
             actual: "DROP VIEW".into(),
+        })),
+        Statement::DropSchema(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "DROP SCHEMA through Database/session path",
+            actual: "DROP SCHEMA".into(),
         })),
         Statement::TruncateTable(stmt) => {
             let mut ctx = ExecutorContext {

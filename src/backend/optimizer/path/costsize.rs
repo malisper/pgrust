@@ -1883,7 +1883,6 @@ fn set_returning_call_uses_immediate_outer_columns(call: &SetReturningCall) -> b
         }
         SetReturningCall::Unnest { args, .. }
         | SetReturningCall::JsonTableFunction { args, .. }
-        | SetReturningCall::JsonPopulateRecordSet { args, .. }
         | SetReturningCall::RegexTableFunction { args, .. }
         | SetReturningCall::TextSearchTableFunction { args, .. }
         | SetReturningCall::UserDefined { args, .. } => {

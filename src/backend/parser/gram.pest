@@ -1,7 +1,7 @@
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 
 statement = { SOI ~ stmt ~ EOI }
-stmt = _{ do_stmt | explain_stmt | table_stmt | select_stmt | values_stmt | copy_stmt | analyze_stmt | show_stmt | set_session_authorization_stmt | reset_session_authorization_stmt | set_stmt | reset_stmt | create_role_stmt | alter_role_stmt | create_schema_stmt | create_index_stmt | alter_table_add_column_stmt | alter_table_add_constraint_stmt | alter_table_drop_constraint_stmt | alter_table_drop_column_stmt | alter_table_alter_column_type_stmt | alter_table_owner_stmt | alter_table_rename_column_stmt | alter_table_rename_stmt | alter_view_owner_stmt | alter_schema_owner_stmt | alter_table_set_stmt | alter_table_set_not_null_stmt | alter_table_drop_not_null_stmt | alter_table_validate_constraint_stmt | comment_on_role_stmt | comment_on_table_stmt | create_table_stmt | create_view_stmt | drop_role_stmt | drop_table_stmt | drop_view_stmt | reassign_owned_stmt | truncate_table_stmt | vacuum_stmt | insert_stmt | update_stmt | delete_stmt | begin_stmt | commit_stmt | rollback_stmt }
+stmt = _{ do_stmt | explain_stmt | table_stmt | select_stmt | values_stmt | copy_stmt | analyze_stmt | show_stmt | set_session_authorization_stmt | reset_session_authorization_stmt | set_stmt | reset_stmt | create_role_stmt | alter_role_stmt | create_schema_stmt | create_index_stmt | alter_table_add_column_stmt | alter_table_add_constraint_stmt | alter_table_drop_constraint_stmt | alter_table_drop_column_stmt | alter_table_alter_column_type_stmt | alter_table_owner_stmt | alter_table_rename_column_stmt | alter_table_rename_stmt | alter_view_owner_stmt | alter_schema_owner_stmt | alter_table_set_stmt | alter_table_set_not_null_stmt | alter_table_drop_not_null_stmt | alter_table_validate_constraint_stmt | comment_on_role_stmt | comment_on_table_stmt | create_table_stmt | create_view_stmt | drop_role_stmt | drop_table_stmt | drop_index_stmt | drop_view_stmt | drop_schema_stmt | reassign_owned_stmt | truncate_table_stmt | vacuum_stmt | insert_stmt | update_stmt | delete_stmt | begin_stmt | commit_stmt | rollback_stmt }
 
 do_stmt = { kw_do ~ do_body ~ do_language_clause? | kw_do ~ do_language_clause ~ do_body }
 do_body = { quoted_string_literal }
@@ -118,7 +118,9 @@ table_with_item = { identifier ~ ("=" ~ (identifier | integer))? }
 without_oids_clause = { kw_without ~ kw_oids }
 table_storage_clause = { table_with_clause | without_oids_clause }
 drop_table_stmt = { kw_drop ~ kw_table ~ if_exists_clause? ~ ident_list }
+drop_index_stmt = { kw_drop ~ kw_index ~ if_exists_clause? ~ ident_list }
 drop_view_stmt = { kw_drop ~ kw_view ~ if_exists_clause? ~ ident_list }
+drop_schema_stmt = { kw_drop ~ kw_schema ~ if_exists_clause? ~ ident_list }
 truncate_table_stmt = { kw_truncate ~ kw_table? ~ ident_list }
 vacuum_stmt = { kw_vacuum ~ (kw_analyze ~ maintenance_target_list | vacuum_option_block ~ maintenance_target_list? | maintenance_target_list) }
 analyze_option_block = { "(" ~ analyze_option ~ ("," ~ analyze_option)* ~ ")" }
@@ -165,11 +167,10 @@ full_join_type = { kw_full ~ kw_outer? }
 join_qualifier = { join_on_clause | join_using_clause }
 join_on_clause = { kw_on ~ expr }
 join_using_clause = { kw_using ~ "(" ~ ident_list ~ ")" }
-aliased_from_item = { from_primary ~ (function_column_def_alias | relation_alias)? }
+aliased_from_item = { from_primary ~ relation_alias? }
 from_primary = { lateral_from_item | values_from_item | srf_from_item | derived_from_item | parenthesized_table_from_item | only_table_from_item | table_from_item | parenthesized_from_item }
 lateral_from_item = { kw_lateral ~ (values_from_item | srf_from_item | derived_from_item | parenthesized_from_item) }
 srf_from_item = { identifier ~ "(" ~ function_arg_list ~ ")" }
-function_column_def_alias = { kw_as? ~ "(" ~ alias_column_def ~ ("," ~ alias_column_def)* ~ ")" }
 derived_from_item = { "(" ~ select_stmt ~ ")" }
 values_from_item = { "(" ~ kw_values ~ values_row ~ ("," ~ values_row)* ~ ")" }
 parenthesized_table_from_item = { "(" ~ kw_table_atom ~ identifier ~ ")" }

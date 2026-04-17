@@ -1330,7 +1330,9 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::create_view_stmt => Ok(Statement::CreateView(build_create_view(inner)?)),
         Rule::drop_role_stmt => Ok(Statement::DropRole(build_drop_role(inner)?)),
         Rule::drop_table_stmt => Ok(Statement::DropTable(build_drop_table(inner)?)),
+        Rule::drop_index_stmt => Ok(Statement::DropIndex(build_drop_index(inner)?)),
         Rule::drop_view_stmt => Ok(Statement::DropView(build_drop_view(inner)?)),
+        Rule::drop_schema_stmt => Ok(Statement::DropSchema(build_drop_schema(inner)?)),
         Rule::reassign_owned_stmt => Ok(Statement::ReassignOwned(build_reassign_owned(inner)?)),
         Rule::truncate_table_stmt => Ok(Statement::TruncateTable(build_truncate_table(inner)?)),
         Rule::vacuum_stmt => Ok(Statement::Vacuum(build_vacuum(inner)?)),
@@ -2294,7 +2296,6 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
             let mut source = None;
             let mut alias = None;
             let mut column_aliases = AliasColumnSpec::None;
-            let mut function_column_defs_without_alias = None;
             for part in pair.into_inner() {
                 match part.as_rule() {
                     Rule::only_table_from_item
@@ -2311,39 +2312,11 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
                         alias = Some(parsed_alias);
                         column_aliases = parsed_column_aliases;
                     }
-                    Rule::function_column_def_alias => {
-                        function_column_defs_without_alias = Some(build_function_column_def_alias(part)?);
-                    }
                     _ => {}
                 }
             }
             let item = source.ok_or(ParseError::UnexpectedEof)?;
             if let Some(alias) = alias {
-                Ok(FromItem::Alias {
-                    source: Box::new(item),
-                    alias,
-                    column_aliases,
-                    preserve_source_names: false,
-                })
-            } else if let Some(column_aliases) = function_column_defs_without_alias {
-                let alias = match &item {
-                    FromItem::FunctionCall { name, .. } => format!("{name}_coldef"),
-                    FromItem::Lateral(inner) => match inner.as_ref() {
-                        FromItem::FunctionCall { name, .. } => format!("{name}_coldef"),
-                        _ => {
-                            return Err(ParseError::UnexpectedToken {
-                                expected: "function call before column definition list",
-                                actual: "lateral non-function from item".into(),
-                            });
-                        }
-                    },
-                    _ => {
-                        return Err(ParseError::UnexpectedToken {
-                            expected: "function call before column definition list",
-                            actual: "non-function from item".into(),
-                        });
-                    }
-                };
                 Ok(FromItem::Alias {
                     source: Box::new(item),
                     alias,
@@ -2510,15 +2483,6 @@ fn build_relation_alias(pair: Pair<'_, Rule>) -> Result<(String, AliasColumnSpec
         }
     }
     Ok((alias.ok_or(ParseError::UnexpectedEof)?, column_aliases))
-}
-
-fn build_function_column_def_alias(pair: Pair<'_, Rule>) -> Result<AliasColumnSpec, ParseError> {
-    let defs = pair
-        .into_inner()
-        .filter(|part| part.as_rule() == Rule::alias_column_def)
-        .map(build_alias_column_def)
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(AliasColumnSpec::Definitions(defs))
 }
 
 fn build_alias_column_spec(pair: Pair<'_, Rule>) -> Result<AliasColumnSpec, ParseError> {
@@ -3384,6 +3348,26 @@ fn build_drop_role(pair: Pair<'_, Rule>) -> Result<DropRoleStatement, ParseError
     })
 }
 
+fn build_drop_index(pair: Pair<'_, Rule>) -> Result<DropIndexStatement, ParseError> {
+    let mut if_exists = false;
+    let mut index_names = Vec::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::if_exists_clause => if_exists = true,
+            Rule::ident_list => index_names.extend(part.into_inner().map(build_identifier)),
+            Rule::identifier => index_names.push(build_identifier(part)),
+            _ => {}
+        }
+    }
+    if index_names.is_empty() {
+        return Err(ParseError::UnexpectedEof);
+    }
+    Ok(DropIndexStatement {
+        if_exists,
+        index_names,
+    })
+}
+
 fn build_drop_view(pair: Pair<'_, Rule>) -> Result<DropViewStatement, ParseError> {
     let mut if_exists = false;
     let mut view_names = Vec::new();
@@ -3403,6 +3387,26 @@ fn build_drop_view(pair: Pair<'_, Rule>) -> Result<DropViewStatement, ParseError
     Ok(DropViewStatement {
         if_exists,
         view_names,
+    })
+}
+
+fn build_drop_schema(pair: Pair<'_, Rule>) -> Result<DropSchemaStatement, ParseError> {
+    let mut if_exists = false;
+    let mut schema_names = Vec::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::if_exists_clause => if_exists = true,
+            Rule::ident_list => schema_names.extend(part.into_inner().map(build_identifier)),
+            Rule::identifier => schema_names.push(build_identifier(part)),
+            _ => {}
+        }
+    }
+    if schema_names.is_empty() {
+        return Err(ParseError::UnexpectedEof);
+    }
+    Ok(DropSchemaStatement {
+        if_exists,
+        schema_names,
     })
 }
 

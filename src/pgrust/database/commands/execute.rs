@@ -516,6 +516,22 @@ impl Database {
                 guard.disarm();
                 result
             }
+            Statement::DropIndex(ref drop_stmt) => {
+                let xid = self.txns.write().begin();
+                let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+                let mut catalog_effects = Vec::new();
+                let result = self.execute_drop_index_stmt_in_transaction_with_search_path(
+                    client_id,
+                    drop_stmt,
+                    xid,
+                    0,
+                    configured_search_path,
+                    &mut catalog_effects,
+                );
+                let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[]);
+                guard.disarm();
+                result
+            }
             Statement::DropDomain(ref drop_stmt) => self.execute_drop_domain_stmt_with_search_path(
                 client_id,
                 drop_stmt,
@@ -531,6 +547,21 @@ impl Database {
                     xid,
                     0,
                     configured_search_path,
+                    &mut catalog_effects,
+                );
+                let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[]);
+                guard.disarm();
+                result
+            }
+            Statement::DropSchema(ref drop_stmt) => {
+                let xid = self.txns.write().begin();
+                let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+                let mut catalog_effects = Vec::new();
+                let result = self.execute_drop_schema_stmt_in_transaction_with_search_path(
+                    client_id,
+                    drop_stmt,
+                    xid,
+                    0,
                     &mut catalog_effects,
                 );
                 let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[]);
