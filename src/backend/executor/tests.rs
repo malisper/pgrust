@@ -10796,6 +10796,75 @@ fn jsonpath_extended_subscripts_work() {
 }
 
 #[test]
+fn jsonpath_expression_method_calls_parse() {
+    let base = temp_dir("jsonpath_expression_method_calls_parse");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select '(($.a - 5).abs() + 10)'::jsonpath, '-($.a * $.a).floor() % 4.3'::jsonpath",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::JsonPath("($.\"a\" - 5).abs() + 10".into()),
+                    Value::JsonPath("-($.\"a\" * $.\"a\").floor() % 4.3".into()),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn jsonpath_expression_method_calls_work() {
+    let base = temp_dir("jsonpath_expression_method_calls");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_path_query('{\"a\":2}', '($.a - 5).abs() + 10'), jsonb_path_query('{\"a\":2.5}', '-($.a * $.a).floor() % 4.3'), jsonb_path_query('[0,1,-2,-3.4,5.6]', '$[*].ceiling().abs().type()')",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows.len(), 5);
+            match &rows[0][0] {
+                Value::Jsonb(bytes) => assert_eq!(
+                    crate::backend::executor::jsonb::render_jsonb_bytes(bytes).unwrap(),
+                    "13"
+                ),
+                other => panic!("expected jsonb, got {:?}", other),
+            }
+            match &rows[0][1] {
+                Value::Jsonb(bytes) => assert_eq!(
+                    crate::backend::executor::jsonb::render_jsonb_bytes(bytes).unwrap(),
+                    "-1.7"
+                ),
+                other => panic!("expected jsonb, got {:?}", other),
+            }
+            for row in rows {
+                match &row[2] {
+                    Value::Jsonb(bytes) => assert_eq!(
+                        crate::backend::executor::jsonb::render_jsonb_bytes(bytes).unwrap(),
+                        "\"number\""
+                    ),
+                    other => panic!("expected jsonb, got {:?}", other),
+                }
+            }
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn getdatabaseencoding_and_jsonpath_unicode_work() {
     let base = temp_dir("jsonpath_unicode");
     let txns = TransactionManager::new_durable(&base).unwrap();
