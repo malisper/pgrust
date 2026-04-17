@@ -3,9 +3,10 @@ use crate::backend::catalog::CatalogError;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::{ColumnDesc, RelationDesc, StatementResult};
 use crate::backend::parser::{
-    CatalogLookup, CreateCompositeTypeStatement, CreateTypeStatement, DropTypeStatement,
-    ParseError, SqlTypeKind, resolve_raw_type_name,
+    CatalogLookup, CreateCompositeTypeStatement, CreateEnumTypeStatement, CreateTypeStatement,
+    DropTypeStatement, ParseError, resolve_raw_type_name,
 };
+use crate::pgrust::database::EnumTypeEntry;
 use crate::pgrust::database::ddl::{
     ensure_relation_owner, is_system_column_name, map_catalog_error, reject_type_with_dependents,
 };
@@ -14,6 +15,11 @@ enum ResolvedDropTypeTarget {
     Composite {
         relation_oid: u32,
         type_oid: u32,
+        display_name: String,
+    },
+    Enum {
+        type_oid: u32,
+        normalized_name: String,
         display_name: String,
     },
     Other,
@@ -51,40 +57,52 @@ impl Database {
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
-        let CreateTypeStatement::Composite(stmt) = create_stmt;
-        let interrupts = self.interrupt_state(client_id);
-        let (type_name, namespace_oid) = self.normalize_create_type_stmt_with_search_path(
-            client_id,
-            Some((xid, cid)),
-            stmt,
-            configured_search_path,
-        )?;
-        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let desc = lower_create_composite_type_desc(stmt, &catalog)?;
-        let ctx = CatalogWriteContext {
-            pool: self.pool.clone(),
-            txns: self.txns.clone(),
-            xid,
-            cid,
-            client_id,
-            waiter: None,
-            interrupts,
-        };
-        match self.catalog.write().create_composite_type_mvcc(
-            type_name,
-            desc,
-            namespace_oid,
-            self.auth_state(client_id).current_user_oid(),
-            &ctx,
-        ) {
-            Ok((_entry, effect)) => {
-                catalog_effects.push(effect);
-                Ok(StatementResult::AffectedRows(0))
+        match create_stmt {
+            CreateTypeStatement::Composite(stmt) => {
+                let interrupts = self.interrupt_state(client_id);
+                let (type_name, namespace_oid) = self.normalize_create_type_name_with_search_path(
+                    client_id,
+                    Some((xid, cid)),
+                    stmt.schema_name.as_deref(),
+                    &stmt.type_name,
+                    configured_search_path,
+                )?;
+                let catalog =
+                    self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+                let desc = lower_create_composite_type_desc(stmt, &catalog)?;
+                let ctx = CatalogWriteContext {
+                    pool: self.pool.clone(),
+                    txns: self.txns.clone(),
+                    xid,
+                    cid,
+                    client_id,
+                    waiter: None,
+                    interrupts,
+                };
+                match self.catalog.write().create_composite_type_mvcc(
+                    type_name,
+                    desc,
+                    namespace_oid,
+                    self.auth_state(client_id).current_user_oid(),
+                    &ctx,
+                ) {
+                    Ok((_entry, effect)) => {
+                        catalog_effects.push(effect);
+                        Ok(StatementResult::AffectedRows(0))
+                    }
+                    Err(CatalogError::TableAlreadyExists(_)) => {
+                        Err(type_already_exists_error(&composite_type_display_name(stmt)))
+                    }
+                    Err(err) => Err(map_catalog_error(err)),
+                }
             }
-            Err(CatalogError::TableAlreadyExists(_)) => Err(type_already_exists_error(
-                &composite_type_display_name(stmt),
-            )),
-            Err(err) => Err(map_catalog_error(err)),
+            CreateTypeStatement::Enum(stmt) => self.execute_create_enum_type_stmt(
+                client_id,
+                stmt,
+                xid,
+                cid,
+                configured_search_path,
+            ),
         }
     }
 
@@ -189,6 +207,26 @@ impl Database {
                         expected: "type",
                     }));
                 }
+                Some(ResolvedDropTypeTarget::Enum {
+                    type_oid,
+                    normalized_name,
+                    display_name,
+                }) => {
+                    reject_type_with_dependents(
+                        self,
+                        client_id,
+                        Some((xid, cid)),
+                        type_oid,
+                        &display_name,
+                    )?;
+                    let removed = self.enum_types.write().remove(&normalized_name);
+                    if removed.is_some() {
+                        self.plan_cache.invalidate_all();
+                        dropped += 1;
+                    } else if !drop_stmt.if_exists {
+                        return Err(type_does_not_exist_error(type_name));
+                    }
+                }
                 None if drop_stmt.if_exists => {}
                 None => return Err(type_does_not_exist_error(type_name)),
             }
@@ -227,6 +265,7 @@ impl Database {
                 _ => format!("{schema_name}.{object_name}"),
             }
         };
+        let search_path = self.effective_search_path(client_id, configured_search_path);
 
         let matched = if let Some((schema_name, object_name)) = type_name.split_once('.') {
             let Some(namespace_oid) = resolve_namespace_oid(schema_name) else {
@@ -236,13 +275,12 @@ impl Database {
                 row.typnamespace == namespace_oid && row.typname.eq_ignore_ascii_case(object_name)
             })
         } else {
-            let search_path = self.effective_search_path(client_id, configured_search_path);
             let mut matched = None;
-            for schema_name in search_path {
+            for schema_name in &search_path {
                 if schema_name.is_empty() || schema_name == "$user" {
                     continue;
                 }
-                let Some(namespace_oid) = resolve_namespace_oid(&schema_name) else {
+                let Some(namespace_oid) = resolve_namespace_oid(schema_name) else {
                     continue;
                 };
                 if let Some(row) = types.iter().find(|row| {
@@ -256,6 +294,30 @@ impl Database {
         };
 
         let Some(type_row) = matched else {
+            let enum_row = if let Some((schema_name, object_name)) = type_name.split_once('.') {
+                let Some(namespace_oid) = resolve_namespace_oid(schema_name) else {
+                    return Ok(None);
+                };
+                self.enum_type_rows_for_search_path(&search_path)
+                    .into_iter()
+                    .find(|row| {
+                        row.typnamespace == namespace_oid
+                            && row.typelem == 0
+                            && row.typname.eq_ignore_ascii_case(object_name)
+                    })
+            } else {
+                self.enum_type_rows_for_search_path(&search_path)
+                    .into_iter()
+                    .find(|row| row.typelem == 0 && row.typname.eq_ignore_ascii_case(type_name))
+            };
+            if let Some(row) = enum_row {
+                let normalized_name = format_name(row.typnamespace, &row.typname);
+                return Ok(Some(ResolvedDropTypeTarget::Enum {
+                    type_oid: row.oid,
+                    normalized_name,
+                    display_name: format_name(row.typnamespace, &row.typname),
+                }));
+            }
             return Ok(None);
         };
         let Some(class_row) = catcache.class_by_oid(type_row.typrelid) else {
@@ -301,7 +363,114 @@ fn lower_create_composite_type_desc(
     Ok(RelationDesc { columns })
 }
 
+impl Database {
+    fn execute_create_enum_type_stmt(
+        &self,
+        client_id: ClientId,
+        stmt: &CreateEnumTypeStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        if stmt.labels.is_empty() {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "one or more enum labels",
+                actual: "()".into(),
+            }));
+        }
+        let (normalized, object_name, namespace_oid) = self.normalize_enum_type_name_for_create(
+            client_id,
+            Some((xid, cid)),
+            stmt,
+            configured_search_path,
+        )?;
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        if catalog.type_rows().into_iter().any(|row| {
+            row.typelem == 0
+                && row.typnamespace == namespace_oid
+                && row.typname.eq_ignore_ascii_case(&object_name)
+        }) {
+            return Err(type_already_exists_error(&enum_type_display_name(stmt)));
+        }
+        let mut enum_types = self.enum_types.write();
+        if enum_types.contains_key(&normalized) {
+            return Err(type_already_exists_error(&enum_type_display_name(stmt)));
+        }
+        if enum_types.values().any(|entry| {
+            entry.namespace_oid == namespace_oid && entry.name.eq_ignore_ascii_case(&object_name)
+        }) {
+            return Err(type_already_exists_error(&enum_type_display_name(stmt)));
+        }
+
+        let next_catalog_oid = {
+            let catalog = self.catalog.write();
+            let snapshot = catalog.catalog_snapshot().map_err(map_catalog_error)?;
+            snapshot.next_oid()
+        };
+        let next_dynamic_oid = self
+            .domains
+            .read()
+            .values()
+            .map(|domain| domain.oid.saturating_add(1))
+            .chain(
+                enum_types
+                    .values()
+                    .map(|entry| entry.array_oid.saturating_add(1)),
+            )
+            .max()
+            .unwrap_or(next_catalog_oid)
+            .max(next_catalog_oid);
+        let oid = next_dynamic_oid;
+        let array_oid = oid.saturating_add(1);
+        enum_types.insert(
+            normalized,
+            EnumTypeEntry {
+                oid,
+                array_oid,
+                name: object_name,
+                namespace_oid,
+                labels: stmt.labels.clone(),
+                comment: None,
+            },
+        );
+        self.plan_cache.invalidate_all();
+        Ok(StatementResult::AffectedRows(0))
+    }
+
+    fn normalize_enum_type_name_for_create(
+        &self,
+        client_id: ClientId,
+        txn_ctx: CatalogTxnContext,
+        stmt: &CreateEnumTypeStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<(String, String, u32), ExecError> {
+        let normalized = self
+            .normalize_create_type_name_with_search_path(
+                client_id,
+                txn_ctx,
+                stmt.schema_name.as_deref(),
+                &stmt.type_name,
+                configured_search_path,
+            )
+            .map_err(ExecError::Parse)?;
+        let object_name = normalized
+            .0
+            .rsplit('.')
+            .next()
+            .unwrap_or(&normalized.0)
+            .to_string();
+        Ok((normalized.0, object_name, normalized.1))
+    }
+}
+
 fn composite_type_display_name(stmt: &CreateCompositeTypeStatement) -> String {
+    match &stmt.schema_name {
+        Some(schema_name) => format!("{schema_name}.{}", stmt.type_name),
+        None => stmt.type_name.clone(),
+    }
+}
+
+fn enum_type_display_name(stmt: &CreateEnumTypeStatement) -> String {
     match &stmt.schema_name {
         Some(schema_name) => format!("{schema_name}.{}", stmt.type_name),
         None => stmt.type_name.clone(),
