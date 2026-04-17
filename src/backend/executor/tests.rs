@@ -9584,6 +9584,45 @@ fn jsonpath_arithmetic_recursive_and_subscripts_work() {
 }
 
 #[test]
+fn jsonpath_exists_returns_null_for_silent_errors() {
+    let base = temp_dir("jsonpath_exists_silent_errors");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select '{\"a\":12}'::jsonb @? '$.b + 2', jsonb_path_exists('[{\"a\":1},{\"a\":2},3]'::jsonb, 'strict $[*].a', silent => true)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Null, Value::Null]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn jsonpath_exists_propagates_non_silent_errors() {
+    let base = temp_dir("jsonpath_exists_errors");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_path_exists('[{\"a\":1},{\"a\":2},3]'::jsonb, 'strict $[*].a', silent => false)",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::InvalidStorageValue { column, details }
+            if column == "jsonpath" && details == "jsonpath member access requires object"
+    ));
+}
+
+#[test]
 fn getdatabaseencoding_and_jsonpath_unicode_work() {
     let base = temp_dir("jsonpath_unicode");
     let txns = TransactionManager::new_durable(&base).unwrap();

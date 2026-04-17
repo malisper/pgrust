@@ -391,6 +391,11 @@ fn eval_arithmetic_any_pair(
     right: &[JsonbValue],
     op: ArithmeticOp,
 ) -> Result<Vec<JsonbValue>, ExecError> {
+    if left.is_empty() || right.is_empty() {
+        return Err(exec_jsonpath_error(
+            "jsonpath arithmetic requires numeric operands",
+        ));
+    }
     let mut out = Vec::new();
     for left_value in left {
         for right_value in right {
