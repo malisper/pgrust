@@ -230,6 +230,7 @@ split_sql_statements() {
         my @current;
         my $in_copy_data = 0;
         my $count = 0;
+        my $dollar_tag;
 
         sub write_stmt {
             my ($out_dir, $count_ref, $lines_ref) = @_;
@@ -239,6 +240,18 @@ split_sql_statements() {
             open my $out, ">", $path or die "open $path: $!";
             print {$out} join("", @$lines_ref);
             close $out or die "close $path: $!";
+        }
+
+        sub update_dollar_quote_state {
+            my ($line, $tag_ref) = @_;
+            while ($line =~ /(\$[A-Za-z_][A-Za-z_0-9]*\$|\$\$)/g) {
+                my $tag = $1;
+                if (!defined $$tag_ref) {
+                    $$tag_ref = $tag;
+                } elsif ($tag eq $$tag_ref) {
+                    undef $$tag_ref;
+                }
+            }
         }
 
         while (my $line = <$in>) {
@@ -263,6 +276,9 @@ split_sql_statements() {
                 $in_copy_data = 1;
                 next;
             }
+
+            update_dollar_quote_state($line, \$dollar_tag);
+            next if defined $dollar_tag;
 
             if ($line =~ /;([[:space:]]*--.*)?[[:space:]]*$/ || $line =~ /(^|[^\\])\\[[:alpha:]]/) {
                 write_stmt($out_dir, \$count, \@current);
@@ -523,6 +539,19 @@ count_matching_queries() {
             my @stmts;
             my @current;
             my $in_copy_data = 0;
+            my $dollar_tag;
+
+            my $update_dollar_quote_state = sub {
+                my ($line, $tag_ref) = @_;
+                while ($line =~ /(\$[A-Za-z_][A-Za-z_0-9]*\$|\$\$)/g) {
+                    my $tag = $1;
+                    if (!defined $$tag_ref) {
+                        $$tag_ref = $tag;
+                    } elsif ($tag eq $$tag_ref) {
+                        undef $$tag_ref;
+                    }
+                }
+            };
 
             for my $line (@$lines) {
                 if ($in_copy_data) {
@@ -546,6 +575,9 @@ count_matching_queries() {
                     $in_copy_data = 1;
                     next;
                 }
+
+                $update_dollar_quote_state->($line, \$dollar_tag);
+                next if defined $dollar_tag;
 
                 if ($line =~ /;([[:space:]]*--.*)?[[:space:]]*$/ || $line =~ /(^|[^\\])\\[[:alpha:]]/) {
                     push @stmts, [ @current ];
