@@ -3431,6 +3431,34 @@ fn parse_union_all_select_chain() {
 }
 
 #[test]
+fn parse_mixed_union_chain_preserves_left_associativity() {
+    let stmt = parse_select("select 1 as x union select 2 as x union all select 2 as x").unwrap();
+    let outer = stmt.set_operation.expect("outer set operation");
+    assert!(matches!(outer.op, SetOperator::Union { all: true }));
+    assert_eq!(outer.inputs.len(), 2);
+    let inner = outer.inputs[0]
+        .set_operation
+        .as_ref()
+        .expect("left-nested set operation");
+    assert!(matches!(inner.op, SetOperator::Union { all: false }));
+    assert_eq!(inner.inputs.len(), 2);
+}
+
+#[test]
+fn parse_intersect_precedence_over_union() {
+    let stmt = parse_select("select 1 union select 2 intersect select 3").unwrap();
+    let outer = stmt.set_operation.expect("outer set operation");
+    assert!(matches!(outer.op, SetOperator::Union { all: false }));
+    assert_eq!(outer.inputs.len(), 2);
+    let right = outer.inputs[1]
+        .set_operation
+        .as_ref()
+        .expect("right-nested set operation");
+    assert!(matches!(right.op, SetOperator::Intersect { all: false }));
+    assert_eq!(right.inputs.len(), 2);
+}
+
+#[test]
 fn parse_union_with_top_level_cte_and_order_by() {
     let stmt =
         parse_select("with q(x) as (select 1) select * from q union select * from q order by 1")

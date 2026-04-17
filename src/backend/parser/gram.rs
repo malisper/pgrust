@@ -2742,18 +2742,7 @@ fn build_set_operation_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, P
         });
     }
 
-    let mut op = None;
-    for next_op in operators {
-        match op {
-            None => op = Some(next_op),
-            Some(current) if current == next_op => {}
-            Some(_) => {
-                return Err(ParseError::FeatureNotSupported(
-                    "mixed set-operation chains".into(),
-                ));
-            }
-        }
-    }
+    let nested_set_operation = build_set_operation_tree(inputs, operators)?;
 
     Ok(SelectStatement {
         with_recursive,
@@ -2767,11 +2756,67 @@ fn build_set_operation_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, P
         limit,
         offset,
         locking_clause,
-        set_operation: Some(Box::new(SetOperationStatement {
-            op: op.ok_or(ParseError::UnexpectedEof)?,
-            inputs,
-        })),
+        set_operation: Some(Box::new(nested_set_operation)),
     })
+}
+
+fn build_set_operation_tree(
+    inputs: Vec<SelectStatement>,
+    operators: Vec<SetOperator>,
+) -> Result<SetOperationStatement, ParseError> {
+    if inputs.len() != operators.len().saturating_add(1) {
+        return Err(ParseError::UnexpectedToken {
+            expected: "set-operation chain with one more input than operator",
+            actual: format!("{} inputs and {} operators", inputs.len(), operators.len()),
+        });
+    }
+
+    let mut pending_inputs = Vec::new();
+    let mut pending_ops = Vec::new();
+    let mut current = inputs[0].clone();
+
+    for (op, next_input) in operators.into_iter().zip(inputs.into_iter().skip(1)) {
+        if matches!(op, SetOperator::Intersect { .. }) {
+            current = select_statement_for_set_operation(op, current, next_input);
+        } else {
+            pending_inputs.push(current);
+            pending_ops.push(op);
+            current = next_input;
+        }
+    }
+    pending_inputs.push(current);
+
+    let mut reduced_inputs = pending_inputs.into_iter();
+    let mut nested = reduced_inputs.next().ok_or(ParseError::UnexpectedEof)?;
+    for (op, next_input) in pending_ops.into_iter().zip(reduced_inputs) {
+        nested = select_statement_for_set_operation(op, nested, next_input);
+    }
+
+    nested.set_operation.ok_or(ParseError::UnexpectedEof).map(|op| *op)
+}
+
+fn select_statement_for_set_operation(
+    op: SetOperator,
+    left: SelectStatement,
+    right: SelectStatement,
+) -> SelectStatement {
+    SelectStatement {
+        with_recursive: false,
+        with: Vec::new(),
+        from: None,
+        targets: Vec::new(),
+        where_clause: None,
+        group_by: Vec::new(),
+        having: None,
+        order_by: Vec::new(),
+        limit: None,
+        offset: None,
+        locking_clause: None,
+        set_operation: Some(Box::new(SetOperationStatement {
+            op,
+            inputs: vec![left, right],
+        })),
+    }
 }
 
 fn build_values_statement(pair: Pair<'_, Rule>) -> Result<ValuesStatement, ParseError> {
