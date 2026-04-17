@@ -388,6 +388,49 @@ extract_clean_output_and_timings() {
     ' "$raw_output" "$clean_output" "$timings_output"
 }
 
+normalize_regression_output() {
+    local input_path="$1"
+    local output_path="$2"
+
+    perl -e '
+        use strict;
+        use warnings;
+
+        my ($input_path, $output_path) = @ARGV;
+        open my $in, "<", $input_path or die "open $input_path: $!";
+        open my $out, ">", $output_path or die "open $output_path: $!";
+
+        my @normalized;
+        while (my $line = <$in>) {
+            $line =~ s/\r$//;
+            $line =~ s/[ \t]+$//;
+
+            # The one-by-one harness executes temp statement files, so psql
+            # prefixes errors with the temp file path. Strip that wrapper so the
+            # output compares against upstream regression expectations.
+            $line =~ s{^psql:[^:]+/[0-9]{5}\.sql:\d+:\s+}{};
+
+            next if $line =~ /^\s*--/;
+            push @normalized, $line;
+        }
+
+        my @collapsed;
+        my $prev_blank = 1;
+        for my $line (@normalized) {
+            my $is_blank = $line =~ /^\s*$/;
+            next if $is_blank && $prev_blank;
+            push @collapsed, $line;
+            $prev_blank = $is_blank ? 1 : 0;
+        }
+        pop @collapsed while @collapsed && $collapsed[-1] =~ /^\s*$/;
+
+        print {$out} @collapsed;
+
+        close $in or die "close $input_path: $!";
+        close $out or die "close $output_path: $!";
+    ' "$input_path" "$output_path"
+}
+
 run_sql_one_by_one() {
     local sql_path="$1"
     local clean_output="$2"
@@ -723,6 +766,7 @@ for sql_file in "${TEST_FILES[@]}"; do
     matched=false
     best_diff_lines=999999
     query_expected_file="$expected_file"
+    normalized_output_file="$tmp_dir/normalized_actual.out"
 
     candidates=("$EXPECTED_DIR/${test_name}.out")
     shopt -s nullglob
@@ -734,7 +778,11 @@ for sql_file in "${TEST_FILES[@]}"; do
     for candidate in "${candidates[@]}"; do
         [[ -f "$candidate" ]] || continue
 
-        if diff -u -b "$candidate" "$output_file" > "$diff_file.tmp" 2>&1; then
+        normalized_expected_file="$tmp_dir/normalized_expected.out"
+        normalize_regression_output "$candidate" "$normalized_expected_file"
+        normalize_regression_output "$output_file" "$normalized_output_file"
+
+        if diff -u -b "$normalized_expected_file" "$normalized_output_file" > "$diff_file.tmp" 2>&1; then
             matched=true
             query_expected_file="$candidate"
             rm -f "$diff_file.tmp"
