@@ -3058,13 +3058,37 @@ fn select_date_trunc_on_date_values() {
         )
         .unwrap(),
         vec![vec![
-            Value::Date(DateADT(
-                crate::backend::utils::time::datetime::days_from_ymd(2001, 1, 1).unwrap(),
+            Value::TimestampTz(crate::include::nodes::datetime::TimestampTzADT(
+                i64::from(crate::backend::utils::time::datetime::days_from_ymd(2001, 1, 1).unwrap())
+                    * crate::include::nodes::datetime::USECS_PER_DAY,
             )),
-            Value::Date(DateADT(
-                crate::backend::utils::time::datetime::days_from_ymd(-10, 1, 1).unwrap(),
+            Value::TimestampTz(crate::include::nodes::datetime::TimestampTzADT(
+                i64::from(crate::backend::utils::time::datetime::days_from_ymd(-10, 1, 1).unwrap())
+                    * crate::include::nodes::datetime::USECS_PER_DAY,
             )),
         ]],
+    );
+}
+
+#[test]
+fn select_date_trunc_on_timestamp_value() {
+    let base = temp_dir("select_date_trunc_timestamp");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select date_trunc('millennium', timestamp '1970-03-20 04:30:00')",
+        )
+        .unwrap(),
+        vec![vec![Value::Timestamp(
+            crate::include::nodes::datetime::TimestampADT(
+                i64::from(crate::backend::utils::time::datetime::days_from_ymd(1001, 1, 1).unwrap())
+                    * crate::include::nodes::datetime::USECS_PER_DAY,
+            ),
+        )]],
     );
 }
 

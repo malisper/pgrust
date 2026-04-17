@@ -448,7 +448,30 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 }
                 Some(BuiltinScalarFunction::TimeOfDay) => SqlType::new(SqlTypeKind::Text),
                 Some(BuiltinScalarFunction::DatePart) => SqlType::new(SqlTypeKind::Float8),
-                Some(BuiltinScalarFunction::DateTrunc) => SqlType::new(SqlTypeKind::Date),
+                Some(BuiltinScalarFunction::DateTrunc) => match args.get(1).map(|arg| {
+                    infer_sql_expr_type_with_ctes(
+                        &arg.value,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )
+                }) {
+                    Some(SqlType {
+                        kind: SqlTypeKind::Date,
+                        ..
+                    })
+                    | Some(SqlType {
+                        kind: SqlTypeKind::TimestampTz,
+                        ..
+                    }) => SqlType::new(SqlTypeKind::TimestampTz),
+                    Some(SqlType {
+                        kind: SqlTypeKind::Timestamp,
+                        ..
+                    }) => SqlType::new(SqlTypeKind::Timestamp),
+                    _ => SqlType::new(SqlTypeKind::Timestamp),
+                },
                 Some(BuiltinScalarFunction::IsFinite) => SqlType::new(SqlTypeKind::Bool),
                 Some(BuiltinScalarFunction::MakeDate) => SqlType::new(SqlTypeKind::Date),
                 Some(BuiltinScalarFunction::ToJson)
