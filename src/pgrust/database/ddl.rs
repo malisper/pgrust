@@ -212,10 +212,15 @@ pub(super) fn validate_alter_table_add_column(
         }));
     }
     if is_system_column_name(&column.name) {
-        return Err(ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "non-system column name",
-            actual: column.name.clone(),
-        }));
+        return Err(ExecError::DetailedError {
+            message: format!(
+                "column name \"{}\" conflicts with a system column name",
+                column.name
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "42701",
+        });
     }
     if desc
         .columns

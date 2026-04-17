@@ -2485,8 +2485,10 @@ fn alter_table_add_column_rejects_unsupported_forms() {
         .unwrap();
 
     match db.execute(1, "alter table items add column xmin int4") {
-        Err(ExecError::Parse(ParseError::UnexpectedToken { expected, actual }))
-            if expected == "non-system column name" && actual == "xmin" => {}
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) if message == "column name \"xmin\" conflicts with a system column name"
+            && sqlstate == "42701" => {}
         other => panic!("expected system-column rejection, got {other:?}"),
     }
 
