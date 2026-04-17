@@ -5,7 +5,7 @@ use crate::include::nodes::primnodes::{
 };
 
 use super::inherit::append_translation;
-use super::pathnodes::{expr_sql_type, is_synthetic_slot_id};
+use super::pathnodes::is_synthetic_slot_id;
 use super::{expand_join_rte_vars, flatten_join_alias_vars};
 
 fn projection_slot_var(
@@ -22,7 +22,7 @@ fn projection_slot_var(
 }
 
 fn projection_is_passthrough_boundary(input: &Path, targets: &[TargetEntry]) -> bool {
-    let input_layout = input.output_vars();
+    let input_layout = input.semantic_output_vars();
     targets.len() == input_layout.len()
         && targets
             .iter()
@@ -222,17 +222,12 @@ pub(super) fn rewrite_expr_for_append_rel(expr: Expr, info: &AppendRelInfo) -> E
 }
 
 pub(super) fn rewrite_expr_for_path(expr: Expr, path: &Path, layout: &[Expr]) -> Expr {
-    if layout.contains(&expr) {
-        return expr;
-    }
-    if let Expr::Var(var) = &expr
-        && var.varlevelsup == 0
-        && path_relids(path).contains(&var.varno)
-        && let Some(index) = attrno_index(var.varattno)
-        && let Some(candidate) = layout.get(index)
-        && expr_sql_type(candidate) == var.vartype
+    if !matches!(
+        path,
+        Path::Projection { .. } | Path::ProjectSet { .. } | Path::NestedLoopJoin { .. } | Path::HashJoin { .. }
+    ) && layout.contains(&expr)
     {
-        return candidate.clone();
+        return expr;
     }
     match path {
         Path::Projection {
@@ -241,7 +236,7 @@ pub(super) fn rewrite_expr_for_path(expr: Expr, path: &Path, layout: &[Expr]) ->
             targets,
             ..
         } => {
-            let input_layout = input.output_vars();
+            let input_layout = input.semantic_output_vars();
             let passthrough_boundary = projection_is_passthrough_boundary(input, targets);
             if let Some(index) =
                 projection_target_index_for_semantic_expr(targets, &input_layout, &expr)
@@ -249,7 +244,8 @@ pub(super) fn rewrite_expr_for_path(expr: Expr, path: &Path, layout: &[Expr]) ->
                 let target = &targets[index];
                 projection_slot_var(*slot_id, user_attrno(index), target.sql_type)
             } else {
-                let rewritten_input_expr = rewrite_expr_for_path(expr.clone(), input, &input_layout);
+                let rewritten_input_expr =
+                    rewrite_expr_for_path(expr.clone(), input, &input_layout);
                 if passthrough_boundary
                     && is_synthetic_slot_id(*slot_id)
                     && let Some(index) = input_layout
@@ -261,6 +257,12 @@ pub(super) fn rewrite_expr_for_path(expr: Expr, path: &Path, layout: &[Expr]) ->
                         user_attrno(index),
                         targets[index].sql_type,
                     );
+                }
+                if targets
+                    .iter()
+                    .any(|target| target.expr == rewritten_input_expr)
+                {
+                    return rewritten_input_expr;
                 }
                 if let Some(index) = projection_target_index_for_semantic_expr(
                     targets,
@@ -278,11 +280,11 @@ pub(super) fn rewrite_expr_for_path(expr: Expr, path: &Path, layout: &[Expr]) ->
             rewrite_expr_for_path(expr, input, layout)
         }
         Path::NestedLoopJoin { left, right, .. } | Path::HashJoin { left, right, .. } => {
-            let left_layout = left.output_vars();
+            let left_layout = left.semantic_output_vars();
             if left_layout.contains(&expr) {
                 return rewrite_expr_for_path(expr, left, &left_layout);
             }
-            let right_layout = right.output_vars();
+            let right_layout = right.semantic_output_vars();
             if right_layout.contains(&expr) {
                 return rewrite_expr_for_path(expr, right, &right_layout);
             }
@@ -359,18 +361,22 @@ pub(super) fn rewrite_semantic_expr_for_path(expr: Expr, path: &Path, layout: &[
                 .collect(),
             ..*func
         })),
-        Expr::SubLink(sublink) => Expr::SubLink(Box::new(crate::include::nodes::primnodes::SubLink {
-            testexpr: sublink
-                .testexpr
-                .map(|expr| Box::new(rewrite_semantic_expr_for_path(*expr, path, layout))),
-            ..*sublink
-        })),
-        Expr::SubPlan(subplan) => Expr::SubPlan(Box::new(crate::include::nodes::primnodes::SubPlan {
-            testexpr: subplan
-                .testexpr
-                .map(|expr| Box::new(rewrite_semantic_expr_for_path(*expr, path, layout))),
-            ..*subplan
-        })),
+        Expr::SubLink(sublink) => {
+            Expr::SubLink(Box::new(crate::include::nodes::primnodes::SubLink {
+                testexpr: sublink
+                    .testexpr
+                    .map(|expr| Box::new(rewrite_semantic_expr_for_path(*expr, path, layout))),
+                ..*sublink
+            }))
+        }
+        Expr::SubPlan(subplan) => {
+            Expr::SubPlan(Box::new(crate::include::nodes::primnodes::SubPlan {
+                testexpr: subplan
+                    .testexpr
+                    .map(|expr| Box::new(rewrite_semantic_expr_for_path(*expr, path, layout))),
+                ..*subplan
+            }))
+        }
         Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(
             crate::include::nodes::primnodes::ScalarArrayOpExpr {
                 left: Box::new(rewrite_semantic_expr_for_path(*saop.left, path, layout)),
@@ -378,9 +384,10 @@ pub(super) fn rewrite_semantic_expr_for_path(expr: Expr, path: &Path, layout: &[
                 ..*saop
             },
         )),
-        Expr::Cast(inner, ty) => {
-            Expr::Cast(Box::new(rewrite_semantic_expr_for_path(*inner, path, layout)), ty)
-        }
+        Expr::Cast(inner, ty) => Expr::Cast(
+            Box::new(rewrite_semantic_expr_for_path(*inner, path, layout)),
+            ty,
+        ),
         Expr::Like {
             expr,
             pattern,
@@ -407,12 +414,12 @@ pub(super) fn rewrite_semantic_expr_for_path(expr: Expr, path: &Path, layout: &[
                 .map(|expr| Box::new(rewrite_semantic_expr_for_path(*expr, path, layout))),
             negated,
         },
-        Expr::IsNull(inner) => {
-            Expr::IsNull(Box::new(rewrite_semantic_expr_for_path(*inner, path, layout)))
-        }
-        Expr::IsNotNull(inner) => {
-            Expr::IsNotNull(Box::new(rewrite_semantic_expr_for_path(*inner, path, layout)))
-        }
+        Expr::IsNull(inner) => Expr::IsNull(Box::new(rewrite_semantic_expr_for_path(
+            *inner, path, layout,
+        ))),
+        Expr::IsNotNull(inner) => Expr::IsNotNull(Box::new(rewrite_semantic_expr_for_path(
+            *inner, path, layout,
+        ))),
         Expr::IsDistinctFrom(left, right) => Expr::IsDistinctFrom(
             Box::new(rewrite_semantic_expr_for_path(*left, path, layout)),
             Box::new(rewrite_semantic_expr_for_path(*right, path, layout)),

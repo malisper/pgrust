@@ -7,12 +7,11 @@ use crate::include::nodes::pathnodes::{Path, PathKey, PathTarget, PlannerInfo};
 use crate::include::nodes::plannodes::{Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
     AggAccum, Aggref, BoolExpr, Expr, ExprArraySubscript, FuncExpr, JoinType, OpExpr,
-    ProjectSetTarget, QueryColumn, ScalarArrayOpExpr, SubLinkType, TargetEntry, Var,
-    user_attrno,
+    ProjectSetTarget, QueryColumn, ScalarArrayOpExpr, SubLinkType, TargetEntry, Var, user_attrno,
 };
 
-use super::inherit::{append_translation, translate_append_rel_expr};
 use super::flatten_join_alias_vars;
+use super::inherit::{append_translation, translate_append_rel_expr};
 
 // :HACK: Planner-generated slot Vars still share the same Var identity space as parse-time
 // rtindex Vars, so keep synthetic slots in a disjoint high range until slot identity is split
@@ -189,7 +188,9 @@ impl Path {
                 rtindex,
                 output_columns,
                 ..
-            } => slot_output_vars(rte_slot_id(*rtindex), output_columns, |column| column.sql_type),
+            } => slot_output_vars(rte_slot_id(*rtindex), output_columns, |column| {
+                column.sql_type
+            }),
             Self::ProjectSet {
                 slot_id, targets, ..
             } => targets
@@ -217,11 +218,15 @@ impl Path {
         }
     }
 
+    pub fn semantic_output_vars(&self) -> Vec<Expr> {
+        self.semantic_output_target().exprs
+    }
+
     pub fn output_target(&self) -> PathTarget {
         match self {
-            Self::Filter { input, .. } | Self::OrderBy { input, .. } | Self::Limit { input, .. } => {
-                input.output_target()
-            }
+            Self::Filter { input, .. }
+            | Self::OrderBy { input, .. }
+            | Self::Limit { input, .. } => input.output_target(),
             Self::Projection {
                 slot_id, targets, ..
             } => PathTarget::with_sortgrouprefs(
@@ -236,6 +241,69 @@ impl Path {
                     .collect(),
             ),
             _ => PathTarget::new(self.output_vars()),
+        }
+    }
+
+    pub fn semantic_output_target(&self) -> PathTarget {
+        match self {
+            Self::Result { .. } => PathTarget::new(Vec::new()),
+            Self::Append {
+                source_id, desc, ..
+            } => slot_output_target(*source_id, &desc.columns, |column| column.sql_type),
+            Self::SeqScan {
+                source_id, desc, ..
+            }
+            | Self::IndexScan {
+                source_id, desc, ..
+            } => slot_output_target(*source_id, &desc.columns, |column| column.sql_type),
+            Self::Filter { input, .. }
+            | Self::OrderBy { input, .. }
+            | Self::Limit { input, .. } => input.semantic_output_target(),
+            Self::Projection { targets, .. } => PathTarget::from_target_list(targets),
+            Self::Aggregate {
+                group_by,
+                accumulators,
+                ..
+            } => aggregate_output_target(group_by, accumulators),
+            Self::Values {
+                slot_id,
+                output_columns,
+                ..
+            }
+            | Self::CteScan {
+                slot_id,
+                output_columns,
+                ..
+            }
+            | Self::WorkTableScan {
+                slot_id,
+                output_columns,
+                ..
+            }
+            | Self::RecursiveUnion {
+                slot_id,
+                output_columns,
+                ..
+            }
+            | Self::SetOp {
+                slot_id,
+                output_columns,
+                ..
+            } => slot_output_target(*slot_id, output_columns, |column| column.sql_type),
+            Self::FunctionScan { slot_id, call, .. } => {
+                slot_output_target(*slot_id, call.output_columns(), |column| column.sql_type)
+            }
+            Self::SubqueryScan {
+                rtindex,
+                output_columns,
+                ..
+            } => slot_output_target(*rtindex, output_columns, |column| column.sql_type),
+            Self::ProjectSet { targets, .. } => project_set_output_target(targets),
+            Self::NestedLoopJoin { left, right, .. } | Self::HashJoin { left, right, .. } => {
+                let mut exprs = left.semantic_output_vars();
+                exprs.extend(right.semantic_output_vars());
+                PathTarget::new(exprs)
+            }
         }
     }
 
@@ -311,7 +379,12 @@ pub(super) fn lower_expr_to_path_output(
             (translated != expr)
                 .then_some(translated)
                 .and_then(|translated| {
-                    lower_expr_to_path_output_internal(Some(root), path, &translated, ressortgroupref)
+                    lower_expr_to_path_output_internal(
+                        Some(root),
+                        path,
+                        &translated,
+                        ressortgroupref,
+                    )
                 })
         })
     })
@@ -325,16 +398,24 @@ fn lower_expr_to_path_output_internal(
 ) -> Option<Expr> {
     match path {
         Path::Projection { input, targets, .. } => {
-            if let Some(candidate) =
-                projection_output_match(root, targets, &input.output_target(), expr, ressortgroupref)
-            {
+            if let Some(candidate) = projection_output_match(
+                root,
+                targets,
+                &input.semantic_output_target(),
+                expr,
+                ressortgroupref,
+            ) {
                 return Some(candidate);
             }
         }
         Path::ProjectSet { input, targets, .. } => {
-            if let Some(candidate) =
-                project_set_output_match(root, targets, &input.output_target(), expr, ressortgroupref)
-            {
+            if let Some(candidate) = project_set_output_match(
+                root,
+                targets,
+                &input.semantic_output_target(),
+                expr,
+                ressortgroupref,
+            ) {
                 return Some(candidate);
             }
         }
@@ -363,7 +444,10 @@ fn projection_output_match(
         .iter()
         .find(|target| {
             target.input_resno.and_then(|input_resno| {
-                input_target.exprs.get(input_resno.saturating_sub(1)).cloned()
+                input_target
+                    .exprs
+                    .get(input_resno.saturating_sub(1))
+                    .cloned()
             }) == Some(expr.clone())
         })
         .map(|target| target.expr.clone())
@@ -461,7 +545,7 @@ fn project_pathkeys(
     targets: &[TargetEntry],
     input_pathkeys: &[PathKey],
 ) -> Vec<PathKey> {
-    let input_target = input.output_target();
+    let input_target = input.semantic_output_target();
     input_pathkeys
         .iter()
         .map(|key| {
