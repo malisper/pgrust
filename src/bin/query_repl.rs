@@ -727,6 +727,7 @@ fn run_statement(
         | Statement::CreateFunction(_)
         | Statement::CreateDatabase(_)
         | Statement::CreateSchema(_)
+        | Statement::CreateTablespace(_)
         | Statement::CreateDomain(_)
         | Statement::CreateType(_)
         | Statement::CreateSequence(_)

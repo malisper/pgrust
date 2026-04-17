@@ -1187,6 +1187,18 @@ fn parse_grant_all_on_schema_statement() {
 }
 
 #[test]
+fn parse_create_tablespace_statement() {
+    let stmt = parse_statement("create tablespace regress_tblspace location ''").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateTablespace(CreateTablespaceStatement {
+            tablespace_name: "regress_tblspace".into(),
+            location: "".into(),
+        })
+    );
+}
+
+#[test]
 fn parse_revoke_all_privileges_on_table_from_public_statement() {
     let stmt = parse_statement("revoke all privileges on tenant_table from public").unwrap();
     assert_eq!(
@@ -2024,6 +2036,17 @@ fn parse_typed_string_literal_expression() {
 }
 
 #[test]
+fn parse_select_star_with_extra_target() {
+    let stmt = parse_select("select *, 'asphalt' from people").unwrap();
+    assert_eq!(stmt.targets.len(), 2);
+    assert!(matches!(&stmt.targets[0].expr, SqlExpr::Column(name) if name == "*"));
+    assert!(matches!(
+        &stmt.targets[1].expr,
+        SqlExpr::Const(Value::Text(value)) if value.as_str() == "asphalt"
+    ));
+}
+
+#[test]
 fn parse_qualified_star_select_target() {
     let stmt = parse_select("select p.* from people p").unwrap();
     assert_eq!(stmt.targets.len(), 1);
@@ -2815,6 +2838,23 @@ fn select_star_expands_to_all_columns() {
         "expected SeqScan (identity projection elided), got {:?}",
         plan
     );
+}
+
+#[test]
+fn select_star_with_extra_target_builds_projection() {
+    let stmt = parse_select("select *, 'asphalt' from people").unwrap();
+    let plan = build_plan(&stmt, &catalog()).unwrap();
+    match plan {
+        Plan::Projection { targets, .. } => {
+            assert_eq!(targets.len(), 4);
+            assert_eq!(targets.last().unwrap().name, "?column?");
+            assert!(matches!(
+                &targets.last().unwrap().expr,
+                Expr::Const(Value::Text(value)) if value.as_str() == "asphalt"
+            ));
+        }
+        other => panic!("expected projection, got {other:?}"),
+    }
 }
 
 #[test]
