@@ -1103,7 +1103,7 @@ fn assign_array_value(
         if items.is_empty() {
             lower_bound = start;
         }
-        extend_assignment_items(&mut lower_bound, &mut items, start, end);
+        extend_assignment_items(&mut lower_bound, &mut items, start, end)?;
         let start_idx = (start - lower_bound) as usize;
         let end_idx = (end - lower_bound) as usize;
         let span = end_idx - start_idx + 1;
@@ -1132,8 +1132,12 @@ fn assign_array_value(
         if items.is_empty() {
             lower_bound = index;
         }
-        extend_assignment_items(&mut lower_bound, &mut items, index, index);
-        let index = (index - lower_bound) as usize;
+        extend_assignment_items(&mut lower_bound, &mut items, index, index)?;
+        let index = usize::try_from(i64::from(index) - i64::from(lower_bound))
+            .map_err(|_| array_assignment_limit_error())?;
+        if index >= items.len() {
+            return Err(array_assignment_limit_error());
+        }
         items[index] = if subscripts.len() == 1 {
             replacement
         } else {
@@ -1478,19 +1482,39 @@ fn assignment_replacement_items(replacement: Value) -> Result<Vec<Value>, ExecEr
     }
 }
 
-fn extend_assignment_items(lower_bound: &mut i32, items: &mut Vec<Value>, start: i32, end: i32) {
+fn extend_assignment_items(
+    lower_bound: &mut i32,
+    items: &mut Vec<Value>,
+    start: i32,
+    end: i32,
+) -> Result<(), ExecError> {
     if items.is_empty() {
         *lower_bound = start;
     }
     if start < *lower_bound {
         let prepend = (*lower_bound - start) as usize;
+        checked_assignment_item_len(items.len(), prepend)?;
         items.splice(0..0, std::iter::repeat_n(Value::Null, prepend));
         *lower_bound = start;
     }
-    let upper_bound = *lower_bound + items.len() as i32 - 1;
-    if end > upper_bound {
-        items.resize(items.len() + (end - upper_bound) as usize, Value::Null);
+    let upper_bound = i64::from(*lower_bound) + i64::try_from(items.len()).unwrap_or(i64::MAX) - 1;
+    if i64::from(end) > upper_bound {
+        let append = usize::try_from(i64::from(end) - upper_bound)
+            .map_err(|_| array_assignment_limit_error())?;
+        let new_len = checked_assignment_item_len(items.len(), append)?;
+        items.resize(new_len, Value::Null);
     }
+    Ok(())
+}
+
+fn checked_assignment_item_len(current_len: usize, extra: usize) -> Result<usize, ExecError> {
+    let new_len = current_len
+        .checked_add(extra)
+        .ok_or_else(array_assignment_limit_error)?;
+    if new_len > i32::MAX as usize {
+        return Err(array_assignment_limit_error());
+    }
+    Ok(new_len)
 }
 
 fn build_assignment_array_value(lower_bound: i32, items: Vec<Value>) -> Result<Value, ExecError> {
