@@ -3,6 +3,7 @@ pub mod fsm;
 pub mod lmgr;
 pub mod page;
 pub mod smgr;
+pub mod sync;
 
 /// POSIX fsync — flushes kernel buffer cache to disk without flushing the
 /// hardware write cache.  Matches PostgreSQL's default `wal_sync_method = fdatasync`

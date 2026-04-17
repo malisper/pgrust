@@ -5854,6 +5854,8 @@ fn durable_open_bootstraps_control_file_and_clean_shutdown_marks_shutdown() {
     {
         let db = Database::open(&base, 32).unwrap();
         assert!(control_path.exists(), "expected control file to be created");
+        let raw = std::fs::read(&control_path).unwrap();
+        assert_ne!(raw.first(), Some(&b'{'));
         let control = ControlFileStore::load(&base).unwrap().snapshot();
         assert_eq!(control.state, ControlFileState::InProduction);
         assert_eq!(control.next_xid, db.txns.read().next_xid());
@@ -5877,6 +5879,23 @@ fn legacy_durable_cluster_without_control_file_is_rejected() {
         }
         Ok(_) => panic!("expected legacy control-file rejection, got successful open"),
         Err(other) => panic!("expected legacy control-file rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn legacy_json_control_file_is_rejected() {
+    use crate::backend::access::transam::{ControlFileError, ControlFileStore};
+
+    let base = temp_dir("legacy_json_control_file");
+    std::fs::create_dir_all(base.join("global")).unwrap();
+    std::fs::write(ControlFileStore::legacy_json_path(&base), b"{}").unwrap();
+
+    match Database::open(&base, 16) {
+        Err(DatabaseError::Control(ControlFileError::Unsupported(message))) => {
+            assert!(message.contains("pg_control.json"));
+        }
+        Ok(_) => panic!("expected legacy json control-file rejection, got successful open"),
+        Err(other) => panic!("expected legacy json control-file rejection, got {other:?}"),
     }
 }
 
@@ -6100,21 +6119,23 @@ fn checkpoint_requires_pg_checkpoint_membership() {
     let db = Database::open(&base, 16).unwrap();
     let mut bootstrap = Session::new(1);
 
+    bootstrap.execute(&db, "create role tenant login").unwrap();
     bootstrap
-        .execute(&db, "create role tenant login")
+        .execute(&db, "create role outsider login")
         .unwrap();
-    bootstrap.execute(&db, "create role outsider login").unwrap();
     let tenant_oid = role_oid(&db, "tenant");
     db.catalog
         .write()
-        .grant_role_membership(&crate::backend::catalog::role_memberships::NewRoleMembership {
-            roleid: crate::include::catalog::PG_CHECKPOINT_OID,
-            member: tenant_oid,
-            grantor: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
-            admin_option: false,
-            inherit_option: true,
-            set_option: true,
-        })
+        .grant_role_membership(
+            &crate::backend::catalog::role_memberships::NewRoleMembership {
+                roleid: crate::include::catalog::PG_CHECKPOINT_OID,
+                member: tenant_oid,
+                grantor: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+                admin_option: false,
+                inherit_option: true,
+                set_option: true,
+            },
+        )
         .unwrap();
 
     let mut session = Session::new(2);

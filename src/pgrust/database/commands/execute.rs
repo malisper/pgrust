@@ -124,7 +124,9 @@ impl Database {
                         sqlstate: "42501",
                     });
                 }
-                self.request_checkpoint(crate::backend::access::transam::CheckpointRequestFlags::sql())?;
+                self.request_checkpoint(
+                    crate::backend::access::transam::CheckpointRequestFlags::sql(),
+                )?;
                 Ok(StatementResult::AffectedRows(0))
             }
             Statement::Analyze(ref analyze_stmt) => self.execute_analyze_stmt_with_search_path(

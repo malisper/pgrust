@@ -2049,13 +2049,16 @@ impl Session {
                 actual: "current transaction is aborted, commands ignored until end of transaction block".into(),
             }));
         }
-        let auth_catalog =
-            db.auth_catalog(self.client_id, None)
-                .map_err(|err| ExecError::Parse(ParseError::UnexpectedToken {
-                    expected: "authorization catalog",
-                    actual: format!("{err:?}"),
-                }))?;
-        if !self.auth.has_effective_membership(PG_CHECKPOINT_OID, &auth_catalog) {
+        let auth_catalog = db.auth_catalog(self.client_id, None).map_err(|err| {
+            ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "authorization catalog",
+                actual: format!("{err:?}"),
+            })
+        })?;
+        if !self
+            .auth
+            .has_effective_membership(PG_CHECKPOINT_OID, &auth_catalog)
+        {
             return Err(ExecError::DetailedError {
                 message: "permission denied to execute CHECKPOINT command".into(),
                 detail: Some(

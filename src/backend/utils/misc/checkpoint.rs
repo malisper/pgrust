@@ -1,6 +1,6 @@
 use crate::backend::utils::time::datetime::current_postgres_timestamp_usecs;
-use crate::include::nodes::datum::Value;
 use crate::include::nodes::datetime::TimestampTzADT;
+use crate::include::nodes::datum::Value;
 use crate::include::nodes::primnodes::BuiltinScalarFunction;
 use std::fs;
 use std::path::Path;
@@ -47,9 +47,7 @@ impl CheckpointConfig {
     pub fn value_for_show(&self, name: &str) -> Option<String> {
         match name {
             "checkpoint_timeout" => Some(format_duration(self.checkpoint_timeout)),
-            "checkpoint_completion_target" => {
-                Some(self.checkpoint_completion_target.to_string())
-            }
+            "checkpoint_completion_target" => Some(self.checkpoint_completion_target.to_string()),
             "checkpoint_warning" => Some(format_duration(self.checkpoint_warning)),
             "max_wal_size" => Some(format_wal_size_kb(self.max_wal_size_kb)),
             "min_wal_size" => Some(format_wal_size_kb(self.min_wal_size_kb)),
@@ -76,6 +74,7 @@ pub struct CheckpointStatsSnapshot {
 pub enum CheckpointCompletionKind {
     Timed,
     Requested,
+    EndOfRecovery,
     Shutdown,
 }
 
@@ -110,7 +109,7 @@ impl CheckpointStatsSnapshot {
             CheckpointCompletionKind::Requested => {
                 self.num_requested = self.num_requested.saturating_add(1);
             }
-            CheckpointCompletionKind::Shutdown => {}
+            CheckpointCompletionKind::EndOfRecovery | CheckpointCompletionKind::Shutdown => {}
         }
         self.num_done = self.num_done.saturating_add(1);
         self.write_time_ms += write_time.as_secs_f64() * 1000.0;
@@ -199,9 +198,8 @@ fn apply_checkpoint_config_file(config: &mut CheckpointConfig, path: &Path) -> R
             continue;
         }
         let value = unquote_config_value(value.trim());
-        apply_checkpoint_setting(config, &name, value).map_err(|message| {
-            format!("{}:{}: {message}", path.display(), index + 1)
-        })?;
+        apply_checkpoint_setting(config, &name, value)
+            .map_err(|message| format!("{}:{}: {message}", path.display(), index + 1))?;
     }
     Ok(())
 }
@@ -350,14 +348,28 @@ mod tests {
     #[test]
     fn checkpoint_show_defaults_match_postgres_shape() {
         let config = CheckpointConfig::default();
-        assert_eq!(config.value_for_show("checkpoint_timeout").as_deref(), Some("5min"));
         assert_eq!(
-            config.value_for_show("checkpoint_completion_target").as_deref(),
+            config.value_for_show("checkpoint_timeout").as_deref(),
+            Some("5min")
+        );
+        assert_eq!(
+            config
+                .value_for_show("checkpoint_completion_target")
+                .as_deref(),
             Some("0.9")
         );
-        assert_eq!(config.value_for_show("checkpoint_warning").as_deref(), Some("30s"));
-        assert_eq!(config.value_for_show("max_wal_size").as_deref(), Some("1GB"));
-        assert_eq!(config.value_for_show("min_wal_size").as_deref(), Some("80MB"));
+        assert_eq!(
+            config.value_for_show("checkpoint_warning").as_deref(),
+            Some("30s")
+        );
+        assert_eq!(
+            config.value_for_show("max_wal_size").as_deref(),
+            Some("1GB")
+        );
+        assert_eq!(
+            config.value_for_show("min_wal_size").as_deref(),
+            Some("80MB")
+        );
         assert_eq!(config.value_for_show("fsync").as_deref(), Some("on"));
         assert_eq!(
             config.value_for_show("full_page_writes").as_deref(),
@@ -370,6 +382,21 @@ mod tests {
         let mut stats = CheckpointStatsSnapshot::default();
         stats.record_manual_checkpoint();
         assert_eq!(stats.num_requested, 1);
+        assert_eq!(stats.num_done, 1);
+    }
+
+    #[test]
+    fn end_of_recovery_checkpoint_only_counts_as_done() {
+        let mut stats = CheckpointStatsSnapshot::default();
+        stats.record_completed_checkpoint(
+            CheckpointCompletionKind::EndOfRecovery,
+            Duration::ZERO,
+            Duration::ZERO,
+            0,
+            0,
+        );
+        assert_eq!(stats.num_requested, 0);
+        assert_eq!(stats.num_timed, 0);
         assert_eq!(stats.num_done, 1);
     }
 }

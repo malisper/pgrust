@@ -603,7 +603,8 @@ fn empty_executor_context(base: &PathBuf) -> ExecutorContext {
         sequences: Some(std::sync::Arc::new(
             crate::pgrust::database::SequenceRuntime::new_ephemeral(),
         )),
-        checkpoint_stats: crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
+        checkpoint_stats: crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(
+        ),
         datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
         interrupts: std::sync::Arc::new(
             crate::backend::utils::misc::interrupts::InterruptState::new(),
@@ -640,7 +641,8 @@ fn run_plan(
         sequences: Some(std::sync::Arc::new(
             crate::pgrust::database::SequenceRuntime::new_ephemeral(),
         )),
-        checkpoint_stats: crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
+        checkpoint_stats: crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(
+        ),
         datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
         interrupts: std::sync::Arc::new(
             crate::backend::utils::misc::interrupts::InterruptState::new(),
@@ -715,7 +717,8 @@ fn run_sql_with_catalog(
             sequences: Some(std::sync::Arc::new(
                 crate::pgrust::database::SequenceRuntime::new_ephemeral(),
             )),
-            checkpoint_stats: crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
+            checkpoint_stats:
+                crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
             interrupts: std::sync::Arc::new(
                 crate::backend::utils::misc::interrupts::InterruptState::new(),
@@ -5121,7 +5124,8 @@ fn prepared_insert_uses_defaults_for_omitted_columns() {
         sequences: Some(std::sync::Arc::new(
             crate::pgrust::database::SequenceRuntime::new_ephemeral(),
         )),
-        checkpoint_stats: crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
+        checkpoint_stats: crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(
+        ),
         datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
         interrupts: std::sync::Arc::new(
             crate::backend::utils::misc::interrupts::InterruptState::new(),

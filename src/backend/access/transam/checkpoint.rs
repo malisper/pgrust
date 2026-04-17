@@ -5,10 +5,11 @@ use std::time::{Duration, Instant};
 use parking_lot::{Condvar, Mutex, RwLock};
 
 use crate::backend::access::transam::xact::TransactionManager;
-use crate::backend::access::transam::{ControlFileState, ControlFileStore};
 use crate::backend::access::transam::xlog::{INVALID_LSN, Lsn, WalWriter};
+use crate::backend::access::transam::{ControlFileState, ControlFileStore};
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
 use crate::backend::storage::buffer::{BufferPool, Error as BufferError};
+use crate::backend::storage::sync::SyncQueue;
 use crate::backend::utils::misc::checkpoint::{
     CheckpointCompletionKind, CheckpointConfig, CheckpointStatsSnapshot,
 };
@@ -19,6 +20,7 @@ pub struct CheckpointRequestFlags {
     pub immediate: bool,
     pub force: bool,
     pub shutdown: bool,
+    pub end_of_recovery: bool,
 }
 
 impl CheckpointRequestFlags {
@@ -28,6 +30,7 @@ impl CheckpointRequestFlags {
             immediate: true,
             force: true,
             shutdown: false,
+            end_of_recovery: false,
         }
     }
 
@@ -37,6 +40,17 @@ impl CheckpointRequestFlags {
             immediate: true,
             force: true,
             shutdown: true,
+            end_of_recovery: false,
+        }
+    }
+
+    pub const fn end_of_recovery() -> Self {
+        Self {
+            wait: true,
+            immediate: true,
+            force: true,
+            shutdown: false,
+            end_of_recovery: true,
         }
     }
 }
@@ -141,6 +155,7 @@ impl Drop for CheckpointBarrierGuard {
 enum CheckpointTrigger {
     Timed,
     Requested,
+    EndOfRecovery,
     Shutdown,
 }
 
@@ -150,6 +165,7 @@ struct CheckpointerState {
     failed_seq: u64,
     last_error: Option<String>,
     shutdown_requested: bool,
+    end_of_recovery_requested: bool,
     worker_exited: bool,
     last_checkpoint_lsn: Lsn,
 }
@@ -165,6 +181,7 @@ pub struct Checkpointer {
     control_file: Option<Arc<ControlFileStore>>,
     config: Arc<CheckpointConfig>,
     stats: Arc<RwLock<CheckpointStatsSnapshot>>,
+    sync_queue: Arc<SyncQueue>,
     commit_barrier: Arc<CheckpointCommitBarrier>,
     state: Mutex<CheckpointerState>,
     cv: Condvar,
@@ -179,9 +196,13 @@ impl Checkpointer {
         control_file: Option<Arc<ControlFileStore>>,
         config: Arc<CheckpointConfig>,
         stats: Arc<RwLock<CheckpointStatsSnapshot>>,
+        sync_queue: Arc<SyncQueue>,
         commit_barrier: Arc<CheckpointCommitBarrier>,
     ) -> Arc<Self> {
-        let initial_lsn = wal.as_ref().map(|wal| wal.insert_lsn()).unwrap_or(INVALID_LSN);
+        let initial_lsn = wal
+            .as_ref()
+            .map(|wal| wal.insert_lsn())
+            .unwrap_or(INVALID_LSN);
         let checkpointer = Arc::new(Self {
             pool,
             wal,
@@ -189,6 +210,7 @@ impl Checkpointer {
             control_file,
             config,
             stats,
+            sync_queue,
             commit_barrier,
             state: Mutex::new(CheckpointerState {
                 requested_seq: 0,
@@ -196,6 +218,7 @@ impl Checkpointer {
                 failed_seq: 0,
                 last_error: None,
                 shutdown_requested: false,
+                end_of_recovery_requested: false,
                 worker_exited: false,
                 last_checkpoint_lsn: initial_lsn,
             }),
@@ -217,6 +240,9 @@ impl Checkpointer {
             if flags.shutdown {
                 state.shutdown_requested = true;
             } else {
+                if flags.end_of_recovery {
+                    state.end_of_recovery_requested = true;
+                }
                 state.requested_seq = state.requested_seq.saturating_add(1);
             }
             let target = state.requested_seq;
@@ -264,7 +290,10 @@ impl Checkpointer {
                 let mut state = self.state.lock();
                 loop {
                     let now = Instant::now();
-                    let has_manual_request = state.requested_seq > state.completed_seq.max(state.failed_seq);
+                    let has_end_of_recovery_request = state.end_of_recovery_requested
+                        && state.requested_seq > state.completed_seq.max(state.failed_seq);
+                    let has_manual_request =
+                        state.requested_seq > state.completed_seq.max(state.failed_seq);
                     let timed_due = now >= next_timed_checkpoint;
                     let wal_due = self.wal_due(state.last_checkpoint_lsn);
                     if state.shutdown_requested {
@@ -272,6 +301,9 @@ impl Checkpointer {
                             CheckpointTrigger::Shutdown,
                             state.requested_seq.max(state.completed_seq),
                         );
+                    }
+                    if has_end_of_recovery_request {
+                        break (CheckpointTrigger::EndOfRecovery, state.requested_seq);
                     }
                     if has_manual_request {
                         break (CheckpointTrigger::Requested, state.requested_seq);
@@ -296,9 +328,15 @@ impl Checkpointer {
                 Ok(execution) => {
                     state.last_checkpoint_lsn = execution.end_lsn;
                     state.last_error = None;
+                    if matches!(trigger, CheckpointTrigger::EndOfRecovery) {
+                        state.end_of_recovery_requested = false;
+                    }
                     state.completed_seq = state.completed_seq.max(request_seq);
                 }
                 Err(err) => {
+                    if matches!(trigger, CheckpointTrigger::EndOfRecovery) {
+                        state.end_of_recovery_requested = false;
+                    }
                     state.last_error = Some(err);
                     state.failed_seq = state.failed_seq.max(request_seq);
                 }
@@ -326,7 +364,10 @@ impl Checkpointer {
         wal.insert_lsn().saturating_sub(last_checkpoint_lsn) >= max_wal_bytes
     }
 
-    fn perform_checkpoint(&self, trigger: CheckpointTrigger) -> Result<CheckpointExecution, String> {
+    fn perform_checkpoint(
+        &self,
+        trigger: CheckpointTrigger,
+    ) -> Result<CheckpointExecution, String> {
         let _checkpoint_barrier = self.commit_barrier.begin_checkpoint();
         let write_start = Instant::now();
         let flush_result = self
@@ -341,6 +382,9 @@ impl Checkpointer {
             txns.flush_clog().map_err(|err| format!("{err:?}"))?;
             1
         };
+        self.pool
+            .with_storage_mut(|storage| self.sync_queue.process_pending_syncs(&mut storage.smgr))
+            .map_err(|err| format!("{err}"))?;
         let next_xid = self.txns.read().next_xid();
 
         let (redo_lsn, end_lsn) = if let Some(wal) = self.wal.as_ref() {
@@ -377,17 +421,15 @@ impl Checkpointer {
         }
 
         if let Some(wal) = self.wal.as_ref() {
-            wal.recycle_segments(
-                redo_lsn,
-                self.config.min_wal_size_kb.saturating_mul(1024),
-            )
-            .map_err(|err| err.to_string())?;
+            wal.recycle_segments(redo_lsn, self.config.min_wal_size_kb.saturating_mul(1024))
+                .map_err(|err| err.to_string())?;
         }
 
         self.stats.write().record_completed_checkpoint(
             match trigger {
                 CheckpointTrigger::Timed => CheckpointCompletionKind::Timed,
                 CheckpointTrigger::Requested => CheckpointCompletionKind::Requested,
+                CheckpointTrigger::EndOfRecovery => CheckpointCompletionKind::EndOfRecovery,
                 CheckpointTrigger::Shutdown => CheckpointCompletionKind::Shutdown,
             },
             write_time,
