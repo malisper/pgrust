@@ -13,7 +13,7 @@ use super::expr_money::{
 };
 use super::expr_range::{parse_range_text, render_range_text};
 use super::node_types::*;
-use crate::backend::executor::jsonb::{parse_jsonb_text, render_jsonb_bytes};
+use crate::backend::executor::jsonb::{parse_json_text_input, parse_jsonb_text, render_jsonb_bytes};
 use crate::backend::parser::{SqlType, SqlTypeKind, parse_type_name};
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::time::date::{
@@ -25,7 +25,6 @@ use crate::include::catalog::{TEXT_TYPE_OID, bootstrap_pg_cast_rows, builtin_typ
 use crate::pgrust::compact_string::CompactString;
 use num_integer::Integer;
 use num_traits::{Signed, Zero};
-use serde_json::Value as SerdeJsonValue;
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
@@ -831,6 +830,7 @@ fn explicit_text_input_target_oids() -> &'static BTreeSet<u32> {
 
 fn input_error_message(err: &ExecError, text: &str) -> String {
     match err {
+        ExecError::JsonInput { message, .. } => message.clone(),
         ExecError::DetailedError { message, .. } => message.clone(),
         ExecError::InvalidIntegerInput { ty, .. } => {
             let value = match err {
@@ -907,6 +907,7 @@ fn input_error_message(err: &ExecError, text: &str) -> String {
 
 fn input_error_sqlstate(err: &ExecError) -> &'static str {
     match err {
+        ExecError::JsonInput { sqlstate, .. } => sqlstate,
         ExecError::InvalidIntegerInput { .. }
         | ExecError::ArrayInput { .. }
         | ExecError::InvalidNumericInput(_)
@@ -988,6 +989,17 @@ fn date_parse_error(text: &str, err: DateParseError) -> ExecError {
 
 fn input_error_info(err: ExecError, text: &str) -> InputErrorInfo {
     match err {
+        ExecError::JsonInput {
+            message,
+            detail,
+            sqlstate,
+            ..
+        } => InputErrorInfo {
+            message,
+            detail,
+            hint: None,
+            sqlstate,
+        },
         ExecError::DetailedError {
             message,
             detail,
@@ -1051,7 +1063,7 @@ pub(crate) fn soft_input_error_info_with_config(
         details: format!("unsupported type: {type_name}"),
     })?;
     if !ty.is_array && matches!(ty.kind, SqlTypeKind::Json | SqlTypeKind::Jsonb) {
-        match serde_json::from_str::<SerdeJsonValue>(text) {
+        match parse_json_text_input(text) {
             Ok(_) => {
                 if matches!(ty.kind, SqlTypeKind::Jsonb) {
                     match parse_jsonb_text(text) {
@@ -1061,19 +1073,7 @@ pub(crate) fn soft_input_error_info_with_config(
                 }
                 return Ok(None);
             }
-            Err(err) => {
-                return Ok(Some(InputErrorInfo {
-                    message: "invalid input syntax for type json".into(),
-                    detail: match err.classify() {
-                        serde_json::error::Category::Eof => {
-                            Some("The input string ended unexpectedly.".into())
-                        }
-                        _ => None,
-                    },
-                    hint: None,
-                    sqlstate: "22P02",
-                }));
-            }
+            Err(err) => return Ok(Some(input_error_info(err, text))),
         }
     }
     let parsed = match ty.kind {

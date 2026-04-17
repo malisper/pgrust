@@ -201,6 +201,13 @@ pub enum ExecError {
         column: String,
         details: String,
     },
+    JsonInput {
+        raw_input: String,
+        message: String,
+        detail: Option<String>,
+        context: Option<String>,
+        sqlstate: &'static str,
+    },
     ArrayInput {
         message: String,
         value: String,

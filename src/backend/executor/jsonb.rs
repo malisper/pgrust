@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 
 use num_bigint::BigInt;
 use num_traits::{Signed, Zero};
-use serde_json::{Map, Value as SerdeJsonValue};
+use serde_json::{Error as SerdeJsonError, Map, Value as SerdeJsonValue};
 
 use crate::backend::executor::ExecError;
 use crate::backend::executor::exec_expr::format_array_text;
@@ -122,13 +122,45 @@ impl JsonbValue {
 }
 
 pub(crate) fn parse_jsonb_text(text: &str) -> Result<Vec<u8>, ExecError> {
-    let value = serde_json::from_str::<SerdeJsonValue>(text).map_err(|_| {
-        ExecError::InvalidStorageValue {
-            column: "jsonb".into(),
-            details: format!("invalid input syntax for type jsonb: \"{text}\""),
-        }
-    })?;
+    let value = parse_json_text_input(text)?;
     Ok(encode_jsonb(&JsonbValue::from_serde(value)?))
+}
+
+pub(crate) fn parse_json_text_input(text: &str) -> Result<SerdeJsonValue, ExecError> {
+    serde_json::from_str::<SerdeJsonValue>(text).map_err(|err| json_input_error(text, err))
+}
+
+pub(crate) fn json_input_error(text: &str, err: SerdeJsonError) -> ExecError {
+    let line = err.line();
+    let column = err.column();
+    let suffix = format!(" at line {line} column {column}");
+    let rendered = err.to_string();
+    let detail = match err.classify() {
+        serde_json::error::Category::Io => None,
+        serde_json::error::Category::Eof => Some("The input string ended unexpectedly.".into()),
+        _ => Some(
+            rendered
+                .strip_suffix(&suffix)
+                .unwrap_or(rendered.as_str())
+                .to_string(),
+        ),
+    };
+    ExecError::JsonInput {
+        raw_input: text.to_string(),
+        message: "invalid input syntax for type json".into(),
+        detail,
+        context: json_error_context(text, line),
+        sqlstate: "22P02",
+    }
+}
+
+fn json_error_context(text: &str, line: usize) -> Option<String> {
+    let line_text = text.lines().nth(line.saturating_sub(1))?;
+    let mut snippet: String = line_text.chars().take(40).collect();
+    if line_text.chars().count() > 40 {
+        snippet.push_str("...");
+    }
+    Some(format!("JSON data, line {line}: {snippet}"))
 }
 
 pub(crate) fn render_jsonb_bytes(bytes: &[u8]) -> Result<String, ExecError> {
@@ -207,12 +239,7 @@ pub(crate) fn jsonb_from_value(value: &Value) -> Result<JsonbValue, ExecError> {
         Value::TsVector(v) => JsonbValue::String(crate::backend::executor::render_tsvector_text(v)),
         Value::TsQuery(v) => JsonbValue::String(crate::backend::executor::render_tsquery_text(v)),
         Value::Json(text) => {
-            JsonbValue::from_serde(serde_json::from_str(text.as_str()).map_err(|_| {
-                ExecError::InvalidStorageValue {
-                    column: "json".into(),
-                    details: format!("invalid input syntax for type json: \"{}\"", text.as_str()),
-                }
-            })?)?
+            JsonbValue::from_serde(parse_json_text_input(text.as_str())?)?
         }
         Value::Jsonb(bytes) => decode_jsonb(bytes)?,
         Value::Record(record) => JsonbValue::Object(
@@ -1211,6 +1238,22 @@ fn corrupt_jsonb() -> ExecError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn json_input_error_keeps_structured_fields() {
+        let err = parse_json_text_input("{\"a\":true").unwrap_err();
+        assert!(matches!(
+            err,
+            ExecError::JsonInput {
+                message,
+                detail: Some(detail),
+                context: Some(context),
+                ..
+            } if message == "invalid input syntax for type json"
+                && detail == "The input string ended unexpectedly."
+                && context == "JSON data, line 1: {\"a\":true"
+        ));
+    }
 
     #[test]
     fn scalar_root_uses_pg_scalar_array_wrapper() {
