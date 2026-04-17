@@ -8719,6 +8719,38 @@ fn array_subscript_partial_slices_on_zero_based_arrays_match_postgres() {
 }
 
 #[test]
+fn array_subscript_on_unsubscriptable_type_uses_postgres_error() {
+    let base = temp_dir("array_subscript_unsubscriptable_error");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select (now())[1]") {
+        Err(ExecError::Parse(ParseError::NonSubscriptableType(actual))) => {
+            assert_eq!(
+                actual,
+                "timestamp with time zone"
+            );
+        }
+        other => panic!("expected unsubscriptable-type error, got {other:?}"),
+    }
+}
+
+#[test]
+fn point_slice_subscript_uses_fixed_length_array_error() {
+    let base = temp_dir("point_slice_subscript_error");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select ('(1,2)'::point)[0:1]",
+    ) {
+        Err(ExecError::Parse(ParseError::FixedLengthArraySliceNotImplemented)) => {}
+        other => panic!("expected fixed-length array slice error, got {other:?}"),
+    }
+}
+
+#[test]
 fn array_subscript_mixed_slice_scalar_queries_match_postgres() {
     let base = temp_dir("array_subscript_mixed_slice_scalar_queries");
     let txns = TransactionManager::new_durable(&base).unwrap();

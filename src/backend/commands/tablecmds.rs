@@ -1029,7 +1029,6 @@ fn sql_type_display_name(ty: SqlType) -> String {
         SqlTypeKind::TsQuery => "tsquery",
         SqlTypeKind::RegConfig => "regconfig",
         SqlTypeKind::RegDictionary => "regdictionary",
-        SqlTypeKind::RegProcedure => "regprocedure",
         SqlTypeKind::Text => "text",
         SqlTypeKind::Bool => "boolean",
         SqlTypeKind::Point => "point",
