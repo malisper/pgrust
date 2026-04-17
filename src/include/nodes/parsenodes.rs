@@ -204,6 +204,7 @@ pub enum Statement {
     CreateType(CreateTypeStatement),
     CreateDatabase(CreateDatabaseStatement),
     CreateSchema(CreateSchemaStatement),
+    CreateTablespace(CreateTablespaceStatement),
     CreateTable(CreateTableStatement),
     CreateTableAs(CreateTableAsStatement),
     CreateSequence(CreateSequenceStatement),
@@ -723,6 +724,12 @@ pub struct CreateSchemaStatement {
     pub schema_name: Option<String>,
     pub auth_role: Option<String>,
     pub if_not_exists: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateTablespaceStatement {
+    pub tablespace_name: String,
+    pub location: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -22,6 +22,7 @@ use crate::backend::executor::{ColumnDesc, RelationDesc};
 use crate::include::catalog::{
     BootstrapCatalogKind, PG_AUTHID_RELATION_OID, PG_CLASS_RELATION_OID, PgConstraintRow,
     PgDatabaseRow, PgDependRow, PgDescriptionRow, PgNamespaceRow, PgRewriteRow, PgStatisticRow,
+    PgTablespaceRow,
 };
 use crate::include::nodes::datum::Value;
 
@@ -418,6 +419,31 @@ impl CatalogStore {
         effect_record_catalog_kinds(&mut effect, &[BootstrapCatalogKind::PgNamespace]);
         effect_record_oid(&mut effect.namespace_oids, namespace_oid);
         Ok(effect)
+    }
+
+    pub fn create_tablespace_mvcc(
+        &mut self,
+        tablespace_name: &str,
+        owner_oid: u32,
+        ctx: &CatalogWriteContext,
+    ) -> Result<(u32, CatalogMutationEffect), CatalogError> {
+        let mut catalog = self.catalog_snapshot_with_control_for_snapshot(ctx)?;
+        let oid = catalog.next_oid();
+        self.persist_control_state(&catalog)?;
+
+        let rows = PhysicalCatalogRows {
+            tablespaces: vec![PgTablespaceRow {
+                oid,
+                spcname: tablespace_name.to_string(),
+                spcowner: owner_oid,
+            }],
+            ..PhysicalCatalogRows::default()
+        };
+        insert_catalog_rows_subset_mvcc(ctx, &rows, 1, &[BootstrapCatalogKind::PgTablespace])?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &[BootstrapCatalogKind::PgTablespace]);
+        Ok((oid, effect))
     }
 
     pub fn create_proc_mvcc(

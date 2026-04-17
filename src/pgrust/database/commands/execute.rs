@@ -257,6 +257,9 @@ impl Database {
                     create_stmt,
                     configured_search_path,
                 ),
+            Statement::CreateTablespace(ref create_stmt) => {
+                self.execute_create_tablespace_stmt(client_id, create_stmt)
+            }
             Statement::AlterSchemaOwner(ref alter_stmt) => self
                 .execute_alter_schema_owner_stmt_with_search_path(
                     client_id,
