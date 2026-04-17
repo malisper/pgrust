@@ -502,7 +502,11 @@ pub(crate) fn send_typed_data_row(
                 buf.extend_from_slice(rendered.as_bytes());
             }
             Value::Record(record) => {
-                let rendered = format_record_text(record, float_format.clone());
+                let rendered = crate::backend::executor::jsonb::jsonb_from_value(&Value::Record(
+                    record.clone(),
+                ))
+                .map(|value| value.to_serde().to_string())
+                .unwrap_or_default();
                 buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
                 buf.extend_from_slice(rendered.as_bytes());
             }
@@ -513,85 +517,6 @@ pub(crate) fn send_typed_data_row(
     w.write_all(&((buf.len() + 4) as i32).to_be_bytes())?;
     w.write_all(buf)?;
     Ok(())
-}
-
-fn format_record_text(
-    record: &crate::include::nodes::datum::RecordValue,
-    float_format: FloatFormatOptions,
-) -> String {
-    let mut out = String::from("(");
-    for (idx, (_, value)) in record.fields.iter().enumerate() {
-        if idx > 0 {
-            out.push(',');
-        }
-        if matches!(value, Value::Null) {
-            continue;
-        }
-        let field = format_record_field_text(value, float_format.clone());
-        if record_field_needs_quotes(&field) {
-            out.push('"');
-            for ch in field.chars() {
-                if matches!(ch, '"' | '\\') {
-                    out.push('\\');
-                }
-                out.push(ch);
-            }
-            out.push('"');
-        } else {
-            out.push_str(&field);
-        }
-    }
-    out.push(')');
-    out
-}
-
-fn format_record_field_text(value: &Value, float_format: FloatFormatOptions) -> String {
-    match value {
-        Value::Null => String::new(),
-        Value::Int16(v) => v.to_string(),
-        Value::Int32(v) => v.to_string(),
-        Value::Int64(v) => v.to_string(),
-        Value::Money(v) => crate::backend::executor::money_format_text(*v),
-        Value::Bytea(v) => format_bytea_text(v, float_format.bytea_output),
-        Value::Date(_)
-        | Value::Time(_)
-        | Value::TimeTz(_)
-        | Value::Timestamp(_)
-        | Value::TimestampTz(_) => {
-            render_datetime_value_text_with_config(value, &float_format.datetime_config)
-                .unwrap_or_default()
-        }
-        Value::Bit(v) => crate::backend::executor::render_bit_text(v),
-        Value::Float64(v) => format_float8_text(*v, float_format),
-        Value::Numeric(v) => v.render(),
-        Value::Json(v) => v.to_string(),
-        Value::Jsonb(v) => crate::backend::executor::jsonb::render_jsonb_bytes(v).unwrap_or_default(),
-        Value::JsonPath(v) => v.to_string(),
-        Value::TsVector(v) => crate::backend::executor::render_tsvector_text(v),
-        Value::TsQuery(v) => crate::backend::executor::render_tsquery_text(v),
-        Value::Text(v) => v.to_string(),
-        Value::TextRef(_, _) => value.as_text().unwrap_or_default().to_string(),
-        Value::InternalChar(byte) => render_internal_char_text(*byte),
-        Value::Bool(true) => "t".into(),
-        Value::Bool(false) => "f".into(),
-        Value::Point(_)
-        | Value::Lseg(_)
-        | Value::Path(_)
-        | Value::Line(_)
-        | Value::Box(_)
-        | Value::Polygon(_)
-        | Value::Circle(_) => render_geometry_text(value, float_format).unwrap_or_default(),
-        Value::Array(items) => format_array_text(items),
-        Value::PgArray(array) => crate::backend::executor::value_io::format_array_value_text(array),
-        Value::Record(record) => format_record_text(record, float_format),
-    }
-}
-
-fn record_field_needs_quotes(field: &str) -> bool {
-    field.is_empty()
-        || field
-            .chars()
-            .any(|ch| matches!(ch, ',' | '"' | '\\' | '(' | ')') || ch.is_ascii_whitespace())
 }
 
 pub fn format_bytea_text(bytes: &[u8], output: ByteaOutputFormat) -> String {

@@ -2801,6 +2801,12 @@ fn parse_insert_update_delete() {
         matches!(parse_statement("drop table if exists pgbench_accounts, pgbench_branches, pgbench_history, pgbench_tellers").unwrap(), Statement::DropTable(DropTableStatement { if_exists: true, table_names }) if table_names == vec!["pgbench_accounts", "pgbench_branches", "pgbench_history", "pgbench_tellers"])
     );
     assert!(
+        matches!(parse_statement("drop index tenant_idx").unwrap(), Statement::DropIndex(DropIndexStatement { if_exists: false, index_names }) if index_names == vec!["tenant_idx"])
+    );
+    assert!(
+        matches!(parse_statement("drop schema if exists tenant_a, tenant_b").unwrap(), Statement::DropSchema(DropSchemaStatement { if_exists: true, schema_names }) if schema_names == vec!["tenant_a", "tenant_b"])
+    );
+    assert!(
         matches!(parse_statement("create view item_names as select id, name from people").unwrap(), Statement::CreateView(CreateViewStatement { schema_name: None, view_name, query_sql, .. }) if view_name == "item_names" && query_sql == "select id, name from people")
     );
     assert!(
@@ -4234,39 +4240,6 @@ fn parse_srf_with_column_definitions() {
                     AliasColumnDef {
                         name: "value".into(),
                         ty: builtin_type(SqlType::new(SqlTypeKind::Json)),
-                    },
-                ])
-            );
-            assert!(!preserve_source_names);
-        }
-        other => panic!("expected aliased function call, got {other:?}"),
-    }
-}
-
-#[test]
-fn parse_srf_with_column_definitions_without_alias() {
-    let stmt =
-        parse_select("select * from json_populate_record(null::record, '{\"x\": 776}') as (x int, y int)")
-            .unwrap();
-    match &stmt.from {
-        Some(FromItem::Alias {
-            source,
-            alias,
-            column_aliases,
-            preserve_source_names,
-        }) => {
-            assert!(matches!(source.as_ref(), FromItem::FunctionCall { name, .. } if name == "json_populate_record"));
-            assert_eq!(alias, "json_populate_record_coldef");
-            assert_eq!(
-                column_aliases,
-                &AliasColumnSpec::Definitions(vec![
-                    AliasColumnDef {
-                        name: "x".into(),
-                        ty: builtin_type(SqlType::new(SqlTypeKind::Int4)),
-                    },
-                    AliasColumnDef {
-                        name: "y".into(),
-                        ty: builtin_type(SqlType::new(SqlTypeKind::Int4)),
                     },
                 ])
             );

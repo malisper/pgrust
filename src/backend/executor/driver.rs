@@ -240,6 +240,10 @@ fn execute_statement_with_source(
             actual: "CREATE VIEW".into(),
         })),
         Statement::DropTable(stmt) => execute_drop_table(stmt, catalog, ctx),
+        Statement::DropIndex(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "DROP INDEX handled by database/session layer",
+            actual: "DROP INDEX".into(),
+        })),
         Statement::DropDomain(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "DROP DOMAIN handled by database/session layer",
             actual: "DROP DOMAIN".into(),
@@ -247,6 +251,10 @@ fn execute_statement_with_source(
         Statement::DropView(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "DROP VIEW handled by database/session layer",
             actual: "DROP VIEW".into(),
+        })),
+        Statement::DropSchema(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "DROP SCHEMA handled by database/session layer",
+            actual: "DROP SCHEMA".into(),
         })),
         Statement::TruncateTable(stmt) => execute_truncate_table(stmt, catalog, ctx, xid),
         Statement::Vacuum(stmt) => execute_vacuum(stmt, catalog, ctx),
