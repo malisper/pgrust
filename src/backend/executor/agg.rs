@@ -7,7 +7,7 @@ use crate::include::nodes::primnodes::AggFunc;
 use crate::pgrust::compact_string::CompactString;
 use crate::pgrust::session::ByteaOutputFormat;
 
-use num_traits::Zero;
+use num_traits::{Signed, Zero};
 use std::cmp::Ordering;
 use std::collections::HashSet;
 
@@ -303,8 +303,13 @@ impl AccumState {
                     match sum {
                         Some(NumericAccum::Int(v)) => {
                             if matches!(result_type.kind, SqlTypeKind::Numeric) {
-                                let avg = NumericValue::from_i64(*v)
-                                    .div(&NumericValue::from_i64(*count), 16)
+                                let sum = NumericValue::from_i64(*v);
+                                let count_numeric = NumericValue::from_i64(*count);
+                                let avg = sum
+                                    .div(
+                                        &count_numeric,
+                                        numeric_div_display_scale(&sum, &count_numeric),
+                                    )
                                     .unwrap_or_else(|| NumericValue::from_i64(*v / *count));
                                 Value::Numeric(format_numeric_result(avg, *result_type))
                             } else {
@@ -313,8 +318,12 @@ impl AccumState {
                         }
                         Some(NumericAccum::Float(v)) => Value::Float64(*v / *count as f64),
                         Some(NumericAccum::Numeric(v)) => {
+                            let count_numeric = NumericValue::from_i64(*count);
                             let avg = v
-                                .div(&NumericValue::from_i64(*count), 16)
+                                .div(
+                                    &count_numeric,
+                                    numeric_div_display_scale(v, &count_numeric),
+                                )
                                 .unwrap_or_else(|| v.clone());
                             Value::Numeric(format_numeric_result(avg, *result_type))
                         }
@@ -731,8 +740,57 @@ fn format_numeric_result(value: NumericValue, sql_type: SqlType) -> NumericValue
     if let Some((_, scale)) = sql_type.numeric_precision_scale() {
         value.round_to_scale(scale as u32).unwrap_or(value)
     } else {
-        value
+        value.normalize_display_scale()
     }
+}
+
+fn floor_div_i32(value: i32, divisor: i32) -> i32 {
+    if value >= 0 {
+        value / divisor
+    } else {
+        -(((-value) + divisor - 1) / divisor)
+    }
+}
+
+fn numeric_div_display_scale(lhs: &NumericValue, rhs: &NumericValue) -> u32 {
+    const NUMERIC_MIN_SIG_DIGITS: i32 = 16;
+    const NUMERIC_MIN_DISPLAY_SCALE: i32 = 0;
+    const NUMERIC_MAX_DISPLAY_SCALE: i32 = 16383;
+    const DEC_DIGITS: i32 = 4;
+
+    fn normalized_weight_and_first_group(value: &NumericValue) -> (i32, i32, i32) {
+        match value {
+            NumericValue::Finite { coeff, scale, dscale } if !coeff.is_zero() => {
+                let digits = coeff.abs().to_str_radix(10);
+                let dec_weight = digits.len() as i32 - (*scale as i32) - 1;
+                let group_weight = floor_div_i32(dec_weight, DEC_DIGITS);
+                let lead_len = (dec_weight - group_weight * DEC_DIGITS + 1).clamp(1, DEC_DIGITS);
+                let first_group = digits
+                    .chars()
+                    .take(lead_len as usize)
+                    .collect::<String>()
+                    .parse::<i32>()
+                    .unwrap_or(0);
+                (group_weight, first_group, *dscale as i32)
+            }
+            NumericValue::Finite { dscale, .. } => (0, 0, *dscale as i32),
+            _ => (0, 0, 0),
+        }
+    }
+
+    let (weight1, first1, dscale1) = normalized_weight_and_first_group(lhs);
+    let (weight2, first2, dscale2) = normalized_weight_and_first_group(rhs);
+    let mut qweight = weight1 - weight2;
+    if first1 <= first2 {
+        qweight -= 1;
+    }
+
+    let mut rscale = NUMERIC_MIN_SIG_DIGITS - qweight * DEC_DIGITS;
+    rscale = rscale.max(dscale1);
+    rscale = rscale.max(dscale2);
+    rscale = rscale.max(NUMERIC_MIN_DISPLAY_SCALE);
+    rscale = rscale.min(NUMERIC_MAX_DISPLAY_SCALE);
+    rscale as u32
 }
 
 #[derive(Debug, Clone)]
