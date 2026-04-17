@@ -1,8 +1,9 @@
 use super::*;
 use crate::include::catalog::{
-    ANYARRAYOID, ANYOID, TEXT_TYPE_OID, bootstrap_pg_proc_rows, builtin_type_rows,
+    ANYARRAYOID, ANYOID, TEXT_TYPE_OID, bootstrap_pg_proc_rows,
+    builtin_window_function_for_proc_oid, builtin_type_rows,
 };
-use crate::include::nodes::primnodes::RegexTableFunction;
+use crate::include::nodes::primnodes::{BuiltinWindowFunction, RegexTableFunction};
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
@@ -52,6 +53,7 @@ pub(super) struct ResolvedFunctionCall {
     pub scalar_impl: Option<BuiltinScalarFunction>,
     pub srf_impl: Option<ResolvedSrfImpl>,
     pub agg_impl: Option<AggFunc>,
+    pub window_impl: Option<BuiltinWindowFunction>,
     pub row_shape: ResolvedFunctionRowShape,
 }
 
@@ -76,6 +78,7 @@ pub(super) fn resolve_function_call(
         let scalar_impl = builtin_scalar_function_for_proc_row(&row);
         let srf_impl = builtin_srf_impl_for_proc_row(&row);
         let agg_impl = aggregate_func_for_proname(&row.proname);
+        let window_impl = builtin_window_function_for_proc_oid(row.oid);
 
         let Some(candidate) = match_proc_signature(catalog, &row, actual_types, func_variadic)
         else {
@@ -101,6 +104,7 @@ pub(super) fn resolve_function_call(
             scalar_impl,
             srf_impl,
             agg_impl,
+            window_impl,
             row_shape,
         };
 

@@ -3,16 +3,16 @@ use std::cmp::Ordering;
 use crate::backend::parser::CatalogLookup;
 use crate::include::nodes::parsenodes::Query;
 use crate::include::nodes::pathnodes::{
-    Path, PathTarget, PlannerGlobal, PlannerInfo, RelOptInfo, RelOptKind, UpperRelKind,
+    Path, PathKey, PathTarget, PlannerGlobal, PlannerInfo, RelOptInfo, RelOptKind, UpperRelKind,
 };
 use crate::include::nodes::plannodes::{PlanEstimate, PlannedStmt};
-use crate::include::nodes::primnodes::{Expr, ProjectSetTarget, TargetEntry};
+use crate::include::nodes::primnodes::{Expr, ProjectSetTarget, TargetEntry, WindowClause};
 
 use super::super::bestpath;
 use super::super::create_plan_with_param_base;
 use super::super::has_grouping;
 use super::super::path::{query_planner, residual_where_qual};
-use super::super::pathnodes::next_synthetic_slot_id;
+use super::super::pathnodes::{next_synthetic_slot_id, window_output_columns};
 use super::super::root;
 use super::super::upperrels;
 use super::super::util::{
@@ -143,6 +143,143 @@ fn make_filter_rel(
         ));
     }
     bestpath::set_cheapest(&mut rel);
+    rel
+}
+
+fn has_windowing(root: &PlannerInfo) -> bool {
+    !root.parse.window_clauses.is_empty()
+}
+
+fn expand_window_clause(root: &PlannerInfo, clause: &WindowClause) -> WindowClause {
+    WindowClause {
+        spec: crate::include::nodes::primnodes::WindowSpec {
+            partition_by: clause
+                .spec
+                .partition_by
+                .iter()
+                .cloned()
+                .map(|expr| expand_join_rte_vars(root, expr))
+                .collect(),
+            order_by: clause
+                .spec
+                .order_by
+                .iter()
+                .cloned()
+                .map(|item| crate::include::nodes::primnodes::OrderByEntry {
+                    expr: expand_join_rte_vars(root, item.expr),
+                    ..item
+                })
+                .collect(),
+        },
+        functions: clause
+            .functions
+            .iter()
+            .cloned()
+            .map(|func| crate::include::nodes::primnodes::WindowFuncExpr {
+                kind: match func.kind {
+                    crate::include::nodes::primnodes::WindowFuncKind::Aggregate(aggref) => {
+                        crate::include::nodes::primnodes::WindowFuncKind::Aggregate(
+                            crate::include::nodes::primnodes::Aggref {
+                                args: aggref
+                                    .args
+                                    .into_iter()
+                                    .map(|arg| expand_join_rte_vars(root, arg))
+                                    .collect(),
+                                aggfilter: aggref
+                                    .aggfilter
+                                    .map(|expr| expand_join_rte_vars(root, expr)),
+                                ..aggref
+                            },
+                        )
+                    }
+                    crate::include::nodes::primnodes::WindowFuncKind::Builtin(kind) => {
+                        crate::include::nodes::primnodes::WindowFuncKind::Builtin(kind)
+                    }
+                },
+                args: func
+                    .args
+                    .into_iter()
+                    .map(|arg| expand_join_rte_vars(root, arg))
+                    .collect(),
+                ..func
+            })
+            .collect(),
+    }
+}
+
+fn window_target(input_target: &PathTarget, clause: &WindowClause) -> PathTarget {
+    let mut exprs = input_target.exprs.clone();
+    let mut sortgrouprefs = input_target.sortgrouprefs.clone();
+    for func in &clause.functions {
+        exprs.push(Expr::WindowFunc(Box::new(func.clone())));
+        sortgrouprefs.push(0);
+    }
+    PathTarget::with_sortgrouprefs(exprs, sortgrouprefs)
+}
+
+fn window_pathkeys(clause: &WindowClause) -> Vec<PathKey> {
+    let mut pathkeys = Vec::with_capacity(clause.spec.partition_by.len() + clause.spec.order_by.len());
+    pathkeys.extend(clause.spec.partition_by.iter().cloned().map(|expr| PathKey {
+        expr,
+        ressortgroupref: 0,
+        descending: false,
+        nulls_first: None,
+    }));
+    pathkeys.extend(clause.spec.order_by.iter().cloned().map(|item| PathKey {
+        expr: item.expr,
+        ressortgroupref: item.ressortgroupref,
+        descending: item.descending,
+        nulls_first: item.nulls_first,
+    }));
+    pathkeys
+}
+
+fn make_window_rel(
+    root: &mut PlannerInfo,
+    input_rel: RelOptInfo,
+    clause: &WindowClause,
+    catalog: &dyn CatalogLookup,
+) -> RelOptInfo {
+    let clause = expand_window_clause(root, clause);
+    let reltarget = window_target(&input_rel.reltarget, &clause);
+    let upper_rel_index = upperrels::ensure_upper_rel_index(
+        root,
+        UpperRelKind::Window,
+        &input_rel.relids,
+        reltarget.clone(),
+    );
+    if !root.upper_rels[upper_rel_index].rel.pathlist.is_empty() {
+        return root.upper_rels[upper_rel_index].rel.clone();
+    }
+    let slot_id = next_synthetic_slot_id();
+    let required_pathkeys = window_pathkeys(&clause);
+    let mut rel = RelOptInfo::new(input_rel.relids.clone(), RelOptKind::UpperRel, reltarget);
+    for path in input_rel.pathlist {
+        let path = if !bestpath::pathkeys_satisfy(&path.pathkeys(), &required_pathkeys) {
+            optimize_path(
+                Path::OrderBy {
+                    plan_info: PlanEstimate::default(),
+                    items: pathkeys_to_order_items(&required_pathkeys),
+                    input: Box::new(path),
+                },
+                catalog,
+            )
+        } else {
+            path
+        };
+        rel.add_path(optimize_path(
+            Path::WindowAgg {
+                plan_info: PlanEstimate::default(),
+                slot_id,
+                output_columns: window_output_columns(&path, &clause),
+                input: Box::new(path),
+                clause: clause.clone(),
+            },
+            catalog,
+        ));
+    }
+    bestpath::set_cheapest(&mut rel);
+    root.upper_rels[upper_rel_index].rel = rel.clone();
     rel
 }
 
@@ -434,6 +571,21 @@ pub(super) fn grouping_planner(
         }
     }
 
+    if has_windowing(root) {
+        if current_rel.reltarget != root.window_input_target {
+            current_rel = make_pathtarget_projection_rel(
+                root,
+                current_rel,
+                &root.window_input_target,
+                catalog,
+                false,
+            );
+        }
+        for clause in root.parse.window_clauses.clone() {
+            current_rel = make_window_rel(root, current_rel, &clause, catalog);
+        }
+    }
+
     if !root.query_pathkeys.is_empty() {
         current_rel = make_ordered_rel(root, current_rel, catalog);
     }
@@ -459,7 +611,7 @@ pub(super) fn grouping_planner(
         );
     }
 
-    if has_grouping {
+    if has_grouping || has_windowing(root) {
         current_rel = make_projection_rel(root, current_rel, &final_targets, catalog, false);
     } else if !projection_done {
         current_rel = make_projection_rel(root, current_rel, &final_targets, catalog, true);

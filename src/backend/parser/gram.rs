@@ -66,7 +66,6 @@ fn parse_statement_with_options_inner(
         return Ok(stmt);
     }
     if let Some(stmt) = try_parse_sequence_statement(&sql)? {
-    if let Some(stmt) = try_parse_create_tablespace_statement(&sql)? {
         return Ok(stmt);
     }
     if let Some(stmt) = try_parse_create_tablespace_statement(&sql)? {
@@ -2582,6 +2581,11 @@ pub(crate) fn build_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, Pars
                         Rule::expr => where_clause = Some(build_expr(inner)?),
                         Rule::group_by_clause => group_by = build_group_by_clause(inner)?,
                         Rule::having_clause => having = Some(build_having_clause(inner)?),
+                        Rule::window_clause_unsupported => {
+                            return Err(ParseError::FeatureNotSupported(
+                                "WINDOW clause aliases".into(),
+                            ));
+                        }
                         Rule::order_by_clause => order_by = build_order_by_clause(inner)?,
                         Rule::limit_clause => limit = Some(build_limit_clause(inner)?),
                         Rule::offset_clause => offset = Some(build_offset_clause(inner)?),
@@ -2594,6 +2598,11 @@ pub(crate) fn build_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, Pars
             Rule::expr => where_clause = Some(build_expr(part)?),
             Rule::group_by_clause => group_by = build_group_by_clause(part)?,
             Rule::having_clause => having = Some(build_having_clause(part)?),
+            Rule::window_clause_unsupported => {
+                return Err(ParseError::FeatureNotSupported(
+                    "WINDOW clause aliases".into(),
+                ));
+            }
             Rule::order_by_clause => order_by = build_order_by_clause(part)?,
             Rule::limit_clause => limit = Some(build_limit_clause(part)?),
             Rule::offset_clause => offset = Some(build_offset_clause(part)?),
@@ -2665,6 +2674,11 @@ fn build_set_operation_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, P
                     SetOperator::Except { all }
                 };
                 operators.push(op);
+            }
+            Rule::window_clause_unsupported => {
+                return Err(ParseError::FeatureNotSupported(
+                    "WINDOW clause aliases".into(),
+                ));
             }
             Rule::order_by_clause => order_by = build_order_by_clause(part)?,
             Rule::limit_clause => limit = Some(build_limit_clause(part)?),
@@ -5106,6 +5120,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                     name: "cbrt".into(),
                     args: vec![SqlFunctionArg::positional(expr)],
                     func_variadic: false,
+                    over: None,
                 })
             } else if raw.starts_with("!!") {
                 Ok(SqlExpr::PrefixOperator {
@@ -5117,12 +5132,14 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                     name: "sqrt".into(),
                     args: vec![SqlFunctionArg::positional(expr)],
                     func_variadic: false,
+                    over: None,
                 })
             } else if raw.starts_with('@') {
                 Ok(SqlExpr::FuncCall {
                     name: "abs".into(),
                     args: vec![SqlFunctionArg::positional(expr)],
                     func_variadic: false,
+                    over: None,
                 })
             } else if raw.starts_with('~') {
                 Ok(SqlExpr::BitNot(Box::new(expr)))
@@ -5453,11 +5470,15 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         Rule::func_call => {
             let mut inner = pair.into_inner();
             let name = build_identifier(inner.next().ok_or(ParseError::UnexpectedEof)?);
-            let parsed_args = inner
-                .find(|part| part.as_rule() == Rule::function_arg_list)
-                .map(build_function_arg_list)
-                .transpose()?
-                .unwrap_or_default();
+            let mut parsed_args = ParsedFunctionArgs::default();
+            let mut over = None;
+            for part in inner {
+                match part.as_rule() {
+                    Rule::function_arg_list => parsed_args = build_function_arg_list(part)?,
+                    Rule::over_clause => over = Some(build_over_clause(part)?),
+                    _ => {}
+                }
+            }
             let args = parsed_args.args;
             if name.eq_ignore_ascii_case("random") && args.is_empty() {
                 Ok(SqlExpr::Random)
@@ -5466,6 +5487,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                     name,
                     args,
                     func_variadic: parsed_args.func_variadic,
+                    over,
                 })
             }
         }
@@ -5489,6 +5511,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                     },
                 ],
                 func_variadic: false,
+                over: None,
             })
         }
         Rule::substring_expr => {
@@ -5517,6 +5540,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                         name: "substring".into(),
                         args: args.into_iter().map(SqlFunctionArg::positional).collect(),
                         func_variadic: false,
+                        over: None,
                     })
                 }
                 Rule::substring_for_expr => {
@@ -5538,6 +5562,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                             .map(SqlFunctionArg::positional)
                             .collect(),
                         func_variadic: false,
+                        over: None,
                     })
                 }
                 Rule::substring_similar_expr => {
@@ -5573,6 +5598,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                         name: "similar_substring".into(),
                         args,
                         func_variadic: false,
+                        over: None,
                     })
                 }
                 _ => Err(ParseError::UnexpectedToken {
@@ -5614,6 +5640,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                     SqlFunctionArg::positional(value.ok_or(ParseError::UnexpectedEof)?),
                 ],
                 func_variadic: false,
+                over: None,
             })
         }
         Rule::overlay_expr => {
@@ -5651,6 +5678,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                 name: "overlay".into(),
                 args: args.into_iter().map(SqlFunctionArg::positional).collect(),
                 func_variadic: false,
+                over: None,
             })
         }
         Rule::trim_expr => build_trim_expr(pair),
@@ -5723,6 +5751,7 @@ fn build_agg_call(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
     let mut is_star = false;
     let mut distinct = false;
     let mut filter = None;
+    let mut over = None;
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::agg_func => {
@@ -5758,6 +5787,9 @@ fn build_agg_call(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
             Rule::agg_filter_clause => {
                 filter = Some(build_agg_filter_clause(part)?);
             }
+            Rule::over_clause => {
+                over = Some(build_over_clause(part)?);
+            }
             _ => {}
         }
     }
@@ -5771,6 +5803,7 @@ fn build_agg_call(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         distinct,
         func_variadic: !is_star && parsed_args.func_variadic,
         filter: filter.map(Box::new),
+        over,
     })
 }
 
@@ -5780,6 +5813,53 @@ fn build_agg_filter_clause(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> 
         .find(|part| part.as_rule() == Rule::expr)
         .ok_or(ParseError::UnexpectedEof)?;
     build_expr(expr)
+}
+
+fn build_over_clause(pair: Pair<'_, Rule>) -> Result<RawWindowSpec, ParseError> {
+    let mut spec = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::raw_window_spec => spec = Some(build_raw_window_spec(part)?),
+            Rule::unsupported_window_frame => {
+                return Err(ParseError::FeatureNotSupported(
+                    "window frame clauses".into(),
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(spec.unwrap_or(RawWindowSpec {
+        partition_by: Vec::new(),
+        order_by: Vec::new(),
+    }))
+}
+
+fn build_raw_window_spec(pair: Pair<'_, Rule>) -> Result<RawWindowSpec, ParseError> {
+    let mut partition_by = Vec::new();
+    let mut order_by = Vec::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::window_partition_by_clause => {
+                partition_by = part
+                    .into_inner()
+                    .filter(|inner| inner.as_rule() == Rule::expr)
+                    .map(build_expr)
+                    .collect::<Result<Vec<_>, _>>()?;
+            }
+            Rule::window_order_by_clause => {
+                order_by = part
+                    .into_inner()
+                    .filter(|inner| inner.as_rule() == Rule::order_by_item)
+                    .map(build_order_by_item)
+                    .collect::<Result<Vec<_>, _>>()?;
+            }
+            _ => {}
+        }
+    }
+    Ok(RawWindowSpec {
+        partition_by,
+        order_by,
+    })
 }
 
 #[derive(Default)]
@@ -6044,6 +6124,7 @@ fn build_trim_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         .into(),
         args,
         func_variadic: false,
+        over: None,
     })
 }
 
@@ -6152,6 +6233,7 @@ fn fold_infix(
                     SqlFunctionArg::positional(rhs),
                 ],
                 func_variadic: false,
+                over: None,
             },
             Rule::shift_op => match op.as_str() {
                 "<<" => SqlExpr::Shl(Box::new(expr), Box::new(rhs)),

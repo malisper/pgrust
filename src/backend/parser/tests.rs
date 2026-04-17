@@ -1555,6 +1555,7 @@ fn parse_variadic_function_call_marks_call_level_flag() {
                     ref name,
                     ref args,
                     func_variadic: true,
+                    ..
                 } if name == "json_build_array" && args.len() == 1
             ));
         })
@@ -1579,6 +1580,7 @@ fn parse_variadic_function_call_with_fixed_prefix_and_cast() {
                     ref name,
                     ref args,
                     func_variadic: true,
+                    ..
                 } if name == "json_extract_path" && args.len() == 2
             ));
         })
@@ -3428,6 +3430,7 @@ fn build_plan_for_recursive_mixed_cte_query() {
             | Plan::Limit { input, .. }
             | Plan::Projection { input, .. }
             | Plan::Aggregate { input, .. }
+            | Plan::WindowAgg { input, .. }
             | Plan::SubqueryScan { input, .. }
             | Plan::ProjectSet { input, .. } => plan_contains_cte_scan(input),
             Plan::NestedLoopJoin { left, right, .. } | Plan::HashJoin { left, right, .. } => {
@@ -3440,7 +3443,6 @@ fn build_plan_for_recursive_mixed_cte_query() {
             | Plan::SeqScan { .. }
             | Plan::IndexScan { .. }
             | Plan::FunctionScan { .. }
-            | Plan::SubqueryScan { .. }
             | Plan::WorkTableScan { .. }
             | Plan::Values { .. } => false,
         }
@@ -4256,6 +4258,36 @@ fn parse_group_by_and_having() {
 }
 
 #[test]
+fn parse_window_calls_capture_over_clause() {
+    let stmt = parse_select(
+        "select row_number() over (), sum(id) over (partition by name order by id) from people",
+    )
+    .unwrap();
+    assert!(matches!(
+        &stmt.targets[0].expr,
+        SqlExpr::FuncCall {
+            name,
+            over: Some(RawWindowSpec {
+                partition_by,
+                order_by,
+            }),
+            ..
+        } if name == "row_number" && partition_by.is_empty() && order_by.is_empty()
+    ));
+    assert!(matches!(
+        &stmt.targets[1].expr,
+        SqlExpr::AggCall {
+            func: AggFunc::Sum,
+            over: Some(RawWindowSpec {
+                partition_by,
+                order_by,
+            }),
+            ..
+        } if partition_by.len() == 1 && order_by.len() == 1
+    ));
+}
+
+#[test]
 fn parse_select_target_with_bare_alias() {
     let stmt = parse_select("select id user_id from people").unwrap();
     assert_eq!(stmt.targets.len(), 1);
@@ -4382,6 +4414,23 @@ fn analyze_grouped_query_keeps_semantic_group_refs() {
 }
 
 #[test]
+fn build_plan_with_window_function_uses_windowagg() {
+    let stmt = parse_select("select row_number() over (order by id) from people").unwrap();
+    let plan = build_plan(&stmt, &catalog()).unwrap();
+    match plan {
+        Plan::Projection { input, .. } => match *input {
+            Plan::WindowAgg { input, clause, .. } => {
+                assert!(clause.spec.partition_by.is_empty());
+                assert_eq!(clause.spec.order_by.len(), 1);
+                assert!(matches!(*input, Plan::OrderBy { .. }));
+            }
+            other => panic!("expected window agg below projection, got {other:?}"),
+        },
+        other => panic!("expected projection, got {other:?}"),
+    }
+}
+
+#[test]
 fn ungrouped_column_rejected_at_plan_time() {
     let stmt = parse_select("select name, count(*) from people").unwrap();
     assert!(matches!(
@@ -4397,6 +4446,30 @@ fn aggregate_in_where_rejected() {
         build_plan(&stmt, &catalog()),
         Err(ParseError::AggInWhere)
     ));
+}
+
+#[test]
+fn window_function_rejected_in_where_group_by_and_having() {
+    for sql in [
+        "select name from people where row_number() over () > 1",
+        "select name from people group by row_number() over ()",
+        "select name, count(*) from people group by name having row_number() over () > 1",
+    ] {
+        let stmt = parse_select(sql).unwrap();
+        assert!(matches!(
+            build_plan(&stmt, &catalog()),
+            Err(ParseError::WindowingError(_)) | Err(ParseError::FeatureNotSupported(_))
+        ));
+    }
+}
+
+#[test]
+fn window_aliases_and_frames_are_rejected() {
+    assert!(parse_select("select row_number() over w from people window w as ()").is_err());
+    assert!(parse_select(
+        "select row_number() over (order by id rows between unbounded preceding and current row) from people"
+    )
+    .is_err());
 }
 
 #[test]

@@ -2,7 +2,7 @@ use super::*;
 
 pub(super) fn expr_contains_agg(expr: &SqlExpr) -> bool {
     match expr {
-        SqlExpr::AggCall { .. } => true,
+        SqlExpr::AggCall { over, .. } => over.is_none(),
         SqlExpr::Column(_)
         | SqlExpr::Default
         | SqlExpr::Const(_)
@@ -273,7 +273,17 @@ pub(super) fn collect_aggs(
             distinct,
             func_variadic,
             filter,
+            over,
         } => {
+            if over.is_some() {
+                for arg in args {
+                    collect_aggs(&arg.value, aggs);
+                }
+                if let Some(filter) = filter.as_deref() {
+                    collect_aggs(filter, aggs);
+                }
+                return;
+            }
             let entry = (
                 *func,
                 args.clone(),

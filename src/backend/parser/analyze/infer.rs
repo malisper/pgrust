@@ -346,6 +346,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
             name,
             args,
             func_variadic,
+            ..
         } => {
             if name.eq_ignore_ascii_case("coalesce") {
                 let values = args.iter().map(|arg| arg.value.clone()).collect::<Vec<_>>();

@@ -23,9 +23,15 @@ impl PlannerInfo {
         } else {
             final_target.clone()
         };
+        let window_input_target = if has_windowing(&parse) {
+            make_window_input_target(&parse, &processed_tlist, &grouped_target)
+        } else {
+            sort_input_target.clone()
+        };
         let scanjoin_target = build_scanjoin_target(
             &parse,
             &group_input_target,
+            &window_input_target,
             &sort_input_target,
             &final_target,
         );
@@ -36,6 +42,7 @@ impl PlannerInfo {
             scanjoin_target,
             group_input_target,
             grouped_target,
+            window_input_target,
             sort_input_target,
             final_target,
             query_pathkeys,
@@ -84,6 +91,10 @@ pub(super) fn build_simple_rel_array(rtable: &[RangeTblEntry]) -> Vec<Option<Rel
 
 fn has_grouping(query: &Query) -> bool {
     !query.group_by.is_empty() || !query.accumulators.is_empty() || query.having_qual.is_some()
+}
+
+fn has_windowing(query: &Query) -> bool {
+    !query.window_clauses.is_empty()
 }
 
 fn make_processed_tlist(parse: &Query) -> Vec<TargetEntry> {
@@ -263,17 +274,145 @@ fn build_grouped_target(parse: &Query) -> PathTarget {
 fn build_scanjoin_target(
     parse: &Query,
     group_input_target: &PathTarget,
+    window_input_target: &PathTarget,
     sort_input_target: &PathTarget,
     final_target: &PathTarget,
 ) -> PathTarget {
     let exprs = if has_grouping(parse) {
         group_input_target.exprs.clone()
+    } else if has_windowing(parse) {
+        window_input_target.exprs.clone()
     } else if !parse.sort_clause.is_empty() {
         sort_input_target.exprs.clone()
     } else {
         final_target.exprs.clone()
     };
     PathTarget::new(exprs)
+}
+
+fn make_window_input_target(
+    parse: &Query,
+    processed_tlist: &[TargetEntry],
+    grouped_target: &PathTarget,
+) -> PathTarget {
+    let mut input_target = if has_grouping(parse) {
+        grouped_target.clone()
+    } else {
+        PathTarget::new(Vec::new())
+    };
+    for target in processed_tlist {
+        collect_window_input_exprs(&target.expr, has_grouping(parse), &mut input_target);
+    }
+    for clause in &parse.sort_clause {
+        collect_window_input_exprs(&clause.expr, has_grouping(parse), &mut input_target);
+    }
+    for clause in &parse.window_clauses {
+        for expr in &clause.spec.partition_by {
+            collect_window_input_exprs(expr, has_grouping(parse), &mut input_target);
+        }
+        for item in &clause.spec.order_by {
+            collect_window_input_exprs(&item.expr, has_grouping(parse), &mut input_target);
+        }
+    }
+    input_target
+}
+
+fn collect_window_input_exprs(expr: &Expr, preserve_expr: bool, target: &mut PathTarget) {
+    if preserve_expr && !expr_contains_window_func(expr) {
+        target.add_column_to_pathtarget(expr.clone(), 0);
+        return;
+    }
+    let mut supporting = Vec::new();
+    collect_supporting_inputs(expr, &mut supporting);
+    target.add_new_columns_to_pathtarget(supporting);
+}
+
+fn expr_contains_window_func(expr: &Expr) -> bool {
+    match expr {
+        Expr::WindowFunc(_) => true,
+        Expr::Aggref(aggref) => {
+            aggref.args.iter().any(expr_contains_window_func)
+                || aggref
+                    .aggfilter
+                    .as_ref()
+                    .is_some_and(expr_contains_window_func)
+        }
+        Expr::Op(op) => op.args.iter().any(expr_contains_window_func),
+        Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_contains_window_func),
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_deref()
+                .is_some_and(expr_contains_window_func)
+                || case_expr.args.iter().any(|arm| {
+                    expr_contains_window_func(&arm.expr) || expr_contains_window_func(&arm.result)
+                })
+                || expr_contains_window_func(&case_expr.defresult)
+        }
+        Expr::Func(func) => func.args.iter().any(expr_contains_window_func),
+        Expr::SubLink(sublink) => sublink
+            .testexpr
+            .as_deref()
+            .is_some_and(expr_contains_window_func),
+        Expr::SubPlan(subplan) => subplan
+            .testexpr
+            .as_deref()
+            .is_some_and(expr_contains_window_func),
+        Expr::ScalarArrayOp(saop) => {
+            expr_contains_window_func(&saop.left) || expr_contains_window_func(&saop.right)
+        }
+        Expr::Cast(inner, _) | Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
+            expr_contains_window_func(inner)
+        }
+        Expr::Param(_)
+        | Expr::Var(_)
+        | Expr::CaseTest(_)
+        | Expr::Const(_)
+        | Expr::Random
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => false,
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_contains_window_func(expr)
+                || expr_contains_window_func(pattern)
+                || escape.as_deref().is_some_and(expr_contains_window_func)
+        }
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            expr_contains_window_func(left) || expr_contains_window_func(right)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements.iter().any(expr_contains_window_func),
+        Expr::Row { fields } => fields
+            .iter()
+            .any(|(_, expr)| expr_contains_window_func(expr)),
+        Expr::ArraySubscript { array, subscripts } => {
+            expr_contains_window_func(array)
+                || subscripts.iter().any(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .is_some_and(expr_contains_window_func)
+                        || subscript
+                            .upper
+                            .as_ref()
+                            .is_some_and(expr_contains_window_func)
+                })
+        }
+    }
 }
 
 fn push_expr(exprs: &mut Vec<Expr>, expr: Expr) {
@@ -296,6 +435,18 @@ fn collect_group_input_exprs(expr: &Expr, group_by: &[Expr], exprs: &mut Vec<Exp
             }
             if let Some(filter) = aggref.aggfilter.as_ref() {
                 collect_group_input_exprs(filter, group_by, exprs);
+            }
+        }
+        Expr::WindowFunc(window_func) => {
+            for arg in &window_func.args {
+                collect_group_input_exprs(arg, group_by, exprs);
+            }
+            if let crate::include::nodes::primnodes::WindowFuncKind::Aggregate(aggref) =
+                &window_func.kind
+            {
+                if let Some(filter) = aggref.aggfilter.as_ref() {
+                    collect_group_input_exprs(filter, group_by, exprs);
+                }
             }
         }
         Expr::Op(op) => collect_expr_vec(&op.args, group_by, exprs),
@@ -401,6 +552,18 @@ fn collect_supporting_inputs(expr: &Expr, exprs: &mut Vec<Expr>) {
             }
             if let Some(filter) = aggref.aggfilter.as_ref() {
                 collect_supporting_inputs(filter, exprs);
+            }
+        }
+        Expr::WindowFunc(window_func) => {
+            for arg in &window_func.args {
+                collect_supporting_inputs(arg, exprs);
+            }
+            if let crate::include::nodes::primnodes::WindowFuncKind::Aggregate(aggref) =
+                &window_func.kind
+            {
+                if let Some(filter) = aggref.aggfilter.as_ref() {
+                    collect_supporting_inputs(filter, exprs);
+                }
             }
         }
         Expr::Op(op) => {
@@ -645,6 +808,18 @@ fn collect_query_outer_refs_expr(expr: &Expr, levelsup: usize, exprs: &mut Vec<E
             }
             if let Some(filter) = aggref.aggfilter.as_ref() {
                 collect_query_outer_refs_expr(filter, levelsup, exprs);
+            }
+        }
+        Expr::WindowFunc(window_func) => {
+            for arg in &window_func.args {
+                collect_query_outer_refs_expr(arg, levelsup, exprs);
+            }
+            if let crate::include::nodes::primnodes::WindowFuncKind::Aggregate(aggref) =
+                &window_func.kind
+            {
+                if let Some(filter) = aggref.aggfilter.as_ref() {
+                    collect_query_outer_refs_expr(filter, levelsup, exprs);
+                }
             }
         }
         Expr::Op(op) => {
