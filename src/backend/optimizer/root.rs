@@ -221,6 +221,9 @@ fn make_group_input_target(parse: &Query) -> PathTarget {
         for arg in &accum.args {
             collect_group_input_exprs(arg, &parse.group_by, &mut exprs);
         }
+        if let Some(filter) = accum.filter.as_ref() {
+            collect_group_input_exprs(filter, &parse.group_by, &mut exprs);
+        }
     }
     if let Some(having) = parse.having_qual.as_ref() {
         collect_group_input_exprs(having, &parse.group_by, &mut exprs);
@@ -240,6 +243,7 @@ fn build_grouped_target(parse: &Query) -> PathTarget {
             aggvariadic: accum.agg_variadic,
             aggdistinct: accum.distinct,
             args: accum.args.clone(),
+            aggfilter: accum.filter.clone(),
             agglevelsup: 0,
             aggno,
         }))
@@ -280,6 +284,9 @@ fn collect_group_input_exprs(expr: &Expr, group_by: &[Expr], exprs: &mut Vec<Exp
         Expr::Aggref(aggref) => {
             for arg in &aggref.args {
                 collect_group_input_exprs(arg, group_by, exprs);
+            }
+            if let Some(filter) = aggref.aggfilter.as_ref() {
+                collect_group_input_exprs(filter, group_by, exprs);
             }
         }
         Expr::Op(op) => collect_expr_vec(&op.args, group_by, exprs),
@@ -377,6 +384,9 @@ fn collect_supporting_inputs(expr: &Expr, exprs: &mut Vec<Expr>) {
         Expr::Aggref(aggref) => {
             for arg in &aggref.args {
                 collect_supporting_inputs(arg, exprs);
+            }
+            if let Some(filter) = aggref.aggfilter.as_ref() {
+                collect_supporting_inputs(filter, exprs);
             }
         }
         Expr::Op(op) => {
@@ -486,6 +496,9 @@ fn collect_query_outer_refs(query: &Query, levelsup: usize, exprs: &mut Vec<Expr
     for accum in &query.accumulators {
         for arg in &accum.args {
             collect_query_outer_refs_expr(arg, levelsup, exprs);
+        }
+        if let Some(filter) = accum.filter.as_ref() {
+            collect_query_outer_refs_expr(filter, levelsup, exprs);
         }
     }
     if let Some(having) = query.having_qual.as_ref() {
@@ -613,6 +626,9 @@ fn collect_query_outer_refs_expr(expr: &Expr, levelsup: usize, exprs: &mut Vec<E
         Expr::Aggref(aggref) => {
             for arg in &aggref.args {
                 collect_query_outer_refs_expr(arg, levelsup, exprs);
+            }
+            if let Some(filter) = aggref.aggfilter.as_ref() {
+                collect_query_outer_refs_expr(filter, levelsup, exprs);
             }
         }
         Expr::Op(op) => {

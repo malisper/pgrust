@@ -138,7 +138,13 @@ pub(super) fn expr_references_input_scope(expr: &SqlExpr) -> bool {
         SqlExpr::BinaryOperator { left, right, .. } => {
             expr_references_input_scope(left) || expr_references_input_scope(right)
         }
-        SqlExpr::AggCall { args, .. } | SqlExpr::FuncCall { args, .. } => args
+        SqlExpr::AggCall { args, filter, .. } => {
+            args.iter().any(|arg| expr_references_input_scope(&arg.value))
+                || filter
+                    .as_deref()
+                    .is_some_and(expr_references_input_scope)
+        }
+        SqlExpr::FuncCall { args, .. } => args
             .iter()
             .any(|arg| expr_references_input_scope(&arg.value)),
         SqlExpr::PrefixOperator { expr, .. } | SqlExpr::FieldSelect { expr, .. } => {
@@ -258,7 +264,7 @@ pub(super) fn expr_references_input_scope(expr: &SqlExpr) -> bool {
 
 pub(super) fn collect_aggs(
     expr: &SqlExpr,
-    aggs: &mut Vec<(AggFunc, Vec<SqlFunctionArg>, bool, bool)>,
+    aggs: &mut Vec<(AggFunc, Vec<SqlFunctionArg>, bool, bool, Option<SqlExpr>)>,
 ) {
     match expr {
         SqlExpr::AggCall {
@@ -266,8 +272,15 @@ pub(super) fn collect_aggs(
             args,
             distinct,
             func_variadic,
+            filter,
         } => {
-            let entry = (*func, args.clone(), *distinct, *func_variadic);
+            let entry = (
+                *func,
+                args.clone(),
+                *distinct,
+                *func_variadic,
+                filter.as_deref().cloned(),
+            );
             if !aggs.contains(&entry) {
                 aggs.push(entry);
             }

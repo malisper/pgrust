@@ -530,6 +530,7 @@ pub struct AggAccum {
     pub aggfnoid: u32,
     pub agg_variadic: bool,
     pub args: Vec<Expr>,
+    pub filter: Option<Expr>,
     pub distinct: bool,
     pub sql_type: SqlType,
 }
@@ -541,6 +542,7 @@ pub struct Aggref {
     pub aggvariadic: bool,
     pub aggdistinct: bool,
     pub args: Vec<Expr>,
+    pub aggfilter: Option<Expr>,
     pub agglevelsup: usize,
     pub aggno: usize,
 }
@@ -894,6 +896,7 @@ impl Expr {
         aggvariadic: bool,
         aggdistinct: bool,
         args: Vec<Expr>,
+        aggfilter: Option<Expr>,
         aggno: usize,
     ) -> Self {
         Expr::Aggref(Box::new(Aggref {
@@ -902,6 +905,7 @@ impl Expr {
             aggvariadic,
             aggdistinct,
             args,
+            aggfilter,
             agglevelsup: 0,
             aggno,
         }))

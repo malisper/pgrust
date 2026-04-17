@@ -1125,10 +1125,16 @@ fn expr_uses_only_layout_vars(expr: &Expr, layout: &[Expr]) -> bool {
     match expr {
         Expr::Var(var) => var.varlevelsup > 0,
         Expr::Const(_) => true,
-        Expr::Aggref(aggref) => aggref
-            .args
-            .iter()
-            .all(|arg| expr_uses_only_layout_vars(arg, layout)),
+        Expr::Aggref(aggref) => {
+            aggref
+                .args
+                .iter()
+                .all(|arg| expr_uses_only_layout_vars(arg, layout))
+                && aggref
+                    .aggfilter
+                    .as_ref()
+                    .is_none_or(|expr| expr_uses_only_layout_vars(expr, layout))
+        }
         Expr::Op(op) => op
             .args
             .iter()
@@ -1308,6 +1314,9 @@ pub(super) fn rewrite_semantic_expr_for_join_inputs(
                     rewrite_semantic_expr_for_join_inputs(root, arg, left, right, join_layout)
                 })
                 .collect(),
+            aggfilter: aggref.aggfilter.map(|expr| {
+                rewrite_semantic_expr_for_join_inputs(root, expr, left, right, join_layout)
+            }),
             ..*aggref
         })),
         Expr::Op(op) => Expr::Op(Box::new(crate::include::nodes::primnodes::OpExpr {
@@ -1584,7 +1593,13 @@ fn expr_uses_immediate_outer_columns(expr: &Expr) -> bool {
     match expr {
         Expr::Var(var) => var.varlevelsup == 1,
         Expr::Param(_) => true,
-        Expr::Aggref(aggref) => aggref.args.iter().any(expr_uses_immediate_outer_columns),
+        Expr::Aggref(aggref) => {
+            aggref.args.iter().any(expr_uses_immediate_outer_columns)
+                || aggref
+                    .aggfilter
+                    .as_ref()
+                    .is_some_and(expr_uses_immediate_outer_columns)
+        }
         Expr::Op(op) => op.args.iter().any(expr_uses_immediate_outer_columns),
         Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_uses_immediate_outer_columns),
         Expr::Case(case_expr) => {
@@ -1744,7 +1759,13 @@ fn path_uses_immediate_outer_columns(path: &Path) -> bool {
                 || group_by.iter().any(expr_uses_immediate_outer_columns)
                 || accumulators
                     .iter()
-                    .any(|accum| accum.args.iter().any(expr_uses_immediate_outer_columns))
+                    .any(|accum| {
+                        accum.args.iter().any(expr_uses_immediate_outer_columns)
+                            || accum
+                                .filter
+                                .as_ref()
+                                .is_some_and(expr_uses_immediate_outer_columns)
+                    })
                 || having
                     .as_ref()
                     .is_some_and(expr_uses_immediate_outer_columns)

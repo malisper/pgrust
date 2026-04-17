@@ -1339,7 +1339,8 @@ fn bind_select_query_with_outer(
     };
 
     if needs_agg {
-        let mut aggs: Vec<(AggFunc, Vec<SqlFunctionArg>, bool, bool)> = Vec::new();
+        let mut aggs: Vec<(AggFunc, Vec<SqlFunctionArg>, bool, bool, Option<SqlExpr>)> =
+            Vec::new();
         for target in &stmt.targets {
             collect_aggs(&target.expr, &mut aggs);
         }
@@ -1365,7 +1366,7 @@ fn bind_select_query_with_outer(
 
         let accumulators: Vec<AggAccum> = aggs
             .iter()
-            .map(|(func, args, distinct, func_variadic)| {
+            .map(|(func, args, distinct, func_variadic, filter)| {
                 if aggregate_args_are_named(args) {
                     return Err(ParseError::UnexpectedToken {
                         expected: "aggregate arguments without names",
@@ -1401,6 +1402,19 @@ fn bind_select_query_with_outer(
                         )
                     })
                     .collect::<Result<Vec<_>, _>>()?;
+                let bound_filter = filter
+                    .as_ref()
+                    .map(|expr| {
+                        bind_expr_with_outer_and_ctes(
+                            expr,
+                            &scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer.as_ref(),
+                            &visible_ctes,
+                        )
+                    })
+                    .transpose()?;
                 let coerced_args = if let Some(resolved) = &resolved {
                     bound_args
                         .into_iter()
@@ -1424,6 +1438,7 @@ fn bind_select_query_with_outer(
                         .map(|call| call.func_variadic)
                         .unwrap_or(*func_variadic),
                     args: coerced_args,
+                    filter: bound_filter,
                     distinct: *distinct,
                     sql_type: aggregate_sql_type(*func, arg_types.first().copied()),
                 })
@@ -1445,7 +1460,7 @@ fn bind_select_query_with_outer(
                 ),
             });
         }
-        for (func, args, _, _) in &aggs {
+        for (func, args, _, _, _) in &aggs {
             output_columns.push(QueryColumn {
                 name: func.name().to_string(),
                 sql_type: aggregate_sql_type(
@@ -1516,6 +1531,7 @@ fn bind_select_query_with_outer(
                         accum.agg_variadic,
                         accum.distinct,
                         accum.args.clone(),
+                        accum.filter.clone(),
                         i,
                     ),
                     accum.sql_type,
