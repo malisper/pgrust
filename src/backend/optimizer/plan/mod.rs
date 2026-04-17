@@ -35,7 +35,10 @@ pub(super) fn finalize_plan_subqueries(
     subselect::finalize_plan_subqueries(plan, catalog, subplans)
 }
 
-pub(super) fn append_planned_subquery(planned_stmt: PlannedStmt, subplans: &mut Vec<Plan>) -> usize {
+pub(super) fn append_planned_subquery(
+    planned_stmt: PlannedStmt,
+    subplans: &mut Vec<Plan>,
+) -> usize {
     subselect::append_planned_subquery(planned_stmt, subplans)
 }
 

@@ -2,7 +2,6 @@ use parking_lot::RwLock;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 mod catalog_access;
 mod commands;
@@ -48,7 +47,7 @@ use crate::backend::storage::lmgr::{
     TableLockManager, TableLockMode, lock_relations_interruptible, lock_tables_interruptible,
     unlock_relations,
 };
-use crate::backend::storage::smgr::{MdStorageManager, RelFileLocator, StorageManager};
+use crate::backend::storage::smgr::{RelFileLocator, StorageManager};
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::inval::{
     CatalogInvalidation, accept_invalidation_messages, catalog_invalidation_from_effect,
@@ -73,6 +72,7 @@ use crate::include::catalog::{
     system_catalog_indexes,
 };
 use crate::pgrust::auth::{AuthCatalog, AuthState};
+use crate::pgrust::cluster::{Cluster, ClusterShared};
 use crate::pl::plpgsql::execute_do;
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
 use ddl::{
@@ -123,9 +123,12 @@ pub(crate) use foreign_keys::{
 
 #[derive(Clone)]
 pub struct Database {
+    pub(crate) cluster: Arc<ClusterShared>,
+    pub database_oid: u32,
     pub pool: Arc<BufferPool<SmgrStorageBackend>>,
     pub wal: Option<Arc<WalWriter>>,
     pub txns: Arc<RwLock<TransactionManager>>,
+    pub shared_catalog: Arc<RwLock<CatalogStore>>,
     pub catalog: Arc<RwLock<CatalogStore>>,
     pub txn_waiter: Arc<TransactionWaiter>,
     pub table_locks: Arc<TableLockManager>,
@@ -137,7 +140,7 @@ pub struct Database {
     pub(crate) temp_relations: Arc<RwLock<HashMap<ClientId, TempNamespace>>>,
     pub(crate) domains: Arc<RwLock<BTreeMap<String, DomainEntry>>>,
     pub(crate) sequences: Arc<SequenceRuntime>,
-    _wal_bg_writer: Option<Arc<WalBgWriter>>,
+    pub(crate) _wal_bg_writer: Option<Arc<WalBgWriter>>,
 }
 
 const TEMP_DB_OID_BASE: u32 = 0x7000_0000;
@@ -213,111 +216,25 @@ impl Database {
         pool_size: usize,
         wal_replay: bool,
     ) -> Result<Self, DatabaseError> {
-        let base_dir = base_dir.into();
-        std::fs::create_dir_all(&base_dir)
-            .map_err(|e| DatabaseError::Catalog(CatalogError::Io(e.to_string())))?;
-
-        let mut txns = TransactionManager::new_durable(&base_dir)?;
-        let catalog = CatalogStore::load(&base_dir)?;
-
-        let wal_dir = base_dir.join("pg_wal");
-        if wal_replay && wal_dir.join("wal.log").exists() {
-            let mut recovery_smgr = MdStorageManager::new_in_recovery(&base_dir);
-            {
-                use crate::backend::storage::smgr::{ForkNumber, StorageManager};
-                let relcache = catalog.relcache()?;
-                for (_, entry) in relcache.entries() {
-                    if !relkind_has_storage(entry.relkind) {
-                        continue;
-                    }
-                    let _ = recovery_smgr.open(entry.rel);
-                    let _ = recovery_smgr.create(entry.rel, ForkNumber::Main, false);
+        Cluster::open_with_options(base_dir.into(), pool_size, wal_replay)?
+            .connect_database("postgres")
+            .map_err(|e| match e {
+                ExecError::DetailedError { message, .. } => {
+                    DatabaseError::Catalog(CatalogError::Io(message))
                 }
-            }
-            let stats = crate::backend::access::transam::xlog::replay::perform_wal_recovery(
-                &wal_dir,
-                &mut recovery_smgr,
-                &mut txns,
-            )
-            .map_err(DatabaseError::Wal)?;
-            if stats.records_replayed > 0 {
-                eprintln!(
-                    "WAL recovery: {} records ({} FPIs, {} inserts, {} commits, {} aborted)",
-                    stats.records_replayed, stats.fpis, stats.inserts, stats.commits, stats.aborted
-                );
-            }
-        }
-
-        let smgr = MdStorageManager::new(&base_dir);
-        let wal = Arc::new(WalWriter::new(&wal_dir).map_err(DatabaseError::Wal)?);
-
-        let pool =
-            BufferPool::new_with_wal(SmgrStorageBackend::new(smgr), pool_size, Arc::clone(&wal));
-
-        {
-            use crate::backend::storage::smgr::{ForkNumber, StorageManager};
-            let relcache = catalog.relcache()?;
-            for (_, entry) in relcache.entries() {
-                if !relkind_has_storage(entry.relkind) {
-                    continue;
-                }
-                let rel = entry.rel;
-                pool.with_storage_mut(|s| {
-                    let _ = s.smgr.open(rel);
-                    let _ = s.smgr.create(rel, ForkNumber::Main, true);
-                });
-            }
-        }
-
-        let wal_bg_writer = WalBgWriter::start(Arc::clone(&wal), Duration::from_millis(200));
-        let sequences = Arc::new(
-            SequenceRuntime::load(Some(base_dir.as_path()), &catalog)
-                .map_err(DatabaseError::Catalog)?,
-        );
-
-        Ok(Self {
-            pool: Arc::new(pool),
-            wal: Some(wal),
-            txns: Arc::new(RwLock::new(txns)),
-            catalog: Arc::new(RwLock::new(catalog)),
-            txn_waiter: Arc::new(TransactionWaiter::new()),
-            table_locks: Arc::new(TableLockManager::new()),
-            plan_cache: Arc::new(PlanCache::new()),
-            backend_cache_states: Arc::new(RwLock::new(HashMap::new())),
-            session_interrupt_states: Arc::new(RwLock::new(HashMap::new())),
-            session_auth_states: Arc::new(RwLock::new(HashMap::new())),
-            database_create_grants: Arc::new(RwLock::new(Vec::new())),
-            temp_relations: Arc::new(RwLock::new(HashMap::new())),
-            domains: Arc::new(RwLock::new(BTreeMap::new())),
-            sequences,
-            _wal_bg_writer: Some(Arc::new(wal_bg_writer)),
-        })
+                other => DatabaseError::Catalog(CatalogError::Io(format!("{other:?}"))),
+            })
     }
 
     pub fn open_ephemeral(pool_size: usize) -> Result<Self, DatabaseError> {
-        let pool = Arc::new(BufferPool::new(SmgrStorageBackend::new_mem(), pool_size));
-        let txns = Arc::new(RwLock::new(TransactionManager::new_ephemeral()));
-        bootstrap_ephemeral_catalog(&pool, &txns)?;
-        let catalog = CatalogStore::new_ephemeral();
-        let sequences = Arc::new(SequenceRuntime::new_ephemeral());
-
-        Ok(Self {
-            pool,
-            wal: None,
-            txns,
-            catalog: Arc::new(RwLock::new(catalog)),
-            txn_waiter: Arc::new(TransactionWaiter::new()),
-            table_locks: Arc::new(TableLockManager::new()),
-            plan_cache: Arc::new(PlanCache::new()),
-            backend_cache_states: Arc::new(RwLock::new(HashMap::new())),
-            session_interrupt_states: Arc::new(RwLock::new(HashMap::new())),
-            session_auth_states: Arc::new(RwLock::new(HashMap::new())),
-            database_create_grants: Arc::new(RwLock::new(Vec::new())),
-            temp_relations: Arc::new(RwLock::new(HashMap::new())),
-            domains: Arc::new(RwLock::new(BTreeMap::new())),
-            sequences,
-            _wal_bg_writer: None,
-        })
+        Cluster::open_ephemeral(pool_size)?
+            .connect_database("postgres")
+            .map_err(|e| match e {
+                ExecError::DetailedError { message, .. } => {
+                    DatabaseError::Catalog(CatalogError::Io(message))
+                }
+                other => DatabaseError::Catalog(CatalogError::Io(format!("{other:?}"))),
+            })
     }
 
     pub(crate) fn install_interrupt_state(

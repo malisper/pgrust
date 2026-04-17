@@ -85,16 +85,14 @@ pub(super) fn raise_expr_varlevels(expr: Expr, levels: usize) -> Expr {
                 .collect(),
             ..*op
         })),
-        Expr::Bool(bool_expr) => {
-            Expr::Bool(Box::new(crate::include::nodes::primnodes::BoolExpr {
-                args: bool_expr
-                    .args
-                    .into_iter()
-                    .map(|arg| raise_expr_varlevels(arg, levels))
-                    .collect(),
-                ..*bool_expr
-            }))
-        }
+        Expr::Bool(bool_expr) => Expr::Bool(Box::new(crate::include::nodes::primnodes::BoolExpr {
+            args: bool_expr
+                .args
+                .into_iter()
+                .map(|arg| raise_expr_varlevels(arg, levels))
+                .collect(),
+            ..*bool_expr
+        })),
         Expr::Func(func) => Expr::Func(Box::new(crate::include::nodes::primnodes::FuncExpr {
             args: func
                 .args

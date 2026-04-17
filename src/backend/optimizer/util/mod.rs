@@ -69,7 +69,10 @@ pub(super) fn required_query_pathkeys_for_path(root: &PlannerInfo, path: &Path) 
     tlist::required_query_pathkeys_for_path(root, path)
 }
 
-pub(super) fn required_query_pathkeys_for_rel(root: &PlannerInfo, rel: &RelOptInfo) -> Vec<PathKey> {
+pub(super) fn required_query_pathkeys_for_rel(
+    root: &PlannerInfo,
+    rel: &RelOptInfo,
+) -> Vec<PathKey> {
     tlist::required_query_pathkeys_for_rel(root, rel)
 }
 
@@ -77,7 +80,10 @@ pub(super) fn path_exposes_required_pathkey_identity(path: &Path, pathkeys: &[Pa
     tlist::path_exposes_required_pathkey_identity(path, pathkeys)
 }
 
-pub(super) fn rel_exposes_required_pathkey_identity(rel: &RelOptInfo, pathkeys: &[PathKey]) -> bool {
+pub(super) fn rel_exposes_required_pathkey_identity(
+    rel: &RelOptInfo,
+    pathkeys: &[PathKey],
+) -> bool {
     tlist::rel_exposes_required_pathkey_identity(rel, pathkeys)
 }
 

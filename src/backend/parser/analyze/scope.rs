@@ -667,7 +667,8 @@ pub(super) fn bind_from_item_with_ctes(
                 grouped_outer,
                 ctes,
             )?;
-            let plan = AnalyzedFrom::join(left_plan, right_plan, plan_join_type(*kind), on, alias_info);
+            let plan =
+                AnalyzedFrom::join(left_plan, right_plan, plan_join_type(*kind), on, alias_info);
             let scope = scope_with_output_exprs(scope.unwrap_or(raw_scope), &plan.output_exprs);
             Ok((plan, scope))
         }

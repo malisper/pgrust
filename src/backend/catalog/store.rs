@@ -10,7 +10,7 @@ use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
 use crate::backend::storage::lmgr::TransactionWaiter;
 use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::misc::interrupts::{InterruptState, check_for_interrupts};
-use crate::include::catalog::BootstrapCatalogKind;
+use crate::include::catalog::{BootstrapCatalogKind, CatalogScope};
 
 // Mirror PostgreSQL's catalog split: durable control/storage lives in `storage`,
 // while relation DDL and catalog row mutation paths live in `heap`.
@@ -39,6 +39,8 @@ enum CatalogStoreMode {
 #[derive(Debug, Clone, PartialEq)]
 pub struct CatalogStore {
     mode: CatalogStoreMode,
+    scope: CatalogScope,
+    oid_control_path: Option<PathBuf>,
     catalog: Catalog,
     control: CatalogControl,
 }
@@ -95,11 +97,11 @@ mod tests {
     use crate::include::catalog::{
         BOOTSTRAP_SUPERUSER_NAME, BOOTSTRAP_SUPERUSER_OID, BTREE_AM_OID, C_COLLATION_OID,
         CURRENT_DATABASE_NAME, DEFAULT_COLLATION_OID, DEFAULT_TABLESPACE_OID, DEPENDENCY_AUTO,
-        DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, HEAP_TABLE_AM_OID, INT4_TYPE_OID, INT8_TYPE_OID,
-        JSON_TYPE_OID, OID_TYPE_OID, PG_ATTRDEF_RELATION_OID, PG_CLASS_RELATION_OID,
-        PG_CONSTRAINT_RELATION_OID, PG_LANGUAGE_INTERNAL_OID, PG_NAMESPACE_RELATION_OID,
-        PG_TOAST_NAMESPACE_OID, PG_TYPE_RELATION_OID, POSIX_COLLATION_OID, PUBLIC_NAMESPACE_OID,
-        TEXT_TYPE_OID, VARCHAR_TYPE_OID,
+        DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, GLOBAL_TABLESPACE_OID, HEAP_TABLE_AM_OID,
+        INT4_TYPE_OID, INT8_TYPE_OID, JSON_TYPE_OID, OID_TYPE_OID, PG_ATTRDEF_RELATION_OID,
+        PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID, PG_LANGUAGE_INTERNAL_OID,
+        PG_NAMESPACE_RELATION_OID, PG_TOAST_NAMESPACE_OID, PG_TYPE_RELATION_OID,
+        POSIX_COLLATION_OID, PUBLIC_NAMESPACE_OID, TEXT_TYPE_OID, VARCHAR_TYPE_OID,
     };
     use crate::include::nodes::primnodes::RelationDesc;
     use std::fs;
@@ -1553,8 +1555,8 @@ mod tests {
         let database_path = segment_path(
             &base,
             RelFileLocator {
-                spc_oid: 0,
-                db_oid: 1,
+                spc_oid: GLOBAL_TABLESPACE_OID,
+                db_oid: 0,
                 rel_number: BootstrapCatalogKind::PgDatabase.relation_oid(),
             },
             ForkNumber::Main,
@@ -1595,8 +1597,8 @@ mod tests {
         let authid_path = segment_path(
             &base,
             RelFileLocator {
-                spc_oid: 0,
-                db_oid: 1,
+                spc_oid: GLOBAL_TABLESPACE_OID,
+                db_oid: 0,
                 rel_number: BootstrapCatalogKind::PgAuthId.relation_oid(),
             },
             ForkNumber::Main,
@@ -1635,8 +1637,8 @@ mod tests {
         let auth_members_path = segment_path(
             &base,
             RelFileLocator {
-                spc_oid: 0,
-                db_oid: 1,
+                spc_oid: GLOBAL_TABLESPACE_OID,
+                db_oid: 0,
                 rel_number: BootstrapCatalogKind::PgAuthMembers.relation_oid(),
             },
             ForkNumber::Main,
@@ -1921,8 +1923,8 @@ mod tests {
         let tablespace_path = segment_path(
             &base,
             RelFileLocator {
-                spc_oid: 0,
-                db_oid: 1,
+                spc_oid: GLOBAL_TABLESPACE_OID,
+                db_oid: 0,
                 rel_number: BootstrapCatalogKind::PgTablespace.relation_oid(),
             },
             ForkNumber::Main,
