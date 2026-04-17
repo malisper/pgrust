@@ -41,6 +41,7 @@ impl AuthCatalog {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthState {
+    authenticated_user_oid: u32,
     session_user_oid: u32,
     current_user_oid: u32,
 }
@@ -48,6 +49,7 @@ pub struct AuthState {
 impl Default for AuthState {
     fn default() -> Self {
         Self {
+            authenticated_user_oid: BOOTSTRAP_SUPERUSER_OID,
             session_user_oid: BOOTSTRAP_SUPERUSER_OID,
             current_user_oid: BOOTSTRAP_SUPERUSER_OID,
         }
@@ -55,6 +57,10 @@ impl Default for AuthState {
 }
 
 impl AuthState {
+    pub fn authenticated_user_oid(&self) -> u32 {
+        self.authenticated_user_oid
+    }
+
     pub fn session_user_oid(&self) -> u32 {
         self.session_user_oid
     }
@@ -63,13 +69,27 @@ impl AuthState {
         self.current_user_oid
     }
 
+    pub fn assume_authenticated_user(&mut self, role_oid: u32) {
+        self.authenticated_user_oid = role_oid;
+        self.session_user_oid = role_oid;
+        self.current_user_oid = role_oid;
+    }
+
     pub fn set_session_authorization(&mut self, role_oid: u32) {
         self.session_user_oid = role_oid;
         self.current_user_oid = role_oid;
     }
 
     pub fn reset_session_authorization(&mut self) {
-        self.current_user_oid = self.session_user_oid;
+        self.session_user_oid = self.authenticated_user_oid;
+        self.current_user_oid = self.authenticated_user_oid;
+    }
+
+    pub fn can_set_session_authorization(&self, target_oid: u32, catalog: &AuthCatalog) -> bool {
+        target_oid == self.authenticated_user_oid
+            || catalog
+                .role_by_oid(self.authenticated_user_oid)
+                .is_some_and(|row| row.rolsuper)
     }
 
     pub fn can_set_role(&self, target_oid: u32, catalog: &AuthCatalog) -> bool {
@@ -220,16 +240,20 @@ mod tests {
     #[test]
     fn auth_state_tracks_session_and_current_user() {
         let mut auth = AuthState::default();
+        assert_eq!(auth.authenticated_user_oid(), BOOTSTRAP_SUPERUSER_OID);
         assert_eq!(auth.session_user_oid(), BOOTSTRAP_SUPERUSER_OID);
         assert_eq!(auth.current_user_oid(), BOOTSTRAP_SUPERUSER_OID);
 
         auth.set_session_authorization(42);
+        assert_eq!(auth.authenticated_user_oid(), BOOTSTRAP_SUPERUSER_OID);
         assert_eq!(auth.session_user_oid(), 42);
         assert_eq!(auth.current_user_oid(), 42);
 
         auth.set_session_authorization(43);
         auth.reset_session_authorization();
-        assert_eq!(auth.current_user_oid(), 43);
+        assert_eq!(auth.authenticated_user_oid(), BOOTSTRAP_SUPERUSER_OID);
+        assert_eq!(auth.session_user_oid(), BOOTSTRAP_SUPERUSER_OID);
+        assert_eq!(auth.current_user_oid(), BOOTSTRAP_SUPERUSER_OID);
     }
 
     #[test]
@@ -247,7 +271,7 @@ mod tests {
             }],
         );
         let mut auth = AuthState::default();
-        auth.set_session_authorization(21);
+        auth.assume_authenticated_user(21);
 
         assert!(auth.has_effective_membership(20, &catalog));
         assert!(!auth.can_set_role(20, &catalog));
@@ -275,7 +299,7 @@ mod tests {
             }],
         );
         let mut auth = AuthState::default();
-        auth.set_session_authorization(creator.oid);
+        auth.assume_authenticated_user(creator.oid);
 
         assert!(auth.can_create_role_with_attrs(
             &RoleAttributes {

@@ -24,10 +24,7 @@ impl Database {
                     stmt.role_name
                 )))
             })?;
-        let current = auth_catalog
-            .role_by_oid(auth.current_user_oid())
-            .ok_or_else(|| ExecError::Parse(role_management_error("permission denied")))?;
-        if !current.rolsuper && !auth.can_set_role(target.oid, &auth_catalog) {
+        if !auth.can_set_session_authorization(target.oid, &auth_catalog) {
             return Err(ExecError::Parse(role_management_error(format!(
                 "permission denied to set session authorization to \"{}\"",
                 target.rolname
@@ -114,8 +111,14 @@ mod tests {
             session.execute(&db, "reset session authorization").unwrap(),
             StatementResult::AffectedRows(0)
         );
-        assert_eq!(session.current_user_oid(), role_oid(&db, "tenant"));
-        assert_eq!(session.session_user_oid(), role_oid(&db, "tenant"));
+        assert_eq!(
+            session.current_user_oid(),
+            crate::include::catalog::BOOTSTRAP_SUPERUSER_OID
+        );
+        assert_eq!(
+            session.session_user_oid(),
+            crate::include::catalog::BOOTSTRAP_SUPERUSER_OID
+        );
     }
 
     #[test]
@@ -168,5 +171,33 @@ mod tests {
             StatementResult::AffectedRows(0)
         );
         assert_eq!(session.current_user_oid(), role_oid(&db, "limited_admin"));
+    }
+
+    #[test]
+    fn authenticated_superuser_can_chain_session_authorization_switches() {
+        let base = temp_dir("superuser_chain");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session
+            .execute(&db, "create role limited_admin createrole")
+            .unwrap();
+        session.execute(&db, "create role role_admin createrole").unwrap();
+
+        assert_eq!(
+            session
+                .execute(&db, "set session authorization limited_admin")
+                .unwrap(),
+            StatementResult::AffectedRows(0)
+        );
+        assert_eq!(session.current_user_oid(), role_oid(&db, "limited_admin"));
+
+        assert_eq!(
+            session
+                .execute(&db, "set session authorization role_admin")
+                .unwrap(),
+            StatementResult::AffectedRows(0)
+        );
+        assert_eq!(session.current_user_oid(), role_oid(&db, "role_admin"));
+        assert_eq!(session.session_user_oid(), role_oid(&db, "role_admin"));
     }
 }
