@@ -4491,6 +4491,40 @@ fn aggregate_rejects_nested_subquery_reference_to_local_cte() {
 }
 
 #[test]
+fn recursive_cte_allows_self_reference_inside_intermediate_setop_with() {
+    let stmt = parse_select(
+        "with recursive outermost(x) as (
+            select 1
+            union (with innermost as (select 2)
+                   select * from outermost
+                   union select * from innermost)
+        )
+        select * from outermost order by 1",
+    )
+    .unwrap();
+    assert!(build_plan(&stmt, &catalog()).is_ok());
+}
+
+#[test]
+fn recursive_cte_rejects_self_reference_inside_subquery_cte_of_recursive_term() {
+    let stmt = parse_select(
+        "with recursive outermost(x) as (
+            with innermost as (select 2 from outermost)
+              select * from innermost
+              union select * from outermost
+        )
+        select * from outermost order by 1",
+    )
+    .unwrap();
+    assert!(matches!(
+        build_plan(&stmt, &catalog()),
+        Err(ParseError::InvalidRecursion(message))
+            if message
+                == "recursive reference to query \"outermost\" must not appear within a subquery"
+    ));
+}
+
+#[test]
 fn window_function_rejected_in_where_group_by_and_having() {
     for sql in [
         "select name from people where row_number() over () > 1",

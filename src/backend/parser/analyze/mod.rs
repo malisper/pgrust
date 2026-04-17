@@ -991,6 +991,7 @@ fn bind_ctes(
                         "recursive CTE requires WITH RECURSIVE".into(),
                     ));
                 }
+                validate_recursive_cte_non_recursive_term(anchor, &cte.name)?;
                 let (anchor_query, anchor_desc) = analyze_non_recursive_cte_body(
                     anchor,
                     catalog,
@@ -1141,6 +1142,7 @@ fn bind_ctes(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RecursiveReferenceContext {
     Ok,
+    NonRecursiveTerm,
     Subquery,
     OuterJoin,
     Intersect,
@@ -1153,6 +1155,9 @@ fn recursive_reference_error(
 ) -> Result<(), ParseError> {
     let message = match context {
         RecursiveReferenceContext::Ok => return Ok(()),
+        RecursiveReferenceContext::NonRecursiveTerm => format!(
+            "recursive reference to query \"{cte_name}\" must not appear within its non-recursive term"
+        ),
         RecursiveReferenceContext::Subquery => {
             format!("recursive reference to query \"{cte_name}\" must not appear within a subquery")
         }
@@ -1187,6 +1192,10 @@ impl<'a> RecursiveReferenceChecker<'a> {
 
     fn validate_recursive_term(&mut self, stmt: &SelectStatement) -> Result<(), ParseError> {
         self.visit_select(stmt, RecursiveReferenceContext::Ok)
+    }
+
+    fn validate_non_recursive_term(&mut self, body: &CteBody) -> Result<(), ParseError> {
+        self.visit_cte_body(body, RecursiveReferenceContext::NonRecursiveTerm)
     }
 
     fn visit_cte_body(
@@ -1533,6 +1542,13 @@ fn validate_recursive_cte_recursive_term(
     RecursiveReferenceChecker::new(cte_name).validate_recursive_term(stmt)
 }
 
+fn validate_recursive_cte_non_recursive_term(
+    body: &CteBody,
+    cte_name: &str,
+) -> Result<(), ParseError> {
+    RecursiveReferenceChecker::new(cte_name).validate_non_recursive_term(body)
+}
+
 fn validate_recursive_cte_recursive_term_decorations(
     stmt: &SelectStatement,
 ) -> Result<(), ParseError> {
@@ -1563,6 +1579,14 @@ fn select_statement_references_table(stmt: &SelectStatement, table_name: &str) -
     stmt.from
         .as_ref()
         .is_some_and(|from| from_item_references_table(from, table_name))
+        || stmt
+            .set_operation
+            .as_ref()
+            .is_some_and(|setop| {
+                setop.inputs
+                    .iter()
+                    .any(|input| select_statement_references_table(input, table_name))
+            })
         || stmt
             .targets
             .iter()

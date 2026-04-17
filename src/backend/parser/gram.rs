@@ -2848,6 +2848,9 @@ fn build_cte_body(pair: Pair<'_, Rule>) -> Result<CteBody, ParseError> {
                     Rule::select_stmt | Rule::simple_select_stmt | Rule::simple_select_core => {
                         recursive = Some(build_select(part)?)
                     }
+                    Rule::parenthesized_set_operation_term => {
+                        recursive = Some(build_set_operation_term(part)?)
+                    }
                     _ => {}
                 }
             }
