@@ -227,24 +227,6 @@ fn parse_point_text(text: &str) -> Result<GeoPoint, ExecError> {
 }
 
 fn parse_lseg_text(text: &str) -> Result<GeoLseg, ExecError> {
-    let trimmed = text.trim();
-    if trimmed.starts_with('(') && trimmed.ends_with(')') && trimmed.matches('(').count() == 1 {
-        let mut parser = GeometryParser::new(text, "lseg");
-        parser.expect('(')?;
-        let x1 = parser.parse_number()?;
-        parser.expect(',')?;
-        let y1 = parser.parse_number()?;
-        parser.expect(',')?;
-        let x2 = parser.parse_number()?;
-        parser.expect(',')?;
-        let y2 = parser.parse_number()?;
-        parser.expect(')')?;
-        parser.finish()?;
-        return Ok(GeoLseg {
-            p: [GeoPoint { x: x1, y: y1 }, GeoPoint { x: x2, y: y2 }],
-        });
-    }
-
     let mut parser = GeometryParser::new(text, "lseg");
     let mut wrapped = false;
     parser.skip_ws();
@@ -2866,20 +2848,6 @@ fn checked_sum(left: f64, right: f64) -> Result<f64, ExecError> {
         return Err(ExecError::FloatOverflow);
     }
     Ok(result)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::parse_lseg_text;
-
-    #[test]
-    fn parse_lseg_accepts_legacy_wrapped_four_number_form() {
-        let lseg = parse_lseg_text("(4.1,4.1,3.1,3.1)").expect("legacy lseg input");
-        assert_eq!(lseg.p[0].x, 4.1);
-        assert_eq!(lseg.p[0].y, 4.1);
-        assert_eq!(lseg.p[1].x, 3.1);
-        assert_eq!(lseg.p[1].y, 3.1);
-    }
 }
 
 fn invalid_geometry_input(ty: &'static str, value: &str) -> ExecError {
