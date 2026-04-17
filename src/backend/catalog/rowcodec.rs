@@ -669,6 +669,8 @@ pub(crate) fn pg_index_row_from_values(values: Vec<Value>) -> Result<PgIndexRow,
 pub(crate) fn pg_type_row_from_values(values: Vec<Value>) -> Result<PgTypeRow, CatalogError> {
     let oid = expect_oid(&values[0])?;
     let typrelid = expect_oid(&values[7])?;
+    let typelem = expect_oid(&values[8])?;
+    let typarray = expect_oid(&values[9])?;
     Ok(PgTypeRow {
         oid,
         typname: expect_text(&values[1])?,
@@ -680,9 +682,13 @@ pub(crate) fn pg_type_row_from_values(values: Vec<Value>) -> Result<PgTypeRow, C
         typstorage: AttributeStorage::from_char(expect_char(&values[6], "typstorage")?)
             .ok_or(CatalogError::Corrupt("invalid typstorage"))?,
         typrelid,
+        typelem,
+        typarray,
         sql_type: decode_builtin_sql_type(oid).unwrap_or_else(|| {
             if typrelid != 0 {
                 SqlType::named_composite(oid, typrelid)
+            } else if typelem != 0 {
+                SqlType::array_of(SqlType::record(typelem))
             } else {
                 SqlType::new(SqlTypeKind::Text)
             }
@@ -1117,6 +1123,8 @@ fn pg_type_row_values(row: PgTypeRow) -> Vec<Value> {
         Value::InternalChar(row.typalign.as_char() as u8),
         Value::InternalChar(row.typstorage.as_char() as u8),
         Value::Int32(row.typrelid as i32),
+        Value::Int32(row.typelem as i32),
+        Value::Int32(row.typarray as i32),
     ]
 }
 

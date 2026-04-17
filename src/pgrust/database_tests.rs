@@ -9493,6 +9493,13 @@ fn create_type_nested_dependencies_and_named_composite_arrays_work() {
         .into_iter()
         .find(|row| row.typname == "complex")
         .unwrap();
+    let complex_array_type = catcache
+        .type_rows()
+        .into_iter()
+        .find(|row| row.typname == "_complex")
+        .unwrap();
+    assert_eq!(complex_type.typarray, complex_array_type.oid);
+    assert_eq!(complex_array_type.typelem, complex_type.oid);
     let holder_relation = db
         .lazy_catalog_lookup(1, None, None)
         .lookup_any_relation("holder")

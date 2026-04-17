@@ -48,6 +48,7 @@ pub struct RelCacheEntry {
     pub namespace_oid: u32,
     pub owner_oid: u32,
     pub row_type_oid: u32,
+    pub array_type_oid: u32,
     pub reltoastrelid: u32,
     pub relpersistence: char,
     pub relkind: char,
@@ -142,6 +143,10 @@ impl RelCache {
                 namespace_oid: class.relnamespace,
                 owner_oid: class.relowner,
                 row_type_oid: class.reltype,
+                array_type_oid: catcache
+                    .type_by_oid(class.reltype)
+                    .map(|row| row.typarray)
+                    .unwrap_or(0),
                 reltoastrelid: class.reltoastrelid,
                 relpersistence: class.relpersistence,
                 relkind: class.relkind,
@@ -328,6 +333,7 @@ fn from_catalog_entry(entry: &CatalogEntry) -> RelCacheEntry {
         namespace_oid: entry.namespace_oid,
         owner_oid: entry.owner_oid,
         row_type_oid: entry.row_type_oid,
+        array_type_oid: entry.array_type_oid,
         reltoastrelid: entry.reltoastrelid,
         relpersistence: entry.relpersistence,
         relkind: entry.relkind,

@@ -150,6 +150,7 @@ fn main() -> Result<(), ExecError> {
             namespace_oid: 11,
             owner_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
             row_type_oid: 16_385,
+            array_type_oid: 16_386,
             reltoastrelid: 0,
             relpersistence: 'p',
             relkind: 'r',

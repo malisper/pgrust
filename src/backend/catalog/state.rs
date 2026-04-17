@@ -61,6 +61,7 @@ pub struct CatalogEntry {
     pub namespace_oid: u32,
     pub owner_oid: u32,
     pub row_type_oid: u32,
+    pub array_type_oid: u32,
     pub reltoastrelid: u32,
     pub relpersistence: char,
     pub relkind: char,
@@ -153,6 +154,7 @@ impl Catalog {
             .next_oid
             .max(entry.relation_oid.saturating_add(1))
             .max(entry.row_type_oid.saturating_add(1))
+            .max(entry.array_type_oid.saturating_add(1))
             .max(next_attrdef_oid)
             .max(next_constraint_oid);
         self.replace_constraint_rows_for_entry(&name, &entry);
@@ -333,7 +335,12 @@ impl Catalog {
 
         let relation_oid = self.next_oid;
         let row_type_oid = relation_oid.saturating_add(1);
-        let mut next_oid = row_type_oid.saturating_add(1);
+        let array_type_oid = if row_type_oid != 0 {
+            row_type_oid.saturating_add(1)
+        } else {
+            0
+        };
+        let mut next_oid = array_type_oid.saturating_add(1);
         if relkind == 'r' {
             allocate_relation_object_oids(&mut desc, &mut next_oid);
         }
@@ -353,6 +360,7 @@ impl Catalog {
             namespace_oid,
             owner_oid,
             row_type_oid,
+            array_type_oid,
             reltoastrelid: 0,
             relpersistence,
             relkind,
@@ -491,6 +499,7 @@ impl Catalog {
             namespace_oid: table.namespace_oid,
             owner_oid: table.owner_oid,
             row_type_oid: 0,
+            array_type_oid: 0,
             reltoastrelid: 0,
             relpersistence: table.relpersistence,
             relkind: 'i',
@@ -1640,6 +1649,9 @@ fn entry_owned_object_oids(entry: &CatalogEntry) -> BTreeSet<u32> {
     let mut oids = BTreeSet::from([entry.relation_oid]);
     if entry.row_type_oid != 0 {
         oids.insert(entry.row_type_oid);
+    }
+    if entry.array_type_oid != 0 {
+        oids.insert(entry.array_type_oid);
     }
     for column in &entry.desc.columns {
         if let Some(oid) = column.attrdef_oid {

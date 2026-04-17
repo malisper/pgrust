@@ -343,6 +343,8 @@ impl Database {
                 typalign: AttributeAlign::Int,
                 typstorage: AttributeStorage::Extended,
                 typrelid: 0,
+                typelem: 0,
+                typarray: 0,
                 sql_type: domain.sql_type,
             })
             .collect::<Vec<_>>();

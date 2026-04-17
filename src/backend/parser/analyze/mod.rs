@@ -218,8 +218,11 @@ pub trait CatalogLookup {
     }
 
     fn type_oid_for_sql_type(&self, sql_type: SqlType) -> Option<u32> {
-        if sql_type.type_oid != 0 {
+        if !sql_type.is_array && sql_type.type_oid != 0 {
             return Some(sql_type.type_oid);
+        }
+        if let Some(row) = self.type_rows().into_iter().find(|row| row.sql_type == sql_type) {
+            return Some(row.oid);
         }
         let mut fallback = None;
         for row in self.type_rows() {
@@ -591,18 +594,26 @@ fn bound_relation_from_relcache_entry(
 fn composite_type_rows_from_relcache(relcache: &RelCache) -> Vec<PgTypeRow> {
     relcache
         .entries()
-        .filter_map(|(name, entry)| {
-            (entry.row_type_oid != 0).then(|| PgTypeRow {
-                oid: entry.row_type_oid,
-                typname: name.rsplit('.').next().unwrap_or(name).to_string(),
-                typnamespace: entry.namespace_oid,
-                typowner: BOOTSTRAP_SUPERUSER_OID,
-                typlen: -1,
-                typalign: crate::include::access::htup::AttributeAlign::Double,
-                typstorage: crate::include::access::htup::AttributeStorage::Extended,
-                typrelid: entry.relation_oid,
-                sql_type: SqlType::named_composite(entry.row_type_oid, entry.relation_oid),
-            })
+        .flat_map(|(name, entry)| {
+            let relname = name.rsplit('.').next().unwrap_or(name);
+            let mut rows = Vec::new();
+            if entry.row_type_oid != 0 {
+                rows.push(crate::include::catalog::composite_type_row(
+                    relname,
+                    entry.row_type_oid,
+                    entry.relation_oid,
+                    entry.array_type_oid,
+                ));
+            }
+            if entry.array_type_oid != 0 {
+                rows.push(crate::include::catalog::composite_array_type_row(
+                    relname,
+                    entry.array_type_oid,
+                    entry.row_type_oid,
+                    entry.relation_oid,
+                ));
+            }
+            rows
         })
         .collect()
 }
