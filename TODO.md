@@ -8,12 +8,11 @@ Counts from `/tmp/pgrust_regress_todo_20260417` on 2026-04-17; `test_setup.sql` 
 - aggregates.sql: 215/583
 - alter_generic.sql: 54/333
 - alter_operator.sql: 3/65
-- alter_table.sql: 431/1683
+- alter_table.sql: 433/1683
   - expression indexes and `ALTER INDEX` operations used by `alter_table.sql`
   - partitioned tables, including `PARTITION OF`, `ATTACH PARTITION`, and `DETACH PARTITION`
   - `SET ROLE` / `RESET ROLE`
   - `ALTER VIEW` forms exercised by `alter_table.sql`
-  - `ALTER TABLE ... RENAME CONSTRAINT`
   - `ALTER TABLE` `NO INHERIT` / `INHERIT`
   - multi-action `ALTER TABLE` statements
   - `ALTER TABLE ... ALTER CONSTRAINT` deferrability changes
@@ -284,7 +283,6 @@ Counts from `/tmp/pgrust_regress_todo_20260417` on 2026-04-17; `test_setup.sql` 
 - partitioned tables, including `PARTITION OF`, `ATTACH PARTITION`, and `DETACH PARTITION`
 - `SET ROLE` / `RESET ROLE`
 - `ALTER VIEW` forms exercised by `alter_table.sql`
-- `ALTER TABLE ... RENAME CONSTRAINT`
 - `ALTER TABLE` `NO INHERIT` / `INHERIT`
 - multi-action `ALTER TABLE` statements
 - `ALTER TABLE ... ALTER CONSTRAINT` deferrability changes
@@ -325,4 +323,5 @@ Counts from `/tmp/pgrust_regress_todo_20260417` on 2026-04-17; `test_setup.sql` 
 
 ## DONE
 
+- `ALTER TABLE ... RENAME CONSTRAINT`
 - int2.sql

@@ -195,6 +195,12 @@ impl Database {
                     alter_stmt,
                     configured_search_path,
                 ),
+            Statement::AlterTableRenameConstraint(ref alter_stmt) => self
+                .execute_alter_table_rename_constraint_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
             Statement::AlterTableSetNotNull(ref alter_stmt) => self
                 .execute_alter_table_set_not_null_stmt_with_search_path(
                     client_id,
