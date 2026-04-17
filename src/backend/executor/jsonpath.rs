@@ -105,6 +105,13 @@ enum CompareOp {
     GtEq,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PredicateValue {
+    True,
+    False,
+    Unknown,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct EvaluationContext<'a> {
     pub(crate) root: &'a JsonbValue,
@@ -157,14 +164,8 @@ fn eval_expr(expr: &Expr, ctx: &RuntimeContext<'_>) -> Result<Vec<JsonbValue>, E
             }
             Ok(values)
         }
-        Expr::Compare { op, left, right } => {
-            let left_values = eval_expr(left, ctx)?;
-            let right_values = eval_expr(right, ctx)?;
-            Ok(vec![JsonbValue::Bool(compare_any_pair(
-                &left_values,
-                &right_values,
-                *op,
-            ))])
+        Expr::Compare { .. } | Expr::And(..) | Expr::Or(..) | Expr::Not(..) | Expr::IsUnknown(..) => {
+            Ok(vec![predicate_value_to_jsonb(eval_predicate(expr, ctx)?)])
         }
         Expr::Arithmetic { op, left, right } => {
             let left_values = eval_expr(left, ctx)?;
@@ -178,21 +179,70 @@ fn eval_expr(expr: &Expr, ctx: &RuntimeContext<'_>) -> Result<Vec<JsonbValue>, E
                 .map(|value| eval_unary_value(value, *op))
                 .collect()
         }
-        Expr::And(left, right) => Ok(vec![JsonbValue::Bool(
-            predicate_bool(left, ctx)? && predicate_bool(right, ctx)?,
-        )]),
-        Expr::Or(left, right) => Ok(vec![JsonbValue::Bool(
-            predicate_bool(left, ctx)? || predicate_bool(right, ctx)?,
-        )]),
-        Expr::Not(inner) => Ok(vec![JsonbValue::Bool(!predicate_bool(inner, ctx)?)]),
-        Expr::IsUnknown(inner) => Ok(vec![JsonbValue::Bool(eval_expr(inner, ctx).is_err())]),
     }
 }
 
-fn predicate_bool(expr: &Expr, ctx: &RuntimeContext<'_>) -> Result<bool, ExecError> {
-    let values = eval_expr(expr, ctx)?;
+fn eval_predicate(expr: &Expr, ctx: &RuntimeContext<'_>) -> Result<PredicateValue, ExecError> {
+    match expr {
+        Expr::Compare { op, left, right } => {
+            let left_values = match eval_expr(left, ctx) {
+                Ok(values) => values,
+                Err(_) => return Ok(PredicateValue::Unknown),
+            };
+            let right_values = match eval_expr(right, ctx) {
+                Ok(values) => values,
+                Err(_) => return Ok(PredicateValue::Unknown),
+            };
+            Ok(compare_any_pair(&left_values, &right_values, *op, ctx.mode))
+        }
+        Expr::And(left, right) => {
+            let left_value = eval_predicate(left, ctx)?;
+            if left_value == PredicateValue::False {
+                return Ok(PredicateValue::False);
+            }
+            let right_value = eval_predicate(right, ctx)?;
+            Ok(if right_value == PredicateValue::True {
+                left_value
+            } else {
+                right_value
+            })
+        }
+        Expr::Or(left, right) => {
+            let left_value = eval_predicate(left, ctx)?;
+            if left_value == PredicateValue::True {
+                return Ok(PredicateValue::True);
+            }
+            let right_value = eval_predicate(right, ctx)?;
+            Ok(if right_value == PredicateValue::False {
+                left_value
+            } else {
+                right_value
+            })
+        }
+        Expr::Not(inner) => Ok(match eval_predicate(inner, ctx)? {
+            PredicateValue::True => PredicateValue::False,
+            PredicateValue::False => PredicateValue::True,
+            PredicateValue::Unknown => PredicateValue::Unknown,
+        }),
+        Expr::IsUnknown(inner) => Ok(if eval_predicate(inner, ctx)? == PredicateValue::Unknown {
+            PredicateValue::True
+        } else {
+            PredicateValue::False
+        }),
+        _ => predicate_value_from_items(expr, ctx),
+    }
+}
+
+fn predicate_value_from_items(
+    expr: &Expr,
+    ctx: &RuntimeContext<'_>,
+) -> Result<PredicateValue, ExecError> {
+    let values = match eval_expr(expr, ctx) {
+        Ok(values) => values,
+        Err(_) => return Ok(PredicateValue::Unknown),
+    };
     if values.is_empty() {
-        return Ok(false);
+        return Ok(PredicateValue::False);
     }
     if values.len() != 1 {
         return Err(exec_jsonpath_error(
@@ -200,11 +250,20 @@ fn predicate_bool(expr: &Expr, ctx: &RuntimeContext<'_>) -> Result<bool, ExecErr
         ));
     }
     match &values[0] {
-        JsonbValue::Bool(value) => Ok(*value),
-        JsonbValue::Null => Ok(false),
+        JsonbValue::Bool(true) => Ok(PredicateValue::True),
+        JsonbValue::Bool(false) => Ok(PredicateValue::False),
+        JsonbValue::Null => Ok(PredicateValue::Unknown),
         _ => Err(exec_jsonpath_error(
             "predicate expression must return boolean",
         )),
+    }
+}
+
+fn predicate_value_to_jsonb(value: PredicateValue) -> JsonbValue {
+    match value {
+        PredicateValue::True => JsonbValue::Bool(true),
+        PredicateValue::False => JsonbValue::Bool(false),
+        PredicateValue::Unknown => JsonbValue::Null,
     }
 }
 
@@ -339,7 +398,7 @@ fn apply_step_single(
                         current: item,
                         mode: ctx.mode,
                     };
-                    if predicate_bool(expr, &nested)? {
+                    if eval_predicate(expr, &nested)? == PredicateValue::True {
                         out.push(item.clone());
                     }
                 }
@@ -350,7 +409,7 @@ fn apply_step_single(
                     current: value,
                     mode: ctx.mode,
                 };
-                if predicate_bool(expr, &nested)? {
+                if eval_predicate(expr, &nested)? == PredicateValue::True {
                     out.push(value.clone());
                 }
             }
@@ -369,27 +428,71 @@ fn array_index(items: &[JsonbValue], index: i32) -> Option<&JsonbValue> {
     }
 }
 
-fn compare_any_pair(left: &[JsonbValue], right: &[JsonbValue], op: CompareOp) -> bool {
+fn compare_any_pair(
+    left: &[JsonbValue],
+    right: &[JsonbValue],
+    op: CompareOp,
+    mode: PathMode,
+) -> PredicateValue {
+    let mut found = false;
+    let mut unknown = false;
     for left_value in left {
         for right_value in right {
-            if compare_values(left_value, right_value, op) {
-                return true;
+            match compare_values(left_value, right_value, op) {
+                PredicateValue::True => {
+                    if matches!(mode, PathMode::Lax) {
+                        return PredicateValue::True;
+                    }
+                    found = true;
+                }
+                PredicateValue::Unknown => {
+                    if matches!(mode, PathMode::Strict) {
+                        return PredicateValue::Unknown;
+                    }
+                    unknown = true;
+                }
+                PredicateValue::False => {}
             }
         }
     }
-    false
+    if found {
+        PredicateValue::True
+    } else if unknown {
+        PredicateValue::Unknown
+    } else {
+        PredicateValue::False
+    }
 }
 
-fn compare_values(left: &JsonbValue, right: &JsonbValue, op: CompareOp) -> bool {
+fn compare_values(left: &JsonbValue, right: &JsonbValue, op: CompareOp) -> PredicateValue {
+    if !same_jsonb_type(left, right) {
+        return PredicateValue::Unknown;
+    }
     let ordering = compare_jsonb(left, right);
-    match op {
+    if match op {
         CompareOp::Eq => ordering == Ordering::Equal,
         CompareOp::NotEq => ordering != Ordering::Equal,
         CompareOp::Lt => ordering == Ordering::Less,
         CompareOp::LtEq => ordering != Ordering::Greater,
         CompareOp::Gt => ordering == Ordering::Greater,
         CompareOp::GtEq => ordering != Ordering::Less,
+    } {
+        PredicateValue::True
+    } else {
+        PredicateValue::False
     }
+}
+
+fn same_jsonb_type(left: &JsonbValue, right: &JsonbValue) -> bool {
+    matches!(
+        (left, right),
+        (JsonbValue::Null, JsonbValue::Null)
+            | (JsonbValue::String(_), JsonbValue::String(_))
+            | (JsonbValue::Numeric(_), JsonbValue::Numeric(_))
+            | (JsonbValue::Bool(_), JsonbValue::Bool(_))
+            | (JsonbValue::Array(_), JsonbValue::Array(_))
+            | (JsonbValue::Object(_), JsonbValue::Object(_))
+    )
 }
 
 fn eval_arithmetic_any_pair(
