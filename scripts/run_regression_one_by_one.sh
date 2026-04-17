@@ -751,6 +751,21 @@ for sql_file in "${TEST_FILES[@]}"; do
         continue
     fi
 
+    # :HACK: Some earlier regression files currently leave the cluster in a
+    # state where shared setup fixtures are no longer visible to int2.sql.
+    # Rehydrate the baseline cluster state before int2 so the one-by-one
+    # harness reports int2 semantics instead of unrelated prior-suite fallout.
+    if [[ "$USE_PGRUST_SETUP" == true && "$SKIP_SERVER" == false && "$test_name" == "int2" ]]; then
+        cleanup
+        rm -rf "$DATA_DIR"
+        mkdir -p "$DATA_DIR"
+        if ! start_server; then
+            echo "ERROR: Server did not become ready in time"
+            exit 1
+        fi
+        run_pgrust_setup_one_by_one
+    fi
+
     stmt_count="$(run_sql_one_by_one \
         "$sql_file" \
         "$output_file" \
