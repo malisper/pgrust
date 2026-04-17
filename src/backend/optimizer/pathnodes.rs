@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::backend::parser::{SqlType, SqlTypeKind};
+use crate::include::catalog::RECORD_TYPE_OID;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::pathnodes::{Path, PathKey, PathTarget, PlannerInfo};
 use crate::include::nodes::plannodes::{Plan, PlanEstimate};
@@ -678,6 +679,7 @@ pub(super) fn expr_sql_type(expr: &Expr) -> SqlType {
         | Expr::ScalarArrayOp(_) => SqlType::new(SqlTypeKind::Bool),
         Expr::Cast(_, ty) => *ty,
         Expr::ArrayLiteral { array_type, .. } => *array_type,
+        Expr::Row { .. } => SqlType::record(RECORD_TYPE_OID),
         Expr::Coalesce(left, right) => expr_sql_type_maybe(left)
             .or_else(|| expr_sql_type_maybe(right))
             .unwrap_or(SqlType::new(SqlTypeKind::Text)),
@@ -751,6 +753,7 @@ fn value_sql_type_hint(value: &Value) -> SqlType {
         Value::Text(_) | Value::TextRef(_, _) => SqlType::new(SqlTypeKind::Text),
         Value::InternalChar(_) => SqlType::new(SqlTypeKind::InternalChar),
         Value::Bool(_) => SqlType::new(SqlTypeKind::Bool),
+        Value::Record(_) => SqlType::record(RECORD_TYPE_OID),
         Value::Array(_) | Value::PgArray(_) | Value::Null => SqlType::new(SqlTypeKind::Text),
     }
 }

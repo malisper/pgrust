@@ -32,22 +32,28 @@ pub(super) fn infer_sql_expr_type_with_ctes(
     }
 
     match expr {
-        SqlExpr::Column(name) => resolve_system_column_with_outer(scope, outer_scopes, name)
-            .ok()
-            .flatten()
-            .map(|resolved| resolved.sql_type)
-            .or_else(
-                || match resolve_column_with_outer(scope, outer_scopes, name, grouped_outer) {
-                    Ok(ResolvedColumn::Local(idx)) => {
-                        scope.desc.columns.get(idx).map(|c| c.sql_type)
-                    }
-                    Ok(ResolvedColumn::Outer { depth, index }) => outer_scopes
-                        .get(depth)
-                        .and_then(|s| s.desc.columns.get(index).map(|c| c.sql_type)),
-                    Err(_) => None,
-                },
-            )
-            .unwrap_or(SqlType::new(SqlTypeKind::Text)),
+        SqlExpr::Column(name) => {
+            if name.ends_with(".*") {
+                SqlType::record(RECORD_TYPE_OID)
+            } else {
+                resolve_system_column_with_outer(scope, outer_scopes, name)
+                    .ok()
+                    .flatten()
+                    .map(|resolved| resolved.sql_type)
+                    .or_else(
+                        || match resolve_column_with_outer(scope, outer_scopes, name, grouped_outer) {
+                            Ok(ResolvedColumn::Local(idx)) => {
+                                scope.desc.columns.get(idx).map(|c| c.sql_type)
+                            }
+                            Ok(ResolvedColumn::Outer { depth, index }) => outer_scopes
+                                .get(depth)
+                                .and_then(|s| s.desc.columns.get(index).map(|c| c.sql_type)),
+                            Err(_) => None,
+                        },
+                    )
+                    .unwrap_or(SqlType::new(SqlTypeKind::Text))
+            }
+        }
         SqlExpr::Default => SqlType::new(SqlTypeKind::Text),
         SqlExpr::Const(Value::Int16(_)) => SqlType::new(SqlTypeKind::Int2),
         SqlExpr::Const(Value::Int32(_)) => SqlType::new(SqlTypeKind::Int4),
@@ -76,6 +82,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
         SqlExpr::Const(Value::TsVector(_)) => SqlType::new(SqlTypeKind::TsVector),
         SqlExpr::Const(Value::TsQuery(_)) => SqlType::new(SqlTypeKind::TsQuery),
         SqlExpr::Const(Value::InternalChar(_)) => SqlType::new(SqlTypeKind::InternalChar),
+        SqlExpr::Const(Value::Record(_)) => SqlType::record(RECORD_TYPE_OID),
         SqlExpr::Const(Value::Text(_))
         | SqlExpr::Const(Value::TextRef(_, _))
         | SqlExpr::Const(Value::Null) => SqlType::new(SqlTypeKind::Text),

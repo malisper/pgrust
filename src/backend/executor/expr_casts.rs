@@ -1685,6 +1685,7 @@ pub(crate) fn cast_value_with_config(
         | Value::Circle(_) => unreachable!("geometry casts handled before scalar match"),
         Value::Array(items) => Ok(Value::Array(items)),
         Value::PgArray(array) => Ok(Value::PgArray(array)),
+        Value::Record(record) => Ok(Value::Record(record)),
     }
 }
 

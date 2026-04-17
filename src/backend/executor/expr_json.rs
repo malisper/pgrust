@@ -122,6 +122,19 @@ pub(crate) fn eval_json_builtin_function(
                     &value, pretty,
                 ))))
             }
+            BuiltinScalarFunction::RowToJson => {
+                let value = values.first().cloned().unwrap_or(Value::Null);
+                let pretty = values
+                    .get(1)
+                    .and_then(|value| match value {
+                        Value::Bool(v) => Some(*v),
+                        _ => None,
+                    })
+                    .unwrap_or(false);
+                Ok(Value::Json(CompactString::from_owned(value_to_json_text(
+                    &value, pretty,
+                ))))
+            }
             BuiltinScalarFunction::JsonBuildArray => {
                 let Some(args) = variadic_args(values, func_variadic, 0, "json_build_array")?
                 else {
@@ -434,6 +447,7 @@ pub(crate) fn eval_json_builtin_function(
         BuiltinScalarFunction::ToJson
         | BuiltinScalarFunction::ToJsonb
         | BuiltinScalarFunction::ArrayToJson
+        | BuiltinScalarFunction::RowToJson
         | BuiltinScalarFunction::JsonBuildArray
         | BuiltinScalarFunction::JsonBuildObject
         | BuiltinScalarFunction::JsonObject
@@ -721,6 +735,11 @@ fn json_object_key_text(value: &Value, op: &'static str) -> Result<String, ExecE
         Value::TsVector(v) => Ok(crate::backend::executor::render_tsvector_text(v)),
         Value::TsQuery(v) => Ok(crate::backend::executor::render_tsquery_text(v)),
         Value::Array(_) | Value::PgArray(_) => Err(ExecError::TypeMismatch {
+            op,
+            left: value.clone(),
+            right: Value::Null,
+        }),
+        Value::Record(_) => Err(ExecError::TypeMismatch {
             op,
             left: value.clone(),
             right: Value::Null,
@@ -1827,6 +1846,13 @@ fn value_to_json_serde(value: &Value) -> SerdeJsonValue {
         Value::Array(items) => {
             SerdeJsonValue::Array(items.iter().map(value_to_json_serde).collect())
         }
+        Value::Record(record) => SerdeJsonValue::Object(
+            record
+                .fields
+                .iter()
+                .map(|(name, value)| (name.clone(), value_to_json_serde(value)))
+                .collect(),
+        ),
         Value::PgArray(array) => SerdeJsonValue::Array(
             array
                 .to_nested_values()

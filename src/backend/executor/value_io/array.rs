@@ -1,7 +1,7 @@
 use super::*;
 use crate::backend::storage::page::bufpage::max_align;
 use crate::include::access::htup::AttributeAlign;
-use crate::include::catalog::builtin_type_rows;
+use crate::include::catalog::{RECORD_TYPE_OID, builtin_type_rows};
 
 pub(crate) fn encode_array_bytes(
     element_type: SqlType,
@@ -184,6 +184,11 @@ fn encode_array_element_payload(
             right: Value::Null,
         }),
         Value::Jsonb(bytes) => Ok(bytes),
+        Value::Record(_) => Err(ExecError::TypeMismatch {
+            op: "array element",
+            left: coerced,
+            right: Value::Null,
+        }),
     }
 }
 
@@ -689,6 +694,7 @@ fn infer_sql_type_from_value(value: &Value) -> Option<SqlType> {
         Value::Box(_) => Some(SqlType::new(SqlTypeKind::Box)),
         Value::Polygon(_) => Some(SqlType::new(SqlTypeKind::Polygon)),
         Value::Circle(_) => Some(SqlType::new(SqlTypeKind::Circle)),
+        Value::Record(_) => Some(SqlType::record(RECORD_TYPE_OID)),
     }
 }
 
@@ -1136,6 +1142,24 @@ fn format_array_values_nested(array: &ArrayValue, depth: usize, offset: &mut usi
             }
             Value::Array(nested) => out.push_str(&format_array_text(nested)),
             Value::PgArray(nested) => out.push_str(&format_array_value_text(nested)),
+            Value::Record(record) => {
+                let rendered = serde_json::Value::Object(
+                    record
+                        .fields
+                        .iter()
+                        .map(|(name, value)| {
+                            (
+                                name.clone(),
+                                crate::backend::executor::jsonb::jsonb_from_value(value)
+                                    .map(|value| value.to_serde())
+                                    .unwrap_or(serde_json::Value::Null),
+                            )
+                        })
+                        .collect(),
+                )
+                .to_string();
+                push_array_text_element(&mut out, &rendered);
+            }
         }
     }
     out.push('}');
