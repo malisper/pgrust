@@ -365,7 +365,8 @@ fn catalog_sql_type_oid(catalog: &Catalog, sql_type: SqlType) -> u32 {
     if sql_type.is_array
         && matches!(
             sql_type.kind,
-            crate::backend::parser::SqlTypeKind::Composite | crate::backend::parser::SqlTypeKind::Record
+            crate::backend::parser::SqlTypeKind::Composite
+                | crate::backend::parser::SqlTypeKind::Record
         )
         && sql_type.type_oid != 0
         && let Some(entry) = catalog

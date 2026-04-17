@@ -48,6 +48,7 @@ pub(super) fn bind_builtin_system_view(
             QueryColumn {
                 name: "pid".into(),
                 sql_type: SqlType::new(SqlTypeKind::Int4),
+                wire_type_oid: None,
             },
             QueryColumn::text("datname"),
             QueryColumn::text("usename"),
@@ -83,58 +84,72 @@ pub(super) fn bind_builtin_system_view(
         QueryColumn {
             name: "inherited".into(),
             sql_type: SqlType::new(SqlTypeKind::Bool),
+            wire_type_oid: None,
         },
         QueryColumn {
             name: "null_frac".into(),
             sql_type: SqlType::new(SqlTypeKind::Float4),
+            wire_type_oid: None,
         },
         QueryColumn {
             name: "avg_width".into(),
             sql_type: SqlType::new(SqlTypeKind::Int4),
+            wire_type_oid: None,
         },
         QueryColumn {
             name: "n_distinct".into(),
             sql_type: SqlType::new(SqlTypeKind::Float4),
+            wire_type_oid: None,
         },
         QueryColumn {
             name: "most_common_vals".into(),
             sql_type: SqlType::new(SqlTypeKind::AnyArray),
+            wire_type_oid: None,
         },
         QueryColumn {
             name: "most_common_freqs".into(),
             sql_type: SqlType::array_of(SqlType::new(SqlTypeKind::Float4)),
+            wire_type_oid: None,
         },
         QueryColumn {
             name: "histogram_bounds".into(),
             sql_type: SqlType::new(SqlTypeKind::AnyArray),
+            wire_type_oid: None,
         },
         QueryColumn {
             name: "correlation".into(),
             sql_type: SqlType::new(SqlTypeKind::Float4),
+            wire_type_oid: None,
         },
         QueryColumn {
             name: "most_common_elems".into(),
             sql_type: SqlType::new(SqlTypeKind::AnyArray),
+            wire_type_oid: None,
         },
         QueryColumn {
             name: "most_common_elem_freqs".into(),
             sql_type: SqlType::array_of(SqlType::new(SqlTypeKind::Float4)),
+            wire_type_oid: None,
         },
         QueryColumn {
             name: "elem_count_histogram".into(),
             sql_type: SqlType::array_of(SqlType::new(SqlTypeKind::Float4)),
+            wire_type_oid: None,
         },
         QueryColumn {
             name: "range_length_histogram".into(),
             sql_type: SqlType::new(SqlTypeKind::AnyArray),
+            wire_type_oid: None,
         },
         QueryColumn {
             name: "range_empty_frac".into(),
             sql_type: SqlType::new(SqlTypeKind::Float4),
+            wire_type_oid: None,
         },
         QueryColumn {
             name: "range_bounds_histogram".into(),
             sql_type: SqlType::new(SqlTypeKind::AnyArray),
+            wire_type_oid: None,
         },
     ];
     let desc = RelationDesc {

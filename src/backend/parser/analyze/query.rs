@@ -85,6 +85,7 @@ impl AnalyzedFrom {
             .map(|column| QueryColumn {
                 name: column.name.clone(),
                 sql_type: column.sql_type,
+                wire_type_oid: None,
             })
             .collect::<Vec<_>>();
         Self {

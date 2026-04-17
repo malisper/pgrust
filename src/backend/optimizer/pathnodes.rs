@@ -82,6 +82,7 @@ impl Path {
                 .map(|c| QueryColumn {
                     name: c.name.clone(),
                     sql_type: c.sql_type,
+                    wire_type_oid: None,
                 })
                 .collect(),
             Self::SeqScan { desc, .. } | Self::IndexScan { desc, .. } => desc
@@ -90,6 +91,7 @@ impl Path {
                 .map(|c| QueryColumn {
                     name: c.name.clone(),
                     sql_type: c.sql_type,
+                    wire_type_oid: None,
                 })
                 .collect(),
             Self::Filter { input, .. }
@@ -100,6 +102,7 @@ impl Path {
                 .map(|t| QueryColumn {
                     name: t.name.clone(),
                     sql_type: t.sql_type,
+                    wire_type_oid: None,
                 })
                 .collect(),
             Self::Aggregate { output_columns, .. } => output_columns.clone(),
@@ -122,10 +125,12 @@ impl Path {
                     ProjectSetTarget::Scalar(entry) => QueryColumn {
                         name: entry.name.clone(),
                         sql_type: entry.sql_type,
+                        wire_type_oid: None,
                     },
                     ProjectSetTarget::Set { name, sql_type, .. } => QueryColumn {
                         name: name.clone(),
                         sql_type: *sql_type,
+                        wire_type_oid: None,
                     },
                 })
                 .collect(),
@@ -668,6 +673,7 @@ pub(super) fn window_output_columns(input: &Path, clause: &WindowClause) -> Vec<
     output_columns.extend(clause.functions.iter().map(|func| QueryColumn {
         name: format!("win{}", func.winno + 1),
         sql_type: func.result_type,
+        wire_type_oid: None,
     }));
     output_columns
 }
@@ -913,5 +919,7 @@ fn expr_sql_type_maybe(expr: &Expr) -> Option<SqlType> {
 }
 
 fn value_sql_type_hint(value: &Value) -> SqlType {
-    value.sql_type_hint().unwrap_or(SqlType::new(SqlTypeKind::Text))
+    value
+        .sql_type_hint()
+        .unwrap_or(SqlType::new(SqlTypeKind::Text))
 }

@@ -221,7 +221,11 @@ pub trait CatalogLookup {
         if !sql_type.is_array && sql_type.type_oid != 0 {
             return Some(sql_type.type_oid);
         }
-        if let Some(row) = self.type_rows().into_iter().find(|row| row.sql_type == sql_type) {
+        if let Some(row) = self
+            .type_rows()
+            .into_iter()
+            .find(|row| row.sql_type == sql_type)
+        {
             return Some(row.oid);
         }
         let mut fallback = None;
@@ -992,6 +996,7 @@ fn bind_ctes(
                     .map(|column| QueryColumn {
                         name: column.name.clone(),
                         sql_type: column.sql_type,
+                        wire_type_oid: None,
                     })
                     .collect::<Vec<_>>();
                 let worktable_plan = AnalyzedFrom::worktable(worktable_id, output_columns.clone());
@@ -1541,6 +1546,7 @@ fn bind_select_query_with_outer(
                     grouped_outer.as_ref(),
                     &visible_ctes,
                 ),
+                wire_type_oid: None,
             });
         }
         for (func, args, _, _, _) in &aggs {
@@ -1559,6 +1565,7 @@ fn bind_select_query_with_outer(
                         )
                     }),
                 ),
+                wire_type_oid: None,
             });
         }
 
@@ -1910,7 +1917,11 @@ fn bind_set_operation_query_with_outer(
     let output_columns = output_names
         .into_iter()
         .zip(output_types.iter().copied())
-        .map(|(name, sql_type)| QueryColumn { name, sql_type })
+        .map(|(name, sql_type)| QueryColumn {
+            name,
+            sql_type,
+            wire_type_oid: None,
+        })
         .collect::<Vec<_>>();
     let output_exprs = output_columns
         .iter()

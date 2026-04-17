@@ -11,20 +11,27 @@ use crate::backend::libpq::pqcomm::{
     cstr_from_bytes, read_byte, read_cstr, read_i16_bytes, read_i32, read_i32_bytes,
 };
 use crate::backend::libpq::pqformat::{
-    FloatFormatOptions, format_exec_error, format_exec_error_hint, infer_command_tag, send_auth_ok,
-    send_backend_key_data, send_bind_complete, send_close_complete, send_command_complete,
-    send_copy_in_response, send_empty_query, send_error, send_error_with_fields,
-    send_error_with_hint, send_no_data, send_notice, send_notice_with_severity,
-    send_parameter_description, send_parameter_status, send_parse_complete, send_query_result,
-    send_ready_for_query, send_row_description, send_row_description_with_formats,
-    send_typed_data_row, validate_binary_result_formats,
+    FloatFormatOptions, format_bytea_text, format_exec_error, format_exec_error_hint,
+    infer_command_tag, send_auth_ok, send_backend_key_data, send_bind_complete,
+    send_close_complete, send_command_complete, send_copy_in_response, send_empty_query,
+    send_error, send_error_with_fields, send_error_with_hint, send_no_data, send_notice,
+    send_notice_with_severity, send_parameter_description, send_parameter_status,
+    send_parse_complete, send_query_result, send_ready_for_query, send_row_description,
+    send_row_description_with_formats, send_typed_data_row, validate_binary_result_formats,
 };
 use crate::backend::parser::CatalogLookup;
 use crate::backend::parser::UngroupedColumnClause;
 use crate::backend::parser::comments::sql_is_effectively_empty_after_comments;
 use crate::backend::parser::{SqlType, SqlTypeKind, parse_expr};
+use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
+use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::include::access::htup::TupleError;
-use crate::include::nodes::datum::Value;
+use crate::include::catalog::RECORD_TYPE_OID;
+use crate::include::nodes::datetime::{DateADT, TimeADT, TimeTzADT, TimestampADT, TimestampTzADT};
+use crate::include::nodes::datum::{
+    ArrayDimension, ArrayValue, RecordDescriptor, RecordValue, Value,
+};
+use crate::pgrust::compact_string::CompactString;
 use crate::pl::plpgsql::{PlpgsqlNotice, RaiseLevel, clear_notices, take_notices};
 
 fn exec_error_sqlstate(e: &ExecError) -> &'static str {
@@ -417,12 +424,20 @@ static NEXT_CLIENT_ID: AtomicU32 = AtomicU32::new(1);
 #[derive(Default)]
 struct PreparedStatement {
     sql: String,
+    param_type_oids: Vec<u32>,
+}
+
+#[derive(Debug, Clone)]
+enum BoundParam {
+    Null,
+    Text(String),
+    SqlExpression(String),
 }
 
 #[derive(Default)]
 struct BoundPortal {
     sql: String,
-    params: Vec<Option<String>>,
+    params: Vec<BoundParam>,
     result_formats: Vec<i16>,
 }
 
@@ -601,7 +616,7 @@ where
                 writer.flush()?;
             }
             b'B' => {
-                handle_bind(&mut writer, &mut state, &body)?;
+                handle_bind(&mut writer, &db, &mut state, &body)?;
                 writer.flush()?;
             }
             b'D' => {
@@ -769,7 +784,9 @@ fn execute_query_statement(
         match state.session.execute_streaming(db, select_stmt) {
             Ok(mut guard) => {
                 use crate::backend::executor::exec_next;
-                let columns = guard.columns.clone();
+                let mut columns = guard.columns.clone();
+                let catalog = state.session.catalog_lookup(db);
+                annotate_query_columns_with_wire_type_oids(&mut columns, &catalog);
                 let mut row_buf = Vec::new();
                 let mut row_count = 0usize;
                 let mut header_sent = false;
@@ -839,7 +856,11 @@ fn execute_query_statement(
 
     clear_notices();
     match state.session.execute(db, &sql) {
-        Ok(StatementResult::Query { columns, rows, .. }) => {
+        Ok(StatementResult::Query {
+            mut columns, rows, ..
+        }) => {
+            let catalog = state.session.catalog_lookup(db);
+            annotate_query_columns_with_wire_type_oids(&mut columns, &catalog);
             send_plpgsql_notices(stream, &take_notices())?;
             send_query_result(
                 stream,
@@ -1166,6 +1187,7 @@ fn psql_describe_lookup_query(
             QueryColumn {
                 name: "oid".into(),
                 sql_type: SqlType::new(SqlTypeKind::Oid),
+                wire_type_oid: None,
             },
             QueryColumn::text("nspname"),
             QueryColumn::text("relname"),
@@ -1191,52 +1213,64 @@ fn psql_describe_tableinfo_query(
             QueryColumn {
                 name: "relchecks".into(),
                 sql_type: SqlType::new(SqlTypeKind::Int4),
+                wire_type_oid: None,
             },
             QueryColumn {
                 name: "relkind".into(),
                 sql_type: SqlType::new(SqlTypeKind::InternalChar),
+                wire_type_oid: None,
             },
             QueryColumn {
                 name: "relhasindex".into(),
                 sql_type: SqlType::new(SqlTypeKind::Bool),
+                wire_type_oid: None,
             },
             QueryColumn {
                 name: "relhasrules".into(),
                 sql_type: SqlType::new(SqlTypeKind::Bool),
+                wire_type_oid: None,
             },
             QueryColumn {
                 name: "relhastriggers".into(),
                 sql_type: SqlType::new(SqlTypeKind::Bool),
+                wire_type_oid: None,
             },
             QueryColumn {
                 name: "relrowsecurity".into(),
                 sql_type: SqlType::new(SqlTypeKind::Bool),
+                wire_type_oid: None,
             },
             QueryColumn {
                 name: "relforcerowsecurity".into(),
                 sql_type: SqlType::new(SqlTypeKind::Bool),
+                wire_type_oid: None,
             },
             QueryColumn {
                 name: "relhasoids".into(),
                 sql_type: SqlType::new(SqlTypeKind::Bool),
+                wire_type_oid: None,
             },
             QueryColumn {
                 name: "relispartition".into(),
                 sql_type: SqlType::new(SqlTypeKind::Bool),
+                wire_type_oid: None,
             },
             QueryColumn::text("?column?"),
             QueryColumn {
                 name: "reltablespace".into(),
                 sql_type: SqlType::new(SqlTypeKind::Oid),
+                wire_type_oid: None,
             },
             QueryColumn::text("reloftype"),
             QueryColumn {
                 name: "relpersistence".into(),
                 sql_type: SqlType::new(SqlTypeKind::InternalChar),
+                wire_type_oid: None,
             },
             QueryColumn {
                 name: "relreplident".into(),
                 sql_type: SqlType::new(SqlTypeKind::InternalChar),
+                wire_type_oid: None,
             },
             QueryColumn::text("amname"),
         ],
@@ -1292,6 +1326,7 @@ fn psql_describe_columns_query(
         columns.push(QueryColumn {
             name: "attnotnull".into(),
             sql_type: SqlType::new(SqlTypeKind::Bool),
+            wire_type_oid: None,
         });
     }
     if include_attcollation {
@@ -1301,12 +1336,14 @@ fn psql_describe_columns_query(
         columns.push(QueryColumn {
             name: "attidentity".into(),
             sql_type: SqlType::new(SqlTypeKind::InternalChar),
+            wire_type_oid: None,
         });
     }
     if include_attgenerated {
         columns.push(QueryColumn {
             name: "attgenerated".into(),
             sql_type: SqlType::new(SqlTypeKind::InternalChar),
+            wire_type_oid: None,
         });
     }
     if include_is_key {
@@ -1322,18 +1359,21 @@ fn psql_describe_columns_query(
         columns.push(QueryColumn {
             name: "attstorage".into(),
             sql_type: SqlType::new(SqlTypeKind::InternalChar),
+            wire_type_oid: None,
         });
     }
     if include_attcompression {
         columns.push(QueryColumn {
             name: "attcompression".into(),
             sql_type: SqlType::new(SqlTypeKind::InternalChar),
+            wire_type_oid: None,
         });
     }
     if include_attstattarget {
         columns.push(QueryColumn {
             name: "attstattarget".into(),
             sql_type: SqlType::new(SqlTypeKind::Int2),
+            wire_type_oid: None,
         });
     }
     if include_attdescr {
@@ -1523,6 +1563,7 @@ fn psql_describe_constraints_query(
             QueryColumn {
                 name: "sametable".into(),
                 sql_type: SqlType::new(SqlTypeKind::Bool),
+                wire_type_oid: None,
             },
             QueryColumn::text("conname"),
             QueryColumn::text("condef"),
@@ -1740,44 +1781,54 @@ fn psql_describe_indexes_query(
             QueryColumn {
                 name: "indisprimary".into(),
                 sql_type: SqlType::new(SqlTypeKind::Bool),
+                wire_type_oid: None,
             },
             QueryColumn {
                 name: "indisunique".into(),
                 sql_type: SqlType::new(SqlTypeKind::Bool),
+                wire_type_oid: None,
             },
             QueryColumn {
                 name: "indisclustered".into(),
                 sql_type: SqlType::new(SqlTypeKind::Bool),
+                wire_type_oid: None,
             },
             QueryColumn {
                 name: "indisvalid".into(),
                 sql_type: SqlType::new(SqlTypeKind::Bool),
+                wire_type_oid: None,
             },
             QueryColumn::text("pg_get_indexdef"),
             QueryColumn::text("pg_get_constraintdef"),
             QueryColumn {
                 name: "contype".into(),
                 sql_type: SqlType::new(SqlTypeKind::InternalChar),
+                wire_type_oid: None,
             },
             QueryColumn {
                 name: "condeferrable".into(),
                 sql_type: SqlType::new(SqlTypeKind::Bool),
+                wire_type_oid: None,
             },
             QueryColumn {
                 name: "condeferred".into(),
                 sql_type: SqlType::new(SqlTypeKind::Bool),
+                wire_type_oid: None,
             },
             QueryColumn {
                 name: "indisreplident".into(),
                 sql_type: SqlType::new(SqlTypeKind::Bool),
+                wire_type_oid: None,
             },
             QueryColumn {
                 name: "reltablespace".into(),
                 sql_type: SqlType::new(SqlTypeKind::Oid),
+                wire_type_oid: None,
             },
             QueryColumn {
                 name: "conperiod".into(),
                 sql_type: SqlType::new(SqlTypeKind::Bool),
+                wire_type_oid: None,
             },
         ],
         rows,
@@ -1999,6 +2050,7 @@ fn psql_relation_obj_description_query(
             QueryColumn {
                 name: "orig_oid".into(),
                 sql_type: SqlType::new(SqlTypeKind::Bool),
+                wire_type_oid: None,
             },
             QueryColumn::text("storage"),
             QueryColumn::text("desc"),
@@ -2364,17 +2416,23 @@ fn handle_parse(
     let statement_name = read_cstr(body, &mut offset)?;
     let sql = read_cstr(body, &mut offset)?;
     let nparams = read_i16_bytes(body, &mut offset)? as usize;
+    let mut param_type_oids = Vec::with_capacity(nparams);
     for _ in 0..nparams {
-        let _ = read_i32_bytes(body, &mut offset)?;
+        param_type_oids.push(read_i32_bytes(body, &mut offset)? as u32);
     }
-    state
-        .prepared
-        .insert(statement_name, PreparedStatement { sql });
+    state.prepared.insert(
+        statement_name,
+        PreparedStatement {
+            sql,
+            param_type_oids,
+        },
+    );
     send_parse_complete(stream)
 }
 
 fn handle_bind(
     stream: &mut impl Write,
+    db: &Database,
     state: &mut ConnectionState,
     body: &[u8],
 ) -> io::Result<()> {
@@ -2382,20 +2440,32 @@ fn handle_bind(
     let portal_name = read_cstr(body, &mut offset)?;
     let statement_name = read_cstr(body, &mut offset)?;
     let n_format_codes = read_i16_bytes(body, &mut offset)? as usize;
+    let mut param_formats = Vec::with_capacity(n_format_codes);
     for _ in 0..n_format_codes {
-        let _ = read_i16_bytes(body, &mut offset)?;
+        param_formats.push(read_i16_bytes(body, &mut offset)?);
+    }
+    if param_formats.iter().any(|code| !matches!(*code, 0 | 1)) {
+        send_error(
+            stream,
+            "0A000",
+            "unsupported parameter format code",
+            None,
+            None,
+            None,
+        )?;
+        return Ok(());
     }
     let nparams = read_i16_bytes(body, &mut offset)? as usize;
-    let mut params = Vec::with_capacity(nparams);
+    let mut raw_params = Vec::with_capacity(nparams);
     for _ in 0..nparams {
         let len = read_i32_bytes(body, &mut offset)?;
         if len < 0 {
-            params.push(None);
+            raw_params.push(None);
         } else {
             let len = len as usize;
             let bytes = &body[offset..offset + len];
             offset += len;
-            params.push(Some(String::from_utf8_lossy(bytes).into_owned()));
+            raw_params.push(Some(bytes.to_vec()));
         }
     }
     let n_result_codes = read_i16_bytes(body, &mut offset)? as usize;
@@ -2426,6 +2496,32 @@ fn handle_bind(
         )?;
         return Ok(());
     };
+    let catalog = state.session.catalog_lookup(db);
+    let mut params = Vec::with_capacity(nparams);
+    for (index, raw) in raw_params.iter().enumerate() {
+        let format_code = parameter_format_code(&param_formats, index);
+        match decode_bound_param(
+            raw.as_deref(),
+            format_code,
+            stmt.param_type_oids.get(index).copied().unwrap_or(0),
+            &catalog,
+            state.session.datetime_config(),
+        ) {
+            Ok(param) => params.push(param),
+            Err(e) => {
+                let message = format_exec_error(&e);
+                let hint = format_exec_error_hint(&e);
+                send_error_with_hint(
+                    stream,
+                    exec_error_sqlstate(&e),
+                    &message,
+                    hint.as_deref(),
+                    None,
+                )?;
+                return Ok(());
+            }
+        }
+    }
     state.portals.insert(
         portal_name,
         BoundPortal {
@@ -2451,17 +2547,21 @@ fn handle_describe(
     offset += 1;
     let name = read_cstr(body, &mut offset)?;
     match target_type {
-        b'S' => {
-            send_parameter_description(stream, &[])?;
-            match state
-                .prepared
-                .get(&name)
-                .and_then(|stmt| describe_sql(db, &state.session, &stmt.sql, &[]))
-            {
-                Some(cols) => send_row_description(stream, &cols),
-                None => send_no_data(stream),
+        b'S' => match state.prepared.get(&name) {
+            Some(stmt) => {
+                let param_type_oids = stmt
+                    .param_type_oids
+                    .iter()
+                    .map(|oid| *oid as i32)
+                    .collect::<Vec<_>>();
+                send_parameter_description(stream, &param_type_oids)?;
+                match describe_sql(db, &state.session, &stmt.sql, &[]) {
+                    Some(cols) => send_row_description(stream, &cols),
+                    None => send_no_data(stream),
+                }
             }
-        }
+            None => send_no_data(stream),
+        },
         b'P' => match state
             .portals
             .get(&name)
@@ -2533,7 +2633,10 @@ fn execute_portal(
         .into_owned();
     clear_notices();
     match session.execute(db, &sql) {
-        Ok(StatementResult::Query { rows, columns, .. }) => {
+        Ok(StatementResult::Query {
+            rows, mut columns, ..
+        }) => {
+            annotate_query_columns_with_wire_type_oids(&mut columns, &catalog);
             send_plpgsql_notices(stream, &take_notices())?;
             if let Err(e) = validate_binary_result_formats(&rows, &columns, &portal.result_formats)
             {
@@ -2738,26 +2841,31 @@ fn describe_sql(
     db: &Database,
     session: &Session,
     sql: &str,
-    params: &[Option<String>],
+    params: &[BoundParam],
 ) -> Option<Vec<QueryColumn>> {
     let catalog = session.catalog_lookup(db);
     let sql = rewrite_regression_sql(&substitute_params(sql, params, &catalog)).into_owned();
     match parse_statement(&sql).ok()? {
         Statement::Select(stmt) => crate::backend::parser::pg_plan_query(&stmt, &catalog)
             .ok()
-            .map(|planned_stmt| planned_stmt.columns()),
+            .map(|planned_stmt| {
+                let mut columns = planned_stmt.columns();
+                annotate_query_columns_with_wire_type_oids(&mut columns, &catalog);
+                columns
+            }),
         Statement::Explain(_) => Some(vec![QueryColumn::text("QUERY PLAN")]),
         _ => None,
     }
 }
 
-fn substitute_params(sql: &str, params: &[Option<String>], catalog: &dyn CatalogLookup) -> String {
+fn substitute_params(sql: &str, params: &[BoundParam], catalog: &dyn CatalogLookup) -> String {
     let mut out = sql.to_string();
     for (i, param) in params.iter().enumerate() {
         let placeholder = format!("${}", i + 1);
         let regclass_value = match param {
-            None => "null".to_string(),
-            Some(v) => resolve_regclass_param(v, catalog),
+            BoundParam::Null => "null".to_string(),
+            BoundParam::Text(v) => resolve_regclass_param(v, catalog),
+            BoundParam::SqlExpression(expr) => expr.clone(),
         };
         out = out.replace(
             &format!("{placeholder}::pg_catalog.regclass"),
@@ -2765,13 +2873,610 @@ fn substitute_params(sql: &str, params: &[Option<String>], catalog: &dyn Catalog
         );
         out = out.replace(&format!("{placeholder}::regclass"), &regclass_value);
         let value = match param {
-            None => "null".to_string(),
-            Some(v) if v.parse::<i64>().is_ok() => v.clone(),
-            Some(v) => format!("'{}'", v.replace('\'', "''")),
+            BoundParam::Null => "null".to_string(),
+            BoundParam::Text(v) if v.parse::<i64>().is_ok() => v.clone(),
+            BoundParam::Text(v) => quote_sql_string(v),
+            BoundParam::SqlExpression(expr) => expr.clone(),
         };
         out = out.replace(&placeholder, &value);
     }
     out
+}
+
+fn annotate_query_columns_with_wire_type_oids(
+    columns: &mut [QueryColumn],
+    catalog: &dyn CatalogLookup,
+) {
+    for column in columns {
+        if column.wire_type_oid.is_some() {
+            continue;
+        }
+        if column.sql_type.is_array
+            || matches!(
+                column.sql_type.kind,
+                SqlTypeKind::Record | SqlTypeKind::Composite
+            )
+        {
+            column.wire_type_oid = catalog.type_oid_for_sql_type(column.sql_type);
+        }
+    }
+}
+
+fn parameter_format_code(format_codes: &[i16], index: usize) -> i16 {
+    match format_codes {
+        [] => 0,
+        [single] => *single,
+        many => many.get(index).copied().unwrap_or(0),
+    }
+}
+
+fn feature_not_supported_error(feature: impl Into<String>) -> ExecError {
+    ExecError::Parse(crate::backend::parser::ParseError::FeatureNotSupported(
+        feature.into(),
+    ))
+}
+
+fn decode_bound_param(
+    raw: Option<&[u8]>,
+    format_code: i16,
+    declared_type_oid: u32,
+    catalog: &dyn CatalogLookup,
+    datetime_config: &DateTimeConfig,
+) -> Result<BoundParam, ExecError> {
+    match (raw, format_code) {
+        (None, _) => Ok(BoundParam::Null),
+        (Some(bytes), 0) => Ok(BoundParam::Text(
+            String::from_utf8_lossy(bytes).into_owned(),
+        )),
+        (Some(bytes), 1) => {
+            if declared_type_oid == 0 {
+                return Err(feature_not_supported_error(
+                    "binary parameters require declared type OIDs",
+                ));
+            }
+            let value = decode_binary_parameter_value(declared_type_oid, bytes, catalog)?;
+            let sql =
+                render_bound_value_sql(&value, Some(declared_type_oid), catalog, datetime_config)?;
+            Ok(BoundParam::SqlExpression(sql))
+        }
+        (_, code) => Err(feature_not_supported_error(format!(
+            "parameter format code {code}"
+        ))),
+    }
+}
+
+fn decode_binary_parameter_value(
+    type_oid: u32,
+    bytes: &[u8],
+    catalog: &dyn CatalogLookup,
+) -> Result<Value, ExecError> {
+    let type_row = catalog.type_by_oid(type_oid).ok_or_else(|| {
+        feature_not_supported_error(format!("binary parameter type oid {type_oid}"))
+    })?;
+    if type_row.sql_type.is_array {
+        return decode_binary_array_parameter(&type_row, bytes, catalog);
+    }
+    match type_row.sql_type.kind {
+        SqlTypeKind::Int2 => {
+            let raw = require_be_i16(bytes, "int2 binary parameter")?;
+            Ok(Value::Int16(raw))
+        }
+        SqlTypeKind::Int4 => {
+            let raw = require_be_i32(bytes, "int4 binary parameter")?;
+            Ok(Value::Int32(raw))
+        }
+        SqlTypeKind::Int8 => {
+            let raw = require_be_i64(bytes, "int8 binary parameter")?;
+            Ok(Value::Int64(raw))
+        }
+        SqlTypeKind::Oid
+        | SqlTypeKind::Xid
+        | SqlTypeKind::RegConfig
+        | SqlTypeKind::RegDictionary => {
+            let raw = require_be_u32(bytes, "oid binary parameter")?;
+            Ok(Value::Int64(raw as i64))
+        }
+        SqlTypeKind::Money => Ok(Value::Money(require_be_i64(
+            bytes,
+            "money binary parameter",
+        )?)),
+        SqlTypeKind::Bool => Ok(Value::Bool(
+            require_exact_len(bytes, 1, "bool binary parameter")?[0] != 0,
+        )),
+        SqlTypeKind::Bytea => Ok(Value::Bytea(bytes.to_vec())),
+        SqlTypeKind::Text
+        | SqlTypeKind::Varchar
+        | SqlTypeKind::Char
+        | SqlTypeKind::Name
+        | SqlTypeKind::PgNodeTree => Ok(Value::Text(CompactString::from_owned(
+            String::from_utf8_lossy(bytes).into_owned(),
+        ))),
+        SqlTypeKind::Json => Ok(Value::Json(CompactString::from_owned(
+            String::from_utf8_lossy(bytes).into_owned(),
+        ))),
+        SqlTypeKind::JsonPath => Ok(Value::JsonPath(CompactString::from_owned(
+            String::from_utf8_lossy(bytes).into_owned(),
+        ))),
+        SqlTypeKind::InternalChar => Ok(Value::InternalChar(
+            require_exact_len(bytes, 1, "internal char binary parameter")?[0],
+        )),
+        SqlTypeKind::Float4 => {
+            let bits = require_be_u32(bytes, "float4 binary parameter")?;
+            Ok(Value::Float64(f32::from_bits(bits) as f64))
+        }
+        SqlTypeKind::Float8 => {
+            let bits = require_be_u64(bytes, "float8 binary parameter")?;
+            Ok(Value::Float64(f64::from_bits(bits)))
+        }
+        SqlTypeKind::Date => Ok(Value::Date(DateADT(require_be_i32(
+            bytes,
+            "date binary parameter",
+        )?))),
+        SqlTypeKind::Time => Ok(Value::Time(TimeADT(require_be_i64(
+            bytes,
+            "time binary parameter",
+        )?))),
+        SqlTypeKind::TimeTz => {
+            let raw = require_exact_len(bytes, 12, "timetz binary parameter")?;
+            Ok(Value::TimeTz(TimeTzADT {
+                time: TimeADT(i64::from_be_bytes(raw[0..8].try_into().unwrap())),
+                offset_seconds: i32::from_be_bytes(raw[8..12].try_into().unwrap()),
+            }))
+        }
+        SqlTypeKind::Timestamp => Ok(Value::Timestamp(TimestampADT(require_be_i64(
+            bytes,
+            "timestamp binary parameter",
+        )?))),
+        SqlTypeKind::TimestampTz => Ok(Value::TimestampTz(TimestampTzADT(require_be_i64(
+            bytes,
+            "timestamptz binary parameter",
+        )?))),
+        SqlTypeKind::Record | SqlTypeKind::Composite => {
+            decode_binary_record_parameter(&type_row, bytes, catalog)
+        }
+        other => Err(feature_not_supported_error(format!(
+            "binary input for {:?}",
+            other
+        ))),
+    }
+}
+
+fn decode_binary_array_parameter(
+    array_type_row: &crate::include::catalog::PgTypeRow,
+    bytes: &[u8],
+    catalog: &dyn CatalogLookup,
+) -> Result<Value, ExecError> {
+    if bytes.len() < 12 {
+        return Err(ExecError::InvalidStorageValue {
+            column: "<bind>".into(),
+            details: "array binary parameter header truncated".into(),
+        });
+    }
+    let ndim = i32::from_be_bytes(bytes[0..4].try_into().unwrap());
+    if ndim < 0 {
+        return Err(ExecError::InvalidStorageValue {
+            column: "<bind>".into(),
+            details: "array binary parameter ndim cannot be negative".into(),
+        });
+    }
+    let ndim = ndim as usize;
+    let element_oid = u32::from_be_bytes(bytes[8..12].try_into().unwrap());
+    let expected_element_oid = if array_type_row.typelem != 0 {
+        array_type_row.typelem
+    } else {
+        array_type_row.sql_type.element_type().type_oid
+    };
+    if expected_element_oid != 0 && element_oid != expected_element_oid {
+        return Err(ExecError::InvalidStorageValue {
+            column: "<bind>".into(),
+            details: format!(
+                "array binary parameter element oid {} does not match expected {}",
+                element_oid, expected_element_oid
+            ),
+        });
+    }
+    let element_type = catalog
+        .type_by_oid(element_oid)
+        .ok_or_else(|| feature_not_supported_error(format!("array element oid {element_oid}")))?;
+    let mut offset = 12usize;
+    let mut dimensions = Vec::with_capacity(ndim);
+    for _ in 0..ndim {
+        if offset + 8 > bytes.len() {
+            return Err(ExecError::InvalidStorageValue {
+                column: "<bind>".into(),
+                details: "array binary parameter dimensions truncated".into(),
+            });
+        }
+        let length = i32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap());
+        let lower_bound = i32::from_be_bytes(bytes[offset + 4..offset + 8].try_into().unwrap());
+        if length < 0 {
+            return Err(ExecError::InvalidStorageValue {
+                column: "<bind>".into(),
+                details: "array binary parameter length cannot be negative".into(),
+            });
+        }
+        dimensions.push(ArrayDimension {
+            lower_bound,
+            length: length as usize,
+        });
+        offset += 8;
+    }
+    let item_count = dimensions
+        .iter()
+        .try_fold(1usize, |acc, dim| acc.checked_mul(dim.length))
+        .unwrap_or(0);
+    let mut elements = Vec::with_capacity(item_count);
+    for _ in 0..item_count {
+        if offset + 4 > bytes.len() {
+            return Err(ExecError::InvalidStorageValue {
+                column: "<bind>".into(),
+                details: "array binary parameter elements truncated".into(),
+            });
+        }
+        let len = i32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap());
+        offset += 4;
+        if len < 0 {
+            elements.push(Value::Null);
+            continue;
+        }
+        let len = len as usize;
+        if offset + len > bytes.len() {
+            return Err(ExecError::InvalidStorageValue {
+                column: "<bind>".into(),
+                details: "array binary parameter element payload truncated".into(),
+            });
+        }
+        let value =
+            decode_binary_parameter_value(element_oid, &bytes[offset..offset + len], catalog)?;
+        elements.push(value);
+        offset += len;
+    }
+    Ok(Value::PgArray(
+        ArrayValue::from_dimensions(dimensions, elements).with_element_type_oid(element_oid),
+    ))
+}
+
+fn decode_binary_record_parameter(
+    type_row: &crate::include::catalog::PgTypeRow,
+    bytes: &[u8],
+    catalog: &dyn CatalogLookup,
+) -> Result<Value, ExecError> {
+    if bytes.len() < 4 {
+        return Err(ExecError::InvalidStorageValue {
+            column: "<bind>".into(),
+            details: "record binary parameter header truncated".into(),
+        });
+    }
+    let field_count = i32::from_be_bytes(bytes[0..4].try_into().unwrap());
+    if field_count < 0 {
+        return Err(ExecError::InvalidStorageValue {
+            column: "<bind>".into(),
+            details: "record binary parameter field count cannot be negative".into(),
+        });
+    }
+    let field_count = field_count as usize;
+    let mut offset = 4usize;
+
+    let named_fields = if type_row.typrelid != 0 {
+        let relation = catalog
+            .lookup_relation_by_oid(type_row.typrelid)
+            .ok_or_else(|| {
+                feature_not_supported_error(format!(
+                    "composite type relation {}",
+                    type_row.typrelid
+                ))
+            })?;
+        Some(
+            relation
+                .desc
+                .columns
+                .iter()
+                .filter(|column| !column.dropped)
+                .map(|column| (column.name.clone(), column.sql_type))
+                .collect::<Vec<_>>(),
+        )
+    } else {
+        None
+    };
+    if let Some(fields) = &named_fields
+        && fields.len() != field_count
+    {
+        return Err(ExecError::InvalidStorageValue {
+            column: "<bind>".into(),
+            details: format!(
+                "record binary parameter field count {} does not match named composite width {}",
+                field_count,
+                fields.len()
+            ),
+        });
+    }
+
+    let mut descriptor_fields = Vec::with_capacity(field_count);
+    let mut values = Vec::with_capacity(field_count);
+    for index in 0..field_count {
+        if offset + 8 > bytes.len() {
+            return Err(ExecError::InvalidStorageValue {
+                column: "<bind>".into(),
+                details: "record binary parameter fields truncated".into(),
+            });
+        }
+        let field_oid = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap());
+        offset += 4;
+        let len = i32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap());
+        offset += 4;
+
+        let (field_name, field_type_oid, field_sql_type) = if let Some(fields) = &named_fields {
+            let (name, sql_type) = fields[index].clone();
+            let resolved_oid = catalog.type_oid_for_sql_type(sql_type).unwrap_or(field_oid);
+            (name, resolved_oid, sql_type)
+        } else {
+            let sql_type = catalog
+                .type_by_oid(field_oid)
+                .map(|row| row.sql_type)
+                .unwrap_or_else(|| SqlType::record(field_oid));
+            (format!("f{}", index + 1), field_oid, sql_type)
+        };
+
+        if len < 0 {
+            descriptor_fields.push((field_name, field_sql_type));
+            values.push(Value::Null);
+            continue;
+        }
+        let len = len as usize;
+        if offset + len > bytes.len() {
+            return Err(ExecError::InvalidStorageValue {
+                column: "<bind>".into(),
+                details: "record binary parameter field payload truncated".into(),
+            });
+        }
+        let payload = &bytes[offset..offset + len];
+        offset += len;
+        let value = decode_binary_parameter_value(field_type_oid, payload, catalog)?;
+        descriptor_fields.push((field_name, field_sql_type));
+        values.push(value);
+    }
+
+    let descriptor = if type_row.typrelid != 0 {
+        RecordDescriptor::named(type_row.oid, type_row.typrelid, -1, descriptor_fields)
+    } else {
+        assign_anonymous_record_descriptor(descriptor_fields)
+    };
+    Ok(Value::Record(RecordValue::from_descriptor(
+        descriptor, values,
+    )))
+}
+
+fn render_bound_value_sql(
+    value: &Value,
+    declared_type_oid: Option<u32>,
+    catalog: &dyn CatalogLookup,
+    datetime_config: &DateTimeConfig,
+) -> Result<String, ExecError> {
+    let base = render_bound_value_base_sql(value, declared_type_oid, catalog, datetime_config)?;
+    if matches!(declared_type_oid, Some(RECORD_TYPE_OID)) {
+        return Ok(base);
+    }
+    if let Some(type_oid) = declared_type_oid.filter(|oid| *oid != 0) {
+        return Ok(format!(
+            "({base})::{}",
+            render_type_name(type_oid, catalog)?
+        ));
+    }
+    Ok(base)
+}
+
+fn render_bound_value_base_sql(
+    value: &Value,
+    declared_type_oid: Option<u32>,
+    catalog: &dyn CatalogLookup,
+    datetime_config: &DateTimeConfig,
+) -> Result<String, ExecError> {
+    Ok(match value {
+        Value::Null => "null".to_string(),
+        Value::Int16(v) => v.to_string(),
+        Value::Int32(v) => v.to_string(),
+        Value::Int64(v) => v.to_string(),
+        Value::Money(v) => v.to_string(),
+        Value::Float64(v) => {
+            if v.is_finite() {
+                v.to_string()
+            } else {
+                quote_sql_string(&v.to_string())
+            }
+        }
+        Value::Bool(v) => v.to_string(),
+        Value::Numeric(v) => v.render(),
+        Value::Text(text) => quote_sql_string(text),
+        Value::TextRef(_, _) => quote_sql_string(value.as_text().unwrap_or_default()),
+        Value::Json(text) => quote_sql_string(text),
+        Value::JsonPath(text) => quote_sql_string(text),
+        Value::Bytea(bytes) => quote_sql_string(&format_bytea_text(
+            bytes,
+            crate::pgrust::session::ByteaOutputFormat::Hex,
+        )),
+        Value::InternalChar(byte) => {
+            quote_sql_string(&crate::backend::executor::render_internal_char_text(*byte))
+        }
+        Value::Date(_)
+        | Value::Time(_)
+        | Value::TimeTz(_)
+        | Value::Timestamp(_)
+        | Value::TimestampTz(_) => quote_sql_string(
+            &crate::backend::executor::render_datetime_value_text_with_config(
+                value,
+                datetime_config,
+            )
+            .unwrap_or_default(),
+        ),
+        Value::TsVector(vector) => {
+            quote_sql_string(&crate::backend::executor::render_tsvector_text(vector))
+        }
+        Value::TsQuery(query) => {
+            quote_sql_string(&crate::backend::executor::render_tsquery_text(query))
+        }
+        Value::Jsonb(bytes) => quote_sql_string(
+            &crate::backend::executor::jsonb::render_jsonb_bytes(bytes).unwrap_or_default(),
+        ),
+        Value::Record(record) => {
+            let mut fields = Vec::with_capacity(record.fields.len());
+            for (field, field_value) in record.iter() {
+                let field_type_oid =
+                    catalog
+                        .type_oid_for_sql_type(field.sql_type)
+                        .or((field.sql_type.type_oid != 0).then_some(field.sql_type.type_oid));
+                fields.push(render_bound_value_sql(
+                    field_value,
+                    field_type_oid,
+                    catalog,
+                    datetime_config,
+                )?);
+            }
+            format!("ROW({})", fields.join(", "))
+        }
+        Value::Array(items) => {
+            let array = ArrayValue::from_1d(items.clone());
+            render_array_sql(&array, declared_type_oid, catalog, datetime_config)?
+        }
+        Value::PgArray(array) => {
+            render_array_sql(array, declared_type_oid, catalog, datetime_config)?
+        }
+        other => {
+            return Err(feature_not_supported_error(format!(
+                "binary parameter rendering for {:?}",
+                other.sql_type_hint()
+            )));
+        }
+    })
+}
+
+fn render_array_sql(
+    array: &ArrayValue,
+    declared_type_oid: Option<u32>,
+    catalog: &dyn CatalogLookup,
+    datetime_config: &DateTimeConfig,
+) -> Result<String, ExecError> {
+    if array.dimensions.is_empty() {
+        return Ok("ARRAY[]".to_string());
+    }
+    let element_type_oid = array.element_type_oid.or_else(|| {
+        declared_type_oid.and_then(|oid| catalog.type_by_oid(oid).map(|row| row.typelem))
+    });
+    let mut index = 0usize;
+    let body = render_array_dimension_sql(
+        &array.dimensions,
+        &array.elements,
+        0,
+        &mut index,
+        element_type_oid,
+        catalog,
+        datetime_config,
+    )?;
+    Ok(format!("ARRAY{body}"))
+}
+
+fn render_array_dimension_sql(
+    dimensions: &[ArrayDimension],
+    elements: &[Value],
+    depth: usize,
+    index: &mut usize,
+    element_type_oid: Option<u32>,
+    catalog: &dyn CatalogLookup,
+    datetime_config: &DateTimeConfig,
+) -> Result<String, ExecError> {
+    let dim = dimensions
+        .get(depth)
+        .ok_or_else(|| ExecError::InvalidStorageValue {
+            column: "<bind>".into(),
+            details: "array dimension index out of bounds".into(),
+        })?;
+    let mut parts = Vec::with_capacity(dim.length);
+    for _ in 0..dim.length {
+        if depth + 1 == dimensions.len() {
+            let value = elements
+                .get(*index)
+                .ok_or_else(|| ExecError::InvalidStorageValue {
+                    column: "<bind>".into(),
+                    details: "array element index out of bounds".into(),
+                })?;
+            parts.push(render_bound_value_sql(
+                value,
+                element_type_oid,
+                catalog,
+                datetime_config,
+            )?);
+            *index += 1;
+        } else {
+            parts.push(render_array_dimension_sql(
+                dimensions,
+                elements,
+                depth + 1,
+                index,
+                element_type_oid,
+                catalog,
+                datetime_config,
+            )?);
+        }
+    }
+    Ok(format!("[{}]", parts.join(", ")))
+}
+
+fn render_type_name(type_oid: u32, catalog: &dyn CatalogLookup) -> Result<String, ExecError> {
+    let row = catalog
+        .type_by_oid(type_oid)
+        .ok_or_else(|| feature_not_supported_error(format!("type oid {type_oid}")))?;
+    Ok(quote_identifier(&row.typname))
+}
+
+fn quote_identifier(ident: &str) -> String {
+    format!("\"{}\"", ident.replace('"', "\"\""))
+}
+
+fn quote_sql_string(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn require_exact_len<'a>(
+    bytes: &'a [u8],
+    expected: usize,
+    label: &str,
+) -> Result<&'a [u8], ExecError> {
+    if bytes.len() != expected {
+        return Err(ExecError::InvalidStorageValue {
+            column: "<bind>".into(),
+            details: format!("{label} expected {expected} bytes, got {}", bytes.len()),
+        });
+    }
+    Ok(bytes)
+}
+
+fn require_be_i16(bytes: &[u8], label: &str) -> Result<i16, ExecError> {
+    Ok(i16::from_be_bytes(
+        require_exact_len(bytes, 2, label)?.try_into().unwrap(),
+    ))
+}
+
+fn require_be_i32(bytes: &[u8], label: &str) -> Result<i32, ExecError> {
+    Ok(i32::from_be_bytes(
+        require_exact_len(bytes, 4, label)?.try_into().unwrap(),
+    ))
+}
+
+fn require_be_i64(bytes: &[u8], label: &str) -> Result<i64, ExecError> {
+    Ok(i64::from_be_bytes(
+        require_exact_len(bytes, 8, label)?.try_into().unwrap(),
+    ))
+}
+
+fn require_be_u32(bytes: &[u8], label: &str) -> Result<u32, ExecError> {
+    Ok(u32::from_be_bytes(
+        require_exact_len(bytes, 4, label)?.try_into().unwrap(),
+    ))
+}
+
+fn require_be_u64(bytes: &[u8], label: &str) -> Result<u64, ExecError> {
+    Ok(u64::from_be_bytes(
+        require_exact_len(bytes, 8, label)?.try_into().unwrap(),
+    ))
 }
 
 fn resolve_regclass_param(value: &str, catalog: &dyn CatalogLookup) -> String {
@@ -2946,7 +3651,7 @@ mod tests {
 
         let sql = substitute_params(
             "select relkind from pg_catalog.pg_class where oid=$1::pg_catalog.regclass",
-            &[Some("widgets".into())],
+            &[BoundParam::Text("widgets".into())],
             &catalog,
         );
         assert_eq!(

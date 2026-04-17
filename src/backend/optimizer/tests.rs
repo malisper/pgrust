@@ -88,10 +88,12 @@ fn values_path(slot_id: usize, startup_cost: f64, total_cost: f64) -> Path {
             QueryColumn {
                 name: "a".into(),
                 sql_type: int4(),
+                wire_type_oid: None,
             },
             QueryColumn {
                 name: "b".into(),
                 sql_type: int4(),
+                wire_type_oid: None,
             },
         ],
     }
@@ -733,6 +735,7 @@ fn into_plan_project_set_set_arg_lowers_via_child_tlist_identity() {
                 output: QueryColumn {
                     name: "g".into(),
                     sql_type: int4(),
+                    wire_type_oid: None,
                 },
             },
             sql_type: int4(),

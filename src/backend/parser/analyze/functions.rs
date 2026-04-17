@@ -346,6 +346,7 @@ fn resolve_function_row_shape(
                 .map(|column| QueryColumn {
                     name: column.name,
                     sql_type: column.sql_type,
+                    wire_type_oid: None,
                 })
                 .collect();
             Some(ResolvedFunctionRowShape::NamedComposite {
@@ -380,7 +381,11 @@ fn resolve_record_row_shape(
             .filter(|name| !name.is_empty())
             .cloned()
             .unwrap_or_else(|| format!("column{}", output_columns.len() + 1));
-        output_columns.push(QueryColumn { name, sql_type });
+        output_columns.push(QueryColumn {
+            name,
+            sql_type,
+            wire_type_oid: None,
+        });
     }
 
     if output_columns.is_empty() {

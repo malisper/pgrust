@@ -126,12 +126,24 @@ mod tests {
     }
 
     fn send_parse(stream: &mut impl Write, statement_name: &str, sql: &str) {
+        send_parse_with_param_types(stream, statement_name, sql, &[]);
+    }
+
+    fn send_parse_with_param_types(
+        stream: &mut impl Write,
+        statement_name: &str,
+        sql: &str,
+        param_type_oids: &[u32],
+    ) {
         let mut body = Vec::new();
         body.extend_from_slice(statement_name.as_bytes());
         body.push(0);
         body.extend_from_slice(sql.as_bytes());
         body.push(0);
-        body.extend_from_slice(&0i16.to_be_bytes());
+        body.extend_from_slice(&(param_type_oids.len() as i16).to_be_bytes());
+        for oid in param_type_oids {
+            body.extend_from_slice(&(*oid as i32).to_be_bytes());
+        }
         send_typed_message(stream, b'P', &body);
     }
 
@@ -145,13 +157,43 @@ mod tests {
         statement_name: &str,
         result_formats: &[i16],
     ) {
+        send_bind_with_formats_and_params(
+            stream,
+            portal_name,
+            statement_name,
+            &[],
+            &[],
+            result_formats,
+        );
+    }
+
+    fn send_bind_with_formats_and_params(
+        stream: &mut impl Write,
+        portal_name: &str,
+        statement_name: &str,
+        param_formats: &[i16],
+        params: &[Option<&[u8]>],
+        result_formats: &[i16],
+    ) {
         let mut body = Vec::new();
         body.extend_from_slice(portal_name.as_bytes());
         body.push(0);
         body.extend_from_slice(statement_name.as_bytes());
         body.push(0);
-        body.extend_from_slice(&0i16.to_be_bytes());
-        body.extend_from_slice(&0i16.to_be_bytes());
+        body.extend_from_slice(&(param_formats.len() as i16).to_be_bytes());
+        for format in param_formats {
+            body.extend_from_slice(&format.to_be_bytes());
+        }
+        body.extend_from_slice(&(params.len() as i16).to_be_bytes());
+        for param in params {
+            match param {
+                None => body.extend_from_slice(&(-1i32).to_be_bytes()),
+                Some(bytes) => {
+                    body.extend_from_slice(&(bytes.len() as i32).to_be_bytes());
+                    body.extend_from_slice(bytes);
+                }
+            }
+        }
         body.extend_from_slice(&(result_formats.len() as i16).to_be_bytes());
         for format in result_formats {
             body.extend_from_slice(&format.to_be_bytes());
@@ -304,6 +346,22 @@ mod tests {
             }
         }
         fields
+    }
+
+    fn encode_binary_record_fields(fields: &[(u32, Option<&[u8]>)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&(fields.len() as i32).to_be_bytes());
+        for (oid, payload) in fields {
+            out.extend_from_slice(&(*oid as i32).to_be_bytes());
+            match payload {
+                None => out.extend_from_slice(&(-1i32).to_be_bytes()),
+                Some(bytes) => {
+                    out.extend_from_slice(&(bytes.len() as i32).to_be_bytes());
+                    out.extend_from_slice(bytes);
+                }
+            }
+        }
+        out
     }
 
     fn error_fields(body: &[u8]) -> Vec<(u8, String)> {
@@ -865,7 +923,10 @@ mod tests {
         send_startup(&mut admin_stream);
         let _ = read_until_ready(&mut admin_stream, "admin_startup");
 
-        send_query(&mut busy_stream, "select * from generate_series(1, 1000000000)");
+        send_query(
+            &mut busy_stream,
+            "select * from generate_series(1, 1000000000)",
+        );
         thread::sleep(Duration::from_millis(20));
 
         send_query(
@@ -888,7 +949,11 @@ mod tests {
             rows[0][4],
             Some("select * from generate_series(1, 1000000000)".into())
         );
-        assert!(rows[0][0].as_deref().is_some_and(|pid| pid.parse::<u32>().is_ok()));
+        assert!(
+            rows[0][0]
+                .as_deref()
+                .is_some_and(|pid| pid.parse::<u32>().is_ok())
+        );
 
         let _ = read_until_ready(&mut busy_stream, "busy_timeout");
 
@@ -1057,9 +1122,99 @@ mod tests {
         let fields = decode_binary_record_fields(payload);
         assert_eq!(fields.len(), 2);
         assert_eq!(fields[0].0, 23);
-        assert_eq!(i32::from_be_bytes(fields[0].1.clone().unwrap().try_into().unwrap()), 1);
+        assert_eq!(
+            i32::from_be_bytes(fields[0].1.clone().unwrap().try_into().unwrap()),
+            1
+        );
         assert_eq!(fields[1].0, 25);
         assert_eq!(fields[1].1.as_deref(), Some(b"x".as_slice()));
+
+        stream.shutdown(Shutdown::Both).unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn extended_protocol_binary_record_input_round_trips() {
+        let (mut stream, server) = start_test_connection();
+        send_startup(&mut stream);
+        let _ = read_until_ready(&mut stream, "startup");
+
+        let one = 1_i32.to_be_bytes();
+        let record = encode_binary_record_fields(&[(23, Some(one.as_slice())), (25, Some(b"x"))]);
+
+        send_parse_with_param_types(&mut stream, "record_input_stmt", "select $1", &[2249]);
+        send_bind_with_formats_and_params(
+            &mut stream,
+            "record_input_portal",
+            "record_input_stmt",
+            &[1],
+            &[Some(record.as_slice())],
+            &[1],
+        );
+        send_execute(&mut stream, "record_input_portal");
+        send_sync(&mut stream);
+
+        let response = read_until_ready(&mut stream, "binary_record_input_execute");
+        let data_row = response
+            .iter()
+            .find(|(kind, _)| *kind == b'D')
+            .map(|(_, body)| data_row_binary_values(body))
+            .unwrap();
+        let payload = data_row[0].as_ref().expect("binary record payload");
+        let fields = decode_binary_record_fields(payload);
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].0, 23);
+        assert_eq!(
+            i32::from_be_bytes(fields[0].1.clone().unwrap().try_into().unwrap()),
+            1
+        );
+        assert_eq!(fields[1].0, 25);
+        assert_eq!(fields[1].1.as_deref(), Some(b"x".as_slice()));
+
+        stream.shutdown(Shutdown::Both).unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn portal_describe_reports_named_composite_array_oid() {
+        let (mut stream, server) = start_test_connection();
+        send_startup(&mut stream);
+        let _ = read_until_ready(&mut stream, "startup");
+
+        send_query(&mut stream, "create type widget as (a int4)");
+        let _ = read_until_ready(&mut stream, "create_type_widget");
+
+        send_query(
+            &mut stream,
+            "select oid from pg_type where typname = '_widget'",
+        );
+        let oid_response = read_until_ready(&mut stream, "lookup_widget_array_oid");
+        let array_oid = oid_response
+            .iter()
+            .find(|(kind, _)| *kind == b'D')
+            .map(|(_, body)| data_row_values(body))
+            .and_then(|row| row.first().cloned().flatten())
+            .and_then(|value| value.parse::<i32>().ok())
+            .expect("widget array oid");
+
+        send_parse(
+            &mut stream,
+            "widget_array_stmt",
+            "select array[row(1)::widget]::widget[]",
+        );
+        send_bind(&mut stream, "widget_array_portal", "widget_array_stmt");
+        send_describe(&mut stream, b'P', "widget_array_portal");
+        send_sync(&mut stream);
+
+        let response = read_until_ready(&mut stream, "widget_array_portal_describe");
+        let fields = response
+            .iter()
+            .find(|(kind, _)| *kind == b'T')
+            .map(|(_, body)| row_description_fields(body))
+            .unwrap();
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].1, array_oid);
+        assert_ne!(fields[0].1, 2287);
 
         stream.shutdown(Shutdown::Both).unwrap();
         server.join().unwrap();
@@ -1087,9 +1242,11 @@ mod tests {
                 .iter()
                 .any(|(code, value)| *code == b'C' && value == "0A000")
         );
-        assert!(error.iter().any(|(code, value)| {
-            *code == b'M' && value.contains("binary output for")
-        }));
+        assert!(
+            error
+                .iter()
+                .any(|(code, value)| { *code == b'M' && value.contains("binary output for") })
+        );
         assert!(!response.iter().any(|(kind, _)| *kind == b'D'));
 
         stream.shutdown(Shutdown::Both).unwrap();

@@ -73,6 +73,7 @@ pub struct RelationDesc {
 pub struct QueryColumn {
     pub name: String,
     pub sql_type: SqlType,
+    pub wire_type_oid: Option<u32>,
 }
 
 impl QueryColumn {
@@ -80,7 +81,13 @@ impl QueryColumn {
         Self {
             name: name.into(),
             sql_type: SqlType::new(SqlTypeKind::Text),
+            wire_type_oid: None,
         }
+    }
+
+    pub fn with_wire_type_oid(mut self, wire_type_oid: Option<u32>) -> Self {
+        self.wire_type_oid = wire_type_oid;
+        self
     }
 }
 

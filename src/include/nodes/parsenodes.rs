@@ -294,6 +294,7 @@ impl Query {
             .map(|target| QueryColumn {
                 name: target.name.clone(),
                 sql_type: target.sql_type,
+                wire_type_oid: None,
             })
             .collect()
     }

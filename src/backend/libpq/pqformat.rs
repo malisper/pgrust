@@ -196,7 +196,14 @@ pub(crate) fn send_query_result(
     send_row_description(stream, columns)?;
     let mut row_buf = Vec::new();
     for row in rows {
-        send_typed_data_row(stream, row, columns, &[], &mut row_buf, float_format.clone())?;
+        send_typed_data_row(
+            stream,
+            row,
+            columns,
+            &[],
+            &mut row_buf,
+            float_format.clone(),
+        )?;
     }
     send_command_complete(stream, tag)
 }
@@ -352,6 +359,18 @@ fn validate_binary_output_type(sql_type: SqlType) -> Result<(), ExecError> {
 }
 
 fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
+    if col.sql_type.is_array
+        && let Some(oid) = col.wire_type_oid
+    {
+        return (oid as i32, -1, -1);
+    }
+    if matches!(
+        col.sql_type.kind,
+        SqlTypeKind::Record | SqlTypeKind::Composite
+    ) && let Some(oid) = col.wire_type_oid
+    {
+        return (oid as i32, -1, col.sql_type.typmod);
+    }
     if !col.sql_type.is_array && col.sql_type.type_oid != 0 {
         return (col.sql_type.type_oid as i32, -1, col.sql_type.typmod);
     }
@@ -658,27 +677,22 @@ pub(crate) fn send_typed_data_row(
 fn encode_binary_data_row_value(value: &Value, sql_type: SqlType) -> Result<Vec<u8>, ExecError> {
     match value {
         Value::Null => Ok(Vec::new()),
-        Value::Int16(v) if matches!(sql_type.kind, SqlTypeKind::Int2) => Ok(v.to_be_bytes().to_vec()),
-        Value::Int32(v)
-            if matches!(
-                sql_type.kind,
-                SqlTypeKind::Int4 | SqlTypeKind::Tid
-            ) =>
-        {
+        Value::Int16(v) if matches!(sql_type.kind, SqlTypeKind::Int2) => {
+            Ok(v.to_be_bytes().to_vec())
+        }
+        Value::Int32(v) if matches!(sql_type.kind, SqlTypeKind::Int4 | SqlTypeKind::Tid) => {
+            Ok(v.to_be_bytes().to_vec())
+        }
+        Value::Int64(v) if matches!(sql_type.kind, SqlTypeKind::Int8 | SqlTypeKind::Money) => {
             Ok(v.to_be_bytes().to_vec())
         }
         Value::Int64(v)
             if matches!(
                 sql_type.kind,
-                SqlTypeKind::Int8 | SqlTypeKind::Money
-            ) =>
-        {
-            Ok(v.to_be_bytes().to_vec())
-        }
-        Value::Int64(v)
-            if matches!(
-                sql_type.kind,
-                SqlTypeKind::Oid | SqlTypeKind::Xid | SqlTypeKind::RegConfig | SqlTypeKind::RegDictionary
+                SqlTypeKind::Oid
+                    | SqlTypeKind::Xid
+                    | SqlTypeKind::RegConfig
+                    | SqlTypeKind::RegDictionary
             ) =>
         {
             let oid = u32::try_from(*v).map_err(|_| ExecError::OidOutOfRange)?;
@@ -751,9 +765,12 @@ fn encode_binary_data_row_value(value: &Value, sql_type: SqlType) -> Result<Vec<
         {
             encode_binary_record_array(array, sql_type.element_type())
         }
-        other => Err(ExecError::Parse(crate::backend::parser::ParseError::FeatureNotSupported(
-            format!("binary output for {:?}", other.sql_type_hint().unwrap_or(sql_type)),
-        ))),
+        other => Err(ExecError::Parse(
+            crate::backend::parser::ParseError::FeatureNotSupported(format!(
+                "binary output for {:?}",
+                other.sql_type_hint().unwrap_or(sql_type)
+            )),
+        )),
     }
 }
 
@@ -769,6 +786,7 @@ fn encode_binary_record(
             wire_type_info(&QueryColumn {
                 name: field.name.clone(),
                 sql_type: field.sql_type,
+                wire_type_oid: None,
             })
             .0 as u32
         };
@@ -791,7 +809,8 @@ fn encode_binary_record_array(
     let element_oid = if element_sql_type.type_oid != 0 {
         element_sql_type.type_oid
     } else {
-        array.elements
+        array
+            .elements
             .iter()
             .find_map(|value| match value {
                 Value::Record(record) => Some(record.type_oid()),
@@ -801,7 +820,9 @@ fn encode_binary_record_array(
     };
     let mut out = Vec::new();
     out.extend_from_slice(&(array.dimensions.len() as i32).to_be_bytes());
-    out.extend_from_slice(&(array.elements.iter().any(|v| matches!(v, Value::Null)) as i32).to_be_bytes());
+    out.extend_from_slice(
+        &(array.elements.iter().any(|v| matches!(v, Value::Null)) as i32).to_be_bytes(),
+    );
     out.extend_from_slice(&element_oid.to_be_bytes());
     for dim in &array.dimensions {
         out.extend_from_slice(&(dim.length as i32).to_be_bytes());

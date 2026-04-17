@@ -15,12 +15,12 @@ use super::node_types::*;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::expr_json::{canonicalize_jsonpath_text, validate_json_text};
 use crate::backend::executor::jsonb::{decode_jsonb, render_jsonb_bytes};
+use crate::backend::libpq::pqformat::FloatFormatOptions;
 use crate::backend::parser::{SqlType, SqlTypeKind};
-use crate::backend::utils::record::register_anonymous_record_descriptor;
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
+use crate::backend::utils::record::register_anonymous_record_descriptor;
 use crate::include::access::htup::{HeapTuple, TupleValue};
 use crate::include::nodes::execnodes::ToastFetchContext;
-use crate::backend::libpq::pqformat::FloatFormatOptions;
 use crate::pgrust::compact_string::CompactString;
 
 mod array;
@@ -85,42 +85,39 @@ pub(crate) fn format_record_text(record: &crate::include::nodes::datum::RecordVa
                 if let Some(text) = other.as_text() {
                     text.to_string()
                 } else {
-                    render_datetime_value_text_with_config(
-                        other,
-                        &DateTimeConfig::default(),
-                    )
-                    .or_else(|| render_geometry_text(other, FloatFormatOptions::default()))
-                    .unwrap_or_else(|| match other {
-                        Value::Bool(true) => "t".to_string(),
-                        Value::Bool(false) => "f".to_string(),
-                        Value::Int16(v) => v.to_string(),
-                        Value::Int32(v) => v.to_string(),
-                        Value::Int64(v) => v.to_string(),
-                        Value::Money(v) => v.to_string(),
-                        Value::Float64(v) => v.to_string(),
-                        Value::Numeric(v) => v.render(),
-                        Value::Bytea(v) => {
-                            let mut rendered = String::from("\\\\x");
-                            for byte in v {
-                                rendered.push_str(&format!("{byte:02x}"));
+                    render_datetime_value_text_with_config(other, &DateTimeConfig::default())
+                        .or_else(|| render_geometry_text(other, FloatFormatOptions::default()))
+                        .unwrap_or_else(|| match other {
+                            Value::Bool(true) => "t".to_string(),
+                            Value::Bool(false) => "f".to_string(),
+                            Value::Int16(v) => v.to_string(),
+                            Value::Int32(v) => v.to_string(),
+                            Value::Int64(v) => v.to_string(),
+                            Value::Money(v) => v.to_string(),
+                            Value::Float64(v) => v.to_string(),
+                            Value::Numeric(v) => v.render(),
+                            Value::Bytea(v) => {
+                                let mut rendered = String::from("\\\\x");
+                                for byte in v {
+                                    rendered.push_str(&format!("{byte:02x}"));
+                                }
+                                rendered
                             }
-                            rendered
-                        }
-                        Value::Bit(v) => v.render(),
-                        Value::TsVector(v) => crate::backend::executor::render_tsvector_text(v),
-                        Value::TsQuery(v) => crate::backend::executor::render_tsquery_text(v),
-                        Value::Json(v) => v.to_string(),
-                        Value::JsonPath(v) => v.to_string(),
-                        Value::Null => String::new(),
-                        _ => format!("{other:?}"),
-                    })
+                            Value::Bit(v) => v.render(),
+                            Value::TsVector(v) => crate::backend::executor::render_tsvector_text(v),
+                            Value::TsQuery(v) => crate::backend::executor::render_tsquery_text(v),
+                            Value::Json(v) => v.to_string(),
+                            Value::JsonPath(v) => v.to_string(),
+                            Value::Null => String::new(),
+                            _ => format!("{other:?}"),
+                        })
                 }
             }
         };
         let needs_quotes = rendered.is_empty()
-            || rendered.chars().any(|ch| {
-                matches!(ch, '"' | '\\' | '(' | ')' | ',') || ch.is_ascii_whitespace()
-            });
+            || rendered
+                .chars()
+                .any(|ch| matches!(ch, '"' | '\\' | '(' | ')' | ',') || ch.is_ascii_whitespace());
         if needs_quotes {
             out.push('"');
         }
@@ -352,10 +349,12 @@ fn decode_composite_datum(
     bytes: &[u8],
 ) -> Result<crate::include::nodes::datum::RecordValue, ExecError> {
     let mut offset = 0usize;
-    let version = *bytes.get(offset).ok_or_else(|| ExecError::InvalidStorageValue {
-        column: "<record>".into(),
-        details: "missing composite datum version".into(),
-    })?;
+    let version = *bytes
+        .get(offset)
+        .ok_or_else(|| ExecError::InvalidStorageValue {
+            column: "<record>".into(),
+            details: "missing composite datum version".into(),
+        })?;
     if version != COMPOSITE_DATUM_VERSION {
         return Err(ExecError::InvalidStorageValue {
             column: "<record>".into(),
@@ -411,7 +410,9 @@ fn decode_composite_datum(
     ))
 }
 
-fn encode_internal_array(array: &crate::include::nodes::datum::ArrayValue) -> Result<Vec<u8>, ExecError> {
+fn encode_internal_array(
+    array: &crate::include::nodes::datum::ArrayValue,
+) -> Result<Vec<u8>, ExecError> {
     let mut out = Vec::new();
     match array.element_type_oid {
         Some(oid) => {
@@ -433,7 +434,9 @@ fn encode_internal_array(array: &crate::include::nodes::datum::ArrayValue) -> Re
     Ok(out)
 }
 
-fn decode_internal_array(bytes: &[u8]) -> Result<crate::include::nodes::datum::ArrayValue, ExecError> {
+fn decode_internal_array(
+    bytes: &[u8],
+) -> Result<crate::include::nodes::datum::ArrayValue, ExecError> {
     let mut offset = 0usize;
     if offset >= bytes.len() {
         return Err(ExecError::InvalidStorageValue {
@@ -475,7 +478,10 @@ fn decode_internal_array(bytes: &[u8]) -> Result<crate::include::nodes::datum::A
         let lower_bound = i32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
         let length = u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().unwrap()) as usize;
         offset += 8;
-        dimensions.push(crate::include::nodes::datum::ArrayDimension { lower_bound, length });
+        dimensions.push(crate::include::nodes::datum::ArrayDimension {
+            lower_bound,
+            length,
+        });
     }
     if offset + 4 > bytes.len() {
         return Err(ExecError::InvalidStorageValue {
@@ -642,11 +648,17 @@ fn encode_internal_value(value: &Value) -> Result<Vec<u8>, ExecError> {
         }
         Value::TsVector(v) => {
             out.push(INTERNAL_VALUE_TAG_TSVECTOR);
-            encode_internal_text(&crate::backend::executor::encode_tsvector_bytes(&v), &mut out);
+            encode_internal_text(
+                &crate::backend::executor::encode_tsvector_bytes(&v),
+                &mut out,
+            );
         }
         Value::TsQuery(v) => {
             out.push(INTERNAL_VALUE_TAG_TSQUERY);
-            encode_internal_text(&crate::backend::executor::encode_tsquery_bytes(&v), &mut out);
+            encode_internal_text(
+                &crate::backend::executor::encode_tsquery_bytes(&v),
+                &mut out,
+            );
         }
         Value::Text(v) => {
             out.push(INTERNAL_VALUE_TAG_TEXT);
@@ -663,7 +675,10 @@ fn encode_internal_value(value: &Value) -> Result<Vec<u8>, ExecError> {
         }
         Value::Array(v) => {
             out.push(INTERNAL_VALUE_TAG_ARRAY);
-            encode_internal_text(&encode_internal_array(&crate::include::nodes::datum::ArrayValue::from_1d(v))?, &mut out);
+            encode_internal_text(
+                &encode_internal_array(&crate::include::nodes::datum::ArrayValue::from_1d(v))?,
+                &mut out,
+            );
         }
         Value::PgArray(v) => {
             out.push(INTERNAL_VALUE_TAG_ARRAY);
@@ -688,31 +703,101 @@ fn decode_internal_value(bytes: &[u8]) -> Result<Value, ExecError> {
     let rest = &bytes[1..];
     Ok(match tag {
         INTERNAL_VALUE_TAG_NULL => Value::Null,
-        INTERNAL_VALUE_TAG_INT16 => Value::Int16(i16::from_le_bytes(rest.try_into().map_err(|_| ExecError::InvalidStorageValue { column: "<record>".into(), details: "invalid int16 record payload".into() })?)),
-        INTERNAL_VALUE_TAG_INT32 => Value::Int32(i32::from_le_bytes(rest.try_into().map_err(|_| ExecError::InvalidStorageValue { column: "<record>".into(), details: "invalid int32 record payload".into() })?)),
-        INTERNAL_VALUE_TAG_INT64 => Value::Int64(i64::from_le_bytes(rest.try_into().map_err(|_| ExecError::InvalidStorageValue { column: "<record>".into(), details: "invalid int64 record payload".into() })?)),
-        INTERNAL_VALUE_TAG_MONEY => Value::Money(i64::from_le_bytes(rest.try_into().map_err(|_| ExecError::InvalidStorageValue { column: "<record>".into(), details: "invalid money record payload".into() })?)),
-        INTERNAL_VALUE_TAG_DATE => Value::Date(crate::include::nodes::datetime::DateADT(i32::from_le_bytes(rest.try_into().map_err(|_| ExecError::InvalidStorageValue { column: "<record>".into(), details: "invalid date record payload".into() })?))),
-        INTERNAL_VALUE_TAG_TIME => Value::Time(crate::include::nodes::datetime::TimeADT(i64::from_le_bytes(rest.try_into().map_err(|_| ExecError::InvalidStorageValue { column: "<record>".into(), details: "invalid time record payload".into() })?))),
+        INTERNAL_VALUE_TAG_INT16 => {
+            Value::Int16(i16::from_le_bytes(rest.try_into().map_err(|_| {
+                ExecError::InvalidStorageValue {
+                    column: "<record>".into(),
+                    details: "invalid int16 record payload".into(),
+                }
+            })?))
+        }
+        INTERNAL_VALUE_TAG_INT32 => {
+            Value::Int32(i32::from_le_bytes(rest.try_into().map_err(|_| {
+                ExecError::InvalidStorageValue {
+                    column: "<record>".into(),
+                    details: "invalid int32 record payload".into(),
+                }
+            })?))
+        }
+        INTERNAL_VALUE_TAG_INT64 => {
+            Value::Int64(i64::from_le_bytes(rest.try_into().map_err(|_| {
+                ExecError::InvalidStorageValue {
+                    column: "<record>".into(),
+                    details: "invalid int64 record payload".into(),
+                }
+            })?))
+        }
+        INTERNAL_VALUE_TAG_MONEY => {
+            Value::Money(i64::from_le_bytes(rest.try_into().map_err(|_| {
+                ExecError::InvalidStorageValue {
+                    column: "<record>".into(),
+                    details: "invalid money record payload".into(),
+                }
+            })?))
+        }
+        INTERNAL_VALUE_TAG_DATE => Value::Date(crate::include::nodes::datetime::DateADT(
+            i32::from_le_bytes(
+                rest.try_into()
+                    .map_err(|_| ExecError::InvalidStorageValue {
+                        column: "<record>".into(),
+                        details: "invalid date record payload".into(),
+                    })?,
+            ),
+        )),
+        INTERNAL_VALUE_TAG_TIME => Value::Time(crate::include::nodes::datetime::TimeADT(
+            i64::from_le_bytes(
+                rest.try_into()
+                    .map_err(|_| ExecError::InvalidStorageValue {
+                        column: "<record>".into(),
+                        details: "invalid time record payload".into(),
+                    })?,
+            ),
+        )),
         INTERNAL_VALUE_TAG_TIMETZ => {
             if rest.len() != 12 {
-                return Err(ExecError::InvalidStorageValue { column: "<record>".into(), details: "invalid timetz record payload".into() });
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<record>".into(),
+                    details: "invalid timetz record payload".into(),
+                });
             }
             Value::TimeTz(crate::include::nodes::datetime::TimeTzADT {
-                time: crate::include::nodes::datetime::TimeADT(i64::from_le_bytes(rest[0..8].try_into().unwrap())),
+                time: crate::include::nodes::datetime::TimeADT(i64::from_le_bytes(
+                    rest[0..8].try_into().unwrap(),
+                )),
                 offset_seconds: i32::from_le_bytes(rest[8..12].try_into().unwrap()),
             })
         }
-        INTERNAL_VALUE_TAG_TIMESTAMP => Value::Timestamp(crate::include::nodes::datetime::TimestampADT(i64::from_le_bytes(rest.try_into().map_err(|_| ExecError::InvalidStorageValue { column: "<record>".into(), details: "invalid timestamp record payload".into() })?))),
-        INTERNAL_VALUE_TAG_TIMESTAMPTZ => Value::TimestampTz(crate::include::nodes::datetime::TimestampTzADT(i64::from_le_bytes(rest.try_into().map_err(|_| ExecError::InvalidStorageValue { column: "<record>".into(), details: "invalid timestamptz record payload".into() })?))),
+        INTERNAL_VALUE_TAG_TIMESTAMP => Value::Timestamp(
+            crate::include::nodes::datetime::TimestampADT(i64::from_le_bytes(
+                rest.try_into()
+                    .map_err(|_| ExecError::InvalidStorageValue {
+                        column: "<record>".into(),
+                        details: "invalid timestamp record payload".into(),
+                    })?,
+            )),
+        ),
+        INTERNAL_VALUE_TAG_TIMESTAMPTZ => Value::TimestampTz(
+            crate::include::nodes::datetime::TimestampTzADT(i64::from_le_bytes(
+                rest.try_into()
+                    .map_err(|_| ExecError::InvalidStorageValue {
+                        column: "<record>".into(),
+                        details: "invalid timestamptz record payload".into(),
+                    })?,
+            )),
+        ),
         INTERNAL_VALUE_TAG_BIT => {
             if rest.len() < 8 {
-                return Err(ExecError::InvalidStorageValue { column: "<record>".into(), details: "invalid bit record payload".into() });
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<record>".into(),
+                    details: "invalid bit record payload".into(),
+                });
             }
             let bit_len = i32::from_le_bytes(rest[0..4].try_into().unwrap());
             let mut offset = 4usize;
             let bit_bytes = decode_internal_text(rest, &mut offset)?.to_vec();
-            Value::Bit(crate::include::nodes::datum::BitString::new(bit_len, bit_bytes))
+            Value::Bit(crate::include::nodes::datum::BitString::new(
+                bit_len, bit_bytes,
+            ))
         }
         INTERNAL_VALUE_TAG_BYTEA => {
             let mut offset = 0usize;
@@ -720,7 +805,10 @@ fn decode_internal_value(bytes: &[u8]) -> Result<Value, ExecError> {
         }
         INTERNAL_VALUE_TAG_POINT => {
             if rest.len() != 16 {
-                return Err(ExecError::InvalidStorageValue { column: "<record>".into(), details: "invalid point record payload".into() });
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<record>".into(),
+                    details: "invalid point record payload".into(),
+                });
             }
             Value::Point(crate::include::nodes::datum::GeoPoint {
                 x: f64::from_le_bytes(rest[0..8].try_into().unwrap()),
@@ -729,23 +817,38 @@ fn decode_internal_value(bytes: &[u8]) -> Result<Value, ExecError> {
         }
         INTERNAL_VALUE_TAG_LSEG => {
             if rest.len() != 32 {
-                return Err(ExecError::InvalidStorageValue { column: "<record>".into(), details: "invalid lseg record payload".into() });
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<record>".into(),
+                    details: "invalid lseg record payload".into(),
+                });
             }
             Value::Lseg(crate::include::nodes::datum::GeoLseg {
                 p: [
-                    crate::include::nodes::datum::GeoPoint { x: f64::from_le_bytes(rest[0..8].try_into().unwrap()), y: f64::from_le_bytes(rest[8..16].try_into().unwrap()) },
-                    crate::include::nodes::datum::GeoPoint { x: f64::from_le_bytes(rest[16..24].try_into().unwrap()), y: f64::from_le_bytes(rest[24..32].try_into().unwrap()) },
+                    crate::include::nodes::datum::GeoPoint {
+                        x: f64::from_le_bytes(rest[0..8].try_into().unwrap()),
+                        y: f64::from_le_bytes(rest[8..16].try_into().unwrap()),
+                    },
+                    crate::include::nodes::datum::GeoPoint {
+                        x: f64::from_le_bytes(rest[16..24].try_into().unwrap()),
+                        y: f64::from_le_bytes(rest[24..32].try_into().unwrap()),
+                    },
                 ],
             })
         }
         INTERNAL_VALUE_TAG_PATH => {
             if rest.len() < 5 {
-                return Err(ExecError::InvalidStorageValue { column: "<record>".into(), details: "invalid path record payload".into() });
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<record>".into(),
+                    details: "invalid path record payload".into(),
+                });
             }
             let closed = rest[0] != 0;
             let count = u32::from_le_bytes(rest[1..5].try_into().unwrap()) as usize;
             if rest.len() != 5 + count * 16 {
-                return Err(ExecError::InvalidStorageValue { column: "<record>".into(), details: "invalid path point payload".into() });
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<record>".into(),
+                    details: "invalid path point payload".into(),
+                });
             }
             let mut points = Vec::with_capacity(count);
             let mut offset = 5usize;
@@ -760,7 +863,10 @@ fn decode_internal_value(bytes: &[u8]) -> Result<Value, ExecError> {
         }
         INTERNAL_VALUE_TAG_LINE => {
             if rest.len() != 24 {
-                return Err(ExecError::InvalidStorageValue { column: "<record>".into(), details: "invalid line record payload".into() });
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<record>".into(),
+                    details: "invalid line record payload".into(),
+                });
             }
             Value::Line(crate::include::nodes::datum::GeoLine {
                 a: f64::from_le_bytes(rest[0..8].try_into().unwrap()),
@@ -770,64 +876,150 @@ fn decode_internal_value(bytes: &[u8]) -> Result<Value, ExecError> {
         }
         INTERNAL_VALUE_TAG_BOX => {
             if rest.len() != 32 {
-                return Err(ExecError::InvalidStorageValue { column: "<record>".into(), details: "invalid box record payload".into() });
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<record>".into(),
+                    details: "invalid box record payload".into(),
+                });
             }
             Value::Box(crate::include::nodes::datum::GeoBox {
-                high: crate::include::nodes::datum::GeoPoint { x: f64::from_le_bytes(rest[0..8].try_into().unwrap()), y: f64::from_le_bytes(rest[8..16].try_into().unwrap()) },
-                low: crate::include::nodes::datum::GeoPoint { x: f64::from_le_bytes(rest[16..24].try_into().unwrap()), y: f64::from_le_bytes(rest[24..32].try_into().unwrap()) },
+                high: crate::include::nodes::datum::GeoPoint {
+                    x: f64::from_le_bytes(rest[0..8].try_into().unwrap()),
+                    y: f64::from_le_bytes(rest[8..16].try_into().unwrap()),
+                },
+                low: crate::include::nodes::datum::GeoPoint {
+                    x: f64::from_le_bytes(rest[16..24].try_into().unwrap()),
+                    y: f64::from_le_bytes(rest[24..32].try_into().unwrap()),
+                },
             })
         }
         INTERNAL_VALUE_TAG_POLYGON => {
             let mut offset = 0usize;
-            Value::Polygon(decode_polygon_bytes(decode_internal_text(rest, &mut offset)?)?)
+            Value::Polygon(decode_polygon_bytes(decode_internal_text(
+                rest,
+                &mut offset,
+            )?)?)
         }
         INTERNAL_VALUE_TAG_CIRCLE => {
             if rest.len() != 24 {
-                return Err(ExecError::InvalidStorageValue { column: "<record>".into(), details: "invalid circle record payload".into() });
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<record>".into(),
+                    details: "invalid circle record payload".into(),
+                });
             }
             Value::Circle(crate::include::nodes::datum::GeoCircle {
-                center: crate::include::nodes::datum::GeoPoint { x: f64::from_le_bytes(rest[0..8].try_into().unwrap()), y: f64::from_le_bytes(rest[8..16].try_into().unwrap()) },
+                center: crate::include::nodes::datum::GeoPoint {
+                    x: f64::from_le_bytes(rest[0..8].try_into().unwrap()),
+                    y: f64::from_le_bytes(rest[8..16].try_into().unwrap()),
+                },
                 radius: f64::from_le_bytes(rest[16..24].try_into().unwrap()),
             })
         }
         INTERNAL_VALUE_TAG_RANGE => {
             let mut offset = 0usize;
-            let kind = match *rest.get(offset).ok_or_else(|| ExecError::InvalidStorageValue { column: "<record>".into(), details: "missing range kind".into() })? {
+            let kind = match *rest
+                .get(offset)
+                .ok_or_else(|| ExecError::InvalidStorageValue {
+                    column: "<record>".into(),
+                    details: "missing range kind".into(),
+                })? {
                 0 => SqlTypeKind::Int4Range,
                 1 => SqlTypeKind::Int8Range,
                 2 => SqlTypeKind::NumericRange,
                 3 => SqlTypeKind::DateRange,
                 4 => SqlTypeKind::TimestampRange,
                 5 => SqlTypeKind::TimestampTzRange,
-                _ => return Err(ExecError::InvalidStorageValue { column: "<record>".into(), details: "invalid range kind".into() }),
+                _ => {
+                    return Err(ExecError::InvalidStorageValue {
+                        column: "<record>".into(),
+                        details: "invalid range kind".into(),
+                    });
+                }
             };
             offset += 1;
-            let text = std::str::from_utf8(decode_internal_text(rest, &mut offset)?).unwrap_or_default();
+            let text =
+                std::str::from_utf8(decode_internal_text(rest, &mut offset)?).unwrap_or_default();
             crate::backend::executor::expr_range::parse_range_text(text, kind)?
         }
-        INTERNAL_VALUE_TAG_FLOAT64 => Value::Float64(f64::from_le_bytes(rest.try_into().map_err(|_| ExecError::InvalidStorageValue { column: "<record>".into(), details: "invalid float record payload".into() })?)),
-        INTERNAL_VALUE_TAG_NUMERIC => Value::Numeric(crate::include::nodes::datum::NumericValue::from(std::str::from_utf8({ let mut offset = 0usize; decode_internal_text(rest, &mut offset)? }).unwrap_or_default())),
-        INTERNAL_VALUE_TAG_JSON => Value::Json(CompactString::new(std::str::from_utf8({ let mut offset = 0usize; decode_internal_text(rest, &mut offset)? }).unwrap_or_default())),
-        INTERNAL_VALUE_TAG_JSONB => Value::Jsonb({ let mut offset = 0usize; decode_internal_text(rest, &mut offset)?.to_vec() }),
-        INTERNAL_VALUE_TAG_JSONPATH => Value::JsonPath(CompactString::new(std::str::from_utf8({ let mut offset = 0usize; decode_internal_text(rest, &mut offset)? }).unwrap_or_default())),
-        INTERNAL_VALUE_TAG_TSVECTOR => Value::TsVector(crate::backend::executor::decode_tsvector_bytes({ let mut offset = 0usize; decode_internal_text(rest, &mut offset)? })?),
-        INTERNAL_VALUE_TAG_TSQUERY => Value::TsQuery(crate::backend::executor::decode_tsquery_bytes({ let mut offset = 0usize; decode_internal_text(rest, &mut offset)? })?),
-        INTERNAL_VALUE_TAG_TEXT => Value::Text(CompactString::new(std::str::from_utf8({ let mut offset = 0usize; decode_internal_text(rest, &mut offset)? }).unwrap_or_default())),
-        INTERNAL_VALUE_TAG_INTERNAL_CHAR => Value::InternalChar(*rest.first().ok_or_else(|| ExecError::InvalidStorageValue { column: "<record>".into(), details: "invalid internal char payload".into() })?),
+        INTERNAL_VALUE_TAG_FLOAT64 => {
+            Value::Float64(f64::from_le_bytes(rest.try_into().map_err(|_| {
+                ExecError::InvalidStorageValue {
+                    column: "<record>".into(),
+                    details: "invalid float record payload".into(),
+                }
+            })?))
+        }
+        INTERNAL_VALUE_TAG_NUMERIC => {
+            Value::Numeric(crate::include::nodes::datum::NumericValue::from(
+                std::str::from_utf8({
+                    let mut offset = 0usize;
+                    decode_internal_text(rest, &mut offset)?
+                })
+                .unwrap_or_default(),
+            ))
+        }
+        INTERNAL_VALUE_TAG_JSON => Value::Json(CompactString::new(
+            std::str::from_utf8({
+                let mut offset = 0usize;
+                decode_internal_text(rest, &mut offset)?
+            })
+            .unwrap_or_default(),
+        )),
+        INTERNAL_VALUE_TAG_JSONB => Value::Jsonb({
+            let mut offset = 0usize;
+            decode_internal_text(rest, &mut offset)?.to_vec()
+        }),
+        INTERNAL_VALUE_TAG_JSONPATH => Value::JsonPath(CompactString::new(
+            std::str::from_utf8({
+                let mut offset = 0usize;
+                decode_internal_text(rest, &mut offset)?
+            })
+            .unwrap_or_default(),
+        )),
+        INTERNAL_VALUE_TAG_TSVECTOR => {
+            Value::TsVector(crate::backend::executor::decode_tsvector_bytes({
+                let mut offset = 0usize;
+                decode_internal_text(rest, &mut offset)?
+            })?)
+        }
+        INTERNAL_VALUE_TAG_TSQUERY => {
+            Value::TsQuery(crate::backend::executor::decode_tsquery_bytes({
+                let mut offset = 0usize;
+                decode_internal_text(rest, &mut offset)?
+            })?)
+        }
+        INTERNAL_VALUE_TAG_TEXT => Value::Text(CompactString::new(
+            std::str::from_utf8({
+                let mut offset = 0usize;
+                decode_internal_text(rest, &mut offset)?
+            })
+            .unwrap_or_default(),
+        )),
+        INTERNAL_VALUE_TAG_INTERNAL_CHAR => {
+            Value::InternalChar(*rest.first().ok_or_else(|| ExecError::InvalidStorageValue {
+                column: "<record>".into(),
+                details: "invalid internal char payload".into(),
+            })?)
+        }
         INTERNAL_VALUE_TAG_BOOL => Value::Bool(rest.first().copied().unwrap_or(0) != 0),
         INTERNAL_VALUE_TAG_ARRAY => {
             let mut offset = 0usize;
-            Value::PgArray(decode_internal_array(decode_internal_text(rest, &mut offset)?)?)
+            Value::PgArray(decode_internal_array(decode_internal_text(
+                rest,
+                &mut offset,
+            )?)?)
         }
         INTERNAL_VALUE_TAG_RECORD => {
             let mut offset = 0usize;
-            Value::Record(decode_internal_record(decode_internal_text(rest, &mut offset)?)?)
+            Value::Record(decode_internal_record(decode_internal_text(
+                rest,
+                &mut offset,
+            )?)?)
         }
         _ => {
             return Err(ExecError::InvalidStorageValue {
                 column: "<record>".into(),
                 details: format!("unknown internal value tag {tag}"),
-            })
+            });
         }
     })
 }
@@ -963,7 +1155,9 @@ pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<TupleVa
         (ScalarType::Text, Value::InternalChar(v)) => {
             Ok(TupleValue::Bytes(render_internal_char_text(v).into_bytes()))
         }
-        (ScalarType::Text, value) => Ok(TupleValue::Bytes(value.as_text().unwrap().as_bytes().to_vec())),
+        (ScalarType::Text, value) => Ok(TupleValue::Bytes(
+            value.as_text().unwrap().as_bytes().to_vec(),
+        )),
         (ScalarType::Record, Value::Record(record)) => {
             Ok(TupleValue::Bytes(encode_composite_datum(&record)?))
         }
@@ -1655,7 +1849,11 @@ mod tests {
     #[test]
     fn record_storage_roundtrip_preserves_identity() {
         let desc = RelationDesc {
-            columns: vec![column_desc("v", SqlType::record(crate::include::catalog::RECORD_TYPE_OID), true)],
+            columns: vec![column_desc(
+                "v",
+                SqlType::record(crate::include::catalog::RECORD_TYPE_OID),
+                true,
+            )],
         };
         let value = Value::Record(RecordValue::named(
             4242,

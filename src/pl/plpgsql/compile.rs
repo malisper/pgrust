@@ -213,7 +213,11 @@ pub(crate) fn compile_function_from_proc(
                     output_slots.push(CompiledOutputSlot {
                         name: name.clone(),
                         slot,
-                        column: QueryColumn { name, sql_type },
+                        column: QueryColumn {
+                            name,
+                            sql_type,
+                            wire_type_oid: None,
+                        },
                     });
                 }
                 b'o' | b't' => {
@@ -221,7 +225,11 @@ pub(crate) fn compile_function_from_proc(
                     output_slots.push(CompiledOutputSlot {
                         name: name.clone(),
                         slot,
-                        column: QueryColumn { name, sql_type },
+                        column: QueryColumn {
+                            name,
+                            sql_type,
+                            wire_type_oid: None,
+                        },
                     });
                 }
                 _ => {}
@@ -292,6 +300,7 @@ fn function_return_contract(
                         .map(|column| QueryColumn {
                             name: column.name,
                             sql_type: column.sql_type,
+                            wire_type_oid: None,
                         })
                         .collect(),
                     setof: true,

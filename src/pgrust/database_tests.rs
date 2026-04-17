@@ -2845,6 +2845,7 @@ fn alter_table_add_column_uses_command_end_invalidation_and_rolls_back() {
             columns: vec![QueryColumn {
                 name: "note".into(),
                 sql_type: SqlType::new(SqlTypeKind::Text),
+                wire_type_oid: None
             }],
             column_names: vec!["note".into()],
             rows: vec![],

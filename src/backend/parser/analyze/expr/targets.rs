@@ -840,6 +840,7 @@ fn bind_select_list_srf_call(
                     output: QueryColumn {
                         name: "generate_series".into(),
                         sql_type: common,
+                        wire_type_oid: None,
                     },
                 },
                 common,
@@ -892,6 +893,7 @@ fn bind_select_list_srf_call(
                 output_columns.push(QueryColumn {
                     name: column_name,
                     sql_type: element_type,
+                    wire_type_oid: None,
                 });
             }
             if output_columns.len() != 1 {
@@ -930,6 +932,7 @@ fn bind_select_list_srf_call(
                     JsonTableFunction::ArrayElements => vec![QueryColumn {
                         name: "json_array_elements".into(),
                         sql_type: SqlType::new(SqlTypeKind::Json),
+                        wire_type_oid: None,
                     }],
                     JsonTableFunction::ArrayElementsText => {
                         vec![QueryColumn::text("json_array_elements_text")]
@@ -937,6 +940,7 @@ fn bind_select_list_srf_call(
                     JsonTableFunction::JsonbPathQuery => vec![QueryColumn {
                         name: "jsonb_path_query".into(),
                         sql_type: SqlType::new(SqlTypeKind::Jsonb),
+                        wire_type_oid: None,
                     }],
                     JsonTableFunction::JsonbObjectKeys => {
                         vec![QueryColumn::text("jsonb_object_keys")]
@@ -944,6 +948,7 @@ fn bind_select_list_srf_call(
                     JsonTableFunction::JsonbArrayElements => vec![QueryColumn {
                         name: "jsonb_array_elements".into(),
                         sql_type: SqlType::new(SqlTypeKind::Jsonb),
+                        wire_type_oid: None,
                     }],
                     JsonTableFunction::JsonbArrayElementsText => {
                         vec![QueryColumn::text("jsonb_array_elements_text")]
@@ -988,6 +993,7 @@ fn bind_select_list_srf_call(
                             vec![QueryColumn {
                                 name: "regexp_matches".into(),
                                 sql_type: SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
+                                wire_type_oid: None,
                             }]
                         }
                         crate::include::nodes::primnodes::RegexTableFunction::SplitToTable => {
@@ -1029,6 +1035,7 @@ fn bind_select_list_srf_call(
                     let output_columns = vec![QueryColumn {
                         name: other.to_string(),
                         sql_type: resolved.result_type,
+                        wire_type_oid: None,
                     }];
                     Ok((
                         SetReturningCall::UserDefined {
