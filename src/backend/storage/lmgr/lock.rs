@@ -143,6 +143,28 @@ impl TableLockManager {
         }
         self.cv.notify_all();
     }
+
+    pub fn unlock_all_for_client(&self, client_id: ClientId) {
+        let mut locks = self.locks.lock();
+        let mut released_any = false;
+        locks.retain(|_, entries| {
+            let before = entries.len();
+            entries.retain(|entry| entry.holder != client_id);
+            released_any |= entries.len() != before;
+            !entries.is_empty()
+        });
+        if released_any {
+            self.cv.notify_all();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_locks_for_client(&self, client_id: ClientId) -> bool {
+        self.locks
+            .lock()
+            .values()
+            .any(|entries| entries.iter().any(|entry| entry.holder == client_id))
+    }
 }
 
 pub(crate) fn unlock_relations(

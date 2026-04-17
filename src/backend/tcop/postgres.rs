@@ -454,6 +454,23 @@ struct CopyInState {
     pending: Vec<u8>,
 }
 
+struct ConnectionCleanupGuard<'a> {
+    db: &'a Database,
+    cluster: &'a Cluster,
+    state: &'a mut ConnectionState,
+}
+
+impl Drop for ConnectionCleanupGuard<'_> {
+    fn drop(&mut self) {
+        let client_id = self.state.session.client_id;
+        self.state.session.cleanup_on_disconnect(self.db);
+        self.db.cleanup_client_temp_relations(client_id);
+        self.db.clear_session_activity(client_id);
+        self.db.clear_interrupt_state(client_id);
+        self.cluster.unregister_connection(self.db.database_oid);
+    }
+}
+
 pub fn serve(addr: &str, cluster: Cluster) -> io::Result<()> {
     let listener = TcpListener::bind(addr)?;
     eprintln!("pgrust: listening on {addr}");
@@ -587,85 +604,90 @@ where
         copy_in: None,
     };
     db.register_session_activity(client_id);
+    let cleanup = ConnectionCleanupGuard {
+        db: &db,
+        cluster,
+        state: &mut state,
+    };
 
-    let result = loop {
-        let msg_type = match read_byte(&mut reader) {
-            Ok(b) => b,
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break Ok(()),
-            Err(e) => break Err(e),
-        };
+    let result = {
+        let state = &mut *cleanup.state;
+        loop {
+            let msg_type = match read_byte(&mut reader) {
+                Ok(b) => b,
+                Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break Ok(()),
+                Err(e) => break Err(e),
+            };
 
-        let len = read_i32(&mut reader)? as usize;
-        if len < 4 {
-            break Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "message too short",
-            ));
-        }
-        let mut body = vec![0u8; len - 4];
-        reader.read_exact(&mut body)?;
+            let len = read_i32(&mut reader)? as usize;
+            if len < 4 {
+                break Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "message too short",
+                ));
+            }
+            let mut body = vec![0u8; len - 4];
+            reader.read_exact(&mut body)?;
 
-        match msg_type {
-            b'Q' => {
-                let sql = cstr_from_bytes(&body);
-                handle_query(&mut writer, &db, &mut state, &sql)?;
-                writer.flush()?;
-            }
-            b'P' => {
-                handle_parse(&mut writer, &mut state, &body)?;
-                writer.flush()?;
-            }
-            b'B' => {
-                handle_bind(&mut writer, &db, &mut state, &body)?;
-                writer.flush()?;
-            }
-            b'D' => {
-                handle_describe(&mut writer, &db, &state, &body)?;
-                writer.flush()?;
-            }
-            b'E' => {
-                handle_execute(&mut writer, &db, &mut state, &body)?;
-                writer.flush()?;
-            }
-            b'S' => {
-                send_ready_for_query(&mut writer, state.session.ready_status())?;
-                writer.flush()?;
-            }
-            b'C' => {
-                handle_close(&mut writer, &mut state, &body)?;
-                writer.flush()?;
-            }
-            b'H' => {
-                writer.flush()?;
-            }
-            b'd' => handle_copy_data(&mut state, &body)?,
-            b'c' => {
-                handle_copy_done(&mut writer, &db, &mut state)?;
-                writer.flush()?;
-            }
-            b'f' => {
-                handle_copy_fail(&mut writer, &mut state, &body)?;
-                writer.flush()?;
-            }
-            b'X' => return Ok(()),
-            _ => {
-                send_error(
-                    &mut writer,
-                    "0A000",
-                    &format!("unsupported message type: '{}'", msg_type as char),
-                    None,
-                    None,
-                    None,
-                )?;
-                send_ready_for_query(&mut writer, state.session.ready_status())?;
-                writer.flush()?;
+            match msg_type {
+                b'Q' => {
+                    let sql = cstr_from_bytes(&body);
+                    handle_query(&mut writer, &db, state, &sql)?;
+                    writer.flush()?;
+                }
+                b'P' => {
+                    handle_parse(&mut writer, state, &body)?;
+                    writer.flush()?;
+                }
+                b'B' => {
+                    handle_bind(&mut writer, &db, state, &body)?;
+                    writer.flush()?;
+                }
+                b'D' => {
+                    handle_describe(&mut writer, &db, state, &body)?;
+                    writer.flush()?;
+                }
+                b'E' => {
+                    handle_execute(&mut writer, &db, state, &body)?;
+                    writer.flush()?;
+                }
+                b'S' => {
+                    send_ready_for_query(&mut writer, state.session.ready_status())?;
+                    writer.flush()?;
+                }
+                b'C' => {
+                    handle_close(&mut writer, state, &body)?;
+                    writer.flush()?;
+                }
+                b'H' => {
+                    writer.flush()?;
+                }
+                b'd' => handle_copy_data(state, &body)?,
+                b'c' => {
+                    handle_copy_done(&mut writer, &db, state)?;
+                    writer.flush()?;
+                }
+                b'f' => {
+                    handle_copy_fail(&mut writer, state, &body)?;
+                    writer.flush()?;
+                }
+                b'X' => break Ok(()),
+                _ => {
+                    send_error(
+                        &mut writer,
+                        "0A000",
+                        &format!("unsupported message type: '{}'", msg_type as char),
+                        None,
+                        None,
+                        None,
+                    )?;
+                    send_ready_for_query(&mut writer, state.session.ready_status())?;
+                    writer.flush()?;
+                }
             }
         }
     };
-    db.cleanup_client_temp_relations(client_id);
-    db.clear_session_activity(client_id);
-    db.clear_interrupt_state(client_id);
-    cluster.unregister_connection(db.database_oid);
+    drop(cleanup);
     result
 }
 
@@ -3496,8 +3518,10 @@ mod tests {
     use crate::backend::catalog::catalog::column_desc;
     use crate::backend::executor::RelationDesc;
     use crate::backend::parser::{SqlType, SqlTypeKind};
+    use crate::pgrust::cluster::Cluster;
     use crate::pgrust::database::Database;
     use crate::pgrust::session::Session;
+    use std::io::Cursor;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -3508,6 +3532,44 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    fn startup_packet(user: &str, database: &str) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&PROTOCOL_VERSION_3_0.to_be_bytes());
+        payload.extend_from_slice(b"user");
+        payload.push(0);
+        payload.extend_from_slice(user.as_bytes());
+        payload.push(0);
+        payload.extend_from_slice(b"database");
+        payload.push(0);
+        payload.extend_from_slice(database.as_bytes());
+        payload.push(0);
+        payload.push(0);
+
+        let mut packet = Vec::new();
+        packet.extend_from_slice(&((payload.len() + 4) as i32).to_be_bytes());
+        packet.extend_from_slice(&payload);
+        packet
+    }
+
+    fn frontend_message(tag: u8, body: &[u8]) -> Vec<u8> {
+        let mut packet = vec![tag];
+        packet.extend_from_slice(&((body.len() + 4) as i32).to_be_bytes());
+        packet.extend_from_slice(body);
+        packet
+    }
+
+    fn query_message(sql: &str) -> Vec<u8> {
+        let mut body = sql.as_bytes().to_vec();
+        body.push(0);
+        frontend_message(b'Q', &body)
+    }
+
+    fn terminate_message() -> Vec<u8> {
+        let mut packet = vec![b'X'];
+        packet.extend_from_slice(&4_i32.to_be_bytes());
+        packet
     }
 
     #[test]
@@ -3578,6 +3640,42 @@ mod tests {
             .map(|row| row.oid)
             .unwrap();
         assert_eq!(state.session.current_user_oid(), tenant_oid);
+    }
+
+    #[test]
+    fn terminate_message_releases_backend_locks_and_aborts_open_transaction() {
+        let cluster = Cluster::open(temp_dir("terminate_cleanup"), 16).unwrap();
+        let db = cluster.connect_database("postgres").unwrap();
+        let mut waiter = Session::new(2);
+
+        db.execute(1, "create table widgets (id int4)").unwrap();
+
+        let mut input = startup_packet("postgres", "postgres");
+        input.extend(query_message(
+            "begin; comment on table widgets is 'held by terminated backend';",
+        ));
+        input.extend(terminate_message());
+
+        let mut output = Vec::new();
+        handle_connection_with_io(Cursor::new(input), &mut output, &cluster, 41).unwrap();
+
+        assert!(cluster.shared().session_activity.read().is_empty());
+        let snapshot = db
+            .txns
+            .read()
+            .snapshot(crate::backend::access::transam::xact::INVALID_TRANSACTION_ID)
+            .unwrap();
+        assert_eq!(snapshot.xmin, snapshot.xmax);
+
+        waiter
+            .execute(&db, "set statement_timeout = '200ms'")
+            .unwrap();
+        match waiter.execute(&db, "select count(*) from widgets").unwrap() {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int64(0)]]);
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
     }
 
     #[test]
