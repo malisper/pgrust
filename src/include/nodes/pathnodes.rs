@@ -6,7 +6,8 @@ use crate::include::nodes::parsenodes::{Query, RangeTblEntry, RangeTblEntryKind}
 use crate::include::nodes::plannodes::PlanEstimate;
 use crate::include::nodes::primnodes::{
     AggAccum, Expr, JoinType, OrderByEntry, ProjectSetTarget, QueryColumn, RelationDesc,
-    SetReturningCall, SortGroupClause, TargetEntry, ToastRelationRef, Var, user_attrno,
+    SetReturningCall, SortGroupClause, TargetEntry, ToastRelationRef, Var, WindowClause,
+    user_attrno,
 };
 use crate::include::nodes::parsenodes::SetOperator;
 
@@ -255,6 +256,7 @@ impl Default for PlannerGlobal {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpperRelKind {
     GroupAgg,
+    Window,
     ProjectSet,
     Ordered,
     Final,
@@ -281,6 +283,7 @@ pub struct PlannerInfo {
     pub scanjoin_target: PathTarget,
     pub group_input_target: PathTarget,
     pub grouped_target: PathTarget,
+    pub window_input_target: PathTarget,
     pub sort_input_target: PathTarget,
     pub final_target: PathTarget,
     pub query_pathkeys: Vec<PathKey>,
@@ -408,6 +411,13 @@ pub enum Path {
         group_by: Vec<Expr>,
         accumulators: Vec<AggAccum>,
         having: Option<Expr>,
+        output_columns: Vec<QueryColumn>,
+    },
+    WindowAgg {
+        plan_info: PlanEstimate,
+        slot_id: usize,
+        input: Box<Path>,
+        clause: WindowClause,
         output_columns: Vec<QueryColumn>,
     },
     Values {

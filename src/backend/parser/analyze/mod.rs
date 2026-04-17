@@ -16,6 +16,7 @@ mod ranges;
 mod scope;
 mod system_views;
 mod views;
+mod window;
 
 use crate::RelFileLocator;
 use crate::backend::catalog::catalog::column_desc;
@@ -70,6 +71,9 @@ pub use scope::BoundRelation;
 use scope::*;
 use system_views::*;
 pub(crate) use views::analyze_view_rule_sql;
+use window::*;
+use std::cell::RefCell;
+use std::rc::Rc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundIndexRelation {
@@ -986,6 +990,7 @@ fn bind_ctes(
                         where_qual: None,
                         group_by: Vec::new(),
                         accumulators: Vec::new(),
+                        window_clauses: Vec::new(),
                         having_qual: None,
                         sort_clause: Vec::new(),
                         limit_count: None,
@@ -1049,6 +1054,7 @@ fn bind_ctes(
                         where_qual: None,
                         group_by: Vec::new(),
                         accumulators: Vec::new(),
+                        window_clauses: Vec::new(),
                         having_qual: None,
                         sort_clause: Vec::new(),
                         limit_count: None,
@@ -1244,6 +1250,7 @@ fn bind_values_query_with_outer(
             where_qual: None,
             group_by: Vec::new(),
             accumulators: Vec::new(),
+            window_clauses: Vec::new(),
             having_qual: None,
             sort_clause,
             limit_count: stmt.limit,
@@ -1329,6 +1336,13 @@ fn bind_select_query_with_outer(
         if expr_contains_agg(predicate) {
             return Err(ParseError::AggInWhere);
         }
+        reject_window_clause(predicate, "WHERE")?;
+    }
+    for group_expr in &stmt.group_by {
+        reject_window_clause(group_expr, "GROUP BY")?;
+    }
+    if let Some(having) = &stmt.having {
+        reject_window_clause(having, "HAVING")?;
     }
 
     let bound_where_qual = stmt
@@ -1385,6 +1399,8 @@ fn bind_select_query_with_outer(
     } else {
         bound_where_qual
     };
+
+    let window_state = Rc::new(RefCell::new(WindowBindingState::default()));
 
     if needs_agg {
         let mut aggs: Vec<(AggFunc, Vec<SqlFunctionArg>, bool, bool, Option<SqlExpr>)> =
@@ -1546,102 +1562,107 @@ fn bind_select_query_with_outer(
             })
             .transpose()?;
 
-        let targets: Vec<TargetEntry> = if stmt.targets.len() == 1
-            && matches!(stmt.targets[0].expr, SqlExpr::Column(ref name) if name == "*")
-        {
-            let mut targets = Vec::with_capacity(output_columns.len());
-            for (i, name) in output_columns.iter().enumerate().take(n_keys) {
-                targets.push(TargetEntry::new(
-                    name.name.clone(),
-                    group_keys.get(i).cloned().unwrap_or_else(|| {
-                        panic!(
-                            "aggregate SELECT * missing grouped key expr for target position {}",
-                            i + 1
-                        )
-                    }),
-                    name.sql_type,
-                    i + 1,
-                )
-                .with_input_resno(i + 1));
-            }
-            for (i, accum) in accumulators.iter().enumerate() {
-                let target_index = n_keys + i;
-                let name = output_columns
-                    .get(target_index)
-                    .expect("aggregate output column")
-                    .name
-                    .clone();
-                targets.push(TargetEntry::new(
-                    name,
-                    Expr::aggref(
-                        accum.aggfnoid,
-                        accum.sql_type,
-                        accum.agg_variadic,
-                        accum.distinct,
-                        accum.args.clone(),
-                        accum.filter.clone(),
-                        i,
-                    ),
-                    accum.sql_type,
-                    target_index + 1,
-                ));
-            }
-            targets
-        } else {
-            stmt.targets
-                .iter()
-                .enumerate()
-                .map(|(index, item)| {
-                    Ok(TargetEntry::new(
-                        item.output_name.clone(),
-                        bind_agg_output_expr_in_clause(
-                            &item.expr,
-                            UngroupedColumnClause::SelectTarget,
-                            &stmt.group_by,
-                            &group_keys,
-                            &scope,
-                            catalog,
-                            outer_scopes,
-                            grouped_outer.as_ref(),
-                            &aggs,
-                            n_keys,
-                        )?,
-                        infer_sql_expr_type_with_ctes(
-                            &item.expr,
-                            &scope,
-                            catalog,
-                            outer_scopes,
-                            grouped_outer.as_ref(),
-                            &visible_ctes,
+        let targets: Vec<TargetEntry> = with_window_binding(window_state.clone(), true, || {
+            if stmt.targets.len() == 1
+                && matches!(stmt.targets[0].expr, SqlExpr::Column(ref name) if name == "*")
+            {
+                let mut targets = Vec::with_capacity(output_columns.len());
+                for (i, name) in output_columns.iter().enumerate().take(n_keys) {
+                    targets.push(TargetEntry::new(
+                        name.name.clone(),
+                        group_keys.get(i).cloned().unwrap_or_else(|| {
+                            panic!(
+                                "aggregate SELECT * missing grouped key expr for target position {}",
+                                i + 1
+                            )
+                        }),
+                        name.sql_type,
+                        i + 1,
+                    )
+                    .with_input_resno(i + 1));
+                }
+                for (i, accum) in accumulators.iter().enumerate() {
+                    let target_index = n_keys + i;
+                    let name = output_columns
+                        .get(target_index)
+                        .expect("aggregate output column")
+                        .name
+                        .clone();
+                    targets.push(TargetEntry::new(
+                        name,
+                        Expr::aggref(
+                            accum.aggfnoid,
+                            accum.sql_type,
+                            accum.agg_variadic,
+                            accum.distinct,
+                            accum.args.clone(),
+                            accum.filter.clone(),
+                            i,
                         ),
-                        index + 1,
-                    ))
-                })
-                .collect::<Result<_, _>>()?
-        };
+                        accum.sql_type,
+                        target_index + 1,
+                    ));
+                }
+                Ok(targets)
+            } else {
+                stmt.targets
+                    .iter()
+                    .enumerate()
+                    .map(|(index, item)| {
+                        Ok(TargetEntry::new(
+                            item.output_name.clone(),
+                            bind_agg_output_expr_in_clause(
+                                &item.expr,
+                                UngroupedColumnClause::SelectTarget,
+                                &stmt.group_by,
+                                &group_keys,
+                                &scope,
+                                catalog,
+                                outer_scopes,
+                                grouped_outer.as_ref(),
+                                &aggs,
+                                n_keys,
+                            )?,
+                            infer_sql_expr_type_with_ctes(
+                                &item.expr,
+                                &scope,
+                                catalog,
+                                outer_scopes,
+                                grouped_outer.as_ref(),
+                                &visible_ctes,
+                            ),
+                            index + 1,
+                        ))
+                    })
+                    .collect::<Result<_, _>>()
+            }
+        })?;
 
-        let sort_inputs = if stmt.order_by.is_empty() {
-            Vec::new()
-        } else {
-            bind_order_by_items(&stmt.order_by, &targets, |expr| {
-                bind_agg_output_expr_in_clause(
-                    expr,
-                    UngroupedColumnClause::SelectTarget,
-                    &stmt.group_by,
-                    &group_keys,
-                    &scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer.as_ref(),
-                    &aggs,
-                    n_keys,
-                )
-            })?
-        };
+        let sort_inputs = with_window_binding(window_state.clone(), true, || {
+            if stmt.order_by.is_empty() {
+                Ok(Vec::new())
+            } else {
+                bind_order_by_items(&stmt.order_by, &targets, |expr| {
+                    bind_agg_output_expr_in_clause(
+                        expr,
+                        UngroupedColumnClause::SelectTarget,
+                        &stmt.group_by,
+                        &group_keys,
+                        &scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer.as_ref(),
+                        &aggs,
+                        n_keys,
+                    )
+                })
+            }
+        })?;
         let targets = targets;
         let sort_inputs = sort_inputs;
         let sort_clause = build_sort_clause(sort_inputs, &targets);
         let target_list = normalize_target_list(targets);
+        let window_clauses = take_window_clauses(&window_state);
 
         Ok((
             Query {
@@ -1652,6 +1673,7 @@ fn bind_select_query_with_outer(
                 where_qual,
                 group_by: rewritten_group_keys,
                 accumulators,
+                window_clauses,
                 having_qual: having,
                 sort_clause,
                 limit_count: stmt.limit,
@@ -1663,32 +1685,37 @@ fn bind_select_query_with_outer(
             scope,
         ))
     } else {
-        let bound_targets = bind_select_targets(
-            &stmt.targets,
-            &scope,
-            catalog,
-            outer_scopes,
-            grouped_outer.as_ref(),
-            &visible_ctes,
-        )?;
+        let bound_targets = with_window_binding(window_state.clone(), true, || {
+            bind_select_targets(
+                &stmt.targets,
+                &scope,
+                catalog,
+                outer_scopes,
+                grouped_outer.as_ref(),
+                &visible_ctes,
+            )
+        })?;
 
         match bound_targets {
             BoundSelectTargets::Plain(targets) => {
-                let sort_inputs = if stmt.order_by.is_empty() {
-                    Vec::new()
-                } else {
-                    bind_order_by_items(&stmt.order_by, &targets, |expr| {
-                        bind_expr_with_outer_and_ctes(
-                            expr,
-                            &scope,
-                            catalog,
-                            outer_scopes,
-                            grouped_outer.as_ref(),
-                            &visible_ctes,
-                        )
-                    })?
-                };
+                let sort_inputs = with_window_binding(window_state.clone(), true, || {
+                    if stmt.order_by.is_empty() {
+                        Ok(Vec::new())
+                    } else {
+                        bind_order_by_items(&stmt.order_by, &targets, |expr| {
+                            bind_expr_with_outer_and_ctes(
+                                expr,
+                                &scope,
+                                catalog,
+                                outer_scopes,
+                                grouped_outer.as_ref(),
+                                &visible_ctes,
+                            )
+                        })
+                    }
+                })?;
                 let sort_clause = build_sort_clause(sort_inputs, &targets);
+                let window_clauses = take_window_clauses(&window_state);
 
                 let is_identity = targets.len() == base.output_columns.len()
                     && targets.iter().enumerate().all(|(i, t)| {
@@ -1712,6 +1739,7 @@ fn bind_select_query_with_outer(
                         where_qual,
                         group_by: Vec::new(),
                         accumulators: Vec::new(),
+                        window_clauses,
                         having_qual: None,
                         sort_clause,
                         limit_count: stmt.limit,
@@ -1727,20 +1755,29 @@ fn bind_select_query_with_outer(
                 project_targets,
                 final_targets,
             } => {
-                let sort_inputs = if stmt.order_by.is_empty() {
-                    Vec::new()
-                } else {
-                    bind_order_by_items(&stmt.order_by, &final_targets, |expr| {
-                        bind_expr_with_outer_and_ctes(
-                            expr,
-                            &scope,
-                            catalog,
-                            outer_scopes,
-                            grouped_outer.as_ref(),
-                            &visible_ctes,
-                        )
-                    })?
-                };
+                let sort_inputs = with_window_binding(window_state.clone(), true, || {
+                    if stmt.order_by.is_empty() {
+                        Ok(Vec::new())
+                    } else {
+                        bind_order_by_items(&stmt.order_by, &final_targets, |expr| {
+                            bind_expr_with_outer_and_ctes(
+                                expr,
+                                &scope,
+                                catalog,
+                                outer_scopes,
+                                grouped_outer.as_ref(),
+                                &visible_ctes,
+                            )
+                        })
+                    }
+                })?;
+                let window_clauses = take_window_clauses(&window_state);
+                if !window_clauses.is_empty() {
+                    return Err(ParseError::FeatureNotSupported(
+                        "queries mixing window functions with select-list set-returning functions"
+                            .into(),
+                    ));
+                }
                 let sort_clause = build_sort_clause(sort_inputs, &final_targets);
                 let target_list = normalize_target_list(final_targets);
                 Ok((
@@ -1752,6 +1789,7 @@ fn bind_select_query_with_outer(
                         where_qual,
                         group_by: Vec::new(),
                         accumulators: Vec::new(),
+                        window_clauses,
                         having_qual: None,
                         sort_clause,
                         limit_count: stmt.limit,
@@ -1899,6 +1937,7 @@ fn bind_set_operation_query_with_outer(
             where_qual: None,
             group_by: Vec::new(),
             accumulators: Vec::new(),
+            window_clauses: Vec::new(),
             having_qual: None,
             sort_clause,
             limit_count: stmt.limit,

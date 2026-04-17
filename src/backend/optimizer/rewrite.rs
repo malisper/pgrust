@@ -61,6 +61,7 @@ fn path_relids(path: &Path) -> Vec<usize> {
         | Path::OrderBy { input, .. }
         | Path::Limit { input, .. }
         | Path::Aggregate { input, .. }
+        | Path::WindowAgg { input, .. }
         | Path::ProjectSet { input, .. } => path_relids(input),
         Path::SubqueryScan { rtindex, .. } => vec![*rtindex],
         Path::Values { slot_id, .. }

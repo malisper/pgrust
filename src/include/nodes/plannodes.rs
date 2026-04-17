@@ -6,7 +6,7 @@ use crate::include::access::scankey::ScanKeyData;
 use crate::include::executor::execdesc::CommandType;
 use crate::include::nodes::primnodes::{
     AggAccum, Expr, JoinType, OrderByEntry, ProjectSetTarget, QueryColumn, RelationDesc,
-    SetReturningCall, TargetEntry, ToastRelationRef,
+    SetReturningCall, TargetEntry, ToastRelationRef, WindowClause,
 };
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -156,6 +156,12 @@ pub enum Plan {
         having: Option<Expr>,
         output_columns: Vec<QueryColumn>,
     },
+    WindowAgg {
+        plan_info: PlanEstimate,
+        input: Box<Plan>,
+        clause: WindowClause,
+        output_columns: Vec<QueryColumn>,
+    },
     FunctionScan {
         plan_info: PlanEstimate,
         call: SetReturningCall,
@@ -217,6 +223,7 @@ impl Plan {
             | Plan::Limit { plan_info, .. }
             | Plan::Projection { plan_info, .. }
             | Plan::Aggregate { plan_info, .. }
+            | Plan::WindowAgg { plan_info, .. }
             | Plan::SubqueryScan { plan_info, .. }
             | Plan::CteScan { plan_info, .. }
             | Plan::WorkTableScan { plan_info, .. }
@@ -242,6 +249,7 @@ impl Plan {
             | Plan::Limit { plan_info, .. }
             | Plan::Projection { plan_info, .. }
             | Plan::Aggregate { plan_info, .. }
+            | Plan::WindowAgg { plan_info, .. }
             | Plan::SubqueryScan { plan_info, .. }
             | Plan::CteScan { plan_info, .. }
             | Plan::WorkTableScan { plan_info, .. }
@@ -292,6 +300,7 @@ impl Plan {
                 })
                 .collect(),
             Plan::Aggregate { output_columns, .. } => output_columns.clone(),
+            Plan::WindowAgg { output_columns, .. } => output_columns.clone(),
             Plan::SubqueryScan { output_columns, .. } => output_columns.clone(),
             Plan::CteScan { output_columns, .. } => output_columns.clone(),
             Plan::WorkTableScan { output_columns, .. }

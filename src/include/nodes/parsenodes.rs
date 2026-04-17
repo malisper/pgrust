@@ -3,7 +3,7 @@ use crate::include::nodes::datum::Value;
 use crate::include::nodes::primnodes::AggFunc;
 use crate::include::nodes::primnodes::{
     AggAccum, Expr, JoinType, ProjectSetTarget, QueryColumn, RelationDesc, SetReturningCall,
-    SortGroupClause, TargetEntry, ToastRelationRef,
+    SortGroupClause, TargetEntry, ToastRelationRef, WindowClause,
 };
 use std::fmt;
 
@@ -38,6 +38,7 @@ pub enum ParseError {
     TableAlreadyExists(String),
     TableDoesNotExist(String),
     UnsupportedType(String),
+    WindowingError(String),
     UndefinedOperator {
         op: &'static str,
         left_type: String,
@@ -109,6 +110,7 @@ impl fmt::Display for ParseError {
             ParseError::TableAlreadyExists(name) => write!(f, "table already exists: {name}"),
             ParseError::TableDoesNotExist(name) => write!(f, "table does not exist: {name}"),
             ParseError::UnsupportedType(name) => write!(f, "unsupported type: {name}"),
+            ParseError::WindowingError(message) => write!(f, "{message}"),
             ParseError::UndefinedOperator {
                 op,
                 left_type,
@@ -275,6 +277,7 @@ pub struct Query {
     pub where_qual: Option<Expr>,
     pub group_by: Vec<Expr>,
     pub accumulators: Vec<AggAccum>,
+    pub window_clauses: Vec<WindowClause>,
     pub having_qual: Option<Expr>,
     pub sort_clause: Vec<SortGroupClause>,
     pub limit_count: Option<usize>,
@@ -669,6 +672,12 @@ pub struct OrderByItem {
     pub expr: SqlExpr,
     pub descending: bool,
     pub nulls_first: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawWindowSpec {
+    pub partition_by: Vec<SqlExpr>,
+    pub order_by: Vec<OrderByItem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1662,6 +1671,7 @@ pub enum SqlExpr {
         distinct: bool,
         func_variadic: bool,
         filter: Option<Box<SqlExpr>>,
+        over: Option<RawWindowSpec>,
     },
     ScalarSubquery(Box<SelectStatement>),
     Exists(Box<SelectStatement>),
@@ -1695,6 +1705,7 @@ pub enum SqlExpr {
         name: String,
         args: Vec<SqlFunctionArg>,
         func_variadic: bool,
+        over: Option<RawWindowSpec>,
     },
     FieldSelect {
         expr: Box<SqlExpr>,

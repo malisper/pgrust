@@ -13,6 +13,18 @@ pub(super) fn collect_rels_from_expr(expr: &Expr, rels: &mut BTreeSet<RelFileLoc
                 collect_rels_from_expr(arg, rels);
             }
         }
+        Expr::WindowFunc(window_func) => {
+            for arg in &window_func.args {
+                collect_rels_from_expr(arg, rels);
+            }
+            if let crate::include::nodes::primnodes::WindowFuncKind::Aggregate(aggref) =
+                &window_func.kind
+            {
+                if let Some(filter) = aggref.aggfilter.as_ref() {
+                    collect_rels_from_expr(filter, rels);
+                }
+            }
+        }
         Expr::Op(op) => {
             for arg in &op.args {
                 collect_rels_from_expr(arg, rels);
@@ -295,6 +307,27 @@ pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLoc
             collect_rels_from_plan(input, rels);
             for item in items {
                 collect_rels_from_expr(&item.expr, rels);
+            }
+        }
+        Plan::WindowAgg { input, clause, .. } => {
+            collect_rels_from_plan(input, rels);
+            for expr in &clause.spec.partition_by {
+                collect_rels_from_expr(expr, rels);
+            }
+            for item in &clause.spec.order_by {
+                collect_rels_from_expr(&item.expr, rels);
+            }
+            for func in &clause.functions {
+                for arg in &func.args {
+                    collect_rels_from_expr(arg, rels);
+                }
+                if let crate::include::nodes::primnodes::WindowFuncKind::Aggregate(aggref) =
+                    &func.kind
+                {
+                    if let Some(filter) = aggref.aggfilter.as_ref() {
+                        collect_rels_from_expr(filter, rels);
+                    }
+                }
             }
         }
         Plan::Limit { input, .. } => collect_rels_from_plan(input, rels),

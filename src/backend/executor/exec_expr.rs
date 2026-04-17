@@ -603,6 +603,15 @@ pub fn eval_expr(
             hint: None,
             sqlstate: "XX000",
         }),
+        Expr::WindowFunc(_) => Err(ExecError::DetailedError {
+            message: "window function reached executor outside window lowering".into(),
+            detail: Some(
+                "the planner should have lowered WindowFunc nodes to window output references before execution"
+                    .into(),
+            ),
+            hint: None,
+            sqlstate: "XX000",
+        }),
         Expr::ScalarArrayOp(saop) => eval_scalar_array_op_expr(saop, slot, ctx),
         Expr::SubLink(_) => Err(ExecError::DetailedError {
             message: "unplanned subquery reached executor".into(),

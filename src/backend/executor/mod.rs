@@ -30,6 +30,7 @@ mod srf;
 mod startup;
 mod tsearch;
 pub(crate) mod value_io;
+mod window;
 pub(crate) mod expr {
     pub(crate) use super::exec_expr::*;
 }
