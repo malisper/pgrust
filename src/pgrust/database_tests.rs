@@ -250,6 +250,48 @@ fn recursive_cte_rejects_self_reference_inside_subquery() {
     ));
 }
 
+#[test]
+fn recursive_cte_rejects_unsupported_term_decorations() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    for (sql, expected) in [
+        (
+            "with recursive x(n) as (
+                select 1
+                union all
+                select n + 1 from x order by 1
+            )
+            select * from x",
+            "ORDER BY in a recursive query is not implemented",
+        ),
+        (
+            "with recursive x(n) as (
+                select 1
+                union all
+                select n + 1 from x limit 10 offset 1
+            )
+            select * from x",
+            "OFFSET in a recursive query is not implemented",
+        ),
+        (
+            "with recursive x(n) as (
+                select 1
+                union all
+                select n + 1 from x for update
+            )
+            select * from x",
+            "FOR UPDATE/SHARE in a recursive query is not implemented",
+        ),
+    ] {
+        let err = session.execute(&db, sql).unwrap_err();
+        assert!(matches!(
+            err,
+            ExecError::Parse(ParseError::FeatureNotSupported(message)) if message == expected
+        ));
+    }
+}
+
 fn assert_single_int_column_rows(result: StatementResult, expected: Vec<Vec<Value>>) {
     match result {
         StatementResult::Query { rows, .. } => assert_eq!(rows, expected),

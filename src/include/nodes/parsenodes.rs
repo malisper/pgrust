@@ -521,7 +521,14 @@ pub struct SelectStatement {
     pub order_by: Vec<OrderByItem>,
     pub limit: Option<usize>,
     pub offset: Option<usize>,
+    pub locking_clause: Option<SelectLockingClause>,
     pub set_operation: Option<Box<SetOperationStatement>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectLockingClause {
+    ForUpdate,
+    ForShare,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

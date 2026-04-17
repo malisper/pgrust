@@ -1516,7 +1516,34 @@ fn validate_recursive_cte_recursive_term(
     stmt: &SelectStatement,
     cte_name: &str,
 ) -> Result<(), ParseError> {
+    validate_recursive_cte_recursive_term_decorations(stmt)?;
     RecursiveReferenceChecker::new(cte_name).validate_recursive_term(stmt)
+}
+
+fn validate_recursive_cte_recursive_term_decorations(
+    stmt: &SelectStatement,
+) -> Result<(), ParseError> {
+    if !stmt.order_by.is_empty() {
+        return Err(ParseError::FeatureNotSupported(
+            "ORDER BY in a recursive query is not implemented".into(),
+        ));
+    }
+    if stmt.offset.is_some() {
+        return Err(ParseError::FeatureNotSupported(
+            "OFFSET in a recursive query is not implemented".into(),
+        ));
+    }
+    if stmt.limit.is_some() {
+        return Err(ParseError::FeatureNotSupported(
+            "LIMIT in a recursive query is not implemented".into(),
+        ));
+    }
+    if stmt.locking_clause.is_some() {
+        return Err(ParseError::FeatureNotSupported(
+            "FOR UPDATE/SHARE in a recursive query is not implemented".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn select_statement_references_table(stmt: &SelectStatement, table_name: &str) -> bool {
@@ -1898,6 +1925,9 @@ fn bind_select_query_with_outer(
     outer_ctes: &[BoundCte],
     expanded_views: &[u32],
 ) -> Result<(Query, BoundScope), ParseError> {
+    if stmt.locking_clause.is_some() {
+        return Err(ParseError::FeatureNotSupported("FOR UPDATE/SHARE".into()));
+    }
     let local_ctes = bind_ctes(
         stmt.with_recursive,
         &stmt.with,
