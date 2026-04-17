@@ -3515,6 +3515,331 @@ fn array_assignment_coerces_text_literals_using_target_type() {
         ExecError::StringDataRightTruncation { ref ty } if ty == "character(5)"
     ));
 }
+
+#[test]
+fn array_slice_assignment_multidimensional_cases_match_postgres() {
+    let base = temp_dir("array_slice_assignment_multidimensional");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+
+    let insert_xid = txns.begin();
+    assert_eq!(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            insert_xid,
+            "insert into t values ('{1,2,3,4,5}'::int[], '{{1,2,3},{4,5,6},{7,8,9}}'::int[])",
+            array_subscript_catalog(),
+        )
+        .unwrap(),
+        StatementResult::AffectedRows(1)
+    );
+    txns.commit(insert_xid).unwrap();
+
+    let update_xid = txns.begin();
+    assert_eq!(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            update_xid,
+            "update t set a[:3] = '{11,12,13}', b[:2][:2] = '{{11,12},{14,15}}'",
+            array_subscript_catalog(),
+        )
+        .unwrap(),
+        StatementResult::AffectedRows(1)
+    );
+    txns.commit(update_xid).unwrap();
+
+    assert_query_rows(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select a, b from t",
+            array_subscript_catalog(),
+        )
+        .unwrap(),
+        vec![vec![
+            Value::PgArray(
+                ArrayValue::from_dimensions(
+                    vec![ArrayDimension {
+                        lower_bound: 1,
+                        length: 5,
+                    }],
+                    vec![
+                        Value::Int32(11),
+                        Value::Int32(12),
+                        Value::Int32(13),
+                        Value::Int32(4),
+                        Value::Int32(5),
+                    ],
+                )
+                .with_element_type_oid(crate::include::catalog::INT4_TYPE_OID),
+            ),
+            Value::PgArray(
+                ArrayValue::from_dimensions(
+                    vec![
+                        ArrayDimension {
+                            lower_bound: 1,
+                            length: 3,
+                        },
+                        ArrayDimension {
+                            lower_bound: 1,
+                            length: 3,
+                        },
+                    ],
+                    vec![
+                        Value::Int32(11),
+                        Value::Int32(12),
+                        Value::Int32(3),
+                        Value::Int32(14),
+                        Value::Int32(15),
+                        Value::Int32(6),
+                        Value::Int32(7),
+                        Value::Int32(8),
+                        Value::Int32(9),
+                    ],
+                )
+                .with_element_type_oid(crate::include::catalog::INT4_TYPE_OID),
+            ),
+        ]],
+    );
+
+    let second_update_xid = txns.begin();
+    assert_eq!(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            second_update_xid,
+            "update t set a[3:] = '{23,24,25}', b[2:][2:] = '{{25,26},{28,29}}'",
+            array_subscript_catalog(),
+        )
+        .unwrap(),
+        StatementResult::AffectedRows(1)
+    );
+    txns.commit(second_update_xid).unwrap();
+
+    assert_query_rows(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select a, b from t",
+            array_subscript_catalog(),
+        )
+        .unwrap(),
+        vec![vec![
+            Value::PgArray(
+                ArrayValue::from_dimensions(
+                    vec![ArrayDimension {
+                        lower_bound: 1,
+                        length: 5,
+                    }],
+                    vec![
+                        Value::Int32(11),
+                        Value::Int32(12),
+                        Value::Int32(23),
+                        Value::Int32(24),
+                        Value::Int32(25),
+                    ],
+                )
+                .with_element_type_oid(crate::include::catalog::INT4_TYPE_OID),
+            ),
+            Value::PgArray(
+                ArrayValue::from_dimensions(
+                    vec![
+                        ArrayDimension {
+                            lower_bound: 1,
+                            length: 3,
+                        },
+                        ArrayDimension {
+                            lower_bound: 1,
+                            length: 3,
+                        },
+                    ],
+                    vec![
+                        Value::Int32(11),
+                        Value::Int32(12),
+                        Value::Int32(3),
+                        Value::Int32(14),
+                        Value::Int32(25),
+                        Value::Int32(26),
+                        Value::Int32(7),
+                        Value::Int32(28),
+                        Value::Int32(29),
+                    ],
+                )
+                .with_element_type_oid(crate::include::catalog::INT4_TYPE_OID),
+            ),
+        ]],
+    );
+}
+
+#[test]
+fn array_slice_assignment_uses_existing_bounds_for_omitted_limits() {
+    let base = temp_dir("array_slice_assignment_existing_bounds");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+
+    let insert_xid = txns.begin();
+    assert_eq!(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            insert_xid,
+            "insert into t values ('[0:4]={1,2,3,4,5}', '[0:2][0:2]={{1,2,3},{4,5,6},{7,8,9}}')",
+            array_subscript_catalog(),
+        )
+        .unwrap(),
+        StatementResult::AffectedRows(1)
+    );
+    txns.commit(insert_xid).unwrap();
+
+    let update_xid = txns.begin();
+    assert_eq!(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            update_xid,
+            "update t set a[3:] = '{23,24,25}', b[2:][2:] = '{{25,26},{28,29}}'",
+            array_subscript_catalog(),
+        )
+        .unwrap(),
+        StatementResult::AffectedRows(1)
+    );
+    txns.commit(update_xid).unwrap();
+
+    assert_query_rows(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select a, b from t",
+            array_subscript_catalog(),
+        )
+        .unwrap(),
+        vec![vec![
+            Value::PgArray(
+                ArrayValue::from_dimensions(
+                    vec![ArrayDimension {
+                        lower_bound: 0,
+                        length: 5,
+                    }],
+                    vec![
+                        Value::Int32(1),
+                        Value::Int32(2),
+                        Value::Int32(3),
+                        Value::Int32(23),
+                        Value::Int32(24),
+                    ],
+                )
+                .with_element_type_oid(crate::include::catalog::INT4_TYPE_OID),
+            ),
+            Value::PgArray(
+                ArrayValue::from_dimensions(
+                    vec![
+                        ArrayDimension {
+                            lower_bound: 0,
+                            length: 3,
+                        },
+                        ArrayDimension {
+                            lower_bound: 0,
+                            length: 3,
+                        },
+                    ],
+                    vec![
+                        Value::Int32(1),
+                        Value::Int32(2),
+                        Value::Int32(3),
+                        Value::Int32(4),
+                        Value::Int32(5),
+                        Value::Int32(6),
+                        Value::Int32(7),
+                        Value::Int32(8),
+                        Value::Int32(25),
+                    ],
+                )
+                .with_element_type_oid(crate::include::catalog::INT4_TYPE_OID),
+            ),
+        ]],
+    );
+}
+
+#[test]
+fn array_slice_assignment_rejects_too_small_sources() {
+    let base = temp_dir("array_slice_assignment_source_too_small");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+
+    let insert_xid = txns.begin();
+    assert_eq!(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            insert_xid,
+            "insert into t values ('{1,2,3,4,5}'::int[], null)",
+            array_subscript_catalog(),
+        )
+        .unwrap(),
+        StatementResult::AffectedRows(1)
+    );
+    txns.commit(insert_xid).unwrap();
+
+    let update_xid = txns.begin();
+    let err = run_sql_with_catalog(
+        &base,
+        &txns,
+        update_xid,
+        "update t set a[:] = '{23,24,25}'",
+        array_subscript_catalog(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError { message, sqlstate, .. }
+            if message == "source array too small" && sqlstate == "2202E"
+    ));
+}
+
+#[test]
+fn array_slice_assignment_requires_full_bounds_for_null_arrays() {
+    let base = temp_dir("array_slice_assignment_null_array_bounds");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+
+    let insert_xid = txns.begin();
+    assert_eq!(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            insert_xid,
+            "insert into t values (null, null)",
+            array_subscript_catalog(),
+        )
+        .unwrap(),
+        StatementResult::AffectedRows(1)
+    );
+    txns.commit(insert_xid).unwrap();
+
+    let update_xid = txns.begin();
+    let err = run_sql_with_catalog(
+        &base,
+        &txns,
+        update_xid,
+        "update t set a[:] = '{11,12,13,14,15}'",
+        array_subscript_catalog(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError {
+            message,
+            detail,
+            sqlstate,
+            ..
+        }
+            if message == "array slice subscript must provide both boundaries"
+                && detail
+                    == Some("When assigning to a slice of an empty array value, slice boundaries must be fully specified.".into())
+                && sqlstate == "2202E"
+    ));
+}
 #[test]
 fn any_array_truth_table_and_overlap_work() {
     let base = temp_dir("array_any_overlap");
