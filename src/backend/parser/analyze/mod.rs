@@ -923,12 +923,13 @@ fn analyze_non_recursive_cte_body(
     visible_ctes: &[BoundCte],
     expanded_views: &[u32],
 ) -> Result<(Query, RelationDesc), ParseError> {
+    let cte_outer_scopes = cte_body_outer_scopes(outer_scopes);
     match body {
         CteBody::Select(select) => {
             let (query, _) = analyze_select_query_with_outer(
                 select,
                 catalog,
-                outer_scopes,
+                &cte_outer_scopes,
                 grouped_outer,
                 visible_ctes,
                 expanded_views,
@@ -940,7 +941,7 @@ fn analyze_non_recursive_cte_body(
             let (query, _) = analyze_values_query_with_outer(
                 values,
                 catalog,
-                outer_scopes,
+                &cte_outer_scopes,
                 grouped_outer,
                 visible_ctes,
                 expanded_views,
@@ -952,6 +953,17 @@ fn analyze_non_recursive_cte_body(
             "nested recursive UNION CTE bodies".into(),
         )),
     }
+}
+
+fn cte_body_outer_scopes(outer_scopes: &[BoundScope]) -> Vec<BoundScope> {
+    // CTE bodies are nested Query levels, but they cannot see the containing
+    // statement's local scope. Insert an empty boundary scope so correlated
+    // Vars keep the same sublevels_up shape that the planner/setrefs pipeline
+    // expects from other child queries.
+    let mut cte_outer_scopes = Vec::with_capacity(outer_scopes.len() + 1);
+    cte_outer_scopes.push(empty_scope());
+    cte_outer_scopes.extend_from_slice(outer_scopes);
+    cte_outer_scopes
 }
 
 fn bind_ctes(
@@ -1031,10 +1043,11 @@ fn bind_ctes(
                     self_reference: true,
                     worktable_id,
                 });
+                let recursive_outer_scopes = cte_body_outer_scopes(outer_scopes);
                 let (recursive_query, _) = analyze_select_query_with_outer(
                     recursive,
                     catalog,
-                    outer_scopes,
+                    &recursive_outer_scopes,
                     grouped_outer.clone(),
                     &recursive_visible,
                     expanded_views,

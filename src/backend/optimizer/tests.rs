@@ -443,6 +443,22 @@ from (values (1),(2)) v1(r1)
 }
 
 #[test]
+fn planned_correlated_cte_subquery_rebases_hidden_cte_boundary_params() {
+    let planned = planned_stmt_for_values_sql(
+        "select (
+            with cte(foo) as (values (x))
+            select (select foo from cte)
+         )
+         from (values (0), (1)) as t(x)",
+    );
+    assert!(
+        planned.ext_params.is_empty(),
+        "unexpected root ext params: {:?}",
+        planned.ext_params
+    );
+}
+
+#[test]
 fn planned_window_query_uses_projection_windowagg_orderby() {
     let planned = planned_stmt_for_values_sql(
         "select row_number() over (order by x) from (values (1), (2)) as t(x)",
