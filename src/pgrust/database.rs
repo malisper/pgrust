@@ -42,7 +42,7 @@ use crate::backend::parser::{
     CommentOnDomainStatement, CommentOnTableStatement, CreateCompositeTypeStatement,
     CreateDomainStatement, CreateIndexStatement, CreateSchemaStatement, CreateSequenceStatement,
     CreateTableAsStatement, CreateTableStatement, CreateViewStatement, DropDomainStatement,
-    DropSequenceStatement, DropViewStatement, OnCommitAction, ParseError, SqlType,
+    DropSequenceStatement, DropViewStatement, OnCommitAction, ParseError, SqlType, SqlTypeKind,
     TablePersistence, bind_delete, bind_insert, bind_update, create_relation_desc,
     lower_create_table_with_catalog, normalize_create_table_as_name, normalize_create_table_name,
     normalize_create_view_name,
@@ -166,6 +166,7 @@ pub struct Database {
     pub(crate) database_create_grants: Arc<RwLock<Vec<DatabaseCreateGrant>>>,
     pub(crate) temp_relations: Arc<RwLock<HashMap<ClientId, TempNamespace>>>,
     pub(crate) domains: Arc<RwLock<BTreeMap<String, DomainEntry>>>,
+    pub(crate) enum_types: Arc<RwLock<BTreeMap<String, EnumTypeEntry>>>,
     pub(crate) sequences: Arc<SequenceRuntime>,
     pub(crate) _wal_bg_writer: Option<Arc<WalBgWriter>>,
 }
@@ -203,6 +204,16 @@ pub(crate) struct DomainEntry {
     pub name: String,
     pub namespace_oid: u32,
     pub sql_type: SqlType,
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EnumTypeEntry {
+    pub oid: u32,
+    pub array_oid: u32,
+    pub name: String,
+    pub namespace_oid: u32,
+    pub labels: Vec<String>,
     pub comment: Option<String>,
 }
 
@@ -372,6 +383,58 @@ impl Database {
                 typelem: 0,
                 typarray: 0,
                 sql_type: domain.sql_type,
+            })
+            .collect::<Vec<_>>();
+        rows.sort_by_key(|row| {
+            let schema_rank = search_path
+                .iter()
+                .position(|schema| {
+                    (schema == "public" && row.typnamespace == PUBLIC_NAMESPACE_OID)
+                        || (schema == "pg_catalog" && row.typnamespace == 11)
+                })
+                .unwrap_or(usize::MAX);
+            (schema_rank, row.typname.clone())
+        });
+        rows
+    }
+
+    pub(crate) fn enum_type_rows_for_search_path(&self, search_path: &[String]) -> Vec<PgTypeRow> {
+        let enum_types = self.enum_types.read();
+        let mut rows = enum_types
+            .values()
+            .flat_map(|entry| {
+                let base_sql_type = SqlType::new(SqlTypeKind::Text).with_identity(entry.oid, 0);
+                [
+                    PgTypeRow {
+                        oid: entry.oid,
+                        typname: entry.name.clone(),
+                        typnamespace: entry.namespace_oid,
+                        typowner: BOOTSTRAP_SUPERUSER_OID,
+                        typlen: -1,
+                        typalign: AttributeAlign::Int,
+                        typstorage: AttributeStorage::Extended,
+                        typrelid: 0,
+                        typelem: 0,
+                        typarray: entry.array_oid,
+                        // :HACK: User-defined enums are text-backed for now. This unlocks
+                        // catalog/type resolution and basic storage flow, but does not yet
+                        // enforce label membership or enum ordering semantics.
+                        sql_type: base_sql_type,
+                    },
+                    PgTypeRow {
+                        oid: entry.array_oid,
+                        typname: format!("_{}", entry.name),
+                        typnamespace: entry.namespace_oid,
+                        typowner: BOOTSTRAP_SUPERUSER_OID,
+                        typlen: -1,
+                        typalign: AttributeAlign::Int,
+                        typstorage: AttributeStorage::Extended,
+                        typrelid: 0,
+                        typelem: entry.oid,
+                        typarray: 0,
+                        sql_type: SqlType::array_of(base_sql_type),
+                    },
+                ]
             })
             .collect::<Vec<_>>();
         rows.sort_by_key(|row| {

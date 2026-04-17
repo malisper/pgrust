@@ -228,14 +228,15 @@ impl Database {
         Ok((storage_name, namespace_oid))
     }
 
-    pub(super) fn normalize_create_type_stmt_with_search_path(
+    pub(super) fn normalize_create_type_name_with_search_path(
         &self,
         client_id: ClientId,
         txn_ctx: CatalogTxnContext,
-        stmt: &CreateCompositeTypeStatement,
+        schema_name: Option<&str>,
+        type_name: &str,
         configured_search_path: Option<&[String]>,
     ) -> Result<(String, u32), ParseError> {
-        let lowered_name = stmt.type_name.to_ascii_lowercase();
+        let lowered_name = type_name.to_ascii_lowercase();
         let temp_namespace = self.owned_temp_namespace(client_id);
         let is_temp_schema_name = |schema: &str| {
             schema.eq_ignore_ascii_case("pg_temp")
@@ -244,7 +245,7 @@ impl Database {
                     .is_some_and(|ns| ns.name.eq_ignore_ascii_case(schema))
         };
 
-        if let Some(schema_name) = stmt.schema_name.as_deref() {
+        if let Some(schema_name) = schema_name {
             let normalized_schema = schema_name.to_ascii_lowercase();
             if normalized_schema == "pg_catalog" {
                 return Err(ParseError::UnsupportedQualifiedName(format!(
@@ -295,6 +296,22 @@ impl Database {
         }
 
         Err(ParseError::NoSchemaSelectedForCreate)
+    }
+
+    pub(super) fn normalize_create_type_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        txn_ctx: CatalogTxnContext,
+        stmt: &CreateCompositeTypeStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<(String, u32), ParseError> {
+        self.normalize_create_type_name_with_search_path(
+            client_id,
+            txn_ctx,
+            stmt.schema_name.as_deref(),
+            &stmt.type_name,
+            configured_search_path,
+        )
     }
 
     pub(crate) fn lazy_catalog_lookup(
