@@ -3945,6 +3945,68 @@ fn array_slice_assignment_rejects_too_small_multidimensional_sources() {
             if message == "source array too small" && sqlstate == "2202E"
     ));
 }
+
+#[test]
+fn array_subscript_assignment_type_mismatch_uses_postgres_message() {
+    let base = temp_dir("array_subscript_assignment_type_mismatch");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+
+    let xid = txns.begin();
+    let err = run_sql_with_catalog(
+        &base,
+        &txns,
+        xid,
+        "insert into t (b[2]) values(now())",
+        array_subscript_catalog(),
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        err,
+        ExecError::DetailedError {
+            message,
+            hint,
+            sqlstate,
+            ..
+        }
+            if message
+                == "subscripted assignment to \"b\" requires type integer but expression is of type timestamp with time zone"
+                && hint.as_deref()
+                    == Some("You will need to rewrite or cast the expression.")
+                && sqlstate == "42804"
+    ));
+}
+
+#[test]
+fn array_slice_assignment_type_mismatch_uses_postgres_message() {
+    let base = temp_dir("array_slice_assignment_type_mismatch");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+
+    let xid = txns.begin();
+    let err = run_sql_with_catalog(
+        &base,
+        &txns,
+        xid,
+        "insert into t (b[1:2]) values(now())",
+        array_subscript_catalog(),
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        err,
+        ExecError::DetailedError {
+            message,
+            hint,
+            sqlstate,
+            ..
+        }
+            if message
+                == "subscripted assignment to \"b\" requires type integer[] but expression is of type timestamp with time zone"
+                && hint.as_deref()
+                    == Some("You will need to rewrite or cast the expression.")
+                && sqlstate == "42804"
+    ));
+}
 #[test]
 fn any_array_truth_table_and_overlap_work() {
     let base = temp_dir("array_any_overlap");
