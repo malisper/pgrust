@@ -202,6 +202,7 @@ pub(super) fn resolve_regex_table_function(name: &str) -> Option<RegexTableFunct
 
 fn builtin_scalar_function_for_proc_row(row: &PgProcRow) -> Option<BuiltinScalarFunction> {
     builtin_scalar_function_for_proc_src(&row.prosrc)
+        .or_else(|| builtin_scalar_function_for_proc_src(&row.proname))
 }
 
 fn builtin_srf_impl_for_proc_row(row: &PgProcRow) -> Option<ResolvedSrfImpl> {
@@ -690,6 +691,11 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::JsonbObject => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::JsonbStripNulls => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::JsonbPretty => args.len() == 1,
+            BuiltinScalarFunction::JsonbContains
+            | BuiltinScalarFunction::JsonbContained
+            | BuiltinScalarFunction::JsonbExists
+            | BuiltinScalarFunction::JsonbExistsAny
+            | BuiltinScalarFunction::JsonbExistsAll => args.len() == 2,
             BuiltinScalarFunction::JsonbDelete => args.len() == 2,
             BuiltinScalarFunction::JsonbDeletePath => args.len() == 2,
             BuiltinScalarFunction::JsonbSet | BuiltinScalarFunction::JsonbInsert => {
@@ -916,7 +922,7 @@ fn scalar_functions_by_name() -> &'static BTreeMap<String, BuiltinScalarFunction
             if row.prokind != 'f' || row.proretset {
                 continue;
             }
-            if let Some(func) = builtin_scalar_function_for_proc_src(&row.prosrc) {
+            if let Some(func) = builtin_scalar_function_for_proc_row(&row) {
                 by_name
                     .entry(row.proname.to_ascii_lowercase())
                     .or_insert(func);
@@ -1250,8 +1256,13 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "jsonb_build_object",
             BuiltinScalarFunction::JsonbBuildObject,
         ),
+        ("jsonb_contains", BuiltinScalarFunction::JsonbContains),
+        ("jsonb_contained", BuiltinScalarFunction::JsonbContained),
         ("jsonb_delete", BuiltinScalarFunction::JsonbDelete),
         ("jsonb_delete_path", BuiltinScalarFunction::JsonbDeletePath),
+        ("jsonb_exists", BuiltinScalarFunction::JsonbExists),
+        ("jsonb_exists_any", BuiltinScalarFunction::JsonbExistsAny),
+        ("jsonb_exists_all", BuiltinScalarFunction::JsonbExistsAll),
         ("jsonb_set", BuiltinScalarFunction::JsonbSet),
         ("jsonb_set_lax", BuiltinScalarFunction::JsonbSetLax),
         ("jsonb_insert", BuiltinScalarFunction::JsonbInsert),
@@ -1903,6 +1914,14 @@ mod tests {
         assert_eq!(
             resolve_scalar_function("ceiling"),
             Some(BuiltinScalarFunction::Ceiling)
+        );
+        assert_eq!(
+            resolve_scalar_function("jsonb_contains"),
+            Some(BuiltinScalarFunction::JsonbContains)
+        );
+        assert_eq!(
+            resolve_scalar_function("jsonb_exists_any"),
+            Some(BuiltinScalarFunction::JsonbExistsAny)
         );
         assert_eq!(resolve_scalar_function("count"), None);
         assert_eq!(resolve_scalar_function("json_array_elements"), None);

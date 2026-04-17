@@ -71,6 +71,11 @@ pub const JSONB_CMP_GT_PROC_OID: u32 = 4040;
 pub const JSONB_CMP_LE_PROC_OID: u32 = 4041;
 pub const JSONB_CMP_GE_PROC_OID: u32 = 4042;
 pub const JSONB_CMP_EQ_PROC_OID: u32 = 4043;
+pub const JSONB_CONTAINS_PROC_OID: u32 = 4044;
+pub const JSONB_CONTAINED_PROC_OID: u32 = 4045;
+pub const JSONB_EXISTS_PROC_OID: u32 = 4046;
+pub const JSONB_EXISTS_ANY_PROC_OID: u32 = 4047;
+pub const JSONB_EXISTS_ALL_PROC_OID: u32 = 4048;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PgProcRow {
@@ -1452,6 +1457,66 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             "jsonb_eq",
             &[JSONB_TYPE_OID, JSONB_TYPE_OID],
         ),
+        proc_row(
+            JSONB_CONTAINS_PROC_OID,
+            "jsonb_contains",
+            BOOL_TYPE_OID,
+            &oid_argtypes(&[JSONB_TYPE_OID, JSONB_TYPE_OID]),
+            "jsonb_contains",
+            2,
+            false,
+            false,
+            'f',
+            's',
+        ),
+        proc_row(
+            JSONB_CONTAINED_PROC_OID,
+            "jsonb_contained",
+            BOOL_TYPE_OID,
+            &oid_argtypes(&[JSONB_TYPE_OID, JSONB_TYPE_OID]),
+            "jsonb_contained",
+            2,
+            false,
+            false,
+            'f',
+            's',
+        ),
+        proc_row(
+            JSONB_EXISTS_PROC_OID,
+            "jsonb_exists",
+            BOOL_TYPE_OID,
+            &oid_argtypes(&[JSONB_TYPE_OID, TEXT_TYPE_OID]),
+            "jsonb_exists",
+            2,
+            false,
+            false,
+            'f',
+            's',
+        ),
+        proc_row(
+            JSONB_EXISTS_ANY_PROC_OID,
+            "jsonb_exists_any",
+            BOOL_TYPE_OID,
+            &oid_argtypes(&[JSONB_TYPE_OID, TEXT_ARRAY_TYPE_OID]),
+            "jsonb_exists_any",
+            2,
+            false,
+            false,
+            'f',
+            's',
+        ),
+        proc_row(
+            JSONB_EXISTS_ALL_PROC_OID,
+            "jsonb_exists_all",
+            BOOL_TYPE_OID,
+            &oid_argtypes(&[JSONB_TYPE_OID, TEXT_ARRAY_TYPE_OID]),
+            "jsonb_exists_all",
+            2,
+            false,
+            false,
+            'f',
+            's',
+        ),
         cast_proc_row(
             CAST_PROC_INT4_INT2_OID,
             "int4",
@@ -2056,8 +2121,13 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "jsonb_build_object",
             BuiltinScalarFunction::JsonbBuildObject,
         ),
+        ("jsonb_contains", BuiltinScalarFunction::JsonbContains),
+        ("jsonb_contained", BuiltinScalarFunction::JsonbContained),
         ("jsonb_delete", BuiltinScalarFunction::JsonbDelete),
         ("jsonb_delete_path", BuiltinScalarFunction::JsonbDeletePath),
+        ("jsonb_exists", BuiltinScalarFunction::JsonbExists),
+        ("jsonb_exists_any", BuiltinScalarFunction::JsonbExistsAny),
+        ("jsonb_exists_all", BuiltinScalarFunction::JsonbExistsAll),
         ("jsonb_set", BuiltinScalarFunction::JsonbSet),
         ("jsonb_set_lax", BuiltinScalarFunction::JsonbSetLax),
         ("jsonb_insert", BuiltinScalarFunction::JsonbInsert),

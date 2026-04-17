@@ -301,6 +301,27 @@ pub(crate) fn eval_json_builtin_function(
                     &pairs,
                 )?)))
             }
+            BuiltinScalarFunction::JsonbContains => {
+                let left =
+                    parse_jsonb_target(values.first().unwrap_or(&Value::Null), "jsonb_contains")?;
+                let right = parse_jsonb_target(values.get(1).unwrap_or(&Value::Null), "jsonb_contains")?;
+                Ok(Value::Bool(crate::backend::executor::jsonb::jsonb_contains(
+                    &left, &right,
+                )))
+            }
+            BuiltinScalarFunction::JsonbContained => {
+                let left = parse_jsonb_target(
+                    values.first().unwrap_or(&Value::Null),
+                    "jsonb_contained",
+                )?;
+                let right = parse_jsonb_target(
+                    values.get(1).unwrap_or(&Value::Null),
+                    "jsonb_contained",
+                )?;
+                Ok(Value::Bool(crate::backend::executor::jsonb::jsonb_contains(
+                    &right, &left,
+                )))
+            }
             BuiltinScalarFunction::JsonbObject => Ok(Value::Jsonb(encode_jsonb(
                 &render_jsonb_object_function(values)?,
             ))),
@@ -330,6 +351,43 @@ pub(crate) fn eval_json_builtin_function(
                     &json,
                     values.get(1).unwrap_or(&Value::Null),
                 )?)))
+            }
+            BuiltinScalarFunction::JsonbExists => {
+                let json =
+                    parse_jsonb_target(values.first().unwrap_or(&Value::Null), "jsonb_exists")?;
+                let key = values
+                    .get(1)
+                    .and_then(Value::as_text)
+                    .ok_or_else(|| ExecError::TypeMismatch {
+                        op: "jsonb_exists",
+                        left: values.get(1).cloned().unwrap_or(Value::Null),
+                        right: Value::Text("key".into()),
+                    })?;
+                Ok(Value::Bool(crate::backend::executor::jsonb::jsonb_exists(
+                    &json, key,
+                )))
+            }
+            BuiltinScalarFunction::JsonbExistsAny => {
+                let json = parse_jsonb_target(
+                    values.first().unwrap_or(&Value::Null),
+                    "jsonb_exists_any",
+                )?;
+                let keys =
+                    parse_text_array_arg(values.get(1).unwrap_or(&Value::Null), "jsonb_exists_any")?;
+                Ok(Value::Bool(
+                    crate::backend::executor::jsonb::jsonb_exists_any(&json, &keys),
+                ))
+            }
+            BuiltinScalarFunction::JsonbExistsAll => {
+                let json = parse_jsonb_target(
+                    values.first().unwrap_or(&Value::Null),
+                    "jsonb_exists_all",
+                )?;
+                let keys =
+                    parse_text_array_arg(values.get(1).unwrap_or(&Value::Null), "jsonb_exists_all")?;
+                Ok(Value::Bool(
+                    crate::backend::executor::jsonb::jsonb_exists_all(&json, &keys),
+                ))
             }
             BuiltinScalarFunction::JsonbDeletePath => {
                 let json = parse_jsonb_target(
@@ -458,8 +516,13 @@ pub(crate) fn eval_json_builtin_function(
         | BuiltinScalarFunction::JsonbExtractPathText
         | BuiltinScalarFunction::JsonbBuildArray
         | BuiltinScalarFunction::JsonbBuildObject
+        | BuiltinScalarFunction::JsonbContains
+        | BuiltinScalarFunction::JsonbContained
         | BuiltinScalarFunction::JsonbDelete
         | BuiltinScalarFunction::JsonbDeletePath
+        | BuiltinScalarFunction::JsonbExists
+        | BuiltinScalarFunction::JsonbExistsAny
+        | BuiltinScalarFunction::JsonbExistsAll
         | BuiltinScalarFunction::JsonbSet
         | BuiltinScalarFunction::JsonbSetLax
         | BuiltinScalarFunction::JsonbInsert
@@ -1070,6 +1133,30 @@ fn parse_jsonb_path_arg(value: &Value, op: &'static str) -> Result<Vec<Option<St
             right: Value::Null,
         }),
     }
+}
+
+fn parse_text_array_arg(value: &Value, op: &'static str) -> Result<Vec<String>, ExecError> {
+    let items = match value {
+        Value::Array(items) => items,
+        Value::PgArray(array) => &array.elements,
+        other => {
+            return Err(ExecError::TypeMismatch {
+                op,
+                left: other.clone(),
+                right: Value::Null,
+            });
+        }
+    };
+    items.iter()
+        .map(|item| match item {
+            Value::Text(_) | Value::TextRef(_, _) => Ok(item.as_text().unwrap().to_string()),
+            other => Err(ExecError::TypeMismatch {
+                op,
+                left: other.clone(),
+                right: Value::Text(String::new().into()),
+            }),
+        })
+        .collect()
 }
 
 fn parse_jsonb_set_lax_treatment(value: Option<&Value>) -> Result<String, ExecError> {
