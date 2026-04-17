@@ -678,6 +678,33 @@ fn union_distinct_deduplicates_rows() {
 }
 
 #[test]
+fn mixed_union_chain_uses_postgres_left_associativity() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    let result = session
+        .execute(
+            &db,
+            "select 1 as x union select 2 as x union all select 2 as x order by x",
+        )
+        .expect("run mixed union chain");
+
+    match result {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(1)],
+                    vec![Value::Int32(2)],
+                    vec![Value::Int32(2)]
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn union_in_derived_subquery_with_cte_executes() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);
