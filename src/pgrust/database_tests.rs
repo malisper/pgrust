@@ -6527,6 +6527,53 @@ fn checkpoint_gucs_show_defaults_and_reject_runtime_set() {
 }
 
 #[test]
+fn stats_gucs_show_postgres_like_defaults_and_runtime_values() {
+    let base = temp_dir("stats_gucs_show_defaults");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    match session.execute(&db, "show track_counts").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Text("on".into())]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match session.execute(&db, "show track_functions").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Text("none".into())]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match session.execute(&db, "show stats_fetch_consistency").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Text("cache".into())]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    session.execute(&db, "set track_functions = 'all'").unwrap();
+    session
+        .execute(&db, "set stats_fetch_consistency = snapshot")
+        .unwrap();
+
+    match session.execute(&db, "show track_functions").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Text("all".into())]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match session.execute(&db, "show stats_fetch_consistency").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Text("snapshot".into())]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn checkpoint_gucs_load_from_postgresql_conf_and_auto_conf() {
     use crate::backend::access::transam::ControlFileStore;
 
