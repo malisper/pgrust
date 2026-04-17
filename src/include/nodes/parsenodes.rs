@@ -68,6 +68,8 @@ pub enum ParseError {
         name: String,
         expected: &'static str,
     },
+    NonSubscriptableType(String),
+    FixedLengthArraySliceNotImplemented,
     RecursiveView(String),
 }
 
@@ -180,6 +182,15 @@ impl fmt::Display for ParseError {
             }
             ParseError::WrongObjectType { name, expected } => {
                 write!(f, "\"{name}\" is not a {expected}")
+            }
+            ParseError::NonSubscriptableType(type_name) => {
+                write!(
+                    f,
+                    "cannot subscript type {type_name} because it does not support subscripting"
+                )
+            }
+            ParseError::FixedLengthArraySliceNotImplemented => {
+                write!(f, "slices of fixed-length arrays not implemented")
             }
             ParseError::RecursiveView(name) => {
                 write!(f, "infinite recursion detected in view \"{name}\"")
