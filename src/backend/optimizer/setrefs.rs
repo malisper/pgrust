@@ -1,6 +1,6 @@
 use super::inherit::append_translation;
 use super::pathnodes::{
-    aggregate_output_vars, expr_sql_type, lower_agg_output_expr, rte_slot_id, rte_slot_varno,
+    aggregate_output_vars, expr_sql_type, lower_agg_output_expr, rte_slot_varno,
 };
 use super::plan::append_planned_subquery;
 use super::{
@@ -8,7 +8,7 @@ use super::{
 };
 use crate::backend::parser::CatalogLookup;
 use crate::include::nodes::parsenodes::{Query, RangeTblEntryKind};
-use crate::include::nodes::pathnodes::{Path, PlannerInfo, RestrictInfo};
+use crate::include::nodes::pathnodes::{Path, PlannerInfo, PlannerSubroot, RestrictInfo};
 use crate::include::nodes::plannodes::{ExecParamSource, Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
     AggAccum, Aggref, BoolExpr, Expr, ExprArraySubscript, FuncExpr, OpExpr, OrderByEntry, Param,
@@ -200,7 +200,7 @@ fn dedup_match_exprs(exprs: Vec<Expr>) -> Vec<Expr> {
 
 fn build_projection_tlist(
     root: Option<&PlannerInfo>,
-    slot_id: usize,
+    _slot_id: usize,
     input: &Path,
     targets: &[TargetEntry],
 ) -> IndexedTlist {
@@ -210,7 +210,7 @@ fn build_projection_tlist(
             .iter()
             .enumerate()
             .map(|(index, target)| {
-                let mut match_exprs = vec![slot_var(slot_id, user_attrno(index), target.sql_type)];
+                let mut match_exprs = Vec::new();
                 if let Some(input_resno) = target.input_resno {
                     if let Some(input_expr) = input_target.exprs.get(input_resno.saturating_sub(1)) {
                         match_exprs.push(input_expr.clone());
@@ -254,16 +254,13 @@ fn build_projection_tlist(
 
 fn build_aggregate_tlist(
     root: Option<&PlannerInfo>,
-    slot_id: usize,
+    _slot_id: usize,
     group_by: &[Expr],
     accumulators: &[crate::include::nodes::primnodes::AggAccum],
 ) -> IndexedTlist {
     let mut entries = Vec::with_capacity(group_by.len() + accumulators.len());
     for (index, expr) in group_by.iter().enumerate() {
-        let mut match_exprs = vec![
-            slot_var(slot_id, user_attrno(index), expr_sql_type(expr)),
-            expr.clone(),
-        ];
+        let mut match_exprs = vec![expr.clone()];
         if let Some(root) = root {
             match_exprs.push(flatten_join_alias_vars(root, expr.clone()));
         }
@@ -280,10 +277,7 @@ fn build_aggregate_tlist(
             index,
             sql_type: accum.sql_type,
             ressortgroupref: 0,
-            match_exprs: dedup_match_exprs(vec![
-                slot_var(slot_id, user_attrno(index), accum.sql_type),
-                aggregate_output_expr(accum, aggno),
-            ]),
+            match_exprs: dedup_match_exprs(vec![aggregate_output_expr(accum, aggno)]),
         });
     }
     IndexedTlist { entries }
@@ -303,16 +297,9 @@ fn build_join_tlist(root: Option<&PlannerInfo>, left: &Path, right: &Path) -> In
 
 fn build_subquery_tlist(
     rtindex: usize,
-    query: &Query,
+    _query: &Query,
     output_columns: &[QueryColumn],
 ) -> IndexedTlist {
-    let slot_id = rte_slot_id(rtindex);
-    let visible_target_exprs = query
-        .target_list
-        .iter()
-        .filter(|target| !target.resjunk)
-        .map(|target| target.expr.clone())
-        .collect::<Vec<_>>();
     IndexedTlist {
         entries: output_columns
             .iter()
@@ -321,23 +308,12 @@ fn build_subquery_tlist(
                 index,
                 sql_type: column.sql_type,
                 ressortgroupref: 0,
-                match_exprs: dedup_match_exprs(vec![
-                    slot_var(slot_id, user_attrno(index), column.sql_type),
-                    Expr::Var(Var {
-                        varno: rtindex,
-                        varattno: user_attrno(index),
-                        varlevelsup: 0,
-                        vartype: column.sql_type,
-                    }),
-                    visible_target_exprs
-                        .get(index)
-                        .cloned()
-                        .unwrap_or_else(|| {
-                            panic!(
-                                "subquery target list is shorter than exposed output column count for rtindex {rtindex}"
-                            )
-                        }),
-                ]),
+                match_exprs: vec![Expr::Var(Var {
+                    varno: rtindex,
+                    varattno: user_attrno(index),
+                    varlevelsup: 0,
+                    vartype: column.sql_type,
+                })],
             })
             .collect(),
     }
@@ -1056,8 +1032,21 @@ fn fix_upper_expr_for_input(
 fn lower_direct_ref(expr: &Expr, mode: LowerMode<'_>) -> Option<Expr> {
     match mode {
         LowerMode::Scalar => None,
-        LowerMode::Input { tlist } | LowerMode::Aggregate { tlist, .. } => search_tlist_entry(None, expr, tlist)
+        LowerMode::Input { tlist } => search_tlist_entry(None, expr, tlist)
             .map(|entry| special_slot_var(OUTER_VAR, entry.index, entry.sql_type)),
+        LowerMode::Aggregate { layout, tlist, .. } => search_tlist_entry(None, expr, tlist)
+            .map(|entry| special_slot_var(OUTER_VAR, entry.index, entry.sql_type))
+            .or_else(|| {
+                layout.iter().enumerate().find_map(|(index, candidate)| {
+                    (candidate == expr).then(|| {
+                        special_slot_var(
+                            OUTER_VAR,
+                            index,
+                            expr_sql_type(candidate),
+                        )
+                    })
+                })
+            }),
         LowerMode::Join {
             outer_tlist,
             inner_tlist,
@@ -2641,15 +2630,14 @@ fn set_cte_scan_references(
     ctx: &mut SetRefsContext<'_>,
     plan_info: PlanEstimate,
     cte_id: usize,
-    query: Box<crate::include::nodes::parsenodes::Query>,
+    subroot: PlannerSubroot,
     cte_plan: Box<Path>,
     output_columns: Vec<QueryColumn>,
 ) -> Plan {
-    let subroot = PlannerInfo::new(*query);
     Plan::CteScan {
         plan_info,
         cte_id,
-        cte_plan: Box::new(recurse_with_root(ctx, Some(&subroot), *cte_plan)),
+        cte_plan: Box::new(recurse_with_root(ctx, Some(subroot.as_ref()), *cte_plan)),
         output_columns,
     }
 }
@@ -2657,12 +2645,11 @@ fn set_cte_scan_references(
 fn set_subquery_scan_references(
     ctx: &mut SetRefsContext<'_>,
     plan_info: PlanEstimate,
-    query: Box<crate::include::nodes::parsenodes::Query>,
+    subroot: PlannerSubroot,
     input: Box<Path>,
     output_columns: Vec<QueryColumn>,
 ) -> Plan {
-    let subroot = PlannerInfo::new(*query);
-    let input = recurse_with_root(ctx, Some(&subroot), *input);
+    let input = recurse_with_root(ctx, Some(subroot.as_ref()), *input);
     if input.columns() == output_columns {
         input
     } else {
@@ -2691,21 +2678,19 @@ fn set_recursive_union_references(
     plan_info: PlanEstimate,
     worktable_id: usize,
     distinct: bool,
-    anchor_query: Box<crate::include::nodes::parsenodes::Query>,
-    recursive_query: Box<crate::include::nodes::parsenodes::Query>,
+    anchor_root: PlannerSubroot,
+    recursive_root: PlannerSubroot,
     output_columns: Vec<QueryColumn>,
     anchor: Box<Path>,
     recursive: Box<Path>,
 ) -> Plan {
-    let anchor_root = PlannerInfo::new(*anchor_query);
-    let recursive_root = PlannerInfo::new(*recursive_query);
     Plan::RecursiveUnion {
         plan_info,
         worktable_id,
         distinct,
         output_columns,
-        anchor: Box::new(recurse_with_root(ctx, Some(&anchor_root), *anchor)),
-        recursive: Box::new(recurse_with_root(ctx, Some(&recursive_root), *recursive)),
+        anchor: Box::new(recurse_with_root(ctx, Some(anchor_root.as_ref()), *anchor)),
+        recursive: Box::new(recurse_with_root(ctx, Some(recursive_root.as_ref()), *recursive)),
     }
 }
 
@@ -2879,19 +2864,27 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
         } => set_function_scan_references(ctx, plan_info, call),
         Path::SubqueryScan {
             plan_info,
+            subroot,
             query,
             input,
             output_columns,
             ..
-        } => set_subquery_scan_references(ctx, plan_info, query, input, output_columns),
+        } => {
+            let _ = query;
+            set_subquery_scan_references(ctx, plan_info, subroot, input, output_columns)
+        }
         Path::CteScan {
             plan_info,
             cte_id,
+            subroot,
             query,
             cte_plan,
             output_columns,
             ..
-        } => set_cte_scan_references(ctx, plan_info, cte_id, query, cte_plan, output_columns),
+        } => {
+            let _ = query;
+            set_cte_scan_references(ctx, plan_info, cte_id, subroot, cte_plan, output_columns)
+        }
         Path::WorkTableScan {
             plan_info,
             worktable_id,
@@ -2902,6 +2895,8 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             plan_info,
             worktable_id,
             distinct,
+            anchor_root,
+            recursive_root,
             anchor_query,
             recursive_query,
             output_columns,
@@ -2913,8 +2908,14 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             plan_info,
             worktable_id,
             distinct,
-            anchor_query,
-            recursive_query,
+            {
+                let _ = anchor_query;
+                anchor_root
+            },
+            {
+                let _ = recursive_query;
+                recursive_root
+            },
             output_columns,
             anchor,
             recursive,
