@@ -1098,6 +1098,20 @@ fn parse_grant_create_on_database_statement() {
 }
 
 #[test]
+fn parse_grant_all_on_schema_statement() {
+    let stmt = parse_statement("grant all on schema public to public").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::GrantObject(GrantObjectStatement {
+            privilege: GrantObjectPrivilege::AllPrivilegesOnSchema,
+            object_name: "public".into(),
+            grantee_names: vec!["public".into()],
+            with_grant_option: false,
+        })
+    );
+}
+
+#[test]
 fn parse_revoke_all_privileges_on_table_from_public_statement() {
     let stmt = parse_statement("revoke all privileges on tenant_table from public").unwrap();
     assert_eq!(
