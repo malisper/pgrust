@@ -9475,18 +9475,14 @@ fn create_type_exposes_catalog_rows_and_function_row_expansion() {
 }
 
 #[test]
-fn create_type_nested_dependencies_and_array_restrictions_work() {
+fn create_type_nested_dependencies_and_named_composite_arrays_work() {
     let dir = temp_dir("create_type_nested_dependencies");
     let db = Database::open(&dir, 64).unwrap();
 
     db.execute(1, "create type complex as (r float8, i float8)")
         .unwrap();
-
-    match db.execute(1, "create type complex_bucket as (items complex[])") {
-        Err(ExecError::Parse(ParseError::FeatureNotSupported(message)))
-            if message.contains("arrays of named composite types are not supported yet") => {}
-        other => panic!("expected composite-array rejection, got {other:?}"),
-    }
+    db.execute(1, "create type complex_bucket as (items complex[])")
+        .unwrap();
 
     db.execute(1, "create type holder as (payload complex)")
         .unwrap();
@@ -9501,9 +9497,19 @@ fn create_type_nested_dependencies_and_array_restrictions_work() {
         .lazy_catalog_lookup(1, None, None)
         .lookup_any_relation("holder")
         .unwrap();
+    let bucket_relation = db
+        .lazy_catalog_lookup(1, None, None)
+        .lookup_any_relation("complex_bucket")
+        .unwrap();
     assert!(catcache.depend_rows().iter().any(|row| {
         row.classid == PG_CLASS_RELATION_OID
             && row.objid == holder_relation.relation_oid
+            && row.refclassid == PG_TYPE_RELATION_OID
+            && row.refobjid == complex_type.oid
+    }));
+    assert!(catcache.depend_rows().iter().any(|row| {
+        row.classid == PG_CLASS_RELATION_OID
+            && row.objid == bucket_relation.relation_oid
             && row.refclassid == PG_TYPE_RELATION_OID
             && row.refobjid == complex_type.oid
     }));
@@ -9525,6 +9531,40 @@ fn create_type_nested_dependencies_and_array_restrictions_work() {
         }
         other => panic!("expected dependent-type drop restriction, got {other:?}"),
     }
+}
+
+#[test]
+fn recursive_cte_cycle_tracking_returns_record_arrays() {
+    let dir = temp_dir("recursive_cte_record_arrays");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table graph(f int4, t int4, label text)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into graph values (1, 2, 'a'), (2, 3, 'b'), (3, 1, 'c')",
+    )
+    .unwrap();
+
+    let rows = query_rows(
+        &db,
+        1,
+        "with recursive search_graph(f, t, label, is_cycle, path) as (
+            select *, false, array[row(g.f, g.t)] from graph g
+            union all
+            select g.*, row(g.f, g.t) = any(path), path || row(g.f, g.t)
+            from graph g, search_graph sg
+            where g.f = sg.t and not is_cycle
+        )
+        select * from search_graph order by label, is_cycle",
+    );
+
+    assert!(!rows.is_empty());
+    assert!(rows.iter().all(|row| matches!(row[4], Value::PgArray(_))));
+    assert!(rows.iter().any(|row| match &row[4] {
+        Value::PgArray(array) => matches!(array.elements.first(), Some(Value::Record(_))),
+        _ => false,
+    }));
 }
 
 #[test]

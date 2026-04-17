@@ -1,5 +1,6 @@
 use crate::backend::catalog::catalog::CatalogEntry;
 use crate::backend::executor::RelationDesc;
+use crate::backend::parser::SqlTypeKind;
 use crate::backend::utils::cache::catcache::sql_type_oid;
 use crate::include::catalog::{
     DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, PG_ATTRDEF_RELATION_OID,
@@ -216,6 +217,15 @@ pub fn derived_relation_depend_rows(
         let type_oid = sql_type_oid(column.sql_type);
         if type_oid != 0 {
             referenced_type_oids.insert(type_oid);
+        }
+        if column.sql_type.is_array
+            && matches!(
+                column.sql_type.kind,
+                SqlTypeKind::Composite | SqlTypeKind::Record
+            )
+            && column.sql_type.type_oid != 0
+        {
+            referenced_type_oids.insert(column.sql_type.type_oid);
         }
     }
     rows.extend(

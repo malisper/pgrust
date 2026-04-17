@@ -74,6 +74,7 @@ pub const OIDVECTOR_TYPE_OID: u32 = 30;
 pub const ANYOID: u32 = 2276;
 pub const ANYARRAYOID: u32 = 2277;
 pub const RECORD_TYPE_OID: u32 = 2249;
+pub const RECORD_ARRAY_TYPE_OID: u32 = 2287;
 pub const TEXT_ARRAY_TYPE_OID: u32 = 1009;
 pub const TID_ARRAY_TYPE_OID: u32 = 1010;
 pub const XID_ARRAY_TYPE_OID: u32 = 1011;

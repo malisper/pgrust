@@ -98,6 +98,7 @@ pub(crate) fn compare_order_values(
             crate::backend::executor::compare_tsvector(a, b)
         }
         (Value::TsQuery(a), Value::TsQuery(b)) => crate::backend::executor::compare_tsquery(a, b),
+        (Value::Record(a), Value::Record(b)) => compare_record_values(a, b),
         (a, b) if a.as_text().is_some() && b.as_text().is_some() => {
             a.as_text().unwrap().cmp(b.as_text().unwrap())
         }
@@ -185,6 +186,9 @@ pub(crate) fn compare_values(
         }
         (Value::TsVector(l), Value::TsVector(r)) => Ok(Value::Bool(l == r)),
         (Value::TsQuery(l), Value::TsQuery(r)) => Ok(Value::Bool(l == r)),
+        (Value::Record(l), Value::Record(r)) => {
+            Ok(Value::Bool(compare_record_values(l, r) == Ordering::Equal))
+        }
         (l, r) if l.as_text().is_some() && r.as_text().is_some() => {
             Ok(Value::Bool(l.as_text() == r.as_text()))
         }
@@ -247,6 +251,7 @@ pub(crate) fn values_are_distinct(left: &Value, right: &Value) -> bool {
         (Value::Range(l), Value::Range(r)) => compare_range_values(l, r) != Ordering::Equal,
         (Value::TsVector(l), Value::TsVector(r)) => l != r,
         (Value::TsQuery(l), Value::TsQuery(r)) => l != r,
+        (Value::Record(l), Value::Record(r)) => compare_record_values(l, r) != Ordering::Equal,
         (l, r) if l.as_text().is_some() && r.as_text().is_some() => l.as_text() != r.as_text(),
         (Value::Bool(l), Value::Bool(r)) => l != r,
         (l, r) if normalize_array_value(l).is_some() && normalize_array_value(r).is_some() => {
@@ -755,6 +760,24 @@ fn compare_ord<T: Ord>(left: T, right: T, op: &'static str) -> bool {
         ">=" => left >= right,
         _ => unreachable!(),
     }
+}
+
+fn compare_record_values(
+    left: &crate::include::nodes::datum::RecordValue,
+    right: &crate::include::nodes::datum::RecordValue,
+) -> Ordering {
+    for ((left_name, left_value), (right_name, right_value)) in left.fields.iter().zip(&right.fields)
+    {
+        let name_ordering = left_name.cmp(right_name);
+        if name_ordering != Ordering::Equal {
+            return name_ordering;
+        }
+        let value_ordering = compare_order_values(left_value, right_value, None, false);
+        if value_ordering != Ordering::Equal {
+            return value_ordering;
+        }
+    }
+    left.fields.len().cmp(&right.fields.len())
 }
 
 fn normalize_array_value(value: &Value) -> Option<ArrayValue> {
