@@ -5791,6 +5791,25 @@ fn sum_and_avg_numeric_preserve_numeric_results() {
 }
 
 #[test]
+fn avg_numeric_drops_display_only_trailing_zeros() {
+    let base = temp_dir("avg_numeric_display_scale");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select avg(x) from unnest(ARRAY[1.1000::numeric, 1.2000::numeric]::numeric[]) as u(x)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Numeric("1.15".into())]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn sum_real_and_avg_real_follow_postgres_result_types() {
     let base = temp_dir("sum_avg_real");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -6261,6 +6280,31 @@ fn numeric_scalar_helpers_follow_postgres_basics() {
             }
             other => panic!("expected query result, got {:?}", other),
         }
+}
+
+#[test]
+fn to_char_numeric_ignores_display_only_trailing_zeros() {
+    let base = temp_dir("to_char_numeric_display_scale");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select to_char(4.31::numeric(210,10), 'FM9999999999999999.999999999999999'), to_char((-34338492.215397047)::numeric(210,10), 'FM9999999999999999.999999999999999PR')",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Text("4.31".into()),
+                    Value::Text("<34338492.215397047>".into()),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
 }
 
 #[test]
