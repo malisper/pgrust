@@ -6063,7 +6063,7 @@ fn checkpoint_requires_pg_checkpoint_membership() {
 }
 
 #[test]
-fn checkpoint_updates_placeholder_checkpointer_stats() {
+fn checkpoint_updates_checkpointer_stats() {
     let base = temp_dir("checkpoint_stats");
     let db = Database::open(&base, 16).unwrap();
     let mut session = Session::new(1);
@@ -6103,12 +6103,80 @@ fn checkpoint_updates_placeholder_checkpointer_stats() {
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0][0], Value::Int64(1));
             assert_eq!(rows[0][1], Value::Int64(1));
-            assert_eq!(rows[0][2], Value::Float64(0.0));
-            assert_eq!(rows[0][3], Value::Float64(0.0));
+            assert!(matches!(rows[0][2], Value::Float64(value) if value >= 0.0));
+            assert!(matches!(rows[0][3], Value::Float64(value) if value >= 0.0));
             assert!(matches!(rows[0][4], Value::TimestampTz(_)));
         }
         other => panic!("expected query result, got {:?}", other),
     }
+}
+
+#[test]
+fn checkpoint_flushes_dirty_pages_and_clog_to_disk() {
+    use crate::backend::access::transam::xact::{
+        INVALID_TRANSACTION_ID, TransactionManager, TransactionStatus,
+    };
+    use crate::backend::storage::smgr::ForkNumber;
+
+    let base = temp_dir("checkpoint_flushes_dirty_pages");
+    let committed_xid;
+    let rel;
+    let buffer_page;
+
+    {
+        let db = Database::open(&base, 64).unwrap();
+        let mut session = Session::new(1);
+
+        session
+            .execute(&db, "create table items (id int4, note text)")
+            .unwrap();
+        session
+            .execute(&db, "insert into items values (1, 'alpha')")
+            .unwrap();
+
+        rel = relation_locator_for(&db, 1, "items");
+        let pinned = db
+            .pool
+            .pin_existing_block(1, rel, ForkNumber::Main, 0)
+            .unwrap();
+        buffer_page = db.pool.read_page(pinned.buffer_id()).unwrap();
+        drop(pinned);
+
+        let disk_page_before = read_relation_block(&db, rel, 0);
+        assert_ne!(
+            disk_page_before, buffer_page,
+            "expected heap page to remain dirty in shared buffers before CHECKPOINT"
+        );
+
+        committed_xid = db
+            .txns
+            .read()
+            .snapshot(INVALID_TRANSACTION_ID)
+            .unwrap()
+            .xmax
+            - 1;
+
+        session.execute(&db, "checkpoint").unwrap();
+
+        let disk_page_after = read_relation_block(&db, rel, 0);
+        assert_eq!(
+            disk_page_after, buffer_page,
+            "expected CHECKPOINT to flush the dirty heap page to disk"
+        );
+    }
+
+    let durable_txns = TransactionManager::new_durable(&base).unwrap();
+    assert_eq!(
+        durable_txns.status(committed_xid),
+        Some(TransactionStatus::Committed),
+        "expected CHECKPOINT to persist committed CLOG state"
+    );
+
+    let reopened = Database::open_with_options(&base, 64, true).unwrap();
+    assert_eq!(
+        query_rows(&reopened, 1, "select id, note from items"),
+        vec![vec![Value::Int32(1), Value::Text("alpha".into())]]
+    );
 }
 
 #[test]

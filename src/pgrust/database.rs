@@ -16,6 +16,9 @@ mod txn;
 use crate::backend::access::transam::xact::{
     CommandId, MvccError, TransactionId, TransactionManager,
 };
+use crate::backend::access::transam::{
+    CheckpointCommitBarrier, CheckpointCommitGuard, CheckpointRequestFlags, Checkpointer,
+};
 use crate::backend::access::transam::xlog::{WalBgWriter, WalError, WalWriter};
 use crate::backend::catalog::catalog::{CatalogIndexBuildOptions, column_desc};
 use crate::backend::catalog::indexing::rebuild_system_catalog_indexes_in_pool;
@@ -130,6 +133,8 @@ pub struct Database {
     pub wal: Option<Arc<WalWriter>>,
     pub checkpoint_config: Arc<CheckpointConfig>,
     pub checkpoint_stats: Arc<RwLock<CheckpointStatsSnapshot>>,
+    pub checkpoint_commit_barrier: Arc<CheckpointCommitBarrier>,
+    pub checkpointer: Option<Arc<Checkpointer>>,
     pub txns: Arc<RwLock<TransactionManager>>,
     pub shared_catalog: Arc<RwLock<CatalogStore>>,
     pub catalog: Arc<RwLock<CatalogStore>>,
@@ -380,8 +385,25 @@ impl Database {
         self.checkpoint_stats.read().clone()
     }
 
-    pub(crate) fn record_manual_checkpoint(&self) {
-        self.checkpoint_stats.write().record_manual_checkpoint();
+    pub(crate) fn request_checkpoint(
+        &self,
+        flags: CheckpointRequestFlags,
+    ) -> Result<(), ExecError> {
+        let Some(checkpointer) = self.checkpointer.as_ref() else {
+            return Ok(());
+        };
+        checkpointer
+            .request(flags)
+            .map_err(|message| ExecError::DetailedError {
+                message: "checkpoint failed".into(),
+                detail: Some(message),
+                hint: None,
+                sqlstate: "58000",
+            })
+    }
+
+    pub(crate) fn checkpoint_commit_guard(&self) -> CheckpointCommitGuard {
+        self.checkpoint_commit_barrier.enter()
     }
 }
 
@@ -424,9 +446,7 @@ fn bootstrap_ephemeral_catalog(
 }
 
 impl Drop for Database {
-    fn drop(&mut self) {
-        self.txns.write().flush_clog();
-    }
+    fn drop(&mut self) {}
 }
 
 #[cfg(test)]

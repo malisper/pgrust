@@ -832,6 +832,7 @@ impl Session {
                 };
                 let held_locks = txn.held_table_locks.keys().copied().collect::<Vec<_>>();
                 let result = (|| {
+                    let _checkpoint_guard = db.checkpoint_commit_guard();
                     db.pool.write_wal_commit(txn.xid).map_err(|e| {
                         ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Storage(
                             crate::backend::storage::smgr::SmgrError::Io(std::io::Error::new(
@@ -2065,7 +2066,7 @@ impl Session {
                 sqlstate: "42501",
             });
         }
-        db.record_manual_checkpoint();
+        db.request_checkpoint(crate::backend::access::transam::CheckpointRequestFlags::sql())?;
         Ok(StatementResult::AffectedRows(0))
     }
 
@@ -2398,6 +2399,7 @@ impl Session {
             let held_locks = txn.held_table_locks.keys().copied().collect::<Vec<_>>();
             match result {
                 Ok(n) => {
+                    let _checkpoint_guard = db.checkpoint_commit_guard();
                     let commit_result = db.pool.write_wal_commit(txn.xid).map_err(|e| {
                         ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Storage(
                             crate::backend::storage::smgr::SmgrError::Io(std::io::Error::new(

@@ -61,6 +61,13 @@ pub struct CheckpointStatsSnapshot {
     pub stats_reset: TimestampTzADT,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckpointCompletionKind {
+    Timed,
+    Requested,
+    Shutdown,
+}
+
 impl Default for CheckpointStatsSnapshot {
     fn default() -> Self {
         Self {
@@ -77,9 +84,38 @@ impl Default for CheckpointStatsSnapshot {
 }
 
 impl CheckpointStatsSnapshot {
-    pub fn record_manual_checkpoint(&mut self) {
-        self.num_requested = self.num_requested.saturating_add(1);
+    pub fn record_completed_checkpoint(
+        &mut self,
+        kind: CheckpointCompletionKind,
+        write_time: Duration,
+        sync_time: Duration,
+        buffers_written: u64,
+        slru_written: u64,
+    ) {
+        match kind {
+            CheckpointCompletionKind::Timed => {
+                self.num_timed = self.num_timed.saturating_add(1);
+            }
+            CheckpointCompletionKind::Requested => {
+                self.num_requested = self.num_requested.saturating_add(1);
+            }
+            CheckpointCompletionKind::Shutdown => {}
+        }
         self.num_done = self.num_done.saturating_add(1);
+        self.write_time_ms += write_time.as_secs_f64() * 1000.0;
+        self.sync_time_ms += sync_time.as_secs_f64() * 1000.0;
+        self.buffers_written = self.buffers_written.saturating_add(buffers_written);
+        self.slru_written = self.slru_written.saturating_add(slru_written);
+    }
+
+    pub fn record_manual_checkpoint(&mut self) {
+        self.record_completed_checkpoint(
+            CheckpointCompletionKind::Requested,
+            Duration::ZERO,
+            Duration::ZERO,
+            0,
+            0,
+        );
     }
 }
 
