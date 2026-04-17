@@ -19,7 +19,7 @@ use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_NOTNULL, PUBLIC_NAMESPACE_OID, PgAuthIdRow,
     PgAuthMembersRow, PgConstraintRow, PgDependRow, PgInheritsRow, PgRewriteRow,
     bootstrap_pg_auth_members_rows, bootstrap_pg_authid_rows, builtin_type_rows,
-    sort_pg_rewrite_rows,
+    relkind_has_storage, sort_pg_rewrite_rows,
 };
 
 const DEFAULT_SPC_OID: u32 = 0;
@@ -324,10 +324,10 @@ impl Catalog {
         if relkind == 'r' {
             allocate_relation_object_oids(&mut desc, &mut next_oid);
         }
-        let rel_number = if relkind == 'v' {
-            0
-        } else {
+        let rel_number = if relkind_has_storage(relkind) {
             self.next_rel_number
+        } else {
+            0
         };
 
         let entry = CatalogEntry {
@@ -350,7 +350,7 @@ impl Catalog {
             desc,
             index_meta: None,
         };
-        if relkind != 'v' {
+        if relkind_has_storage(relkind) {
             self.next_rel_number = self.next_rel_number.saturating_add(1);
         }
         self.next_oid = next_oid;
@@ -1623,6 +1623,9 @@ fn not_null_constraint_column_index(
 fn validate_builtin_type_rows(desc: &RelationDesc) -> Result<(), CatalogError> {
     let builtin_rows = builtin_type_rows();
     for column in &desc.columns {
+        if !column.sql_type.is_array && column.sql_type.type_oid != 0 {
+            continue;
+        }
         let present = builtin_rows.iter().any(|row| {
             row.sql_type.kind == column.sql_type.kind
                 && row.sql_type.is_array == column.sql_type.is_array

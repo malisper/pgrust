@@ -1,10 +1,12 @@
 use crate::backend::catalog::catalog::CatalogEntry;
 use crate::backend::executor::RelationDesc;
+use crate::backend::utils::cache::catcache::sql_type_oid;
 use crate::include::catalog::{
     DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, PG_ATTRDEF_RELATION_OID,
     PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID, PG_NAMESPACE_RELATION_OID,
-    PG_REWRITE_RELATION_OID, PG_TYPE_RELATION_OID, PgDependRow,
+    PG_PROC_RELATION_OID, PG_REWRITE_RELATION_OID, PG_TYPE_RELATION_OID, PgDependRow,
 };
+use std::collections::BTreeSet;
 
 pub fn sort_pg_depend_rows(rows: &mut [PgDependRow]) {
     rows.sort_by_key(|row| {
@@ -209,6 +211,63 @@ pub fn derived_relation_depend_rows(
             deptype: DEPENDENCY_AUTO,
         })
     }));
+    let mut referenced_type_oids = BTreeSet::new();
+    for column in &desc.columns {
+        let type_oid = sql_type_oid(column.sql_type);
+        if type_oid != 0 {
+            referenced_type_oids.insert(type_oid);
+        }
+    }
+    rows.extend(
+        referenced_type_oids
+            .into_iter()
+            .map(|type_oid| PgDependRow {
+                classid: PG_CLASS_RELATION_OID,
+                objid: relation_oid,
+                objsubid: 0,
+                refclassid: PG_TYPE_RELATION_OID,
+                refobjid: type_oid,
+                refobjsubid: 0,
+                deptype: DEPENDENCY_NORMAL,
+            }),
+    );
+    rows
+}
+
+pub fn proc_depend_rows(
+    proc_oid: u32,
+    namespace_oid: u32,
+    return_type_oid: u32,
+    arg_type_oids: &[u32],
+) -> Vec<PgDependRow> {
+    let mut rows = vec![PgDependRow {
+        classid: PG_PROC_RELATION_OID,
+        objid: proc_oid,
+        objsubid: 0,
+        refclassid: PG_NAMESPACE_RELATION_OID,
+        refobjid: namespace_oid,
+        refobjsubid: 0,
+        deptype: DEPENDENCY_NORMAL,
+    }];
+    let mut referenced_type_oids = BTreeSet::new();
+    if return_type_oid != 0 {
+        referenced_type_oids.insert(return_type_oid);
+    }
+    referenced_type_oids.extend(arg_type_oids.iter().copied().filter(|oid| *oid != 0));
+    rows.extend(
+        referenced_type_oids
+            .into_iter()
+            .map(|type_oid| PgDependRow {
+                classid: PG_PROC_RELATION_OID,
+                objid: proc_oid,
+                objsubid: 0,
+                refclassid: PG_TYPE_RELATION_OID,
+                refobjid: type_oid,
+                refobjsubid: 0,
+                deptype: DEPENDENCY_NORMAL,
+            }),
+    );
+    sort_pg_depend_rows(&mut rows);
     rows
 }
 

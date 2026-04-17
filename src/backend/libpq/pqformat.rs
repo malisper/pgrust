@@ -160,26 +160,28 @@ pub(crate) fn format_exec_error_hint(e: &ExecError) -> Option<String> {
 }
 
 pub(crate) fn infer_command_tag(sql: &str, affected: usize) -> String {
-    let first_word = sql
+    let mut words = sql
         .split_ascii_whitespace()
-        .next()
-        .unwrap_or("")
-        .to_ascii_uppercase();
-    match first_word.as_str() {
-        "INSERT" => format!("INSERT 0 {affected}"),
-        "UPDATE" => format!("UPDATE {affected}"),
-        "DELETE" => format!("DELETE {affected}"),
-        "CREATE" => "CREATE TABLE".to_string(),
-        "DROP" => "DROP TABLE".to_string(),
-        "ANALYZE" => "ANALYZE".to_string(),
-        "COMMENT" => "COMMENT".to_string(),
-        "DO" => "DO".to_string(),
-        "VACUUM" => "VACUUM".to_string(),
-        "SET" => "SET".to_string(),
-        "RESET" => "RESET".to_string(),
-        "BEGIN" | "START" => "BEGIN".to_string(),
-        "COMMIT" | "END" => "COMMIT".to_string(),
-        "ROLLBACK" => "ROLLBACK".to_string(),
+        .map(|word| word.to_ascii_uppercase());
+    let first_word = words.next().unwrap_or_default();
+    let second_word = words.next().unwrap_or_default();
+    match (first_word.as_str(), second_word.as_str()) {
+        ("INSERT", _) => format!("INSERT 0 {affected}"),
+        ("UPDATE", _) => format!("UPDATE {affected}"),
+        ("DELETE", _) => format!("DELETE {affected}"),
+        ("CREATE", "TYPE") => "CREATE TYPE".to_string(),
+        ("CREATE", _) => "CREATE TABLE".to_string(),
+        ("DROP", "TYPE") => "DROP TYPE".to_string(),
+        ("DROP", _) => "DROP TABLE".to_string(),
+        ("ANALYZE", _) => "ANALYZE".to_string(),
+        ("COMMENT", _) => "COMMENT".to_string(),
+        ("DO", _) => "DO".to_string(),
+        ("VACUUM", _) => "VACUUM".to_string(),
+        ("SET", _) => "SET".to_string(),
+        ("RESET", _) => "RESET".to_string(),
+        ("BEGIN", _) | ("START", _) => "BEGIN".to_string(),
+        ("COMMIT", _) | ("END", _) => "COMMIT".to_string(),
+        ("ROLLBACK", _) => "ROLLBACK".to_string(),
         _ => format!("SELECT {affected}"),
     }
 }
