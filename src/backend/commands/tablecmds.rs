@@ -41,7 +41,7 @@ use crate::backend::storage::page::bufpage::MAX_HEAP_TUPLE_SIZE;
 use crate::include::access::detoast::is_ondisk_toast_pointer;
 use crate::include::access::htup::{HeapTuple, TupleValue};
 use crate::include::access::itemptr::ItemPointerData;
-use crate::include::nodes::datum::{ArrayDimension, ArrayValue};
+use crate::include::nodes::datum::{ArrayDimension, ArrayValue, array_value_from_value};
 use crate::include::nodes::execnodes::*;
 
 fn finalize_bound_insert(
@@ -929,6 +929,9 @@ fn assign_array_value(
     if subscripts.is_empty() {
         return Ok(replacement);
     }
+    if subscripts.iter().any(|subscript| subscript.is_slice) {
+        return assign_array_slice_value(current, subscripts, replacement);
+    }
     let subscript = &subscripts[0];
     let (mut lower_bound, mut items) = assignment_top_level(current)?;
     if subscript.is_slice {
@@ -986,6 +989,278 @@ fn assign_array_value(
         };
         build_assignment_array_value(lower_bound, items)
     }
+}
+
+fn assign_array_slice_value(
+    current: Value,
+    subscripts: &[ResolvedAssignmentSubscript],
+    replacement: Value,
+) -> Result<Value, ExecError> {
+    if matches!(replacement, Value::Null) {
+        return Ok(current);
+    }
+
+    let current_array = assignment_current_array(current)?;
+    let source_array = assignment_source_array(replacement)?;
+
+    if subscripts.len() > 6 {
+        return Err(array_assignment_error("wrong number of array subscripts"));
+    }
+
+    if current_array.ndim() == 0 {
+        return assign_array_slice_into_empty(subscripts, source_array);
+    }
+
+    let ndim = current_array.ndim();
+    if ndim < subscripts.len() || ndim > 6 {
+        return Err(array_assignment_error("wrong number of array subscripts"));
+    }
+
+    let mut dimensions = current_array.dimensions.clone();
+    let mut lower_bounds = Vec::with_capacity(ndim);
+    let mut upper_bounds = Vec::with_capacity(ndim);
+
+    for (dim_idx, subscript) in subscripts.iter().enumerate() {
+        let dim = &dimensions[dim_idx];
+        let lower = resolve_assignment_slice_bound(
+            subscript.lower.as_ref(),
+            dim.lower_bound,
+            subscript.is_slice,
+        )?;
+        let upper = resolve_assignment_slice_bound(
+            if subscript.is_slice {
+                subscript.upper.as_ref()
+            } else {
+                subscript.lower.as_ref()
+            },
+            dim.lower_bound + dim.length as i32 - 1,
+            subscript.is_slice,
+        )?;
+        if lower > upper {
+            return Err(array_assignment_error(
+                "upper bound cannot be less than lower bound",
+            ));
+        }
+
+        if ndim == 1 {
+            if lower < dimensions[0].lower_bound {
+                let extension = (dimensions[0].lower_bound - lower) as usize;
+                dimensions[0].lower_bound = lower;
+                dimensions[0].length += extension;
+            }
+            let current_upper = dimensions[0].lower_bound + dimensions[0].length as i32 - 1;
+            if upper > current_upper {
+                dimensions[0].length += (upper - current_upper) as usize;
+            }
+        } else if lower < dim.lower_bound || upper >= dim.lower_bound + dim.length as i32 {
+            return Err(array_assignment_error("array subscript out of range"));
+        }
+
+        lower_bounds.push(lower);
+        upper_bounds.push(upper);
+    }
+
+    for dim in dimensions.iter().skip(subscripts.len()) {
+        lower_bounds.push(dim.lower_bound);
+        upper_bounds.push(dim.lower_bound + dim.length as i32 - 1);
+    }
+
+    let span_lengths = lower_bounds
+        .iter()
+        .zip(upper_bounds.iter())
+        .map(|(lower, upper)| (*upper - *lower + 1) as usize)
+        .collect::<Vec<_>>();
+    let target_items = span_lengths
+        .iter()
+        .try_fold(1usize, |count, span| count.checked_mul(*span))
+        .ok_or_else(|| array_assignment_limit_error())?;
+    if source_array.elements.len() < target_items {
+        return Err(array_assignment_error("source array too small"));
+    }
+
+    let element_type_oid = current_array.element_type_oid.or(source_array.element_type_oid);
+    if ndim == 1 {
+        let mut elements = vec![Value::Null; dimensions[0].length];
+        let original_lower = current_array.lower_bound(0).unwrap_or(1);
+        for (idx, value) in current_array.elements.iter().enumerate() {
+            let target_idx = (original_lower + idx as i32 - dimensions[0].lower_bound) as usize;
+            elements[target_idx] = value.clone();
+        }
+        let start_idx = (lower_bounds[0] - dimensions[0].lower_bound) as usize;
+        for (offset, value) in source_array.elements.into_iter().take(target_items).enumerate() {
+            elements[start_idx + offset] = value;
+        }
+        return Ok(Value::PgArray(array_with_element_type(
+            ArrayValue::from_dimensions(dimensions, elements),
+            element_type_oid,
+        )));
+    }
+
+    let mut elements = current_array.elements.clone();
+    for (offset, value) in source_array.elements.into_iter().take(target_items).enumerate() {
+        let coords = linear_index_to_assignment_coords(offset, &lower_bounds, &span_lengths);
+        let target_idx = assignment_coords_to_linear_index(&coords, &dimensions);
+        elements[target_idx] = value;
+    }
+    Ok(Value::PgArray(array_with_element_type(
+        ArrayValue::from_dimensions(dimensions, elements),
+        element_type_oid,
+    )))
+}
+
+fn assign_array_slice_into_empty(
+    subscripts: &[ResolvedAssignmentSubscript],
+    source_array: ArrayValue,
+) -> Result<Value, ExecError> {
+    let mut dimensions = Vec::with_capacity(subscripts.len());
+    for subscript in subscripts {
+        let Some(lower_value) = subscript.lower.as_ref() else {
+            return Err(ExecError::DetailedError {
+                message: "array slice subscript must provide both boundaries".into(),
+                detail: Some(
+                    "When assigning to a slice of an empty array value, slice boundaries must be fully specified."
+                        .into(),
+                ),
+                hint: None,
+                sqlstate: "2202E",
+            });
+        };
+        let Some(upper_value) = (if subscript.is_slice {
+            subscript.upper.as_ref()
+        } else {
+            subscript.lower.as_ref()
+        }) else {
+            return Err(ExecError::DetailedError {
+                message: "array slice subscript must provide both boundaries".into(),
+                detail: Some(
+                    "When assigning to a slice of an empty array value, slice boundaries must be fully specified."
+                        .into(),
+                ),
+                hint: None,
+                sqlstate: "2202E",
+            });
+        };
+        let lower = assignment_subscript_index(Some(lower_value))?
+            .ok_or_else(|| assignment_null_subscript_error())?;
+        let upper = assignment_subscript_index(Some(upper_value))?
+            .ok_or_else(|| assignment_null_subscript_error())?;
+        if lower > upper {
+            return Err(array_assignment_error(
+                "upper bound cannot be less than lower bound",
+            ));
+        }
+        dimensions.push(ArrayDimension {
+            lower_bound: lower,
+            length: (upper - lower + 1) as usize,
+        });
+    }
+
+    let target_items = dimensions
+        .iter()
+        .try_fold(1usize, |count, dim| count.checked_mul(dim.length))
+        .ok_or_else(|| array_assignment_limit_error())?;
+    if source_array.elements.len() < target_items {
+        return Err(array_assignment_error("source array too small"));
+    }
+
+    Ok(Value::PgArray(array_with_element_type(
+        ArrayValue::from_dimensions(
+            dimensions,
+            source_array.elements.into_iter().take(target_items).collect(),
+        ),
+        source_array.element_type_oid,
+    )))
+}
+
+fn assignment_current_array(current: Value) -> Result<ArrayValue, ExecError> {
+    match current {
+        Value::Null => Ok(ArrayValue::empty()),
+        other => array_value_from_value(&other).ok_or(ExecError::TypeMismatch {
+            op: "array assignment",
+            left: other,
+            right: Value::Null,
+        }),
+    }
+}
+
+fn assignment_source_array(replacement: Value) -> Result<ArrayValue, ExecError> {
+    array_value_from_value(&replacement).ok_or(ExecError::TypeMismatch {
+        op: "array slice assignment",
+        left: Value::Null,
+        right: replacement,
+    })
+}
+
+fn resolve_assignment_slice_bound(
+    value: Option<&Value>,
+    default: i32,
+    is_slice: bool,
+) -> Result<i32, ExecError> {
+    match value {
+        None if is_slice => Ok(default),
+        None => assignment_subscript_index(None)?.ok_or_else(assignment_null_subscript_error),
+        Some(_) => assignment_subscript_index(value)?.ok_or_else(assignment_null_subscript_error),
+    }
+}
+
+fn assignment_null_subscript_error() -> ExecError {
+    ExecError::InvalidStorageValue {
+        column: "<array>".into(),
+        details: "array subscript in assignment must not be null".into(),
+    }
+}
+
+fn array_assignment_error(message: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: message.into(),
+        detail: None,
+        hint: None,
+        sqlstate: "2202E",
+    }
+}
+
+fn array_assignment_limit_error() -> ExecError {
+    ExecError::DetailedError {
+        message: "array size exceeds the maximum allowed".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "54000",
+    }
+}
+
+fn array_with_element_type(mut array: ArrayValue, element_type_oid: Option<u32>) -> ArrayValue {
+    array.element_type_oid = element_type_oid;
+    array
+}
+
+fn linear_index_to_assignment_coords(
+    mut offset: usize,
+    lower_bounds: &[i32],
+    lengths: &[usize],
+) -> Vec<i32> {
+    let mut coords = vec![0; lengths.len()];
+    for dim_idx in 0..lengths.len() {
+        let stride = lengths[dim_idx + 1..]
+            .iter()
+            .fold(1usize, |product, length| product.saturating_mul(*length));
+        let axis_offset = if stride == 0 { 0 } else { offset / stride };
+        if stride != 0 {
+            offset %= stride;
+        }
+        coords[dim_idx] = lower_bounds[dim_idx] + axis_offset as i32;
+    }
+    coords
+}
+
+fn assignment_coords_to_linear_index(coords: &[i32], dimensions: &[ArrayDimension]) -> usize {
+    let mut offset = 0usize;
+    for (dim_idx, coord) in coords.iter().enumerate() {
+        let stride = dimensions[dim_idx + 1..]
+            .iter()
+            .fold(1usize, |product, dim| product.saturating_mul(dim.length));
+        offset += (*coord - dimensions[dim_idx].lower_bound) as usize * stride;
+    }
+    offset
 }
 
 fn assignment_top_level(current: Value) -> Result<(i32, Vec<Value>), ExecError> {
