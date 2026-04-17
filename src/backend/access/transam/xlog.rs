@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crate::backend::access::transam::xloginsert::RegisteredXLogRecord;
+use crate::backend::access::transam::CheckpointRecord;
 use crate::backend::access::transam::xlogreader::{
     BKPBLOCK_FORK_MASK, BKPBLOCK_HAS_DATA, BKPBLOCK_HAS_IMAGE, BKPBLOCK_SAME_REL,
     BKPBLOCK_WILL_INIT, BKPIMAGE_APPLY, BKPIMAGE_HAS_HOLE, CRC_OFFSET, DecodedBkpBlock,
@@ -48,10 +49,13 @@ pub const INVALID_LSN: Lsn = 0;
 pub const XLOG_FPI: u8 = 0;
 pub const XLOG_HEAP_INSERT: u8 = 1;
 pub const XLOG_XACT_COMMIT: u8 = 0;
+pub const XLOG_CHECKPOINT_ONLINE: u8 = 0x10;
+pub const XLOG_CHECKPOINT_SHUTDOWN: u8 = 0x11;
 
 pub const RM_HEAP_ID: u8 = 0;
 pub const RM_XACT_ID: u8 = 1;
 pub const RM_BTREE_ID: u8 = 2;
+pub const RM_XLOG_ID: u8 = 3;
 
 pub const REGBUF_STANDARD: u8 = 1 << 0;
 pub const REGBUF_WILL_INIT: u8 = 1 << 1;
@@ -158,6 +162,10 @@ pub enum WalRecord {
     },
     XactCommit {
         xid: u32,
+    },
+    Checkpoint {
+        redo_lsn: Lsn,
+        shutdown: bool,
     },
 }
 
@@ -637,6 +645,16 @@ impl WalReader {
                 }
             }
             (RM_XACT_ID, XLOG_XACT_COMMIT) => WalRecord::XactCommit { xid: decoded.xid },
+            (RM_XLOG_ID, XLOG_CHECKPOINT_ONLINE | XLOG_CHECKPOINT_SHUTDOWN) => {
+                if decoded.main_data.len() < 8 {
+                    return Err(WalError::Corrupt("checkpoint record missing redo LSN".into()));
+                }
+                let redo_lsn = u64::from_le_bytes(decoded.main_data[0..8].try_into().unwrap());
+                WalRecord::Checkpoint {
+                    redo_lsn,
+                    shutdown: decoded.info == XLOG_CHECKPOINT_SHUTDOWN,
+                }
+            }
             _ => {
                 return Err(WalError::Corrupt(format!(
                     "unknown WAL record: rmid={} info={}",
@@ -787,6 +805,27 @@ impl WalWriter {
             xid,
             RM_XACT_ID,
             XLOG_XACT_COMMIT,
+        )
+    }
+
+    pub fn write_checkpoint_record(
+        &self,
+        record: CheckpointRecord,
+        shutdown: bool,
+    ) -> Result<Lsn, WalError> {
+        crate::backend::access::transam::xloginsert::xlog_begin_insert();
+        crate::backend::access::transam::xloginsert::xlog_register_data(
+            &record.redo_lsn.to_le_bytes(),
+        );
+        crate::backend::access::transam::xloginsert::xlog_insert(
+            self,
+            0,
+            RM_XLOG_ID,
+            if shutdown {
+                XLOG_CHECKPOINT_SHUTDOWN
+            } else {
+                XLOG_CHECKPOINT_ONLINE
+            },
         )
     }
 
@@ -1035,6 +1074,10 @@ impl WalWriter {
     pub fn flushed_lsn(&self) -> Lsn {
         self.inner.lock().flushed_lsn
     }
+
+    pub fn clear_page_image_tracking(&self) {
+        self.inner.lock().pages_with_image.clear();
+    }
 }
 
 struct EncodedBlock {
@@ -1225,5 +1268,32 @@ mod tests {
         let crc = u32::from_le_bytes(check[CRC_OFFSET..CRC_OFFSET + 4].try_into().unwrap());
         check[CRC_OFFSET..CRC_OFFSET + 4].copy_from_slice(&[0, 0, 0, 0]);
         assert_eq!(crc32c::crc32c(&check), crc);
+    }
+
+    #[test]
+    fn checkpoint_record_roundtrip_decodes_shutdown_flag() {
+        let dir = test_dir("checkpoint_roundtrip");
+        let wal = WalWriter::new(&dir).unwrap();
+        wal.write_checkpoint_record(CheckpointRecord { redo_lsn: 1234 }, false)
+            .unwrap();
+        wal.write_checkpoint_record(CheckpointRecord { redo_lsn: 5678 }, true)
+            .unwrap();
+        wal.flush().unwrap();
+
+        let mut reader = WalReader::open(&dir).unwrap();
+        assert!(matches!(
+            reader.next_record().unwrap().unwrap().1,
+            WalRecord::Checkpoint {
+                redo_lsn: 1234,
+                shutdown: false
+            }
+        ));
+        assert!(matches!(
+            reader.next_record().unwrap().unwrap().1,
+            WalRecord::Checkpoint {
+                redo_lsn: 5678,
+                shutdown: true
+            }
+        ));
     }
 }

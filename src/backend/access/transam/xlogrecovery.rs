@@ -12,7 +12,8 @@ use crate::backend::storage::smgr::md::MdStorageManager;
 use crate::backend::storage::smgr::{ForkNumber, StorageManager};
 
 use super::{
-    RM_BTREE_ID, RM_HEAP_ID, RM_XACT_ID, WalError, WalReader, XLOG_FPI, XLOG_HEAP_INSERT,
+    RM_BTREE_ID, RM_HEAP_ID, RM_XACT_ID, RM_XLOG_ID, WalError, WalReader,
+    XLOG_CHECKPOINT_ONLINE, XLOG_CHECKPOINT_SHUTDOWN, XLOG_FPI, XLOG_HEAP_INSERT,
     XLOG_XACT_COMMIT,
 };
 
@@ -127,6 +128,7 @@ pub fn perform_wal_recovery(
                 committed_xids.insert(record.xid);
                 txns.replay_commit(record.xid);
             }
+            (RM_XLOG_ID, XLOG_CHECKPOINT_ONLINE | XLOG_CHECKPOINT_SHUTDOWN) => {}
             _ => {
                 return Err(WalError::Corrupt(format!(
                     "unknown WAL record during recovery: rmid={} info={}",
@@ -146,7 +148,8 @@ pub fn perform_wal_recovery(
     }
 
     // Persist the updated CLOG to disk.
-    txns.flush_clog();
+    txns.flush_clog()
+        .map_err(|err| WalError::Corrupt(format!("failed to flush clog after recovery: {err:?}")))?;
 
     Ok(stats)
 }

@@ -1,6 +1,6 @@
 use parking_lot::{Condvar, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use rustc_hash::FxHashMap;
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -1021,6 +1021,70 @@ impl<S: StorageBackend + Send> BufferPool<S> {
 }
 
 impl BufferPool<SmgrStorageBackend> {
+    pub fn checkpoint_flush_all(&self, fsync: bool) -> Result<CheckpointFlushResult, Error> {
+        let mut synced_forks = BTreeSet::new();
+        let mut buffers_written = 0u64;
+
+        for frame in &self.frames {
+            let tag_guard = frame.tag.lock();
+            let Some(tag) = *tag_guard else {
+                continue;
+            };
+            if !frame.state.is_valid() || !frame.state.is_dirty() || frame.state.is_io_in_progress()
+            {
+                continue;
+            }
+
+            {
+                let page_guard = frame.content_lock.write();
+                let buf_state = frame.state.lock_header();
+                let valid = buf_state & BM_VALID_PUB != 0;
+                let dirty = buf_state & BM_DIRTY_PUB != 0;
+                let io_in_progress = buf_state & BM_IO_IN_PROGRESS_PUB != 0;
+                frame.state.unlock_header(buf_state & !BM_LOCKED_PUB);
+                if !valid || !dirty || io_in_progress || *tag_guard != Some(tag) {
+                    continue;
+                }
+                let page = *page_guard;
+                if let Some(wal) = self.wal.as_ref() {
+                    let page_lsn = u64::from_le_bytes(page[0..8].try_into().unwrap());
+                    if page_lsn > 0 {
+                        wal.flush_to(page_lsn).map_err(|e| Error::Wal(e.to_string()))?;
+                    }
+                }
+                {
+                    let mut storage = self.storage.lock();
+                    storage
+                        .write_page(tag, &page, self.wal.is_some())
+                        .map_err(Error::Storage)?;
+                }
+                let buf_state = frame.state.lock_header();
+                let mut new_state = buf_state & !BM_LOCKED_PUB;
+                if new_state & BM_VALID_PUB != 0 && *tag_guard == Some(tag) {
+                    new_state &= !BM_DIRTY_PUB;
+                }
+                frame.state.unlock_header(new_state);
+            }
+            self.stats_written.fetch_add(1, Ordering::Relaxed);
+            buffers_written = buffers_written.saturating_add(1);
+            if fsync {
+                synced_forks.insert((tag.rel, tag.fork));
+            }
+        }
+
+        if fsync {
+            let mut storage = self.storage.lock();
+            for (rel, fork) in synced_forks {
+                storage
+                    .smgr
+                    .immedsync(rel, fork)
+                    .map_err(|err| Error::Storage(err.to_string()))?;
+            }
+        }
+
+        Ok(CheckpointFlushResult { buffers_written })
+    }
+
     pub fn ensure_relation_fork(&self, rel: RelFileLocator, fork: ForkNumber) -> Result<(), Error> {
         self.with_storage_mut(|storage| {
             let _ = storage.smgr.open(rel);
@@ -1078,6 +1142,11 @@ impl BufferPool<SmgrStorageBackend> {
         };
         Ok(self.wrap_pinned(client_id, buffer_id))
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CheckpointFlushResult {
+    pub buffers_written: u64,
 }
 
 /// RAII guard that unpins a buffer on drop. Prevents pin leaks when

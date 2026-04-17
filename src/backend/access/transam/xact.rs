@@ -267,18 +267,24 @@ impl TransactionManager {
     }
 
     /// Flush in-memory CLOG buffer to disk (like PostgreSQL's SLRU writeback).
-    pub fn flush_clog(&mut self) {
+    pub fn flush_clog(&mut self) -> Result<(), MvccError> {
         let Some(ref mut file) = self.status_file else {
-            return;
+            return Ok(());
         };
-        let _ = file.seek(SeekFrom::Start(0));
-        let _ = file.write_all(&self.clog_buf);
+        file.seek(SeekFrom::Start(0))
+            .map_err(|e| MvccError::Io(e.to_string()))?;
+        file.write_all(&self.clog_buf)
+            .map_err(|e| MvccError::Io(e.to_string()))?;
+        file.sync_data().map_err(|e| MvccError::Io(e.to_string()))?;
+        file.seek(SeekFrom::Start(0))
+            .map_err(|e| MvccError::Io(e.to_string()))?;
+        Ok(())
     }
 }
 
 impl Drop for TransactionManager {
     fn drop(&mut self) {
-        self.flush_clog();
+        let _ = self.flush_clog();
     }
 }
 

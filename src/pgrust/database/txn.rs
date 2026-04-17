@@ -155,6 +155,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         match result {
             Ok(r) => {
+                let _checkpoint_guard = self.checkpoint_commit_guard();
                 self.pool.write_wal_commit(xid).map_err(|e| {
                     ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Storage(
                         crate::backend::storage::smgr::SmgrError::Io(std::io::Error::new(

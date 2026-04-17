@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use parking_lot::RwLock;
 
+use crate::backend::access::transam::checkpoint::{CheckpointCommitBarrier, Checkpointer};
 use crate::backend::access::transam::xact::TransactionManager;
 use crate::backend::access::transam::xlog::{WalBgWriter, WalWriter};
 use crate::backend::catalog::{CatalogError, CatalogStore};
@@ -38,6 +39,10 @@ pub(crate) struct ClusterShared {
     pub plan_cache: Arc<PlanCache>,
     pub open_databases: Arc<RwLock<HashMap<u32, Arc<OpenDatabaseState>>>>,
     pub active_connections: Arc<RwLock<HashMap<u32, usize>>>,
+    pub checkpoint_config: Arc<CheckpointConfig>,
+    pub checkpoint_stats: Arc<RwLock<CheckpointStatsSnapshot>>,
+    pub checkpoint_commit_barrier: Arc<CheckpointCommitBarrier>,
+    pub checkpointer: Option<Arc<Checkpointer>>,
     pub wal_bg_writer: Option<Arc<WalBgWriter>>,
 }
 
@@ -67,6 +72,16 @@ impl OpenDatabaseState {
             domains: Arc::new(RwLock::new(BTreeMap::new())),
             sequences,
         })
+    }
+}
+
+impl Drop for ClusterShared {
+    fn drop(&mut self) {
+        if let Some(checkpointer) = self.checkpointer.as_ref() {
+            let _ = checkpointer.shutdown_and_join();
+        } else {
+            let _ = self.txns.write().flush_clog();
+        }
     }
 }
 
@@ -128,18 +143,34 @@ impl Cluster {
         }
 
         let wal_bg_writer = WalBgWriter::start(Arc::clone(&wal), Duration::from_millis(200));
+        let txns = Arc::new(RwLock::new(txns));
+        let checkpoint_config = Arc::new(CheckpointConfig::default());
+        let checkpoint_stats = Arc::new(RwLock::new(CheckpointStatsSnapshot::default()));
+        let checkpoint_commit_barrier = Arc::new(CheckpointCommitBarrier::new());
+        let checkpointer = Some(Checkpointer::start(
+            Arc::clone(&pool),
+            Some(Arc::clone(&wal)),
+            Arc::clone(&txns),
+            Arc::clone(&checkpoint_config),
+            Arc::clone(&checkpoint_stats),
+            Arc::clone(&checkpoint_commit_barrier),
+        ));
         Ok(Self {
             shared: Arc::new(ClusterShared {
                 base_dir,
                 pool,
                 wal: Some(wal),
-                txns: Arc::new(RwLock::new(txns)),
+                txns,
                 shared_catalog: Arc::new(RwLock::new(shared_catalog)),
                 txn_waiter: Arc::new(TransactionWaiter::new()),
                 table_locks: Arc::new(TableLockManager::new()),
                 plan_cache: Arc::new(PlanCache::new()),
                 open_databases: Arc::new(RwLock::new(open_databases)),
                 active_connections: Arc::new(RwLock::new(HashMap::new())),
+                checkpoint_config,
+                checkpoint_stats,
+                checkpoint_commit_barrier,
+                checkpointer,
                 wal_bg_writer: Some(Arc::new(wal_bg_writer)),
             }),
         })
@@ -187,8 +218,10 @@ impl Cluster {
             database_oid: row.oid,
             pool: Arc::clone(&self.shared.pool),
             wal: self.shared.wal.clone(),
-            checkpoint_config: Arc::new(CheckpointConfig::default()),
-            checkpoint_stats: Arc::new(RwLock::new(CheckpointStatsSnapshot::default())),
+            checkpoint_config: Arc::clone(&self.shared.checkpoint_config),
+            checkpoint_stats: Arc::clone(&self.shared.checkpoint_stats),
+            checkpoint_commit_barrier: Arc::clone(&self.shared.checkpoint_commit_barrier),
+            checkpointer: self.shared.checkpointer.clone(),
             txns: Arc::clone(&self.shared.txns),
             shared_catalog: Arc::clone(&self.shared.shared_catalog),
             catalog: Arc::clone(&state.catalog),
