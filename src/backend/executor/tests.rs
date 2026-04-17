@@ -9308,6 +9308,50 @@ fn jsonb_operators_and_scalar_functions_work() {
 }
 
 #[test]
+fn jsonb_contains_and_exists_helpers_follow_postgres_semantics() {
+    let base = temp_dir("jsonb_contains_exists_helpers");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select \
+            jsonb_contains('{\"a\":\"b\", \"b\":1, \"c\":null}', '{\"a\":\"b\", \"c\":null}'), \
+            jsonb_contained('{\"a\":\"b\"}', '{\"a\":\"b\", \"b\":1, \"c\":null}'), \
+            '[1,2]'::jsonb @> '[1,2,2]'::jsonb, \
+            '[1,2,2]'::jsonb <@ '[1,2]'::jsonb, \
+            jsonb_exists('{\"a\":null, \"b\":\"qq\"}', 'a'), \
+            jsonb_exists_any('{\"a\":null, \"b\":\"qq\"}', ARRAY['c','a']::text[]), \
+            jsonb_exists_all('{\"a\":null, \"b\":\"qq\"}', ARRAY['a','b']::text[]), \
+            '{\"a\":null, \"b\":\"qq\"}'::jsonb ? 'a', \
+            '{\"a\":null, \"b\":\"qq\"}'::jsonb ?| ARRAY['c','a']::text[], \
+            '{\"a\":null, \"b\":\"qq\"}'::jsonb ?& ARRAY['a','b']::text[]",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Bool(true),
+                    Value::Bool(true),
+                    Value::Bool(true),
+                    Value::Bool(true),
+                    Value::Bool(true),
+                    Value::Bool(true),
+                    Value::Bool(true),
+                    Value::Bool(true),
+                    Value::Bool(true),
+                    Value::Bool(true),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn jsonb_object_and_pretty_functions_work() {
     let base = temp_dir("jsonb_object_and_pretty");
     let txns = TransactionManager::new_durable(&base).unwrap();

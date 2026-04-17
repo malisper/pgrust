@@ -850,17 +850,9 @@ pub(crate) fn jsonb_contains(left: &JsonbValue, right: &JsonbValue) -> bool {
             })
         }
         (JsonbValue::Array(left_items), JsonbValue::Array(right_items)) => {
-            let mut used = vec![false; left_items.len()];
-            'outer: for right_item in right_items {
-                for (idx, left_item) in left_items.iter().enumerate() {
-                    if !used[idx] && jsonb_contains(left_item, right_item) {
-                        used[idx] = true;
-                        continue 'outer;
-                    }
-                }
-                return false;
-            }
-            true
+            right_items
+                .iter()
+                .all(|right_item| left_items.iter().any(|left_item| jsonb_contains(left_item, right_item)))
         }
         _ => false,
     }
