@@ -4244,6 +4244,39 @@ fn parse_srf_with_column_definitions() {
 }
 
 #[test]
+fn parse_srf_with_column_definitions_without_alias() {
+    let stmt =
+        parse_select("select * from json_populate_record(null::record, '{\"x\": 776}') as (x int, y int)")
+            .unwrap();
+    match &stmt.from {
+        Some(FromItem::Alias {
+            source,
+            alias,
+            column_aliases,
+            preserve_source_names,
+        }) => {
+            assert!(matches!(source.as_ref(), FromItem::FunctionCall { name, .. } if name == "json_populate_record"));
+            assert_eq!(alias, "json_populate_record_coldef");
+            assert_eq!(
+                column_aliases,
+                &AliasColumnSpec::Definitions(vec![
+                    AliasColumnDef {
+                        name: "x".into(),
+                        ty: builtin_type(SqlType::new(SqlTypeKind::Int4)),
+                    },
+                    AliasColumnDef {
+                        name: "y".into(),
+                        ty: builtin_type(SqlType::new(SqlTypeKind::Int4)),
+                    },
+                ])
+            );
+            assert!(!preserve_source_names);
+        }
+        other => panic!("expected aliased function call, got {other:?}"),
+    }
+}
+
+#[test]
 fn analyze_json_each_uses_pg_proc_out_metadata_for_output_columns() {
     let mut row = json_each_proc_row();
     row.proargnames = Some(vec![String::new(), "left_key".into(), "payload".into()]);

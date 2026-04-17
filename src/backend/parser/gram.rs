@@ -2294,6 +2294,7 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
             let mut source = None;
             let mut alias = None;
             let mut column_aliases = AliasColumnSpec::None;
+            let mut function_column_defs_without_alias = None;
             for part in pair.into_inner() {
                 match part.as_rule() {
                     Rule::only_table_from_item
@@ -2310,11 +2311,39 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
                         alias = Some(parsed_alias);
                         column_aliases = parsed_column_aliases;
                     }
+                    Rule::function_column_def_alias => {
+                        function_column_defs_without_alias = Some(build_function_column_def_alias(part)?);
+                    }
                     _ => {}
                 }
             }
             let item = source.ok_or(ParseError::UnexpectedEof)?;
             if let Some(alias) = alias {
+                Ok(FromItem::Alias {
+                    source: Box::new(item),
+                    alias,
+                    column_aliases,
+                    preserve_source_names: false,
+                })
+            } else if let Some(column_aliases) = function_column_defs_without_alias {
+                let alias = match &item {
+                    FromItem::FunctionCall { name, .. } => format!("{name}_coldef"),
+                    FromItem::Lateral(inner) => match inner.as_ref() {
+                        FromItem::FunctionCall { name, .. } => format!("{name}_coldef"),
+                        _ => {
+                            return Err(ParseError::UnexpectedToken {
+                                expected: "function call before column definition list",
+                                actual: "lateral non-function from item".into(),
+                            });
+                        }
+                    },
+                    _ => {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "function call before column definition list",
+                            actual: "non-function from item".into(),
+                        });
+                    }
+                };
                 Ok(FromItem::Alias {
                     source: Box::new(item),
                     alias,
@@ -2481,6 +2510,15 @@ fn build_relation_alias(pair: Pair<'_, Rule>) -> Result<(String, AliasColumnSpec
         }
     }
     Ok((alias.ok_or(ParseError::UnexpectedEof)?, column_aliases))
+}
+
+fn build_function_column_def_alias(pair: Pair<'_, Rule>) -> Result<AliasColumnSpec, ParseError> {
+    let defs = pair
+        .into_inner()
+        .filter(|part| part.as_rule() == Rule::alias_column_def)
+        .map(build_alias_column_def)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(AliasColumnSpec::Definitions(defs))
 }
 
 fn build_alias_column_spec(pair: Pair<'_, Rule>) -> Result<AliasColumnSpec, ParseError> {
