@@ -229,8 +229,10 @@ pub enum Statement {
     GrantRoleMembership(GrantRoleMembershipStatement),
     RevokeRoleMembership(RevokeRoleMembershipStatement),
     DropTable(DropTableStatement),
+    DropIndex(DropIndexStatement),
     DropDomain(DropDomainStatement),
     DropView(DropViewStatement),
+    DropSchema(DropSchemaStatement),
     CreateRole(CreateRoleStatement),
     AlterRole(AlterRoleStatement),
     DropRole(DropRoleStatement),
@@ -947,6 +949,12 @@ pub struct DropTableStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropIndexStatement {
+    pub if_exists: bool,
+    pub index_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DropDomainStatement {
     pub if_exists: bool,
     pub domain_name: String,
@@ -957,6 +965,12 @@ pub struct DropDomainStatement {
 pub struct DropViewStatement {
     pub if_exists: bool,
     pub view_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropSchemaStatement {
+    pub if_exists: bool,
+    pub schema_names: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
