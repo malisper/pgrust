@@ -10628,6 +10628,18 @@ fn recursive_cte_cycle_tracking_returns_record_arrays() {
 }
 
 #[test]
+fn setop_for_no_key_update_reports_postgres_compat_error() {
+    let dir = temp_dir("setop_for_no_key_update");
+    let db = Database::open(&dir, 64).unwrap();
+
+    match db.execute(1, "select 1 except all select 1 for no key update") {
+        Err(ExecError::Parse(ParseError::FeatureNotSupportedMessage(message)))
+            if message == "FOR NO KEY UPDATE is not allowed with UNION/INTERSECT/EXCEPT" => {}
+        other => panic!("expected set-op FOR NO KEY UPDATE rejection, got {other:?}"),
+    }
+}
+
+#[test]
 fn drop_type_enforces_restrict_and_if_exists() {
     let dir = temp_dir("drop_type_restrict");
     let db = Database::open(&dir, 64).unwrap();

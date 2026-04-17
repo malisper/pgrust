@@ -3073,10 +3073,12 @@ fn build_order_by_clause(pair: Pair<'_, Rule>) -> Result<Vec<OrderByItem>, Parse
 
 fn build_locking_clause(pair: Pair<'_, Rule>) -> Result<SelectLockingClause, ParseError> {
     match pair.as_str().trim().to_ascii_lowercase().as_str() {
+        "for no key update" => Ok(SelectLockingClause::ForNoKeyUpdate),
         "for update" => Ok(SelectLockingClause::ForUpdate),
+        "for key share" => Ok(SelectLockingClause::ForKeyShare),
         "for share" => Ok(SelectLockingClause::ForShare),
         _ => Err(ParseError::UnexpectedToken {
-            expected: "FOR UPDATE or FOR SHARE",
+            expected: "FOR UPDATE, FOR NO KEY UPDATE, FOR SHARE, or FOR KEY SHARE",
             actual: pair.as_str().into(),
         }),
     }
