@@ -2673,6 +2673,7 @@ pub(super) fn estimate_sql_type_width(sql_type: SqlType) -> usize {
         SqlTypeKind::Int2 => 2,
         SqlTypeKind::Int4
         | SqlTypeKind::Oid
+        | SqlTypeKind::RegProcedure
         | SqlTypeKind::Xid
         | SqlTypeKind::Date
         | SqlTypeKind::Float4 => 4,
@@ -2702,6 +2703,7 @@ pub(super) fn estimate_sql_type_width(sql_type: SqlType) -> usize {
         | SqlTypeKind::JsonPath
         | SqlTypeKind::TsVector
         | SqlTypeKind::TsQuery
+        | SqlTypeKind::Void
         | SqlTypeKind::RegConfig
         | SqlTypeKind::RegDictionary
         | SqlTypeKind::AnyArray

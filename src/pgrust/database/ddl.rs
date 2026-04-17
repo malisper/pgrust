@@ -522,6 +522,7 @@ fn format_sql_type_name(sql_type: SqlType) -> &'static str {
     match sql_type.kind {
         SqlTypeKind::AnyArray => "anyarray",
         SqlTypeKind::Record | SqlTypeKind::Composite => "record",
+        SqlTypeKind::Void => "void",
         SqlTypeKind::Int2 => "smallint",
         SqlTypeKind::Int2Vector => "int2vector",
         SqlTypeKind::Int4 => "integer",
@@ -530,6 +531,7 @@ fn format_sql_type_name(sql_type: SqlType) -> &'static str {
         SqlTypeKind::Tid => "tid",
         SqlTypeKind::Xid => "xid",
         SqlTypeKind::Oid => "oid",
+        SqlTypeKind::RegProcedure => "regprocedure",
         SqlTypeKind::OidVector => "oidvector",
         SqlTypeKind::Bit => "bit",
         SqlTypeKind::VarBit => "bit varying",

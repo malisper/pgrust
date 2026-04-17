@@ -164,6 +164,10 @@ pub fn parse_type_name(sql: &str) -> Result<RawTypeName, ParseError> {
         "oidvector" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::OidVector))),
         "name" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Name))),
         "pg_node_tree" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::PgNodeTree))),
+        "void" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Void))),
+        "regprocedure" => {
+            return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegProcedure)));
+        }
         _ => {}
     }
     SqlParser::parse(Rule::type_name, &sql)
@@ -4427,6 +4431,7 @@ fn sql_type_output_name(ty: SqlType) -> &'static str {
     match ty.kind {
         SqlTypeKind::Record => "record",
         SqlTypeKind::Composite => "record",
+        SqlTypeKind::Void => "void",
         SqlTypeKind::Int2 => "int2",
         SqlTypeKind::Int2Vector => "int2vector",
         SqlTypeKind::Int4 => "int4",
@@ -4435,6 +4440,7 @@ fn sql_type_output_name(ty: SqlType) -> &'static str {
         SqlTypeKind::Int8Range => "int8range",
         SqlTypeKind::Name => "name",
         SqlTypeKind::Oid => "oid",
+        SqlTypeKind::RegProcedure => "regprocedure",
         SqlTypeKind::Tid => "tid",
         SqlTypeKind::Xid => "xid",
         SqlTypeKind::OidVector => "oidvector",

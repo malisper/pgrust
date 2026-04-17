@@ -387,7 +387,9 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
             | SqlTypeKind::DateRange
             | SqlTypeKind::TimestampRange
             | SqlTypeKind::TimestampTzRange => unreachable!("range arrays are unsupported"),
+            SqlTypeKind::Void => unreachable!("void arrays are unsupported"),
             SqlTypeKind::Oid => 1028,
+            SqlTypeKind::RegProcedure => crate::include::catalog::REGPROCEDURE_ARRAY_TYPE_OID as i32,
             SqlTypeKind::Tid => 1010,
             SqlTypeKind::Xid => 1011,
             SqlTypeKind::Bit => 1561,
@@ -443,7 +445,9 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
         SqlTypeKind::Int8 => (20, 8, -1),
         SqlTypeKind::Int4Range => (INT4RANGE_TYPE_OID as i32, -1, -1),
         SqlTypeKind::Int8Range => (INT8RANGE_TYPE_OID as i32, -1, -1),
+        SqlTypeKind::Void => (crate::include::catalog::VOID_TYPE_OID as i32, 4, -1),
         SqlTypeKind::Oid => (26, 4, -1),
+        SqlTypeKind::RegProcedure => (crate::include::catalog::REGPROCEDURE_TYPE_OID as i32, 4, -1),
         SqlTypeKind::Tid => (27, 6, -1),
         SqlTypeKind::Xid => (28, 4, -1),
         SqlTypeKind::Bit => (1560, -1, col.sql_type.typmod),

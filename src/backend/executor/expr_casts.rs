@@ -1157,7 +1157,7 @@ pub(crate) fn cast_value_with_config(
                 ..
             } => Ok(Value::Int64(v as i64)),
             SqlType {
-                kind: SqlTypeKind::Oid | SqlTypeKind::Xid,
+                kind: SqlTypeKind::Oid | SqlTypeKind::RegProcedure | SqlTypeKind::Xid,
                 ..
             } => {
                 if v < 0 {
@@ -1213,6 +1213,7 @@ pub(crate) fn cast_value_with_config(
                     | SqlTypeKind::JsonPath
                     | SqlTypeKind::TsVector
                     | SqlTypeKind::TsQuery
+                    | SqlTypeKind::Void
                     | SqlTypeKind::Tid
                     | SqlTypeKind::Interval
                     | SqlTypeKind::RegConfig
@@ -1256,7 +1257,7 @@ pub(crate) fn cast_value_with_config(
                 ..
             } => Ok(Value::Int64(v as i64)),
             SqlType {
-                kind: SqlTypeKind::Oid | SqlTypeKind::Xid,
+                kind: SqlTypeKind::Oid | SqlTypeKind::RegProcedure | SqlTypeKind::Xid,
                 ..
             } => {
                 if v < 0 {
@@ -1312,6 +1313,7 @@ pub(crate) fn cast_value_with_config(
                     | SqlTypeKind::JsonPath
                     | SqlTypeKind::TsVector
                     | SqlTypeKind::TsQuery
+                    | SqlTypeKind::Void
                     | SqlTypeKind::Tid
                     | SqlTypeKind::Interval
                     | SqlTypeKind::RegConfig
@@ -1379,6 +1381,7 @@ pub(crate) fn cast_value_with_config(
                     | SqlTypeKind::JsonPath
                     | SqlTypeKind::TsVector
                     | SqlTypeKind::TsQuery
+                    | SqlTypeKind::Void
                     | SqlTypeKind::Tid
                     | SqlTypeKind::Interval
                     | SqlTypeKind::RegConfig
@@ -1391,6 +1394,7 @@ pub(crate) fn cast_value_with_config(
                     | SqlTypeKind::Int4
                     | SqlTypeKind::Int8
                     | SqlTypeKind::Oid
+                    | SqlTypeKind::RegProcedure
                     | SqlTypeKind::Xid
                     | SqlTypeKind::Bytea
                     | SqlTypeKind::Float4
@@ -1720,7 +1724,7 @@ pub(crate) fn cast_value_with_config(
                 ..
             } => Ok(Value::Int64(v)),
             SqlType {
-                kind: SqlTypeKind::Oid | SqlTypeKind::Xid,
+                kind: SqlTypeKind::Oid | SqlTypeKind::RegProcedure | SqlTypeKind::Xid,
                 ..
             } => {
                 if !(0..=i32::MAX as i64).contains(&v) {
@@ -1784,6 +1788,7 @@ pub(crate) fn cast_value_with_config(
                     | SqlTypeKind::JsonPath
                     | SqlTypeKind::TsVector
                     | SqlTypeKind::TsQuery
+                    | SqlTypeKind::Void
                     | SqlTypeKind::Tid
                     | SqlTypeKind::Interval
                     | SqlTypeKind::RegConfig
@@ -1867,6 +1872,7 @@ pub(crate) fn cast_value_with_config(
                     | SqlTypeKind::JsonPath
                     | SqlTypeKind::TsVector
                     | SqlTypeKind::TsQuery
+                    | SqlTypeKind::Void
                     | SqlTypeKind::Tid
                     | SqlTypeKind::Interval
                     | SqlTypeKind::RegConfig
@@ -1886,7 +1892,7 @@ pub(crate) fn cast_value_with_config(
                 ..
             } => cast_float_to_int(v, ty),
             SqlType {
-                kind: SqlTypeKind::Oid | SqlTypeKind::Xid,
+                kind: SqlTypeKind::Oid | SqlTypeKind::RegProcedure | SqlTypeKind::Xid,
                 ..
             } => cast_float_to_int(v, ty),
             SqlType {
@@ -2039,7 +2045,14 @@ pub(super) fn cast_text_value_with_config(
         | SqlTypeKind::DateRange
         | SqlTypeKind::TimestampRange
         | SqlTypeKind::TimestampTzRange => parse_range_text(text, ty.kind),
-        SqlTypeKind::RegConfig | SqlTypeKind::RegDictionary => cast_text_to_oid(text),
+        SqlTypeKind::Void => Err(ExecError::TypeMismatch {
+            op: "::void",
+            left: Value::Text(CompactString::new(text)),
+            right: Value::Null,
+        }),
+        SqlTypeKind::RegProcedure | SqlTypeKind::RegConfig | SqlTypeKind::RegDictionary => {
+            cast_text_to_oid(text)
+        }
         SqlTypeKind::Tid => Ok(Value::Text(CompactString::from_owned(
             canonicalize_tid_text(text)?,
         ))),
@@ -2083,6 +2096,11 @@ pub(super) fn cast_numeric_value(
     match ty.kind {
         SqlTypeKind::AnyArray => Err(unsupported_anyarray_input()),
         SqlTypeKind::Record | SqlTypeKind::Composite => Err(unsupported_record_input()),
+        SqlTypeKind::Void => Err(ExecError::TypeMismatch {
+            op: "::void",
+            left: Value::Numeric(value),
+            right: Value::Null,
+        }),
         SqlTypeKind::Numeric => Ok(Value::Numeric(coerce_numeric_value(value, ty)?)),
         SqlTypeKind::Money => money_parse_text(&value.render()).map(Value::Money),
         SqlTypeKind::Text
@@ -2156,7 +2174,7 @@ pub(super) fn cast_numeric_value(
             .and_then(|rounded| rounded.render().parse::<i64>().ok())
             .map(Value::Int64)
             .ok_or(ExecError::Int8OutOfRange),
-        SqlTypeKind::Oid | SqlTypeKind::Xid => value
+        SqlTypeKind::Oid | SqlTypeKind::RegProcedure | SqlTypeKind::Xid => value
             .round_to_scale(0)
             .and_then(|rounded| rounded.render().parse::<u32>().ok())
             .and_then(|rounded| Some(Value::Int64(rounded as i64)))
