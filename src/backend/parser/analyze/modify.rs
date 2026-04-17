@@ -51,6 +51,7 @@ pub struct BoundUpdateTarget {
     pub toast_index: Option<BoundIndexRelation>,
     pub desc: RelationDesc,
     pub relation_constraints: BoundRelationConstraints,
+    pub referenced_by_foreign_keys: Vec<BoundReferencedByForeignKey>,
     pub row_source: BoundModifyRowSource,
     pub indexes: Vec<BoundIndexRelation>,
     pub assignments: Vec<BoundAssignment>,
@@ -70,6 +71,7 @@ pub struct BoundDeleteTarget {
     pub relation_oid: u32,
     pub toast: Option<ToastRelationRef>,
     pub desc: RelationDesc,
+    pub referenced_by_foreign_keys: Vec<BoundReferencedByForeignKey>,
     pub row_source: BoundModifyRowSource,
     pub predicate: Option<Expr>,
 }
@@ -148,10 +150,12 @@ fn inheritance_translation_exprs(
     indexes
         .iter()
         .map(|index| match index {
-            Some(index) => child_output_exprs
-                .get(*index)
-                .cloned()
-                .unwrap_or_else(|| panic!("missing inherited child output expr for column {}", index + 1)),
+            Some(index) => child_output_exprs.get(*index).cloned().unwrap_or_else(|| {
+                panic!(
+                    "missing inherited child output expr for column {}",
+                    index + 1
+                )
+            }),
             None => Expr::Const(Value::Null),
         })
         .collect()
@@ -187,9 +191,8 @@ fn build_update_target(
     let translation_indexes = inheritance_translation_indexes(parent_desc, &child.desc);
     let translation_exprs = inheritance_translation_exprs(&child.desc, &translation_indexes);
     let indexes = catalog.index_relations_for_heap(child.relation_oid);
-    let predicate = parent_predicate.map(|expr| {
-        rewrite_local_vars_for_output_exprs(expr.clone(), 1, &translation_exprs)
-    });
+    let predicate = parent_predicate
+        .map(|expr| rewrite_local_vars_for_output_exprs(expr.clone(), 1, &translation_exprs));
     let assignments = parent_assignments
         .iter()
         .map(|assignment| {
@@ -222,6 +225,11 @@ fn build_update_target(
             &child.desc,
             catalog,
         )?,
+        referenced_by_foreign_keys: bind_referenced_by_foreign_keys(
+            child.relation_oid,
+            &child.desc,
+            catalog,
+        )?,
         row_source: choose_modify_row_source(predicate.as_ref(), &indexes),
         indexes,
         assignments,
@@ -235,26 +243,30 @@ fn build_delete_target(
     parent_predicate: Option<&Expr>,
     child: &BoundRelation,
     catalog: &dyn CatalogLookup,
-) -> BoundDeleteTarget {
+) -> Result<BoundDeleteTarget, ParseError> {
     let relation_name = relation_display_name(catalog, child.relation_oid, base_relation_name);
-    let translation_exprs = inheritance_translation_exprs(&child.desc, &inheritance_translation_indexes(
-        parent_desc,
+    let translation_exprs = inheritance_translation_exprs(
         &child.desc,
-    ));
-    let predicate = parent_predicate.map(|expr| {
-        rewrite_local_vars_for_output_exprs(expr.clone(), 1, &translation_exprs)
-    });
+        &inheritance_translation_indexes(parent_desc, &child.desc),
+    );
+    let predicate = parent_predicate
+        .map(|expr| rewrite_local_vars_for_output_exprs(expr.clone(), 1, &translation_exprs));
     let indexes = catalog.index_relations_for_heap(child.relation_oid);
 
-    BoundDeleteTarget {
+    Ok(BoundDeleteTarget {
         relation_name,
         rel: child.rel,
         relation_oid: child.relation_oid,
         toast: child.toast,
         desc: child.desc.clone(),
+        referenced_by_foreign_keys: bind_referenced_by_foreign_keys(
+            child.relation_oid,
+            &child.desc,
+            catalog,
+        )?,
         row_source: choose_modify_row_source(predicate.as_ref(), &indexes),
         predicate,
-    }
+    })
 }
 
 fn bind_insert_column_defaults(
@@ -618,13 +630,13 @@ pub fn bind_delete(
         let child = catalog
             .relation_by_oid(relation_oid)
             .ok_or_else(|| ParseError::UnknownTable(stmt.table_name.clone()))?;
-        Ok(build_delete_target(
+        build_delete_target(
             &stmt.table_name,
             &entry.desc,
             predicate.as_ref(),
             &child,
             catalog,
-        ))
+        )
     })
     .collect::<Result<Vec<_>, ParseError>>()?;
 

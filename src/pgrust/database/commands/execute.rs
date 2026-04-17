@@ -326,13 +326,14 @@ impl Database {
             Statement::Insert(ref insert_stmt) => {
                 let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
                 let bound = bind_insert(insert_stmt, &catalog)?;
-                let rel = bound.rel;
-                self.table_locks.lock_table_interruptible(
-                    rel,
-                    TableLockMode::RowExclusive,
+                let lock_requests = insert_foreign_key_lock_requests(&bound);
+                crate::backend::storage::lmgr::lock_table_requests_interruptible(
+                    &self.table_locks,
                     client_id,
+                    &lock_requests,
                     interrupts.as_ref(),
                 )?;
+                let locked_rels = table_lock_relations(&lock_requests);
 
                 let xid = self.txns.write().begin();
                 let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
@@ -362,25 +363,20 @@ impl Database {
                 drop(ctx);
                 let result = self.finish_txn(client_id, xid, result, &[], &[]);
                 guard.disarm();
-                self.table_locks.unlock_table(rel, client_id);
+                unlock_relations(&self.table_locks, client_id, &locked_rels);
                 result
             }
             Statement::Update(ref update_stmt) => {
                 let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
                 let bound = bind_update(update_stmt, &catalog)?;
-                let rels = bound
-                    .targets
-                    .iter()
-                    .map(|target| target.rel)
-                    .collect::<Vec<_>>();
-                for rel in &rels {
-                    self.table_locks.lock_table_interruptible(
-                        *rel,
-                        TableLockMode::RowExclusive,
-                        client_id,
-                        interrupts.as_ref(),
-                    )?;
-                }
+                let lock_requests = update_foreign_key_lock_requests(&bound);
+                crate::backend::storage::lmgr::lock_table_requests_interruptible(
+                    &self.table_locks,
+                    client_id,
+                    &lock_requests,
+                    interrupts.as_ref(),
+                )?;
+                let locked_rels = table_lock_relations(&lock_requests);
 
                 let xid = self.txns.write().begin();
                 let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
@@ -417,27 +413,20 @@ impl Database {
                 drop(ctx);
                 let result = self.finish_txn(client_id, xid, result, &[], &[]);
                 guard.disarm();
-                for rel in rels {
-                    self.table_locks.unlock_table(rel, client_id);
-                }
+                unlock_relations(&self.table_locks, client_id, &locked_rels);
                 result
             }
             Statement::Delete(ref delete_stmt) => {
                 let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
                 let bound = bind_delete(delete_stmt, &catalog)?;
-                let rels = bound
-                    .targets
-                    .iter()
-                    .map(|target| target.rel)
-                    .collect::<Vec<_>>();
-                for rel in &rels {
-                    self.table_locks.lock_table_interruptible(
-                        *rel,
-                        TableLockMode::RowExclusive,
-                        client_id,
-                        interrupts.as_ref(),
-                    )?;
-                }
+                let lock_requests = delete_foreign_key_lock_requests(&bound);
+                crate::backend::storage::lmgr::lock_table_requests_interruptible(
+                    &self.table_locks,
+                    client_id,
+                    &lock_requests,
+                    interrupts.as_ref(),
+                )?;
+                let locked_rels = table_lock_relations(&lock_requests);
 
                 let xid = self.txns.write().begin();
                 let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
@@ -473,9 +462,7 @@ impl Database {
                 drop(ctx);
                 let result = self.finish_txn(client_id, xid, result, &[], &[]);
                 guard.disarm();
-                for rel in rels {
-                    self.table_locks.unlock_table(rel, client_id);
-                }
+                unlock_relations(&self.table_locks, client_id, &locked_rels);
                 result
             }
             Statement::CreateTable(ref create_stmt) => self
@@ -546,10 +533,21 @@ impl Database {
             }
             Statement::TruncateTable(ref truncate_stmt) => {
                 let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-                let rels = truncate_stmt
+                let relations = truncate_stmt
                     .table_names
                     .iter()
-                    .filter_map(|name| catalog.lookup_any_relation(name).map(|e| e.rel))
+                    .filter_map(|name| catalog.lookup_any_relation(name))
+                    .collect::<Vec<_>>();
+                for relation in &relations {
+                    reject_relation_with_referencing_foreign_keys(
+                        &catalog,
+                        relation.relation_oid,
+                        "TRUNCATE on table without referencing foreign keys",
+                    )?;
+                }
+                let rels = relations
+                    .iter()
+                    .map(|relation| relation.rel)
                     .collect::<Vec<_>>();
                 lock_tables_interruptible(
                     &self.table_locks,

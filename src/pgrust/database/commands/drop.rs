@@ -112,6 +112,14 @@ impl Database {
                 result = Err(err);
                 break;
             }
+            if let Err(err) = reject_relation_with_referencing_foreign_keys(
+                &catalog,
+                relation_oid,
+                "DROP TABLE on unreferenced table",
+            ) {
+                result = Err(err);
+                break;
+            }
             let mut catalog_guard = self.catalog.write();
             let ctx = CatalogWriteContext {
                 pool: self.pool.clone(),

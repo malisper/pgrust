@@ -4,7 +4,8 @@ use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlExpr, SqlType, SqlTypeKind, parse_expr};
 use crate::include::catalog::PgConstraintRow;
 use crate::include::nodes::parsenodes::{
-    ColumnConstraint, ConstraintAttributes, CreateTableStatement, TableConstraint,
+    ColumnConstraint, ConstraintAttributes, CreateTableStatement, ForeignKeyAction,
+    ForeignKeyMatchType, TableConstraint,
 };
 use crate::include::nodes::primnodes::Expr;
 
@@ -32,10 +33,25 @@ pub struct CheckConstraintAction {
     pub not_valid: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForeignKeyConstraintAction {
+    pub constraint_name: String,
+    pub columns: Vec<String>,
+    pub referenced_table: String,
+    pub referenced_relation_oid: u32,
+    pub referenced_index_oid: u32,
+    pub referenced_columns: Vec<String>,
+    pub match_type: ForeignKeyMatchType,
+    pub on_delete: ForeignKeyAction,
+    pub on_update: ForeignKeyAction,
+    pub not_valid: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct BoundRelationConstraints {
     pub not_nulls: Vec<BoundNotNullConstraint>,
     pub checks: Vec<BoundCheckConstraint>,
+    pub foreign_keys: Vec<BoundForeignKeyConstraint>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,10 +67,40 @@ pub struct BoundCheckConstraint {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundForeignKeyConstraint {
+    pub constraint_name: String,
+    pub column_names: Vec<String>,
+    pub column_indexes: Vec<usize>,
+    pub referenced_relation_name: String,
+    pub referenced_relation_oid: u32,
+    pub referenced_rel: crate::backend::storage::smgr::RelFileLocator,
+    pub referenced_desc: RelationDesc,
+    pub referenced_column_indexes: Vec<usize>,
+    pub referenced_index: super::BoundIndexRelation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundReferencedByForeignKey {
+    pub constraint_name: String,
+    pub child_relation_name: String,
+    pub child_relation_oid: u32,
+    pub child_rel: crate::backend::storage::smgr::RelFileLocator,
+    pub child_toast: Option<crate::include::nodes::execnodes::ToastRelationRef>,
+    pub child_desc: RelationDesc,
+    pub child_column_indexes: Vec<usize>,
+    pub referenced_column_names: Vec<String>,
+    pub referenced_column_indexes: Vec<usize>,
+    pub child_index: Option<super::BoundIndexRelation>,
+    pub on_delete: ForeignKeyAction,
+    pub on_update: ForeignKeyAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NormalizedCreateTableConstraints {
     pub not_nulls: Vec<NotNullConstraintAction>,
     pub checks: Vec<CheckConstraintAction>,
     pub index_backed: Vec<IndexBackedConstraintAction>,
+    pub foreign_keys: Vec<ForeignKeyConstraintAction>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,6 +108,7 @@ pub enum NormalizedAlterTableConstraint {
     NotNull(NotNullConstraintAction),
     Check(CheckConstraintAction),
     IndexBacked(IndexBackedConstraintAction),
+    ForeignKey(ForeignKeyConstraintAction),
 }
 
 #[derive(Debug, Clone)]
@@ -90,8 +137,29 @@ struct PendingNotNullConstraint {
     column_index: usize,
 }
 
+#[derive(Debug, Clone)]
+struct PendingForeignKeyConstraint {
+    explicit_name: Option<String>,
+    generated_base: String,
+    columns: Vec<String>,
+    referenced_table: String,
+    referenced_columns: Option<Vec<String>>,
+    match_type: ForeignKeyMatchType,
+    on_delete: ForeignKeyAction,
+    on_update: ForeignKeyAction,
+    not_valid: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedReferencedKey {
+    relation: super::BoundRelation,
+    columns: Vec<String>,
+    index_oid: u32,
+}
+
 pub fn normalize_create_table_constraints(
     stmt: &CreateTableStatement,
+    catalog: &dyn super::CatalogLookup,
 ) -> Result<NormalizedCreateTableConstraints, ParseError> {
     let columns = stmt.columns().cloned().collect::<Vec<_>>();
     let column_lookup = columns
@@ -103,6 +171,7 @@ pub fn normalize_create_table_constraints(
     let mut index_constraints = Vec::new();
     let mut check_constraints = Vec::new();
     let mut not_nulls = BTreeMap::<String, PendingNotNullConstraint>::new();
+    let mut foreign_keys = Vec::new();
 
     for column in &columns {
         for constraint in &column.constraints {
@@ -146,6 +215,27 @@ pub fn normalize_create_table_constraints(
                         generated_base: format!("{}_{}_key", stmt.table_name, column.name),
                         columns: vec![column.name.clone()],
                         primary: false,
+                    });
+                }
+                ColumnConstraint::References {
+                    attributes,
+                    referenced_table,
+                    referenced_columns,
+                    match_type,
+                    on_delete,
+                    on_update,
+                } => {
+                    validate_create_foreign_key(attributes, *match_type, *on_delete, *on_update)?;
+                    foreign_keys.push(PendingForeignKeyConstraint {
+                        explicit_name: attributes.name.clone(),
+                        generated_base: format!("{}_{}_fkey", stmt.table_name, column.name),
+                        columns: vec![column.name.clone()],
+                        referenced_table: referenced_table.clone(),
+                        referenced_columns: referenced_columns.clone(),
+                        match_type: *match_type,
+                        on_delete: *on_delete,
+                        on_update: *on_update,
+                        not_valid: attributes.not_valid,
                     });
                 }
             }
@@ -202,6 +292,29 @@ pub fn normalize_create_table_constraints(
                     primary: false,
                 });
             }
+            TableConstraint::ForeignKey {
+                attributes,
+                columns: key_columns,
+                referenced_table,
+                referenced_columns,
+                match_type,
+                on_delete,
+                on_update,
+            } => {
+                validate_create_foreign_key(attributes, *match_type, *on_delete, *on_update)?;
+                let resolved = resolve_constraint_columns(key_columns, &columns, &column_lookup)?;
+                foreign_keys.push(PendingForeignKeyConstraint {
+                    explicit_name: attributes.name.clone(),
+                    generated_base: format!("{}_{}_fkey", stmt.table_name, resolved.join("_")),
+                    columns: resolved,
+                    referenced_table: referenced_table.clone(),
+                    referenced_columns: referenced_columns.clone(),
+                    match_type: *match_type,
+                    on_delete: *on_delete,
+                    on_update: *on_update,
+                    not_valid: attributes.not_valid,
+                });
+            }
         }
     }
 
@@ -252,6 +365,12 @@ pub fn normalize_create_table_constraints(
             .iter()
             .filter_map(|constraint| constraint.explicit_name.as_deref()),
     )?;
+    reserve_explicit_constraint_names(
+        &mut used_names,
+        foreign_keys
+            .iter()
+            .filter_map(|constraint| constraint.explicit_name.as_deref()),
+    )?;
 
     let mut finalized_not_nulls = not_nulls.into_values().collect::<Vec<_>>();
     finalized_not_nulls.sort_by_key(|constraint| constraint.column_index);
@@ -289,10 +408,54 @@ pub fn normalize_create_table_constraints(
         })
         .collect();
 
+    let finalized_foreign_keys = foreign_keys
+        .into_iter()
+        .map(|constraint| {
+            let local_columns =
+                resolve_constraint_columns(&constraint.columns, &columns, &column_lookup)?;
+            let child_types = local_columns
+                .iter()
+                .map(|column| {
+                    let index = *column_lookup
+                        .get(&column.to_ascii_lowercase())
+                        .ok_or_else(|| ParseError::UnknownColumn(column.clone()))?;
+                    super::resolve_raw_type_name(&columns[index].ty, catalog)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let referenced = resolve_referenced_key(
+                &stmt.table_name,
+                None,
+                &constraint.referenced_table,
+                constraint.referenced_columns.as_deref(),
+                &child_types,
+                catalog,
+            )?;
+            Ok(ForeignKeyConstraintAction {
+                constraint_name: constraint.explicit_name.unwrap_or_else(|| {
+                    choose_generated_constraint_name(&constraint.generated_base, &mut used_names)
+                }),
+                columns: local_columns,
+                referenced_table: relation_display_name(
+                    catalog,
+                    referenced.relation.relation_oid,
+                    &constraint.referenced_table,
+                ),
+                referenced_relation_oid: referenced.relation.relation_oid,
+                referenced_index_oid: referenced.index_oid,
+                referenced_columns: referenced.columns,
+                match_type: constraint.match_type,
+                on_delete: constraint.on_delete,
+                on_update: constraint.on_update,
+                not_valid: constraint.not_valid,
+            })
+        })
+        .collect::<Result<Vec<_>, ParseError>>()?;
+
     Ok(NormalizedCreateTableConstraints {
         not_nulls: finalized_not_nulls,
         checks: finalized_checks,
         index_backed: finalized_index_backed,
+        foreign_keys: finalized_foreign_keys,
     })
 }
 
@@ -315,27 +478,54 @@ pub fn bind_relation_constraints(
         })
         .collect::<Vec<_>>();
     let checks = rows
-        .into_iter()
+        .iter()
         .filter(|row| row.contype == crate::include::catalog::CONSTRAINT_CHECK)
         .map(|row| {
-            let expr_sql = row.conbin.ok_or(ParseError::UnexpectedToken {
+            let expr_sql = row.conbin.clone().ok_or(ParseError::UnexpectedToken {
                 expected: "stored CHECK constraint expression",
                 actual: format!("missing expression for constraint {}", row.conname),
             })?;
             Ok(BoundCheckConstraint {
-                constraint_name: row.conname,
+                constraint_name: row.conname.clone(),
                 expr: bind_check_constraint_expr(&expr_sql, relation_name, desc, catalog)?,
             })
         })
         .collect::<Result<Vec<_>, ParseError>>()?;
-    Ok(BoundRelationConstraints { not_nulls, checks })
+    let foreign_keys = rows
+        .into_iter()
+        .filter(|row| row.contype == crate::include::catalog::CONSTRAINT_FOREIGN)
+        .map(|row| bind_outbound_foreign_key_constraint(relation_oid, desc, row, catalog))
+        .collect::<Result<Vec<_>, ParseError>>()?;
+    Ok(BoundRelationConstraints {
+        not_nulls,
+        checks,
+        foreign_keys,
+    })
+}
+
+pub fn bind_referenced_by_foreign_keys(
+    relation_oid: u32,
+    desc: &RelationDesc,
+    catalog: &dyn super::CatalogLookup,
+) -> Result<Vec<BoundReferencedByForeignKey>, ParseError> {
+    catalog
+        .constraint_rows()
+        .into_iter()
+        .filter(|row| {
+            row.contype == crate::include::catalog::CONSTRAINT_FOREIGN
+                && row.confrelid == relation_oid
+        })
+        .map(|row| bind_inbound_foreign_key_constraint(relation_oid, desc, row, catalog))
+        .collect()
 }
 
 pub fn normalize_alter_table_add_constraint(
     table_name: &str,
+    relation_oid: u32,
     desc: &RelationDesc,
     existing_constraints: &[PgConstraintRow],
     constraint: &TableConstraint,
+    catalog: &dyn super::CatalogLookup,
 ) -> Result<NormalizedAlterTableConstraint, ParseError> {
     let column_lookup = relation_column_lookup(desc);
     let mut used_names = existing_constraint_names(existing_constraints);
@@ -431,6 +621,58 @@ pub fn normalize_alter_table_add_constraint(
                 },
             ))
         }
+        TableConstraint::ForeignKey {
+            attributes,
+            columns,
+            referenced_table,
+            referenced_columns,
+            match_type,
+            on_delete,
+            on_update,
+        } => {
+            validate_alter_foreign_key(attributes, *match_type, *on_delete, *on_update)?;
+            let resolved = resolve_relation_constraint_columns(columns, desc, &column_lookup)?;
+            let child_types = resolved
+                .iter()
+                .map(|column| {
+                    let index = *column_lookup
+                        .get(&column.to_ascii_lowercase())
+                        .ok_or_else(|| ParseError::UnknownColumn(column.clone()))?;
+                    Ok(desc.columns[index].sql_type)
+                })
+                .collect::<Result<Vec<_>, ParseError>>()?;
+            let referenced = resolve_referenced_key(
+                table_name,
+                Some(relation_oid),
+                referenced_table,
+                referenced_columns.as_deref(),
+                &child_types,
+                catalog,
+            )?;
+            let constraint_name = assign_constraint_name(
+                attributes.name.clone(),
+                format!("{table_name}_{}_fkey", resolved.join("_")),
+                &mut used_names,
+            )?;
+            Ok(NormalizedAlterTableConstraint::ForeignKey(
+                ForeignKeyConstraintAction {
+                    constraint_name,
+                    columns: resolved,
+                    referenced_table: relation_display_name(
+                        catalog,
+                        referenced.relation.relation_oid,
+                        referenced_table,
+                    ),
+                    referenced_relation_oid: referenced.relation.relation_oid,
+                    referenced_index_oid: referenced.index_oid,
+                    referenced_columns: referenced.columns,
+                    match_type: *match_type,
+                    on_delete: *on_delete,
+                    on_update: *on_update,
+                    not_valid: attributes.not_valid,
+                },
+            ))
+        }
     }
 }
 
@@ -508,6 +750,246 @@ fn validate_key_attributes(
         )));
     }
     validate_not_null_or_check_attributes(attributes, constraint_kind)
+}
+
+fn validate_create_foreign_key(
+    attributes: &ConstraintAttributes,
+    match_type: ForeignKeyMatchType,
+    on_delete: ForeignKeyAction,
+    on_update: ForeignKeyAction,
+) -> Result<(), ParseError> {
+    if attributes.not_valid {
+        return Err(ParseError::FeatureNotSupported(
+            "FOREIGN KEY NOT VALID".into(),
+        ));
+    }
+    validate_foreign_key(attributes, match_type, on_delete, on_update)
+}
+
+fn validate_alter_foreign_key(
+    attributes: &ConstraintAttributes,
+    match_type: ForeignKeyMatchType,
+    on_delete: ForeignKeyAction,
+    on_update: ForeignKeyAction,
+) -> Result<(), ParseError> {
+    validate_foreign_key(attributes, match_type, on_delete, on_update)
+}
+
+fn validate_foreign_key(
+    attributes: &ConstraintAttributes,
+    match_type: ForeignKeyMatchType,
+    on_delete: ForeignKeyAction,
+    on_update: ForeignKeyAction,
+) -> Result<(), ParseError> {
+    validate_not_null_or_check_attributes(attributes, "FOREIGN KEY")?;
+    if match_type != ForeignKeyMatchType::Simple {
+        return Err(ParseError::FeatureNotSupported(format!(
+            "FOREIGN KEY MATCH {}",
+            foreign_key_match_keyword(match_type)
+        )));
+    }
+    validate_foreign_key_action("ON DELETE", on_delete)?;
+    validate_foreign_key_action("ON UPDATE", on_update)?;
+    Ok(())
+}
+
+fn validate_foreign_key_action(clause: &str, action: ForeignKeyAction) -> Result<(), ParseError> {
+    if matches!(
+        action,
+        ForeignKeyAction::NoAction | ForeignKeyAction::Restrict
+    ) {
+        return Ok(());
+    }
+    Err(ParseError::FeatureNotSupported(format!(
+        "FOREIGN KEY {clause} {}",
+        foreign_key_action_keyword(action)
+    )))
+}
+
+fn resolve_referenced_key(
+    child_relation_name: &str,
+    child_relation_oid: Option<u32>,
+    referenced_table: &str,
+    referenced_columns: Option<&[String]>,
+    child_types: &[SqlType],
+    catalog: &dyn super::CatalogLookup,
+) -> Result<ResolvedReferencedKey, ParseError> {
+    let relation = catalog
+        .lookup_relation(referenced_table)
+        .ok_or_else(|| ParseError::UnknownTable(referenced_table.to_string()))?;
+    if relation.relation_oid == child_relation_oid.unwrap_or(u32::MAX)
+        || referenced_table.eq_ignore_ascii_case(child_relation_name)
+    {
+        return Err(ParseError::FeatureNotSupported(
+            "self-referential FOREIGN KEY".into(),
+        ));
+    }
+    if relation.relpersistence == 't' {
+        return Err(ParseError::FeatureNotSupported(
+            "FOREIGN KEY referencing temporary tables".into(),
+        ));
+    }
+
+    let relation_lookup = relation_column_lookup(&relation.desc);
+    let (columns, referenced_attnums, index_oid) = if let Some(referenced_columns) =
+        referenced_columns
+    {
+        let columns = resolve_relation_constraint_columns(
+            referenced_columns,
+            &relation.desc,
+            &relation_lookup,
+        )?;
+        let attnums = column_attnums_for_names(&relation.desc, &columns)?;
+        let index = find_exact_index_for_attnums(catalog, relation.relation_oid, &attnums, true)
+            .ok_or_else(|| ParseError::UnexpectedToken {
+                expected: "referenced UNIQUE or PRIMARY KEY index",
+                actual: format!(
+                    "table \"{}\" lacks an exact matching unique key",
+                    referenced_table
+                ),
+            })?;
+        (columns, attnums, index.relation_oid)
+    } else {
+        let primary = catalog
+            .constraint_rows_for_relation(relation.relation_oid)
+            .into_iter()
+            .filter(|row| row.contype == crate::include::catalog::CONSTRAINT_PRIMARY)
+            .collect::<Vec<_>>();
+        if primary.len() != 1 {
+            return Err(ParseError::UnexpectedToken {
+                expected: "referenced PRIMARY KEY",
+                actual: if primary.is_empty() {
+                    format!("table \"{}\" has no PRIMARY KEY", referenced_table)
+                } else {
+                    format!(
+                        "table \"{}\" has multiple PRIMARY KEY constraints",
+                        referenced_table
+                    )
+                },
+            });
+        }
+        let row = &primary[0];
+        let attnums = constraint_attnums(row, "PRIMARY KEY")?;
+        let columns = attnums_to_column_names(&relation.desc, &attnums)?;
+        (columns, attnums, row.conindid)
+    };
+
+    if child_types.len() != referenced_attnums.len() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "matching foreign-key column counts",
+            actual: format!(
+                "{} referencing column(s) for {} local column(s)",
+                referenced_attnums.len(),
+                child_types.len()
+            ),
+        });
+    }
+
+    let parent_types = referenced_attnums
+        .iter()
+        .map(|&attnum| {
+            column_index_for_attnum(&relation.desc, attnum)
+                .map(|index| relation.desc.columns[index].sql_type)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if child_types != parent_types {
+        return Err(ParseError::FeatureNotSupported(
+            "FOREIGN KEY with cross-type columns".into(),
+        ));
+    }
+
+    Ok(ResolvedReferencedKey {
+        relation,
+        columns,
+        index_oid,
+    })
+}
+
+fn bind_outbound_foreign_key_constraint(
+    _relation_oid: u32,
+    desc: &RelationDesc,
+    row: PgConstraintRow,
+    catalog: &dyn super::CatalogLookup,
+) -> Result<BoundForeignKeyConstraint, ParseError> {
+    let local_attnums = constraint_attnums(&row, "FOREIGN KEY")?;
+    let referenced_attnums = row
+        .confkey
+        .clone()
+        .filter(|keys| !keys.is_empty())
+        .ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "referenced foreign-key columns",
+            actual: format!("missing confkey for constraint {}", row.conname),
+        })?;
+    let referenced_relation = catalog
+        .lookup_relation_by_oid(row.confrelid)
+        .or_else(|| catalog.relation_by_oid(row.confrelid))
+        .ok_or_else(|| ParseError::UnknownTable(row.confrelid.to_string()))?;
+    let referenced_index = catalog
+        .index_relations_for_heap(referenced_relation.relation_oid)
+        .into_iter()
+        .find(|index| index.relation_oid == row.conindid)
+        .ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "referenced foreign-key index",
+            actual: format!("missing referenced index {}", row.conindid),
+        })?;
+    Ok(BoundForeignKeyConstraint {
+        constraint_name: row.conname,
+        column_names: attnums_to_column_names(desc, &local_attnums)?,
+        column_indexes: attnums_to_column_indexes(desc, &local_attnums)?,
+        referenced_relation_name: relation_display_name(
+            catalog,
+            referenced_relation.relation_oid,
+            &row.confrelid.to_string(),
+        ),
+        referenced_relation_oid: referenced_relation.relation_oid,
+        referenced_rel: referenced_relation.rel,
+        referenced_desc: referenced_relation.desc.clone(),
+        referenced_column_indexes: attnums_to_column_indexes(
+            &referenced_relation.desc,
+            &referenced_attnums,
+        )?,
+        referenced_index,
+    })
+}
+
+fn bind_inbound_foreign_key_constraint(
+    _relation_oid: u32,
+    desc: &RelationDesc,
+    row: PgConstraintRow,
+    catalog: &dyn super::CatalogLookup,
+) -> Result<BoundReferencedByForeignKey, ParseError> {
+    let child_relation = catalog
+        .lookup_relation_by_oid(row.conrelid)
+        .or_else(|| catalog.relation_by_oid(row.conrelid))
+        .ok_or_else(|| ParseError::UnknownTable(row.conrelid.to_string()))?;
+    let child_attnums = constraint_attnums(&row, "FOREIGN KEY")?;
+    let referenced_attnums = row
+        .confkey
+        .clone()
+        .filter(|keys| !keys.is_empty())
+        .ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "referenced foreign-key columns",
+            actual: format!("missing confkey for constraint {}", row.conname),
+        })?;
+    Ok(BoundReferencedByForeignKey {
+        constraint_name: row.conname,
+        child_relation_name: relation_display_name(catalog, child_relation.relation_oid, "<child>"),
+        child_relation_oid: child_relation.relation_oid,
+        child_rel: child_relation.rel,
+        child_toast: child_relation.toast,
+        child_desc: child_relation.desc.clone(),
+        child_column_indexes: attnums_to_column_indexes(&child_relation.desc, &child_attnums)?,
+        referenced_column_names: attnums_to_column_names(desc, &referenced_attnums)?,
+        referenced_column_indexes: attnums_to_column_indexes(desc, &referenced_attnums)?,
+        child_index: find_exact_index_for_attnums(
+            catalog,
+            child_relation.relation_oid,
+            &child_attnums,
+            false,
+        ),
+        on_delete: foreign_key_action_from_code(row.confdeltype)?,
+        on_update: foreign_key_action_from_code(row.confupdtype)?,
+    })
 }
 
 fn merge_not_null_constraint(
@@ -609,6 +1091,146 @@ fn relation_column_lookup(desc: &RelationDesc) -> BTreeMap<String, usize> {
         .filter(|(_, column)| !column.dropped)
         .map(|(index, column)| (column.name.to_ascii_lowercase(), index))
         .collect()
+}
+
+fn relation_display_name(
+    catalog: &dyn super::CatalogLookup,
+    relation_oid: u32,
+    fallback: &str,
+) -> String {
+    catalog
+        .class_row_by_oid(relation_oid)
+        .map(|row| row.relname)
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+fn column_attnums_for_names(
+    desc: &RelationDesc,
+    columns: &[String],
+) -> Result<Vec<i16>, ParseError> {
+    let lookup = relation_column_lookup(desc);
+    columns
+        .iter()
+        .map(|column| {
+            lookup
+                .get(&column.to_ascii_lowercase())
+                .copied()
+                .map(|index| (index + 1) as i16)
+                .ok_or_else(|| ParseError::UnknownColumn(column.clone()))
+        })
+        .collect()
+}
+
+fn constraint_attnums(
+    row: &PgConstraintRow,
+    _constraint_kind: &str,
+) -> Result<Vec<i16>, ParseError> {
+    row.conkey
+        .clone()
+        .filter(|keys| !keys.is_empty())
+        .ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "constraint columns",
+            actual: format!("missing conkey for constraint {}", row.conname),
+        })
+}
+
+fn column_index_for_attnum(desc: &RelationDesc, attnum: i16) -> Result<usize, ParseError> {
+    let index =
+        usize::try_from(attnum.saturating_sub(1)).map_err(|_| ParseError::UnexpectedToken {
+            expected: "user column attnum",
+            actual: format!("invalid attnum {attnum}"),
+        })?;
+    desc.columns
+        .get(index)
+        .filter(|column| !column.dropped)
+        .map(|_| index)
+        .ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "user column attnum",
+            actual: format!("invalid attnum {attnum}"),
+        })
+}
+
+fn attnums_to_column_indexes(
+    desc: &RelationDesc,
+    attnums: &[i16],
+) -> Result<Vec<usize>, ParseError> {
+    attnums
+        .iter()
+        .map(|&attnum| column_index_for_attnum(desc, attnum))
+        .collect()
+}
+
+fn attnums_to_column_names(
+    desc: &RelationDesc,
+    attnums: &[i16],
+) -> Result<Vec<String>, ParseError> {
+    attnums
+        .iter()
+        .map(|&attnum| {
+            let index = column_index_for_attnum(desc, attnum)?;
+            Ok(desc.columns[index].name.clone())
+        })
+        .collect()
+}
+
+fn find_exact_index_for_attnums(
+    catalog: &dyn super::CatalogLookup,
+    relation_oid: u32,
+    attnums: &[i16],
+    unique_required: bool,
+) -> Option<super::BoundIndexRelation> {
+    catalog
+        .index_relations_for_heap(relation_oid)
+        .into_iter()
+        .find(|index| {
+            (!unique_required || index.index_meta.indisunique)
+                && index.index_meta.indisvalid
+                && index.index_meta.indisready
+                && index.index_meta.am_oid == crate::include::catalog::BTREE_AM_OID
+                && index.index_meta.indkey == attnums
+                && !index
+                    .index_meta
+                    .indpred
+                    .as_deref()
+                    .is_some_and(|pred| !pred.is_empty())
+                && !index
+                    .index_meta
+                    .indexprs
+                    .as_deref()
+                    .is_some_and(|exprs| !exprs.is_empty())
+        })
+}
+
+fn foreign_key_action_keyword(action: ForeignKeyAction) -> &'static str {
+    match action {
+        ForeignKeyAction::NoAction => "NO ACTION",
+        ForeignKeyAction::Restrict => "RESTRICT",
+        ForeignKeyAction::Cascade => "CASCADE",
+        ForeignKeyAction::SetNull => "SET NULL",
+        ForeignKeyAction::SetDefault => "SET DEFAULT",
+    }
+}
+
+fn foreign_key_match_keyword(match_type: ForeignKeyMatchType) -> &'static str {
+    match match_type {
+        ForeignKeyMatchType::Simple => "SIMPLE",
+        ForeignKeyMatchType::Full => "FULL",
+        ForeignKeyMatchType::Partial => "PARTIAL",
+    }
+}
+
+fn foreign_key_action_from_code(code: char) -> Result<ForeignKeyAction, ParseError> {
+    match code {
+        'a' | ' ' => Ok(ForeignKeyAction::NoAction),
+        'r' => Ok(ForeignKeyAction::Restrict),
+        'c' => Ok(ForeignKeyAction::Cascade),
+        'n' => Ok(ForeignKeyAction::SetNull),
+        'd' => Ok(ForeignKeyAction::SetDefault),
+        other => Err(ParseError::UnexpectedToken {
+            expected: "foreign-key action code",
+            actual: other.to_string(),
+        }),
+    }
 }
 
 fn existing_constraint_names(existing_constraints: &[PgConstraintRow]) -> BTreeSet<String> {

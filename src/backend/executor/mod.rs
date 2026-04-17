@@ -17,6 +17,7 @@ mod expr_money;
 mod expr_numeric;
 mod expr_ops;
 mod expr_string;
+mod foreign_keys;
 pub(crate) mod hashjoin;
 pub(crate) mod jsonb;
 pub(crate) mod jsonpath;
@@ -99,6 +100,10 @@ use std::sync::Arc;
 pub(crate) use constraints::enforce_relation_constraints;
 pub(crate) use expr_ops::compare_order_values;
 use expr_ops::parse_numeric_text;
+pub(crate) use foreign_keys::{
+    enforce_inbound_foreign_keys_on_delete, enforce_inbound_foreign_keys_on_update,
+    enforce_outbound_foreign_keys,
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct ExprEvalBindings {
@@ -163,6 +168,11 @@ pub enum ExecError {
     CheckViolation {
         relation: String,
         constraint: String,
+    },
+    ForeignKeyViolation {
+        constraint: String,
+        message: String,
+        detail: Option<String>,
     },
     InvalidColumn(usize),
     TypeMismatch {

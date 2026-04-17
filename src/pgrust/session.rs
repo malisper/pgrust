@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::mem;
 use std::sync::Arc;
@@ -31,7 +31,13 @@ use crate::backend::utils::misc::guc_datetime::{
 use crate::backend::utils::misc::interrupts::{InterruptState, StatementInterruptGuard};
 use crate::include::nodes::execnodes::ScalarType;
 use crate::pgrust::auth::AuthState;
-use crate::pgrust::database::{Database, TempMutationEffect};
+use crate::pgrust::database::{
+    Database, TempMutationEffect, alter_table_add_constraint_lock_requests,
+    alter_table_validate_constraint_lock_requests, delete_foreign_key_lock_requests,
+    insert_foreign_key_lock_requests, prepared_insert_foreign_key_lock_requests,
+    reject_relation_with_referencing_foreign_keys, relation_foreign_key_lock_requests,
+    update_foreign_key_lock_requests,
+};
 use crate::pl::plpgsql::execute_do;
 use crate::{ClientId, RelFileLocator};
 
@@ -55,7 +61,7 @@ impl Drop for SelectGuard<'_> {
 struct ActiveTransaction {
     xid: TransactionId,
     failed: bool,
-    held_table_locks: Vec<RelFileLocator>,
+    held_table_locks: BTreeMap<RelFileLocator, TableLockMode>,
     next_command_id: u32,
     catalog_effects: Vec<CatalogMutationEffect>,
     current_cmd_catalog_invalidations: Vec<CatalogInvalidation>,
@@ -735,7 +741,7 @@ impl Session {
                 self.active_txn = Some(ActiveTransaction {
                     xid,
                     failed: false,
-                    held_table_locks: Vec::new(),
+                    held_table_locks: BTreeMap::new(),
                     next_command_id: 0,
                     catalog_effects: Vec::new(),
                     current_cmd_catalog_invalidations: Vec::new(),
@@ -749,56 +755,64 @@ impl Session {
                     Some(t) => t,
                     None => return Ok(StatementResult::AffectedRows(0)),
                 };
-                for rel in &txn.held_table_locks {
-                    db.table_locks.unlock_table(*rel, self.client_id);
+                let held_locks = txn.held_table_locks.keys().copied().collect::<Vec<_>>();
+                let result = (|| {
+                    db.pool.write_wal_commit(txn.xid).map_err(|e| {
+                        ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Storage(
+                            crate::backend::storage::smgr::SmgrError::Io(std::io::Error::new(
+                                std::io::ErrorKind::Other,
+                                e,
+                            )),
+                        ))
+                    })?;
+                    db.pool.flush_wal().map_err(|e| {
+                        ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Storage(
+                            crate::backend::storage::smgr::SmgrError::Io(std::io::Error::new(
+                                std::io::ErrorKind::Other,
+                                e,
+                            )),
+                        ))
+                    })?;
+                    db.txns.write().commit(txn.xid).map_err(|e| {
+                        ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Mvcc(e))
+                    })?;
+                    db.finalize_committed_catalog_effects(
+                        self.client_id,
+                        &txn.catalog_effects,
+                        &txn.prior_cmd_catalog_invalidations,
+                    );
+                    db.finalize_committed_temp_effects(self.client_id, &txn.temp_effects);
+                    db.apply_temp_on_commit(self.client_id)?;
+                    db.txn_waiter.notify();
+                    Ok(StatementResult::AffectedRows(0))
+                })();
+                for rel in held_locks {
+                    db.table_locks.unlock_table(rel, self.client_id);
                 }
-                db.pool.write_wal_commit(txn.xid).map_err(|e| {
-                    ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Storage(
-                        crate::backend::storage::smgr::SmgrError::Io(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            e,
-                        )),
-                    ))
-                })?;
-                db.pool.flush_wal().map_err(|e| {
-                    ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Storage(
-                        crate::backend::storage::smgr::SmgrError::Io(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            e,
-                        )),
-                    ))
-                })?;
-                db.txns.write().commit(txn.xid).map_err(|e| {
-                    ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Mvcc(e))
-                })?;
-                db.finalize_committed_catalog_effects(
-                    self.client_id,
-                    &txn.catalog_effects,
-                    &txn.prior_cmd_catalog_invalidations,
-                );
-                db.finalize_committed_temp_effects(self.client_id, &txn.temp_effects);
-                db.apply_temp_on_commit(self.client_id)?;
-                db.txn_waiter.notify();
-                Ok(StatementResult::AffectedRows(0))
+                result
             }
             Statement::Rollback => {
                 let txn = match self.active_txn.take() {
                     Some(t) => t,
                     None => return Ok(StatementResult::AffectedRows(0)),
                 };
-                for rel in &txn.held_table_locks {
-                    db.table_locks.unlock_table(*rel, self.client_id);
+                let held_locks = txn.held_table_locks.keys().copied().collect::<Vec<_>>();
+                let result = {
+                    let _ = db.txns.write().abort(txn.xid);
+                    db.finalize_aborted_local_catalog_invalidations(
+                        self.client_id,
+                        &txn.prior_cmd_catalog_invalidations,
+                        &txn.current_cmd_catalog_invalidations,
+                    );
+                    db.finalize_aborted_catalog_effects(&txn.catalog_effects);
+                    db.finalize_aborted_temp_effects(self.client_id, &txn.temp_effects);
+                    db.txn_waiter.notify();
+                    Ok(StatementResult::AffectedRows(0))
+                };
+                for rel in held_locks {
+                    db.table_locks.unlock_table(rel, self.client_id);
                 }
-                let _ = db.txns.write().abort(txn.xid);
-                db.finalize_aborted_local_catalog_invalidations(
-                    self.client_id,
-                    &txn.prior_cmd_catalog_invalidations,
-                    &txn.current_cmd_catalog_invalidations,
-                );
-                db.finalize_aborted_catalog_effects(&txn.catalog_effects);
-                db.finalize_aborted_temp_effects(self.client_id, &txn.temp_effects);
-                db.txn_waiter.notify();
-                Ok(StatementResult::AffectedRows(0))
+                result
             }
             _ => {
                 if let Some(ref txn) = self.active_txn {
@@ -866,14 +880,33 @@ impl Session {
             )?;
             return Ok(());
         };
-        if !txn.held_table_locks.contains(&rel) {
-            db.table_locks.lock_table_interruptible(
-                rel,
-                mode,
-                self.client_id,
-                self.interrupts.as_ref(),
-            )?;
-            txn.held_table_locks.push(rel);
+        if txn
+            .held_table_locks
+            .get(&rel)
+            .is_some_and(|existing| existing.strongest(mode) == *existing)
+        {
+            return Ok(());
+        }
+        db.table_locks.lock_table_interruptible(
+            rel,
+            mode,
+            self.client_id,
+            self.interrupts.as_ref(),
+        )?;
+        txn.held_table_locks
+            .entry(rel)
+            .and_modify(|existing| *existing = existing.strongest(mode))
+            .or_insert(mode);
+        Ok(())
+    }
+
+    fn lock_table_requests_if_needed(
+        &mut self,
+        db: &Database,
+        requests: &[(RelFileLocator, TableLockMode)],
+    ) -> Result<(), ExecError> {
+        for (rel, mode) in requests {
+            self.lock_table_if_needed(db, *rel, *mode)?;
         }
         Ok(())
     }
@@ -1075,15 +1108,7 @@ impl Session {
                             drop_stmt.table_name.clone(),
                         ))
                     })?;
-                let txn = self.active_txn.as_mut().unwrap();
-                if !txn.held_table_locks.contains(&relation.rel) {
-                    db.table_locks.lock_table(
-                        relation.rel,
-                        TableLockMode::AccessExclusive,
-                        client_id,
-                    );
-                    txn.held_table_locks.push(relation.rel);
-                }
+                self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
                 let search_path = self.configured_search_path();
                 let txn = self.active_txn.as_mut().unwrap();
                 db.execute_alter_table_drop_column_stmt_in_transaction_with_search_path(
@@ -1125,7 +1150,9 @@ impl Session {
                             alter_stmt.table_name.clone(),
                         ))
                     })?;
-                self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
+                let lock_requests =
+                    alter_table_add_constraint_lock_requests(&relation, alter_stmt, &catalog)?;
+                self.lock_table_requests_if_needed(db, &lock_requests)?;
                 let search_path = self.configured_search_path();
                 let txn = self.active_txn.as_mut().unwrap();
                 db.execute_alter_table_add_constraint_stmt_in_transaction_with_search_path(
@@ -1209,7 +1236,9 @@ impl Session {
                             alter_stmt.table_name.clone(),
                         ))
                     })?;
-                self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
+                let lock_requests =
+                    alter_table_validate_constraint_lock_requests(&relation, alter_stmt, &catalog)?;
+                self.lock_table_requests_if_needed(db, &lock_requests)?;
                 let search_path = self.configured_search_path();
                 let txn = self.active_txn.as_mut().unwrap();
                 db.execute_alter_table_validate_constraint_stmt_in_transaction_with_search_path(
@@ -1346,8 +1375,8 @@ impl Session {
             Statement::Insert(ref insert_stmt) => {
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);
                 let bound = bind_insert(insert_stmt, &catalog)?;
-                let rel = bound.rel;
-                self.lock_table_if_needed(db, rel, TableLockMode::RowExclusive)?;
+                let lock_requests = insert_foreign_key_lock_requests(&bound);
+                self.lock_table_requests_if_needed(db, &lock_requests)?;
                 let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
                 let interrupts = self.interrupts();
                 let mut ctx = ExecutorContext {
@@ -1375,9 +1404,8 @@ impl Session {
             Statement::Update(ref update_stmt) => {
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);
                 let bound = bind_update(update_stmt, &catalog)?;
-                for target in &bound.targets {
-                    self.lock_table_if_needed(db, target.rel, TableLockMode::RowExclusive)?;
-                }
+                let lock_requests = update_foreign_key_lock_requests(&bound);
+                self.lock_table_requests_if_needed(db, &lock_requests)?;
                 let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
                 let interrupts = self.interrupts();
                 let mut ctx = ExecutorContext {
@@ -1412,9 +1440,8 @@ impl Session {
             Statement::Delete(ref delete_stmt) => {
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);
                 let bound = bind_delete(delete_stmt, &catalog)?;
-                for target in &bound.targets {
-                    self.lock_table_if_needed(db, target.rel, TableLockMode::RowExclusive)?;
-                }
+                let lock_requests = delete_foreign_key_lock_requests(&bound);
+                self.lock_table_requests_if_needed(db, &lock_requests)?;
                 let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
                 let interrupts = self.interrupts();
                 let mut ctx = ExecutorContext {
@@ -1562,15 +1589,22 @@ impl Session {
             }
             Statement::TruncateTable(ref truncate_stmt) => {
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);
-                let rels = {
+                let relations = {
                     truncate_stmt
                         .table_names
                         .iter()
-                        .filter_map(|name| catalog.lookup_any_relation(name).map(|e| e.rel))
+                        .filter_map(|name| catalog.lookup_any_relation(name))
                         .collect::<Vec<_>>()
                 };
-                for rel in rels {
-                    self.lock_table_if_needed(db, rel, TableLockMode::AccessExclusive)?;
+                for relation in &relations {
+                    reject_relation_with_referencing_foreign_keys(
+                        &catalog,
+                        relation.relation_oid,
+                        "TRUNCATE on table without referencing foreign keys",
+                    )?;
+                }
+                for relation in relations {
+                    self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
                 }
                 let search_path = self.configured_search_path();
                 let txn = self.active_txn.as_mut().unwrap();
@@ -1746,8 +1780,8 @@ impl Session {
         txn.next_command_id = txn.next_command_id.saturating_add(1);
         let client_id = self.client_id;
 
-        let rel = prepared.rel;
-        self.lock_table_if_needed(db, rel, TableLockMode::RowExclusive)?;
+        let lock_requests = prepared_insert_foreign_key_lock_requests(prepared);
+        self.lock_table_requests_if_needed(db, &lock_requests)?;
 
         let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
         let interrupts = self.interrupts();
@@ -1809,7 +1843,7 @@ impl Session {
             self.active_txn = Some(ActiveTransaction {
                 xid,
                 failed: false,
-                held_table_locks: Vec::new(),
+                held_table_locks: BTreeMap::new(),
                 next_command_id: 0,
                 catalog_effects: Vec::new(),
                 current_cmd_catalog_invalidations: Vec::new(),
@@ -1864,7 +1898,14 @@ impl Session {
                 (0..desc.columns.len()).collect()
             };
 
-            self.lock_table_if_needed(db, rel, TableLockMode::RowExclusive)?;
+            let relation_constraints = crate::backend::parser::bind_relation_constraints(
+                None,
+                relation_oid,
+                &desc,
+                &catalog,
+            )?;
+            let lock_requests = relation_foreign_key_lock_requests(rel, &relation_constraints);
+            self.lock_table_requests_if_needed(db, &lock_requests)?;
 
             let parsed_rows = rows
                 .iter()
@@ -1999,12 +2040,6 @@ impl Session {
                 cte_producers: std::collections::HashMap::new(),
                 recursive_worktables: std::collections::HashMap::new(),
             };
-            let relation_constraints = crate::backend::parser::bind_relation_constraints(
-                None,
-                relation_oid,
-                &desc,
-                &self.catalog_lookup(db),
-            )?;
             crate::backend::commands::tablecmds::execute_insert_values(
                 table_name,
                 rel,
@@ -2022,37 +2057,50 @@ impl Session {
 
         let final_result = if started_txn {
             let txn = self.active_txn.take().unwrap();
-            for rel in &txn.held_table_locks {
-                db.table_locks.unlock_table(*rel, self.client_id);
-            }
+            let held_locks = txn.held_table_locks.keys().copied().collect::<Vec<_>>();
             match result {
                 Ok(n) => {
-                    db.pool.write_wal_commit(txn.xid).map_err(|e| {
+                    let commit_result = db.pool.write_wal_commit(txn.xid).map_err(|e| {
                         ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Storage(
                             crate::backend::storage::smgr::SmgrError::Io(std::io::Error::new(
                                 std::io::ErrorKind::Other,
                                 e,
                             )),
                         ))
-                    })?;
-                    db.pool.flush_wal().map_err(|e| {
-                        ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Storage(
-                            crate::backend::storage::smgr::SmgrError::Io(std::io::Error::new(
-                                std::io::ErrorKind::Other,
+                    });
+                    let commit_result = commit_result.and_then(|_| {
+                        db.pool.flush_wal().map_err(|e| {
+                            ExecError::Heap(
+                                crate::backend::access::heap::heapam::HeapError::Storage(
+                                    crate::backend::storage::smgr::SmgrError::Io(
+                                        std::io::Error::new(std::io::ErrorKind::Other, e),
+                                    ),
+                                ),
+                            )
+                        })
+                    });
+                    let commit_result = commit_result.and_then(|_| {
+                        db.txns.write().commit(txn.xid).map_err(|e| {
+                            ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Mvcc(
                                 e,
-                            )),
-                        ))
-                    })?;
-                    db.txns.write().commit(txn.xid).map_err(|e| {
-                        ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Mvcc(e))
-                    })?;
-                    db.apply_temp_on_commit(self.client_id)?;
+                            ))
+                        })
+                    });
+                    let commit_result =
+                        commit_result.and_then(|_| db.apply_temp_on_commit(self.client_id));
                     db.txn_waiter.notify();
+                    for rel in held_locks {
+                        db.table_locks.unlock_table(rel, self.client_id);
+                    }
+                    commit_result?;
                     Ok(n)
                 }
                 Err(e) => {
                     let _ = db.txns.write().abort(txn.xid);
                     db.txn_waiter.notify();
+                    for rel in held_locks {
+                        db.table_locks.unlock_table(rel, self.client_id);
+                    }
                     Err(e)
                 }
             }
