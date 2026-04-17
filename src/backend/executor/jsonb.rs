@@ -199,36 +199,433 @@ fn stack_depth_limit_error(max_stack_depth_kb: u32) -> ExecError {
 }
 
 pub(crate) fn json_input_error(text: &str, err: SerdeJsonError) -> ExecError {
-    let line = err.line();
-    let column = err.column();
-    let suffix = format!(" at line {line} column {column}");
-    let rendered = err.to_string();
-    let detail = match err.classify() {
-        serde_json::error::Category::Io => None,
-        serde_json::error::Category::Eof => Some("The input string ended unexpectedly.".into()),
-        _ => Some(
-            rendered
-                .strip_suffix(&suffix)
-                .unwrap_or(rendered.as_str())
-                .to_string(),
-        ),
+    let (detail, context) = match diagnose_json_input(text) {
+        Some(diag) => (Some(diag.detail), Some(diag.context)),
+        None => {
+            let line = err.line();
+            let column = err.column();
+            let suffix = format!(" at line {line} column {column}");
+            let rendered = err.to_string();
+            let detail = match err.classify() {
+                serde_json::error::Category::Io => None,
+                serde_json::error::Category::Eof => Some("The input string ended unexpectedly.".into()),
+                _ => Some(
+                    rendered
+                        .strip_suffix(&suffix)
+                        .unwrap_or(rendered.as_str())
+                        .to_string(),
+                ),
+            };
+            (detail, json_error_context(text, line, column))
+        }
     };
     ExecError::JsonInput {
         raw_input: text.to_string(),
         message: "invalid input syntax for type json".into(),
         detail,
-        context: json_error_context(text, line),
+        context,
         sqlstate: "22P02",
     }
 }
 
-fn json_error_context(text: &str, line: usize) -> Option<String> {
+fn json_error_context(text: &str, line: usize, column: usize) -> Option<String> {
     let line_text = text.lines().nth(line.saturating_sub(1))?;
-    let mut snippet: String = line_text.chars().take(40).collect();
-    if line_text.chars().count() > 40 {
+    let snippet_start = column.saturating_sub(1).saturating_sub(15);
+    let mut snippet: String = line_text.chars().skip(snippet_start).take(40).collect();
+    if snippet_start > 0 {
+        snippet.insert_str(0, "...");
+    }
+    if line_text.chars().skip(snippet_start).count() > 40 {
         snippet.push_str("...");
     }
     Some(format!("JSON data, line {line}: {snippet}"))
+}
+
+#[derive(Debug)]
+struct JsonInputDiagnostic {
+    detail: String,
+    context: String,
+}
+
+fn diagnose_json_input(text: &str) -> Option<JsonInputDiagnostic> {
+    JsonDiagnosticParser::new(text).parse().err()
+}
+
+struct JsonDiagnosticParser<'a> {
+    text: &'a str,
+    chars: Vec<char>,
+    pos: usize,
+}
+
+impl<'a> JsonDiagnosticParser<'a> {
+    fn new(text: &'a str) -> Self {
+        Self {
+            text,
+            chars: text.chars().collect(),
+            pos: 0,
+        }
+    }
+
+    fn parse(mut self) -> Result<(), JsonInputDiagnostic> {
+        self.skip_ws();
+        self.parse_value()?;
+        self.skip_ws();
+        if self.pos == self.chars.len() {
+            return Ok(());
+        }
+        Err(self.error_expected_end_of_input())
+    }
+
+    fn parse_value(&mut self) -> Result<(), JsonInputDiagnostic> {
+        self.skip_ws();
+        let Some(ch) = self.peek() else {
+            return Err(self.error_unexpected_end());
+        };
+        match ch {
+            '"' => self.parse_string(),
+            '[' => self.parse_array(),
+            '{' => self.parse_object(),
+            '-' | '0'..='9' => self.parse_number(),
+            't' => self.parse_literal("true"),
+            'f' => self.parse_literal("false"),
+            'n' => self.parse_literal("null"),
+            _ => Err(self.error_expected_json_value()),
+        }
+    }
+
+    fn parse_array(&mut self) -> Result<(), JsonInputDiagnostic> {
+        self.bump();
+        self.skip_ws();
+        if self.peek() == Some(']') {
+            self.bump();
+            return Ok(());
+        }
+        loop {
+            self.parse_value()?;
+            self.skip_ws();
+            match self.peek() {
+                Some(',') => {
+                    self.bump();
+                    self.skip_ws();
+                    if self.peek() == Some(']') {
+                        return Err(self.error_expected_json_value());
+                    }
+                }
+                Some(']') => {
+                    self.bump();
+                    return Ok(());
+                }
+                None => return Err(self.error_unexpected_end()),
+                Some(_) => return Err(self.error_expected_one_of(&[",", "]"])),
+            }
+        }
+    }
+
+    fn parse_object(&mut self) -> Result<(), JsonInputDiagnostic> {
+        self.bump();
+        self.skip_ws();
+        let mut allow_object_end = true;
+        loop {
+            match self.peek() {
+                Some('"') => self.parse_string()?,
+                Some('}') if allow_object_end => {
+                    self.bump();
+                    return Ok(());
+                }
+                None => return Err(self.error_unexpected_end()),
+                Some(_) if allow_object_end => {
+                    return Err(self.error_expected_one_of(&["string", "}"]));
+                }
+                Some(_) => return Err(self.error_expected_one_of(&["string"])),
+            }
+            self.skip_ws();
+            match self.peek() {
+                Some(':') => self.bump(),
+                Some(',') | Some('}') => return Err(self.error_expected_found(":")),
+                Some('=') => return Err(self.error_invalid_token()),
+                Some(_) => return Err(self.error_invalid_token()),
+                None => return Err(self.error_unexpected_end()),
+            }
+            self.skip_ws();
+            self.parse_value()?;
+            self.skip_ws();
+            match self.peek() {
+                Some(',') => {
+                    self.bump();
+                    self.skip_ws();
+                    allow_object_end = false;
+                }
+                Some('}') => {
+                    self.bump();
+                    return Ok(());
+                }
+                None => return Err(self.error_unexpected_end()),
+                Some(_) => return Err(self.error_expected_one_of(&[",", "}"])),
+            }
+        }
+    }
+
+    fn parse_string(&mut self) -> Result<(), JsonInputDiagnostic> {
+        let start = self.pos;
+        self.bump();
+        while let Some(ch) = self.peek() {
+            match ch {
+                '"' => {
+                    self.bump();
+                    return Ok(());
+                }
+                '\\' => {
+                    self.bump();
+                    let Some(escaped) = self.peek() else {
+                        return Err(self.error_token_invalid_range(start, self.pos));
+                    };
+                    match escaped {
+                        '"' | '\\' | '/' | 'b' | 'f' | 'n' | 'r' | 't' => {
+                            self.bump();
+                        }
+                        'u' => {
+                            self.bump();
+                            for _ in 0..4 {
+                                let Some(hex) = self.peek() else {
+                                    return Err(self.error_invalid_escape('u'));
+                                };
+                                if !hex.is_ascii_hexdigit() {
+                                    return Err(self.error_invalid_escape('u'));
+                                }
+                                self.bump();
+                            }
+                        }
+                        other => return Err(self.error_invalid_escape(other)),
+                    }
+                }
+                ch if ch.is_control() => return Err(self.error_unescaped_control(ch)),
+                _ => self.bump(),
+            }
+        }
+        Err(self.error_token_invalid_range(start, self.pos))
+    }
+
+    fn parse_number(&mut self) -> Result<(), JsonInputDiagnostic> {
+        let start = self.pos;
+        if self.peek() == Some('-') {
+            self.bump();
+        }
+        match self.peek() {
+            Some('0') => {
+                self.bump();
+                if matches!(self.peek(), Some('0'..='9')) {
+                    self.consume_token_tail();
+                    return Err(self.error_token_invalid_range(start, self.pos));
+                }
+            }
+            Some('1'..='9') => {
+                self.bump();
+                while matches!(self.peek(), Some('0'..='9')) {
+                    self.bump();
+                }
+            }
+            _ => return Err(self.error_token_invalid_range(start, self.pos)),
+        }
+        if self.peek() == Some('.') {
+            self.bump();
+            if !matches!(self.peek(), Some('0'..='9')) {
+                self.consume_token_tail();
+                return Err(self.error_token_invalid_range(start, self.pos));
+            }
+            while matches!(self.peek(), Some('0'..='9')) {
+                self.bump();
+            }
+        }
+        if matches!(self.peek(), Some('e' | 'E')) {
+            self.bump();
+            if matches!(self.peek(), Some('+' | '-')) {
+                self.bump();
+            }
+            if !matches!(self.peek(), Some('0'..='9')) {
+                self.consume_token_tail();
+                return Err(self.error_token_invalid_range(start, self.pos));
+            }
+            while matches!(self.peek(), Some('0'..='9')) {
+                self.bump();
+            }
+        }
+        if self.peek().is_some_and(|ch| !is_json_delimiter(ch)) {
+            self.consume_token_tail();
+            return Err(self.error_token_invalid_range(start, self.pos));
+        }
+        Ok(())
+    }
+
+    fn parse_literal(&mut self, expected: &str) -> Result<(), JsonInputDiagnostic> {
+        let start = self.pos;
+        for expected_ch in expected.chars() {
+            if self.peek() == Some(expected_ch) {
+                self.bump();
+            } else {
+                self.consume_token_tail();
+                return Err(self.error_token_invalid_range(start, self.pos));
+            }
+        }
+        if self.peek().is_some_and(|ch| !is_json_delimiter(ch)) {
+            self.consume_token_tail();
+            return Err(self.error_token_invalid_range(start, self.pos));
+        }
+        Ok(())
+    }
+
+    fn error_unexpected_end(&self) -> JsonInputDiagnostic {
+        self.error_with_position("The input string ended unexpectedly.".into(), self.pos)
+    }
+
+    fn error_invalid_escape(&self, escaped: char) -> JsonInputDiagnostic {
+        self.error_with_position(
+            format!("Escape sequence \"\\{escaped}\" is invalid."),
+            self.pos.saturating_sub(1),
+        )
+    }
+
+    fn error_unescaped_control(&self, ch: char) -> JsonInputDiagnostic {
+        self.error_with_position(
+            format!("Character with value 0x{:02x} must be escaped.", ch as u32),
+            self.pos,
+        )
+    }
+
+    fn error_expected_json_value(&self) -> JsonInputDiagnostic {
+        if self.peek().is_some_and(|ch| !matches!(ch, ':' | ',' | ']' | '}')) {
+            return self.error_invalid_token();
+        }
+        self.error_expected_found("JSON value")
+    }
+
+    fn error_expected_end_of_input(&self) -> JsonInputDiagnostic {
+        self.error_expected_found("end of input")
+    }
+
+    fn error_expected_found(&self, expected: &str) -> JsonInputDiagnostic {
+        let token = self.current_token();
+        let rendered = if expected == "end of input" {
+            format!("Expected end of input, but found {token}.")
+        } else if expected == "JSON value" {
+            format!("Expected JSON value, but found {token}.")
+        } else {
+            format!("Expected \"{expected}\", but found {token}.")
+        };
+        self.error_with_position(rendered, self.pos)
+    }
+
+    fn error_expected_one_of(&self, expected: &[&str]) -> JsonInputDiagnostic {
+        let rendered_expected = match expected {
+            [single] => render_json_expected(single),
+            [left, right] => format!(
+                "{} or {}",
+                render_json_expected(left),
+                render_json_expected(right)
+            ),
+            _ => expected
+                .iter()
+                .map(|item| render_json_expected(item))
+                .collect::<Vec<_>>()
+                .join(", "),
+        };
+        let token = self.current_token();
+        self.error_with_position(
+            format!("Expected {rendered_expected}, but found {token}."),
+            self.pos,
+        )
+    }
+
+    fn error_invalid_token(&self) -> JsonInputDiagnostic {
+        self.error_token_invalid_range(self.pos, self.token_end(self.pos))
+    }
+
+    fn error_token_invalid_range(&self, start: usize, end: usize) -> JsonInputDiagnostic {
+        let token = self.chars[start..end].iter().collect::<String>();
+        self.error_with_position(format!("Token \"{token}\" is invalid."), start)
+    }
+
+    fn error_with_position(&self, detail: String, pos: usize) -> JsonInputDiagnostic {
+        let (line, column) = self.line_col_at(pos);
+        JsonInputDiagnostic {
+            detail,
+            context: json_error_context(self.text, line, column)
+                .unwrap_or_else(|| format!("JSON data, line {line}: ")),
+        }
+    }
+
+    fn current_token(&self) -> String {
+        match self.peek() {
+            Some(ch) if is_json_delimiter(ch) && !ch.is_whitespace() => format!("\"{ch}\""),
+            Some(_) => {
+                let end = self.token_end(self.pos);
+                let token = self.chars[self.pos..end].iter().collect::<String>();
+                format!("\"{token}\"")
+            }
+            None => "end of input".into(),
+        }
+    }
+
+    fn token_end(&self, start: usize) -> usize {
+        if let Some(ch) = self.chars.get(start) {
+            if *ch == '\'' || (!ch.is_ascii_alphanumeric() && !matches!(ch, '"' | '-')) {
+                return start.saturating_add(1).min(self.chars.len());
+            }
+        }
+        let mut end = start;
+        while let Some(ch) = self.chars.get(end) {
+            if is_json_delimiter(*ch) {
+                break;
+            }
+            end += 1;
+        }
+        end.max(start.saturating_add(1).min(self.chars.len()))
+    }
+
+    fn consume_token_tail(&mut self) {
+        while self.peek().is_some_and(|ch| !is_json_delimiter(ch)) {
+            self.bump();
+        }
+    }
+
+    fn skip_ws(&mut self) {
+        while self.peek().is_some_and(|ch| ch.is_whitespace()) {
+            self.bump();
+        }
+    }
+
+    fn line_col_at(&self, pos: usize) -> (usize, usize) {
+        let mut line = 1usize;
+        let mut column = 1usize;
+        for ch in self.chars.iter().take(pos) {
+            if *ch == '\n' {
+                line += 1;
+                column = 1;
+            } else {
+                column += 1;
+            }
+        }
+        (line, column)
+    }
+
+    fn peek(&self) -> Option<char> {
+        self.chars.get(self.pos).copied()
+    }
+
+    fn bump(&mut self) {
+        self.pos += 1;
+    }
+}
+
+fn is_json_delimiter(ch: char) -> bool {
+    ch.is_whitespace() || matches!(ch, ',' | ':' | ']' | '[' | '}' | '{')
+}
+
+fn render_json_expected(expected: &str) -> String {
+    if expected == "string" {
+        expected.to_string()
+    } else {
+        format!("\"{expected}\"")
+    }
 }
 
 pub(crate) fn render_jsonb_bytes(bytes: &[u8]) -> Result<String, ExecError> {
@@ -1321,6 +1718,89 @@ mod tests {
                 && detail == "The input string ended unexpectedly."
                 && context == "JSON data, line 1: {\"a\":true"
         ));
+    }
+
+    #[test]
+    fn json_input_error_uses_postgres_style_detail_messages() {
+        let cases = [
+            (
+                "''",
+                "Token \"'\" is invalid.",
+                "JSON data, line 1: ''",
+            ),
+            (
+                "\"abc",
+                "Token \"\"abc\" is invalid.",
+                "JSON data, line 1: \"abc",
+            ),
+            (
+                "\"abc\ndef\"",
+                "Character with value 0x0a must be escaped.",
+                "JSON data, line 1: \"abc",
+            ),
+            (
+                "\"\\v\"",
+                "Escape sequence \"\\v\" is invalid.",
+                "JSON data, line 1: \"\\v\"",
+            ),
+            (
+                "[1,2,]",
+                "Expected JSON value, but found \"]\".",
+                "JSON data, line 1: [1,2,]",
+            ),
+            (
+                "{\"abc\"}",
+                "Expected \":\", but found \"}\".",
+                "JSON data, line 1: {\"abc\"}",
+            ),
+            (
+                "{1:\"abc\"}",
+                "Expected string or \"}\", but found \"1\".",
+                "JSON data, line 1: {1:\"abc\"}",
+            ),
+            (
+                "{\"abc\"=1}",
+                "Token \"=\" is invalid.",
+                "JSON data, line 1: {\"abc\"=1}",
+            ),
+            (
+                "{\"abc\":1:2}",
+                "Expected \",\" or \"}\", but found \":\".",
+                "JSON data, line 1: {\"abc\":1:2}",
+            ),
+            (
+                "{\"abc\":1,3}",
+                "Expected string, but found \"3\".",
+                "JSON data, line 1: {\"abc\":1,3}",
+            ),
+            (
+                "true false",
+                "Expected end of input, but found \"false\".",
+                "JSON data, line 1: true false",
+            ),
+            (
+                "trues",
+                "Token \"trues\" is invalid.",
+                "JSON data, line 1: trues",
+            ),
+            (
+                "01",
+                "Token \"01\" is invalid.",
+                "JSON data, line 1: 01",
+            ),
+        ];
+
+        for (input, expected_detail, expected_context) in cases {
+            let err = parse_json_text_input(input).unwrap_err();
+            assert!(matches!(
+                err,
+                ExecError::JsonInput {
+                    detail: Some(ref detail),
+                    context: Some(ref context),
+                    ..
+                } if detail == expected_detail && context == expected_context
+            ), "unexpected diagnostic for input {input:?}: {err:?}");
+        }
     }
 
     #[test]
