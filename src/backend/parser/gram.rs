@@ -2085,6 +2085,7 @@ fn build_table_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, ParseErro
     Ok(SelectStatement {
         with: Vec::new(),
         with_recursive: false,
+        distinct: false,
         from: Some(FromItem::Table { name, only: false }),
         targets: vec![SelectItem {
             expr: SqlExpr::Column("*".into()),
@@ -2604,6 +2605,7 @@ pub(crate) fn build_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, Pars
     };
     let mut with_recursive = false;
     let mut with = Vec::new();
+    let mut distinct = false;
     let mut targets = None;
     let mut from = None;
     let mut where_clause = None;
@@ -2620,9 +2622,11 @@ pub(crate) fn build_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, Pars
                 with_recursive = recursive;
                 with = ctes;
             }
+            Rule::select_distinct_clause => distinct = true,
             Rule::simple_select_core => {
                 for inner in part.into_inner() {
                     match inner.as_rule() {
+                        Rule::select_distinct_clause => distinct = true,
                         Rule::select_list => targets = Some(build_select_list(inner)?),
                         Rule::from_item => from = Some(build_from_item(inner)?),
                         Rule::expr => where_clause = Some(build_expr(inner)?),
@@ -2661,6 +2665,7 @@ pub(crate) fn build_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, Pars
     Ok(SelectStatement {
         with_recursive,
         with,
+        distinct,
         from,
         targets: targets.unwrap_or_default(),
         where_clause,
@@ -2751,6 +2756,7 @@ fn build_set_operation_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, P
     Ok(SelectStatement {
         with_recursive,
         with,
+        distinct: false,
         from: None,
         targets: Vec::new(),
         where_clause: None,
@@ -2807,6 +2813,7 @@ fn select_statement_for_set_operation(
     SelectStatement {
         with_recursive: false,
         with: Vec::new(),
+        distinct: false,
         from: None,
         targets: Vec::new(),
         where_clause: None,
@@ -2858,6 +2865,7 @@ fn wrap_values_as_select(stmt: ValuesStatement) -> SelectStatement {
     SelectStatement {
         with_recursive: stmt.with_recursive,
         with: stmt.with,
+        distinct: false,
         from: Some(FromItem::Values { rows: stmt.rows }),
         targets: vec![SelectItem {
             output_name: "*".into(),
