@@ -486,6 +486,7 @@ fn run_statement(
             ))))
         }
         Statement::CommentOnRole(_)
+        | Statement::CommentOnConversion(_)
         | Statement::CreateRole(_)
         | Statement::CreateDatabase(_)
         | Statement::AlterRole(_)
@@ -734,18 +735,19 @@ fn run_statement(
             execute_readonly_statement(Statement::Analyze(stmt), &relcache, &mut ctx)
         }
         Statement::CommentOnDomain(_)
+        | Statement::CreateConversion(_)
         | Statement::CreateFunction(_)
-        | Statement::CreateDatabase(_)
         | Statement::CreateSchema(_)
         | Statement::CreateTablespace(_)
         | Statement::CreateDomain(_)
         | Statement::CreateType(_)
         | Statement::CreateSequence(_)
         | Statement::DropDomain(_)
+        | Statement::DropConversion(_)
         | Statement::DropType(_)
-        | Statement::DropSequence(_)
-        | Statement::DropDatabase(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
-            "domain/function/type/sequence statements are not supported in query_repl".into(),
+        | Statement::DropSequence(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
+            "conversion/domain/function/type/sequence statements are not supported in query_repl"
+                .into(),
         ))),
         Statement::CreateTable(stmt) => {
             let (table_name, _) = normalize_create_table_name(&stmt)?;

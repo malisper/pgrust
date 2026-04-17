@@ -21,8 +21,8 @@ use crate::backend::utils::misc::checkpoint::{CheckpointConfig, CheckpointStatsS
 use crate::backend::utils::misc::interrupts::InterruptState;
 use crate::pgrust::auth::AuthState;
 use crate::pgrust::database::{
-    Database, DatabaseCreateGrant, DatabaseError, DatabaseOpenOptions, DomainEntry, EnumTypeEntry,
-    RangeTypeEntry, SequenceRuntime, TempNamespace,
+    ConversionEntry, Database, DatabaseCreateGrant, DatabaseError, DatabaseOpenOptions,
+    DomainEntry, EnumTypeEntry, RangeTypeEntry, SequenceRuntime, TempNamespace,
 };
 use crate::{BufferPool, ClientId};
 
@@ -84,6 +84,7 @@ pub(crate) struct OpenDatabaseState {
     pub domains: Arc<RwLock<BTreeMap<String, DomainEntry>>>,
     pub enum_types: Arc<RwLock<BTreeMap<String, EnumTypeEntry>>>,
     pub range_types: Arc<RwLock<BTreeMap<String, RangeTypeEntry>>>,
+    pub conversions: Arc<RwLock<BTreeMap<String, ConversionEntry>>>,
     pub sequences: Arc<SequenceRuntime>,
 }
 
@@ -102,6 +103,7 @@ impl OpenDatabaseState {
             domains: Arc::new(RwLock::new(BTreeMap::new())),
             enum_types: Arc::new(RwLock::new(BTreeMap::new())),
             range_types: Arc::new(RwLock::new(BTreeMap::new())),
+            conversions: Arc::new(RwLock::new(BTreeMap::new())),
             sequences,
         })
     }
@@ -318,6 +320,7 @@ impl Cluster {
             domains: Arc::clone(&state.domains),
             enum_types: Arc::clone(&state.enum_types),
             range_types: Arc::clone(&state.range_types),
+            conversions: Arc::clone(&state.conversions),
             sequences: Arc::clone(&state.sequences),
             _wal_bg_writer: self.shared.wal_bg_writer.clone(),
         })
