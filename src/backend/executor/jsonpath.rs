@@ -280,7 +280,7 @@ fn apply_step_single(
         } => {
             let min_depth = resolve_recursive_bound(value, *min_depth);
             let max_depth = resolve_recursive_bound(value, *max_depth);
-            collect_recursive_values(value, min_depth, max_depth, 1, out);
+            collect_recursive_values(value, min_depth, max_depth, 0, out);
         }
         Step::Index(index) => match value {
             JsonbValue::Array(items) => {
@@ -540,18 +540,19 @@ fn collect_recursive_values(
     current_depth: i32,
     out: &mut Vec<JsonbValue>,
 ) {
+    if current_depth >= min_depth && current_depth <= max_depth {
+        out.push(value.clone());
+    }
+    if current_depth >= max_depth {
+        return;
+    }
     let children: Vec<&JsonbValue> = match value {
         JsonbValue::Array(items) => items.iter().collect(),
         JsonbValue::Object(items) => items.iter().map(|(_, item)| item).collect(),
         _ => Vec::new(),
     };
     for child in children {
-        if current_depth >= min_depth && current_depth <= max_depth {
-            out.push(child.clone());
-        }
-        if current_depth < max_depth {
-            collect_recursive_values(child, min_depth, max_depth, current_depth + 1, out);
-        }
+        collect_recursive_values(child, min_depth, max_depth, current_depth + 1, out);
     }
 }
 
@@ -1018,7 +1019,7 @@ impl<'a> Parser<'a> {
     ) -> Result<(RecursiveBound, RecursiveBound), ExecError> {
         self.skip_ws();
         if !self.consume("{") {
-            return Ok((RecursiveBound::Int(1), RecursiveBound::Last));
+            return Ok((RecursiveBound::Int(0), RecursiveBound::Last));
         }
         self.skip_ws();
         let start = self.parse_recursive_bound()?;

@@ -9844,6 +9844,90 @@ fn jsonpath_lax_scalar_index_zero_returns_scalar() {
 }
 
 #[test]
+fn jsonpath_recursive_descent_includes_current_item_at_depth_zero() {
+    let base = temp_dir("jsonpath_recursive_depth");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_path_query('{\"a\":{\"b\":1}}', 'lax $.**')",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Jsonb(
+                        crate::backend::executor::jsonb::parse_jsonb_text("{\"a\":{\"b\":1}}")
+                            .unwrap()
+                    )],
+                    vec![Value::Jsonb(
+                        crate::backend::executor::jsonb::parse_jsonb_text("{\"b\":1}")
+                            .unwrap()
+                    )],
+                    vec![Value::Jsonb(
+                        crate::backend::executor::jsonb::parse_jsonb_text("1").unwrap()
+                    )],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_path_query('{\"a\":{\"b\":1}}', 'lax $.**{0}')",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Jsonb(
+                    crate::backend::executor::jsonb::parse_jsonb_text("{\"a\":{\"b\":1}}")
+                        .unwrap()
+                )]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_path_query('{\"a\":{\"b\":1}}', 'lax $.**{0 to last}')",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Jsonb(
+                        crate::backend::executor::jsonb::parse_jsonb_text("{\"a\":{\"b\":1}}")
+                            .unwrap()
+                    )],
+                    vec![Value::Jsonb(
+                        crate::backend::executor::jsonb::parse_jsonb_text("{\"b\":1}")
+                            .unwrap()
+                    )],
+                    vec![Value::Jsonb(
+                        crate::backend::executor::jsonb::parse_jsonb_text("1").unwrap()
+                    )],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn getdatabaseencoding_and_jsonpath_unicode_work() {
     let base = temp_dir("jsonpath_unicode");
     let txns = TransactionManager::new_durable(&base).unwrap();
