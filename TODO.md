@@ -49,7 +49,6 @@ Counts from `/tmp/pgrust_regress_todo_20260417` on 2026-04-17; `test_setup.sql` 
   - `inet` and `cidr` type support
   - composite/type lookup support for user-defined and partitioned relation row types
   - `trigger` type support
-  - `lseg` input syntax used by `alter_table.sql`
   - table rename handling for array-type name collisions in `pg_type`
 - amutils.sql: 0/10
 - arrays.sql: 156/526
@@ -292,6 +291,8 @@ Counts from `/tmp/pgrust_regress_todo_20260417` on 2026-04-17; `test_setup.sql` 
 
 ## Features
 
+- done: `lseg` input syntax used by `alter_table.sql`
+
 - PostgreSQL-compatible jsonb input errors with `LINE` / `DETAIL` / `CONTEXT`
 - stack depth limit handling for deeply nested jsonb input
 - aggregate-local `ORDER BY` support for `jsonb_agg` / `jsonb_object_agg`
@@ -340,7 +341,6 @@ Counts from `/tmp/pgrust_regress_todo_20260417` on 2026-04-17; `test_setup.sql` 
 - `inet` and `cidr` type support
 - composite/type lookup support for user-defined and partitioned relation row types
 - `trigger` type support
-- `lseg` input syntax used by `alter_table.sql`
 - table rename handling for array-type name collisions in `pg_type`
 
 - plpgsql.sql
