@@ -1289,6 +1289,9 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::alter_view_owner_stmt => Ok(Statement::AlterViewOwner(build_alter_relation_owner(
             inner,
         )?)),
+        Rule::alter_schema_owner_stmt => {
+            Ok(Statement::AlterSchemaOwner(build_alter_schema_owner(inner)?))
+        }
         Rule::alter_table_set_stmt => Ok(Statement::AlterTableSet(build_alter_table_set(inner)?)),
         Rule::alter_table_set_not_null_stmt => Ok(Statement::AlterTableSetNotNull(
             build_alter_table_set_not_null(inner)?,
@@ -3724,6 +3727,17 @@ fn build_alter_relation_owner(
         .map(build_identifier);
     Ok(AlterRelationOwnerStatement {
         relation_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
+        new_owner: parts.next().ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
+fn build_alter_schema_owner(pair: Pair<'_, Rule>) -> Result<AlterSchemaOwnerStatement, ParseError> {
+    let mut parts = pair
+        .into_inner()
+        .filter(|part| part.as_rule() == Rule::identifier)
+        .map(build_identifier);
+    Ok(AlterSchemaOwnerStatement {
+        schema_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
         new_owner: parts.next().ok_or(ParseError::UnexpectedEof)?,
     })
 }

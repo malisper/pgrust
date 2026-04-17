@@ -408,6 +408,24 @@ impl Session {
                     )
                 }
             }
+            Statement::AlterSchemaOwner(ref alter_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_alter_schema_owner_stmt_with_search_path(
+                        self.client_id,
+                        alter_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
             Statement::AlterTableRenameColumn(ref rename_stmt) => {
                 if self.active_txn.is_some() {
                     let result = self.execute_in_transaction(db, stmt);
@@ -722,6 +740,19 @@ impl Session {
                         comment_stmt,
                         search_path.as_deref(),
                     )
+                }
+            }
+            Statement::CommentOnRole(ref comment_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    db.execute_comment_on_role_stmt(self.client_id, comment_stmt)
                 }
             }
             Statement::Begin => {
@@ -1263,9 +1294,16 @@ impl Session {
                     &mut txn.catalog_effects,
                 )
             }
-            Statement::CommentOnRole(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                "role management".into(),
-            ))),
+            Statement::CommentOnRole(ref comment_stmt) => {
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_comment_on_role_stmt_in_transaction(
+                    client_id,
+                    comment_stmt,
+                    xid,
+                    cid,
+                    &mut txn.catalog_effects,
+                )
+            }
             Statement::SetSessionAuthorization(ref set_stmt) => {
                 self.auth = db.execute_set_session_authorization_stmt(client_id, set_stmt)?;
                 Ok(StatementResult::AffectedRows(0))
@@ -1279,6 +1317,16 @@ impl Session {
                     "{}: {}",
                     unsupported_stmt.feature, unsupported_stmt.sql
                 ))))
+            }
+            Statement::AlterSchemaOwner(ref alter_stmt) => {
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_alter_schema_owner_stmt_in_transaction_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    xid,
+                    cid,
+                    &mut txn.catalog_effects,
+                )
             }
             Statement::CommentOnTable(ref comment_stmt) => {
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);

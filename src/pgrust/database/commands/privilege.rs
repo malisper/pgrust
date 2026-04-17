@@ -1,5 +1,8 @@
 use super::super::*;
-use crate::backend::commands::rolecmds::{grant_membership_authorized, membership_row, role_management_error};
+use crate::backend::commands::rolecmds::{
+    GrantMembershipAuthorizationError, grant_membership_authorized_with_detail, membership_row,
+    role_management_error,
+};
 use crate::backend::parser::{
     GrantObjectPrivilege, GrantObjectStatement, GrantRoleMembershipStatement,
     RevokeObjectStatement, RevokeRoleMembershipStatement,
@@ -60,8 +63,7 @@ impl Database {
         let mut touched = false;
 
         for role_name in &stmt.role_names {
-            let role = grant_membership_authorized(&auth, &auth_catalog, role_name)
-                .map_err(ExecError::Parse)?;
+            let role = authorize_grant_membership(&auth, &auth_catalog, role_name)?;
             for grantee_name in &stmt.grantee_names {
                 let grantee = lookup_membership_grantee(&auth_catalog, grantee_name)?;
                 let admin_option = stmt.admin_option;
@@ -100,8 +102,7 @@ impl Database {
         let mut touched = false;
 
         for role_name in &stmt.role_names {
-            let role = grant_membership_authorized(&auth, &auth_catalog, role_name)
-                .map_err(ExecError::Parse)?;
+            let role = authorize_grant_membership(&auth, &auth_catalog, role_name)?;
             for grantee_name in &stmt.grantee_names {
                 let grantee = lookup_membership_grantee(&auth_catalog, grantee_name)?;
                 let existing = auth_catalog
@@ -383,7 +384,15 @@ fn upsert_role_membership(
                 inherit_option,
                 set_option,
             ))
-            .map_err(map_role_grant_error)?;
+            .map_err(|err| {
+                map_named_role_membership_error(
+                    err,
+                    member,
+                    &member_name(db, auth_catalog, member),
+                    roleid,
+                    &role_name(db, auth_catalog, roleid),
+                )
+            })?;
     }
     Ok(())
 }
@@ -416,6 +425,57 @@ fn map_role_grant_error(err: crate::backend::catalog::CatalogError) -> ExecError
         ),
         other => ExecError::Parse(role_management_error(format!("{other:?}"))),
     }
+}
+
+fn authorize_grant_membership(
+    auth: &AuthState,
+    catalog: &AuthCatalog,
+    role_name: &str,
+) -> Result<PgAuthIdRow, ExecError> {
+    grant_membership_authorized_with_detail(auth, catalog, role_name).map_err(
+        |err| match err {
+            GrantMembershipAuthorizationError::Parse(err) => ExecError::Parse(err),
+            GrantMembershipAuthorizationError::PermissionDenied { role_name, detail } => {
+                ExecError::DetailedError {
+                    message: format!("permission denied to grant role \"{role_name}\""),
+                    detail,
+                    hint: None,
+                    sqlstate: "42501",
+                }
+            }
+        },
+    )
+}
+
+fn map_named_role_membership_error(
+    err: crate::backend::catalog::CatalogError,
+    member_oid: u32,
+    member_name: &str,
+    role_oid: u32,
+    role_name: &str,
+) -> ExecError {
+    match err {
+        crate::backend::catalog::CatalogError::UniqueViolation(message)
+            if message
+                == format!("role membership cycle: {member_oid} -> {role_oid}") =>
+        {
+            ExecError::Parse(role_management_error(format!(
+                "role \"{member_name}\" is a member of role \"{role_name}\""
+            )))
+        }
+        other => map_role_grant_error(other),
+    }
+}
+
+fn role_name(_db: &Database, auth_catalog: &AuthCatalog, role_oid: u32) -> String {
+    auth_catalog
+        .role_by_oid(role_oid)
+        .map(|row| row.rolname.clone())
+        .unwrap_or_else(|| role_oid.to_string())
+}
+
+fn member_name(db: &Database, auth_catalog: &AuthCatalog, member_oid: u32) -> String {
+    role_name(db, auth_catalog, member_oid)
 }
 
 fn publish_direct_auth_members_invalidation(db: &Database, client_id: ClientId) {
