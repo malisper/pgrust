@@ -491,6 +491,10 @@ impl Database {
         )?;
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let subtype = resolve_raw_type_name(&stmt.subtype, &catalog).map_err(ExecError::Parse)?;
+        let subtype_oid = catalog
+            .type_oid_for_sql_type(subtype)
+            .ok_or_else(|| ExecError::Parse(ParseError::UnsupportedType(stmt.type_name.clone())))?;
+        let subtype = subtype.with_identity(subtype_oid, subtype.typrelid);
         if catalog.type_rows().into_iter().any(|row| {
             row.typelem == 0
                 && row.typnamespace == namespace_oid
