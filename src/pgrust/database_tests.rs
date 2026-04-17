@@ -884,6 +884,42 @@ fn statement_timeout_interrupts_unique_index_conflict_wait() {
 }
 
 #[test]
+fn disconnect_cleanup_aborts_open_transaction_and_releases_table_locks() {
+    let dir = temp_dir("disconnect_cleanup_table_locks");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut holder = Session::new(1);
+    let mut waiter = Session::new(2);
+
+    holder.execute(&db, "create table t (id int)").unwrap();
+
+    holder.execute(&db, "begin").unwrap();
+    holder
+        .execute(&db, "comment on table t is 'held by disconnected session'")
+        .unwrap();
+    assert!(db.table_locks.has_locks_for_client(1));
+
+    holder.cleanup_on_disconnect(&db);
+    assert!(!db.table_locks.has_locks_for_client(1));
+    let snapshot = db
+        .txns
+        .read()
+        .snapshot(crate::backend::access::transam::xact::INVALID_TRANSACTION_ID)
+        .unwrap();
+    assert_eq!(snapshot.xmin, snapshot.xmax);
+
+    waiter
+        .execute(&db, "set statement_timeout = '200ms'")
+        .unwrap();
+    match waiter.execute(&db, "select count(*) from t").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(0)]]);
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+
+}
+
+#[test]
 fn analyze_populates_pg_statistic_and_pg_class_stats() {
     let dir = temp_dir("analyze_populates_stats");
     let db = Database::open(&dir, 128).unwrap();

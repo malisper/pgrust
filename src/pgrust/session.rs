@@ -939,6 +939,30 @@ impl Session {
         Arc::clone(&self.interrupts)
     }
 
+    pub(crate) fn cleanup_on_disconnect(&mut self, db: &Database) {
+        if let Some(txn) = self.active_txn.take() {
+            let _ = db.txns.write().abort(txn.xid);
+            db.finalize_aborted_local_catalog_invalidations(
+                self.client_id,
+                &txn.prior_cmd_catalog_invalidations,
+                &txn.current_cmd_catalog_invalidations,
+            );
+            db.finalize_aborted_catalog_effects(&txn.catalog_effects);
+            db.finalize_aborted_temp_effects(self.client_id, &txn.temp_effects);
+            db.finalize_aborted_sequence_effects(&txn.sequence_effects);
+            db.txn_waiter.notify();
+            for rel in txn.held_table_locks.keys().copied() {
+                db.table_locks.unlock_table(rel, self.client_id);
+            }
+        }
+
+        // :HACK: Session-scoped table locks are currently tracked partly on the
+        // session and partly in the global table lock manager. Release anything
+        // still associated with this backend on disconnect, mirroring PostgreSQL
+        // backend-exit lock cleanup even if the session missed normal unwind.
+        db.table_locks.unlock_all_for_client(self.client_id);
+    }
+
     fn lock_table_if_needed(
         &mut self,
         db: &Database,
