@@ -1926,6 +1926,7 @@ fn expr_uses_immediate_outer_columns(expr: &Expr) -> bool {
         Expr::Row { fields, .. } => fields
             .iter()
             .any(|(_, expr)| expr_uses_immediate_outer_columns(expr)),
+        Expr::FieldSelect { expr, .. } => expr_uses_immediate_outer_columns(expr),
         Expr::ArraySubscript { array, subscripts } => {
             expr_uses_immediate_outer_columns(array)
                 || subscripts.iter().any(|subscript| {

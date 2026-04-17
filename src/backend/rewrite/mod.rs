@@ -546,6 +546,15 @@ fn rewrite_semantic_expr(
                 })
                 .collect::<Result<Vec<_>, ParseError>>()?,
         },
+        Expr::FieldSelect {
+            expr,
+            field,
+            field_type,
+        } => Expr::FieldSelect {
+            expr: Box::new(rewrite_semantic_expr(*expr, catalog, expanded_views)?),
+            field,
+            field_type,
+        },
         Expr::Coalesce(left, right) => Expr::Coalesce(
             Box::new(rewrite_semantic_expr(*left, catalog, expanded_views)?),
             Box::new(rewrite_semantic_expr(*right, catalog, expanded_views)?),

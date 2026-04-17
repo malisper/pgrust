@@ -528,6 +528,15 @@ pub(super) fn shift_expr_rtindexes(expr: Expr, offset: usize) -> Expr {
                 .map(|(name, expr)| (name, shift_expr_rtindexes(expr, offset)))
                 .collect(),
         },
+        Expr::FieldSelect {
+            expr,
+            field,
+            field_type,
+        } => Expr::FieldSelect {
+            expr: Box::new(shift_expr_rtindexes(*expr, offset)),
+            field,
+            field_type,
+        },
         Expr::SubLink(sublink) => Expr::SubLink(Box::new(SubLink {
             testexpr: sublink
                 .testexpr
@@ -795,6 +804,19 @@ pub(super) fn rewrite_local_vars_for_output_exprs(
                     )
                 })
                 .collect(),
+        },
+        Expr::FieldSelect {
+            expr,
+            field,
+            field_type,
+        } => Expr::FieldSelect {
+            expr: Box::new(rewrite_local_vars_for_output_exprs(
+                *expr,
+                source_varno,
+                output_exprs,
+            )),
+            field,
+            field_type,
         },
         Expr::SubLink(sublink) => Expr::SubLink(Box::new(SubLink {
             testexpr: sublink

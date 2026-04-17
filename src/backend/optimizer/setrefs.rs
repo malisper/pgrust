@@ -1821,6 +1821,15 @@ fn lower_expr(ctx: &mut SetRefsContext<'_>, expr: Expr, mode: LowerMode<'_>) -> 
                 .map(|(name, expr)| (name, lower_expr(ctx, expr, mode)))
                 .collect(),
         },
+        Expr::FieldSelect {
+            expr,
+            field,
+            field_type,
+        } => Expr::FieldSelect {
+            expr: Box::new(lower_expr(ctx, *expr, mode)),
+            field,
+            field_type,
+        },
         Expr::Coalesce(left, right) => Expr::Coalesce(
             Box::new(lower_expr(ctx, *left, mode)),
             Box::new(lower_expr(ctx, *right, mode)),
@@ -1923,6 +1932,7 @@ fn validate_executable_expr(expr: &Expr, plan_node: &str, field: &str) {
         Expr::Row { fields, .. } => fields
             .iter()
             .for_each(|(_, expr)| validate_executable_expr(expr, plan_node, field)),
+        Expr::FieldSelect { expr, .. } => validate_executable_expr(expr, plan_node, field),
         Expr::ArraySubscript { array, subscripts } => {
             validate_executable_expr(array, plan_node, field);
             for subscript in subscripts {
@@ -2234,6 +2244,7 @@ fn validate_planner_expr(expr: &Expr, path_node: &str, field: &str) {
         Expr::Row { fields, .. } => fields
             .iter()
             .for_each(|(_, expr)| validate_planner_expr(expr, path_node, field)),
+        Expr::FieldSelect { expr, .. } => validate_planner_expr(expr, path_node, field),
         Expr::ArraySubscript { array, subscripts } => {
             validate_planner_expr(array, path_node, field);
             for subscript in subscripts {

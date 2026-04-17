@@ -876,6 +876,11 @@ pub enum Expr {
         descriptor: RecordDescriptor,
         fields: Vec<(String, Expr)>,
     },
+    FieldSelect {
+        expr: Box<Expr>,
+        field: String,
+        field_type: SqlType,
+    },
     Coalesce(Box<Expr>, Box<Expr>),
     ArraySubscript {
         array: Box<Expr>,
@@ -1145,6 +1150,7 @@ pub fn expr_sql_type_hint(expr: &Expr) -> Option<SqlType> {
         Expr::Cast(_, ty) => Some(*ty),
         Expr::ArrayLiteral { array_type, .. } => Some(*array_type),
         Expr::Row { descriptor, .. } => Some(descriptor.sql_type()),
+        Expr::FieldSelect { field_type, .. } => Some(*field_type),
         Expr::Coalesce(left, right) => {
             expr_sql_type_hint(left).or_else(|| expr_sql_type_hint(right))
         }

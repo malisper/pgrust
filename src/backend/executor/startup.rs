@@ -86,6 +86,7 @@ fn expr_uses_outer_columns(expr: &Expr) -> bool {
         }
         Expr::ArrayLiteral { elements, .. } => elements.iter().any(expr_uses_outer_columns),
         Expr::Row { fields, .. } => fields.iter().any(|(_, expr)| expr_uses_outer_columns(expr)),
+        Expr::FieldSelect { expr, .. } => expr_uses_outer_columns(expr),
         Expr::ArraySubscript { array, subscripts } => {
             expr_uses_outer_columns(array)
                 || subscripts.iter().any(|subscript| {
