@@ -365,6 +365,7 @@ fn apply_step_single(
         },
         Step::IndexWildcard => match value {
             JsonbValue::Array(items) => out.extend(items.iter().cloned()),
+            _ if matches!(ctx.mode, PathMode::Lax) => out.push(value.clone()),
             _ if matches!(ctx.mode, PathMode::Strict) => {
                 return Err(exec_jsonpath_error(
                     "jsonpath array wildcard requires array",
