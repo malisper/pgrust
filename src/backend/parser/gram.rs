@@ -59,6 +59,9 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_create_function_statement(&sql)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_grant_revoke_statement(&sql)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_unsupported_statement(&sql) {
         if matches!(
             stmt,
@@ -231,6 +234,264 @@ fn try_parse_create_function_statement(sql: &str) -> Result<Option<Statement>, P
     Ok(Some(Statement::CreateFunction(
         build_create_function_statement(trimmed)?,
     )))
+}
+
+fn try_parse_grant_revoke_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if lowered.starts_with("grant ") {
+        return build_grant_statement(trimmed).map(Some);
+    }
+    if lowered.starts_with("revoke ") {
+        return build_revoke_statement(trimmed).map(Some);
+    }
+    Ok(None)
+}
+
+fn build_grant_statement(sql: &str) -> Result<Statement, ParseError> {
+    let lowered = sql.to_ascii_lowercase();
+    if lowered.starts_with("grant create on database ") {
+        return Ok(Statement::GrantObject(build_grant_database_create(sql)?));
+    }
+    if lowered.starts_with("grant all privileges on ") {
+        return Ok(Statement::GrantObject(build_grant_table_all_privileges(sql)?));
+    }
+    Ok(Statement::GrantRoleMembership(build_grant_role_membership(
+        sql,
+    )?))
+}
+
+fn build_revoke_statement(sql: &str) -> Result<Statement, ParseError> {
+    let lowered = sql.to_ascii_lowercase();
+    if lowered.starts_with("revoke create on database ") {
+        return Ok(Statement::RevokeObject(build_revoke_database_create(sql)?));
+    }
+    if lowered.starts_with("revoke all privileges on ") {
+        return Ok(Statement::RevokeObject(build_revoke_table_all_privileges(sql)?));
+    }
+    Ok(Statement::RevokeRoleMembership(build_revoke_role_membership(
+        sql,
+    )?))
+}
+
+fn build_grant_database_create(sql: &str) -> Result<GrantObjectStatement, ParseError> {
+    let prefix = "grant create on database ";
+    let rest = sql
+        .get(prefix.len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let (object_name, rest) = split_once_keyword(rest, "to")?;
+    let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
+    Ok(GrantObjectStatement {
+        privilege: GrantObjectPrivilege::CreateOnDatabase,
+        object_name: normalize_simple_identifier(object_name)?,
+        grantee_names,
+        with_grant_option,
+    })
+}
+
+fn build_grant_table_all_privileges(sql: &str) -> Result<GrantObjectStatement, ParseError> {
+    let prefix = "grant all privileges on ";
+    let rest = sql
+        .get(prefix.len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let (object_name, rest) = split_once_keyword(rest, "to")?;
+    let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
+    Ok(GrantObjectStatement {
+        privilege: GrantObjectPrivilege::AllPrivilegesOnTable,
+        object_name: normalize_simple_identifier(object_name)?,
+        grantee_names,
+        with_grant_option,
+    })
+}
+
+fn build_revoke_database_create(sql: &str) -> Result<RevokeObjectStatement, ParseError> {
+    let prefix = "revoke create on database ";
+    let rest = sql
+        .get(prefix.len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let (object_name, rest) = split_once_keyword(rest, "from")?;
+    let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
+    Ok(RevokeObjectStatement {
+        privilege: GrantObjectPrivilege::CreateOnDatabase,
+        object_name: normalize_simple_identifier(object_name)?,
+        grantee_names,
+        cascade,
+    })
+}
+
+fn build_revoke_table_all_privileges(sql: &str) -> Result<RevokeObjectStatement, ParseError> {
+    let prefix = "revoke all privileges on ";
+    let rest = sql
+        .get(prefix.len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let (object_name, rest) = split_once_keyword(rest, "from")?;
+    let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
+    Ok(RevokeObjectStatement {
+        privilege: GrantObjectPrivilege::AllPrivilegesOnTable,
+        object_name: normalize_simple_identifier(object_name)?,
+        grantee_names,
+        cascade,
+    })
+}
+
+fn build_grant_role_membership(sql: &str) -> Result<GrantRoleMembershipStatement, ParseError> {
+    let prefix = "grant ";
+    let rest = sql
+        .get(prefix.len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let (role_names, rest) = split_once_keyword(rest, "to")?;
+    let (grantee_names_text, with_clause) =
+        split_optional_keyword(rest, "with").unwrap_or((rest.trim(), None));
+    let mut stmt = GrantRoleMembershipStatement {
+        role_names: parse_identifier_list(role_names)?,
+        grantee_names: parse_identifier_list(grantee_names_text)?,
+        admin_option: false,
+        inherit_option: None,
+        set_option: None,
+    };
+    if let Some(with_clause) = with_clause {
+        let lowered = with_clause.to_ascii_lowercase();
+        if lowered == "admin option" {
+            stmt.admin_option = true;
+        } else {
+            for option in with_clause.split(',') {
+                let option = option.trim();
+                let mut parts = option.split_whitespace();
+                let name = parts.next().ok_or(ParseError::UnexpectedEof)?;
+                let value = parts.next().ok_or(ParseError::UnexpectedEof)?;
+                if parts.next().is_some() {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "GRANT role option",
+                        actual: option.into(),
+                    });
+                }
+                match name.to_ascii_lowercase().as_str() {
+                    "admin" => stmt.admin_option = parse_grant_bool(value)?,
+                    "inherit" => stmt.inherit_option = Some(parse_grant_bool(value)?),
+                    "set" => stmt.set_option = Some(parse_grant_bool(value)?),
+                    _ => {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "GRANT role option",
+                            actual: option.into(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    Ok(stmt)
+}
+
+fn build_revoke_role_membership(sql: &str) -> Result<RevokeRoleMembershipStatement, ParseError> {
+    let prefix = "revoke ";
+    let rest = sql
+        .get(prefix.len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let (flags, rest) = if let Some(stripped) = strip_keyword_prefix(rest, "admin option for") {
+        ((true, false, false), stripped)
+    } else if let Some(stripped) = strip_keyword_prefix(rest, "inherit option for") {
+        ((false, true, false), stripped)
+    } else if let Some(stripped) = strip_keyword_prefix(rest, "set option for") {
+        ((false, false, true), stripped)
+    } else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "REVOKE <option> OPTION FOR role FROM member",
+            actual: sql.into(),
+        });
+    };
+    let (role_names, rest) = split_once_keyword(rest, "from")?;
+    Ok(RevokeRoleMembershipStatement {
+        role_names: parse_identifier_list(role_names)?,
+        grantee_names: parse_identifier_list(rest)?,
+        admin_option: flags.0,
+        inherit_option: flags.1,
+        set_option: flags.2,
+    })
+}
+
+fn split_once_keyword<'a>(input: &'a str, keyword: &str) -> Result<(&'a str, &'a str), ParseError> {
+    let (left, right) = split_optional_keyword(input, keyword).ok_or_else(|| {
+        ParseError::UnexpectedToken {
+            expected: "keyword-delimited clause",
+            actual: input.into(),
+        }
+    })?;
+    right.map(|right| (left, right)).ok_or_else(|| ParseError::UnexpectedEof)
+}
+
+fn split_optional_keyword<'a>(input: &'a str, keyword: &str) -> Option<(&'a str, Option<&'a str>)> {
+    let lowered = input.to_ascii_lowercase();
+    let needle = format!(" {keyword} ");
+    let index = lowered.find(&needle)?;
+    let left = input[..index].trim();
+    let right = input[index + needle.len()..].trim();
+    Some((left, (!right.is_empty()).then_some(right)))
+}
+
+fn strip_keyword_prefix<'a>(input: &'a str, keyword: &str) -> Option<&'a str> {
+    let lowered = input.to_ascii_lowercase();
+    lowered
+        .starts_with(keyword)
+        .then(|| input[keyword.len()..].trim_start())
+}
+
+fn parse_grantees_with_optional_grant(input: &str) -> Result<(Vec<String>, bool), ParseError> {
+    let (grantees, suffix) = split_optional_keyword(input, "with")
+        .map(|(grantees, suffix)| (grantees, suffix.unwrap_or_default()))
+        .unwrap_or((input.trim(), ""));
+    let with_grant_option = if suffix.is_empty() {
+        false
+    } else if suffix.eq_ignore_ascii_case("grant option") {
+        true
+    } else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "WITH GRANT OPTION",
+            actual: suffix.into(),
+        });
+    };
+    Ok((parse_identifier_list(grantees)?, with_grant_option))
+}
+
+fn parse_revokee_list_with_optional_cascade(input: &str) -> Result<(Vec<String>, bool), ParseError> {
+    let lowered = input.to_ascii_lowercase();
+    if let Some(stripped) = lowered.strip_suffix(" cascade") {
+        let grantees_len = stripped.len();
+        let grantees = input[..grantees_len].trim_end();
+        return Ok((parse_identifier_list(grantees)?, true));
+    }
+    Ok((parse_identifier_list(input)?, false))
+}
+
+fn parse_identifier_list(input: &str) -> Result<Vec<String>, ParseError> {
+    input
+        .split(',')
+        .map(normalize_simple_identifier)
+        .collect::<Result<Vec<_>, _>>()
+}
+
+fn normalize_simple_identifier(input: &str) -> Result<String, ParseError> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err(ParseError::UnexpectedEof);
+    }
+    Ok(trimmed.trim_matches('"').to_ascii_lowercase())
+}
+
+fn parse_grant_bool(input: &str) -> Result<bool, ParseError> {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        other => Err(ParseError::UnexpectedToken {
+            expected: "TRUE or FALSE",
+            actual: other.into(),
+        }),
+    }
 }
 
 fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement, ParseError> {

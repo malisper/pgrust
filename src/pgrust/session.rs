@@ -613,6 +613,68 @@ impl Session {
                     db.execute_drop_role_stmt(self.client_id, drop_stmt)
                 }
             }
+            Statement::GrantObject(ref grant_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_grant_object_stmt_with_search_path(
+                        self.client_id,
+                        grant_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
+            Statement::RevokeObject(ref revoke_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_revoke_object_stmt_with_search_path(
+                        self.client_id,
+                        revoke_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
+            Statement::GrantRoleMembership(ref grant_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    db.execute_grant_role_membership_stmt(self.client_id, grant_stmt)
+                }
+            }
+            Statement::RevokeRoleMembership(ref revoke_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    db.execute_revoke_role_membership_stmt(self.client_id, revoke_stmt)
+                }
+            }
             Statement::SetSessionAuthorization(ref set_stmt) => {
                 if self.active_txn.is_some() {
                     let result = self.execute_in_transaction(db, stmt);
@@ -1169,6 +1231,28 @@ impl Session {
                 db.execute_alter_role_stmt(client_id, alter_stmt)
             }
             Statement::DropRole(ref drop_stmt) => db.execute_drop_role_stmt(client_id, drop_stmt),
+            Statement::GrantObject(ref grant_stmt) => {
+                let search_path = self.configured_search_path();
+                db.execute_grant_object_stmt_with_search_path(
+                    client_id,
+                    grant_stmt,
+                    search_path.as_deref(),
+                )
+            }
+            Statement::RevokeObject(ref revoke_stmt) => {
+                let search_path = self.configured_search_path();
+                db.execute_revoke_object_stmt_with_search_path(
+                    client_id,
+                    revoke_stmt,
+                    search_path.as_deref(),
+                )
+            }
+            Statement::GrantRoleMembership(ref grant_stmt) => {
+                db.execute_grant_role_membership_stmt(client_id, grant_stmt)
+            }
+            Statement::RevokeRoleMembership(ref revoke_stmt) => {
+                db.execute_revoke_role_membership_stmt(client_id, revoke_stmt)
+            }
             Statement::ReassignOwned(ref reassign_stmt) => {
                 let txn = self.active_txn.as_mut().unwrap();
                 db.execute_reassign_owned_stmt_in_transaction(
