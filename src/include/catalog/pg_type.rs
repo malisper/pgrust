@@ -372,21 +372,42 @@ pub fn bootstrap_composite_type_rows() -> Vec<PgTypeRow> {
         composite_type_row(
             "pg_namespace",
             PG_NAMESPACE_ROWTYPE_OID,
+            PG_CATALOG_NAMESPACE_OID,
             PG_NAMESPACE_RELATION_OID,
             0,
         ),
-        composite_type_row("pg_type", PG_TYPE_ROWTYPE_OID, PG_TYPE_RELATION_OID, 0),
-        composite_type_row("pg_proc", PG_PROC_ROWTYPE_OID, PG_PROC_RELATION_OID, 0),
+        composite_type_row(
+            "pg_type",
+            PG_TYPE_ROWTYPE_OID,
+            PG_CATALOG_NAMESPACE_OID,
+            PG_TYPE_RELATION_OID,
+            0,
+        ),
+        composite_type_row(
+            "pg_proc",
+            PG_PROC_ROWTYPE_OID,
+            PG_CATALOG_NAMESPACE_OID,
+            PG_PROC_RELATION_OID,
+            0,
+        ),
         composite_type_row(
             "pg_attribute",
             PG_ATTRIBUTE_ROWTYPE_OID,
+            PG_CATALOG_NAMESPACE_OID,
             PG_ATTRIBUTE_RELATION_OID,
             0,
         ),
-        composite_type_row("pg_class", PG_CLASS_ROWTYPE_OID, PG_CLASS_RELATION_OID, 0),
+        composite_type_row(
+            "pg_class",
+            PG_CLASS_ROWTYPE_OID,
+            PG_CATALOG_NAMESPACE_OID,
+            PG_CLASS_RELATION_OID,
+            0,
+        ),
         composite_type_row(
             "pg_database",
             PG_DATABASE_ROWTYPE_OID,
+            PG_CATALOG_NAMESPACE_OID,
             PG_DATABASE_RELATION_OID,
             0,
         ),
@@ -410,11 +431,17 @@ fn builtin_type_row(name: &str, oid: u32, sql_type: SqlType) -> PgTypeRow {
     }
 }
 
-pub fn composite_type_row(name: &str, oid: u32, relid: u32, array_oid: u32) -> PgTypeRow {
+pub fn composite_type_row(
+    name: &str,
+    oid: u32,
+    namespace_oid: u32,
+    relid: u32,
+    array_oid: u32,
+) -> PgTypeRow {
     PgTypeRow {
         oid,
         typname: name.to_string(),
-        typnamespace: PG_CATALOG_NAMESPACE_OID,
+        typnamespace: namespace_oid,
         typowner: BOOTSTRAP_SUPERUSER_OID,
         typlen: -1,
         typalign: AttributeAlign::Double,
@@ -426,11 +453,17 @@ pub fn composite_type_row(name: &str, oid: u32, relid: u32, array_oid: u32) -> P
     }
 }
 
-pub fn composite_array_type_row(name: &str, oid: u32, elem_oid: u32, relid: u32) -> PgTypeRow {
+pub fn composite_array_type_row(
+    name: &str,
+    oid: u32,
+    namespace_oid: u32,
+    elem_oid: u32,
+    relid: u32,
+) -> PgTypeRow {
     PgTypeRow {
         oid,
         typname: format!("_{name}"),
-        typnamespace: PG_CATALOG_NAMESPACE_OID,
+        typnamespace: namespace_oid,
         typowner: BOOTSTRAP_SUPERUSER_OID,
         typlen: -1,
         typalign: AttributeAlign::Double,
