@@ -3,8 +3,8 @@ use super::node_types::*;
 use super::{ExecError, ExecutorContext};
 use crate::backend::executor::jsonb::{
     JsonbValue, decode_jsonb, encode_jsonb, jsonb_builder_key, jsonb_from_value, jsonb_get,
-    jsonb_object_from_pairs, jsonb_path, jsonb_to_text_value, jsonb_to_value, parse_jsonb_text,
-    render_jsonb_bytes,
+    jsonb_object_from_pairs, jsonb_path, jsonb_to_text_value, jsonb_to_value,
+    parse_json_text_input, parse_jsonb_text, render_jsonb_bytes,
 };
 use crate::backend::executor::jsonpath::{
     EvaluationContext as JsonPathEvaluationContext, canonicalize_jsonpath, evaluate_jsonpath,
@@ -20,19 +20,11 @@ use crate::pgrust::session::ByteaOutputFormat;
 use serde_json::Value as SerdeJsonValue;
 
 pub(crate) fn validate_json_text(text: &str) -> Result<(), ExecError> {
-    serde_json::from_str::<SerdeJsonValue>(text)
-        .map(|_| ())
-        .map_err(|_| ExecError::InvalidStorageValue {
-            column: "json".into(),
-            details: format!("invalid input syntax for type json: \"{text}\""),
-        })
+    parse_json_text_input(text).map(|_| ())
 }
 
 fn parse_json_text(text: &str) -> Result<SerdeJsonValue, ExecError> {
-    serde_json::from_str::<SerdeJsonValue>(text).map_err(|_| ExecError::InvalidStorageValue {
-        column: "json".into(),
-        details: format!("invalid input syntax for type json: \"{text}\""),
-    })
+    parse_json_text_input(text)
 }
 
 fn validate_jsonpath_text(text: &str) -> Result<(), ExecError> {

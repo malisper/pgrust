@@ -8669,7 +8669,10 @@ fn invalid_json_input_errors() {
     let base = temp_dir("json_invalid_input");
     let txns = TransactionManager::new_durable(&base).unwrap();
     let err = run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select '{bad'::json").unwrap_err();
-    assert!(matches!(err, ExecError::InvalidStorageValue { column, .. } if column == "json"));
+    assert!(matches!(
+        err,
+        ExecError::JsonInput { message, .. } if message == "invalid input syntax for type json"
+    ));
 }
 
 #[test]

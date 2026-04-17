@@ -37,6 +37,7 @@ use crate::pl::plpgsql::{PlpgsqlNotice, RaiseLevel, clear_notices, take_notices}
 fn exec_error_sqlstate(e: &ExecError) -> &'static str {
     match e {
         ExecError::Regex(err) => err.sqlstate,
+        ExecError::JsonInput { sqlstate, .. } => sqlstate,
         ExecError::DetailedError { sqlstate, .. } => sqlstate,
         ExecError::Parse(crate::backend::parser::ParseError::InvalidInteger(_))
         | ExecError::Parse(crate::backend::parser::ParseError::InvalidNumeric(_))
@@ -96,6 +97,7 @@ fn exec_error_sqlstate(e: &ExecError) -> &'static str {
 fn exec_error_detail(e: &ExecError) -> Option<&str> {
     match e {
         ExecError::Regex(err) => err.detail.as_deref(),
+        ExecError::JsonInput { detail, .. } => detail.as_deref(),
         ExecError::DetailedError { detail, .. } => detail.as_deref(),
         ExecError::ForeignKeyViolation { detail, .. } => detail.as_deref(),
         ExecError::ArrayInput { detail, .. } => detail.as_deref(),
@@ -107,6 +109,13 @@ fn exec_error_hint(e: &ExecError) -> Option<&str> {
     match e {
         ExecError::Regex(err) => err.hint.as_deref(),
         ExecError::DetailedError { hint, .. } => hint.as_deref(),
+        _ => None,
+    }
+}
+
+fn exec_error_context(e: &ExecError) -> Option<&str> {
+    match e {
+        ExecError::JsonInput { context, .. } => context.as_deref(),
         _ => None,
     }
 }
@@ -158,10 +167,13 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
                 return None;
             }
         }
+        ExecError::JsonInput { raw_input, .. } => raw_input.as_str(),
         _ => return None,
     };
-    let needle = format!("'{}'", value.replace('\'', "''"));
-    sql.rfind(&needle).map(|index| index + 1)
+    sql.find(value).map(|index| index + 1).or_else(|| {
+        let needle = format!("'{}'", value.replace('\'', "''"));
+        sql.rfind(&needle).map(|index| index + 1)
+    })
 }
 
 fn extract_quoted_error_value(message: &str) -> Option<&str> {
@@ -176,6 +188,7 @@ struct ExecErrorResponse {
     message: String,
     detail: Option<String>,
     hint: Option<String>,
+    context: Option<String>,
     position: Option<usize>,
 }
 
@@ -203,6 +216,7 @@ fn exec_error_response(sql: &str, e: &ExecError) -> ExecErrorResponse {
         message,
         detail: None,
         hint: None,
+        context: exec_error_context(e).map(str::to_string),
         position: exec_error_position(sql, e),
     };
 
@@ -374,6 +388,7 @@ fn send_exec_error(stream: &mut impl Write, sql: &str, e: &ExecError) -> io::Res
         &response.message,
         response.detail.as_deref(),
         response.hint.as_deref(),
+        response.context.as_deref(),
         response.position,
     )
 }
