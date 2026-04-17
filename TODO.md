@@ -2,237 +2,239 @@
 
 ## Regression test files
 
-- advisory_lock.sql
-- aggregates.sql
-- alter_generic.sql
-- alter_operator.sql
-- alter_table.sql
-- amutils.sql
-- arrays.sql
-- async.sql
-- bit.sql
-- bitmapops.sql
-- boolean.sql
-- box.sql
-- brin.sql
-- brin_bloom.sql
-- brin_multi.sql
-- btree_index.sql
-- case.sql
-- char.sql
-- circle.sql
-- cluster.sql
-- collate.icu.utf8.sql
-- collate.linux.utf8.sql
-- collate.sql
-- collate.utf8.sql
-- collate.windows.win1252.sql
-- combocid.sql
-- comments.sql
-- compression.sql
-- constraints.sql
-- conversion.sql
-- copy.sql
-- copy2.sql
-- copydml.sql
-- copyencoding.sql
-- copyselect.sql
-- create_aggregate.sql
-- create_am.sql
-- create_cast.sql
-- create_function_c.sql
-- create_function_sql.sql
-- create_index.sql
-- create_index_spgist.sql
-- create_misc.sql
-- create_operator.sql
-- create_procedure.sql
-- create_role.sql
-- create_schema.sql
-- create_table.sql
-- create_table_like.sql
-- create_type.sql
-- create_view.sql
-- database.sql
-- date.sql
-- dbsize.sql
-- delete.sql
-- dependency.sql
-- domain.sql
-- drop_if_exists.sql
-- drop_operator.sql
-- encoding.sql
-- enum.sql
-- equivclass.sql
-- errors.sql
-- euc_kr.sql
-- event_trigger.sql
-- event_trigger_login.sql
-- explain.sql
-- expressions.sql
-- fast_default.sql
-- float4.sql
-- float8.sql
-- foreign_data.sql
-- foreign_key.sql
-- functional_deps.sql
-- generated_stored.sql
-- generated_virtual.sql
-- geometry.sql
-- gin.sql
-- gist.sql
-- groupingsets.sql
-- guc.sql
-- hash_func.sql
-- hash_index.sql
-- hash_part.sql
-- horology.sql
-- identity.sql
-- incremental_sort.sql
-- index_including.sql
-- index_including_gist.sql
-- indexing.sql
-- indirect_toast.sql
-- inet.sql
-- infinite_recurse.sql
-- inherit.sql
-- init_privs.sql
-- insert.sql
-- insert_conflict.sql
-- int2.sql
-- int4.sql
-- int8.sql
-- interval.sql
-- join.sql
-- join_hash.sql
-- json.sql
-- json_encoding.sql
-- jsonb.sql
-- jsonb_jsonpath.sql
-- jsonpath.sql
-- jsonpath_encoding.sql
-- largeobject.sql
-- limit.sql
-- line.sql
-- lock.sql
-- lseg.sql
-- macaddr.sql
-- macaddr8.sql
-- maintain_every.sql
-- matview.sql
-- md5.sql
-- memoize.sql
-- merge.sql
-- misc.sql
-- misc_functions.sql
-- misc_sanity.sql
-- money.sql
-- multirangetypes.sql
-- mvcc.sql
-- name.sql
-- namespace.sql
-- numa.sql
-- numeric.sql
-- numeric_big.sql
-- numerology.sql
-- object_address.sql
-- oid.sql
-- oidjoins.sql
-- opr_sanity.sql
-- partition_aggregate.sql
-- partition_info.sql
-- partition_join.sql
-- partition_prune.sql
-- password.sql
-- path.sql
-- pg_lsn.sql
-- plancache.sql
-- plpgsql.sql
-- point.sql
-- polygon.sql
-- polymorphism.sql
-- portals.sql
-- portals_p2.sql
-- predicate.sql
-- prepare.sql
-- prepared_xacts.sql
-- privileges.sql
-- psql.sql
-- psql_crosstab.sql
-- psql_pipeline.sql
-- publication.sql
-- random.sql
-- rangefuncs.sql
-- rangetypes.sql
-- regex.sql
-- regproc.sql
-- reindex_catalog.sql
-- reloptions.sql
-- replica_identity.sql
-- returning.sql
-- roleattributes.sql
-- rowsecurity.sql
-- rowtypes.sql
-- rules.sql
-- sanity_check.sql
-- security_label.sql
-- select.sql
-- select_distinct.sql
-- select_distinct_on.sql
-- select_having.sql
-- select_implicit.sql
-- select_into.sql
-- select_parallel.sql
-- select_views.sql
-- sequence.sql
-- spgist.sql
-- sqljson.sql
-- sqljson_jsontable.sql
-- sqljson_queryfuncs.sql
-- stats.sql
-- stats_ext.sql
-- stats_import.sql
-- strings.sql
-- subscription.sql
-- subselect.sql
-- sysviews.sql
-- tablesample.sql
-- tablespace.sql
-- temp.sql
-- test_setup.sql
-- text.sql
-- tid.sql
-- tidrangescan.sql
-- tidscan.sql
-- time.sql
-- timestamp.sql
-- timestamptz.sql
-- timetz.sql
-- transactions.sql
-- triggers.sql
-- truncate.sql
-- tsdicts.sql
-- tsearch.sql
-- tsrf.sql
-- tstypes.sql
-- tuplesort.sql
-- txid.sql
-- type_sanity.sql
-- typed_table.sql
-- unicode.sql
-- union.sql
-- updatable_views.sql
-- update.sql
-- uuid.sql
-- vacuum.sql
-- vacuum_parallel.sql
-- varchar.sql
-- window.sql
-- with.sql
-- without_overlaps.sql
-- write_parallel.sql
-- xid.sql
-- xml.sql
-- xmlmap.sql
+Counts from `/tmp/pgrust_regress_todo_20260417` on 2026-04-17; `test_setup.sql` comes from `/tmp/pgrust_regress_test_setup_todo_20260417` with `--upstream-setup`.
+
+- advisory_lock.sql: 8/38
+- aggregates.sql: 215/583
+- alter_generic.sql: 54/333
+- alter_operator.sql: 3/65
+- alter_table.sql: 425/1683
+- amutils.sql: 0/10
+- arrays.sql: 156/526
+- async.sql: 0/11
+- bit.sql: 74/132
+- bitmapops.sql: 3/12
+- boolean.sql: 46/98
+- box.sql: 17/101
+- brin.sql: 56/125
+- brin_bloom.sql: 50/88
+- brin_multi.sql: 67/220
+- btree_index.sql: 22/133
+- case.sql: 17/67
+- char.sql: 12/32
+- circle.sql: 1/22
+- cluster.sql: 26/204
+- collate.icu.utf8.sql: 0/588
+- collate.linux.utf8.sql: 0/211
+- collate.sql: 7/144
+- collate.utf8.sql: 0/59
+- collate.windows.win1252.sql: 0/182
+- combocid.sql: 8/62
+- comments.sql: 11/13
+- compression.sql: 2/87
+- constraints.sql: 30/565
+- conversion.sql: 84/149
+- copy.sql: 11/113
+- copy2.sql: 48/215
+- copydml.sql: 5/64
+- copyencoding.sql: 7/17
+- copyselect.sql: 0/21
+- create_aggregate.sql: 0/59
+- create_am.sql: 25/142
+- create_cast.sql: 0/24
+- create_function_c.sql: 0/5
+- create_function_sql.sql: 22/180
+- create_index.sql: 58/687
+- create_index_spgist.sql: 14/202
+- create_misc.sql: 0/88
+- create_operator.sql: 38/99
+- create_procedure.sql: 23/125
+- create_role.sql: 95/144
+- create_schema.sql: 2/27
+- create_table.sql: 10/330
+- create_table_like.sql: 3/152
+- create_type.sql: 2/86
+- create_view.sql: 14/311
+- database.sql: 7/16
+- date.sql: 117/271
+- dbsize.sql: 0/25
+- delete.sql: 0/10
+- dependency.sql: 11/62
+- domain.sql: 70/507
+- drop_if_exists.sql: 14/161
+- drop_operator.sql: 0/12
+- encoding.sql: 0/133
+- enum.sql: 16/172
+- equivclass.sql: 20/96
+- errors.sql: 13/87
+- euc_kr.sql: 3/3
+- event_trigger.sql: 64/281
+- event_trigger_login.sql: 3/14
+- explain.sql: 31/75
+- expressions.sql: 21/81
+- fast_default.sql: 27/296
+- float4.sql: 57/100
+- float8.sql: 131/184
+- foreign_data.sql: 16/540
+- foreign_key.sql: 78/1252
+- functional_deps.sql: 0/40
+- generated_stored.sql: 1/131
+- generated_virtual.sql: 1/131
+- geometry.sql: 5/162
+- gin.sql: 21/71
+- gist.sql: 6/62
+- groupingsets.sql: 28/219
+- guc.sql: 72/229
+- hash_func.sql: 0/43
+- hash_index.sql: 10/100
+- hash_part.sql: 0/28
+- horology.sql: 15/399
+- identity.sql: 3/271
+- incremental_sort.sql: 79/169
+- index_including.sql: 4/135
+- index_including_gist.sql: 4/50
+- indexing.sql: 7/570
+- indirect_toast.sql: 4/30
+- inet.sql: 6/116
+- infinite_recurse.sql: 0/3
+- inherit.sql: 42/884
+- init_privs.sql: 0/4
+- insert.sql: 7/390
+- insert_conflict.sql: 15/266
+- int2.sql: 40/76
+- int4.sql: 57/94
+- int8.sql: 87/174
+- interval.sql: 23/450
+- join.sql: 110/918
+- join_hash.sql: 162/315
+- json.sql: 138/470
+- json_encoding.sql: 23/44
+- jsonb.sql: 353/1084
+- jsonb_jsonpath.sql: 188/830
+- jsonpath.sql: 31/224
+- jsonpath_encoding.sql: 0/32
+- largeobject.sql: 27/129
+- limit.sql: 3/80
+- line.sql: 11/35
+- lock.sql: 42/131
+- lseg.sql: 2/16
+- macaddr.sql: 0/35
+- macaddr8.sql: 0/71
+- maintain_every.sql: 5/16
+- matview.sql: 18/185
+- md5.sql: 14/14
+- memoize.sql: 38/88
+- merge.sql: 206/641
+- misc.sql: 0/61
+- misc_functions.sql: 23/160
+- misc_sanity.sql: 0/5
+- money.sql: 53/109
+- multirangetypes.sql: 23/605
+- mvcc.sql: 11/17
+- name.sql: 6/46
+- namespace.sql: 14/45
+- numa.sql: 0/3
+- numeric.sql: 335/1057
+- numeric_big.sql: 16/552
+- numerology.sql: 3/92
+- object_address.sql: 23/97
+- oid.sql: 10/37
+- oidjoins.sql: 29/30
+- opr_sanity.sql: 0/131
+- partition_aggregate.sql: 19/137
+- partition_info.sql: 0/73
+- partition_join.sql: 16/614
+- partition_prune.sql: 68/750
+- password.sql: 37/55
+- path.sql: 4/23
+- pg_lsn.sql: 0/31
+- plancache.sql: 23/113
+- plpgsql.sql: 1347/2271
+- point.sql: 12/43
+- polygon.sql: 15/62
+- polymorphism.sql: 37/455
+- portals.sql: 70/349
+- portals_p2.sql: 2/41
+- predicate.sql: 0/42
+- prepare.sql: 0/33
+- prepared_xacts.sql: 0/96
+- privileges.sql: 303/1295
+- psql.sql: 141/464
+- psql_crosstab.sql: 13/35
+- psql_pipeline.sql: 73/124
+- publication.sql: 80/710
+- random.sql: 47/73
+- rangefuncs.sql: 24/437
+- rangetypes.sql: 70/407
+- regex.sql: 96/105
+- regproc.sql: 0/105
+- reindex_catalog.sql: 3/20
+- reloptions.sql: 2/66
+- replica_identity.sql: 0/66
+- returning.sql: 9/150
+- roleattributes.sql: 15/80
+- rowsecurity.sql: 222/774
+- rowtypes.sql: 12/241
+- rules.sql: 17/626
+- sanity_check.sql: 0/3
+- security_label.sql: 7/28
+- select.sql: 11/87
+- select_distinct.sql: 50/105
+- select_distinct_on.sql: 2/23
+- select_having.sql: 0/23
+- select_implicit.sql: 0/44
+- select_into.sql: 8/70
+- select_parallel.sql: 110/265
+- select_views.sql: 6/52
+- sequence.sql: 25/261
+- spgist.sql: 1/31
+- sqljson.sql: 3/221
+- sqljson_jsontable.sql: 1/117
+- sqljson_queryfuncs.sql: 5/314
+- stats.sql: 103/479
+- stats_ext.sql: 50/866
+- stats_import.sql: 5/132
+- strings.sql: 363/508
+- subscription.sql: 37/158
+- subselect.sql: 37/334
+- sysviews.sql: 4/29
+- tablesample.sql: 2/56
+- tablespace.sql: 26/205
+- temp.sql: 56/216
+- test_setup.sql: 58/69
+- text.sql: 57/73
+- tid.sql: 0/41
+- tidrangescan.sql: 4/45
+- tidscan.sql: 9/49
+- time.sql: 0/44
+- timestamp.sql: 12/177
+- timestamptz.sql: 41/404
+- timetz.sql: 3/57
+- transactions.sql: 78/439
+- triggers.sql: 259/1262
+- truncate.sql: 22/201
+- tsdicts.sql: 0/131
+- tsearch.sql: 43/464
+- tsrf.sql: 8/74
+- tstypes.sql: 69/238
+- tuplesort.sql: 31/108
+- txid.sql: 14/51
+- type_sanity.sql: 0/63
+- typed_table.sql: 1/32
+- unicode.sql: 0/17
+- union.sql: 75/197
+- updatable_views.sql: 109/1139
+- update.sql: 28/300
+- uuid.sql: 0/63
+- vacuum.sql: 26/328
+- vacuum_parallel.sql: 4/14
+- varchar.sql: 3/22
+- window.sql: 7/388
+- with.sql: 31/312
+- without_overlaps.sql: 24/643
+- write_parallel.sql: 6/22
+- xid.sql: 14/88
+- xml.sql: 15/281
+- xmlmap.sql: 3/40
 
 ## Features
