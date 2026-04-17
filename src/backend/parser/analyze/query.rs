@@ -349,6 +349,7 @@ pub(super) fn query_from_from_projection(input: AnalyzedFrom, targets: Vec<Targe
         limit_offset: 0,
         project_set: None,
         recursive_union: None,
+        set_operation: None,
     }
 }
 
