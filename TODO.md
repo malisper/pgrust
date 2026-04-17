@@ -281,6 +281,20 @@ Counts from `/tmp/pgrust_regress_todo_20260417` on 2026-04-17; `test_setup.sql` 
 - Fold unquoted identifiers consistently so `CHAR_TBL`, `VARCHAR_TBL`, and `TEXT_TBL` resolve like PostgreSQL in `strings.sql`.
 - Match PostgreSQL `bytea` input diagnostics for malformed hex and escape sequences, including `pg_input_error_info()` messages and SQLSTATEs.
 - Tighten `SIMILAR TO` and `SUBSTRING ... SIMILAR` behavior for one-separator patterns, `ESCAPE NULL`, and PostgreSQL-compatible error text.
+
+## JSONPath follow-ups
+
+- Done: `jsonb_jsonpath.sql` and `jsonpath.sql` `@?` / `jsonb_path_exists` semantics now return `NULL` for silent evaluation errors and propagate non-silent strict errors.
+- Add missing jsonpath parser support for index lists and computed subscripts:
+  `$[0,1]`, `$[last - 1]`, `$[2.5 - 1 to $.size() - 2]`, `$[last ? (...)]`.
+- Add missing jsonpath expression/forms support:
+  `exists(...)`, method calls like `.size()` and `.type()`, and other currently-rejected valid jsonpath syntax.
+- Implement PostgreSQL lax-mode auto-unwrapping for array/scalar access so queries like `lax $[0]` and `lax $[*]` on scalar values match upstream behavior.
+- Implement jsonpath three-valued predicate semantics:
+  comparisons, `is unknown`, and filter evaluation should preserve `unknown` instead of reducing everything to Rust `bool`.
+- Fix jsonpath comparison semantics for mixed types and multi-item sequences so strict comparisons do not incorrectly return `true`.
+- Fix recursive descent depth handling for `**` so depth `0` includes the current item and results match `$.**`, `$.**{0}`, and `$.**{0 to last}`.
+- Align jsonpath runtime error behavior and messages with PostgreSQL where possible, especially around structural errors, out-of-range subscripts, and numeric/arithmetic failures.
 - type_sanity.sql: 0/63
 - typed_table.sql: 1/32
 - unicode.sql: 0/17
