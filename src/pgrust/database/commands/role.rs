@@ -8,6 +8,7 @@ use crate::backend::parser::{
     AlterRoleAction, AlterRoleStatement, CreateRoleStatement, DropRoleStatement,
     ReassignOwnedStatement,
 };
+use crate::backend::storage::smgr::RelFileLocator;
 use std::collections::{BTreeMap, BTreeSet};
 
 impl Database {
@@ -374,11 +375,25 @@ fn publish_direct_catalog_invalidation(
     client_id: ClientId,
     kinds: &[crate::include::catalog::BootstrapCatalogKind],
 ) {
+    invalidate_catalog_heap_pages(db, kinds);
     let invalidation = crate::backend::utils::cache::inval::CatalogInvalidation {
         touched_catalogs: kinds.iter().copied().collect(),
         ..Default::default()
     };
     db.publish_committed_catalog_invalidation(client_id, &invalidation);
+}
+
+fn invalidate_catalog_heap_pages(
+    db: &Database,
+    kinds: &[crate::include::catalog::BootstrapCatalogKind],
+) {
+    for &kind in kinds {
+        let _ = db.pool.invalidate_relation(RelFileLocator {
+            spc_oid: 0,
+            db_oid: 1,
+            rel_number: kind.relation_oid(),
+        });
+    }
 }
 
 fn lookup_membership_member(
