@@ -1548,8 +1548,16 @@ fn eval_width_bucket_float(
         if operand >= high {
             return width_bucket_outside(count, true);
         }
-        let bucket = (((operand - low) / (high - low)) * f64::from(count)).floor() as i64 + 1;
-        return i32::try_from(bucket)
+        let mut bucket = if !(high - low).is_infinite() {
+            (f64::from(count) * ((operand - low) / (high - low))) as i64
+        } else {
+            // Match PostgreSQL's overflow-avoidance path for finite bounds spanning > DBL_MAX.
+            (f64::from(count) * ((operand / 2.0 - low / 2.0) / (high / 2.0 - low / 2.0))) as i64
+        };
+        if bucket >= i64::from(count) {
+            bucket = i64::from(count - 1);
+        }
+        return i32::try_from(bucket + 1)
             .map(Value::Int32)
             .map_err(|_| ExecError::Int4OutOfRange);
     }
@@ -1559,8 +1567,15 @@ fn eval_width_bucket_float(
     if operand <= high {
         return width_bucket_outside(count, true);
     }
-    let bucket = (((low - operand) / (low - high)) * f64::from(count)).floor() as i64 + 1;
-    i32::try_from(bucket)
+    let mut bucket = if !(low - high).is_infinite() {
+        (f64::from(count) * ((low - operand) / (low - high))) as i64
+    } else {
+        (f64::from(count) * ((low / 2.0 - operand / 2.0) / (low / 2.0 - high / 2.0))) as i64
+    };
+    if bucket >= i64::from(count) {
+        bucket = i64::from(count - 1);
+    }
+    i32::try_from(bucket + 1)
         .map(Value::Int32)
         .map_err(|_| ExecError::Int4OutOfRange)
 }
