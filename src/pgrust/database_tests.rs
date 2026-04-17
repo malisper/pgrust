@@ -251,6 +251,35 @@ fn recursive_cte_rejects_self_reference_inside_subquery() {
 }
 
 #[test]
+fn recursive_cte_intermediate_setop_with_can_read_worktable() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    let result = session
+        .execute(
+            &db,
+            "with recursive outermost(x) as (
+                select 1
+                union (with innermost as (select 2)
+                       select * from outermost
+                       union select * from innermost)
+            )
+            select * from outermost order by 1",
+        )
+        .expect("execute recursive CTE");
+
+    match result {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Int32(1)], vec![Value::Int32(2)]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn recursive_cte_rejects_unsupported_term_decorations() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);
