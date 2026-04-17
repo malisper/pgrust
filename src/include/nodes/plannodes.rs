@@ -186,6 +186,7 @@ pub enum Plan {
         plan_info: PlanEstimate,
         worktable_id: usize,
         distinct: bool,
+        recursive_references_worktable: bool,
         output_columns: Vec<QueryColumn>,
         anchor: Box<Plan>,
         recursive: Box<Plan>,

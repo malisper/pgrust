@@ -226,6 +226,138 @@ fn recursive_cte_union_deduplicates_and_terminates() {
     }
 }
 
+fn assert_single_int_column_rows(result: StatementResult, expected: Vec<Vec<Value>>) {
+    match result {
+        StatementResult::Query { rows, .. } => assert_eq!(rows, expected),
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+fn assert_single_int_column_shape(result: StatementResult, expected_len: usize) {
+    match result {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows.len(), expected_len);
+            assert_eq!(rows.first(), Some(&vec![Value::Int32(1)]));
+            assert_eq!(rows.last(), Some(&vec![Value::Int32(10)]));
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn recursive_cte_x_shape_executes() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    let x_only = session
+        .execute(
+            &db,
+            "with recursive x(id) as (
+                select 1
+                union all
+                select id + 1 from x where id < 3
+            )
+            select * from x",
+        )
+        .expect("run recursive x shape");
+    assert_single_int_column_rows(
+        x_only,
+        vec![
+            vec![Value::Int32(1)],
+            vec![Value::Int32(2)],
+            vec![Value::Int32(3)],
+        ],
+    );
+}
+
+#[test]
+fn recursive_cte_x_y_shape_executes() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    let y_shape = session
+        .execute(
+            &db,
+            "with recursive x(id) as (
+                select 1
+                union all
+                select id + 1 from x where id < 3
+            ),
+            y(id) as (
+                select * from x
+                union all
+                select * from x
+            )
+            select * from y",
+        )
+        .expect("run x+y shape");
+    assert_single_int_column_rows(
+        y_shape,
+        vec![
+            vec![Value::Int32(1)],
+            vec![Value::Int32(2)],
+            vec![Value::Int32(3)],
+            vec![Value::Int32(1)],
+            vec![Value::Int32(2)],
+            vec![Value::Int32(3)],
+        ],
+    );
+}
+
+#[test]
+fn recursive_cte_x_z_shape_executes() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    let z_from_x = session
+        .execute(
+            &db,
+            "with recursive x(id) as (
+                select 1
+                union all
+                select id + 1 from x where id < 3
+            ),
+            z(id) as (
+                select * from x
+                union all
+                select id + 1 from z where id < 10
+            )
+            select * from z",
+        )
+        .expect("run x+z shape");
+    assert_single_int_column_shape(z_from_x, 27);
+}
+
+#[test]
+fn recursive_cte_xyz_chain_executes() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    let original = session
+        .execute(
+            &db,
+            "with recursive
+                x(id) as (
+                    select 1
+                    union all
+                    select id + 1 from x where id < 3
+                ),
+                y(id) as (
+                    select * from x
+                    union all
+                    select * from x
+                ),
+                z(id) as (
+                    select * from y
+                    union all
+                    select id + 1 from z where id < 10
+                )
+            select * from z",
+        )
+        .expect("run original recursive cte chain");
+    assert_single_int_column_shape(original, 54);
+}
+
 #[test]
 fn scalar_values_subquery_expr_returns_single_value() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
@@ -655,6 +787,30 @@ fn statement_timeout_interrupts_generate_series_query() {
 
     let err = session
         .execute(&db, "select * from generate_series(1, 1000000000)")
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::Interrupted(
+            crate::backend::utils::misc::interrupts::InterruptReason::StatementTimeout
+        )
+    ));
+}
+
+#[test]
+fn statement_timeout_interrupts_recursive_cte_query() {
+    let dir = temp_dir("statement_timeout_recursive_cte");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "set statement_timeout = '5ms'")
+        .unwrap();
+
+    let err = session
+        .execute(
+            &db,
+            "with recursive t(n) as (select 1 union all select n + 1 from t) select * from t",
+        )
         .unwrap_err();
     assert!(matches!(
         err,
