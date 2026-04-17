@@ -507,6 +507,7 @@ fn aggregate_output_expr(accum: &AggAccum, aggno: usize) -> Expr {
         aggvariadic: accum.agg_variadic,
         aggdistinct: accum.distinct,
         args: accum.args.clone(),
+        aggfilter: accum.filter.clone(),
         agglevelsup: 0,
         aggno,
     }))
