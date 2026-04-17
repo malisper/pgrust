@@ -3840,6 +3840,111 @@ fn array_slice_assignment_requires_full_bounds_for_null_arrays() {
                 && sqlstate == "2202E"
     ));
 }
+
+#[test]
+fn array_slice_assignment_three_dimensional_serial_updates_match_postgres() {
+    let base = temp_dir("array_slice_assignment_three_dimensional");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+
+    let insert_xid = txns.begin();
+    assert_eq!(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            insert_xid,
+            "insert into t values ('{{{0,0},{1,2}}}'::int[])",
+            multidimensional_array_catalog(),
+        )
+        .unwrap(),
+        StatementResult::AffectedRows(1)
+    );
+    txns.commit(insert_xid).unwrap();
+
+    let update_xid = txns.begin();
+    assert_eq!(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            update_xid,
+            "update t set a[1:1][1:1][1:2] = '{113,117}', a[1:1][1:2][2:2] = '{142,147}'",
+            multidimensional_array_catalog(),
+        )
+        .unwrap(),
+        StatementResult::AffectedRows(1)
+    );
+    txns.commit(update_xid).unwrap();
+
+    assert_query_rows(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select a from t",
+            multidimensional_array_catalog(),
+        )
+        .unwrap(),
+        vec![vec![Value::PgArray(
+            ArrayValue::from_dimensions(
+                vec![
+                    ArrayDimension {
+                        lower_bound: 1,
+                        length: 1,
+                    },
+                    ArrayDimension {
+                        lower_bound: 1,
+                        length: 2,
+                    },
+                    ArrayDimension {
+                        lower_bound: 1,
+                        length: 2,
+                    },
+                ],
+                vec![
+                    Value::Int32(113),
+                    Value::Int32(142),
+                    Value::Int32(1),
+                    Value::Int32(147),
+                ],
+            )
+            .with_element_type_oid(crate::include::catalog::INT4_TYPE_OID),
+        )]],
+    );
+}
+
+#[test]
+fn array_slice_assignment_rejects_too_small_multidimensional_sources() {
+    let base = temp_dir("array_slice_assignment_multidimensional_source_too_small");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+
+    let insert_xid = txns.begin();
+    assert_eq!(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            insert_xid,
+            "insert into t values (null, '{{1,2,3},{4,5,6},{7,8,9}}'::int[])",
+            array_subscript_catalog(),
+        )
+        .unwrap(),
+        StatementResult::AffectedRows(1)
+    );
+    txns.commit(insert_xid).unwrap();
+
+    let update_xid = txns.begin();
+    let err = run_sql_with_catalog(
+        &base,
+        &txns,
+        update_xid,
+        "update t set b[1:2][1:2] = '{{11,12,13}}'",
+        array_subscript_catalog(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError { message, sqlstate, .. }
+            if message == "source array too small" && sqlstate == "2202E"
+    ));
+}
 #[test]
 fn any_array_truth_table_and_overlap_work() {
     let base = temp_dir("array_any_overlap");
