@@ -807,12 +807,7 @@ fn expr_eval_obeys_null_semantics() {
         Value::Null
     );
     assert_eq!(
-        eval_expr(
-            &Expr::IsNull(Box::new(local_var(2))),
-            &mut slot,
-            &mut ctx
-        )
-        .unwrap(),
+        eval_expr(&Expr::IsNull(Box::new(local_var(2))), &mut slot, &mut ctx).unwrap(),
         Value::Bool(true)
     );
     assert_eq!(
@@ -826,10 +821,7 @@ fn expr_eval_obeys_null_semantics() {
     );
     assert_eq!(
         eval_expr(
-            &Expr::IsDistinctFrom(
-                Box::new(local_var(2)),
-                Box::new(Expr::Const(Value::Null))
-            ),
+            &Expr::IsDistinctFrom(Box::new(local_var(2)), Box::new(Expr::Const(Value::Null))),
             &mut slot,
             &mut ctx
         )
@@ -838,10 +830,7 @@ fn expr_eval_obeys_null_semantics() {
     );
     assert_eq!(
         eval_expr(
-            &Expr::IsDistinctFrom(
-                Box::new(local_var(1)),
-                Box::new(Expr::Const(Value::Null))
-            ),
+            &Expr::IsDistinctFrom(Box::new(local_var(1)), Box::new(Expr::Const(Value::Null))),
             &mut slot,
             &mut ctx
         )
@@ -2527,7 +2516,8 @@ fn string_agg_supports_bytea_inputs() {
 fn string_agg_coerces_unknown_delimiter_for_bytea_inputs() {
     let base = temp_dir("string_agg_bytea_unknown_delimiter");
     let db = Database::open(&base, 16).unwrap();
-    db.execute(1, "create table bytes_demo (payload bytea)").unwrap();
+    db.execute(1, "create table bytes_demo (payload bytea)")
+        .unwrap();
     db.execute(
         1,
         "insert into bytes_demo (payload) values (decode('ff', 'hex')), (decode('aa', 'hex'))",

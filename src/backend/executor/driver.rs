@@ -202,11 +202,8 @@ fn execute_statement_with_source(
             expected: "COMMENT ON DOMAIN handled by database/session layer",
             actual: "COMMENT ON DOMAIN".into(),
         })),
-        Statement::CommentOnRole(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "COMMENT ON ROLE handled by database/session layer",
-            actual: "COMMENT ON ROLE".into(),
-        })),
-        Statement::CreateRole(_)
+        Statement::CommentOnRole(_)
+        | Statement::CreateRole(_)
         | Statement::AlterRole(_)
         | Statement::DropRole(_)
         | Statement::GrantObject(_)
@@ -222,6 +219,10 @@ fn execute_statement_with_source(
         Statement::CreateFunction(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "CREATE FUNCTION handled by database/session layer",
             actual: "CREATE FUNCTION".into(),
+        })),
+        Statement::CreateDatabase(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "CREATE DATABASE handled by database/session layer",
+            actual: "CREATE DATABASE".into(),
         })),
         Statement::CreateSchema(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "CREATE SCHEMA handled by database/session layer",
@@ -264,6 +265,10 @@ fn execute_statement_with_source(
         Statement::DropSequence(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "DROP SEQUENCE handled by database/session layer",
             actual: "DROP SEQUENCE".into(),
+        })),
+        Statement::DropDatabase(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "DROP DATABASE handled by database/session layer",
+            actual: "DROP DATABASE".into(),
         })),
         Statement::DropView(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "DROP VIEW handled by database/session layer",
@@ -347,6 +352,10 @@ pub fn execute_readonly_statement(
             expected: "read-only statement",
             actual: "CREATE FUNCTION".into(),
         })),
+        Statement::CreateDatabase(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "CREATE DATABASE".into(),
+        })),
         Statement::CreateSchema(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "CREATE SCHEMA".into(),
@@ -379,6 +388,10 @@ pub fn execute_readonly_statement(
         Statement::DropType(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "DROP TYPE".into(),
+        })),
+        Statement::DropDatabase(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "DROP DATABASE".into(),
         })),
         other => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",

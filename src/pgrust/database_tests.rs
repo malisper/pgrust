@@ -1779,17 +1779,27 @@ fn create_index_and_alter_table_set_are_noops() {
     match db
             .execute(
                 1,
-                "select d.datname, t.spcname from pg_database d join pg_tablespace t on t.oid = d.dattablespace",
+                "select d.datname, t.spcname from pg_database d join pg_tablespace t on t.oid = d.dattablespace order by d.datname",
             )
             .unwrap()
         {
             StatementResult::Query { rows, .. } => {
                 assert_eq!(
                     rows,
-                    vec![vec![
-                        Value::Text("postgres".into()),
-                        Value::Text("pg_default".into()),
-                    ]]
+                    vec![
+                        vec![
+                            Value::Text("postgres".into()),
+                            Value::Text("pg_default".into()),
+                        ],
+                        vec![
+                            Value::Text("template0".into()),
+                            Value::Text("pg_default".into()),
+                        ],
+                        vec![
+                            Value::Text("template1".into()),
+                            Value::Text("pg_default".into()),
+                        ],
+                    ]
                 );
             }
             other => panic!("expected query result, got {:?}", other),
@@ -1798,12 +1808,19 @@ fn create_index_and_alter_table_set_are_noops() {
     match db
         .execute(
             1,
-            "select a.rolname from pg_database d join pg_authid a on a.oid = d.datdba",
+            "select a.rolname from pg_database d join pg_authid a on a.oid = d.datdba order by d.datname",
         )
         .unwrap()
     {
         StatementResult::Query { rows, .. } => {
-            assert_eq!(rows, vec![vec![Value::Text("postgres".into())]]);
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Text("postgres".into())],
+                    vec![Value::Text("postgres".into())],
+                    vec![Value::Text("postgres".into())],
+                ]
+            );
         }
         other => panic!("expected query result, got {:?}", other),
     }
@@ -2276,6 +2293,200 @@ fn create_index_and_alter_table_set_are_noops() {
             assert_eq!(rows, vec![vec![Value::Int64(0)]]);
         }
         other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn cluster_bootstraps_multiple_databases_and_connection_rules() {
+    let base = temp_dir("cluster_bootstrap_databases");
+    let cluster = Cluster::open(&base, 16).unwrap();
+    let postgres = cluster.connect_database("postgres").unwrap();
+
+    assert_eq!(
+        query_rows(
+            &postgres,
+            1,
+            "select datname, datallowconn, datistemplate from pg_database order by datname",
+        ),
+        vec![
+            vec![
+                Value::Text("postgres".into()),
+                Value::Bool(true),
+                Value::Bool(false),
+            ],
+            vec![
+                Value::Text("template0".into()),
+                Value::Bool(false),
+                Value::Bool(true),
+            ],
+            vec![
+                Value::Text("template1".into()),
+                Value::Bool(true),
+                Value::Bool(true),
+            ],
+        ]
+    );
+
+    let template1 = cluster.connect_database("template1").unwrap();
+    assert_eq!(
+        query_rows(&template1, 2, "select 1"),
+        vec![vec![Value::Int32(1)]]
+    );
+
+    match cluster.connect_database("template0") {
+        Err(ExecError::DetailedError {
+            sqlstate, message, ..
+        }) => {
+            assert_eq!(sqlstate, "55000");
+            assert!(message.contains("template0"));
+        }
+        Ok(_) => panic!("expected template0 connection rejection"),
+        Err(_) => panic!("expected template0 connection rejection"),
+    }
+
+    match cluster.connect_database("missingdb") {
+        Err(ExecError::DetailedError {
+            sqlstate, message, ..
+        }) => {
+            assert_eq!(sqlstate, "3D000");
+            assert!(message.contains("missingdb"));
+        }
+        Ok(_) => panic!("expected missing database error"),
+        Err(_) => panic!("expected missing database error"),
+    }
+}
+
+#[test]
+fn create_database_clones_template1_and_persists_across_reopen() {
+    let base = temp_dir("create_database_cluster");
+    let cluster = Cluster::open(&base, 16).unwrap();
+    let template1 = cluster.connect_database("template1").unwrap();
+    let mut template_session = Session::new(1);
+    template_session
+        .execute(&template1, "create table template_seed (id int4)")
+        .unwrap();
+    template_session
+        .execute(&template1, "insert into template_seed values (7)")
+        .unwrap();
+
+    let postgres = cluster.connect_database("postgres").unwrap();
+    let mut admin = Session::new(2);
+    admin
+        .execute(&postgres, "create database analytics")
+        .unwrap();
+
+    let analytics = cluster.connect_database("analytics").unwrap();
+    assert_eq!(
+        query_rows(
+            &analytics,
+            3,
+            "select datname from pg_database order by datname"
+        ),
+        vec![
+            vec![Value::Text("analytics".into())],
+            vec![Value::Text("postgres".into())],
+            vec![Value::Text("template0".into())],
+            vec![Value::Text("template1".into())],
+        ]
+    );
+    assert_eq!(
+        query_rows(&analytics, 3, "select id from template_seed"),
+        vec![vec![Value::Int32(7)]]
+    );
+
+    let mut analytics_session = Session::new(4);
+    analytics_session
+        .execute(&analytics, "create table analytics_only (id int4)")
+        .unwrap();
+    analytics_session
+        .execute(&analytics, "insert into analytics_only values (11)")
+        .unwrap();
+
+    match postgres.execute(5, "select id from analytics_only") {
+        Err(ExecError::Parse(ParseError::UnknownTable(name))) => {
+            assert_eq!(name, "analytics_only");
+        }
+        other => panic!("expected postgres-local isolation error, got {:?}", other),
+    }
+
+    drop(analytics_session);
+    drop(analytics);
+    drop(admin);
+    drop(postgres);
+    drop(template_session);
+    drop(template1);
+    drop(cluster);
+
+    let reopened = Cluster::open(&base, 16).unwrap();
+    let analytics = reopened.connect_database("analytics").unwrap();
+    assert_eq!(
+        query_rows(&analytics, 6, "select id from template_seed"),
+        vec![vec![Value::Int32(7)]]
+    );
+    assert_eq!(
+        query_rows(&analytics, 6, "select id from analytics_only"),
+        vec![vec![Value::Int32(11)]]
+    );
+}
+
+#[test]
+fn drop_database_rejects_current_and_active_connections_then_removes_files() {
+    let base = temp_dir("drop_database_cluster");
+    let cluster = Cluster::open(&base, 16).unwrap();
+    let postgres = cluster.connect_database("postgres").unwrap();
+    let mut admin = Session::new(1);
+    admin.execute(&postgres, "create database doomed").unwrap();
+
+    let doomed = cluster.connect_database("doomed").unwrap();
+    let doomed_oid = doomed.database_oid;
+    let doomed_dir = base.join("base").join(doomed_oid.to_string());
+    assert!(doomed_dir.exists());
+
+    let mut doomed_session = Session::new(2);
+    match doomed_session.execute(&doomed, "drop database doomed") {
+        Err(ExecError::DetailedError {
+            sqlstate, message, ..
+        }) => {
+            assert_eq!(sqlstate, "55006");
+            assert!(message.contains("currently open database"));
+        }
+        other => panic!("expected current database rejection, got {:?}", other),
+    }
+
+    cluster.register_connection(doomed_oid);
+    match admin.execute(&postgres, "drop database doomed") {
+        Err(ExecError::DetailedError {
+            sqlstate, message, ..
+        }) => {
+            assert_eq!(sqlstate, "55006");
+            assert!(message.contains("being accessed by other users"));
+        }
+        other => panic!("expected active connection rejection, got {:?}", other),
+    }
+    cluster.unregister_connection(doomed_oid);
+
+    admin.execute(&postgres, "drop database doomed").unwrap();
+    assert!(!doomed_dir.exists());
+
+    match cluster.connect_database("doomed") {
+        Err(ExecError::DetailedError {
+            sqlstate, message, ..
+        }) => {
+            assert_eq!(sqlstate, "3D000");
+            assert!(message.contains("doomed"));
+        }
+        Ok(_) => panic!("expected dropped database to disappear"),
+        Err(_) => panic!("expected dropped database to disappear"),
+    }
+
+    match admin.execute(&postgres, "drop database template0") {
+        Err(ExecError::DetailedError {
+            sqlstate, message, ..
+        }) => {
+            assert_eq!(sqlstate, "55006");
+            assert!(message.contains("cannot drop database"));
+        }
+        other => panic!("expected template database rejection, got {:?}", other),
     }
 }
 
@@ -8299,6 +8510,37 @@ fn vacuum_analyze_is_rejected_inside_transaction_block() {
         other => panic!("expected active transaction error, got {:?}", other),
     }
     session.execute(&db, "rollback").unwrap();
+}
+
+#[test]
+fn create_and_drop_database_are_rejected_inside_transaction_blocks() {
+    let base = temp_dir("database_ddl_txn_block");
+    let cluster = Cluster::open(&base, 16).unwrap();
+    let postgres = cluster.connect_database("postgres").unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&postgres, "begin").unwrap();
+    match session.execute(&postgres, "create database txdb") {
+        Err(ExecError::Parse(ParseError::ActiveSqlTransaction(stmt))) => {
+            assert_eq!(stmt, "CREATE DATABASE");
+        }
+        other => panic!(
+            "expected create database transaction error, got {:?}",
+            other
+        ),
+    }
+    session.execute(&postgres, "rollback").unwrap();
+
+    session.execute(&postgres, "create database txdb").unwrap();
+    session.execute(&postgres, "begin").unwrap();
+    match session.execute(&postgres, "drop database txdb") {
+        Err(ExecError::Parse(ParseError::ActiveSqlTransaction(stmt))) => {
+            assert_eq!(stmt, "DROP DATABASE");
+        }
+        other => panic!("expected drop database transaction error, got {:?}", other),
+    }
+    session.execute(&postgres, "rollback").unwrap();
+    session.execute(&postgres, "drop database txdb").unwrap();
 }
 
 #[test]

@@ -8,6 +8,7 @@ use crate::backend::access::index::indexam::{
     index_beginscan, index_build_stub, index_endscan, index_getnext,
 };
 use crate::backend::access::transam::xact::{INVALID_TRANSACTION_ID, TransactionManager};
+use crate::backend::catalog::bootstrap::bootstrap_catalog_rel;
 use crate::backend::catalog::catalog::{Catalog, CatalogEntry, CatalogError, CatalogIndexMeta};
 use crate::backend::catalog::store::CatalogWriteContext;
 use crate::backend::executor::RelationDesc;
@@ -40,12 +41,15 @@ pub fn insert_bootstrap_system_indexes(catalog: &mut Catalog) {
 pub fn system_catalog_index_entry(
     descriptor: crate::include::catalog::CatalogIndexDescriptor,
 ) -> CatalogEntry {
+    system_catalog_index_entry_for_db(descriptor, 1)
+}
+
+pub fn system_catalog_index_entry_for_db(
+    descriptor: crate::include::catalog::CatalogIndexDescriptor,
+    db_oid: u32,
+) -> CatalogEntry {
     CatalogEntry {
-        rel: RelFileLocator {
-            spc_oid: 0,
-            db_oid: 1,
-            rel_number: descriptor.relation_oid,
-        },
+        rel: system_catalog_index_rel(descriptor, db_oid),
         relation_oid: descriptor.relation_oid,
         namespace_oid: PG_CATALOG_NAMESPACE_OID,
         owner_oid: BOOTSTRAP_SUPERUSER_OID,
@@ -59,6 +63,18 @@ pub fn system_catalog_index_entry(
         reltuples: 0.0,
         desc: system_catalog_index_desc(descriptor),
         index_meta: Some(system_catalog_index_meta(descriptor)),
+    }
+}
+
+fn system_catalog_index_rel(
+    descriptor: crate::include::catalog::CatalogIndexDescriptor,
+    db_oid: u32,
+) -> RelFileLocator {
+    let heap_rel = bootstrap_catalog_rel(descriptor.heap_kind, db_oid);
+    RelFileLocator {
+        spc_oid: heap_rel.spc_oid,
+        db_oid: heap_rel.db_oid,
+        rel_number: descriptor.relation_oid,
     }
 }
 
@@ -135,13 +151,16 @@ pub fn system_catalog_index_relcache(
 }
 
 pub fn rebuild_system_catalog_indexes(base_dir: &Path) -> Result<(), CatalogError> {
+    rebuild_system_catalog_indexes_for_db(base_dir, 1)
+}
+
+pub fn rebuild_system_catalog_indexes_for_db(
+    base_dir: &Path,
+    db_oid: u32,
+) -> Result<(), CatalogError> {
     let mut smgr = MdStorageManager::new(base_dir);
     for descriptor in system_catalog_indexes() {
-        let rel = RelFileLocator {
-            spc_oid: 0,
-            db_oid: 1,
-            rel_number: descriptor.relation_oid,
-        };
+        let rel = system_catalog_index_rel(*descriptor, db_oid);
         smgr.open(rel)
             .map_err(|e| CatalogError::Io(format!("open system index relfile failed: {e}")))?;
         smgr.unlink(rel, Some(ForkNumber::Main), false);
@@ -153,12 +172,20 @@ pub fn rebuild_system_catalog_indexes(base_dir: &Path) -> Result<(), CatalogErro
     let txns = Arc::new(RwLock::new(
         TransactionManager::new_durable(base_dir.to_path_buf()).unwrap_or_default(),
     ));
-    rebuild_system_catalog_indexes_in_pool(&pool, &txns)
+    rebuild_system_catalog_indexes_in_pool_for_db(&pool, &txns, db_oid)
 }
 
 pub fn rebuild_system_catalog_indexes_in_pool(
     pool: &Arc<BufferPool<SmgrStorageBackend>>,
     txns: &Arc<RwLock<TransactionManager>>,
+) -> Result<(), CatalogError> {
+    rebuild_system_catalog_indexes_in_pool_for_db(pool, txns, 1)
+}
+
+pub fn rebuild_system_catalog_indexes_in_pool_for_db(
+    pool: &Arc<BufferPool<SmgrStorageBackend>>,
+    txns: &Arc<RwLock<TransactionManager>>,
+    db_oid: u32,
 ) -> Result<(), CatalogError> {
     let snapshot = txns
         .read()
@@ -166,23 +193,16 @@ pub fn rebuild_system_catalog_indexes_in_pool(
         .map_err(|err| CatalogError::Io(format!("system catalog snapshot failed: {err:?}")))?;
     let interrupts = Arc::new(InterruptState::new());
     for descriptor in system_catalog_indexes() {
+        let heap_relation = bootstrap_catalog_rel(descriptor.heap_kind, db_oid);
         let build_ctx = IndexBuildContext {
             pool: Arc::clone(pool),
             txns: Arc::clone(txns),
             client_id: 0,
             interrupts: Arc::clone(&interrupts),
             snapshot: snapshot.clone(),
-            heap_relation: RelFileLocator {
-                spc_oid: 0,
-                db_oid: 1,
-                rel_number: descriptor.heap_kind.relation_oid(),
-            },
+            heap_relation,
             heap_desc: crate::include::catalog::bootstrap_relation_desc(descriptor.heap_kind),
-            index_relation: RelFileLocator {
-                spc_oid: 0,
-                db_oid: 1,
-                rel_number: descriptor.relation_oid,
-            },
+            index_relation: system_catalog_index_rel(*descriptor, db_oid),
             index_name: descriptor.relation_name.to_string(),
             index_desc: system_catalog_index_desc(*descriptor),
             index_meta: system_catalog_index_relcache(*descriptor),
@@ -204,12 +224,23 @@ pub fn maintain_catalog_indexes_for_insert(
     heap_tid: crate::include::access::itemptr::ItemPointerData,
     values: &[Value],
 ) -> Result<(), CatalogError> {
+    maintain_catalog_indexes_for_insert_in_db(ctx, heap_kind, 1, heap_tid, values)
+}
+
+pub fn maintain_catalog_indexes_for_insert_in_db(
+    ctx: &CatalogWriteContext,
+    heap_kind: BootstrapCatalogKind,
+    db_oid: u32,
+    heap_tid: crate::include::access::itemptr::ItemPointerData,
+    values: &[Value],
+) -> Result<(), CatalogError> {
     let snapshot = ctx
         .txns
         .read()
         .snapshot_for_command(ctx.xid, ctx.cid)
         .map_err(|err| CatalogError::Io(format!("catalog snapshot failed: {err:?}")))?;
     for descriptor in system_catalog_indexes_for_heap(heap_kind) {
+        let heap_relation = bootstrap_catalog_rel(heap_kind, db_oid);
         let insert_ctx = IndexInsertContext {
             pool: ctx.pool.clone(),
             txns: ctx.txns.clone(),
@@ -217,17 +248,9 @@ pub fn maintain_catalog_indexes_for_insert(
             client_id: ctx.client_id,
             interrupts: ctx.interrupts.clone(),
             snapshot: snapshot.clone(),
-            heap_relation: RelFileLocator {
-                spc_oid: 0,
-                db_oid: 1,
-                rel_number: heap_kind.relation_oid(),
-            },
+            heap_relation,
             heap_desc: crate::include::catalog::bootstrap_relation_desc(heap_kind),
-            index_relation: RelFileLocator {
-                spc_oid: 0,
-                db_oid: 1,
-                rel_number: descriptor.relation_oid,
-            },
+            index_relation: system_catalog_index_rel(*descriptor, db_oid),
             index_name: descriptor.relation_name.to_string(),
             index_desc: system_catalog_index_desc(*descriptor),
             index_meta: system_catalog_index_relcache(*descriptor),
@@ -252,6 +275,26 @@ pub fn probe_system_catalog_rows_visible(
     index_relation_oid: u32,
     key_data: Vec<ScanKeyData>,
 ) -> Result<Vec<Vec<Value>>, CatalogError> {
+    probe_system_catalog_rows_visible_in_db(
+        pool,
+        txns,
+        snapshot,
+        client_id,
+        1,
+        index_relation_oid,
+        key_data,
+    )
+}
+
+pub fn probe_system_catalog_rows_visible_in_db(
+    pool: &Arc<BufferPool<SmgrStorageBackend>>,
+    txns: &RwLock<TransactionManager>,
+    snapshot: &Snapshot,
+    client_id: crate::ClientId,
+    db_oid: u32,
+    index_relation_oid: u32,
+    key_data: Vec<ScanKeyData>,
+) -> Result<Vec<Vec<Value>>, CatalogError> {
     let descriptor = *system_catalog_index_by_oid(index_relation_oid)
         .ok_or(CatalogError::Corrupt("unknown system catalog index"))?;
     let heap_desc = crate::include::catalog::bootstrap_relation_desc(descriptor.heap_kind);
@@ -261,16 +304,8 @@ pub fn probe_system_catalog_rows_visible(
         pool: Arc::clone(pool),
         client_id,
         snapshot: snapshot.clone(),
-        heap_relation: RelFileLocator {
-            spc_oid: 0,
-            db_oid: 1,
-            rel_number: descriptor.heap_kind.relation_oid(),
-        },
-        index_relation: RelFileLocator {
-            spc_oid: 0,
-            db_oid: 1,
-            rel_number: descriptor.relation_oid,
-        },
+        heap_relation: bootstrap_catalog_rel(descriptor.heap_kind, db_oid),
+        index_relation: system_catalog_index_rel(descriptor, db_oid),
         index_desc,
         index_meta,
         key_data,

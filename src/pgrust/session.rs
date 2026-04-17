@@ -326,6 +326,19 @@ impl Session {
                     )
                 }
             }
+            Statement::CreateDatabase(ref create_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    db.execute_create_database_stmt(self.client_id, create_stmt)
+                }
+            }
             Statement::CreateSchema(ref create_stmt) => {
                 if self.active_txn.is_some() {
                     let result = self.execute_in_transaction(db, stmt);
@@ -636,6 +649,19 @@ impl Session {
                     result
                 } else {
                     db.execute_drop_role_stmt(self.client_id, drop_stmt)
+                }
+            }
+            Statement::DropDatabase(ref drop_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    db.execute_drop_database_stmt(self.client_id, drop_stmt)
                 }
             }
             Statement::GrantObject(ref grant_stmt) => {
@@ -1357,10 +1383,16 @@ impl Session {
                 create_stmt,
                 self.gucs.get("createrole_self_grant").map(String::as_str),
             ),
+            Statement::CreateDatabase(_) => Err(ExecError::Parse(
+                ParseError::ActiveSqlTransaction("CREATE DATABASE"),
+            )),
             Statement::AlterRole(ref alter_stmt) => {
                 db.execute_alter_role_stmt(client_id, alter_stmt)
             }
             Statement::DropRole(ref drop_stmt) => db.execute_drop_role_stmt(client_id, drop_stmt),
+            Statement::DropDatabase(_) => Err(ExecError::Parse(ParseError::ActiveSqlTransaction(
+                "DROP DATABASE",
+            ))),
             Statement::GrantObject(ref grant_stmt) => {
                 let search_path = self.configured_search_path();
                 db.execute_grant_object_stmt_with_search_path(

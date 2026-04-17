@@ -173,6 +173,12 @@ pub enum BootstrapCatalogKind {
     PgOpfamily,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CatalogScope {
+    Shared,
+    Database(u32),
+}
+
 impl BootstrapCatalogKind {
     pub const fn relation_oid(self) -> u32 {
         match self {
@@ -279,6 +285,15 @@ impl BootstrapCatalogKind {
             Self::PgStatistic => PG_STATISTIC_ROWTYPE_OID,
             Self::PgOpclass => 0,
             Self::PgOpfamily => 0,
+        }
+    }
+
+    pub const fn scope(self) -> CatalogScope {
+        match self {
+            Self::PgDatabase | Self::PgAuthId | Self::PgAuthMembers | Self::PgTablespace => {
+                CatalogScope::Shared
+            }
+            _ => CatalogScope::Database(0),
         }
     }
 }

@@ -961,6 +961,22 @@ impl<S: StorageBackend + Send> BufferPool<S> {
         Ok(removed)
     }
 
+    pub fn flush_relation(&self, rel: RelFileLocator) -> Result<usize, Error> {
+        let mut flushed = 0;
+        for (buffer_id, frame) in self.frames.iter().enumerate() {
+            let matches = {
+                let tag_guard = frame.tag.lock();
+                matches!(*tag_guard, Some(tag) if tag.rel == rel)
+            };
+            if !matches {
+                continue;
+            }
+            self.flush_buffer(buffer_id)?;
+            flushed += 1;
+        }
+        Ok(flushed)
+    }
+
     fn allocate_victim(&self, strategy: &mut StrategyState) -> Option<BufferId> {
         while let Some(buffer_id) = strategy.free_list.pop_front() {
             let frame = &self.frames[buffer_id];

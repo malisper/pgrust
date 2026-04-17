@@ -13,7 +13,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use pgrust::pgrust::database::Database;
+use pgrust::pgrust::cluster::Cluster;
 use pgrust::pgrust::server::serve;
 
 struct Args {
@@ -196,12 +196,12 @@ fn prepare_dir(path: &Path, preserve: bool) -> Result<(), String> {
 }
 
 fn start_server(data_dir: &Path, port: u16, pool_size: usize) -> Result<(), String> {
-    let db = Database::open(data_dir, pool_size).map_err(|e| format!("{e:?}"))?;
+    let cluster = Cluster::open(data_dir, pool_size).map_err(|e| format!("{e:?}"))?;
     let addr = format!("127.0.0.1:{port}");
     let (tx, rx) = mpsc::channel::<String>();
 
     thread::spawn(move || {
-        if let Err(err) = serve(&addr, db) {
+        if let Err(err) = serve(&addr, cluster) {
             let _ = tx.send(err.to_string());
         }
     });

@@ -76,7 +76,7 @@ mod tests {
     }
 
     fn role_oid(db: &Database, role_name: &str) -> u32 {
-        db.catalog
+        db.shared_catalog
             .read()
             .catcache()
             .unwrap()

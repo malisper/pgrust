@@ -9,7 +9,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use pgrust::pgrust::database::Database;
+use pgrust::pgrust::cluster::Cluster;
 use pgrust::pgrust::server::serve;
 
 struct Args {
@@ -171,11 +171,11 @@ fn main() -> Result<(), String> {
     }
     std::fs::create_dir_all(&args.base_dir).map_err(|e| e.to_string())?;
 
-    let db = Database::open(&args.base_dir, args.pool_size).map_err(|e| format!("{e:?}"))?;
+    let cluster = Cluster::open(&args.base_dir, args.pool_size).map_err(|e| format!("{e:?}"))?;
     let addr = format!("127.0.0.1:{}", args.port);
     let (startup_tx, startup_rx) = mpsc::channel::<String>();
     thread::spawn(move || {
-        if let Err(err) = serve(&addr, db) {
+        if let Err(err) = serve(&addr, cluster) {
             let _ = startup_tx.send(err.to_string());
         }
     });

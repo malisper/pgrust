@@ -385,6 +385,7 @@ fn find_identifier_in_segment(segment: &str, token: &str) -> Option<usize> {
 }
 use crate::ClientId;
 use crate::backend::parser::{Statement, parse_statement};
+use crate::pgrust::cluster::Cluster;
 use crate::pgrust::database::Database;
 use crate::pgrust::session::Session;
 
@@ -417,21 +418,24 @@ struct CopyInState {
     pending: Vec<u8>,
 }
 
-pub fn serve(addr: &str, db: Database) -> io::Result<()> {
+pub fn serve(addr: &str, cluster: Cluster) -> io::Result<()> {
     let listener = TcpListener::bind(addr)?;
     eprintln!("pgrust: listening on {addr}");
 
     for stream in listener.incoming() {
         let stream = stream?;
         let peer = stream.peer_addr().ok();
-        let db = db.clone();
+        let cluster = cluster.clone();
         thread::spawn(move || {
             let client_id = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
-            db.pool.with_storage_mut(|s| s.smgr.acquire_external_fd());
+            cluster
+                .shared()
+                .pool
+                .with_storage_mut(|s| s.smgr.acquire_external_fd());
             if let Some(peer) = &peer {
                 eprintln!("pgrust: connection from {peer} (client {client_id})");
             }
-            if let Err(e) = handle_connection(stream, &db, client_id) {
+            if let Err(e) = handle_connection(stream, &cluster, client_id) {
                 if e.kind() != io::ErrorKind::UnexpectedEof
                     && e.kind() != io::ErrorKind::ConnectionReset
                 {
@@ -441,7 +445,10 @@ pub fn serve(addr: &str, db: Database) -> io::Result<()> {
             if let Some(peer) = &peer {
                 eprintln!("pgrust: client {client_id} ({peer}) disconnected");
             }
-            db.pool.with_storage_mut(|s| s.smgr.release_external_fd());
+            cluster
+                .shared()
+                .pool
+                .with_storage_mut(|s| s.smgr.release_external_fd());
         });
     }
     Ok(())
@@ -450,7 +457,7 @@ pub fn serve(addr: &str, db: Database) -> io::Result<()> {
 pub(crate) fn handle_connection_with_io<R, W>(
     mut reader: R,
     writer: W,
-    db: &Database,
+    cluster: &Cluster,
     client_id: ClientId,
 ) -> io::Result<()>
 where
@@ -459,6 +466,7 @@ where
 {
     let mut writer = BufWriter::new(writer);
 
+    let mut startup_params = HashMap::new();
     loop {
         let len = read_i32(&mut reader)? as usize;
         if len < 4 {
@@ -477,7 +485,10 @@ where
                 writer.flush()?;
                 continue;
             }
-            PROTOCOL_VERSION_3_0 => break,
+            PROTOCOL_VERSION_3_0 => {
+                startup_params = parse_startup_parameters(&payload[4..])?;
+                break;
+            }
             _ => {
                 send_error(
                     &mut writer,
@@ -492,6 +503,34 @@ where
             }
         }
     }
+
+    let requested_database = startup_params
+        .get("database")
+        .filter(|value| !value.is_empty())
+        .cloned()
+        .or_else(|| {
+            startup_params
+                .get("user")
+                .filter(|value| !value.is_empty())
+                .cloned()
+        })
+        .unwrap_or_else(|| "postgres".into());
+    let db = match cluster.connect_database(&requested_database) {
+        Ok(db) => db,
+        Err(err) => {
+            send_error(
+                &mut writer,
+                exec_error_sqlstate(&err),
+                &format_exec_error(&err),
+                exec_error_detail(&err),
+                exec_error_hint(&err),
+                None,
+            )?;
+            writer.flush()?;
+            return Ok(());
+        }
+    };
+    cluster.register_connection(db.database_oid);
 
     send_auth_ok(&mut writer)?;
     send_parameter_status(&mut writer, "server_version", "16.0")?;
@@ -532,7 +571,7 @@ where
         match msg_type {
             b'Q' => {
                 let sql = cstr_from_bytes(&body);
-                handle_query(&mut writer, db, &mut state, &sql)?;
+                handle_query(&mut writer, &db, &mut state, &sql)?;
                 writer.flush()?;
             }
             b'P' => {
@@ -544,11 +583,11 @@ where
                 writer.flush()?;
             }
             b'D' => {
-                handle_describe(&mut writer, db, &state, &body)?;
+                handle_describe(&mut writer, &db, &state, &body)?;
                 writer.flush()?;
             }
             b'E' => {
-                handle_execute(&mut writer, db, &mut state, &body)?;
+                handle_execute(&mut writer, &db, &mut state, &body)?;
                 writer.flush()?;
             }
             b'S' => {
@@ -564,7 +603,7 @@ where
             }
             b'd' => handle_copy_data(&mut state, &body)?,
             b'c' => {
-                handle_copy_done(&mut writer, db, &mut state)?;
+                handle_copy_done(&mut writer, &db, &mut state)?;
                 writer.flush()?;
             }
             b'f' => {
@@ -588,16 +627,31 @@ where
     };
     db.cleanup_client_temp_relations(client_id);
     db.clear_interrupt_state(client_id);
+    cluster.unregister_connection(db.database_oid);
     result
 }
 
 pub(crate) fn handle_connection(
     stream: TcpStream,
-    db: &Database,
+    cluster: &Cluster,
     client_id: ClientId,
 ) -> io::Result<()> {
     let reader = stream.try_clone()?;
-    handle_connection_with_io(reader, stream, db, client_id)
+    handle_connection_with_io(reader, stream, cluster, client_id)
+}
+
+fn parse_startup_parameters(payload: &[u8]) -> io::Result<HashMap<String, String>> {
+    let mut params = HashMap::new();
+    let mut offset = 0usize;
+    while offset < payload.len() {
+        let key = read_cstr(payload, &mut offset)?;
+        if key.is_empty() {
+            break;
+        }
+        let value = read_cstr(payload, &mut offset)?;
+        params.insert(key, value);
+    }
+    Ok(params)
 }
 
 fn handle_query(

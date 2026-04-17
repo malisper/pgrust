@@ -1,6 +1,5 @@
 use super::super::*;
 use crate::backend::commands::schemacmds::{CreateSchemaResolution, resolve_create_schema_stmt};
-use crate::include::catalog::CURRENT_DATABASE_OID;
 
 fn current_database_owner_oid(
     db: &Database,
@@ -11,7 +10,7 @@ fn current_database_owner_oid(
         .map_err(map_catalog_error)?
         .database_rows()
         .into_iter()
-        .find(|row| row.oid == CURRENT_DATABASE_OID)
+        .find(|row| row.oid == db.database_oid)
         .map(|row| row.datdba)
         .ok_or_else(|| ExecError::DetailedError {
             message: "current database does not exist".into(),

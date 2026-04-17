@@ -7,6 +7,7 @@ use serde_json::Value as JsonValue;
 use crate::BufferPool;
 use crate::backend::access::heap::heapam::{heap_scan_begin, heap_scan_next};
 use crate::backend::access::transam::xact::{INVALID_TRANSACTION_ID, Snapshot, TransactionManager};
+use crate::backend::catalog::bootstrap::bootstrap_catalog_rel;
 use crate::backend::catalog::catalog::{
     Catalog, CatalogEntry, CatalogError, CatalogIndexMeta, column_desc,
 };
@@ -36,7 +37,8 @@ use crate::include::catalog::{
     BootstrapCatalogKind, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow,
     PgClassRow, PgCollationRow, PgConstraintRow, PgIndexRow, PgNamespaceRow, PgOpclassRow,
     PgOpfamilyRow, PgTypeRow, bootstrap_catalog_kinds, bootstrap_pg_auth_members_rows,
-    bootstrap_pg_authid_rows, bootstrap_relation_desc,
+    bootstrap_pg_authid_rows, bootstrap_pg_database_rows, bootstrap_pg_tablespace_rows,
+    bootstrap_relation_desc, system_catalog_index_by_oid,
 };
 use crate::include::nodes::datum::Value;
 
@@ -44,7 +46,7 @@ use super::store::{DEFAULT_FIRST_REL_NUMBER, DEFAULT_FIRST_USER_OID};
 
 pub(crate) fn load_catalog_from_physical(base_dir: &Path) -> Result<Catalog, CatalogError> {
     let rows = load_physical_catalog_rows(base_dir)?;
-    catalog_from_physical_rows(base_dir, rows)
+    catalog_from_physical_rows_scoped(base_dir, rows, 1)
 }
 
 pub(crate) fn load_catalog_from_visible_physical(
@@ -55,7 +57,35 @@ pub(crate) fn load_catalog_from_visible_physical(
     client_id: crate::ClientId,
 ) -> Result<Catalog, CatalogError> {
     let rows = load_physical_catalog_rows_visible(base_dir, pool, txns, snapshot, client_id)?;
-    catalog_from_physical_rows(base_dir, rows)
+    catalog_from_physical_rows_scoped(base_dir, rows, 1)
+}
+
+pub(crate) fn load_catalog_from_physical_scoped(
+    base_dir: &Path,
+    db_oid: u32,
+) -> Result<Catalog, CatalogError> {
+    let rows = load_physical_catalog_rows_scoped(base_dir, db_oid, &bootstrap_catalog_kinds())?;
+    catalog_from_physical_rows_scoped(base_dir, rows, db_oid)
+}
+
+pub(crate) fn load_catalog_from_visible_physical_scoped(
+    base_dir: &Path,
+    pool: &BufferPool<SmgrStorageBackend>,
+    txns: &TransactionManager,
+    snapshot: &Snapshot,
+    client_id: crate::ClientId,
+    db_oid: u32,
+) -> Result<Catalog, CatalogError> {
+    let rows = load_physical_catalog_rows_visible_scoped(
+        base_dir,
+        pool,
+        txns,
+        snapshot,
+        client_id,
+        db_oid,
+        &bootstrap_catalog_kinds(),
+    )?;
+    catalog_from_physical_rows_scoped(base_dir, rows, db_oid)
 }
 
 pub(crate) fn load_catalog_from_visible_pool(
@@ -65,12 +95,20 @@ pub(crate) fn load_catalog_from_visible_pool(
     client_id: crate::ClientId,
 ) -> Result<Catalog, CatalogError> {
     let rows = load_physical_catalog_rows_visible_in_pool(pool, txns, snapshot, client_id)?;
-    catalog_from_physical_rows(Path::new(""), rows)
+    catalog_from_physical_rows_scoped(Path::new(""), rows, 1)
 }
 
 pub(crate) fn catalog_from_physical_rows(
     base_dir: &Path,
     rows: PhysicalCatalogRows,
+) -> Result<Catalog, CatalogError> {
+    catalog_from_physical_rows_scoped(base_dir, rows, 1)
+}
+
+pub(crate) fn catalog_from_physical_rows_scoped(
+    base_dir: &Path,
+    rows: PhysicalCatalogRows,
+    db_oid: u32,
 ) -> Result<Catalog, CatalogError> {
     let namespace_rows = rows.namespaces;
     let type_rows = rows.types;
@@ -96,8 +134,8 @@ pub(crate) fn catalog_from_physical_rows(
     let _proc_rows = rows.procs;
     let _cast_rows = rows.casts;
     let _collation_rows = rows.collations;
-    let _database_rows = rows.databases;
-    let _tablespace_rows = rows.tablespaces;
+    let database_rows = rows.databases;
+    let tablespace_rows = rows.tablespaces;
 
     let namespace_names = namespace_rows
         .iter()
@@ -183,6 +221,20 @@ pub(crate) fn catalog_from_physical_rows(
                 .fold(DEFAULT_FIRST_USER_OID, |next_oid, row| {
                     next_oid.max(row.oid.saturating_add(1))
                 }),
+        )
+        .max(
+            database_rows
+                .iter()
+                .fold(DEFAULT_FIRST_USER_OID, |next_oid, row| {
+                    next_oid.max(row.oid.saturating_add(1))
+                }),
+        )
+        .max(
+            tablespace_rows
+                .iter()
+                .fold(DEFAULT_FIRST_USER_OID, |next_oid, row| {
+                    next_oid.max(row.oid.saturating_add(1))
+                }),
         );
     let mut catalog = Catalog {
         tables: BTreeMap::new(),
@@ -192,6 +244,8 @@ pub(crate) fn catalog_from_physical_rows(
         rewrites: Vec::new(),
         authids: authid_rows,
         auth_members: auth_members_rows,
+        databases: database_rows,
+        tablespaces: tablespace_rows,
         next_rel_number: DEFAULT_FIRST_REL_NUMBER,
         next_oid,
     };
@@ -270,11 +324,7 @@ pub(crate) fn catalog_from_physical_rows(
         catalog.insert(
             name,
             CatalogEntry {
-                rel: RelFileLocator {
-                    spc_oid: 0,
-                    db_oid: 1,
-                    rel_number: row.relfilenode,
-                },
+                rel: catalog_relation_locator(row.oid, row.relfilenode, db_oid),
                 relation_oid: row.oid,
                 namespace_oid: row.relnamespace,
                 owner_oid: row.relowner,
@@ -343,14 +393,377 @@ pub(crate) fn catalog_from_physical_rows(
     Ok(catalog)
 }
 
+fn catalog_relation_locator(relation_oid: u32, relfilenode: u32, db_oid: u32) -> RelFileLocator {
+    if let Some(kind) = bootstrap_catalog_kinds()
+        .into_iter()
+        .find(|kind| kind.relation_oid() == relation_oid)
+    {
+        return bootstrap_catalog_rel(kind, db_oid);
+    }
+    if let Some(descriptor) = system_catalog_index_by_oid(relation_oid) {
+        let heap_rel = bootstrap_catalog_rel(descriptor.heap_kind, db_oid);
+        return RelFileLocator {
+            spc_oid: heap_rel.spc_oid,
+            db_oid: heap_rel.db_oid,
+            rel_number: relfilenode,
+        };
+    }
+    RelFileLocator {
+        spc_oid: 0,
+        db_oid,
+        rel_number: relfilenode,
+    }
+}
+
+pub(crate) fn load_physical_catalog_rows_scoped(
+    base_dir: &Path,
+    db_oid: u32,
+    kinds: &[BootstrapCatalogKind],
+) -> Result<PhysicalCatalogRows, CatalogError> {
+    let mut smgr = MdStorageManager::new(base_dir);
+    let pool = BufferPool::new(SmgrStorageBackend::new(MdStorageManager::new(base_dir)), 64);
+    let mut rows = PhysicalCatalogRows::default();
+    let mut missing_database = false;
+    let mut missing_authid = false;
+    let mut missing_auth_members = false;
+    let mut missing_tablespace = false;
+    let mut missing_constraint = false;
+    let mut missing_depend = false;
+    for &kind in kinds {
+        let rel = bootstrap_catalog_rel(kind, db_oid);
+        if !smgr.exists(rel, ForkNumber::Main) {
+            if kind == BootstrapCatalogKind::PgDatabase {
+                missing_database = true;
+            }
+            if kind == BootstrapCatalogKind::PgAuthId {
+                missing_authid = true;
+            }
+            if kind == BootstrapCatalogKind::PgAuthMembers {
+                missing_auth_members = true;
+            }
+            if kind == BootstrapCatalogKind::PgTablespace {
+                missing_tablespace = true;
+            }
+            if kind == BootstrapCatalogKind::PgConstraint {
+                missing_constraint = true;
+            }
+            if kind == BootstrapCatalogKind::PgDepend {
+                missing_depend = true;
+            }
+            continue;
+        }
+        let values = scan_catalog_relation(&pool, rel, &bootstrap_relation_desc(kind))?;
+        append_catalog_kind_rows(&mut rows, kind, values)?;
+    }
+    if missing_database {
+        rows.databases = bootstrap_pg_database_rows().into();
+    }
+    if missing_authid {
+        rows.authids = bootstrap_pg_authid_rows();
+    }
+    if missing_auth_members {
+        rows.auth_members = bootstrap_pg_auth_members_rows().into();
+    }
+    if missing_tablespace {
+        rows.tablespaces = bootstrap_pg_tablespace_rows().into();
+    }
+    restore_missing_first_class_catalog_rows_scoped(
+        base_dir,
+        &mut rows,
+        db_oid,
+        missing_constraint,
+        missing_depend,
+    )?;
+    Ok(rows)
+}
+
+pub(crate) fn load_physical_catalog_rows_visible_scoped(
+    base_dir: &Path,
+    pool: &BufferPool<SmgrStorageBackend>,
+    txns: &TransactionManager,
+    snapshot: &Snapshot,
+    client_id: crate::ClientId,
+    db_oid: u32,
+    kinds: &[BootstrapCatalogKind],
+) -> Result<PhysicalCatalogRows, CatalogError> {
+    let mut rows = PhysicalCatalogRows::default();
+    let mut missing_database = false;
+    let mut missing_authid = false;
+    let mut missing_auth_members = false;
+    let mut missing_tablespace = false;
+    let mut missing_constraint = false;
+    let mut missing_depend = false;
+    for &kind in kinds {
+        let rel = bootstrap_catalog_rel(kind, db_oid);
+        let exists = pool.with_storage_mut(|storage| storage.smgr.exists(rel, ForkNumber::Main));
+        if !exists {
+            if kind == BootstrapCatalogKind::PgDatabase {
+                missing_database = true;
+            }
+            if kind == BootstrapCatalogKind::PgAuthId {
+                missing_authid = true;
+            }
+            if kind == BootstrapCatalogKind::PgAuthMembers {
+                missing_auth_members = true;
+            }
+            if kind == BootstrapCatalogKind::PgTablespace {
+                missing_tablespace = true;
+            }
+            if kind == BootstrapCatalogKind::PgConstraint {
+                missing_constraint = true;
+            }
+            if kind == BootstrapCatalogKind::PgDepend {
+                missing_depend = true;
+            }
+            continue;
+        }
+        let values = load_visible_catalog_kind_in_pool_scoped(
+            pool, txns, snapshot, client_id, kind, db_oid,
+        )?;
+        append_catalog_kind_rows(&mut rows, kind, values)?;
+    }
+    if missing_database {
+        rows.databases = bootstrap_pg_database_rows().into();
+    }
+    if missing_authid {
+        rows.authids = bootstrap_pg_authid_rows();
+    }
+    if missing_auth_members {
+        rows.auth_members = bootstrap_pg_auth_members_rows().into();
+    }
+    if missing_tablespace {
+        rows.tablespaces = bootstrap_pg_tablespace_rows().into();
+    }
+    restore_missing_first_class_catalog_rows_scoped(
+        base_dir,
+        &mut rows,
+        db_oid,
+        missing_constraint,
+        missing_depend,
+    )?;
+    Ok(rows)
+}
+
+fn append_catalog_kind_rows(
+    rows: &mut PhysicalCatalogRows,
+    kind: BootstrapCatalogKind,
+    values: Vec<Vec<Value>>,
+) -> Result<(), CatalogError> {
+    match kind {
+        BootstrapCatalogKind::PgNamespace => {
+            rows.namespaces = values
+                .into_iter()
+                .map(namespace_row_from_values)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        BootstrapCatalogKind::PgClass => {
+            rows.classes = values
+                .into_iter()
+                .map(pg_class_row_from_values)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        BootstrapCatalogKind::PgAttribute => {
+            rows.attributes = values
+                .into_iter()
+                .map(pg_attribute_row_from_values)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        BootstrapCatalogKind::PgType => {
+            rows.types = values
+                .into_iter()
+                .map(pg_type_row_from_values)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        BootstrapCatalogKind::PgProc => {
+            rows.procs = values
+                .into_iter()
+                .map(pg_proc_row_from_values)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        BootstrapCatalogKind::PgTsParser => {
+            rows.ts_parsers = values
+                .into_iter()
+                .map(pg_ts_parser_row_from_values)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        BootstrapCatalogKind::PgTsTemplate => {
+            rows.ts_templates = values
+                .into_iter()
+                .map(pg_ts_template_row_from_values)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        BootstrapCatalogKind::PgTsDict => {
+            rows.ts_dicts = values
+                .into_iter()
+                .map(pg_ts_dict_row_from_values)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        BootstrapCatalogKind::PgTsConfig => {
+            rows.ts_configs = values
+                .into_iter()
+                .map(pg_ts_config_row_from_values)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        BootstrapCatalogKind::PgTsConfigMap => {
+            rows.ts_config_maps = values
+                .into_iter()
+                .map(pg_ts_config_map_row_from_values)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        BootstrapCatalogKind::PgLanguage => {
+            rows.languages = values
+                .into_iter()
+                .map(pg_language_row_from_values)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        BootstrapCatalogKind::PgOperator => {
+            rows.operators = values
+                .into_iter()
+                .map(pg_operator_row_from_values)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        BootstrapCatalogKind::PgDatabase => {
+            rows.databases = values
+                .into_iter()
+                .map(pg_database_row_from_values)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        BootstrapCatalogKind::PgAuthId => {
+            rows.authids = values
+                .into_iter()
+                .map(pg_authid_row_from_values)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        BootstrapCatalogKind::PgAuthMembers => {
+            rows.auth_members = values
+                .into_iter()
+                .map(pg_auth_members_row_from_values)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        BootstrapCatalogKind::PgCollation => {
+            rows.collations = values
+                .into_iter()
+                .map(pg_collation_row_from_values)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        BootstrapCatalogKind::PgTablespace => {
+            rows.tablespaces = values
+                .into_iter()
+                .map(pg_tablespace_row_from_values)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        BootstrapCatalogKind::PgAm => {
+            rows.ams = values
+                .into_iter()
+                .map(pg_am_row_from_values)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        BootstrapCatalogKind::PgAmop => {
+            rows.amops = values
+                .into_iter()
+                .map(pg_amop_row_from_values)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        BootstrapCatalogKind::PgAmproc => {
+            rows.amprocs = values
+                .into_iter()
+                .map(pg_amproc_row_from_values)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        BootstrapCatalogKind::PgAttrdef => {
+            rows.attrdefs = values
+                .into_iter()
+                .map(pg_attrdef_row_from_values)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        BootstrapCatalogKind::PgCast => {
+            rows.casts = values
+                .into_iter()
+                .map(pg_cast_row_from_values)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        BootstrapCatalogKind::PgConstraint => {
+            rows.constraints = values
+                .into_iter()
+                .map(pg_constraint_row_from_values)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        BootstrapCatalogKind::PgDepend => {
+            rows.depends = values
+                .into_iter()
+                .map(pg_depend_row_from_values)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        BootstrapCatalogKind::PgDescription => {
+            rows.descriptions = values
+                .into_iter()
+                .map(pg_description_row_from_values)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        BootstrapCatalogKind::PgIndex => {
+            rows.indexes = values
+                .into_iter()
+                .map(pg_index_row_from_values)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        BootstrapCatalogKind::PgInherits => {
+            rows.inherits = values
+                .into_iter()
+                .map(pg_inherits_row_from_values)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        BootstrapCatalogKind::PgRewrite => {
+            rows.rewrites = values
+                .into_iter()
+                .map(pg_rewrite_row_from_values)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        BootstrapCatalogKind::PgStatistic => {
+            rows.statistics = values
+                .into_iter()
+                .map(pg_statistic_row_from_values)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        BootstrapCatalogKind::PgOpclass => {
+            rows.opclasses = values
+                .into_iter()
+                .map(pg_opclass_row_from_values)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        BootstrapCatalogKind::PgOpfamily => {
+            rows.opfamilies = values
+                .into_iter()
+                .map(pg_opfamily_row_from_values)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+    }
+    Ok(())
+}
+
 fn restore_missing_first_class_catalog_rows(
     base_dir: &Path,
     rows: &mut PhysicalCatalogRows,
     missing_constraint: bool,
     missing_depend: bool,
 ) -> Result<(), CatalogError> {
+    restore_missing_first_class_catalog_rows_scoped(
+        base_dir,
+        rows,
+        1,
+        missing_constraint,
+        missing_depend,
+    )
+}
+
+fn restore_missing_first_class_catalog_rows_scoped(
+    base_dir: &Path,
+    rows: &mut PhysicalCatalogRows,
+    db_oid: u32,
+    missing_constraint: bool,
+    missing_depend: bool,
+) -> Result<(), CatalogError> {
     if missing_constraint {
-        let catalog = catalog_from_physical_rows(base_dir, rows.clone())?;
+        let catalog = catalog_from_physical_rows_scoped(base_dir, rows.clone(), db_oid)?;
         rows.constraints = catalog
             .entries()
             .filter(|(_, entry)| entry.relkind == 'r')
@@ -366,7 +779,7 @@ fn restore_missing_first_class_catalog_rows(
     }
 
     if missing_depend {
-        let catalog = catalog_from_physical_rows(base_dir, rows.clone())?;
+        let catalog = catalog_from_physical_rows_scoped(base_dir, rows.clone(), db_oid)?;
         rows.depends = catalog
             .entries()
             .flat_map(|(_, entry)| derived_pg_depend_rows(entry))
@@ -416,6 +829,10 @@ fn load_legacy_default_exprs(
 pub(crate) fn load_physical_catalog_rows(
     base_dir: &Path,
 ) -> Result<PhysicalCatalogRows, CatalogError> {
+    load_physical_catalog_rows_scoped(base_dir, 1, &bootstrap_catalog_kinds())
+}
+
+fn load_physical_catalog_rows_legacy(base_dir: &Path) -> Result<PhysicalCatalogRows, CatalogError> {
     let mut smgr = MdStorageManager::new(base_dir);
     let mut rels = BTreeMap::new();
     let mut missing_attrdef = false;
@@ -932,6 +1349,24 @@ pub(crate) fn load_physical_catalog_rows(
 }
 
 pub(crate) fn load_physical_catalog_rows_visible(
+    base_dir: &Path,
+    pool: &BufferPool<SmgrStorageBackend>,
+    txns: &TransactionManager,
+    snapshot: &Snapshot,
+    client_id: crate::ClientId,
+) -> Result<PhysicalCatalogRows, CatalogError> {
+    load_physical_catalog_rows_visible_scoped(
+        base_dir,
+        pool,
+        txns,
+        snapshot,
+        client_id,
+        1,
+        &bootstrap_catalog_kinds(),
+    )
+}
+
+fn load_physical_catalog_rows_visible_legacy(
     base_dir: &Path,
     pool: &BufferPool<SmgrStorageBackend>,
     txns: &TransactionManager,
@@ -1907,11 +2342,18 @@ fn load_visible_catalog_kind_in_pool(
     client_id: crate::ClientId,
     kind: BootstrapCatalogKind,
 ) -> Result<Vec<Vec<Value>>, CatalogError> {
-    let rel = RelFileLocator {
-        spc_oid: 0,
-        db_oid: 1,
-        rel_number: kind.relation_oid(),
-    };
+    load_visible_catalog_kind_in_pool_scoped(pool, txns, snapshot, client_id, kind, 1)
+}
+
+fn load_visible_catalog_kind_in_pool_scoped(
+    pool: &BufferPool<SmgrStorageBackend>,
+    txns: &TransactionManager,
+    snapshot: &Snapshot,
+    client_id: crate::ClientId,
+    kind: BootstrapCatalogKind,
+    db_oid: u32,
+) -> Result<Vec<Vec<Value>>, CatalogError> {
+    let rel = bootstrap_catalog_rel(kind, db_oid);
     let exists = pool.with_storage_mut(|storage| storage.smgr.exists(rel, ForkNumber::Main));
     if !exists {
         return Ok(Vec::new());

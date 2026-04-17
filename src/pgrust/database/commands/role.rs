@@ -2,14 +2,14 @@ use super::super::*;
 use crate::backend::catalog::roles::find_role_by_name;
 use crate::backend::commands::rolecmds::{
     GrantMembershipAuthorizationError, build_alter_role_spec, build_create_role_spec,
-    can_rename_role, grant_membership_authorized_with_detail, membership_row,
+    can_rename_role, grant_membership_authorized, grant_membership_authorized_with_detail,
+    membership_row,
     normalize_drop_role_names, parse_createrole_self_grant, role_management_error,
 };
 use crate::backend::parser::{
     AlterRoleAction, AlterRoleStatement, CommentOnRoleStatement, CreateRoleStatement,
     DropRoleStatement, ReassignOwnedStatement,
 };
-use crate::backend::storage::smgr::RelFileLocator;
 use std::collections::{BTreeMap, BTreeSet};
 
 impl Database {
@@ -32,14 +32,14 @@ impl Database {
             ));
         }
         let mut touched_catalogs = vec![crate::include::catalog::BootstrapCatalogKind::PgAuthId];
-        self.catalog
+        self.shared_catalog
             .write()
             .create_role(&stmt.role_name, &spec.attrs)
             .map_err(map_role_catalog_error)?;
 
         let current_user_oid = auth.current_user_oid();
         let created = self
-            .catalog
+            .shared_catalog
             .read()
             .catcache()
             .map_err(map_role_catalog_error)?
@@ -52,7 +52,7 @@ impl Database {
             .role_by_oid(current_user_oid)
             .is_some_and(|row| row.rolsuper)
         {
-            self.catalog
+            self.shared_catalog
                 .write()
                 .grant_role_membership(&membership_row(
                     created.oid,
@@ -67,7 +67,7 @@ impl Database {
 
             if let Some(raw) = createrole_self_grant {
                 if let Some(options) = parse_createrole_self_grant(raw).map_err(ExecError::Parse)? {
-                    self.catalog
+                    self.shared_catalog
                         .write()
                         .grant_role_membership(&membership_row(
                             created.oid,
@@ -86,8 +86,9 @@ impl Database {
 
         let live_catalog = live_auth_catalog(self).map_err(map_role_catalog_error)?;
         for role_name in &spec.add_role_to {
-            let parent = authorize_grant_membership(&auth, &live_catalog, role_name)?;
-            self.catalog
+            let parent = grant_membership_authorized(&auth, &live_catalog, role_name)
+                .map_err(ExecError::Parse)?;
+            self.shared_catalog
                 .write()
                 .grant_role_membership(&membership_row(
                     parent.oid,
@@ -110,7 +111,7 @@ impl Database {
         }
         for member_name in &spec.role_members {
             let member = lookup_membership_member(&live_catalog, member_name)?;
-            self.catalog
+            self.shared_catalog
                 .write()
                 .grant_role_membership(&membership_row(
                     created.oid,
@@ -133,7 +134,7 @@ impl Database {
         }
         for member_name in &spec.admin_members {
             let member = lookup_membership_member(&live_catalog, member_name)?;
-            self.catalog
+            self.shared_catalog
                 .write()
                 .grant_role_membership(&membership_row(
                     created.oid,
@@ -181,7 +182,7 @@ impl Database {
                 if !can_rename_role(&auth, existing.oid, &auth_catalog) {
                     return Err(rename_role_permission_error(&existing));
                 }
-                self.catalog
+                self.shared_catalog
                     .write()
                     .rename_role(&stmt.role_name, new_name)
                     .map_err(map_role_catalog_error)?;
@@ -203,7 +204,7 @@ impl Database {
                         &spec.attrs,
                     ));
                 }
-                self.catalog
+                self.shared_catalog
                     .write()
                     .alter_role_attributes(&stmt.role_name, &spec.attrs)
                     .map_err(map_role_catalog_error)?;
@@ -333,7 +334,7 @@ impl Database {
                     sqlstate: "2BP01",
                 });
             }
-            self.catalog
+            self.shared_catalog
                 .write()
                 .drop_role(&role_name)
                 .map_err(map_role_catalog_error)?;
@@ -456,7 +457,7 @@ fn map_role_catalog_error(err: crate::backend::catalog::CatalogError) -> ExecErr
 }
 
 fn live_auth_catalog(db: &Database) -> Result<crate::pgrust::auth::AuthCatalog, CatalogError> {
-    let cache = db.catalog.read().catcache()?;
+    let cache = db.shared_catalog.read().catcache()?;
     Ok(crate::pgrust::auth::AuthCatalog::new(
         cache.authid_rows(),
         cache.auth_members_rows(),
@@ -505,25 +506,15 @@ fn publish_direct_catalog_invalidation(
     client_id: ClientId,
     kinds: &[crate::include::catalog::BootstrapCatalogKind],
 ) {
-    invalidate_catalog_heap_pages(db, kinds);
+    for &kind in kinds {
+        let rel = crate::backend::catalog::bootstrap::bootstrap_catalog_rel(kind, db.database_oid);
+        let _ = db.pool.invalidate_relation(rel);
+    }
     let invalidation = crate::backend::utils::cache::inval::CatalogInvalidation {
         touched_catalogs: kinds.iter().copied().collect(),
         ..Default::default()
     };
     db.publish_committed_catalog_invalidation(client_id, &invalidation);
-}
-
-fn invalidate_catalog_heap_pages(
-    db: &Database,
-    kinds: &[crate::include::catalog::BootstrapCatalogKind],
-) {
-    for &kind in kinds {
-        let _ = db.pool.invalidate_relation(RelFileLocator {
-            spc_oid: 0,
-            db_oid: 1,
-            rel_number: kind.relation_oid(),
-        });
-    }
 }
 
 fn lookup_membership_member(
@@ -837,7 +828,7 @@ mod tests {
         let role_id = role_oid(db, role_name);
         let member_id = role_oid(db, member_name);
         let grantor_id = role_oid(db, grantor_name);
-        db.catalog
+        db.shared_catalog
             .write()
             .update_role_membership_options(
                 role_id,
@@ -888,7 +879,7 @@ mod tests {
             StatementResult::AffectedRows(0)
         );
         assert!(
-            db.catalog
+            db.shared_catalog
                 .read()
                 .catcache()
                 .unwrap()
@@ -1001,7 +992,7 @@ mod tests {
             )
             .unwrap();
 
-        let catcache = db.catalog.read().catcache().unwrap();
+        let catcache = db.shared_catalog.read().catcache().unwrap();
         let child_oid = role_oid(&db, "child");
         let parent_oid = role_oid(&db, "parent");
         let member_oid = role_oid(&db, "member_role");
@@ -1044,7 +1035,7 @@ mod tests {
             .unwrap();
         limited.execute(&db, "create role tenant").unwrap();
 
-        let catcache = db.catalog.read().catcache().unwrap();
+        let catcache = db.shared_catalog.read().catcache().unwrap();
         let tenant_oid = role_oid(&db, "tenant");
         let limited_oid = role_oid(&db, "limited_admin");
         let grants = memberships_for_member(&catcache.auth_members_rows(), limited_oid);
@@ -1146,7 +1137,7 @@ mod tests {
             .unwrap();
 
         for role_oid in [tenant_oid, target_oid, target2_oid] {
-            db.catalog
+            db.shared_catalog
                 .write()
                 .grant_role_membership(&membership_row(
                     role_oid,
@@ -1265,7 +1256,7 @@ mod tests {
         let limited_oid = role_oid(&db, "limited_admin");
         let tenant2_oid = role_oid(&db, "tenant2");
         let target2_oid = role_oid(&db, "target2");
-        db.catalog
+        db.shared_catalog
             .write()
             .grant_role_membership(&membership_row(
                 tenant2_oid,
@@ -1276,7 +1267,7 @@ mod tests {
                 true,
             ))
             .unwrap();
-        db.catalog
+        db.shared_catalog
             .write()
             .grant_role_membership(&membership_row(
                 target2_oid,

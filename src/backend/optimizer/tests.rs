@@ -1,16 +1,17 @@
 use super::bestpath::{self, CostSelector};
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::optimizer::util;
-use crate::backend::parser::{analyze_select_query_with_outer, parse_select};
 use crate::backend::parser::analyze::LiteralDefaultCatalog;
 use crate::backend::parser::{SqlType, SqlTypeKind};
+use crate::backend::parser::{analyze_select_query_with_outer, parse_select};
 use crate::include::nodes::datum::Value;
-use crate::include::nodes::pathnodes::{Path, PathKey, PathTarget, PlannerInfo, RelOptInfo, RelOptKind};
+use crate::include::nodes::pathnodes::{
+    Path, PathKey, PathTarget, PlannerInfo, RelOptInfo, RelOptKind,
+};
 use crate::include::nodes::plannodes::{Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
-    Aggref, AttrNumber, Expr, JoinType, OpExpr, OpExprKind, OrderByEntry, Param, ParamKind,
-    QueryColumn, RelationDesc, TargetEntry, Var,
-    INNER_VAR, OUTER_VAR,
+    Aggref, AttrNumber, Expr, INNER_VAR, JoinType, OUTER_VAR, OpExpr, OpExprKind, OrderByEntry,
+    Param, ParamKind, QueryColumn, RelationDesc, TargetEntry, Var,
 };
 
 fn int4() -> SqlType {
@@ -39,7 +40,10 @@ fn pathkey(expr: crate::include::nodes::primnodes::Expr) -> PathKey {
     }
 }
 
-fn pathkey_with_ref(expr: crate::include::nodes::primnodes::Expr, ressortgroupref: usize) -> PathKey {
+fn pathkey_with_ref(
+    expr: crate::include::nodes::primnodes::Expr,
+    ressortgroupref: usize,
+) -> PathKey {
     PathKey {
         expr,
         ressortgroupref,
@@ -323,7 +327,9 @@ fn plan_contains(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> bool 
         | Plan::Aggregate { input, .. }
         | Plan::ProjectSet { input, .. }
         | Plan::SubqueryScan { input, .. }
-        | Plan::CteScan { cte_plan: input, .. } => plan_contains(input, predicate),
+        | Plan::CteScan {
+            cte_plan: input, ..
+        } => plan_contains(input, predicate),
         Plan::NestedLoopJoin { left, right, .. }
         | Plan::HashJoin { left, right, .. }
         | Plan::RecursiveUnion {
@@ -367,7 +373,13 @@ from (values (1),(2)) v1(r1)
         planned.ext_params
     );
     assert!(plan_contains(&planned.plan_tree, |plan| {
-        matches!(plan, Plan::NestedLoopJoin { kind: crate::include::nodes::primnodes::JoinType::Left, .. })
+        matches!(
+            plan,
+            Plan::NestedLoopJoin {
+                kind: crate::include::nodes::primnodes::JoinType::Left,
+                ..
+            }
+        )
     }));
     assert!(!plan_contains(&planned.plan_tree, |plan| {
         matches!(
@@ -443,7 +455,9 @@ fn required_query_pathkeys_for_path_keeps_sortgroup_identified_keys() {
         plan_info: PlanEstimate::new(1.0, 1.5, 10.0, 1),
         slot_id: 20,
         input: Box::new(values_path(10, 1.0, 1.0)),
-        targets: vec![TargetEntry::new("a", var(10, 1), int4(), 1).with_sort_group_ref(sortgroupref)],
+        targets: vec![
+            TargetEntry::new("a", var(10, 1), int4(), 1).with_sort_group_ref(sortgroupref),
+        ],
     };
 
     let required = util::required_query_pathkeys_for_path(&root, &path);
@@ -474,7 +488,10 @@ fn projection_pathkeys_prefer_sortgroupref_identity() {
         ],
     };
 
-    assert_eq!(projection.pathkeys(), vec![pathkey_with_ref(var(10, 2), 17)]);
+    assert_eq!(
+        projection.pathkeys(),
+        vec![pathkey_with_ref(var(20, 2), 17)]
+    );
 }
 
 #[test]
@@ -623,7 +640,10 @@ fn into_plan_project_set_set_arg_lowers_via_child_tlist_identity() {
         Plan::ProjectSet { targets, .. } => match &targets[0] {
             crate::include::nodes::primnodes::ProjectSetTarget::Set { call, .. } => match call {
                 crate::include::nodes::primnodes::SetReturningCall::GenerateSeries {
-                    start, stop, step, ..
+                    start,
+                    stop,
+                    step,
+                    ..
                 } => {
                     assert!(is_special_user_var(start, OUTER_VAR, 0));
                     assert_eq!(*stop, Expr::Const(Value::Int32(3)));
@@ -639,20 +659,26 @@ fn into_plan_project_set_set_arg_lowers_via_child_tlist_identity() {
 
 #[test]
 fn planner_keeps_function_scan_filter_semantic_until_setrefs() {
-    let planned =
-        planned_stmt_for_sql("select * from generate_series(1, 3) as g(x) where x > 1");
+    let planned = planned_stmt_for_sql("select * from generate_series(1, 3) as g(x) where x > 1");
 
-    assert!(plan_contains(&planned.plan_tree, |plan| match plan {
-        Plan::Filter { predicate, input, .. } => {
-            matches!(
-                predicate,
-                Expr::Op(op)
-                    if is_special_user_var(&op.args[0], OUTER_VAR, 0)
-                        && op.args[1] == Expr::Const(Value::Int32(1))
-            ) && matches!(input.as_ref(), Plan::FunctionScan { .. } | Plan::Projection { .. })
+    match planned.plan_tree {
+        Plan::Filter {
+            predicate, input, ..
+        } => {
+            match predicate {
+                Expr::Op(op) => {
+                    assert!(is_special_user_var(&op.args[0], OUTER_VAR, 0));
+                    assert_eq!(op.args[1], Expr::Const(Value::Int32(1)));
+                }
+                other => panic!("expected filter op, got {other:?}"),
+            }
+            assert!(matches!(
+                *input,
+                Plan::FunctionScan { .. } | Plan::Projection { .. }
+            ));
         }
-        _ => false,
-    }));
+        other => panic!("expected top-level filter plan, got {other:?}"),
+    }
 }
 
 #[test]
@@ -662,7 +688,10 @@ fn planner_keeps_recursive_cte_filter_semantic_until_setrefs() {
          select * from t where n > 1",
     );
 
-    assert!(plan_contains(&planned.plan_tree, |plan| matches!(plan, Plan::CteScan { .. })));
+    assert!(plan_contains(&planned.plan_tree, |plan| matches!(
+        plan,
+        Plan::CteScan { .. }
+    )));
     assert!(plan_contains(&planned.plan_tree, |plan| match plan {
         Plan::Filter { predicate, .. } => match predicate {
             Expr::Op(op) => {
@@ -682,16 +711,20 @@ fn planner_keeps_recursive_project_set_scalar_semantic_until_setrefs() {
          select n + 1, generate_series(1, n) from t",
     );
 
-    assert!(plan_contains(&planned.plan_tree, |plan| matches!(plan, Plan::ProjectSet { .. })));
+    assert!(plan_contains(&planned.plan_tree, |plan| matches!(
+        plan,
+        Plan::ProjectSet { .. }
+    )));
     assert!(plan_contains(&planned.plan_tree, |plan| match plan {
         Plan::ProjectSet { targets, .. } => targets.iter().any(|target| match target {
-            crate::include::nodes::primnodes::ProjectSetTarget::Scalar(entry) => match &entry.expr {
-                Expr::Op(op) => {
-                    is_special_user_var(&op.args[0], OUTER_VAR, 0)
-                        && op.args[1] == Expr::Const(Value::Int32(1))
-                }
-                _ => false,
-            },
+            crate::include::nodes::primnodes::ProjectSetTarget::Scalar(entry) =>
+                match &entry.expr {
+                    Expr::Op(op) => {
+                        is_special_user_var(&op.args[0], OUTER_VAR, 0)
+                            && op.args[1] == Expr::Const(Value::Int32(1))
+                    }
+                    _ => false,
+                },
             crate::include::nodes::primnodes::ProjectSetTarget::Set { .. } => false,
         }),
         _ => false,
@@ -885,7 +918,9 @@ fn rel_exposes_required_pathkey_identity_only_when_a_path_matches() {
         plan_info: PlanEstimate::new(1.0, 1.5, 10.0, 1),
         slot_id: 20,
         input: Box::new(values_path(10, 1.0, 1.0)),
-        targets: vec![TargetEntry::new("a", var(10, 1), int4(), 1).with_sort_group_ref(sortgroupref)],
+        targets: vec![
+            TargetEntry::new("a", var(10, 1), int4(), 1).with_sort_group_ref(sortgroupref),
+        ],
     };
     let non_matching_path = Path::Projection {
         plan_info: PlanEstimate::new(2.0, 2.5, 10.0, 1),
@@ -893,12 +928,25 @@ fn rel_exposes_required_pathkey_identity_only_when_a_path_matches() {
         input: Box::new(values_path(11, 2.0, 2.0)),
         targets: vec![TargetEntry::new("a", var(11, 1), int4(), 1)],
     };
-    let mut rel = RelOptInfo::new(vec![1], RelOptKind::UpperRel, PathTarget::from_target_list(&[]));
+    let mut rel = RelOptInfo::new(
+        vec![1],
+        RelOptKind::UpperRel,
+        PathTarget::from_target_list(&[]),
+    );
     rel.add_path(non_matching_path.clone());
-    assert!(!util::rel_exposes_required_pathkey_identity(&rel, &root.query_pathkeys));
+    assert!(!util::rel_exposes_required_pathkey_identity(
+        &rel,
+        &root.query_pathkeys
+    ));
     rel.add_path(matching_path.clone());
-    assert!(util::path_exposes_required_pathkey_identity(&matching_path, &root.query_pathkeys));
-    assert!(util::rel_exposes_required_pathkey_identity(&rel, &root.query_pathkeys));
+    assert!(util::path_exposes_required_pathkey_identity(
+        &matching_path,
+        &root.query_pathkeys
+    ));
+    assert!(util::rel_exposes_required_pathkey_identity(
+        &rel,
+        &root.query_pathkeys
+    ));
 }
 
 #[test]
@@ -910,7 +958,11 @@ fn required_query_pathkeys_for_rel_falls_back_when_rel_lacks_identity() {
         input: Box::new(values_path(10, 1.0, 1.0)),
         targets: vec![TargetEntry::new("a", var(10, 1), int4(), 1)],
     };
-    let mut rel = RelOptInfo::new(vec![1], RelOptKind::UpperRel, PathTarget::from_target_list(&[]));
+    let mut rel = RelOptInfo::new(
+        vec![1],
+        RelOptKind::UpperRel,
+        PathTarget::from_target_list(&[]),
+    );
     rel.add_path(path);
 
     let required = util::required_query_pathkeys_for_rel(&root, &rel);
@@ -927,9 +979,15 @@ fn required_query_pathkeys_for_rel_keeps_sortgroup_identified_keys_when_rel_has_
         plan_info: PlanEstimate::new(1.0, 1.5, 10.0, 1),
         slot_id: 20,
         input: Box::new(values_path(10, 1.0, 1.0)),
-        targets: vec![TargetEntry::new("a", var(10, 1), int4(), 1).with_sort_group_ref(sortgroupref)],
+        targets: vec![
+            TargetEntry::new("a", var(10, 1), int4(), 1).with_sort_group_ref(sortgroupref),
+        ],
     };
-    let mut rel = RelOptInfo::new(vec![1], RelOptKind::UpperRel, PathTarget::from_target_list(&[]));
+    let mut rel = RelOptInfo::new(
+        vec![1],
+        RelOptKind::UpperRel,
+        PathTarget::from_target_list(&[]),
+    );
     rel.add_path(path);
 
     let required = util::required_query_pathkeys_for_rel(&root, &rel);

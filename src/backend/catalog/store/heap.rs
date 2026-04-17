@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use crate::backend::catalog::catalog::{
     Catalog, CatalogEntry, CatalogError, CatalogIndexBuildOptions,
 };
-use crate::backend::catalog::indexing::probe_system_catalog_rows_visible;
+use crate::backend::catalog::indexing::probe_system_catalog_rows_visible_in_db;
 use crate::backend::catalog::persistence::{
     append_catalog_entry_rows, delete_catalog_rows_subset_mvcc, insert_catalog_rows_subset_mvcc,
 };
@@ -21,7 +21,7 @@ use crate::backend::catalog::toasting::{ToastCatalogChanges, new_relation_create
 use crate::backend::executor::{ColumnDesc, RelationDesc};
 use crate::include::catalog::{
     BootstrapCatalogKind, PG_AUTHID_RELATION_OID, PG_CLASS_RELATION_OID, PgConstraintRow,
-    PgDependRow, PgDescriptionRow, PgNamespaceRow, PgRewriteRow, PgStatisticRow,
+    PgDatabaseRow, PgDependRow, PgDescriptionRow, PgNamespaceRow, PgRewriteRow, PgStatisticRow,
 };
 use crate::include::nodes::datum::Value;
 
@@ -68,6 +68,41 @@ impl CatalogStore {
         Ok((entry, effect))
     }
 
+    pub fn create_database_row(
+        &mut self,
+        mut row: PgDatabaseRow,
+    ) -> Result<PgDatabaseRow, CatalogError> {
+        let mut catalog = self.catalog_snapshot_with_control()?;
+        if catalog
+            .databases
+            .iter()
+            .any(|existing| existing.datname.eq_ignore_ascii_case(&row.datname))
+        {
+            return Err(CatalogError::UniqueViolation(
+                "pg_database_datname_index".into(),
+            ));
+        }
+        if row.oid == 0 {
+            row.oid = catalog.next_oid();
+        }
+        catalog.next_oid = catalog.next_oid.max(row.oid.saturating_add(1));
+        catalog.databases.push(row.clone());
+        self.persist_catalog_kinds(&catalog, &[BootstrapCatalogKind::PgDatabase])?;
+        Ok(row)
+    }
+
+    pub fn drop_database_row(&mut self, name: &str) -> Result<PgDatabaseRow, CatalogError> {
+        let mut catalog = self.catalog_snapshot_with_control()?;
+        let position = catalog
+            .databases
+            .iter()
+            .position(|row| row.datname.eq_ignore_ascii_case(name))
+            .ok_or_else(|| CatalogError::UnknownTable(name.to_string()))?;
+        let row = catalog.databases.remove(position);
+        self.persist_catalog_kinds(&catalog, &[BootstrapCatalogKind::PgDatabase])?;
+        Ok(row)
+    }
+
     pub fn create_table(
         &mut self,
         name: impl Into<String>,
@@ -75,7 +110,14 @@ impl CatalogStore {
     ) -> Result<CatalogEntry, CatalogError> {
         let name = name.into();
         let mut catalog = self.catalog_snapshot_with_control()?;
-        let entry = catalog.create_table(name.clone(), desc)?;
+        let entry = catalog.create_table_with_options(
+            name.clone(),
+            desc,
+            crate::include::catalog::PUBLIC_NAMESPACE_OID,
+            self.scope_db_oid(),
+            'p',
+            crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+        )?;
         let toast = new_relation_create_toast_table(
             &mut catalog,
             entry.relation_oid,
@@ -278,7 +320,7 @@ impl CatalogStore {
             name,
             desc,
             crate::include::catalog::PUBLIC_NAMESPACE_OID,
-            1,
+            self.scope_db_oid(),
             'p',
             crate::include::catalog::PG_TOAST_NAMESPACE_OID,
             crate::backend::catalog::toasting::PG_TOAST_NAMESPACE,
@@ -328,7 +370,7 @@ impl CatalogStore {
             merge_catalog_kinds(&mut kinds, &create_table_sync_kinds(&toast.toast_entry));
             merge_catalog_kinds(&mut kinds, &create_index_sync_kinds());
         }
-        insert_catalog_rows_subset_mvcc(ctx, &rows, 1, &kinds)?;
+        insert_catalog_rows_subset_mvcc(ctx, &rows, self.scope_db_oid(), &kinds)?;
 
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
@@ -365,7 +407,12 @@ impl CatalogStore {
             }],
             ..PhysicalCatalogRows::default()
         };
-        insert_catalog_rows_subset_mvcc(ctx, &rows, 1, &[BootstrapCatalogKind::PgNamespace])?;
+        insert_catalog_rows_subset_mvcc(
+            ctx,
+            &rows,
+            self.scope_db_oid(),
+            &[BootstrapCatalogKind::PgNamespace],
+        )?;
 
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &[BootstrapCatalogKind::PgNamespace]);
@@ -402,7 +449,7 @@ impl CatalogStore {
         insert_catalog_rows_subset_mvcc(
             ctx,
             &rows,
-            1,
+            self.scope_db_oid(),
             &[BootstrapCatalogKind::PgProc, BootstrapCatalogKind::PgDepend],
         )?;
 
@@ -479,10 +526,10 @@ impl CatalogStore {
             BootstrapCatalogKind::PgDepend,
             BootstrapCatalogKind::PgInherits,
         ];
-        delete_catalog_rows_subset_mvcc(ctx, &old_parent_rows, 1, &parent_kinds)?;
-        delete_catalog_rows_subset_mvcc(ctx, &old_child_rows, 1, &child_kinds)?;
-        insert_catalog_rows_subset_mvcc(ctx, &new_parent_rows, 1, &parent_kinds)?;
-        insert_catalog_rows_subset_mvcc(ctx, &new_child_rows, 1, &child_kinds)?;
+        delete_catalog_rows_subset_mvcc(ctx, &old_parent_rows, self.scope_db_oid(), &parent_kinds)?;
+        delete_catalog_rows_subset_mvcc(ctx, &old_child_rows, self.scope_db_oid(), &child_kinds)?;
+        insert_catalog_rows_subset_mvcc(ctx, &new_parent_rows, self.scope_db_oid(), &parent_kinds)?;
+        insert_catalog_rows_subset_mvcc(ctx, &new_child_rows, self.scope_db_oid(), &child_kinds)?;
 
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &parent_kinds);
@@ -509,7 +556,12 @@ impl CatalogStore {
             }],
             ..PhysicalCatalogRows::default()
         };
-        delete_catalog_rows_subset_mvcc(ctx, &rows, 1, &[BootstrapCatalogKind::PgNamespace])?;
+        delete_catalog_rows_subset_mvcc(
+            ctx,
+            &rows,
+            self.scope_db_oid(),
+            &[BootstrapCatalogKind::PgNamespace],
+        )?;
 
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &[BootstrapCatalogKind::PgNamespace]);
@@ -559,7 +611,7 @@ impl CatalogStore {
         let kinds = create_view_sync_kinds();
         self.persist_control_state(&catalog)?;
         let rows = physical_catalog_rows_for_catalog_entry(&catalog, &name, &entry);
-        insert_catalog_rows_subset_mvcc(ctx, &rows, 1, &kinds)?;
+        insert_catalog_rows_subset_mvcc(ctx, &rows, self.scope_db_oid(), &kinds)?;
 
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
@@ -682,7 +734,7 @@ impl CatalogStore {
         let kinds = create_index_sync_kinds();
         self.persist_control_state(&catalog)?;
         let rows = physical_catalog_rows_for_catalog_entry(&catalog, &index_name, &entry);
-        insert_catalog_rows_subset_mvcc(ctx, &rows, 1, &kinds)?;
+        insert_catalog_rows_subset_mvcc(ctx, &rows, self.scope_db_oid(), &kinds)?;
 
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
@@ -727,7 +779,7 @@ impl CatalogStore {
             BootstrapCatalogKind::PgConstraint,
             BootstrapCatalogKind::PgDepend,
         ];
-        insert_catalog_rows_subset_mvcc(ctx, &rows, 1, &kinds)?;
+        insert_catalog_rows_subset_mvcc(ctx, &rows, self.scope_db_oid(), &kinds)?;
 
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
@@ -767,7 +819,7 @@ impl CatalogStore {
             BootstrapCatalogKind::PgConstraint,
             BootstrapCatalogKind::PgDepend,
         ];
-        insert_catalog_rows_subset_mvcc(ctx, &rows, 1, &kinds)?;
+        insert_catalog_rows_subset_mvcc(ctx, &rows, self.scope_db_oid(), &kinds)?;
 
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
@@ -842,7 +894,7 @@ impl CatalogStore {
             .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
         let old_rows = physical_catalog_rows_for_catalog_entry(&old_catalog, &name, &old_entry);
         let kinds = drop_relation_delete_kinds();
-        delete_catalog_rows_subset_mvcc(ctx, &old_rows, 1, &kinds)?;
+        delete_catalog_rows_subset_mvcc(ctx, &old_rows, self.scope_db_oid(), &kinds)?;
         let (_removed_name, removed_entry) = catalog.drop_relation_entry_by_oid(relation_oid)?;
         self.persist_control_state(&catalog)?;
 
@@ -884,8 +936,8 @@ impl CatalogStore {
         let old_rows = physical_catalog_rows_for_catalog_entry(&old_catalog, &name, &old_entry);
         let new_rows = physical_catalog_rows_for_catalog_entry(&catalog, &name, &new_entry);
         self.persist_control_state(&catalog)?;
-        delete_catalog_rows_subset_mvcc(ctx, &old_rows, 1, &kinds)?;
-        insert_catalog_rows_subset_mvcc(ctx, &new_rows, 1, &kinds)?;
+        delete_catalog_rows_subset_mvcc(ctx, &old_rows, self.scope_db_oid(), &kinds)?;
+        insert_catalog_rows_subset_mvcc(ctx, &new_rows, self.scope_db_oid(), &kinds)?;
 
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
@@ -912,8 +964,8 @@ impl CatalogStore {
         let old_rows = physical_catalog_rows_for_catalog_entry(&old_catalog, &name, &old_entry);
         let new_rows = physical_catalog_rows_for_catalog_entry(&catalog, &name, &new_entry);
         self.persist_control_state(&catalog)?;
-        delete_catalog_rows_subset_mvcc(ctx, &old_rows, 1, &kinds)?;
-        insert_catalog_rows_subset_mvcc(ctx, &new_rows, 1, &kinds)?;
+        delete_catalog_rows_subset_mvcc(ctx, &old_rows, self.scope_db_oid(), &kinds)?;
+        insert_catalog_rows_subset_mvcc(ctx, &new_rows, self.scope_db_oid(), &kinds)?;
 
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
@@ -940,8 +992,8 @@ impl CatalogStore {
         let old_rows = physical_catalog_rows_for_catalog_entry(&old_catalog, &name, &old_entry);
         let new_rows = physical_catalog_rows_for_catalog_entry(&catalog, &name, &new_entry);
         self.persist_control_state(&catalog)?;
-        delete_catalog_rows_subset_mvcc(ctx, &old_rows, 1, &kinds)?;
-        insert_catalog_rows_subset_mvcc(ctx, &new_rows, 1, &kinds)?;
+        delete_catalog_rows_subset_mvcc(ctx, &old_rows, self.scope_db_oid(), &kinds)?;
+        insert_catalog_rows_subset_mvcc(ctx, &new_rows, self.scope_db_oid(), &kinds)?;
 
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
@@ -1123,7 +1175,12 @@ impl CatalogStore {
         }
         let inherit_kinds = vec![BootstrapCatalogKind::PgInherits];
         if !inherit_rows.inherits.is_empty() {
-            delete_catalog_rows_subset_mvcc(ctx, &inherit_rows, 1, &inherit_kinds)?;
+            delete_catalog_rows_subset_mvcc(
+                ctx,
+                &inherit_rows,
+                self.scope_db_oid(),
+                &inherit_kinds,
+            )?;
         }
         for entry in &dropped {
             let _ = catalog.detach_inheritance(entry.relation_oid);
@@ -1133,7 +1190,7 @@ impl CatalogStore {
             .into_iter()
             .filter(|kind| *kind != BootstrapCatalogKind::PgInherits)
             .collect::<Vec<_>>();
-        delete_catalog_rows_subset_mvcc(ctx, &rows, 1, &kinds)?;
+        delete_catalog_rows_subset_mvcc(ctx, &rows, self.scope_db_oid(), &kinds)?;
         let parent_kinds = vec![BootstrapCatalogKind::PgClass];
         let mut new_parent_rows = PhysicalCatalogRows::default();
         for (name, _) in &affected_parent_entries {
@@ -1143,8 +1200,18 @@ impl CatalogStore {
             add_catalog_entry_rows(&mut new_parent_rows, &catalog, name, entry);
         }
         if !affected_parent_entries.is_empty() {
-            delete_catalog_rows_subset_mvcc(ctx, &old_parent_rows, 1, &parent_kinds)?;
-            insert_catalog_rows_subset_mvcc(ctx, &new_parent_rows, 1, &parent_kinds)?;
+            delete_catalog_rows_subset_mvcc(
+                ctx,
+                &old_parent_rows,
+                self.scope_db_oid(),
+                &parent_kinds,
+            )?;
+            insert_catalog_rows_subset_mvcc(
+                ctx,
+                &new_parent_rows,
+                self.scope_db_oid(),
+                &parent_kinds,
+            )?;
         }
 
         let mut effect = CatalogMutationEffect::default();
@@ -1181,7 +1248,7 @@ impl CatalogStore {
         }
         let rows = physical_catalog_rows_for_catalog_entry(&catalog, &name, &entry);
         let kinds = drop_relation_delete_kinds();
-        delete_catalog_rows_subset_mvcc(ctx, &rows, 1, &kinds)?;
+        delete_catalog_rows_subset_mvcc(ctx, &rows, self.scope_db_oid(), &kinds)?;
         let _ = catalog.remove_by_oid(relation_oid);
 
         let mut effect = CatalogMutationEffect::default();
@@ -1235,8 +1302,8 @@ impl CatalogStore {
         let kinds = vec![BootstrapCatalogKind::PgIndex];
         let old_rows = physical_catalog_rows_for_catalog_entry(&old_catalog, &name, &old_entry);
         let new_rows = physical_catalog_rows_for_catalog_entry(&catalog, &name, &new_entry);
-        delete_catalog_rows_subset_mvcc(ctx, &old_rows, 1, &kinds)?;
-        insert_catalog_rows_subset_mvcc(ctx, &new_rows, 1, &kinds)?;
+        delete_catalog_rows_subset_mvcc(ctx, &old_rows, self.scope_db_oid(), &kinds)?;
+        insert_catalog_rows_subset_mvcc(ctx, &new_rows, self.scope_db_oid(), &kinds)?;
 
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
@@ -1272,8 +1339,8 @@ impl CatalogStore {
         }
         let old_rows = physical_catalog_rows_for_catalog_entry(&old_catalog, &name, &old_entry);
         let new_rows = physical_catalog_rows_for_catalog_entry(&catalog, &name, &new_entry);
-        delete_catalog_rows_subset_mvcc(ctx, &old_rows, 1, &kinds)?;
-        insert_catalog_rows_subset_mvcc(ctx, &new_rows, 1, &kinds)?;
+        delete_catalog_rows_subset_mvcc(ctx, &old_rows, self.scope_db_oid(), &kinds)?;
+        insert_catalog_rows_subset_mvcc(ctx, &new_rows, self.scope_db_oid(), &kinds)?;
 
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
@@ -1357,8 +1424,8 @@ impl CatalogStore {
         }
         let old_rows = physical_catalog_rows_for_catalog_entry(&old_catalog, &name, &old_entry);
         let new_rows = physical_catalog_rows_for_catalog_entry(&catalog, &name, &new_entry);
-        delete_catalog_rows_subset_mvcc(ctx, &old_rows, 1, &kinds)?;
-        insert_catalog_rows_subset_mvcc(ctx, &new_rows, 1, &kinds)?;
+        delete_catalog_rows_subset_mvcc(ctx, &old_rows, self.scope_db_oid(), &kinds)?;
+        insert_catalog_rows_subset_mvcc(ctx, &new_rows, self.scope_db_oid(), &kinds)?;
 
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
@@ -1399,8 +1466,8 @@ impl CatalogStore {
         }
         let old_rows = physical_catalog_rows_for_catalog_entry(&old_catalog, &name, &old_entry);
         let new_rows = physical_catalog_rows_for_catalog_entry(&catalog, &name, &new_entry);
-        delete_catalog_rows_subset_mvcc(ctx, &old_rows, 1, &kinds)?;
-        insert_catalog_rows_subset_mvcc(ctx, &new_rows, 1, &kinds)?;
+        delete_catalog_rows_subset_mvcc(ctx, &old_rows, self.scope_db_oid(), &kinds)?;
+        insert_catalog_rows_subset_mvcc(ctx, &new_rows, self.scope_db_oid(), &kinds)?;
 
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
@@ -1428,8 +1495,8 @@ impl CatalogStore {
         ];
         let old_rows = physical_catalog_rows_for_catalog_entry(&old_catalog, &name, &old_entry);
         let new_rows = physical_catalog_rows_for_catalog_entry(&catalog, &name, &new_entry);
-        delete_catalog_rows_subset_mvcc(ctx, &old_rows, 1, &kinds)?;
-        insert_catalog_rows_subset_mvcc(ctx, &new_rows, 1, &kinds)?;
+        delete_catalog_rows_subset_mvcc(ctx, &old_rows, self.scope_db_oid(), &kinds)?;
+        insert_catalog_rows_subset_mvcc(ctx, &new_rows, self.scope_db_oid(), &kinds)?;
 
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
@@ -1456,8 +1523,8 @@ impl CatalogStore {
         ];
         let old_rows = physical_catalog_rows_for_catalog_entry(&old_catalog, &old_name, &old_entry);
         let new_rows = physical_catalog_rows_for_catalog_entry(&catalog, &new_name, &new_entry);
-        delete_catalog_rows_subset_mvcc(ctx, &old_rows, 1, &kinds)?;
-        insert_catalog_rows_subset_mvcc(ctx, &new_rows, 1, &kinds)?;
+        delete_catalog_rows_subset_mvcc(ctx, &old_rows, self.scope_db_oid(), &kinds)?;
+        insert_catalog_rows_subset_mvcc(ctx, &new_rows, self.scope_db_oid(), &kinds)?;
 
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
@@ -1512,8 +1579,8 @@ impl CatalogStore {
         }
         let old_rows = physical_catalog_rows_for_catalog_entry(&old_catalog, &name, &old_entry);
         let new_rows = physical_catalog_rows_for_catalog_entry(&catalog, &name, &new_entry);
-        delete_catalog_rows_subset_mvcc(ctx, &old_rows, 1, &kinds)?;
-        insert_catalog_rows_subset_mvcc(ctx, &new_rows, 1, &kinds)?;
+        delete_catalog_rows_subset_mvcc(ctx, &old_rows, self.scope_db_oid(), &kinds)?;
+        insert_catalog_rows_subset_mvcc(ctx, &new_rows, self.scope_db_oid(), &kinds)?;
 
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
@@ -1538,8 +1605,8 @@ impl CatalogStore {
         let kinds = vec![BootstrapCatalogKind::PgClass];
         let old_rows = physical_catalog_rows_for_catalog_entry(&old_catalog, &name, &old_entry);
         let new_rows = physical_catalog_rows_for_catalog_entry(&catalog, &name, &new_entry);
-        delete_catalog_rows_subset_mvcc(ctx, &old_rows, 1, &kinds)?;
-        insert_catalog_rows_subset_mvcc(ctx, &new_rows, 1, &kinds)?;
+        delete_catalog_rows_subset_mvcc(ctx, &old_rows, self.scope_db_oid(), &kinds)?;
+        insert_catalog_rows_subset_mvcc(ctx, &new_rows, self.scope_db_oid(), &kinds)?;
 
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
@@ -1558,11 +1625,12 @@ impl CatalogStore {
             .read()
             .snapshot_for_command(ctx.xid, ctx.cid)
             .map_err(|e| CatalogError::Io(format!("catalog snapshot failed: {e:?}")))?;
-        let existing = probe_system_catalog_rows_visible(
+        let existing = probe_system_catalog_rows_visible_in_db(
             &ctx.pool,
             &ctx.txns,
             &snapshot,
             ctx.client_id,
+            self.scope_db_oid(),
             PG_STATISTIC_RELID_ATT_INH_INDEX_OID,
             vec![crate::include::access::scankey::ScanKeyData {
                 attribute_number: 1,
@@ -1582,7 +1650,7 @@ impl CatalogStore {
                     statistics: existing,
                     ..PhysicalCatalogRows::default()
                 },
-                1,
+                self.scope_db_oid(),
                 &kinds,
             )?;
         }
@@ -1593,7 +1661,7 @@ impl CatalogStore {
                     statistics,
                     ..PhysicalCatalogRows::default()
                 },
-                1,
+                self.scope_db_oid(),
                 &kinds,
             )?;
         }
@@ -1634,11 +1702,12 @@ impl CatalogStore {
             .read()
             .snapshot_for_command(ctx.xid, ctx.cid)
             .map_err(|e| CatalogError::Io(format!("catalog snapshot failed: {e:?}")))?;
-        let existing = probe_system_catalog_rows_visible(
+        let existing = probe_system_catalog_rows_visible_in_db(
             &ctx.pool,
             &ctx.txns,
             &snapshot,
             ctx.client_id,
+            self.scope_db_oid(),
             PG_DESCRIPTION_O_C_O_INDEX_OID,
             vec![
                 crate::include::access::scankey::ScanKeyData {
@@ -1670,7 +1739,7 @@ impl CatalogStore {
                     descriptions: vec![existing_row.clone()],
                     ..PhysicalCatalogRows::default()
                 },
-                1,
+                self.scope_db_oid(),
                 &[BootstrapCatalogKind::PgDescription],
             )?;
             if let Some(text) = normalized {
@@ -1685,7 +1754,7 @@ impl CatalogStore {
                         }],
                         ..PhysicalCatalogRows::default()
                     },
-                    1,
+                    self.scope_db_oid(),
                     &[BootstrapCatalogKind::PgDescription],
                 )?;
             }
@@ -1701,7 +1770,7 @@ impl CatalogStore {
                     }],
                     ..PhysicalCatalogRows::default()
                 },
-                1,
+                self.scope_db_oid(),
                 &[BootstrapCatalogKind::PgDescription],
             )?;
         }
@@ -1723,11 +1792,12 @@ impl CatalogStore {
             .read()
             .snapshot_for_command(ctx.xid, ctx.cid)
             .map_err(|e| CatalogError::Io(format!("catalog snapshot failed: {e:?}")))?;
-        let existing = probe_system_catalog_rows_visible(
+        let existing = probe_system_catalog_rows_visible_in_db(
             &ctx.pool,
             &ctx.txns,
             &snapshot,
             ctx.client_id,
+            self.scope_db_oid(),
             PG_NAMESPACE_OID_INDEX_OID,
             vec![crate::include::access::scankey::ScanKeyData {
                 attribute_number: 1,

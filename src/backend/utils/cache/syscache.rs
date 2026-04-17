@@ -12,6 +12,41 @@ use crate::include::catalog::{
 };
 use crate::pgrust::database::Database;
 
+fn merge_catcaches(shared: CatCache, local: CatCache) -> CatCache {
+    CatCache::from_rows(
+        local.namespace_rows(),
+        local.class_rows(),
+        local.attribute_rows(),
+        local.attrdef_rows(),
+        local.depend_rows(),
+        local.inherit_rows(),
+        local.index_rows(),
+        local.rewrite_rows(),
+        local.am_rows(),
+        local.amop_rows(),
+        local.amproc_rows(),
+        shared.authid_rows(),
+        shared.auth_members_rows(),
+        local.language_rows(),
+        local.ts_parser_rows(),
+        local.ts_template_rows(),
+        local.ts_dict_rows(),
+        local.ts_config_rows(),
+        local.ts_config_map_rows(),
+        local.constraint_rows(),
+        local.operator_rows(),
+        local.opclass_rows(),
+        local.opfamily_rows(),
+        local.proc_rows(),
+        local.cast_rows(),
+        local.collation_rows(),
+        shared.database_rows(),
+        shared.tablespace_rows(),
+        local.statistic_rows(),
+        local.type_rows(),
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendCacheContext {
     Autocommit,
@@ -64,9 +99,16 @@ pub fn backend_catcache(
     let snapshot = get_catalog_snapshot(db, client_id, txn_ctx, None)
         .ok_or_else(|| CatalogError::Io("catalog snapshot failed".into()))?;
     let cache = {
-        let store = db.catalog.read();
         let txns = db.txns.read();
-        store.catcache_with_snapshot(&db.pool, &txns, &snapshot, client_id)?
+        let shared = db
+            .shared_catalog
+            .read()
+            .catcache_with_snapshot(&db.pool, &txns, &snapshot, client_id)?;
+        let local = db
+            .catalog
+            .read()
+            .catcache_with_snapshot(&db.pool, &txns, &snapshot, client_id)?;
+        merge_catcaches(shared, local)
     };
 
     let mut states = db.backend_cache_states.write();
@@ -93,7 +135,8 @@ pub fn backend_relcache(
         return Ok(cache);
     }
 
-    let relcache = RelCache::from_catcache(&backend_catcache(db, client_id, txn_ctx)?)?;
+    let relcache =
+        RelCache::from_catcache_in_db(&backend_catcache(db, client_id, txn_ctx)?, db.database_oid)?;
     let mut states = db.backend_cache_states.write();
     let state = states.entry(client_id).or_default();
     state.cache_ctx = Some(cache_ctx);
