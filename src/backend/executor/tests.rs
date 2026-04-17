@@ -8056,6 +8056,85 @@ fn array_subscript_partial_slices_on_zero_based_arrays_match_postgres() {
         ))]],
     );
 }
+
+#[test]
+fn array_subscript_mixed_slice_scalar_queries_match_postgres() {
+    let base = temp_dir("array_subscript_mixed_slice_scalar_queries");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select ('{{1,2,3},{4,5,6},{7,8,9}}'::int[])[1:2][2]",
+        )
+        .unwrap(),
+        vec![vec![Value::PgArray(ArrayValue::from_dimensions(
+            vec![
+                ArrayDimension {
+                    lower_bound: 1,
+                    length: 2,
+                },
+                ArrayDimension {
+                    lower_bound: 1,
+                    length: 2,
+                },
+            ],
+            vec![
+                Value::Int32(1),
+                Value::Int32(2),
+                Value::Int32(4),
+                Value::Int32(5),
+            ],
+        ))]],
+    );
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select ('[0:2][0:2]={{1,2,3},{4,5,6},{7,8,9}}'::int[])[1:2][2]",
+        )
+        .unwrap(),
+        vec![vec![Value::PgArray(ArrayValue::from_dimensions(
+            vec![
+                ArrayDimension {
+                    lower_bound: 1,
+                    length: 2,
+                },
+                ArrayDimension {
+                    lower_bound: 1,
+                    length: 2,
+                },
+            ],
+            vec![
+                Value::Int32(5),
+                Value::Int32(6),
+                Value::Int32(8),
+                Value::Int32(9),
+            ],
+        ))]],
+    );
+}
+
+#[test]
+fn array_subscript_null_scalar_index_returns_null() {
+    let base = temp_dir("array_subscript_null_scalar_index_returns_null");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select ('{{{1},{2},{3}},{{4},{5},{6}}}'::int[])[1][NULL][1]",
+        )
+        .unwrap(),
+        vec![vec![Value::Null]],
+    );
+}
 #[test]
 fn regex_filters_rows_in_where_clause() {
     let base = temp_dir("regex_filter_where");
