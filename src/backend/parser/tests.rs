@@ -1777,6 +1777,20 @@ fn parse_qualified_star_select_target() {
 }
 
 #[test]
+fn parse_qualified_star_inside_row_expr() {
+    let stmt = parse_select("select row(p.*, 42) from people p").unwrap();
+    assert_eq!(stmt.targets.len(), 1);
+    match &stmt.targets[0].expr {
+        SqlExpr::Row(items) => {
+            assert_eq!(items.len(), 2);
+            assert!(matches!(&items[0], SqlExpr::Column(name) if name == "p.*"));
+            assert!(matches!(&items[1], SqlExpr::IntegerLiteral(value) if value == "42"));
+        }
+        other => panic!("expected row expr, got {other:?}"),
+    }
+}
+
+#[test]
 fn parse_shift_expression_precedence() {
     let stmt = parse_select("select (-1::int2<<15)::text").unwrap();
     assert_eq!(stmt.targets[0].output_name, "text");

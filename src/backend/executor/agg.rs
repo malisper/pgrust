@@ -526,7 +526,7 @@ fn json_object_agg_key(key: &Value) -> String {
         }
         Value::TsVector(v) => crate::backend::executor::render_tsvector_text(v),
         Value::TsQuery(v) => crate::backend::executor::render_tsquery_text(v),
-        Value::Array(_) | Value::PgArray(_) => value_to_json_text(key),
+        Value::Array(_) | Value::PgArray(_) | Value::Record(_) => value_to_json_text(key),
     }
 }
 
@@ -585,6 +585,13 @@ fn value_to_json_text(value: &Value) -> String {
             serde_json::to_string(&crate::backend::executor::render_tsquery_text(v)).unwrap()
         }
         Value::Array(items) => render_json_array(items),
+        Value::Record(record) => render_json_object(
+            &record
+                .fields
+                .iter()
+                .map(|(key, value)| (Value::Text(key.clone().into()), value.clone()))
+                .collect::<Vec<_>>(),
+        ),
         Value::PgArray(array) => render_json_array(&array.to_nested_values()),
     }
 }

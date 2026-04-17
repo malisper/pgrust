@@ -490,6 +490,12 @@ pub(super) fn shift_expr_rtindexes(expr: Expr, offset: usize) -> Expr {
                 .collect(),
             array_type,
         },
+        Expr::Row { fields } => Expr::Row {
+            fields: fields
+                .into_iter()
+                .map(|(name, expr)| (name, shift_expr_rtindexes(expr, offset)))
+                .collect(),
+        },
         Expr::SubLink(sublink) => Expr::SubLink(Box::new(SubLink {
             testexpr: sublink
                 .testexpr
@@ -703,6 +709,17 @@ pub(super) fn rewrite_local_vars_for_output_exprs(
                 .map(|expr| rewrite_local_vars_for_output_exprs(expr, source_varno, output_exprs))
                 .collect(),
             array_type,
+        },
+        Expr::Row { fields } => Expr::Row {
+            fields: fields
+                .into_iter()
+                .map(|(name, expr)| {
+                    (
+                        name,
+                        rewrite_local_vars_for_output_exprs(expr, source_varno, output_exprs),
+                    )
+                })
+                .collect(),
         },
         Expr::SubLink(sublink) => Expr::SubLink(Box::new(SubLink {
             testexpr: sublink

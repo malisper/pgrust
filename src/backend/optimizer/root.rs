@@ -343,6 +343,11 @@ fn collect_group_input_exprs(expr: &Expr, group_by: &[Expr], exprs: &mut Vec<Exp
                 collect_group_input_exprs(element, group_by, exprs);
             }
         }
+        Expr::Row { fields } => {
+            for (_, expr) in fields {
+                collect_group_input_exprs(expr, group_by, exprs);
+            }
+        }
         Expr::ArraySubscript { array, subscripts } => {
             collect_group_input_exprs(array, group_by, exprs);
             for subscript in subscripts {
@@ -450,6 +455,11 @@ fn collect_supporting_inputs(expr: &Expr, exprs: &mut Vec<Expr>) {
         Expr::ArrayLiteral { elements, .. } => {
             for element in elements {
                 collect_supporting_inputs(element, exprs);
+            }
+        }
+        Expr::Row { fields } => {
+            for (_, expr) in fields {
+                collect_supporting_inputs(expr, exprs);
             }
         }
         Expr::ArraySubscript { array, subscripts } => {
@@ -686,6 +696,11 @@ fn collect_query_outer_refs_expr(expr: &Expr, levelsup: usize, exprs: &mut Vec<E
         Expr::ArrayLiteral { elements, .. } => {
             for element in elements {
                 collect_query_outer_refs_expr(element, levelsup, exprs);
+            }
+        }
+        Expr::Row { fields } => {
+            for (_, expr) in fields {
+                collect_query_outer_refs_expr(expr, levelsup, exprs);
             }
         }
         Expr::ArraySubscript { array, subscripts } => {

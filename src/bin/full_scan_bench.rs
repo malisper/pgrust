@@ -301,6 +301,11 @@ fn value_checksum(value: &Value) -> i64 {
         Value::Bool(v) => i64::from(*v),
         Value::Array(items) => items.iter().map(value_checksum).sum(),
         Value::PgArray(array) => array.elements.iter().map(value_checksum).sum(),
+        Value::Record(record) => record
+            .fields
+            .iter()
+            .map(|(name, value)| name.bytes().map(i64::from).sum::<i64>() + value_checksum(value))
+            .sum(),
         Value::Null => 0,
     }
 }

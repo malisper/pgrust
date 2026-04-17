@@ -12,7 +12,9 @@ mod ops;
 mod subquery;
 mod targets;
 
-use self::func::{bind_scalar_function_call, bind_user_defined_scalar_function_call};
+use self::func::{
+    bind_row_to_json_call, bind_scalar_function_call, bind_user_defined_scalar_function_call,
+};
 use self::json::{
     bind_json_binary_expr, bind_jsonb_contained_expr, bind_jsonb_contains_expr,
     bind_jsonb_exists_all_expr, bind_jsonb_exists_any_expr, bind_jsonb_exists_expr,
@@ -149,6 +151,12 @@ pub(super) fn raise_expr_varlevels(expr: Expr, levels: usize) -> Expr {
                 .collect(),
             array_type,
         },
+        Expr::Row { fields } => Expr::Row {
+            fields: fields
+                .into_iter()
+                .map(|(name, expr)| (name, raise_expr_varlevels(expr, levels)))
+                .collect(),
+        },
         Expr::Case(case_expr) => Expr::Case(Box::new(crate::include::nodes::primnodes::CaseExpr {
             arg: case_expr
                 .arg
@@ -193,7 +201,12 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
 ) -> Result<Expr, ParseError> {
     Ok(match expr {
         SqlExpr::Column(name) => {
-            if let Some(system_column) =
+            if let Some(relation_name) = name.strip_suffix(".*") {
+                let fields =
+                    resolve_relation_row_expr_with_outer(scope, outer_scopes, relation_name)
+                        .ok_or_else(|| ParseError::UnknownColumn(name.clone()))?;
+                Expr::Row { fields }
+            } else if let Some(system_column) =
                 resolve_system_column_with_outer(scope, outer_scopes, name)?
             {
                 Expr::Var(crate::include::nodes::primnodes::Var {
@@ -230,11 +243,34 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
         SqlExpr::Const(value) => Expr::Const(value.clone()),
         SqlExpr::IntegerLiteral(value) => Expr::Const(bind_integer_literal(value)?),
         SqlExpr::NumericLiteral(value) => Expr::Const(bind_numeric_literal(value)?),
-        SqlExpr::Row(_) => {
-            return Err(ParseError::UnexpectedToken {
-                expected: "implemented row expression",
-                actual: "ROW(...)".into(),
-            });
+        SqlExpr::Row(items) => {
+            let mut field_exprs = Vec::new();
+            for item in items {
+                if let SqlExpr::Column(name) = item
+                    && let Some(relation_name) = name.strip_suffix(".*")
+                {
+                    let fields =
+                        resolve_relation_row_expr_with_outer(scope, outer_scopes, relation_name)
+                            .ok_or_else(|| ParseError::UnknownColumn(name.clone()))?;
+                    field_exprs.extend(fields.into_iter().map(|(_, expr)| expr));
+                    continue;
+                }
+                field_exprs.push(bind_expr_with_outer_and_ctes(
+                    item,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?);
+            }
+            Expr::Row {
+                fields: field_exprs
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, expr)| (format!("f{}", index + 1), expr))
+                    .collect(),
+            }
         }
         SqlExpr::BinaryOperator { op, left, right } => match op.as_str() {
             "@@" => bind_overloaded_binary_expr(
@@ -1285,6 +1321,18 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             args,
             func_variadic,
         } => {
+            if name.eq_ignore_ascii_case("row_to_json") {
+                return bind_row_to_json_call(
+                    name,
+                    args,
+                    *func_variadic,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                );
+            }
             if name.eq_ignore_ascii_case("coalesce") {
                 return bind_coalesce_call(args, scope, catalog, outer_scopes, grouped_outer, ctes);
             }

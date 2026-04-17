@@ -157,6 +157,10 @@ fn encode_index_value(
             "unsupported index key type {:?}",
             sql_type.kind
         ))),
+        Value::Record(_) => Err(CatalogError::Io(format!(
+            "unsupported index key type {:?}",
+            sql_type.kind
+        ))),
     }
 }
 
