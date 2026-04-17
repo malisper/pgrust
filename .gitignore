@@ -7,3 +7,4 @@ web/wasm-demo/pkg/pgrust_bg.wasm
 .dolt/
 *.db
 .beads-credential-key
+/issues.jsonl
