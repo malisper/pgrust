@@ -27,6 +27,18 @@ impl Database {
                 })?;
                 Ok(StatementResult::AffectedRows(0))
             }
+            GrantObjectPrivilege::AllPrivilegesOnSchema => {
+                self.backend_catcache(client_id, None)
+                    .map_err(map_catalog_error)?
+                    .namespace_by_name(&stmt.object_name)
+                    .ok_or_else(|| ExecError::DetailedError {
+                        message: format!("schema \"{}\" does not exist", stmt.object_name),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "3F000",
+                    })?;
+                Ok(StatementResult::AffectedRows(0))
+            }
         }
     }
 
@@ -45,6 +57,18 @@ impl Database {
                 catalog.lookup_relation(&stmt.object_name).ok_or_else(|| {
                     ExecError::Parse(ParseError::TableDoesNotExist(stmt.object_name.clone()))
                 })?;
+                Ok(StatementResult::AffectedRows(0))
+            }
+            GrantObjectPrivilege::AllPrivilegesOnSchema => {
+                self.backend_catcache(client_id, None)
+                    .map_err(map_catalog_error)?
+                    .namespace_by_name(&stmt.object_name)
+                    .ok_or_else(|| ExecError::DetailedError {
+                        message: format!("schema \"{}\" does not exist", stmt.object_name),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "3F000",
+                    })?;
                 Ok(StatementResult::AffectedRows(0))
             }
         }

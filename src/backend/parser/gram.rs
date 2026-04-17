@@ -253,6 +253,9 @@ fn build_grant_statement(sql: &str) -> Result<Statement, ParseError> {
     if lowered.starts_with("grant create on database ") {
         return Ok(Statement::GrantObject(build_grant_database_create(sql)?));
     }
+    if lowered.starts_with("grant all on schema ") {
+        return Ok(Statement::GrantObject(build_grant_schema_all(sql)?));
+    }
     if lowered.starts_with("grant all privileges on ") {
         return Ok(Statement::GrantObject(build_grant_table_all_privileges(sql)?));
     }
@@ -300,6 +303,22 @@ fn build_grant_table_all_privileges(sql: &str) -> Result<GrantObjectStatement, P
     let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
     Ok(GrantObjectStatement {
         privilege: GrantObjectPrivilege::AllPrivilegesOnTable,
+        object_name: normalize_simple_identifier(object_name)?,
+        grantee_names,
+        with_grant_option,
+    })
+}
+
+fn build_grant_schema_all(sql: &str) -> Result<GrantObjectStatement, ParseError> {
+    let prefix = "grant all on schema ";
+    let rest = sql
+        .get(prefix.len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let (object_name, rest) = split_once_keyword(rest, "to")?;
+    let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
+    Ok(GrantObjectStatement {
+        privilege: GrantObjectPrivilege::AllPrivilegesOnSchema,
         object_name: normalize_simple_identifier(object_name)?,
         grantee_names,
         with_grant_option,
