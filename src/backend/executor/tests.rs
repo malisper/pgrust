@@ -10888,6 +10888,33 @@ fn jsonpath_expression_method_calls_parse() {
 }
 
 #[test]
+fn jsonpath_builtin_method_calls_parse() {
+    let base = temp_dir("jsonpath_builtin_method_calls_parse");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select '$.double().floor().ceiling().abs()'::jsonpath, '$.boolean()'::jsonpath, '$.string()'::jsonpath",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::JsonPath("$.double().floor().ceiling().abs()".into()),
+                    Value::JsonPath("$.boolean()".into()),
+                    Value::JsonPath("$.string()".into()),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn jsonpath_expression_method_calls_work() {
     let base = temp_dir("jsonpath_expression_method_calls");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -10928,6 +10955,81 @@ fn jsonpath_expression_method_calls_work() {
         }
         other => panic!("expected query result, got {:?}", other),
     }
+}
+
+#[test]
+fn jsonpath_builtin_method_calls_work() {
+    let base = temp_dir("jsonpath_builtin_method_calls");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_path_query('1.23', '$.double()'), jsonb_path_query_array('[1, \"yes\", false]', '$[*].boolean()'), jsonb_path_query_array('[1.23, \"yes\", false]', '$[*].string().type()')",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows.len(), 1);
+            match &rows[0][0] {
+                Value::Jsonb(bytes) => assert_eq!(
+                    crate::backend::executor::jsonb::render_jsonb_bytes(bytes).unwrap(),
+                    "1.23"
+                ),
+                other => panic!("expected jsonb, got {:?}", other),
+            }
+            match &rows[0][1] {
+                Value::Jsonb(bytes) => assert_eq!(
+                    crate::backend::executor::jsonb::render_jsonb_bytes(bytes).unwrap(),
+                    "[true, true, false]"
+                ),
+                other => panic!("expected jsonb, got {:?}", other),
+            }
+            match &rows[0][2] {
+                Value::Jsonb(bytes) => assert_eq!(
+                    crate::backend::executor::jsonb::render_jsonb_bytes(bytes).unwrap(),
+                    "[\"string\", \"string\", \"string\"]"
+                ),
+                other => panic!("expected jsonb, got {:?}", other),
+            }
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn jsonpath_builtin_method_calls_errors() {
+    let base = temp_dir("jsonpath_builtin_method_calls_errors");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_path_query('\"nan\"', '$.double()')",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::InvalidStorageValue { column, details }
+            if column == "jsonpath"
+                && details == "NaN or Infinity is not allowed for jsonpath item method .double()"
+    ));
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_path_query('1.23', '$.boolean()')",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::InvalidStorageValue { column, details }
+            if column == "jsonpath"
+                && details == "argument \"1.23\" of jsonpath item method .boolean() is invalid for type boolean"
+    ));
 }
 
 #[test]
