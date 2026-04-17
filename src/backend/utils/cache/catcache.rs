@@ -243,6 +243,7 @@ impl CatCache {
                 let composite_type = composite_type_row(
                     relname,
                     entry.row_type_oid,
+                    entry.namespace_oid,
                     entry.relation_oid,
                     entry.array_type_oid,
                 );
@@ -256,6 +257,7 @@ impl CatCache {
                     let array_type = composite_array_type_row(
                         relname,
                         entry.array_type_oid,
+                        entry.namespace_oid,
                         entry.row_type_oid,
                         entry.relation_oid,
                     );

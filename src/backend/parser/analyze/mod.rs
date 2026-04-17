@@ -605,6 +605,7 @@ fn composite_type_rows_from_relcache(relcache: &RelCache) -> Vec<PgTypeRow> {
                 rows.push(crate::include::catalog::composite_type_row(
                     relname,
                     entry.row_type_oid,
+                    entry.namespace_oid,
                     entry.relation_oid,
                     entry.array_type_oid,
                 ));
@@ -613,6 +614,7 @@ fn composite_type_rows_from_relcache(relcache: &RelCache) -> Vec<PgTypeRow> {
                 rows.push(crate::include::catalog::composite_array_type_row(
                     relname,
                     entry.array_type_oid,
+                    entry.namespace_oid,
                     entry.row_type_oid,
                     entry.relation_oid,
                 ));

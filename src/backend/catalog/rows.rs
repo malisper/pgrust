@@ -239,6 +239,7 @@ pub(crate) fn physical_catalog_rows_for_catalog_entry(
         rows.types.push(composite_type_row(
             relname,
             entry.row_type_oid,
+            entry.namespace_oid,
             entry.relation_oid,
             entry.array_type_oid,
         ));
@@ -247,6 +248,7 @@ pub(crate) fn physical_catalog_rows_for_catalog_entry(
         rows.types.push(composite_array_type_row(
             relname,
             entry.array_type_oid,
+            entry.namespace_oid,
             entry.row_type_oid,
             entry.relation_oid,
         ));
