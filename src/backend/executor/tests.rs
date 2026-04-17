@@ -8620,9 +8620,7 @@ fn array_subscript_rejects_more_than_max_dimensions() {
         "select ('{}'::int[])[1][2][3][4][5][6][7]",
     ) {
         Err(ExecError::DetailedError {
-            message,
-            sqlstate,
-            ..
+            message, sqlstate, ..
         }) => {
             assert_eq!(
                 message,
