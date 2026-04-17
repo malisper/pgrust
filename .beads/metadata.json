@@ -1,7 +1,7 @@
 {
   "database": "dolt",
   "backend": "dolt",
-  "dolt_mode": "embedded",
+  "dolt_mode": "server",
   "dolt_database": "pgrust",
-  "project_id": "caa20f51-b10e-4ecd-9890-d96715f99cf0"
+  "project_id": "5b4f939f-c1b8-4521-a4c0-ad5f79c03e24"
 }
