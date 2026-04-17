@@ -5742,6 +5742,18 @@ fn parse_sql_string_continuation_literal() {
 }
 
 #[test]
+fn parse_sql_string_continuation_rejects_comment_between_literals() {
+    match parse_statement(
+        "select 'first line'\n' - next line' /* blocked */\n' - third line' as joined",
+    ) {
+        Err(ParseError::UnexpectedToken { actual, .. }) => {
+            assert_eq!(actual, "syntax error at or near \"' - third line'\"");
+        }
+        other => panic!("expected syntax error, got {other:?}"),
+    }
+}
+
+#[test]
 fn parse_unicode_string_and_identifier_literals() {
     let stmt = parse_statement("select U&'d\\0061t\\+000061' as U&\"d\\0061t\\+000061\"").unwrap();
     match stmt {

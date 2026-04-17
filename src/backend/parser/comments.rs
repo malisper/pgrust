@@ -193,6 +193,70 @@ pub(crate) fn normalize_string_continuation_preserving_layout(sql: &str) -> Stri
     out
 }
 
+pub(crate) fn find_comment_blocked_string_continuation(sql: &str) -> Option<String> {
+    let bytes = sql.as_bytes();
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        if bytes[i] != b'\'' {
+            let ch = sql[i..].chars().next().expect("valid utf-8");
+            i += ch.len_utf8();
+            continue;
+        }
+
+        let (_, next) = parse_plain_string_literal(sql, i);
+        i = next;
+
+        let mut j = i;
+        let mut saw_newline = false;
+        let mut saw_comment = false;
+
+        loop {
+            while j < bytes.len() && matches!(bytes[j], b' ' | b'\t' | b'\r' | b'\n') {
+                saw_newline |= matches!(bytes[j], b'\r' | b'\n');
+                j += 1;
+            }
+
+            if starts_line_comment(bytes, j) {
+                saw_comment = true;
+                j += 2;
+                while j < bytes.len() && !matches!(bytes[j], b'\r' | b'\n') {
+                    j += 1;
+                }
+                continue;
+            }
+
+            if starts_block_comment(bytes, j) {
+                saw_comment = true;
+                j += 2;
+                let mut depth = 1usize;
+                while j < bytes.len() && depth > 0 {
+                    if starts_block_comment(bytes, j) {
+                        depth += 1;
+                        j += 2;
+                    } else if ends_block_comment(bytes, j) {
+                        depth -= 1;
+                        j += 2;
+                    } else {
+                        saw_newline |= matches!(bytes[j], b'\r' | b'\n');
+                        j += 1;
+                    }
+                }
+                continue;
+            }
+
+            break;
+        }
+
+        if saw_comment && saw_newline && j < bytes.len() && bytes[j] == b'\'' {
+            let (_, token_end) = parse_plain_string_literal(sql, j);
+            return Some(sql[j..token_end].to_string());
+        }
+    }
+
+    None
+}
+
 pub(crate) fn normalize_position_syntax_preserving_layout(sql: &str) -> String {
     let bytes = sql.as_bytes();
     let mut out = sql.as_bytes().to_vec();
@@ -516,8 +580,8 @@ fn is_identifier_continue(byte: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        normalize_position_syntax_preserving_layout, sql_is_effectively_empty_after_comments,
-        strip_sql_comments_preserving_layout,
+        find_comment_blocked_string_continuation, normalize_position_syntax_preserving_layout,
+        sql_is_effectively_empty_after_comments, strip_sql_comments_preserving_layout,
     };
 
     #[test]
@@ -552,6 +616,15 @@ mod tests {
         assert_eq!(
             normalize_position_syntax_preserving_layout(sql),
             "select position('bc' ,  'abcd')"
+        );
+    }
+
+    #[test]
+    fn finds_comment_blocking_string_continuation() {
+        let sql = "select 'first line'\n' - next line' /* blocked */\n' - third line'";
+        assert_eq!(
+            find_comment_blocked_string_continuation(sql).as_deref(),
+            Some("' - third line'")
         );
     }
 }
