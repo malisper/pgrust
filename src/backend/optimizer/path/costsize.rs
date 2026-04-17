@@ -70,6 +70,43 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                     children,
                 }
             }
+            Path::SetOp {
+                slot_id,
+                op,
+                output_columns,
+                children,
+                ..
+            } => {
+                let children = children
+                    .into_iter()
+                    .map(|child| optimize_path(child, catalog))
+                    .collect::<Vec<_>>();
+                let startup_cost = children
+                    .iter()
+                    .map(|child| child.plan_info().startup_cost.as_f64())
+                    .fold(0.0, f64::max);
+                let total_cost = children
+                    .iter()
+                    .map(|child| child.plan_info().total_cost.as_f64())
+                    .sum::<f64>();
+                let rows = clamp_rows(
+                    children
+                        .iter()
+                        .map(|child| child.plan_info().plan_rows.as_f64())
+                        .sum::<f64>(),
+                );
+                let width = output_columns
+                    .iter()
+                    .map(|column| estimate_sql_type_width(column.sql_type))
+                    .sum();
+                Path::SetOp {
+                    plan_info: PlanEstimate::new(startup_cost, total_cost, rows, width),
+                    slot_id,
+                    op,
+                    output_columns,
+                    children,
+                }
+            }
             Path::SeqScan {
                 source_id,
                 rel,
@@ -1794,6 +1831,9 @@ fn expr_uses_immediate_outer_columns(expr: &Expr) -> bool {
         Expr::ArrayLiteral { elements, .. } => {
             elements.iter().any(expr_uses_immediate_outer_columns)
         }
+        Expr::Row { fields } => fields
+            .iter()
+            .any(|(_, expr)| expr_uses_immediate_outer_columns(expr)),
         Expr::ArraySubscript { array, subscripts } => {
             expr_uses_immediate_outer_columns(array)
                 || subscripts.iter().any(|subscript| {
@@ -1849,7 +1889,9 @@ fn path_uses_immediate_outer_columns(path: &Path) -> bool {
         | Path::SeqScan { .. }
         | Path::IndexScan { .. }
         | Path::WorkTableScan { .. } => false,
-        Path::Append { children, .. } => children.iter().any(path_uses_immediate_outer_columns),
+        Path::Append { children, .. } | Path::SetOp { children, .. } => {
+            children.iter().any(path_uses_immediate_outer_columns)
+        }
         Path::Filter {
             input, predicate, ..
         } => {

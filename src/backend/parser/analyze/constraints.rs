@@ -748,6 +748,12 @@ fn reject_unsupported_check_expr(expr: &Expr) -> Result<(), ParseError> {
             }
             Ok(())
         }
+        Expr::Row { fields } => {
+            for (_, field) in fields {
+                reject_unsupported_check_expr(field)?;
+            }
+            Ok(())
+        }
         Expr::ArraySubscript { array, subscripts } => {
             reject_unsupported_check_expr(array)?;
             for subscript in subscripts {

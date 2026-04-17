@@ -1731,8 +1731,6 @@ fn bind_set_operation_query_with_outer(
             actual: "simple SELECT".into(),
         });
     };
-    let SetOperator::Union { all } = set_operation.op;
-
     let mut inputs = set_operation
         .inputs
         .iter()
@@ -1842,12 +1840,6 @@ fn bind_set_operation_query_with_outer(
         })?
     };
     let sort_clause = build_sort_clause(sort_inputs, &target_list);
-    let group_by = if all {
-        Vec::new()
-    } else {
-        output_exprs.clone()
-    };
-
     Ok((
         Query {
             command_type: crate::include::executor::execdesc::CommandType::Select,
@@ -1855,7 +1847,7 @@ fn bind_set_operation_query_with_outer(
             jointree: None,
             target_list,
             where_qual: None,
-            group_by,
+            group_by: Vec::new(),
             accumulators: Vec::new(),
             having_qual: None,
             sort_clause,
@@ -1865,7 +1857,7 @@ fn bind_set_operation_query_with_outer(
             recursive_union: None,
             set_operation: Some(Box::new(SetOperationQuery {
                 output_desc: desc.clone(),
-                all,
+                op: stmt.set_operation.as_ref().expect("set operation").op,
                 inputs,
             })),
         },
