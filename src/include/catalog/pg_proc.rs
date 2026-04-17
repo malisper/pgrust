@@ -11,7 +11,7 @@ use crate::include::catalog::{
     POLYGON_TYPE_OID, RECORD_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIMESTAMP_TYPE_OID,
     TIMESTAMPTZ_TYPE_OID, TSQUERY_TYPE_OID, TSRANGE_TYPE_OID, TSTZRANGE_TYPE_OID, VARBIT_TYPE_OID,
 };
-use crate::include::nodes::primnodes::{AggFunc, BuiltinScalarFunction};
+use crate::include::nodes::primnodes::{AggFunc, BuiltinScalarFunction, BuiltinWindowFunction};
 use std::sync::OnceLock;
 
 const VOID_TYPE_OID: u32 = 2278;
@@ -169,6 +169,42 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             false,
             'f',
             'v',
+        ),
+        proc_row(
+            3100,
+            "row_number",
+            INT8_TYPE_OID,
+            "",
+            "window_row_number",
+            0,
+            false,
+            false,
+            'w',
+            'i',
+        ),
+        proc_row(
+            3101,
+            "rank",
+            INT8_TYPE_OID,
+            "",
+            "window_rank",
+            0,
+            false,
+            false,
+            'w',
+            'i',
+        ),
+        proc_row(
+            3102,
+            "dense_rank",
+            INT8_TYPE_OID,
+            "",
+            "window_dense_rank",
+            0,
+            false,
+            false,
+            'w',
+            'i',
         ),
         PgProcRow {
             pronargdefaults: 2,
@@ -1624,6 +1660,18 @@ pub fn builtin_aggregate_function_for_proc_oid(oid: u32) -> Option<AggFunc> {
         })
 }
 
+pub fn builtin_window_function_for_proc_oid(oid: u32) -> Option<BuiltinWindowFunction> {
+    bootstrap_pg_proc_rows()
+        .into_iter()
+        .find(|row| row.oid == oid && row.prokind == 'w')
+        .and_then(|row| window_func_for_proname(&row.proname))
+        .or_else(|| {
+            synthetic_window_proc_oids()
+                .iter()
+                .find_map(|(func, synthetic_oid)| (*synthetic_oid == oid).then_some(*func))
+        })
+}
+
 pub fn proc_oid_for_builtin_aggregate_function(func: AggFunc) -> Option<u32> {
     bootstrap_pg_proc_rows()
         .into_iter()
@@ -1631,6 +1679,18 @@ pub fn proc_oid_for_builtin_aggregate_function(func: AggFunc) -> Option<u32> {
         .map(|row| row.oid)
         .or_else(|| {
             synthetic_aggregate_proc_oids()
+                .iter()
+                .find_map(|(candidate, oid)| (*candidate == func).then_some(*oid))
+        })
+}
+
+pub fn proc_oid_for_builtin_window_function(func: BuiltinWindowFunction) -> Option<u32> {
+    bootstrap_pg_proc_rows()
+        .into_iter()
+        .find(|row| row.prokind == 'w' && window_func_for_proname(&row.proname) == Some(func))
+        .map(|row| row.oid)
+        .or_else(|| {
+            synthetic_window_proc_oids()
                 .iter()
                 .find_map(|(candidate, oid)| (*candidate == func).then_some(*oid))
         })
@@ -1693,6 +1753,23 @@ fn synthetic_aggregate_proc_oids() -> &'static Vec<(AggFunc, u32)> {
     })
 }
 
+fn synthetic_window_proc_oids() -> &'static Vec<(BuiltinWindowFunction, u32)> {
+    static OIDS: OnceLock<Vec<(BuiltinWindowFunction, u32)>> = OnceLock::new();
+    OIDS.get_or_init(|| {
+        // :HACK: See synthetic_scalar_proc_oids().
+        const BASE: u32 = 920_000;
+        [
+            BuiltinWindowFunction::RowNumber,
+            BuiltinWindowFunction::Rank,
+            BuiltinWindowFunction::DenseRank,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, func)| (func, BASE + index as u32))
+        .collect()
+    })
+}
+
 fn aggregate_func_for_proname(name: &str) -> Option<AggFunc> {
     match name.to_ascii_lowercase().as_str() {
         "count" => Some(AggFunc::Count),
@@ -1709,6 +1786,15 @@ fn aggregate_func_for_proname(name: &str) -> Option<AggFunc> {
         "json_object_agg" => Some(AggFunc::JsonObjectAgg),
         "jsonb_object_agg" => Some(AggFunc::JsonbObjectAgg),
         "range_intersect_agg" => Some(AggFunc::RangeIntersectAgg),
+        _ => None,
+    }
+}
+
+fn window_func_for_proname(name: &str) -> Option<BuiltinWindowFunction> {
+    match name.to_ascii_lowercase().as_str() {
+        "row_number" => Some(BuiltinWindowFunction::RowNumber),
+        "rank" => Some(BuiltinWindowFunction::Rank),
+        "dense_rank" => Some(BuiltinWindowFunction::DenseRank),
         _ => None,
     }
 }

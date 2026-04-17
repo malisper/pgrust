@@ -6,7 +6,7 @@ use crate::include::nodes::execnodes::{
     AggregateState, AppendState, CteScanState, FilterState, FunctionScanState, HashJoinState,
     HashState, IndexScanState, LimitState, NestedLoopJoinState, NodeExecStats, OrderByState,
     ProjectSetState, ProjectionState, RecursiveUnionState, RecursiveWorkTable, ResultState,
-    SeqScanState, SetOpState, SubqueryScanState, ValuesState, WorkTableScanState,
+    SeqScanState, SetOpState, SubqueryScanState, ValuesState, WindowAggState, WorkTableScanState,
 };
 use crate::backend::parser::SqlType;
 use crate::include::nodes::parsenodes::SqlTypeKind;
@@ -24,6 +24,16 @@ fn expr_uses_outer_columns(expr: &Expr) -> bool {
                     .aggfilter
                     .as_ref()
                     .is_some_and(expr_uses_outer_columns)
+        }
+        Expr::WindowFunc(window_func) => {
+            window_func.args.iter().any(expr_uses_outer_columns)
+                || match &window_func.kind {
+                    crate::include::nodes::primnodes::WindowFuncKind::Aggregate(aggref) => aggref
+                        .aggfilter
+                        .as_ref()
+                        .is_some_and(expr_uses_outer_columns),
+                    crate::include::nodes::primnodes::WindowFuncKind::Builtin(_) => false,
+                }
         }
         Expr::Op(op) => op.args.iter().any(expr_uses_outer_columns),
         Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_uses_outer_columns),
@@ -211,6 +221,24 @@ fn plan_uses_outer_columns(plan: &Plan) -> bool {
                 || group_by.iter().any(expr_uses_outer_columns)
                 || accumulators.iter().any(agg_accum_uses_outer_columns)
                 || having.as_ref().is_some_and(expr_uses_outer_columns)
+        }
+        Plan::WindowAgg { input, clause, .. } => {
+            plan_uses_outer_columns(input)
+                || clause.spec.partition_by.iter().any(expr_uses_outer_columns)
+                || clause
+                    .spec
+                    .order_by
+                    .iter()
+                    .any(|item| expr_uses_outer_columns(&item.expr))
+                || clause.functions.iter().any(|func| {
+                    func.args.iter().any(expr_uses_outer_columns)
+                        || match &func.kind {
+                            crate::include::nodes::primnodes::WindowFuncKind::Aggregate(
+                                aggref,
+                            ) => aggref.aggfilter.as_ref().is_some_and(expr_uses_outer_columns),
+                            crate::include::nodes::primnodes::WindowFuncKind::Builtin(_) => false,
+                        }
+                })
         }
         Plan::FunctionScan { call, .. } => set_returning_call_uses_outer_columns(call),
         Plan::SubqueryScan { input, .. } => plan_uses_outer_columns(input),
@@ -598,6 +626,21 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 stats: NodeExecStats::default(),
             })
         }
+        Plan::WindowAgg {
+            plan_info,
+            input,
+            clause,
+            output_columns,
+        } => Box::new(WindowAggState {
+            input: executor_start(*input),
+            clause,
+            output_columns: output_columns.into_iter().map(|c| c.name).collect(),
+            result_rows: None,
+            next_index: 0,
+            current_bindings: Vec::new(),
+            plan_info,
+            stats: NodeExecStats::default(),
+        }),
         Plan::FunctionScan { plan_info, call } => Box::new(FunctionScanState {
             output_columns: call
                 .output_columns()

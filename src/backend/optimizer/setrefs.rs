@@ -11,7 +11,8 @@ use crate::include::nodes::plannodes::{ExecParamSource, Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
     AggAccum, Aggref, BoolExpr, Expr, ExprArraySubscript, FuncExpr, INNER_VAR, OUTER_VAR, OpExpr,
     OrderByEntry, Param, ParamKind, QueryColumn, ScalarArrayOpExpr, SubPlan, TargetEntry, Var,
-    attrno_index, is_executor_special_varno, is_system_attr, user_attrno,
+    WindowClause, WindowFuncKind, attrno_index, is_executor_special_varno, is_system_attr,
+    user_attrno,
 };
 
 #[derive(Clone, Debug)]
@@ -360,6 +361,42 @@ fn build_project_set_tlist(
     }
 }
 
+fn build_window_tlist(
+    root: Option<&PlannerInfo>,
+    slot_id: usize,
+    input: &Path,
+    clause: &WindowClause,
+    output_columns: &[QueryColumn],
+) -> IndexedTlist {
+    let input_target = input.semantic_output_target();
+    let input_output_target = input.output_target();
+    let mut entries = Vec::with_capacity(output_columns.len());
+    for (index, column) in output_columns.iter().enumerate() {
+        let mut match_exprs = vec![slot_var(slot_id, user_attrno(index), column.sql_type)];
+        let ressortgroupref = input_output_target.sortgrouprefs.get(index).copied().unwrap_or(0);
+        if let Some(input_expr) = input_target.exprs.get(index) {
+            match_exprs.push(input_expr.clone());
+            match_exprs.push(fully_expand_output_expr_with_root(
+                root,
+                input_expr.clone(),
+                input,
+            ));
+            if let Some(root) = root {
+                match_exprs.push(flatten_join_alias_vars(root, input_expr.clone()));
+            }
+        } else if let Some(func) = clause.functions.get(index - input_target.exprs.len()) {
+            match_exprs.push(Expr::WindowFunc(Box::new(func.clone())));
+        }
+        entries.push(IndexedTlistEntry {
+            index,
+            sql_type: column.sql_type,
+            ressortgroupref,
+            match_exprs: dedup_match_exprs(match_exprs),
+        });
+    }
+    IndexedTlist { entries }
+}
+
 fn build_join_tlist(root: Option<&PlannerInfo>, left: &Path, right: &Path) -> IndexedTlist {
     let left_tlist = build_path_tlist(root, left);
     let right_tlist = build_path_tlist(root, right);
@@ -421,6 +458,13 @@ fn build_path_tlist(root: Option<&PlannerInfo>, path: &Path) -> IndexedTlist {
             accumulators,
             ..
         } => build_aggregate_tlist(root, *slot_id, group_by, accumulators),
+        Path::WindowAgg {
+            slot_id,
+            input,
+            clause,
+            output_columns,
+            ..
+        } => build_window_tlist(root, *slot_id, input, clause, output_columns),
         Path::ProjectSet {
             slot_id,
             input,
@@ -1805,6 +1849,9 @@ fn validate_executable_expr(expr: &Expr, plan_node: &str, field: &str) {
         Expr::Aggref(aggref) => {
             panic!("executable plan contains unresolved Aggref in {plan_node}.{field}: {aggref:?}")
         }
+        Expr::WindowFunc(window_func) => panic!(
+            "executable plan contains unresolved WindowFunc in {plan_node}.{field}: {window_func:?}"
+        ),
         Expr::SubLink(sublink) => panic!(
             "executable plan contains unresolved SubLink in {plan_node}.{field}: {sublink:?}"
         ),
@@ -2033,6 +2080,28 @@ fn validate_executable_plan(plan: &Plan) {
             }
             validate_executable_plan(input);
         }
+        Plan::WindowAgg { input, clause, .. } => {
+            for expr in &clause.spec.partition_by {
+                validate_executable_expr(expr, "WindowAgg", "partition_by");
+            }
+            for item in &clause.spec.order_by {
+                validate_executable_expr(&item.expr, "WindowAgg", "order_by");
+            }
+            for func in &clause.functions {
+                for arg in &func.args {
+                    validate_executable_expr(arg, "WindowAgg", "functions");
+                }
+                if let WindowFuncKind::Aggregate(aggref) = &func.kind {
+                    aggref.args.iter().for_each(|arg| {
+                        validate_executable_expr(arg, "WindowAgg", "functions")
+                    });
+                    if let Some(filter) = aggref.aggfilter.as_ref() {
+                        validate_executable_expr(filter, "WindowAgg", "functions");
+                    }
+                }
+            }
+            validate_executable_plan(input);
+        }
         Plan::FunctionScan { call, .. } => {
             validate_set_returning_call(call, "FunctionScan", "call");
         }
@@ -2076,6 +2145,21 @@ fn validate_planner_expr(expr: &Expr, path_node: &str, field: &str) {
             paramkind: ParamKind::Exec,
             ..
         }) => panic!("planner path contains PARAM_EXEC in {path_node}.{field}: {expr:?}"),
+        Expr::WindowFunc(window_func) => {
+            for arg in &window_func.args {
+                validate_planner_expr(arg, path_node, field);
+            }
+            if let crate::include::nodes::primnodes::WindowFuncKind::Aggregate(aggref) =
+                &window_func.kind
+            {
+                for arg in &aggref.args {
+                    validate_planner_expr(arg, path_node, field);
+                }
+                if let Some(filter) = aggref.aggfilter.as_ref() {
+                    validate_planner_expr(filter, path_node, field);
+                }
+            }
+        }
         Expr::Op(op) => op
             .args
             .iter()
@@ -2288,6 +2372,28 @@ fn validate_planner_path(path: &Path) {
             }
             if let Some(having) = having {
                 validate_planner_expr(having, "Aggregate", "having");
+            }
+            validate_planner_path(input);
+        }
+        Path::WindowAgg { input, clause, .. } => {
+            for expr in &clause.spec.partition_by {
+                validate_planner_expr(expr, "WindowAgg", "partition_by");
+            }
+            for item in &clause.spec.order_by {
+                validate_planner_expr(&item.expr, "WindowAgg", "order_by");
+            }
+            for func in &clause.functions {
+                for arg in &func.args {
+                    validate_planner_expr(arg, "WindowAgg", "functions");
+                }
+                if let WindowFuncKind::Aggregate(aggref) = &func.kind {
+                    aggref.args.iter().for_each(|arg| {
+                        validate_planner_expr(arg, "WindowAgg", "functions")
+                    });
+                    if let Some(filter) = aggref.aggfilter.as_ref() {
+                        validate_planner_expr(filter, "WindowAgg", "functions");
+                    }
+                }
             }
             validate_planner_path(input);
         }
@@ -2770,6 +2876,87 @@ fn set_aggregate_references(
     }
 }
 
+fn lower_window_clause_for_input(
+    ctx: &mut SetRefsContext<'_>,
+    input: &Path,
+    input_tlist: &IndexedTlist,
+    clause: WindowClause,
+) -> WindowClause {
+    let root = ctx.root;
+    let lower_expr_for_input = |ctx: &mut SetRefsContext<'_>, expr: Expr| {
+        let fixed = fix_upper_expr_for_input(root, expr, input, input_tlist);
+        lower_expr(
+            ctx,
+            fixed,
+            LowerMode::Input {
+                tlist: input_tlist,
+            },
+        )
+    };
+    WindowClause {
+        spec: crate::include::nodes::primnodes::WindowSpec {
+            partition_by: clause
+                .spec
+                .partition_by
+                .into_iter()
+                .map(|expr| lower_expr_for_input(ctx, expr))
+                .collect(),
+            order_by: clause
+                .spec
+                .order_by
+                .into_iter()
+                .map(|item| OrderByEntry {
+                    expr: lower_expr_for_input(ctx, item.expr),
+                    ..item
+                })
+                .collect(),
+        },
+        functions: clause
+            .functions
+            .into_iter()
+            .map(|func| crate::include::nodes::primnodes::WindowFuncExpr {
+                kind: match func.kind {
+                    WindowFuncKind::Aggregate(aggref) => WindowFuncKind::Aggregate(Aggref {
+                        args: aggref
+                            .args
+                            .into_iter()
+                            .map(|arg| lower_expr_for_input(ctx, arg))
+                            .collect(),
+                        aggfilter: aggref.aggfilter.map(|expr| lower_expr_for_input(ctx, expr)),
+                        ..aggref
+                    }),
+                    WindowFuncKind::Builtin(kind) => WindowFuncKind::Builtin(kind),
+                },
+                args: func
+                    .args
+                    .into_iter()
+                    .map(|arg| lower_expr_for_input(ctx, arg))
+                    .collect(),
+                ..func
+            })
+            .collect(),
+    }
+}
+
+fn set_window_references(
+    ctx: &mut SetRefsContext<'_>,
+    plan_info: PlanEstimate,
+    slot_id: usize,
+    input: Box<Path>,
+    clause: WindowClause,
+    output_columns: Vec<QueryColumn>,
+) -> Plan {
+    let input_tlist = build_path_tlist(ctx.root, &input);
+    let clause = lower_window_clause_for_input(ctx, &input, &input_tlist, clause);
+    let _ = build_window_tlist(ctx.root, slot_id, &input, &clause, &output_columns);
+    Plan::WindowAgg {
+        plan_info,
+        input: Box::new(set_plan_refs(ctx, *input)),
+        clause,
+        output_columns,
+    }
+}
+
 fn set_values_references(
     ctx: &mut SetRefsContext<'_>,
     plan_info: PlanEstimate,
@@ -3047,6 +3234,13 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             having,
             output_columns,
         ),
+        Path::WindowAgg {
+            plan_info,
+            slot_id,
+            input,
+            clause,
+            output_columns,
+        } => set_window_references(ctx, plan_info, slot_id, input, clause, output_columns),
         Path::Values {
             plan_info,
             rows,

@@ -302,6 +302,34 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                     output_columns,
                 }
             }
+            Path::WindowAgg {
+                input,
+                clause,
+                output_columns,
+                slot_id,
+                ..
+            } => {
+                let input = optimize_path(*input, catalog);
+                let input_info = input.plan_info();
+                let width = output_columns
+                    .iter()
+                    .map(|col| estimate_sql_type_width(col.sql_type))
+                    .sum();
+                let function_cost = clause.functions.len().max(1) as f64 * CPU_OPERATOR_COST;
+                Path::WindowAgg {
+                    plan_info: PlanEstimate::new(
+                        input_info.total_cost.as_f64(),
+                        input_info.total_cost.as_f64()
+                            + input_info.plan_rows.as_f64() * function_cost,
+                        input_info.plan_rows.as_f64(),
+                        width,
+                    ),
+                    slot_id,
+                    input: Box::new(input),
+                    clause,
+                    output_columns,
+                }
+            }
             Path::CteScan {
                 slot_id,
                 cte_id,
@@ -1822,6 +1850,16 @@ fn expr_uses_immediate_outer_columns(expr: &Expr) -> bool {
                     .as_ref()
                     .is_some_and(expr_uses_immediate_outer_columns)
         }
+        Expr::WindowFunc(window_func) => {
+            window_func.args.iter().any(expr_uses_immediate_outer_columns)
+                || match &window_func.kind {
+                    crate::include::nodes::primnodes::WindowFuncKind::Aggregate(aggref) => aggref
+                        .aggfilter
+                        .as_ref()
+                        .is_some_and(expr_uses_immediate_outer_columns),
+                    crate::include::nodes::primnodes::WindowFuncKind::Builtin(_) => false,
+                }
+        }
         Expr::Op(op) => op.args.iter().any(expr_uses_immediate_outer_columns),
         Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_uses_immediate_outer_columns),
         Expr::Case(case_expr) => {
@@ -1996,6 +2034,31 @@ fn path_uses_immediate_outer_columns(path: &Path) -> bool {
                 || having
                     .as_ref()
                     .is_some_and(expr_uses_immediate_outer_columns)
+        }
+        Path::WindowAgg { input, clause, .. } => {
+            path_uses_immediate_outer_columns(input)
+                || clause
+                    .spec
+                    .partition_by
+                    .iter()
+                    .any(expr_uses_immediate_outer_columns)
+                || clause
+                    .spec
+                    .order_by
+                    .iter()
+                    .any(|item| expr_uses_immediate_outer_columns(&item.expr))
+                || clause.functions.iter().any(|func| {
+                    func.args.iter().any(expr_uses_immediate_outer_columns)
+                        || match &func.kind {
+                            crate::include::nodes::primnodes::WindowFuncKind::Aggregate(
+                                aggref,
+                            ) => aggref
+                                .aggfilter
+                                .as_ref()
+                                .is_some_and(expr_uses_immediate_outer_columns),
+                            crate::include::nodes::primnodes::WindowFuncKind::Builtin(_) => false,
+                        }
+                })
         }
         Path::Values { rows, .. } => rows.iter().flatten().any(expr_uses_immediate_outer_columns),
         Path::FunctionScan { call, .. } => set_returning_call_uses_immediate_outer_columns(call),

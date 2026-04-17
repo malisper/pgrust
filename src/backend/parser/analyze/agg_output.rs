@@ -1,7 +1,242 @@
 use super::agg_output_special::*;
 use super::expr::raise_expr_varlevels;
 use super::*;
-use crate::include::nodes::primnodes::OpExprKind;
+use crate::include::nodes::primnodes::{OpExprKind, WindowFuncKind};
+
+fn current_window_state_or_error() -> Result<std::rc::Rc<std::cell::RefCell<WindowBindingState>>, ParseError> {
+    match current_window_state() {
+        Some(state) if windows_allowed() => Ok(state),
+        Some(_) => Err(nested_window_error()),
+        None => Err(window_not_allowed_error()),
+    }
+}
+
+fn bind_grouped_window_agg_call(
+    func: AggFunc,
+    args: &[SqlFunctionArg],
+    distinct: bool,
+    func_variadic: bool,
+    filter: Option<&SqlExpr>,
+    over: &RawWindowSpec,
+    group_by_exprs: &[SqlExpr],
+    group_key_exprs: &[Expr],
+    input_scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    agg_list: &[(AggFunc, Vec<SqlFunctionArg>, bool, bool, Option<SqlExpr>)],
+    n_keys: usize,
+) -> Result<Expr, ParseError> {
+    let state = current_window_state_or_error()?;
+    if aggregate_args_are_named(args) {
+        return Err(ParseError::UnexpectedToken {
+            expected: "aggregate arguments without names",
+            actual: func.name().into(),
+        });
+    }
+    let arg_values = args.iter().map(|arg| arg.value.clone()).collect::<Vec<_>>();
+    validate_aggregate_arity(func, &arg_values)?;
+    let arg_types = arg_values
+        .iter()
+        .map(|expr| {
+            infer_sql_expr_type(
+                expr,
+                input_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+            )
+        })
+        .collect::<Vec<_>>();
+    let resolved = resolve_aggregate_call(catalog, func, &arg_types, func_variadic);
+    let bound_args = arg_values
+        .iter()
+        .map(|expr| {
+            with_windows_disallowed(|| {
+                bind_agg_output_expr(
+                    expr,
+                    group_by_exprs,
+                    group_key_exprs,
+                    input_scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    agg_list,
+                    n_keys,
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let coerced_args = if let Some(resolved) = &resolved {
+        bound_args
+            .into_iter()
+            .zip(arg_types.iter().copied())
+            .zip(resolved.declared_arg_types.iter().copied())
+            .map(|((arg, actual_type), declared_type)| {
+                coerce_bound_expr(arg, actual_type, declared_type)
+            })
+            .collect()
+    } else {
+        bound_args
+    };
+    let bound_filter = filter
+        .map(|expr| {
+            with_windows_disallowed(|| {
+                bind_agg_output_expr(
+                    expr,
+                    group_by_exprs,
+                    group_key_exprs,
+                    input_scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    agg_list,
+                    n_keys,
+                )
+            })
+        })
+        .transpose()?;
+    let spec = bind_window_spec(over, |expr| {
+        bind_agg_output_expr(
+            expr,
+            group_by_exprs,
+            group_key_exprs,
+            input_scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            agg_list,
+            n_keys,
+        )
+    })?;
+    let result_type = aggregate_sql_type(func, arg_types.first().copied());
+    let kind = WindowFuncKind::Aggregate(crate::include::nodes::primnodes::Aggref {
+        aggfnoid: resolved
+            .as_ref()
+            .map(|call| call.proc_oid)
+            .or_else(|| proc_oid_for_builtin_aggregate_function(func))
+            .unwrap_or(0),
+        aggtype: result_type,
+        aggvariadic: resolved
+            .as_ref()
+            .map(|call| call.func_variadic)
+            .unwrap_or(func_variadic),
+        aggdistinct: distinct,
+        args: coerced_args.clone(),
+        aggfilter: bound_filter,
+        agglevelsup: 0,
+        aggno: 0,
+    });
+    Ok(register_window_expr(
+        &state,
+        spec,
+        kind,
+        coerced_args,
+        result_type,
+    ))
+}
+
+fn bind_grouped_window_func_call(
+    name: &str,
+    args: &[SqlFunctionArg],
+    func_variadic: bool,
+    over: &RawWindowSpec,
+    group_by_exprs: &[SqlExpr],
+    group_key_exprs: &[Expr],
+    input_scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    agg_list: &[(AggFunc, Vec<SqlFunctionArg>, bool, bool, Option<SqlExpr>)],
+    n_keys: usize,
+) -> Result<Expr, ParseError> {
+    let state = current_window_state_or_error()?;
+    let actual_types = args
+        .iter()
+        .map(|arg| {
+            infer_sql_expr_type(
+                &arg.value,
+                input_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+            )
+        })
+        .collect::<Vec<_>>();
+    let resolved = resolve_function_call(catalog, name, &actual_types, func_variadic)?;
+    if resolved.proretset || !matches!(resolved.prokind, 'w' | 'a') {
+        return Err(ParseError::UnexpectedToken {
+            expected: "window or aggregate function",
+            actual: name.to_string(),
+        });
+    }
+    let spec = bind_window_spec(over, |expr| {
+        bind_agg_output_expr(
+            expr,
+            group_by_exprs,
+            group_key_exprs,
+            input_scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            agg_list,
+            n_keys,
+        )
+    })?;
+    if let Some(window_impl) = resolved.window_impl {
+        if args.iter().any(|arg| arg.name.is_some()) {
+            return Err(ParseError::FeatureNotSupported(
+                "named arguments are not supported for window functions".into(),
+            ));
+        }
+        let bound_args = args
+            .iter()
+            .map(|arg| {
+                with_windows_disallowed(|| {
+                    bind_agg_output_expr(
+                        &arg.value,
+                        group_by_exprs,
+                        group_key_exprs,
+                        input_scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        agg_list,
+                        n_keys,
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        return Ok(register_window_expr(
+            &state,
+            spec,
+            WindowFuncKind::Builtin(window_impl),
+            bound_args,
+            resolved.result_type,
+        ));
+    }
+    if let Some(agg_impl) = resolved.agg_impl {
+        return bind_grouped_window_agg_call(
+            agg_impl,
+            args,
+            false,
+            resolved.func_variadic,
+            None,
+            over,
+            group_by_exprs,
+            group_key_exprs,
+            input_scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            agg_list,
+            n_keys,
+        );
+    }
+    Err(ParseError::FeatureNotSupported(format!(
+        "window function {name}"
+    )))
+}
 
 fn grouped_key_expr(group_key_exprs: &[Expr], index: usize) -> Expr {
     group_key_exprs.get(index).cloned().unwrap_or_else(|| {
@@ -71,7 +306,26 @@ pub(super) fn bind_agg_output_expr_in_clause(
             distinct,
             func_variadic,
             filter,
+            over,
         } => {
+            if let Some(raw_over) = over {
+                return bind_grouped_window_agg_call(
+                    *func,
+                    args,
+                    *distinct,
+                    *func_variadic,
+                    filter.as_deref(),
+                    raw_over,
+                    group_by_exprs,
+                    group_key_exprs,
+                    input_scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    agg_list,
+                    n_keys,
+                );
+            }
             let entry = (
                 *func,
                 args.clone(),
@@ -1659,18 +1913,42 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 .collect::<Result<_, ParseError>>()?,
         }),
         SqlExpr::Random => Ok(Expr::Random),
-        SqlExpr::FuncCall { name, args, .. } => bind_grouped_func_call(
+        SqlExpr::FuncCall {
             name,
             args,
-            group_by_exprs,
-            group_key_exprs,
-            input_scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            agg_list,
-            n_keys,
-        ),
+            func_variadic,
+            over,
+        } => {
+            if let Some(raw_over) = over {
+                bind_grouped_window_func_call(
+                    name,
+                    args,
+                    *func_variadic,
+                    raw_over,
+                    group_by_exprs,
+                    group_key_exprs,
+                    input_scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    agg_list,
+                    n_keys,
+                )
+            } else {
+                bind_grouped_func_call(
+                    name,
+                    args,
+                    group_by_exprs,
+                    group_key_exprs,
+                    input_scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    agg_list,
+                    n_keys,
+                )
+            }
+        }
         SqlExpr::Subscript { expr, index } => {
             let expr_type =
                 infer_sql_expr_type(expr, input_scope, catalog, outer_scopes, grouped_outer);

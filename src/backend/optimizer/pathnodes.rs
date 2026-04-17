@@ -7,9 +7,9 @@ use crate::include::nodes::datum::Value;
 use crate::include::nodes::pathnodes::{Path, PathKey, PathTarget, PlannerInfo};
 use crate::include::nodes::plannodes::{Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
-    AggAccum, BoolExpr, Expr, ExprArraySubscript, FuncExpr, JoinType, OpExpr, ProjectSetTarget,
-    QueryColumn, ScalarArrayOpExpr, SubLinkType, TargetEntry, Var, user_attrno,
-    Aggref,
+    AggAccum, Aggref, BoolExpr, Expr, ExprArraySubscript, FuncExpr, JoinType, OpExpr,
+    ProjectSetTarget, QueryColumn, ScalarArrayOpExpr, SubLinkType, TargetEntry, Var,
+    WindowClause, user_attrno,
 };
 
 use super::flatten_join_alias_vars;
@@ -61,6 +61,7 @@ impl Path {
             | Self::OrderBy { plan_info, .. }
             | Self::Limit { plan_info, .. }
             | Self::Aggregate { plan_info, .. }
+            | Self::WindowAgg { plan_info, .. }
             | Self::SubqueryScan { plan_info, .. }
             | Self::CteScan { plan_info, .. }
             | Self::WorkTableScan { plan_info, .. }
@@ -102,6 +103,7 @@ impl Path {
                 })
                 .collect(),
             Self::Aggregate { output_columns, .. } => output_columns.clone(),
+            Self::WindowAgg { output_columns, .. } => output_columns.clone(),
             Self::SubqueryScan { output_columns, .. } => output_columns.clone(),
             Self::CteScan { output_columns, .. } => output_columns.clone(),
             Self::WorkTableScan { output_columns, .. }
@@ -158,6 +160,11 @@ impl Path {
                 accumulators,
                 ..
             } => aggregate_output_vars(*slot_id, group_by, accumulators),
+            Self::WindowAgg {
+                slot_id,
+                output_columns,
+                ..
+            } => slot_output_vars(*slot_id, output_columns, |column| column.sql_type),
             Self::Values {
                 slot_id,
                 output_columns,
@@ -242,6 +249,19 @@ impl Path {
                     .map(|target| target.ressortgroupref)
                     .collect(),
             ),
+            Self::WindowAgg {
+                slot_id,
+                output_columns,
+                input,
+                ..
+            } => {
+                let mut sortgrouprefs = input.output_target().sortgrouprefs;
+                sortgrouprefs.resize(output_columns.len(), 0);
+                PathTarget::with_sortgrouprefs(
+                    slot_output_vars(*slot_id, output_columns, |column| column.sql_type),
+                    sortgrouprefs,
+                )
+            }
             _ => PathTarget::new(self.output_vars()),
         }
     }
@@ -267,6 +287,9 @@ impl Path {
                 accumulators,
                 ..
             } => aggregate_output_target(group_by, accumulators),
+            Self::WindowAgg { input, clause, .. } => {
+                window_semantic_output_target(input, clause)
+            }
             Self::Values {
                 slot_id,
                 output_columns,
@@ -333,6 +356,7 @@ impl Path {
             } => {
                 project_pathkeys(*slot_id, input, targets, &input.pathkeys())
             }
+            Self::WindowAgg { input, .. } => input.pathkeys(),
             Self::OrderBy { items, .. } => items
                 .iter()
                 .map(|item| PathKey {
@@ -605,8 +629,8 @@ fn aggregate_output_expr(accum: &AggAccum, aggno: usize) -> Expr {
         aggtype: accum.sql_type,
         aggvariadic: accum.agg_variadic,
         aggdistinct: accum.distinct,
-        aggfilter: accum.filter.clone(),
         args: accum.args.clone(),
+        aggfilter: accum.filter.clone(),
         agglevelsup: 0,
         aggno,
     }))
@@ -641,6 +665,25 @@ fn project_set_output_target(targets: &[ProjectSetTarget]) -> PathTarget {
             })
             .collect(),
     )
+}
+
+pub(super) fn window_output_columns(input: &Path, clause: &WindowClause) -> Vec<QueryColumn> {
+    let mut output_columns = input.columns();
+    output_columns.extend(clause.functions.iter().map(|func| QueryColumn {
+        name: format!("win{}", func.winno + 1),
+        sql_type: func.result_type,
+    }));
+    output_columns
+}
+
+fn window_semantic_output_target(input: &Path, clause: &WindowClause) -> PathTarget {
+    let mut exprs = input.semantic_output_vars();
+    let mut sortgrouprefs = input.semantic_output_target().sortgrouprefs;
+    for func in &clause.functions {
+        exprs.push(Expr::WindowFunc(Box::new(func.clone())));
+        sortgrouprefs.push(0);
+    }
+    PathTarget::with_sortgrouprefs(exprs, sortgrouprefs)
 }
 
 pub(super) fn aggregate_output_vars(
@@ -814,6 +857,7 @@ pub(super) fn expr_sql_type(expr: &Expr) -> SqlType {
         Expr::Var(var) => var.vartype,
         Expr::Param(param) => param.paramtype,
         Expr::Aggref(aggref) => aggref.aggtype,
+        Expr::WindowFunc(window_func) => window_func.result_type,
         Expr::Op(op) => op.opresulttype,
         Expr::Func(func) => func
             .funcresulttype
