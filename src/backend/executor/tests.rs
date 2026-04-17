@@ -10559,6 +10559,128 @@ fn jsonpath_strict_mixed_type_sequence_compare_returns_false() {
 }
 
 #[test]
+fn jsonpath_extended_subscripts_parse() {
+    let base = temp_dir("jsonpath_extended_subscripts_parse");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select '$[0,1]'::jsonpath, '$[last - 1]'::jsonpath, '$[2.5 - 1 to $.size() - 2]'::jsonpath, '$[last ? (@.type() == \"number\")]'::jsonpath",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::JsonPath("$[0, 1]".into()),
+                    Value::JsonPath("$[last - 1]".into()),
+                    Value::JsonPath("$[2.5 - 1 to $.size() - 2]".into()),
+                    Value::JsonPath("$[last ? (@.type() == \"number\")]".into()),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn jsonpath_extended_subscripts_work() {
+    let base = temp_dir("jsonpath_extended_subscripts");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_path_query('[12,{\"a\":13},{\"b\":14}]', 'lax $[0,1].a'), jsonb_path_query('[1,2,3]', '$[last - 1]'), jsonb_path_query('[12,{\"a\":13},{\"b\":14},\"ccc\",true]', '$[2.5 - 1 to $.size() - 2]'), jsonb_path_query('[1,2,3]', '$[last ? (@.type() == \"number\")]')",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![
+                        Value::Jsonb(
+                            crate::backend::executor::jsonb::parse_jsonb_text("13").unwrap()
+                        ),
+                        Value::Jsonb(
+                            crate::backend::executor::jsonb::parse_jsonb_text("2").unwrap()
+                        ),
+                        Value::Jsonb(
+                            crate::backend::executor::jsonb::parse_jsonb_text("{\"a\":13}")
+                                .unwrap()
+                        ),
+                        Value::Jsonb(
+                            crate::backend::executor::jsonb::parse_jsonb_text("3").unwrap()
+                        ),
+                    ],
+                    vec![
+                        Value::Null,
+                        Value::Null,
+                        Value::Jsonb(
+                            crate::backend::executor::jsonb::parse_jsonb_text("{\"b\":14}")
+                                .unwrap()
+                        ),
+                        Value::Null,
+                    ],
+                    vec![
+                        Value::Null,
+                        Value::Null,
+                        Value::Jsonb(
+                            crate::backend::executor::jsonb::parse_jsonb_text("\"ccc\"").unwrap()
+                        ),
+                        Value::Null,
+                    ],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_path_query('[]', '$[last ? (exists(last))]')",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => assert!(rows.is_empty()),
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_path_query('[1,2,3]', '$[last ? (@.type() == \"string\")]')",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::InvalidStorageValue { column, details }
+            if column == "jsonpath"
+                && details == "jsonpath array subscript is not a single numeric value"
+    ));
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_path_query('[1,2,3]', '$[last ? (@.type() == \"string\")]', silent => true)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => assert!(rows.is_empty()),
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn getdatabaseencoding_and_jsonpath_unicode_work() {
     let base = temp_dir("jsonpath_unicode");
     let txns = TransactionManager::new_durable(&base).unwrap();
