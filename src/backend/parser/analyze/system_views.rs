@@ -9,6 +9,11 @@ fn is_pg_stats_name(name: &str) -> bool {
     name.eq_ignore_ascii_case("pg_stats") || name.eq_ignore_ascii_case("pg_catalog.pg_stats")
 }
 
+fn is_pg_stat_activity_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("pg_stat_activity")
+        || name.eq_ignore_ascii_case("pg_catalog.pg_stat_activity")
+}
+
 pub(super) fn bind_builtin_system_view(
     name: &str,
     catalog: &dyn CatalogLookup,
@@ -28,6 +33,35 @@ pub(super) fn bind_builtin_system_view(
         };
         let rows = catalog
             .pg_views_rows()
+            .into_iter()
+            .map(|row| row.into_iter().map(Expr::Const).collect())
+            .collect();
+
+        return Some((
+            AnalyzedFrom::values(rows, output_columns),
+            scope_for_relation(Some(name), &desc),
+        ));
+    }
+
+    if is_pg_stat_activity_name(name) {
+        let output_columns = vec![
+            QueryColumn {
+                name: "pid".into(),
+                sql_type: SqlType::new(SqlTypeKind::Int4),
+            },
+            QueryColumn::text("datname"),
+            QueryColumn::text("usename"),
+            QueryColumn::text("state"),
+            QueryColumn::text("query"),
+        ];
+        let desc = RelationDesc {
+            columns: output_columns
+                .iter()
+                .map(|col| column_desc(col.name.clone(), col.sql_type, true))
+                .collect(),
+        };
+        let rows = catalog
+            .pg_stat_activity_rows()
             .into_iter()
             .map(|row| row.into_iter().map(Expr::Const).collect())
             .collect();

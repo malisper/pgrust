@@ -770,6 +770,10 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         )
     }
 
+    fn pg_stat_activity_rows(&self) -> Vec<Vec<Value>> {
+        self.db.pg_stat_activity_rows()
+    }
+
     fn index_relations_for_heap(
         &self,
         relation_oid: u32,

@@ -265,6 +265,10 @@ impl CatalogLookup for VisibleCatalog {
         )
     }
 
+    fn pg_stat_activity_rows(&self) -> Vec<Vec<crate::backend::executor::Value>> {
+        Vec::new()
+    }
+
     fn materialize_visible_catalog(&self) -> Option<VisibleCatalog> {
         Some(self.clone())
     }
