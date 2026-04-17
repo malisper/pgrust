@@ -87,6 +87,15 @@ pub enum ByteaOutputFormat {
     Escape,
 }
 
+fn default_stats_guc_value(name: &str) -> Option<&'static str> {
+    match name {
+        "track_counts" => Some("on"),
+        "track_functions" => Some("none"),
+        "stats_fetch_consistency" => Some("cache"),
+        _ => None,
+    }
+}
+
 impl Session {
     const DEFAULT_MAINTENANCE_WORK_MEM_KB: usize = 65_536;
 
@@ -2068,6 +2077,16 @@ impl Session {
             )));
         }
 
+        let fallback_value = || -> String {
+            match name.as_str() {
+                "datestyle" => default_datestyle().to_string(),
+                "timezone" => default_timezone().to_string(),
+                _ => default_stats_guc_value(&name)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| "default".to_string()),
+            }
+        };
+
         let (column_name, value) = match name.as_str() {
             "datestyle" => (
                 "DateStyle".to_string(),
@@ -2087,11 +2106,7 @@ impl Session {
                 self.gucs
                     .get(&name)
                     .cloned()
-                    .unwrap_or_else(|| match name.as_str() {
-                        "datestyle" => default_datestyle().to_string(),
-                        "timezone" => default_timezone().to_string(),
-                        _ => "default".to_string(),
-                    }),
+                    .unwrap_or_else(fallback_value),
             ),
         };
 
