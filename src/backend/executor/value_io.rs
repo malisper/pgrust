@@ -10,6 +10,7 @@ use super::expr_geometry::{
     decode_path_bytes, decode_polygon_bytes, encode_path_bytes, encode_polygon_bytes,
     render_geometry_text,
 };
+use super::expr_range::{decode_range_bytes, encode_range_bytes};
 use super::node_types::*;
 use crate::backend::executor::expr_json::{canonicalize_jsonpath_text, validate_json_text};
 use crate::backend::executor::jsonb::{decode_jsonb, render_jsonb_bytes};
@@ -81,6 +82,9 @@ pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<TupleVa
         }
         (ScalarType::TimestampTz, Value::TimestampTz(v)) => {
             Ok(TupleValue::Bytes(v.0.to_le_bytes().to_vec()))
+        }
+        (ScalarType::Range(_), Value::Range(range)) => {
+            Ok(TupleValue::Bytes(encode_range_bytes(&range)?))
         }
         (ScalarType::BitString, Value::Bit(v)) => {
             let mut bytes = Vec::with_capacity(4 + v.bytes.len());
@@ -287,6 +291,7 @@ pub(crate) fn coerce_assignment_value(value: &Value, target: SqlType) -> Result<
         Value::Text(text) => cast_text_value(text.as_str(), target, false),
         Value::TextRef(_, _) => cast_text_value(value.as_text().unwrap(), target, false),
         Value::InternalChar(byte) => cast_value(Value::InternalChar(*byte), target),
+        Value::Range(range) => Ok(Value::Range(range.clone())),
         Value::Point(_)
         | Value::Lseg(_)
         | Value::Path(_)
@@ -743,6 +748,16 @@ pub(crate) fn decode_value_with_toast(
             } else {
                 decode_array_bytes(column.sql_type.element_type(), bytes)
             }
+        }
+        ScalarType::Range(kind) => {
+            if column.storage.attlen != -1 && column.storage.attlen != -2 {
+                return Err(ExecError::UnsupportedStorageType {
+                    column: column.name.clone(),
+                    ty: column.ty.clone(),
+                    attlen: column.storage.attlen,
+                });
+            }
+            Ok(Value::Range(decode_range_bytes(kind, bytes)?))
         }
     }
 }

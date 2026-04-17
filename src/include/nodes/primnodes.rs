@@ -3,8 +3,9 @@ use crate::backend::parser::{SqlType, SqlTypeKind, SubqueryComparisonOp};
 use crate::include::access::htup::AttributeDesc;
 use crate::include::catalog::{
     builtin_scalar_function_for_proc_oid, proc_oid_for_builtin_scalar_function,
+    sql_type_for_range_kind,
 };
-use crate::include::nodes::datum::Value;
+use crate::include::nodes::datum::{RangeTypeId, Value};
 use crate::include::nodes::parsenodes::Query;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,6 +28,7 @@ pub enum ScalarType {
     Box,
     Polygon,
     Circle,
+    Range(RangeTypeId),
     Float32,
     Float64,
     Numeric,
@@ -176,6 +178,7 @@ pub enum AggFunc {
     JsonbAgg,
     JsonObjectAgg,
     JsonbObjectAgg,
+    RangeIntersectAgg,
 }
 
 impl AggFunc {
@@ -194,6 +197,7 @@ impl AggFunc {
             AggFunc::JsonbAgg => "jsonb_agg",
             AggFunc::JsonObjectAgg => "json_object_agg",
             AggFunc::JsonbObjectAgg => "jsonb_object_agg",
+            AggFunc::RangeIntersectAgg => "range_intersect_agg",
         }
     }
 }
@@ -408,6 +412,26 @@ pub enum BuiltinScalarFunction {
     GeoDiv,
     GeoPointX,
     GeoPointY,
+    RangeConstructor,
+    RangeIsEmpty,
+    RangeLower,
+    RangeUpper,
+    RangeLowerInc,
+    RangeUpperInc,
+    RangeLowerInf,
+    RangeUpperInf,
+    RangeContains,
+    RangeContainedBy,
+    RangeOverlap,
+    RangeStrictLeft,
+    RangeStrictRight,
+    RangeOverLeft,
+    RangeOverRight,
+    RangeAdjacent,
+    RangeUnion,
+    RangeIntersect,
+    RangeDifference,
+    RangeMerge,
     BoolEq,
     BoolNe,
     TsMatch,
@@ -1067,6 +1091,7 @@ fn value_sql_type_hint(value: &Value) -> Option<SqlType> {
         Value::Box(_) => Some(SqlType::new(SqlTypeKind::Box)),
         Value::Polygon(_) => Some(SqlType::new(SqlTypeKind::Polygon)),
         Value::Circle(_) => Some(SqlType::new(SqlTypeKind::Circle)),
+        Value::Range(range) => Some(sql_type_for_range_kind(range.kind)),
         Value::Float64(_) => Some(SqlType::new(SqlTypeKind::Float8)),
         Value::Numeric(_) => Some(SqlType::new(SqlTypeKind::Numeric)),
         Value::Json(_) => Some(SqlType::new(SqlTypeKind::Json)),

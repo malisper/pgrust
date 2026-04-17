@@ -426,6 +426,37 @@ fn numeric_catalog(name: &str) -> Catalog {
     catalog
 }
 
+fn range_catalog(name: &str, ty: crate::backend::parser::SqlTypeKind) -> Catalog {
+    let mut catalog = Catalog::default();
+    catalog.insert(
+        name,
+        test_catalog_entry(
+            crate::RelFileLocator {
+                spc_oid: 0,
+                db_oid: 1,
+                rel_number: 15006,
+            },
+            RelationDesc {
+                columns: vec![
+                    crate::backend::catalog::catalog::column_desc(
+                        "id",
+                        crate::backend::parser::SqlType::new(
+                            crate::backend::parser::SqlTypeKind::Int4,
+                        ),
+                        false,
+                    ),
+                    crate::backend::catalog::catalog::column_desc(
+                        "span",
+                        crate::backend::parser::SqlType::new(ty),
+                        true,
+                    ),
+                ],
+            },
+        ),
+    );
+    catalog
+}
+
 fn oid_catalog(name: &str) -> Catalog {
     let mut catalog = Catalog::default();
     catalog.insert(
@@ -9694,6 +9725,205 @@ fn scalar_subquery_target_list_returns_per_row_counts() {
                 vec![Value::Text("carol".into()), Value::Int64(0)],
             ],
         );
+}
+
+#[test]
+fn range_constructor_and_accessor_semantics() {
+    let base = temp_dir("range_constructor_accessors");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select \
+                int4range(1, 10, '[]')::text, \
+                daterange('2000-01-10', '2000-01-20', '[]')::text, \
+                numrange(1.7, 1.7, '[]')::text, \
+                numrange(1.7, 1.7, '()')::text, \
+                lower(int4range(1, 10))::text, \
+                upper(int4range(1, 10))::text, \
+                lower(int4range(null, 10))::text, \
+                upper(int4range(1, null))::text, \
+                lower_inf(int4range(null, 10)), \
+                upper_inf(int4range(1, null)), \
+                lower_inc('empty'::int4range), \
+                upper_inf('empty'::int4range)",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Text("[1,11)".into()),
+            Value::Text("[2000-01-10,2000-01-21)".into()),
+            Value::Text("[1.7,1.7]".into()),
+            Value::Text("empty".into()),
+            Value::Text("1".into()),
+            Value::Text("10".into()),
+            Value::Null,
+            Value::Null,
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(false),
+            Value::Bool(false),
+        ]],
+    );
+}
+
+#[test]
+fn range_set_operators_and_aggregate_work() {
+    let base = temp_dir("range_set_operators");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select \
+                (int4range(1, 5) + int4range(5, 10))::text, \
+                (int4range(1, 10) * int4range(5, 20))::text, \
+                (int4range(1, 10) - int4range(5, 20))::text, \
+                range_merge(int4range(1, 5), int4range(10, 15))::text",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Text("[1,10)".into()),
+            Value::Text("[5,10)".into()),
+            Value::Text("[1,5)".into()),
+            Value::Text("[1,15)".into()),
+        ]],
+    );
+
+    let xid = txns.begin();
+    run_sql_with_catalog(
+        &base,
+        &txns,
+        xid,
+        "insert into t (id, span) values \
+            (1, '[1,10)'::int4range), \
+            (2, '[5,20)'::int4range), \
+            (3, null)",
+        range_catalog("t", crate::backend::parser::SqlTypeKind::Int4Range),
+    )
+    .unwrap();
+    txns.commit(xid).unwrap();
+
+    assert_query_rows(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select range_intersect_agg(span)::text from t",
+            range_catalog("t", crate::backend::parser::SqlTypeKind::Int4Range),
+        )
+        .unwrap(),
+        vec![vec![Value::Text("[5,10)".into())]],
+    );
+
+    assert_query_rows(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select range_intersect_agg(span)::text from (select null::int4range as span) q",
+            range_catalog("t", crate::backend::parser::SqlTypeKind::Int4Range),
+        )
+        .unwrap(),
+        vec![vec![Value::Null]],
+    );
+}
+
+#[test]
+fn range_storage_ordering_grouping_and_joining_work() {
+    let base = temp_dir("range_storage_grouping");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let xid = txns.begin();
+    run_sql_with_catalog(
+        &base,
+        &txns,
+        xid,
+        "insert into t (id, span) values \
+            (1, '[5,7)'::int4range), \
+            (2, 'empty'::int4range), \
+            (3, '[1,3)'::int4range), \
+            (4, '[1,3)'::int4range)",
+        range_catalog("t", crate::backend::parser::SqlTypeKind::Int4Range),
+    )
+    .unwrap();
+    txns.commit(xid).unwrap();
+
+    assert_query_rows(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select span::text from t order by t.span, id",
+            range_catalog("t", crate::backend::parser::SqlTypeKind::Int4Range),
+        )
+        .unwrap(),
+        vec![
+            vec![Value::Text("empty".into())],
+            vec![Value::Text("[1,3)".into())],
+            vec![Value::Text("[1,3)".into())],
+            vec![Value::Text("[5,7)".into())],
+        ],
+    );
+
+    assert_query_rows(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select span::text, count(*) from t group by t.span order by t.span",
+            range_catalog("t", crate::backend::parser::SqlTypeKind::Int4Range),
+        )
+        .unwrap(),
+        vec![
+            vec![Value::Text("empty".into()), Value::Int64(1)],
+            vec![Value::Text("[1,3)".into()), Value::Int64(2)],
+            vec![Value::Text("[5,7)".into()), Value::Int64(1)],
+        ],
+    );
+
+    assert_query_rows(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select a.id, b.id from t a join t b on a.span = b.span where a.id < b.id order by a.id, b.id",
+            range_catalog("t", crate::backend::parser::SqlTypeKind::Int4Range),
+        )
+        .unwrap(),
+        vec![vec![Value::Int32(3), Value::Int32(4)]],
+    );
+}
+
+#[test]
+fn range_union_and_difference_errors_match_postgres() {
+    let base = temp_dir("range_operator_errors");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    let union_err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select int4range(1, 5) + int4range(7, 10)",
+    )
+    .unwrap_err();
+    assert_eq!(
+        format_exec_error(&union_err),
+        "result of range union would not be contiguous"
+    );
+
+    let diff_err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select int4range(1, 10) - int4range(5, 7)",
+    )
+    .unwrap_err();
+    assert_eq!(
+        format_exec_error(&diff_err),
+        "result of range difference would not be contiguous"
+    );
 }
 
 #[test]

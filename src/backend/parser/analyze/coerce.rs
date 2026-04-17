@@ -100,10 +100,14 @@ pub(super) fn sql_type_name(ty: SqlType) -> String {
         SqlTypeKind::Float8 => "double precision",
         SqlTypeKind::Money => "money",
         SqlTypeKind::Numeric => "numeric",
+        SqlTypeKind::Int4Range => "int4range",
+        SqlTypeKind::Int8Range => "int8range",
+        SqlTypeKind::NumericRange => "numrange",
         SqlTypeKind::Json => "json",
         SqlTypeKind::Jsonb => "jsonb",
         SqlTypeKind::JsonPath => "jsonpath",
         SqlTypeKind::Date => "date",
+        SqlTypeKind::DateRange => "daterange",
         SqlTypeKind::Time => "time without time zone",
         SqlTypeKind::TimeTz => "time with time zone",
         SqlTypeKind::TsVector => "tsvector",
@@ -120,7 +124,9 @@ pub(super) fn sql_type_name(ty: SqlType) -> String {
         SqlTypeKind::Line => "line",
         SqlTypeKind::Circle => "circle",
         SqlTypeKind::Timestamp => "timestamp without time zone",
+        SqlTypeKind::TimestampRange => "tsrange",
         SqlTypeKind::TimestampTz => "timestamp with time zone",
+        SqlTypeKind::TimestampTzRange => "tstzrange",
         SqlTypeKind::PgNodeTree => "pg_node_tree",
         SqlTypeKind::InternalChar => "\"char\"",
         SqlTypeKind::Char => "character",
@@ -232,6 +238,9 @@ pub(super) fn coerce_unknown_string_literal_type(
             }
         }
         if is_geometry_type(peer_type) {
+            return peer_type.element_type();
+        }
+        if crate::include::catalog::range_kind_for_sql_type(peer_type).is_some() {
             return peer_type.element_type();
         }
     }

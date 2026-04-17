@@ -6,10 +6,15 @@ use crate::backend::executor::exec_expr::format_array_text;
 use crate::backend::executor::{
     ExecError, QueryColumn, Value, geometry_input_error_message,
     render_datetime_value_text_with_config, render_geometry_text, render_internal_char_text,
+    render_range_text,
 };
 use crate::backend::parser::SqlTypeKind;
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::include::access::htup::TupleError;
+use crate::include::catalog::{
+    DATERANGE_TYPE_OID, INT4RANGE_TYPE_OID, INT8RANGE_TYPE_OID, NUMRANGE_TYPE_OID,
+    TSRANGE_TYPE_OID, TSTZRANGE_TYPE_OID,
+};
 use crate::pgrust::session::ByteaOutputFormat;
 use num_bigint::BigInt;
 use num_traits::One;
@@ -256,6 +261,12 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
             SqlTypeKind::Int2 => 1005,
             SqlTypeKind::Int4 => 1007,
             SqlTypeKind::Int8 => 1016,
+            SqlTypeKind::Int4Range
+            | SqlTypeKind::Int8Range
+            | SqlTypeKind::NumericRange
+            | SqlTypeKind::DateRange
+            | SqlTypeKind::TimestampRange
+            | SqlTypeKind::TimestampTzRange => unreachable!("range arrays are unsupported"),
             SqlTypeKind::Oid => 1028,
             SqlTypeKind::Bit => 1561,
             SqlTypeKind::VarBit => 1563,
@@ -307,6 +318,8 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
         SqlTypeKind::Int2 => (21, 2, -1),
         SqlTypeKind::Int4 => (23, 4, -1),
         SqlTypeKind::Int8 => (20, 8, -1),
+        SqlTypeKind::Int4Range => (INT4RANGE_TYPE_OID as i32, -1, -1),
+        SqlTypeKind::Int8Range => (INT8RANGE_TYPE_OID as i32, -1, -1),
         SqlTypeKind::Oid => (26, 4, -1),
         SqlTypeKind::Bit => (1560, -1, col.sql_type.typmod),
         SqlTypeKind::VarBit => (1562, -1, col.sql_type.typmod),
@@ -315,10 +328,12 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
         SqlTypeKind::Float8 => (701, 8, -1),
         SqlTypeKind::Money => (790, 8, -1),
         SqlTypeKind::Numeric => (1700, -1, col.sql_type.typmod),
+        SqlTypeKind::NumericRange => (NUMRANGE_TYPE_OID as i32, -1, -1),
         SqlTypeKind::Json => (114, -1, -1),
         SqlTypeKind::Jsonb => (3802, -1, -1),
         SqlTypeKind::JsonPath => (4072, -1, -1),
         SqlTypeKind::Date => (1082, 4, -1),
+        SqlTypeKind::DateRange => (DATERANGE_TYPE_OID as i32, -1, -1),
         SqlTypeKind::Time => (1083, 8, col.sql_type.typmod),
         SqlTypeKind::TimeTz => (1266, 12, col.sql_type.typmod),
         SqlTypeKind::Point => (600, 16, -1),
@@ -342,7 +357,9 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
         | SqlTypeKind::Char
         | SqlTypeKind::PgNodeTree => (25, -1, col.sql_type.typmod),
         SqlTypeKind::Timestamp => (1114, 8, col.sql_type.typmod),
+        SqlTypeKind::TimestampRange => (TSRANGE_TYPE_OID as i32, -1, -1),
         SqlTypeKind::TimestampTz => (1184, 8, col.sql_type.typmod),
+        SqlTypeKind::TimestampTzRange => (TSTZRANGE_TYPE_OID as i32, -1, -1),
     }
 }
 
@@ -404,6 +421,11 @@ pub(crate) fn send_typed_data_row(
                 let rendered =
                     render_datetime_value_text_with_config(val, &float_format.datetime_config)
                         .expect("datetime values render");
+                buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
+                buf.extend_from_slice(rendered.as_bytes());
+            }
+            Value::Range(_) => {
+                let rendered = render_range_text(val).unwrap_or_default();
                 buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
                 buf.extend_from_slice(rendered.as_bytes());
             }

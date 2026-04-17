@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::backend::parser::{SqlType, SqlTypeKind};
+use crate::include::catalog::sql_type_for_range_kind;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::pathnodes::{Path, PathKey, PathTarget};
 use crate::include::nodes::plannodes::{Plan, PlanEstimate};
@@ -591,6 +592,7 @@ fn value_sql_type_hint(value: &Value) -> SqlType {
         Value::Box(_) => SqlType::new(SqlTypeKind::Box),
         Value::Polygon(_) => SqlType::new(SqlTypeKind::Polygon),
         Value::Circle(_) => SqlType::new(SqlTypeKind::Circle),
+        Value::Range(range) => sql_type_for_range_kind(range.kind),
         Value::Float64(_) => SqlType::new(SqlTypeKind::Float8),
         Value::Numeric(_) => SqlType::new(SqlTypeKind::Numeric),
         Value::Json(_) => SqlType::new(SqlTypeKind::Json),

@@ -12,6 +12,7 @@ mod infer;
 mod modify;
 mod paths;
 mod query;
+mod ranges;
 mod scope;
 mod system_views;
 mod views;

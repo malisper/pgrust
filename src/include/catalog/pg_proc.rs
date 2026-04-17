@@ -3,11 +3,14 @@ use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::{
     ANYARRAYOID, ANYOID, BIT_TYPE_OID, BOOL_TYPE_OID, BOOTSTRAP_SUPERUSER_OID, BOX_TYPE_OID,
-    BPCHAR_TYPE_OID, BYTEA_TYPE_OID, CIRCLE_TYPE_OID, FLOAT8_TYPE_OID, INT2_TYPE_OID,
-    INT4_TYPE_OID, INT8_TYPE_OID, JSON_TYPE_OID, JSONB_TYPE_OID, JSONPATH_TYPE_OID, LINE_TYPE_OID,
-    LSEG_TYPE_OID, MONEY_TYPE_OID, NUMERIC_TYPE_OID, OID_TYPE_OID, PATH_TYPE_OID,
-    PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_INTERNAL_OID, POINT_TYPE_OID, POLYGON_TYPE_OID,
-    RECORD_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TSQUERY_TYPE_OID, VARBIT_TYPE_OID,
+    BPCHAR_TYPE_OID, BYTEA_TYPE_OID, CIRCLE_TYPE_OID, DATERANGE_TYPE_OID, DATE_TYPE_OID,
+    FLOAT8_TYPE_OID, INT2_TYPE_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID, INT8_TYPE_OID,
+    INT8RANGE_TYPE_OID, JSON_TYPE_OID, JSONB_TYPE_OID, JSONPATH_TYPE_OID, LINE_TYPE_OID,
+    LSEG_TYPE_OID, MONEY_TYPE_OID, NUMERIC_TYPE_OID, NUMRANGE_TYPE_OID, OID_TYPE_OID,
+    PATH_TYPE_OID, PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_INTERNAL_OID, POINT_TYPE_OID,
+    POLYGON_TYPE_OID, RECORD_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID,
+    TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID, TSRANGE_TYPE_OID, TSQUERY_TYPE_OID,
+    TSTZRANGE_TYPE_OID, VARBIT_TYPE_OID,
 };
 use crate::include::nodes::primnodes::{AggFunc, BuiltinScalarFunction};
 use std::sync::OnceLock;
@@ -1361,6 +1364,7 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
         ),
     ];
     rows.extend(geometry_proc_rows());
+    rows.extend(range_proc_rows());
     rows
 }
 
@@ -1488,6 +1492,7 @@ fn aggregate_func_for_proname(name: &str) -> Option<AggFunc> {
         "jsonb_agg" => Some(AggFunc::JsonbAgg),
         "json_object_agg" => Some(AggFunc::JsonObjectAgg),
         "jsonb_object_agg" => Some(AggFunc::JsonbObjectAgg),
+        "range_intersect_agg" => Some(AggFunc::RangeIntersectAgg),
         _ => None,
     }
 }
@@ -1764,6 +1769,26 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("geo_sub", BuiltinScalarFunction::GeoSub),
         ("geo_mul", BuiltinScalarFunction::GeoMul),
         ("geo_div", BuiltinScalarFunction::GeoDiv),
+        ("range_constructor", BuiltinScalarFunction::RangeConstructor),
+        ("range_isempty", BuiltinScalarFunction::RangeIsEmpty),
+        ("range_lower", BuiltinScalarFunction::RangeLower),
+        ("range_upper", BuiltinScalarFunction::RangeUpper),
+        ("range_lower_inc", BuiltinScalarFunction::RangeLowerInc),
+        ("range_upper_inc", BuiltinScalarFunction::RangeUpperInc),
+        ("range_lower_inf", BuiltinScalarFunction::RangeLowerInf),
+        ("range_upper_inf", BuiltinScalarFunction::RangeUpperInf),
+        ("range_contains", BuiltinScalarFunction::RangeContains),
+        ("range_contained_by", BuiltinScalarFunction::RangeContainedBy),
+        ("range_overlap", BuiltinScalarFunction::RangeOverlap),
+        ("range_strict_left", BuiltinScalarFunction::RangeStrictLeft),
+        ("range_strict_right", BuiltinScalarFunction::RangeStrictRight),
+        ("range_over_left", BuiltinScalarFunction::RangeOverLeft),
+        ("range_over_right", BuiltinScalarFunction::RangeOverRight),
+        ("range_adjacent", BuiltinScalarFunction::RangeAdjacent),
+        ("range_union", BuiltinScalarFunction::RangeUnion),
+        ("range_intersect", BuiltinScalarFunction::RangeIntersect),
+        ("range_difference", BuiltinScalarFunction::RangeDifference),
+        ("range_merge", BuiltinScalarFunction::RangeMerge),
         ("pointx", BuiltinScalarFunction::GeoPointX),
         ("pointy", BuiltinScalarFunction::GeoPointY),
         (
@@ -2326,6 +2351,147 @@ fn geometry_proc_rows() -> Vec<PgProcRow> {
         ),
     ];
     rows.extend(geometry_operator_proc_rows());
+    rows
+}
+
+fn range_proc_rows() -> Vec<PgProcRow> {
+    let specs = [
+        ("int4range", INT4RANGE_TYPE_OID, INT4_TYPE_OID),
+        ("int8range", INT8RANGE_TYPE_OID, INT8_TYPE_OID),
+        ("numrange", NUMRANGE_TYPE_OID, NUMERIC_TYPE_OID),
+        ("daterange", DATERANGE_TYPE_OID, DATE_TYPE_OID),
+        ("tsrange", TSRANGE_TYPE_OID, TIMESTAMP_TYPE_OID),
+        ("tstzrange", TSTZRANGE_TYPE_OID, TIMESTAMPTZ_TYPE_OID),
+    ];
+    let mut next_oid = 62_100u32;
+    let mut rows = Vec::new();
+    for (name, range_oid, subtype_oid) in specs {
+        rows.push(proc_row(
+            next_oid,
+            name,
+            range_oid,
+            &oid_argtypes(&[subtype_oid, subtype_oid]),
+            "range_constructor",
+            2,
+            false,
+            true,
+            'f',
+            'i',
+        ));
+        next_oid += 1;
+        rows.push(proc_row(
+            next_oid,
+            name,
+            range_oid,
+            &oid_argtypes(&[subtype_oid, subtype_oid, TEXT_TYPE_OID]),
+            "range_constructor",
+            3,
+            false,
+            true,
+            'f',
+            'i',
+        ));
+        next_oid += 1;
+        for (proname, prosrc, rettype) in [
+            ("isempty", "range_isempty", BOOL_TYPE_OID),
+            ("lower", "range_lower", subtype_oid),
+            ("upper", "range_upper", subtype_oid),
+            ("lower_inc", "range_lower_inc", BOOL_TYPE_OID),
+            ("upper_inc", "range_upper_inc", BOOL_TYPE_OID),
+            ("lower_inf", "range_lower_inf", BOOL_TYPE_OID),
+            ("upper_inf", "range_upper_inf", BOOL_TYPE_OID),
+            ("range_merge", "range_merge", range_oid),
+            ("range_adjacent", "range_adjacent", BOOL_TYPE_OID),
+            ("range_minus", "range_difference", range_oid),
+        ] {
+            let arg_oids = if matches!(prosrc, "range_merge" | "range_adjacent" | "range_difference")
+            {
+                vec![range_oid, range_oid]
+            } else {
+                vec![range_oid]
+            };
+            rows.push(proc_row(
+                next_oid,
+                proname,
+                rettype,
+                &oid_argtypes(&arg_oids),
+                prosrc,
+                if matches!(prosrc, "range_merge" | "range_adjacent" | "range_difference") {
+                    2
+                } else {
+                    1
+                },
+                false,
+                true,
+                'f',
+                'i',
+            ));
+            next_oid += 1;
+        }
+        for (proname, prosrc, argtypes) in [
+            ("range_contains", "range_contains", vec![range_oid, range_oid]),
+            ("range_contained_by", "range_contained_by", vec![range_oid, range_oid]),
+            ("range_contains", "range_contains", vec![range_oid, subtype_oid]),
+            ("range_contained_by", "range_contained_by", vec![subtype_oid, range_oid]),
+        ] {
+            rows.push(proc_row(
+                next_oid,
+                proname,
+                BOOL_TYPE_OID,
+                &oid_argtypes(&argtypes),
+                prosrc,
+                argtypes.len() as i16,
+                false,
+                true,
+                'f',
+                'i',
+            ));
+            next_oid += 1;
+        }
+        rows.push(aggregate_row(
+            next_oid,
+            "range_intersect_agg",
+            range_oid,
+            &oid_argtypes(&[range_oid]),
+            1,
+        ));
+        next_oid += 1;
+        for (proname, prosrc) in [
+            ("range_eq", "range_contains"),
+            ("range_ne", "range_contains"),
+            ("range_lt", "range_strict_left"),
+            ("range_le", "range_over_left"),
+            ("range_gt", "range_strict_right"),
+            ("range_ge", "range_over_right"),
+            ("range_overlap", "range_overlap"),
+            ("range_left", "range_strict_left"),
+            ("range_right", "range_strict_right"),
+            ("range_overleft", "range_over_left"),
+            ("range_overright", "range_over_right"),
+            ("range_adjacent_op", "range_adjacent"),
+            ("range_union_op", "range_union"),
+            ("range_intersect_op", "range_intersect"),
+            ("range_difference_op", "range_difference"),
+        ] {
+            rows.push(proc_row(
+                next_oid,
+                proname,
+                if matches!(prosrc, "range_union" | "range_intersect" | "range_difference") {
+                    range_oid
+                } else {
+                    BOOL_TYPE_OID
+                },
+                &oid_argtypes(&[range_oid, range_oid]),
+                prosrc,
+                2,
+                false,
+                true,
+                'f',
+                'i',
+            ));
+            next_oid += 1;
+        }
+    }
     rows
 }
 
