@@ -151,6 +151,13 @@ Counts from `/tmp/pgrust_regress_todo_20260417` on 2026-04-17; `test_setup.sql` 
 - json.sql: 138/470
 - json_encoding.sql: 23/44
 - jsonb.sql: 353/1084
+  - PostgreSQL-compatible jsonb input errors with `LINE` / `DETAIL` / `CONTEXT`
+  - stack depth limit handling for deeply nested jsonb input
+  - aggregate-local `ORDER BY` support for `jsonb_agg` / `jsonb_object_agg`
+  - jsonb containment and existence builtin semantics (`@>`, `<@`, `?`, `?|`, `?&`, helper funcs)
+  - jsonb object/key construction semantics and SQL-visible errors (`jsonb_object_keys`, `jsonb_build_object`, `jsonb_object`, `jsonb_object_agg`)
+  - jsonb subscripting semantics
+  - record-expansion semantics for `jsonb_to_record` / `jsonb_populate_record`
 - jsonb_jsonpath.sql: 188/830
 - jsonpath.sql: 31/224
 - jsonpath_encoding.sql: 0/32
@@ -279,6 +286,14 @@ Counts from `/tmp/pgrust_regress_todo_20260417` on 2026-04-17; `test_setup.sql` 
 - xmlmap.sql: 3/40
 
 ## Features
+
+- PostgreSQL-compatible jsonb input errors with `LINE` / `DETAIL` / `CONTEXT`
+- stack depth limit handling for deeply nested jsonb input
+- aggregate-local `ORDER BY` support for `jsonb_agg` / `jsonb_object_agg`
+- jsonb containment and existence builtin semantics (`@>`, `<@`, `?`, `?|`, `?&`, helper funcs)
+- jsonb object/key construction semantics and SQL-visible errors (`jsonb_object_keys`, `jsonb_build_object`, `jsonb_object`, `jsonb_object_agg`)
+- jsonb subscripting semantics
+- record-expansion semantics for `jsonb_to_record` / `jsonb_populate_record`
 
 - expression indexes and `ALTER INDEX` operations used by `alter_table.sql`
 - partitioned tables, including `PARTITION OF`, `ATTACH PARTITION`, and `DETACH PARTITION`
