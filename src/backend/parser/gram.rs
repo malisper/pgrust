@@ -66,7 +66,6 @@ fn parse_statement_with_options_inner(
         return Ok(stmt);
     }
     if let Some(stmt) = try_parse_sequence_statement(&sql)? {
-    if let Some(stmt) = try_parse_create_tablespace_statement(&sql)? {
         return Ok(stmt);
     }
     if let Some(stmt) = try_parse_create_tablespace_statement(&sql)? {
