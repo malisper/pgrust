@@ -1,0 +1,5 @@
+[target.aarch64-apple-darwin]
+linker = "scripts/macos-rust-lld-linker.sh"
+
+[target.x86_64-apple-darwin]
+linker = "scripts/macos-rust-lld-linker.sh"
