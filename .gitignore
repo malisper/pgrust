@@ -2,3 +2,8 @@ target/
 perl5/
 .DS_Store
 web/wasm-demo/pkg/pgrust_bg.wasm
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
