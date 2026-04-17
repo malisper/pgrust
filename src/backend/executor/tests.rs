@@ -6441,6 +6441,32 @@ fn to_char_numeric_ignores_display_only_trailing_zeros() {
 }
 
 #[test]
+fn to_char_numeric_fill_mode_respects_integer_zero_masks() {
+    let base = temp_dir("to_char_numeric_fill_mode_zero_masks");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select to_char(0::numeric(210,10), 'FM0999999999999999.999999999999999'), to_char(0::numeric(210,10), 'FM9999999999990999.990999999999999'), to_char(0::numeric(210,10), 'FM9999999999999999.099999999999999')",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Text("0000000000000000.".into()),
+                    Value::Text("0000.000".into()),
+                    Value::Text(".0".into()),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn width_bucket_supports_numeric_and_float_special_cases() {
     let base = temp_dir("width_bucket_numeric_float");
     let txns = TransactionManager::new_durable(&base).unwrap();
