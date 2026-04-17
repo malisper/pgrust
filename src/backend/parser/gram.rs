@@ -62,6 +62,9 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_grant_revoke_statement(&sql)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_create_tablespace_statement(&sql)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_unsupported_statement(&sql) {
         if matches!(
             stmt,
@@ -79,6 +82,50 @@ fn parse_statement_with_options_inner(
             try_parse_unsupported_statement(&sql).ok_or_else(|| map_pest_error("statement", err))
         }
     }
+}
+
+fn try_parse_create_tablespace_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if !lowered.starts_with("create tablespace ") {
+        return Ok(None);
+    }
+    Ok(Some(Statement::CreateTablespace(
+        build_create_tablespace_statement(trimmed)?,
+    )))
+}
+
+fn build_create_tablespace_statement(sql: &str) -> Result<CreateTablespaceStatement, ParseError> {
+    let prefix = "create tablespace";
+    let rest = sql
+        .get(prefix.len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let (tablespace_name, rest) = parse_sql_identifier(rest)?;
+    let rest = rest.trim_start();
+    if !keyword_at_start(rest, "location") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "LOCATION string literal",
+            actual: rest.into(),
+        });
+    }
+    let rest = consume_keyword(rest, "location").trim_start();
+    let token_len = scan_string_literal_token_len(rest).ok_or(ParseError::UnexpectedToken {
+        expected: "tablespace location string literal",
+        actual: rest.into(),
+    })?;
+    let location = decode_string_literal(&rest[..token_len])?;
+    let trailing = rest[token_len..].trim();
+    if !trailing.is_empty() {
+        return Err(ParseError::FeatureNotSupported(format!(
+            "unsupported CREATE TABLESPACE clause: {}",
+            trailing.split_whitespace().next().unwrap_or(trailing)
+        )));
+    }
+    Ok(CreateTablespaceStatement {
+        tablespace_name,
+        location,
+    })
 }
 
 pub fn parse_expr(sql: &str) -> Result<SqlExpr, ParseError> {

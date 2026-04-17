@@ -700,6 +700,7 @@ fn run_statement(
         Statement::CommentOnDomain(_)
         | Statement::CreateFunction(_)
         | Statement::CreateSchema(_)
+        | Statement::CreateTablespace(_)
         | Statement::CreateDomain(_)
         | Statement::DropDomain(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
             "domain/function statements are not supported in query_repl".into(),
