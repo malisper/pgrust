@@ -69,11 +69,11 @@ fn exec_error_sqlstate(e: &ExecError) -> &'static str {
         ExecError::Parse(crate::backend::parser::ParseError::NoSchemaSelectedForCreate) => "3F000",
         ExecError::Parse(crate::backend::parser::ParseError::WindowingError(_)) => "42P20",
         ExecError::Parse(crate::backend::parser::ParseError::InvalidRecursion(_)) => "42P19",
-        ExecError::Parse(crate::backend::parser::ParseError::InvalidTableDefinition(_)) => {
-            "42P16"
-        }
+        ExecError::Parse(crate::backend::parser::ParseError::InvalidTableDefinition(_)) => "42P16",
         ExecError::Parse(crate::backend::parser::ParseError::FeatureNotSupported(_))
-        | ExecError::Parse(crate::backend::parser::ParseError::OuterLevelAggregateNestedCte(_)) => "0A000",
+        | ExecError::Parse(crate::backend::parser::ParseError::OuterLevelAggregateNestedCte(_)) => {
+            "0A000"
+        }
         ExecError::Parse(crate::backend::parser::ParseError::ActiveSqlTransaction(_)) => "25001",
         ExecError::IntegerOutOfRange { .. }
         | ExecError::Int2OutOfRange
@@ -135,9 +135,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         }) if matches!(*expected, "valid binary digit" | "valid hexadecimal digit") => {
             return find_bit_literal_position(sql);
         }
-        ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken { actual, .. })
-            if actual.starts_with("syntax error at or near \"") =>
-        {
+        ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
+            actual, ..
+        }) if actual.starts_with("syntax error at or near \"") => {
             return extract_syntax_error_token(actual)
                 .and_then(|token| sql.rfind(token).map(|index| index + 1));
         }
@@ -293,7 +293,9 @@ fn exec_error_response(sql: &str, e: &ExecError) -> ExecErrorResponse {
             cte_name,
         )) = e
     {
-        response.detail = Some(format!("CTE \"{cte_name}\" is below the aggregate's semantic level."));
+        response.detail = Some(format!(
+            "CTE \"{cte_name}\" is below the aggregate's semantic level."
+        ));
     }
 
     response

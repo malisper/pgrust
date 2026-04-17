@@ -83,8 +83,10 @@ impl Database {
         sql: &str,
         configured_search_path: Option<&[String]>,
     ) -> Result<StatementResult, ExecError> {
-        let stmt = self.plan_cache.get_statement(sql)?;
-        self.execute_statement_with_search_path(client_id, stmt, configured_search_path)
+        stacker::grow(32 * 1024 * 1024, || {
+            let stmt = self.plan_cache.get_statement(sql)?;
+            self.execute_statement_with_search_path(client_id, stmt, configured_search_path)
+        })
     }
 
     pub(crate) fn execute_statement_with_search_path(
