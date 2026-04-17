@@ -9740,6 +9740,31 @@ fn jsonpath_exists_propagates_non_silent_errors() {
 }
 
 #[test]
+fn jsonpath_lax_scalar_index_zero_returns_scalar() {
+    let base = temp_dir("jsonpath_lax_scalar_index");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_path_query('1', 'lax $[0]')",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Jsonb(
+                    crate::backend::executor::jsonb::parse_jsonb_text("1").unwrap()
+                )]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn getdatabaseencoding_and_jsonpath_unicode_work() {
     let base = temp_dir("jsonpath_unicode");
     let txns = TransactionManager::new_durable(&base).unwrap();
