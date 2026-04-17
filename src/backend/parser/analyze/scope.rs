@@ -539,16 +539,19 @@ pub(super) fn bind_from_item_with_ctes(
             name,
             args,
             func_variadic,
-        } => bind_function_from_item_with_ctes(
-            name,
-            args,
-            *func_variadic,
-            None,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        ),
+        } => {
+            let (plan, scope, _) = bind_function_from_item_with_ctes(
+                name,
+                args,
+                *func_variadic,
+                None,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?;
+            Ok((plan, scope))
+        }
         FromItem::DerivedTable(select) => {
             let (plan, _) =
                 analyze_select_query_with_outer(select, catalog, &[], None, ctes, expanded_views)?;
@@ -650,7 +653,8 @@ pub(super) fn bind_from_item_with_ctes(
                 },
                 _ => None,
             };
-            let (plan, scope) = if let Some((name, args, func_variadic)) = function_source {
+            let (plan, scope, alias_single_function_output) =
+                if let Some((name, args, func_variadic)) = function_source {
                 let typed_defs = match column_aliases {
                     AliasColumnSpec::Definitions(defs) => Some(defs.as_slice()),
                     AliasColumnSpec::None | AliasColumnSpec::Names(_) => None,
@@ -666,14 +670,15 @@ pub(super) fn bind_from_item_with_ctes(
                     ctes,
                 )?
             } else {
-                bind_from_item_with_ctes(
+                let (plan, scope) = bind_from_item_with_ctes(
                     source,
                     catalog,
                     outer_scopes,
                     grouped_outer,
                     ctes,
                     expanded_views,
-                )?
+                )?;
+                (plan, scope, false)
             };
             let alias_columns = match column_aliases {
                 AliasColumnSpec::Definitions(_) => &AliasColumnSpec::None,
@@ -684,7 +689,7 @@ pub(super) fn bind_from_item_with_ctes(
                 scope,
                 alias,
                 alias_columns,
-                matches!(source.as_ref(), FromItem::FunctionCall { .. }),
+                alias_single_function_output,
                 *preserve_source_names,
                 matches!(source.as_ref(), FromItem::Alias { .. }),
             )
@@ -702,7 +707,7 @@ fn bind_function_from_item_with_ctes(
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
-) -> Result<(AnalyzedFrom, BoundScope), ParseError> {
+) -> Result<(AnalyzedFrom, BoundScope, bool), ParseError> {
     let args = lower_named_table_function_args(name, args)?;
     let call_scope = empty_scope();
     let actual_types = args
@@ -817,6 +822,7 @@ fn bind_function_from_item_with_ctes(
                     },
                 }),
                 scope,
+                true,
             ))
         }
         "unnest" => {
@@ -874,6 +880,7 @@ fn bind_function_from_item_with_ctes(
                 columns: desc_columns,
             };
             let scope = scope_for_relation(Some(name), &desc);
+            let alias_single_function_output = output_columns.len() == 1;
             Ok((
                 AnalyzedFrom::function(SetReturningCall::Unnest {
                     func_oid: resolved_proc_oid,
@@ -882,6 +889,7 @@ fn bind_function_from_item_with_ctes(
                     output_columns,
                 }),
                 scope,
+                alias_single_function_output,
             ))
         }
         "pg_input_error_info" => {
@@ -994,6 +1002,7 @@ fn bind_function_from_item_with_ctes(
                     ),
                 ]),
                 scope,
+                false,
             ))
         }
         other => {
@@ -1063,6 +1072,7 @@ fn bind_function_from_item_with_ctes(
                         .collect(),
                 };
                 let scope = scope_for_relation(Some(name), &desc);
+                let alias_single_function_output = output_columns.len() == 1;
                 Ok((
                     AnalyzedFrom::function(SetReturningCall::JsonTableFunction {
                         func_oid: resolved_proc_oid,
@@ -1072,6 +1082,7 @@ fn bind_function_from_item_with_ctes(
                         output_columns,
                     }),
                     scope,
+                    alias_single_function_output,
                 ))
             } else if let Some(kind) = resolve_regex_table_function(other) {
                 let empty_scope = empty_scope();
@@ -1106,6 +1117,7 @@ fn bind_function_from_item_with_ctes(
                         .collect(),
                 };
                 let scope = scope_for_relation(Some(name), &desc);
+                let alias_single_function_output = output_columns.len() == 1;
                 Ok((
                     AnalyzedFrom::function(SetReturningCall::RegexTableFunction {
                         func_oid: resolved_proc_oid,
@@ -1115,6 +1127,7 @@ fn bind_function_from_item_with_ctes(
                         output_columns,
                     }),
                     scope,
+                    alias_single_function_output,
                 ))
             } else if let Some(resolved) = resolved.as_ref() {
                 if resolved.prokind != 'f' || !resolved.proretset {
@@ -1128,6 +1141,7 @@ fn bind_function_from_item_with_ctes(
                     grouped_outer,
                     &resolved.declared_arg_types,
                 )?;
+                let alias_single_function_output = resolved_row_columns.is_none();
                 let output_columns = resolved_row_columns.unwrap_or_else(|| {
                     vec![QueryColumn {
                         name: other.to_string(),
@@ -1149,6 +1163,7 @@ fn bind_function_from_item_with_ctes(
                         output_columns,
                     }),
                     scope,
+                    alias_single_function_output,
                 ))
             } else {
                 Err(ParseError::UnknownTable(other.to_string()))
@@ -1535,7 +1550,7 @@ fn apply_relation_alias(
     scope: BoundScope,
     alias: &str,
     column_aliases: &AliasColumnSpec,
-    _alias_single_function_output: bool,
+    alias_single_function_output: bool,
     preserve_source_names: bool,
     source_is_alias: bool,
 ) -> Result<(AnalyzedFrom, BoundScope), ParseError> {
@@ -1570,6 +1585,15 @@ fn apply_relation_alias(
     let mut columns = scope.columns.clone();
     let mut relations = scope.relations.clone();
     let mut renamed = false;
+
+    if alias_single_function_output && column_aliases.is_empty() && visible_positions.len() == 1 {
+        let column_index = visible_positions[0];
+        let column = &mut columns[column_index];
+        renamed |= column.output_name != alias;
+        column.output_name = alias.to_string();
+        desc.columns[column_index].name = alias.to_string();
+        desc.columns[column_index].storage.name = alias.to_string();
+    }
 
     if relations.iter().any(|relation| {
         relation
