@@ -4,6 +4,7 @@
 use super::ExecError;
 use super::exec_expr::parse_numeric_text;
 use super::expr_geometry::{decode_path_bytes, decode_polygon_bytes};
+use super::expr_range::decode_range_bytes;
 use super::value_io::missing_column_value;
 use super::value_io::{decode_anyarray_bytes, decode_array_bytes};
 use crate::backend::executor::{decode_tsquery_bytes, decode_tsvector_bytes};
@@ -421,6 +422,10 @@ impl CompiledTupleDecoder {
                                 values.push(Value::Null);
                                 continue;
                             }
+                            ScalarType::Range(_) => {
+                                values.push(Value::Null);
+                                continue;
+                            }
                         });
                     }
                     -1 => {
@@ -519,6 +524,9 @@ impl CompiledTupleDecoder {
                                         decode_array_bytes(sql_type.element_type(), bytes_slice)?
                                     },
                                 );
+                            }
+                            ScalarType::Range(kind) => {
+                                values.push(Value::Range(decode_range_bytes(*kind, bytes_slice)?));
                             }
                             _ => values.push(Value::Null),
                         }

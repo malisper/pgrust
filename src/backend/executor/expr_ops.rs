@@ -15,6 +15,7 @@ use super::expr_money::{
     money_add, money_cash_div, money_cmp, money_div_float, money_div_int, money_mul_float,
     money_mul_int, money_sub,
 };
+use super::expr_range::compare_range_values;
 use super::node_types::*;
 use crate::backend::executor::jsonb::{
     JsonbValue, compare_jsonb, decode_jsonb, encode_jsonb, jsonb_concat,
@@ -92,6 +93,7 @@ pub(crate) fn compare_order_values(
             &decode_jsonb(a).unwrap_or(JsonbValue::Null),
             &decode_jsonb(b).unwrap_or(JsonbValue::Null),
         ),
+        (Value::Range(a), Value::Range(b)) => compare_range_values(a, b),
         (Value::TsVector(a), Value::TsVector(b)) => {
             crate::backend::executor::compare_tsvector(a, b)
         }
@@ -178,6 +180,9 @@ pub(crate) fn compare_values(
         (Value::Jsonb(l), Value::Jsonb(r)) => Ok(Value::Bool(
             compare_jsonb(&decode_jsonb(l)?, &decode_jsonb(r)?) == Ordering::Equal,
         )),
+        (Value::Range(l), Value::Range(r)) => {
+            Ok(Value::Bool(compare_range_values(l, r) == Ordering::Equal))
+        }
         (Value::TsVector(l), Value::TsVector(r)) => Ok(Value::Bool(l == r)),
         (Value::TsQuery(l), Value::TsQuery(r)) => Ok(Value::Bool(l == r)),
         (l, r) if l.as_text().is_some() && r.as_text().is_some() => {
@@ -239,6 +244,7 @@ pub(crate) fn values_are_distinct(left: &Value, right: &Value) -> bool {
             .zip(decode_jsonb(r).ok())
             .map(|(l, r)| compare_jsonb(&l, &r) != Ordering::Equal)
             .unwrap_or(true),
+        (Value::Range(l), Value::Range(r)) => compare_range_values(l, r) != Ordering::Equal,
         (Value::TsVector(l), Value::TsVector(r)) => l != r,
         (Value::TsQuery(l), Value::TsQuery(r)) => l != r,
         (l, r) if l.as_text().is_some() && r.as_text().is_some() => l.as_text() != r.as_text(),
@@ -702,6 +708,16 @@ pub(crate) fn order_values(
         }
         (Value::Jsonb(l), Value::Jsonb(r)) => {
             let ordering = compare_jsonb(&decode_jsonb(l)?, &decode_jsonb(r)?);
+            Ok(Value::Bool(match op {
+                "<" => ordering == Ordering::Less,
+                "<=" => ordering != Ordering::Greater,
+                ">" => ordering == Ordering::Greater,
+                ">=" => ordering != Ordering::Less,
+                _ => unreachable!(),
+            }))
+        }
+        (Value::Range(l), Value::Range(r)) => {
+            let ordering = compare_range_values(l, r);
             Ok(Value::Bool(match op {
                 "<" => ordering == Ordering::Less,
                 "<=" => ordering != Ordering::Greater,

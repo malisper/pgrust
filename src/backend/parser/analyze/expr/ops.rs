@@ -1,4 +1,5 @@
 use super::*;
+use crate::backend::parser::analyze::ranges::bind_maybe_range_overlap_or_adjacent;
 
 pub(super) fn bind_arithmetic_expr(
     op: &'static str,
@@ -538,6 +539,18 @@ pub(super) fn bind_overloaded_binary_expr(
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
 ) -> Result<Expr, ParseError> {
+    if let Some(result) = bind_maybe_range_overlap_or_adjacent(
+        op,
+        left,
+        right,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    ) {
+        return result;
+    }
     let raw_left_type =
         infer_sql_expr_type_with_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes);
     let raw_right_type =

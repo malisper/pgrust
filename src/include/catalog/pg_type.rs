@@ -7,6 +7,7 @@ use crate::include::catalog::{
     ANYARRAYOID, BIT_ARRAY_TYPE_OID, BIT_TYPE_OID, BOOL_ARRAY_TYPE_OID, BOOL_TYPE_OID,
     BOOTSTRAP_SUPERUSER_OID, BOX_TYPE_OID, BPCHAR_ARRAY_TYPE_OID, BPCHAR_TYPE_OID,
     BYTEA_ARRAY_TYPE_OID, BYTEA_TYPE_OID, CIRCLE_TYPE_OID, DATE_ARRAY_TYPE_OID, DATE_TYPE_OID,
+    DATERANGE_TYPE_OID, INT4RANGE_TYPE_OID, INT8RANGE_TYPE_OID,
     FLOAT4_ARRAY_TYPE_OID, FLOAT4_TYPE_OID, FLOAT8_ARRAY_TYPE_OID, FLOAT8_TYPE_OID,
     INT2_ARRAY_TYPE_OID, INT2_TYPE_OID, INT2VECTOR_TYPE_OID, INT4_ARRAY_TYPE_OID, INT4_TYPE_OID,
     INT8_ARRAY_TYPE_OID, INT8_TYPE_OID, INTERNAL_CHAR_ARRAY_TYPE_OID, INTERNAL_CHAR_TYPE_OID,
@@ -14,7 +15,7 @@ use crate::include::catalog::{
     JSON_ARRAY_TYPE_OID, JSON_TYPE_OID, JSONB_ARRAY_TYPE_OID, JSONB_TYPE_OID,
     JSONPATH_ARRAY_TYPE_OID, JSONPATH_TYPE_OID, LINE_TYPE_OID, LSEG_TYPE_OID, MONEY_ARRAY_TYPE_OID,
     MONEY_TYPE_OID, NAME_ARRAY_TYPE_OID, NAME_TYPE_OID, NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID,
-    OID_ARRAY_TYPE_OID, OID_TYPE_OID, OIDVECTOR_TYPE_OID, PATH_TYPE_OID, PG_ATTRIBUTE_RELATION_OID,
+    NUMRANGE_TYPE_OID, OID_ARRAY_TYPE_OID, OID_TYPE_OID, OIDVECTOR_TYPE_OID, PATH_TYPE_OID, PG_ATTRIBUTE_RELATION_OID,
     PG_ATTRIBUTE_ROWTYPE_OID, PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID,
     PG_CLASS_ROWTYPE_OID, PG_DATABASE_RELATION_OID, PG_DATABASE_ROWTYPE_OID,
     PG_NAMESPACE_RELATION_OID, PG_NAMESPACE_ROWTYPE_OID, PG_NODE_TREE_TYPE_OID,
@@ -25,6 +26,7 @@ use crate::include::catalog::{
     TIMESTAMP_ARRAY_TYPE_OID,
     TIMESTAMP_TYPE_OID, TIMESTAMPTZ_ARRAY_TYPE_OID, TIMESTAMPTZ_TYPE_OID, TIMETZ_ARRAY_TYPE_OID,
     TIMETZ_TYPE_OID, TSQUERY_ARRAY_TYPE_OID, TSQUERY_TYPE_OID, TSVECTOR_ARRAY_TYPE_OID,
+    TSRANGE_TYPE_OID, TSTZRANGE_TYPE_OID,
     XID_ARRAY_TYPE_OID, XID_TYPE_OID,
     TSVECTOR_TYPE_OID, VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID,
     VARCHAR_TYPE_OID,
@@ -201,6 +203,11 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
         ),
         builtin_type_row("date", DATE_TYPE_OID, SqlType::new(SqlTypeKind::Date)),
         builtin_type_row(
+            "daterange",
+            DATERANGE_TYPE_OID,
+            SqlType::new(SqlTypeKind::DateRange),
+        ),
+        builtin_type_row(
             "_date",
             DATE_ARRAY_TYPE_OID,
             SqlType::array_of(SqlType::new(SqlTypeKind::Date)),
@@ -223,6 +230,11 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
             SqlType::new(SqlTypeKind::Timestamp),
         ),
         builtin_type_row(
+            "tsrange",
+            TSRANGE_TYPE_OID,
+            SqlType::new(SqlTypeKind::TimestampRange),
+        ),
+        builtin_type_row(
             "_timestamp",
             TIMESTAMP_ARRAY_TYPE_OID,
             SqlType::array_of(SqlType::new(SqlTypeKind::Timestamp)),
@@ -231,6 +243,11 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
             "timestamptz",
             TIMESTAMPTZ_TYPE_OID,
             SqlType::new(SqlTypeKind::TimestampTz),
+        ),
+        builtin_type_row(
+            "tstzrange",
+            TSTZRANGE_TYPE_OID,
+            SqlType::new(SqlTypeKind::TimestampTzRange),
         ),
         builtin_type_row(
             "_timestamptz",
@@ -253,9 +270,24 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
             SqlType::new(SqlTypeKind::Numeric),
         ),
         builtin_type_row(
+            "numrange",
+            NUMRANGE_TYPE_OID,
+            SqlType::new(SqlTypeKind::NumericRange),
+        ),
+        builtin_type_row(
             "_numeric",
             NUMERIC_ARRAY_TYPE_OID,
             SqlType::array_of(SqlType::new(SqlTypeKind::Numeric)),
+        ),
+        builtin_type_row(
+            "int4range",
+            INT4RANGE_TYPE_OID,
+            SqlType::new(SqlTypeKind::Int4Range),
+        ),
+        builtin_type_row(
+            "int8range",
+            INT8RANGE_TYPE_OID,
+            SqlType::new(SqlTypeKind::Int8Range),
         ),
         builtin_type_row("json", JSON_TYPE_OID, SqlType::new(SqlTypeKind::Json)),
         builtin_type_row(

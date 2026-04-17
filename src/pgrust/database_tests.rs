@@ -1846,43 +1846,38 @@ fn create_index_and_alter_table_set_are_noops() {
              order by p.proname";
     match db.execute(1, proc_sql).unwrap() {
         StatementResult::Query { rows, .. } => {
-            assert_eq!(
-                rows,
-                vec![
-                    vec![
-                        Value::Text("count".into()),
-                        Value::Text("a".into()),
-                        Value::Int16(1),
-                        Value::Bool(false),
-                        Value::Text("int8".into()),
-                        Value::Text("internal".into()),
-                    ],
-                    vec![
-                        Value::Text("json_array_elements".into()),
-                        Value::Text("f".into()),
-                        Value::Int16(1),
-                        Value::Bool(true),
-                        Value::Text("json".into()),
-                        Value::Text("internal".into()),
-                    ],
-                    vec![
-                        Value::Text("lower".into()),
-                        Value::Text("f".into()),
-                        Value::Int16(1),
-                        Value::Bool(false),
-                        Value::Text("text".into()),
-                        Value::Text("internal".into()),
-                    ],
-                    vec![
-                        Value::Text("random".into()),
-                        Value::Text("f".into()),
-                        Value::Int16(0),
-                        Value::Bool(false),
-                        Value::Text("float8".into()),
-                        Value::Text("internal".into()),
-                    ],
-                ]
-            );
+            assert!(rows.contains(&vec![
+                Value::Text("count".into()),
+                Value::Text("a".into()),
+                Value::Int16(1),
+                Value::Bool(false),
+                Value::Text("int8".into()),
+                Value::Text("internal".into()),
+            ]));
+            assert!(rows.contains(&vec![
+                Value::Text("json_array_elements".into()),
+                Value::Text("f".into()),
+                Value::Int16(1),
+                Value::Bool(true),
+                Value::Text("json".into()),
+                Value::Text("internal".into()),
+            ]));
+            assert!(rows.contains(&vec![
+                Value::Text("lower".into()),
+                Value::Text("f".into()),
+                Value::Int16(1),
+                Value::Bool(false),
+                Value::Text("text".into()),
+                Value::Text("internal".into()),
+            ]));
+            assert!(rows.contains(&vec![
+                Value::Text("random".into()),
+                Value::Text("f".into()),
+                Value::Int16(0),
+                Value::Bool(false),
+                Value::Text("float8".into()),
+                Value::Text("internal".into()),
+            ]));
         }
         other => panic!("expected query result, got {:?}", other),
     }

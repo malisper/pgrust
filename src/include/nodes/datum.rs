@@ -256,6 +256,30 @@ pub struct GeoCircle {
     pub radius: f64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum RangeTypeId {
+    Int4Range,
+    Int8Range,
+    NumericRange,
+    DateRange,
+    TimestampRange,
+    TimestampTzRange,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RangeBound {
+    pub value: Box<Value>,
+    pub inclusive: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RangeValue {
+    pub kind: RangeTypeId,
+    pub empty: bool,
+    pub lower: Option<RangeBound>,
+    pub upper: Option<RangeBound>,
+}
+
 impl BitString {
     pub fn new(bit_len: i32, mut bytes: Vec<u8>) -> Self {
         let required = Self::byte_len(bit_len);
@@ -307,6 +331,7 @@ pub enum Value {
     Box(GeoBox),
     Polygon(GeoPolygon),
     Circle(GeoCircle),
+    Range(RangeValue),
     Float64(f64),
     Numeric(NumericValue),
     Json(CompactString),
@@ -652,6 +677,7 @@ impl Value {
             Value::Box(v) => Value::Box(v.clone()),
             Value::Polygon(v) => Value::Polygon(v.clone()),
             Value::Circle(v) => Value::Circle(v.clone()),
+            Value::Range(v) => Value::Range(v.clone()),
             Value::Float64(v) => Value::Float64(*v),
             Value::Numeric(v) => Value::Numeric(v.clone()),
             Value::Json(s) => Value::Json(s.clone()),
@@ -701,6 +727,13 @@ impl Value {
             } else if let Value::Record(record) = v {
                 for (_, value) in record.fields.iter_mut() {
                     *value = value.to_owned_value();
+                }
+            } else if let Value::Range(range) = v {
+                if let Some(lower) = &mut range.lower {
+                    lower.value = Box::new(lower.value.to_owned_value());
+                }
+                if let Some(upper) = &mut range.upper {
+                    upper.value = Box::new(upper.value.to_owned_value());
                 }
             }
         }
@@ -772,6 +805,7 @@ impl PartialEq for Value {
                     && a.center.y.to_bits() == b.center.y.to_bits()
                     && a.radius.to_bits() == b.radius.to_bits()
             }
+            (Value::Range(a), Value::Range(b)) => a == b,
             (Value::Float64(a), Value::Float64(b)) => a.to_bits() == b.to_bits(),
             (Value::Numeric(a), Value::Numeric(b)) => a == b,
             (Value::Json(a), Value::Json(b)) => a == b,
@@ -894,6 +928,10 @@ impl std::hash::Hash for Value {
                 v.center.x.to_bits().hash(state);
                 v.center.y.to_bits().hash(state);
                 v.radius.to_bits().hash(state);
+            }
+            Value::Range(v) => {
+                23u8.hash(state);
+                v.hash(state);
             }
             Value::Float64(v) => {
                 3u8.hash(state);

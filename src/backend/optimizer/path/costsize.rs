@@ -2593,6 +2593,12 @@ pub(super) fn estimate_sql_type_width(sql_type: SqlType) -> usize {
         | SqlTypeKind::Tid
         | SqlTypeKind::Float8 => 8,
         SqlTypeKind::Numeric => 16,
+        SqlTypeKind::Int4Range
+        | SqlTypeKind::Int8Range
+        | SqlTypeKind::NumericRange
+        | SqlTypeKind::DateRange
+        | SqlTypeKind::TimestampRange
+        | SqlTypeKind::TimestampTzRange => 32,
         SqlTypeKind::Bit | SqlTypeKind::VarBit | SqlTypeKind::Bytea => 16,
         SqlTypeKind::Text
         | SqlTypeKind::Interval

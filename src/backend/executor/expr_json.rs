@@ -12,6 +12,7 @@ use crate::backend::executor::jsonpath::{
 };
 use crate::backend::executor::render_bit_text;
 use crate::backend::executor::render_datetime_value_text;
+use crate::backend::executor::render_range_text;
 use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::include::nodes::primnodes::BuiltinScalarFunction;
 use crate::pgrust::compact_string::CompactString;
@@ -732,6 +733,7 @@ fn json_object_key_text(value: &Value, op: &'static str) -> Result<String, ExecE
             Default::default(),
         )
         .unwrap_or_default()),
+        Value::Range(_) => Ok(render_range_text(value).unwrap_or_default()),
         Value::TsVector(v) => Ok(crate::backend::executor::render_tsvector_text(v)),
         Value::TsQuery(v) => Ok(crate::backend::executor::render_tsquery_text(v)),
         Value::Array(_) | Value::PgArray(_) => Err(ExecError::TypeMismatch {
@@ -1837,6 +1839,7 @@ fn value_to_json_serde(value: &Value) -> SerdeJsonValue {
             crate::backend::executor::render_geometry_text(value, Default::default())
                 .unwrap_or_default(),
         ),
+        Value::Range(_) => SerdeJsonValue::String(render_range_text(value).unwrap_or_default()),
         Value::TsVector(v) => {
             SerdeJsonValue::String(crate::backend::executor::render_tsvector_text(v))
         }
