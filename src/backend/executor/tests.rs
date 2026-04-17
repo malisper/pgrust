@@ -7942,6 +7942,120 @@ fn regex_null_pattern_returns_null() {
         Value::Null
     );
 }
+
+#[test]
+fn array_subscript_null_slice_bounds_return_null() {
+    let base = temp_dir("array_subscript_null_slice_bounds");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select ('{{{1},{2},{3}},{{4},{5},{6}}}'::int[])[1][NULL:1][1]",
+        )
+        .unwrap(),
+        vec![vec![Value::Null]],
+    );
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select ('{{{1},{2},{3}},{{4},{5},{6}}}'::int[])[1][1:NULL][1]",
+        )
+        .unwrap(),
+        vec![vec![Value::Null]],
+    );
+}
+
+#[test]
+fn array_subscript_rejects_more_than_max_dimensions() {
+    let base = temp_dir("array_subscript_max_dimensions");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select ('{}'::int[])[1][2][3][4][5][6][7]",
+    ) {
+        Err(ExecError::DetailedError {
+            message,
+            sqlstate,
+            ..
+        }) => {
+            assert_eq!(
+                message,
+                "number of array dimensions (7) exceeds the maximum allowed (6)"
+            );
+            assert_eq!(sqlstate, "54000");
+        }
+        other => panic!("expected max-dimension error, got {other:?}"),
+    }
+}
+
+#[test]
+fn array_subscript_partial_slices_on_zero_based_arrays_match_postgres() {
+    let base = temp_dir("array_subscript_zero_based_partial_slices");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select ('[0:4]={1,2,3,4,5}'::int[])[:3]",
+        )
+        .unwrap(),
+        vec![vec![Value::PgArray(ArrayValue::from_1d(vec![
+            Value::Int32(1),
+            Value::Int32(2),
+            Value::Int32(3),
+            Value::Int32(4),
+        ]))]],
+    );
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select ('[0:4]={1,2,3,4,5}'::int[])[2:]",
+        )
+        .unwrap(),
+        vec![vec![Value::PgArray(ArrayValue::from_1d(vec![
+            Value::Int32(3),
+            Value::Int32(4),
+            Value::Int32(5),
+        ]))]],
+    );
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select ('[0:4]={1,2,3,4,5}'::int[])[:]",
+        )
+        .unwrap(),
+        vec![vec![Value::PgArray(ArrayValue::from_dimensions(
+            vec![ArrayDimension {
+                lower_bound: 0,
+                length: 5,
+            }],
+            vec![
+                Value::Int32(1),
+                Value::Int32(2),
+                Value::Int32(3),
+                Value::Int32(4),
+                Value::Int32(5),
+            ],
+        ))]],
+    );
+}
 #[test]
 fn regex_filters_rows_in_where_clause() {
     let base = temp_dir("regex_filter_where");

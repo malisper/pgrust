@@ -53,7 +53,7 @@ Counts from `/tmp/pgrust_regress_todo_20260417` on 2026-04-17; `test_setup.sql` 
 - amutils.sql: 0/10
 - arrays.sql: 156/526
   - [done] array subscript result names should inherit the base column name instead of defaulting to `?column?`
-  - array read semantics need executor fixes for slice/subscript edge cases
+  - [done] array read semantics need executor fixes for slice/subscript edge cases
   - array write semantics need slice-assignment fixes, especially for multidimensional arrays
 - async.sql: 0/11
 - bit.sql: 74/132
