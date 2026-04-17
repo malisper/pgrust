@@ -1120,6 +1120,19 @@ fn parse_create_user_statement() {
 }
 
 #[test]
+fn parse_create_user_with_statement() {
+    let stmt = parse_statement("create user regress_login with nocreatedb nocreaterole").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateRole(CreateRoleStatement {
+            role_name: "regress_login".into(),
+            is_user: true,
+            options: vec![RoleOption::CreateDb(false), RoleOption::CreateRole(false)],
+        })
+    );
+}
+
+#[test]
 fn parse_create_role_membership_options() {
     let stmt = parse_statement(
         "create role regress_inroles role regress_createdb, regress_login admin regress_role_super in role regress_createrole",
@@ -1229,6 +1242,18 @@ fn parse_comment_on_role_statement() {
         Statement::CommentOnRole(CommentOnRoleStatement {
             role_name: "regress_hasprivs".into(),
             comment: Some("some comment".into()),
+        })
+    );
+}
+
+#[test]
+fn parse_drop_user_statement() {
+    let stmt = parse_statement("drop user if exists regress_login").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::DropRole(DropRoleStatement {
+            if_exists: true,
+            role_names: vec!["regress_login".into()],
         })
     );
 }
@@ -4143,6 +4168,39 @@ fn parse_create_drop_and_comment_on_domain_statements() {
         panic!("expected comment on domain");
     };
     assert_eq!(comment.domain_name, "dom_int");
+    assert_eq!(comment.comment.as_deref(), Some("hello"));
+}
+
+#[test]
+fn parse_create_drop_and_comment_on_conversion_statements() {
+    let Statement::CreateConversion(create) = parse_statement(
+        "create default conversion public.mydef for 'LATIN1' to 'UTF8' from iso8859_1_to_utf8",
+    )
+    .unwrap()
+    else {
+        panic!("expected create conversion");
+    };
+    assert_eq!(create.conversion_name, "public.mydef");
+    assert_eq!(create.for_encoding, "LATIN1");
+    assert_eq!(create.to_encoding, "UTF8");
+    assert_eq!(create.function_name, "iso8859_1_to_utf8");
+    assert!(create.is_default);
+
+    let Statement::DropConversion(drop_stmt) =
+        parse_statement("drop conversion if exists myconv cascade").unwrap()
+    else {
+        panic!("expected drop conversion");
+    };
+    assert!(drop_stmt.if_exists);
+    assert!(drop_stmt.cascade);
+    assert_eq!(drop_stmt.conversion_name, "myconv");
+
+    let Statement::CommentOnConversion(comment) =
+        parse_statement("comment on conversion myconv is 'hello'").unwrap()
+    else {
+        panic!("expected comment on conversion");
+    };
+    assert_eq!(comment.conversion_name, "myconv");
     assert_eq!(comment.comment.as_deref(), Some("hello"));
 }
 

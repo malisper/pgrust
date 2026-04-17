@@ -62,6 +62,40 @@ setup_pg_regress_env() {
     fi
 }
 
+transform_conversion_fixture() {
+    local input_path="$1"
+    local output_path="$2"
+
+    perl -0pe "
+        s/CREATE FUNCTION test_enc_setup\\(\\) RETURNS void\\n\\s+AS :'regresslib', 'test_enc_setup'\\n\\s+LANGUAGE C STRICT;\\nSELECT FROM test_enc_setup\\(\\);/SELECT pg_rust_test_enc_setup();/s;
+        s/CREATE FUNCTION test_enc_conversion\\(bytea, name, name, bool, validlen OUT int, result OUT bytea\\)\\n\\s+AS :'regresslib', 'test_enc_conversion'\\n\\s+LANGUAGE C STRICT;\\n//s;
+        s/\\btest_enc_conversion\\s*\\(/pg_rust_test_enc_conversion(/g;
+        s/\\bcreate\\s+or\\s+replace\\s+function\\s+test_conv\\(/create function test_conv(/i;
+    " "$input_path" > "$output_path"
+}
+
+prepare_test_fixture() {
+    local sql_file="$1"
+    local expected_file="$2"
+    local test_name="$3"
+
+    PREPARED_SQL_FILE="$sql_file"
+    PREPARED_EXPECTED_FILE="$expected_file"
+
+    if [[ "$test_name" != "conversion" ]]; then
+        return 0
+    fi
+
+    local fixture_dir="$RESULTS_DIR/fixtures"
+    mkdir -p "$fixture_dir"
+
+    PREPARED_SQL_FILE="$fixture_dir/${test_name}.sql"
+    PREPARED_EXPECTED_FILE="$fixture_dir/${test_name}.out"
+
+    transform_conversion_fixture "$sql_file" "$PREPARED_SQL_FILE"
+    transform_conversion_fixture "$expected_file" "$PREPARED_EXPECTED_FILE"
+}
+
 PORT=5433
 SKIP_BUILD=false
 SKIP_SERVER=false
@@ -416,6 +450,10 @@ for sql_file in "${TEST_FILES[@]}"; do
         continue
     fi
 
+    prepare_test_fixture "$sql_file" "$expected_file" "$test_name"
+    sql_file="$PREPARED_SQL_FILE"
+    expected_file="$PREPARED_EXPECTED_FILE"
+
     # Run the test with timeout (if available)
     # -a = echo all input, -q = quiet mode (matches PG regression test runner)
     if [[ -n "$TIMEOUT_CMD" ]]; then
@@ -439,12 +477,14 @@ for sql_file in "${TEST_FILES[@]}"; do
     best_diff_lines=999999
     query_expected_file="$expected_file"
 
-    candidates=("$EXPECTED_DIR/${test_name}.out")
-    shopt -s nullglob
-    for candidate in "$EXPECTED_DIR/${test_name}_"[0-9]*.out; do
-        candidates+=("$candidate")
-    done
-    shopt -u nullglob
+    candidates=("$expected_file")
+    if [[ "$expected_file" == "$EXPECTED_DIR/${test_name}.out" ]]; then
+        shopt -s nullglob
+        for candidate in "$EXPECTED_DIR/${test_name}_"[0-9]*.out; do
+            candidates+=("$candidate")
+        done
+        shopt -u nullglob
+    fi
 
     for candidate in "${candidates[@]}"; do
         [[ -f "$candidate" ]] || continue

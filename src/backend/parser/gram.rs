@@ -62,6 +62,9 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_domain_statement(&sql)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_conversion_statement(&sql)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_create_function_statement(&sql)? {
         return Ok(stmt);
     }
@@ -279,6 +282,25 @@ fn try_parse_domain_statement(sql: &str) -> Result<Option<Statement>, ParseError
     if lowered.starts_with("comment on domain ") {
         return build_comment_on_domain_statement(trimmed)
             .map(|stmt| Some(Statement::CommentOnDomain(stmt)));
+    }
+    Ok(None)
+}
+
+fn try_parse_conversion_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if lowered.starts_with("create default conversion ")
+        || lowered.starts_with("create conversion ")
+    {
+        return build_create_conversion_statement(trimmed)
+            .map(|stmt| Some(Statement::CreateConversion(stmt)));
+    }
+    if lowered.starts_with("drop conversion ") {
+        return build_drop_conversion_statement(trimmed).map(|stmt| Some(Statement::DropConversion(stmt)));
+    }
+    if lowered.starts_with("comment on conversion ") {
+        return build_comment_on_conversion_statement(trimmed)
+            .map(|stmt| Some(Statement::CommentOnConversion(stmt)));
     }
     Ok(None)
 }
@@ -1901,6 +1923,136 @@ fn build_comment_on_domain_statement(sql: &str) -> Result<CommentOnDomainStateme
     };
     Ok(CommentOnDomainStatement {
         domain_name: object.to_string(),
+        comment,
+    })
+}
+
+fn build_create_conversion_statement(sql: &str) -> Result<CreateConversionStatement, ParseError> {
+    let lowered = sql.to_ascii_lowercase();
+    let (is_default, prefix) = if lowered.starts_with("create default conversion ") {
+        (true, "create default conversion ")
+    } else {
+        (false, "create conversion ")
+    };
+    let rest = sql
+        .get(prefix.len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let ((schema_name, base_name), rest) = parse_schema_qualified_name(rest)?;
+    let conversion_name = schema_name
+        .map(|schema| format!("{schema}.{base_name}"))
+        .unwrap_or(base_name);
+    let rest = consume_keyword(rest.trim_start(), "for").trim_start();
+    let for_len = scan_string_literal_token_len(rest).ok_or(ParseError::UnexpectedToken {
+        expected: "source encoding string literal",
+        actual: rest.into(),
+    })?;
+    let for_encoding = decode_string_literal(&rest[..for_len])?;
+    let rest = rest[for_len..].trim_start();
+    let rest = consume_keyword(rest, "to").trim_start();
+    let to_len = scan_string_literal_token_len(rest).ok_or(ParseError::UnexpectedToken {
+        expected: "destination encoding string literal",
+        actual: rest.into(),
+    })?;
+    let to_encoding = decode_string_literal(&rest[..to_len])?;
+    let rest = rest[to_len..].trim_start();
+    let rest = consume_keyword(rest, "from").trim_start();
+    let ((function_schema, function_base), trailing) = parse_schema_qualified_name(rest)?;
+    let function_name = function_schema
+        .map(|schema| format!("{schema}.{function_base}"))
+        .unwrap_or(function_base);
+    if !trailing.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of statement",
+            actual: trailing.trim().into(),
+        });
+    }
+    Ok(CreateConversionStatement {
+        conversion_name,
+        for_encoding,
+        to_encoding,
+        function_name,
+        is_default,
+    })
+}
+
+fn build_drop_conversion_statement(sql: &str) -> Result<DropConversionStatement, ParseError> {
+    let tokens = sql.split_whitespace().collect::<Vec<_>>();
+    if tokens.len() < 3 {
+        return Err(ParseError::UnexpectedEof);
+    }
+    let mut index = 2usize;
+    let mut if_exists = false;
+    if tokens
+        .get(index)
+        .is_some_and(|tok| tok.eq_ignore_ascii_case("if"))
+    {
+        if !tokens
+            .get(index + 1)
+            .is_some_and(|tok| tok.eq_ignore_ascii_case("exists"))
+        {
+            return Err(ParseError::UnexpectedToken {
+                expected: "EXISTS",
+                actual: tokens.get(index + 1).unwrap_or(&"").to_string(),
+            });
+        }
+        if_exists = true;
+        index += 2;
+    }
+    let Some(name) = tokens.get(index) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "conversion name",
+            actual: sql.into(),
+        });
+    };
+    let mut cascade = false;
+    if let Some(option) = tokens.get(index + 1) {
+        if option.eq_ignore_ascii_case("cascade") {
+            cascade = true;
+        } else if !option.eq_ignore_ascii_case("restrict") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "CASCADE, RESTRICT, or end of statement",
+                actual: (*option).into(),
+            });
+        }
+    }
+    if tokens.len() > index + 2 {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of statement",
+            actual: sql.into(),
+        });
+    }
+    Ok(DropConversionStatement {
+        if_exists,
+        conversion_name: (*name).to_string(),
+        cascade,
+    })
+}
+
+fn build_comment_on_conversion_statement(
+    sql: &str,
+) -> Result<CommentOnConversionStatement, ParseError> {
+    let lower = sql.to_ascii_lowercase();
+    let Some(is_offset) = lower.find(" is ") else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "COMMENT ON CONVERSION name IS ...",
+            actual: sql.into(),
+        });
+    };
+    let object = sql["comment on conversion ".len()..is_offset].trim();
+    let value = sql[is_offset + 4..].trim();
+    let comment = if value.eq_ignore_ascii_case("null") {
+        None
+    } else if value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2 {
+        Some(value[1..value.len() - 1].replace("''", "'"))
+    } else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "quoted string or NULL",
+            actual: value.into(),
+        });
+    };
+    Ok(CommentOnConversionStatement {
+        conversion_name: object.to_string(),
         comment,
     })
 }

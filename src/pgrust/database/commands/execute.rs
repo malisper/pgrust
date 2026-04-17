@@ -319,6 +319,12 @@ impl Database {
                     comment_stmt,
                     configured_search_path,
                 ),
+            Statement::CommentOnConversion(ref comment_stmt) => self
+                .execute_comment_on_conversion_stmt_with_search_path(
+                    client_id,
+                    comment_stmt,
+                    configured_search_path,
+                ),
             Statement::Select(_) | Statement::Values(_) | Statement::Explain(_) => {
                 let visible_catalog =
                     self.lazy_catalog_lookup(client_id, None, configured_search_path);
@@ -551,6 +557,12 @@ impl Database {
                     create_stmt,
                     configured_search_path,
                 ),
+            Statement::CreateConversion(ref create_stmt) => self
+                .execute_create_conversion_stmt_with_search_path(
+                    client_id,
+                    create_stmt,
+                    configured_search_path,
+                ),
             Statement::CreateType(ref create_stmt) => self
                 .execute_create_type_stmt_with_search_path(
                     client_id,
@@ -611,6 +623,12 @@ impl Database {
                 drop_stmt,
                 configured_search_path,
             ),
+            Statement::DropConversion(ref drop_stmt) => self
+                .execute_drop_conversion_stmt_with_search_path(
+                    client_id,
+                    drop_stmt,
+                    configured_search_path,
+                ),
             Statement::DropType(ref drop_stmt) => self.execute_drop_type_stmt_with_search_path(
                 client_id,
                 drop_stmt,

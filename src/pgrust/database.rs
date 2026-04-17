@@ -168,6 +168,7 @@ pub struct Database {
     pub(crate) domains: Arc<RwLock<BTreeMap<String, DomainEntry>>>,
     pub(crate) enum_types: Arc<RwLock<BTreeMap<String, EnumTypeEntry>>>,
     pub(crate) range_types: Arc<RwLock<BTreeMap<String, RangeTypeEntry>>>,
+    pub(crate) conversions: Arc<RwLock<BTreeMap<String, ConversionEntry>>>,
     pub(crate) sequences: Arc<SequenceRuntime>,
     pub(crate) _wal_bg_writer: Option<Arc<WalBgWriter>>,
 }
@@ -227,6 +228,17 @@ pub(crate) struct RangeTypeEntry {
     pub subtype: SqlType,
     pub subtype_diff: Option<String>,
     pub collation: Option<String>,
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ConversionEntry {
+    pub oid: u32,
+    pub name: String,
+    pub namespace_oid: u32,
+    pub for_encoding: String,
+    pub to_encoding: String,
+    pub function_name: String,
+    pub is_default: bool,
+    pub owner_oid: u32,
     pub comment: Option<String>,
 }
 
@@ -357,6 +369,40 @@ impl Database {
                 };
                 Ok((
                     name.to_ascii_lowercase(),
+                    object.to_ascii_lowercase(),
+                    namespace_oid,
+                ))
+            }
+            Some(_) => Err(ParseError::UnsupportedQualifiedName(name.to_string())),
+            None => Ok((
+                format!("public.{}", name.to_ascii_lowercase()),
+                name.to_ascii_lowercase(),
+                match self
+                    .effective_search_path(0, configured_search_path)
+                    .into_iter()
+                    .find(|schema| schema == "public")
+                {
+                    Some(_) => PUBLIC_NAMESPACE_OID,
+                    None => PUBLIC_NAMESPACE_OID,
+                },
+            )),
+        }
+    }
+
+    pub(crate) fn normalize_conversion_name_for_create(
+        &self,
+        name: &str,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<(String, String, u32), ParseError> {
+        match name.split_once('.') {
+            Some((schema, object)) if !object.is_empty() => {
+                let namespace_oid = match schema.to_ascii_lowercase().as_str() {
+                    "public" => PUBLIC_NAMESPACE_OID,
+                    "pg_catalog" => 11,
+                    _ => PUBLIC_NAMESPACE_OID,
+                };
+                Ok((
+                    format!("{}.{}", schema.to_ascii_lowercase(), object.to_ascii_lowercase()),
                     object.to_ascii_lowercase(),
                     namespace_oid,
                 ))

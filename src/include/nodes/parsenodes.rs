@@ -247,7 +247,9 @@ pub enum Statement {
     AlterTableValidateConstraint(AlterTableValidateConstraintStatement),
     CommentOnTable(CommentOnTableStatement),
     CommentOnDomain(CommentOnDomainStatement),
+    CommentOnConversion(CommentOnConversionStatement),
     CreateDomain(CreateDomainStatement),
+    CreateConversion(CreateConversionStatement),
     CommentOnRole(CommentOnRoleStatement),
     GrantObject(GrantObjectStatement),
     RevokeObject(RevokeObjectStatement),
@@ -255,6 +257,7 @@ pub enum Statement {
     RevokeRoleMembership(RevokeRoleMembershipStatement),
     DropType(DropTypeStatement),
     DropSequence(DropSequenceStatement),
+    DropConversion(DropConversionStatement),
     DropDatabase(DropDatabaseStatement),
     DropTable(DropTableStatement),
     DropIndex(DropIndexStatement),
@@ -967,6 +970,21 @@ pub struct CommentOnDomainStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentOnConversionStatement {
+    pub conversion_name: String,
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateConversionStatement {
+    pub conversion_name: String,
+    pub for_encoding: String,
+    pub to_encoding: String,
+    pub function_name: String,
+    pub is_default: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateRoleStatement {
     pub role_name: String,
     pub is_user: bool,
@@ -989,6 +1007,13 @@ pub enum AlterRoleAction {
 pub struct DropRoleStatement {
     pub if_exists: bool,
     pub role_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropConversionStatement {
+    pub if_exists: bool,
+    pub conversion_name: String,
+    pub cascade: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

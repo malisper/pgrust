@@ -3170,6 +3170,69 @@ fn comment_on_table_respects_txn_commit_and_rollback() {
 }
 
 #[test]
+fn create_comment_and_drop_conversion_track_catalog_state() {
+    let base = temp_dir("conversion_catalog_state");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create default conversion public.mydef for 'LATIN1' to 'UTF8' from iso8859_1_to_utf8",
+    )
+    .unwrap();
+    db.execute(1, "comment on conversion mydef is 'hello conversion'")
+        .unwrap();
+
+    let conversions = db.conversions.read();
+    let entry = conversions.get("public.mydef").expect("conversion exists");
+    assert_eq!(entry.for_encoding, "LATIN1");
+    assert_eq!(entry.to_encoding, "UTF8");
+    assert!(entry.is_default);
+    assert_eq!(entry.comment.as_deref(), Some("hello conversion"));
+    drop(conversions);
+
+    db.execute(1, "drop conversion mydef").unwrap();
+    assert!(db.conversions.read().get("public.mydef").is_none());
+}
+
+#[test]
+fn create_conversion_rejects_duplicate_name_and_default_pair() {
+    let base = temp_dir("conversion_duplicate_checks");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create conversion myconv for 'LATIN1' to 'UTF8' from iso8859_1_to_utf8",
+    )
+    .unwrap();
+    match db.execute(
+        1,
+        "create conversion myconv for 'LATIN1' to 'UTF8' from iso8859_1_to_utf8",
+    ) {
+        Err(ExecError::DetailedError { message, sqlstate, .. }) => {
+            assert_eq!(message, "conversion \"myconv\" already exists");
+            assert_eq!(sqlstate, "42710");
+        }
+        other => panic!("expected duplicate conversion error, got {:?}", other),
+    }
+
+    db.execute(
+        1,
+        "create default conversion public.mydef for 'LATIN1' to 'UTF8' from iso8859_1_to_utf8",
+    )
+    .unwrap();
+    match db.execute(
+        1,
+        "create default conversion public.mydef2 for 'LATIN1' to 'UTF8' from iso8859_1_to_utf8",
+    ) {
+        Err(ExecError::DetailedError { message, sqlstate, .. }) => {
+            assert_eq!(message, "default conversion for LATIN1 to UTF8 already exists");
+            assert_eq!(sqlstate, "42710");
+        }
+        other => panic!("expected duplicate default conversion error, got {:?}", other),
+    }
+}
+
+#[test]
 fn comment_on_temp_table_is_unsupported() {
     let base = temp_dir("comment_on_temp_table");
     let db = Database::open(&base, 16).unwrap();
