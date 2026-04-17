@@ -3,11 +3,12 @@ use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::{AggFunc, Expr, Plan, RelationDesc, Value};
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, JSON_TYPE_OID, PUBLIC_NAMESPACE_OID, PgProcRow, PgRewriteRow,
-    PgTypeRow, RECORD_TYPE_OID, bootstrap_pg_proc_rows, sort_pg_rewrite_rows,
+    BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_PRIMARY, JSON_TYPE_OID, PUBLIC_NAMESPACE_OID, PgProcRow,
+    PgRewriteRow, PgTypeRow, RECORD_TYPE_OID, bootstrap_pg_proc_rows, sort_pg_rewrite_rows,
 };
 use crate::include::nodes::parsenodes::{
-    AliasColumnDef, AliasColumnSpec, JoinTreeNode, RangeTblEntryKind, RawTypeName,
+    AliasColumnDef, AliasColumnSpec, ColumnConstraint, ForeignKeyAction, ForeignKeyMatchType,
+    JoinTreeNode, RangeTblEntryKind, RawTypeName, TableConstraint,
 };
 use crate::include::nodes::primnodes::{AttrNumber, JoinType, Var, is_system_attr};
 
@@ -241,6 +242,107 @@ fn catalog_with_people_id_index() -> Catalog {
             }),
         },
     );
+    catalog
+}
+
+fn catalog_with_people_primary_key() -> Catalog {
+    let mut catalog = catalog();
+    catalog.insert(
+        "people_pkey",
+        CatalogEntry {
+            rel: crate::RelFileLocator {
+                spc_oid: 0,
+                db_oid: 1,
+                rel_number: 15011,
+            },
+            relation_oid: 50011,
+            namespace_oid: 11,
+            owner_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+            row_type_oid: 60011,
+            reltoastrelid: 0,
+            relpersistence: 'p',
+            relkind: 'i',
+            relhassubclass: false,
+            relispartition: false,
+            relpages: 0,
+            reltuples: 0.0,
+            desc: RelationDesc {
+                columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
+            },
+            index_meta: Some(crate::backend::catalog::state::CatalogIndexMeta {
+                indrelid: 65000,
+                indisunique: true,
+                indisprimary: true,
+                indisvalid: true,
+                indisready: true,
+                indislive: true,
+                indkey: vec![1],
+                indclass: vec![crate::include::catalog::INT4_BTREE_OPCLASS_OID],
+                indcollation: vec![0],
+                indoption: vec![0],
+                indexprs: None,
+                indpred: None,
+            }),
+        },
+    );
+    catalog
+        .create_index_backed_constraint(65000, 50011, "people_pkey", CONSTRAINT_PRIMARY, &[])
+        .unwrap();
+    catalog
+}
+
+fn catalog_with_text_parent_primary_key() -> Catalog {
+    let mut catalog = Catalog::default();
+    catalog.insert(
+        "labels",
+        test_catalog_entry(
+            15030,
+            RelationDesc {
+                columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Text), false)],
+            },
+        ),
+    );
+    catalog.insert(
+        "labels_pkey",
+        CatalogEntry {
+            rel: crate::RelFileLocator {
+                spc_oid: 0,
+                db_oid: 1,
+                rel_number: 15031,
+            },
+            relation_oid: 50031,
+            namespace_oid: 11,
+            owner_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+            row_type_oid: 60031,
+            reltoastrelid: 0,
+            relpersistence: 'p',
+            relkind: 'i',
+            relhassubclass: false,
+            relispartition: false,
+            relpages: 0,
+            reltuples: 0.0,
+            desc: RelationDesc {
+                columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Text), false)],
+            },
+            index_meta: Some(crate::backend::catalog::state::CatalogIndexMeta {
+                indrelid: 65030,
+                indisunique: true,
+                indisprimary: true,
+                indisvalid: true,
+                indisready: true,
+                indislive: true,
+                indkey: vec![1],
+                indclass: vec![crate::include::catalog::TEXT_BTREE_OPCLASS_OID],
+                indcollation: vec![0],
+                indoption: vec![0],
+                indexprs: None,
+                indpred: None,
+            }),
+        },
+    );
+    catalog
+        .create_index_backed_constraint(65030, 50031, "labels_pkey", CONSTRAINT_PRIMARY, &[])
+        .unwrap();
     catalog
 }
 
@@ -3187,6 +3289,45 @@ fn parse_create_table_named_check_and_not_null_constraints() {
 }
 
 #[test]
+fn parse_create_table_foreign_key_constraints() {
+    let stmt = parse_statement(
+        "create table pets (
+            owner_id int4 references people(id),
+            owner_name text,
+            foreign key (owner_name) references people(name) match simple on delete restrict on update no action
+        )",
+    )
+    .unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+    let columns = ct.columns().collect::<Vec<_>>();
+    assert_eq!(
+        columns[0].constraints,
+        vec![ColumnConstraint::References {
+            attributes: attrs(),
+            referenced_table: "people".into(),
+            referenced_columns: Some(vec!["id".into()]),
+            match_type: ForeignKeyMatchType::Simple,
+            on_delete: ForeignKeyAction::NoAction,
+            on_update: ForeignKeyAction::NoAction,
+        }]
+    );
+    assert_eq!(
+        ct.constraints().cloned().collect::<Vec<_>>(),
+        vec![TableConstraint::ForeignKey {
+            attributes: attrs(),
+            columns: vec!["owner_name".into()],
+            referenced_table: "people".into(),
+            referenced_columns: Some(vec!["name".into()]),
+            match_type: ForeignKeyMatchType::Simple,
+            on_delete: ForeignKeyAction::Restrict,
+            on_update: ForeignKeyAction::NoAction,
+        }]
+    );
+}
+
+#[test]
 fn lower_create_table_rejects_invalid_key_constraints() {
     let stmt =
         parse_statement("create table items (id int4 primary key, note text, primary key (note))")
@@ -3268,6 +3409,16 @@ fn lower_create_table_rejects_unsupported_constraint_attributes() {
         lower_create_table(&ct, &crate::backend::parser::analyze::LiteralDefaultCatalog),
         Err(ParseError::FeatureNotSupported(feature)) if feature == "PRIMARY KEY NOT VALID"
     ));
+
+    let stmt = parse_statement("create table pets (owner_id int4 references people(id) not valid)")
+        .unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+    assert!(matches!(
+        lower_create_table(&ct, &catalog_with_people_primary_key()),
+        Err(ParseError::FeatureNotSupported(feature)) if feature == "FOREIGN KEY NOT VALID"
+    ));
 }
 
 #[test]
@@ -3288,6 +3439,37 @@ fn lower_create_table_collapses_duplicate_not_null_constraints() {
             .as_deref(),
         Some("items_id_nn")
     );
+}
+
+#[test]
+fn lower_create_table_resolves_foreign_keys_against_primary_keys() {
+    let stmt = parse_statement("create table pets (owner_id int4 references people)").unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+    let lowered = lower_create_table(&ct, &catalog_with_people_primary_key()).unwrap();
+    assert_eq!(lowered.foreign_key_actions.len(), 1);
+    let foreign_key = &lowered.foreign_key_actions[0];
+    assert_eq!(foreign_key.constraint_name, "pets_owner_id_fkey");
+    assert_eq!(foreign_key.columns, vec!["owner_id".to_string()]);
+    assert_eq!(foreign_key.referenced_table, "people");
+    assert_eq!(foreign_key.referenced_columns, vec!["id".to_string()]);
+    assert_eq!(foreign_key.match_type, ForeignKeyMatchType::Simple);
+    assert_eq!(foreign_key.on_delete, ForeignKeyAction::NoAction);
+    assert_eq!(foreign_key.on_update, ForeignKeyAction::NoAction);
+}
+
+#[test]
+fn lower_create_table_rejects_cross_type_foreign_keys() {
+    let stmt = parse_statement("create table pets (owner_id int4 references labels(id))").unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+    assert!(matches!(
+        lower_create_table(&ct, &catalog_with_text_parent_primary_key()),
+        Err(ParseError::FeatureNotSupported(feature))
+            if feature == "FOREIGN KEY with cross-type columns"
+    ));
 }
 
 #[test]
@@ -4280,10 +4462,9 @@ fn build_plan_partial_derived_table_column_aliases_preserve_suffix() {
 
 #[test]
 fn build_plan_cross_join_derived_table_column_aliases() {
-    let stmt = parse_select(
-        "select ii, tt, kk from (people cross join pets) as tx (ii, jj, tt, ii2, kk)",
-    )
-    .unwrap();
+    let stmt =
+        parse_select("select ii, tt, kk from (people cross join pets) as tx (ii, jj, tt, ii2, kk)")
+            .unwrap();
     let plan = build_plan(&stmt, &catalog_with_pets()).unwrap();
     match plan {
         Plan::Projection { targets, .. } => {

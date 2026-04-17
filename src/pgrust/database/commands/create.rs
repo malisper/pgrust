@@ -7,6 +7,7 @@ use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_PLPGSQL_OID,
     PUBLIC_NAMESPACE_OID, PgProcRow, RECORD_TYPE_OID,
 };
+use crate::include::nodes::parsenodes::{ForeignKeyAction, ForeignKeyMatchType};
 use crate::include::nodes::primnodes::QueryColumn;
 
 fn normalize_create_function_name_for_search_path(
@@ -52,6 +53,43 @@ fn proc_arg_mode(mode: FunctionArgMode) -> u8 {
         FunctionArgMode::Out => b'o',
         FunctionArgMode::InOut => b'b',
     }
+}
+
+fn foreign_key_action_code(action: ForeignKeyAction) -> char {
+    match action {
+        ForeignKeyAction::NoAction => 'a',
+        ForeignKeyAction::Restrict => 'r',
+        ForeignKeyAction::Cascade => 'c',
+        ForeignKeyAction::SetNull => 'n',
+        ForeignKeyAction::SetDefault => 'd',
+    }
+}
+
+fn foreign_key_match_code(match_type: ForeignKeyMatchType) -> char {
+    match match_type {
+        ForeignKeyMatchType::Simple => 's',
+        ForeignKeyMatchType::Full => 'f',
+        ForeignKeyMatchType::Partial => 'p',
+    }
+}
+
+fn column_attnums_for_names(
+    desc: &crate::backend::executor::RelationDesc,
+    columns: &[String],
+) -> Vec<i16> {
+    columns
+        .iter()
+        .map(|column_name| {
+            desc.columns
+                .iter()
+                .enumerate()
+                .find_map(|(index, column)| {
+                    (!column.dropped && column.name.eq_ignore_ascii_case(column_name))
+                        .then_some(index as i16 + 1)
+                })
+                .unwrap_or_else(|| panic!("missing column for foreign key: {column_name}"))
+        })
+        .collect()
 }
 
 impl Database {
@@ -602,14 +640,62 @@ impl Database {
                             self.apply_catalog_mutation_effect_immediate(&constraint_effect)?;
                             catalog_effects.push(constraint_effect);
                         }
+                        let foreign_key_base_cid =
+                            check_base_cid.saturating_add(lowered.check_actions.len() as u32);
+                        for (index, action) in lowered.foreign_key_actions.iter().enumerate() {
+                            let referenced_relation = catalog
+                                .lookup_relation_by_oid(action.referenced_relation_oid)
+                                .ok_or_else(|| {
+                                    ExecError::Parse(ParseError::UnknownTable(
+                                        action.referenced_table.clone(),
+                                    ))
+                                })?;
+                            let local_attnums =
+                                column_attnums_for_names(&relation.desc, &action.columns);
+                            let referenced_attnums = column_attnums_for_names(
+                                &referenced_relation.desc,
+                                &action.referenced_columns,
+                            );
+                            let constraint_ctx = CatalogWriteContext {
+                                pool: self.pool.clone(),
+                                txns: self.txns.clone(),
+                                xid,
+                                cid: foreign_key_base_cid.saturating_add(index as u32),
+                                client_id,
+                                waiter: None,
+                                interrupts: Arc::clone(&interrupts),
+                            };
+                            let constraint_effect = self
+                                .catalog
+                                .write()
+                                .create_foreign_key_constraint_mvcc(
+                                    relation.relation_oid,
+                                    action.constraint_name.clone(),
+                                    !action.not_valid,
+                                    &local_attnums,
+                                    action.referenced_relation_oid,
+                                    action.referenced_index_oid,
+                                    &referenced_attnums,
+                                    foreign_key_action_code(action.on_update),
+                                    foreign_key_action_code(action.on_delete),
+                                    foreign_key_match_code(action.match_type),
+                                    &constraint_ctx,
+                                )
+                                .map_err(map_catalog_error)?;
+                            self.apply_catalog_mutation_effect_immediate(&constraint_effect)?;
+                            catalog_effects.push(constraint_effect);
+                        }
                         Ok(StatementResult::AffectedRows(0))
                     }
                 }
             }
             TablePersistence::Temporary => {
-                if !lowered.constraint_actions.is_empty() || !lowered.check_actions.is_empty() {
+                if !lowered.constraint_actions.is_empty()
+                    || !lowered.check_actions.is_empty()
+                    || !lowered.foreign_key_actions.is_empty()
+                {
                     return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                        expected: "permanent table for PRIMARY KEY/UNIQUE/CHECK constraints",
+                        expected: "permanent table for PRIMARY KEY/UNIQUE/CHECK/FOREIGN KEY constraints",
                         actual: "temporary table".into(),
                     }));
                 }

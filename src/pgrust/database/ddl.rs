@@ -12,8 +12,8 @@ use crate::backend::utils::cache::syscache::{
     ensure_class_rows, ensure_depend_rows, ensure_namespace_rows, ensure_rewrite_rows,
 };
 use crate::include::catalog::{
-    DEPENDENCY_NORMAL, PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID, PG_REWRITE_RELATION_OID,
-    PUBLIC_NAMESPACE_OID,
+    CONSTRAINT_FOREIGN, DEPENDENCY_NORMAL, PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID,
+    PG_REWRITE_RELATION_OID, PUBLIC_NAMESPACE_OID,
 };
 use crate::include::nodes::primnodes::{Var, user_attrno};
 
@@ -171,6 +171,113 @@ pub(super) fn reject_relation_with_dependent_views(
         actual: format!(
             "cannot {operation}; view depends on it: {}",
             dependent_views.join(", ")
+        ),
+    }))
+}
+
+fn relation_name_for_oid(catalog: &dyn CatalogLookup, relation_oid: u32) -> String {
+    catalog
+        .class_row_by_oid(relation_oid)
+        .map(|row| row.relname)
+        .unwrap_or_else(|| relation_oid.to_string())
+}
+
+pub(crate) fn reject_relation_with_referencing_foreign_keys(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+    operation: &'static str,
+) -> Result<(), ExecError> {
+    let mut references = catalog
+        .constraint_rows()
+        .into_iter()
+        .filter(|row| row.contype == CONSTRAINT_FOREIGN && row.confrelid == relation_oid)
+        .map(|row| (row.conname, relation_name_for_oid(catalog, row.conrelid)))
+        .collect::<Vec<_>>();
+    references.sort();
+    references.dedup();
+
+    let Some((constraint_name, child_relation_name)) = references.into_iter().next() else {
+        return Ok(());
+    };
+    Err(ExecError::Parse(ParseError::UnexpectedToken {
+        expected: operation,
+        actual: format!(
+            "foreign key constraint \"{constraint_name}\" on table \"{child_relation_name}\" references this table"
+        ),
+    }))
+}
+
+pub(crate) fn reject_column_with_foreign_key_dependencies(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+    column_name: &str,
+    attnum: i16,
+    operation: &'static str,
+) -> Result<(), ExecError> {
+    let mut messages = catalog
+        .constraint_rows()
+        .into_iter()
+        .filter(|row| row.contype == CONSTRAINT_FOREIGN)
+        .filter_map(|row| {
+            if row.conrelid == relation_oid
+                && row
+                    .conkey
+                    .as_ref()
+                    .is_some_and(|attnums| attnums.contains(&attnum))
+            {
+                return Some(format!(
+                    "column \"{column_name}\" is used by foreign key constraint \"{}\"",
+                    row.conname
+                ));
+            }
+            if row.confrelid == relation_oid
+                && row
+                    .confkey
+                    .as_ref()
+                    .is_some_and(|attnums| attnums.contains(&attnum))
+            {
+                return Some(format!(
+                    "column \"{column_name}\" is referenced by foreign key constraint \"{}\" on table \"{}\"",
+                    row.conname,
+                    relation_name_for_oid(catalog, row.conrelid),
+                ));
+            }
+            None
+        })
+        .collect::<Vec<_>>();
+    messages.sort();
+    messages.dedup();
+
+    let Some(actual) = messages.into_iter().next() else {
+        return Ok(());
+    };
+    Err(ExecError::Parse(ParseError::UnexpectedToken {
+        expected: operation,
+        actual,
+    }))
+}
+
+pub(crate) fn reject_index_with_referencing_foreign_keys(
+    catalog: &dyn CatalogLookup,
+    index_oid: u32,
+    operation: &'static str,
+) -> Result<(), ExecError> {
+    let mut references = catalog
+        .constraint_rows()
+        .into_iter()
+        .filter(|row| row.contype == CONSTRAINT_FOREIGN && row.conindid == index_oid)
+        .map(|row| (row.conname, relation_name_for_oid(catalog, row.conrelid)))
+        .collect::<Vec<_>>();
+    references.sort();
+    references.dedup();
+
+    let Some((constraint_name, child_relation_name)) = references.into_iter().next() else {
+        return Ok(());
+    };
+    Err(ExecError::Parse(ParseError::UnexpectedToken {
+        expected: operation,
+        actual: format!(
+            "foreign key constraint \"{constraint_name}\" on table \"{child_relation_name}\" depends on the referenced key"
         ),
     }))
 }
