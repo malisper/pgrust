@@ -1,4 +1,5 @@
 use super::super::*;
+use crate::backend::executor::execute_planned_stmt;
 
 impl Database {
     pub fn execute(&self, client_id: ClientId, sql: &str) -> Result<StatementResult, ExecError> {
@@ -161,6 +162,12 @@ impl Database {
                     create_stmt,
                     configured_search_path,
                 ),
+            Statement::CreateSequence(ref create_stmt) => self
+                .execute_create_sequence_stmt_with_search_path(
+                    client_id,
+                    create_stmt,
+                    configured_search_path,
+                ),
             Statement::CommentOnTable(ref comment_stmt) => self
                 .execute_comment_on_table_stmt_with_search_path(
                     client_id,
@@ -176,13 +183,15 @@ impl Database {
             Statement::Select(_) | Statement::Values(_) | Statement::Explain(_) => {
                 let visible_catalog =
                     self.lazy_catalog_lookup(client_id, None, configured_search_path);
-                let (plan_or_stmt, rels) = {
+                let (stmt, planned_select, rels) = {
                     let mut rels = std::collections::BTreeSet::new();
+                    let mut planned_select = None;
                     match &stmt {
                         Statement::Select(select) => {
                             let planned_stmt =
                                 crate::backend::parser::pg_plan_query(select, &visible_catalog)?;
                             collect_rels_from_planned_stmt(&planned_stmt, &mut rels);
+                            planned_select = Some(planned_stmt);
                         }
                         Statement::Values(_) => {}
                         Statement::Explain(explain) => {
@@ -196,7 +205,7 @@ impl Database {
                         }
                         _ => unreachable!(),
                     }
-                    (stmt, rels.into_iter().collect::<Vec<_>>())
+                    (stmt, planned_select, rels.into_iter().collect::<Vec<_>>())
                 };
 
                 lock_relations_interruptible(
@@ -211,6 +220,7 @@ impl Database {
                     pool: std::sync::Arc::clone(&self.pool),
                     txns: self.txns.clone(),
                     txn_waiter: Some(self.txn_waiter.clone()),
+                    sequences: Some(self.sequences.clone()),
                     datetime_config:
                         crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                     interrupts: Arc::clone(&interrupts),
@@ -222,13 +232,17 @@ impl Database {
                     system_bindings: Vec::new(),
                     subplans: Vec::new(),
                     timed: false,
+                    allow_side_effects: true,
                     catalog: visible_catalog.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
                     cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
                 };
-                let result = execute_readonly_statement(plan_or_stmt, &visible_catalog, &mut ctx);
+                let result = match planned_select {
+                    Some(planned_stmt) => execute_planned_stmt(planned_stmt, &mut ctx),
+                    None => execute_readonly_statement(stmt, &visible_catalog, &mut ctx),
+                };
                 drop(ctx);
 
                 unlock_relations(&self.table_locks, client_id, &rels);
@@ -252,6 +266,7 @@ impl Database {
                     pool: std::sync::Arc::clone(&self.pool),
                     txns: self.txns.clone(),
                     txn_waiter: Some(self.txn_waiter.clone()),
+                    sequences: Some(self.sequences.clone()),
                     datetime_config:
                         crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                     interrupts: Arc::clone(&interrupts),
@@ -263,6 +278,7 @@ impl Database {
                     system_bindings: Vec::new(),
                     subplans: Vec::new(),
                     timed: false,
+                    allow_side_effects: true,
                     catalog: catalog.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
@@ -271,7 +287,7 @@ impl Database {
                 };
                 let result = execute_insert(bound, &catalog, &mut ctx, xid, 0);
                 drop(ctx);
-                let result = self.finish_txn(client_id, xid, result, &[], &[]);
+                let result = self.finish_txn(client_id, xid, result, &[], &[], &[]);
                 guard.disarm();
                 self.table_locks.unlock_table(rel, client_id);
                 result
@@ -300,6 +316,7 @@ impl Database {
                     pool: std::sync::Arc::clone(&self.pool),
                     txns: self.txns.clone(),
                     txn_waiter: Some(self.txn_waiter.clone()),
+                    sequences: Some(self.sequences.clone()),
                     datetime_config:
                         crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                     interrupts: Arc::clone(&interrupts),
@@ -311,6 +328,7 @@ impl Database {
                     system_bindings: Vec::new(),
                     subplans: Vec::new(),
                     timed: false,
+                    allow_side_effects: true,
                     catalog: catalog.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
@@ -326,7 +344,7 @@ impl Database {
                     Some((&self.txns, &self.txn_waiter, interrupts.as_ref())),
                 );
                 drop(ctx);
-                let result = self.finish_txn(client_id, xid, result, &[], &[]);
+                let result = self.finish_txn(client_id, xid, result, &[], &[], &[]);
                 guard.disarm();
                 for rel in rels {
                     self.table_locks.unlock_table(rel, client_id);
@@ -357,6 +375,7 @@ impl Database {
                     pool: std::sync::Arc::clone(&self.pool),
                     txns: self.txns.clone(),
                     txn_waiter: Some(self.txn_waiter.clone()),
+                    sequences: Some(self.sequences.clone()),
                     datetime_config:
                         crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                     interrupts: Arc::clone(&interrupts),
@@ -368,6 +387,7 @@ impl Database {
                     system_bindings: Vec::new(),
                     subplans: Vec::new(),
                     timed: false,
+                    allow_side_effects: true,
                     catalog: catalog.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
@@ -382,7 +402,7 @@ impl Database {
                     Some((&self.txns, &self.txn_waiter, interrupts.as_ref())),
                 );
                 drop(ctx);
-                let result = self.finish_txn(client_id, xid, result, &[], &[]);
+                let result = self.finish_txn(client_id, xid, result, &[], &[], &[]);
                 guard.disarm();
                 for rel in rels {
                     self.table_locks.unlock_table(rel, client_id);
@@ -430,7 +450,7 @@ impl Database {
                     &mut temp_effects,
                 );
                 let result =
-                    self.finish_txn(client_id, xid, result, &catalog_effects, &temp_effects);
+                    self.finish_txn(client_id, xid, result, &catalog_effects, &temp_effects, &[]);
                 guard.disarm();
                 result
             }
@@ -439,6 +459,33 @@ impl Database {
                 drop_stmt,
                 configured_search_path,
             ),
+            Statement::DropSequence(ref drop_stmt) => {
+                let xid = self.txns.write().begin();
+                let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+                let mut catalog_effects = Vec::new();
+                let mut temp_effects = Vec::new();
+                let mut sequence_effects = Vec::new();
+                let result = self.execute_drop_sequence_stmt_in_transaction_with_search_path(
+                    client_id,
+                    drop_stmt,
+                    xid,
+                    0,
+                    configured_search_path,
+                    &mut catalog_effects,
+                    &mut temp_effects,
+                    &mut sequence_effects,
+                );
+                let result = self.finish_txn(
+                    client_id,
+                    xid,
+                    result,
+                    &catalog_effects,
+                    &temp_effects,
+                    &sequence_effects,
+                );
+                guard.disarm();
+                result
+            }
             Statement::DropView(ref drop_stmt) => {
                 let xid = self.txns.write().begin();
                 let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
@@ -451,10 +498,28 @@ impl Database {
                     configured_search_path,
                     &mut catalog_effects,
                 );
-                let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[]);
+                let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
                 guard.disarm();
                 result
             }
+            Statement::AlterSequence(ref alter_stmt) => self
+                .execute_alter_sequence_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
+            Statement::AlterSequenceOwner(ref alter_stmt) => self
+                .execute_alter_sequence_owner_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
+            Statement::AlterSequenceRename(ref rename_stmt) => self
+                .execute_alter_sequence_rename_stmt_with_search_path(
+                    client_id,
+                    rename_stmt,
+                    configured_search_path,
+                ),
             Statement::TruncateTable(ref truncate_stmt) => {
                 let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
                 let rels = truncate_stmt
@@ -475,6 +540,7 @@ impl Database {
                     pool: std::sync::Arc::clone(&self.pool),
                     txns: self.txns.clone(),
                     txn_waiter: Some(self.txn_waiter.clone()),
+                    sequences: Some(self.sequences.clone()),
                     datetime_config:
                         crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                     interrupts: Arc::clone(&interrupts),
@@ -486,6 +552,7 @@ impl Database {
                     system_bindings: Vec::new(),
                     subplans: Vec::new(),
                     timed: false,
+                    allow_side_effects: true,
                     catalog: catalog.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
@@ -528,6 +595,7 @@ impl Database {
                     pool: std::sync::Arc::clone(&self.pool),
                     txns: self.txns.clone(),
                     txn_waiter: Some(self.txn_waiter.clone()),
+                    sequences: Some(self.sequences.clone()),
                     interrupts: Arc::clone(&interrupts),
                     snapshot,
                     client_id,
@@ -539,6 +607,7 @@ impl Database {
                     system_bindings: Vec::new(),
                     subplans: Vec::new(),
                     timed: false,
+                    allow_side_effects: false,
                     catalog: catalog.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
@@ -601,6 +670,7 @@ impl Database {
             pool: std::sync::Arc::clone(&self.pool),
             txns: self.txns.clone(),
             txn_waiter: Some(self.txn_waiter.clone()),
+            sequences: Some(self.sequences.clone()),
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
             interrupts,
             snapshot,
@@ -611,6 +681,7 @@ impl Database {
             system_bindings: Vec::new(),
             subplans: query_desc.planned_stmt.subplans,
             timed: false,
+            allow_side_effects: true,
             catalog: visible_catalog_snapshot,
             compiled_functions: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),

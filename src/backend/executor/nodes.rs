@@ -105,6 +105,19 @@ fn materialize_slot_values(slot: &mut TupleSlot) -> Result<Vec<Value>, ExecError
     Ok(values)
 }
 
+fn sequence_scan_runtime(
+    ctx: &ExecutorContext,
+) -> Result<&crate::pgrust::database::SequenceRuntime, ExecError> {
+    ctx.sequences
+        .as_deref()
+        .ok_or_else(|| ExecError::DetailedError {
+            message: "sequence runtime unavailable".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        })
+}
+
 fn bind_exec_params(
     params: &[crate::include::nodes::plannodes::ExecParamSource],
     slot: &mut TupleSlot,
@@ -334,6 +347,56 @@ impl PlanNode for SeqScanState {
         &'a mut self,
         ctx: &mut ExecutorContext,
     ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        if self.relkind == 'S' {
+            let start = if ctx.timed {
+                Some(Instant::now())
+            } else {
+                None
+            };
+            begin_node(&mut self.stats, ctx);
+            if self.sequence_emitted {
+                finish_eof(&mut self.stats, start, ctx);
+                return Ok(None);
+            }
+
+            let values = sequence_scan_runtime(ctx)?
+                .current_row(self.relation_oid)
+                .ok_or_else(|| ExecError::DetailedError {
+                    message: format!("sequence {} does not exist", self.relation_name),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42P01",
+                })?;
+            self.slot.kind = SlotKind::Virtual;
+            self.slot.tts_values = values;
+            self.slot.tts_nvalid = self.slot.tts_values.len();
+            self.slot.decode_offset = 0;
+            self.slot.toast = None;
+            self.slot.table_oid = Some(self.relation_oid);
+            self.current_bindings = vec![SystemVarBinding {
+                varno: self.source_id,
+                table_oid: self.relation_oid,
+            }];
+            set_active_system_bindings(ctx, &self.current_bindings);
+
+            if let Some(qual) = &self.qual {
+                let outer_values = materialize_slot_values(&mut self.slot)?;
+                let current_bindings = self.current_bindings.clone();
+                set_outer_expr_bindings(ctx, outer_values, &current_bindings);
+                clear_inner_expr_bindings(ctx);
+                if !qual(&mut self.slot, ctx)? {
+                    self.sequence_emitted = true;
+                    note_filtered_row(&mut self.stats);
+                    finish_eof(&mut self.stats, start, ctx);
+                    return Ok(None);
+                }
+            }
+
+            self.sequence_emitted = true;
+            finish_row(&mut self.stats, start);
+            return Ok(Some(&mut self.slot));
+        }
+
         if self.scan.is_none() {
             self.scan = Some(heap_scan_begin_visible(
                 &ctx.pool,

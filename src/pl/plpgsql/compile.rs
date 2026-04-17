@@ -593,6 +593,16 @@ fn parse_proc_argtype_oids(argtypes: &str) -> Option<Vec<u32>> {
 pub(crate) fn compile_decl_type(type_name: &str) -> Result<SqlType, ParseError> {
     parse_type_name(type_name).and_then(|ty| match ty {
         crate::backend::parser::RawTypeName::Builtin(sql_type) => Ok(sql_type),
+        crate::backend::parser::RawTypeName::Serial(kind) => {
+            Err(ParseError::FeatureNotSupported(format!(
+                "{} is only allowed in CREATE TABLE / ALTER TABLE ADD COLUMN",
+                match kind {
+                    crate::backend::parser::SerialKind::Small => "smallserial",
+                    crate::backend::parser::SerialKind::Regular => "serial",
+                    crate::backend::parser::SerialKind::Big => "bigserial",
+                }
+            )))
+        }
         crate::backend::parser::RawTypeName::Record => {
             Err(ParseError::UnsupportedType("record".into()))
         }

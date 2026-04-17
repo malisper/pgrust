@@ -627,6 +627,9 @@ fn literal_sql_expr_value(expr: &SqlExpr) -> Option<Value> {
 pub(crate) fn raw_type_name_hint(raw: &RawTypeName) -> SqlType {
     match raw {
         RawTypeName::Builtin(ty) => *ty,
+        RawTypeName::Serial(SerialKind::Small) => SqlType::new(SqlTypeKind::Int2),
+        RawTypeName::Serial(SerialKind::Regular) => SqlType::new(SqlTypeKind::Int4),
+        RawTypeName::Serial(SerialKind::Big) => SqlType::new(SqlTypeKind::Int8),
         RawTypeName::Named { array_bounds, .. } => {
             let mut ty = builtin_named_type_alias(raw_type_name_name(raw))
                 .unwrap_or_else(|| SqlType::new(SqlTypeKind::Composite));
@@ -645,6 +648,14 @@ pub(crate) fn resolve_raw_type_name(
 ) -> Result<SqlType, ParseError> {
     match raw {
         RawTypeName::Builtin(ty) => Ok(*ty),
+        RawTypeName::Serial(kind) => Err(ParseError::FeatureNotSupported(format!(
+            "{} is only allowed in CREATE TABLE / ALTER TABLE ADD COLUMN",
+            match kind {
+                SerialKind::Small => "smallserial",
+                SerialKind::Regular => "serial",
+                SerialKind::Big => "bigserial",
+            }
+        ))),
         RawTypeName::Record => Ok(SqlType::record(RECORD_TYPE_OID)),
         RawTypeName::Named { name, array_bounds } => {
             let mut ty = if let Some(alias) = builtin_named_type_alias(name) {

@@ -8,6 +8,7 @@ mod catalog_access;
 mod commands;
 mod ddl;
 mod relation_refs;
+mod sequences;
 mod temp;
 mod toast;
 mod txn;
@@ -34,12 +35,13 @@ use crate::backend::executor::{
 };
 use crate::backend::parser::Statement;
 use crate::backend::parser::{
-    AlterTableAddColumnStatement, AlterTableDropColumnStatement, AlterTableRenameColumnStatement,
-    AlterTableRenameStatement, AnalyzeStatement, CatalogLookup, CommentOnDomainStatement,
-    CommentOnTableStatement, CreateDomainStatement, CreateIndexStatement,
-    CreateSchemaStatement, CreateTableAsStatement, CreateTableStatement, CreateViewStatement,
-    DropDomainStatement, DropViewStatement, normalize_create_table_as_name,
-    normalize_create_table_name, normalize_create_view_name,
+    AlterSequenceStatement, AlterTableAddColumnStatement, AlterTableDropColumnStatement,
+    AlterTableRenameColumnStatement, AlterTableRenameStatement, AnalyzeStatement, CatalogLookup,
+    CommentOnDomainStatement, CommentOnTableStatement, CreateDomainStatement,
+    CreateIndexStatement, CreateSchemaStatement, CreateSequenceStatement, CreateTableAsStatement,
+    CreateTableStatement, CreateViewStatement, DropDomainStatement, DropSequenceStatement,
+    DropViewStatement, normalize_create_table_as_name, normalize_create_table_name,
+    normalize_create_view_name,
     OnCommitAction, ParseError, SqlType, TablePersistence, bind_delete, bind_insert, bind_update,
     create_relation_desc, lower_create_table_with_catalog,
 };
@@ -80,6 +82,13 @@ use ddl::{
     validate_alter_table_add_column,
 };
 use relation_refs::{collect_direct_relation_oids_from_select, collect_rels_from_planned_stmt};
+pub(crate) use sequences::{
+    SequenceData, SequenceMutationEffect, SequenceOptions, SequenceOwnedByRef, SequenceRuntime,
+    SequenceState, apply_sequence_option_patch, default_sequence_name_base,
+    default_sequence_oid_from_default_expr,
+    format_nextval_default_oid, initial_sequence_state, resolve_sequence_options_spec,
+    sequence_type_oid_for_serial_kind, sequence_type_oid_for_sql_type,
+};
 use toast::{toast_bindings_from_create_result, toast_bindings_from_temp_relation};
 use txn::AutoCommitGuard;
 
@@ -119,6 +128,7 @@ pub struct Database {
     pub(crate) session_auth_states: Arc<RwLock<HashMap<ClientId, AuthState>>>,
     pub(crate) temp_relations: Arc<RwLock<HashMap<ClientId, TempNamespace>>>,
     pub(crate) domains: Arc<RwLock<BTreeMap<String, DomainEntry>>>,
+    pub(crate) sequences: Arc<SequenceRuntime>,
     _wal_bg_writer: Option<Arc<WalBgWriter>>,
 }
 
@@ -239,6 +249,8 @@ impl Database {
         }
 
         let wal_bg_writer = WalBgWriter::start(Arc::clone(&wal), Duration::from_millis(200));
+        let sequences =
+            Arc::new(SequenceRuntime::load(Some(base_dir.as_path()), &catalog).map_err(DatabaseError::Catalog)?);
 
         Ok(Self {
             pool: Arc::new(pool),
@@ -253,6 +265,7 @@ impl Database {
             session_auth_states: Arc::new(RwLock::new(HashMap::new())),
             temp_relations: Arc::new(RwLock::new(HashMap::new())),
             domains: Arc::new(RwLock::new(BTreeMap::new())),
+            sequences,
             _wal_bg_writer: Some(Arc::new(wal_bg_writer)),
         })
     }
@@ -262,6 +275,7 @@ impl Database {
         let txns = Arc::new(RwLock::new(TransactionManager::new_ephemeral()));
         bootstrap_ephemeral_catalog(&pool, &txns)?;
         let catalog = CatalogStore::new_ephemeral();
+        let sequences = Arc::new(SequenceRuntime::new_ephemeral());
 
         Ok(Self {
             pool,
@@ -276,6 +290,7 @@ impl Database {
             session_auth_states: Arc::new(RwLock::new(HashMap::new())),
             temp_relations: Arc::new(RwLock::new(HashMap::new())),
             domains: Arc::new(RwLock::new(BTreeMap::new())),
+            sequences,
             _wal_bg_writer: None,
         })
     }
@@ -405,6 +420,7 @@ impl Database {
     pub(crate) fn clear_interrupt_state(&self, client_id: ClientId) {
         self.session_interrupt_states.write().remove(&client_id);
         self.clear_auth_state(client_id);
+        self.sequences.clear_currvals_for_client(client_id);
     }
 
     pub(crate) fn accept_invalidation_messages(&self, client_id: ClientId) {

@@ -5,8 +5,9 @@ use crate::backend::catalog::CatalogError;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::{ColumnDesc, ExecError, Expr, RelationDesc};
 use crate::backend::parser::{
-    BoundRelation, CatalogLookup, ColumnDef, ParseError, RawTypeName, SqlExpr, SqlType,
-    SqlTypeKind, bind_scalar_expr_in_scope, derive_literal_default_value, resolve_raw_type_name,
+    BoundRelation, CatalogLookup, ColumnDef, OwnedSequenceSpec, ParseError, RawTypeName, SqlExpr,
+    SqlType, SqlTypeKind, bind_scalar_expr_in_scope, derive_literal_default_value,
+    raw_type_name_hint, resolve_raw_type_name,
 };
 use crate::backend::utils::cache::syscache::{
     ensure_class_rows, ensure_depend_rows, ensure_namespace_rows, ensure_rewrite_rows,
@@ -54,6 +55,7 @@ fn auth_catalog_for_ddl(
 
 pub(super) fn relation_kind_name(relkind: char) -> &'static str {
     match relkind {
+        'S' => "sequence",
         'v' => "view",
         'i' => "index",
         _ => "table",
@@ -189,11 +191,15 @@ pub(super) fn reject_inheritance_tree_ddl(
 }
 
 pub(super) fn validate_alter_table_add_column(
-    desc: &RelationDesc,
+    relation_desc: &RelationDesc,
     column: &ColumnDef,
     catalog: &dyn CatalogLookup,
-) -> Result<crate::backend::executor::ColumnDesc, ExecError> {
-    if !column.nullable() {
+) -> Result<AlterTableAddColumnPlan, ExecError> {
+    let serial_kind = match column.ty {
+        RawTypeName::Serial(kind) => Some(kind),
+        _ => None,
+    };
+    if !column.nullable() && serial_kind.is_none() {
         return Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "ADD COLUMN without NOT NULL",
             actual: "NOT NULL".into(),
@@ -217,7 +223,7 @@ pub(super) fn validate_alter_table_add_column(
             actual: column.name.clone(),
         }));
     }
-    if desc
+    if relation_desc
         .columns
         .iter()
         .any(|existing| existing.name.eq_ignore_ascii_case(&column.name))
@@ -228,13 +234,35 @@ pub(super) fn validate_alter_table_add_column(
         }));
     }
 
-    let sql_type = resolve_raw_type_name(&column.ty, catalog).map_err(ExecError::Parse)?;
-    let mut desc = column_desc(column.name.clone(), sql_type, true);
-    desc.default_expr = column.default_expr.clone();
-    if let Some(sql) = desc.default_expr.as_deref() {
-        desc.missing_default_value = Some(derive_literal_default_value(sql, desc.sql_type)?);
+    let sql_type = match column.ty {
+        RawTypeName::Serial(_) => raw_type_name_hint(&column.ty),
+        _ => resolve_raw_type_name(&column.ty, catalog).map_err(ExecError::Parse)?,
+    };
+    let mut desc = column_desc(column.name.clone(), sql_type, serial_kind.is_none());
+    if serial_kind.is_some() && column.default_expr.is_some() {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "serial column without explicit DEFAULT",
+            actual: format!(
+                "multiple default values specified for column \"{}\"",
+                column.name
+            ),
+        }));
     }
-    Ok(desc)
+    if serial_kind.is_none() {
+        desc.default_expr = column.default_expr.clone();
+        if let Some(sql) = desc.default_expr.as_deref() {
+            desc.missing_default_value = Some(derive_literal_default_value(sql, desc.sql_type)?);
+        }
+    }
+    Ok(AlterTableAddColumnPlan {
+        column: desc,
+        owned_sequence: serial_kind.map(|serial_kind| OwnedSequenceSpec {
+            column_index: relation_desc.columns.len(),
+            column_name: column.name.clone(),
+            serial_kind,
+            sql_type,
+        }),
+    })
 }
 
 pub(super) fn validate_alter_table_rename_column(
@@ -282,6 +310,12 @@ pub(super) fn validate_alter_table_rename_column(
     }
 
     Ok(normalized_new)
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct AlterTableAddColumnPlan {
+    pub column: ColumnDesc,
+    pub owned_sequence: Option<OwnedSequenceSpec>,
 }
 
 #[derive(Debug, Clone)]
@@ -407,6 +441,16 @@ pub(super) fn validate_alter_table_alter_column_type(
     let current_column = &desc.columns[column_index];
     let target_sql_type = match ty {
         RawTypeName::Builtin(sql_type) => *sql_type,
+        RawTypeName::Serial(kind) => {
+            return Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
+                "{} is only allowed in CREATE TABLE / ALTER TABLE ADD COLUMN",
+                match kind {
+                    crate::backend::parser::SerialKind::Small => "smallserial",
+                    crate::backend::parser::SerialKind::Regular => "serial",
+                    crate::backend::parser::SerialKind::Big => "bigserial",
+                }
+            ))));
+        }
         RawTypeName::Record => {
             return Err(ExecError::Parse(ParseError::UnsupportedType(
                 "record".into(),
@@ -493,10 +537,14 @@ pub(super) fn validate_alter_table_alter_column_type(
     new_column.not_null_primary_key_owned = current_column.not_null_primary_key_owned;
     new_column.attrdef_oid = current_column.attrdef_oid;
     new_column.default_expr = current_column.default_expr.clone();
-    new_column.missing_default_value = current_column
-        .default_expr
-        .as_deref()
-        .and_then(|sql| derive_literal_default_value(sql, target_sql_type).ok());
+    new_column.missing_default_value = if current_column.default_sequence_oid.is_some() {
+        None
+    } else {
+        current_column
+            .default_expr
+            .as_deref()
+            .and_then(|sql| derive_literal_default_value(sql, target_sql_type).ok())
+    };
 
     Ok(AlterColumnTypePlan {
         column_index,

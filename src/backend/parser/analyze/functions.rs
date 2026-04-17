@@ -522,6 +522,9 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::IsFinite => args.len() == 1,
             BuiltinScalarFunction::MakeDate => args.len() == 3,
             BuiltinScalarFunction::GetDatabaseEncoding => args.is_empty(),
+            BuiltinScalarFunction::NextVal | BuiltinScalarFunction::CurrVal => args.len() == 1,
+            BuiltinScalarFunction::SetVal => matches!(args.len(), 2 | 3),
+            BuiltinScalarFunction::PgGetSerialSequence => args.len() == 2,
             BuiltinScalarFunction::ToJson | BuiltinScalarFunction::ToJsonb => args.len() == 1,
             BuiltinScalarFunction::ArrayLength
             | BuiltinScalarFunction::ArrayLower
@@ -1087,6 +1090,13 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "getdatabaseencoding",
             BuiltinScalarFunction::GetDatabaseEncoding,
         ),
+        ("nextval", BuiltinScalarFunction::NextVal),
+        ("currval", BuiltinScalarFunction::CurrVal),
+        ("setval", BuiltinScalarFunction::SetVal),
+        (
+            "pg_get_serial_sequence",
+            BuiltinScalarFunction::PgGetSerialSequence,
+        ),
         ("to_json", BuiltinScalarFunction::ToJson),
         ("to_jsonb", BuiltinScalarFunction::ToJsonb),
         ("to_tsvector", BuiltinScalarFunction::ToTsVector),
@@ -1487,6 +1497,10 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::StatementTimestamp
             | BuiltinScalarFunction::ClockTimestamp
             | BuiltinScalarFunction::TimeOfDay
+            | BuiltinScalarFunction::NextVal
+            | BuiltinScalarFunction::CurrVal
+            | BuiltinScalarFunction::SetVal
+            | BuiltinScalarFunction::PgGetSerialSequence
             | BuiltinScalarFunction::GetDatabaseEncoding
             | BuiltinScalarFunction::ToJson
             | BuiltinScalarFunction::ToJsonb

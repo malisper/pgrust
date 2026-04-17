@@ -275,7 +275,7 @@ impl Database {
             0,
             &mut catalog_effects,
         );
-        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[]);
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
         guard.disarm();
         result
     }
@@ -567,7 +567,7 @@ mod tests {
             .write()
             .alter_relation_owner_mvcc(relation_oid, owner_oid, &ctx)
             .unwrap();
-        db.finish_txn(1, xid, Ok(StatementResult::AffectedRows(0)), &[effect], &[])
+        db.finish_txn(1, xid, Ok(StatementResult::AffectedRows(0)), &[effect], &[], &[])
             .unwrap();
     }
 

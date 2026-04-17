@@ -70,7 +70,7 @@ use super::{ExecError, ExecutorContext, exec_next, executor_start};
 use crate::backend::executor::jsonb::{
     JsonbValue, jsonb_contains, jsonb_exists, jsonb_exists_all, jsonb_exists_any, jsonb_from_value,
 };
-use crate::backend::parser::{ParseError, SqlType, SqlTypeKind, SubqueryComparisonOp};
+use crate::backend::parser::{CatalogLookup, ParseError, SqlType, SqlTypeKind, SubqueryComparisonOp};
 use crate::include::catalog::builtin_scalar_function_for_proc_oid;
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue};
 use crate::include::nodes::primnodes::{
@@ -126,6 +126,216 @@ fn builtin_function_for_expr(funcid: u32) -> Result<BuiltinScalarFunction, ExecE
         hint: None,
         sqlstate: "XX000",
     })
+}
+
+fn ensure_builtin_side_effects_allowed(
+    func: BuiltinScalarFunction,
+    ctx: &ExecutorContext,
+) -> Result<(), ExecError> {
+    if matches!(
+        func,
+        BuiltinScalarFunction::NextVal | BuiltinScalarFunction::SetVal
+    ) && !ctx.allow_side_effects
+    {
+        return Err(ExecError::DetailedError {
+            message: format!(
+                "{} is not allowed in a read-only execution context",
+                match func {
+                    BuiltinScalarFunction::NextVal => "nextval",
+                    BuiltinScalarFunction::SetVal => "setval",
+                    _ => unreachable!(),
+                }
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "25006",
+        });
+    }
+    Ok(())
+}
+
+fn sequence_catalog(
+    ctx: &ExecutorContext,
+) -> Result<&crate::backend::utils::cache::visible_catalog::VisibleCatalog, ExecError> {
+    ctx.catalog.as_ref().ok_or_else(|| ExecError::DetailedError {
+        message: "sequence lookup requires a visible catalog".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "XX000",
+    })
+}
+
+fn sequence_runtime(ctx: &ExecutorContext) -> Result<&crate::pgrust::database::SequenceRuntime, ExecError> {
+    ctx.sequences.as_deref().ok_or_else(|| ExecError::DetailedError {
+        message: "sequence runtime is not available".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "XX000",
+    })
+}
+
+fn sequence_name_for_oid(
+    catalog: &crate::backend::utils::cache::visible_catalog::VisibleCatalog,
+    relation_oid: u32,
+) -> Option<String> {
+    catalog
+        .relcache()
+        .entries()
+        .find(|(_, entry)| entry.relation_oid == relation_oid)
+        .map(|(name, _)| name.to_string())
+}
+
+fn resolve_sequence_call_target(
+    ctx: &ExecutorContext,
+    value: &Value,
+) -> Result<(u32, bool), ExecError> {
+    let catalog = sequence_catalog(ctx)?;
+    let relation = match value {
+        Value::Int32(oid) => {
+            let oid = u32::try_from(*oid).map_err(|_| ExecError::OidOutOfRange)?;
+            catalog.relation_by_oid(oid).ok_or_else(|| {
+                ExecError::DetailedError {
+                    message: format!("sequence with OID {oid} does not exist"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42P01",
+                }
+            })?
+        }
+        Value::Int64(oid) => {
+            let oid = u32::try_from(*oid).map_err(|_| ExecError::OidOutOfRange)?;
+            catalog.relation_by_oid(oid).ok_or_else(|| ExecError::DetailedError {
+                message: format!("sequence with OID {oid} does not exist"),
+                detail: None,
+                hint: None,
+                sqlstate: "42P01",
+            })?
+        }
+        Value::Text(_) | Value::TextRef(_, _) => {
+            let name = value.as_text().expect("text value");
+            catalog.lookup_any_relation(name).ok_or_else(|| {
+                ExecError::Parse(ParseError::TableDoesNotExist(name.to_string()))
+            })?
+        }
+        other => {
+            return Err(ExecError::TypeMismatch {
+                op: "sequence function",
+                left: other.clone(),
+                right: Value::Text("sequence".into()),
+            });
+        }
+    };
+    if relation.relkind != 'S' {
+        return Err(ExecError::Parse(ParseError::WrongObjectType {
+            name: sequence_name_for_oid(catalog, relation.relation_oid)
+                .unwrap_or_else(|| relation.relation_oid.to_string()),
+            expected: "sequence",
+        }));
+    }
+    Ok((relation.relation_oid, relation.relpersistence != 't'))
+}
+
+fn eval_sequence_builtin_function(
+    func: BuiltinScalarFunction,
+    values: &[Value],
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    match (func, values) {
+        (_, [Value::Null, ..]) | (_, [_, Value::Null, ..]) | (_, [_, _, Value::Null]) => {
+            Ok(Value::Null)
+        }
+        (BuiltinScalarFunction::NextVal, [target]) => {
+            let (relation_oid, persistent) = resolve_sequence_call_target(ctx, target)?;
+            let value = sequence_runtime(ctx)?.next_value(ctx.client_id, relation_oid, persistent)?;
+            Ok(Value::Int64(value))
+        }
+        (BuiltinScalarFunction::CurrVal, [target]) => {
+            let (relation_oid, _) = resolve_sequence_call_target(ctx, target)?;
+            let value = sequence_runtime(ctx)?.curr_value(ctx.client_id, relation_oid)?;
+            Ok(Value::Int64(value))
+        }
+        (BuiltinScalarFunction::SetVal, [target, Value::Int64(value)]) => {
+            let (relation_oid, persistent) = resolve_sequence_call_target(ctx, target)?;
+            let value =
+                sequence_runtime(ctx)?.set_value(ctx.client_id, relation_oid, *value, true, persistent)?;
+            Ok(Value::Int64(value))
+        }
+        (BuiltinScalarFunction::SetVal, [target, Value::Int32(value)]) => {
+            let (relation_oid, persistent) = resolve_sequence_call_target(ctx, target)?;
+            let value = sequence_runtime(ctx)?.set_value(
+                ctx.client_id,
+                relation_oid,
+                i64::from(*value),
+                true,
+                persistent,
+            )?;
+            Ok(Value::Int64(value))
+        }
+        (BuiltinScalarFunction::SetVal, [target, Value::Int64(value), Value::Bool(is_called)]) => {
+            let (relation_oid, persistent) = resolve_sequence_call_target(ctx, target)?;
+            let value = sequence_runtime(ctx)?.set_value(
+                ctx.client_id,
+                relation_oid,
+                *value,
+                *is_called,
+                persistent,
+            )?;
+            Ok(Value::Int64(value))
+        }
+        (BuiltinScalarFunction::SetVal, [target, Value::Int32(value), Value::Bool(is_called)]) => {
+            let (relation_oid, persistent) = resolve_sequence_call_target(ctx, target)?;
+            let value = sequence_runtime(ctx)?.set_value(
+                ctx.client_id,
+                relation_oid,
+                i64::from(*value),
+                *is_called,
+                persistent,
+            )?;
+            Ok(Value::Int64(value))
+        }
+        (BuiltinScalarFunction::PgGetSerialSequence, [table, column]) => {
+            let table_name = table.as_text().ok_or_else(|| ExecError::TypeMismatch {
+                op: "pg_get_serial_sequence",
+                left: table.clone(),
+                right: Value::Text("".into()),
+            })?;
+            let column_name = column.as_text().ok_or_else(|| ExecError::TypeMismatch {
+                op: "pg_get_serial_sequence",
+                left: column.clone(),
+                right: Value::Text("".into()),
+            })?;
+            let catalog = sequence_catalog(ctx)?;
+            let relation = catalog.lookup_relation(table_name).ok_or_else(|| {
+                ExecError::Parse(ParseError::TableDoesNotExist(table_name.to_string()))
+            })?;
+            let Some(column) = relation.desc.columns.iter().find(|candidate| {
+                !candidate.dropped && candidate.name.eq_ignore_ascii_case(column_name)
+            }) else {
+                return Err(ExecError::Parse(ParseError::UnknownColumn(column_name.to_string())));
+            };
+            let Some(sequence_oid) = column.default_sequence_oid else {
+                return Ok(Value::Null);
+            };
+            Ok(sequence_name_for_oid(catalog, sequence_oid)
+                .map(Into::into)
+                .map(Value::Text)
+                .unwrap_or(Value::Null))
+        }
+        (BuiltinScalarFunction::SetVal, [target, other]) => Err(ExecError::TypeMismatch {
+            op: "setval",
+            left: target.clone(),
+            right: other.clone(),
+        }),
+        (BuiltinScalarFunction::SetVal, [target, other, _]) => Err(ExecError::TypeMismatch {
+            op: "setval",
+            left: target.clone(),
+            right: other.clone(),
+        }),
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "valid sequence builtin call",
+            actual: format!("{func:?}"),
+        })),
+    }
 }
 
 fn eval_op_expr(
@@ -1275,6 +1485,7 @@ fn eval_builtin_function(
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
+    ensure_builtin_side_effects_allowed(func, ctx)?;
     let values = args
         .iter()
         .map(|arg| eval_expr(arg, slot, ctx))
@@ -1284,6 +1495,15 @@ fn eval_builtin_function(
     }
     if let Some(result) = eval_json_builtin_function(func, &values, func_variadic) {
         return result;
+    }
+    if matches!(
+        func,
+        BuiltinScalarFunction::NextVal
+            | BuiltinScalarFunction::CurrVal
+            | BuiltinScalarFunction::SetVal
+            | BuiltinScalarFunction::PgGetSerialSequence
+    ) {
+        return eval_sequence_builtin_function(func, &values, ctx);
     }
     match func {
         BuiltinScalarFunction::ToTsVector
@@ -1336,6 +1556,12 @@ fn eval_builtin_function(
                     .unwrap_or_else(render_current_timestamp)
                     .into(),
             ))
+        }
+        BuiltinScalarFunction::NextVal
+        | BuiltinScalarFunction::CurrVal
+        | BuiltinScalarFunction::SetVal
+        | BuiltinScalarFunction::PgGetSerialSequence => {
+            unreachable!("sequence builtins handled earlier");
         }
         BuiltinScalarFunction::DatePart => eval_date_part_function(&values),
         BuiltinScalarFunction::DateTrunc => eval_date_trunc_function(&values),

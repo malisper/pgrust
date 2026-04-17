@@ -88,7 +88,7 @@ use crate::backend::utils::misc::interrupts::{
     InterruptReason, InterruptState, check_for_interrupts,
 };
 use crate::include::access::htup::TupleError;
-use crate::pgrust::database::TransactionWaiter;
+use crate::pgrust::database::{SequenceRuntime, TransactionWaiter};
 use crate::pl::plpgsql::CompiledFunction;
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
 use std::cell::RefCell;
@@ -115,6 +115,7 @@ pub struct ExecutorContext {
     pub pool: std::sync::Arc<BufferPool<SmgrStorageBackend>>,
     pub txns: std::sync::Arc<parking_lot::RwLock<TransactionManager>>,
     pub txn_waiter: Option<std::sync::Arc<TransactionWaiter>>,
+    pub sequences: Option<std::sync::Arc<SequenceRuntime>>,
     pub datetime_config: DateTimeConfig,
     pub interrupts: std::sync::Arc<InterruptState>,
     pub snapshot: Snapshot,
@@ -126,6 +127,7 @@ pub struct ExecutorContext {
     pub subplans: Vec<Plan>,
     /// When true, each node records per-node timing stats (for EXPLAIN ANALYZE).
     pub timed: bool,
+    pub allow_side_effects: bool,
     pub catalog: Option<VisibleCatalog>,
     pub compiled_functions: HashMap<u32, Arc<CompiledFunction>>,
     pub cte_tables: HashMap<usize, Rc<RefCell<MaterializedCteTable>>>,
