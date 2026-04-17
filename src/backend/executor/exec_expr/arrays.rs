@@ -145,7 +145,11 @@ fn apply_array_subscripts(
         };
     }
     if subscripts.len() > array.ndim() {
-        return Ok(Value::Null);
+        return if any_slice {
+            Ok(Value::PgArray(ArrayValue::empty()))
+        } else {
+            Ok(Value::Null)
+        };
     }
     apply_array_subscripts_to_value(&array, subscripts, any_slice)
 }
