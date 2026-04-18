@@ -55,6 +55,38 @@ fn unsupported_record_input() -> ExecError {
     }
 }
 
+fn numeric_typmod_overflow_detail(precision: i32, scale: i32) -> String {
+    let max_exponent = precision - scale;
+    let limit = if max_exponent == 0 {
+        "1".to_string()
+    } else {
+        format!("10^{max_exponent}")
+    };
+    format!(
+        "A field with precision {precision}, scale {scale} must round to an absolute value less than {limit}."
+    )
+}
+
+fn numeric_typmod_overflow_error(precision: i32, scale: i32) -> ExecError {
+    ExecError::DetailedError {
+        message: "numeric field overflow".into(),
+        detail: Some(numeric_typmod_overflow_detail(precision, scale)),
+        hint: None,
+        sqlstate: "22003",
+    }
+}
+
+fn numeric_typmod_infinite_error(precision: i32, scale: i32) -> ExecError {
+    ExecError::DetailedError {
+        message: "numeric field overflow".into(),
+        detail: Some(format!(
+            "A field with precision {precision}, scale {scale} cannot hold an infinite value."
+        )),
+        hint: None,
+        sqlstate: "22003",
+    }
+}
+
 fn parse_pg_integer_text(text: &str, ty: &'static str) -> Result<i128, ExecError> {
     let trimmed = text.trim_matches(|ch: char| ch.is_ascii_whitespace());
     if trimmed.is_empty() {
@@ -2305,18 +2337,20 @@ fn coerce_numeric_value(parsed: NumericValue, ty: SqlType) -> Result<NumericValu
     let rounded = if scale >= 0 {
         parsed
             .round_to_scale(scale as u32)
-            .ok_or(ExecError::NumericFieldOverflow)?
+            .ok_or_else(|| numeric_typmod_overflow_error(precision, scale))?
     } else {
         coerce_numeric_negative_scale(parsed, scale)?
     };
 
     match rounded {
         NumericValue::NaN => Ok(NumericValue::NaN),
-        NumericValue::PosInf | NumericValue::NegInf => Err(ExecError::NumericFieldOverflow),
+        NumericValue::PosInf | NumericValue::NegInf => {
+            Err(numeric_typmod_infinite_error(precision, scale))
+        }
         NumericValue::Finite { .. } if numeric_fits_precision_scale(&rounded, precision, scale) => {
             Ok(rounded)
         }
-        NumericValue::Finite { .. } => Err(ExecError::NumericFieldOverflow),
+        NumericValue::Finite { .. } => Err(numeric_typmod_overflow_error(precision, scale)),
     }
 }
 
