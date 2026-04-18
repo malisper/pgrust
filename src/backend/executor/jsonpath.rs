@@ -7,11 +7,10 @@ use crate::backend::executor::ExecError;
 use crate::backend::executor::expr_bool::parse_pg_bool_text;
 use crate::backend::executor::expr_casts::{cast_text_value_with_config, parse_pg_float};
 use crate::backend::executor::expr_ops::parse_numeric_text;
-use crate::backend::executor::jsonb::{JsonbValue, compare_jsonb};
+use crate::backend::executor::jsonb::{JsonbValue, compare_jsonb, render_temporal_jsonb_value};
 use crate::backend::executor::pg_regex::{
     eval_jsonpath_like_regex, validate_jsonpath_like_regex,
 };
-use crate::backend::executor::render_datetime_value_text;
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::include::nodes::datum::{NumericValue, Value};
 use crate::include::nodes::parsenodes::{SqlType, SqlTypeKind};
@@ -152,7 +151,7 @@ enum MethodKind {
 #[derive(Debug, Clone)]
 struct Method {
     kind: MethodKind,
-    args: Vec<NumericValue>,
+    args: Vec<MethodArg>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -170,6 +169,12 @@ enum PredicateValue {
     True,
     False,
     Unknown,
+}
+
+#[derive(Debug, Clone)]
+enum MethodArg {
+    Numeric(NumericValue),
+    String(String),
 }
 
 #[derive(Debug, Clone)]
@@ -635,7 +640,7 @@ fn apply_method(value: &JsonbValue, method: &Method, mode: PathMode) -> Result<J
             datetime_method_no_args(method)?;
             apply_datetime_cast_method(value, ".date()", None, SqlType::new(SqlTypeKind::Date))
         }
-        MethodKind::Decimal => apply_decimal_method(value, &method.args),
+        MethodKind::Decimal => apply_decimal_method(value, numeric_method_args(method, ".decimal()")?),
         MethodKind::Datetime => apply_datetime_method(value, method),
         MethodKind::Double => apply_double_method(value),
         MethodKind::Floor => match value {
@@ -655,15 +660,45 @@ fn apply_method(value: &JsonbValue, method: &Method, mode: PathMode) -> Result<J
             )),
         },
         MethodKind::String => apply_string_method(value),
-        MethodKind::Time => apply_datetime_cast_method(value, ".time()", datetime_method_precision_arg(method, ".time()")?, datetime_sql_type(SqlTypeKind::Time, method.args.first())),
-        MethodKind::TimeTz => apply_datetime_cast_method(value, ".time_tz()", datetime_method_precision_arg(method, ".time_tz()")?, datetime_sql_type(SqlTypeKind::TimeTz, method.args.first())),
-        MethodKind::Timestamp => apply_datetime_cast_method(value, ".timestamp()", datetime_method_precision_arg(method, ".timestamp()")?, datetime_sql_type(SqlTypeKind::Timestamp, method.args.first())),
-        MethodKind::TimestampTz => apply_datetime_cast_method(value, ".timestamp_tz()", datetime_method_precision_arg(method, ".timestamp_tz()")?, datetime_sql_type(SqlTypeKind::TimestampTz, method.args.first())),
+        MethodKind::Time => apply_datetime_cast_method(value, ".time()", datetime_method_precision_arg(method, ".time()")?, datetime_sql_type(SqlTypeKind::Time, numeric_method_arg(method, 0, ".time()")?)),
+        MethodKind::TimeTz => apply_datetime_cast_method(value, ".time_tz()", datetime_method_precision_arg(method, ".time_tz()")?, datetime_sql_type(SqlTypeKind::TimeTz, numeric_method_arg(method, 0, ".time_tz()")?)),
+        MethodKind::Timestamp => apply_datetime_cast_method(value, ".timestamp()", datetime_method_precision_arg(method, ".timestamp()")?, datetime_sql_type(SqlTypeKind::Timestamp, numeric_method_arg(method, 0, ".timestamp()")?)),
+        MethodKind::TimestampTz => apply_datetime_cast_method(value, ".timestamp_tz()", datetime_method_precision_arg(method, ".timestamp_tz()")?, datetime_sql_type(SqlTypeKind::TimestampTz, numeric_method_arg(method, 0, ".timestamp_tz()")?)),
     }
 }
 
 fn method_auto_unwraps_array(method: &Method) -> bool {
     !matches!(method.kind, MethodKind::Size | MethodKind::Type)
+}
+
+fn numeric_method_args<'a>(
+    method: &'a Method,
+    method_name: &str,
+) -> Result<Vec<&'a NumericValue>, ExecError> {
+    method
+        .args
+        .iter()
+        .map(|arg| match arg {
+            MethodArg::Numeric(value) => Ok(value),
+            MethodArg::String(_) => Err(exec_jsonpath_error(&format!(
+                "jsonpath item method {method_name} expects numeric arguments"
+            ))),
+        })
+        .collect()
+}
+
+fn numeric_method_arg<'a>(
+    method: &'a Method,
+    index: usize,
+    method_name: &str,
+) -> Result<Option<&'a NumericValue>, ExecError> {
+    match method.args.get(index) {
+        Some(MethodArg::Numeric(value)) => Ok(Some(value)),
+        Some(MethodArg::String(_)) => Err(exec_jsonpath_error(&format!(
+            "jsonpath item method {method_name} expects numeric arguments"
+        ))),
+        None => Ok(None),
+    }
 }
 
 fn apply_double_method(value: &JsonbValue) -> Result<JsonbValue, ExecError> {
@@ -719,12 +754,15 @@ fn apply_bigint_method(value: &JsonbValue) -> Result<JsonbValue, ExecError> {
 }
 
 fn apply_datetime_method(value: &JsonbValue, method: &Method) -> Result<JsonbValue, ExecError> {
-    datetime_method_no_args(method)?;
     let JsonbValue::String(text) = value else {
         return Err(exec_jsonpath_error(
             "jsonpath item method .datetime() can only be applied to a string",
         ));
     };
+    if let Some(template) = datetime_method_template_arg(method)? {
+        return apply_datetime_template_method(text, template);
+    }
+    datetime_method_no_args(method)?;
     for ty in [
         SqlType::new(SqlTypeKind::Timestamp),
         SqlType::new(SqlTypeKind::TimestampTz),
@@ -790,9 +828,13 @@ fn datetime_method_no_args(method: &Method) -> Result<(), ExecError> {
 }
 
 fn datetime_method_precision_arg(method: &Method, method_name: &str) -> Result<Option<i32>, ExecError> {
-    match method.args.as_slice() {
-        [] => Ok(None),
-        [arg] => Ok(Some(datetime_precision_arg_to_i32(arg, method_name)?)),
+    match method.args.len() {
+        0 => Ok(None),
+        1 => Ok(Some(datetime_precision_arg_to_i32(
+            numeric_method_arg(method, 0, method_name)?
+                .expect("single arg present"),
+            method_name,
+        )?)),
         _ => Err(exec_jsonpath_error("unsupported jsonpath item method")),
     }
 }
@@ -829,6 +871,272 @@ fn datetime_method_target_name(kind: SqlTypeKind) -> &'static str {
     }
 }
 
+#[derive(Debug, Clone)]
+enum DateTimeTemplateItem {
+    Year4,
+    Month2,
+    Day2,
+    Hour24,
+    Minute,
+    Second,
+    TzHour,
+    TzMinute,
+    Literal(String),
+}
+
+fn datetime_method_template_arg<'a>(method: &'a Method) -> Result<Option<&'a str>, ExecError> {
+    match method.args.as_slice() {
+        [] => Ok(None),
+        [MethodArg::String(value)] => Ok(Some(value.as_str())),
+        [_] => Err(exec_jsonpath_error("unsupported jsonpath item method")),
+        _ => Err(exec_jsonpath_error("unsupported jsonpath item method")),
+    }
+}
+
+fn apply_datetime_template_method(text: &str, template: &str) -> Result<JsonbValue, ExecError> {
+    let items = parse_datetime_template(template)?;
+    let mut offset = 0usize;
+    let mut year = None;
+    let mut month = None;
+    let mut day = None;
+    let mut hour = None;
+    let mut minute = None;
+    let mut second = None;
+    let mut tz_hour = None;
+    let mut tz_minute = None;
+
+    for item in items {
+        match item {
+            DateTimeTemplateItem::Year4 => {
+                year = Some(parse_template_digits(text, &mut offset, 4, "YYYY")?);
+            }
+            DateTimeTemplateItem::Month2 => {
+                month = Some(parse_template_digits(text, &mut offset, 2, "MM")?);
+            }
+            DateTimeTemplateItem::Day2 => {
+                day = Some(parse_template_digits(text, &mut offset, 2, "DD")?);
+            }
+            DateTimeTemplateItem::Hour24 => {
+                hour = Some(parse_template_digits(text, &mut offset, 2, "HH24")?);
+            }
+            DateTimeTemplateItem::Minute => {
+                minute = Some(parse_template_digits(text, &mut offset, 2, "MI")?);
+            }
+            DateTimeTemplateItem::Second => {
+                second = Some(parse_template_digits(text, &mut offset, 2, "SS")?);
+            }
+            DateTimeTemplateItem::TzHour => {
+                let (parsed, consumed) = parse_template_tz_hour(&text[offset..])?;
+                tz_hour = Some(parsed);
+                offset += consumed;
+            }
+            DateTimeTemplateItem::TzMinute => {
+                tz_minute = Some(parse_template_digits(text, &mut offset, 2, "TZM")?);
+            }
+            DateTimeTemplateItem::Literal(literal) => {
+                if !text[offset..].starts_with(&literal) {
+                    return Err(ExecError::DetailedError {
+                        message: format!("unmatched format character \"{literal}\""),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "22007",
+                    });
+                }
+                offset += literal.len();
+            }
+        }
+    }
+
+    if offset != text.len() {
+        return Err(ExecError::DetailedError {
+            message: "trailing characters remain in input string after datetime format".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22007",
+        });
+    }
+
+    let rendered = if let (Some(year), Some(month), Some(day)) = (year, month, day) {
+        if hour.is_some() || minute.is_some() || second.is_some() || tz_hour.is_some() || tz_minute.is_some()
+        {
+            let offset = render_template_offset(tz_hour, tz_minute);
+            if let Some(offset) = offset {
+                (
+                    SqlType::new(SqlTypeKind::TimestampTz),
+                    format!(
+                        "{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02}{offset}",
+                        hour.unwrap_or(0),
+                        minute.unwrap_or(0),
+                        second.unwrap_or(0)
+                    ),
+                )
+            } else {
+                (
+                    SqlType::new(SqlTypeKind::Timestamp),
+                    format!(
+                        "{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02}",
+                        hour.unwrap_or(0),
+                        minute.unwrap_or(0),
+                        second.unwrap_or(0)
+                    ),
+                )
+            }
+        } else {
+            (SqlType::new(SqlTypeKind::Date), format!("{year:04}-{month:02}-{day:02}"))
+        }
+    } else {
+        let offset = render_template_offset(tz_hour, tz_minute);
+        if let Some(offset) = offset {
+            (
+                SqlType::new(SqlTypeKind::TimeTz),
+                format!(
+                    "{:02}:{:02}:{:02}{offset}",
+                    hour.unwrap_or(0),
+                    minute.unwrap_or(0),
+                    second.unwrap_or(0)
+                ),
+            )
+        } else {
+            (
+                SqlType::new(SqlTypeKind::Time),
+                format!(
+                    "{:02}:{:02}:{:02}",
+                    hour.unwrap_or(0),
+                    minute.unwrap_or(0),
+                    second.unwrap_or(0)
+                ),
+            )
+        }
+    };
+
+    cast_text_value_with_config(&rendered.1, rendered.0, true, &DateTimeConfig::default())
+        .and_then(datetime_jsonb_from_value)
+}
+
+fn parse_datetime_template(template: &str) -> Result<Vec<DateTimeTemplateItem>, ExecError> {
+    let mut items = Vec::new();
+    let mut offset = 0usize;
+    while offset < template.len() {
+        let rest = &template[offset..];
+        if let Some(literal) = rest.strip_prefix('"') {
+            let Some(end) = literal.find('"') else {
+                return Err(exec_jsonpath_error("unterminated jsonpath string"));
+            };
+            let lit = &literal[..end];
+            if !lit.is_empty() {
+                items.push(DateTimeTemplateItem::Literal(lit.to_string()));
+            }
+            offset += end + 2;
+            continue;
+        }
+        if let Some((item, consumed)) = parse_datetime_template_token(rest) {
+            items.push(item);
+            offset += consumed;
+            continue;
+        }
+        let ch = rest.chars().next().unwrap();
+        if ch.is_ascii_alphabetic() {
+            return Err(exec_jsonpath_error(&format!(
+                "invalid datetime format separator: \"{ch}\""
+            )));
+        }
+        items.push(DateTimeTemplateItem::Literal(ch.to_string()));
+        offset += ch.len_utf8();
+    }
+    Ok(items)
+}
+
+fn parse_datetime_template_token(rest: &str) -> Option<(DateTimeTemplateItem, usize)> {
+    let upper = rest.to_ascii_uppercase();
+    for (name, item) in [
+        ("YYYY", DateTimeTemplateItem::Year4),
+        ("HH24", DateTimeTemplateItem::Hour24),
+        ("TZH", DateTimeTemplateItem::TzHour),
+        ("TZM", DateTimeTemplateItem::TzMinute),
+        ("DD", DateTimeTemplateItem::Day2),
+        ("MM", DateTimeTemplateItem::Month2),
+        ("MI", DateTimeTemplateItem::Minute),
+        ("SS", DateTimeTemplateItem::Second),
+    ] {
+        if upper.starts_with(name) {
+            return Some((item, name.len()));
+        }
+    }
+    None
+}
+
+fn parse_template_digits(
+    text: &str,
+    offset: &mut usize,
+    len: usize,
+    token: &str,
+) -> Result<i32, ExecError> {
+    let end = (*offset).saturating_add(len).min(text.len());
+    let raw = &text[*offset..end];
+    if raw.len() != len || !raw.chars().all(|ch| ch.is_ascii_digit()) {
+        return Err(ExecError::DetailedError {
+            message: format!("invalid value \"{raw}\" for \"{token}\""),
+            detail: Some("Value must be an integer.".into()),
+            hint: None,
+            sqlstate: "22007",
+        });
+    }
+    *offset += len;
+    raw.parse::<i32>().map_err(|_| ExecError::DetailedError {
+        message: format!("invalid value \"{raw}\" for \"{token}\""),
+        detail: Some("Value must be an integer.".into()),
+        hint: None,
+        sqlstate: "22007",
+    })
+}
+
+fn parse_template_tz_hour(text: &str) -> Result<(i32, usize), ExecError> {
+    let mut chars = text.chars();
+    let Some(sign) = chars.next() else {
+        return Err(ExecError::DetailedError {
+            message: "invalid value \"\" for \"TZH\"".into(),
+            detail: Some("Value must be an integer.".into()),
+            hint: None,
+            sqlstate: "22007",
+        });
+    };
+    if sign != '+' && sign != '-' {
+        return Err(ExecError::DetailedError {
+            message: format!("invalid value \"{sign}\" for \"TZH\""),
+            detail: Some("Value must be an integer.".into()),
+            hint: None,
+            sqlstate: "22007",
+        });
+    }
+    let digits: String = chars.take_while(|ch| ch.is_ascii_digit()).take(2).collect();
+    if digits.is_empty() {
+        return Err(ExecError::DetailedError {
+            message: format!("invalid value \"{sign}\" for \"TZH\""),
+            detail: Some("Value must be an integer.".into()),
+            hint: None,
+            sqlstate: "22007",
+        });
+    }
+    let parsed = digits.parse::<i32>().map_err(|_| ExecError::DetailedError {
+        message: format!("invalid value \"{sign}{digits}\" for \"TZH\""),
+        detail: Some("Value must be an integer.".into()),
+        hint: None,
+        sqlstate: "22007",
+    })?;
+    let value = if sign == '-' { -parsed } else { parsed };
+    Ok((value, 1 + digits.len()))
+}
+
+fn render_template_offset(hour: Option<i32>, minute: Option<i32>) -> Option<String> {
+    let hour = hour?;
+    let sign = if hour < 0 { '-' } else { '+' };
+    let hour = hour.abs();
+    match minute {
+        Some(minute) => Some(format!("{sign}{hour:02}:{minute:02}")),
+        None => Some(format!("{sign}{hour:02}")),
+    }
+}
+
 fn apply_number_method(value: &JsonbValue, method_name: &str) -> Result<JsonbValue, ExecError> {
     match value {
         JsonbValue::Numeric(numeric) => {
@@ -850,7 +1158,7 @@ fn apply_number_method(value: &JsonbValue, method_name: &str) -> Result<JsonbVal
     }
 }
 
-fn apply_decimal_method(value: &JsonbValue, args: &[NumericValue]) -> Result<JsonbValue, ExecError> {
+fn apply_decimal_method(value: &JsonbValue, args: Vec<&NumericValue>) -> Result<JsonbValue, ExecError> {
     if args.len() > 2 {
         return Err(exec_jsonpath_error("unsupported jsonpath item method"));
     }
@@ -861,7 +1169,7 @@ fn apply_decimal_method(value: &JsonbValue, args: &[NumericValue]) -> Result<Jso
     if args.is_empty() {
         return Ok(JsonbValue::Numeric(numeric));
     }
-    let precision = decimal_arg_to_i32(&args[0], "precision")?;
+    let precision = decimal_arg_to_i32(args[0], "precision")?;
     let scale = if let Some(arg) = args.get(1) {
         decimal_arg_to_i32(arg, "scale")?
     } else {
@@ -960,8 +1268,7 @@ fn apply_string_method(value: &JsonbValue) -> Result<JsonbValue, ExecError> {
         | JsonbValue::Time(_)
         | JsonbValue::TimeTz(_)
         | JsonbValue::Timestamp(_)
-        | JsonbValue::TimestampTz(_) => render_datetime_value_text(&jsonb_temporal_to_value(value))
-            .expect("datetime values render"),
+        | JsonbValue::TimestampTz(_) => render_temporal_jsonb_value(value),
         _ => {
             return Err(exec_jsonpath_error(
                 "jsonpath item method .string() can only be applied to a boolean, string, numeric, or datetime value",
@@ -1681,7 +1988,10 @@ fn render_method(method: &Method, out: &mut String) {
             out.push(',');
             out.push(' ');
         }
-        out.push_str(&arg.render());
+        match arg {
+            MethodArg::Numeric(value) => out.push_str(&value.render()),
+            MethodArg::String(value) => render_quoted_string(value, out),
+        }
     }
     out.push(')');
 }
@@ -1727,10 +2037,7 @@ fn render_literal(value: &JsonbValue, out: &mut String) {
         | JsonbValue::TimeTz(_)
         | JsonbValue::Timestamp(_)
         | JsonbValue::TimestampTz(_) => {
-            render_quoted_string(
-                &render_datetime_value_text(&jsonb_temporal_to_value(value)).expect("datetime values render"),
-                out,
-            )
+            render_quoted_string(&render_temporal_jsonb_value(value), out)
         }
         JsonbValue::Array(_) | JsonbValue::Object(_) => out.push_str("null"),
     }
@@ -2194,14 +2501,14 @@ impl<'a> Parser<'a> {
         Ok(Method { kind, args })
     }
 
-    fn parse_method_args(&mut self) -> Result<Vec<NumericValue>, ExecError> {
+    fn parse_method_args(&mut self) -> Result<Vec<MethodArg>, ExecError> {
         self.skip_ws();
         if self.consume(")") {
             return Ok(Vec::new());
         }
         let mut args = Vec::new();
         loop {
-            args.push(self.parse_method_numeric_arg()?);
+            args.push(self.parse_method_arg()?);
             self.skip_ws();
             if self.consume(")") {
                 break;
@@ -2210,6 +2517,13 @@ impl<'a> Parser<'a> {
             self.skip_ws();
         }
         Ok(args)
+    }
+
+    fn parse_method_arg(&mut self) -> Result<MethodArg, ExecError> {
+        if let Some(text) = self.parse_string()? {
+            return Ok(MethodArg::String(text));
+        }
+        Ok(MethodArg::Numeric(self.parse_method_numeric_arg()?))
     }
 
     fn parse_method_numeric_arg(&mut self) -> Result<NumericValue, ExecError> {
