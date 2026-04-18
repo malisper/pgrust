@@ -193,7 +193,10 @@ fn ensure_builtin_side_effects_allowed(
 ) -> Result<(), ExecError> {
     if matches!(
         func,
-        BuiltinScalarFunction::NextVal | BuiltinScalarFunction::SetVal
+        BuiltinScalarFunction::NextVal
+            | BuiltinScalarFunction::SetVal
+            | BuiltinScalarFunction::LoCreate
+            | BuiltinScalarFunction::LoUnlink
     ) && !ctx.allow_side_effects
     {
         return Err(ExecError::DetailedError {
@@ -202,6 +205,8 @@ fn ensure_builtin_side_effects_allowed(
                 match func {
                     BuiltinScalarFunction::NextVal => "nextval",
                     BuiltinScalarFunction::SetVal => "setval",
+                    BuiltinScalarFunction::LoCreate => "lo_create",
+                    BuiltinScalarFunction::LoUnlink => "lo_unlink",
                     _ => unreachable!(),
                 }
             ),
@@ -248,6 +253,19 @@ fn sequence_name_for_oid(
         .entries()
         .find(|(_, entry)| entry.relation_oid == relation_oid)
         .map(|(name, _)| name.to_string())
+}
+
+fn large_object_runtime(
+    ctx: &ExecutorContext,
+) -> Result<&crate::pgrust::database::LargeObjectRuntime, ExecError> {
+    ctx.large_objects
+        .as_deref()
+        .ok_or_else(|| ExecError::DetailedError {
+            message: "large object runtime is not available".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        })
 }
 
 fn resolve_sequence_call_target(
@@ -408,6 +426,30 @@ fn eval_sequence_builtin_function(
         }),
         _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "valid sequence builtin call",
+            actual: format!("{func:?}"),
+        })),
+    }
+}
+
+fn eval_large_object_builtin_function(
+    func: BuiltinScalarFunction,
+    values: &[Value],
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    match (func, values) {
+        (_, [Value::Null]) => Ok(Value::Null),
+        (BuiltinScalarFunction::LoCreate, [value]) => {
+            let oid = oid_arg_to_u32(value, "lo_create")?;
+            Ok(Value::Int64(i64::from(
+                large_object_runtime(ctx)?.create(oid, ctx.current_user_oid)?,
+            )))
+        }
+        (BuiltinScalarFunction::LoUnlink, [value]) => {
+            let oid = oid_arg_to_u32(value, "lo_unlink")?;
+            Ok(Value::Int32(large_object_runtime(ctx)?.unlink(oid)?))
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "valid large object builtin call",
             actual: format!("{func:?}"),
         })),
     }
@@ -1657,6 +1699,12 @@ fn eval_builtin_function(
             | BuiltinScalarFunction::PgGetSerialSequence
     ) {
         return eval_sequence_builtin_function(func, &values, ctx);
+    }
+    if matches!(
+        func,
+        BuiltinScalarFunction::LoCreate | BuiltinScalarFunction::LoUnlink
+    ) {
+        return eval_large_object_builtin_function(func, &values, ctx);
     }
     match func {
         BuiltinScalarFunction::ToTsVector

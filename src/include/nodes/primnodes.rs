@@ -356,6 +356,8 @@ pub enum BuiltinScalarFunction {
     CurrVal,
     SetVal,
     PgGetSerialSequence,
+    LoCreate,
+    LoUnlink,
     DatePart,
     DateTrunc,
     IsFinite,

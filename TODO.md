@@ -440,6 +440,7 @@ Targeted reruns on 2026-04-17:
 - Shared regression fixture visibility: investigate why bootstrap tables from `scripts/test_setup_pgrust.sql` like `float8_tbl`, `int8_tbl`, and `tenk1` are not consistently resolvable during regression runs.
 - privileges.sql parity:
   - [done] expose privilege-related system catalogs in SQL, including `pg_auth_members` and `pg_largeobject_metadata`
+  - [done] implement `lo_create` / `lo_unlink` and surface `pg_largeobject_metadata` rows from runtime state
   - [done] add parser/analyzer support for role membership `GRANTED BY`
   - [done] add parser/analyzer/executor support for `CASCADE` in role membership revokes
   - [done] implement `SET ROLE` and `RESET ROLE`

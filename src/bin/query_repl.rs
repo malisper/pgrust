@@ -630,6 +630,7 @@ fn run_statement(
                 txns: txns.clone(),
                 txn_waiter: None,
                 sequences: None,
+                large_objects: None,
                 checkpoint_stats:
                     pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
                 datetime_config:
@@ -637,6 +638,7 @@ fn run_statement(
                 interrupts: Arc::clone(&interrupts),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
+                current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 next_command_id: 0,
                 expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
                 case_test_values: Vec::new(),
@@ -658,6 +660,7 @@ fn run_statement(
                 txns: txns.clone(),
                 txn_waiter: None,
                 sequences: None,
+                large_objects: None,
                 checkpoint_stats:
                     pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
                 datetime_config:
@@ -665,6 +668,7 @@ fn run_statement(
                 interrupts: Arc::clone(&interrupts),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
+                current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 next_command_id: 0,
                 expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
                 case_test_values: Vec::new(),
@@ -686,6 +690,7 @@ fn run_statement(
                 txns: txns.clone(),
                 txn_waiter: None,
                 sequences: None,
+                large_objects: None,
                 checkpoint_stats:
                     pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
                 datetime_config:
@@ -693,6 +698,7 @@ fn run_statement(
                 interrupts: Arc::clone(&interrupts),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
+                current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 next_command_id: 0,
                 expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
                 case_test_values: Vec::new(),
@@ -714,6 +720,7 @@ fn run_statement(
                 txns: txns.clone(),
                 txn_waiter: None,
                 sequences: None,
+                large_objects: None,
                 checkpoint_stats:
                     pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
                 datetime_config:
@@ -721,6 +728,7 @@ fn run_statement(
                 interrupts: Arc::clone(&interrupts),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
+                current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 next_command_id: 0,
                 expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
                 case_test_values: Vec::new(),
@@ -819,6 +827,7 @@ fn run_statement(
                 txns: txns.clone(),
                 txn_waiter: None,
                 sequences: None,
+                large_objects: None,
                 checkpoint_stats:
                     pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
                 datetime_config:
@@ -826,6 +835,7 @@ fn run_statement(
                 interrupts: Arc::clone(&interrupts),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
+                current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 next_command_id: 0,
                 expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
                 case_test_values: Vec::new(),
@@ -847,6 +857,7 @@ fn run_statement(
                 txns: txns.clone(),
                 txn_waiter: None,
                 sequences: None,
+                large_objects: None,
                 checkpoint_stats:
                     pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
                 datetime_config:
@@ -854,6 +865,7 @@ fn run_statement(
                 interrupts: Arc::clone(&interrupts),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
+                current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 next_command_id: 0,
                 expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
                 case_test_values: Vec::new(),
@@ -878,6 +890,7 @@ fn run_statement(
                     txns: txns.clone(),
                     txn_waiter: None,
                     sequences: None,
+                    large_objects: None,
                     checkpoint_stats:
                         pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
                     datetime_config:
@@ -885,6 +898,7 @@ fn run_statement(
                     interrupts: Arc::clone(&interrupts),
                     snapshot: txns.read().snapshot(xid)?,
                     client_id: 21,
+                    current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                     next_command_id: 0,
                     expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
                     case_test_values: Vec::new(),
@@ -920,6 +934,7 @@ fn run_statement(
                     txns: txns.clone(),
                     txn_waiter: None,
                     sequences: None,
+                    large_objects: None,
                     checkpoint_stats:
                         pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
                     datetime_config:
@@ -927,6 +942,7 @@ fn run_statement(
                     interrupts: Arc::clone(&interrupts),
                     snapshot: txns.read().snapshot(xid)?,
                     client_id: 21,
+                    current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                     next_command_id: 0,
                     expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
                     case_test_values: Vec::new(),
@@ -962,6 +978,7 @@ fn run_statement(
                     txns: txns.clone(),
                     txn_waiter: None,
                     sequences: None,
+                    large_objects: None,
                     checkpoint_stats:
                         pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
                     datetime_config:
@@ -969,6 +986,7 @@ fn run_statement(
                     interrupts: Arc::clone(&interrupts),
                     snapshot: txns.read().snapshot(xid)?,
                     client_id: 21,
+                    current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                     next_command_id: 0,
                     expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
                     case_test_values: Vec::new(),
