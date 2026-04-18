@@ -13,6 +13,7 @@ use crate::backend::catalog::bootstrap::bootstrap_catalog_rel;
 use crate::backend::catalog::catalog::{Catalog, CatalogEntry, CatalogError};
 use crate::backend::catalog::indexing::{
     maintain_catalog_indexes_for_insert_in_db, rebuild_system_catalog_indexes_for_db,
+    vacuum_system_catalog_indexes_for_kinds_in_db,
 };
 use crate::backend::catalog::rowcodec::{catalog_row_values_for_kind, decode_catalog_tuple_values};
 use crate::backend::catalog::rows::{PhysicalCatalogRows, physical_catalog_rows_for_catalog_entry};
@@ -193,19 +194,21 @@ pub(crate) fn sync_catalog_rows_subset_incremental(
         interrupts: Arc::new(InterruptState::new()),
     };
 
+    let mut committed = false;
     let result = (|| {
-        // :HACK: This transitional path only inserts new system catalog index tuples.
-        // Deletes/updates rely on heap visibility checks to ignore stale index entries
-        // until we add true system-catalog index delete/update maintenance.
         delete_catalog_rows_subset_mvcc(&ctx, &rows_to_delete, db_oid, kinds)?;
         insert_catalog_rows_subset_mvcc(&ctx, &rows_to_insert, db_oid, kinds)?;
         txns.write()
             .commit(xid)
             .map_err(|e| CatalogError::Io(format!("catalog transaction commit failed: {e:?}")))?;
+        committed = true;
+        // Dead heap tuples only become reclaimable after commit, so index cleanup
+        // is best-effort follow-up work rather than part of the transaction result.
+        let _ = vacuum_system_catalog_indexes_for_kinds_in_db(&ctx.pool, &ctx.txns, db_oid, kinds);
         Ok(())
     })();
 
-    if result.is_err() {
+    if result.is_err() && !committed {
         let _ = txns.write().abort(xid);
     }
     result

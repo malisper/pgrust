@@ -5,7 +5,8 @@ use parking_lot::RwLock;
 
 use crate::BufferPool;
 use crate::backend::access::index::indexam::{
-    index_beginscan, index_build_stub, index_endscan, index_getnext,
+    index_beginscan, index_build_stub, index_bulk_delete, index_endscan, index_getnext,
+    index_vacuum_cleanup,
 };
 use crate::backend::access::transam::xact::{INVALID_TRANSACTION_ID, TransactionManager};
 use crate::backend::catalog::bootstrap::bootstrap_catalog_rel;
@@ -19,6 +20,7 @@ use crate::backend::utils::misc::interrupts::InterruptState;
 use crate::backend::utils::time::snapmgr::Snapshot;
 use crate::include::access::amapi::{
     IndexBeginScanContext, IndexBuildContext, IndexInsertContext, IndexUniqueCheck,
+    IndexVacuumContext,
 };
 use crate::include::access::relscan::ScanDirection;
 use crate::include::access::scankey::ScanKeyData;
@@ -338,4 +340,44 @@ pub fn probe_system_catalog_rows_visible_in_db(
     }
     index_endscan(scan, BTREE_AM_OID)?;
     Ok(rows)
+}
+
+pub fn vacuum_system_catalog_indexes_for_kinds(
+    pool: &Arc<BufferPool<SmgrStorageBackend>>,
+    txns: &Arc<RwLock<TransactionManager>>,
+    kinds: &[BootstrapCatalogKind],
+) -> Result<(), CatalogError> {
+    vacuum_system_catalog_indexes_for_kinds_in_db(pool, txns, 1, kinds)
+}
+
+pub fn vacuum_system_catalog_indexes_for_kinds_in_db(
+    pool: &Arc<BufferPool<SmgrStorageBackend>>,
+    txns: &Arc<RwLock<TransactionManager>>,
+    db_oid: u32,
+    kinds: &[BootstrapCatalogKind],
+) -> Result<(), CatalogError> {
+    let interrupts = Arc::new(InterruptState::new());
+    let mut visited_index_oids = std::collections::BTreeSet::new();
+    for &kind in kinds {
+        for descriptor in system_catalog_indexes_for_heap(kind) {
+            if !visited_index_oids.insert(descriptor.relation_oid) {
+                continue;
+            }
+            let ctx = IndexVacuumContext {
+                pool: Arc::clone(pool),
+                txns: Arc::clone(txns),
+                client_id: 0,
+                interrupts: Arc::clone(&interrupts),
+                heap_relation: bootstrap_catalog_rel(descriptor.heap_kind, db_oid),
+                heap_desc: crate::include::catalog::bootstrap_relation_desc(descriptor.heap_kind),
+                index_relation: system_catalog_index_rel(*descriptor, db_oid),
+                index_name: descriptor.relation_name.to_string(),
+                index_desc: system_catalog_index_desc(*descriptor),
+                index_meta: system_catalog_index_relcache(*descriptor),
+            };
+            let stats = index_bulk_delete(&ctx, BTREE_AM_OID, None)?;
+            let _ = index_vacuum_cleanup(&ctx, BTREE_AM_OID, Some(stats))?;
+        }
+    }
+    Ok(())
 }
