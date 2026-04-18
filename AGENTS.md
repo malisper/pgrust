@@ -122,7 +122,7 @@ If a change is about SQL semantics, planning, or execution, it usually belongs u
 - Keep parser analysis, logical plan construction, and executor runtime concerns separate.
 - Keep tests close to the module they validate when practical. The executor facade still has a large test block; shrinking that is still a good follow-up.
 - Avoid adding new parser dependencies on executor implementation modules.
-- When the user says `Finish`, mark the work as finished in the todo list, commit it, merge it, and then list the next related features to work on.
+- When the user says `Finish`, mark the work as finished in the todo list, commit it, merge it, and then list the next related features to work on as a numbered list.
 - When you introduce a narrow workaround, compatibility shim, or intentionally temporary shortcut, add a nearby `:HACK:` comment explaining what is being worked around and what the preferred long-term shape should be.
 
 ## Validation
