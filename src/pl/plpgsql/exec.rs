@@ -1,22 +1,55 @@
 use std::sync::Arc;
 
 use crate::backend::executor::{
-    ExecError, ExecutorContext, Expr, StatementResult, TupleSlot, Value, cast_value, eval_expr,
-    eval_plpgsql_expr, execute_planned_stmt,
+    ArrayValue, ExecError, ExecutorContext, Expr, RelationDesc, StatementResult, TupleSlot, Value,
+    cast_value, eval_expr, eval_plpgsql_expr, execute_planned_stmt,
 };
-use crate::backend::parser::{CatalogLookup, ParseError, SqlType, SqlTypeKind};
+use crate::backend::parser::{
+    CatalogLookup, ParseError, SqlType, SqlTypeKind, TriggerLevel, TriggerTiming,
+};
+use crate::include::catalog::TEXT_TYPE_OID;
 use crate::include::nodes::primnodes::QueryColumn;
 
 use super::ast::RaiseLevel;
 use super::compile::{
     CompiledBlock, CompiledExpr, CompiledFunction, CompiledStmt, FunctionReturnContract,
-    compile_function_from_proc,
+    TriggerReturnedRow, compile_function_from_proc, compile_trigger_function_from_proc,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlpgsqlNotice {
     pub level: RaiseLevel,
     pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TriggerOperation {
+    Insert,
+    Update,
+    Delete,
+}
+
+#[derive(Debug, Clone)]
+pub struct TriggerCallContext {
+    pub relation_desc: RelationDesc,
+    pub relation_oid: u32,
+    pub table_name: String,
+    pub table_schema: String,
+    pub trigger_name: String,
+    pub trigger_args: Vec<String>,
+    pub timing: TriggerTiming,
+    pub level: TriggerLevel,
+    pub op: TriggerOperation,
+    pub new_row: Option<Vec<Value>>,
+    pub old_row: Option<Vec<Value>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TriggerFunctionResult {
+    SkipRow,
+    ReturnNew(Vec<Value>),
+    ReturnOld(Vec<Value>),
+    NoValue,
 }
 
 #[derive(Debug)]
@@ -30,6 +63,7 @@ struct FunctionState {
     values: Vec<Value>,
     rows: Vec<TupleSlot>,
     scalar_return: Option<Value>,
+    trigger_return: Option<TriggerFunctionResult>,
 }
 
 thread_local! {
@@ -126,6 +160,90 @@ pub fn execute_user_defined_set_returning_function(
     result
 }
 
+pub fn execute_user_defined_trigger_function(
+    proc_oid: u32,
+    call: &TriggerCallContext,
+    ctx: &mut ExecutorContext,
+) -> Result<TriggerFunctionResult, ExecError> {
+    let catalog = ctx.catalog.as_ref().ok_or_else(|| {
+        function_runtime_error(
+            "user-defined functions require executor catalog context",
+            None,
+            "0A000",
+        )
+    })?;
+    let row = catalog.proc_row_by_oid(proc_oid).ok_or_else(|| {
+        function_runtime_error(&format!("unknown function oid {proc_oid}"), None, "42883")
+    })?;
+    if row.prokind != 'f' {
+        return Err(function_runtime_error(
+            "only functions are executable through the PL/pgSQL runtime",
+            Some(format!("prokind = {}", row.prokind)),
+            "0A000",
+        ));
+    }
+    let language = catalog.language_row_by_oid(row.prolang).ok_or_else(|| {
+        function_runtime_error(
+            &format!("unknown language oid {}", row.prolang),
+            None,
+            "42883",
+        )
+    })?;
+    if !language.lanname.eq_ignore_ascii_case("plpgsql") {
+        return Err(function_runtime_error(
+            "only LANGUAGE plpgsql functions are supported",
+            Some(format!("function language is {}", language.lanname)),
+            "0A000",
+        ));
+    }
+    let return_type = catalog.type_by_oid(row.prorettype).ok_or_else(|| {
+        function_runtime_error(
+            &format!("unknown return type oid {}", row.prorettype),
+            None,
+            "42883",
+        )
+    })?;
+    if return_type.sql_type.kind != SqlTypeKind::Trigger {
+        return Err(function_runtime_error(
+            "trigger runtime called for a non-trigger function",
+            Some(format!("return type is {:?}", return_type.sql_type.kind)),
+            "0A000",
+        ));
+    }
+    if row.pronargs != 0 {
+        return Err(function_runtime_error(
+            "trigger functions must not accept SQL arguments",
+            Some(format!("pronargs = {}", row.pronargs)),
+            "0A000",
+        ));
+    }
+    let compiled = compile_trigger_function_from_proc(&row, &call.relation_desc, catalog)
+        .map_err(ExecError::Parse)?;
+    let FunctionReturnContract::Trigger { bindings } = &compiled.return_contract else {
+        return Err(function_runtime_error(
+            "trigger function compiled with a non-trigger return contract",
+            None,
+            "0A000",
+        ));
+    };
+
+    let mut state = FunctionState {
+        values: vec![Value::Null; compiled.body.total_slots],
+        rows: Vec::new(),
+        scalar_return: None,
+        trigger_return: None,
+    };
+    seed_trigger_state(bindings, call, &mut state);
+    let _ = exec_function_block(&compiled.body, &compiled, None, &mut state, ctx)?;
+    state.trigger_return.ok_or_else(|| {
+        function_runtime_error(
+            "control reached end of trigger procedure without RETURN",
+            None,
+            "2F005",
+        )
+    })
+}
+
 fn compiled_function_for_proc(
     proc_oid: u32,
     ctx: &mut ExecutorContext,
@@ -196,6 +314,7 @@ fn execute_compiled_function(
         values: vec![Value::Null; compiled.body.total_slots],
         rows: Vec::new(),
         scalar_return: None,
+        trigger_return: None,
     };
     for (slot_def, arg_value) in compiled.parameter_slots.iter().zip(arg_values.iter()) {
         state.values[slot_def.slot] = cast_value(arg_value.clone(), slot_def.ty)?;
@@ -235,6 +354,11 @@ fn execute_compiled_function(
         FunctionReturnContract::Scalar { setof: true, .. }
         | FunctionReturnContract::FixedRow { .. }
         | FunctionReturnContract::AnonymousRecord { .. } => Ok(state.rows),
+        FunctionReturnContract::Trigger { .. } => Err(function_runtime_error(
+            "trigger function executed through SQL function path",
+            None,
+            "0A000",
+        )),
     }
 }
 
@@ -334,6 +458,9 @@ fn exec_do_stmt(stmt: &CompiledStmt, values: &mut [Value]) -> Result<(), ExecErr
         }
         CompiledStmt::Return { .. }
         | CompiledStmt::ReturnNext { .. }
+        | CompiledStmt::ReturnTriggerRow { .. }
+        | CompiledStmt::ReturnTriggerNull
+        | CompiledStmt::ReturnTriggerNoValue
         | CompiledStmt::ReturnQuery { .. } => {
             Err(ExecError::Parse(ParseError::FeatureNotSupported(
                 "RETURN statements are only supported inside CREATE FUNCTION".into(),
@@ -464,6 +591,18 @@ fn exec_function_stmt(
             exec_function_return_next(expr.as_ref(), compiled, state, ctx)?;
             Ok(FunctionControl::Continue)
         }
+        CompiledStmt::ReturnTriggerRow { row } => {
+            state.trigger_return = Some(current_trigger_return(compiled, state, *row)?);
+            Ok(FunctionControl::Return)
+        }
+        CompiledStmt::ReturnTriggerNull => {
+            state.trigger_return = Some(TriggerFunctionResult::SkipRow);
+            Ok(FunctionControl::Return)
+        }
+        CompiledStmt::ReturnTriggerNoValue => {
+            state.trigger_return = Some(TriggerFunctionResult::NoValue);
+            Ok(FunctionControl::Return)
+        }
         CompiledStmt::ReturnQuery { plan, .. } => {
             exec_function_return_query(plan, compiled, expected_record_shape, state, ctx)?;
             Ok(FunctionControl::Continue)
@@ -496,6 +635,11 @@ fn exec_function_return(
     ctx: &mut ExecutorContext,
 ) -> Result<FunctionControl, ExecError> {
     match &compiled.return_contract {
+        FunctionReturnContract::Trigger { .. } => Err(function_runtime_error(
+            "trigger functions must return NEW, OLD, or NULL",
+            None,
+            "0A000",
+        )),
         FunctionReturnContract::Scalar {
             ty,
             setof: false,
@@ -553,6 +697,11 @@ fn exec_function_return_next(
             state.rows.push(current_output_row(compiled, state)?);
             Ok(())
         }
+        FunctionReturnContract::Trigger { .. } => Err(function_runtime_error(
+            "RETURN NEXT is not valid for trigger functions",
+            None,
+            "0A000",
+        )),
         _ => Err(function_runtime_error(
             "RETURN NEXT is not valid for this function return contract",
             None,
@@ -630,6 +779,11 @@ fn coerce_function_result_row(
                 )
             })?,
         ),
+        FunctionReturnContract::Trigger { .. } => Err(function_runtime_error(
+            "trigger functions do not produce SQL rows",
+            None,
+            "0A000",
+        )),
     }
 }
 
@@ -769,4 +923,90 @@ fn function_runtime_error(
         hint: None,
         sqlstate,
     }
+}
+
+fn seed_trigger_state(
+    bindings: &super::compile::CompiledTriggerBindings,
+    call: &TriggerCallContext,
+    state: &mut FunctionState,
+) {
+    seed_trigger_relation(&bindings.new_row, call.new_row.as_ref(), state);
+    seed_trigger_relation(&bindings.old_row, call.old_row.as_ref(), state);
+    state.values[bindings.tg_name_slot] = Value::Text(call.trigger_name.clone().into());
+    state.values[bindings.tg_op_slot] = Value::Text(
+        match call.op {
+            TriggerOperation::Insert => "INSERT",
+            TriggerOperation::Update => "UPDATE",
+            TriggerOperation::Delete => "DELETE",
+        }
+        .into(),
+    );
+    state.values[bindings.tg_when_slot] = Value::Text(
+        match call.timing {
+            TriggerTiming::Before => "BEFORE",
+            TriggerTiming::After => "AFTER",
+        }
+        .into(),
+    );
+    state.values[bindings.tg_level_slot] = Value::Text(
+        match call.level {
+            TriggerLevel::Row => "ROW",
+            TriggerLevel::Statement => "STATEMENT",
+        }
+        .into(),
+    );
+    state.values[bindings.tg_relid_slot] = Value::Int32(call.relation_oid as i32);
+    state.values[bindings.tg_nargs_slot] = Value::Int32(call.trigger_args.len() as i32);
+    state.values[bindings.tg_argv_slot] = Value::PgArray(
+        ArrayValue::from_1d(
+            call.trigger_args
+                .iter()
+                .cloned()
+                .map(|arg| Value::Text(arg.into()))
+                .collect(),
+        )
+        .with_element_type_oid(TEXT_TYPE_OID),
+    );
+    state.values[bindings.tg_table_name_slot] = Value::Text(call.table_name.clone().into());
+    state.values[bindings.tg_table_schema_slot] = Value::Text(call.table_schema.clone().into());
+}
+
+fn seed_trigger_relation(
+    relation: &super::compile::CompiledTriggerRelation,
+    source: Option<&Vec<Value>>,
+    state: &mut FunctionState,
+) {
+    let Some(source) = source else {
+        return;
+    };
+    for (slot, value) in relation.slots.iter().copied().zip(source.iter()) {
+        state.values[slot] = value.clone();
+    }
+}
+
+fn current_trigger_return(
+    compiled: &CompiledFunction,
+    state: &FunctionState,
+    returned_row: TriggerReturnedRow,
+) -> Result<TriggerFunctionResult, ExecError> {
+    let FunctionReturnContract::Trigger { bindings } = &compiled.return_contract else {
+        return Err(function_runtime_error(
+            "trigger return reached a non-trigger function",
+            None,
+            "0A000",
+        ));
+    };
+    let relation = match returned_row {
+        TriggerReturnedRow::New => &bindings.new_row,
+        TriggerReturnedRow::Old => &bindings.old_row,
+    };
+    let values = relation
+        .slots
+        .iter()
+        .map(|slot| state.values[*slot].clone())
+        .collect::<Vec<_>>();
+    Ok(match returned_row {
+        TriggerReturnedRow::New => TriggerFunctionResult::ReturnNew(values),
+        TriggerReturnedRow::Old => TriggerFunctionResult::ReturnOld(values),
+    })
 }

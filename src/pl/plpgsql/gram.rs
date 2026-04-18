@@ -5,7 +5,7 @@ use pest_derive::Parser;
 use crate::backend::executor::Value;
 use crate::backend::parser::{ParseError, SqlExpr, parse_expr, parse_type_name};
 
-use super::ast::{Block, RaiseLevel, ReturnQueryKind, Stmt, VarDecl};
+use super::ast::{AssignTarget, Block, RaiseLevel, ReturnQueryKind, Stmt, VarDecl};
 
 #[derive(Parser)]
 #[grammar = "pl/plpgsql/gram.pest"]
@@ -134,19 +134,39 @@ fn build_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
 }
 
 fn build_assign_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
-    let mut name = None;
+    let mut target = None;
     let mut expr = None;
     for part in pair.into_inner() {
         match part.as_rule() {
-            Rule::ident => name = Some(build_ident(part)),
+            Rule::assign_target => target = Some(build_assign_target(part)?),
             Rule::expr_until_semi => expr = Some(part.as_str().trim().to_string()),
             _ => {}
         }
     }
     Ok(Stmt::Assign {
-        name: name.ok_or(ParseError::UnexpectedEof)?,
+        target: target.ok_or(ParseError::UnexpectedEof)?,
         expr: expr.ok_or(ParseError::UnexpectedEof)?,
     })
+}
+
+fn build_assign_target(pair: Pair<'_, Rule>) -> Result<AssignTarget, ParseError> {
+    let raw = pair.as_str().to_string();
+    let parts = pair
+        .into_inner()
+        .filter(|part| part.as_rule() == Rule::ident)
+        .map(build_ident)
+        .collect::<Vec<_>>();
+    match parts.as_slice() {
+        [name] => Ok(AssignTarget::Name(name.clone())),
+        [relation, field] => Ok(AssignTarget::Field {
+            relation: relation.clone(),
+            field: field.clone(),
+        }),
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "assignment target",
+            actual: raw,
+        }),
+    }
 }
 
 fn build_if_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {

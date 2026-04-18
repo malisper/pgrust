@@ -536,6 +536,22 @@ impl Session {
                     search_path.as_deref(),
                 )
             }
+            Statement::CreateTrigger(ref create_stmt) => {
+                let search_path = self.configured_search_path();
+                db.execute_create_trigger_stmt_with_search_path(
+                    self.client_id,
+                    create_stmt,
+                    search_path.as_deref(),
+                )
+            }
+            Statement::DropTrigger(ref drop_stmt) => {
+                let search_path = self.configured_search_path();
+                db.execute_drop_trigger_stmt_with_search_path(
+                    self.client_id,
+                    drop_stmt,
+                    search_path.as_deref(),
+                )
+            }
             Statement::CreateIndex(ref create_stmt) => {
                 let search_path = self.configured_search_path();
                 db.execute_create_index_stmt_with_search_path(
@@ -1320,6 +1336,18 @@ impl Session {
                     search_path.as_deref(),
                 )
             }
+            Statement::CreateTrigger(ref create_stmt) => {
+                let search_path = self.configured_search_path();
+                let catalog_effects = &mut self.active_txn.as_mut().unwrap().catalog_effects;
+                db.execute_create_trigger_stmt_in_transaction_with_search_path(
+                    client_id,
+                    create_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    catalog_effects,
+                )
+            }
             Statement::CreateIndex(ref create_stmt) => {
                 let search_path = self.configured_search_path();
                 let maintenance_work_mem_kb = self.maintenance_work_mem_kb()?;
@@ -1776,6 +1804,18 @@ impl Session {
                     client_id,
                     drop_stmt,
                     search_path.as_deref(),
+                )
+            }
+            Statement::DropTrigger(ref drop_stmt) => {
+                let search_path = self.configured_search_path();
+                let catalog_effects = &mut self.active_txn.as_mut().unwrap().catalog_effects;
+                db.execute_drop_trigger_stmt_in_transaction_with_search_path(
+                    client_id,
+                    drop_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    catalog_effects,
                 )
             }
             Statement::SetSessionAuthorization(ref set_stmt) => {
@@ -2711,6 +2751,7 @@ impl Session {
             ctx.interrupts = interrupts;
             crate::backend::commands::tablecmds::execute_insert_values(
                 table_name,
+                relation_oid,
                 rel,
                 toast,
                 toast_index.as_ref(),

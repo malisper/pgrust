@@ -7,7 +7,9 @@ use crate::backend::catalog::indexing::probe_system_catalog_rows_visible_in_db;
 use crate::backend::catalog::persistence::{
     append_catalog_entry_rows, delete_catalog_rows_subset_mvcc, insert_catalog_rows_subset_mvcc,
 };
-use crate::backend::catalog::pg_depend::{proc_depend_rows, sort_pg_depend_rows, view_rewrite_depend_rows};
+use crate::backend::catalog::pg_depend::{
+    proc_depend_rows, sort_pg_depend_rows, trigger_depend_rows, view_rewrite_depend_rows,
+};
 use crate::backend::catalog::rowcodec::{
     pg_description_row_from_values, pg_statistic_row_from_values,
 };
@@ -691,6 +693,230 @@ impl CatalogStore {
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
         Ok((opclass_row.oid, effect))
+    }
+
+    pub fn create_trigger_mvcc(
+        &mut self,
+        mut row: crate::include::catalog::PgTriggerRow,
+        ctx: &CatalogWriteContext,
+    ) -> Result<(u32, CatalogMutationEffect), CatalogError> {
+        let mut catalog = self.catalog_snapshot_with_control_for_snapshot(ctx)?;
+        let relation_name = catalog
+            .relation_name_by_oid(row.tgrelid)
+            .unwrap_or_default()
+            .to_string();
+        let old_entry = catalog
+            .get_by_oid(row.tgrelid)
+            .cloned()
+            .ok_or_else(|| CatalogError::UnknownTable(row.tgrelid.to_string()))?;
+        let old_rows =
+            physical_catalog_rows_for_catalog_entry(&catalog, &relation_name, &old_entry);
+        let created = catalog.create_trigger(row.clone())?;
+        row = created.clone();
+        self.persist_control_state(&catalog)?;
+
+        let new_entry = catalog
+            .get_by_oid(row.tgrelid)
+            .cloned()
+            .ok_or_else(|| CatalogError::UnknownTable(row.tgrelid.to_string()))?;
+        let new_rows =
+            physical_catalog_rows_for_catalog_entry(&catalog, &relation_name, &new_entry);
+        let trigger_depends = trigger_depend_rows(row.oid, row.tgrelid, row.tgfoid);
+        let old_parent_rows = PhysicalCatalogRows {
+            classes: old_rows.classes,
+            ..PhysicalCatalogRows::default()
+        };
+        let new_parent_rows = PhysicalCatalogRows {
+            classes: new_rows.classes,
+            triggers: vec![row.clone()],
+            depends: trigger_depends,
+            ..PhysicalCatalogRows::default()
+        };
+        let class_kinds = [BootstrapCatalogKind::PgClass];
+        delete_catalog_rows_subset_mvcc(ctx, &old_parent_rows, self.scope_db_oid(), &class_kinds)?;
+        insert_catalog_rows_subset_mvcc(
+            ctx,
+            &new_parent_rows,
+            self.scope_db_oid(),
+            &[
+                BootstrapCatalogKind::PgClass,
+                BootstrapCatalogKind::PgTrigger,
+                BootstrapCatalogKind::PgDepend,
+            ],
+        )?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(
+            &mut effect,
+            &[
+                BootstrapCatalogKind::PgClass,
+                BootstrapCatalogKind::PgTrigger,
+                BootstrapCatalogKind::PgDepend,
+            ],
+        );
+        effect_record_oid(&mut effect.relation_oids, row.tgrelid);
+        Ok((row.oid, effect))
+    }
+
+    pub fn replace_trigger_mvcc(
+        &mut self,
+        old_row: &crate::include::catalog::PgTriggerRow,
+        mut row: crate::include::catalog::PgTriggerRow,
+        ctx: &CatalogWriteContext,
+    ) -> Result<(u32, CatalogMutationEffect), CatalogError> {
+        let mut catalog = self.catalog_snapshot_with_control_for_snapshot(ctx)?;
+        let relation_name = catalog
+            .relation_name_by_oid(old_row.tgrelid)
+            .unwrap_or_default()
+            .to_string();
+        let old_entry = catalog
+            .get_by_oid(old_row.tgrelid)
+            .cloned()
+            .ok_or_else(|| CatalogError::UnknownTable(old_row.tgrelid.to_string()))?;
+        let old_rows =
+            physical_catalog_rows_for_catalog_entry(&catalog, &relation_name, &old_entry);
+        row.oid = old_row.oid;
+        catalog.replace_trigger(old_row.tgrelid, &old_row.tgname, row.clone())?;
+        self.persist_control_state(&catalog)?;
+
+        let new_entry = catalog
+            .get_by_oid(old_row.tgrelid)
+            .cloned()
+            .ok_or_else(|| CatalogError::UnknownTable(old_row.tgrelid.to_string()))?;
+        let new_rows =
+            physical_catalog_rows_for_catalog_entry(&catalog, &relation_name, &new_entry);
+        let old_trigger_rows = PhysicalCatalogRows {
+            triggers: vec![old_row.clone()],
+            depends: trigger_depend_rows(old_row.oid, old_row.tgrelid, old_row.tgfoid),
+            ..PhysicalCatalogRows::default()
+        };
+        let new_trigger_rows = PhysicalCatalogRows {
+            triggers: vec![row.clone()],
+            depends: trigger_depend_rows(row.oid, row.tgrelid, row.tgfoid),
+            ..PhysicalCatalogRows::default()
+        };
+        delete_catalog_rows_subset_mvcc(
+            ctx,
+            &old_trigger_rows,
+            self.scope_db_oid(),
+            &[
+                BootstrapCatalogKind::PgTrigger,
+                BootstrapCatalogKind::PgDepend,
+            ],
+        )?;
+        delete_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                classes: old_rows.classes,
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &[BootstrapCatalogKind::PgClass],
+        )?;
+        insert_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                classes: new_rows.classes,
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &[BootstrapCatalogKind::PgClass],
+        )?;
+        insert_catalog_rows_subset_mvcc(
+            ctx,
+            &new_trigger_rows,
+            self.scope_db_oid(),
+            &[
+                BootstrapCatalogKind::PgTrigger,
+                BootstrapCatalogKind::PgDepend,
+            ],
+        )?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(
+            &mut effect,
+            &[
+                BootstrapCatalogKind::PgClass,
+                BootstrapCatalogKind::PgTrigger,
+                BootstrapCatalogKind::PgDepend,
+            ],
+        );
+        effect_record_oid(&mut effect.relation_oids, row.tgrelid);
+        Ok((row.oid, effect))
+    }
+
+    pub fn drop_trigger_mvcc(
+        &mut self,
+        relation_oid: u32,
+        trigger_name: &str,
+        ctx: &CatalogWriteContext,
+    ) -> Result<(crate::include::catalog::PgTriggerRow, CatalogMutationEffect), CatalogError> {
+        let mut catalog = self.catalog_snapshot_with_control_for_snapshot(ctx)?;
+        let relation_name = catalog
+            .relation_name_by_oid(relation_oid)
+            .unwrap_or_default()
+            .to_string();
+        let old_entry = catalog
+            .get_by_oid(relation_oid)
+            .cloned()
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        let old_trigger = catalog
+            .trigger_rows_for_relation(relation_oid)
+            .iter()
+            .find(|row| row.tgname.eq_ignore_ascii_case(trigger_name))
+            .cloned()
+            .ok_or_else(|| CatalogError::UnknownTable(trigger_name.to_string()))?;
+        let old_rows =
+            physical_catalog_rows_for_catalog_entry(&catalog, &relation_name, &old_entry);
+        let removed = catalog.drop_trigger(relation_oid, trigger_name)?;
+        self.persist_control_state(&catalog)?;
+
+        let new_entry = catalog
+            .get_by_oid(relation_oid)
+            .cloned()
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        let new_rows =
+            physical_catalog_rows_for_catalog_entry(&catalog, &relation_name, &new_entry);
+        delete_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                classes: old_rows.classes,
+                triggers: vec![old_trigger.clone()],
+                depends: trigger_depend_rows(
+                    old_trigger.oid,
+                    old_trigger.tgrelid,
+                    old_trigger.tgfoid,
+                ),
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &[
+                BootstrapCatalogKind::PgClass,
+                BootstrapCatalogKind::PgTrigger,
+                BootstrapCatalogKind::PgDepend,
+            ],
+        )?;
+        insert_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                classes: new_rows.classes,
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &[BootstrapCatalogKind::PgClass],
+        )?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(
+            &mut effect,
+            &[
+                BootstrapCatalogKind::PgClass,
+                BootstrapCatalogKind::PgTrigger,
+                BootstrapCatalogKind::PgDepend,
+            ],
+        );
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        Ok((removed, effect))
     }
 
     pub fn create_relation_inheritance_mvcc(

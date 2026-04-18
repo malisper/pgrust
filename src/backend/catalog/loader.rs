@@ -22,9 +22,9 @@ use crate::backend::catalog::rowcodec::{
     pg_index_row_from_values, pg_inherits_row_from_values, pg_language_row_from_values,
     pg_opclass_row_from_values, pg_operator_row_from_values, pg_opfamily_row_from_values,
     pg_proc_row_from_values, pg_rewrite_row_from_values, pg_statistic_row_from_values,
-    pg_tablespace_row_from_values, pg_ts_config_map_row_from_values, pg_ts_config_row_from_values,
-    pg_ts_dict_row_from_values, pg_ts_parser_row_from_values, pg_ts_template_row_from_values,
-    pg_type_row_from_values,
+    pg_tablespace_row_from_values, pg_trigger_row_from_values, pg_ts_config_map_row_from_values,
+    pg_ts_config_row_from_values, pg_ts_dict_row_from_values, pg_ts_parser_row_from_values,
+    pg_ts_template_row_from_values, pg_type_row_from_values,
 };
 use crate::backend::catalog::rows::PhysicalCatalogRows;
 use crate::backend::executor::RelationDesc;
@@ -118,6 +118,7 @@ pub(crate) fn catalog_from_physical_rows_scoped(
     let depend_rows = rows.depends;
     let inherit_rows = rows.inherits;
     let rewrite_rows = rows.rewrites;
+    let trigger_rows = rows.triggers;
     let index_rows = rows.indexes;
     let _description_rows = rows.descriptions;
     let _am_rows = rows.ams;
@@ -206,6 +207,13 @@ pub(crate) fn catalog_from_physical_rows_scoped(
                 }),
         )
         .max(
+            trigger_rows
+                .iter()
+                .fold(DEFAULT_FIRST_USER_OID, |next_oid, row| {
+                    next_oid.max(row.oid.saturating_add(1))
+                }),
+        )
+        .max(
             authid_rows
                 .iter()
                 .fold(DEFAULT_FIRST_USER_OID, |next_oid, row| {
@@ -246,6 +254,7 @@ pub(crate) fn catalog_from_physical_rows_scoped(
         depends: Vec::new(),
         inherits: inherit_rows,
         rewrites: Vec::new(),
+        triggers: Vec::new(),
         authids: authid_rows,
         auth_members: auth_members_rows,
         databases: database_rows,
@@ -341,6 +350,7 @@ pub(crate) fn catalog_from_physical_rows_scoped(
                 relpersistence: row.relpersistence,
                 relkind: row.relkind,
                 relhassubclass: row.relhassubclass,
+                relhastriggers: row.relhastriggers,
                 relispartition: row.relispartition,
                 relpages: row.relpages,
                 reltuples: row.reltuples,
@@ -398,6 +408,8 @@ pub(crate) fn catalog_from_physical_rows_scoped(
     }
     catalog.rewrites = rewrite_rows;
     crate::include::catalog::sort_pg_rewrite_rows(&mut catalog.rewrites);
+    catalog.triggers = trigger_rows;
+    crate::include::catalog::sort_pg_trigger_rows(&mut catalog.triggers);
     Ok(catalog)
 }
 
@@ -725,6 +737,12 @@ fn append_catalog_kind_rows(
             rows.rewrites = values
                 .into_iter()
                 .map(pg_rewrite_row_from_values)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        BootstrapCatalogKind::PgTrigger => {
+            rows.triggers = values
+                .into_iter()
+                .map(pg_trigger_row_from_values)
                 .collect::<Result<Vec<_>, _>>()?;
         }
         BootstrapCatalogKind::PgStatistic => {
@@ -1325,6 +1343,7 @@ fn load_physical_catalog_rows_legacy(base_dir: &Path) -> Result<PhysicalCatalogR
         descriptions: description_rows,
         indexes: index_rows,
         rewrites: rewrite_rows,
+        triggers: Vec::new(),
         ams: am_rows,
         amops: amop_rows,
         amprocs: amproc_rows,
@@ -1957,6 +1976,7 @@ fn load_physical_catalog_rows_visible_legacy(
         descriptions: description_rows,
         indexes: index_rows,
         rewrites: rewrite_rows,
+        triggers: Vec::new(),
         ams: am_rows,
         amops: amop_rows,
         amprocs: amproc_rows,
