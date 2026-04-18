@@ -1380,7 +1380,7 @@ fn psql_describe_tableinfo_query(
             Value::InternalChar(entry.relkind as u8),
             Value::Bool(relhasindex),
             Value::Bool(false),
-            Value::Bool(false),
+            Value::Bool(entry.relhastriggers),
             Value::Bool(false),
             Value::Bool(false),
             Value::Bool(false),

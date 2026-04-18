@@ -220,6 +220,7 @@ pub enum Statement {
     Set(SetStatement),
     Reset(ResetStatement),
     CreateFunction(CreateFunctionStatement),
+    CreateTrigger(CreateTriggerStatement),
     CreateType(CreateTypeStatement),
     CreateDatabase(CreateDatabaseStatement),
     CreateSchema(CreateSchemaStatement),
@@ -262,6 +263,7 @@ pub enum Statement {
     DropConversion(DropConversionStatement),
     DropDatabase(DropDatabaseStatement),
     DropTable(DropTableStatement),
+    DropTrigger(DropTriggerStatement),
     DropIndex(DropIndexStatement),
     DropDomain(DropDomainStatement),
     DropView(DropViewStatement),
@@ -444,6 +446,46 @@ pub struct CreateFunctionStatement {
     pub return_spec: CreateFunctionReturnSpec,
     pub language: String,
     pub body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TriggerTiming {
+    Before,
+    After,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TriggerLevel {
+    Row,
+    Statement,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TriggerEvent {
+    Insert,
+    Update,
+    Delete,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TriggerEventSpec {
+    pub event: TriggerEvent,
+    pub update_columns: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateTriggerStatement {
+    pub replace_existing: bool,
+    pub trigger_name: String,
+    pub schema_name: Option<String>,
+    pub table_name: String,
+    pub timing: TriggerTiming,
+    pub level: TriggerLevel,
+    pub events: Vec<TriggerEventSpec>,
+    pub when_clause_sql: Option<String>,
+    pub function_schema_name: Option<String>,
+    pub function_name: String,
+    pub func_args: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1152,6 +1194,15 @@ pub struct DropTableStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropTriggerStatement {
+    pub if_exists: bool,
+    pub trigger_name: String,
+    pub schema_name: Option<String>,
+    pub table_name: String,
+    pub cascade: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DropIndexStatement {
     pub if_exists: bool,
     pub index_names: Vec<String>,
@@ -1369,6 +1420,7 @@ pub enum SqlTypeKind {
     Record,
     Composite,
     Void,
+    Trigger,
     Int2,
     Int2Vector,
     Int4,

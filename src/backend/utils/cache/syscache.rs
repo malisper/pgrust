@@ -22,6 +22,7 @@ fn merge_catcaches(shared: CatCache, local: CatCache) -> CatCache {
         local.inherit_rows(),
         local.index_rows(),
         local.rewrite_rows(),
+        local.trigger_rows(),
         local.am_rows(),
         local.amop_rows(),
         local.amproc_rows(),

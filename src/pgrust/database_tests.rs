@@ -5,6 +5,7 @@ use crate::include::catalog::{
     FLOAT8_TYPE_OID, PG_CLASS_RELATION_OID, PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID,
 };
 use crate::include::nodes::primnodes::QueryColumn;
+use crate::pl::plpgsql::{clear_notices, take_notices};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
@@ -854,6 +855,13 @@ fn query_rows(db: &Database, client_id: u32, sql: &str) -> Vec<Vec<Value>> {
         StatementResult::Query { rows, .. } => rows,
         other => panic!("expected query result, got {:?}", other),
     }
+}
+
+fn take_notice_messages() -> Vec<String> {
+    take_notices()
+        .into_iter()
+        .map(|notice| notice.message)
+        .collect()
 }
 
 fn explain_lines(db: &Database, client_id: u32, sql: &str) -> Vec<String> {
@@ -3348,7 +3356,9 @@ fn create_conversion_rejects_duplicate_name_and_default_pair() {
         1,
         "create conversion myconv for 'LATIN1' to 'UTF8' from iso8859_1_to_utf8",
     ) {
-        Err(ExecError::DetailedError { message, sqlstate, .. }) => {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
             assert_eq!(message, "conversion \"myconv\" already exists");
             assert_eq!(sqlstate, "42710");
         }
@@ -3364,11 +3374,19 @@ fn create_conversion_rejects_duplicate_name_and_default_pair() {
         1,
         "create default conversion public.mydef2 for 'LATIN1' to 'UTF8' from iso8859_1_to_utf8",
     ) {
-        Err(ExecError::DetailedError { message, sqlstate, .. }) => {
-            assert_eq!(message, "default conversion for LATIN1 to UTF8 already exists");
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(
+                message,
+                "default conversion for LATIN1 to UTF8 already exists"
+            );
             assert_eq!(sqlstate, "42710");
         }
-        other => panic!("expected duplicate default conversion error, got {:?}", other),
+        other => panic!(
+            "expected duplicate default conversion error, got {:?}",
+            other
+        ),
     }
 }
 
@@ -10437,7 +10455,10 @@ fn create_or_replace_function_updates_existing_body() {
         "create function inc(x int4) returns int4 language plpgsql as $$ begin return x + 1; end $$",
     )
     .unwrap();
-    assert_eq!(query_rows(&db, 1, "select inc(4)"), vec![vec![Value::Int32(5)]]);
+    assert_eq!(
+        query_rows(&db, 1, "select inc(4)"),
+        vec![vec![Value::Int32(5)]]
+    );
 
     db.execute(
         1,
@@ -10445,7 +10466,10 @@ fn create_or_replace_function_updates_existing_body() {
     )
     .unwrap();
 
-    assert_eq!(query_rows(&db, 1, "select inc(4)"), vec![vec![Value::Int32(6)]]);
+    assert_eq!(
+        query_rows(&db, 1, "select inc(4)"),
+        vec![vec![Value::Int32(6)]]
+    );
 }
 
 #[test]
@@ -10560,7 +10584,10 @@ fn create_function_supports_void_returns_and_regprocedure_oid_lookup() {
             Value::Text("void".into()),
         ]]
     );
-    assert_eq!(query_rows(&db, 1, "select stats_test_func1()"), vec![vec![Value::Null]]);
+    assert_eq!(
+        query_rows(&db, 1, "select stats_test_func1()"),
+        vec![vec![Value::Null]]
+    );
     assert_eq!(
         query_rows(&db, 1, "select 'stats_test_func1()'::regprocedure::oid"),
         vec![vec![Value::Int64(proc.oid as i64)]]
@@ -10626,6 +10653,295 @@ fn create_function_named_composite_rows_expand_from_relation_rowtype() {
     assert_eq!(
         query_rows(&db, 1, "select * from widget_rows(5)"),
         vec![vec![Value::Int32(5), Value::Text("widget".into())]]
+    );
+}
+
+#[test]
+fn create_trigger_updates_pg_trigger_and_relhastriggers() {
+    let dir = temp_dir("create_trigger_catalog_rows");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table items (id int4, note text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create function items_before() returns trigger language plpgsql as $$ begin return new; end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger items_before before insert on items for each row execute function items_before()",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select t.typname from pg_proc p join pg_type t on t.oid = p.prorettype where p.proname = 'items_before'",
+        ),
+        vec![vec![Value::Text("trigger".into())]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select tgname from pg_trigger where tgname = 'items_before'",
+        ),
+        vec![vec![Value::Text("items_before".into())]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relhastriggers from pg_class where relname = 'items'",
+        ),
+        vec![vec![Value::Bool(true)]]
+    );
+
+    db.execute(1, "drop trigger items_before on items").unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select tgname from pg_trigger where tgname = 'items_before'",
+        ),
+        Vec::<Vec<Value>>::new()
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relhastriggers from pg_class where relname = 'items'",
+        ),
+        vec![vec![Value::Bool(false)]]
+    );
+}
+
+#[test]
+fn before_insert_trigger_can_mutate_new_and_skip_rows() {
+    let dir = temp_dir("before_insert_trigger_mutate_skip");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table items (id int4, note text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create function items_before_insert() returns trigger language plpgsql as $$ begin if NEW.id < 0 then return null; end if; NEW.note := NEW.note || '-mutated'; return NEW; end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger items_before_insert before insert on items for each row execute function items_before_insert()",
+    )
+    .unwrap();
+
+    db.execute(1, "insert into items values (1, 'a'), (-1, 'skip')")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select id, note from items order by id"),
+        vec![vec![Value::Int32(1), Value::Text("a-mutated".into()),]]
+    );
+}
+
+#[test]
+fn after_insert_triggers_fire_per_row_in_alphabetical_order() {
+    let dir = temp_dir("after_insert_trigger_notices");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table items (id int4, note text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create function trig_a() returns trigger language plpgsql as $$ begin raise notice 'a:%', NEW.id; return NEW; end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function trig_b() returns trigger language plpgsql as $$ begin raise notice 'b:%', NEW.id; return NEW; end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger b_after after insert on items for each row execute function trig_b()",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger a_after after insert on items for each row execute function trig_a()",
+    )
+    .unwrap();
+
+    clear_notices();
+    db.execute(1, "insert into items values (1, 'a'), (2, 'b')")
+        .unwrap();
+    assert_eq!(
+        take_notice_messages(),
+        vec![
+            "a:1".to_string(),
+            "b:1".to_string(),
+            "a:2".to_string(),
+            "b:2".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn update_triggers_honor_update_of_when_and_statement_firing() {
+    let dir = temp_dir("update_trigger_update_of_when");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table items (id int4, name text)")
+        .unwrap();
+    db.execute(1, "insert into items values (1, 'alpha')")
+        .unwrap();
+    db.execute(
+        1,
+        "create function row_update_notice() returns trigger language plpgsql as $$ begin raise notice 'row:%', NEW.name; return NEW; end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function stmt_update_notice() returns trigger language plpgsql as $$ begin raise notice 'stmt:%:%', TG_WHEN, TG_LEVEL; return; end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger items_stmt_before before update on items for each statement execute function stmt_update_notice()",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger items_stmt_after after update on items for each statement execute function stmt_update_notice()",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger items_name_update before update of name on items for each row when (NEW.name <> OLD.name) execute function row_update_notice()",
+    )
+    .unwrap();
+
+    clear_notices();
+    db.execute(1, "update items set id = id where false")
+        .unwrap();
+    assert_eq!(
+        take_notice_messages(),
+        vec![
+            "stmt:BEFORE:STATEMENT".to_string(),
+            "stmt:AFTER:STATEMENT".to_string(),
+        ]
+    );
+
+    clear_notices();
+    db.execute(1, "update items set id = 7 where id = 1")
+        .unwrap();
+    assert_eq!(
+        take_notice_messages(),
+        vec![
+            "stmt:BEFORE:STATEMENT".to_string(),
+            "stmt:AFTER:STATEMENT".to_string(),
+        ]
+    );
+
+    clear_notices();
+    db.execute(1, "update items set name = 'beta' where id = 7")
+        .unwrap();
+    assert_eq!(
+        take_notice_messages(),
+        vec![
+            "stmt:BEFORE:STATEMENT".to_string(),
+            "row:beta".to_string(),
+            "stmt:AFTER:STATEMENT".to_string(),
+        ]
+    );
+
+    clear_notices();
+    db.execute(1, "update items set name = 'beta' where id = 7")
+        .unwrap();
+    assert_eq!(
+        take_notice_messages(),
+        vec![
+            "stmt:BEFORE:STATEMENT".to_string(),
+            "stmt:AFTER:STATEMENT".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn delete_prepared_insert_and_copy_from_fire_triggers() {
+    let dir = temp_dir("trigger_delete_prepared_copy");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    db.execute(1, "create table items (id int4, note text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create function before_insert_notice() returns trigger language plpgsql as $$ begin raise notice 'insert:%', NEW.id; NEW.note := NEW.note || '-ok'; return NEW; end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function before_delete_notice() returns trigger language plpgsql as $$ begin if OLD.id = 2 then return null; end if; raise notice 'delete:%', OLD.id; return OLD; end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger items_before_insert before insert on items for each row execute function before_insert_notice()",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger items_before_delete before delete on items for each row execute function before_delete_notice()",
+    )
+    .unwrap();
+
+    let prepared = session.prepare_insert(&db, "items", None, 2).unwrap();
+    session.execute(&db, "begin").unwrap();
+    clear_notices();
+    session
+        .execute_prepared_insert(
+            &db,
+            &prepared,
+            &[Value::Int32(1), Value::Text("prepared".into())],
+        )
+        .unwrap();
+    session.execute(&db, "commit").unwrap();
+    assert_eq!(take_notice_messages(), vec!["insert:1".to_string()]);
+
+    clear_notices();
+    session
+        .copy_from_rows(
+            &db,
+            "items",
+            &[
+                vec!["2".into(), "copied".into()],
+                vec!["3".into(), "copied".into()],
+            ],
+        )
+        .unwrap();
+    assert_eq!(
+        take_notice_messages(),
+        vec!["insert:2".to_string(), "insert:3".to_string()]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select id, note from items order by id"),
+        vec![
+            vec![Value::Int32(1), Value::Text("prepared-ok".into())],
+            vec![Value::Int32(2), Value::Text("copied-ok".into())],
+            vec![Value::Int32(3), Value::Text("copied-ok".into())],
+        ]
+    );
+
+    clear_notices();
+    db.execute(1, "delete from items where id in (1, 2)")
+        .unwrap();
+    assert_eq!(take_notice_messages(), vec!["delete:1".to_string()]);
+    assert_eq!(
+        query_rows(&db, 1, "select id from items order by id"),
+        vec![vec![Value::Int32(2)], vec![Value::Int32(3)]]
     );
 }
 
@@ -11021,8 +11337,11 @@ fn drop_range_type_enforces_restrict_and_if_exists() {
         other => panic!("expected no-op drop type if exists, got {other:?}"),
     }
 
-    db.execute(1, "create type unused_float8range as range (subtype = float8)")
-        .unwrap();
+    db.execute(
+        1,
+        "create type unused_float8range as range (subtype = float8)",
+    )
+    .unwrap();
     match db.execute(1, "drop type unused_float8range") {
         Ok(StatementResult::AffectedRows(1)) => {}
         other => panic!("expected unused range drop success, got {other:?}"),

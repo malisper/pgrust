@@ -9,6 +9,7 @@ use crate::backend::catalog::pg_depend::{
     derived_pg_depend_rows, foreign_key_constraint_depend_rows,
     index_backed_constraint_depend_rows, inheritance_depend_rows,
     primary_key_owned_not_null_depend_rows, relation_constraint_depend_rows, sort_pg_depend_rows,
+    trigger_depend_rows,
 };
 use crate::backend::catalog::pg_inherits::sort_pg_inherits_rows;
 use crate::backend::catalog::store::{DEFAULT_FIRST_REL_NUMBER, DEFAULT_FIRST_USER_OID};
@@ -19,7 +20,7 @@ use crate::backend::utils::misc::interrupts::InterruptReason;
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_NOTNULL, PUBLIC_NAMESPACE_OID, PgAuthIdRow,
     PgAuthMembersRow, PgConstraintRow, PgDatabaseRow, PgDependRow, PgInheritsRow, PgRewriteRow,
-    PgTablespaceRow, bootstrap_pg_auth_members_rows, bootstrap_pg_authid_rows,
+    PgTablespaceRow, PgTriggerRow, bootstrap_pg_auth_members_rows, bootstrap_pg_authid_rows,
     bootstrap_pg_database_rows, bootstrap_pg_tablespace_rows, builtin_type_rows,
     relkind_has_storage, sort_pg_rewrite_rows,
 };
@@ -67,6 +68,7 @@ pub struct CatalogEntry {
     pub relpersistence: char,
     pub relkind: char,
     pub relhassubclass: bool,
+    pub relhastriggers: bool,
     pub relispartition: bool,
     pub relpages: i32,
     pub reltuples: f64,
@@ -93,6 +95,7 @@ pub struct Catalog {
     pub(crate) depends: Vec<PgDependRow>,
     pub(crate) inherits: Vec<PgInheritsRow>,
     pub(crate) rewrites: Vec<PgRewriteRow>,
+    pub(crate) triggers: Vec<crate::include::catalog::PgTriggerRow>,
     pub(crate) authids: Vec<PgAuthIdRow>,
     pub(crate) auth_members: Vec<PgAuthMembersRow>,
     pub(crate) databases: Vec<PgDatabaseRow>,
@@ -109,6 +112,7 @@ impl Default for Catalog {
             depends: Vec::new(),
             inherits: Vec::new(),
             rewrites: Vec::new(),
+            triggers: Vec::new(),
             authids: bootstrap_pg_authid_rows(),
             auth_members: bootstrap_pg_auth_members_rows().into(),
             databases: bootstrap_pg_database_rows().into(),
@@ -263,6 +267,18 @@ impl Catalog {
         &self.rewrites[start..end]
     }
 
+    pub fn trigger_rows(&self) -> &[PgTriggerRow] {
+        &self.triggers
+    }
+
+    pub fn trigger_rows_for_relation(&self, relation_oid: u32) -> &[PgTriggerRow] {
+        let start = self
+            .triggers
+            .partition_point(|row| row.tgrelid < relation_oid);
+        let end = start + self.triggers[start..].partition_point(|row| row.tgrelid == relation_oid);
+        &self.triggers[start..end]
+    }
+
     pub fn next_oid(&self) -> u32 {
         self.next_oid
     }
@@ -373,6 +389,7 @@ impl Catalog {
             relpersistence,
             relkind,
             relhassubclass: false,
+            relhastriggers: false,
             relispartition: false,
             relpages,
             reltuples,
@@ -527,6 +544,7 @@ impl Catalog {
             relpersistence: table.relpersistence,
             relkind: 'i',
             relhassubclass: false,
+            relhastriggers: false,
             relispartition: false,
             relpages: 0,
             reltuples: -1.0,
@@ -1713,6 +1731,76 @@ impl Catalog {
         removed
     }
 
+    pub fn create_trigger(&mut self, mut row: PgTriggerRow) -> Result<PgTriggerRow, CatalogError> {
+        let relation_name = self.relation_name_for_oid(row.tgrelid)?;
+        let Some(entry) = self.tables.get(&relation_name) else {
+            return Err(CatalogError::UnknownTable(row.tgrelid.to_string()));
+        };
+        if self
+            .trigger_rows_for_relation(row.tgrelid)
+            .iter()
+            .any(|existing| existing.tgname.eq_ignore_ascii_case(&row.tgname))
+        {
+            return Err(CatalogError::UniqueViolation(
+                "pg_trigger_tgrelid_tgname_index".into(),
+            ));
+        }
+        if row.oid == 0 {
+            row.oid = self.next_oid;
+        }
+        self.next_oid = self.next_oid.max(row.oid.saturating_add(1));
+        self.triggers.push(row.clone());
+        crate::include::catalog::sort_pg_trigger_rows(&mut self.triggers);
+        self.depends
+            .extend(trigger_depend_rows(row.oid, row.tgrelid, row.tgfoid));
+        sort_pg_depend_rows(&mut self.depends);
+        if !entry.relhastriggers {
+            let mut new_entry = entry.clone();
+            new_entry.relhastriggers = true;
+            self.tables.insert(relation_name, new_entry);
+        }
+        Ok(row)
+    }
+
+    pub fn replace_trigger(
+        &mut self,
+        relation_oid: u32,
+        trigger_name: &str,
+        row: PgTriggerRow,
+    ) -> Result<PgTriggerRow, CatalogError> {
+        let old = self.drop_trigger(relation_oid, trigger_name)?;
+        let mut row = row;
+        row.oid = old.oid;
+        self.create_trigger(row)
+    }
+
+    pub fn drop_trigger(
+        &mut self,
+        relation_oid: u32,
+        trigger_name: &str,
+    ) -> Result<PgTriggerRow, CatalogError> {
+        let relation_name = self.relation_name_for_oid(relation_oid)?;
+        let index = self
+            .triggers
+            .iter()
+            .position(|row| {
+                row.tgrelid == relation_oid && row.tgname.eq_ignore_ascii_case(trigger_name)
+            })
+            .ok_or_else(|| CatalogError::UnknownTable(trigger_name.to_string()))?;
+        let removed = self.triggers.remove(index);
+        self.depends
+            .retain(|row| row.objid != removed.oid && row.refobjid != removed.oid);
+        let has_remaining = self.triggers.iter().any(|row| row.tgrelid == relation_oid);
+        if let Some(entry) = self.tables.get(&relation_name).cloned()
+            && entry.relhastriggers != has_remaining
+        {
+            let mut new_entry = entry;
+            new_entry.relhastriggers = has_remaining;
+            self.tables.insert(relation_name, new_entry);
+        }
+        Ok(removed)
+    }
+
     fn replace_constraint_rows_for_entry(&mut self, relation_name: &str, entry: &CatalogEntry) {
         self.constraints.retain(|row| {
             !(row.conrelid == entry.relation_oid && row.contype == CONSTRAINT_NOTNULL)
@@ -1851,6 +1939,9 @@ fn not_null_constraint_column_index(
 fn validate_builtin_type_rows(desc: &RelationDesc) -> Result<(), CatalogError> {
     let builtin_rows = builtin_type_rows();
     for column in &desc.columns {
+        if matches!(column.sql_type.kind, SqlTypeKind::Trigger) {
+            return Err(CatalogError::UnknownType("trigger".into()));
+        }
         if !column.sql_type.is_array && column.sql_type.type_oid != 0 {
             continue;
         }
@@ -1876,6 +1967,7 @@ fn format_sql_type_name(sql_type: SqlType) -> &'static str {
             SqlTypeKind::Record => "unsupported array",
             SqlTypeKind::Composite => "_record",
             SqlTypeKind::Void => "unsupported array",
+            SqlTypeKind::Trigger => "unsupported array",
             SqlTypeKind::Bool => "_bool",
             SqlTypeKind::Bit => "_bit",
             SqlTypeKind::VarBit => "_varbit",
@@ -1934,6 +2026,7 @@ fn format_sql_type_name(sql_type: SqlType) -> &'static str {
         SqlTypeKind::Record => "record",
         SqlTypeKind::Composite => "record",
         SqlTypeKind::Void => "void",
+        SqlTypeKind::Trigger => "trigger",
         SqlTypeKind::Bool => "bool",
         SqlTypeKind::Bit => "bit",
         SqlTypeKind::VarBit => "varbit",

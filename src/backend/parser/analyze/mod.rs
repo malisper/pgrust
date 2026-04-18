@@ -247,7 +247,9 @@ pub trait CatalogLookup {
     }
 
     fn range_row_by_type_oid(&self, oid: u32) -> Option<PgRangeRow> {
-        self.range_rows().into_iter().find(|row| row.rngtypid == oid)
+        self.range_rows()
+            .into_iter()
+            .find(|row| row.rngtypid == oid)
     }
 
     fn type_oid_for_sql_type(&self, sql_type: SqlType) -> Option<u32> {
@@ -290,6 +292,13 @@ pub trait CatalogLookup {
     }
 
     fn rewrite_rows_for_relation(&self, _relation_oid: u32) -> Vec<PgRewriteRow> {
+        Vec::new()
+    }
+
+    fn trigger_rows_for_relation(
+        &self,
+        _relation_oid: u32,
+    ) -> Vec<crate::include::catalog::PgTriggerRow> {
         Vec::new()
     }
 
@@ -444,6 +453,14 @@ impl CatalogLookup for Catalog {
         self.rewrite_rows_for_relation(relation_oid).to_vec()
     }
 
+    fn trigger_rows_for_relation(
+        &self,
+        relation_oid: u32,
+    ) -> Vec<crate::include::catalog::PgTriggerRow> {
+        crate::backend::utils::cache::catcache::CatCache::from_catalog(self)
+            .trigger_rows_for_relation(relation_oid)
+    }
+
     fn constraint_rows_for_relation(&self, relation_oid: u32) -> Vec<PgConstraintRow> {
         let catcache = crate::backend::utils::cache::catcache::CatCache::from_catalog(self);
         catcache.constraint_rows_for_relation(relation_oid)
@@ -553,6 +570,13 @@ impl CatalogLookup for RelCache {
                 )
             })
             .collect()
+    }
+
+    fn trigger_rows_for_relation(
+        &self,
+        _relation_oid: u32,
+    ) -> Vec<crate::include::catalog::PgTriggerRow> {
+        Vec::new()
     }
 
     fn relation_by_oid(&self, relation_oid: u32) -> Option<BoundRelation> {
@@ -843,6 +867,180 @@ pub(crate) fn bind_scalar_expr_in_scope(
             .collect(),
     };
     let scope = scope_for_relation(None, &desc);
+    let empty_outer = Vec::new();
+    let bound = bind_expr_with_outer(expr, &scope, catalog, &empty_outer, None)?;
+    let sql_type = infer_sql_expr_type(expr, &scope, catalog, &empty_outer, None);
+    Ok((bound, sql_type))
+}
+
+pub(crate) fn bind_scalar_expr_in_named_relation_scope(
+    expr: &SqlExpr,
+    relation_scopes: &[(&str, &RelationDesc)],
+    columns: &[(String, SqlType)],
+    catalog: &dyn CatalogLookup,
+) -> Result<(Expr, SqlType), ParseError> {
+    let mut desc_columns = columns
+        .iter()
+        .map(|(name, sql_type)| column_desc(name.clone(), *sql_type, true))
+        .collect::<Vec<_>>();
+    let mut scope_columns = columns
+        .iter()
+        .map(|(name, _)| scope::ScopeColumn {
+            output_name: name.clone(),
+            hidden: false,
+            relation_names: Vec::new(),
+            hidden_invalid_relation_names: Vec::new(),
+            hidden_missing_relation_names: Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    let mut relations = Vec::new();
+    for (relation_name, desc) in relation_scopes {
+        relations.push(scope::ScopeRelation {
+            relation_names: vec![(*relation_name).to_string()],
+            hidden_invalid_relation_names: Vec::new(),
+            hidden_missing_relation_names: Vec::new(),
+            system_varno: None,
+        });
+        for column in &desc.columns {
+            desc_columns.push(column.clone());
+            scope_columns.push(scope::ScopeColumn {
+                output_name: column.name.clone(),
+                hidden: column.dropped,
+                relation_names: vec![(*relation_name).to_string()],
+                hidden_invalid_relation_names: Vec::new(),
+                hidden_missing_relation_names: Vec::new(),
+            });
+        }
+    }
+    let desc = RelationDesc {
+        columns: desc_columns,
+    };
+    let scope = scope::BoundScope {
+        output_exprs: desc
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(index, column)| {
+                Expr::Var(Var {
+                    varno: 1,
+                    varattno: user_attrno(index),
+                    varlevelsup: 0,
+                    vartype: column.sql_type,
+                })
+            })
+            .collect(),
+        desc,
+        columns: scope_columns,
+        relations,
+    };
+    let empty_outer = Vec::new();
+    let bound = bind_expr_with_outer(expr, &scope, catalog, &empty_outer, None)?;
+    let sql_type = infer_sql_expr_type(expr, &scope, catalog, &empty_outer, None);
+    Ok((bound, sql_type))
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SlotScopeColumn {
+    pub slot: usize,
+    pub name: String,
+    pub sql_type: SqlType,
+    pub hidden: bool,
+}
+
+pub(crate) fn bind_scalar_expr_in_named_slot_scope(
+    expr: &SqlExpr,
+    relation_scopes: &[(String, Vec<SlotScopeColumn>)],
+    columns: &[SlotScopeColumn],
+    catalog: &dyn CatalogLookup,
+) -> Result<(Expr, SqlType), ParseError> {
+    let max_slot = columns
+        .iter()
+        .map(|column| column.slot)
+        .chain(
+            relation_scopes
+                .iter()
+                .flat_map(|(_, columns)| columns.iter().map(|column| column.slot)),
+        )
+        .max();
+    let Some(max_slot) = max_slot else {
+        let empty_scope = scope::empty_scope();
+        let empty_outer = Vec::new();
+        let bound = bind_expr_with_outer(expr, &empty_scope, catalog, &empty_outer, None)?;
+        let sql_type = infer_sql_expr_type(expr, &empty_scope, catalog, &empty_outer, None);
+        return Ok((bound, sql_type));
+    };
+
+    let mut desc_columns = (0..=max_slot)
+        .map(|index| {
+            column_desc(
+                format!("__slot{index}"),
+                SqlType::new(SqlTypeKind::Text),
+                true,
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut scope_columns = (0..=max_slot)
+        .map(|index| scope::ScopeColumn {
+            output_name: format!("__slot{index}"),
+            hidden: true,
+            relation_names: Vec::new(),
+            hidden_invalid_relation_names: Vec::new(),
+            hidden_missing_relation_names: Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    let mut relations = Vec::new();
+
+    for column in columns {
+        desc_columns[column.slot] = column_desc(column.name.clone(), column.sql_type, true);
+        scope_columns[column.slot] = scope::ScopeColumn {
+            output_name: column.name.clone(),
+            hidden: column.hidden,
+            relation_names: Vec::new(),
+            hidden_invalid_relation_names: Vec::new(),
+            hidden_missing_relation_names: Vec::new(),
+        };
+    }
+
+    for (relation_name, relation_columns) in relation_scopes {
+        relations.push(scope::ScopeRelation {
+            relation_names: vec![relation_name.clone()],
+            hidden_invalid_relation_names: Vec::new(),
+            hidden_missing_relation_names: Vec::new(),
+            system_varno: None,
+        });
+        for column in relation_columns {
+            desc_columns[column.slot] = column_desc(column.name.clone(), column.sql_type, true);
+            scope_columns[column.slot] = scope::ScopeColumn {
+                output_name: column.name.clone(),
+                hidden: column.hidden,
+                relation_names: vec![relation_name.clone()],
+                hidden_invalid_relation_names: Vec::new(),
+                hidden_missing_relation_names: Vec::new(),
+            };
+        }
+    }
+
+    let desc = RelationDesc {
+        columns: desc_columns,
+    };
+    let scope = scope::BoundScope {
+        output_exprs: desc
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(index, column)| {
+                Expr::Var(Var {
+                    varno: 1,
+                    varattno: user_attrno(index),
+                    varlevelsup: 0,
+                    vartype: column.sql_type,
+                })
+            })
+            .collect(),
+        desc,
+        columns: scope_columns,
+        relations,
+    };
     let empty_outer = Vec::new();
     let bound = bind_expr_with_outer(expr, &scope, catalog, &empty_outer, None)?;
     let sql_type = infer_sql_expr_type(expr, &scope, catalog, &empty_outer, None);
@@ -2123,8 +2321,7 @@ fn bind_select_query_with_outer(
         );
     }
 
-    if stmt.distinct
-        && (!stmt.order_by.is_empty() || stmt.limit.is_some() || stmt.offset.is_some())
+    if stmt.distinct && (!stmt.order_by.is_empty() || stmt.limit.is_some() || stmt.offset.is_some())
     {
         return Err(ParseError::FeatureNotSupported(
             "SELECT DISTINCT with ORDER BY/LIMIT/OFFSET".into(),
@@ -2524,22 +2721,22 @@ fn bind_select_query_with_outer(
             let window_clauses = take_window_clauses(&window_state);
 
             let query = Query {
-                    command_type: crate::include::executor::execdesc::CommandType::Select,
-                    rtable: base.rtable,
-                    jointree: base.jointree,
-                    target_list,
-                    where_qual,
-                    group_by: rewritten_group_keys,
-                    accumulators,
-                    window_clauses,
-                    having_qual: having,
-                    sort_clause,
-                    limit_count: stmt.limit,
-                    limit_offset: stmt.offset.unwrap_or(0),
-                    project_set: None,
-                    recursive_union: None,
-                    set_operation: None,
-                };
+                command_type: crate::include::executor::execdesc::CommandType::Select,
+                rtable: base.rtable,
+                jointree: base.jointree,
+                target_list,
+                where_qual,
+                group_by: rewritten_group_keys,
+                accumulators,
+                window_clauses,
+                having_qual: having,
+                sort_clause,
+                limit_count: stmt.limit,
+                limit_offset: stmt.offset.unwrap_or(0),
+                project_set: None,
+                recursive_union: None,
+                set_operation: None,
+            };
             let query = apply_select_distinct(query, stmt.distinct);
             Ok((query, scope))
         });
@@ -2590,22 +2787,22 @@ fn bind_select_query_with_outer(
                 };
 
                 let query = Query {
-                        command_type: crate::include::executor::execdesc::CommandType::Select,
-                        rtable: base.rtable,
-                        jointree: base.jointree,
-                        target_list,
-                        where_qual,
-                        group_by: Vec::new(),
-                        accumulators: Vec::new(),
-                        window_clauses,
-                        having_qual: None,
-                        sort_clause,
-                        limit_count: stmt.limit,
-                        limit_offset: stmt.offset.unwrap_or(0),
-                        project_set: None,
-                        recursive_union: None,
-                        set_operation: None,
-                    };
+                    command_type: crate::include::executor::execdesc::CommandType::Select,
+                    rtable: base.rtable,
+                    jointree: base.jointree,
+                    target_list,
+                    where_qual,
+                    group_by: Vec::new(),
+                    accumulators: Vec::new(),
+                    window_clauses,
+                    having_qual: None,
+                    sort_clause,
+                    limit_count: stmt.limit,
+                    limit_offset: stmt.offset.unwrap_or(0),
+                    project_set: None,
+                    recursive_union: None,
+                    set_operation: None,
+                };
                 let query = apply_select_distinct(query, stmt.distinct);
                 Ok((query, scope))
             }
@@ -2639,22 +2836,22 @@ fn bind_select_query_with_outer(
                 let sort_clause = build_sort_clause(sort_inputs, &final_targets);
                 let target_list = normalize_target_list(final_targets);
                 let query = Query {
-                        command_type: crate::include::executor::execdesc::CommandType::Select,
-                        rtable: base.rtable,
-                        jointree: base.jointree,
-                        target_list,
-                        where_qual,
-                        group_by: Vec::new(),
-                        accumulators: Vec::new(),
-                        window_clauses,
-                        having_qual: None,
-                        sort_clause,
-                        limit_count: stmt.limit,
-                        limit_offset: stmt.offset.unwrap_or(0),
-                        project_set: Some(project_targets),
-                        recursive_union: None,
-                        set_operation: None,
-                    };
+                    command_type: crate::include::executor::execdesc::CommandType::Select,
+                    rtable: base.rtable,
+                    jointree: base.jointree,
+                    target_list,
+                    where_qual,
+                    group_by: Vec::new(),
+                    accumulators: Vec::new(),
+                    window_clauses,
+                    having_qual: None,
+                    sort_clause,
+                    limit_count: stmt.limit,
+                    limit_offset: stmt.offset.unwrap_or(0),
+                    project_set: Some(project_targets),
+                    recursive_union: None,
+                    set_operation: None,
+                };
                 let query = apply_select_distinct(query, stmt.distinct);
                 Ok((query, scope))
             }

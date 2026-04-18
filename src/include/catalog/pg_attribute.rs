@@ -232,6 +232,8 @@ fn sql_type_oid(sql_type: SqlType) -> u32 {
         (SqlTypeKind::InternalChar, true) => INTERNAL_CHAR_ARRAY_TYPE_OID,
         (SqlTypeKind::Void, false) => crate::include::catalog::VOID_TYPE_OID,
         (SqlTypeKind::Void, true) => unreachable!("void arrays are unsupported"),
+        (SqlTypeKind::Trigger, false) => crate::include::catalog::TRIGGER_TYPE_OID,
+        (SqlTypeKind::Trigger, true) => unreachable!("trigger arrays are unsupported"),
         (SqlTypeKind::Int8, false) => INT8_TYPE_OID,
         (SqlTypeKind::Int8, true) => INT8_ARRAY_TYPE_OID,
         (SqlTypeKind::Name, false) => NAME_TYPE_OID,
