@@ -110,6 +110,7 @@ pub(crate) fn catalog_row_values_for_kind(
             .cloned()
             .map(pg_collation_row_values)
             .collect(),
+        BootstrapCatalogKind::PgLargeobjectMetadata => Vec::new(),
         BootstrapCatalogKind::PgTablespace => rows
             .tablespaces
             .iter()

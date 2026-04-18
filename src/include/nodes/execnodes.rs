@@ -295,6 +295,8 @@ pub struct SeqScanState {
     pub(crate) desc: Rc<RelationDesc>,
     pub(crate) attr_descs: Rc<[AttributeDesc]>,
     pub(crate) scan: Option<VisibleHeapScan>,
+    pub(crate) scan_rows: Vec<Vec<Value>>,
+    pub(crate) scan_index: usize,
     pub(crate) sequence_emitted: bool,
     /// Reusable slot, like PG's ss_ScanTupleSlot. Holds BufferHeapTuple
     /// with lazy decode into tts_values. The slot's `decoder` field holds

@@ -48,7 +48,7 @@ pub use crate::include::executor::execdesc::*;
 pub use crate::include::nodes::datum::*;
 pub use crate::include::nodes::execnodes::*;
 pub use crate::include::nodes::plannodes::*;
-pub(crate) use agg::{AccumState, AggGroup, OrderedAggInput};
+pub(crate) use agg::{AccumState, AggGroup, AggTransitionFn, OrderedAggInput};
 pub use driver::{
     exec_next, execute_plan, execute_planned_stmt, execute_readonly_statement, execute_sql,
     execute_statement,
@@ -99,7 +99,8 @@ use crate::backend::utils::misc::interrupts::{
 };
 use crate::include::access::htup::TupleError;
 use crate::pgrust::database::{
-    DatabaseStatsStore, SequenceRuntime, SessionStatsState, TransactionWaiter,
+    DatabaseStatsStore, LargeObjectRuntime, SequenceRuntime, SessionStatsState,
+    TransactionWaiter,
 };
 use crate::pl::plpgsql::CompiledFunction;
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
@@ -132,6 +133,7 @@ pub struct ExecutorContext {
     pub txns: std::sync::Arc<parking_lot::RwLock<TransactionManager>>,
     pub txn_waiter: Option<std::sync::Arc<TransactionWaiter>>,
     pub sequences: Option<std::sync::Arc<SequenceRuntime>>,
+    pub large_objects: Option<std::sync::Arc<LargeObjectRuntime>>,
     pub checkpoint_stats: CheckpointStatsSnapshot,
     pub datetime_config: DateTimeConfig,
     pub interrupts: std::sync::Arc<InterruptState>,
@@ -139,6 +141,7 @@ pub struct ExecutorContext {
     pub session_stats: std::sync::Arc<parking_lot::RwLock<SessionStatsState>>,
     pub snapshot: Snapshot,
     pub client_id: ClientId,
+    pub current_user_oid: u32,
     pub next_command_id: CommandId,
     pub expr_bindings: ExprEvalBindings,
     pub case_test_values: Vec<Value>,

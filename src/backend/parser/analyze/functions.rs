@@ -549,6 +549,7 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::NextVal | BuiltinScalarFunction::CurrVal => args.len() == 1,
             BuiltinScalarFunction::SetVal => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::PgGetSerialSequence => args.len() == 2,
+            BuiltinScalarFunction::LoCreate | BuiltinScalarFunction::LoUnlink => args.len() == 1,
             BuiltinScalarFunction::PgStatGetCheckpointerNumTimed
             | BuiltinScalarFunction::PgStatGetCheckpointerNumRequested
             | BuiltinScalarFunction::PgStatGetCheckpointerNumPerformed
@@ -1213,6 +1214,8 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "pg_get_serial_sequence",
             BuiltinScalarFunction::PgGetSerialSequence,
         ),
+        ("lo_create", BuiltinScalarFunction::LoCreate),
+        ("lo_unlink", BuiltinScalarFunction::LoUnlink),
         ("pg_typeof", BuiltinScalarFunction::PgTypeof),
         (
             "pg_stat_get_checkpointer_num_timed",

@@ -23,7 +23,7 @@ use crate::pgrust::auth::AuthState;
 use crate::pgrust::database::{
     ConversionEntry, Database, DatabaseCreateGrant, DatabaseError, DatabaseOpenOptions,
     DatabaseStatsStore, DomainEntry, EnumTypeEntry, RangeTypeEntry, SequenceRuntime,
-    SessionStatsState, TempNamespace,
+    SessionStatsState, TempNamespace, LargeObjectRuntime,
 };
 use crate::{BufferPool, ClientId};
 
@@ -89,6 +89,7 @@ pub(crate) struct OpenDatabaseState {
     pub conversions: Arc<RwLock<BTreeMap<String, ConversionEntry>>>,
     pub sequences: Arc<SequenceRuntime>,
     pub stats: Arc<RwLock<DatabaseStatsStore>>,
+    pub large_objects: Arc<LargeObjectRuntime>,
 }
 
 impl OpenDatabaseState {
@@ -110,6 +111,7 @@ impl OpenDatabaseState {
             conversions: Arc::new(RwLock::new(BTreeMap::new())),
             sequences,
             stats: Arc::new(RwLock::new(DatabaseStatsStore::with_default_io_rows())),
+            large_objects: Arc::new(LargeObjectRuntime::new_ephemeral()),
         })
     }
 }
@@ -329,6 +331,7 @@ impl Cluster {
             conversions: Arc::clone(&state.conversions),
             sequences: Arc::clone(&state.sequences),
             stats: Arc::clone(&state.stats),
+            large_objects: Arc::clone(&state.large_objects),
             _wal_bg_writer: self.shared.wal_bg_writer.clone(),
         })
     }

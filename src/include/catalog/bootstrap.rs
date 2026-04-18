@@ -16,6 +16,7 @@ pub const PG_AUTHID_RELATION_OID: u32 = 1260;
 pub const PG_AUTH_MEMBERS_RELATION_OID: u32 = 1261;
 pub const PG_DATABASE_RELATION_OID: u32 = 1262;
 pub const PG_COLLATION_RELATION_OID: u32 = 3456;
+pub const PG_LARGEOBJECT_METADATA_RELATION_OID: u32 = 2995;
 pub const PG_TABLESPACE_RELATION_OID: u32 = 1213;
 pub const PG_AM_RELATION_OID: u32 = 2601;
 pub const PG_AMOP_RELATION_OID: u32 = 2602;
@@ -160,6 +161,7 @@ pub enum BootstrapCatalogKind {
     PgAuthId,
     PgAuthMembers,
     PgCollation,
+    PgLargeobjectMetadata,
     PgTablespace,
     PgAm,
     PgAmop,
@@ -202,6 +204,7 @@ impl BootstrapCatalogKind {
             Self::PgAuthId => PG_AUTHID_RELATION_OID,
             Self::PgAuthMembers => PG_AUTH_MEMBERS_RELATION_OID,
             Self::PgCollation => PG_COLLATION_RELATION_OID,
+            Self::PgLargeobjectMetadata => PG_LARGEOBJECT_METADATA_RELATION_OID,
             Self::PgTablespace => PG_TABLESPACE_RELATION_OID,
             Self::PgAm => PG_AM_RELATION_OID,
             Self::PgAmop => PG_AMOP_RELATION_OID,
@@ -238,6 +241,7 @@ impl BootstrapCatalogKind {
             Self::PgAuthId => "pg_authid",
             Self::PgAuthMembers => "pg_auth_members",
             Self::PgCollation => "pg_collation",
+            Self::PgLargeobjectMetadata => "pg_largeobject_metadata",
             Self::PgTablespace => "pg_tablespace",
             Self::PgAm => "pg_am",
             Self::PgAmop => "pg_amop",
@@ -274,6 +278,7 @@ impl BootstrapCatalogKind {
             Self::PgAuthId => 0,
             Self::PgAuthMembers => 0,
             Self::PgCollation => 0,
+            Self::PgLargeobjectMetadata => 0,
             Self::PgTablespace => 0,
             Self::PgAm => PG_AM_ROWTYPE_OID,
             Self::PgAmop => 0,
@@ -294,7 +299,11 @@ impl BootstrapCatalogKind {
 
     pub const fn scope(self) -> CatalogScope {
         match self {
-            Self::PgDatabase | Self::PgAuthId | Self::PgAuthMembers | Self::PgTablespace => {
+            Self::PgDatabase
+            | Self::PgAuthId
+            | Self::PgAuthMembers
+            | Self::PgLargeobjectMetadata
+            | Self::PgTablespace => {
                 CatalogScope::Shared
             }
             _ => CatalogScope::Database(0),
@@ -302,7 +311,7 @@ impl BootstrapCatalogKind {
     }
 }
 
-pub const CORE_BOOTSTRAP_KINDS: [BootstrapCatalogKind; 31] = [
+pub const CORE_BOOTSTRAP_KINDS: [BootstrapCatalogKind; 32] = [
     BootstrapCatalogKind::PgNamespace,
     BootstrapCatalogKind::PgType,
     BootstrapCatalogKind::PgProc,
@@ -322,6 +331,7 @@ pub const CORE_BOOTSTRAP_KINDS: [BootstrapCatalogKind; 31] = [
     BootstrapCatalogKind::PgAuthId,
     BootstrapCatalogKind::PgAuthMembers,
     BootstrapCatalogKind::PgCollation,
+    BootstrapCatalogKind::PgLargeobjectMetadata,
     BootstrapCatalogKind::PgDatabase,
     BootstrapCatalogKind::PgTablespace,
     BootstrapCatalogKind::PgAm,
@@ -336,12 +346,13 @@ pub const CORE_BOOTSTRAP_KINDS: [BootstrapCatalogKind; 31] = [
     BootstrapCatalogKind::PgStatistic,
 ];
 
-pub const fn bootstrap_catalog_kinds() -> [BootstrapCatalogKind; 31] {
+pub const fn bootstrap_catalog_kinds() -> [BootstrapCatalogKind; 32] {
     CORE_BOOTSTRAP_KINDS
 }
 
 use crate::include::catalog::{
-    pg_description_desc, pg_inherits_desc, pg_rewrite_desc, pg_statistic_desc,
+    pg_description_desc, pg_inherits_desc, pg_largeobject_metadata_desc, pg_rewrite_desc,
+    pg_statistic_desc,
 };
 
 pub fn bootstrap_relation_desc(kind: BootstrapCatalogKind) -> RelationDesc {
@@ -362,6 +373,7 @@ pub fn bootstrap_relation_desc(kind: BootstrapCatalogKind) -> RelationDesc {
         BootstrapCatalogKind::PgAuthId => pg_authid_desc(),
         BootstrapCatalogKind::PgAuthMembers => pg_auth_members_desc(),
         BootstrapCatalogKind::PgCollation => pg_collation_desc(),
+        BootstrapCatalogKind::PgLargeobjectMetadata => pg_largeobject_metadata_desc(),
         BootstrapCatalogKind::PgTablespace => pg_tablespace_desc(),
         BootstrapCatalogKind::PgAm => pg_am_desc(),
         BootstrapCatalogKind::PgAmop => pg_amop_desc(),
@@ -384,7 +396,7 @@ pub const fn bootstrap_namespace_oid() -> u32 {
     PG_CATALOG_NAMESPACE_OID
 }
 
-pub const CORE_BOOTSTRAP_RELATIONS: [BootstrapCatalogRelation; 31] = [
+pub const CORE_BOOTSTRAP_RELATIONS: [BootstrapCatalogRelation; 32] = [
     BootstrapCatalogRelation {
         oid: PG_NAMESPACE_RELATION_OID,
         name: "pg_namespace",
@@ -460,6 +472,10 @@ pub const CORE_BOOTSTRAP_RELATIONS: [BootstrapCatalogRelation; 31] = [
     BootstrapCatalogRelation {
         oid: PG_COLLATION_RELATION_OID,
         name: "pg_collation",
+    },
+    BootstrapCatalogRelation {
+        oid: PG_LARGEOBJECT_METADATA_RELATION_OID,
+        name: "pg_largeobject_metadata",
     },
     BootstrapCatalogRelation {
         oid: PG_DATABASE_RELATION_OID,
