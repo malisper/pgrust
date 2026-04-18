@@ -9,6 +9,7 @@ mod ddl;
 pub(crate) mod foreign_keys;
 mod relation_refs;
 mod sequences;
+mod stats;
 mod temp;
 mod toast;
 mod txn;
@@ -94,6 +95,11 @@ pub(crate) use sequences::{
     resolve_sequence_options_spec, sequence_type_oid_for_serial_kind,
     sequence_type_oid_for_sql_type,
 };
+pub(crate) use stats::{
+    DatabaseStatsStore, FunctionStatsDelta, FunctionStatsEntry, IoStatsEntry, IoStatsKey,
+    RelationStatsDelta, RelationStatsEntry, SessionStatsState, StatsDelta, StatsFetchConsistency,
+    StatsMutationEffect, TrackFunctionsSetting, default_pg_stat_io_keys, now_timestamptz,
+};
 use toast::{toast_bindings_from_create_result, toast_bindings_from_temp_relation};
 use txn::AutoCommitGuard;
 
@@ -163,11 +169,14 @@ pub struct Database {
     pub(crate) backend_cache_states: Arc<RwLock<HashMap<ClientId, BackendCacheState>>>,
     pub(crate) session_interrupt_states: Arc<RwLock<HashMap<ClientId, Arc<InterruptState>>>>,
     pub(crate) session_auth_states: Arc<RwLock<HashMap<ClientId, AuthState>>>,
+    pub(crate) session_stats_states:
+        Arc<RwLock<HashMap<ClientId, Arc<RwLock<SessionStatsState>>>>>,
     pub(crate) database_create_grants: Arc<RwLock<Vec<DatabaseCreateGrant>>>,
     pub(crate) temp_relations: Arc<RwLock<HashMap<ClientId, TempNamespace>>>,
     pub(crate) domains: Arc<RwLock<BTreeMap<String, DomainEntry>>>,
     pub(crate) enum_types: Arc<RwLock<BTreeMap<String, EnumTypeEntry>>>,
     pub(crate) sequences: Arc<SequenceRuntime>,
+    pub(crate) stats: Arc<RwLock<DatabaseStatsStore>>,
     pub(crate) _wal_bg_writer: Option<Arc<WalBgWriter>>,
 }
 
@@ -296,6 +305,16 @@ impl Database {
         self.session_auth_states.write().insert(client_id, auth);
     }
 
+    pub(crate) fn install_stats_state(
+        &self,
+        client_id: ClientId,
+        stats_state: Arc<RwLock<SessionStatsState>>,
+    ) {
+        self.session_stats_states
+            .write()
+            .insert(client_id, stats_state);
+    }
+
     pub(crate) fn auth_state(&self, client_id: ClientId) -> AuthState {
         self.session_auth_states
             .read()
@@ -306,6 +325,21 @@ impl Database {
 
     pub(crate) fn clear_auth_state(&self, client_id: ClientId) {
         self.session_auth_states.write().remove(&client_id);
+    }
+
+    pub(crate) fn session_stats_state(
+        &self,
+        client_id: ClientId,
+    ) -> Arc<RwLock<SessionStatsState>> {
+        self.session_stats_states
+            .read()
+            .get(&client_id)
+            .cloned()
+            .unwrap_or_else(|| Arc::new(RwLock::new(SessionStatsState::default())))
+    }
+
+    pub(crate) fn clear_stats_state(&self, client_id: ClientId) {
+        self.session_stats_states.write().remove(&client_id);
     }
 
     pub(crate) fn auth_catalog(
@@ -453,6 +487,7 @@ impl Database {
     pub(crate) fn clear_interrupt_state(&self, client_id: ClientId) {
         self.session_interrupt_states.write().remove(&client_id);
         self.clear_auth_state(client_id);
+        self.clear_stats_state(client_id);
         self.sequences.clear_currvals_for_client(client_id);
     }
 

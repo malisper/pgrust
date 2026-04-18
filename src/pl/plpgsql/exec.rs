@@ -77,7 +77,14 @@ pub fn execute_user_defined_scalar_function(
         ));
     }
 
+    let track_stats = ctx.session_stats.read().track_functions.tracks_plpgsql();
+    if track_stats {
+        ctx.session_stats.write().begin_function_call(proc_oid);
+    }
     let mut rows = execute_compiled_function(&compiled, &arg_values, None, ctx)?;
+    if track_stats {
+        ctx.session_stats.write().finish_function_call(proc_oid);
+    }
     let mut row = rows.pop().ok_or_else(|| {
         function_runtime_error(
             "control reached end of function without RETURN",
@@ -108,7 +115,15 @@ pub fn execute_user_defined_set_returning_function(
         .iter()
         .map(|arg| eval_expr(arg, slot, ctx))
         .collect::<Result<Vec<_>, _>>()?;
-    execute_compiled_function(&compiled, &arg_values, Some(output_columns), ctx)
+    let track_stats = ctx.session_stats.read().track_functions.tracks_plpgsql();
+    if track_stats {
+        ctx.session_stats.write().begin_function_call(proc_oid);
+    }
+    let result = execute_compiled_function(&compiled, &arg_values, Some(output_columns), ctx);
+    if track_stats {
+        ctx.session_stats.write().finish_function_call(proc_oid);
+    }
+    result
 }
 
 fn compiled_function_for_proc(

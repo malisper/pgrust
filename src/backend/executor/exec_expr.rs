@@ -120,6 +120,116 @@ fn sql_type_from_builtin_oid(oid: u32) -> Option<SqlType> {
         .map(|row| row.sql_type)
 }
 
+fn stats_oid_arg(values: &[Value], op: &'static str) -> Result<u32, ExecError> {
+    match values.first() {
+        Some(Value::Int32(v)) if *v >= 0 => Ok(*v as u32),
+        Some(Value::Int64(v)) if *v >= 0 && *v <= i64::from(u32::MAX) => Ok(*v as u32),
+        Some(other) => Err(ExecError::TypeMismatch {
+            op,
+            left: other.clone(),
+            right: Value::Int64(i64::from(crate::include::catalog::OID_TYPE_OID)),
+        }),
+        None => Err(malformed_expr_error(op)),
+    }
+}
+
+fn relation_stats_value(
+    func: BuiltinScalarFunction,
+    oid: u32,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    let stats = ctx.session_stats.write().visible_stats(&ctx.stats);
+    let entry = stats.relations.get(&oid).cloned().unwrap_or_default();
+    Ok(match func {
+        BuiltinScalarFunction::PgStatGetNumscans => Value::Int64(entry.numscans),
+        BuiltinScalarFunction::PgStatGetLastscan => entry
+            .lastscan
+            .map(Value::TimestampTz)
+            .unwrap_or(Value::Null),
+        BuiltinScalarFunction::PgStatGetTuplesReturned => Value::Int64(entry.tuples_returned),
+        BuiltinScalarFunction::PgStatGetTuplesFetched => Value::Int64(entry.tuples_fetched),
+        BuiltinScalarFunction::PgStatGetTuplesInserted => Value::Int64(entry.tuples_inserted),
+        BuiltinScalarFunction::PgStatGetTuplesUpdated => Value::Int64(entry.tuples_updated),
+        BuiltinScalarFunction::PgStatGetTuplesDeleted => Value::Int64(entry.tuples_deleted),
+        BuiltinScalarFunction::PgStatGetLiveTuples => Value::Int64(entry.live_tuples),
+        BuiltinScalarFunction::PgStatGetDeadTuples => Value::Int64(entry.dead_tuples),
+        BuiltinScalarFunction::PgStatGetBlocksFetched => Value::Int64(entry.blocks_fetched),
+        BuiltinScalarFunction::PgStatGetBlocksHit => Value::Int64(entry.blocks_hit),
+        _ => unreachable!("non-relation stats builtin in relation_stats_value"),
+    })
+}
+
+fn relation_xact_stats_value(
+    func: BuiltinScalarFunction,
+    oid: u32,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    let session = ctx.session_stats.read();
+    if session.dropped_relations_in_xact.contains(&oid) {
+        return Ok(Value::Int64(0));
+    }
+    let current = session
+        .relation_xact
+        .get(&oid)
+        .map(|entry| &entry.current)
+        .cloned()
+        .unwrap_or_default();
+    Ok(match func {
+        BuiltinScalarFunction::PgStatGetXactNumscans => Value::Int64(current.numscans),
+        BuiltinScalarFunction::PgStatGetXactTuplesReturned => Value::Int64(current.tuples_returned),
+        BuiltinScalarFunction::PgStatGetXactTuplesFetched => Value::Int64(current.tuples_fetched),
+        BuiltinScalarFunction::PgStatGetXactTuplesInserted => Value::Int64(current.tuples_inserted),
+        BuiltinScalarFunction::PgStatGetXactTuplesUpdated => Value::Int64(current.tuples_updated),
+        BuiltinScalarFunction::PgStatGetXactTuplesDeleted => Value::Int64(current.tuples_deleted),
+        _ => unreachable!("non-xact relation stats builtin in relation_xact_stats_value"),
+    })
+}
+
+fn function_stats_value(
+    func: BuiltinScalarFunction,
+    oid: u32,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    let stats = ctx.session_stats.write().visible_stats(&ctx.stats);
+    let Some(entry) = stats.functions.get(&oid) else {
+        return Ok(Value::Null);
+    };
+    Ok(match func {
+        BuiltinScalarFunction::PgStatGetFunctionCalls => Value::Int64(entry.calls),
+        BuiltinScalarFunction::PgStatGetFunctionTotalTime => {
+            Value::Float64(entry.total_time_micros as f64 / 1000.0)
+        }
+        BuiltinScalarFunction::PgStatGetFunctionSelfTime => {
+            Value::Float64(entry.self_time_micros as f64 / 1000.0)
+        }
+        _ => unreachable!("non-function stats builtin in function_stats_value"),
+    })
+}
+
+fn function_xact_stats_value(
+    func: BuiltinScalarFunction,
+    oid: u32,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    let session = ctx.session_stats.read();
+    if session.dropped_functions_in_xact.contains(&oid) {
+        return Ok(Value::Null);
+    }
+    let Some(entry) = session.function_xact.get(&oid) else {
+        return Ok(Value::Null);
+    };
+    Ok(match func {
+        BuiltinScalarFunction::PgStatGetXactFunctionCalls => Value::Int64(entry.calls),
+        BuiltinScalarFunction::PgStatGetXactFunctionTotalTime => {
+            Value::Float64(entry.total_time_micros as f64 / 1000.0)
+        }
+        BuiltinScalarFunction::PgStatGetXactFunctionSelfTime => {
+            Value::Float64(entry.self_time_micros as f64 / 1000.0)
+        }
+        _ => unreachable!("non-xact function stats builtin in function_xact_stats_value"),
+    })
+}
+
 fn oid_arg_to_u32(value: &Value, op: &'static str) -> Result<u32, ExecError> {
     match value {
         Value::Int32(oid) => u32::try_from(*oid).map_err(|_| ExecError::OidOutOfRange),
@@ -1711,6 +1821,93 @@ fn eval_builtin_function(
             Ok(checkpoint_stats_value(func, &ctx.checkpoint_stats)
                 .expect("checkpoint stats builtin must map to a value"))
         }
+        BuiltinScalarFunction::PgStatForceNextFlush => {
+            ctx.session_stats.write().flush_pending(&ctx.stats);
+            Ok(Value::Null)
+        }
+        BuiltinScalarFunction::PgStatGetSnapshotTimestamp => Ok(ctx
+            .session_stats
+            .read()
+            .snapshot_timestamp()
+            .map(Value::TimestampTz)
+            .unwrap_or(Value::Null)),
+        BuiltinScalarFunction::PgStatClearSnapshot => {
+            ctx.session_stats.write().clear_snapshot();
+            Ok(Value::Null)
+        }
+        BuiltinScalarFunction::PgStatHaveStats => {
+            let kind = values
+                .first()
+                .and_then(Value::as_text)
+                .ok_or_else(|| ExecError::TypeMismatch {
+                    op: "pg_stat_have_stats",
+                    left: values.first().cloned().unwrap_or(Value::Null),
+                    right: Value::Text("".into()),
+                })?;
+            let objid = stats_oid_arg(&values[1..], "pg_stat_have_stats")?;
+            let objsubid = values
+                .get(2)
+                .map(|value| match value {
+                    Value::Int64(v) => Ok(*v),
+                    Value::Int32(v) => Ok(i64::from(*v)),
+                    other => Err(ExecError::TypeMismatch {
+                        op: "pg_stat_have_stats",
+                        left: other.clone(),
+                        right: Value::Int64(0),
+                    }),
+                })
+                .transpose()?
+                .unwrap_or_default();
+            let visible = ctx.session_stats.write().visible_stats(&ctx.stats);
+            let has_stats = match kind.to_ascii_lowercase().as_str() {
+                "bgwriter" | "checkpointer" | "wal" => objid == 0 && objsubid == 0,
+                "database" => objid != 0 && (objsubid == 0 || objsubid == 1),
+                "relation" => visible.relations.contains_key(&objid),
+                "function" => visible.functions.contains_key(&objid),
+                other => {
+                    return Err(ExecError::DetailedError {
+                        message: format!("unrecognized statistics kind \"{other}\""),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "22023",
+                    });
+                }
+            };
+            Ok(Value::Bool(has_stats))
+        }
+        BuiltinScalarFunction::PgStatGetNumscans
+        | BuiltinScalarFunction::PgStatGetLastscan
+        | BuiltinScalarFunction::PgStatGetTuplesReturned
+        | BuiltinScalarFunction::PgStatGetTuplesFetched
+        | BuiltinScalarFunction::PgStatGetTuplesInserted
+        | BuiltinScalarFunction::PgStatGetTuplesUpdated
+        | BuiltinScalarFunction::PgStatGetTuplesDeleted
+        | BuiltinScalarFunction::PgStatGetLiveTuples
+        | BuiltinScalarFunction::PgStatGetDeadTuples
+        | BuiltinScalarFunction::PgStatGetBlocksFetched
+        | BuiltinScalarFunction::PgStatGetBlocksHit => {
+            relation_stats_value(func, stats_oid_arg(&values, "pg_stat_get_*")?, ctx)
+        }
+        BuiltinScalarFunction::PgStatGetXactNumscans
+        | BuiltinScalarFunction::PgStatGetXactTuplesReturned
+        | BuiltinScalarFunction::PgStatGetXactTuplesFetched
+        | BuiltinScalarFunction::PgStatGetXactTuplesInserted
+        | BuiltinScalarFunction::PgStatGetXactTuplesUpdated
+        | BuiltinScalarFunction::PgStatGetXactTuplesDeleted => {
+            relation_xact_stats_value(func, stats_oid_arg(&values, "pg_stat_get_xact_*")?, ctx)
+        }
+        BuiltinScalarFunction::PgStatGetFunctionCalls
+        | BuiltinScalarFunction::PgStatGetFunctionTotalTime
+        | BuiltinScalarFunction::PgStatGetFunctionSelfTime => {
+            function_stats_value(func, stats_oid_arg(&values, "pg_stat_get_function_*")?, ctx)
+        }
+        BuiltinScalarFunction::PgStatGetXactFunctionCalls
+        | BuiltinScalarFunction::PgStatGetXactFunctionTotalTime
+        | BuiltinScalarFunction::PgStatGetXactFunctionSelfTime => function_xact_stats_value(
+            func,
+            stats_oid_arg(&values, "pg_stat_get_xact_function_*")?,
+            ctx,
+        ),
         BuiltinScalarFunction::PgInputIsValid => {
             let input = values[0].as_text().ok_or_else(|| ExecError::TypeMismatch {
                 op: "pg_input_is_valid",

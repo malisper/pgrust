@@ -6,10 +6,13 @@ use crate::backend::utils::cache::catcache::normalize_catalog_name;
 use crate::backend::utils::cache::relcache::RelCacheEntry;
 use crate::backend::utils::cache::syscache::{
     backend_catcache, backend_relcache, ensure_attribute_rows, ensure_class_rows,
-    ensure_constraint_rows, ensure_inherit_rows, ensure_namespace_rows, ensure_rewrite_rows,
-    ensure_statistic_rows, ensure_type_rows,
+    ensure_constraint_rows, ensure_index_rows, ensure_inherit_rows, ensure_namespace_rows,
+    ensure_proc_rows, ensure_rewrite_rows, ensure_statistic_rows, ensure_type_rows,
 };
-use crate::backend::utils::cache::system_views::{build_pg_stats_rows, build_pg_views_rows};
+use crate::backend::utils::cache::system_views::{
+    build_pg_stat_io_rows, build_pg_stat_user_functions_rows, build_pg_stat_user_tables_rows,
+    build_pg_stats_rows, build_pg_statio_user_tables_rows, build_pg_views_rows,
+};
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::include::catalog::{
     PgAmRow, PgAmopRow, PgAmprocRow, PgClassRow, PgCollationRow, PgConstraintRow, PgIndexRow,
@@ -773,6 +776,56 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
 
     fn pg_stat_activity_rows(&self) -> Vec<Vec<Value>> {
         self.db.pg_stat_activity_rows()
+    }
+
+    fn pg_stat_user_tables_rows(&self) -> Vec<Vec<Value>> {
+        let stats = self
+            .db
+            .session_stats_state(self.client_id)
+            .write()
+            .visible_stats(&self.db.stats);
+        build_pg_stat_user_tables_rows(
+            ensure_namespace_rows(self.db, self.client_id, self.txn_ctx),
+            ensure_class_rows(self.db, self.client_id, self.txn_ctx),
+            ensure_index_rows(self.db, self.client_id, self.txn_ctx),
+            &stats,
+        )
+    }
+
+    fn pg_statio_user_tables_rows(&self) -> Vec<Vec<Value>> {
+        let stats = self
+            .db
+            .session_stats_state(self.client_id)
+            .write()
+            .visible_stats(&self.db.stats);
+        build_pg_statio_user_tables_rows(
+            ensure_namespace_rows(self.db, self.client_id, self.txn_ctx),
+            ensure_class_rows(self.db, self.client_id, self.txn_ctx),
+            ensure_index_rows(self.db, self.client_id, self.txn_ctx),
+            &stats,
+        )
+    }
+
+    fn pg_stat_user_functions_rows(&self) -> Vec<Vec<Value>> {
+        let stats = self
+            .db
+            .session_stats_state(self.client_id)
+            .write()
+            .visible_stats(&self.db.stats);
+        build_pg_stat_user_functions_rows(
+            ensure_namespace_rows(self.db, self.client_id, self.txn_ctx),
+            ensure_proc_rows(self.db, self.client_id, self.txn_ctx),
+            &stats,
+        )
+    }
+
+    fn pg_stat_io_rows(&self) -> Vec<Vec<Value>> {
+        let stats = self
+            .db
+            .session_stats_state(self.client_id)
+            .write()
+            .visible_stats(&self.db.stats);
+        build_pg_stat_io_rows(&stats)
     }
 
     fn index_relations_for_heap(

@@ -548,7 +548,34 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::PgStatGetCheckpointerSlruWritten
             | BuiltinScalarFunction::PgStatGetCheckpointerWriteTime
             | BuiltinScalarFunction::PgStatGetCheckpointerSyncTime
-            | BuiltinScalarFunction::PgStatGetCheckpointerStatResetTime => args.is_empty(),
+            | BuiltinScalarFunction::PgStatGetCheckpointerStatResetTime
+            | BuiltinScalarFunction::PgStatForceNextFlush
+            | BuiltinScalarFunction::PgStatGetSnapshotTimestamp
+            | BuiltinScalarFunction::PgStatClearSnapshot => args.is_empty(),
+            BuiltinScalarFunction::PgStatHaveStats => args.len() == 3,
+            BuiltinScalarFunction::PgStatGetNumscans
+            | BuiltinScalarFunction::PgStatGetLastscan
+            | BuiltinScalarFunction::PgStatGetTuplesReturned
+            | BuiltinScalarFunction::PgStatGetTuplesFetched
+            | BuiltinScalarFunction::PgStatGetTuplesInserted
+            | BuiltinScalarFunction::PgStatGetTuplesUpdated
+            | BuiltinScalarFunction::PgStatGetTuplesDeleted
+            | BuiltinScalarFunction::PgStatGetLiveTuples
+            | BuiltinScalarFunction::PgStatGetDeadTuples
+            | BuiltinScalarFunction::PgStatGetBlocksFetched
+            | BuiltinScalarFunction::PgStatGetBlocksHit
+            | BuiltinScalarFunction::PgStatGetXactNumscans
+            | BuiltinScalarFunction::PgStatGetXactTuplesReturned
+            | BuiltinScalarFunction::PgStatGetXactTuplesFetched
+            | BuiltinScalarFunction::PgStatGetXactTuplesInserted
+            | BuiltinScalarFunction::PgStatGetXactTuplesUpdated
+            | BuiltinScalarFunction::PgStatGetXactTuplesDeleted
+            | BuiltinScalarFunction::PgStatGetFunctionCalls
+            | BuiltinScalarFunction::PgStatGetFunctionTotalTime
+            | BuiltinScalarFunction::PgStatGetFunctionSelfTime
+            | BuiltinScalarFunction::PgStatGetXactFunctionCalls
+            | BuiltinScalarFunction::PgStatGetXactFunctionTotalTime
+            | BuiltinScalarFunction::PgStatGetXactFunctionSelfTime => args.len() == 1,
             BuiltinScalarFunction::ToJson | BuiltinScalarFunction::ToJsonb => args.len() == 1,
             BuiltinScalarFunction::ArrayLength
             | BuiltinScalarFunction::ArrayLower
@@ -1205,6 +1232,105 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         (
             "pg_stat_get_checkpointer_stat_reset_time",
             BuiltinScalarFunction::PgStatGetCheckpointerStatResetTime,
+        ),
+        (
+            "pg_stat_force_next_flush",
+            BuiltinScalarFunction::PgStatForceNextFlush,
+        ),
+        (
+            "pg_stat_get_snapshot_timestamp",
+            BuiltinScalarFunction::PgStatGetSnapshotTimestamp,
+        ),
+        (
+            "pg_stat_clear_snapshot",
+            BuiltinScalarFunction::PgStatClearSnapshot,
+        ),
+        ("pg_stat_have_stats", BuiltinScalarFunction::PgStatHaveStats),
+        ("pg_stat_get_numscans", BuiltinScalarFunction::PgStatGetNumscans),
+        ("pg_stat_get_lastscan", BuiltinScalarFunction::PgStatGetLastscan),
+        (
+            "pg_stat_get_tuples_returned",
+            BuiltinScalarFunction::PgStatGetTuplesReturned,
+        ),
+        (
+            "pg_stat_get_tuples_fetched",
+            BuiltinScalarFunction::PgStatGetTuplesFetched,
+        ),
+        (
+            "pg_stat_get_tuples_inserted",
+            BuiltinScalarFunction::PgStatGetTuplesInserted,
+        ),
+        (
+            "pg_stat_get_tuples_updated",
+            BuiltinScalarFunction::PgStatGetTuplesUpdated,
+        ),
+        (
+            "pg_stat_get_tuples_deleted",
+            BuiltinScalarFunction::PgStatGetTuplesDeleted,
+        ),
+        (
+            "pg_stat_get_live_tuples",
+            BuiltinScalarFunction::PgStatGetLiveTuples,
+        ),
+        (
+            "pg_stat_get_dead_tuples",
+            BuiltinScalarFunction::PgStatGetDeadTuples,
+        ),
+        (
+            "pg_stat_get_blocks_fetched",
+            BuiltinScalarFunction::PgStatGetBlocksFetched,
+        ),
+        (
+            "pg_stat_get_blocks_hit",
+            BuiltinScalarFunction::PgStatGetBlocksHit,
+        ),
+        (
+            "pg_stat_get_xact_numscans",
+            BuiltinScalarFunction::PgStatGetXactNumscans,
+        ),
+        (
+            "pg_stat_get_xact_tuples_returned",
+            BuiltinScalarFunction::PgStatGetXactTuplesReturned,
+        ),
+        (
+            "pg_stat_get_xact_tuples_fetched",
+            BuiltinScalarFunction::PgStatGetXactTuplesFetched,
+        ),
+        (
+            "pg_stat_get_xact_tuples_inserted",
+            BuiltinScalarFunction::PgStatGetXactTuplesInserted,
+        ),
+        (
+            "pg_stat_get_xact_tuples_updated",
+            BuiltinScalarFunction::PgStatGetXactTuplesUpdated,
+        ),
+        (
+            "pg_stat_get_xact_tuples_deleted",
+            BuiltinScalarFunction::PgStatGetXactTuplesDeleted,
+        ),
+        (
+            "pg_stat_get_function_calls",
+            BuiltinScalarFunction::PgStatGetFunctionCalls,
+        ),
+        (
+            "pg_stat_get_function_total_time",
+            BuiltinScalarFunction::PgStatGetFunctionTotalTime,
+        ),
+        (
+            "pg_stat_get_function_self_time",
+            BuiltinScalarFunction::PgStatGetFunctionSelfTime,
+        ),
+        (
+            "pg_stat_get_xact_function_calls",
+            BuiltinScalarFunction::PgStatGetXactFunctionCalls,
+        ),
+        (
+            "pg_stat_get_xact_function_total_time",
+            BuiltinScalarFunction::PgStatGetXactFunctionTotalTime,
+        ),
+        (
+            "pg_stat_get_xact_function_self_time",
+            BuiltinScalarFunction::PgStatGetXactFunctionSelfTime,
         ),
         ("to_json", BuiltinScalarFunction::ToJson),
         ("to_jsonb", BuiltinScalarFunction::ToJsonb),
