@@ -925,6 +925,9 @@ impl Session {
                     )
                 }
             }
+            Statement::Merge(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                "MERGE".into(),
+            ))),
             Statement::Begin => {
                 if self.active_txn.is_some() {
                     return Err(ExecError::Parse(ParseError::UnexpectedToken {
@@ -1738,6 +1741,9 @@ impl Session {
             Statement::Vacuum(_) => {
                 Err(ExecError::Parse(ParseError::ActiveSqlTransaction("VACUUM")))
             }
+            Statement::Merge(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                "MERGE".into(),
+            ))),
             Statement::Select(_) | Statement::Values(_) | Statement::Explain(_) => {
                 let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
                 let search_path = self.configured_search_path();
