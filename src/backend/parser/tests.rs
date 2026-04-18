@@ -6344,6 +6344,17 @@ fn parse_scalar_subquery_expression() {
 }
 
 #[test]
+fn parse_array_subquery_expression() {
+    let stmt = parse_select("select array(select 1)").unwrap();
+    match &stmt.targets[0].expr {
+        SqlExpr::ArraySubquery(subquery) => {
+            assert_eq!(subquery.targets.len(), 1);
+        }
+        other => panic!("expected array subquery, got {other:?}"),
+    }
+}
+
+#[test]
 fn parse_exists_subquery_expression() {
     assert!(parse_select("select exists (select 1)").is_ok());
     assert!(parse_select("select not exists (select 1)").is_ok());

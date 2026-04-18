@@ -1,5 +1,7 @@
 use super::*;
+use crate::backend::parser::CatalogLookup;
 use crate::backend::parser::{SqlType, SqlTypeKind};
+use crate::include::nodes::datum::ArrayValue;
 use crate::include::nodes::primnodes::{Expr, Var, user_attrno};
 
 fn local_var(index: usize) -> Expr {
@@ -88,6 +90,37 @@ pub(super) fn eval_scalar_subquery(
             first_value = Some(values[0].clone());
         }
         Ok(first_value.unwrap_or(Value::Null))
+    })
+}
+
+pub(super) fn eval_array_subquery(
+    subplan: &crate::include::nodes::primnodes::SubPlan,
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    let plan = planned_subquery_plan(subplan, ctx)?;
+    with_scoped_subquery_runtime(ctx, |ctx| {
+        bind_subplan_params(subplan, slot, ctx)?;
+        let mut state = executor_start(plan.clone());
+        let mut values = Vec::new();
+        while let Some(inner_slot) = exec_next(&mut state, ctx)? {
+            let mut row = inner_slot.values()?.iter().cloned().collect::<Vec<_>>();
+            Value::materialize_all(&mut row);
+            if row.len() != 1 {
+                return Err(ExecError::CardinalityViolation(
+                    "subquery must return only one column".into(),
+                ));
+            }
+            values.push(row.remove(0));
+        }
+        let mut array = ArrayValue::from_1d(values);
+        if let Some(element_type_oid) = subplan
+            .first_col_type
+            .and_then(|sql_type| ctx.catalog.as_ref()?.type_oid_for_sql_type(sql_type))
+        {
+            array = array.with_element_type_oid(element_type_oid);
+        }
+        Ok(Value::PgArray(array))
     })
 }
 

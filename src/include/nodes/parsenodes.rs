@@ -1954,6 +1954,7 @@ pub enum SqlExpr {
         over: Option<RawWindowSpec>,
     },
     ScalarSubquery(Box<SelectStatement>),
+    ArraySubquery(Box<SelectStatement>),
     Exists(Box<SelectStatement>),
     InSubquery {
         expr: Box<SqlExpr>,

@@ -838,6 +838,7 @@ pub enum SubLinkType {
     AllSubLink(SubqueryComparisonOp),
     AnySubLink(SubqueryComparisonOp),
     ExprSubLink,
+    ArraySubLink,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1206,6 +1207,16 @@ pub fn expr_sql_type_hint(expr: &Expr) -> Option<SqlType> {
         {
             Some(SqlType::new(SqlTypeKind::Bool))
         }
+        Expr::SubLink(sublink) if matches!(sublink.sublink_type, SubLinkType::ArraySubLink) => {
+            Some(SqlType::array_of(
+                sublink
+                    .subselect
+                    .target_list
+                    .first()
+                    .map(|target| target.sql_type)
+                    .unwrap_or(SqlType::new(SqlTypeKind::Text)),
+            ))
+        }
         Expr::SubLink(sublink) => sublink
             .subselect
             .target_list
@@ -1220,6 +1231,13 @@ pub fn expr_sql_type_hint(expr: &Expr) -> Option<SqlType> {
             ) =>
         {
             Some(SqlType::new(SqlTypeKind::Bool))
+        }
+        Expr::SubPlan(subplan) if matches!(subplan.sublink_type, SubLinkType::ArraySubLink) => {
+            Some(SqlType::array_of(
+                subplan
+                    .first_col_type
+                    .unwrap_or(SqlType::new(SqlTypeKind::Text)),
+            ))
         }
         Expr::SubPlan(subplan) => subplan.first_col_type,
         Expr::Like { .. }

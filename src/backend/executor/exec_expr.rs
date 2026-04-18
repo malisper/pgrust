@@ -101,7 +101,9 @@ use arrays::{
     eval_array_subscript_plpgsql, eval_array_to_string_function, eval_cardinality_function,
     eval_quantified_array, eval_string_to_array_function, eval_width_bucket_thresholds,
 };
-use subquery::{eval_exists_subquery, eval_quantified_subquery, eval_scalar_subquery};
+use subquery::{
+    eval_array_subquery, eval_exists_subquery, eval_quantified_subquery, eval_scalar_subquery,
+};
 
 extern crate rand;
 
@@ -1034,6 +1036,7 @@ pub fn eval_expr(
         }
         Expr::SubPlan(subplan) => match subplan.sublink_type {
             SubLinkType::ExprSubLink => eval_scalar_subquery(subplan, slot, ctx),
+            SubLinkType::ArraySubLink => eval_array_subquery(subplan, slot, ctx),
             SubLinkType::ExistsSubLink => eval_exists_subquery(subplan, slot, ctx),
             SubLinkType::AnySubLink(op) => {
                 let left = subplan.testexpr.as_ref().ok_or(ExecError::DetailedError {

@@ -29,7 +29,8 @@ use self::ops::{
     bind_concat_expr, bind_overloaded_binary_expr, bind_prefix_operator_expr, bind_shift_expr,
 };
 use self::subquery::{
-    bind_exists_subquery_expr, bind_in_subquery_expr, bind_quantified_array_expr,
+    bind_array_subquery_expr, bind_exists_subquery_expr, bind_in_subquery_expr,
+    bind_quantified_array_expr,
     bind_quantified_subquery_expr, bind_scalar_subquery_expr,
 };
 pub(crate) use self::targets::{
@@ -1596,6 +1597,9 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
         }
         SqlExpr::ScalarSubquery(select) => {
             bind_scalar_subquery_expr(select, scope, catalog, outer_scopes, ctes)?
+        }
+        SqlExpr::ArraySubquery(select) => {
+            bind_array_subquery_expr(select, scope, catalog, outer_scopes, ctes)?
         }
         SqlExpr::Exists(select) => {
             bind_exists_subquery_expr(select, scope, catalog, outer_scopes, ctes)?

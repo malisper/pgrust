@@ -2262,6 +2262,9 @@ pub(super) fn bind_agg_output_expr_in_clause(
         SqlExpr::ScalarSubquery(select) => {
             bind_grouped_scalar_subquery(select, group_by_exprs, input_scope, catalog, outer_scopes)
         }
+        SqlExpr::ArraySubquery(select) => {
+            bind_grouped_array_subquery(select, group_by_exprs, input_scope, catalog, outer_scopes)
+        }
         SqlExpr::Exists(select) => {
             bind_grouped_exists_subquery(select, group_by_exprs, input_scope, catalog, outer_scopes)
         }
