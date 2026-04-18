@@ -6,6 +6,8 @@ use regex::{Regex, RegexBuilder};
 
 const INVALID_REGULAR_EXPRESSION: &str = "2201B";
 const INVALID_PARAMETER_VALUE: &str = "22023";
+const INVALID_ESCAPE_SEQUENCE: &str = "22025";
+const INVALID_USE_OF_ESCAPE_CHARACTER: &str = "2200C";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum PgRegexFlavor {
@@ -61,6 +63,14 @@ struct RegexMatchContext {
 enum PgRegexPurpose {
     Boolean,
     MatchSpans,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SimilarEscape {
+    Default,
+    None,
+    Char(char),
+    Null,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -217,8 +227,11 @@ pub(super) fn eval_similar_substring(values: &[Value]) -> Result<Value, ExecErro
     }
     let text = expect_text_arg("substring similar", text_value, pattern_value)?;
     let pattern = expect_text_arg("substring similar", pattern_value, text_value)?;
-    let escape = parse_similar_escape_arg(text_value, values.get(2))?;
-    let regex_pattern = similar_substring_regex(pattern, escape)?;
+    let escape = parse_similar_escape_arg("substring similar", text_value, values.get(2))?;
+    if matches!(escape, SimilarEscape::Null) {
+        return Ok(Value::Null);
+    }
+    let regex_pattern = translate_similar_pattern(pattern, escape)?;
     let compiled = compile_pg_regex(
         &regex_pattern,
         &PgRegexFlags::default(),
@@ -228,15 +241,16 @@ pub(super) fn eval_similar_substring(values: &[Value]) -> Result<Value, ExecErro
     let Some(first) = context.matches.first() else {
         return Ok(Value::Null);
     };
-    if let Some(span) = first.captures.first().and_then(|span| *span) {
-        Ok(text_value_from_span(
-            &context.text,
-            &context.char_to_byte,
-            span,
-        ))
-    } else {
-        Ok(Value::Null)
+    if first.captures.is_empty() {
+        return Ok(match first.whole {
+            Some(span) => text_value_from_span(&context.text, &context.char_to_byte, span),
+            None => Value::Null,
+        });
     }
+    Ok(match first.captures.first().and_then(|span| *span) {
+        Some(span) => text_value_from_span(&context.text, &context.char_to_byte, span),
+        None => Value::Null,
+    })
 }
 
 pub(super) fn eval_similar(
@@ -250,8 +264,11 @@ pub(super) fn eval_similar(
     }
     let text = expect_text_arg("similar to", left, pattern)?;
     let pattern_text = expect_text_arg("similar to", pattern, left)?;
-    let escape_char = parse_similar_escape_arg(left, escape)?;
-    let regex_pattern = similar_to_regex(pattern_text, escape_char)?;
+    let escape = parse_similar_escape_arg("similar to", left, escape)?;
+    if matches!(escape, SimilarEscape::Null) {
+        return Ok(Value::Null);
+    }
+    let regex_pattern = translate_similar_pattern(pattern_text, escape)?;
     let compiled = compile_pg_regex(
         &regex_pattern,
         &PgRegexFlags::default(),
@@ -421,8 +438,15 @@ pub(super) fn eval_regexp_replace(values: &[Value]) -> Result<Value, ExecError> 
     let text = expect_text_arg("regexp_replace", text_value, pattern_value)?;
     let pattern = expect_text_arg("regexp_replace", pattern_value, text_value)?;
     let replacement = expect_text_arg("regexp_replace", replacement_value, text_value)?;
-    let (start, nth, flags_text) = regexp_replace_options(values)?;
+    let options = regexp_replace_options(values)?;
+    let (start, nth, flags_text, nth_explicit) = (
+        options.start,
+        options.nth,
+        options.flags_text,
+        options.nth_explicit,
+    );
     let flags = parse_pg_regex_flags(flags_text)?;
+    let replace_all = if nth_explicit { nth == 0 } else { flags.global };
     let compiled = compile_pg_regex(pattern, &flags, PgRegexPurpose::MatchSpans)?;
     let context = build_regex_match_context(
         text,
@@ -442,7 +466,7 @@ pub(super) fn eval_regexp_replace(values: &[Value]) -> Result<Value, ExecError> 
         let Some((match_start, match_end)) = matched.whole else {
             continue;
         };
-        let should_replace = flags.global || nth == 0 || idx + 1 == nth as usize;
+        let should_replace = replace_all || idx + 1 == nth as usize;
         out.push_str(span_as_str(
             &context.text,
             &context.char_to_byte,
@@ -458,7 +482,7 @@ pub(super) fn eval_regexp_replace(values: &[Value]) -> Result<Value, ExecError> 
             ));
         }
         cursor = match_end;
-        if nth > 0 && idx + 1 == nth as usize && !flags.global {
+        if !replace_all && nth > 0 && idx + 1 == nth as usize {
             break;
         }
     }
@@ -578,6 +602,7 @@ fn expand_regexp_replacement(
         }
         index += 1;
         let Some(next) = chars.get(index).copied() else {
+            out.push('\\');
             break;
         };
         match next {
@@ -593,7 +618,10 @@ fn expand_regexp_replacement(
                 }
             }
             '\\' => out.push('\\'),
-            other => out.push(other),
+            other => {
+                out.push('\\');
+                out.push(other);
+            }
         }
         index += 1;
     }
@@ -988,6 +1016,28 @@ fn regex_invalid(message: impl Into<String>) -> ExecError {
     })
 }
 
+fn regex_invalid_with_hint(
+    sqlstate: &'static str,
+    message: impl Into<String>,
+    hint: impl Into<String>,
+) -> ExecError {
+    ExecError::Regex(RegexError {
+        sqlstate,
+        message: message.into(),
+        detail: None,
+        hint: Some(hint.into()),
+    })
+}
+
+fn regex_plain_error(sqlstate: &'static str, message: impl Into<String>) -> ExecError {
+    ExecError::Regex(RegexError {
+        sqlstate,
+        message: message.into(),
+        detail: None,
+        hint: None,
+    })
+}
+
 fn regex_invalid_parameter(message: impl Into<String>) -> ExecError {
     ExecError::Regex(RegexError {
         sqlstate: INVALID_PARAMETER_VALUE,
@@ -995,6 +1045,14 @@ fn regex_invalid_parameter(message: impl Into<String>) -> ExecError {
         detail: None,
         hint: None,
     })
+}
+
+fn invalid_escape_string() -> ExecError {
+    regex_invalid_with_hint(
+        INVALID_ESCAPE_SEQUENCE,
+        "invalid escape string",
+        "Escape string must be empty or one character.",
+    )
 }
 
 fn regex_invalid_value(parameter: &'static str, value: i32) -> ExecError {
@@ -1029,23 +1087,77 @@ fn byte_to_char_index(char_to_byte: &[usize], byte_index: usize) -> usize {
     char_to_byte.partition_point(|candidate| *candidate < byte_index)
 }
 
-fn similar_to_regex(pattern: &str, escape: Option<char>) -> Result<String, ExecError> {
+fn parse_similar_escape_arg(
+    op: &'static str,
+    left: &Value,
+    escape: Option<&Value>,
+) -> Result<SimilarEscape, ExecError> {
+    match escape {
+        Some(Value::Null) => Ok(SimilarEscape::Null),
+        Some(value) => {
+            let escape_text = value.as_text().ok_or_else(|| ExecError::TypeMismatch {
+                op,
+                left: left.clone(),
+                right: value.clone(),
+            })?;
+            parse_similar_escape_text(Some(escape_text))
+        }
+        None => Ok(SimilarEscape::Default),
+    }
+}
+
+fn parse_similar_escape_text(escape: Option<&str>) -> Result<SimilarEscape, ExecError> {
+    match escape {
+        None => Ok(SimilarEscape::Default),
+        Some("") => Ok(SimilarEscape::None),
+        Some(escape_text) => {
+            let mut chars = escape_text.chars();
+            let Some(ch) = chars.next() else {
+                return Ok(SimilarEscape::None);
+            };
+            if chars.next().is_some() {
+                return Err(invalid_escape_string());
+            }
+            Ok(SimilarEscape::Char(ch))
+        }
+    }
+}
+
+fn translate_similar_pattern(pattern: &str, escape: SimilarEscape) -> Result<String, ExecError> {
+    let escape = match escape {
+        SimilarEscape::Default => Some('\\'),
+        SimilarEscape::None => None,
+        SimilarEscape::Char(ch) => Some(ch),
+        SimilarEscape::Null => return Ok(String::new()),
+    };
     let mut out = String::from("^(?:");
-    let mut chars = pattern.chars().peekable();
     let mut after_escape = false;
+    let mut separators = 0usize;
     let mut bracket_depth = 0usize;
     let mut charclass_pos = 0usize;
-    while let Some(ch) = chars.next() {
+    for ch in pattern.chars() {
         if after_escape {
-            out.push('\\');
-            out.push(ch);
-            after_escape = false;
-            if bracket_depth > 0 {
+            if ch == '"' && bracket_depth < 1 {
+                match separators {
+                    0 => out.push_str("){1,1}?("),
+                    1 => out.push_str("){1,1}(?:"),
+                    _ => {
+                        return Err(regex_plain_error(
+                            INVALID_USE_OF_ESCAPE_CHARACTER,
+                            "SQL regular expression may not contain more than two escape-double-quote separators",
+                        ));
+                    }
+                }
+                separators += 1;
+            } else {
+                out.push('\\');
+                out.push(ch);
                 charclass_pos = 3;
             }
+            after_escape = false;
             continue;
         }
-        if Some(ch) == escape {
+        if escape == Some(ch) {
             after_escape = true;
             continue;
         }
@@ -1090,169 +1202,11 @@ fn similar_to_regex(pattern: &str, escape: Option<char>) -> Result<String, ExecE
     Ok(out)
 }
 
-fn parse_similar_escape_arg(
-    left: &Value,
-    escape: Option<&Value>,
-) -> Result<Option<char>, ExecError> {
-    match escape {
-        Some(Value::Null) => Ok(None),
-        Some(value) => {
-            let escape_text = value.as_text().ok_or_else(|| ExecError::TypeMismatch {
-                op: "substring similar",
-                left: left.clone(),
-                right: value.clone(),
-            })?;
-            if escape_text.is_empty() {
-                Ok(None)
-            } else {
-                let mut chars = escape_text.chars();
-                let ch = chars
-                    .next()
-                    .ok_or_else(|| regex_invalid("invalid escape string"))?;
-                if chars.next().is_some() {
-                    return Err(regex_invalid("invalid escape string"));
-                }
-                Ok(Some(ch))
-            }
-        }
-        None => Ok(Some('\\')),
-    }
-}
-
-fn similar_substring_regex(pattern: &str, escape: Option<char>) -> Result<String, ExecError> {
-    let (prefix, middle, suffix) = split_similar_substring_pattern(pattern, escape)?;
-    Ok(format!(
-        "^(?:{}){{1,1}}?({}){{1,1}}(?:{})$",
-        similar_fragment_to_regex(&prefix, escape, true)?,
-        similar_fragment_to_regex(&middle, escape, false)?,
-        similar_fragment_to_regex(&suffix, escape, true)?,
-    ))
-}
-
-fn split_similar_substring_pattern(
+pub(crate) fn explain_similar_pattern(
     pattern: &str,
-    escape: Option<char>,
-) -> Result<(String, String, String), ExecError> {
-    let mut separators = Vec::new();
-    let mut chars = pattern.char_indices().peekable();
-    let mut bracket_depth = 0usize;
-    let mut charclass_pos = 0usize;
-    while let Some((index, ch)) = chars.next() {
-        if bracket_depth > 0 {
-            if ch == ']' && charclass_pos > 2 {
-                bracket_depth = bracket_depth.saturating_sub(1);
-            } else if ch == '[' {
-                bracket_depth += 1;
-                charclass_pos = 3;
-            } else if ch == '^' {
-                charclass_pos += 1;
-            } else {
-                charclass_pos = 3;
-            }
-            continue;
-        }
-        if Some(ch) == escape {
-            if let Some((_, next)) = chars.peek().copied() {
-                if next == '"' {
-                    separators.push(index);
-                    chars.next();
-                    continue;
-                }
-            }
-            continue;
-        }
-        if ch == '[' {
-            bracket_depth = 1;
-            charclass_pos = 1;
-        }
-    }
-    if separators.len() > 2 {
-        return Err(regex_invalid(
-            "SQL regular expression may not contain more than two escape-double-quote separators",
-        ));
-    }
-    if separators.is_empty() {
-        return Ok((String::new(), pattern.to_string(), String::new()));
-    }
-    let escape_len = escape.unwrap_or('\\').len_utf8() + '"'.len_utf8();
-    if separators.len() == 1 {
-        let first = separators[0];
-        return Ok((
-            String::new(),
-            format!("{}{}", &pattern[..first], &pattern[first + escape_len..]),
-            String::new(),
-        ));
-    }
-    let first = separators[0];
-    let second = separators[1];
-    Ok((
-        pattern[..first].to_string(),
-        pattern[first + escape_len..second].to_string(),
-        pattern[second + escape_len..].to_string(),
-    ))
-}
-
-fn similar_fragment_to_regex(
-    pattern: &str,
-    escape: Option<char>,
-    non_greedy_wildcards: bool,
+    escape: Option<&str>,
 ) -> Result<String, ExecError> {
-    let mut out = String::new();
-    let mut chars = pattern.chars().peekable();
-    let mut after_escape = false;
-    let mut bracket_depth = 0usize;
-    let mut charclass_pos = 0usize;
-    while let Some(ch) = chars.next() {
-        if after_escape {
-            out.push('\\');
-            out.push(ch);
-            after_escape = false;
-            if bracket_depth > 0 {
-                charclass_pos = 3;
-            }
-            continue;
-        }
-        if Some(ch) == escape {
-            after_escape = true;
-            continue;
-        }
-        if bracket_depth > 0 {
-            if ch == '\\' {
-                out.push('\\');
-            }
-            out.push(ch);
-            if ch == ']' && charclass_pos > 2 {
-                bracket_depth = bracket_depth.saturating_sub(1);
-            } else if ch == '[' {
-                bracket_depth += 1;
-                charclass_pos = 3;
-            } else if ch == '^' {
-                charclass_pos += 1;
-            } else {
-                charclass_pos = 3;
-            }
-            continue;
-        }
-        match ch {
-            '[' => {
-                out.push('[');
-                bracket_depth = 1;
-                charclass_pos = 1;
-            }
-            '%' => out.push_str(if non_greedy_wildcards { ".*?" } else { ".*" }),
-            '_' => out.push('.'),
-            '(' => out.push_str("(?:"),
-            '\\' | '.' | '^' | '$' => {
-                out.push('\\');
-                out.push(ch);
-            }
-            _ => out.push(ch),
-        }
-    }
-    if after_escape {
-        return Err(regex_invalid("escape character at end of pattern"));
-    }
-    Ok(out)
+    translate_similar_pattern(pattern, parse_similar_escape_text(escape)?)
 }
 
 fn regex_text_pattern_flags_only<'a>(
@@ -1331,30 +1285,56 @@ fn regex_substr_args(values: &[Value]) -> Result<(&str, &str, i32, i32, &str, us
     Ok((text, pattern, start, nth, flags, subexpr as usize))
 }
 
-fn regexp_replace_options(values: &[Value]) -> Result<(i32, i32, &str), ExecError> {
+struct RegexpReplaceOptions<'a> {
+    start: i32,
+    nth: i32,
+    flags_text: &'a str,
+    nth_explicit: bool,
+}
+
+fn regexp_replace_options(values: &[Value]) -> Result<RegexpReplaceOptions<'_>, ExecError> {
     let mut start = 1;
     let mut nth = 1;
     let mut flags = "";
+    let mut nth_explicit = false;
     match values.len() {
         4 => match values[3] {
             Value::Int32(value) => start = value,
-            Value::Null => return Ok((1, 1, "")),
+            Value::Null => {
+                return Ok(RegexpReplaceOptions {
+                    start: 1,
+                    nth: 1,
+                    flags_text: "",
+                    nth_explicit: false,
+                });
+            }
             _ => {
                 flags = values[3].as_text().ok_or_else(|| ExecError::TypeMismatch {
                     op: "regexp_replace",
                     left: values[0].clone(),
                     right: values[3].clone(),
                 })?;
+                if let Some(first) = flags.chars().next() {
+                    if first.is_ascii_digit() {
+                        return Err(regex_invalid_with_hint(
+                            INVALID_PARAMETER_VALUE,
+                            format!("invalid regular expression option: \"{first}\""),
+                            "If you meant to use regexp_replace() with a start parameter, cast the fourth argument to integer explicitly.",
+                        ));
+                    }
+                }
             }
         },
         5 => {
             start = optional_regex_i32_arg("regexp_replace", values.get(3), 1)?;
             nth = optional_regex_i32_arg("regexp_replace", values.get(4), 1)?;
+            nth_explicit = true;
         }
         6 => {
             start = optional_regex_i32_arg("regexp_replace", values.get(3), 1)?;
             nth = optional_regex_i32_arg("regexp_replace", values.get(4), 1)?;
             flags = optional_regex_text_arg("regexp_replace", values.get(5), "")?;
+            nth_explicit = true;
         }
         _ => {}
     }
@@ -1364,7 +1344,12 @@ fn regexp_replace_options(values: &[Value]) -> Result<(i32, i32, &str), ExecErro
     if nth < 0 {
         return Err(regex_invalid_value("n", nth));
     }
-    Ok((start, nth, flags))
+    Ok(RegexpReplaceOptions {
+        start,
+        nth,
+        flags_text: flags,
+        nth_explicit,
+    })
 }
 
 fn regex_text_pattern_pair<'a>(
@@ -1999,6 +1984,9 @@ impl<'a> SlowParser<'a> {
             return Ok(None);
         }
         self.index += 1;
+        if max.is_some_and(|max| max < min) {
+            return Err(regex_invalid("invalid repetition count(s)"));
+        }
         Ok(Some((min, max)))
     }
 
@@ -2237,7 +2225,7 @@ impl<'a> SlowParser<'a> {
         if self.next_char() == Some(expected) {
             Ok(())
         } else {
-            Err(regex_invalid("unterminated parenthesized expression"))
+            Err(regex_invalid("parentheses () not balanced"))
         }
     }
 

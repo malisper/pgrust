@@ -1,6 +1,6 @@
 use super::hashjoin::HashJoinPhase;
 use super::node_hash::eval_hash_key_exprs;
-use crate::backend::commands::explain::format_explain_lines;
+use crate::backend::commands::explain::format_explain_lines_with_costs;
 use crate::backend::executor::exec_expr::eval_expr;
 use crate::backend::executor::nodes::render_explain_join_expr;
 use crate::backend::executor::{ExecError, ExecutorContext};
@@ -291,7 +291,13 @@ impl PlanNode for HashJoinState {
         }
     }
 
-    fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
+    fn explain_children(
+        &self,
+        indent: usize,
+        analyze: bool,
+        show_costs: bool,
+        lines: &mut Vec<String>,
+    ) {
         let prefix = "  ".repeat(indent + 1);
         if !self.hash_clauses.is_empty() {
             let (left_names, right_names) = self.combined_names.split_at(self.left_width);
@@ -322,7 +328,13 @@ impl PlanNode for HashJoinState {
                 render_explain_join_expr(&format_qual_list(&self.qual), left_names, right_names)
             ));
         }
-        format_explain_lines(&*self.left, indent + 1, analyze, lines);
-        format_explain_lines(self.right.as_ref(), indent + 1, analyze, lines);
+        format_explain_lines_with_costs(&*self.left, indent + 1, analyze, show_costs, lines);
+        format_explain_lines_with_costs(
+            self.right.as_ref(),
+            indent + 1,
+            analyze,
+            show_costs,
+            lines,
+        );
     }
 }

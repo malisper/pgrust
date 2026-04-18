@@ -1,5 +1,5 @@
 use super::hashjoin::{HashJoinTable, HashJoinTupleEntry, HashKey};
-use crate::backend::commands::explain::format_explain_lines;
+use crate::backend::commands::explain::format_explain_lines_with_costs;
 use crate::backend::executor::exec_expr::eval_expr;
 use crate::backend::executor::{ExecError, ExecutorContext};
 use crate::include::nodes::datum::Value;
@@ -97,7 +97,13 @@ impl PlanNode for HashState {
         "Hash".into()
     }
 
-    fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
-        format_explain_lines(&*self.input, indent + 1, analyze, lines);
+    fn explain_children(
+        &self,
+        indent: usize,
+        analyze: bool,
+        show_costs: bool,
+        lines: &mut Vec<String>,
+    ) {
+        format_explain_lines_with_costs(&*self.input, indent + 1, analyze, show_costs, lines);
     }
 }

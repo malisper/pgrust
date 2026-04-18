@@ -1823,6 +1823,44 @@ fn explain_mentions_sort_and_limit_nodes() {
         other => panic!("expected query result, got {:?}", other),
     }
 }
+
+#[test]
+fn explain_costs_off_hides_plan_costs() {
+    let base = temp_dir("explain_costs_off");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "explain (costs off) select name from people",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            let rendered = rows
+                .into_iter()
+                .map(|row| match &row[0] {
+                    Value::Text(text) => text.clone(),
+                    other => panic!("expected explain text row, got {:?}", other),
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                rendered
+                    .iter()
+                    .all(|line| !line.contains("(cost=") && !line.contains(" width=")),
+                "expected costs-off explain without planner costs, got {rendered:?}"
+            );
+            assert!(
+                rendered
+                    .iter()
+                    .any(|line| line.trim_start() == "Seq Scan on people"),
+                "expected plain scan label in costs-off explain, got {rendered:?}"
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
 #[test]
 fn order_by_nulls_first_and_last_work() {
     let base = temp_dir("order_by_nulls");
@@ -10144,6 +10182,71 @@ fn regexp_match_edge_cases_work() {
 }
 
 #[test]
+fn regexp_like_and_replace_follow_postgres_flag_rules() {
+    let base = temp_dir("regexp_like_and_replace_flags");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select regexp_like('a'||chr(10)||'d', 'a.d', 'n'), \
+                regexp_like('a'||chr(10)||'d', 'a.d', 's'), \
+                regexp_like('abc', ' a . c ', 'x'), \
+                regexp_replace('foobarrbazz', E'(.)\\\\1', E'X\\\\\\\\Y', 'g'), \
+                regexp_replace('foobarrbazz', E'(.)\\\\1', E'X\\\\Y\\\\1Z\\\\'), \
+                regexp_replace('A PostgreSQL function', 'a|e|i|o|u', 'X', 1, 1, 'g')",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Bool(false),
+                    Value::Bool(true),
+                    Value::Bool(true),
+                    Value::Text("fX\\YbaX\\YbaX\\Y".into()),
+                    Value::Text("fX\\YoZ\\barrbazz".into()),
+                    Value::Text("A PXstgreSQL function".into()),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select regexp_like('abc', 'a.c', 'g')",
+    )
+    .expect_err("regexp_like global flag should error");
+    assert!(matches!(
+        err,
+        ExecError::Regex(RegexError { sqlstate, message, hint, .. })
+            if sqlstate == "22023"
+                && message == "regexp_like() does not support the \"global\" option"
+                && hint.is_none()
+    ));
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select regexp_replace('A PostgreSQL function', 'a|e|i|o|u', 'X', '1')",
+    )
+    .expect_err("text fourth argument beginning with digit should hint");
+    assert!(matches!(
+        err,
+        ExecError::Regex(RegexError { sqlstate, message, hint, .. })
+            if sqlstate == "22023"
+                && message == "invalid regular expression option: \"1\""
+                && hint.as_deref() == Some("If you meant to use regexp_replace() with a start parameter, cast the fourth argument to integer explicitly.")
+    ));
+}
+
+#[test]
 fn sql_regex_substring_forms_work() {
     let base = temp_dir("sql_regex_substring_forms");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -10160,6 +10263,10 @@ fn sql_regex_substring_forms_work() {
         (
             "select substring('abcdefg' similar 'a#\"%#\"g' escape '#')",
             Value::Text("bcdef".into()),
+        ),
+        (
+            "select substring('abcdefg' similar 'a%g' escape '#')",
+            Value::Text("abcdefg".into()),
         ),
         (
             "select substring('abcdefg' from 'c.e')",
@@ -10189,6 +10296,70 @@ fn sql_regex_substring_forms_work() {
             other => panic!("expected query result, got {:?}", other),
         }
     }
+}
+
+#[test]
+fn sql_similar_and_regexp_errors_match_postgres_text() {
+    let base = temp_dir("sql_similar_and_regexp_errors");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select 'abcdefg' similar to '_bcd#%' escape '##'",
+    )
+    .expect_err("multi-character similar escape should error");
+    assert!(matches!(
+        err,
+        ExecError::Regex(RegexError { sqlstate, message, hint, .. })
+            if sqlstate == "22025"
+                && message == "invalid escape string"
+                && hint.as_deref() == Some("Escape string must be empty or one character.")
+    ));
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select substring('abcdefg' similar 'a*#\"%#\"g*#\"x' escape '#')",
+    )
+    .expect_err("too many similar substring separators should error");
+    assert!(matches!(
+        err,
+        ExecError::Regex(RegexError { sqlstate, message, hint, .. })
+            if sqlstate == "2200C"
+                && message == "SQL regular expression may not contain more than two escape-double-quote separators"
+                && hint.is_none()
+    ));
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select regexp_matches('foobarbequebaz', '(barbeque')",
+    )
+    .expect_err("unbalanced regexp should error");
+    assert!(matches!(
+        err,
+        ExecError::Regex(RegexError { sqlstate, message, .. })
+            if sqlstate == "2201B"
+                && message == "invalid regular expression: parentheses () not balanced"
+    ));
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select regexp_matches('foobarbequebaz', '(bar)(beque){2,1}')",
+    )
+    .expect_err("invalid repetition bounds should error");
+    assert!(matches!(
+        err,
+        ExecError::Regex(RegexError { sqlstate, message, .. })
+            if sqlstate == "2201B"
+                && message == "invalid regular expression: invalid repetition count(s)"
+    ));
 }
 
 #[test]
@@ -10250,6 +10421,38 @@ fn similar_to_predicates_work() {
                     Value::Bool(true),
                     Value::Bool(true),
                 ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn explain_renders_similar_predicates_as_translated_regex() {
+    let base = temp_dir("explain_similar_predicates");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "explain (costs off) select * from people where name similar to '_[_[:alpha:]_]_'",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            let rendered = rows
+                .into_iter()
+                .map(|row| match &row[0] {
+                    Value::Text(text) => text.clone(),
+                    other => panic!("expected text explain line, got {:?}", other),
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                rendered
+                    .iter()
+                    .any(|line| line.as_str() == "  Filter: (name ~ '^(?:.[_[:alpha:]_].)$'::text)"),
+                "expected translated similar-to regex in explain output, got {rendered:?}"
             );
         }
         other => panic!("expected query result, got {:?}", other),

@@ -519,6 +519,7 @@ pub struct CheckpointStatement;
 pub struct ExplainStatement {
     pub analyze: bool,
     pub buffers: bool,
+    pub costs: bool,
     pub timing: bool,
     pub statement: Box<Statement>,
 }

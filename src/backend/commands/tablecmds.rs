@@ -29,7 +29,7 @@ use crate::backend::storage::smgr::StorageManager;
 use crate::backend::utils::time::instant::Instant;
 use crate::pgrust::database::TransactionWaiter;
 
-use super::explain::{format_buffer_usage, format_explain_lines};
+use super::explain::{format_buffer_usage, format_explain_lines_with_costs};
 use crate::backend::executor::exec_expr::{compile_predicate_with_decoder, eval_expr};
 use crate::backend::executor::exec_tuples::CompiledTupleDecoder;
 use crate::backend::executor::value_io::{coerce_assignment_value, encode_tuple_values};
@@ -176,7 +176,7 @@ pub(crate) fn execute_explain(
         ctx.timed = false;
         let execution_buffer_stats = ctx.pool.usage_stats();
         let (state, row_count, elapsed) = exec_result?;
-        format_explain_lines(state.as_ref(), 0, true, &mut lines);
+        format_explain_lines_with_costs(state.as_ref(), 0, true, stmt.costs, &mut lines);
         if stmt.buffers {
             lines.push("Planning:".into());
             lines.push(format!("  {}", format_buffer_usage(planning_buffer_stats)));
@@ -195,7 +195,7 @@ pub(crate) fn execute_explain(
         lines.push(format!("Result Rows: {}", row_count));
     } else {
         let state = executor_start(query_desc.planned_stmt.plan_tree);
-        format_explain_lines(state.as_ref(), 0, false, &mut lines);
+        format_explain_lines_with_costs(state.as_ref(), 0, false, stmt.costs, &mut lines);
     }
 
     Ok(StatementResult::Query {
