@@ -312,19 +312,47 @@ pub fn view_rewrite_depend_rows(
     view_relation_oid: u32,
     referenced_relation_oids: &[u32],
 ) -> Vec<PgDependRow> {
+    rewrite_depend_rows(
+        rewrite_oid,
+        view_relation_oid,
+        referenced_relation_oids,
+        DEPENDENCY_INTERNAL,
+    )
+}
+
+pub fn relation_rule_depend_rows(
+    rewrite_oid: u32,
+    relation_oid: u32,
+    referenced_relation_oids: &[u32],
+) -> Vec<PgDependRow> {
+    rewrite_depend_rows(
+        rewrite_oid,
+        relation_oid,
+        referenced_relation_oids,
+        DEPENDENCY_AUTO,
+    )
+}
+
+fn rewrite_depend_rows(
+    rewrite_oid: u32,
+    relation_oid: u32,
+    referenced_relation_oids: &[u32],
+    owner_deptype: char,
+) -> Vec<PgDependRow> {
     let mut rows = vec![PgDependRow {
         classid: PG_REWRITE_RELATION_OID,
         objid: rewrite_oid,
         objsubid: 0,
         refclassid: PG_CLASS_RELATION_OID,
-        refobjid: view_relation_oid,
+        refobjid: relation_oid,
         refobjsubid: 0,
-        deptype: DEPENDENCY_INTERNAL,
+        deptype: owner_deptype,
     }];
     rows.extend(
         referenced_relation_oids
             .iter()
             .copied()
+            .filter(|referenced_oid| *referenced_oid != relation_oid)
             .map(|relation_oid| PgDependRow {
                 classid: PG_REWRITE_RELATION_OID,
                 objid: rewrite_oid,

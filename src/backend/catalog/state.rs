@@ -1824,6 +1824,14 @@ impl Catalog {
         Ok(removed)
     }
 
+    pub fn remove_rewrite_row_by_oid(&mut self, rewrite_oid: u32) -> Option<PgRewriteRow> {
+        let position = self
+            .rewrites
+            .iter()
+            .position(|row| row.oid == rewrite_oid)?;
+        Some(self.rewrites.remove(position))
+    }
+
     fn replace_constraint_rows_for_entry(&mut self, relation_name: &str, entry: &CatalogEntry) {
         self.constraints.retain(|row| {
             !(row.conrelid == entry.relation_oid && row.contype == CONSTRAINT_NOTNULL)

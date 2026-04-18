@@ -773,11 +773,11 @@ fn ensure_same_range_kind(
 }
 
 fn ensure_range_subtype(range: &RangeValue, value: &Value) -> Result<(), ExecError> {
+    let expected = range.range_type.subtype.element_type();
     let matches = value
         .sql_type_hint()
-        .map(|ty| {
-            let actual = ty.element_type();
-            let expected = range.range_type.subtype.element_type();
+        .map(SqlType::element_type)
+        .map(|actual| {
             if actual.type_oid != 0 && expected.type_oid != 0 {
                 actual.type_oid == expected.type_oid
             } else {

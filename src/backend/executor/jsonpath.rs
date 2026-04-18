@@ -2556,7 +2556,12 @@ impl<'a> Parser<'a> {
 
     fn parse_signed_int(&mut self) -> Result<i32, ExecError> {
         self.skip_ws();
-        let negative = self.consume("-");
+        let negative = if self.consume("-") {
+            true
+        } else {
+            let _ = self.consume("+");
+            false
+        };
         let digits = self
             .take_while(|ch| ch.is_ascii_digit())
             .ok_or_else(|| exec_jsonpath_error("expected integer jsonpath subscript"))?;

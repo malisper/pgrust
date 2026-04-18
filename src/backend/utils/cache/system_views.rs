@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::backend::executor::Value;
+use crate::backend::rewrite::format_stored_rule_definition;
 use crate::include::catalog::{
     PG_LANGUAGE_INTERNAL_OID, PgAttributeRow, PgAuthIdRow, PgClassRow, PgIndexRow, PgNamespaceRow,
     PgProcRow, PgRewriteRow, PgStatisticRow,
@@ -64,6 +65,53 @@ pub fn build_pg_views_rows(
         .collect::<Vec<_>>();
     rows.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
     rows.into_iter().map(|(_, _, row)| row).collect()
+}
+
+pub fn build_pg_rules_rows(
+    namespaces: Vec<PgNamespaceRow>,
+    classes: Vec<PgClassRow>,
+    rewrites: Vec<PgRewriteRow>,
+) -> Vec<Vec<Value>> {
+    let namespace_names = namespaces
+        .into_iter()
+        .map(|row| (row.oid, row.nspname))
+        .collect::<BTreeMap<_, _>>();
+    let classes_by_oid = classes
+        .into_iter()
+        .map(|row| (row.oid, row))
+        .collect::<BTreeMap<_, _>>();
+
+    let mut rows = rewrites
+        .into_iter()
+        .filter(|row| row.rulename != "_RETURN")
+        .filter_map(|row| {
+            let class = classes_by_oid.get(&row.ev_class)?;
+            let schemaname = namespace_names
+                .get(&class.relnamespace)
+                .cloned()
+                .unwrap_or_else(|| "public".to_string());
+            let rulename = row.rulename.clone();
+            let relation_name = format!("{}.{}", schemaname, class.relname);
+            Some((
+                schemaname.clone(),
+                class.relname.clone(),
+                rulename.clone(),
+                vec![
+                    Value::Text(schemaname.into()),
+                    Value::Text(class.relname.clone().into()),
+                    Value::Text(rulename.into()),
+                    Value::Text(format_stored_rule_definition(&row, &relation_name).into()),
+                ],
+            ))
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| left.1.cmp(&right.1))
+            .then_with(|| left.2.cmp(&right.2))
+    });
+    rows.into_iter().map(|(_, _, _, row)| row).collect()
 }
 
 pub fn build_pg_stats_rows(

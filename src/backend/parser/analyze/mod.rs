@@ -14,6 +14,7 @@ mod on_conflict;
 mod paths;
 mod query;
 mod ranges;
+mod rules;
 mod scope;
 mod system_views;
 mod views;
@@ -47,7 +48,9 @@ pub use crate::backend::catalog::catalog::{Catalog, CatalogEntry};
 static NEXT_WORKTABLE_ID: AtomicUsize = AtomicUsize::new(1);
 static NEXT_CTE_ID: AtomicUsize = AtomicUsize::new(1);
 use crate::backend::utils::cache::relcache::RelCache;
-use crate::backend::utils::cache::system_views::{build_pg_stats_rows, build_pg_views_rows};
+use crate::backend::utils::cache::system_views::{
+    build_pg_rules_rows, build_pg_stats_rows, build_pg_views_rows,
+};
 use agg::*;
 use agg_output::*;
 pub use coerce::is_binary_coercible_type;
@@ -67,12 +70,18 @@ pub use modify::{
     PreparedInsert, bind_delete, bind_insert, bind_insert_prepared, bind_update, plan_merge,
 };
 pub use on_conflict::{BoundOnConflictAction, BoundOnConflictClause};
+pub(crate) use modify::{
+    bind_delete_with_outer_scopes, bind_insert_with_outer_scopes, bind_update_with_outer_scopes,
+};
 pub use paths::BoundModifyRowSource;
 use paths::bind_order_by_items;
 pub(crate) use query::analyze_select_query_with_outer;
 use query::{
     AnalyzedFrom, analyze_values_query_with_outer, identity_target_list, normalize_target_list,
     query_from_from_projection,
+};
+pub(crate) use rules::{
+    BoundRuleAction, bind_rule_action_statement, bind_rule_qual, validate_rule_definition,
 };
 pub use scope::BoundRelation;
 use scope::*;
@@ -379,6 +388,10 @@ pub trait CatalogLookup {
         Vec::new()
     }
 
+    fn pg_rules_rows(&self) -> Vec<Vec<Value>> {
+        Vec::new()
+    }
+
     fn pg_stats_rows(&self) -> Vec<Vec<Value>> {
         Vec::new()
     }
@@ -542,6 +555,15 @@ impl CatalogLookup for Catalog {
         build_pg_views_rows(
             catcache.namespace_rows(),
             catcache.authid_rows(),
+            catcache.class_rows(),
+            catcache.rewrite_rows(),
+        )
+    }
+
+    fn pg_rules_rows(&self) -> Vec<Vec<Value>> {
+        let catcache = crate::backend::utils::cache::catcache::CatCache::from_catalog(self);
+        build_pg_rules_rows(
+            catcache.namespace_rows(),
             catcache.class_rows(),
             catcache.rewrite_rows(),
         )
@@ -924,6 +946,7 @@ pub(crate) fn bind_scalar_expr_in_named_relation_scope(
         .map(|(name, _)| scope::ScopeColumn {
             output_name: name.clone(),
             hidden: false,
+            qualified_only: false,
             relation_names: Vec::new(),
             hidden_invalid_relation_names: Vec::new(),
             hidden_missing_relation_names: Vec::new(),
@@ -942,6 +965,7 @@ pub(crate) fn bind_scalar_expr_in_named_relation_scope(
             scope_columns.push(scope::ScopeColumn {
                 output_name: column.name.clone(),
                 hidden: column.dropped,
+                qualified_only: false,
                 relation_names: vec![(*relation_name).to_string()],
                 hidden_invalid_relation_names: Vec::new(),
                 hidden_missing_relation_names: Vec::new(),
@@ -1019,6 +1043,7 @@ pub(crate) fn bind_scalar_expr_in_named_slot_scope(
         .map(|index| scope::ScopeColumn {
             output_name: format!("__slot{index}"),
             hidden: true,
+            qualified_only: false,
             relation_names: Vec::new(),
             hidden_invalid_relation_names: Vec::new(),
             hidden_missing_relation_names: Vec::new(),
@@ -1031,6 +1056,7 @@ pub(crate) fn bind_scalar_expr_in_named_slot_scope(
         scope_columns[column.slot] = scope::ScopeColumn {
             output_name: column.name.clone(),
             hidden: column.hidden,
+            qualified_only: false,
             relation_names: Vec::new(),
             hidden_invalid_relation_names: Vec::new(),
             hidden_missing_relation_names: Vec::new(),
@@ -1049,6 +1075,7 @@ pub(crate) fn bind_scalar_expr_in_named_slot_scope(
             scope_columns[column.slot] = scope::ScopeColumn {
                 output_name: column.name.clone(),
                 hidden: column.hidden,
+                qualified_only: false,
                 relation_names: vec![relation_name.clone()],
                 hidden_invalid_relation_names: Vec::new(),
                 hidden_missing_relation_names: Vec::new(),
@@ -1699,6 +1726,7 @@ impl<'a> RecursiveReferenceChecker<'a> {
             | SqlExpr::NumericLiteral(_)
             | SqlExpr::Random
             | SqlExpr::CurrentDate
+            | SqlExpr::CurrentUser
             | SqlExpr::CurrentTime { .. }
             | SqlExpr::CurrentTimestamp { .. }
             | SqlExpr::LocalTime { .. }
@@ -1991,6 +2019,7 @@ fn sql_expr_references_table(expr: &SqlExpr, table_name: &str) -> bool {
         | SqlExpr::NumericLiteral(_)
         | SqlExpr::Random
         | SqlExpr::CurrentDate
+        | SqlExpr::CurrentUser
         | SqlExpr::CurrentTime { .. }
         | SqlExpr::CurrentTimestamp { .. }
         | SqlExpr::LocalTime { .. }

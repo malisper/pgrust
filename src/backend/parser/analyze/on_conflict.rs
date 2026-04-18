@@ -267,6 +267,7 @@ fn scope_for_executor_relation(
             .map(|column| ScopeColumn {
                 output_name: column.name.clone(),
                 hidden: column.dropped,
+                qualified_only: false,
                 relation_names: vec![relation_name.to_string()],
                 hidden_invalid_relation_names: vec![],
                 hidden_missing_relation_names: vec![],

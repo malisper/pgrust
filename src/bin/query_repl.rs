@@ -769,8 +769,10 @@ fn run_statement(
         }
         Statement::CommentOnDomain(_)
         | Statement::CreateConversion(_)
+        | Statement::CommentOnRule(_)
         | Statement::CreateFunction(_)
         | Statement::CreateOperatorClass(_)
+        | Statement::CreateRule(_)
         | Statement::CreateSchema(_)
         | Statement::CreateTablespace(_)
         | Statement::CreateDomain(_)
@@ -778,9 +780,11 @@ fn run_statement(
         | Statement::CreateSequence(_)
         | Statement::DropDomain(_)
         | Statement::DropConversion(_)
+        | Statement::DropRule(_)
         | Statement::DropType(_)
-        | Statement::DropSequence(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
-            "conversion/domain/function/type/sequence statements are not supported in query_repl"
+        | Statement::DropSequence(_)
+        => Err(ExecError::Parse(ParseError::FeatureNotSupported(
+            "conversion/domain/function/type/sequence/rule statements are not supported in query_repl"
                 .into(),
         ))),
         Statement::CreateTable(stmt) => {

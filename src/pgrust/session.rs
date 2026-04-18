@@ -1026,6 +1026,24 @@ impl Session {
                     )
                 }
             }
+            Statement::CommentOnRule(ref comment_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_comment_on_rule_stmt_with_search_path(
+                        self.client_id,
+                        comment_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
             Statement::CommentOnRole(ref comment_stmt) => {
                 if self.active_txn.is_some() {
                     let result = self.execute_in_transaction(db, stmt);
@@ -1871,6 +1889,34 @@ impl Session {
                     &mut txn.catalog_effects,
                 )
             }
+            Statement::CommentOnRule(ref comment_stmt) => {
+                let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                let relation = match catalog.lookup_any_relation(&comment_stmt.relation_name) {
+                    Some(relation) if matches!(relation.relkind, 'r' | 'v') => relation,
+                    Some(_) => {
+                        return Err(ExecError::Parse(ParseError::WrongObjectType {
+                            name: comment_stmt.relation_name.clone(),
+                            expected: "table or view",
+                        }));
+                    }
+                    None => {
+                        return Err(ExecError::Parse(ParseError::TableDoesNotExist(
+                            comment_stmt.relation_name.clone(),
+                        )));
+                    }
+                };
+                self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_comment_on_rule_stmt_in_transaction_with_search_path(
+                    client_id,
+                    comment_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
             Statement::Analyze(ref analyze_stmt) => {
                 let search_path = self.configured_search_path();
                 let targets = db.effective_analyze_targets_with_search_path(
@@ -1928,7 +1974,9 @@ impl Session {
                     &catalog,
                     Some(deferred_foreign_keys),
                 );
-                execute_insert(bound, &catalog, &mut ctx, xid, cid)
+                crate::pgrust::database::commands::rules::execute_bound_insert_with_rules(
+                    bound, &catalog, &mut ctx, xid, cid,
+                )
             }
             Statement::Update(ref update_stmt) => {
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);
@@ -1951,7 +1999,7 @@ impl Session {
                     Some(deferred_foreign_keys),
                 );
                 ctx.interrupts = Arc::clone(&interrupts);
-                execute_update_with_waiter(
+                crate::pgrust::database::commands::rules::execute_bound_update_with_rules(
                     bound,
                     &catalog,
                     &mut ctx,
@@ -1981,7 +2029,7 @@ impl Session {
                     Some(deferred_foreign_keys),
                 );
                 ctx.interrupts = Arc::clone(&interrupts);
-                execute_delete_with_waiter(
+                crate::pgrust::database::commands::rules::execute_bound_delete_with_rules(
                     bound,
                     &catalog,
                     &mut ctx,
@@ -2081,6 +2129,34 @@ impl Session {
                     &mut txn.catalog_effects,
                 )
             }
+            Statement::CreateRule(ref create_stmt) => {
+                let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                let relation = match catalog.lookup_any_relation(&create_stmt.relation_name) {
+                    Some(relation) if matches!(relation.relkind, 'r' | 'v') => relation,
+                    Some(_) => {
+                        return Err(ExecError::Parse(ParseError::WrongObjectType {
+                            name: create_stmt.relation_name.clone(),
+                            expected: "table or view",
+                        }));
+                    }
+                    None => {
+                        return Err(ExecError::Parse(ParseError::TableDoesNotExist(
+                            create_stmt.relation_name.clone(),
+                        )));
+                    }
+                };
+                self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_create_rule_stmt_in_transaction_with_search_path(
+                    client_id,
+                    create_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
             Statement::CreateTableAs(ref create_stmt) => {
                 let search_path = self.configured_search_path();
                 let txn = self.active_txn.as_mut().unwrap();
@@ -2121,6 +2197,22 @@ impl Session {
                 let search_path = self.configured_search_path();
                 let txn = self.active_txn.as_mut().unwrap();
                 db.execute_drop_view_stmt_in_transaction_with_search_path(
+                    client_id,
+                    drop_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
+            Statement::DropRule(ref drop_stmt) => {
+                let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                if let Some(relation) = catalog.lookup_any_relation(&drop_stmt.relation_name) {
+                    self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
+                }
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_drop_rule_stmt_in_transaction_with_search_path(
                     client_id,
                     drop_stmt,
                     xid,

@@ -4,7 +4,8 @@ use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::relcache::RelCache;
 use crate::backend::utils::cache::system_views::{
     build_pg_stat_io_rows, build_pg_stat_user_functions_rows, build_pg_stat_user_tables_rows,
-    build_pg_stats_rows, build_pg_statio_user_tables_rows, build_pg_views_rows,
+    build_pg_rules_rows, build_pg_stats_rows, build_pg_statio_user_tables_rows,
+    build_pg_views_rows,
 };
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, PgCastRow, PgClassRow, PgConstraintRow, PgInheritsRow, PgIndexRow,
@@ -282,6 +283,17 @@ impl CatalogLookup for VisibleCatalog {
         build_pg_views_rows(
             catcache.namespace_rows(),
             catcache.authid_rows(),
+            catcache.class_rows(),
+            catcache.rewrite_rows(),
+        )
+    }
+
+    fn pg_rules_rows(&self) -> Vec<Vec<crate::backend::executor::Value>> {
+        let Some(catcache) = &self.catcache else {
+            return Vec::new();
+        };
+        build_pg_rules_rows(
+            catcache.namespace_rows(),
             catcache.class_rows(),
             catcache.rewrite_rows(),
         )

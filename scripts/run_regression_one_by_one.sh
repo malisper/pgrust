@@ -135,7 +135,7 @@ wait_for_server_ready() {
     local pid="$1"
 
     echo "Waiting for server to accept connections..."
-    for i in $(seq 1 30); do
+    for i in $(seq 1 60); do
         if psql -X -h 127.0.0.1 -p "$PORT" -U postgres -c "SELECT 1" >/dev/null 2>&1; then
             echo "Server ready."
             return 0
@@ -230,6 +230,7 @@ split_sql_statements() {
         my $in_copy_data = 0;
         my $count = 0;
         my $dollar_tag;
+        my $paren_depth = 0;
 
         sub write_stmt {
             my ($out_dir, $count_ref, $lines_ref) = @_;
@@ -253,6 +254,18 @@ split_sql_statements() {
             }
         }
 
+        sub update_paren_depth {
+            my ($line, $depth_ref) = @_;
+            my $stripped = $line;
+            $stripped =~ s/--.*$//;
+            $stripped =~ s/\x27(?:\x27\x27|[^\x27])*\x27//g;
+            $stripped =~ s/"(?:""|[^"])*"//g;
+            my $opens = () = $stripped =~ /\(/g;
+            my $closes = () = $stripped =~ /\)/g;
+            $$depth_ref += $opens - $closes;
+            $$depth_ref = 0 if $$depth_ref < 0;
+        }
+
         while (my $line = <$in>) {
             if ($in_copy_data) {
                 push @current, $line;
@@ -260,6 +273,7 @@ split_sql_statements() {
                     write_stmt($out_dir, \$count, \@current);
                     @current = ();
                     $in_copy_data = 0;
+                    $paren_depth = 0;
                 }
                 next;
             }
@@ -267,6 +281,7 @@ split_sql_statements() {
             if (!@current) {
                 next if $line =~ /^\s*$/;
                 next if $line =~ /^\s*--/;
+                next if $line =~ /^\s*\*\*/;
             }
 
             push @current, $line;
@@ -278,10 +293,14 @@ split_sql_statements() {
 
             update_dollar_quote_state($line, \$dollar_tag);
             next if defined $dollar_tag;
+            update_paren_depth($line, \$paren_depth);
 
-            if ($line =~ /;([[:space:]]*--.*)?[[:space:]]*$/ || $line =~ /(^|[^\\])\\[[:alpha:]]/) {
+            if (($line =~ /;([[:space:]]*--.*)?[[:space:]]*$/ && $paren_depth == 0)
+                || $line =~ /(^|[^\\])\\[[:alpha:]]/)
+            {
                 write_stmt($out_dir, \$count, \@current);
                 @current = ();
+                $paren_depth = 0;
             }
         }
 
@@ -410,6 +429,7 @@ normalize_regression_output() {
             $line =~ s{^psql:[^:]+/[0-9]{5}\.sql:\d+:\s+}{};
 
             next if $line =~ /^\s*--/;
+            next if $line =~ /^\*\*/;
             push @normalized, $line;
         }
 
@@ -582,6 +602,7 @@ count_matching_queries() {
             my @current;
             my $in_copy_data = 0;
             my $dollar_tag;
+            my $paren_depth = 0;
 
             my $update_dollar_quote_state = sub {
                 my ($line, $tag_ref) = @_;
@@ -595,6 +616,18 @@ count_matching_queries() {
                 }
             };
 
+            my $update_paren_depth = sub {
+                my ($line, $depth_ref) = @_;
+                my $stripped = $line;
+                $stripped =~ s/--.*$//;
+                $stripped =~ s/\x27(?:\x27\x27|[^\x27])*\x27//g;
+                $stripped =~ s/"(?:""|[^"])*"//g;
+                my $opens = () = $stripped =~ /\(/g;
+                my $closes = () = $stripped =~ /\)/g;
+                $$depth_ref += $opens - $closes;
+                $$depth_ref = 0 if $$depth_ref < 0;
+            };
+
             for my $line (@$lines) {
                 if ($in_copy_data) {
                     push @current, normalize_line($line);
@@ -602,6 +635,7 @@ count_matching_queries() {
                         push @stmts, [ @current ];
                         @current = ();
                         $in_copy_data = 0;
+                        $paren_depth = 0;
                     }
                     next;
                 }
@@ -609,6 +643,7 @@ count_matching_queries() {
                 if (!@current) {
                     next if $line =~ /^\s*$/;
                     next if $line =~ /^\s*--/;
+                    next if $line =~ /^\s*\*\*/;
                 }
 
                 push @current, normalize_line($line);
@@ -620,10 +655,14 @@ count_matching_queries() {
 
                 $update_dollar_quote_state->($line, \$dollar_tag);
                 next if defined $dollar_tag;
+                $update_paren_depth->($line, \$paren_depth);
 
-                if ($line =~ /;([[:space:]]*--.*)?[[:space:]]*$/ || $line =~ /(^|[^\\])\\[[:alpha:]]/) {
+                if (($line =~ /;([[:space:]]*--.*)?[[:space:]]*$/ && $paren_depth == 0)
+                    || $line =~ /(^|[^\\])\\[[:alpha:]]/)
+                {
                     push @stmts, [ @current ];
                     @current = ();
+                    $paren_depth = 0;
                 }
             }
 
