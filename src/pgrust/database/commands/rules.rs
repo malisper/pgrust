@@ -833,6 +833,7 @@ fn materialize_view_rows(
     let select = SelectStatement {
         with_recursive: false,
         with: Vec::new(),
+        distinct: false,
         from: Some(FromItem::Table {
             name: relation_name.to_string(),
             only: false,
