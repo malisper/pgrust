@@ -359,6 +359,26 @@ pub(super) fn infer_sql_expr_type_with_ctes(
             }
         })
         .unwrap_or(SqlType::new(SqlTypeKind::Text)),
+        SqlExpr::ArraySubquery(select) => SqlType::array_of(
+            bind_select_query_with_outer(
+                select,
+                catalog,
+                outer_scopes,
+                grouped_outer.cloned(),
+                ctes,
+                &[],
+            )
+            .ok()
+            .and_then(|(plan, _)| {
+                let cols = plan.columns();
+                if cols.len() == 1 {
+                    Some(cols[0].sql_type)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(SqlType::new(SqlTypeKind::Text)),
+        ),
         SqlExpr::Exists(_) | SqlExpr::InSubquery { .. } | SqlExpr::QuantifiedSubquery { .. } => {
             SqlType::new(SqlTypeKind::Bool)
         }

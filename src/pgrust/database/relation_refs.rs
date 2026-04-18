@@ -743,7 +743,9 @@ fn collect_direct_relation_oids_from_sql_expr(
                 collect_direct_relation_oids_from_sql_expr(&arg.value, catalog, visible_ctes, rels);
             }
         }
-        SqlExpr::ScalarSubquery(select) | SqlExpr::Exists(select) => {
+        SqlExpr::ScalarSubquery(select)
+        | SqlExpr::ArraySubquery(select)
+        | SqlExpr::Exists(select) => {
             collect_direct_relation_oids_from_select(select, catalog, visible_ctes, rels);
         }
         SqlExpr::InSubquery { expr, subquery, .. } => {

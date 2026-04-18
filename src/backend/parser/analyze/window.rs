@@ -117,6 +117,7 @@ pub(super) fn expr_contains_window(expr: &SqlExpr) -> bool {
         | SqlExpr::IntegerLiteral(_)
         | SqlExpr::NumericLiteral(_)
         | SqlExpr::ScalarSubquery(_)
+        | SqlExpr::ArraySubquery(_)
         | SqlExpr::Exists(_)
         | SqlExpr::InSubquery { .. }
         | SqlExpr::QuantifiedSubquery { .. }

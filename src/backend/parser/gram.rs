@@ -6426,21 +6426,12 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         Rule::primary_expr => {
             build_expr(pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?)
         }
-        Rule::scalar_subquery_expr => {
-            let subquery = match pair.into_inner().next().ok_or(ParseError::UnexpectedEof)? {
-                part if part.as_rule() == Rule::select_stmt => build_select(part)?,
-                part if part.as_rule() == Rule::values_stmt => {
-                    wrap_values_as_select(build_values_statement(part)?)
-                }
-                part => {
-                    return Err(ParseError::UnexpectedToken {
-                        expected: "SELECT or VALUES subquery",
-                        actual: part.as_str().into(),
-                    });
-                }
-            };
-            Ok(SqlExpr::ScalarSubquery(Box::new(subquery)))
-        }
+        Rule::scalar_subquery_expr => Ok(SqlExpr::ScalarSubquery(Box::new(
+            build_select_like_subquery(pair)?,
+        ))),
+        Rule::array_subquery_expr => Ok(SqlExpr::ArraySubquery(Box::new(
+            build_select_like_subquery(pair)?,
+        ))),
         Rule::exists_expr => {
             let subquery = build_select(
                 pair.into_inner()
@@ -6765,6 +6756,23 @@ fn build_array_literal(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         .transpose()?
         .unwrap_or_default();
     Ok(SqlExpr::ArrayLiteral(elements))
+}
+
+fn build_select_like_subquery(pair: Pair<'_, Rule>) -> Result<SelectStatement, ParseError> {
+    match pair
+        .into_inner()
+        .find(|part| matches!(part.as_rule(), Rule::select_stmt | Rule::values_stmt))
+        .ok_or(ParseError::UnexpectedEof)?
+    {
+        part if part.as_rule() == Rule::select_stmt => build_select(part),
+        part if part.as_rule() == Rule::values_stmt => {
+            Ok(wrap_values_as_select(build_values_statement(part)?))
+        }
+        part => Err(ParseError::UnexpectedToken {
+            expected: "SELECT or VALUES subquery",
+            actual: part.as_str().into(),
+        }),
+    }
 }
 
 fn build_array_literal_elements(pair: Pair<'_, Rule>) -> Result<Vec<SqlExpr>, ParseError> {
