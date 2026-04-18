@@ -310,6 +310,8 @@ Targeted reruns on 2026-04-17:
   Done: builtin numeric cast methods `.number()`, `.integer()`, and `.decimal(...)`.
   Done: builtin datetime-related methods `.bigint()`, `.date()`, `.time()`, `.time_tz()`,
   `.timestamp()`, `.timestamp_tz()`, and `.datetime()`.
+  Done: `.datetime("template")` for the currently implemented PostgreSQL-style template subset,
+  including `DD`, `MM`, `YYYY`, `HH24`, `MI`, `SS`, `TZH`, `TZM`, and quoted literals.
   Done: string predicate operators `starts with` and `like_regex ... flag ...`.
   Remaining: other currently-rejected valid jsonpath syntax.
 - In progress: PostgreSQL lax-mode auto-unwrapping for array/scalar access.
