@@ -411,7 +411,7 @@ Targeted reruns on 2026-04-17:
 - test_setup.sql: add either real `LANGUAGE C` function registration or a narrow compatibility shim for upstream `binary_coercible`
 - test_setup.sql: support `CREATE OPERATOR CLASS` for the hash opclass forms used by upstream setup
 - date.sql:
-  tighten named-month and BC-date acceptance rules to match PostgreSQL for forms like `99-Jan-08`, `08-Jan-99`, `99-08-Jan`, and `January 8, 99 BC`
+  [done] tighten named-month and BC-date acceptance rules to match PostgreSQL for forms like `99-Jan-08`, `08-Jan-99`, `99-08-Jan`, and `January 8, 99 BC`
 - date.sql:
   preserve PostgreSQL-style `LINE`/caret context for date input range and syntax errors in simple-query output
 - date.sql:
