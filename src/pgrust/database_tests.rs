@@ -3368,7 +3368,9 @@ fn create_conversion_rejects_duplicate_name_and_default_pair() {
         1,
         "create conversion myconv for 'LATIN1' to 'UTF8' from iso8859_1_to_utf8",
     ) {
-        Err(ExecError::DetailedError { message, sqlstate, .. }) => {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
             assert_eq!(message, "conversion \"myconv\" already exists");
             assert_eq!(sqlstate, "42710");
         }
@@ -3384,11 +3386,19 @@ fn create_conversion_rejects_duplicate_name_and_default_pair() {
         1,
         "create default conversion public.mydef2 for 'LATIN1' to 'UTF8' from iso8859_1_to_utf8",
     ) {
-        Err(ExecError::DetailedError { message, sqlstate, .. }) => {
-            assert_eq!(message, "default conversion for LATIN1 to UTF8 already exists");
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(
+                message,
+                "default conversion for LATIN1 to UTF8 already exists"
+            );
             assert_eq!(sqlstate, "42710");
         }
-        other => panic!("expected duplicate default conversion error, got {:?}", other),
+        other => panic!(
+            "expected duplicate default conversion error, got {:?}",
+            other
+        ),
     }
 }
 
@@ -3435,6 +3445,50 @@ fn alter_table_add_column_reads_old_rows_with_null_or_default() {
             vec![Value::Int32(2), Value::Null, Value::Int32(3)],
         ]
     );
+}
+
+#[test]
+fn alter_table_multi_action_adds_columns_atomically() {
+    let base = temp_dir("alter_table_multi_action_adds_columns");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4 not null)")
+        .unwrap();
+    db.execute(1, "insert into items values (1), (2)").unwrap();
+    db.execute(
+        1,
+        "alter table items add column note text, add column bucket int4 default 3",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select id, note, bucket from items order by id"),
+        vec![
+            vec![Value::Int32(1), Value::Null, Value::Int32(3)],
+            vec![Value::Int32(2), Value::Null, Value::Int32(3)],
+        ]
+    );
+}
+
+#[test]
+fn alter_table_multi_action_rolls_back_on_failure() {
+    let base = temp_dir("alter_table_multi_action_rollback");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4 not null)")
+        .unwrap();
+    match db.execute(
+        1,
+        "alter table items add column note text, add column note text",
+    ) {
+        Err(ExecError::DetailedError { .. }) | Err(ExecError::Parse(_)) => {}
+        other => panic!("expected multi-action ALTER TABLE failure, got {other:?}"),
+    }
+
+    match db.execute(1, "select note from items") {
+        Err(ExecError::Parse(ParseError::UnknownColumn(name))) => assert_eq!(name, "note"),
+        other => panic!("expected rolled back column addition, got {other:?}"),
+    }
 }
 
 #[test]
@@ -10457,7 +10511,10 @@ fn create_or_replace_function_updates_existing_body() {
         "create function inc(x int4) returns int4 language plpgsql as $$ begin return x + 1; end $$",
     )
     .unwrap();
-    assert_eq!(query_rows(&db, 1, "select inc(4)"), vec![vec![Value::Int32(5)]]);
+    assert_eq!(
+        query_rows(&db, 1, "select inc(4)"),
+        vec![vec![Value::Int32(5)]]
+    );
 
     db.execute(
         1,
@@ -10465,7 +10522,10 @@ fn create_or_replace_function_updates_existing_body() {
     )
     .unwrap();
 
-    assert_eq!(query_rows(&db, 1, "select inc(4)"), vec![vec![Value::Int32(6)]]);
+    assert_eq!(
+        query_rows(&db, 1, "select inc(4)"),
+        vec![vec![Value::Int32(6)]]
+    );
 }
 
 #[test]
@@ -10580,7 +10640,10 @@ fn create_function_supports_void_returns_and_regprocedure_oid_lookup() {
             Value::Text("void".into()),
         ]]
     );
-    assert_eq!(query_rows(&db, 1, "select stats_test_func1()"), vec![vec![Value::Null]]);
+    assert_eq!(
+        query_rows(&db, 1, "select stats_test_func1()"),
+        vec![vec![Value::Null]]
+    );
     assert_eq!(
         query_rows(&db, 1, "select 'stats_test_func1()'::regprocedure::oid"),
         vec![vec![Value::Int64(proc.oid as i64)]]
@@ -11041,8 +11104,11 @@ fn drop_range_type_enforces_restrict_and_if_exists() {
         other => panic!("expected no-op drop type if exists, got {other:?}"),
     }
 
-    db.execute(1, "create type unused_float8range as range (subtype = float8)")
-        .unwrap();
+    db.execute(
+        1,
+        "create type unused_float8range as range (subtype = float8)",
+    )
+    .unwrap();
     match db.execute(1, "drop type unused_float8range") {
         Ok(StatementResult::AffectedRows(1)) => {}
         other => panic!("expected unused range drop success, got {other:?}"),
