@@ -36,7 +36,46 @@ pub(super) fn bind_row_to_json_call(
         .iter()
         .map(|(_, sql_type)| *sql_type)
         .collect::<Vec<_>>();
-    let resolved = resolve_function_call(catalog, name, &actual_types, func_variadic)?;
+    let resolved = resolve_function_call(catalog, name, &actual_types, func_variadic).or_else(|_| {
+        let first = actual_types.first().copied();
+        let second = actual_types.get(1).copied();
+        match (first, second, actual_types.len()) {
+            (Some(first), None, 1)
+                if matches!(first.kind, SqlTypeKind::Record | SqlTypeKind::Composite)
+                    && !first.is_array =>
+            {
+                let mut resolved = resolve_function_call(
+                    catalog,
+                    name,
+                    &[SqlType::record(crate::include::catalog::RECORD_TYPE_OID)],
+                    func_variadic,
+                )?;
+                resolved.declared_arg_types = vec![first];
+                Ok(resolved)
+            }
+            (Some(first), Some(second), 2)
+                if matches!(first.kind, SqlTypeKind::Record | SqlTypeKind::Composite)
+                    && !first.is_array
+                    && second == SqlType::new(SqlTypeKind::Bool) =>
+            {
+                let mut resolved = resolve_function_call(
+                    catalog,
+                    name,
+                    &[
+                        SqlType::record(crate::include::catalog::RECORD_TYPE_OID),
+                        SqlType::new(SqlTypeKind::Bool),
+                    ],
+                    func_variadic,
+                )?;
+                resolved.declared_arg_types = vec![first, second];
+                Ok(resolved)
+            }
+            _ => Err(ParseError::UnexpectedToken {
+                expected: "supported function",
+                actual: name.into(),
+            }),
+        }
+    })?;
     let coerced_args = bound_args
         .into_iter()
         .zip(resolved.declared_arg_types.iter().copied())

@@ -1690,7 +1690,7 @@ fn jsonpath_exists_result(
 ) -> Result<Value, ExecError> {
     match result {
         Ok(items) => Ok(Value::Bool(!items.is_empty())),
-        Err(_) if silent => Ok(Value::Null),
+        Err(_) if silent => Ok(Value::Bool(false)),
         Err(err) => Err(err),
     }
 }
