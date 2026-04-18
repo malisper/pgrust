@@ -307,6 +307,7 @@ Targeted reruns on 2026-04-17:
   Done: `exists(...)`, `.size()`, `.type()`, and expression-level method chaining for
   `.abs()`, `.ceiling()`, and `.floor()`.
   Done: builtin item methods `.double()`, `.boolean()`, and `.string()`.
+  Done: builtin numeric cast methods `.number()`, `.integer()`, and `.decimal(...)`.
   Remaining: other currently-rejected valid jsonpath syntax.
 - In progress: PostgreSQL lax-mode auto-unwrapping for array/scalar access.
   Done: `lax $[0]` on scalar values now matches upstream behavior.
