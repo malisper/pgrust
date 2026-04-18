@@ -138,54 +138,117 @@ fn parse_numeric_tokens(
 
 fn parse_named_month_tokens(
     tokens: &[&str],
-    _config: &DateTimeConfig,
+    config: &DateTimeConfig,
     allow_two_digit_year: bool,
 ) -> Result<DateADT, DateParseError> {
-    if tokens.len() != 3 {
+    let hyphenated = tokens.len() == 1 && tokens[0].contains('-');
+    let parts = if hyphenated {
+        tokens[0]
+            .split('-')
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+    } else {
+        tokens.to_vec()
+    };
+    if parts.len() != 3 {
         return Err(DateParseError::Invalid);
     }
-    let first_month = month_number(tokens[0]);
-    let second_month = month_number(tokens[1]);
-    let third_month = month_number(tokens[2]);
+    let first_month = month_number(parts[0]);
+    let second_month = month_number(parts[1]);
+    let third_month = month_number(parts[2]);
 
     match (first_month, second_month, third_month) {
-        (Some(month), None, None) => build_date(
-            parse_year_number(tokens[2], allow_two_digit_year)?,
-            month,
-            tokens[1]
+        (Some(month), None, None) => {
+            let day = parts[1]
                 .parse::<u32>()
-                .map_err(|_| DateParseError::Invalid)?,
-            false,
-        ),
+                .map_err(|_| DateParseError::Invalid)?;
+            let year_text = parts[2];
+            if year_text.len() >= 4 {
+                build_date(
+                    parse_year_number(year_text, allow_two_digit_year)?,
+                    month,
+                    day,
+                    false,
+                )
+            } else if matches!(config.date_order, DateOrder::Ymd) {
+                Err(DateParseError::FieldOutOfRange {
+                    datestyle_hint: true,
+                })
+            } else {
+                build_date(
+                    parse_year_number(year_text, allow_two_digit_year)?,
+                    month,
+                    day,
+                    false,
+                )
+            }
+        }
         (None, Some(month), None) => {
-            let first = tokens[0];
-            let third = tokens[2];
-            let first_value = first.parse::<i32>().map_err(|_| DateParseError::Invalid)?;
-            let year_first = first.len() >= 3 || first_value > 31;
-            if year_first {
+            let first = parts[0];
+            let third = parts[2];
+            if first.len() >= 4 {
                 build_date(
                     parse_year_number(first, allow_two_digit_year)?,
                     month,
                     third.parse::<u32>().map_err(|_| DateParseError::Invalid)?,
                     false,
                 )
-            } else {
+            } else if third.len() >= 4 {
                 build_date(
                     parse_year_number(third, allow_two_digit_year)?,
                     month,
                     first.parse::<u32>().map_err(|_| DateParseError::Invalid)?,
                     false,
                 )
+            } else {
+                match config.date_order {
+                    DateOrder::Ymd => build_date(
+                        parse_year_number(first, allow_two_digit_year)?,
+                        month,
+                        third.parse::<u32>().map_err(|_| DateParseError::Invalid)?,
+                        true,
+                    ),
+                    DateOrder::Dmy => build_date(
+                        parse_year_number(third, allow_two_digit_year)?,
+                        month,
+                        first.parse::<u32>().map_err(|_| DateParseError::Invalid)?,
+                        true,
+                    ),
+                    DateOrder::Mdy => {
+                        let day = first.parse::<u32>().map_err(|_| DateParseError::Invalid)?;
+                        if day > 31 {
+                            Err(DateParseError::Invalid)
+                        } else {
+                            build_date(
+                                parse_year_number(third, allow_two_digit_year)?,
+                                month,
+                                day,
+                                false,
+                            )
+                        }
+                    }
+                }
             }
         }
-        (None, None, Some(month)) => build_date(
-            parse_year_number(tokens[0], allow_two_digit_year)?,
-            month,
-            tokens[1]
+        (None, None, Some(month)) => {
+            if hyphenated {
+                return Err(DateParseError::Invalid);
+            }
+            let first = parts[0];
+            let day = parts[1]
                 .parse::<u32>()
-                .map_err(|_| DateParseError::Invalid)?,
-            false,
-        ),
+                .map_err(|_| DateParseError::Invalid)?;
+            if first.len() >= 4 || matches!(config.date_order, DateOrder::Ymd) {
+                build_date(
+                    parse_year_number(first, allow_two_digit_year)?,
+                    month,
+                    day,
+                    false,
+                )
+            } else {
+                Err(DateParseError::Invalid)
+            }
+        }
         _ => Err(DateParseError::Invalid),
     }
 }
@@ -284,7 +347,9 @@ pub fn parse_date_text(text: &str, config: &DateTimeConfig) -> Result<DateADT, D
         if token.contains(' ') {
             return Err(DateParseError::Invalid);
         }
-        if token.contains('-')
+        if token.chars().any(|ch| ch.is_ascii_alphabetic()) {
+            parse_named_month_tokens(&tokens, config, !bc)?
+        } else if token.contains('-')
             || token.contains('/')
             || token.contains('.')
             || token.chars().all(|ch| ch.is_ascii_digit())
@@ -302,12 +367,7 @@ pub fn parse_date_text(text: &str, config: &DateTimeConfig) -> Result<DateADT, D
             .filter(|token| token.chars().any(|ch| ch.is_ascii_alphabetic()))
             .count();
         if alpha_tokens > 0 {
-            let split_tokens = tokens
-                .iter()
-                .flat_map(|token| token.split('-'))
-                .filter(|part| !part.is_empty())
-                .collect::<Vec<_>>();
-            parse_named_month_tokens(&split_tokens, config, !bc)?
+            parse_named_month_tokens(&tokens, config, !bc)?
         } else {
             parse_numeric_tokens(&tokens, config)?
         }
@@ -557,10 +617,6 @@ mod tests {
             parse_date_text("01/02/03", &mdy),
             parse_date_text("2003-01-02", &mdy)
         );
-        assert_eq!(
-            parse_date_text("January 8, 99 BC", &ymd),
-            parse_date_text("0099-01-08 BC", &ymd)
-        );
     }
 
     #[test]
@@ -683,5 +739,107 @@ mod tests {
             parse_date_text("1999-01-08", &mdy)
         );
         assert_eq!(parse_date_text("99 08 01", &mdy), out_of_range);
+    }
+
+    #[test]
+    fn parse_date_text_matches_postgres_for_named_month_forms() {
+        let ymd = DateTimeConfig {
+            date_style_format: DateStyleFormat::Iso,
+            date_order: DateOrder::Ymd,
+            time_zone: "UTC".into(),
+            max_stack_depth_kb: 100,
+        };
+        let dmy = DateTimeConfig {
+            date_style_format: DateStyleFormat::Iso,
+            date_order: DateOrder::Dmy,
+            time_zone: "UTC".into(),
+            max_stack_depth_kb: 100,
+        };
+        let mdy = DateTimeConfig {
+            date_style_format: DateStyleFormat::Iso,
+            date_order: DateOrder::Mdy,
+            time_zone: "UTC".into(),
+            max_stack_depth_kb: 100,
+        };
+
+        let out_of_range = Err(DateParseError::FieldOutOfRange {
+            datestyle_hint: true,
+        });
+        let invalid = Err(DateParseError::Invalid);
+
+        assert_eq!(parse_date_text("January 8, 99 BC", &ymd), out_of_range);
+        assert_eq!(
+            parse_date_text("January 8, 99 BC", &dmy),
+            parse_date_text("0099-01-08 BC", &dmy)
+        );
+        assert_eq!(
+            parse_date_text("January 8, 99 BC", &mdy),
+            parse_date_text("0099-01-08 BC", &mdy)
+        );
+
+        assert_eq!(
+            parse_date_text("99-Jan-08", &ymd),
+            parse_date_text("1999-01-08", &ymd)
+        );
+        assert_eq!(parse_date_text("99-Jan-08", &dmy), out_of_range);
+        assert_eq!(parse_date_text("99-Jan-08", &mdy), invalid);
+
+        assert_eq!(parse_date_text("08-Jan-99", &ymd), out_of_range);
+        assert_eq!(
+            parse_date_text("08-Jan-99", &dmy),
+            parse_date_text("1999-01-08", &dmy)
+        );
+        assert_eq!(
+            parse_date_text("08-Jan-99", &mdy),
+            parse_date_text("1999-01-08", &mdy)
+        );
+
+        assert_eq!(parse_date_text("Jan-08-99", &ymd), out_of_range);
+        assert_eq!(
+            parse_date_text("Jan-08-99", &dmy),
+            parse_date_text("1999-01-08", &dmy)
+        );
+        assert_eq!(
+            parse_date_text("Jan-08-99", &mdy),
+            parse_date_text("1999-01-08", &mdy)
+        );
+
+        assert_eq!(parse_date_text("99-08-Jan", &ymd), invalid);
+        assert_eq!(parse_date_text("99-08-Jan", &dmy), invalid);
+        assert_eq!(parse_date_text("99-08-Jan", &mdy), invalid);
+
+        assert_eq!(
+            parse_date_text("99 Jan 08", &ymd),
+            parse_date_text("1999-01-08", &ymd)
+        );
+        assert_eq!(parse_date_text("99 Jan 08", &dmy), out_of_range);
+        assert_eq!(parse_date_text("99 Jan 08", &mdy), invalid);
+
+        assert_eq!(parse_date_text("08 Jan 99", &ymd), out_of_range);
+        assert_eq!(
+            parse_date_text("08 Jan 99", &dmy),
+            parse_date_text("1999-01-08", &dmy)
+        );
+        assert_eq!(
+            parse_date_text("08 Jan 99", &mdy),
+            parse_date_text("1999-01-08", &mdy)
+        );
+
+        assert_eq!(parse_date_text("Jan 08 99", &ymd), out_of_range);
+        assert_eq!(
+            parse_date_text("Jan 08 99", &dmy),
+            parse_date_text("1999-01-08", &dmy)
+        );
+        assert_eq!(
+            parse_date_text("Jan 08 99", &mdy),
+            parse_date_text("1999-01-08", &mdy)
+        );
+
+        assert_eq!(
+            parse_date_text("99 08 Jan", &ymd),
+            parse_date_text("1999-01-08", &ymd)
+        );
+        assert_eq!(parse_date_text("99 08 Jan", &dmy), invalid);
+        assert_eq!(parse_date_text("99 08 Jan", &mdy), invalid);
     }
 }
