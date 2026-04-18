@@ -6,6 +6,7 @@ use crate::backend::access::heap::heapam::{
 use crate::backend::access::index::indexam;
 use crate::backend::commands::explain::format_explain_lines;
 use crate::backend::executor::exec_expr::{compare_order_by_keys, eval_expr};
+use crate::backend::executor::pg_regex::explain_similar_pattern;
 use crate::backend::executor::srf::{
     eval_scalar_set_returning_call, eval_set_returning_call, set_returning_call_label,
 };
@@ -816,6 +817,14 @@ fn render_explain_expr_inner(expr: &Expr, column_names: &[String]) -> String {
                 render_explain_expr_inner(inner, column_names)
             )
         }
+        Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            negated,
+        } => render_similar_explain_expr(expr, pattern, escape.as_deref(), *negated, |expr| {
+            render_explain_expr_inner(expr, column_names)
+        }),
         other => format!("{other:?}"),
     }
 }
@@ -913,8 +922,64 @@ fn render_explain_join_expr_inner(
             "{} IS NOT NULL",
             render_explain_join_expr_inner(inner, outer_names, inner_names)
         ),
+        Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            negated,
+        } => render_similar_explain_expr(expr, pattern, escape.as_deref(), *negated, |expr| {
+            render_explain_join_expr_inner(expr, outer_names, inner_names)
+        }),
         other => format!("{other:?}"),
     }
+}
+
+fn render_similar_explain_expr<F>(
+    expr: &Expr,
+    pattern: &Expr,
+    escape: Option<&Expr>,
+    negated: bool,
+    render: F,
+) -> String
+where
+    F: Fn(&Expr) -> String,
+{
+    let left = render(expr);
+    if let Some(regex) = explain_similar_regex(pattern, escape) {
+        let op = if negated { "!~" } else { "~" };
+        return format!(
+            "{} {} {}",
+            left,
+            op,
+            render_explain_const(&Value::Text(regex.into()))
+        );
+    }
+
+    let keyword = if negated {
+        "NOT SIMILAR TO"
+    } else {
+        "SIMILAR TO"
+    };
+    let mut out = format!("{} {} {}", left, keyword, render(pattern));
+    if let Some(escape) = escape {
+        out.push_str(" ESCAPE ");
+        out.push_str(&render(escape));
+    }
+    out
+}
+
+fn explain_similar_regex(pattern: &Expr, escape: Option<&Expr>) -> Option<String> {
+    let Expr::Const(pattern) = pattern else {
+        return None;
+    };
+    let pattern = pattern.as_text()?;
+    let escape = match escape {
+        None => None,
+        Some(Expr::Const(Value::Null)) => return None,
+        Some(Expr::Const(value)) => Some(value.as_text()?),
+        Some(_) => return None,
+    };
+    explain_similar_pattern(pattern, escape).ok()
 }
 
 fn render_explain_const(value: &Value) -> String {
