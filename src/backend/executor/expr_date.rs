@@ -1,7 +1,13 @@
 use super::{ExecError, Value};
+use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::time::datetime::{
     day_of_week_from_julian_day, day_of_year, days_from_ymd, iso_day_of_week_from_julian_day,
-    iso_week_and_year, julian_day_from_postgres_date, unix_days_from_postgres_date, ymd_from_days,
+    iso_week_and_year, julian_day_from_postgres_date, timezone_offset_seconds,
+    unix_days_from_postgres_date, ymd_from_days,
+};
+use crate::include::nodes::datetime::{
+    DATEVAL_NOBEGIN, DATEVAL_NOEND, TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, TimestampADT,
+    TimestampTzADT, USECS_PER_DAY, USECS_PER_SEC,
 };
 
 fn extract_year_number(astronomical_year: i32) -> i32 {
@@ -197,7 +203,38 @@ pub(crate) fn eval_isfinite_function(values: &[Value]) -> Result<Value, ExecErro
     }
 }
 
-pub(crate) fn eval_date_trunc_function(values: &[Value]) -> Result<Value, ExecError> {
+fn truncate_timestamp_local(field: &str, days: i32) -> Result<i32, ExecError> {
+    let (astronomical_year, _, _) = ymd_from_days(days);
+    let display_year = extract_year_number(astronomical_year);
+    let truncated_astronomical_year = match field {
+        "millennium" => {
+            display_year_to_astronomical(truncation_field_start_display_year(display_year, 1000))
+        }
+        "century" => {
+            display_year_to_astronomical(truncation_field_start_display_year(display_year, 100))
+        }
+        "decade" => astronomical_year.div_euclid(10) * 10,
+        _ => {
+            return Err(ExecError::DetailedError {
+                message: format!("unit \"{field}\" not supported for type timestamp"),
+                detail: None,
+                hint: None,
+                sqlstate: "0A000",
+            });
+        }
+    };
+    days_from_ymd(truncated_astronomical_year, 1, 1).ok_or_else(|| ExecError::DetailedError {
+        message: format!("unit \"{field}\" not supported for type timestamp"),
+        detail: None,
+        hint: None,
+        sqlstate: "0A000",
+    })
+}
+
+pub(crate) fn eval_date_trunc_function(
+    values: &[Value],
+    config: &DateTimeConfig,
+) -> Result<Value, ExecError> {
     let [field_value, date_value] = values else {
         return Err(ExecError::DetailedError {
             message: "malformed date_trunc call".into(),
@@ -216,48 +253,60 @@ pub(crate) fn eval_date_trunc_function(values: &[Value]) -> Result<Value, ExecEr
             left: field_value.clone(),
             right: Value::Text("".into()),
         })?;
-    let date = match date_value {
-        Value::Date(date) => *date,
-        other => {
-            return Err(ExecError::TypeMismatch {
-                op: "date_trunc",
-                left: field_value.clone(),
-                right: other.clone(),
-            });
-        }
-    };
-    if !date.is_finite() {
-        return Ok(Value::Date(date));
-    }
     let field = field.trim().to_ascii_lowercase();
-    let (astronomical_year, _, _) = ymd_from_days(date.0);
-    let display_year = extract_year_number(astronomical_year);
-    let truncated_astronomical_year = match field.as_str() {
-        "millennium" => {
-            display_year_to_astronomical(truncation_field_start_display_year(display_year, 1000))
+    match date_value {
+        Value::Date(date) => {
+            if !date.is_finite() {
+                return Ok(Value::TimestampTz(TimestampTzADT(match date.0 {
+                    DATEVAL_NOEND => TIMESTAMP_NOEND,
+                    DATEVAL_NOBEGIN => TIMESTAMP_NOBEGIN,
+                    _ => unreachable!("checked finite date above"),
+                })));
+            }
+            let days =
+                truncate_timestamp_local(&field, date.0).map_err(|_| ExecError::DetailedError {
+                    message: format!("unit \"{field}\" not supported for type date"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "0A000",
+                })?;
+            let offset_seconds = i64::from(timezone_offset_seconds(config));
+            Ok(Value::TimestampTz(TimestampTzADT(
+                i64::from(days) * USECS_PER_DAY - offset_seconds * USECS_PER_SEC,
+            )))
         }
-        "century" => {
-            display_year_to_astronomical(truncation_field_start_display_year(display_year, 100))
+        Value::Timestamp(timestamp) => {
+            if !timestamp.is_finite() {
+                return Ok(Value::Timestamp(*timestamp));
+            }
+            let (days, _) = crate::backend::utils::time::datetime::timestamp_parts_from_usecs(
+                timestamp.0,
+            );
+            let truncated_days = truncate_timestamp_local(&field, days)?;
+            Ok(Value::Timestamp(TimestampADT(
+                i64::from(truncated_days) * USECS_PER_DAY,
+            )))
         }
-        "decade" => astronomical_year.div_euclid(10) * 10,
-        _ => {
-            return Err(ExecError::DetailedError {
-                message: format!("unit \"{field}\" not supported for type date"),
-                detail: None,
-                hint: None,
-                sqlstate: "0A000",
-            });
+        Value::TimestampTz(timestamp) => {
+            if !timestamp.is_finite() {
+                return Ok(Value::TimestampTz(*timestamp));
+            }
+            let offset_seconds = i64::from(timezone_offset_seconds(config));
+            let local_usecs = timestamp.0 + offset_seconds * USECS_PER_SEC;
+            let (days, _) = crate::backend::utils::time::datetime::timestamp_parts_from_usecs(
+                local_usecs,
+            );
+            let truncated_days = truncate_timestamp_local(&field, days)?;
+            Ok(Value::TimestampTz(TimestampTzADT(
+                i64::from(truncated_days) * USECS_PER_DAY - offset_seconds * USECS_PER_SEC,
+            )))
         }
-    };
-    let days = days_from_ymd(truncated_astronomical_year, 1, 1).ok_or_else(|| {
-        ExecError::DetailedError {
-            message: format!("unit \"{field}\" not supported for type date"),
-            detail: None,
-            hint: None,
-            sqlstate: "0A000",
-        }
-    })?;
-    Ok(Value::Date(crate::include::nodes::datetime::DateADT(days)))
+        other => Err(ExecError::TypeMismatch {
+            op: "date_trunc",
+            left: field_value.clone(),
+            right: other.clone(),
+        }),
+    }
 }
 
 pub(crate) fn eval_make_date_function(values: &[Value]) -> Result<Value, ExecError> {
@@ -338,17 +387,62 @@ mod tests {
             eval_date_trunc_function(&[
                 Value::Text("century".into()),
                 Value::Date(DateADT(days_from_ymd(-54, 8, 10).unwrap())),
-            ])
+            ], &DateTimeConfig::default())
             .unwrap(),
-            Value::Date(DateADT(days_from_ymd(-99, 1, 1).unwrap()))
+            Value::TimestampTz(TimestampTzADT(
+                i64::from(days_from_ymd(-99, 1, 1).unwrap()) * USECS_PER_DAY,
+            ))
         );
         assert_eq!(
             eval_date_trunc_function(&[
                 Value::Text("decade".into()),
                 Value::Date(DateADT(days_from_ymd(4, 12, 25).unwrap())),
-            ])
+            ], &DateTimeConfig::default())
             .unwrap(),
-            Value::Date(DateADT(days_from_ymd(0, 1, 1).unwrap()))
+            Value::TimestampTz(TimestampTzADT(
+                i64::from(days_from_ymd(0, 1, 1).unwrap()) * USECS_PER_DAY,
+            ))
+        );
+    }
+
+    #[test]
+    fn date_trunc_supports_timestamp_and_timestamptz() {
+        let config = DateTimeConfig {
+            time_zone: "America/Los_Angeles".into(),
+            ..DateTimeConfig::default()
+        };
+        assert_eq!(
+            eval_date_trunc_function(
+                &[
+                    Value::Text("century".into()),
+                    Value::Timestamp(TimestampADT(
+                        i64::from(days_from_ymd(1970, 3, 20).unwrap()) * USECS_PER_DAY
+                            + (4 * 3600 + 30 * 60) * USECS_PER_SEC,
+                    )),
+                ],
+                &config,
+            )
+            .unwrap(),
+            Value::Timestamp(TimestampADT(
+                i64::from(days_from_ymd(1901, 1, 1).unwrap()) * USECS_PER_DAY,
+            ))
+        );
+        assert_eq!(
+            eval_date_trunc_function(
+                &[
+                    Value::Text("decade".into()),
+                    Value::TimestampTz(TimestampTzADT(
+                        i64::from(days_from_ymd(1993, 12, 25).unwrap()) * USECS_PER_DAY
+                            + 8 * 3600 * USECS_PER_SEC,
+                    )),
+                ],
+                &config,
+            )
+            .unwrap(),
+            Value::TimestampTz(TimestampTzADT(
+                i64::from(days_from_ymd(1990, 1, 1).unwrap()) * USECS_PER_DAY
+                    + 8 * 3600 * USECS_PER_SEC,
+            ))
         );
     }
 

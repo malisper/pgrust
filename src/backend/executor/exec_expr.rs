@@ -1718,7 +1718,7 @@ fn eval_builtin_function(
             unreachable!("sequence builtins handled earlier");
         }
         BuiltinScalarFunction::DatePart => eval_date_part_function(&values),
-        BuiltinScalarFunction::DateTrunc => eval_date_trunc_function(&values),
+        BuiltinScalarFunction::DateTrunc => eval_date_trunc_function(&values, &ctx.datetime_config),
         BuiltinScalarFunction::IsFinite => eval_isfinite_function(&values),
         BuiltinScalarFunction::MakeDate => eval_make_date_function(&values),
         BuiltinScalarFunction::GetDatabaseEncoding => Ok(Value::Text("UTF8".into())),

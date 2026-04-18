@@ -418,8 +418,6 @@ Targeted reruns on 2026-04-17:
 - date.sql:
   make `EXTRACT(... FROM date)` use PostgreSQL-compatible default column labels and unsupported-unit diagnostics
 - date.sql:
-  support `date_trunc(text, timestamp)` and match PostgreSQL `date_trunc` output semantics for date and timestamp inputs
-- date.sql:
   fix `make_date` / `make_time` SQL-visible behavior, including overflow handling and proper error messages for invalid arguments
 
 - stats.sql

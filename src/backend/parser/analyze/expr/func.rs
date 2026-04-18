@@ -280,7 +280,7 @@ pub(super) fn bind_scalar_function_call(
                 SqlType::new(SqlTypeKind::Money),
             )],
         )),
-        BuiltinScalarFunction::DatePart | BuiltinScalarFunction::DateTrunc => Ok(build_func(
+        BuiltinScalarFunction::DatePart => Ok(build_func(
             false,
             vec![
                 coerce_bound_expr(
@@ -291,6 +291,25 @@ pub(super) fn bind_scalar_function_call(
                 bound_args[1].clone(),
             ],
         )),
+        BuiltinScalarFunction::DateTrunc => {
+            let target_type = match arg_types[1].kind {
+                SqlTypeKind::Date => SqlType::new(SqlTypeKind::Date),
+                SqlTypeKind::Timestamp => SqlType::new(SqlTypeKind::Timestamp),
+                SqlTypeKind::TimestampTz => SqlType::new(SqlTypeKind::TimestampTz),
+                _ => arg_types[1],
+            };
+            Ok(build_func(
+                false,
+                vec![
+                    coerce_bound_expr(
+                        bound_args[0].clone(),
+                        arg_types[0],
+                        SqlType::new(SqlTypeKind::Text),
+                    ),
+                    coerce_bound_expr(bound_args[1].clone(), arg_types[1], target_type),
+                ],
+            ))
+        }
         BuiltinScalarFunction::IsFinite => Ok(build_func(false, bound_args)),
         BuiltinScalarFunction::MakeDate => Ok(build_func(
             false,
