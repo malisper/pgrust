@@ -1671,7 +1671,7 @@ impl PlanNode for AggregateState {
                         .map(|arg| eval_expr(arg, slot, ctx))
                         .collect::<Result<Vec<_>, _>>()?;
                     if accum.order_by.is_empty() {
-                        (self.trans_fns[i])(&mut group.accum_states[i], &values);
+                        (self.trans_fns[i])(&mut group.accum_states[i], &values)?;
                     } else {
                         let sort_keys = accum
                             .order_by
@@ -1718,7 +1718,7 @@ impl PlanNode for AggregateState {
                         compare_order_by_keys(&accum.order_by, &left.sort_keys, &right.sort_keys)
                     });
                     for input in inputs.iter() {
-                        (self.trans_fns[i])(&mut group.accum_states[i], &input.arg_values);
+                        (self.trans_fns[i])(&mut group.accum_states[i], &input.arg_values)?;
                     }
                 }
             }

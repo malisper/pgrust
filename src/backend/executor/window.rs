@@ -108,7 +108,7 @@ fn advance_window_aggregate(
         )
     });
     let transition = AccumState::transition_fn(func, aggref.args.len(), aggref.aggdistinct);
-    transition(state, &values);
+    transition(state, &values)?;
     Ok(())
 }
 
