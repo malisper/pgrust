@@ -228,6 +228,8 @@ pub(crate) struct RangeTypeEntry {
     pub subtype: SqlType,
     pub subtype_diff: Option<String>,
     pub collation: Option<String>,
+    pub comment: Option<String>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ConversionEntry {

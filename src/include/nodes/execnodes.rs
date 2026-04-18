@@ -572,6 +572,7 @@ pub struct SetOpState {
     pub(crate) op: SetOperator,
     pub(crate) children: Vec<PlanState>,
     pub(crate) output_columns: Vec<String>,
+    pub(crate) output_types: Vec<SqlType>,
     pub(crate) result_rows: Option<Vec<MaterializedRow>>,
     pub(crate) next_index: usize,
     pub(crate) slot: TupleSlot,
