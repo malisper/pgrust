@@ -5,10 +5,10 @@ use crate::backend::access::transam::xact::{
 };
 use crate::backend::catalog::CatalogError;
 use crate::include::access::amapi::{IndexInsertContext, IndexUniqueCheck};
+use crate::include::access::htup::HeapTuple;
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::access::relscan::ScanDirection;
 use crate::include::access::scankey::ScanKeyData;
-use crate::include::access::htup::HeapTuple;
 use crate::include::nodes::datum::Value;
 
 #[derive(Debug, Clone)]
@@ -68,10 +68,9 @@ pub fn probe_unique_conflict(
         let Some(xid) = wait_for_xid else {
             return Ok(None);
         };
-        let waiter = ctx
-            .txn_waiter
-            .as_ref()
-            .ok_or_else(|| CatalogError::Io("btree unique check missing transaction waiter".into()))?;
+        let waiter = ctx.txn_waiter.as_ref().ok_or_else(|| {
+            CatalogError::Io("btree unique check missing transaction waiter".into())
+        })?;
         match waiter.wait_for(&ctx.txns, xid, ctx.interrupts.as_ref()) {
             crate::backend::storage::lmgr::WaitOutcome::Completed => {}
             crate::backend::storage::lmgr::WaitOutcome::DeadlockTimeout => {

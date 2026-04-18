@@ -1,7 +1,9 @@
 use super::query::rewrite_local_vars_for_output_exprs;
 use super::*;
 use crate::include::catalog::BTREE_AM_OID;
-use crate::include::nodes::parsenodes::{OnConflictAction, OnConflictClause, OnConflictTarget};
+use crate::include::nodes::parsenodes::{
+    OnConflictAction, OnConflictClause, OnConflictInferenceSpec, OnConflictTarget, SqlExpr,
+};
 use crate::include::nodes::primnodes::{INNER_VAR, OUTER_VAR, Var, user_attrno};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,8 +51,12 @@ pub(super) fn bind_on_conflict_clause(
                 .assignments
                 .iter()
                 .map(|assignment| {
-                    let target =
-                        super::modify::bind_assignment_target(&assignment.target, &target_scope, catalog, local_ctes)?;
+                    let target = super::modify::bind_assignment_target(
+                        &assignment.target,
+                        &target_scope,
+                        catalog,
+                        local_ctes,
+                    )?;
                     let expr = bind_expr_with_outer_and_ctes(
                         &assignment.expr,
                         &raw_scope,
@@ -59,10 +65,8 @@ pub(super) fn bind_on_conflict_clause(
                         None,
                         local_ctes,
                     )?;
-                    let expr =
-                        rewrite_local_vars_for_output_exprs(expr, 1, &outer_output_exprs);
-                    let expr =
-                        rewrite_local_vars_for_output_exprs(expr, 2, &inner_output_exprs);
+                    let expr = rewrite_local_vars_for_output_exprs(expr, 1, &outer_output_exprs);
+                    let expr = rewrite_local_vars_for_output_exprs(expr, 2, &inner_output_exprs);
                     Ok(BoundAssignment {
                         column_index: target.column_index,
                         subscripts: target.subscripts,
@@ -82,8 +86,7 @@ pub(super) fn bind_on_conflict_clause(
                         None,
                         local_ctes,
                     )?;
-                    let expr =
-                        rewrite_local_vars_for_output_exprs(expr, 1, &outer_output_exprs);
+                    let expr = rewrite_local_vars_for_output_exprs(expr, 1, &outer_output_exprs);
                     Ok(rewrite_local_vars_for_output_exprs(
                         expr,
                         2,
@@ -114,10 +117,10 @@ fn resolve_arbiter_indexes(
         None => Ok(inferable_unique_indexes(
             &catalog.index_relations_for_heap(relation_oid),
         )),
-        Some(OnConflictTarget::Columns(columns)) => {
+        Some(OnConflictTarget::Inference(spec)) => {
             let scope = scope_for_relation(Some(relation_name), desc);
             let requested = normalize_attnums(
-                &columns
+                &supported_inference_columns(spec)?
                     .iter()
                     .map(|column| {
                         let index = resolve_column(&scope, column)?;
@@ -171,6 +174,36 @@ fn resolve_arbiter_indexes(
     }
 }
 
+fn supported_inference_columns(spec: &OnConflictInferenceSpec) -> Result<Vec<String>, ParseError> {
+    if spec.predicate.is_some() {
+        return Err(ParseError::FeatureNotSupported(
+            "ON CONFLICT inference WHERE".into(),
+        ));
+    }
+
+    spec.elements
+        .iter()
+        .map(|element| {
+            if element.collation.is_some() {
+                return Err(ParseError::FeatureNotSupported(
+                    "ON CONFLICT inference collation".into(),
+                ));
+            }
+            if element.opclass.is_some() {
+                return Err(ParseError::FeatureNotSupported(
+                    "ON CONFLICT inference operator class".into(),
+                ));
+            }
+            match &element.expr {
+                SqlExpr::Column(name) => Ok(name.clone()),
+                _ => Err(ParseError::FeatureNotSupported(
+                    "ON CONFLICT inference expressions".into(),
+                )),
+            }
+        })
+        .collect()
+}
+
 fn inferable_unique_indexes(indexes: &[BoundIndexRelation]) -> Vec<BoundIndexRelation> {
     indexes
         .iter()
@@ -179,8 +212,20 @@ fn inferable_unique_indexes(indexes: &[BoundIndexRelation]) -> Vec<BoundIndexRel
                 && index.index_meta.indisvalid
                 && index.index_meta.indisready
                 && index.index_meta.am_oid == BTREE_AM_OID
-                && index.index_meta.indpred.as_deref().map(str::trim).unwrap_or("").is_empty()
-                && index.index_meta.indexprs.as_deref().map(str::trim).unwrap_or("").is_empty()
+                && index
+                    .index_meta
+                    .indpred
+                    .as_deref()
+                    .map(str::trim)
+                    .unwrap_or("")
+                    .is_empty()
+                && index
+                    .index_meta
+                    .indexprs
+                    .as_deref()
+                    .map(str::trim)
+                    .unwrap_or("")
+                    .is_empty()
         })
         .cloned()
         .collect()

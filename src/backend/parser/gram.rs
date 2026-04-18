@@ -1,5 +1,5 @@
-use pest::iterators::Pair;
 use pest::Parser as _;
+use pest::iterators::Pair;
 use pest_derive::Parser;
 
 use super::comments::{
@@ -2969,6 +2969,7 @@ fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
                 }
             }
             Rule::select_stmt => statement = Some(Statement::Select(build_select(part)?)),
+            Rule::insert_stmt => statement = Some(Statement::Insert(build_insert(part)?)),
             Rule::merge_stmt => statement = Some(Statement::Merge(build_merge(part)?)),
             _ => {}
         }
@@ -3778,6 +3779,7 @@ fn build_insert(pair: Pair<'_, Rule>) -> Result<InsertStatement, ParseError> {
     let mut with_recursive = false;
     let mut with = Vec::new();
     let mut table_name = None;
+    let mut table_alias = None;
     let mut columns = None;
     let mut source = None;
     let mut on_conflict = None;
@@ -3789,6 +3791,17 @@ fn build_insert(pair: Pair<'_, Rule>) -> Result<InsertStatement, ParseError> {
                 with = ctes;
             }
             Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
+            Rule::insert_target_alias => {
+                let alias = part
+                    .into_inner()
+                    .find(|inner| inner.as_rule() == Rule::insert_alias_identifier)
+                    .ok_or(ParseError::UnexpectedEof)?;
+                let alias = alias
+                    .into_inner()
+                    .find(|inner| inner.as_rule() == Rule::identifier)
+                    .ok_or(ParseError::UnexpectedEof)?;
+                table_alias = Some(build_identifier(alias));
+            }
             Rule::assignment_target_list => columns = Some(build_assignment_target_list(part)?),
             Rule::insert_values_source => {
                 source = Some(InsertSource::Values(
@@ -3808,6 +3821,7 @@ fn build_insert(pair: Pair<'_, Rule>) -> Result<InsertStatement, ParseError> {
         with_recursive,
         with,
         table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
+        table_alias,
         columns,
         source: source.ok_or(ParseError::UnexpectedEof)?,
         on_conflict,
@@ -3863,9 +3877,7 @@ fn build_merge(pair: Pair<'_, Rule>) -> Result<MergeStatement, ParseError> {
     })
 }
 
-fn build_merge_target(
-    pair: Pair<'_, Rule>,
-) -> Result<(String, Option<String>, bool), ParseError> {
+fn build_merge_target(pair: Pair<'_, Rule>) -> Result<(String, Option<String>, bool), ParseError> {
     let mut table_name = None;
     let mut alias = None;
     let mut only = false;
@@ -3875,7 +3887,10 @@ fn build_merge_target(
             Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
             Rule::merge_target_alias => {
                 let alias_pair = part.into_inner().find(|inner| {
-                    matches!(inner.as_rule(), Rule::merge_alias_identifier | Rule::identifier)
+                    matches!(
+                        inner.as_rule(),
+                        Rule::merge_alias_identifier | Rule::identifier
+                    )
                 });
                 if let Some(alias_pair) = alias_pair {
                     alias = Some(build_identifier(alias_pair));
@@ -3994,25 +4009,13 @@ fn build_on_conflict_clause(pair: Pair<'_, Rule>) -> Result<OnConflictClause, Pa
             Rule::on_conflict_do_nothing => {
                 *action = Some(OnConflictAction::Nothing);
                 for nested in part.into_inner() {
-                    apply_on_conflict_part(
-                        nested,
-                        target,
-                        action,
-                        assignments,
-                        where_clause,
-                    )?;
+                    apply_on_conflict_part(nested, target, action, assignments, where_clause)?;
                 }
             }
             Rule::on_conflict_do_update => {
                 *action = Some(OnConflictAction::Update);
                 for nested in part.into_inner() {
-                    apply_on_conflict_part(
-                        nested,
-                        target,
-                        action,
-                        assignments,
-                        where_clause,
-                    )?;
+                    apply_on_conflict_part(nested, target, action, assignments, where_clause)?;
                 }
             }
             Rule::on_conflict_target => *target = Some(build_on_conflict_target(part)?),
@@ -4058,14 +4061,57 @@ fn build_on_conflict_target(pair: Pair<'_, Rule>) -> Result<OnConflictTarget, Pa
                 .map(build_identifier)
                 .ok_or(ParseError::UnexpectedEof)?,
         )),
-        Rule::on_conflict_column_target => Ok(OnConflictTarget::Columns(
-            inner.into_inner()
-                .find(|part| part.as_rule() == Rule::ident_list)
-                .ok_or(ParseError::UnexpectedEof)?
-                .into_inner()
-                .map(build_identifier)
-                .collect(),
-        )),
+        Rule::on_conflict_inference_target => {
+            let mut elements = Vec::new();
+            let mut predicate = None;
+            for part in inner.into_inner() {
+                match part.as_rule() {
+                    Rule::on_conflict_inference_elem => {
+                        let mut expr = None;
+                        let mut collation = None;
+                        let mut opclass = None;
+                        for child in part.into_inner() {
+                            match child.as_rule() {
+                                Rule::on_conflict_inference_expr => {
+                                    expr = child
+                                        .into_inner()
+                                        .find(|part| part.as_rule() == Rule::expr)
+                                        .map(build_expr)
+                                        .transpose()?;
+                                }
+                                Rule::on_conflict_inference_collation => {
+                                    collation = child
+                                        .into_inner()
+                                        .find(|part| part.as_rule() == Rule::identifier)
+                                        .map(build_identifier);
+                                }
+                                Rule::on_conflict_inference_opclass => {
+                                    opclass = child.into_inner().next().map(build_identifier);
+                                }
+                                _ => {}
+                            }
+                        }
+                        elements.push(OnConflictInferenceElem {
+                            expr: expr.ok_or(ParseError::UnexpectedEof)?,
+                            collation,
+                            opclass,
+                        });
+                    }
+                    Rule::on_conflict_inference_predicate => {
+                        predicate = part
+                            .into_inner()
+                            .find(|part| part.as_rule() == Rule::expr)
+                            .map(build_expr)
+                            .transpose()?;
+                    }
+                    _ => {}
+                }
+            }
+            Ok(OnConflictTarget::Inference(OnConflictInferenceSpec {
+                elements,
+                predicate,
+            }))
+        }
         _ => Err(ParseError::UnexpectedToken {
             expected: "ON CONFLICT target",
             actual: inner.as_str().to_string(),
