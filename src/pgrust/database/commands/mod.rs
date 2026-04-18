@@ -8,6 +8,7 @@ mod drop_column;
 mod execute;
 mod index;
 mod maintenance;
+mod opclass;
 mod owner;
 mod privilege;
 mod rename;
