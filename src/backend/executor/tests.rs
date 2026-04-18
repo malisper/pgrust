@@ -3062,6 +3062,76 @@ fn select_extract_uses_date_part_runtime() {
     );
 }
 
+
+#[test]
+fn select_extract_uses_extract_as_default_column_name() {
+    let base = temp_dir("select_extract_column_name");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select extract(day from date '2020-08-11')",
+    )
+    .unwrap()
+    {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(column_names, vec!["extract"]);
+            assert_eq!(rows, vec![vec![Value::Float64(11.0)]]);
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+}
+
+#[test]
+fn select_extract_rejects_unsupported_date_units_with_postgres_diagnostic() {
+    let base = temp_dir("select_extract_unsupported_date_unit");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select extract(microseconds from date '2020-08-11')",
+    )
+    .unwrap_err()
+    {
+        ExecError::DetailedError {
+            message, sqlstate, ..
+        } => {
+            assert_eq!(message, "unit \"microseconds\" not supported for type date");
+            assert_eq!(sqlstate, "0A000");
+        }
+        other => panic!("expected detailed error, got {other:?}"),
+    }
+}
+
+#[test]
+fn select_extract_rejects_unrecognized_date_units_with_postgres_diagnostic() {
+    let base = temp_dir("select_extract_unrecognized_date_unit");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select extract(microsec from date 'infinity')",
+    )
+    .unwrap_err()
+    {
+        ExecError::DetailedError {
+            message, sqlstate, ..
+        } => {
+            assert_eq!(message, "unit \"microsec\" not recognized for type date");
+            assert_eq!(sqlstate, "22023");
+        }
+        other => panic!("expected detailed error, got {other:?}"),
+    }
+}
+
 #[test]
 fn select_date_trunc_on_date_values() {
     let base = temp_dir("select_date_trunc_date");

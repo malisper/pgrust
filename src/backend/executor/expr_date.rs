@@ -118,7 +118,6 @@ pub(crate) fn eval_date_part_function(values: &[Value]) -> Result<Value, ExecErr
             | "timezone"
             | "timezone_m"
             | "timezone_h"
-            | "microsec"
     ) {
         return Err(unsupported_date_part(&field));
     }
