@@ -659,12 +659,12 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::Decode
             | BuiltinScalarFunction::ToChar
             | BuiltinScalarFunction::ToNumber
-            | BuiltinScalarFunction::RegexpLike
             | BuiltinScalarFunction::PgInputIsValid
             | BuiltinScalarFunction::PgInputErrorMessage
             | BuiltinScalarFunction::PgInputErrorDetail
             | BuiltinScalarFunction::PgInputErrorHint
             | BuiltinScalarFunction::PgInputErrorSqlState => args.len() == 2,
+            BuiltinScalarFunction::RegexpLike => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::RegexpMatch => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::Replace
             | BuiltinScalarFunction::Translate

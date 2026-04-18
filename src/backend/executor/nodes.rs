@@ -4,8 +4,9 @@ use crate::backend::access::heap::heapam::{
     heap_scan_page_next_tuple, heap_scan_prepare_next_page,
 };
 use crate::backend::access::index::indexam;
-use crate::backend::commands::explain::format_explain_lines;
+use crate::backend::commands::explain::format_explain_lines_with_costs;
 use crate::backend::executor::exec_expr::{compare_order_by_keys, eval_expr};
+use crate::backend::executor::pg_regex::explain_similar_pattern;
 use crate::backend::executor::srf::{
     eval_scalar_set_returning_call, eval_set_returning_call, set_returning_call_label,
 };
@@ -352,7 +353,14 @@ impl PlanNode for ResultState {
     fn node_label(&self) -> String {
         "Result".into()
     }
-    fn explain_children(&self, _indent: usize, _analyze: bool, _lines: &mut Vec<String>) {}
+    fn explain_children(
+        &self,
+        _indent: usize,
+        _analyze: bool,
+        _show_costs: bool,
+        _lines: &mut Vec<String>,
+    ) {
+    }
 }
 
 impl PlanNode for AppendState {
@@ -418,9 +426,21 @@ impl PlanNode for AppendState {
     fn node_label(&self) -> String {
         "Append".into()
     }
-    fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
+    fn explain_children(
+        &self,
+        indent: usize,
+        analyze: bool,
+        show_costs: bool,
+        lines: &mut Vec<String>,
+    ) {
         for child in &self.children {
-            format_explain_lines(child.as_ref(), indent + 1, analyze, lines);
+            format_explain_lines_with_costs(
+                child.as_ref(),
+                indent + 1,
+                analyze,
+                show_costs,
+                lines,
+            );
         }
     }
 }
@@ -573,7 +593,13 @@ impl PlanNode for SeqScanState {
     fn node_label(&self) -> String {
         format!("Seq Scan on {}", self.relation_name)
     }
-    fn explain_details(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
+    fn explain_details(
+        &self,
+        indent: usize,
+        analyze: bool,
+        _show_costs: bool,
+        lines: &mut Vec<String>,
+    ) {
         if let Some(qual_expr) = &self.qual_expr {
             let prefix = "  ".repeat(indent + 1);
             lines.push(format!(
@@ -599,7 +625,14 @@ impl PlanNode for SeqScanState {
             ));
         }
     }
-    fn explain_children(&self, _indent: usize, _analyze: bool, _lines: &mut Vec<String>) {}
+    fn explain_children(
+        &self,
+        _indent: usize,
+        _analyze: bool,
+        _show_costs: bool,
+        _lines: &mut Vec<String>,
+    ) {
+    }
 }
 
 impl PlanNode for IndexScanState {
@@ -720,7 +753,14 @@ impl PlanNode for IndexScanState {
             self.index_rel.rel_number, self.rel.rel_number
         )
     }
-    fn explain_children(&self, _indent: usize, _analyze: bool, _lines: &mut Vec<String>) {}
+    fn explain_children(
+        &self,
+        _indent: usize,
+        _analyze: bool,
+        _show_costs: bool,
+        _lines: &mut Vec<String>,
+    ) {
+    }
 }
 
 pub(crate) fn render_explain_expr(expr: &Expr, column_names: &[String]) -> String {
@@ -816,6 +856,14 @@ fn render_explain_expr_inner(expr: &Expr, column_names: &[String]) -> String {
                 render_explain_expr_inner(inner, column_names)
             )
         }
+        Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            negated,
+        } => render_similar_explain_expr(expr, pattern, escape.as_deref(), *negated, |expr| {
+            render_explain_expr_inner(expr, column_names)
+        }),
         other => format!("{other:?}"),
     }
 }
@@ -913,8 +961,64 @@ fn render_explain_join_expr_inner(
             "{} IS NOT NULL",
             render_explain_join_expr_inner(inner, outer_names, inner_names)
         ),
+        Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            negated,
+        } => render_similar_explain_expr(expr, pattern, escape.as_deref(), *negated, |expr| {
+            render_explain_join_expr_inner(expr, outer_names, inner_names)
+        }),
         other => format!("{other:?}"),
     }
+}
+
+fn render_similar_explain_expr<F>(
+    expr: &Expr,
+    pattern: &Expr,
+    escape: Option<&Expr>,
+    negated: bool,
+    render: F,
+) -> String
+where
+    F: Fn(&Expr) -> String,
+{
+    let left = render(expr);
+    if let Some(regex) = explain_similar_regex(pattern, escape) {
+        let op = if negated { "!~" } else { "~" };
+        return format!(
+            "{} {} {}",
+            left,
+            op,
+            render_explain_const(&Value::Text(regex.into()))
+        );
+    }
+
+    let keyword = if negated {
+        "NOT SIMILAR TO"
+    } else {
+        "SIMILAR TO"
+    };
+    let mut out = format!("{} {} {}", left, keyword, render(pattern));
+    if let Some(escape) = escape {
+        out.push_str(" ESCAPE ");
+        out.push_str(&render(escape));
+    }
+    out
+}
+
+fn explain_similar_regex(pattern: &Expr, escape: Option<&Expr>) -> Option<String> {
+    let Expr::Const(pattern) = pattern else {
+        return None;
+    };
+    let pattern = pattern.as_text()?;
+    let escape = match escape {
+        None => None,
+        Some(Expr::Const(Value::Null)) => return None,
+        Some(Expr::Const(value)) => Some(value.as_text()?),
+        Some(_) => return None,
+    };
+    explain_similar_pattern(pattern, escape).ok()
 }
 
 fn render_explain_const(value: &Value) -> String {
@@ -984,7 +1088,13 @@ impl PlanNode for FilterState {
     fn node_label(&self) -> String {
         "Filter".into()
     }
-    fn explain_details(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
+    fn explain_details(
+        &self,
+        indent: usize,
+        analyze: bool,
+        _show_costs: bool,
+        lines: &mut Vec<String>,
+    ) {
         let prefix = "  ".repeat(indent + 1);
         lines.push(format!(
             "{prefix}Filter: {}",
@@ -997,8 +1107,14 @@ impl PlanNode for FilterState {
             ));
         }
     }
-    fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
-        format_explain_lines(&*self.input, indent + 1, analyze, lines);
+    fn explain_children(
+        &self,
+        indent: usize,
+        analyze: bool,
+        show_costs: bool,
+        lines: &mut Vec<String>,
+    ) {
+        format_explain_lines_with_costs(&*self.input, indent + 1, analyze, show_costs, lines);
     }
 }
 
@@ -1144,7 +1260,13 @@ impl PlanNode for NestedLoopJoinState {
             JoinType::Cross => "Nested Loop".into(),
         }
     }
-    fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
+    fn explain_children(
+        &self,
+        indent: usize,
+        analyze: bool,
+        show_costs: bool,
+        lines: &mut Vec<String>,
+    ) {
         let prefix = "  ".repeat(indent + 1);
         if !self.join_qual.is_empty() {
             let (left_names, right_names) = self.combined_names.split_at(self.left_width);
@@ -1164,8 +1286,8 @@ impl PlanNode for NestedLoopJoinState {
                 render_explain_join_expr(&format_qual_list(&self.qual), left_names, right_names)
             ));
         }
-        format_explain_lines(&*self.left, indent + 1, analyze, lines);
-        format_explain_lines(&*self.right, indent + 1, analyze, lines);
+        format_explain_lines_with_costs(&*self.left, indent + 1, analyze, show_costs, lines);
+        format_explain_lines_with_costs(&*self.right, indent + 1, analyze, show_costs, lines);
     }
 }
 
@@ -1445,7 +1567,13 @@ impl PlanNode for OrderByState {
     fn node_label(&self) -> String {
         "Sort".into()
     }
-    fn explain_details(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
+    fn explain_details(
+        &self,
+        indent: usize,
+        analyze: bool,
+        _show_costs: bool,
+        lines: &mut Vec<String>,
+    ) {
         let prefix = "  ".repeat(indent + 1);
         let sort_keys = self
             .items
@@ -1477,8 +1605,14 @@ impl PlanNode for OrderByState {
             }
         }
     }
-    fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
-        format_explain_lines(&*self.input, indent + 1, analyze, lines);
+    fn explain_children(
+        &self,
+        indent: usize,
+        analyze: bool,
+        show_costs: bool,
+        lines: &mut Vec<String>,
+    ) {
+        format_explain_lines_with_costs(&*self.input, indent + 1, analyze, show_costs, lines);
     }
 }
 
@@ -1538,8 +1672,14 @@ impl PlanNode for LimitState {
     fn node_label(&self) -> String {
         "Limit".into()
     }
-    fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
-        format_explain_lines(&*self.input, indent + 1, analyze, lines);
+    fn explain_children(
+        &self,
+        indent: usize,
+        analyze: bool,
+        show_costs: bool,
+        lines: &mut Vec<String>,
+    ) {
+        format_explain_lines_with_costs(&*self.input, indent + 1, analyze, show_costs, lines);
     }
 }
 
@@ -1601,8 +1741,14 @@ impl PlanNode for ProjectionState {
     fn node_label(&self) -> String {
         "Projection".into()
     }
-    fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
-        format_explain_lines(&*self.input, indent + 1, analyze, lines);
+    fn explain_children(
+        &self,
+        indent: usize,
+        analyze: bool,
+        show_costs: bool,
+        lines: &mut Vec<String>,
+    ) {
+        format_explain_lines_with_costs(&*self.input, indent + 1, analyze, show_costs, lines);
     }
 }
 
@@ -1787,8 +1933,14 @@ impl PlanNode for AggregateState {
     fn node_label(&self) -> String {
         "Aggregate".into()
     }
-    fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
-        format_explain_lines(&*self.input, indent + 1, analyze, lines);
+    fn explain_children(
+        &self,
+        indent: usize,
+        analyze: bool,
+        show_costs: bool,
+        lines: &mut Vec<String>,
+    ) {
+        format_explain_lines_with_costs(&*self.input, indent + 1, analyze, show_costs, lines);
     }
 }
 
@@ -1856,7 +2008,13 @@ impl PlanNode for WindowAggState {
         "WindowAgg".into()
     }
 
-    fn explain_details(&self, indent: usize, _analyze: bool, lines: &mut Vec<String>) {
+    fn explain_details(
+        &self,
+        indent: usize,
+        _analyze: bool,
+        _show_costs: bool,
+        lines: &mut Vec<String>,
+    ) {
         let prefix = "  ".repeat(indent + 1);
         if !self.clause.spec.partition_by.is_empty() {
             let partition_by = self
@@ -1882,8 +2040,14 @@ impl PlanNode for WindowAggState {
         }
     }
 
-    fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
-        format_explain_lines(&*self.input, indent + 1, analyze, lines);
+    fn explain_children(
+        &self,
+        indent: usize,
+        analyze: bool,
+        show_costs: bool,
+        lines: &mut Vec<String>,
+    ) {
+        format_explain_lines_with_costs(&*self.input, indent + 1, analyze, show_costs, lines);
     }
 }
 
@@ -1943,7 +2107,14 @@ impl PlanNode for FunctionScanState {
     fn node_label(&self) -> String {
         format!("Function Scan on {}", set_returning_call_label(&self.call))
     }
-    fn explain_children(&self, _indent: usize, _analyze: bool, _lines: &mut Vec<String>) {}
+    fn explain_children(
+        &self,
+        _indent: usize,
+        _analyze: bool,
+        _show_costs: bool,
+        _lines: &mut Vec<String>,
+    ) {
+    }
 }
 
 impl PlanNode for SubqueryScanState {
@@ -1993,8 +2164,14 @@ impl PlanNode for SubqueryScanState {
         "Subquery Scan".into()
     }
 
-    fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
-        format_explain_lines(&*self.input, indent + 1, analyze, lines);
+    fn explain_children(
+        &self,
+        indent: usize,
+        analyze: bool,
+        show_costs: bool,
+        lines: &mut Vec<String>,
+    ) {
+        format_explain_lines_with_costs(&*self.input, indent + 1, analyze, show_costs, lines);
     }
 }
 
@@ -2063,7 +2240,14 @@ impl PlanNode for ValuesState {
     fn node_label(&self) -> String {
         "Values Scan".into()
     }
-    fn explain_children(&self, _indent: usize, _analyze: bool, _lines: &mut Vec<String>) {}
+    fn explain_children(
+        &self,
+        _indent: usize,
+        _analyze: bool,
+        _show_costs: bool,
+        _lines: &mut Vec<String>,
+    ) {
+    }
 }
 
 impl PlanNode for WorkTableScanState {
@@ -2118,7 +2302,14 @@ impl PlanNode for WorkTableScanState {
     fn node_label(&self) -> String {
         "WorkTable Scan".into()
     }
-    fn explain_children(&self, _indent: usize, _analyze: bool, _lines: &mut Vec<String>) {}
+    fn explain_children(
+        &self,
+        _indent: usize,
+        _analyze: bool,
+        _show_costs: bool,
+        _lines: &mut Vec<String>,
+    ) {
+    }
 }
 
 impl PlanNode for CteScanState {
@@ -2189,7 +2380,14 @@ impl PlanNode for CteScanState {
     fn node_label(&self) -> String {
         "CTE Scan".into()
     }
-    fn explain_children(&self, _indent: usize, _analyze: bool, _lines: &mut Vec<String>) {}
+    fn explain_children(
+        &self,
+        _indent: usize,
+        _analyze: bool,
+        _show_costs: bool,
+        _lines: &mut Vec<String>,
+    ) {
+    }
 }
 
 impl PlanNode for RecursiveUnionState {
@@ -2303,13 +2501,31 @@ impl PlanNode for RecursiveUnionState {
     fn node_label(&self) -> String {
         "Recursive Union".into()
     }
-    fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
-        format_explain_lines(&*self.anchor, indent + 1, analyze, lines);
+    fn explain_children(
+        &self,
+        indent: usize,
+        analyze: bool,
+        show_costs: bool,
+        lines: &mut Vec<String>,
+    ) {
+        format_explain_lines_with_costs(&*self.anchor, indent + 1, analyze, show_costs, lines);
         if let Some(recursive_state) = &self.recursive_state {
-            format_explain_lines(&**recursive_state, indent + 1, analyze, lines);
+            format_explain_lines_with_costs(
+                &**recursive_state,
+                indent + 1,
+                analyze,
+                show_costs,
+                lines,
+            );
         } else {
             let recursive_state = executor_start(self.recursive_plan.clone());
-            format_explain_lines(&*recursive_state, indent + 1, analyze, lines);
+            format_explain_lines_with_costs(
+                &*recursive_state,
+                indent + 1,
+                analyze,
+                show_costs,
+                lines,
+            );
         }
     }
 }
@@ -2392,9 +2608,15 @@ impl PlanNode for SetOpState {
         }
     }
 
-    fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
+    fn explain_children(
+        &self,
+        indent: usize,
+        analyze: bool,
+        show_costs: bool,
+        lines: &mut Vec<String>,
+    ) {
         for child in &self.children {
-            format_explain_lines(child.as_ref(), indent, analyze, lines);
+            format_explain_lines_with_costs(child.as_ref(), indent, analyze, show_costs, lines);
         }
     }
 }
@@ -2526,8 +2748,14 @@ impl PlanNode for ProjectSetState {
     fn node_label(&self) -> String {
         "ProjectSet".into()
     }
-    fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
-        format_explain_lines(&*self.input, indent + 1, analyze, lines);
+    fn explain_children(
+        &self,
+        indent: usize,
+        analyze: bool,
+        show_costs: bool,
+        lines: &mut Vec<String>,
+    ) {
+        format_explain_lines_with_costs(&*self.input, indent + 1, analyze, show_costs, lines);
     }
 }
 
