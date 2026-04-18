@@ -135,47 +135,79 @@ impl Database {
             let role = lookup_membership_role(&auth_catalog, role_name)?;
             let grantor_oid =
                 resolve_role_grantor(&auth, &auth_catalog, &role, stmt.granted_by.as_ref(), false)?;
+            let role_rows = auth_catalog
+                .memberships()
+                .iter()
+                .filter(|row| row.roleid == role.oid)
+                .cloned()
+                .collect::<Vec<_>>();
             for grantee_name in &stmt.grantee_names {
                 let grantee = lookup_membership_grantee(&auth_catalog, grantee_name)?;
-                let existing = auth_catalog
-                    .memberships()
+                let existing_index = role_rows
                     .iter()
-                    .find(|row| {
-                        row.roleid == role.oid
-                            && row.member == grantee.oid
-                            && row.grantor == grantor_oid
-                    })
-                    .cloned()
+                    .position(|row| row.member == grantee.oid && row.grantor == grantor_oid)
                     .ok_or_else(|| {
                         ExecError::Parse(role_management_error(format!(
                             "role grant does not exist: \"{}\" to \"{}\"",
                             role.rolname, grantee.rolname
                         )))
                     })?;
-                self.catalog
-                    .write()
-                    .update_role_membership_options(
-                        role.oid,
-                        grantee.oid,
-                        grantor_oid,
-                        if stmt.admin_option {
-                            false
-                        } else {
-                            existing.admin_option
-                        },
-                        if stmt.inherit_option {
-                            false
-                        } else {
-                            existing.inherit_option
-                        },
-                        if stmt.set_option {
-                            false
-                        } else {
-                            existing.set_option
-                        },
-                    )
-                    .map_err(map_role_grant_error)?;
-                touched = true;
+                let planned_actions =
+                    plan_role_membership_revoke(&role_rows, existing_index, stmt)?;
+                for (row, action) in role_rows.iter().zip(planned_actions.iter()) {
+                    match action {
+                        PlannedRoleMembershipRevoke::Noop => {}
+                        PlannedRoleMembershipRevoke::DeleteGrant => {
+                            self.catalog
+                                .write()
+                                .revoke_role_membership(row.roleid, row.member, row.grantor)
+                                .map_err(map_role_grant_error)?;
+                            touched = true;
+                        }
+                        PlannedRoleMembershipRevoke::RemoveAdminOption => {
+                            self.catalog
+                                .write()
+                                .update_role_membership_options(
+                                    row.roleid,
+                                    row.member,
+                                    row.grantor,
+                                    false,
+                                    row.inherit_option,
+                                    row.set_option,
+                                )
+                                .map_err(map_role_grant_error)?;
+                            touched = true;
+                        }
+                        PlannedRoleMembershipRevoke::RemoveInheritOption => {
+                            self.catalog
+                                .write()
+                                .update_role_membership_options(
+                                    row.roleid,
+                                    row.member,
+                                    row.grantor,
+                                    row.admin_option,
+                                    false,
+                                    row.set_option,
+                                )
+                                .map_err(map_role_grant_error)?;
+                            touched = true;
+                        }
+                        PlannedRoleMembershipRevoke::RemoveSetOption => {
+                            self.catalog
+                                .write()
+                                .update_role_membership_options(
+                                    row.roleid,
+                                    row.member,
+                                    row.grantor,
+                                    row.admin_option,
+                                    row.inherit_option,
+                                    false,
+                                )
+                                .map_err(map_role_grant_error)?;
+                            touched = true;
+                        }
+                    }
+                }
             }
         }
 
@@ -549,6 +581,96 @@ fn resolve_role_grantor_spec(
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PlannedRoleMembershipRevoke {
+    Noop,
+    DeleteGrant,
+    RemoveAdminOption,
+    RemoveInheritOption,
+    RemoveSetOption,
+}
+
+fn plan_role_membership_revoke(
+    role_rows: &[crate::include::catalog::PgAuthMembersRow],
+    target_index: usize,
+    stmt: &RevokeRoleMembershipStatement,
+) -> Result<Vec<PlannedRoleMembershipRevoke>, ExecError> {
+    let mut actions = vec![PlannedRoleMembershipRevoke::Noop; role_rows.len()];
+    if stmt.inherit_option {
+        actions[target_index] = PlannedRoleMembershipRevoke::RemoveInheritOption;
+        return Ok(actions);
+    }
+    if stmt.set_option {
+        actions[target_index] = PlannedRoleMembershipRevoke::RemoveSetOption;
+        return Ok(actions);
+    }
+    let revoke_admin_option_only = stmt.admin_option;
+    plan_recursive_role_revoke(
+        role_rows,
+        &mut actions,
+        target_index,
+        revoke_admin_option_only,
+        stmt.cascade,
+    )?;
+    Ok(actions)
+}
+
+fn plan_recursive_role_revoke(
+    role_rows: &[crate::include::catalog::PgAuthMembersRow],
+    actions: &mut [PlannedRoleMembershipRevoke],
+    index: usize,
+    revoke_admin_option_only: bool,
+    cascade: bool,
+) -> Result<(), ExecError> {
+    if actions[index] == PlannedRoleMembershipRevoke::DeleteGrant {
+        return Ok(());
+    }
+    if actions[index] == PlannedRoleMembershipRevoke::RemoveAdminOption && revoke_admin_option_only {
+        return Ok(());
+    }
+
+    let row = &role_rows[index];
+    if !revoke_admin_option_only {
+        actions[index] = PlannedRoleMembershipRevoke::DeleteGrant;
+        if !row.admin_option {
+            return Ok(());
+        }
+    } else {
+        if !row.admin_option {
+            return Ok(());
+        }
+        actions[index] = PlannedRoleMembershipRevoke::RemoveAdminOption;
+    }
+
+    let would_still_have_admin_option = role_rows.iter().enumerate().any(|(other_index, other)| {
+        other_index != index
+            && other.member == row.member
+            && other.admin_option
+            && actions[other_index] == PlannedRoleMembershipRevoke::Noop
+    });
+    if would_still_have_admin_option {
+        return Ok(());
+    }
+
+    for (other_index, other) in role_rows.iter().enumerate() {
+        if other.grantor == row.member
+            && actions[other_index] != PlannedRoleMembershipRevoke::DeleteGrant
+        {
+            if !cascade {
+                return Err(ExecError::DetailedError {
+                    message: "dependent privileges exist".into(),
+                    detail: None,
+                    hint: Some("Use CASCADE to revoke them too.".into()),
+                    sqlstate: "2BP01",
+                });
+            }
+            plan_recursive_role_revoke(role_rows, actions, other_index, false, cascade)?;
+        }
+    }
+
+    Ok(())
+}
+
 fn map_role_grant_error(err: crate::backend::catalog::CatalogError) -> ExecError {
     match err {
         crate::backend::catalog::CatalogError::UniqueViolation(message) => {
@@ -772,5 +894,109 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn plain_revoke_role_membership_removes_explicit_grant() {
+        let base = temp_dir("revoke_role_grantor");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session.execute(&db, "create role parent").unwrap();
+        session.execute(&db, "create role grantor").unwrap();
+        session.execute(&db, "create role grantee").unwrap();
+        session
+            .execute(&db, "grant parent to grantor with admin option")
+            .unwrap();
+        session
+            .execute(&db, "grant parent to grantee granted by grantor")
+            .unwrap();
+        session
+            .execute(&db, "revoke parent from grantee granted by grantor")
+            .unwrap();
+
+        let parent_oid = role_oid(&db, "parent");
+        let grantor_oid = role_oid(&db, "grantor");
+        let grantee_oid = role_oid(&db, "grantee");
+        assert!(
+            !db.catalog
+                .read()
+                .catcache()
+                .unwrap()
+                .auth_members_rows()
+                .into_iter()
+                .any(|row| {
+                    row.roleid == parent_oid
+                        && row.member == grantee_oid
+                        && row.grantor == grantor_oid
+                })
+        );
+    }
+
+    #[test]
+    fn revoke_role_membership_requires_cascade_for_dependent_grants() {
+        let base = temp_dir("revoke_role_grantor_dependents");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session.execute(&db, "create role parent").unwrap();
+        session.execute(&db, "create role grantor").unwrap();
+        session.execute(&db, "create role grantee").unwrap();
+        session.execute(&db, "create role child").unwrap();
+        session
+            .execute(&db, "grant parent to grantor with admin option")
+            .unwrap();
+        session
+            .execute(&db, "grant parent to grantee with admin true granted by grantor")
+            .unwrap();
+        session
+            .execute(&db, "grant parent to child granted by grantee")
+            .unwrap();
+
+        let err = session
+            .execute(&db, "revoke parent from grantee granted by grantor")
+            .unwrap_err();
+        match err {
+            ExecError::DetailedError {
+                message, hint, ..
+            } => {
+                assert_eq!(message, "dependent privileges exist");
+                assert_eq!(hint.as_deref(), Some("Use CASCADE to revoke them too."));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn revoke_role_membership_cascade_removes_dependent_grants() {
+        let base = temp_dir("revoke_role_grantor_cascade");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session.execute(&db, "create role parent").unwrap();
+        session.execute(&db, "create role grantor").unwrap();
+        session.execute(&db, "create role grantee").unwrap();
+        session.execute(&db, "create role child").unwrap();
+        session
+            .execute(&db, "grant parent to grantor with admin option")
+            .unwrap();
+        session
+            .execute(&db, "grant parent to grantee with admin true granted by grantor")
+            .unwrap();
+        session
+            .execute(&db, "grant parent to child granted by grantee")
+            .unwrap();
+        session
+            .execute(&db, "revoke parent from grantee granted by grantor cascade")
+            .unwrap();
+
+        let parent_oid = role_oid(&db, "parent");
+        let grantor_oid = role_oid(&db, "grantor");
+        let grantee_oid = role_oid(&db, "grantee");
+        let child_oid = role_oid(&db, "child");
+        let rows = db.catalog.read().catcache().unwrap().auth_members_rows();
+        assert!(!rows.iter().any(|row| {
+            row.roleid == parent_oid && row.member == grantee_oid && row.grantor == grantor_oid
+        }));
+        assert!(!rows.iter().any(|row| {
+            row.roleid == parent_oid && row.member == child_oid && row.grantor == grantee_oid
+        }));
     }
 }

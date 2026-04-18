@@ -115,6 +115,19 @@ pub fn revoke_role_membership_option(
     Ok(row.clone())
 }
 
+pub fn revoke_role_membership(
+    rows: &mut Vec<PgAuthMembersRow>,
+    roleid: u32,
+    member: u32,
+    grantor: u32,
+) -> Result<PgAuthMembersRow, CatalogError> {
+    let index = rows
+        .iter()
+        .position(|row| row.roleid == roleid && row.member == member && row.grantor == grantor)
+        .ok_or_else(|| CatalogError::UnknownTable(format!("{roleid}/{member}/{grantor}")))?;
+    Ok(rows.remove(index))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -144,6 +157,9 @@ mod tests {
         assert!(updated.admin_option);
         assert!(!updated.inherit_option);
         assert!(!updated.set_option);
+        let removed = revoke_role_membership(&mut rows, 11, 12, 10).unwrap();
+        assert_eq!(removed.oid, 200);
+        assert!(rows.is_empty());
     }
 
     #[test]

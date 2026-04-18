@@ -1361,9 +1361,11 @@ fn parse_revoke_role_membership_option_statement() {
         Statement::RevokeRoleMembership(RevokeRoleMembershipStatement {
             role_names: vec!["regress_tenant2".into()],
             grantee_names: vec!["regress_createrole".into()],
+            revoke_membership: false,
             admin_option: false,
             inherit_option: true,
             set_option: false,
+            cascade: false,
             granted_by: None,
         })
     );
@@ -1380,10 +1382,33 @@ fn parse_revoke_role_membership_granted_by_statement() {
         Statement::RevokeRoleMembership(RevokeRoleMembershipStatement {
             role_names: vec!["regress_tenant2".into()],
             grantee_names: vec!["regress_createrole".into()],
+            revoke_membership: false,
             admin_option: false,
             inherit_option: true,
             set_option: false,
+            cascade: false,
             granted_by: Some(RoleGrantorSpec::CurrentUser),
+        })
+    );
+}
+
+#[test]
+fn parse_plain_revoke_role_membership_granted_by_cascade_statement() {
+    let stmt = parse_statement(
+        "revoke regress_tenant2 from regress_createrole granted by regress_admin cascade",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::RevokeRoleMembership(RevokeRoleMembershipStatement {
+            role_names: vec!["regress_tenant2".into()],
+            grantee_names: vec!["regress_createrole".into()],
+            revoke_membership: true,
+            admin_option: false,
+            inherit_option: false,
+            set_option: false,
+            cascade: true,
+            granted_by: Some(RoleGrantorSpec::RoleName("regress_admin".into())),
         })
     );
 }
