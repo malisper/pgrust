@@ -2,6 +2,7 @@ use crate::ClientId;
 use crate::backend::access::transam::xact::{CommandId, TransactionId};
 use crate::backend::catalog::pg_constraint::derived_pg_constraint_rows;
 use crate::backend::parser::{BoundRelation, CatalogLookup};
+use crate::backend::storage::smgr::{ForkNumber, StorageManager};
 use crate::backend::utils::cache::catcache::normalize_catalog_name;
 use crate::backend::utils::cache::relcache::RelCacheEntry;
 use crate::backend::utils::cache::syscache::{
@@ -679,6 +680,14 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
             relkind: entry.relkind,
             desc: entry.desc.clone(),
         })
+    }
+
+    fn current_relation_pages(&self, relation_oid: u32) -> Option<u32> {
+        let relation = self.relation_by_oid(relation_oid)?;
+        self.db
+            .pool
+            .with_storage_mut(|storage| storage.smgr.nblocks(relation.rel, ForkNumber::Main))
+            .ok()
     }
 
     fn constraint_rows_for_relation(&self, relation_oid: u32) -> Vec<PgConstraintRow> {

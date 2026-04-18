@@ -350,6 +350,13 @@ impl Catalog {
         } else {
             0
         };
+        let (relpages, reltuples) = if relkind == 'S' {
+            (1, 1.0)
+        } else if relkind_has_storage(relkind) {
+            (0, -1.0)
+        } else {
+            (0, 0.0)
+        };
 
         let entry = CatalogEntry {
             rel: RelFileLocator {
@@ -367,8 +374,8 @@ impl Catalog {
             relkind,
             relhassubclass: false,
             relispartition: false,
-            relpages: 0,
-            reltuples: 0.0,
+            relpages,
+            reltuples,
             desc,
             index_meta: None,
         };
@@ -522,7 +529,7 @@ impl Catalog {
             relhassubclass: false,
             relispartition: false,
             relpages: 0,
-            reltuples: 0.0,
+            reltuples: -1.0,
             desc: RelationDesc {
                 columns: index_columns,
             },

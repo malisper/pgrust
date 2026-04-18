@@ -4,7 +4,10 @@ use std::collections::HashMap;
 use crate::RelFileLocator;
 use crate::backend::executor::{Value, compare_order_values};
 use crate::backend::parser::{BoundIndexRelation, CatalogLookup, SqlType, SqlTypeKind};
-use crate::include::catalog::{BTREE_AM_OID, PgStatisticRow};
+use crate::backend::storage::page::bufpage::{ITEM_ID_SIZE, MAXALIGN, SIZE_OF_PAGE_HEADER_DATA};
+use crate::backend::storage::smgr::BLCKSZ;
+use crate::include::access::htup::SIZEOF_HEAP_TUPLE_HEADER;
+use crate::include::catalog::{BTREE_AM_OID, PgStatisticRow, relkind_has_storage};
 use crate::include::nodes::datum::ArrayValue;
 use crate::include::nodes::pathnodes::{Path, PathKey, PlannerInfo, RestrictInfo};
 use crate::include::nodes::plannodes::PlanEstimate;
@@ -740,41 +743,80 @@ pub(super) fn relation_stats(
     relation_oid: u32,
     desc: &RelationDesc,
 ) -> RelationStats {
-    let class_row = catalog.class_row_by_oid(relation_oid);
-    if class_row.as_ref().is_some_and(|row| row.relkind == 'S') {
-        return RelationStats {
-            relpages: 1.0,
-            reltuples: 1.0,
-            width: estimate_relation_width(desc, &HashMap::new()),
-            stats_by_attnum: HashMap::new(),
-        };
-    }
-    let relpages = class_row
-        .as_ref()
-        .map(|row| row.relpages.max(1) as f64)
-        .unwrap_or(DEFAULT_NUM_PAGES);
-    let reltuples = class_row
-        .as_ref()
-        .map(|row| {
-            if row.reltuples > 0.0 {
-                row.reltuples
-            } else {
-                DEFAULT_NUM_ROWS
-            }
-        })
-        .unwrap_or(DEFAULT_NUM_ROWS);
     let stats = catalog
         .statistic_rows_for_relation(relation_oid)
         .into_iter()
         .filter(|row| !row.stainherit)
         .map(|row| (row.staattnum, row))
         .collect::<HashMap<_, _>>();
+    let width = estimate_relation_width(desc, &stats);
+    let class_row = catalog.class_row_by_oid(relation_oid);
+    if class_row.as_ref().is_some_and(|row| row.relkind == 'S') {
+        return RelationStats {
+            relpages: 1.0,
+            reltuples: 1.0,
+            width,
+            stats_by_attnum: stats,
+        };
+    }
+
+    let (relpages, reltuples) = if let Some(class_row) = class_row.as_ref() {
+        if relkind_has_storage(class_row.relkind) {
+            if let Some(mut current_pages) = catalog.current_relation_pages(relation_oid) {
+                if current_pages < 10 && class_row.reltuples < 0.0 && !class_row.relhassubclass {
+                    current_pages = 10;
+                }
+
+                let relpages = current_pages as f64;
+                let reltuples = if current_pages == 0 {
+                    0.0
+                } else if class_row.reltuples >= 0.0 && class_row.relpages > 0 {
+                    (class_row.reltuples / class_row.relpages as f64 * relpages).round()
+                } else {
+                    (heap_fallback_density(width) * relpages).round()
+                };
+                (relpages, reltuples)
+            } else {
+                metadata_only_relation_stats(class_row.relpages, class_row.reltuples)
+            }
+        } else {
+            metadata_only_relation_stats(class_row.relpages, class_row.reltuples)
+        }
+    } else {
+        (DEFAULT_NUM_PAGES, DEFAULT_NUM_ROWS)
+    };
+
     RelationStats {
         relpages,
         reltuples,
-        width: estimate_relation_width(desc, &stats),
+        width,
         stats_by_attnum: stats,
     }
+}
+
+fn metadata_only_relation_stats(relpages: i32, reltuples: f64) -> (f64, f64) {
+    (
+        relpages.max(1) as f64,
+        if reltuples > 0.0 {
+            reltuples
+        } else {
+            DEFAULT_NUM_ROWS
+        },
+    )
+}
+
+fn heap_fallback_density(width: usize) -> f64 {
+    const HEAP_DEFAULT_FILLFACTOR: usize = 100;
+    let tuple_width = width
+        .saturating_add(max_align_size(SIZEOF_HEAP_TUPLE_HEADER))
+        .saturating_add(ITEM_ID_SIZE)
+        .max(1);
+    let usable_bytes_per_page = BLCKSZ.saturating_sub(SIZE_OF_PAGE_HEADER_DATA);
+    (((usable_bytes_per_page * HEAP_DEFAULT_FILLFACTOR / 100) / tuple_width).max(1)) as f64
+}
+
+fn max_align_size(size: usize) -> usize {
+    (size + (MAXALIGN - 1)) & !(MAXALIGN - 1)
 }
 
 pub(super) fn estimate_seqscan_candidate(
