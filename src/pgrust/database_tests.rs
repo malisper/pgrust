@@ -3271,7 +3271,7 @@ fn cluster_bootstraps_multiple_databases_and_connection_rules() {
 #[test]
 fn create_database_clones_template1_and_persists_across_reopen() {
     let base = temp_dir("create_database_cluster");
-    let cluster = Cluster::open(&base, 16).unwrap();
+    let cluster = Cluster::open_with_options(base.clone(), DatabaseOpenOptions::new(16)).unwrap();
     let template1 = cluster.connect_database("template1").unwrap();
     let mut template_session = Session::new(1);
     template_session
@@ -3972,7 +3972,7 @@ fn current_user_compares_against_name_columns() {
 fn comment_on_table_respects_txn_commit_and_rollback() {
     let base = temp_dir("comment_on_table_txn");
     {
-        let db = Database::open(&base, 16).unwrap();
+        let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
         let mut session = Session::new(1);
 
         session
@@ -4329,7 +4329,7 @@ fn alter_table_drop_column_hides_column_and_retargets_inserts() {
 #[test]
 fn alter_table_drop_column_persists_hidden_metadata() {
     let base = temp_dir("alter_table_drop_column_reopen");
-    let db = Database::open(&base, 16).unwrap();
+    let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
 
     db.execute(1, "create table items (a int4 not null, b int4)")
         .unwrap();
@@ -4517,7 +4517,7 @@ fn alter_table_rename_column_updates_lookup_and_rolls_back() {
 #[test]
 fn alter_table_rename_column_persists_after_reopen() {
     let base = temp_dir("alter_table_rename_column_reopen");
-    let db = Database::open(&base, 16).unwrap();
+    let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
 
     db.execute(1, "create table items (id int4 not null, note text)")
         .unwrap();
@@ -5396,7 +5396,7 @@ fn create_unique_index_allows_multiple_nulls() {
 #[test]
 fn create_table_primary_key_and_unique_constraints_are_enforced_and_persisted() {
     let base = temp_dir("create_table_primary_key_unique");
-    let db = Database::open(&base, 16).unwrap();
+    let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
 
     db.execute(
         1,
@@ -5540,7 +5540,7 @@ fn create_table_table_level_primary_key_and_unique_constraints_work() {
 #[test]
 fn create_table_check_and_named_not_null_constraints_are_enforced_and_persisted() {
     let base = temp_dir("create_table_check_constraints");
-    let db = Database::open(&base, 16).unwrap();
+    let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
 
     db.execute(
         1,
@@ -5707,7 +5707,7 @@ fn create_table_foreign_keys_are_enforced_and_persisted() {
 #[test]
 fn create_table_serial_creates_sequence_defaults_and_persists_state() {
     let base = temp_dir("create_table_serial_defaults");
-    let db = Database::open(&base, 16).unwrap();
+    let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
 
     db.execute(1, "create table items (id serial, note text)")
         .unwrap();
@@ -7662,7 +7662,7 @@ fn durable_open_bootstraps_control_file_and_clean_shutdown_marks_shutdown() {
     let control_path = ControlFileStore::path(&base);
 
     {
-        let db = Database::open(&base, 32).unwrap();
+        let db = Database::open_with_options(&base, DatabaseOpenOptions::new(32)).unwrap();
         assert!(control_path.exists(), "expected control file to be created");
         let raw = std::fs::read(&control_path).unwrap();
         assert_ne!(raw.first(), Some(&b'{'));
@@ -12821,7 +12821,7 @@ fn drop_range_type_enforces_restrict_and_if_exists() {
 #[test]
 fn composite_type_persists_across_reopen_without_storage() {
     let base = temp_dir("composite_type_reopen");
-    let db = Database::open(&base, 64).unwrap();
+    let db = Database::open_with_options(&base, DatabaseOpenOptions::new(64)).unwrap();
 
     db.execute(1, "create type widget as (id int4, label text)")
         .unwrap();

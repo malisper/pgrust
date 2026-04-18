@@ -34,6 +34,7 @@ pub struct Cluster {
 
 pub(crate) struct ClusterShared {
     pub base_dir: PathBuf,
+    pub durable_shutdown: bool,
     pub pool: Arc<BufferPool<SmgrStorageBackend>>,
     pub wal: Option<Arc<WalWriter>>,
     pub txns: Arc<RwLock<TransactionManager>>,
@@ -118,6 +119,9 @@ impl OpenDatabaseState {
 
 impl Drop for ClusterShared {
     fn drop(&mut self) {
+        if !self.durable_shutdown {
+            return;
+        }
         if let Some(checkpointer) = self.checkpointer.as_ref() {
             let _ = checkpointer.shutdown_and_join();
         } else {
@@ -127,6 +131,12 @@ impl Drop for ClusterShared {
 }
 
 impl Cluster {
+    #[cfg(test)]
+    pub fn open(base_dir: impl Into<PathBuf>, pool_size: usize) -> Result<Self, DatabaseError> {
+        Self::open_with_options(base_dir.into(), DatabaseOpenOptions::for_tests(pool_size))
+    }
+
+    #[cfg(not(test))]
     pub fn open(base_dir: impl Into<PathBuf>, pool_size: usize) -> Result<Self, DatabaseError> {
         Self::open_with_options(base_dir.into(), DatabaseOpenOptions::new(pool_size))
     }
@@ -247,6 +257,7 @@ impl Cluster {
         Ok(Self {
             shared: Arc::new(ClusterShared {
                 base_dir,
+                durable_shutdown: options.durable_shutdown,
                 pool,
                 wal: Some(wal),
                 txns,
