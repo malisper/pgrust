@@ -13,6 +13,13 @@ use super::pgstat_io::{IoStatsDelta, IoStatsEntry, IoStatsKey, default_pg_stat_i
 use super::pgstat_relation::{RelationStatsDelta, RelationStatsEntry, RelationTransactionState};
 use super::pgstat_xact::StatsMutationEffect;
 
+#[derive(Debug, Clone, Default)]
+struct StatsReadCache {
+    relations: BTreeMap<u32, Option<RelationStatsEntry>>,
+    functions: BTreeMap<u32, Option<FunctionStatsEntry>>,
+    io: BTreeMap<IoStatsKey, Option<IoStatsEntry>>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StatsFetchConsistency {
     None,
@@ -88,18 +95,60 @@ impl DatabaseStatsStore {
         }
     }
 
-    pub(crate) fn merged_with_pending(&self, pending: &StatsDelta) -> Self {
-        let mut merged = self.clone();
+    pub(crate) fn snapshot_with_pending(&self, pending: &StatsDelta) -> Self {
+        let mut snapshot = self.clone();
         for (oid, delta) in &pending.relations {
-            merged.relations.entry(*oid).or_default().apply_delta(delta);
+            snapshot.relations.entry(*oid).or_default().apply_delta(delta);
         }
         for (oid, delta) in &pending.functions {
-            merged.functions.entry(*oid).or_default().apply_delta(delta);
+            snapshot.functions.entry(*oid).or_default().apply_delta(delta);
         }
         for (key, delta) in &pending.io {
-            merged.io.entry(key.clone()).or_default().apply_delta(delta);
+            snapshot.io.entry(key.clone()).or_default().apply_delta(delta);
         }
-        merged
+        snapshot
+    }
+
+    pub(crate) fn merged_relation_entry(
+        &self,
+        pending: &StatsDelta,
+        oid: u32,
+    ) -> Option<RelationStatsEntry> {
+        let mut entry = self.relations.get(&oid).cloned();
+        if let Some(delta) = pending.relations.get(&oid) {
+            entry
+                .get_or_insert_with(RelationStatsEntry::default)
+                .apply_delta(delta);
+        }
+        entry
+    }
+
+    pub(crate) fn merged_function_entry(
+        &self,
+        pending: &StatsDelta,
+        oid: u32,
+    ) -> Option<FunctionStatsEntry> {
+        let mut entry = self.functions.get(&oid).cloned();
+        if let Some(delta) = pending.functions.get(&oid) {
+            entry
+                .get_or_insert_with(FunctionStatsEntry::default)
+                .apply_delta(delta);
+        }
+        entry
+    }
+
+    pub(crate) fn merged_io_entry(
+        &self,
+        pending: &StatsDelta,
+        key: &IoStatsKey,
+    ) -> Option<IoStatsEntry> {
+        let mut entry = self.io.get(key).cloned();
+        if let Some(delta) = pending.io.get(key) {
+            entry
+                .get_or_insert_with(IoStatsEntry::default)
+                .apply_delta(delta);
+        }
+        entry
     }
 
     pub(crate) fn remove_relation(&mut self, oid: u32) {
@@ -112,19 +161,19 @@ impl DatabaseStatsStore {
 }
 
 #[derive(Debug, Clone)]
-pub struct SessionStatsState {
-    pub(crate) pending_flush: StatsDelta,
-    pub(crate) fetch_consistency: StatsFetchConsistency,
-    pub(crate) track_functions: TrackFunctionsSetting,
-    pub(crate) cache_snapshot: Option<DatabaseStatsStore>,
-    pub(crate) full_snapshot: Option<DatabaseStatsStore>,
-    pub(crate) snapshot_timestamp: Option<TimestampTzADT>,
-    pub(crate) relation_xact: BTreeMap<u32, RelationTransactionState>,
-    pub(crate) function_xact: BTreeMap<u32, FunctionStatsDelta>,
-    pub(crate) stats_effects: Vec<StatsMutationEffect>,
-    pub(crate) dropped_relations_in_xact: BTreeSet<u32>,
-    pub(crate) dropped_functions_in_xact: BTreeSet<u32>,
-    pub(crate) xact_active: bool,
+pub(crate) struct SessionStatsState {
+    pub pending_flush: StatsDelta,
+    pub fetch_consistency: StatsFetchConsistency,
+    pub track_functions: TrackFunctionsSetting,
+    cache_snapshot: StatsReadCache,
+    snapshot_store: Option<DatabaseStatsStore>,
+    pub snapshot_timestamp: Option<TimestampTzADT>,
+    pub relation_xact: BTreeMap<u32, RelationTransactionState>,
+    pub function_xact: BTreeMap<u32, FunctionStatsDelta>,
+    pub stats_effects: Vec<StatsMutationEffect>,
+    pub dropped_relations_in_xact: BTreeSet<u32>,
+    pub dropped_functions_in_xact: BTreeSet<u32>,
+    pub xact_active: bool,
     pub(super) call_stack: Vec<FunctionCallFrame>,
 }
 
@@ -134,8 +183,8 @@ impl Default for SessionStatsState {
             pending_flush: StatsDelta::default(),
             fetch_consistency: StatsFetchConsistency::Cache,
             track_functions: TrackFunctionsSetting::None,
-            cache_snapshot: None,
-            full_snapshot: None,
+            cache_snapshot: StatsReadCache::default(),
+            snapshot_store: None,
             snapshot_timestamp: None,
             relation_xact: BTreeMap::new(),
             function_xact: BTreeMap::new(),
@@ -150,8 +199,8 @@ impl Default for SessionStatsState {
 
 impl SessionStatsState {
     pub(crate) fn clear_snapshot(&mut self) {
-        self.cache_snapshot = None;
-        self.full_snapshot = None;
+        self.cache_snapshot = StatsReadCache::default();
+        self.snapshot_store = None;
         self.snapshot_timestamp = None;
     }
 
@@ -166,26 +215,277 @@ impl SessionStatsState {
         self.track_functions = track_functions;
     }
 
-    pub(crate) fn visible_stats(
+    pub(crate) fn visible_relation_entry(
         &mut self,
         db_stats: &Arc<RwLock<DatabaseStatsStore>>,
-    ) -> DatabaseStatsStore {
+        oid: u32,
+    ) -> Option<RelationStatsEntry> {
         match self.fetch_consistency {
-            StatsFetchConsistency::None => db_stats.read().merged_with_pending(&self.pending_flush),
+            StatsFetchConsistency::None => db_stats
+                .read()
+                .merged_relation_entry(&self.pending_flush, oid),
             StatsFetchConsistency::Cache => {
-                if self.cache_snapshot.is_none() {
-                    self.cache_snapshot =
-                        Some(db_stats.read().merged_with_pending(&self.pending_flush));
+                if let Some(cached) = self.cache_snapshot.relations.get(&oid).cloned() {
+                    return cached;
                 }
-                self.cache_snapshot.clone().unwrap_or_default()
+                let entry = db_stats
+                    .read()
+                    .merged_relation_entry(&self.pending_flush, oid);
+                self.cache_snapshot.relations.insert(oid, entry.clone());
+                entry
             }
             StatsFetchConsistency::Snapshot => {
-                if self.full_snapshot.is_none() {
-                    self.full_snapshot =
-                        Some(db_stats.read().merged_with_pending(&self.pending_flush));
-                    self.snapshot_timestamp = Some(now_timestamptz());
+                self.ensure_snapshot_started(db_stats);
+                self.snapshot_store
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.relations.get(&oid).cloned())
+            }
+        }
+    }
+
+    pub(crate) fn visible_relation_entries(
+        &mut self,
+        db_stats: &Arc<RwLock<DatabaseStatsStore>>,
+        oids: impl IntoIterator<Item = u32>,
+    ) -> BTreeMap<u32, RelationStatsEntry> {
+        let requested = oids.into_iter().collect::<BTreeSet<_>>();
+        match self.fetch_consistency {
+            StatsFetchConsistency::None => {
+                let store = db_stats.read();
+                requested
+                    .into_iter()
+                    .filter_map(|oid| {
+                        store
+                            .merged_relation_entry(&self.pending_flush, oid)
+                            .map(|entry| (oid, entry))
+                    })
+                    .collect()
+            }
+            StatsFetchConsistency::Cache => {
+                let missing = requested
+                    .iter()
+                    .copied()
+                    .filter(|oid| !self.cache_snapshot.relations.contains_key(oid))
+                    .collect::<Vec<_>>();
+                if !missing.is_empty() {
+                    let computed = {
+                        let store = db_stats.read();
+                        missing
+                            .iter()
+                            .map(|oid| {
+                                (*oid, store.merged_relation_entry(&self.pending_flush, *oid))
+                            })
+                            .collect::<Vec<_>>()
+                    };
+                    for (oid, entry) in computed {
+                        self.cache_snapshot.relations.insert(oid, entry);
+                    }
                 }
-                self.full_snapshot.clone().unwrap_or_default()
+                requested
+                    .into_iter()
+                    .filter_map(|oid| {
+                        self.cache_snapshot
+                            .relations
+                            .get(&oid)
+                            .cloned()
+                            .flatten()
+                            .map(|entry| (oid, entry))
+                    })
+                    .collect()
+            }
+            StatsFetchConsistency::Snapshot => {
+                self.ensure_snapshot_started(db_stats);
+                let Some(snapshot) = self.snapshot_store.as_ref() else {
+                    return BTreeMap::new();
+                };
+                requested
+                    .into_iter()
+                    .filter_map(|oid| {
+                        snapshot
+                            .relations
+                            .get(&oid)
+                            .cloned()
+                            .map(|entry| (oid, entry))
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    pub(crate) fn has_visible_relation_stats(
+        &mut self,
+        db_stats: &Arc<RwLock<DatabaseStatsStore>>,
+        oid: u32,
+    ) -> bool {
+        self.visible_relation_entry(db_stats, oid).is_some()
+    }
+
+    pub(crate) fn visible_function_entry(
+        &mut self,
+        db_stats: &Arc<RwLock<DatabaseStatsStore>>,
+        oid: u32,
+    ) -> Option<FunctionStatsEntry> {
+        match self.fetch_consistency {
+            StatsFetchConsistency::None => db_stats
+                .read()
+                .merged_function_entry(&self.pending_flush, oid),
+            StatsFetchConsistency::Cache => {
+                if let Some(cached) = self.cache_snapshot.functions.get(&oid).cloned() {
+                    return cached;
+                }
+                let entry = db_stats
+                    .read()
+                    .merged_function_entry(&self.pending_flush, oid);
+                self.cache_snapshot.functions.insert(oid, entry.clone());
+                entry
+            }
+            StatsFetchConsistency::Snapshot => {
+                self.ensure_snapshot_started(db_stats);
+                self.snapshot_store
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.functions.get(&oid).cloned())
+            }
+        }
+    }
+
+    pub(crate) fn visible_function_entries(
+        &mut self,
+        db_stats: &Arc<RwLock<DatabaseStatsStore>>,
+        oids: impl IntoIterator<Item = u32>,
+    ) -> BTreeMap<u32, FunctionStatsEntry> {
+        let requested = oids.into_iter().collect::<BTreeSet<_>>();
+        match self.fetch_consistency {
+            StatsFetchConsistency::None => {
+                let store = db_stats.read();
+                requested
+                    .into_iter()
+                    .filter_map(|oid| {
+                        store
+                            .merged_function_entry(&self.pending_flush, oid)
+                            .map(|entry| (oid, entry))
+                    })
+                    .collect()
+            }
+            StatsFetchConsistency::Cache => {
+                let missing = requested
+                    .iter()
+                    .copied()
+                    .filter(|oid| !self.cache_snapshot.functions.contains_key(oid))
+                    .collect::<Vec<_>>();
+                if !missing.is_empty() {
+                    let computed = {
+                        let store = db_stats.read();
+                        missing
+                            .iter()
+                            .map(|oid| {
+                                (*oid, store.merged_function_entry(&self.pending_flush, *oid))
+                            })
+                            .collect::<Vec<_>>()
+                    };
+                    for (oid, entry) in computed {
+                        self.cache_snapshot.functions.insert(oid, entry);
+                    }
+                }
+                requested
+                    .into_iter()
+                    .filter_map(|oid| {
+                        self.cache_snapshot
+                            .functions
+                            .get(&oid)
+                            .cloned()
+                            .flatten()
+                            .map(|entry| (oid, entry))
+                    })
+                    .collect()
+            }
+            StatsFetchConsistency::Snapshot => {
+                self.ensure_snapshot_started(db_stats);
+                let Some(snapshot) = self.snapshot_store.as_ref() else {
+                    return BTreeMap::new();
+                };
+                requested
+                    .into_iter()
+                    .filter_map(|oid| {
+                        snapshot
+                            .functions
+                            .get(&oid)
+                            .cloned()
+                            .map(|entry| (oid, entry))
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    pub(crate) fn has_visible_function_stats(
+        &mut self,
+        db_stats: &Arc<RwLock<DatabaseStatsStore>>,
+        oid: u32,
+    ) -> bool {
+        self.visible_function_entry(db_stats, oid).is_some()
+    }
+
+    pub(crate) fn visible_io_entries(
+        &mut self,
+        db_stats: &Arc<RwLock<DatabaseStatsStore>>,
+        keys: impl IntoIterator<Item = IoStatsKey>,
+    ) -> BTreeMap<IoStatsKey, IoStatsEntry> {
+        let requested = keys.into_iter().collect::<BTreeSet<_>>();
+        match self.fetch_consistency {
+            StatsFetchConsistency::None => {
+                let store = db_stats.read();
+                requested
+                    .into_iter()
+                    .filter_map(|key| {
+                        store
+                            .merged_io_entry(&self.pending_flush, &key)
+                            .map(|entry| (key, entry))
+                    })
+                    .collect()
+            }
+            StatsFetchConsistency::Cache => {
+                let missing = requested
+                    .iter()
+                    .filter(|key| !self.cache_snapshot.io.contains_key(*key))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if !missing.is_empty() {
+                    let computed = {
+                        let store = db_stats.read();
+                        missing
+                            .iter()
+                            .map(|key| {
+                                (key.clone(), store.merged_io_entry(&self.pending_flush, key))
+                            })
+                            .collect::<Vec<_>>()
+                    };
+                    for (key, entry) in computed {
+                        self.cache_snapshot.io.insert(key, entry);
+                    }
+                }
+                requested
+                    .into_iter()
+                    .filter_map(|key| {
+                        self.cache_snapshot
+                            .io
+                            .get(&key)
+                            .cloned()
+                            .flatten()
+                            .map(|entry| (key, entry))
+                    })
+                    .collect()
+            }
+            StatsFetchConsistency::Snapshot => {
+                self.ensure_snapshot_started(db_stats);
+                let Some(snapshot) = self.snapshot_store.as_ref() else {
+                    return BTreeMap::new();
+                };
+                requested
+                    .into_iter()
+                    .filter_map(|key| {
+                        snapshot.io.get(&key).cloned().map(|entry| (key, entry))
+                    })
+                    .collect()
             }
         }
     }
@@ -199,6 +499,15 @@ impl SessionStatsState {
             .write()
             .apply_pending_flush(&mut self.pending_flush);
         self.clear_snapshot();
+    }
+
+    fn ensure_snapshot_started(&mut self, db_stats: &Arc<RwLock<DatabaseStatsStore>>) {
+        if self.snapshot_store.is_none() {
+            self.snapshot_store = Some(db_stats.read().snapshot_with_pending(&self.pending_flush));
+        }
+        if self.snapshot_timestamp.is_none() {
+            self.snapshot_timestamp = Some(now_timestamptz());
+        }
     }
 }
 
