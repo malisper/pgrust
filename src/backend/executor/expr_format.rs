@@ -1458,6 +1458,22 @@ mod tests {
             to_char_numeric(&NumericValue::NegInf, "MI99.99").unwrap(),
             "-##.##"
         );
+        assert_eq!(
+            to_char_numeric(&NumericValue::from("4200000000"), "MI99.99").unwrap(),
+            " ##.##"
+        );
+        assert_eq!(
+            to_char_numeric(&NumericValue::from("4200000000"), "MI9999999999.99")
+                .unwrap()
+                .trim(),
+            "4200000000.00"
+        );
+        assert_eq!(
+            to_char_numeric(&NumericValue::PosInf, "MI9999999999.99")
+                .unwrap()
+                .trim(),
+            "Infinity"
+        );
     }
 
     #[test]
