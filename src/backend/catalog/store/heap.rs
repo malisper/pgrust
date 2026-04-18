@@ -5,7 +5,7 @@ use crate::backend::catalog::catalog::{
 };
 use crate::backend::catalog::indexing::probe_system_catalog_rows_visible_in_db;
 use crate::backend::catalog::persistence::{
-    append_catalog_entry_rows, delete_catalog_rows_subset_mvcc, insert_catalog_rows_subset_mvcc,
+    delete_catalog_rows_subset_mvcc, insert_catalog_rows_subset_mvcc,
 };
 use crate::backend::catalog::pg_depend::{
     proc_depend_rows, relation_rule_depend_rows, sort_pg_depend_rows, trigger_depend_rows,
@@ -23,12 +23,12 @@ use crate::backend::catalog::rows::{
 use crate::backend::catalog::toasting::{ToastCatalogChanges, new_relation_create_toast_table};
 use crate::backend::executor::{ColumnDesc, RelationDesc};
 use crate::include::catalog::{
-    BootstrapCatalogKind, PG_AMPROC_RELATION_OID, PG_AMOP_RELATION_OID, PG_AM_RELATION_OID,
+    BootstrapCatalogKind, PG_AM_RELATION_OID, PG_AMOP_RELATION_OID, PG_AMPROC_RELATION_OID,
     PG_AUTHID_RELATION_OID, PG_CLASS_RELATION_OID, PG_NAMESPACE_RELATION_OID,
-    PG_OPERATOR_RELATION_OID, PG_OPCLASS_RELATION_OID, PG_OPFAMILY_RELATION_OID,
-    PG_PROC_RELATION_OID, PG_REWRITE_RELATION_OID, PG_TYPE_RELATION_OID, PgAmopRow,
-    PgAmprocRow, PgConstraintRow, PgDatabaseRow, PgDependRow, PgDescriptionRow, PgNamespaceRow,
-    PgOpclassRow, PgOpfamilyRow, PgProcRow, PgRewriteRow, PgStatisticRow, PgTablespaceRow,
+    PG_OPCLASS_RELATION_OID, PG_OPERATOR_RELATION_OID, PG_OPFAMILY_RELATION_OID,
+    PG_PROC_RELATION_OID, PG_REWRITE_RELATION_OID, PG_TYPE_RELATION_OID, PgAmopRow, PgAmprocRow,
+    PgConstraintRow, PgDatabaseRow, PgDependRow, PgDescriptionRow, PgNamespaceRow, PgOpclassRow,
+    PgOpfamilyRow, PgProcRow, PgRewriteRow, PgStatisticRow, PgTablespaceRow,
 };
 use crate::include::nodes::datum::Value;
 
@@ -94,7 +94,15 @@ impl CatalogStore {
         }
         catalog.next_oid = catalog.next_oid.max(row.oid.saturating_add(1));
         catalog.databases.push(row.clone());
-        self.persist_catalog_kinds(&catalog, &[BootstrapCatalogKind::PgDatabase])?;
+        self.persist_catalog_row_changes(
+            &catalog,
+            &PhysicalCatalogRows::default(),
+            &PhysicalCatalogRows {
+                databases: vec![row.clone()],
+                ..PhysicalCatalogRows::default()
+            },
+            &[BootstrapCatalogKind::PgDatabase],
+        )?;
         Ok(row)
     }
 
@@ -106,7 +114,15 @@ impl CatalogStore {
             .position(|row| row.datname.eq_ignore_ascii_case(name))
             .ok_or_else(|| CatalogError::UnknownTable(name.to_string()))?;
         let row = catalog.databases.remove(position);
-        self.persist_catalog_kinds(&catalog, &[BootstrapCatalogKind::PgDatabase])?;
+        self.persist_catalog_row_changes(
+            &catalog,
+            &PhysicalCatalogRows {
+                databases: vec![row.clone()],
+                ..PhysicalCatalogRows::default()
+            },
+            &PhysicalCatalogRows::default(),
+            &[BootstrapCatalogKind::PgDatabase],
+        )?;
         Ok(row)
     }
 
@@ -135,29 +151,30 @@ impl CatalogStore {
             .as_ref()
             .map(|changes| changes.new_parent.clone())
             .unwrap_or(entry);
-        let kinds = create_table_sync_kinds(&entry);
-        self.persist_control_state(&catalog)?;
-        if let crate::backend::catalog::store::CatalogStoreMode::Durable { base_dir, .. } =
-            &self.mode
-        {
-            append_catalog_entry_rows(base_dir, &catalog, &name, &entry, &kinds)?;
-            if let Some(toast) = toast {
-                append_catalog_entry_rows(
-                    base_dir,
-                    &catalog,
-                    &toast.toast_name,
-                    &toast.toast_entry,
-                    &create_table_sync_kinds(&toast.toast_entry),
-                )?;
-                append_catalog_entry_rows(
-                    base_dir,
-                    &catalog,
-                    &toast.index_name,
-                    &toast.index_entry,
-                    &create_index_sync_kinds(),
-                )?;
-            }
+        let mut kinds = create_table_sync_kinds(&entry);
+        let mut rows_to_insert = physical_catalog_rows_for_catalog_entry(&catalog, &name, &entry);
+        if let Some(toast) = &toast {
+            merge_catalog_kinds(&mut kinds, &create_table_sync_kinds(&toast.toast_entry));
+            merge_catalog_kinds(&mut kinds, &create_index_sync_kinds());
+            add_catalog_entry_rows(
+                &mut rows_to_insert,
+                &catalog,
+                &toast.toast_name,
+                &toast.toast_entry,
+            );
+            add_catalog_entry_rows(
+                &mut rows_to_insert,
+                &catalog,
+                &toast.index_name,
+                &toast.index_entry,
+            );
         }
+        self.persist_catalog_row_changes(
+            &catalog,
+            &PhysicalCatalogRows::default(),
+            &rows_to_insert,
+            &kinds,
+        )?;
         Ok(entry)
     }
 
@@ -196,12 +213,13 @@ impl CatalogStore {
             catalog.create_index(index_name.clone(), table_name, unique, columns)?
         };
         let kinds = create_index_sync_kinds();
-        self.persist_control_state(&catalog)?;
-        if let crate::backend::catalog::store::CatalogStoreMode::Durable { base_dir, .. } =
-            &self.mode
-        {
-            append_catalog_entry_rows(base_dir, &catalog, &index_name, &entry, &kinds)?;
-        }
+        let rows_to_insert = physical_catalog_rows_for_catalog_entry(&catalog, &index_name, &entry);
+        self.persist_catalog_row_changes(
+            &catalog,
+            &PhysicalCatalogRows::default(),
+            &rows_to_insert,
+            &kinds,
+        )?;
         Ok(entry)
     }
 
@@ -272,12 +290,13 @@ impl CatalogStore {
             )?
         };
         let kinds = create_index_sync_kinds();
-        self.persist_control_state(&catalog)?;
-        if let crate::backend::catalog::store::CatalogStoreMode::Durable { base_dir, .. } =
-            &self.mode
-        {
-            append_catalog_entry_rows(base_dir, &catalog, &index_name, &entry, &kinds)?;
-        }
+        let rows_to_insert = physical_catalog_rows_for_catalog_entry(&catalog, &index_name, &entry);
+        self.persist_catalog_row_changes(
+            &catalog,
+            &PhysicalCatalogRows::default(),
+            &rows_to_insert,
+            &kinds,
+        )?;
         Ok(entry)
     }
 
@@ -289,15 +308,8 @@ impl CatalogStore {
         if entry.relkind != 'r' {
             return Err(CatalogError::UnknownTable(name.to_string()));
         }
-        let oids = drop_relation_oids_by_oid(&catalog, entry.relation_oid)?;
-        let mut dropped = Vec::with_capacity(oids.len());
-        for oid in oids {
-            if let Some((_name, entry)) = catalog.remove_by_oid(oid) {
-                dropped.push(entry);
-            }
-        }
-        self.persist_catalog_kinds(&catalog, &drop_relation_sync_kinds())?;
-        Ok(dropped)
+        let relation_oid = entry.relation_oid;
+        self.drop_relation_entries(&mut catalog, relation_oid)
     }
 
     pub fn drop_relation_by_oid(
@@ -305,14 +317,94 @@ impl CatalogStore {
         relation_oid: u32,
     ) -> Result<Vec<CatalogEntry>, CatalogError> {
         let mut catalog = self.catalog_snapshot_with_control()?;
-        let oids = drop_relation_oids_by_oid(&catalog, relation_oid)?;
-        let mut dropped = Vec::with_capacity(oids.len());
-        for oid in oids {
-            if let Some((_name, entry)) = catalog.remove_by_oid(oid) {
-                dropped.push(entry);
-            }
+        self.drop_relation_entries(&mut catalog, relation_oid)
+    }
+
+    fn drop_relation_entries(
+        &mut self,
+        catalog: &mut Catalog,
+        relation_oid: u32,
+    ) -> Result<Vec<CatalogEntry>, CatalogError> {
+        let oids = drop_relation_oids_by_oid(catalog, relation_oid)?;
+        let dropped_entries = oids
+            .iter()
+            .copied()
+            .map(|oid| {
+                let name = catalog
+                    .relation_name_by_oid(oid)
+                    .ok_or_else(|| CatalogError::UnknownTable(oid.to_string()))?
+                    .to_string();
+                let entry = catalog
+                    .get_by_oid(oid)
+                    .cloned()
+                    .ok_or_else(|| CatalogError::UnknownTable(oid.to_string()))?;
+                Ok::<_, CatalogError>((name, entry))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let dropped_oids = dropped_entries
+            .iter()
+            .map(|(_, entry)| entry.relation_oid)
+            .collect::<BTreeSet<_>>();
+        let affected_parent_oids = dropped_entries
+            .iter()
+            .flat_map(|(_, entry)| catalog.inheritance_parents(entry.relation_oid))
+            .map(|row| row.inhparent)
+            .filter(|parent_oid| !dropped_oids.contains(parent_oid))
+            .collect::<BTreeSet<_>>();
+        let affected_parent_entries = affected_parent_oids
+            .iter()
+            .copied()
+            .map(|parent_oid| {
+                let name = catalog
+                    .relation_name_by_oid(parent_oid)
+                    .ok_or_else(|| CatalogError::UnknownTable(parent_oid.to_string()))?
+                    .to_string();
+                let entry = catalog
+                    .get_by_oid(parent_oid)
+                    .cloned()
+                    .ok_or_else(|| CatalogError::UnknownTable(parent_oid.to_string()))?;
+                Ok::<_, CatalogError>((name, entry))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut rows_to_delete = PhysicalCatalogRows::default();
+        for (name, entry) in &affected_parent_entries {
+            add_catalog_entry_rows(&mut rows_to_delete, catalog, name, entry);
         }
-        self.persist_catalog_kinds(&catalog, &drop_relation_sync_kinds())?;
+        for (name, entry) in &dropped_entries {
+            rows_to_delete
+                .inherits
+                .extend(catalog.inheritance_parents(entry.relation_oid));
+            let mut entry_rows = physical_catalog_rows_for_catalog_entry(catalog, name, entry);
+            entry_rows.inherits.clear();
+            extend_physical_catalog_rows(&mut rows_to_delete, entry_rows);
+        }
+
+        for (_, entry) in &dropped_entries {
+            let _ = catalog.detach_inheritance(entry.relation_oid);
+        }
+        let dropped = dropped_entries
+            .iter()
+            .map(|(_, entry)| entry.clone())
+            .collect::<Vec<_>>();
+        for (_, entry) in &dropped_entries {
+            let _ = catalog.remove_by_oid(entry.relation_oid);
+        }
+
+        let mut rows_to_insert = PhysicalCatalogRows::default();
+        for (name, _) in &affected_parent_entries {
+            let Some(entry) = catalog.get(name) else {
+                continue;
+            };
+            add_catalog_entry_rows(&mut rows_to_insert, catalog, name, entry);
+        }
+
+        self.persist_catalog_row_changes(
+            catalog,
+            &rows_to_delete,
+            &rows_to_insert,
+            &drop_relation_sync_kinds(),
+        )?;
         Ok(dropped)
     }
 

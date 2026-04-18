@@ -278,20 +278,6 @@ fn sync_cloned_local_catalogs(
     source_db_oid: u32,
     target_db_oid: u32,
 ) -> Result<(), ExecError> {
-    let source_catalog = if let Some(state) = db.cluster.open_databases.read().get(&source_db_oid) {
-        state
-            .catalog
-            .read()
-            .catalog_snapshot()
-            .map_err(map_catalog_error)?
-    } else {
-        crate::backend::catalog::CatalogStore::load_database(&db.cluster.base_dir, source_db_oid)
-            .and_then(|store| store.catalog_snapshot())
-            .map_err(map_catalog_error)?
-    };
-    let rows = crate::backend::catalog::rows::physical_catalog_rows_from_catcache(
-        &crate::backend::utils::cache::catcache::CatCache::from_catalog(&source_catalog),
-    );
     let kinds = crate::backend::catalog::bootstrap::bootstrap_catalog_kinds()
         .into_iter()
         .filter(|kind| {
@@ -301,6 +287,12 @@ fn sync_cloned_local_catalogs(
             )
         })
         .collect::<Vec<_>>();
+    let rows = crate::backend::catalog::loader::load_physical_catalog_rows_scoped(
+        &db.cluster.base_dir,
+        source_db_oid,
+        &kinds,
+    )
+    .map_err(map_catalog_error)?;
     crate::backend::catalog::persistence::sync_catalog_rows_subset(
         &db.cluster.base_dir,
         &rows,

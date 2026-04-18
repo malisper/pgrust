@@ -10,13 +10,13 @@ use crate::backend::access::heap::heapam::{
 };
 use crate::backend::access::transam::xact::{Snapshot, TransactionManager};
 use crate::backend::catalog::bootstrap::bootstrap_catalog_rel;
-use crate::backend::catalog::catalog::{Catalog, CatalogEntry, CatalogError};
+use crate::backend::catalog::catalog::CatalogError;
 use crate::backend::catalog::indexing::{
     maintain_catalog_indexes_for_insert_in_db, rebuild_system_catalog_indexes_for_db,
     vacuum_system_catalog_indexes_for_kinds_in_db,
 };
 use crate::backend::catalog::rowcodec::{catalog_row_values_for_kind, decode_catalog_tuple_values};
-use crate::backend::catalog::rows::{PhysicalCatalogRows, physical_catalog_rows_for_catalog_entry};
+use crate::backend::catalog::rows::PhysicalCatalogRows;
 use crate::backend::catalog::store::CatalogWriteContext;
 use crate::backend::executor::RelationDesc;
 use crate::backend::executor::value_io::tuple_from_values;
@@ -45,6 +45,8 @@ pub(crate) fn sync_catalog_rows_subset(
     db_oid: u32,
     kinds: &[BootstrapCatalogKind],
 ) -> Result<(), CatalogError> {
+    // Bootstrap/template-copy path only. Steady-state durable catalog writes
+    // should use row-level incremental maintenance instead of heap rewrites.
     let mut smgr = MdStorageManager::new(base_dir);
     for &kind in kinds {
         let rel = bootstrap_catalog_rel(kind, db_oid);
@@ -76,17 +78,6 @@ pub(crate) fn sync_catalog_rows_subset_in_pool(
         )?;
     }
     Ok(())
-}
-
-pub(crate) fn append_catalog_entry_rows(
-    base_dir: &Path,
-    catalog: &Catalog,
-    relation_name: &str,
-    entry: &CatalogEntry,
-    kinds: &[BootstrapCatalogKind],
-) -> Result<(), CatalogError> {
-    let rows = physical_catalog_rows_for_catalog_entry(catalog, relation_name, entry);
-    append_catalog_rows_subset_incremental(base_dir, &rows, entry.rel.db_oid, kinds)
 }
 
 pub(crate) fn insert_catalog_rows_subset_mvcc(
@@ -129,45 +120,14 @@ pub(crate) fn delete_catalog_rows_subset_mvcc(
     Ok(())
 }
 
-fn append_catalog_rows_subset(
+pub(crate) fn apply_catalog_row_changes_subset_incremental(
     base_dir: &Path,
-    rows: &PhysicalCatalogRows,
+    rows_to_delete: &PhysicalCatalogRows,
+    rows_to_insert: &PhysicalCatalogRows,
     db_oid: u32,
     kinds: &[BootstrapCatalogKind],
 ) -> Result<(), CatalogError> {
-    let mut smgr = MdStorageManager::new(base_dir);
-    for &kind in kinds {
-        let rel = bootstrap_catalog_rel(kind, db_oid);
-        smgr.open(rel)
-            .map_err(|e| CatalogError::Io(e.to_string()))?;
-        smgr.create(rel, ForkNumber::Main, true)
-            .map_err(|e| CatalogError::Io(e.to_string()))?;
-    }
-
-    let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 16);
-    for &kind in kinds {
-        insert_catalog_rows(
-            &pool,
-            bootstrap_catalog_rel(kind, db_oid),
-            &bootstrap_relation_desc(kind),
-            catalog_row_values_for_kind(rows, kind),
-        )?;
-    }
-    rebuild_system_catalog_indexes_for_db(base_dir, db_oid)?;
-    Ok(())
-}
-
-pub(crate) fn sync_catalog_rows_subset_incremental(
-    base_dir: &Path,
-    current_rows: &PhysicalCatalogRows,
-    target_rows: &PhysicalCatalogRows,
-    db_oid: u32,
-    kinds: &[BootstrapCatalogKind],
-) -> Result<(), CatalogError> {
-    let (rows_to_delete, rows_to_insert) =
-        diff_catalog_rows_subset(current_rows, target_rows, kinds);
-    if physical_catalog_rows_empty(&rows_to_delete) && physical_catalog_rows_empty(&rows_to_insert)
-    {
+    if physical_catalog_rows_empty(rows_to_delete) && physical_catalog_rows_empty(rows_to_insert) {
         return Ok(());
     }
 
@@ -196,8 +156,8 @@ pub(crate) fn sync_catalog_rows_subset_incremental(
 
     let mut committed = false;
     let result = (|| {
-        delete_catalog_rows_subset_mvcc(&ctx, &rows_to_delete, db_oid, kinds)?;
-        insert_catalog_rows_subset_mvcc(&ctx, &rows_to_insert, db_oid, kinds)?;
+        delete_catalog_rows_subset_mvcc(&ctx, rows_to_delete, db_oid, kinds)?;
+        insert_catalog_rows_subset_mvcc(&ctx, rows_to_insert, db_oid, kinds)?;
         txns.write()
             .commit(xid)
             .map_err(|e| CatalogError::Io(format!("catalog transaction commit failed: {e:?}")))?;
@@ -212,21 +172,6 @@ pub(crate) fn sync_catalog_rows_subset_incremental(
         let _ = txns.write().abort(xid);
     }
     result
-}
-
-fn append_catalog_rows_subset_incremental(
-    base_dir: &Path,
-    rows: &PhysicalCatalogRows,
-    db_oid: u32,
-    kinds: &[BootstrapCatalogKind],
-) -> Result<(), CatalogError> {
-    sync_catalog_rows_subset_incremental(
-        base_dir,
-        &PhysicalCatalogRows::default(),
-        rows,
-        db_oid,
-        kinds,
-    )
 }
 
 fn insert_catalog_rows(
@@ -347,80 +292,6 @@ fn find_catalog_tuple_tid(
         }
     }
     Ok(None)
-}
-
-fn diff_catalog_rows_subset(
-    current_rows: &PhysicalCatalogRows,
-    target_rows: &PhysicalCatalogRows,
-    kinds: &[BootstrapCatalogKind],
-) -> (PhysicalCatalogRows, PhysicalCatalogRows) {
-    let mut rows_to_delete = PhysicalCatalogRows::default();
-    let mut rows_to_insert = PhysicalCatalogRows::default();
-
-    macro_rules! diff_kind {
-        ($field:ident) => {{
-            let (deletes, inserts) =
-                diff_catalog_row_list(&current_rows.$field, &target_rows.$field);
-            rows_to_delete.$field = deletes;
-            rows_to_insert.$field = inserts;
-        }};
-    }
-
-    for &kind in kinds {
-        match kind {
-            BootstrapCatalogKind::PgNamespace => diff_kind!(namespaces),
-            BootstrapCatalogKind::PgClass => diff_kind!(classes),
-            BootstrapCatalogKind::PgAttribute => diff_kind!(attributes),
-            BootstrapCatalogKind::PgType => diff_kind!(types),
-            BootstrapCatalogKind::PgProc => diff_kind!(procs),
-            BootstrapCatalogKind::PgTsParser => diff_kind!(ts_parsers),
-            BootstrapCatalogKind::PgTsTemplate => diff_kind!(ts_templates),
-            BootstrapCatalogKind::PgTsDict => diff_kind!(ts_dicts),
-            BootstrapCatalogKind::PgTsConfig => diff_kind!(ts_configs),
-            BootstrapCatalogKind::PgTsConfigMap => diff_kind!(ts_config_maps),
-            BootstrapCatalogKind::PgLanguage => diff_kind!(languages),
-            BootstrapCatalogKind::PgOperator => diff_kind!(operators),
-            BootstrapCatalogKind::PgDatabase => diff_kind!(databases),
-            BootstrapCatalogKind::PgAuthId => diff_kind!(authids),
-            BootstrapCatalogKind::PgAuthMembers => diff_kind!(auth_members),
-            BootstrapCatalogKind::PgCollation => diff_kind!(collations),
-            BootstrapCatalogKind::PgLargeobjectMetadata => {}
-            BootstrapCatalogKind::PgTablespace => diff_kind!(tablespaces),
-            BootstrapCatalogKind::PgAm => diff_kind!(ams),
-            BootstrapCatalogKind::PgAmop => diff_kind!(amops),
-            BootstrapCatalogKind::PgAmproc => diff_kind!(amprocs),
-            BootstrapCatalogKind::PgAttrdef => diff_kind!(attrdefs),
-            BootstrapCatalogKind::PgCast => diff_kind!(casts),
-            BootstrapCatalogKind::PgConstraint => diff_kind!(constraints),
-            BootstrapCatalogKind::PgDepend => diff_kind!(depends),
-            BootstrapCatalogKind::PgDescription => diff_kind!(descriptions),
-            BootstrapCatalogKind::PgIndex => diff_kind!(indexes),
-            BootstrapCatalogKind::PgInherits => diff_kind!(inherits),
-            BootstrapCatalogKind::PgRewrite => diff_kind!(rewrites),
-            BootstrapCatalogKind::PgStatistic => diff_kind!(statistics),
-            BootstrapCatalogKind::PgTrigger => diff_kind!(triggers),
-            BootstrapCatalogKind::PgOpclass => diff_kind!(opclasses),
-            BootstrapCatalogKind::PgOpfamily => diff_kind!(opfamilies),
-        }
-    }
-
-    (rows_to_delete, rows_to_insert)
-}
-
-fn diff_catalog_row_list<T: Clone + PartialEq>(current: &[T], target: &[T]) -> (Vec<T>, Vec<T>) {
-    let mut remaining_target = target.to_vec();
-    let mut rows_to_delete = Vec::new();
-    for row in current {
-        if let Some(idx) = remaining_target
-            .iter()
-            .position(|candidate| candidate == row)
-        {
-            remaining_target.remove(idx);
-        } else {
-            rows_to_delete.push(row.clone());
-        }
-    }
-    (rows_to_delete, remaining_target)
 }
 
 fn physical_catalog_rows_empty(rows: &PhysicalCatalogRows) -> bool {

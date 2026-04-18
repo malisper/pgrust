@@ -620,6 +620,73 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn catalog_store_role_mutations_reuse_shared_auth_relfiles() {
+        let base = temp_dir("role_relfile_reuse");
+        let mut store = CatalogStore::load_shared(&base).unwrap();
+        let authid_path = segment_path(
+            &base,
+            bootstrap_catalog_rel(BootstrapCatalogKind::PgAuthId, 1),
+            ForkNumber::Main,
+            0,
+        );
+        let auth_members_path = segment_path(
+            &base,
+            bootstrap_catalog_rel(BootstrapCatalogKind::PgAuthMembers, 1),
+            ForkNumber::Main,
+            0,
+        );
+        let authid_before = fs::metadata(&authid_path).unwrap();
+        let auth_members_before = fs::metadata(&auth_members_path).unwrap();
+
+        let parent = store
+            .create_role(
+                "parent_role",
+                &crate::backend::catalog::roles::RoleAttributes::default(),
+            )
+            .unwrap();
+        let member = store
+            .create_role(
+                "member_role",
+                &crate::backend::catalog::roles::RoleAttributes::default(),
+            )
+            .unwrap();
+        store.rename_role("member_role", "member_owner").unwrap();
+        store
+            .grant_role_membership(
+                &crate::backend::catalog::role_memberships::NewRoleMembership {
+                    roleid: parent.oid,
+                    member: member.oid,
+                    grantor: BOOTSTRAP_SUPERUSER_OID,
+                    admin_option: false,
+                    inherit_option: true,
+                    set_option: true,
+                },
+            )
+            .unwrap();
+        store
+            .update_role_membership_options(
+                parent.oid,
+                member.oid,
+                BOOTSTRAP_SUPERUSER_OID,
+                true,
+                false,
+                false,
+            )
+            .unwrap();
+        store
+            .revoke_role_membership(parent.oid, member.oid, BOOTSTRAP_SUPERUSER_OID)
+            .unwrap();
+        store.drop_role("member_owner").unwrap();
+        store.drop_role("parent_role").unwrap();
+
+        let authid_after = fs::metadata(&authid_path).unwrap();
+        let auth_members_after = fs::metadata(&auth_members_path).unwrap();
+        assert_eq!(authid_before.ino(), authid_after.ino());
+        assert_eq!(auth_members_before.ino(), auth_members_after.ino());
+    }
+
     #[test]
     fn catalog_store_persists_role_memberships_and_option_updates() {
         let base = temp_dir("auth_membership_mutations");
@@ -671,6 +738,46 @@ mod tests {
                 && !row.inherit_option
                 && !row.set_option
         }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn catalog_store_database_row_mutations_reuse_shared_database_relfile() {
+        let base = temp_dir("database_relfile_reuse");
+        let mut store = CatalogStore::load_shared(&base).unwrap();
+        let database_path = segment_path(
+            &base,
+            bootstrap_catalog_rel(BootstrapCatalogKind::PgDatabase, 1),
+            ForkNumber::Main,
+            0,
+        );
+        let before = fs::metadata(&database_path).unwrap();
+
+        let created = store
+            .create_database_row(crate::include::catalog::PgDatabaseRow {
+                oid: 0,
+                datname: "tenant".into(),
+                datdba: BOOTSTRAP_SUPERUSER_OID,
+                encoding: 6,
+                datlocprovider: 'c',
+                dattablespace: DEFAULT_TABLESPACE_OID,
+                datistemplate: false,
+                datallowconn: true,
+                datconnlimit: -1,
+                datcollate: "C".into(),
+                datctype: "C".into(),
+                datlocale: None,
+                daticurules: None,
+                datcollversion: None,
+                datacl: None,
+            })
+            .unwrap();
+        assert_eq!(created.datname, "tenant");
+        let dropped = store.drop_database_row("tenant").unwrap();
+        assert_eq!(dropped.datname, "tenant");
+
+        let after = fs::metadata(&database_path).unwrap();
+        assert_eq!(before.ino(), after.ino());
     }
 
     #[test]
