@@ -395,9 +395,45 @@ impl Database {
                     create_stmt,
                     configured_search_path,
                 ),
-            Statement::Merge(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                "MERGE".into(),
-            ))),
+            Statement::Merge(ref merge_stmt) => {
+                let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+                let bound = crate::backend::parser::plan_merge(merge_stmt, &catalog)?;
+                let xid = self.txns.write().begin();
+                let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+                let snapshot = self.txns.read().snapshot_for_command(xid, 0)?;
+                let mut ctx = ExecutorContext {
+                    pool: std::sync::Arc::clone(&self.pool),
+                    txns: self.txns.clone(),
+                    txn_waiter: Some(self.txn_waiter.clone()),
+                    sequences: Some(self.sequences.clone()),
+                    checkpoint_stats: self.checkpoint_stats_snapshot(),
+                    datetime_config: datetime_config.clone(),
+                    interrupts: Arc::clone(&interrupts),
+                    stats: std::sync::Arc::clone(&self.stats),
+                    session_stats: self.session_stats_state(client_id),
+                    snapshot,
+                    client_id,
+                    next_command_id: 0,
+                    expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
+                    case_test_values: Vec::new(),
+                    system_bindings: Vec::new(),
+                    subplans: Vec::new(),
+                    timed: false,
+                    allow_side_effects: true,
+                    catalog: catalog.materialize_visible_catalog(),
+                    compiled_functions: std::collections::HashMap::new(),
+                    cte_tables: std::collections::HashMap::new(),
+                    cte_producers: std::collections::HashMap::new(),
+                    recursive_worktables: std::collections::HashMap::new(),
+                };
+                let result = crate::backend::commands::tablecmds::execute_merge(
+                    bound, &catalog, &mut ctx, xid, 0,
+                );
+                drop(ctx);
+                let result = self.finish_txn(client_id, xid, result, &[], &[], &[]);
+                guard.disarm();
+                result
+            }
             Statement::CommentOnTable(ref comment_stmt) => self
                 .execute_comment_on_table_stmt_with_search_path(
                     client_id,

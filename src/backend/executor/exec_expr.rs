@@ -84,8 +84,10 @@ use crate::include::catalog::builtin_scalar_function_for_proc_oid;
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue, NumericValue};
 use crate::include::nodes::primnodes::{
     BoolExpr, BoolExprType, FuncExpr, INDEX_VAR, INNER_VAR, OUTER_VAR, OpExpr, OpExprKind,
-    ScalarArrayOpExpr, ScalarFunctionImpl, SubLinkType, TABLE_OID_ATTR_NO, attrno_index,
+    SELF_ITEM_POINTER_ATTR_NO, ScalarArrayOpExpr, ScalarFunctionImpl, SubLinkType,
+    TABLE_OID_ATTR_NO, attrno_index,
 };
+use crate::pgrust::compact_string::CompactString;
 use crate::pl::plpgsql::execute_user_defined_scalar_function;
 
 mod arrays;
@@ -283,6 +285,22 @@ fn lookup_system_binding(
         .map(|binding| Value::Int64(i64::from(binding.table_oid)))
         .ok_or(ExecError::DetailedError {
             message: "tableoid is not available for this row".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        })
+}
+
+fn lookup_ctid(slot: &TupleSlot) -> Result<Value, ExecError> {
+    slot.tid()
+        .map(|tid| {
+            Value::Text(CompactString::from_owned(format!(
+                "({},{})",
+                tid.block_number, tid.offset_number
+            )))
+        })
+        .ok_or(ExecError::DetailedError {
+            message: "ctid is not available for this row".into(),
             detail: None,
             hint: None,
             sqlstate: "XX000",
@@ -886,6 +904,8 @@ pub fn eval_expr(
                 })
             } else if var.varattno == TABLE_OID_ATTR_NO {
                 lookup_system_binding(&ctx.system_bindings, var.varno)
+            } else if var.varattno == SELF_ITEM_POINTER_ATTR_NO {
+                lookup_ctid(slot)
             } else {
                 let index = attrno_index(var.varattno).ok_or_else(|| {
                     malformed_expr_error("system attribute outside executor support")
