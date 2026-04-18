@@ -27,6 +27,7 @@ mod node_hashjoin;
 mod nodes;
 mod pg_regex;
 mod srf;
+mod sqlfunc;
 mod startup;
 mod tsearch;
 pub(crate) mod value_io;
