@@ -300,3 +300,19 @@ CREATE TABLE stud_emp (
 );
 INSERT INTO stud_emp (name, age, location, salary, manager, gpa, percent) VALUES
   ('heidi', 22::int4, '(7,7)', 20000::int4, 'dave', 3.5::float8, 50::int4);
+
+--
+-- Refresh planner stats for bootstrap relations.
+-- :HACK: Use explicit relation targets until bare ANALYZE walks all
+-- visible relations in pgrust like PostgreSQL does.
+--
+ANALYZE onek;
+ANALYZE onek2;
+ANALYZE tenk1;
+ANALYZE tenk2;
+ANALYZE pgrust_index_tbl;
+ANALYZE pgrust_unique_tbl;
+ANALYZE person;
+ANALYZE emp;
+ANALYZE student;
+ANALYZE stud_emp;
