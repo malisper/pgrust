@@ -120,6 +120,7 @@ fn exec_error_hint(e: &ExecError) -> Option<&str> {
 fn exec_error_context(e: &ExecError) -> Option<&str> {
     match e {
         ExecError::JsonInput { context, .. } => context.as_deref(),
+        ExecError::Regex(err) => err.context.as_deref(),
         _ => None,
     }
 }
@@ -3719,6 +3720,41 @@ mod tests {
             .map(|row| row.oid)
             .unwrap();
         assert_eq!(state.session.current_user_oid(), tenant_oid);
+    }
+
+    #[test]
+    fn simple_query_substring_similar_error_includes_context_field() {
+        let db = Database::open(temp_dir("substring_similar_error_context"), 16).unwrap();
+        let mut state = ConnectionState {
+            session: Session::new(2),
+            prepared: HashMap::new(),
+            portals: HashMap::new(),
+            copy_in: None,
+        };
+        let mut output = Vec::new();
+
+        handle_query(
+            &mut output,
+            &db,
+            &mut state,
+            "select substring('abcdefg' similar 'a*#\"%#\"g*#\"x' escape '#')",
+        )
+        .unwrap();
+
+        assert!(
+            output
+                .windows(
+                    "MSQL regular expression may not contain more than two escape-double-quote separators\0"
+                        .len()
+                )
+                .any(|window| {
+                    window
+                        == b"MSQL regular expression may not contain more than two escape-double-quote separators\0"
+                })
+        );
+        assert!(output.windows("WSQL function \"substring\" statement 1\0".len()).any(
+            |window| window == b"WSQL function \"substring\" statement 1\0"
+        ));
     }
 
     #[test]
