@@ -82,6 +82,49 @@ pub(super) fn eval_to_number_function(values: &[Value]) -> Result<Value, ExecErr
     Ok(Value::Numeric(to_number_numeric(text, format)?))
 }
 
+fn render_integer_base(op: &'static str, value: &Value, base: u32) -> Result<Value, ExecError> {
+    let rendered = match value {
+        Value::Int32(v) => match base {
+            2 => format!("{:b}", *v as u32),
+            8 => format!("{:o}", *v as u32),
+            16 => format!("{:x}", *v as u32),
+            _ => unreachable!("unsupported base"),
+        },
+        Value::Int64(v) => match base {
+            2 => format!("{:b}", *v as u64),
+            8 => format!("{:o}", *v as u64),
+            16 => format!("{:x}", *v as u64),
+            _ => unreachable!("unsupported base"),
+        },
+        other => {
+            return Err(ExecError::TypeMismatch {
+                op,
+                left: other.clone(),
+                right: Value::Null,
+            });
+        }
+    };
+    Ok(Value::Text(rendered.into()))
+}
+
+pub(super) fn eval_to_bin_function(values: &[Value]) -> Result<Value, ExecError> {
+    values
+        .first()
+        .map_or(Ok(Value::Null), |value| render_integer_base("to_bin", value, 2))
+}
+
+pub(super) fn eval_to_oct_function(values: &[Value]) -> Result<Value, ExecError> {
+    values
+        .first()
+        .map_or(Ok(Value::Null), |value| render_integer_base("to_oct", value, 8))
+}
+
+pub(super) fn eval_to_hex_function(values: &[Value]) -> Result<Value, ExecError> {
+    values
+        .first()
+        .map_or(Ok(Value::Null), |value| render_integer_base("to_hex", value, 16))
+}
+
 fn value_output_text(value: &Value) -> Result<String, ExecError> {
     Ok(match value {
         Value::Null => String::new(),
