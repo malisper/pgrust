@@ -3,10 +3,11 @@ use crate::RelFileLocator;
 use crate::backend::access::heap::heapam::{heap_flush, heap_insert_mvcc, heap_update};
 use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
 use crate::backend::libpq::pqformat::format_exec_error;
-use crate::backend::parser::{Catalog, CatalogEntry, CatalogLookup};
+use crate::backend::parser::{Catalog, CatalogEntry, CatalogLookup, IndexColumnDef};
 use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, StorageManager};
 use crate::include::access::htup::TupleValue;
 use crate::include::access::htup::{AttributeDesc, HeapTuple};
+use crate::include::catalog::{CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE};
 use crate::include::nodes::datetime::DateADT;
 use crate::include::nodes::primnodes::{Var, user_attrno};
 use crate::pgrust::database::{Database, Session};
@@ -152,6 +153,54 @@ fn test_catalog_entry(rel: RelFileLocator, desc: RelationDesc) -> CatalogEntry {
 fn catalog() -> Catalog {
     let mut catalog = Catalog::default();
     catalog.insert("people", test_catalog_entry(rel(), relation_desc()));
+    catalog
+}
+
+fn add_ready_people_index(
+    catalog: &mut Catalog,
+    index_name: &str,
+    unique: bool,
+    primary: bool,
+    columns: &[IndexColumnDef],
+    constraint: Option<(char, &str)>,
+) {
+    let relation_oid = catalog.lookup_any_relation("people").unwrap().relation_oid;
+    let entry = catalog
+        .create_index_for_relation_with_flags(index_name, relation_oid, unique, primary, columns)
+        .unwrap();
+    catalog
+        .set_index_ready_valid(entry.relation_oid, true, true)
+        .unwrap();
+    if let Some((contype, conname)) = constraint {
+        catalog
+            .create_index_backed_constraint(relation_oid, entry.relation_oid, conname, contype, &[])
+            .unwrap();
+    }
+}
+
+fn catalog_with_people_primary_key() -> Catalog {
+    let mut catalog = catalog();
+    add_ready_people_index(
+        &mut catalog,
+        "people_pkey",
+        true,
+        true,
+        &[IndexColumnDef::from("id")],
+        Some((CONSTRAINT_PRIMARY, "people_pkey")),
+    );
+    catalog
+}
+
+fn catalog_with_people_note_unique_index() -> Catalog {
+    let mut catalog = catalog();
+    add_ready_people_index(
+        &mut catalog,
+        "people_note_key",
+        true,
+        false,
+        &[IndexColumnDef::from("note")],
+        Some((CONSTRAINT_UNIQUE, "people_note_key")),
+    );
     catalog
 }
 
@@ -1717,6 +1766,431 @@ fn insert_sql_inserts_multiple_rows() {
         other => panic!("expected query result, got {:?}", other),
     }
 }
+
+#[test]
+fn on_conflict_do_nothing_inserts_when_no_conflict() {
+    let base = temp_dir("upsert_insert_no_conflict");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let catalog = catalog_with_people_primary_key();
+    let xid = txns.begin();
+    assert_eq!(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            xid,
+            "insert into people (id, name, note) values (1, 'alice', 'alpha') on conflict (id) do nothing",
+            catalog.clone(),
+        )
+        .unwrap(),
+        StatementResult::AffectedRows(1)
+    );
+    txns.commit(xid).unwrap();
+}
+
+#[test]
+fn on_conflict_targeted_do_nothing_skips_duplicate() {
+    let base = temp_dir("upsert_targeted_do_nothing");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let catalog = catalog_with_people_primary_key();
+
+    let insert_xid = txns.begin();
+    run_sql_with_catalog(
+        &base,
+        &txns,
+        insert_xid,
+        "insert into people (id, name, note) values (1, 'alice', 'alpha')",
+        catalog.clone(),
+    )
+    .unwrap();
+    txns.commit(insert_xid).unwrap();
+
+    let upsert_xid = txns.begin();
+    assert_eq!(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            upsert_xid,
+            "insert into people (id, name, note) values (1, 'bob', 'beta') on conflict (id) do nothing",
+            catalog.clone(),
+        )
+        .unwrap(),
+        StatementResult::AffectedRows(0)
+    );
+    txns.commit(upsert_xid).unwrap();
+
+    assert_query_rows(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select id, name, note from people",
+            catalog,
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Int32(1),
+            Value::Text("alice".into()),
+            Value::Text("alpha".into()),
+        ]],
+    );
+}
+
+#[test]
+fn on_conflict_targetless_do_nothing_skips_duplicate() {
+    let base = temp_dir("upsert_targetless_do_nothing");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let catalog = catalog_with_people_primary_key();
+
+    let insert_xid = txns.begin();
+    run_sql_with_catalog(
+        &base,
+        &txns,
+        insert_xid,
+        "insert into people (id, name, note) values (1, 'alice', 'alpha')",
+        catalog.clone(),
+    )
+    .unwrap();
+    txns.commit(insert_xid).unwrap();
+
+    let upsert_xid = txns.begin();
+    assert_eq!(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            upsert_xid,
+            "insert into people (id, name, note) values (1, 'bob', 'beta') on conflict do nothing",
+            catalog,
+        )
+        .unwrap(),
+        StatementResult::AffectedRows(0)
+    );
+    txns.commit(upsert_xid).unwrap();
+}
+
+#[test]
+fn on_conflict_do_update_can_use_target_and_excluded_values() {
+    let base = temp_dir("upsert_do_update_target_and_excluded");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let catalog = catalog_with_people_primary_key();
+
+    let insert_xid = txns.begin();
+    run_sql_with_catalog(
+        &base,
+        &txns,
+        insert_xid,
+        "insert into people (id, name, note) values (1, 'alice', 'alpha')",
+        catalog.clone(),
+    )
+    .unwrap();
+    txns.commit(insert_xid).unwrap();
+
+    let upsert_xid = txns.begin();
+    assert_eq!(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            upsert_xid,
+            "insert into people (id, name, note) values (1, 'bob', 'beta') on conflict (id) do update set name = excluded.name, note = people.name",
+            catalog.clone(),
+        )
+        .unwrap(),
+        StatementResult::AffectedRows(1)
+    );
+    txns.commit(upsert_xid).unwrap();
+
+    assert_query_rows(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select name, note from people",
+            catalog,
+        )
+        .unwrap(),
+        vec![vec![Value::Text("bob".into()), Value::Text("alice".into())]],
+    );
+}
+
+#[test]
+fn on_conflict_do_update_where_false_skips_row() {
+    let base = temp_dir("upsert_do_update_where_false");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let catalog = catalog_with_people_primary_key();
+
+    let insert_xid = txns.begin();
+    run_sql_with_catalog(
+        &base,
+        &txns,
+        insert_xid,
+        "insert into people (id, name, note) values (1, 'alice', 'alpha')",
+        catalog.clone(),
+    )
+    .unwrap();
+    txns.commit(insert_xid).unwrap();
+
+    let upsert_xid = txns.begin();
+    assert_eq!(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            upsert_xid,
+            "insert into people (id, name, note) values (1, 'bob', 'beta') on conflict (id) do update set name = excluded.name where false",
+            catalog.clone(),
+        )
+        .unwrap(),
+        StatementResult::AffectedRows(0)
+    );
+    txns.commit(upsert_xid).unwrap();
+
+    assert_query_rows(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select name, note from people",
+            catalog,
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Text("alice".into()),
+            Value::Text("alpha".into()),
+        ]],
+    );
+}
+
+#[test]
+fn on_conflict_do_update_rejects_duplicate_input_rows() {
+    let base = temp_dir("upsert_duplicate_input_rows");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let catalog = catalog_with_people_primary_key();
+    let xid = txns.begin();
+    let err = run_sql_with_catalog(
+        &base,
+        &txns,
+        xid,
+        "insert into people (id, name) values (1, 'alice'), (1, 'bob') on conflict (id) do update set name = excluded.name",
+        catalog.clone(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::CardinalityViolation { message, hint }
+            if message == "ON CONFLICT DO UPDATE command cannot affect row a second time"
+                && hint.as_deref()
+                    == Some("Ensure that no rows proposed for insertion within the same command have duplicate constrained values.")
+    ));
+    txns.commit(xid).unwrap();
+
+    assert_query_rows(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select count(*) from people",
+            catalog,
+        )
+        .unwrap(),
+        vec![vec![Value::Int64(0)]],
+    );
+}
+
+#[test]
+fn on_conflict_do_update_duplicate_existing_conflicts_leave_row_unchanged() {
+    let base = temp_dir("upsert_duplicate_existing_conflicts");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let catalog = catalog_with_people_primary_key();
+
+    let seed_xid = txns.begin();
+    run_sql_with_catalog(
+        &base,
+        &txns,
+        seed_xid,
+        "insert into people (id, name, note) values (1, 'alice', 'alpha')",
+        catalog.clone(),
+    )
+    .unwrap();
+    txns.commit(seed_xid).unwrap();
+
+    let xid = txns.begin();
+    let err = run_sql_with_catalog(
+        &base,
+        &txns,
+        xid,
+        "insert into people (id, name) values (1, 'bob'), (1, 'carol') on conflict (id) do update set name = excluded.name",
+        catalog.clone(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::CardinalityViolation { message, .. }
+            if message == "ON CONFLICT DO UPDATE command cannot affect row a second time"
+    ));
+    txns.commit(xid).unwrap();
+
+    assert_query_rows(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select id, name, note from people",
+            catalog,
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Int32(1),
+            Value::Text("alice".into()),
+            Value::Text("alpha".into()),
+        ]],
+    );
+}
+
+#[test]
+fn on_conflict_do_update_where_false_allows_duplicate_existing_conflicts() {
+    let base = temp_dir("upsert_duplicate_where_false_existing_conflicts");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let catalog = catalog_with_people_primary_key();
+
+    let seed_xid = txns.begin();
+    run_sql_with_catalog(
+        &base,
+        &txns,
+        seed_xid,
+        "insert into people (id, name, note) values (1, 'alice', 'alpha')",
+        catalog.clone(),
+    )
+    .unwrap();
+    txns.commit(seed_xid).unwrap();
+
+    let xid = txns.begin();
+    assert_eq!(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            xid,
+            "insert into people (id, name) values (1, 'bob'), (1, 'carol') on conflict (id) do update set name = excluded.name where false",
+            catalog.clone(),
+        )
+        .unwrap(),
+        StatementResult::AffectedRows(0)
+    );
+    txns.commit(xid).unwrap();
+
+    assert_query_rows(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select id, name, note from people",
+            catalog,
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Int32(1),
+            Value::Text("alice".into()),
+            Value::Text("alpha".into()),
+        ]],
+    );
+}
+
+#[test]
+fn on_conflict_do_update_allows_duplicate_input_after_arbiter_key_changes() {
+    let base = temp_dir("upsert_duplicate_after_arbiter_key_change");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let catalog = catalog_with_people_note_unique_index();
+
+    let seed_xid = txns.begin();
+    run_sql_with_catalog(
+        &base,
+        &txns,
+        seed_xid,
+        "insert into people (id, name, note) values (1, 'seed', 'key')",
+        catalog.clone(),
+    )
+    .unwrap();
+    txns.commit(seed_xid).unwrap();
+
+    let xid = txns.begin();
+    assert_eq!(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            xid,
+            "insert into people (id, name, note) values (2, 'newkey1', 'key'), (3, 'newkey2', 'key') on conflict (note) do update set name = excluded.name, note = excluded.name",
+            catalog.clone(),
+        )
+        .unwrap(),
+        StatementResult::AffectedRows(2)
+    );
+    txns.commit(xid).unwrap();
+
+    assert_query_rows(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select id, name, note from people order by id",
+            catalog,
+        )
+        .unwrap(),
+        vec![
+            vec![
+                Value::Int32(1),
+                Value::Text("newkey1".into()),
+                Value::Text("newkey1".into()),
+            ],
+            vec![
+                Value::Int32(3),
+                Value::Text("newkey2".into()),
+                Value::Text("key".into()),
+            ],
+        ],
+    );
+}
+
+#[test]
+fn on_conflict_null_arbiter_keys_do_not_conflict() {
+    let base = temp_dir("upsert_null_arbiter_keys");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let catalog = catalog_with_people_note_unique_index();
+
+    let first_xid = txns.begin();
+    run_sql_with_catalog(
+        &base,
+        &txns,
+        first_xid,
+        "insert into people (id, name, note) values (1, 'alice', null)",
+        catalog.clone(),
+    )
+    .unwrap();
+    txns.commit(first_xid).unwrap();
+
+    let second_xid = txns.begin();
+    assert_eq!(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            second_xid,
+            "insert into people (id, name, note) values (2, 'bob', null) on conflict (note) do nothing",
+            catalog.clone(),
+        )
+        .unwrap(),
+        StatementResult::AffectedRows(1)
+    );
+    txns.commit(second_xid).unwrap();
+
+    assert_query_rows(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select count(*) from people",
+            catalog,
+        )
+        .unwrap(),
+        vec![vec![Value::Int64(2)]],
+    );
+}
+
 #[test]
 fn update_sql_updates_matching_rows() {
     let base = temp_dir("update_sql");
@@ -5079,12 +5553,12 @@ fn pg_rust_test_enc_conversion_validates_utf8_prefixes() {
     .unwrap();
     assert_query_rows(
         result,
-        vec![vec![Value::Record(crate::include::nodes::datum::RecordValue::anonymous(
-            vec![
+        vec![vec![Value::Record(
+            crate::include::nodes::datum::RecordValue::anonymous(vec![
                 ("validlen".into(), Value::Int32(1)),
                 ("result".into(), Value::Bytea(vec![0x66])),
-            ],
-        ))]],
+            ]),
+        )]],
     );
 }
 
@@ -5101,12 +5575,12 @@ fn pg_rust_test_enc_conversion_converts_euc_kr_to_utf8() {
     .unwrap();
     assert_query_rows(
         result,
-        vec![vec![Value::Record(crate::include::nodes::datum::RecordValue::anonymous(
-            vec![
+        vec![vec![Value::Record(
+            crate::include::nodes::datum::RecordValue::anonymous(vec![
                 ("validlen".into(), Value::Int32(4)),
                 ("result".into(), Value::Bytea("수학".as_bytes().to_vec())),
-            ],
-        ))]],
+            ]),
+        )]],
     );
 }
 
@@ -10203,7 +10677,6 @@ fn jsonb_object_keys_and_object_agg_reject_invalid_keys() {
         ExecError::DetailedError { message, sqlstate, .. }
             if message == "field name must not be null" && sqlstate == "22004"
     ));
-
 }
 
 #[test]
@@ -11249,8 +11722,7 @@ fn jsonpath_recursive_descent_includes_current_item_at_depth_zero() {
                             .unwrap()
                     )],
                     vec![Value::Jsonb(
-                        crate::backend::executor::jsonb::parse_jsonb_text("{\"b\":1}")
-                            .unwrap()
+                        crate::backend::executor::jsonb::parse_jsonb_text("{\"b\":1}").unwrap()
                     )],
                     vec![Value::Jsonb(
                         crate::backend::executor::jsonb::parse_jsonb_text("1").unwrap()
@@ -11273,8 +11745,7 @@ fn jsonpath_recursive_descent_includes_current_item_at_depth_zero() {
             assert_eq!(
                 rows,
                 vec![vec![Value::Jsonb(
-                    crate::backend::executor::jsonb::parse_jsonb_text("{\"a\":{\"b\":1}}")
-                        .unwrap()
+                    crate::backend::executor::jsonb::parse_jsonb_text("{\"a\":{\"b\":1}}").unwrap()
                 )]]
             );
         }
@@ -11298,8 +11769,7 @@ fn jsonpath_recursive_descent_includes_current_item_at_depth_zero() {
                             .unwrap()
                     )],
                     vec![Value::Jsonb(
-                        crate::backend::executor::jsonb::parse_jsonb_text("{\"b\":1}")
-                            .unwrap()
+                        crate::backend::executor::jsonb::parse_jsonb_text("{\"b\":1}").unwrap()
                     )],
                     vec![Value::Jsonb(
                         crate::backend::executor::jsonb::parse_jsonb_text("1").unwrap()
@@ -14029,7 +14499,8 @@ fn trunc_and_round_large_negative_scale_short_circuit_to_zero() {
 fn large_object_metadata_tracks_create_and_unlink() {
     let base = temp_dir("large_object_metadata_tracks_create_and_unlink");
     let txns = TransactionManager::new_durable(&base).unwrap();
-    let large_objects = std::sync::Arc::new(crate::pgrust::database::LargeObjectRuntime::new_ephemeral());
+    let large_objects =
+        std::sync::Arc::new(crate::pgrust::database::LargeObjectRuntime::new_ephemeral());
     let run_large_object_sql = |sql: &str| -> Result<StatementResult, ExecError> {
         let mut catalog = catalog();
         crate::backend::catalog::store::sync_catalog_heaps_for_tests(&base, &catalog).unwrap();
@@ -14098,9 +14569,7 @@ fn large_object_metadata_tracks_create_and_unlink() {
                 rows,
                 vec![vec![
                     Value::Int64(1001),
-                    Value::Int64(i64::from(
-                        crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
-                    )),
+                    Value::Int64(i64::from(crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,)),
                     Value::Null,
                 ]]
             );
@@ -14115,9 +14584,7 @@ fn large_object_metadata_tracks_create_and_unlink() {
         other => panic!("expected query result, got {:?}", other),
     }
 
-    match run_large_object_sql("select oid from pg_largeobject_metadata")
-    .unwrap()
-    {
+    match run_large_object_sql("select oid from pg_largeobject_metadata").unwrap() {
         StatementResult::Query { rows, .. } => {
             assert!(rows.is_empty());
         }

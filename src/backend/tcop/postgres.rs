@@ -95,7 +95,7 @@ fn exec_error_sqlstate(e: &ExecError) -> &'static str {
         ExecError::DivisionByZero(_) => "22012",
         ExecError::GenerateSeriesInvalidArg(_, _) => "22023",
         ExecError::StringDataRightTruncation { .. } => "22001",
-        ExecError::CardinalityViolation(_) => "21000",
+        ExecError::CardinalityViolation { .. } => "21000",
         ExecError::Parse(_) => "42601",
         _ => "XX000",
     }

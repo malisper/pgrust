@@ -48,6 +48,7 @@ pub(crate) fn format_exec_error(e: &ExecError) -> String {
         ExecError::DetailedError { message, .. } => message.clone(),
         ExecError::RaiseException(message) => message.clone(),
         ExecError::InvalidRegex(message) => message.clone(),
+        ExecError::CardinalityViolation { message, .. } => message.clone(),
         ExecError::UniqueViolation { constraint } => {
             format!("duplicate key value violates unique constraint \"{constraint}\"")
         }
@@ -157,6 +158,7 @@ pub(crate) fn format_exec_error_hint(e: &ExecError) -> Option<String> {
             Some("For a single \"%\" use \"%%\".".into())
         }
         ExecError::DetailedError { hint, .. } => hint.clone(),
+        ExecError::CardinalityViolation { hint, .. } => hint.clone(),
         _ => None,
     }
 }
@@ -1495,9 +1497,10 @@ fn trim_fractional_zeros(text: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        FloatFormatOptions, format_bytea_text, format_float4_text, format_float8_text,
-        send_error_with_fields,
+        FloatFormatOptions, format_bytea_text, format_exec_error, format_exec_error_hint,
+        format_float4_text, format_float8_text, send_error_with_fields,
     };
+    use crate::backend::executor::ExecError;
     use crate::pgrust::session::ByteaOutputFormat;
 
     #[test]
@@ -1659,6 +1662,26 @@ mod tests {
         assert!(
             out.windows("WJSON data, line 1: {\"a\":true\0".len())
                 .any(|window| { window == b"WJSON data, line 1: {\"a\":true\0" })
+        );
+    }
+
+    #[test]
+    fn format_exec_error_renders_cardinality_violation_message() {
+        let err = ExecError::CardinalityViolation {
+            message: "ON CONFLICT DO UPDATE command cannot affect row a second time".into(),
+            hint: Some(
+                "Ensure that no rows proposed for insertion within the same command have duplicate constrained values.".into(),
+            ),
+        };
+        assert_eq!(
+            format_exec_error(&err),
+            "ON CONFLICT DO UPDATE command cannot affect row a second time"
+        );
+        assert_eq!(
+            format_exec_error_hint(&err).as_deref(),
+            Some(
+                "Ensure that no rows proposed for insertion within the same command have duplicate constrained values."
+            )
         );
     }
 }
