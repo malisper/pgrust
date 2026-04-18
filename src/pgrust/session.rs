@@ -807,6 +807,34 @@ impl Session {
                     Ok(StatementResult::AffectedRows(0))
                 }
             }
+            Statement::SetRole(ref set_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    self.auth = db.execute_set_role_stmt(self.client_id, set_stmt)?;
+                    Ok(StatementResult::AffectedRows(0))
+                }
+            }
+            Statement::ResetRole(ref reset_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    self.auth = db.execute_reset_role_stmt(self.client_id, reset_stmt)?;
+                    Ok(StatementResult::AffectedRows(0))
+                }
+            }
             Statement::AlterTableSet(_) => Ok(StatementResult::AffectedRows(0)),
             Statement::CommentOnTable(ref comment_stmt) => {
                 if self.active_txn.is_some() {
@@ -1605,6 +1633,14 @@ impl Session {
                 self.auth = db.execute_reset_session_authorization_stmt(client_id, reset_stmt)?;
                 Ok(StatementResult::AffectedRows(0))
             }
+            Statement::SetRole(ref set_stmt) => {
+                self.auth = db.execute_set_role_stmt(client_id, set_stmt)?;
+                Ok(StatementResult::AffectedRows(0))
+            }
+            Statement::ResetRole(ref reset_stmt) => {
+                self.auth = db.execute_reset_role_stmt(client_id, reset_stmt)?;
+                Ok(StatementResult::AffectedRows(0))
+            }
             Statement::Unsupported(ref unsupported_stmt) => {
                 Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
                     "{}: {}",
@@ -2153,10 +2189,7 @@ impl Session {
             ),
             _ => (
                 stmt.name.clone(),
-                self.gucs
-                    .get(&name)
-                    .cloned()
-                    .unwrap_or_else(fallback_value),
+                self.gucs.get(&name).cloned().unwrap_or_else(fallback_value),
             ),
         };
 

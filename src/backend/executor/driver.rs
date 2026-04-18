@@ -142,6 +142,8 @@ fn execute_statement_with_source(
         | Statement::Checkpoint(_)
         | Statement::Set(_)
         | Statement::Reset(_)
+        | Statement::SetRole(_)
+        | Statement::ResetRole(_)
         // :HACK: ALTER TABLE ... SET (...) is accepted narrowly for numeric.sql and ignored
         // until table reloptions are modeled for real.
         | Statement::AlterTableSet(_) => Ok(StatementResult::AffectedRows(0)),
