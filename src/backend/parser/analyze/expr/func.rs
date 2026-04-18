@@ -817,9 +817,12 @@ pub(super) fn bind_scalar_function_call(
             let same_bit_kind = is_bit_string_type(value_type) && is_bit_string_type(place_type);
             let same_bytea_kind =
                 value_type.kind == SqlTypeKind::Bytea && place_type.kind == SqlTypeKind::Bytea;
-            if (!same_bit_kind && !same_bytea_kind) || !is_integer_family(start_type) {
+            let same_text_kind = is_text_like_type(value_type) && is_text_like_type(place_type);
+            if (!same_bit_kind && !same_bytea_kind && !same_text_kind)
+                || !is_integer_family(start_type)
+            {
                 return Err(ParseError::UnexpectedToken {
-                    expected: "overlay(bit, bit, int4[, int4]) or overlay(bytea, bytea, int4[, int4])",
+                    expected: "overlay(text, text, int4[, int4]), overlay(bit, bit, int4[, int4]) or overlay(bytea, bytea, int4[, int4])",
                     actual: format!(
                         "{func:?}({}, {}, {})",
                         sql_type_name(value_type),
@@ -832,6 +835,24 @@ pub(super) fn bind_scalar_function_call(
                 vec![
                     bound_args[0].clone(),
                     bound_args[1].clone(),
+                    coerce_bound_expr(
+                        bound_args[2].clone(),
+                        start_type,
+                        SqlType::new(SqlTypeKind::Int4),
+                    ),
+                ]
+            } else if same_text_kind {
+                vec![
+                    coerce_bound_expr(
+                        bound_args[0].clone(),
+                        raw_value_type,
+                        SqlType::new(SqlTypeKind::Text),
+                    ),
+                    coerce_bound_expr(
+                        bound_args[1].clone(),
+                        raw_place_type,
+                        SqlType::new(SqlTypeKind::Text),
+                    ),
                     coerce_bound_expr(
                         bound_args[2].clone(),
                         start_type,
