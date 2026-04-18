@@ -10,6 +10,7 @@ mod functions;
 mod geometry;
 mod infer;
 mod modify;
+mod on_conflict;
 mod paths;
 mod query;
 mod ranges;
@@ -52,6 +53,7 @@ use agg_output::*;
 pub use coerce::is_binary_coercible_type;
 use coerce::*;
 pub(crate) use constraints::*;
+pub(crate) use constraints::{BoundReferencedByForeignKey, BoundRelationConstraints};
 pub use create_table::*;
 pub use create_table_inherits::*;
 use expr::*;
@@ -63,6 +65,7 @@ pub use modify::{
     BoundDeleteTarget, BoundInsertSource, BoundInsertStatement, BoundUpdateStatement,
     BoundUpdateTarget, PreparedInsert, bind_delete, bind_insert, bind_insert_prepared, bind_update,
 };
+pub use on_conflict::{BoundOnConflictAction, BoundOnConflictClause};
 pub use paths::BoundModifyRowSource;
 use paths::bind_order_by_items;
 pub(crate) use query::analyze_select_query_with_outer;

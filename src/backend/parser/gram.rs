@@ -3780,6 +3780,7 @@ fn build_insert(pair: Pair<'_, Rule>) -> Result<InsertStatement, ParseError> {
     let mut table_name = None;
     let mut columns = None;
     let mut source = None;
+    let mut on_conflict = None;
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::cte_clause => {
@@ -3799,6 +3800,7 @@ fn build_insert(pair: Pair<'_, Rule>) -> Result<InsertStatement, ParseError> {
             }
             Rule::insert_default_values_source => source = Some(InsertSource::DefaultValues),
             Rule::select_stmt => source = Some(InsertSource::Select(Box::new(build_select(part)?))),
+            Rule::on_conflict_clause => on_conflict = Some(build_on_conflict_clause(part)?),
             _ => {}
         }
     }
@@ -3808,6 +3810,7 @@ fn build_insert(pair: Pair<'_, Rule>) -> Result<InsertStatement, ParseError> {
         table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
         columns,
         source: source.ok_or(ParseError::UnexpectedEof)?,
+        on_conflict,
     })
 }
 
@@ -3971,6 +3974,101 @@ fn build_merge_action(pair: Pair<'_, Rule>) -> Result<MergeAction, ParseError> {
         _ => Err(ParseError::UnexpectedToken {
             expected: "merge action",
             actual: pair.as_str().to_string(),
+        }),
+    }
+}
+
+fn build_on_conflict_clause(pair: Pair<'_, Rule>) -> Result<OnConflictClause, ParseError> {
+    let mut target = None;
+    let mut action = None;
+    let mut assignments = Vec::new();
+    let mut where_clause = None;
+    fn apply_on_conflict_part(
+        part: Pair<'_, Rule>,
+        target: &mut Option<OnConflictTarget>,
+        action: &mut Option<OnConflictAction>,
+        assignments: &mut Vec<Assignment>,
+        where_clause: &mut Option<SqlExpr>,
+    ) -> Result<(), ParseError> {
+        match part.as_rule() {
+            Rule::on_conflict_do_nothing => {
+                *action = Some(OnConflictAction::Nothing);
+                for nested in part.into_inner() {
+                    apply_on_conflict_part(
+                        nested,
+                        target,
+                        action,
+                        assignments,
+                        where_clause,
+                    )?;
+                }
+            }
+            Rule::on_conflict_do_update => {
+                *action = Some(OnConflictAction::Update);
+                for nested in part.into_inner() {
+                    apply_on_conflict_part(
+                        nested,
+                        target,
+                        action,
+                        assignments,
+                        where_clause,
+                    )?;
+                }
+            }
+            Rule::on_conflict_target => *target = Some(build_on_conflict_target(part)?),
+            Rule::assignment => assignments.push(build_assignment(part)?),
+            Rule::expr => *where_clause = Some(build_expr(part)?),
+            _ => {}
+        }
+        Ok(())
+    }
+    for part in pair.into_inner() {
+        apply_on_conflict_part(
+            part,
+            &mut target,
+            &mut action,
+            &mut assignments,
+            &mut where_clause,
+        )?;
+    }
+    let action = action.ok_or(ParseError::UnexpectedEof)?;
+    Ok(OnConflictClause {
+        target,
+        action,
+        assignments: if matches!(action, OnConflictAction::Nothing) {
+            Vec::new()
+        } else {
+            assignments
+        },
+        where_clause: if matches!(action, OnConflictAction::Nothing) {
+            None
+        } else {
+            where_clause
+        },
+    })
+}
+
+fn build_on_conflict_target(pair: Pair<'_, Rule>) -> Result<OnConflictTarget, ParseError> {
+    let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+    match inner.as_rule() {
+        Rule::on_conflict_constraint_target => Ok(OnConflictTarget::Constraint(
+            inner
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::identifier)
+                .map(build_identifier)
+                .ok_or(ParseError::UnexpectedEof)?,
+        )),
+        Rule::on_conflict_column_target => Ok(OnConflictTarget::Columns(
+            inner.into_inner()
+                .find(|part| part.as_rule() == Rule::ident_list)
+                .ok_or(ParseError::UnexpectedEof)?
+                .into_inner()
+                .map(build_identifier)
+                .collect(),
+        )),
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "ON CONFLICT target",
+            actual: inner.as_str().to_string(),
         }),
     }
 }

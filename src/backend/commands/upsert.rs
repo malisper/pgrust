@@ -1,0 +1,279 @@
+use std::collections::HashSet;
+use std::rc::Rc;
+
+use crate::backend::access::index::unique::{UniqueProbeConflict, probe_unique_conflict};
+use crate::backend::access::transam::xact::{CommandId, TransactionId};
+use crate::backend::executor::{ExecError, ExecutorContext, Expr, Value, eval_expr};
+use crate::backend::parser::{
+    BoundAssignmentTarget, BoundIndexRelation, BoundInsertStatement, BoundOnConflictAction,
+    BoundOnConflictClause,
+};
+use crate::include::access::htup::HeapTuple;
+use crate::include::access::itemptr::ItemPointerData;
+use crate::include::nodes::execnodes::TupleSlot;
+
+use super::tablecmds::{
+    WriteUpdatedRowResult, apply_assignment_target, build_index_insert_context,
+    insert_index_entry_for_row, index_key_values_for_row, rollback_inserted_row,
+    slot_toast_context, write_insert_heap_row, write_updated_row,
+};
+
+enum ConflictActionResult {
+    Updated,
+    Skipped,
+    Retry,
+}
+
+struct ArbiterConflict {
+    tid: ItemPointerData,
+    tuple: HeapTuple,
+}
+
+fn eval_bool_qual(
+    expr: &Expr,
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<bool, ExecError> {
+    match eval_expr(expr, slot, ctx)? {
+        Value::Bool(true) => Ok(true),
+        Value::Bool(false) | Value::Null => Ok(false),
+        other => Err(ExecError::NonBoolQual(other)),
+    }
+}
+
+fn with_conflict_bindings<T, F>(
+    current_values: &[Value],
+    excluded_values: &[Value],
+    ctx: &mut ExecutorContext,
+    f: F,
+) -> Result<T, ExecError>
+where
+    F: FnOnce(&mut ExecutorContext) -> Result<T, ExecError>,
+{
+    let saved_outer_tuple = ctx.expr_bindings.outer_tuple.replace(current_values.to_vec());
+    let saved_outer_system_bindings = std::mem::take(&mut ctx.expr_bindings.outer_system_bindings);
+    let saved_inner_tuple = ctx.expr_bindings.inner_tuple.replace(excluded_values.to_vec());
+    let saved_inner_system_bindings = std::mem::take(&mut ctx.expr_bindings.inner_system_bindings);
+    let result = f(ctx);
+    ctx.expr_bindings.outer_tuple = saved_outer_tuple;
+    ctx.expr_bindings.outer_system_bindings = saved_outer_system_bindings;
+    ctx.expr_bindings.inner_tuple = saved_inner_tuple;
+    ctx.expr_bindings.inner_system_bindings = saved_inner_system_bindings;
+    result
+}
+
+fn decode_tuple_values(
+    stmt: &BoundInsertStatement,
+    desc: &Rc<crate::backend::executor::RelationDesc>,
+    attr_descs: &Rc<[crate::include::access::htup::AttributeDesc]>,
+    tid: ItemPointerData,
+    tuple: HeapTuple,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<Value>, ExecError> {
+    let mut slot = TupleSlot::from_heap_tuple(Rc::clone(desc), Rc::clone(attr_descs), tid, tuple);
+    slot.toast = slot_toast_context(stmt.toast, ctx);
+    slot.into_values()
+}
+
+fn probe_arbiter_conflict(
+    stmt: &BoundInsertStatement,
+    arbiter_indexes: &[&BoundIndexRelation],
+    values: &[Value],
+    ctx: &mut ExecutorContext,
+) -> Result<Option<ArbiterConflict>, ExecError> {
+    for index in arbiter_indexes {
+        let key_values = index_key_values_for_row(index, &stmt.desc, values, ctx)?;
+        let insert_ctx = build_index_insert_context(
+            stmt.rel,
+            &stmt.desc,
+            index,
+            key_values,
+            ItemPointerData::default(),
+            ctx,
+        );
+        if let Some(UniqueProbeConflict { tid, tuple }) =
+            probe_unique_conflict(&insert_ctx, &insert_ctx.values)?
+        {
+            return Ok(Some(ArbiterConflict { tid, tuple }));
+        }
+    }
+    Ok(None)
+}
+
+fn run_conflict_update(
+    stmt: &BoundInsertStatement,
+    assignments: &[crate::backend::parser::BoundAssignment],
+    predicate: Option<&Expr>,
+    excluded_values: &[Value],
+    conflict_tid: ItemPointerData,
+    conflict_tuple: HeapTuple,
+    desc: &Rc<crate::backend::executor::RelationDesc>,
+    attr_descs: &Rc<[crate::include::access::htup::AttributeDesc]>,
+    ctx: &mut ExecutorContext,
+    xid: TransactionId,
+    cid: CommandId,
+) -> Result<ConflictActionResult, ExecError> {
+    if conflict_tuple.header.xmin == xid && conflict_tuple.header.cid_or_xvac == cid {
+        return Err(ExecError::CardinalityViolation(
+            "ON CONFLICT DO UPDATE command cannot affect row a second time".into(),
+        ));
+    }
+
+    let current_old_values =
+        decode_tuple_values(stmt, desc, attr_descs, conflict_tid, conflict_tuple, ctx)?;
+    let mut eval_slot = TupleSlot::virtual_row(current_old_values.clone());
+    let mut new_values = current_old_values.clone();
+
+    let eval_result = with_conflict_bindings(&current_old_values, excluded_values, ctx, |ctx| {
+        if let Some(predicate) = predicate {
+            if !eval_bool_qual(predicate, &mut eval_slot, ctx)? {
+                return Ok(ConflictActionResult::Skipped);
+            }
+        }
+        for assignment in assignments {
+            let value = eval_expr(&assignment.expr, &mut eval_slot, ctx)?;
+            apply_assignment_target(
+                &stmt.desc,
+                &mut new_values,
+                &BoundAssignmentTarget {
+                    column_index: assignment.column_index,
+                    subscripts: assignment.subscripts.clone(),
+                },
+                value,
+                &mut eval_slot,
+                ctx,
+            )?;
+        }
+        Ok(ConflictActionResult::Updated)
+    })?;
+    if matches!(eval_result, ConflictActionResult::Skipped) {
+        return Ok(ConflictActionResult::Skipped);
+    }
+
+    match write_updated_row(
+        &stmt.relation_name,
+        stmt.rel,
+        stmt.toast,
+        stmt.toast_index.as_ref(),
+        &stmt.desc,
+        &stmt.relation_constraints,
+        &stmt.referenced_by_foreign_keys,
+        &stmt.indexes,
+        conflict_tid,
+        &current_old_values,
+        &new_values,
+        ctx,
+        xid,
+        cid,
+        None,
+    )? {
+        WriteUpdatedRowResult::Updated(_new_tid) => Ok(ConflictActionResult::Updated),
+        WriteUpdatedRowResult::TupleUpdated(_new_tid) => Ok(ConflictActionResult::Retry),
+        WriteUpdatedRowResult::AlreadyModified => Ok(ConflictActionResult::Retry),
+    }
+}
+
+pub(crate) fn execute_insert_on_conflict_rows(
+    stmt: &BoundInsertStatement,
+    on_conflict: &BoundOnConflictClause,
+    rows: &[Vec<Value>],
+    ctx: &mut ExecutorContext,
+    xid: TransactionId,
+    cid: CommandId,
+) -> Result<usize, ExecError> {
+    let desc = Rc::new(stmt.desc.clone());
+    let attr_descs: Rc<[_]> = desc.attribute_descs().into();
+    let arbiter_index_oids = on_conflict
+        .arbiter_indexes
+        .iter()
+        .map(|index| index.relation_oid)
+        .collect::<HashSet<_>>();
+    let arbiter_indexes = on_conflict
+        .arbiter_indexes
+        .iter()
+        .filter(|index| index.index_meta.indisvalid && index.index_meta.indisready)
+        .collect::<Vec<_>>();
+    let non_arbiter_indexes = stmt
+        .indexes
+        .iter()
+        .filter(|index| {
+            index.index_meta.indisvalid
+                && index.index_meta.indisready
+                && !arbiter_index_oids.contains(&index.relation_oid)
+        })
+        .collect::<Vec<_>>();
+    let mut affected_rows = 0usize;
+
+    for values in rows {
+        loop {
+            ctx.check_for_interrupts()?;
+            if let Some(conflict) = probe_arbiter_conflict(stmt, &arbiter_indexes, values, ctx)? {
+                match &on_conflict.action {
+                    BoundOnConflictAction::Nothing => break,
+                    BoundOnConflictAction::Update {
+                        assignments,
+                        predicate,
+                    } => match run_conflict_update(
+                        stmt,
+                        assignments,
+                        predicate.as_ref(),
+                        values,
+                        conflict.tid,
+                        conflict.tuple,
+                        &desc,
+                        &attr_descs,
+                        ctx,
+                        xid,
+                        cid,
+                    )? {
+                        ConflictActionResult::Updated => {
+                            affected_rows += 1;
+                            break;
+                        }
+                        ConflictActionResult::Skipped => break,
+                        ConflictActionResult::Retry => continue,
+                    },
+                }
+            }
+
+            let heap_tid = write_insert_heap_row(
+                &stmt.relation_name,
+                stmt.rel,
+                stmt.toast,
+                stmt.toast_index.as_ref(),
+                &stmt.desc,
+                &stmt.relation_constraints,
+                values,
+                ctx,
+                xid,
+                cid,
+            )?;
+
+            let mut retry_conflict = false;
+            for index in &arbiter_indexes {
+                match insert_index_entry_for_row(stmt.rel, &stmt.desc, index, values, heap_tid, ctx) {
+                    Ok(()) => {}
+                    Err(ExecError::UniqueViolation { constraint })
+                        if constraint.eq_ignore_ascii_case(&index.name) =>
+                    {
+                        rollback_inserted_row(stmt.rel, stmt.toast, &stmt.desc, heap_tid, ctx, xid)?;
+                        retry_conflict = true;
+                        break;
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
+            if retry_conflict {
+                continue;
+            }
+
+            for index in &non_arbiter_indexes {
+                insert_index_entry_for_row(stmt.rel, &stmt.desc, index, values, heap_tid, ctx)?;
+            }
+            affected_rows += 1;
+            break;
+        }
+    }
+
+    Ok(affected_rows)
+}

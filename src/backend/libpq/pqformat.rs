@@ -51,6 +51,7 @@ pub(crate) fn format_exec_error(e: &ExecError) -> String {
         ExecError::DetailedError { message, .. } => message.clone(),
         ExecError::RaiseException(message) => message.clone(),
         ExecError::InvalidRegex(message) => message.clone(),
+        ExecError::CardinalityViolation(message) => message.clone(),
         ExecError::UniqueViolation { constraint } => {
             format!("duplicate key value violates unique constraint \"{constraint}\"")
         }
@@ -1484,9 +1485,10 @@ fn trim_fractional_zeros(text: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        FloatFormatOptions, format_bytea_text, format_float4_text, format_float8_text,
-        send_error_with_fields,
+        FloatFormatOptions, format_bytea_text, format_exec_error, format_float4_text,
+        format_float8_text, send_error_with_fields,
     };
+    use crate::backend::executor::ExecError;
     use crate::pgrust::session::ByteaOutputFormat;
 
     #[test]
@@ -1648,6 +1650,17 @@ mod tests {
         assert!(
             out.windows("WJSON data, line 1: {\"a\":true\0".len())
                 .any(|window| { window == b"WJSON data, line 1: {\"a\":true\0" })
+        );
+    }
+
+    #[test]
+    fn format_exec_error_renders_cardinality_violation_message() {
+        let err = ExecError::CardinalityViolation(
+            "ON CONFLICT DO UPDATE command cannot affect row a second time".into(),
+        );
+        assert_eq!(
+            format_exec_error(&err),
+            "ON CONFLICT DO UPDATE command cannot affect row a second time"
         );
     }
 }
