@@ -1,11 +1,14 @@
 use std::path::Path;
+use std::sync::Arc;
+
+use parking_lot::RwLock;
 
 use crate::BufferPool;
 use crate::backend::access::heap::heapam::{
     heap_delete_with_waiter, heap_flush, heap_insert, heap_insert_mvcc_with_cid, heap_scan_begin,
     heap_scan_next, heap_update_with_waiter,
 };
-use crate::backend::access::transam::xact::Snapshot;
+use crate::backend::access::transam::xact::{Snapshot, TransactionManager};
 use crate::backend::catalog::bootstrap::bootstrap_catalog_rel;
 use crate::backend::catalog::catalog::{Catalog, CatalogEntry, CatalogError};
 use crate::backend::catalog::indexing::{
@@ -19,6 +22,7 @@ use crate::backend::executor::value_io::tuple_from_values;
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
 use crate::backend::storage::smgr::ForkNumber;
 use crate::backend::storage::smgr::{MdStorageManager, RelFileLocator, StorageManager};
+use crate::backend::utils::misc::interrupts::InterruptState;
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::catalog::{
     BootstrapCatalogKind, bootstrap_catalog_kinds, bootstrap_relation_desc,
@@ -81,7 +85,7 @@ pub(crate) fn append_catalog_entry_rows(
     kinds: &[BootstrapCatalogKind],
 ) -> Result<(), CatalogError> {
     let rows = physical_catalog_rows_for_catalog_entry(catalog, relation_name, entry);
-    append_catalog_rows_subset(base_dir, &rows, entry.rel.db_oid, kinds)
+    append_catalog_rows_subset_incremental(base_dir, &rows, entry.rel.db_oid, kinds)
 }
 
 pub(crate) fn insert_catalog_rows_subset_mvcc(
@@ -150,6 +154,76 @@ fn append_catalog_rows_subset(
     }
     rebuild_system_catalog_indexes_for_db(base_dir, db_oid)?;
     Ok(())
+}
+
+pub(crate) fn sync_catalog_rows_subset_incremental(
+    base_dir: &Path,
+    current_rows: &PhysicalCatalogRows,
+    target_rows: &PhysicalCatalogRows,
+    db_oid: u32,
+    kinds: &[BootstrapCatalogKind],
+) -> Result<(), CatalogError> {
+    let (rows_to_delete, rows_to_insert) =
+        diff_catalog_rows_subset(current_rows, target_rows, kinds);
+    if physical_catalog_rows_empty(&rows_to_delete) && physical_catalog_rows_empty(&rows_to_insert)
+    {
+        return Ok(());
+    }
+
+    let mut smgr = MdStorageManager::new(base_dir);
+    for &kind in kinds {
+        let rel = bootstrap_catalog_rel(kind, db_oid);
+        smgr.open(rel)
+            .map_err(|e| CatalogError::Io(e.to_string()))?;
+    }
+
+    let pool = Arc::new(BufferPool::new(SmgrStorageBackend::new(smgr), 16));
+    let txns = Arc::new(RwLock::new(
+        TransactionManager::new_durable(base_dir.to_path_buf())
+            .map_err(|e| CatalogError::Io(format!("catalog transaction load failed: {e:?}")))?,
+    ));
+    let xid = txns.write().begin();
+    let ctx = CatalogWriteContext {
+        pool,
+        txns: Arc::clone(&txns),
+        xid,
+        cid: 0,
+        client_id: 0,
+        waiter: None,
+        interrupts: Arc::new(InterruptState::new()),
+    };
+
+    let result = (|| {
+        // :HACK: This transitional path only inserts new system catalog index tuples.
+        // Deletes/updates rely on heap visibility checks to ignore stale index entries
+        // until we add true system-catalog index delete/update maintenance.
+        delete_catalog_rows_subset_mvcc(&ctx, &rows_to_delete, db_oid, kinds)?;
+        insert_catalog_rows_subset_mvcc(&ctx, &rows_to_insert, db_oid, kinds)?;
+        txns.write()
+            .commit(xid)
+            .map_err(|e| CatalogError::Io(format!("catalog transaction commit failed: {e:?}")))?;
+        Ok(())
+    })();
+
+    if result.is_err() {
+        let _ = txns.write().abort(xid);
+    }
+    result
+}
+
+fn append_catalog_rows_subset_incremental(
+    base_dir: &Path,
+    rows: &PhysicalCatalogRows,
+    db_oid: u32,
+    kinds: &[BootstrapCatalogKind],
+) -> Result<(), CatalogError> {
+    sync_catalog_rows_subset_incremental(
+        base_dir,
+        &PhysicalCatalogRows::default(),
+        rows,
+        db_oid,
+        kinds,
+    )
 }
 
 fn insert_catalog_rows(
@@ -270,6 +344,115 @@ fn find_catalog_tuple_tid(
         }
     }
     Ok(None)
+}
+
+fn diff_catalog_rows_subset(
+    current_rows: &PhysicalCatalogRows,
+    target_rows: &PhysicalCatalogRows,
+    kinds: &[BootstrapCatalogKind],
+) -> (PhysicalCatalogRows, PhysicalCatalogRows) {
+    let mut rows_to_delete = PhysicalCatalogRows::default();
+    let mut rows_to_insert = PhysicalCatalogRows::default();
+
+    macro_rules! diff_kind {
+        ($field:ident) => {{
+            let (deletes, inserts) =
+                diff_catalog_row_list(&current_rows.$field, &target_rows.$field);
+            rows_to_delete.$field = deletes;
+            rows_to_insert.$field = inserts;
+        }};
+    }
+
+    for &kind in kinds {
+        match kind {
+            BootstrapCatalogKind::PgNamespace => diff_kind!(namespaces),
+            BootstrapCatalogKind::PgClass => diff_kind!(classes),
+            BootstrapCatalogKind::PgAttribute => diff_kind!(attributes),
+            BootstrapCatalogKind::PgType => diff_kind!(types),
+            BootstrapCatalogKind::PgProc => diff_kind!(procs),
+            BootstrapCatalogKind::PgTsParser => diff_kind!(ts_parsers),
+            BootstrapCatalogKind::PgTsTemplate => diff_kind!(ts_templates),
+            BootstrapCatalogKind::PgTsDict => diff_kind!(ts_dicts),
+            BootstrapCatalogKind::PgTsConfig => diff_kind!(ts_configs),
+            BootstrapCatalogKind::PgTsConfigMap => diff_kind!(ts_config_maps),
+            BootstrapCatalogKind::PgLanguage => diff_kind!(languages),
+            BootstrapCatalogKind::PgOperator => diff_kind!(operators),
+            BootstrapCatalogKind::PgDatabase => diff_kind!(databases),
+            BootstrapCatalogKind::PgAuthId => diff_kind!(authids),
+            BootstrapCatalogKind::PgAuthMembers => diff_kind!(auth_members),
+            BootstrapCatalogKind::PgCollation => diff_kind!(collations),
+            BootstrapCatalogKind::PgLargeobjectMetadata => {}
+            BootstrapCatalogKind::PgTablespace => diff_kind!(tablespaces),
+            BootstrapCatalogKind::PgAm => diff_kind!(ams),
+            BootstrapCatalogKind::PgAmop => diff_kind!(amops),
+            BootstrapCatalogKind::PgAmproc => diff_kind!(amprocs),
+            BootstrapCatalogKind::PgAttrdef => diff_kind!(attrdefs),
+            BootstrapCatalogKind::PgCast => diff_kind!(casts),
+            BootstrapCatalogKind::PgConstraint => diff_kind!(constraints),
+            BootstrapCatalogKind::PgDepend => diff_kind!(depends),
+            BootstrapCatalogKind::PgDescription => diff_kind!(descriptions),
+            BootstrapCatalogKind::PgIndex => diff_kind!(indexes),
+            BootstrapCatalogKind::PgInherits => diff_kind!(inherits),
+            BootstrapCatalogKind::PgRewrite => diff_kind!(rewrites),
+            BootstrapCatalogKind::PgStatistic => diff_kind!(statistics),
+            BootstrapCatalogKind::PgTrigger => diff_kind!(triggers),
+            BootstrapCatalogKind::PgOpclass => diff_kind!(opclasses),
+            BootstrapCatalogKind::PgOpfamily => diff_kind!(opfamilies),
+        }
+    }
+
+    (rows_to_delete, rows_to_insert)
+}
+
+fn diff_catalog_row_list<T: Clone + PartialEq>(current: &[T], target: &[T]) -> (Vec<T>, Vec<T>) {
+    let mut remaining_target = target.to_vec();
+    let mut rows_to_delete = Vec::new();
+    for row in current {
+        if let Some(idx) = remaining_target
+            .iter()
+            .position(|candidate| candidate == row)
+        {
+            remaining_target.remove(idx);
+        } else {
+            rows_to_delete.push(row.clone());
+        }
+    }
+    (rows_to_delete, remaining_target)
+}
+
+fn physical_catalog_rows_empty(rows: &PhysicalCatalogRows) -> bool {
+    rows.namespaces.is_empty()
+        && rows.classes.is_empty()
+        && rows.attributes.is_empty()
+        && rows.attrdefs.is_empty()
+        && rows.depends.is_empty()
+        && rows.inherits.is_empty()
+        && rows.descriptions.is_empty()
+        && rows.indexes.is_empty()
+        && rows.rewrites.is_empty()
+        && rows.triggers.is_empty()
+        && rows.ams.is_empty()
+        && rows.amops.is_empty()
+        && rows.amprocs.is_empty()
+        && rows.authids.is_empty()
+        && rows.auth_members.is_empty()
+        && rows.languages.is_empty()
+        && rows.ts_parsers.is_empty()
+        && rows.ts_templates.is_empty()
+        && rows.ts_dicts.is_empty()
+        && rows.ts_configs.is_empty()
+        && rows.ts_config_maps.is_empty()
+        && rows.constraints.is_empty()
+        && rows.operators.is_empty()
+        && rows.opclasses.is_empty()
+        && rows.opfamilies.is_empty()
+        && rows.procs.is_empty()
+        && rows.casts.is_empty()
+        && rows.collations.is_empty()
+        && rows.databases.is_empty()
+        && rows.tablespaces.is_empty()
+        && rows.statistics.is_empty()
+        && rows.types.is_empty()
 }
 
 fn catalog_row_identity_matches(
