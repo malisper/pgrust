@@ -13,7 +13,9 @@ use crate::backend::catalog::loader::{
     load_physical_catalog_rows_scoped, load_physical_catalog_rows_visible_in_pool,
     load_physical_catalog_rows_visible_scoped,
 };
-use crate::backend::catalog::persistence::sync_catalog_rows_subset;
+use crate::backend::catalog::persistence::{
+    sync_catalog_rows_subset, sync_catalog_rows_subset_incremental,
+};
 use crate::backend::catalog::rows::physical_catalog_rows_from_catcache;
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
 use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, StorageManager};
@@ -23,11 +25,11 @@ use crate::include::catalog::{
     BootstrapCatalogKind, CatalogScope, bootstrap_catalog_kinds, system_catalog_indexes,
 };
 
-use super::{
-    CONTROL_FILE_MAGIC, CatalogControl, CatalogStore, CatalogStoreMode, CatalogWriteContext,
-};
 use super::relcache_init::{
     invalidate_relcache_init_file, load_relcache_init_file, persist_relcache_init_file,
+};
+use super::{
+    CONTROL_FILE_MAGIC, CatalogControl, CatalogStore, CatalogStoreMode, CatalogWriteContext,
 };
 
 fn scope_db_oid(scope: CatalogScope) -> u32 {
@@ -186,7 +188,8 @@ impl CatalogStore {
                 if let Some(relcache) = load_relcache_init_file(base_dir, self.scope) {
                     return Ok(relcache);
                 }
-                let relcache = RelCache::from_catcache_in_db(&self.catcache()?, self.scope_db_oid())?;
+                let relcache =
+                    RelCache::from_catcache_in_db(&self.catcache()?, self.scope_db_oid())?;
                 persist_relcache_init_file(base_dir, self.scope, &relcache);
                 Ok(relcache)
             }
@@ -347,7 +350,20 @@ impl CatalogStore {
         match &self.mode {
             CatalogStoreMode::Durable { base_dir, .. } => {
                 self.persist_control_state(catalog)?;
-                sync_physical_catalogs_scoped(base_dir, catalog, self.scope, kinds)
+                let db_oid = scope_db_oid(self.scope);
+                let current_rows = load_physical_catalog_rows_scoped(base_dir, db_oid, kinds)?;
+                let catcache = CatCache::from_catalog(catalog);
+                let mut target_rows = physical_catalog_rows_from_catcache(&catcache);
+                if kinds.contains(&BootstrapCatalogKind::PgDescription) {
+                    target_rows.descriptions = current_rows.descriptions.clone();
+                }
+                sync_catalog_rows_subset_incremental(
+                    base_dir,
+                    &current_rows,
+                    &target_rows,
+                    db_oid,
+                    kinds,
+                )
             }
             CatalogStoreMode::Ephemeral => Ok(()),
         }
@@ -478,7 +494,10 @@ fn insert_missing_bootstrap_relations(
     }
 }
 
-fn validate_storage_relfiles_exist(base_dir: &Path, scope: CatalogScope) -> Result<(), CatalogError> {
+fn validate_storage_relfiles_exist(
+    base_dir: &Path,
+    scope: CatalogScope,
+) -> Result<(), CatalogError> {
     let mut smgr = MdStorageManager::new(base_dir);
 
     let db_oid = scope_db_oid(scope);

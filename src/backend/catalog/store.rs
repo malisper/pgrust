@@ -16,10 +16,10 @@ use crate::include::catalog::{BootstrapCatalogKind, CatalogScope};
 // while relation DDL and catalog row mutation paths live in `heap`.
 #[path = "store/heap.rs"]
 mod heap;
-#[path = "store/roles.rs"]
-mod roles;
 #[path = "store/relcache_init.rs"]
 mod relcache_init;
+#[path = "store/roles.rs"]
+mod roles;
 #[path = "store/storage.rs"]
 mod storage;
 #[cfg(test)]
@@ -100,11 +100,11 @@ mod tests {
     use crate::include::catalog::{
         BOOTSTRAP_SUPERUSER_NAME, BOOTSTRAP_SUPERUSER_OID, BTREE_AM_OID, C_COLLATION_OID,
         CURRENT_DATABASE_NAME, CatalogScope, DEFAULT_COLLATION_OID, DEFAULT_TABLESPACE_OID,
-        DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, HEAP_TABLE_AM_OID,
-        INT4_TYPE_OID, INT8_TYPE_OID, JSON_TYPE_OID, OID_TYPE_OID, PG_ATTRDEF_RELATION_OID,
-        PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID, PG_LANGUAGE_INTERNAL_OID,
-        PG_NAMESPACE_RELATION_OID, PG_TOAST_NAMESPACE_OID, PG_TYPE_RELATION_OID,
-        POSIX_COLLATION_OID, PUBLIC_NAMESPACE_OID, TEXT_TYPE_OID, VARCHAR_TYPE_OID,
+        DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, HEAP_TABLE_AM_OID, INT4_TYPE_OID,
+        INT8_TYPE_OID, JSON_TYPE_OID, OID_TYPE_OID, PG_ATTRDEF_RELATION_OID, PG_CLASS_RELATION_OID,
+        PG_CONSTRAINT_RELATION_OID, PG_LANGUAGE_INTERNAL_OID, PG_NAMESPACE_RELATION_OID,
+        PG_TOAST_NAMESPACE_OID, PG_TYPE_RELATION_OID, POSIX_COLLATION_OID, PUBLIC_NAMESPACE_OID,
+        TEXT_TYPE_OID, VARCHAR_TYPE_OID, system_catalog_indexes,
     };
     use crate::include::nodes::primnodes::RelationDesc;
     use std::fs;
@@ -118,6 +118,24 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("pgrust_catalog_{label}_{nanos}"))
+    }
+
+    #[cfg(unix)]
+    fn system_index_path(base: &PathBuf, db_oid: u32, relname: &str) -> PathBuf {
+        let descriptor = system_catalog_indexes()
+            .iter()
+            .find(|descriptor| descriptor.relation_name == relname)
+            .unwrap();
+        segment_path(
+            base,
+            RelFileLocator {
+                spc_oid: 0,
+                db_oid,
+                rel_number: descriptor.relation_oid,
+            },
+            ForkNumber::Main,
+            0,
+        )
     }
 
     #[test]
@@ -159,7 +177,13 @@ mod tests {
         fs::write(&init_path, b"corrupt").unwrap();
 
         let reopened = CatalogStore::load(&base).unwrap();
-        assert!(reopened.relcache().unwrap().get_by_name("pg_class").is_some());
+        assert!(
+            reopened
+                .relcache()
+                .unwrap()
+                .get_by_name("pg_class")
+                .is_some()
+        );
         let rewritten = fs::read_to_string(&init_path).unwrap();
         assert!(
             rewritten.contains("\"magic\""),
@@ -1205,8 +1229,10 @@ mod tests {
             ForkNumber::Main,
             0,
         );
+        let class_index_path = system_index_path(&base, 1, "pg_class_relname_nsp_index");
         let proc_meta_before = fs::metadata(&proc_path).unwrap();
         let class_meta_before = fs::metadata(&class_path).unwrap();
+        let class_index_meta_before = fs::metadata(&class_index_path).unwrap();
 
         store
             .create_table(
@@ -1219,12 +1245,14 @@ mod tests {
 
         let proc_meta_after = fs::metadata(&proc_path).unwrap();
         let class_meta_after = fs::metadata(&class_path).unwrap();
+        let class_index_meta_after = fs::metadata(&class_index_path).unwrap();
         assert_eq!(proc_meta_before.ino(), proc_meta_after.ino());
         assert_eq!(
             proc_meta_before.modified().unwrap(),
             proc_meta_after.modified().unwrap()
         );
         assert_eq!(class_meta_before.ino(), class_meta_after.ino());
+        assert_eq!(class_index_meta_before.ino(), class_index_meta_after.ino());
     }
 
     #[cfg(unix)]
@@ -1270,9 +1298,11 @@ mod tests {
             ForkNumber::Main,
             0,
         );
+        let class_index_path = system_index_path(&base, 1, "pg_class_relname_nsp_index");
         let proc_meta_before = fs::metadata(&proc_path).unwrap();
         let class_meta_before = fs::metadata(&class_path).unwrap();
         let index_meta_before = fs::metadata(&index_path).unwrap();
+        let class_index_meta_before = fs::metadata(&class_index_path).unwrap();
 
         store
             .create_index("people_id_idx", "people", false, &["id".into()])
@@ -1281,6 +1311,7 @@ mod tests {
         let proc_meta_after = fs::metadata(&proc_path).unwrap();
         let class_meta_after = fs::metadata(&class_path).unwrap();
         let index_meta_after = fs::metadata(&index_path).unwrap();
+        let class_index_meta_after = fs::metadata(&class_index_path).unwrap();
         assert_eq!(proc_meta_before.ino(), proc_meta_after.ino());
         assert_eq!(
             proc_meta_before.modified().unwrap(),
@@ -1288,6 +1319,33 @@ mod tests {
         );
         assert_eq!(class_meta_before.ino(), class_meta_after.ino());
         assert_eq!(index_meta_before.ino(), index_meta_after.ino());
+        assert_eq!(class_index_meta_before.ino(), class_index_meta_after.ino());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn catalog_store_drop_table_updates_catalog_indexes_in_place() {
+        let base = temp_dir("selective_catalog_sync_drop_table");
+        let mut store = CatalogStore::load(&base).unwrap();
+        store
+            .create_table(
+                "people",
+                RelationDesc {
+                    columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
+                },
+            )
+            .unwrap();
+        let class_index_path = system_index_path(&base, 1, "pg_class_relname_nsp_index");
+        let type_index_path = system_index_path(&base, 1, "pg_type_typname_nsp_index");
+        let class_index_meta_before = fs::metadata(&class_index_path).unwrap();
+        let type_index_meta_before = fs::metadata(&type_index_path).unwrap();
+
+        store.drop_table("people").unwrap();
+
+        let class_index_meta_after = fs::metadata(&class_index_path).unwrap();
+        let type_index_meta_after = fs::metadata(&type_index_path).unwrap();
+        assert_eq!(class_index_meta_before.ino(), class_index_meta_after.ino());
+        assert_eq!(type_index_meta_before.ino(), type_index_meta_after.ino());
     }
 
     #[cfg(unix)]
@@ -1332,7 +1390,13 @@ mod tests {
         let index_meta_before = fs::metadata(&index_path).unwrap();
 
         let reopened = CatalogStore::load(&base).unwrap();
-        assert!(reopened.catalog_snapshot().unwrap().get("pg_class").is_some());
+        assert!(
+            reopened
+                .catalog_snapshot()
+                .unwrap()
+                .get("pg_class")
+                .is_some()
+        );
 
         let proc_meta_after = fs::metadata(&proc_path).unwrap();
         let class_meta_after = fs::metadata(&class_path).unwrap();
@@ -1575,12 +1639,18 @@ mod tests {
             ("missing_depend_reload", BootstrapCatalogKind::PgDepend),
             ("missing_index_reload", BootstrapCatalogKind::PgIndex),
             ("missing_am_reload", BootstrapCatalogKind::PgAm),
-            ("missing_collation_reload", BootstrapCatalogKind::PgCollation),
+            (
+                "missing_collation_reload",
+                BootstrapCatalogKind::PgCollation,
+            ),
             ("missing_cast_reload", BootstrapCatalogKind::PgCast),
             ("missing_proc_reload", BootstrapCatalogKind::PgProc),
             ("missing_language_reload", BootstrapCatalogKind::PgLanguage),
             ("missing_operator_reload", BootstrapCatalogKind::PgOperator),
-            ("missing_constraint_reload", BootstrapCatalogKind::PgConstraint),
+            (
+                "missing_constraint_reload",
+                BootstrapCatalogKind::PgConstraint,
+            ),
         ] {
             assert_missing_bootstrap_relfile_fails(label, kind);
         }
@@ -1591,8 +1661,14 @@ mod tests {
         for (label, kind) in [
             ("missing_database_reload", BootstrapCatalogKind::PgDatabase),
             ("missing_authid_reload", BootstrapCatalogKind::PgAuthId),
-            ("missing_auth_members_reload", BootstrapCatalogKind::PgAuthMembers),
-            ("missing_tablespace_reload", BootstrapCatalogKind::PgTablespace),
+            (
+                "missing_auth_members_reload",
+                BootstrapCatalogKind::PgAuthMembers,
+            ),
+            (
+                "missing_tablespace_reload",
+                BootstrapCatalogKind::PgTablespace,
+            ),
         ] {
             assert_missing_bootstrap_relfile_fails(label, kind);
         }
