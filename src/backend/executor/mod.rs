@@ -165,6 +165,7 @@ pub struct RegexError {
     pub message: String,
     pub detail: Option<String>,
     pub hint: Option<String>,
+    pub context: Option<String>,
 }
 
 #[derive(Debug)]
