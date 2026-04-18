@@ -87,6 +87,15 @@ fn numeric_typmod_infinite_error(precision: i32, scale: i32) -> ExecError {
     }
 }
 
+fn numeric_to_integer_cast_error(message: impl Into<String>) -> ExecError {
+    ExecError::DetailedError {
+        message: message.into(),
+        detail: None,
+        hint: None,
+        sqlstate: "22P02",
+    }
+}
+
 fn parse_pg_integer_text(text: &str, ty: &'static str) -> Result<i128, ExecError> {
     let trimmed = text.trim_matches(|ch: char| ch.is_ascii_whitespace());
     if trimmed.is_empty() {
@@ -2202,21 +2211,43 @@ pub(super) fn cast_numeric_value(
             let v = parse_pg_float(&rendered, SqlTypeKind::Float8)?;
             Ok(Value::Float64(v))
         }
-        SqlTypeKind::Int2 => value
-            .round_to_scale(0)
-            .and_then(|rounded| rounded.render().parse::<i16>().ok())
-            .map(Value::Int16)
-            .ok_or(ExecError::Int2OutOfRange),
-        SqlTypeKind::Int4 => value
-            .round_to_scale(0)
-            .and_then(|rounded| rounded.render().parse::<i32>().ok())
-            .map(Value::Int32)
-            .ok_or(ExecError::Int4OutOfRange),
-        SqlTypeKind::Int8 => value
-            .round_to_scale(0)
-            .and_then(|rounded| rounded.render().parse::<i64>().ok())
-            .map(Value::Int64)
-            .ok_or(ExecError::Int8OutOfRange),
+        SqlTypeKind::Int2 => match value {
+            NumericValue::NaN => Err(numeric_to_integer_cast_error(
+                "cannot convert NaN to smallint",
+            )),
+            NumericValue::PosInf | NumericValue::NegInf => Err(numeric_to_integer_cast_error(
+                "cannot convert infinity to smallint",
+            )),
+            _ => value
+                .round_to_scale(0)
+                .and_then(|rounded| rounded.render().parse::<i16>().ok())
+                .map(Value::Int16)
+                .ok_or(ExecError::Int2OutOfRange),
+        },
+        SqlTypeKind::Int4 => match value {
+            NumericValue::NaN => Err(numeric_to_integer_cast_error(
+                "cannot convert NaN to integer",
+            )),
+            NumericValue::PosInf | NumericValue::NegInf => Err(numeric_to_integer_cast_error(
+                "cannot convert infinity to integer",
+            )),
+            _ => value
+                .round_to_scale(0)
+                .and_then(|rounded| rounded.render().parse::<i32>().ok())
+                .map(Value::Int32)
+                .ok_or(ExecError::Int4OutOfRange),
+        },
+        SqlTypeKind::Int8 => match value {
+            NumericValue::NaN => Err(numeric_to_integer_cast_error("cannot convert NaN to bigint")),
+            NumericValue::PosInf | NumericValue::NegInf => Err(numeric_to_integer_cast_error(
+                "cannot convert infinity to bigint",
+            )),
+            _ => value
+                .round_to_scale(0)
+                .and_then(|rounded| rounded.render().parse::<i64>().ok())
+                .map(Value::Int64)
+                .ok_or(ExecError::Int8OutOfRange),
+        },
         SqlTypeKind::Oid | SqlTypeKind::RegProcedure | SqlTypeKind::Xid => value
             .round_to_scale(0)
             .and_then(|rounded| rounded.render().parse::<u32>().ok())
