@@ -161,7 +161,7 @@ impl DatabaseStatsStore {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct SessionStatsState {
+pub struct SessionStatsState {
     pub pending_flush: StatsDelta,
     pub fetch_consistency: StatsFetchConsistency,
     pub track_functions: TrackFunctionsSetting,

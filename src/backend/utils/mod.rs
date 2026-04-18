@@ -1,4 +1,4 @@
-pub(crate) mod activity;
+pub mod activity;
 pub mod cache;
 pub mod misc;
 pub mod record;
