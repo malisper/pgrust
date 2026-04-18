@@ -78,6 +78,7 @@ use crate::backend::parser::analyze::is_binary_coercible_type;
 use crate::backend::parser::{
     CatalogLookup, ParseError, SqlType, SqlTypeKind, SubqueryComparisonOp,
 };
+use crate::backend::executor::sqlfunc::execute_user_defined_sql_scalar_function;
 use crate::backend::utils::misc::checkpoint::checkpoint_stats_value;
 use crate::include::catalog::builtin_scalar_function_for_proc_oid;
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue, NumericValue};
@@ -706,7 +707,24 @@ fn eval_func_expr(
             ctx,
         ),
         ScalarFunctionImpl::UserDefined { proc_oid } => {
-            execute_user_defined_scalar_function(proc_oid, &func.args, slot, ctx)
+            let catalog = ctx.catalog.as_ref().ok_or_else(|| ExecError::DetailedError {
+                message: "user-defined functions require executor catalog context".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "0A000",
+            })?;
+            let row = catalog.proc_row_by_oid(proc_oid).ok_or_else(|| ExecError::DetailedError {
+                message: format!("unknown function oid {proc_oid}"),
+                detail: None,
+                hint: None,
+                sqlstate: "42883",
+            })?;
+            match row.prolang {
+                crate::include::catalog::PG_LANGUAGE_SQL_OID => {
+                    execute_user_defined_sql_scalar_function(&row, &func.args, slot, ctx)
+                }
+                _ => execute_user_defined_scalar_function(proc_oid, &func.args, slot, ctx),
+            }
         }
     }
 }
