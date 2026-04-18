@@ -182,6 +182,7 @@ impl Database {
             cte_tables: std::collections::HashMap::new(),
             cte_producers: std::collections::HashMap::new(),
             recursive_worktables: std::collections::HashMap::new(),
+            deferred_foreign_keys: None,
         };
         rewrite_heap_rows_for_alter_column_type(
             self,

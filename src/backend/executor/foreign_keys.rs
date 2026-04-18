@@ -15,6 +15,22 @@ use crate::include::nodes::execnodes::{SlotKind, ToastRelationRef, TupleSlot};
 
 use super::{ExecError, ExecutorContext, compare_order_values};
 
+fn maybe_defer_constraint(
+    ctx: &ExecutorContext,
+    constraint_oid: u32,
+    deferrable: bool,
+    initially_deferred: bool,
+) -> bool {
+    if !deferrable || !initially_deferred {
+        return false;
+    }
+    let Some(tracker) = ctx.deferred_foreign_keys.as_ref() else {
+        return false;
+    };
+    tracker.record(constraint_oid);
+    true
+}
+
 pub(crate) fn enforce_outbound_foreign_keys(
     relation_name: &str,
     constraints: &[BoundForeignKeyConstraint],
@@ -30,6 +46,14 @@ pub(crate) fn enforce_outbound_foreign_keys(
         }
         let key_values = extract_key_values(values, &constraint.column_indexes);
         if key_values.iter().any(|value| matches!(value, Value::Null)) {
+            continue;
+        }
+        if maybe_defer_constraint(
+            ctx,
+            constraint.constraint_oid,
+            constraint.deferrable,
+            constraint.initially_deferred,
+        ) {
             continue;
         }
         if referenced_key_exists(constraint, &key_values, ctx)? {
@@ -68,6 +92,14 @@ pub(crate) fn enforce_inbound_foreign_keys_on_update(
         ) {
             continue;
         }
+        if maybe_defer_constraint(
+            ctx,
+            constraint.constraint_oid,
+            constraint.deferrable,
+            constraint.initially_deferred,
+        ) {
+            continue;
+        }
         enforce_inbound_foreign_key(relation_name, constraint, previous_values, ctx)?;
     }
     Ok(())
@@ -80,6 +112,14 @@ pub(crate) fn enforce_inbound_foreign_keys_on_delete(
     ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
     for constraint in constraints {
+        if maybe_defer_constraint(
+            ctx,
+            constraint.constraint_oid,
+            constraint.deferrable,
+            constraint.initially_deferred,
+        ) {
+            continue;
+        }
         enforce_inbound_foreign_key(relation_name, constraint, values, ctx)?;
     }
     Ok(())

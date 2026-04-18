@@ -948,6 +948,20 @@ fn parse_alter_table_constraint_statements() {
         })
     );
 
+    let stmt = parse_statement(
+        "alter table items alter constraint items_id_check deferrable initially deferred",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableAlterConstraint(AlterTableAlterConstraintStatement {
+            table_name: "items".into(),
+            constraint_name: "items_id_check".into(),
+            deferrable: Some(true),
+            initially_deferred: Some(true),
+        })
+    );
+
     let stmt =
         parse_statement("alter table items rename constraint items_id_check to items_id_guard")
             .unwrap();
@@ -1003,7 +1017,6 @@ fn parse_alter_table_set_statement() {
     );
 }
 
-#[test]
 fn parse_alter_table_rename_statement() {
     let stmt = parse_statement("alter table items rename to items_new").unwrap();
     assert_eq!(

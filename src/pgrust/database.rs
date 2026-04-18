@@ -139,6 +139,7 @@ pub(crate) use foreign_keys::{
     delete_foreign_key_lock_requests, insert_foreign_key_lock_requests,
     prepared_insert_foreign_key_lock_requests, relation_foreign_key_lock_requests,
     table_lock_relations, update_foreign_key_lock_requests,
+    validate_deferred_foreign_key_constraints,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

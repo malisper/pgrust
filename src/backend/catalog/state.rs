@@ -945,6 +945,29 @@ impl Catalog {
         Ok((old_row, new_row))
     }
 
+    pub fn alter_foreign_key_constraint_deferrability(
+        &mut self,
+        relation_oid: u32,
+        constraint_name: &str,
+        deferrable: bool,
+        initially_deferred: bool,
+    ) -> Result<(PgConstraintRow, PgConstraintRow), CatalogError> {
+        let row = self
+            .constraints
+            .iter_mut()
+            .find(|row| {
+                row.conrelid == relation_oid
+                    && row.contype == crate::include::catalog::CONSTRAINT_FOREIGN
+                    && row.conname.eq_ignore_ascii_case(constraint_name)
+            })
+            .ok_or_else(|| CatalogError::UnknownTable(constraint_name.to_string()))?;
+        let old_row = row.clone();
+        row.condeferrable = deferrable;
+        row.condeferred = initially_deferred;
+        let new_row = row.clone();
+        Ok((old_row, new_row))
+    }
+
     pub fn drop_relation_constraint(
         &mut self,
         relation_oid: u32,
