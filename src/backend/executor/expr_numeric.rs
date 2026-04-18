@@ -1031,7 +1031,7 @@ pub(super) fn eval_scale_function(values: &[Value]) -> Result<Value, ExecError> 
     match values {
         [] | [Value::Null] => Ok(Value::Null),
         [value] => match value_as_numeric(value) {
-            Some(NumericValue::Finite { scale, .. }) => Ok(Value::Int32(scale as i32)),
+            Some(NumericValue::Finite { dscale, .. }) => Ok(Value::Int32(dscale as i32)),
             Some(NumericValue::PosInf | NumericValue::NegInf | NumericValue::NaN) => {
                 Ok(Value::Null)
             }
