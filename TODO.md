@@ -409,8 +409,6 @@ Targeted reruns on 2026-04-17:
 - test_setup.sql: add either real `LANGUAGE C` function registration or a narrow compatibility shim for upstream `binary_coercible`
 - test_setup.sql: support `CREATE OPERATOR CLASS` for the hash opclass forms used by upstream setup
 - date.sql:
-  make ambiguous date input parsing respect PostgreSQL `DateStyle` semantics across `YMD`, `DMY`, and `MDY`
-- date.sql:
   reject ambiguous slash-, dash-, and space-separated date forms that PostgreSQL rejects, and parse accepted forms with PostgreSQL-compatible field ordering and two-digit year rules
 - date.sql:
   tighten named-month and BC-date acceptance rules to match PostgreSQL for forms like `99-Jan-08`, `08-Jan-99`, `99-08-Jan`, and `January 8, 99 BC`
