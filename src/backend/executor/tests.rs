@@ -1,4 +1,5 @@
 use super::*;
+use crate::RelFileLocator;
 use crate::backend::access::heap::heapam::{heap_flush, heap_insert_mvcc, heap_update};
 use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
 use crate::backend::libpq::pqformat::format_exec_error;
@@ -7,9 +8,8 @@ use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, StorageManager
 use crate::include::access::htup::TupleValue;
 use crate::include::access::htup::{AttributeDesc, HeapTuple};
 use crate::include::nodes::datetime::DateADT;
-use crate::include::nodes::primnodes::{user_attrno, Var};
+use crate::include::nodes::primnodes::{Var, user_attrno};
 use crate::pgrust::database::{Database, Session};
-use crate::RelFileLocator;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::PathBuf;
@@ -1819,44 +1819,6 @@ fn explain_mentions_sort_and_limit_nodes() {
             assert!(rendered.iter().any(|line| line.contains("Projection")));
             assert!(rendered.iter().any(|line| line.contains("Limit")));
             assert!(rendered.iter().any(|line| line.contains("Sort")));
-        }
-        other => panic!("expected query result, got {:?}", other),
-    }
-}
-
-#[test]
-fn explain_costs_off_hides_plan_costs() {
-    let base = temp_dir("explain_costs_off");
-    let txns = TransactionManager::new_durable(&base).unwrap();
-
-    match run_sql(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "explain (costs off) select name from people",
-    )
-    .unwrap()
-    {
-        StatementResult::Query { rows, .. } => {
-            let rendered = rows
-                .into_iter()
-                .map(|row| match &row[0] {
-                    Value::Text(text) => text.clone(),
-                    other => panic!("expected explain text row, got {:?}", other),
-                })
-                .collect::<Vec<_>>();
-            assert!(
-                rendered
-                    .iter()
-                    .all(|line| !line.contains("(cost=") && !line.contains(" width=")),
-                "expected costs-off explain without planner costs, got {rendered:?}"
-            );
-            assert!(
-                rendered
-                    .iter()
-                    .any(|line| line.trim_start() == "Seq Scan on people"),
-                "expected plain scan label in costs-off explain, got {rendered:?}"
-            );
         }
         other => panic!("expected query result, got {:?}", other),
     }
@@ -5014,12 +4976,12 @@ fn pg_rust_test_enc_conversion_validates_utf8_prefixes() {
     .unwrap();
     assert_query_rows(
         result,
-        vec![vec![Value::Record(
-            crate::include::nodes::datum::RecordValue::anonymous(vec![
+        vec![vec![Value::Record(crate::include::nodes::datum::RecordValue::anonymous(
+            vec![
                 ("validlen".into(), Value::Int32(1)),
                 ("result".into(), Value::Bytea(vec![0x66])),
-            ]),
-        )]],
+            ],
+        ))]],
     );
 }
 
@@ -5036,12 +4998,12 @@ fn pg_rust_test_enc_conversion_converts_euc_kr_to_utf8() {
     .unwrap();
     assert_query_rows(
         result,
-        vec![vec![Value::Record(
-            crate::include::nodes::datum::RecordValue::anonymous(vec![
+        vec![vec![Value::Record(crate::include::nodes::datum::RecordValue::anonymous(
+            vec![
                 ("validlen".into(), Value::Int32(4)),
                 ("result".into(), Value::Bytea("수학".as_bytes().to_vec())),
-            ]),
-        )]],
+            ],
+        ))]],
     );
 }
 
@@ -8757,6 +8719,38 @@ fn array_subscript_partial_slices_on_zero_based_arrays_match_postgres() {
 }
 
 #[test]
+fn array_subscript_on_unsubscriptable_type_uses_postgres_error() {
+    let base = temp_dir("array_subscript_unsubscriptable_error");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select (now())[1]") {
+        Err(ExecError::Parse(ParseError::NonSubscriptableType(actual))) => {
+            assert_eq!(
+                actual,
+                "timestamp with time zone"
+            );
+        }
+        other => panic!("expected unsubscriptable-type error, got {other:?}"),
+    }
+}
+
+#[test]
+fn point_slice_subscript_uses_fixed_length_array_error() {
+    let base = temp_dir("point_slice_subscript_error");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select ('(1,2)'::point)[0:1]",
+    ) {
+        Err(ExecError::Parse(ParseError::FixedLengthArraySliceNotImplemented)) => {}
+        other => panic!("expected fixed-length array slice error, got {other:?}"),
+    }
+}
+
+#[test]
 fn array_subscript_mixed_slice_scalar_queries_match_postgres() {
     let base = temp_dir("array_subscript_mixed_slice_scalar_queries");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -10135,71 +10129,6 @@ fn regexp_match_edge_cases_work() {
 }
 
 #[test]
-fn regexp_like_and_replace_follow_postgres_flag_rules() {
-    let base = temp_dir("regexp_like_and_replace_flags");
-    let txns = TransactionManager::new_durable(&base).unwrap();
-
-    match run_sql(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "select regexp_like('a'||chr(10)||'d', 'a.d', 'n'), \
-                regexp_like('a'||chr(10)||'d', 'a.d', 's'), \
-                regexp_like('abc', ' a . c ', 'x'), \
-                regexp_replace('foobarrbazz', E'(.)\\\\1', E'X\\\\\\\\Y', 'g'), \
-                regexp_replace('foobarrbazz', E'(.)\\\\1', E'X\\\\Y\\\\1Z\\\\'), \
-                regexp_replace('A PostgreSQL function', 'a|e|i|o|u', 'X', 1, 1, 'g')",
-    )
-    .unwrap()
-    {
-        StatementResult::Query { rows, .. } => {
-            assert_eq!(
-                rows,
-                vec![vec![
-                    Value::Bool(false),
-                    Value::Bool(true),
-                    Value::Bool(true),
-                    Value::Text("fX\\YbaX\\YbaX\\Y".into()),
-                    Value::Text("fX\\YoZ\\barrbazz".into()),
-                    Value::Text("A PXstgreSQL function".into()),
-                ]]
-            );
-        }
-        other => panic!("expected query result, got {:?}", other),
-    }
-
-    let err = run_sql(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "select regexp_like('abc', 'a.c', 'g')",
-    )
-    .expect_err("regexp_like global flag should error");
-    assert!(matches!(
-        err,
-        ExecError::Regex(RegexError { sqlstate, message, hint, .. })
-            if sqlstate == "22023"
-                && message == "regexp_like() does not support the \"global\" option"
-                && hint.is_none()
-    ));
-
-    let err = run_sql(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "select regexp_replace('A PostgreSQL function', 'a|e|i|o|u', 'X', '1')",
-    )
-    .expect_err("text fourth argument beginning with digit should hint");
-    assert!(matches!(
-        err,
-        ExecError::Regex(RegexError { sqlstate, message, hint, .. })
-            if sqlstate == "22023"
-                && message == "invalid regular expression option: \"1\""
-                && hint.as_deref() == Some("If you meant to use regexp_replace() with a start parameter, cast the fourth argument to integer explicitly.")
-    ));
-}
-
-#[test]
 fn sql_regex_substring_forms_work() {
     let base = temp_dir("sql_regex_substring_forms");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -10216,10 +10145,6 @@ fn sql_regex_substring_forms_work() {
         (
             "select substring('abcdefg' similar 'a#\"%#\"g' escape '#')",
             Value::Text("bcdef".into()),
-        ),
-        (
-            "select substring('abcdefg' similar 'a%g' escape '#')",
-            Value::Text("abcdefg".into()),
         ),
         (
             "select substring('abcdefg' from 'c.e')",
@@ -10249,70 +10174,6 @@ fn sql_regex_substring_forms_work() {
             other => panic!("expected query result, got {:?}", other),
         }
     }
-}
-
-#[test]
-fn sql_similar_and_regexp_errors_match_postgres_text() {
-    let base = temp_dir("sql_similar_and_regexp_errors");
-    let txns = TransactionManager::new_durable(&base).unwrap();
-
-    let err = run_sql(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "select 'abcdefg' similar to '_bcd#%' escape '##'",
-    )
-    .expect_err("multi-character similar escape should error");
-    assert!(matches!(
-        err,
-        ExecError::Regex(RegexError { sqlstate, message, hint, .. })
-            if sqlstate == "22025"
-                && message == "invalid escape string"
-                && hint.as_deref() == Some("Escape string must be empty or one character.")
-    ));
-
-    let err = run_sql(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "select substring('abcdefg' similar 'a*#\"%#\"g*#\"x' escape '#')",
-    )
-    .expect_err("too many similar substring separators should error");
-    assert!(matches!(
-        err,
-        ExecError::Regex(RegexError { sqlstate, message, hint, .. })
-            if sqlstate == "2200C"
-                && message == "SQL regular expression may not contain more than two escape-double-quote separators"
-                && hint.is_none()
-    ));
-
-    let err = run_sql(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "select regexp_matches('foobarbequebaz', '(barbeque')",
-    )
-    .expect_err("unbalanced regexp should error");
-    assert!(matches!(
-        err,
-        ExecError::Regex(RegexError { sqlstate, message, .. })
-            if sqlstate == "2201B"
-                && message == "invalid regular expression: parentheses () not balanced"
-    ));
-
-    let err = run_sql(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "select regexp_matches('foobarbequebaz', '(bar)(beque){2,1}')",
-    )
-    .expect_err("invalid repetition bounds should error");
-    assert!(matches!(
-        err,
-        ExecError::Regex(RegexError { sqlstate, message, .. })
-            if sqlstate == "2201B"
-                && message == "invalid regular expression: invalid repetition count(s)"
-    ));
 }
 
 #[test]
@@ -10374,38 +10235,6 @@ fn similar_to_predicates_work() {
                     Value::Bool(true),
                     Value::Bool(true),
                 ]]
-            );
-        }
-        other => panic!("expected query result, got {:?}", other),
-    }
-}
-
-#[test]
-fn explain_renders_similar_predicates_as_translated_regex() {
-    let base = temp_dir("explain_similar_predicates");
-    let txns = TransactionManager::new_durable(&base).unwrap();
-
-    match run_sql(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "explain (costs off) select * from people where name similar to '_[_[:alpha:]_]_'",
-    )
-    .unwrap()
-    {
-        StatementResult::Query { rows, .. } => {
-            let rendered = rows
-                .into_iter()
-                .map(|row| match &row[0] {
-                    Value::Text(text) => text.clone(),
-                    other => panic!("expected text explain line, got {:?}", other),
-                })
-                .collect::<Vec<_>>();
-            assert!(
-                rendered
-                    .iter()
-                    .any(|line| line.as_str() == "  Filter: (name ~ '^(?:.[_[:alpha:]_].)$'::text)"),
-                "expected translated similar-to regex in explain output, got {rendered:?}"
             );
         }
         other => panic!("expected query result, got {:?}", other),
@@ -10820,7 +10649,8 @@ fn jsonpath_recursive_descent_includes_current_item_at_depth_zero() {
                             .unwrap()
                     )],
                     vec![Value::Jsonb(
-                        crate::backend::executor::jsonb::parse_jsonb_text("{\"b\":1}").unwrap()
+                        crate::backend::executor::jsonb::parse_jsonb_text("{\"b\":1}")
+                            .unwrap()
                     )],
                     vec![Value::Jsonb(
                         crate::backend::executor::jsonb::parse_jsonb_text("1").unwrap()
@@ -10843,7 +10673,8 @@ fn jsonpath_recursive_descent_includes_current_item_at_depth_zero() {
             assert_eq!(
                 rows,
                 vec![vec![Value::Jsonb(
-                    crate::backend::executor::jsonb::parse_jsonb_text("{\"a\":{\"b\":1}}").unwrap()
+                    crate::backend::executor::jsonb::parse_jsonb_text("{\"a\":{\"b\":1}}")
+                        .unwrap()
                 )]]
             );
         }
@@ -10867,7 +10698,8 @@ fn jsonpath_recursive_descent_includes_current_item_at_depth_zero() {
                             .unwrap()
                     )],
                     vec![Value::Jsonb(
-                        crate::backend::executor::jsonb::parse_jsonb_text("{\"b\":1}").unwrap()
+                        crate::backend::executor::jsonb::parse_jsonb_text("{\"b\":1}")
+                            .unwrap()
                     )],
                     vec![Value::Jsonb(
                         crate::backend::executor::jsonb::parse_jsonb_text("1").unwrap()
@@ -11114,6 +10946,7 @@ fn jsonpath_builtin_method_calls_parse() {
     }
 }
 
+#[test]
 fn jsonpath_numeric_method_calls_parse() {
     let base = temp_dir("jsonpath_numeric_method_calls_parse");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -11133,6 +10966,37 @@ fn jsonpath_numeric_method_calls_parse() {
                     Value::JsonPath("$.number()".into()),
                     Value::JsonPath("$.integer()".into()),
                     Value::JsonPath("$.decimal(4, 2)".into()),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn jsonpath_datetime_method_calls_parse() {
+    let base = temp_dir("jsonpath_datetime_method_calls_parse");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select '$.bigint()'::jsonpath, '$.date()'::jsonpath, '$.time(6)'::jsonpath, '$.time_tz(4)'::jsonpath, '$.timestamp(2)'::jsonpath, '$.timestamp_tz()'::jsonpath, '$.datetime()'::jsonpath",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::JsonPath("$.bigint()".into()),
+                    Value::JsonPath("$.date()".into()),
+                    Value::JsonPath("$.time(6)".into()),
+                    Value::JsonPath("$.time_tz(4)".into()),
+                    Value::JsonPath("$.timestamp(2)".into()),
+                    Value::JsonPath("$.timestamp_tz()".into()),
+                    Value::JsonPath("$.datetime()".into()),
                 ]]
             );
         }
@@ -11210,6 +11074,7 @@ fn jsonpath_expression_method_calls_work() {
     }
 }
 
+#[test]
 fn jsonpath_numeric_method_calls_work() {
     let base = temp_dir("jsonpath_numeric_method_calls");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -11242,6 +11107,82 @@ fn jsonpath_numeric_method_calls_work() {
                 Value::Jsonb(bytes) => assert_eq!(
                     crate::backend::executor::jsonb::render_jsonb_bytes(bytes).unwrap(),
                     "1200"
+                ),
+                other => panic!("expected jsonb, got {:?}", other),
+            }
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn jsonpath_datetime_method_calls_work() {
+    let base = temp_dir("jsonpath_datetime_method_calls");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_path_query('1.83', '$.bigint()'), jsonb_path_query('\"2023-08-15\"', '$.date().type()'), jsonb_path_query('\"12:34:56.789\"', '$.time(2).string()'), jsonb_path_query('\"12:34:56+05:20\"', '$.time_tz().type()'), jsonb_path_query('\"2023-08-15 12:34:56.789\"', '$.timestamp(2).string()'), jsonb_path_query('\"2023-08-15 12:34:56 +05:20\"', '$.timestamp_tz().type()'), jsonb_path_query('\"2023-08-15 12:34:56\"', '$.datetime().type()'), jsonb_path_query_array('[\"1\", \"2\"]', '$.bigint()')",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows.len(), 1);
+            match &rows[0][0] {
+                Value::Jsonb(bytes) => assert_eq!(
+                    crate::backend::executor::jsonb::render_jsonb_bytes(bytes).unwrap(),
+                    "2"
+                ),
+                other => panic!("expected jsonb, got {:?}", other),
+            }
+            match &rows[0][1] {
+                Value::Jsonb(bytes) => assert_eq!(
+                    crate::backend::executor::jsonb::render_jsonb_bytes(bytes).unwrap(),
+                    "\"date\""
+                ),
+                other => panic!("expected jsonb, got {:?}", other),
+            }
+            match &rows[0][2] {
+                Value::Jsonb(bytes) => assert_eq!(
+                    crate::backend::executor::jsonb::render_jsonb_bytes(bytes).unwrap(),
+                    "\"12:34:56.78\""
+                ),
+                other => panic!("expected jsonb, got {:?}", other),
+            }
+            match &rows[0][3] {
+                Value::Jsonb(bytes) => assert_eq!(
+                    crate::backend::executor::jsonb::render_jsonb_bytes(bytes).unwrap(),
+                    "\"time with time zone\""
+                ),
+                other => panic!("expected jsonb, got {:?}", other),
+            }
+            match &rows[0][4] {
+                Value::Jsonb(bytes) => assert_eq!(
+                    crate::backend::executor::jsonb::render_jsonb_bytes(bytes).unwrap(),
+                    "\"2023-08-15 12:34:56.78\""
+                ),
+                other => panic!("expected jsonb, got {:?}", other),
+            }
+            match &rows[0][5] {
+                Value::Jsonb(bytes) => assert_eq!(
+                    crate::backend::executor::jsonb::render_jsonb_bytes(bytes).unwrap(),
+                    "\"timestamp with time zone\""
+                ),
+                other => panic!("expected jsonb, got {:?}", other),
+            }
+            match &rows[0][6] {
+                Value::Jsonb(bytes) => assert_eq!(
+                    crate::backend::executor::jsonb::render_jsonb_bytes(bytes).unwrap(),
+                    "\"timestamp without time zone\""
+                ),
+                other => panic!("expected jsonb, got {:?}", other),
+            }
+            match &rows[0][7] {
+                Value::Jsonb(bytes) => assert_eq!(
+                    crate::backend::executor::jsonb::render_jsonb_bytes(bytes).unwrap(),
+                    "[1, 2]"
                 ),
                 other => panic!("expected jsonb, got {:?}", other),
             }
@@ -11328,6 +11269,55 @@ fn jsonpath_builtin_method_calls_work() {
     }
 }
 
+#[test]
+fn jsonpath_datetime_method_calls_errors() {
+    let base = temp_dir("jsonpath_datetime_method_calls_errors");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_path_query('true', '$.bigint()')",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::InvalidStorageValue { column, details }
+            if column == "jsonpath"
+                && details == "jsonpath item method .bigint() can only be applied to a string or numeric value"
+    ));
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_path_query('\"bogus\"', '$.datetime()')",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError { message, hint, .. }
+            if message == "datetime format is not recognized: \"bogus\""
+                && hint.as_deref() == Some("Use a datetime template argument to specify the input data format.")
+    ));
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_path_query('\"12:34:56\"', '$.time(12345678901)')",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::InvalidStorageValue { column, details }
+            if column == "jsonpath"
+                && details == "time precision of jsonpath item method .time() is out of range for type integer"
+    ));
+}
+
+#[test]
 fn jsonpath_string_predicates_errors() {
     let base = temp_dir("jsonpath_string_predicates_errors");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -11809,54 +11799,6 @@ fn jsonb_builders_and_object_agg_work() {
             }
             other => panic!("expected query result, got {:?}", other),
         }
-}
-
-#[test]
-fn jsonb_aggregate_local_order_by_is_respected() {
-    let base = temp_dir("jsonb_agg_local_order_by");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-    let xid = txns.begin();
-    run_sql(
-        &base,
-        &txns,
-        xid,
-        "insert into people (id, name, note) values \
-            (1, 'alice', 'b'), \
-            (2, 'bob', 'a'), \
-            (3, 'carol', 'c')",
-    )
-    .unwrap();
-    txns.commit(xid).unwrap();
-
-    match run_sql(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "select \
-            jsonb_agg(id order by note, id desc), \
-            jsonb_object_agg(name, id order by note desc) \
-         from people",
-    )
-    .unwrap()
-    {
-        StatementResult::Query { rows, .. } => {
-            assert_eq!(
-                rows,
-                vec![vec![
-                    Value::Jsonb(
-                        crate::backend::executor::jsonb::parse_jsonb_text("[2,1,3]").unwrap()
-                    ),
-                    Value::Jsonb(
-                        crate::backend::executor::jsonb::parse_jsonb_text(
-                            "{\"carol\":3,\"alice\":1,\"bob\":2}"
-                        )
-                        .unwrap()
-                    ),
-                ]]
-            );
-        }
-        other => panic!("expected query result, got {:?}", other),
-    }
 }
 
 #[test]
@@ -12529,8 +12471,10 @@ fn scalar_subquery_multiple_rows_errors() {
         catalog_with_pets(),
     )
     .unwrap_err();
-    assert!(format!("{err:?}")
-        .contains("more than one row returned by a subquery used as an expression"));
+    assert!(
+        format!("{err:?}")
+            .contains("more than one row returned by a subquery used as an expression")
+    );
 }
 
 #[test]

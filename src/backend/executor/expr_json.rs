@@ -78,6 +78,11 @@ impl ParsedJsonValue {
                 JsonbValue::Bool(_) => "boolean",
                 JsonbValue::Numeric(_) => "number",
                 JsonbValue::String(_) => "string",
+                JsonbValue::Date(_) => "date",
+                JsonbValue::Time(_) => "time without time zone",
+                JsonbValue::TimeTz(_) => "time with time zone",
+                JsonbValue::Timestamp(_) => "timestamp without time zone",
+                JsonbValue::TimestampTz(_) => "timestamp with time zone",
                 JsonbValue::Array(_) => "array",
                 JsonbValue::Object(_) => "object",
             },
@@ -1261,7 +1266,12 @@ fn apply_jsonb_delete(target: &JsonbValue, key: &Value) -> Result<JsonbValue, Ex
                 JsonbValue::Null
                 | JsonbValue::String(_)
                 | JsonbValue::Numeric(_)
-                | JsonbValue::Bool(_) => {
+                | JsonbValue::Bool(_)
+                | JsonbValue::Date(_)
+                | JsonbValue::Time(_)
+                | JsonbValue::TimeTz(_)
+                | JsonbValue::Timestamp(_)
+                | JsonbValue::TimestampTz(_) => {
                     return Err(ExecError::InvalidStorageValue {
                         column: "jsonb".into(),
                         details: "cannot delete from scalar".into(),
@@ -1330,7 +1340,12 @@ fn delete_jsonb_array_index(target: &JsonbValue, index: i32) -> Result<JsonbValu
             JsonbValue::Null
             | JsonbValue::String(_)
             | JsonbValue::Numeric(_)
-            | JsonbValue::Bool(_) => Err(ExecError::InvalidStorageValue {
+            | JsonbValue::Bool(_)
+            | JsonbValue::Date(_)
+            | JsonbValue::Time(_)
+            | JsonbValue::TimeTz(_)
+            | JsonbValue::Timestamp(_)
+            | JsonbValue::TimestampTz(_) => Err(ExecError::InvalidStorageValue {
                 column: "jsonb".into(),
                 details: "cannot delete from scalar".into(),
             }),
@@ -1383,7 +1398,12 @@ fn delete_jsonb_path_inner(
             JsonbValue::Null
             | JsonbValue::String(_)
             | JsonbValue::Numeric(_)
-            | JsonbValue::Bool(_) => {
+            | JsonbValue::Bool(_)
+            | JsonbValue::Date(_)
+            | JsonbValue::Time(_)
+            | JsonbValue::TimeTz(_)
+            | JsonbValue::Timestamp(_)
+            | JsonbValue::TimestampTz(_) => {
                 return Err(ExecError::InvalidStorageValue {
                     column: "jsonb".into(),
                     details: "cannot delete path in scalar".into(),
@@ -1415,7 +1435,15 @@ fn delete_jsonb_path_inner(
             out[index] = delete_jsonb_path_inner(&out[index], &path[1..], path_index + 1)?;
             JsonbValue::Array(out)
         }
-        JsonbValue::Null | JsonbValue::String(_) | JsonbValue::Numeric(_) | JsonbValue::Bool(_) => {
+        JsonbValue::Null
+        | JsonbValue::String(_)
+        | JsonbValue::Numeric(_)
+        | JsonbValue::Bool(_)
+        | JsonbValue::Date(_)
+        | JsonbValue::Time(_)
+        | JsonbValue::TimeTz(_)
+        | JsonbValue::Timestamp(_)
+        | JsonbValue::TimestampTz(_) => {
             return Err(ExecError::InvalidStorageValue {
                 column: "jsonb".into(),
                 details: "cannot delete path in scalar".into(),
