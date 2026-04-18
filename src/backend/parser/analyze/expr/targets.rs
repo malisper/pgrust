@@ -1,4 +1,5 @@
 use super::*;
+use crate::backend::utils::record::lookup_anonymous_record_descriptor;
 pub(crate) enum BoundSelectTargets {
     Plain(Vec<TargetEntry>),
     WithProjectSet {
@@ -736,6 +737,7 @@ fn func_call_is_set_returning(
     let normalized = name.to_ascii_lowercase();
     if matches!(normalized.as_str(), "generate_series" | "unnest")
         || resolve_json_table_function(&normalized).is_some()
+        || resolve_json_record_function(&normalized).is_some_and(|kind| kind.is_set_returning())
         || resolve_regex_table_function(&normalized).is_some()
     {
         return true;
@@ -987,6 +989,51 @@ fn bind_select_list_srf_call(
                         kind,
                         args: bound_args,
                         output_columns: output_columns.clone(),
+                    },
+                    output_columns[0].sql_type,
+                ))
+            } else if let Some(kind) = resolve_json_record_function(other) {
+                if !kind.is_set_returning() {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "supported set-returning function",
+                        actual: other.to_string(),
+                    });
+                }
+                let resolved = resolved.as_ref().ok_or_else(|| ParseError::UnexpectedToken {
+                    expected: "supported set-returning function",
+                    actual: other.to_string(),
+                })?;
+                let bound_args = bind_user_defined_srf_args(
+                    &args,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                    &resolved.declared_arg_types,
+                )?;
+                let output_columns = vec![QueryColumn {
+                    name: other.to_string(),
+                    sql_type: resolved.result_type,
+                    wire_type_oid: None,
+                }];
+                if matches!(resolved.result_type.kind, SqlTypeKind::Record)
+                    && resolved.result_type.typmod > 0
+                    && lookup_anonymous_record_descriptor(resolved.result_type.typmod).is_none()
+                {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "registered anonymous record descriptor",
+                        actual: other.to_string(),
+                    });
+                }
+                Ok((
+                    SetReturningCall::JsonRecordFunction {
+                        func_oid: resolved.proc_oid,
+                        func_variadic: resolved.func_variadic,
+                        kind,
+                        args: bound_args,
+                        output_columns: output_columns.clone(),
+                        record_type: Some(resolved.result_type),
                     },
                     output_columns[0].sql_type,
                 ))

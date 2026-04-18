@@ -1449,6 +1449,24 @@ fn lower_set_returning_call(
                 .collect(),
             output_columns,
         },
+        SetReturningCall::JsonRecordFunction {
+            func_oid,
+            func_variadic,
+            kind,
+            args,
+            output_columns,
+            record_type,
+        } => SetReturningCall::JsonRecordFunction {
+            func_oid,
+            func_variadic,
+            kind,
+            args: args
+                .into_iter()
+                .map(|arg| lower_expr(ctx, arg, mode))
+                .collect(),
+            output_columns,
+            record_type,
+        },
         SetReturningCall::RegexTableFunction {
             func_oid,
             func_variadic,
@@ -1547,6 +1565,24 @@ fn fix_set_returning_call_upper_exprs(
                 .map(|arg| fix_upper_expr_for_input(root, arg, path, input_tlist))
                 .collect(),
             output_columns,
+        },
+        SetReturningCall::JsonRecordFunction {
+            func_oid,
+            func_variadic,
+            kind,
+            args,
+            output_columns,
+            record_type,
+        } => SetReturningCall::JsonRecordFunction {
+            func_oid,
+            func_variadic,
+            kind,
+            args: args
+                .into_iter()
+                .map(|arg| fix_upper_expr_for_input(root, arg, path, input_tlist))
+                .collect(),
+            output_columns,
+            record_type,
         },
         SetReturningCall::RegexTableFunction {
             func_oid,
@@ -2007,6 +2043,7 @@ fn validate_set_returning_call(
         }
         SetReturningCall::Unnest { args, .. }
         | SetReturningCall::JsonTableFunction { args, .. }
+        | SetReturningCall::JsonRecordFunction { args, .. }
         | SetReturningCall::RegexTableFunction { args, .. }
         | SetReturningCall::TextSearchTableFunction { args, .. }
         | SetReturningCall::UserDefined { args, .. } => args
@@ -2319,6 +2356,7 @@ fn validate_planner_set_returning_call(
         }
         SetReturningCall::Unnest { args, .. }
         | SetReturningCall::JsonTableFunction { args, .. }
+        | SetReturningCall::JsonRecordFunction { args, .. }
         | SetReturningCall::RegexTableFunction { args, .. }
         | SetReturningCall::TextSearchTableFunction { args, .. }
         | SetReturningCall::UserDefined { args, .. } => args

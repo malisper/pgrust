@@ -1,4 +1,4 @@
-use super::expr_json::eval_json_table_function;
+use super::expr_json::{eval_json_record_set_returning_function, eval_json_table_function};
 use super::pg_regex::{eval_regexp_matches_rows, eval_regexp_split_to_table_rows};
 use super::{ExecError, ExecutorContext, Expr, SetReturningCall, TupleSlot, Value, eval_expr};
 use crate::backend::parser::SqlTypeKind;
@@ -22,6 +22,20 @@ pub(crate) fn eval_set_returning_call(
         SetReturningCall::JsonTableFunction { kind, args, .. } => {
             eval_json_table_function(*kind, args, slot, ctx)
         }
+        SetReturningCall::JsonRecordFunction {
+            kind,
+            args,
+            output_columns,
+            record_type,
+            ..
+        } => eval_json_record_set_returning_function(
+            *kind,
+            args,
+            output_columns,
+            *record_type,
+            slot,
+            ctx,
+        ),
         SetReturningCall::RegexTableFunction { kind, args, .. } => {
             eval_regex_table_function(*kind, args, slot, ctx)
         }
@@ -91,6 +105,7 @@ pub(crate) fn set_returning_call_label(call: &SetReturningCall) -> &'static str 
                 "jsonb_array_elements_text"
             }
         },
+        SetReturningCall::JsonRecordFunction { kind, .. } => kind.name(),
         SetReturningCall::RegexTableFunction { kind, .. } => match kind {
             crate::include::nodes::primnodes::RegexTableFunction::Matches => "regexp_matches",
             crate::include::nodes::primnodes::RegexTableFunction::SplitToTable => {

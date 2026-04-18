@@ -278,10 +278,7 @@ impl Database {
                 continue;
             }
             if is_temp_schema_name(&schema_name) {
-                return Err(ParseError::UnexpectedToken {
-                    expected: "permanent type",
-                    actual: "temporary type".into(),
-                });
+                continue;
             }
             if let Some(namespace) =
                 self.visible_namespace_by_name(client_id, txn_ctx, &schema_name)
