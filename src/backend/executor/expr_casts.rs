@@ -1120,11 +1120,33 @@ pub(crate) fn cast_value_with_config(
             Value::Null => Ok(Value::Null),
             Value::Array(items) => {
                 let element_type = ty.element_type();
-                let mut casted = Vec::with_capacity(items.len());
-                for item in items {
-                    casted.push(cast_value_with_config(item, element_type, config)?);
+                if items
+                    .iter()
+                    .any(|item| matches!(item, Value::Array(_) | Value::PgArray(_)))
+                {
+                    let array = ArrayValue::from_nested_values(items, vec![1]).map_err(|details| {
+                        ExecError::DetailedError {
+                            message: "malformed array literal".into(),
+                            detail: Some(details),
+                            hint: None,
+                            sqlstate: "22P02",
+                        }
+                    })?;
+                    let mut casted = Vec::with_capacity(array.elements.len());
+                    for item in array.elements {
+                        casted.push(cast_value_with_config(item, element_type, config)?);
+                    }
+                    Ok(Value::PgArray(ArrayValue::from_dimensions(
+                        array.dimensions,
+                        casted,
+                    )))
+                } else {
+                    let mut casted = Vec::with_capacity(items.len());
+                    for item in items {
+                        casted.push(cast_value_with_config(item, element_type, config)?);
+                    }
+                    Ok(Value::Array(casted))
                 }
-                Ok(Value::Array(casted))
             }
             Value::PgArray(array) => {
                 let element_type = ty.element_type();

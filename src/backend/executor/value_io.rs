@@ -1204,11 +1204,33 @@ pub(crate) fn coerce_assignment_value(value: &Value, target: SqlType) -> Result<
             Value::Null => Ok(Value::Null),
             Value::Array(items) => {
                 let element_type = target.element_type();
-                let mut coerced = Vec::with_capacity(items.len());
-                for item in items {
-                    coerced.push(coerce_assignment_value(item, element_type)?);
+                if items
+                    .iter()
+                    .any(|item| matches!(item, Value::Array(_) | Value::PgArray(_)))
+                {
+                    let array = ArrayValue::from_nested_values(items.clone(), vec![1]).map_err(
+                        |details| ExecError::DetailedError {
+                            message: "malformed array literal".into(),
+                            detail: Some(details),
+                            hint: None,
+                            sqlstate: "22P02",
+                        },
+                    )?;
+                    let mut coerced = Vec::with_capacity(array.elements.len());
+                    for item in &array.elements {
+                        coerced.push(coerce_assignment_value(item, element_type)?);
+                    }
+                    Ok(Value::PgArray(ArrayValue::from_dimensions(
+                        array.dimensions,
+                        coerced,
+                    )))
+                } else {
+                    let mut coerced = Vec::with_capacity(items.len());
+                    for item in items {
+                        coerced.push(coerce_assignment_value(item, element_type)?);
+                    }
+                    Ok(Value::Array(coerced))
                 }
-                Ok(Value::Array(coerced))
             }
             Value::PgArray(array) => {
                 let element_type = target.element_type();
