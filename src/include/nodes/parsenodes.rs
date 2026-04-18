@@ -269,6 +269,8 @@ pub enum Statement {
     CreateRole(CreateRoleStatement),
     AlterRole(AlterRoleStatement),
     DropRole(DropRoleStatement),
+    SetRole(SetRoleStatement),
+    ResetRole(ResetRoleStatement),
     SetSessionAuthorization(SetSessionAuthorizationStatement),
     ResetSessionAuthorization(ResetSessionAuthorizationStatement),
     ReassignOwned(ReassignOwnedStatement),
@@ -1045,6 +1047,14 @@ pub struct SetSessionAuthorizationStatement {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResetSessionAuthorizationStatement;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetRoleStatement {
+    pub role_name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResetRoleStatement;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommentOnRoleStatement {

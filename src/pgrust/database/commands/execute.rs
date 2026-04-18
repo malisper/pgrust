@@ -311,6 +311,14 @@ impl Database {
                 self.execute_reset_session_authorization_stmt(client_id, reset_stmt)?;
                 Ok(StatementResult::AffectedRows(0))
             }
+            Statement::SetRole(ref set_stmt) => {
+                self.execute_set_role_stmt(client_id, set_stmt)?;
+                Ok(StatementResult::AffectedRows(0))
+            }
+            Statement::ResetRole(ref reset_stmt) => {
+                self.execute_reset_role_stmt(client_id, reset_stmt)?;
+                Ok(StatementResult::AffectedRows(0))
+            }
             Statement::Unsupported(ref unsupported_stmt) => {
                 Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
                     "{}: {}",
