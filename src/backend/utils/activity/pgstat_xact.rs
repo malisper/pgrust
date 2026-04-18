@@ -30,7 +30,6 @@ impl SessionStatsState {
     }
 
     pub(crate) fn commit_top_level_xact(&mut self, db_stats: &Arc<RwLock<DatabaseStatsStore>>) {
-        let visible_before_commit = db_stats.read().merged_with_pending(&self.pending_flush);
         let effects = std::mem::take(&mut self.stats_effects);
         for (oid, state) in std::mem::take(&mut self.relation_xact) {
             if self.dropped_relations_in_xact.contains(&oid) {
@@ -38,10 +37,9 @@ impl SessionStatsState {
             }
             let relation_delta = if state.truncated {
                 let current = state.current;
-                let base = visible_before_commit
-                    .relations
-                    .get(&oid)
-                    .cloned()
+                let base = db_stats
+                    .read()
+                    .merged_relation_entry(&self.pending_flush, oid)
                     .unwrap_or_default();
                 RelationStatsDelta {
                     numscans: current.numscans,

@@ -141,8 +141,11 @@ fn relation_stats_value(
     oid: u32,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
-    let stats = ctx.session_stats.write().visible_stats(&ctx.stats);
-    let entry = stats.relations.get(&oid).cloned().unwrap_or_default();
+    let entry = ctx
+        .session_stats
+        .write()
+        .visible_relation_entry(&ctx.stats, oid)
+        .unwrap_or_default();
     Ok(match func {
         BuiltinScalarFunction::PgStatGetNumscans => Value::Int64(entry.numscans),
         BuiltinScalarFunction::PgStatGetLastscan => entry
@@ -193,8 +196,11 @@ fn function_stats_value(
     oid: u32,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
-    let stats = ctx.session_stats.write().visible_stats(&ctx.stats);
-    let Some(entry) = stats.functions.get(&oid) else {
+    let Some(entry) = ctx
+        .session_stats
+        .write()
+        .visible_function_entry(&ctx.stats, oid)
+    else {
         return Ok(Value::Null);
     };
     Ok(match func {
@@ -1995,14 +2001,15 @@ fn eval_builtin_function(
             Ok(Value::Null)
         }
         BuiltinScalarFunction::PgStatHaveStats => {
-            let kind = values
-                .first()
-                .and_then(Value::as_text)
-                .ok_or_else(|| ExecError::TypeMismatch {
-                    op: "pg_stat_have_stats",
-                    left: values.first().cloned().unwrap_or(Value::Null),
-                    right: Value::Text("".into()),
-                })?;
+            let kind =
+                values
+                    .first()
+                    .and_then(Value::as_text)
+                    .ok_or_else(|| ExecError::TypeMismatch {
+                        op: "pg_stat_have_stats",
+                        left: values.first().cloned().unwrap_or(Value::Null),
+                        right: Value::Text("".into()),
+                    })?;
             let objid = stats_oid_arg(&values[1..], "pg_stat_have_stats")?;
             let objsubid = values
                 .get(2)
@@ -2017,12 +2024,17 @@ fn eval_builtin_function(
                 })
                 .transpose()?
                 .unwrap_or_default();
-            let visible = ctx.session_stats.write().visible_stats(&ctx.stats);
             let has_stats = match kind.to_ascii_lowercase().as_str() {
                 "bgwriter" | "checkpointer" | "wal" => objid == 0 && objsubid == 0,
                 "database" => objid != 0 && (objsubid == 0 || objsubid == 1),
-                "relation" => visible.relations.contains_key(&objid),
-                "function" => visible.functions.contains_key(&objid),
+                "relation" => ctx
+                    .session_stats
+                    .write()
+                    .has_visible_relation_stats(&ctx.stats, objid),
+                "function" => ctx
+                    .session_stats
+                    .write()
+                    .has_visible_function_stats(&ctx.stats, objid),
                 other => {
                     return Err(ExecError::DetailedError {
                         message: format!("unrecognized statistics kind \"{other}\""),

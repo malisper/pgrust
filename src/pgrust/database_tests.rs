@@ -6963,6 +6963,124 @@ fn stats_snapshot_timestamp_requires_snapshot_mode_and_clear_snapshot_resets_it(
 }
 
 #[test]
+fn stats_fetch_consistency_cache_holds_cached_relation_entry_until_clear() {
+    let base = temp_dir("stats_cache_entry_visibility");
+    let db = Database::open(&base, 16).unwrap();
+    let mut writer = Session::new(1);
+    let mut reader = Session::new(2);
+
+    writer
+        .execute(&db, "create table items (id int4 primary key)")
+        .unwrap();
+    writer
+        .execute(&db, "set stats_fetch_consistency = none")
+        .unwrap();
+    reader
+        .execute(&db, "set stats_fetch_consistency = cache")
+        .unwrap();
+    reader.execute(&db, "begin").unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut reader,
+            &db,
+            "select n_tup_ins from pg_stat_user_tables where relname = 'items'",
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+
+    writer.execute(&db, "insert into items values (1)").unwrap();
+    assert_eq!(
+        session_query_rows(&mut writer, &db, "select pg_stat_force_next_flush()"),
+        vec![vec![Value::Null]]
+    );
+
+    assert_eq!(
+        session_query_rows(
+            &mut reader,
+            &db,
+            "select n_tup_ins from pg_stat_user_tables where relname = 'items'",
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+    assert_eq!(
+        session_query_rows(&mut reader, &db, "select pg_stat_clear_snapshot()"),
+        vec![vec![Value::Null]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut reader,
+            &db,
+            "select n_tup_ins from pg_stat_user_tables where relname = 'items'",
+        ),
+        vec![vec![Value::Int64(1)]]
+    );
+    reader.execute(&db, "commit").unwrap();
+}
+
+#[test]
+fn stats_snapshot_holds_unseen_relation_entries_stable_until_clear() {
+    let base = temp_dir("stats_snapshot_unseen_entry_visibility");
+    let db = Database::open(&base, 16).unwrap();
+    let mut writer = Session::new(1);
+    let mut reader = Session::new(2);
+
+    writer
+        .execute(&db, "create table items (id int4 primary key)")
+        .unwrap();
+    writer
+        .execute(&db, "create table other_items (id int4 primary key)")
+        .unwrap();
+    writer
+        .execute(&db, "set stats_fetch_consistency = none")
+        .unwrap();
+
+    reader.execute(&db, "begin").unwrap();
+    reader
+        .execute(&db, "set local stats_fetch_consistency = snapshot")
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut reader,
+            &db,
+            "select n_tup_ins from pg_stat_user_tables where relname = 'items'",
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+
+    writer
+        .execute(&db, "insert into other_items values (1)")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut writer, &db, "select pg_stat_force_next_flush()"),
+        vec![vec![Value::Null]]
+    );
+
+    assert_eq!(
+        session_query_rows(
+            &mut reader,
+            &db,
+            "select n_tup_ins from pg_stat_user_tables where relname = 'other_items'",
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+    assert_eq!(
+        session_query_rows(&mut reader, &db, "select pg_stat_clear_snapshot()"),
+        vec![vec![Value::Null]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut reader,
+            &db,
+            "select n_tup_ins from pg_stat_user_tables where relname = 'other_items'",
+        ),
+        vec![vec![Value::Int64(1)]]
+    );
+    reader.execute(&db, "commit").unwrap();
+}
+
+#[test]
 fn relation_stats_views_track_commit_flush_and_rollback() {
     let base = temp_dir("relation_stats_views");
     let db = Database::open(&base, 16).unwrap();
