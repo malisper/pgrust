@@ -9752,6 +9752,42 @@ fn jsonb_object_and_pretty_functions_work() {
 }
 
 #[test]
+fn jsonb_object_accepts_text_array_literals() {
+    let base = temp_dir("jsonb_object_text_array_literals");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_object('{a,1,b,2,3,NULL,\"d e f\",\"a b c\"}'), \
+                jsonb_object('{a,b,c,\"d e f\"}','{1,2,3,\"a b c\"}')",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Jsonb(
+                        crate::backend::executor::jsonb::parse_jsonb_text(
+                            "{\"3\":null,\"a\":\"1\",\"b\":\"2\",\"d e f\":\"a b c\"}"
+                        )
+                        .unwrap()
+                    ),
+                    Value::Jsonb(
+                        crate::backend::executor::jsonb::parse_jsonb_text(
+                            "{\"a\":\"1\",\"b\":\"2\",\"c\":\"3\",\"d e f\":\"a b c\"}"
+                        )
+                        .unwrap()
+                    ),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn jsonb_object_and_builder_report_postgres_style_errors() {
     let base = temp_dir("jsonb_object_errors");
     let txns = TransactionManager::new_durable(&base).unwrap();
