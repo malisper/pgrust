@@ -1,14 +1,13 @@
+use crate::backend::utils::misc::guc_datetime::DateStyleFormat;
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::time::datetime::{
     DateTimeKeyword, DateTimeParseError, TimeZoneSpec, current_postgres_timestamp_usecs,
     current_timezone_name, day_of_week_from_julian_day, days_from_ymd, format_date_ymd,
-    format_offset, format_time_usecs, is_bc_token, is_weekday_token,
-    julian_day_from_postgres_date, month_number, named_timezone_offset_seconds,
-    parse_date_token_with_config, parse_keyword, parse_time_components, parse_timezone_spec,
-    split_time_and_offset, time_usecs_from_hms, timestamp_parts_from_usecs,
-    timezone_offset_seconds, today_pg_days, ymd_from_days,
+    format_offset, format_time_usecs, is_bc_token, is_weekday_token, julian_day_from_postgres_date,
+    month_number, named_timezone_offset_seconds, parse_date_token_with_config, parse_keyword,
+    parse_time_components, parse_timezone_spec, split_time_and_offset, time_usecs_from_hms,
+    timestamp_parts_from_usecs, timezone_offset_seconds, today_pg_days, ymd_from_days,
 };
-use crate::backend::utils::misc::guc_datetime::DateStyleFormat;
 use crate::include::nodes::datetime::{TimestampADT, TimestampTzADT, USECS_PER_DAY, USECS_PER_SEC};
 
 const WEEKDAY_ABBREV: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -56,7 +55,11 @@ fn format_timestamp_year_suffix(pg_days: i32) -> String {
 }
 
 fn timezone_abbrev_for_output(config: &DateTimeConfig, pg_days: i32) -> Option<&'static str> {
-    match current_timezone_name(config).trim().to_ascii_lowercase().as_str() {
+    match current_timezone_name(config)
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "utc" | "gmt" | "etc/utc" | "etc/gmt" | "z" | "zulu" => Some("UTC"),
         "pst" => Some("PST"),
         "pdt" => Some("PDT"),
@@ -488,7 +491,8 @@ mod format_tests {
             ..DateTimeConfig::default()
         };
         let ts = TimestampTzADT(
-            i64::from(days_from_ymd(1901, 1, 1).unwrap()) * USECS_PER_DAY + 8 * 3600 * USECS_PER_SEC,
+            i64::from(days_from_ymd(1901, 1, 1).unwrap()) * USECS_PER_DAY
+                + 8 * 3600 * USECS_PER_SEC,
         );
         assert_eq!(
             format_timestamptz_text(ts, &config),

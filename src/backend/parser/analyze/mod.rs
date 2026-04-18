@@ -30,7 +30,7 @@ use crate::include::catalog::{
     PgOperatorRow, PgProcRow, PgRangeRow, PgRewriteRow, PgStatisticRow, PgTypeRow, RECORD_TYPE_OID,
     bootstrap_pg_cast_rows, bootstrap_pg_language_rows, bootstrap_pg_operator_rows,
     bootstrap_pg_proc_rows, builtin_range_rows, builtin_type_rows,
-    proc_oid_for_builtin_aggregate_function,
+    proc_oid_for_builtin_aggregate_function, range_type_ref_for_sql_type,
 };
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{
@@ -247,10 +247,22 @@ pub trait CatalogLookup {
     }
 
     fn range_row_by_type_oid(&self, oid: u32) -> Option<PgRangeRow> {
-        self.range_rows().into_iter().find(|row| row.rngtypid == oid)
+        self.range_rows()
+            .into_iter()
+            .find(|row| row.rngtypid == oid)
     }
 
     fn type_oid_for_sql_type(&self, sql_type: SqlType) -> Option<u32> {
+        if let Some(range_type) = range_type_ref_for_sql_type(sql_type) {
+            if sql_type.is_array {
+                return self
+                    .type_rows()
+                    .into_iter()
+                    .find(|row| row.typelem == range_type.type_oid())
+                    .map(|row| row.oid);
+            }
+            return Some(range_type.type_oid());
+        }
         if !sql_type.is_array && sql_type.type_oid != 0 {
             return Some(sql_type.type_oid);
         }
@@ -2123,8 +2135,7 @@ fn bind_select_query_with_outer(
         );
     }
 
-    if stmt.distinct
-        && (!stmt.order_by.is_empty() || stmt.limit.is_some() || stmt.offset.is_some())
+    if stmt.distinct && (!stmt.order_by.is_empty() || stmt.limit.is_some() || stmt.offset.is_some())
     {
         return Err(ParseError::FeatureNotSupported(
             "SELECT DISTINCT with ORDER BY/LIMIT/OFFSET".into(),
@@ -2524,22 +2535,22 @@ fn bind_select_query_with_outer(
             let window_clauses = take_window_clauses(&window_state);
 
             let query = Query {
-                    command_type: crate::include::executor::execdesc::CommandType::Select,
-                    rtable: base.rtable,
-                    jointree: base.jointree,
-                    target_list,
-                    where_qual,
-                    group_by: rewritten_group_keys,
-                    accumulators,
-                    window_clauses,
-                    having_qual: having,
-                    sort_clause,
-                    limit_count: stmt.limit,
-                    limit_offset: stmt.offset.unwrap_or(0),
-                    project_set: None,
-                    recursive_union: None,
-                    set_operation: None,
-                };
+                command_type: crate::include::executor::execdesc::CommandType::Select,
+                rtable: base.rtable,
+                jointree: base.jointree,
+                target_list,
+                where_qual,
+                group_by: rewritten_group_keys,
+                accumulators,
+                window_clauses,
+                having_qual: having,
+                sort_clause,
+                limit_count: stmt.limit,
+                limit_offset: stmt.offset.unwrap_or(0),
+                project_set: None,
+                recursive_union: None,
+                set_operation: None,
+            };
             let query = apply_select_distinct(query, stmt.distinct);
             Ok((query, scope))
         });
@@ -2590,22 +2601,22 @@ fn bind_select_query_with_outer(
                 };
 
                 let query = Query {
-                        command_type: crate::include::executor::execdesc::CommandType::Select,
-                        rtable: base.rtable,
-                        jointree: base.jointree,
-                        target_list,
-                        where_qual,
-                        group_by: Vec::new(),
-                        accumulators: Vec::new(),
-                        window_clauses,
-                        having_qual: None,
-                        sort_clause,
-                        limit_count: stmt.limit,
-                        limit_offset: stmt.offset.unwrap_or(0),
-                        project_set: None,
-                        recursive_union: None,
-                        set_operation: None,
-                    };
+                    command_type: crate::include::executor::execdesc::CommandType::Select,
+                    rtable: base.rtable,
+                    jointree: base.jointree,
+                    target_list,
+                    where_qual,
+                    group_by: Vec::new(),
+                    accumulators: Vec::new(),
+                    window_clauses,
+                    having_qual: None,
+                    sort_clause,
+                    limit_count: stmt.limit,
+                    limit_offset: stmt.offset.unwrap_or(0),
+                    project_set: None,
+                    recursive_union: None,
+                    set_operation: None,
+                };
                 let query = apply_select_distinct(query, stmt.distinct);
                 Ok((query, scope))
             }
@@ -2639,22 +2650,22 @@ fn bind_select_query_with_outer(
                 let sort_clause = build_sort_clause(sort_inputs, &final_targets);
                 let target_list = normalize_target_list(final_targets);
                 let query = Query {
-                        command_type: crate::include::executor::execdesc::CommandType::Select,
-                        rtable: base.rtable,
-                        jointree: base.jointree,
-                        target_list,
-                        where_qual,
-                        group_by: Vec::new(),
-                        accumulators: Vec::new(),
-                        window_clauses,
-                        having_qual: None,
-                        sort_clause,
-                        limit_count: stmt.limit,
-                        limit_offset: stmt.offset.unwrap_or(0),
-                        project_set: Some(project_targets),
-                        recursive_union: None,
-                        set_operation: None,
-                    };
+                    command_type: crate::include::executor::execdesc::CommandType::Select,
+                    rtable: base.rtable,
+                    jointree: base.jointree,
+                    target_list,
+                    where_qual,
+                    group_by: Vec::new(),
+                    accumulators: Vec::new(),
+                    window_clauses,
+                    having_qual: None,
+                    sort_clause,
+                    limit_count: stmt.limit,
+                    limit_offset: stmt.offset.unwrap_or(0),
+                    project_set: Some(project_targets),
+                    recursive_union: None,
+                    set_operation: None,
+                };
                 let query = apply_select_distinct(query, stmt.distinct);
                 Ok((query, scope))
             }

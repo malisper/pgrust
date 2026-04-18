@@ -12,7 +12,7 @@ use std::cmp::Ordering;
 use std::collections::HashSet;
 
 use super::expr_range::{range_intersection_agg_transition, render_range_text};
-use super::jsonb::{encode_jsonb, jsonb_from_value, render_jsonb_bytes, JsonbValue};
+use super::jsonb::{JsonbValue, encode_jsonb, jsonb_from_value, render_jsonb_bytes};
 
 #[derive(Debug, Clone)]
 pub(crate) enum NumericAccum {

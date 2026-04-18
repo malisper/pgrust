@@ -477,7 +477,10 @@ fn compile_return_stmt(
         }
         (
             FunctionReturnContract::Scalar {
-                ty, output_slot, setof, ..
+                ty,
+                output_slot,
+                setof,
+                ..
             },
             None,
         ) if output_slot.is_some() || *setof || ty.kind == SqlTypeKind::Void => {

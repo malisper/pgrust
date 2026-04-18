@@ -3,6 +3,7 @@ use crate::backend::commands::tablecmds::{collect_matching_rows_heap, index_key_
 use crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot;
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::include::access::amapi::{IndexBuildEmptyContext, IndexInsertContext, IndexUniqueCheck};
+use crate::include::catalog::range_type_ref_for_sql_type;
 use std::collections::BTreeSet;
 
 impl Database {
@@ -104,10 +105,14 @@ impl Database {
                     })?
                     .sql_type
             };
-            let type_oid = type_rows
-                .iter()
-                .find(|row| row.sql_type == sql_type)
-                .map(|row| row.oid)
+            let type_oid = range_type_ref_for_sql_type(sql_type)
+                .map(|range_type| range_type.type_oid())
+                .or_else(|| {
+                    type_rows
+                        .iter()
+                        .find(|row| row.sql_type == sql_type)
+                        .map(|row| row.oid)
+                })
                 .ok_or_else(|| {
                     ExecError::Parse(ParseError::UnsupportedType(
                         column

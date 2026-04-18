@@ -2,7 +2,7 @@ use super::functions::*;
 use super::infer::*;
 use super::*;
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
-use crate::include::catalog::builtin_range_spec_for_sql_type;
+use crate::include::catalog::range_type_ref_for_sql_type;
 use crate::include::nodes::primnodes::{
     BoolExprType, CaseExpr as BoundCaseExpr, CaseTestExpr as BoundCaseTestExpr,
     CaseWhen as BoundCaseWhen, ExprArraySubscript, OpExprKind, WindowFuncKind, expr_sql_type_hint,
@@ -1924,20 +1924,21 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             let legacy_result_type =
                 if matches!(legacy_func, BuiltinScalarFunction::RangeConstructor) {
                     resolve_function_cast_type(catalog, name)
-                        .filter(|ty| builtin_range_spec_for_sql_type(*ty).is_some())
+                        .filter(|ty| range_type_ref_for_sql_type(*ty).is_some())
                 } else {
                     None
                 };
-            let legacy_declared_arg_types =
-                if let Some(spec) = legacy_result_type.and_then(builtin_range_spec_for_sql_type) {
-                    let mut declared = vec![spec.range_type.subtype, spec.range_type.subtype];
-                    if lowered_args.len() == 3 {
-                        declared.push(SqlType::new(SqlTypeKind::Text));
-                    }
-                    declared
-                } else {
-                    actual_types.clone()
-                };
+            let legacy_declared_arg_types = if let Some(range_type) =
+                legacy_result_type.and_then(range_type_ref_for_sql_type)
+            {
+                let mut declared = vec![range_type.subtype, range_type.subtype];
+                if lowered_args.len() == 3 {
+                    declared.push(SqlType::new(SqlTypeKind::Text));
+                }
+                declared
+            } else {
+                actual_types.clone()
+            };
             bind_scalar_function_call(
                 legacy_func,
                 0,
@@ -2070,8 +2071,7 @@ fn bind_field_select_expr(
                         .map(|(field_name, expr)| {
                             (
                                 field_name.clone(),
-                                expr_sql_type_hint(expr)
-                                    .unwrap_or(SqlType::new(SqlTypeKind::Text)),
+                                expr_sql_type_hint(expr).unwrap_or(SqlType::new(SqlTypeKind::Text)),
                             )
                         })
                         .collect(),
@@ -2079,14 +2079,9 @@ fn bind_field_select_expr(
                 fields,
             }
         }
-        _ => bind_expr_with_outer_and_ctes(
-            expr,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        )?,
+        _ => {
+            bind_expr_with_outer_and_ctes(expr, scope, catalog, outer_scopes, grouped_outer, ctes)?
+        }
     };
     let field_type = resolve_bound_field_select_type(&bound_inner, field, catalog)?;
     Ok(Expr::FieldSelect {
@@ -2119,13 +2114,12 @@ fn resolve_bound_field_select_type(
     };
 
     if matches!(row_type.kind, SqlTypeKind::Composite) && row_type.typrelid != 0 {
-        let relation =
-            catalog
-                .lookup_relation_by_oid(row_type.typrelid)
-                .ok_or_else(|| ParseError::UnexpectedToken {
-                    expected: "named composite type",
-                    actual: format!("type relation {} not found", row_type.typrelid),
-                })?;
+        let relation = catalog
+            .lookup_relation_by_oid(row_type.typrelid)
+            .ok_or_else(|| ParseError::UnexpectedToken {
+                expected: "named composite type",
+                actual: format!("type relation {} not found", row_type.typrelid),
+            })?;
         if let Some(found) = relation
             .desc
             .columns
@@ -2421,9 +2415,9 @@ fn resolve_regprocedure_signature(
             .map(|arg| {
                 let raw_type = crate::backend::parser::parse_type_name(arg.trim())?;
                 let sql_type = resolve_raw_type_name(&raw_type, catalog)?;
-                catalog.type_oid_for_sql_type(sql_type).ok_or_else(|| {
-                    ParseError::UnsupportedType(sql_type_name(sql_type))
-                })
+                catalog
+                    .type_oid_for_sql_type(sql_type)
+                    .ok_or_else(|| ParseError::UnsupportedType(sql_type_name(sql_type)))
             })
             .collect::<Result<Vec<_>, _>>()?
     };

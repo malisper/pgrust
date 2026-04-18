@@ -3,14 +3,13 @@ use crate::backend::catalog::CatalogError;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::{ColumnDesc, RelationDesc, StatementResult};
 use crate::backend::parser::{
-    CatalogLookup, CreateCompositeTypeStatement, CreateEnumTypeStatement,
-    CreateRangeTypeStatement, CreateTypeStatement, DropTypeStatement, ParseError,
-    resolve_raw_type_name,
+    CatalogLookup, CreateCompositeTypeStatement, CreateEnumTypeStatement, CreateRangeTypeStatement,
+    CreateTypeStatement, DropTypeStatement, ParseError, resolve_raw_type_name,
 };
-use crate::pgrust::database::{EnumTypeEntry, RangeTypeEntry};
 use crate::pgrust::database::ddl::{
     ensure_relation_owner, is_system_column_name, map_catalog_error, reject_type_with_dependents,
 };
+use crate::pgrust::database::{EnumTypeEntry, RangeTypeEntry};
 
 enum ResolvedDropTypeTarget {
     Composite {
@@ -96,9 +95,9 @@ impl Database {
                         catalog_effects.push(effect);
                         Ok(StatementResult::AffectedRows(0))
                     }
-                    Err(CatalogError::TableAlreadyExists(_)) => {
-                        Err(type_already_exists_error(&composite_type_display_name(stmt)))
-                    }
+                    Err(CatalogError::TableAlreadyExists(_)) => Err(type_already_exists_error(
+                        &composite_type_display_name(stmt),
+                    )),
                     Err(err) => Err(map_catalog_error(err)),
                 }
             }

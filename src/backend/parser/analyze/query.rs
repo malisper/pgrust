@@ -2,8 +2,8 @@ use super::*;
 use crate::include::executor::execdesc::CommandType;
 use crate::include::nodes::parsenodes::{JoinTreeNode, Query, RangeTblEntry, RangeTblEntryKind};
 use crate::include::nodes::primnodes::{
-    attrno_index, is_system_attr, user_attrno, Aggref, BoolExpr, FuncExpr, OpExpr, OrderByEntry,
-    ScalarArrayOpExpr, SubLink,
+    Aggref, BoolExpr, FuncExpr, OpExpr, OrderByEntry, ScalarArrayOpExpr, SubLink, attrno_index,
+    is_system_attr, user_attrno,
 };
 use crate::include::nodes::primnodes::{ExprArraySubscript, JoinType, Var};
 

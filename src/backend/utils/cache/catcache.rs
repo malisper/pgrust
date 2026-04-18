@@ -58,7 +58,8 @@ use crate::include::catalog::{
     bootstrap_pg_opfamily_rows, bootstrap_pg_proc_rows, bootstrap_pg_tablespace_rows,
     bootstrap_pg_ts_config_map_rows, bootstrap_pg_ts_config_rows, bootstrap_pg_ts_dict_rows,
     bootstrap_pg_ts_parser_rows, bootstrap_pg_ts_template_rows, builtin_type_rows,
-    composite_array_type_row, composite_type_row, sort_pg_rewrite_rows,
+    composite_array_type_row, composite_type_row, range_type_ref_for_sql_type,
+    sort_pg_rewrite_rows,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -758,8 +759,20 @@ fn catalog_object_name(name: &str) -> &str {
 }
 
 pub fn sql_type_oid(sql_type: SqlType) -> u32 {
-    if sql_type.type_oid != 0 && matches!(sql_type.kind, SqlTypeKind::Range) {
-        return sql_type.type_oid;
+    if let Some(range_type) = range_type_ref_for_sql_type(sql_type) {
+        if sql_type.is_array {
+            if sql_type.type_oid != 0 && matches!(sql_type.kind, SqlTypeKind::Range) {
+                return sql_type.type_oid;
+            }
+            if let Some(array_row) = builtin_type_rows()
+                .into_iter()
+                .find(|row| row.typelem == range_type.type_oid())
+            {
+                return array_row.oid;
+            }
+            unreachable!("range arrays are unsupported");
+        }
+        return range_type.type_oid();
     }
     if !sql_type.is_array && sql_type.type_oid != 0 {
         return sql_type.type_oid;
@@ -795,8 +808,6 @@ pub fn sql_type_oid(sql_type: SqlType) -> u32 {
         (SqlTypeKind::Int2Vector, true) => unreachable!("int2vector arrays are unsupported"),
         (SqlTypeKind::Int4, false) => INT4_TYPE_OID,
         (SqlTypeKind::Int4, true) => INT4_ARRAY_TYPE_OID,
-        (SqlTypeKind::Int4Range, false) => crate::include::catalog::INT4RANGE_TYPE_OID,
-        (SqlTypeKind::Int4Range, true) => unreachable!("range arrays are unsupported"),
         (SqlTypeKind::Text, false) => TEXT_TYPE_OID,
         (SqlTypeKind::Text, true) => TEXT_ARRAY_TYPE_OID,
         (SqlTypeKind::Tid, false) => TID_TYPE_OID,
@@ -821,28 +832,18 @@ pub fn sql_type_oid(sql_type: SqlType) -> u32 {
         (SqlTypeKind::Char, true) => BPCHAR_ARRAY_TYPE_OID,
         (SqlTypeKind::Date, false) => crate::include::catalog::DATE_TYPE_OID,
         (SqlTypeKind::Date, true) => crate::include::catalog::DATE_ARRAY_TYPE_OID,
-        (SqlTypeKind::DateRange, false) => crate::include::catalog::DATERANGE_TYPE_OID,
-        (SqlTypeKind::DateRange, true) => unreachable!("range arrays are unsupported"),
         (SqlTypeKind::Time, false) => crate::include::catalog::TIME_TYPE_OID,
         (SqlTypeKind::Time, true) => crate::include::catalog::TIME_ARRAY_TYPE_OID,
         (SqlTypeKind::TimeTz, false) => crate::include::catalog::TIMETZ_TYPE_OID,
         (SqlTypeKind::TimeTz, true) => crate::include::catalog::TIMETZ_ARRAY_TYPE_OID,
         (SqlTypeKind::Timestamp, false) => TIMESTAMP_TYPE_OID,
         (SqlTypeKind::Timestamp, true) => TIMESTAMP_ARRAY_TYPE_OID,
-        (SqlTypeKind::TimestampRange, false) => crate::include::catalog::TSRANGE_TYPE_OID,
-        (SqlTypeKind::TimestampRange, true) => unreachable!("range arrays are unsupported"),
         (SqlTypeKind::TimestampTz, false) => crate::include::catalog::TIMESTAMPTZ_TYPE_OID,
         (SqlTypeKind::TimestampTz, true) => crate::include::catalog::TIMESTAMPTZ_ARRAY_TYPE_OID,
         (SqlTypeKind::Interval, false) => INTERVAL_TYPE_OID,
         (SqlTypeKind::Interval, true) => INTERVAL_ARRAY_TYPE_OID,
-        (SqlTypeKind::TimestampTzRange, false) => crate::include::catalog::TSTZRANGE_TYPE_OID,
-        (SqlTypeKind::TimestampTzRange, true) => unreachable!("range arrays are unsupported"),
         (SqlTypeKind::Numeric, false) => NUMERIC_TYPE_OID,
         (SqlTypeKind::Numeric, true) => NUMERIC_ARRAY_TYPE_OID,
-        (SqlTypeKind::NumericRange, false) => crate::include::catalog::NUMRANGE_TYPE_OID,
-        (SqlTypeKind::NumericRange, true) => unreachable!("range arrays are unsupported"),
-        (SqlTypeKind::Int8Range, false) => crate::include::catalog::INT8RANGE_TYPE_OID,
-        (SqlTypeKind::Int8Range, true) => unreachable!("range arrays are unsupported"),
         (SqlTypeKind::Json, false) => JSON_TYPE_OID,
         (SqlTypeKind::Json, true) => JSON_ARRAY_TYPE_OID,
         (SqlTypeKind::Jsonb, false) => JSONB_TYPE_OID,
@@ -873,6 +874,12 @@ pub fn sql_type_oid(sql_type: SqlType) -> u32 {
         (SqlTypeKind::RegDictionary, true) => REGDICTIONARY_ARRAY_TYPE_OID,
         (SqlTypeKind::PgNodeTree, false) => crate::include::catalog::PG_NODE_TREE_TYPE_OID,
         (SqlTypeKind::PgNodeTree, true) => unreachable!("pg_node_tree arrays are unsupported"),
+        (SqlTypeKind::Int4Range, _) => unreachable!("range handled above"),
+        (SqlTypeKind::Int8Range, _) => unreachable!("range handled above"),
+        (SqlTypeKind::NumericRange, _) => unreachable!("range handled above"),
+        (SqlTypeKind::DateRange, _) => unreachable!("range handled above"),
+        (SqlTypeKind::TimestampRange, _) => unreachable!("range handled above"),
+        (SqlTypeKind::TimestampTzRange, _) => unreachable!("range handled above"),
     }
 }
 

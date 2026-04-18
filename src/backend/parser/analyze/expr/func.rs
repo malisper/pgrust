@@ -1,6 +1,6 @@
 use super::*;
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
-use crate::include::catalog::{ANYOID, builtin_range_spec_for_sql_type};
+use crate::include::catalog::{ANYOID, range_type_ref_for_sql_type};
 use crate::include::nodes::primnodes::expr_sql_type_hint;
 
 pub(super) fn bind_row_to_json_call(
@@ -2340,13 +2340,13 @@ pub(super) fn bind_scalar_function_call(
             let fallback_declared = if !declared_arg_types.is_empty() {
                 declared_arg_types.to_vec()
             } else if matches!(func, BuiltinScalarFunction::RangeConstructor) {
-                let spec = result_type
-                    .and_then(builtin_range_spec_for_sql_type)
+                let range_type = result_type
+                    .and_then(range_type_ref_for_sql_type)
                     .ok_or_else(|| ParseError::UnexpectedToken {
                         expected: "range constructor with a concrete range return type",
                         actual: format!("{func:?}"),
                     })?;
-                let mut types = vec![spec.range_type.subtype, spec.range_type.subtype];
+                let mut types = vec![range_type.subtype, range_type.subtype];
                 if args.len() == 3 {
                     types.push(SqlType::new(SqlTypeKind::Text));
                 }

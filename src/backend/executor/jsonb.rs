@@ -853,9 +853,11 @@ pub(crate) fn jsonb_contains(left: &JsonbValue, right: &JsonbValue) -> bool {
             })
         }
         (JsonbValue::Array(left_items), JsonbValue::Array(right_items)) => {
-            right_items
-                .iter()
-                .all(|right_item| left_items.iter().any(|left_item| jsonb_contains(left_item, right_item)))
+            right_items.iter().all(|right_item| {
+                left_items
+                    .iter()
+                    .any(|left_item| jsonb_contains(left_item, right_item))
+            })
         }
         _ => false,
     }

@@ -3,16 +3,15 @@ use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::{AggFunc, Expr, Plan, RelationDesc, Value};
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
-    bootstrap_pg_proc_rows, sort_pg_rewrite_rows, PgProcRow, PgRewriteRow, PgTypeRow,
-    BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_PRIMARY, JSON_TYPE_OID, PUBLIC_NAMESPACE_OID,
-    RECORD_TYPE_OID,
+    BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_PRIMARY, JSON_TYPE_OID, PUBLIC_NAMESPACE_OID, PgProcRow,
+    PgRewriteRow, PgTypeRow, RECORD_TYPE_OID, bootstrap_pg_proc_rows, sort_pg_rewrite_rows,
 };
 use crate::include::nodes::parsenodes::{
     AliasColumnDef, AliasColumnSpec, ColumnConstraint, CompositeTypeAttributeDef,
     CreateCompositeTypeStatement, CreateTypeStatement, DropTypeStatement, ForeignKeyAction,
     ForeignKeyMatchType, JoinTreeNode, RangeTblEntryKind, RawTypeName, TableConstraint,
 };
-use crate::include::nodes::primnodes::{is_system_attr, AttrNumber, JoinType, Var};
+use crate::include::nodes::primnodes::{AttrNumber, JoinType, Var, is_system_attr};
 
 fn desc() -> RelationDesc {
     RelationDesc {
@@ -2712,14 +2711,16 @@ fn build_plan_accepts_catalog_backed_bit_comparisons() {
 
 #[test]
 fn build_plan_accepts_catalog_backed_bytea_comparisons() {
-    assert!(build_plan(
-        &parse_select(
-            r"select E'\\x01'::bytea = E'\\x01'::bytea, E'\\x01'::bytea < E'\\x02'::bytea"
+    assert!(
+        build_plan(
+            &parse_select(
+                r"select E'\\x01'::bytea = E'\\x01'::bytea, E'\\x01'::bytea < E'\\x02'::bytea"
+            )
+            .unwrap(),
+            &catalog(),
         )
-        .unwrap(),
-        &catalog(),
-    )
-    .is_ok());
+        .is_ok()
+    );
 }
 
 #[test]
@@ -2779,12 +2780,14 @@ fn build_plan_coerces_unknown_string_literals_for_array_ops() {
 
 #[test]
 fn build_plan_accepts_catalog_backed_text_array_casts() {
-    assert!(build_plan(
-        &parse_select("select cast('{1,2}' as int4[]), cast('{\"a\",\"b\"}' as varchar[])")
-            .unwrap(),
-        &catalog(),
-    )
-    .is_ok());
+    assert!(
+        build_plan(
+            &parse_select("select cast('{1,2}' as int4[]), cast('{\"a\",\"b\"}' as varchar[])")
+                .unwrap(),
+            &catalog(),
+        )
+        .is_ok()
+    );
 }
 
 #[test]

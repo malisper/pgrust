@@ -475,7 +475,10 @@ fn lookup_membership_grantee(
     Ok(role)
 }
 
-fn lookup_membership_role(catalog: &AuthCatalog, role_name: &str) -> Result<PgAuthIdRow, ExecError> {
+fn lookup_membership_role(
+    catalog: &AuthCatalog,
+    role_name: &str,
+) -> Result<PgAuthIdRow, ExecError> {
     let role = lookup_membership_role_by_name(catalog, role_name)?;
     if role.oid == crate::include::catalog::PG_DATABASE_OWNER_OID {
         return Err(ExecError::Parse(role_management_error(format!(
@@ -525,9 +528,10 @@ fn resolve_role_grantor(
             });
         }
         if grantor.oid != BOOTSTRAP_SUPERUSER_OID
-            && !catalog.memberships().iter().any(|row| {
-                row.roleid == role.oid && row.member == grantor.oid && row.admin_option
-            })
+            && !catalog
+                .memberships()
+                .iter()
+                .any(|row| row.roleid == role.oid && row.member == grantor.oid && row.admin_option)
         {
             return Err(ExecError::DetailedError {
                 message: format!(
@@ -570,14 +574,14 @@ fn resolve_role_grantor_spec(
             .role_by_oid(auth.current_user_oid())
             .cloned()
             .ok_or_else(|| ExecError::Parse(role_management_error("current role does not exist"))),
-        RoleGrantorSpec::RoleName(role_name) => catalog.role_by_name(role_name).cloned().ok_or_else(
-            || {
+        RoleGrantorSpec::RoleName(role_name) => {
+            catalog.role_by_name(role_name).cloned().ok_or_else(|| {
                 ExecError::Parse(role_management_error(format!(
                     "role \"{}\" does not exist",
                     role_name
                 )))
-            },
-        ),
+            })
+        }
     }
 }
 
@@ -625,7 +629,8 @@ fn plan_recursive_role_revoke(
     if actions[index] == PlannedRoleMembershipRevoke::DeleteGrant {
         return Ok(());
     }
-    if actions[index] == PlannedRoleMembershipRevoke::RemoveAdminOption && revoke_admin_option_only {
+    if actions[index] == PlannedRoleMembershipRevoke::RemoveAdminOption && revoke_admin_option_only
+    {
         return Ok(());
     }
 
@@ -886,7 +891,10 @@ mod tests {
             ExecError::DetailedError {
                 message, detail, ..
             } => {
-                assert_eq!(message, "permission denied to grant privileges as role \"grantor\"");
+                assert_eq!(
+                    message,
+                    "permission denied to grant privileges as role \"grantor\""
+                );
                 assert_eq!(
                     detail.as_deref(),
                     Some("The grantor must have the ADMIN option on role \"parent\".")
@@ -945,7 +953,10 @@ mod tests {
             .execute(&db, "grant parent to grantor with admin option")
             .unwrap();
         session
-            .execute(&db, "grant parent to grantee with admin true granted by grantor")
+            .execute(
+                &db,
+                "grant parent to grantee with admin true granted by grantor",
+            )
             .unwrap();
         session
             .execute(&db, "grant parent to child granted by grantee")
@@ -955,9 +966,7 @@ mod tests {
             .execute(&db, "revoke parent from grantee granted by grantor")
             .unwrap_err();
         match err {
-            ExecError::DetailedError {
-                message, hint, ..
-            } => {
+            ExecError::DetailedError { message, hint, .. } => {
                 assert_eq!(message, "dependent privileges exist");
                 assert_eq!(hint.as_deref(), Some("Use CASCADE to revoke them too."));
             }
@@ -978,7 +987,10 @@ mod tests {
             .execute(&db, "grant parent to grantor with admin option")
             .unwrap();
         session
-            .execute(&db, "grant parent to grantee with admin true granted by grantor")
+            .execute(
+                &db,
+                "grant parent to grantee with admin true granted by grantor",
+            )
             .unwrap();
         session
             .execute(&db, "grant parent to child granted by grantee")
