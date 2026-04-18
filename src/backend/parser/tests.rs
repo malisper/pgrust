@@ -3062,6 +3062,7 @@ fn parse_insert_update_delete() {
         Statement::Explain(ExplainStatement {
             analyze: false,
             buffers: false,
+            costs: true,
             ..
         })
     ));
@@ -3070,6 +3071,7 @@ fn parse_insert_update_delete() {
         Statement::Explain(ExplainStatement {
             analyze: true,
             buffers: false,
+            costs: true,
             ..
         })
     ));
@@ -3078,6 +3080,16 @@ fn parse_insert_update_delete() {
         Statement::Explain(ExplainStatement {
             analyze: true,
             buffers: true,
+            costs: true,
+            ..
+        })
+    ));
+    assert!(matches!(
+        parse_statement("explain (costs off) select name from people").unwrap(),
+        Statement::Explain(ExplainStatement {
+            analyze: false,
+            buffers: false,
+            costs: false,
             ..
         })
     ));
