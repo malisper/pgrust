@@ -1106,6 +1106,11 @@ fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement,
     let mut return_spec = None;
     let mut language = None;
     let mut body = None;
+    let mut link_symbol = None;
+    let mut strict = false;
+    let mut leakproof = false;
+    let mut volatility = crate::backend::parser::FunctionVolatility::Volatile;
+    let mut parallel = crate::backend::parser::FunctionParallel::Unsafe;
 
     while !rest.trim_start().is_empty() {
         rest = rest.trim_start();
@@ -1140,8 +1145,40 @@ fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement,
                     actual: rest.into(),
                 });
             }
-            let (parsed, next_rest) = parse_create_function_body(rest)?;
+            let (parsed, parsed_link_symbol, next_rest) = parse_create_function_body(rest)?;
             body = Some(parsed);
+            link_symbol = parsed_link_symbol;
+            rest = next_rest;
+            continue;
+        }
+        if keyword_at_start(rest, "strict") {
+            strict = true;
+            rest = consume_keyword(rest, "strict");
+            continue;
+        }
+        if keyword_at_start(rest, "leakproof") {
+            leakproof = true;
+            rest = consume_keyword(rest, "leakproof");
+            continue;
+        }
+        if keyword_at_start(rest, "immutable") {
+            volatility = crate::backend::parser::FunctionVolatility::Immutable;
+            rest = consume_keyword(rest, "immutable");
+            continue;
+        }
+        if keyword_at_start(rest, "stable") {
+            volatility = crate::backend::parser::FunctionVolatility::Stable;
+            rest = consume_keyword(rest, "stable");
+            continue;
+        }
+        if keyword_at_start(rest, "volatile") {
+            volatility = crate::backend::parser::FunctionVolatility::Volatile;
+            rest = consume_keyword(rest, "volatile");
+            continue;
+        }
+        if keyword_at_start(rest, "parallel") {
+            let (parsed, next_rest) = parse_create_function_parallel(rest)?;
+            parallel = parsed;
             rest = next_rest;
             continue;
         }
@@ -1179,8 +1216,13 @@ fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement,
         replace_existing,
         args,
         return_spec,
+        strict,
+        leakproof,
+        volatility,
+        parallel,
         language: language.ok_or(ParseError::UnexpectedEof)?,
         body: body.ok_or(ParseError::UnexpectedEof)?,
+        link_symbol,
     })
 }
 
@@ -1519,9 +1561,12 @@ fn parse_create_function_arg(input: &str) -> Result<CreateFunctionArg, ParseErro
     } else {
         (FunctionArgMode::In, trimmed)
     };
-    let (name, rest) = parse_sql_identifier(rest.trim_start())?;
-    let type_sql = rest.trim();
-    if type_sql.is_empty() {
+    let rest = rest.trim_start();
+    let (name, type_sql) = match parse_sql_identifier(rest) {
+        Ok((name, rest)) if !rest.trim().is_empty() => (Some(name), rest.trim()),
+        _ => (None, rest),
+    };
+    if type_sql.trim().is_empty() {
         return Err(ParseError::UnexpectedToken {
             expected: "argument type name",
             actual: input.into(),
@@ -1530,7 +1575,7 @@ fn parse_create_function_arg(input: &str) -> Result<CreateFunctionArg, ParseErro
     Ok(CreateFunctionArg {
         mode,
         name,
-        ty: parse_type_name(type_sql)?,
+        ty: parse_type_name(type_sql.trim())?,
     })
 }
 
@@ -1553,8 +1598,20 @@ fn parse_create_function_returns(
     } else {
         rest
     };
-    let boundary =
-        find_next_top_level_keyword(type_rest, &["language", "as"]).unwrap_or(type_rest.len());
+    let boundary = find_next_top_level_keyword(
+        type_rest,
+        &[
+            "language",
+            "as",
+            "strict",
+            "immutable",
+            "stable",
+            "volatile",
+            "leakproof",
+            "parallel",
+        ],
+    )
+    .unwrap_or(type_rest.len());
     let type_sql = type_rest[..boundary].trim();
     if type_sql.is_empty() {
         return Err(ParseError::UnexpectedToken {
@@ -1600,16 +1657,56 @@ fn parse_create_function_language(input: &str) -> Result<(String, &str), ParseEr
     Ok((language, rest))
 }
 
-fn parse_create_function_body(input: &str) -> Result<(String, &str), ParseError> {
+fn parse_create_function_parallel(
+    input: &str,
+) -> Result<(crate::backend::parser::FunctionParallel, &str), ParseError> {
+    let rest = consume_keyword(input.trim_start(), "parallel").trim_start();
+    if keyword_at_start(rest, "safe") {
+        return Ok((
+            crate::backend::parser::FunctionParallel::Safe,
+            consume_keyword(rest, "safe"),
+        ));
+    }
+    if keyword_at_start(rest, "restricted") {
+        return Ok((
+            crate::backend::parser::FunctionParallel::Restricted,
+            consume_keyword(rest, "restricted"),
+        ));
+    }
+    if keyword_at_start(rest, "unsafe") {
+        return Ok((
+            crate::backend::parser::FunctionParallel::Unsafe,
+            consume_keyword(rest, "unsafe"),
+        ));
+    }
+    Err(ParseError::UnexpectedToken {
+        expected: "PARALLEL SAFE, RESTRICTED, or UNSAFE",
+        actual: input.into(),
+    })
+}
+
+fn parse_create_function_body(input: &str) -> Result<(String, Option<String>, &str), ParseError> {
     let rest = consume_keyword(input.trim_start(), "as").trim_start();
     let token_len = scan_string_literal_token_len(rest).ok_or(ParseError::UnexpectedToken {
         expected: "function body string literal",
         actual: rest.into(),
     })?;
-    Ok((
-        decode_string_literal(&rest[..token_len])?,
-        &rest[token_len..],
-    ))
+    let body = decode_string_literal(&rest[..token_len])?;
+    let rest = &rest[token_len..];
+    let rest = rest.trim_start();
+    if let Some(rest) = rest.strip_prefix(',') {
+        let rest = rest.trim_start();
+        let token_len = scan_string_literal_token_len(rest).ok_or(ParseError::UnexpectedToken {
+            expected: "function link symbol string literal",
+            actual: rest.into(),
+        })?;
+        return Ok((
+            body,
+            Some(decode_string_literal(&rest[..token_len])?),
+            &rest[token_len..],
+        ));
+    }
+    Ok((body, None, rest))
 }
 
 fn parse_sql_identifier(input: &str) -> Result<(String, &str), ParseError> {
