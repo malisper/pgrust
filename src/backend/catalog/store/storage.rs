@@ -6,7 +6,7 @@ use crate::backend::access::transam::xact::{INVALID_TRANSACTION_ID, Snapshot, Tr
 use crate::backend::catalog::bootstrap::bootstrap_catalog_entry;
 use crate::backend::catalog::catalog::{Catalog, CatalogError};
 use crate::backend::catalog::indexing::{
-    insert_bootstrap_system_indexes, rebuild_system_catalog_indexes_for_db,
+    insert_bootstrap_system_indexes, system_catalog_index_entry_for_db,
 };
 use crate::backend::catalog::loader::{
     catalog_from_physical_rows_scoped, load_catalog_from_visible_pool,
@@ -16,13 +16,18 @@ use crate::backend::catalog::loader::{
 use crate::backend::catalog::persistence::sync_catalog_rows_subset;
 use crate::backend::catalog::rows::physical_catalog_rows_from_catcache;
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
-use crate::backend::storage::smgr::MdStorageManager;
+use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, StorageManager};
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::relcache::{RelCache, RelCacheEntry};
-use crate::include::catalog::{BootstrapCatalogKind, CatalogScope, bootstrap_catalog_kinds};
+use crate::include::catalog::{
+    BootstrapCatalogKind, CatalogScope, bootstrap_catalog_kinds, system_catalog_indexes,
+};
 
 use super::{
     CONTROL_FILE_MAGIC, CatalogControl, CatalogStore, CatalogStoreMode, CatalogWriteContext,
+};
+use super::relcache_init::{
+    invalidate_relcache_init_file, load_relcache_init_file, persist_relcache_init_file,
 };
 
 fn scope_db_oid(scope: CatalogScope) -> u32 {
@@ -100,7 +105,7 @@ impl CatalogStore {
         let kinds = scope_kinds(scope);
         let db_oid = scope_db_oid(scope);
 
-        let (mut catalog, control) = if control_path.exists() {
+        let (mut catalog, control, needs_bootstrap_sync) = if control_path.exists() {
             let control = load_control_file(&control_path)?;
             let mut catalog = load_catalog_from_visible_physical_startup_scoped(&base_dir, scope)?;
             insert_missing_bootstrap_relations(&mut catalog, &kinds, db_oid);
@@ -108,7 +113,8 @@ impl CatalogStore {
                 insert_bootstrap_system_indexes(&mut catalog);
             }
             catalog.next_rel_number = catalog.next_rel_number.max(control.next_rel_number);
-            (catalog, control)
+            validate_storage_relfiles_exist(&base_dir, scope)?;
+            (catalog, control, false)
         } else {
             let catalog = Catalog::default();
             let control = CatalogControl {
@@ -117,23 +123,26 @@ impl CatalogStore {
                 bootstrap_complete: true,
             };
             persist_control_file(&control_path, &control)?;
-            (catalog, control)
+            (catalog, control, true)
         };
 
         let oid_next = load_effective_next_oid(&control_path, oid_control_path.as_deref())?;
         catalog.next_oid = catalog.next_oid.max(oid_next);
         catalog.next_rel_number = catalog.next_rel_number.max(control.next_rel_number);
-        persist_scope_control_file(
-            &control_path,
-            oid_control_path.as_deref(),
-            scope,
-            &CatalogControl {
-                next_rel_number: catalog.next_rel_number,
-                next_oid: catalog.next_oid.max(oid_next),
-                bootstrap_complete: control.bootstrap_complete,
-            },
-        )?;
-        sync_physical_catalogs_scoped(&base_dir, &catalog, scope, &kinds)?;
+        let effective_control = CatalogControl {
+            next_rel_number: catalog.next_rel_number,
+            next_oid: catalog.next_oid.max(oid_next),
+            bootstrap_complete: control.bootstrap_complete,
+        };
+        if needs_bootstrap_sync {
+            persist_scope_control_file(
+                &control_path,
+                oid_control_path.as_deref(),
+                scope,
+                &effective_control,
+            )?;
+            sync_physical_catalogs_scoped(&base_dir, &catalog, scope, &kinds)?;
+        }
 
         Ok(Self {
             mode: CatalogStoreMode::Durable {
@@ -143,7 +152,7 @@ impl CatalogStore {
             scope,
             oid_control_path,
             catalog,
-            control: control.clone(),
+            control: effective_control,
         })
     }
 
@@ -172,10 +181,20 @@ impl CatalogStore {
     }
 
     pub fn relcache(&self) -> Result<RelCache, CatalogError> {
-        Ok(RelCache::from_catcache_in_db(
-            &self.catcache()?,
-            self.scope_db_oid(),
-        )?)
+        match &self.mode {
+            CatalogStoreMode::Durable { base_dir, .. } => {
+                if let Some(relcache) = load_relcache_init_file(base_dir, self.scope) {
+                    return Ok(relcache);
+                }
+                let relcache = RelCache::from_catcache_in_db(&self.catcache()?, self.scope_db_oid())?;
+                persist_relcache_init_file(base_dir, self.scope, &relcache);
+                Ok(relcache)
+            }
+            CatalogStoreMode::Ephemeral => Ok(RelCache::from_catcache_in_db(
+                &self.catcache()?,
+                self.scope_db_oid(),
+            )?),
+        }
     }
 
     pub fn catcache(&self) -> Result<CatCache, CatalogError> {
@@ -336,16 +355,22 @@ impl CatalogStore {
 
     pub(super) fn persist_control_state(&self, catalog: &Catalog) -> Result<(), CatalogError> {
         match &self.mode {
-            CatalogStoreMode::Durable { control_path, .. } => persist_scope_control_file(
+            CatalogStoreMode::Durable {
+                base_dir,
                 control_path,
-                self.oid_control_path.as_deref(),
-                self.scope,
-                &CatalogControl {
-                    next_oid: catalog.next_oid,
-                    next_rel_number: catalog.next_rel_number,
-                    bootstrap_complete: true,
-                },
-            ),
+            } => {
+                invalidate_relcache_init_file(base_dir, self.scope);
+                persist_scope_control_file(
+                    control_path,
+                    self.oid_control_path.as_deref(),
+                    self.scope,
+                    &CatalogControl {
+                        next_oid: catalog.next_oid,
+                        next_rel_number: catalog.next_rel_number,
+                        bootstrap_complete: true,
+                    },
+                )
+            }
             CatalogStoreMode::Ephemeral => Ok(()),
         }
     }
@@ -453,6 +478,29 @@ fn insert_missing_bootstrap_relations(
     }
 }
 
+fn validate_storage_relfiles_exist(base_dir: &Path, scope: CatalogScope) -> Result<(), CatalogError> {
+    let mut smgr = MdStorageManager::new(base_dir);
+
+    let db_oid = scope_db_oid(scope);
+    for kind in scope_kinds(scope) {
+        let rel = crate::backend::catalog::bootstrap::bootstrap_catalog_rel(kind, db_oid);
+        if !smgr.exists(rel, ForkNumber::Main) {
+            return Err(CatalogError::Corrupt("missing physical relation relfile"));
+        }
+    }
+
+    if matches!(scope, CatalogScope::Database(_)) {
+        for descriptor in system_catalog_indexes() {
+            let entry = system_catalog_index_entry_for_db(*descriptor, db_oid);
+            if !smgr.exists(entry.rel, ForkNumber::Main) {
+                return Err(CatalogError::Corrupt("missing physical relation relfile"));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn load_catalog_from_visible_physical_startup_scoped(
     base_dir: &Path,
     scope: CatalogScope,
@@ -498,8 +546,7 @@ fn sync_physical_catalogs_scoped(
             }
         }
     }
-    sync_catalog_rows_subset(base_dir, &rows, db_oid, kinds)?;
-    rebuild_system_catalog_indexes_for_db(base_dir, db_oid)
+    sync_catalog_rows_subset(base_dir, &rows, db_oid, kinds)
 }
 
 fn persist_control_file(path: &Path, control: &CatalogControl) -> Result<(), CatalogError> {
