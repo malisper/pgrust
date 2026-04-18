@@ -438,7 +438,7 @@ Targeted reruns on 2026-04-17:
 - Mixed set-operation chains: accept PostgreSQL-style left-associative chains such as `SELECT 1 UNION SELECT 2 UNION ALL SELECT 2` instead of rejecting them in the parser.
 - Shared regression fixture visibility: investigate why bootstrap tables from `scripts/test_setup_pgrust.sql` like `float8_tbl`, `int8_tbl`, and `tenk1` are not consistently resolvable during regression runs.
 - privileges.sql parity:
-  - expose privilege-related system catalogs in SQL, including `pg_auth_members` and `pg_largeobject_metadata`
+  - [done] expose privilege-related system catalogs in SQL, including `pg_auth_members` and `pg_largeobject_metadata`
   - [done] add parser/analyzer support for role membership `GRANTED BY`
   - [done] add parser/analyzer/executor support for `CASCADE` in role membership revokes
   - [done] implement `SET ROLE` and `RESET ROLE`
