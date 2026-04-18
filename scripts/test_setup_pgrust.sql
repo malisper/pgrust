@@ -303,8 +303,9 @@ INSERT INTO stud_emp (name, age, location, salary, manager, gpa, percent) VALUES
 
 --
 -- Refresh planner stats for bootstrap relations.
--- :HACK: Use explicit relation targets until bare ANALYZE walks all
--- visible relations in pgrust like PostgreSQL does.
+-- :HACK: Bare ANALYZE now scans permitted heap relations from pg_class,
+-- but keep the explicit targets until it can finish the full bootstrap
+-- fixture set.
 --
 ANALYZE onek;
 ANALYZE onek2;

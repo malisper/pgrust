@@ -1227,6 +1227,98 @@ fn analyze_populates_pg_statistic_and_pg_class_stats() {
 }
 
 #[test]
+fn analyze_without_targets_scans_permitted_heap_relations() {
+    let dir = temp_dir("analyze_permitted_relations");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut bootstrap = Session::new(1);
+    let mut session = Session::new(2);
+
+    bootstrap
+        .execute(&db, "create role analyze_owner login")
+        .unwrap();
+    bootstrap
+        .execute(&db, "create schema hidden authorization analyze_owner")
+        .unwrap();
+    bootstrap
+        .execute(&db, "create table public.not_owned(id int4)")
+        .unwrap();
+    bootstrap
+        .execute(&db, "insert into public.not_owned values (99)")
+        .unwrap();
+
+    session
+        .execute(&db, "set session authorization analyze_owner")
+        .unwrap();
+    session
+        .execute(&db, "create table visible_a(id int4)")
+        .unwrap();
+    session
+        .execute(&db, "create table hidden.hidden_c(id int4)")
+        .unwrap();
+    session
+        .execute(&db, "create table visible_b(id int4)")
+        .unwrap();
+    session
+        .execute(&db, "insert into visible_a values (1), (2)")
+        .unwrap();
+    session
+        .execute(&db, "insert into visible_b values (3)")
+        .unwrap();
+    session
+        .execute(&db, "insert into hidden.hidden_c values (4)")
+        .unwrap();
+
+    match session.execute(&db, "analyze").unwrap() {
+        StatementResult::AffectedRows(count) => assert_eq!(count, 0),
+        other => panic!("expected affected rows, got {other:?}"),
+    }
+
+    let visible_a = query_rows(
+        &db,
+        1,
+        "select relpages, reltuples from pg_class
+         where relname = 'visible_a'
+           and relnamespace = (select oid from pg_namespace where nspname = 'public')",
+    );
+    assert_eq!(visible_a.len(), 1);
+    assert!(int_value(&visible_a[0][0]) >= 1);
+    assert!(float_value(&visible_a[0][1]) >= 2.0);
+
+    let visible_b = query_rows(
+        &db,
+        1,
+        "select relpages, reltuples from pg_class
+         where relname = 'visible_b'
+           and relnamespace = (select oid from pg_namespace where nspname = 'public')",
+    );
+    assert_eq!(visible_b.len(), 1);
+    assert!(int_value(&visible_b[0][0]) >= 1);
+    assert!(float_value(&visible_b[0][1]) >= 1.0);
+
+    let hidden_c = query_rows(
+        &db,
+        1,
+        "select relpages, reltuples from pg_class
+         where relname = 'hidden_c'
+           and relnamespace = (select oid from pg_namespace where nspname = 'hidden')",
+    );
+    assert_eq!(hidden_c.len(), 1);
+    assert!(int_value(&hidden_c[0][0]) >= 1);
+    assert!(float_value(&hidden_c[0][1]) >= 1.0);
+
+    let not_owned = query_rows(
+        &db,
+        1,
+        "select relpages, reltuples from pg_class
+         where relname = 'not_owned'
+           and relnamespace = (select oid from pg_namespace where nspname = 'public')",
+    );
+    assert_eq!(not_owned.len(), 1);
+    assert_eq!(int_value(&not_owned[0][0]), 0);
+    assert_eq!(float_value(&not_owned[0][1]), -1.0);
+}
+
+#[test]
 fn new_tables_report_never_analyzed_reltuples() {
     let dir = temp_dir("new_table_reltuples");
     let db = Database::open(&dir, 128).unwrap();

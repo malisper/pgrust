@@ -458,4 +458,5 @@ Targeted reruns on 2026-04-17:
 - expression indexes and `ALTER INDEX` operations used by `alter_table.sql`
 - `ALTER TABLE ... RENAME CONSTRAINT`
 - int2.sql
+- make bare `ANALYZE` enumerate permitted relations from catalog rows instead of search-path-visible names
 - Normalize numeric display scale before result rendering so aggregates and scalar outputs do not keep extra trailing zeros; this affects `AVG(val)` output and many `to_char(numeric, ...)` cases
