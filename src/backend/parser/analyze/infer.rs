@@ -977,13 +977,13 @@ fn infer_sql_row_expr_type(
             && let Some(relation_fields) =
                 resolve_relation_row_expr_with_outer(scope, outer_scopes, relation_name)
         {
-            for (field_name, expr) in relation_fields {
+            for (_, expr) in relation_fields {
                 fields.push((
-                    field_name,
+                    format!("f{next_index}"),
                     expr_sql_type_hint(&expr).unwrap_or(SqlType::new(SqlTypeKind::Text)),
                 ));
+                next_index += 1;
             }
-            next_index = fields.len() + 1;
             continue;
         }
 

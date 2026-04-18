@@ -2664,7 +2664,7 @@ fn sum_of_all_nulls_returns_null() {
     .unwrap()
     {
         StatementResult::Query { rows, .. } => {
-            assert_eq!(rows, vec![vec![Value::Bool(false), Value::Bool(false)]]);
+            assert_eq!(rows, vec![vec![Value::Null, Value::Null]]);
         }
         other => panic!("expected query result, got {:?}", other),
     }
@@ -8924,12 +8924,18 @@ fn array_subscript_partial_slices_on_zero_based_arrays_match_postgres() {
             "select ('[0:4]={1,2,3,4,5}'::int[])[:3]",
         )
         .unwrap(),
-        vec![vec![Value::PgArray(ArrayValue::from_1d(vec![
-            Value::Int32(1),
-            Value::Int32(2),
-            Value::Int32(3),
-            Value::Int32(4),
-        ]))]],
+        vec![vec![Value::PgArray(ArrayValue::from_dimensions(
+            vec![ArrayDimension {
+                lower_bound: 0,
+                length: 4,
+            }],
+            vec![
+                Value::Int32(1),
+                Value::Int32(2),
+                Value::Int32(3),
+                Value::Int32(4),
+            ],
+        ))]],
     );
 
     assert_query_rows(
@@ -8940,11 +8946,17 @@ fn array_subscript_partial_slices_on_zero_based_arrays_match_postgres() {
             "select ('[0:4]={1,2,3,4,5}'::int[])[2:]",
         )
         .unwrap(),
-        vec![vec![Value::PgArray(ArrayValue::from_1d(vec![
-            Value::Int32(3),
-            Value::Int32(4),
-            Value::Int32(5),
-        ]))]],
+        vec![vec![Value::PgArray(ArrayValue::from_dimensions(
+            vec![ArrayDimension {
+                lower_bound: 2,
+                length: 3,
+            }],
+            vec![
+                Value::Int32(3),
+                Value::Int32(4),
+                Value::Int32(5),
+            ],
+        ))]],
     );
 
     assert_query_rows(
@@ -11135,7 +11147,7 @@ fn jsonpath_arithmetic_recursive_and_subscripts_work() {
 }
 
 #[test]
-fn jsonpath_exists_returns_null_for_silent_errors() {
+fn jsonpath_exists_returns_false_for_silent_errors() {
     let base = temp_dir("jsonpath_exists_silent_errors");
     let txns = TransactionManager::new_durable(&base).unwrap();
 
@@ -11145,7 +11157,7 @@ fn jsonpath_exists_returns_null_for_silent_errors() {
         INVALID_TRANSACTION_ID,
         "select '{\"a\":12}'::jsonb @? '$.b + 2', jsonb_path_exists('[{\"a\":1},{\"a\":2},3]'::jsonb, 'strict $[*].a', silent => true)",
     )
-    .unwrap()
+        .unwrap()
     {
         StatementResult::Query { rows, .. } => {
             assert_eq!(rows, vec![vec![Value::Bool(false), Value::Bool(false)]]);
