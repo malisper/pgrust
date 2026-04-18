@@ -3,7 +3,6 @@ use super::ranges::infer_range_special_expr_type_with_ctes;
 use super::*;
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::include::catalog::builtin_range_spec_for_sql_type;
-use crate::include::catalog::sql_type_for_range_kind;
 use crate::include::nodes::primnodes::expr_sql_type_hint;
 
 pub(super) fn infer_sql_expr_type(
@@ -86,7 +85,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
         SqlExpr::Const(Value::TimeTz(_)) => SqlType::new(SqlTypeKind::TimeTz),
         SqlExpr::Const(Value::Timestamp(_)) => SqlType::new(SqlTypeKind::Timestamp),
         SqlExpr::Const(Value::TimestampTz(_)) => SqlType::new(SqlTypeKind::TimestampTz),
-        SqlExpr::Const(Value::Range(range)) => sql_type_for_range_kind(range.kind),
+        SqlExpr::Const(Value::Range(range)) => range.range_type.sql_type,
         SqlExpr::Const(Value::Bit(v)) => SqlType::with_bit_len(SqlTypeKind::VarBit, v.bit_len),
         SqlExpr::Const(Value::Bytea(_)) => SqlType::new(SqlTypeKind::Bytea),
         SqlExpr::Const(Value::Bool(_)) => SqlType::new(SqlTypeKind::Bool),

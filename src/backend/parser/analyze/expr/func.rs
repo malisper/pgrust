@@ -2327,7 +2327,7 @@ pub(super) fn bind_scalar_function_call(
                         expected: "range constructor with a concrete range return type",
                         actual: format!("{func:?}"),
                     })?;
-                let mut types = vec![spec.subtype, spec.subtype];
+                let mut types = vec![spec.range_type.subtype, spec.range_type.subtype];
                 if args.len() == 3 {
                     types.push(SqlType::new(SqlTypeKind::Text));
                 }

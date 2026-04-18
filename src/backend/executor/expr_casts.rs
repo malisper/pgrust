@@ -1192,6 +1192,7 @@ pub(crate) fn cast_value_with_config(
             SqlType {
                 kind:
                     SqlTypeKind::Text
+                    | SqlTypeKind::Range
                     | SqlTypeKind::Name
                     | SqlTypeKind::Int4Range
                     | SqlTypeKind::Int8Range
@@ -1292,6 +1293,7 @@ pub(crate) fn cast_value_with_config(
             SqlType {
                 kind:
                     SqlTypeKind::Text
+                    | SqlTypeKind::Range
                     | SqlTypeKind::Name
                     | SqlTypeKind::Int4Range
                     | SqlTypeKind::Int8Range
@@ -1360,6 +1362,7 @@ pub(crate) fn cast_value_with_config(
             SqlType {
                 kind:
                     SqlTypeKind::Text
+                    | SqlTypeKind::Range
                     | SqlTypeKind::Name
                     | SqlTypeKind::Int4Range
                     | SqlTypeKind::Int8Range
@@ -1556,13 +1559,14 @@ pub(crate) fn cast_value_with_config(
             cast_text_value_with_config(text, ty, true, config)
         }
         Value::Range(range) => match ty.kind {
-            SqlTypeKind::Int4Range
+            SqlTypeKind::Range
+            | SqlTypeKind::Int4Range
             | SqlTypeKind::Int8Range
             | SqlTypeKind::NumericRange
             | SqlTypeKind::DateRange
             | SqlTypeKind::TimestampRange
             | SqlTypeKind::TimestampTzRange => {
-                if ty == crate::include::catalog::sql_type_for_range_kind(range.kind) {
+                if ty == range.range_type.sql_type {
                     Ok(Value::Range(range))
                 } else {
                     cast_text_value_with_config(
@@ -1767,6 +1771,7 @@ pub(crate) fn cast_value_with_config(
             SqlType {
                 kind:
                     SqlTypeKind::Text
+                    | SqlTypeKind::Range
                     | SqlTypeKind::Name
                     | SqlTypeKind::Int4Range
                     | SqlTypeKind::Int8Range
@@ -1851,6 +1856,7 @@ pub(crate) fn cast_value_with_config(
             SqlType {
                 kind:
                     SqlTypeKind::Text
+                    | SqlTypeKind::Range
                     | SqlTypeKind::Name
                     | SqlTypeKind::Int4Range
                     | SqlTypeKind::Int8Range
@@ -1991,6 +1997,7 @@ pub(super) fn cast_text_value_with_config(
         SqlTypeKind::AnyArray => Err(unsupported_anyarray_input()),
         SqlTypeKind::Record | SqlTypeKind::Composite => Err(unsupported_record_input()),
         SqlTypeKind::Text
+        | SqlTypeKind::Range
         | SqlTypeKind::Int2Vector
         | SqlTypeKind::OidVector
         | SqlTypeKind::PgNodeTree => Ok(Value::Text(CompactString::new(text))),
@@ -2050,12 +2057,13 @@ pub(super) fn cast_text_value_with_config(
         SqlTypeKind::TsQuery => {
             crate::backend::executor::parse_tsquery_text(text).map(Value::TsQuery)
         }
-        SqlTypeKind::Int4Range
+        SqlTypeKind::Range
+        | SqlTypeKind::Int4Range
         | SqlTypeKind::Int8Range
         | SqlTypeKind::NumericRange
         | SqlTypeKind::DateRange
         | SqlTypeKind::TimestampRange
-        | SqlTypeKind::TimestampTzRange => parse_range_text(text, ty.kind),
+        | SqlTypeKind::TimestampTzRange => parse_range_text(text, ty),
         SqlTypeKind::Void => Err(ExecError::TypeMismatch {
             op: "::void",
             left: Value::Text(CompactString::new(text)),
@@ -2127,7 +2135,8 @@ pub(super) fn cast_numeric_value(
         | SqlTypeKind::Tid
         | SqlTypeKind::Interval
         | SqlTypeKind::PgNodeTree => Ok(Value::Text(CompactString::from_owned(value.render()))),
-        SqlTypeKind::Date
+        SqlTypeKind::Range
+        | SqlTypeKind::Date
         | SqlTypeKind::Int4Range
         | SqlTypeKind::Int8Range
         | SqlTypeKind::NumericRange

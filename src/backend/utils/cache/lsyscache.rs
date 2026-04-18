@@ -690,11 +690,23 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
     }
 
     fn proc_rows_by_name(&self, name: &str) -> Vec<PgProcRow> {
-        proc_rows_by_name(self.db, self.client_id, self.txn_ctx, name)
+        let mut rows = proc_rows_by_name(self.db, self.client_id, self.txn_ctx, name);
+        rows.extend(crate::include::catalog::synthetic_range_proc_rows_by_name(
+            name,
+            &self.type_rows(),
+            &self.range_rows(),
+        ));
+        rows
     }
 
     fn proc_row_by_oid(&self, oid: u32) -> Option<PgProcRow> {
-        proc_row_by_oid(self.db, self.client_id, self.txn_ctx, oid)
+        proc_row_by_oid(self.db, self.client_id, self.txn_ctx, oid).or_else(|| {
+            crate::include::catalog::synthetic_range_proc_row_by_oid(
+                oid,
+                &self.type_rows(),
+                &self.range_rows(),
+            )
+        })
     }
 
     fn type_rows(&self) -> Vec<PgTypeRow> {

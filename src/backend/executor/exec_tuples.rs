@@ -525,8 +525,11 @@ impl CompiledTupleDecoder {
                                     },
                                 );
                             }
-                            ScalarType::Range(kind) => {
-                                values.push(Value::Range(decode_range_bytes(*kind, bytes_slice)?));
+                            ScalarType::Range(range_type) => {
+                                values.push(Value::Range(decode_range_bytes(
+                                    *range_type,
+                                    bytes_slice,
+                                )?));
                             }
                             _ => values.push(Value::Null),
                         }

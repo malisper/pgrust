@@ -1,7 +1,7 @@
 use super::*;
 use crate::backend::storage::page::bufpage::max_align;
 use crate::include::access::htup::AttributeAlign;
-use crate::include::catalog::{builtin_type_rows, sql_type_for_range_kind};
+use crate::include::catalog::{builtin_type_rows, range_type_ref_for_sql_type};
 
 pub(crate) fn encode_array_bytes(
     element_type: SqlType,
@@ -117,10 +117,7 @@ fn encode_array_element_payload(
         }
         Value::Timestamp(v) => Ok(v.0.to_le_bytes().to_vec()),
         Value::TimestampTz(v) => Ok(v.0.to_le_bytes().to_vec()),
-        Value::Range(_) => Err(ExecError::InvalidStorageValue {
-            column: "<array>".into(),
-            details: "range arrays are unsupported".into(),
-        }),
+        Value::Range(range) => crate::backend::executor::encode_range_bytes(&range),
         Value::Bit(v) => {
             let mut bytes = Vec::with_capacity(4 + v.bytes.len());
             bytes.extend_from_slice(&(v.bit_len as u32).to_le_bytes());
@@ -491,17 +488,13 @@ fn array_element_layout(
         | SqlTypeKind::Timestamp
         | SqlTypeKind::TimestampTz
         | SqlTypeKind::Float8 => (8, AttributeAlign::Double),
-        SqlTypeKind::Int4Range
+        SqlTypeKind::Range
+        | SqlTypeKind::Int4Range
         | SqlTypeKind::Int8Range
         | SqlTypeKind::NumericRange
         | SqlTypeKind::DateRange
         | SqlTypeKind::TimestampRange
-        | SqlTypeKind::TimestampTzRange => {
-            return Err(ExecError::InvalidStorageValue {
-                column: column.into(),
-                details: "range arrays are unsupported".into(),
-            });
-        }
+        | SqlTypeKind::TimestampTzRange => (-1, AttributeAlign::Int),
         SqlTypeKind::TimeTz => (12, AttributeAlign::Double),
         SqlTypeKind::Point => (16, AttributeAlign::Double),
         SqlTypeKind::Line | SqlTypeKind::Circle => (24, AttributeAlign::Double),
@@ -719,7 +712,7 @@ fn infer_sql_type_from_value(value: &Value) -> Option<SqlType> {
         } else {
             record.sql_type()
         }),
-        Value::Range(range) => Some(sql_type_for_range_kind(range.kind)),
+        Value::Range(range) => Some(range.range_type.sql_type),
     }
 }
 
@@ -843,15 +836,21 @@ fn decode_array_element_value(
                 )),
             ))
         }
-        SqlTypeKind::Int4Range
+        SqlTypeKind::Range
+        | SqlTypeKind::Int4Range
         | SqlTypeKind::Int8Range
         | SqlTypeKind::NumericRange
         | SqlTypeKind::DateRange
         | SqlTypeKind::TimestampRange
-        | SqlTypeKind::TimestampTzRange => Err(ExecError::InvalidStorageValue {
-            column: column.into(),
-            details: "range arrays are unsupported".into(),
-        }),
+        | SqlTypeKind::TimestampTzRange => {
+            let Some(range_type) = range_type_ref_for_sql_type(element_type) else {
+                return Err(ExecError::InvalidStorageValue {
+                    column: column.into(),
+                    details: format!("unsupported range array element type {:?}", element_type),
+                });
+            };
+            crate::backend::executor::decode_range_bytes(range_type, bytes).map(Value::Range)
+        }
         SqlTypeKind::Float4 | SqlTypeKind::Float8 => {
             let width = if matches!(element_type.kind, SqlTypeKind::Float4) {
                 4
