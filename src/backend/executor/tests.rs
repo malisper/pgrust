@@ -6737,6 +6737,39 @@ fn numeric_transcendentals_match_postgres_reference_values() {
 }
 
 #[test]
+fn numeric_exp_underflow_matches_postgres_zero_semantics() {
+    let base = temp_dir("numeric_exp_underflow");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select \
+                exp(-5000::numeric) = 0, \
+                scale(exp(-5000::numeric)), \
+                exp(-10000::numeric) = 0, \
+                scale(exp(-10000::numeric)), \
+                coalesce(nullif(exp(-5000::numeric), 0), 0), \
+                coalesce(nullif(exp(-10000::numeric), 0), 0), \
+                exp(32.999::numeric), \
+                exp(-32.999::numeric)",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Bool(true),
+            Value::Int32(1000),
+            Value::Bool(true),
+            Value::Int32(1000),
+            Value::Numeric("0".into()),
+            Value::Numeric("0".into()),
+            Value::Numeric("214429043492155.053".into()),
+            Value::Numeric("0.000000000000004663547361468248".into()),
+        ]],
+    );
+}
+
+#[test]
 fn numeric_power_special_values_follow_postgres() {
     let base = temp_dir("numeric_power_special_values");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -8921,6 +8954,48 @@ fn array_subscript_null_scalar_index_returns_null() {
         )
         .unwrap(),
         vec![vec![Value::Null]],
+    );
+}
+
+#[test]
+fn nested_array_constructor_select_executes() {
+    let base = temp_dir("nested_array_constructor_select_executes");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select ARRAY[[[111,112],[121,122]],[[211,212],[221,222]]]",
+        )
+        .unwrap(),
+        vec![vec![Value::PgArray(ArrayValue::from_dimensions(
+            vec![
+                ArrayDimension {
+                    lower_bound: 1,
+                    length: 2,
+                },
+                ArrayDimension {
+                    lower_bound: 1,
+                    length: 2,
+                },
+                ArrayDimension {
+                    lower_bound: 1,
+                    length: 2,
+                },
+            ],
+            vec![
+                Value::Int32(111),
+                Value::Int32(112),
+                Value::Int32(121),
+                Value::Int32(122),
+                Value::Int32(211),
+                Value::Int32(212),
+                Value::Int32(221),
+                Value::Int32(222),
+            ],
+        ))]],
     );
 }
 #[test]
@@ -13176,9 +13251,16 @@ fn generate_series_supports_numeric_arguments() {
     .unwrap()
     {
         StatementResult::Query { rows, .. } => {
-            assert_eq!(rows.len(), 5);
-            assert_eq!(rows[0], vec![Value::Numeric("0.0".into())]);
-            assert_eq!(rows[4], vec![Value::Numeric("4.0".into())]);
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Numeric("0.0".into())],
+                    vec![Value::Numeric("1.0".into())],
+                    vec![Value::Numeric("2.0".into())],
+                    vec![Value::Numeric("3.0".into())],
+                    vec![Value::Numeric("4.0".into())],
+                ]
+            );
         }
         other => panic!("expected query result, got {:?}", other),
     }
@@ -13192,9 +13274,15 @@ fn generate_series_supports_numeric_arguments() {
     .unwrap()
     {
         StatementResult::Query { rows, .. } => {
-            assert_eq!(rows.len(), 4);
-            assert_eq!(rows[0], vec![Value::Numeric("0.0".into())]);
-            assert_eq!(rows[3], vec![Value::Numeric("0.9".into())]);
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Numeric("0.0".into())],
+                    vec![Value::Numeric("0.3".into())],
+                    vec![Value::Numeric("0.6".into())],
+                    vec![Value::Numeric("0.9".into())],
+                ]
+            );
         }
         other => panic!("expected query result, got {:?}", other),
     }
@@ -13219,6 +13307,41 @@ fn generate_series_supports_numeric_arguments() {
         }
         other => panic!("expected query result, got {:?}", other),
     }
+}
+
+#[test]
+fn generate_series_preserves_numeric_display_scale_and_descending_rows() {
+    let base = temp_dir("generate_series_numeric_display_scale");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select * from generate_series(0.1::numeric, 4.0::numeric, 1.3::numeric)",
+        )
+        .unwrap(),
+        vec![
+            vec![Value::Numeric("0.1".into())],
+            vec![Value::Numeric("1.4".into())],
+            vec![Value::Numeric("2.7".into())],
+            vec![Value::Numeric("4.0".into())],
+        ],
+    );
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select * from generate_series(4.0::numeric, -1.5::numeric, -2.2::numeric)",
+        )
+        .unwrap(),
+        vec![
+            vec![Value::Numeric("4.0".into())],
+            vec![Value::Numeric("1.8".into())],
+            vec![Value::Numeric("-0.4".into())],
+        ],
+    );
 }
 
 #[test]

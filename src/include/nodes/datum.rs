@@ -558,6 +558,13 @@ impl NumericValue {
         }
     }
 
+    pub fn dscale(&self) -> u32 {
+        match self {
+            Self::Finite { dscale, .. } => *dscale,
+            _ => 0,
+        }
+    }
+
     pub fn normalize(self) -> Self {
         match self {
             Self::PosInf | Self::NegInf => self,

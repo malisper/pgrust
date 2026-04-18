@@ -800,6 +800,39 @@ fn parse_create_index_if_not_exists_requires_name() {
 }
 
 #[test]
+fn parse_create_operator_class_hash_support() {
+    let stmt = parse_statement(
+        "create operator class part_test_int4_ops for type int4 using hash as operator 1 =, function 2 part_hashint4_noop(int4, int8)",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateOperatorClass(CreateOperatorClassStatement {
+            schema_name: None,
+            opclass_name: "part_test_int4_ops".into(),
+            data_type: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
+            access_method: "hash".into(),
+            is_default: false,
+            items: vec![
+                CreateOperatorClassItem::Operator {
+                    strategy_number: 1,
+                    operator_name: "=".into(),
+                },
+                CreateOperatorClassItem::Function {
+                    support_number: 2,
+                    schema_name: None,
+                    function_name: "part_hashint4_noop".into(),
+                    arg_types: vec![
+                        RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
+                        RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int8)),
+                    ],
+                },
+            ],
+        })
+    );
+}
+
+#[test]
 fn parse_create_index_with_expression_item() {
     let stmt = parse_statement("create index attmp_idx on attmp (a, (d + e), b)").unwrap();
     assert_eq!(
@@ -4802,6 +4835,20 @@ fn parse_array_and_unnest_expressions() {
 
     let stmt = parse_select("select ARRAY['a'] && ARRAY['b']").unwrap();
     assert!(matches!(stmt.targets[0].expr, SqlExpr::ArrayOverlap(_, _)));
+}
+
+#[test]
+fn parse_nested_array_constructor_shorthand() {
+    let stmt = parse_select("select ARRAY[[[111,112],[121,122]],[[211,212],[221,222]]] as f")
+        .unwrap();
+    match &stmt.targets[0].expr {
+        SqlExpr::ArrayLiteral(outer) => {
+            assert_eq!(outer.len(), 2);
+            assert!(matches!(outer[0], SqlExpr::ArrayLiteral(_)));
+            assert!(matches!(outer[1], SqlExpr::ArrayLiteral(_)));
+        }
+        other => panic!("expected nested array literal, got {other:?}"),
+    }
 }
 
 #[test]

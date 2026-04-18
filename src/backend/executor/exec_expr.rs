@@ -974,14 +974,37 @@ pub fn eval_expr(
         } => {
             let element_type = array_type.element_type();
             let mut values = Vec::with_capacity(elements.len());
+            let mut has_nested_arrays = false;
             for expr in elements {
-                values.push(cast_value_with_config(
-                    eval_expr(expr, slot, ctx)?,
-                    element_type,
-                    &ctx.datetime_config,
-                )?);
+                let value = eval_expr(expr, slot, ctx)?;
+                if matches!(value, Value::Array(_) | Value::PgArray(_)) {
+                    has_nested_arrays = true;
+                    values.push(cast_value_with_config(
+                        value,
+                        *array_type,
+                        &ctx.datetime_config,
+                    )?);
+                } else {
+                    values.push(cast_value_with_config(
+                        value,
+                        element_type,
+                        &ctx.datetime_config,
+                    )?);
+                }
             }
-            Ok(Value::PgArray(ArrayValue::from_1d(values)))
+            if has_nested_arrays {
+                let array = ArrayValue::from_nested_values(values, vec![1]).map_err(|details| {
+                    ExecError::DetailedError {
+                        message: "malformed array literal".into(),
+                        detail: Some(details),
+                        hint: None,
+                        sqlstate: "22P02",
+                    }
+                })?;
+                Ok(Value::PgArray(array))
+            } else {
+                Ok(Value::PgArray(ArrayValue::from_1d(values)))
+            }
         }
         Expr::SubPlan(subplan) => match subplan.sublink_type {
             SubLinkType::ExprSubLink => eval_scalar_subquery(subplan, slot, ctx),
@@ -1287,10 +1310,29 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
         } => {
             let element_type = array_type.element_type();
             let mut values = Vec::with_capacity(elements.len());
+            let mut has_nested_arrays = false;
             for expr in elements {
-                values.push(cast_value(eval_plpgsql_expr(expr, slot)?, element_type)?);
+                let value = eval_plpgsql_expr(expr, slot)?;
+                if matches!(value, Value::Array(_) | Value::PgArray(_)) {
+                    has_nested_arrays = true;
+                    values.push(cast_value(value, *array_type)?);
+                } else {
+                    values.push(cast_value(value, element_type)?);
+                }
             }
-            Ok(Value::PgArray(ArrayValue::from_1d(values)))
+            if has_nested_arrays {
+                let array = ArrayValue::from_nested_values(values, vec![1]).map_err(|details| {
+                    ExecError::DetailedError {
+                        message: "malformed array literal".into(),
+                        detail: Some(details),
+                        hint: None,
+                        sqlstate: "22P02",
+                    }
+                })?;
+                Ok(Value::PgArray(array))
+            } else {
+                Ok(Value::PgArray(ArrayValue::from_1d(values)))
+            }
         }
         Expr::ArraySubscript { array, subscripts } => {
             let value = eval_plpgsql_expr(array, slot)?;

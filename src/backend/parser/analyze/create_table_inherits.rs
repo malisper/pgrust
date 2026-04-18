@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::backend::utils::misc::notices::push_notice;
+
 use super::create_table::{LoweredCreateTable, lower_create_table};
 use super::{
     BoundRelation, CatalogLookup, ColumnConstraint, ConstraintAttributes, CreateTableElement,
@@ -156,6 +158,12 @@ fn merge_parent_column(
     parent: &crate::backend::parser::ColumnDef,
 ) -> Result<(), ParseError> {
     ensure_matching_column_type(&merged.column.name, &merged.column.ty, &parent.ty)?;
+    if merged.attinhcount == 1 {
+        push_notice(format!(
+            "merging multiple inherited definitions of column \"{}\"",
+            merged.column.name
+        ));
+    }
     merged.attinhcount = merged.attinhcount.saturating_add(1);
     if !parent.nullable() {
         ensure_not_null_constraint(&mut merged.column);

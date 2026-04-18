@@ -1773,7 +1773,6 @@ impl PlanNode for ProjectionState {
                 return Ok(None);
             }
         };
-
         let mut values = Vec::with_capacity(self.targets.len());
         let outer_values = materialize_slot_values(input_slot)?;
         let current_bindings = ctx.system_bindings.clone();
