@@ -3375,7 +3375,9 @@ fn create_conversion_rejects_duplicate_name_and_default_pair() {
         1,
         "create conversion myconv for 'LATIN1' to 'UTF8' from iso8859_1_to_utf8",
     ) {
-        Err(ExecError::DetailedError { message, sqlstate, .. }) => {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
             assert_eq!(message, "conversion \"myconv\" already exists");
             assert_eq!(sqlstate, "42710");
         }
@@ -3391,11 +3393,19 @@ fn create_conversion_rejects_duplicate_name_and_default_pair() {
         1,
         "create default conversion public.mydef2 for 'LATIN1' to 'UTF8' from iso8859_1_to_utf8",
     ) {
-        Err(ExecError::DetailedError { message, sqlstate, .. }) => {
-            assert_eq!(message, "default conversion for LATIN1 to UTF8 already exists");
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(
+                message,
+                "default conversion for LATIN1 to UTF8 already exists"
+            );
             assert_eq!(sqlstate, "42710");
         }
-        other => panic!("expected duplicate default conversion error, got {:?}", other),
+        other => panic!(
+            "expected duplicate default conversion error, got {:?}",
+            other
+        ),
     }
 }
 
@@ -6949,6 +6959,124 @@ fn stats_snapshot_timestamp_requires_snapshot_mode_and_clear_snapshot_resets_it(
     );
 
     session.execute(&db, "commit").unwrap();
+}
+
+#[test]
+fn stats_fetch_consistency_cache_holds_cached_relation_entry_until_clear() {
+    let base = temp_dir("stats_cache_entry_visibility");
+    let db = Database::open(&base, 16).unwrap();
+    let mut writer = Session::new(1);
+    let mut reader = Session::new(2);
+
+    writer
+        .execute(&db, "create table items (id int4 primary key)")
+        .unwrap();
+    writer
+        .execute(&db, "set stats_fetch_consistency = none")
+        .unwrap();
+    reader
+        .execute(&db, "set stats_fetch_consistency = cache")
+        .unwrap();
+    reader.execute(&db, "begin").unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut reader,
+            &db,
+            "select n_tup_ins from pg_stat_user_tables where relname = 'items'",
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+
+    writer.execute(&db, "insert into items values (1)").unwrap();
+    assert_eq!(
+        session_query_rows(&mut writer, &db, "select pg_stat_force_next_flush()"),
+        vec![vec![Value::Null]]
+    );
+
+    assert_eq!(
+        session_query_rows(
+            &mut reader,
+            &db,
+            "select n_tup_ins from pg_stat_user_tables where relname = 'items'",
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+    assert_eq!(
+        session_query_rows(&mut reader, &db, "select pg_stat_clear_snapshot()"),
+        vec![vec![Value::Null]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut reader,
+            &db,
+            "select n_tup_ins from pg_stat_user_tables where relname = 'items'",
+        ),
+        vec![vec![Value::Int64(1)]]
+    );
+    reader.execute(&db, "commit").unwrap();
+}
+
+#[test]
+fn stats_snapshot_holds_unseen_relation_entries_stable_until_clear() {
+    let base = temp_dir("stats_snapshot_unseen_entry_visibility");
+    let db = Database::open(&base, 16).unwrap();
+    let mut writer = Session::new(1);
+    let mut reader = Session::new(2);
+
+    writer
+        .execute(&db, "create table items (id int4 primary key)")
+        .unwrap();
+    writer
+        .execute(&db, "create table other_items (id int4 primary key)")
+        .unwrap();
+    writer
+        .execute(&db, "set stats_fetch_consistency = none")
+        .unwrap();
+
+    reader.execute(&db, "begin").unwrap();
+    reader
+        .execute(&db, "set local stats_fetch_consistency = snapshot")
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut reader,
+            &db,
+            "select n_tup_ins from pg_stat_user_tables where relname = 'items'",
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+
+    writer
+        .execute(&db, "insert into other_items values (1)")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut writer, &db, "select pg_stat_force_next_flush()"),
+        vec![vec![Value::Null]]
+    );
+
+    assert_eq!(
+        session_query_rows(
+            &mut reader,
+            &db,
+            "select n_tup_ins from pg_stat_user_tables where relname = 'other_items'",
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+    assert_eq!(
+        session_query_rows(&mut reader, &db, "select pg_stat_clear_snapshot()"),
+        vec![vec![Value::Null]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut reader,
+            &db,
+            "select n_tup_ins from pg_stat_user_tables where relname = 'other_items'",
+        ),
+        vec![vec![Value::Int64(1)]]
+    );
+    reader.execute(&db, "commit").unwrap();
 }
 
 #[test]
@@ -10715,7 +10843,10 @@ fn create_or_replace_function_updates_existing_body() {
         "create function inc(x int4) returns int4 language plpgsql as $$ begin return x + 1; end $$",
     )
     .unwrap();
-    assert_eq!(query_rows(&db, 1, "select inc(4)"), vec![vec![Value::Int32(5)]]);
+    assert_eq!(
+        query_rows(&db, 1, "select inc(4)"),
+        vec![vec![Value::Int32(5)]]
+    );
 
     db.execute(
         1,
@@ -10723,7 +10854,10 @@ fn create_or_replace_function_updates_existing_body() {
     )
     .unwrap();
 
-    assert_eq!(query_rows(&db, 1, "select inc(4)"), vec![vec![Value::Int32(6)]]);
+    assert_eq!(
+        query_rows(&db, 1, "select inc(4)"),
+        vec![vec![Value::Int32(6)]]
+    );
 }
 
 #[test]
@@ -10838,7 +10972,10 @@ fn create_function_supports_void_returns_and_regprocedure_oid_lookup() {
             Value::Text("void".into()),
         ]]
     );
-    assert_eq!(query_rows(&db, 1, "select stats_test_func1()"), vec![vec![Value::Null]]);
+    assert_eq!(
+        query_rows(&db, 1, "select stats_test_func1()"),
+        vec![vec![Value::Null]]
+    );
     assert_eq!(
         query_rows(&db, 1, "select 'stats_test_func1()'::regprocedure::oid"),
         vec![vec![Value::Int64(proc.oid as i64)]]
@@ -11299,8 +11436,11 @@ fn drop_range_type_enforces_restrict_and_if_exists() {
         other => panic!("expected no-op drop type if exists, got {other:?}"),
     }
 
-    db.execute(1, "create type unused_float8range as range (subtype = float8)")
-        .unwrap();
+    db.execute(
+        1,
+        "create type unused_float8range as range (subtype = float8)",
+    )
+    .unwrap();
     match db.execute(1, "drop type unused_float8range") {
         Ok(StatementResult::AffectedRows(1)) => {}
         other => panic!("expected unused range drop success, got {other:?}"),

@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use crate::ClientId;
 use crate::backend::access::transam::xact::{CommandId, TransactionId};
 use crate::backend::catalog::pg_constraint::derived_pg_constraint_rows;
@@ -12,7 +14,7 @@ use crate::backend::utils::cache::syscache::{
 };
 use crate::backend::utils::cache::system_views::{
     build_pg_stat_io_rows, build_pg_stat_user_functions_rows, build_pg_stat_user_tables_rows,
-    build_pg_stats_rows, build_pg_statio_user_tables_rows, build_pg_views_rows,
+    build_pg_statio_user_tables_rows, build_pg_stats_rows, build_pg_views_rows,
 };
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::include::catalog::{
@@ -21,7 +23,9 @@ use crate::include::catalog::{
     PgStatisticRow, PgTypeRow,
 };
 use crate::include::nodes::datum::Value;
-use crate::pgrust::database::{Database, TempNamespace};
+use crate::pgrust::database::{
+    Database, DatabaseStatsStore, TempNamespace, default_pg_stat_io_keys,
+};
 
 fn namespace_row_by_name(
     db: &Database,
@@ -807,52 +811,78 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
     }
 
     fn pg_stat_user_tables_rows(&self) -> Vec<Vec<Value>> {
-        let stats = self
+        let namespaces = ensure_namespace_rows(self.db, self.client_id, self.txn_ctx);
+        let classes = ensure_class_rows(self.db, self.client_id, self.txn_ctx);
+        let indexes = ensure_index_rows(self.db, self.client_id, self.txn_ctx);
+        let relation_oids = classes
+            .iter()
+            .flat_map(|class| {
+                std::iter::once(class.oid)
+                    .chain((class.reltoastrelid != 0).then_some(class.reltoastrelid))
+            })
+            .chain(indexes.iter().map(|row| row.indexrelid))
+            .collect::<BTreeSet<_>>();
+        let relation_stats = self
             .db
             .session_stats_state(self.client_id)
             .write()
-            .visible_stats(&self.db.stats);
-        build_pg_stat_user_tables_rows(
-            ensure_namespace_rows(self.db, self.client_id, self.txn_ctx),
-            ensure_class_rows(self.db, self.client_id, self.txn_ctx),
-            ensure_index_rows(self.db, self.client_id, self.txn_ctx),
-            &stats,
-        )
+            .visible_relation_entries(&self.db.stats, relation_oids);
+        let stats = DatabaseStatsStore {
+            relations: relation_stats,
+            ..DatabaseStatsStore::default()
+        };
+        build_pg_stat_user_tables_rows(namespaces, classes, indexes, &stats)
     }
 
     fn pg_statio_user_tables_rows(&self) -> Vec<Vec<Value>> {
-        let stats = self
+        let namespaces = ensure_namespace_rows(self.db, self.client_id, self.txn_ctx);
+        let classes = ensure_class_rows(self.db, self.client_id, self.txn_ctx);
+        let indexes = ensure_index_rows(self.db, self.client_id, self.txn_ctx);
+        let relation_oids = classes
+            .iter()
+            .flat_map(|class| {
+                std::iter::once(class.oid)
+                    .chain((class.reltoastrelid != 0).then_some(class.reltoastrelid))
+            })
+            .chain(indexes.iter().map(|row| row.indexrelid))
+            .collect::<BTreeSet<_>>();
+        let relation_stats = self
             .db
             .session_stats_state(self.client_id)
             .write()
-            .visible_stats(&self.db.stats);
-        build_pg_statio_user_tables_rows(
-            ensure_namespace_rows(self.db, self.client_id, self.txn_ctx),
-            ensure_class_rows(self.db, self.client_id, self.txn_ctx),
-            ensure_index_rows(self.db, self.client_id, self.txn_ctx),
-            &stats,
-        )
+            .visible_relation_entries(&self.db.stats, relation_oids);
+        let stats = DatabaseStatsStore {
+            relations: relation_stats,
+            ..DatabaseStatsStore::default()
+        };
+        build_pg_statio_user_tables_rows(namespaces, classes, indexes, &stats)
     }
 
     fn pg_stat_user_functions_rows(&self) -> Vec<Vec<Value>> {
-        let stats = self
+        let namespaces = ensure_namespace_rows(self.db, self.client_id, self.txn_ctx);
+        let procs = ensure_proc_rows(self.db, self.client_id, self.txn_ctx);
+        let function_stats = self
             .db
             .session_stats_state(self.client_id)
             .write()
-            .visible_stats(&self.db.stats);
-        build_pg_stat_user_functions_rows(
-            ensure_namespace_rows(self.db, self.client_id, self.txn_ctx),
-            ensure_proc_rows(self.db, self.client_id, self.txn_ctx),
-            &stats,
-        )
+            .visible_function_entries(&self.db.stats, procs.iter().map(|proc| proc.oid));
+        let stats = DatabaseStatsStore {
+            functions: function_stats,
+            ..DatabaseStatsStore::default()
+        };
+        build_pg_stat_user_functions_rows(namespaces, procs, &stats)
     }
 
     fn pg_stat_io_rows(&self) -> Vec<Vec<Value>> {
-        let stats = self
+        let io_stats = self
             .db
             .session_stats_state(self.client_id)
             .write()
-            .visible_stats(&self.db.stats);
+            .visible_io_entries(&self.db.stats, default_pg_stat_io_keys());
+        let stats = DatabaseStatsStore {
+            io: io_stats,
+            ..DatabaseStatsStore::default()
+        };
         build_pg_stat_io_rows(&stats)
     }
 
