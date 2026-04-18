@@ -13,7 +13,7 @@ use std::cmp::Ordering;
 use std::collections::HashSet;
 
 use super::expr_range::{range_intersection_agg_transition, render_range_text};
-use super::jsonb::{encode_jsonb, jsonb_from_value, render_jsonb_bytes, JsonbValue};
+use super::jsonb::{JsonbValue, encode_jsonb, jsonb_from_value, render_jsonb_bytes};
 
 pub(crate) type AggTransitionFn = fn(&mut AccumState, &[Value]) -> Result<(), ExecError>;
 

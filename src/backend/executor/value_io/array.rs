@@ -459,6 +459,12 @@ fn array_element_layout(
     element_type: SqlType,
     column: &'static str,
 ) -> Result<ArrayElementLayout, ExecError> {
+    if element_type.is_range() {
+        return Ok(ArrayElementLayout {
+            typlen: -1,
+            typalign: AttributeAlign::Int,
+        });
+    }
     let (typlen, typalign) = match element_type.kind {
         SqlTypeKind::AnyArray => {
             return Err(ExecError::InvalidStorageValue {
@@ -488,13 +494,6 @@ fn array_element_layout(
         | SqlTypeKind::Timestamp
         | SqlTypeKind::TimestampTz
         | SqlTypeKind::Float8 => (8, AttributeAlign::Double),
-        SqlTypeKind::Range
-        | SqlTypeKind::Int4Range
-        | SqlTypeKind::Int8Range
-        | SqlTypeKind::NumericRange
-        | SqlTypeKind::DateRange
-        | SqlTypeKind::TimestampRange
-        | SqlTypeKind::TimestampTzRange => (-1, AttributeAlign::Int),
         SqlTypeKind::TimeTz => (12, AttributeAlign::Double),
         SqlTypeKind::Point => (16, AttributeAlign::Double),
         SqlTypeKind::Line | SqlTypeKind::Circle => (24, AttributeAlign::Double),
@@ -525,6 +524,13 @@ fn array_element_layout(
                 details: format!("unsupported array element type {:?}", element_type.kind),
             });
         }
+        SqlTypeKind::Range
+        | SqlTypeKind::Int4Range
+        | SqlTypeKind::Int8Range
+        | SqlTypeKind::NumericRange
+        | SqlTypeKind::DateRange
+        | SqlTypeKind::TimestampRange
+        | SqlTypeKind::TimestampTzRange => unreachable!("range handled above"),
     };
     Ok(ArrayElementLayout { typlen, typalign })
 }
@@ -656,6 +662,9 @@ fn decode_embedded_varlena<'a>(
 }
 
 fn builtin_type_oid_for_sql_type(sql_type: SqlType) -> Option<u32> {
+    if let Some(range_type) = range_type_ref_for_sql_type(sql_type) {
+        return Some(range_type.type_oid());
+    }
     if sql_type.type_oid != 0 {
         return Some(sql_type.type_oid);
     }
@@ -721,6 +730,9 @@ fn decode_array_element_value(
     bytes: &[u8],
     column: &'static str,
 ) -> Result<Value, ExecError> {
+    if let Some(range_type) = range_type_ref_for_sql_type(element_type) {
+        return crate::backend::executor::decode_range_bytes(range_type, bytes).map(Value::Range);
+    }
     match element_type.kind {
         SqlTypeKind::AnyArray => Err(ExecError::InvalidStorageValue {
             column: column.into(),
@@ -835,21 +847,6 @@ fn decode_array_element_value(
                     bytes.try_into().unwrap(),
                 )),
             ))
-        }
-        SqlTypeKind::Range
-        | SqlTypeKind::Int4Range
-        | SqlTypeKind::Int8Range
-        | SqlTypeKind::NumericRange
-        | SqlTypeKind::DateRange
-        | SqlTypeKind::TimestampRange
-        | SqlTypeKind::TimestampTzRange => {
-            let Some(range_type) = range_type_ref_for_sql_type(element_type) else {
-                return Err(ExecError::InvalidStorageValue {
-                    column: column.into(),
-                    details: format!("unsupported range array element type {:?}", element_type),
-                });
-            };
-            crate::backend::executor::decode_range_bytes(range_type, bytes).map(Value::Range)
         }
         SqlTypeKind::Float4 | SqlTypeKind::Float8 => {
             let width = if matches!(element_type.kind, SqlTypeKind::Float4) {
@@ -1015,6 +1012,13 @@ fn decode_array_element_value(
         | SqlTypeKind::Varchar => Ok(Value::Text(CompactString::new(unsafe {
             std::str::from_utf8_unchecked(bytes)
         }))),
+        SqlTypeKind::Range
+        | SqlTypeKind::Int4Range
+        | SqlTypeKind::Int8Range
+        | SqlTypeKind::NumericRange
+        | SqlTypeKind::DateRange
+        | SqlTypeKind::TimestampRange
+        | SqlTypeKind::TimestampTzRange => unreachable!("range handled above"),
     }
 }
 

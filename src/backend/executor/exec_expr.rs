@@ -59,9 +59,9 @@ use super::expr_string::{
     eval_pg_rust_test_enc_setup, eval_position_function, eval_quote_literal_function,
     eval_repeat_function, eval_replace_function, eval_reverse_function, eval_right_function,
     eval_rpad_function, eval_set_bit_bytes, eval_set_byte, eval_sha224_function,
-    eval_sha256_function, eval_sha384_function, eval_sha512_function,
-    eval_split_part_function, eval_strpos_function, eval_text_substring, eval_to_char_function,
-    eval_to_number_function, eval_translate_function, eval_trim_function, eval_unistr_function,
+    eval_sha256_function, eval_sha384_function, eval_sha512_function, eval_split_part_function,
+    eval_strpos_function, eval_text_substring, eval_to_char_function, eval_to_number_function,
+    eval_translate_function, eval_trim_function, eval_unistr_function,
 };
 use super::node_types::*;
 use super::pg_regex::{
@@ -1902,9 +1902,7 @@ fn eval_builtin_function(
             eval_pg_rust_internal_binary_coercible(&values)
         }
         BuiltinScalarFunction::PgRustTestEncSetup => eval_pg_rust_test_enc_setup(&values),
-        BuiltinScalarFunction::PgRustTestEncConversion => {
-            eval_pg_rust_test_enc_conversion(&values)
-        }
+        BuiltinScalarFunction::PgRustTestEncConversion => eval_pg_rust_test_enc_conversion(&values),
         BuiltinScalarFunction::PgStatGetCheckpointerNumTimed
         | BuiltinScalarFunction::PgStatGetCheckpointerNumRequested
         | BuiltinScalarFunction::PgStatGetCheckpointerNumPerformed

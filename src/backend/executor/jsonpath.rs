@@ -242,9 +242,7 @@ fn eval_expr(expr: &Expr, ctx: &RuntimeContext<'_>) -> Result<Vec<JsonbValue>, E
         | Expr::And(..)
         | Expr::Or(..)
         | Expr::Not(..)
-        | Expr::IsUnknown(..) => {
-            Ok(vec![predicate_value_to_jsonb(eval_predicate(expr, ctx)?)])
-        }
+        | Expr::IsUnknown(..) => Ok(vec![predicate_value_to_jsonb(eval_predicate(expr, ctx)?)]),
         Expr::Exists(..) => Ok(vec![predicate_value_to_jsonb(eval_predicate(expr, ctx)?)]),
         Expr::Arithmetic { op, left, right } => {
             let left_values = eval_expr(left, ctx)?;
@@ -545,21 +543,27 @@ fn apply_subscript_selections(
     let mut had_range = false;
     for selection in selections {
         match selection {
-            SubscriptSelection::Index(expr) => match resolve_subscript_expr(expr, &subscript_ctx)? {
-                Some(index) => {
-                    if let Some(found) = array_index(items, index) {
-                        out.push(found.clone());
-                        matched = true;
-                    } else if matches!(ctx.mode, PathMode::Strict) {
-                        return Err(exec_jsonpath_error("jsonpath array subscript is out of bounds"));
+            SubscriptSelection::Index(expr) => {
+                match resolve_subscript_expr(expr, &subscript_ctx)? {
+                    Some(index) => {
+                        if let Some(found) = array_index(items, index) {
+                            out.push(found.clone());
+                            matched = true;
+                        } else if matches!(ctx.mode, PathMode::Strict) {
+                            return Err(exec_jsonpath_error(
+                                "jsonpath array subscript is out of bounds",
+                            ));
+                        }
+                    }
+                    None => {
+                        if matches!(ctx.mode, PathMode::Strict) {
+                            return Err(exec_jsonpath_error(
+                                "jsonpath array subscript is out of bounds",
+                            ));
+                        }
                     }
                 }
-                None => {
-                    if matches!(ctx.mode, PathMode::Strict) {
-                        return Err(exec_jsonpath_error("jsonpath array subscript is out of bounds"));
-                    }
-                }
-            },
+            }
             SubscriptSelection::Range(start, end) => {
                 had_range = true;
                 let start = resolve_bound_expr(start, &subscript_ctx)?;
@@ -574,7 +578,9 @@ fn apply_subscript_selections(
                         }
                     }
                     _ if matches!(ctx.mode, PathMode::Strict) => {
-                        return Err(exec_jsonpath_error("jsonpath array subscript is out of bounds"));
+                        return Err(exec_jsonpath_error(
+                            "jsonpath array subscript is out of bounds",
+                        ));
                     }
                     _ => {}
                 }
@@ -602,7 +608,10 @@ fn apply_scalar_subscript_selections(
     for selection in selections {
         match selection {
             SubscriptSelection::Index(expr) => {
-                if matches!(resolve_subscript_expr(expr, &subscript_ctx)?, Some(0) | Some(-1)) {
+                if matches!(
+                    resolve_subscript_expr(expr, &subscript_ctx)?,
+                    Some(0) | Some(-1)
+                ) {
                     out.push(value.clone());
                 }
             }

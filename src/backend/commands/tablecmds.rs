@@ -42,6 +42,7 @@ use crate::include::access::amapi::IndexUniqueCheck;
 use crate::include::access::detoast::is_ondisk_toast_pointer;
 use crate::include::access::htup::{HeapTuple, TupleValue};
 use crate::include::access::itemptr::ItemPointerData;
+use crate::include::catalog::builtin_range_name_for_sql_type;
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue, array_value_from_value};
 use crate::include::nodes::execnodes::TupleSlot;
 use crate::include::nodes::execnodes::*;
@@ -997,6 +998,14 @@ fn rewrite_subscripted_assignment_error(
 }
 
 fn sql_type_display_name(ty: SqlType) -> String {
+    if ty.is_range() {
+        let base = builtin_range_name_for_sql_type(ty).unwrap_or("range");
+        return if ty.is_array {
+            format!("{base}[]")
+        } else {
+            base.to_string()
+        };
+    }
     let base = match ty.kind {
         SqlTypeKind::AnyArray => "anyarray",
         SqlTypeKind::Record | SqlTypeKind::Composite => "record",
@@ -1018,15 +1027,10 @@ fn sql_type_display_name(ty: SqlType) -> String {
         SqlTypeKind::Float8 => "double precision",
         SqlTypeKind::Money => "money",
         SqlTypeKind::Numeric => "numeric",
-        SqlTypeKind::Range => "range",
-        SqlTypeKind::Int4Range => "int4range",
-        SqlTypeKind::Int8Range => "int8range",
-        SqlTypeKind::NumericRange => "numrange",
         SqlTypeKind::Json => "json",
         SqlTypeKind::Jsonb => "jsonb",
         SqlTypeKind::JsonPath => "jsonpath",
         SqlTypeKind::Date => "date",
-        SqlTypeKind::DateRange => "daterange",
         SqlTypeKind::Time => "time without time zone",
         SqlTypeKind::TimeTz => "time with time zone",
         SqlTypeKind::Interval => "interval",
@@ -1034,7 +1038,6 @@ fn sql_type_display_name(ty: SqlType) -> String {
         SqlTypeKind::TsQuery => "tsquery",
         SqlTypeKind::RegConfig => "regconfig",
         SqlTypeKind::RegDictionary => "regdictionary",
-        SqlTypeKind::RegProcedure => "regprocedure",
         SqlTypeKind::Text => "text",
         SqlTypeKind::Bool => "boolean",
         SqlTypeKind::Point => "point",
@@ -1045,13 +1048,18 @@ fn sql_type_display_name(ty: SqlType) -> String {
         SqlTypeKind::Line => "line",
         SqlTypeKind::Circle => "circle",
         SqlTypeKind::Timestamp => "timestamp without time zone",
-        SqlTypeKind::TimestampRange => "tsrange",
         SqlTypeKind::TimestampTz => "timestamp with time zone",
-        SqlTypeKind::TimestampTzRange => "tstzrange",
         SqlTypeKind::PgNodeTree => "pg_node_tree",
         SqlTypeKind::InternalChar => "\"char\"",
         SqlTypeKind::Char => "character",
         SqlTypeKind::Varchar => "character varying",
+        SqlTypeKind::Range
+        | SqlTypeKind::Int4Range
+        | SqlTypeKind::Int8Range
+        | SqlTypeKind::NumericRange
+        | SqlTypeKind::DateRange
+        | SqlTypeKind::TimestampRange
+        | SqlTypeKind::TimestampTzRange => unreachable!("range handled above"),
     };
 
     if ty.is_array {

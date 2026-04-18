@@ -75,6 +75,10 @@ fn default_attribute_storage(sql_type: SqlType, attlen: i16) -> AttributeStorage
         return AttributeStorage::Extended;
     }
 
+    if sql_type.is_range() {
+        return AttributeStorage::Extended;
+    }
+
     match sql_type.kind {
         SqlTypeKind::AnyArray => AttributeStorage::Extended,
         SqlTypeKind::Name
@@ -96,13 +100,6 @@ fn default_attribute_storage(sql_type: SqlType, attlen: i16) -> AttributeStorage
         | SqlTypeKind::Varchar
         | SqlTypeKind::Char
         | SqlTypeKind::Numeric
-        | SqlTypeKind::Range
-        | SqlTypeKind::Int4Range
-        | SqlTypeKind::Int8Range
-        | SqlTypeKind::NumericRange
-        | SqlTypeKind::DateRange
-        | SqlTypeKind::TimestampRange
-        | SqlTypeKind::TimestampTzRange
         | SqlTypeKind::Path
         | SqlTypeKind::Polygon
         | SqlTypeKind::Json
@@ -130,6 +127,13 @@ fn default_attribute_storage(sql_type: SqlType, attlen: i16) -> AttributeStorage
         | SqlTypeKind::Circle
         | SqlTypeKind::Float4
         | SqlTypeKind::Float8 => AttributeStorage::Plain,
+        SqlTypeKind::Range
+        | SqlTypeKind::Int4Range
+        | SqlTypeKind::Int8Range
+        | SqlTypeKind::NumericRange
+        | SqlTypeKind::DateRange
+        | SqlTypeKind::TimestampRange
+        | SqlTypeKind::TimestampTzRange => unreachable!("range handled above"),
     }
 }
 

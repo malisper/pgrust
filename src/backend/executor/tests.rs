@@ -11732,11 +11732,11 @@ fn jsonpath_string_predicates_errors() {
     .unwrap_err();
     assert!(
         matches!(
-        &err,
-        ExecError::InvalidStorageValue { column, details }
-            if column == "jsonpath"
-                && details == "invalid input syntax for type jsonpath: \"$ ? (@ like_regex \"pattern\" flag \"a\")\""
-    ),
+            &err,
+            ExecError::InvalidStorageValue { column, details }
+                if column == "jsonpath"
+                    && details == "invalid input syntax for type jsonpath: \"$ ? (@ like_regex \"pattern\" flag \"a\")\""
+        ),
         "{err:?}"
     );
 }

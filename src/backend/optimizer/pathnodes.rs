@@ -1,8 +1,6 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::backend::parser::{SqlType, SqlTypeKind};
-use crate::include::catalog::RECORD_TYPE_OID;
-use crate::include::catalog::sql_type_for_range_kind;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::pathnodes::{Path, PathKey, PathTarget, PlannerInfo};
 use crate::include::nodes::plannodes::{Plan, PlanEstimate};

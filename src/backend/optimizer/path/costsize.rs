@@ -2733,6 +2733,10 @@ fn estimate_relation_width(desc: &RelationDesc, stats: &HashMap<i16, PgStatistic
 }
 
 pub(super) fn estimate_sql_type_width(sql_type: SqlType) -> usize {
+    if sql_type.is_range() {
+        return 32;
+    }
+
     match sql_type.kind {
         SqlTypeKind::Bool => 1,
         SqlTypeKind::Int2 => 2,
@@ -2751,13 +2755,6 @@ pub(super) fn estimate_sql_type_width(sql_type: SqlType) -> usize {
         | SqlTypeKind::Tid
         | SqlTypeKind::Float8 => 8,
         SqlTypeKind::Numeric => 16,
-        SqlTypeKind::Range => 32,
-        SqlTypeKind::Int4Range
-        | SqlTypeKind::Int8Range
-        | SqlTypeKind::NumericRange
-        | SqlTypeKind::DateRange
-        | SqlTypeKind::TimestampRange
-        | SqlTypeKind::TimestampTzRange => 32,
         SqlTypeKind::Bit | SqlTypeKind::VarBit | SqlTypeKind::Bytea => 16,
         SqlTypeKind::Text
         | SqlTypeKind::Interval
@@ -2786,6 +2783,13 @@ pub(super) fn estimate_sql_type_width(sql_type: SqlType) -> usize {
         | SqlTypeKind::PgNodeTree
         | SqlTypeKind::Record
         | SqlTypeKind::Composite => 32,
+        SqlTypeKind::Range
+        | SqlTypeKind::Int4Range
+        | SqlTypeKind::Int8Range
+        | SqlTypeKind::NumericRange
+        | SqlTypeKind::DateRange
+        | SqlTypeKind::TimestampRange
+        | SqlTypeKind::TimestampTzRange => unreachable!("range handled above"),
     }
 }
 

@@ -1,5 +1,5 @@
-use pest::iterators::Pair;
 use pest::Parser as _;
+use pest::iterators::Pair;
 use pest_derive::Parser;
 
 use super::comments::{

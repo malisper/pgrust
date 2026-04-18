@@ -1,5 +1,6 @@
 use super::*;
 use crate::include::catalog::bootstrap_pg_cast_rows;
+use crate::include::catalog::{builtin_range_name_for_sql_type, range_type_ref_for_sql_type};
 
 pub(super) fn coerce_bound_expr(expr: Expr, from: SqlType, to: SqlType) -> Expr {
     if from == to {
@@ -19,14 +20,22 @@ pub fn is_binary_coercible_type(from: SqlType, to: SqlType) -> bool {
         return true;
     }
 
-    let from_oid = crate::include::catalog::builtin_type_rows()
-        .iter()
-        .find(|row| row.sql_type == from && row.typrelid == 0)
-        .map(|row| row.oid);
-    let to_oid = crate::include::catalog::builtin_type_rows()
-        .iter()
-        .find(|row| row.sql_type == to && row.typrelid == 0)
-        .map(|row| row.oid);
+    let from_oid = range_type_ref_for_sql_type(from)
+        .map(|range_type| range_type.type_oid())
+        .or_else(|| {
+            crate::include::catalog::builtin_type_rows()
+                .iter()
+                .find(|row| row.sql_type == from && row.typrelid == 0)
+                .map(|row| row.oid)
+        });
+    let to_oid = range_type_ref_for_sql_type(to)
+        .map(|range_type| range_type.type_oid())
+        .or_else(|| {
+            crate::include::catalog::builtin_type_rows()
+                .iter()
+                .find(|row| row.sql_type == to && row.typrelid == 0)
+                .map(|row| row.oid)
+        });
 
     let (Some(from_oid), Some(to_oid)) = (from_oid, to_oid) else {
         return false;
@@ -109,61 +118,65 @@ pub(super) fn resolve_generate_series_common_type(
 }
 
 pub(super) fn sql_type_name(ty: SqlType) -> String {
-    let base = match ty.kind {
-        SqlTypeKind::AnyArray => "anyarray",
-        SqlTypeKind::Record => "record",
-        SqlTypeKind::Composite => "record",
-        SqlTypeKind::Void => "void",
-        SqlTypeKind::Int2 => "smallint",
-        SqlTypeKind::Int2Vector => "int2vector",
-        SqlTypeKind::Int4 => "integer",
-        SqlTypeKind::Int8 => "bigint",
-        SqlTypeKind::Name => "name",
-        SqlTypeKind::Oid => "oid",
-        SqlTypeKind::RegProcedure => "regprocedure",
-        SqlTypeKind::Tid => "tid",
-        SqlTypeKind::Xid => "xid",
-        SqlTypeKind::OidVector => "oidvector",
-        SqlTypeKind::Bit => "bit",
-        SqlTypeKind::VarBit => "bit varying",
-        SqlTypeKind::Bytea => "bytea",
-        SqlTypeKind::Float4 => "real",
-        SqlTypeKind::Float8 => "double precision",
-        SqlTypeKind::Money => "money",
-        SqlTypeKind::Numeric => "numeric",
-        SqlTypeKind::Range => "range",
-        SqlTypeKind::Int4Range => "int4range",
-        SqlTypeKind::Int8Range => "int8range",
-        SqlTypeKind::NumericRange => "numrange",
-        SqlTypeKind::Json => "json",
-        SqlTypeKind::Jsonb => "jsonb",
-        SqlTypeKind::JsonPath => "jsonpath",
-        SqlTypeKind::Date => "date",
-        SqlTypeKind::DateRange => "daterange",
-        SqlTypeKind::Time => "time without time zone",
-        SqlTypeKind::TimeTz => "time with time zone",
-        SqlTypeKind::Interval => "interval",
-        SqlTypeKind::TsVector => "tsvector",
-        SqlTypeKind::TsQuery => "tsquery",
-        SqlTypeKind::RegConfig => "regconfig",
-        SqlTypeKind::RegDictionary => "regdictionary",
-        SqlTypeKind::Text => "text",
-        SqlTypeKind::Bool => "boolean",
-        SqlTypeKind::Point => "point",
-        SqlTypeKind::Lseg => "lseg",
-        SqlTypeKind::Path => "path",
-        SqlTypeKind::Box => "box",
-        SqlTypeKind::Polygon => "polygon",
-        SqlTypeKind::Line => "line",
-        SqlTypeKind::Circle => "circle",
-        SqlTypeKind::Timestamp => "timestamp without time zone",
-        SqlTypeKind::TimestampRange => "tsrange",
-        SqlTypeKind::TimestampTz => "timestamp with time zone",
-        SqlTypeKind::TimestampTzRange => "tstzrange",
-        SqlTypeKind::PgNodeTree => "pg_node_tree",
-        SqlTypeKind::InternalChar => "\"char\"",
-        SqlTypeKind::Char => "character",
-        SqlTypeKind::Varchar => "character varying",
+    let base = if ty.is_range() {
+        builtin_range_name_for_sql_type(ty).unwrap_or("range")
+    } else {
+        match ty.kind {
+            SqlTypeKind::AnyArray => "anyarray",
+            SqlTypeKind::Record => "record",
+            SqlTypeKind::Composite => "record",
+            SqlTypeKind::Void => "void",
+            SqlTypeKind::Int2 => "smallint",
+            SqlTypeKind::Int2Vector => "int2vector",
+            SqlTypeKind::Int4 => "integer",
+            SqlTypeKind::Int8 => "bigint",
+            SqlTypeKind::Name => "name",
+            SqlTypeKind::Oid => "oid",
+            SqlTypeKind::RegProcedure => "regprocedure",
+            SqlTypeKind::Tid => "tid",
+            SqlTypeKind::Xid => "xid",
+            SqlTypeKind::OidVector => "oidvector",
+            SqlTypeKind::Bit => "bit",
+            SqlTypeKind::VarBit => "bit varying",
+            SqlTypeKind::Bytea => "bytea",
+            SqlTypeKind::Float4 => "real",
+            SqlTypeKind::Float8 => "double precision",
+            SqlTypeKind::Money => "money",
+            SqlTypeKind::Numeric => "numeric",
+            SqlTypeKind::Json => "json",
+            SqlTypeKind::Jsonb => "jsonb",
+            SqlTypeKind::JsonPath => "jsonpath",
+            SqlTypeKind::Date => "date",
+            SqlTypeKind::Time => "time without time zone",
+            SqlTypeKind::TimeTz => "time with time zone",
+            SqlTypeKind::Interval => "interval",
+            SqlTypeKind::TsVector => "tsvector",
+            SqlTypeKind::TsQuery => "tsquery",
+            SqlTypeKind::RegConfig => "regconfig",
+            SqlTypeKind::RegDictionary => "regdictionary",
+            SqlTypeKind::Text => "text",
+            SqlTypeKind::Bool => "boolean",
+            SqlTypeKind::Point => "point",
+            SqlTypeKind::Lseg => "lseg",
+            SqlTypeKind::Path => "path",
+            SqlTypeKind::Box => "box",
+            SqlTypeKind::Polygon => "polygon",
+            SqlTypeKind::Line => "line",
+            SqlTypeKind::Circle => "circle",
+            SqlTypeKind::Timestamp => "timestamp without time zone",
+            SqlTypeKind::TimestampTz => "timestamp with time zone",
+            SqlTypeKind::PgNodeTree => "pg_node_tree",
+            SqlTypeKind::InternalChar => "\"char\"",
+            SqlTypeKind::Char => "character",
+            SqlTypeKind::Varchar => "character varying",
+            SqlTypeKind::Range
+            | SqlTypeKind::Int4Range
+            | SqlTypeKind::Int8Range
+            | SqlTypeKind::NumericRange
+            | SqlTypeKind::DateRange
+            | SqlTypeKind::TimestampRange
+            | SqlTypeKind::TimestampTzRange => unreachable!("range handled above"),
+        }
     };
     if ty.is_array {
         format!("{base}[]")
@@ -279,7 +292,7 @@ pub(super) fn coerce_unknown_string_literal_type(
         if is_geometry_type(peer_type) {
             return peer_type.element_type();
         }
-        if crate::include::catalog::range_kind_for_sql_type(peer_type).is_some() {
+        if peer_type.is_range() {
             return peer_type.element_type();
         }
     }

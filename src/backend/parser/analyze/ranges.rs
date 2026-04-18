@@ -36,7 +36,11 @@ fn looks_like_range_literal_expr(expr: &SqlExpr) -> bool {
 fn range_declared_arg_types(range_type: RangeTypeRef, arity: usize) -> Vec<SqlType> {
     match arity {
         2 => vec![range_type.sql_type, range_type.sql_type],
-        3 => vec![range_type.subtype, range_type.subtype, SqlType::new(SqlTypeKind::Text)],
+        3 => vec![
+            range_type.subtype,
+            range_type.subtype,
+            SqlType::new(SqlTypeKind::Text),
+        ],
         _ => unreachable!("unsupported range declared arity"),
     }
 }
@@ -350,31 +354,31 @@ pub(super) fn bind_maybe_range_contains(
     }
 
     match (left_range_type, right_range_type) {
-        (Some(left_range_type), Some(right_range_type)) => Some(if left_range_type.type_oid()
-            == right_range_type.type_oid()
-        {
-            bind_range_call(
-                if op == "@>" {
-                    BuiltinScalarFunction::RangeContains
-                } else {
-                    BuiltinScalarFunction::RangeContainedBy
-                },
-                &[left, right],
-                &range_declared_arg_types(left_range_type, 2),
-                SqlType::new(SqlTypeKind::Bool),
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )
-        } else {
-            Err(ParseError::UndefinedOperator {
-                op,
-                left_type: sql_type_name(left_type),
-                right_type: sql_type_name(right_type),
-            })
-        }),
+        (Some(left_range_type), Some(right_range_type)) => Some(
+            if left_range_type.type_oid() == right_range_type.type_oid() {
+                bind_range_call(
+                    if op == "@>" {
+                        BuiltinScalarFunction::RangeContains
+                    } else {
+                        BuiltinScalarFunction::RangeContainedBy
+                    },
+                    &[left, right],
+                    &range_declared_arg_types(left_range_type, 2),
+                    SqlType::new(SqlTypeKind::Bool),
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )
+            } else {
+                Err(ParseError::UndefinedOperator {
+                    op,
+                    left_type: sql_type_name(left_type),
+                    right_type: sql_type_name(right_type),
+                })
+            },
+        ),
         (Some(range_type), None) if op == "@>" => {
             let target_type =
                 if is_string_literal_expr(right) && looks_like_range_literal_expr(right) {

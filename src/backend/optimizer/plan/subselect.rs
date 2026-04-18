@@ -1240,31 +1240,35 @@ pub(super) fn finalize_plan_subqueries(
             input,
             clause,
             output_columns,
-        } => Plan::WindowAgg {
-            plan_info,
-            input: Box::new(finalize_plan_subqueries(*input, catalog, subplans)),
-            clause: crate::include::nodes::primnodes::WindowClause {
-                spec: crate::include::nodes::primnodes::WindowSpec {
-                    partition_by: clause
-                        .spec
-                        .partition_by
-                        .into_iter()
-                        .map(|expr| finalize_expr_subqueries(expr, catalog, subplans))
-                        .collect(),
-                    order_by: clause
-                        .spec
-                        .order_by
-                        .into_iter()
-                        .map(|item| crate::include::nodes::primnodes::OrderByEntry {
-                            expr: finalize_expr_subqueries(item.expr, catalog, subplans),
-                            ..item
-                        })
-                        .collect(),
-                },
-                functions: clause
-                    .functions
-                    .into_iter()
-                    .map(|func| crate::include::nodes::primnodes::WindowFuncExpr {
+        } => {
+            Plan::WindowAgg {
+                plan_info,
+                input: Box::new(finalize_plan_subqueries(*input, catalog, subplans)),
+                clause:
+                    crate::include::nodes::primnodes::WindowClause {
+                        spec: crate::include::nodes::primnodes::WindowSpec {
+                            partition_by: clause
+                                .spec
+                                .partition_by
+                                .into_iter()
+                                .map(|expr| finalize_expr_subqueries(expr, catalog, subplans))
+                                .collect(),
+                            order_by: clause
+                                .spec
+                                .order_by
+                                .into_iter()
+                                .map(|item| crate::include::nodes::primnodes::OrderByEntry {
+                                    expr: finalize_expr_subqueries(item.expr, catalog, subplans),
+                                    ..item
+                                })
+                                .collect(),
+                        },
+                        functions:
+                            clause
+                                .functions
+                                .into_iter()
+                                .map(|func| {
+                                    crate::include::nodes::primnodes::WindowFuncExpr {
                         kind: match func.kind {
                             crate::include::nodes::primnodes::WindowFuncKind::Aggregate(aggref) => {
                                 crate::include::nodes::primnodes::WindowFuncKind::Aggregate(
@@ -1290,11 +1294,13 @@ pub(super) fn finalize_plan_subqueries(
                             .map(|arg| finalize_expr_subqueries(arg, catalog, subplans))
                             .collect(),
                         ..func
-                    })
-                    .collect(),
-            },
-            output_columns,
-        },
+                    }
+                                })
+                                .collect(),
+                    },
+                output_columns,
+            }
+        }
         Plan::FunctionScan { plan_info, call } => Plan::FunctionScan {
             plan_info,
             call: finalize_set_returning_call(call, catalog, subplans),

@@ -6,7 +6,12 @@ use super::expr_datetime::render_datetime_value_text;
 use super::expr_ops::compare_order_values;
 use super::node_types::{BuiltinScalarFunction, RangeBound, RangeTypeRef, RangeValue, Value};
 use crate::backend::parser::{SqlType, SqlTypeKind};
-use crate::include::catalog::{RangeCanonicalization, range_type_ref_for_sql_type};
+use crate::include::catalog::{
+    DATE_TYPE_OID, DATERANGE_TYPE_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID, INT8_TYPE_OID,
+    INT8RANGE_TYPE_OID, NUMERIC_TYPE_OID, NUMRANGE_TYPE_OID, RangeCanonicalization,
+    TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID, TSRANGE_TYPE_OID, TSTZRANGE_TYPE_OID,
+    builtin_range_name_for_sql_type, range_type_ref_for_sql_type,
+};
 use crate::include::nodes::datetime::DateADT;
 
 const RANGE_EMPTY_FLAG: u8 = 0x01;
@@ -558,8 +563,7 @@ fn range_intersection(left: &RangeValue, right: &RangeValue) -> RangeValue {
     }
     let lower = max_lower_bound(left.lower.as_ref(), right.lower.as_ref());
     let upper = min_upper_bound(left.upper.as_ref(), right.upper.as_ref());
-    normalize_range(left.range_type, lower, upper)
-        .unwrap_or_else(|_| empty_range(left.range_type))
+    normalize_range(left.range_type, lower, upper).unwrap_or_else(|_| empty_range(left.range_type))
 }
 
 fn range_merge(left: &RangeValue, right: &RangeValue) -> RangeValue {
@@ -771,7 +775,15 @@ fn ensure_same_range_kind(
 fn ensure_range_subtype(range: &RangeValue, value: &Value) -> Result<(), ExecError> {
     let matches = value
         .sql_type_hint()
-        .map(|ty| ty.element_type() == range.range_type.subtype.element_type())
+        .map(|ty| {
+            let actual = ty.element_type();
+            let expected = range.range_type.subtype.element_type();
+            if actual.type_oid != 0 && expected.type_oid != 0 {
+                actual.type_oid == expected.type_oid
+            } else {
+                actual.kind == expected.kind && actual.is_array == expected.is_array
+            }
+        })
         .unwrap_or(false);
     if matches {
         Ok(())
@@ -787,15 +799,23 @@ fn ensure_range_subtype(range: &RangeValue, value: &Value) -> Result<(), ExecErr
 fn range_type_for_scalar_value(value: &Value) -> Option<RangeTypeRef> {
     match value {
         Value::Range(range) => Some(range.range_type),
-        Value::Int32(_) => range_type_ref_for_sql_type(SqlType::new(SqlTypeKind::Int4Range)),
-        Value::Int64(_) => range_type_ref_for_sql_type(SqlType::new(SqlTypeKind::Int8Range)),
-        Value::Numeric(_) => range_type_ref_for_sql_type(SqlType::new(SqlTypeKind::NumericRange)),
-        Value::Date(_) => range_type_ref_for_sql_type(SqlType::new(SqlTypeKind::DateRange)),
+        Value::Int32(_) => {
+            range_type_ref_for_sql_type(SqlType::range(INT4RANGE_TYPE_OID, INT4_TYPE_OID))
+        }
+        Value::Int64(_) => {
+            range_type_ref_for_sql_type(SqlType::range(INT8RANGE_TYPE_OID, INT8_TYPE_OID))
+        }
+        Value::Numeric(_) => {
+            range_type_ref_for_sql_type(SqlType::range(NUMRANGE_TYPE_OID, NUMERIC_TYPE_OID))
+        }
+        Value::Date(_) => {
+            range_type_ref_for_sql_type(SqlType::range(DATERANGE_TYPE_OID, DATE_TYPE_OID))
+        }
         Value::Timestamp(_) => {
-            range_type_ref_for_sql_type(SqlType::new(SqlTypeKind::TimestampRange))
+            range_type_ref_for_sql_type(SqlType::range(TSRANGE_TYPE_OID, TIMESTAMP_TYPE_OID))
         }
         Value::TimestampTz(_) => {
-            range_type_ref_for_sql_type(SqlType::new(SqlTypeKind::TimestampTzRange))
+            range_type_ref_for_sql_type(SqlType::range(TSTZRANGE_TYPE_OID, TIMESTAMPTZ_TYPE_OID))
         }
         _ => None,
     }
@@ -978,15 +998,7 @@ fn parse_range_flags(value: &Value) -> Result<(bool, bool), ExecError> {
 
 fn invalid_range_input(range_type: RangeTypeRef, value: &str) -> ExecError {
     ExecError::InvalidRangeInput {
-        ty: match range_type.sql_type.kind {
-            SqlTypeKind::Int4Range => "int4range",
-            SqlTypeKind::Int8Range => "int8range",
-            SqlTypeKind::NumericRange => "numrange",
-            SqlTypeKind::DateRange => "daterange",
-            SqlTypeKind::TimestampRange => "tsrange",
-            SqlTypeKind::TimestampTzRange => "tstzrange",
-            _ => "range",
-        },
+        ty: builtin_range_name_for_sql_type(range_type.sql_type).unwrap_or("range"),
         value: value.to_string(),
     }
 }
@@ -1115,9 +1127,11 @@ mod tests {
         )
         .unwrap();
         let encoded = encode_range_bytes(&range).unwrap();
-        let decoded =
-            decode_range_bytes(test_range_type(SqlType::new(SqlTypeKind::Int4Range)), &encoded)
-                .unwrap();
+        let decoded = decode_range_bytes(
+            test_range_type(SqlType::new(SqlTypeKind::Int4Range)),
+            &encoded,
+        )
+        .unwrap();
         assert_eq!(decoded, range);
     }
 }

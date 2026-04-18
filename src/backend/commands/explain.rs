@@ -42,11 +42,7 @@ pub(crate) fn format_explain_lines_with_costs(
         let stats = state.node_stats();
         lines.push(format!(
             "{prefix}{label}  (actual time={:.3}..{:.3} rows={:.2} loops={})",
-            stats
-                .first_tuple_time
-                .unwrap_or_default()
-                .as_secs_f64()
-                * 1000.0,
+            stats.first_tuple_time.unwrap_or_default().as_secs_f64() * 1000.0,
             stats.total_time.as_secs_f64() * 1000.0,
             stats.rows as f64,
             stats.loops,

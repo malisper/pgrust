@@ -15,7 +15,7 @@ use crate::backend::utils::cache::syscache::{
 use crate::include::catalog::{
     CONSTRAINT_FOREIGN, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, PG_CATALOG_NAMESPACE_OID,
     PG_CLASS_RELATION_OID, PG_PROC_RELATION_OID, PG_REWRITE_RELATION_OID, PG_TYPE_RELATION_OID,
-    PUBLIC_NAMESPACE_OID,
+    PUBLIC_NAMESPACE_OID, builtin_range_name_for_sql_type,
 };
 use crate::include::nodes::primnodes::{Var, user_attrno};
 
@@ -519,6 +519,9 @@ fn is_text_like_type(ty: SqlType) -> bool {
 }
 
 fn format_sql_type_name(sql_type: SqlType) -> &'static str {
+    if sql_type.is_range() {
+        return builtin_range_name_for_sql_type(sql_type).unwrap_or("range");
+    }
     match sql_type.kind {
         SqlTypeKind::AnyArray => "anyarray",
         SqlTypeKind::Record | SqlTypeKind::Composite => "record",
@@ -540,15 +543,10 @@ fn format_sql_type_name(sql_type: SqlType) -> &'static str {
         SqlTypeKind::Float8 => "double precision",
         SqlTypeKind::Money => "money",
         SqlTypeKind::Numeric => "numeric",
-        SqlTypeKind::Range => "range",
-        SqlTypeKind::Int4Range => "int4range",
-        SqlTypeKind::Int8Range => "int8range",
-        SqlTypeKind::NumericRange => "numrange",
         SqlTypeKind::Json => "json",
         SqlTypeKind::Jsonb => "jsonb",
         SqlTypeKind::JsonPath => "jsonpath",
         SqlTypeKind::Date => "date",
-        SqlTypeKind::DateRange => "daterange",
         SqlTypeKind::Time => "time without time zone",
         SqlTypeKind::TimeTz => "time with time zone",
         SqlTypeKind::TsVector => "tsvector",
@@ -565,14 +563,19 @@ fn format_sql_type_name(sql_type: SqlType) -> &'static str {
         SqlTypeKind::Line => "line",
         SqlTypeKind::Circle => "circle",
         SqlTypeKind::Timestamp => "timestamp without time zone",
-        SqlTypeKind::TimestampRange => "tsrange",
         SqlTypeKind::TimestampTz => "timestamp with time zone",
-        SqlTypeKind::TimestampTzRange => "tstzrange",
         SqlTypeKind::Interval => "interval",
         SqlTypeKind::PgNodeTree => "pg_node_tree",
         SqlTypeKind::InternalChar => "\"char\"",
         SqlTypeKind::Char => "character",
         SqlTypeKind::Varchar => "character varying",
+        SqlTypeKind::Range
+        | SqlTypeKind::Int4Range
+        | SqlTypeKind::Int8Range
+        | SqlTypeKind::NumericRange
+        | SqlTypeKind::DateRange
+        | SqlTypeKind::TimestampRange
+        | SqlTypeKind::TimestampTzRange => unreachable!("range handled above"),
     }
 }
 

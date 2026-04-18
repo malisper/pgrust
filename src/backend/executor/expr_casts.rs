@@ -23,7 +23,9 @@ use crate::backend::utils::time::date::{
 };
 use crate::backend::utils::time::datetime::DateTimeParseError;
 use crate::backend::utils::time::timestamp::{parse_timestamp_text, parse_timestamptz_text};
-use crate::include::catalog::{TEXT_TYPE_OID, bootstrap_pg_cast_rows, builtin_type_rows};
+use crate::include::catalog::{
+    TEXT_TYPE_OID, bootstrap_pg_cast_rows, builtin_type_rows, range_type_ref_for_sql_type,
+};
 use crate::pgrust::compact_string::CompactString;
 use num_integer::Integer;
 use num_traits::{Signed, Zero};
@@ -817,6 +819,9 @@ fn input_type_name_supported(parsed: SqlType) -> bool {
 }
 
 fn builtin_type_oid(sql_type: SqlType) -> Option<u32> {
+    if let Some(range_type) = range_type_ref_for_sql_type(sql_type) {
+        return Some(range_type.type_oid());
+    }
     builtin_type_rows().into_iter().find_map(|row| {
         (row.sql_type.is_array == sql_type.is_array && row.sql_type.kind == sql_type.kind)
             .then_some(row.oid)
@@ -1155,6 +1160,7 @@ pub(crate) fn cast_value_with_config(
     match value {
         Value::Null => Ok(Value::Null),
         Value::Int16(v) => match ty {
+            ty if ty.is_range() => cast_text_value(&v.to_string(), ty, true),
             SqlType {
                 kind: SqlTypeKind::Int2,
                 ..
@@ -1192,15 +1198,10 @@ pub(crate) fn cast_value_with_config(
             SqlType {
                 kind:
                     SqlTypeKind::Text
-                    | SqlTypeKind::Range
                     | SqlTypeKind::Name
-                    | SqlTypeKind::Int4Range
-                    | SqlTypeKind::Int8Range
                     | SqlTypeKind::Int2Vector
-                    | SqlTypeKind::NumericRange
                     | SqlTypeKind::OidVector
                     | SqlTypeKind::Date
-                    | SqlTypeKind::DateRange
                     | SqlTypeKind::Time
                     | SqlTypeKind::TimeTz
                     | SqlTypeKind::Point
@@ -1211,9 +1212,7 @@ pub(crate) fn cast_value_with_config(
                     | SqlTypeKind::Line
                     | SqlTypeKind::Circle
                     | SqlTypeKind::Timestamp
-                    | SqlTypeKind::TimestampRange
                     | SqlTypeKind::TimestampTz
-                    | SqlTypeKind::TimestampTzRange
                     | SqlTypeKind::PgNodeTree
                     | SqlTypeKind::InternalChar
                     | SqlTypeKind::Bit
@@ -1252,8 +1251,20 @@ pub(crate) fn cast_value_with_config(
                 kind: SqlTypeKind::Record | SqlTypeKind::Composite,
                 ..
             } => Err(unsupported_record_input()),
+            SqlType {
+                kind:
+                    SqlTypeKind::Range
+                    | SqlTypeKind::Int4Range
+                    | SqlTypeKind::Int8Range
+                    | SqlTypeKind::NumericRange
+                    | SqlTypeKind::DateRange
+                    | SqlTypeKind::TimestampRange
+                    | SqlTypeKind::TimestampTzRange,
+                ..
+            } => unreachable!("range handled above"),
         },
         Value::Int32(v) => match ty {
+            ty if ty.is_range() => cast_text_value(&v.to_string(), ty, true),
             SqlType {
                 kind: SqlTypeKind::Int2,
                 ..
@@ -1293,15 +1304,10 @@ pub(crate) fn cast_value_with_config(
             SqlType {
                 kind:
                     SqlTypeKind::Text
-                    | SqlTypeKind::Range
                     | SqlTypeKind::Name
-                    | SqlTypeKind::Int4Range
-                    | SqlTypeKind::Int8Range
                     | SqlTypeKind::Int2Vector
-                    | SqlTypeKind::NumericRange
                     | SqlTypeKind::OidVector
                     | SqlTypeKind::Date
-                    | SqlTypeKind::DateRange
                     | SqlTypeKind::Time
                     | SqlTypeKind::TimeTz
                     | SqlTypeKind::Point
@@ -1312,9 +1318,7 @@ pub(crate) fn cast_value_with_config(
                     | SqlTypeKind::Line
                     | SqlTypeKind::Circle
                     | SqlTypeKind::Timestamp
-                    | SqlTypeKind::TimestampRange
                     | SqlTypeKind::TimestampTz
-                    | SqlTypeKind::TimestampTzRange
                     | SqlTypeKind::PgNodeTree
                     | SqlTypeKind::InternalChar
                     | SqlTypeKind::Bit
@@ -1353,8 +1357,20 @@ pub(crate) fn cast_value_with_config(
                 kind: SqlTypeKind::Record | SqlTypeKind::Composite,
                 ..
             } => Err(unsupported_record_input()),
+            SqlType {
+                kind:
+                    SqlTypeKind::Range
+                    | SqlTypeKind::Int4Range
+                    | SqlTypeKind::Int8Range
+                    | SqlTypeKind::NumericRange
+                    | SqlTypeKind::DateRange
+                    | SqlTypeKind::TimestampRange
+                    | SqlTypeKind::TimestampTzRange,
+                ..
+            } => unreachable!("range handled above"),
         },
         Value::Bool(v) => match ty {
+            ty if ty.is_range() => cast_text_value(if v { "true" } else { "false" }, ty, true),
             SqlType {
                 kind: SqlTypeKind::Bool,
                 ..
@@ -1362,15 +1378,10 @@ pub(crate) fn cast_value_with_config(
             SqlType {
                 kind:
                     SqlTypeKind::Text
-                    | SqlTypeKind::Range
                     | SqlTypeKind::Name
-                    | SqlTypeKind::Int4Range
-                    | SqlTypeKind::Int8Range
                     | SqlTypeKind::Int2Vector
-                    | SqlTypeKind::NumericRange
                     | SqlTypeKind::OidVector
                     | SqlTypeKind::Date
-                    | SqlTypeKind::DateRange
                     | SqlTypeKind::Time
                     | SqlTypeKind::TimeTz
                     | SqlTypeKind::Point
@@ -1381,9 +1392,7 @@ pub(crate) fn cast_value_with_config(
                     | SqlTypeKind::Line
                     | SqlTypeKind::Circle
                     | SqlTypeKind::Timestamp
-                    | SqlTypeKind::TimestampRange
                     | SqlTypeKind::TimestampTz
-                    | SqlTypeKind::TimestampTzRange
                     | SqlTypeKind::PgNodeTree
                     | SqlTypeKind::InternalChar
                     | SqlTypeKind::Bit
@@ -1429,6 +1438,17 @@ pub(crate) fn cast_value_with_config(
                 kind: SqlTypeKind::Record | SqlTypeKind::Composite,
                 ..
             } => Err(unsupported_record_input()),
+            SqlType {
+                kind:
+                    SqlTypeKind::Range
+                    | SqlTypeKind::Int4Range
+                    | SqlTypeKind::Int8Range
+                    | SqlTypeKind::NumericRange
+                    | SqlTypeKind::DateRange
+                    | SqlTypeKind::TimestampRange
+                    | SqlTypeKind::TimestampTzRange,
+                ..
+            } => unreachable!("range handled above"),
         },
         Value::Date(v) => match ty.kind {
             SqlTypeKind::Date => Ok(Value::Date(v)),
@@ -1558,15 +1578,11 @@ pub(crate) fn cast_value_with_config(
             };
             cast_text_value_with_config(text, ty, true, config)
         }
-        Value::Range(range) => match ty.kind {
-            SqlTypeKind::Range
-            | SqlTypeKind::Int4Range
-            | SqlTypeKind::Int8Range
-            | SqlTypeKind::NumericRange
-            | SqlTypeKind::DateRange
-            | SqlTypeKind::TimestampRange
-            | SqlTypeKind::TimestampTzRange => {
-                if ty == range.range_type.sql_type {
+        Value::Range(range) => {
+            if ty.is_range() {
+                if range_type_ref_for_sql_type(ty).is_some_and(|target_type| {
+                    target_type.type_oid() == range.range_type.type_oid()
+                }) {
                     Ok(Value::Range(range))
                 } else {
                     cast_text_value_with_config(
@@ -1576,25 +1592,28 @@ pub(crate) fn cast_value_with_config(
                         config,
                     )
                 }
+            } else {
+                match ty.kind {
+                    SqlTypeKind::Text
+                    | SqlTypeKind::Name
+                    | SqlTypeKind::Char
+                    | SqlTypeKind::Varchar
+                    | SqlTypeKind::Json
+                    | SqlTypeKind::Jsonb
+                    | SqlTypeKind::JsonPath => cast_text_value_with_config(
+                        &render_range_text(&Value::Range(range.clone())).unwrap_or_default(),
+                        ty,
+                        true,
+                        config,
+                    ),
+                    _ => Err(ExecError::TypeMismatch {
+                        op: "::range",
+                        left: Value::Range(range),
+                        right: Value::Null,
+                    }),
+                }
             }
-            SqlTypeKind::Text
-            | SqlTypeKind::Name
-            | SqlTypeKind::Char
-            | SqlTypeKind::Varchar
-            | SqlTypeKind::Json
-            | SqlTypeKind::Jsonb
-            | SqlTypeKind::JsonPath => cast_text_value_with_config(
-                &render_range_text(&Value::Range(range.clone())).unwrap_or_default(),
-                ty,
-                true,
-                config,
-            ),
-            _ => Err(ExecError::TypeMismatch {
-                op: "::range",
-                left: Value::Range(range),
-                right: Value::Null,
-            }),
-        },
+        }
         Value::InternalChar(byte) => match ty.kind {
             SqlTypeKind::InternalChar => Ok(Value::InternalChar(byte)),
             SqlTypeKind::Text
@@ -1722,6 +1741,7 @@ pub(crate) fn cast_value_with_config(
             }),
         },
         Value::Int64(v) => match ty {
+            ty if ty.is_range() => cast_text_value(&v.to_string(), ty, true),
             SqlType {
                 kind: SqlTypeKind::Int2,
                 ..
@@ -1771,15 +1791,10 @@ pub(crate) fn cast_value_with_config(
             SqlType {
                 kind:
                     SqlTypeKind::Text
-                    | SqlTypeKind::Range
                     | SqlTypeKind::Name
-                    | SqlTypeKind::Int4Range
-                    | SqlTypeKind::Int8Range
                     | SqlTypeKind::Int2Vector
-                    | SqlTypeKind::NumericRange
                     | SqlTypeKind::OidVector
                     | SqlTypeKind::Date
-                    | SqlTypeKind::DateRange
                     | SqlTypeKind::Time
                     | SqlTypeKind::TimeTz
                     | SqlTypeKind::Point
@@ -1790,9 +1805,7 @@ pub(crate) fn cast_value_with_config(
                     | SqlTypeKind::Line
                     | SqlTypeKind::Circle
                     | SqlTypeKind::Timestamp
-                    | SqlTypeKind::TimestampRange
                     | SqlTypeKind::TimestampTz
-                    | SqlTypeKind::TimestampTzRange
                     | SqlTypeKind::PgNodeTree
                     | SqlTypeKind::InternalChar
                     | SqlTypeKind::Bit
@@ -1831,8 +1844,20 @@ pub(crate) fn cast_value_with_config(
                 kind: SqlTypeKind::Record | SqlTypeKind::Composite,
                 ..
             } => Err(unsupported_record_input()),
+            SqlType {
+                kind:
+                    SqlTypeKind::Range
+                    | SqlTypeKind::Int4Range
+                    | SqlTypeKind::Int8Range
+                    | SqlTypeKind::NumericRange
+                    | SqlTypeKind::DateRange
+                    | SqlTypeKind::TimestampRange
+                    | SqlTypeKind::TimestampTzRange,
+                ..
+            } => unreachable!("range handled above"),
         },
         Value::Float64(v) => match ty {
+            ty if ty.is_range() => cast_text_value(&v.to_string(), ty, true),
             SqlType {
                 kind: SqlTypeKind::Float4 | SqlTypeKind::Float8,
                 ..
@@ -1856,15 +1881,10 @@ pub(crate) fn cast_value_with_config(
             SqlType {
                 kind:
                     SqlTypeKind::Text
-                    | SqlTypeKind::Range
                     | SqlTypeKind::Name
-                    | SqlTypeKind::Int4Range
-                    | SqlTypeKind::Int8Range
                     | SqlTypeKind::Int2Vector
-                    | SqlTypeKind::NumericRange
                     | SqlTypeKind::OidVector
                     | SqlTypeKind::Date
-                    | SqlTypeKind::DateRange
                     | SqlTypeKind::Time
                     | SqlTypeKind::TimeTz
                     | SqlTypeKind::Point
@@ -1875,9 +1895,7 @@ pub(crate) fn cast_value_with_config(
                     | SqlTypeKind::Line
                     | SqlTypeKind::Circle
                     | SqlTypeKind::Timestamp
-                    | SqlTypeKind::TimestampRange
                     | SqlTypeKind::TimestampTz
-                    | SqlTypeKind::TimestampTzRange
                     | SqlTypeKind::PgNodeTree
                     | SqlTypeKind::InternalChar
                     | SqlTypeKind::Bit
@@ -1936,6 +1954,17 @@ pub(crate) fn cast_value_with_config(
                 kind: SqlTypeKind::Record | SqlTypeKind::Composite,
                 ..
             } => Err(unsupported_record_input()),
+            SqlType {
+                kind:
+                    SqlTypeKind::Range
+                    | SqlTypeKind::Int4Range
+                    | SqlTypeKind::Int8Range
+                    | SqlTypeKind::NumericRange
+                    | SqlTypeKind::DateRange
+                    | SqlTypeKind::TimestampRange
+                    | SqlTypeKind::TimestampTzRange,
+                ..
+            } => unreachable!("range handled above"),
         },
         Value::Numeric(numeric) => cast_numeric_value(numeric, ty, true),
         Value::Money(v) => match ty.kind {
@@ -1993,11 +2022,13 @@ pub(super) fn cast_text_value_with_config(
     explicit: bool,
     config: &DateTimeConfig,
 ) -> Result<Value, ExecError> {
+    if ty.is_range() {
+        return parse_range_text(text, ty);
+    }
     match ty.kind {
         SqlTypeKind::AnyArray => Err(unsupported_anyarray_input()),
         SqlTypeKind::Record | SqlTypeKind::Composite => Err(unsupported_record_input()),
         SqlTypeKind::Text
-        | SqlTypeKind::Range
         | SqlTypeKind::Int2Vector
         | SqlTypeKind::OidVector
         | SqlTypeKind::PgNodeTree => Ok(Value::Text(CompactString::new(text))),
@@ -2057,13 +2088,6 @@ pub(super) fn cast_text_value_with_config(
         SqlTypeKind::TsQuery => {
             crate::backend::executor::parse_tsquery_text(text).map(Value::TsQuery)
         }
-        SqlTypeKind::Range
-        | SqlTypeKind::Int4Range
-        | SqlTypeKind::Int8Range
-        | SqlTypeKind::NumericRange
-        | SqlTypeKind::DateRange
-        | SqlTypeKind::TimestampRange
-        | SqlTypeKind::TimestampTzRange => parse_range_text(text, ty),
         SqlTypeKind::Void => Err(ExecError::TypeMismatch {
             op: "::void",
             left: Value::Text(CompactString::new(text)),
@@ -2104,6 +2128,13 @@ pub(super) fn cast_text_value_with_config(
         | SqlTypeKind::Polygon
         | SqlTypeKind::Line
         | SqlTypeKind::Circle => parse_geometry_text(text, ty.kind),
+        SqlTypeKind::Range
+        | SqlTypeKind::Int4Range
+        | SqlTypeKind::Int8Range
+        | SqlTypeKind::NumericRange
+        | SqlTypeKind::DateRange
+        | SqlTypeKind::TimestampRange
+        | SqlTypeKind::TimestampTzRange => unreachable!("range handled above"),
     }
 }
 
@@ -2112,6 +2143,9 @@ pub(super) fn cast_numeric_value(
     ty: SqlType,
     explicit: bool,
 ) -> Result<Value, ExecError> {
+    if ty.is_range() {
+        return cast_text_value(&value.render(), ty, explicit);
+    }
     match ty.kind {
         SqlTypeKind::AnyArray => Err(unsupported_anyarray_input()),
         SqlTypeKind::Record | SqlTypeKind::Composite => Err(unsupported_record_input()),
@@ -2135,18 +2169,11 @@ pub(super) fn cast_numeric_value(
         | SqlTypeKind::Tid
         | SqlTypeKind::Interval
         | SqlTypeKind::PgNodeTree => Ok(Value::Text(CompactString::from_owned(value.render()))),
-        SqlTypeKind::Range
-        | SqlTypeKind::Date
-        | SqlTypeKind::Int4Range
-        | SqlTypeKind::Int8Range
-        | SqlTypeKind::NumericRange
-        | SqlTypeKind::DateRange
+        SqlTypeKind::Date
         | SqlTypeKind::Time
         | SqlTypeKind::TimeTz
         | SqlTypeKind::Timestamp
-        | SqlTypeKind::TimestampTz
-        | SqlTypeKind::TimestampRange
-        | SqlTypeKind::TimestampTzRange => cast_text_value(&value.render(), ty, explicit),
+        | SqlTypeKind::TimestampTz => cast_text_value(&value.render(), ty, explicit),
         SqlTypeKind::Json => {
             let rendered = value.render();
             validate_json_text(&rendered)?;
@@ -2209,6 +2236,13 @@ pub(super) fn cast_numeric_value(
             left: Value::Numeric(value),
             right: Value::Bytea(Vec::new()),
         }),
+        SqlTypeKind::Range
+        | SqlTypeKind::Int4Range
+        | SqlTypeKind::Int8Range
+        | SqlTypeKind::NumericRange
+        | SqlTypeKind::DateRange
+        | SqlTypeKind::TimestampRange
+        | SqlTypeKind::TimestampTzRange => unreachable!("range handled above"),
     }
 }
 
