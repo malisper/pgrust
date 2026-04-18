@@ -135,16 +135,28 @@ impl JsonbValue {
     }
 }
 
-fn render_temporal_jsonb_value(value: &JsonbValue) -> String {
-    let datum = match value {
-        JsonbValue::Date(v) => Value::Date(*v),
-        JsonbValue::Time(v) => Value::Time(*v),
-        JsonbValue::TimeTz(v) => Value::TimeTz(*v),
-        JsonbValue::Timestamp(v) => Value::Timestamp(*v),
-        JsonbValue::TimestampTz(v) => Value::TimestampTz(*v),
+pub(crate) fn render_temporal_jsonb_value(value: &JsonbValue) -> String {
+    match value {
+        JsonbValue::Date(v) => render_datetime_value_text(&Value::Date(*v)),
+        JsonbValue::Time(v) => render_datetime_value_text(&Value::Time(*v)),
+        JsonbValue::TimeTz(v) => render_datetime_value_text(&Value::TimeTz(*v)),
+        JsonbValue::Timestamp(v) => {
+            render_jsonpath_timestamp_text(render_datetime_value_text(&Value::Timestamp(*v)).expect(
+                "datetime values render",
+            ))
+        }
+        JsonbValue::TimestampTz(v) => render_jsonpath_timestamp_text(
+            render_datetime_value_text(&Value::TimestampTz(*v)).expect("datetime values render"),
+        ),
         _ => unreachable!("temporal renderer only accepts temporal jsonb values"),
-    };
-    render_datetime_value_text(&datum).expect("datetime values render")
+    }
+    .expect("datetime values render")
+}
+
+fn render_jsonpath_timestamp_text(mut text: String) -> Option<String> {
+    let separator = text.find(' ')?;
+    text.replace_range(separator..=separator, "T");
+    Some(text)
 }
 
 pub(crate) fn parse_jsonb_text(text: &str) -> Result<Vec<u8>, ExecError> {
