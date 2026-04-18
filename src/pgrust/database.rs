@@ -9,7 +9,6 @@ mod ddl;
 pub(crate) mod foreign_keys;
 mod relation_refs;
 mod sequences;
-mod stats;
 mod temp;
 mod toast;
 mod txn;
@@ -53,6 +52,12 @@ use crate::backend::storage::lmgr::{
     unlock_relations,
 };
 use crate::backend::storage::smgr::{RelFileLocator, StorageManager};
+#[allow(unused_imports)]
+pub(crate) use crate::backend::utils::activity::{
+    DatabaseStatsStore, FunctionStatsDelta, FunctionStatsEntry, IoStatsEntry, IoStatsKey,
+    RelationStatsDelta, RelationStatsEntry, SessionStatsState, StatsDelta, StatsFetchConsistency,
+    StatsMutationEffect, TrackFunctionsSetting, default_pg_stat_io_keys, now_timestamptz,
+};
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::inval::{
     CatalogInvalidation, accept_invalidation_messages, catalog_invalidation_from_effect,
@@ -94,11 +99,6 @@ pub(crate) use sequences::{
     default_sequence_oid_from_default_expr, format_nextval_default_oid, initial_sequence_state,
     resolve_sequence_options_spec, sequence_type_oid_for_serial_kind,
     sequence_type_oid_for_sql_type,
-};
-pub(crate) use stats::{
-    DatabaseStatsStore, FunctionStatsDelta, FunctionStatsEntry, IoStatsEntry, IoStatsKey,
-    RelationStatsDelta, RelationStatsEntry, SessionStatsState, StatsDelta, StatsFetchConsistency,
-    StatsMutationEffect, TrackFunctionsSetting, default_pg_stat_io_keys, now_timestamptz,
 };
 use toast::{toast_bindings_from_create_result, toast_bindings_from_temp_relation};
 use txn::AutoCommitGuard;
@@ -169,8 +169,7 @@ pub struct Database {
     pub(crate) backend_cache_states: Arc<RwLock<HashMap<ClientId, BackendCacheState>>>,
     pub(crate) session_interrupt_states: Arc<RwLock<HashMap<ClientId, Arc<InterruptState>>>>,
     pub(crate) session_auth_states: Arc<RwLock<HashMap<ClientId, AuthState>>>,
-    pub(crate) session_stats_states:
-        Arc<RwLock<HashMap<ClientId, Arc<RwLock<SessionStatsState>>>>>,
+    pub(crate) session_stats_states: Arc<RwLock<HashMap<ClientId, Arc<RwLock<SessionStatsState>>>>>,
     pub(crate) database_create_grants: Arc<RwLock<Vec<DatabaseCreateGrant>>>,
     pub(crate) temp_relations: Arc<RwLock<HashMap<ClientId, TempNamespace>>>,
     pub(crate) domains: Arc<RwLock<BTreeMap<String, DomainEntry>>>,
