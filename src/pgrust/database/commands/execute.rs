@@ -262,6 +262,12 @@ impl Database {
                     alter_stmt,
                     configured_search_path,
                 ),
+            Statement::AlterTableMulti(ref alter_stmt) => self
+                .execute_alter_table_multi_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
             Statement::Show(_)
             | Statement::Set(_)
             | Statement::Reset(_)

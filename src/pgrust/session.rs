@@ -659,6 +659,24 @@ impl Session {
                     )
                 }
             }
+            Statement::AlterTableMulti(ref alter_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_alter_table_multi_stmt_with_search_path(
+                        self.client_id,
+                        alter_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
             Statement::CreateRole(ref create_stmt) => {
                 if self.active_txn.is_some() {
                     let result = self.execute_in_transaction(db, stmt);
@@ -1560,6 +1578,12 @@ impl Session {
                     search_path.as_deref(),
                     &mut txn.catalog_effects,
                 )
+            }
+            Statement::AlterTableMulti(ref alter_stmt) => {
+                for action in &alter_stmt.actions {
+                    self.execute_in_transaction(db, action.to_statement())?;
+                }
+                Ok(StatementResult::AffectedRows(0))
             }
             Statement::AlterTableSet(_) => Ok(StatementResult::AffectedRows(0)),
             Statement::CreateRole(ref create_stmt) => db.execute_create_role_stmt(

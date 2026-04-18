@@ -472,7 +472,8 @@ fn run_statement(
         | Statement::AlterTableRenameConstraint(_)
         | Statement::AlterTableSetNotNull(_)
         | Statement::AlterTableDropNotNull(_)
-        | Statement::AlterTableValidateConstraint(_) => Ok(StatementResult::AffectedRows(0)),
+        | Statement::AlterTableValidateConstraint(_)
+        | Statement::AlterTableMulti(_) => Ok(StatementResult::AffectedRows(0)),
         Statement::AlterTableOwner(stmt) => {
             Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
                 "ALTER TABLE OWNER in query_repl: {} -> {}",
