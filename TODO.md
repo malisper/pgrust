@@ -56,7 +56,7 @@ Targeted reruns on 2026-04-17:
   - `lseg` input syntax used by `alter_table.sql`
   - table rename handling for array-type name collisions in `pg_type`
 - amutils.sql: 0/10
-- arrays.sql: ERROR, 178/526 queries matched from `/tmp/pgrust_regress`
+- arrays.sql: ERROR, 187/526 queries matched from `/tmp/pgrust_nested_arrays_regress_fresh`
   - [done] array subscript result names should inherit the base column name instead of defaulting to `?column?`
   - [done] array read semantics need executor fixes for slice/subscript edge cases
   - [done] widen verification for array read semantics against more `arrays.sql` slice/subscript cases
@@ -68,7 +68,8 @@ Targeted reruns on 2026-04-17:
   - [x] fix scalar array assignment overflow/bounds handling that currently panics in `src/backend/commands/tablecmds.rs`
   - support `RETURNING` with subscripted array/fixed-length assignments used by `point_tbl`
   - [done] support `CREATE TEMP TABLE` column definitions with fixed-length array syntax like `integer ARRAY[4]`
-  - support deeper array constructors and array expressions in `SELECT` targets and subqueries
+  - [done] support deeper array constructors and nested `ARRAY[...]` expressions in `SELECT` targets and `INSERT` values
+  - support `ARRAY(SELECT ...)` forms used later in `arrays.sql`
   - implement missing array builtins exercised by `arrays.sql` such as `array_append`, `array_prepend`, and `array_cat`
   - support row/composite array expressions and comparisons, including `ARRAY(SELECT ...)` and `array_agg(record) || array_agg(record)`
 - async.sql: 0/11
@@ -446,12 +447,14 @@ Targeted reruns on 2026-04-17:
 - numeric.sql:
   Retest source: `/tmp/pgrust_numeric_regress_55433/diff/numeric.diff`
 - Preserve PostgreSQL-compatible row order for the unordered `WITH v AS (VALUES ...) FROM v1, v2` cross-join cases in `numeric.sql`, or otherwise make the planner/executor match upstream join/input ordering closely enough for regression parity
+- [x] Preserve numeric display scale in `generate_series(numeric, ...)` so rows like `0.0, 1.0, 2.0, 3.0, 4.0` do not degrade into integer-looking outputs after the first increment
 - [x] Remaining `to_number(...)` / Roman numeral formatting and validation parity in `expr_format.rs`, including `V`-scaled output, `RN` aggregate validation, and PostgreSQL-style `DETAIL` / caret output for invalid Roman formats
 - [x] Fix `width_bucket(float8, low, high, count)` boundary behavior for huge ranges; current float math can round into bucket `count + 1` or the wrong descending bucket near the upper edge
 - [x] Make `to_char(numeric, ...)` formatting match PostgreSQL more closely when the input numeric carries excess display scale
 - [x] Add PostgreSQL-style `DETAIL` output for numeric typmod overflow, including fractional-only numerics and infinite values rejected by typmod constraints
 - [x] Add dedicated numeric-to-integer cast errors for `NaN` and `Infinity` instead of collapsing them into generic `smallint/integer/bigint out of range`
 - [x] Audit the remaining `numeric.sql` formatting mismatches after the display-scale fix; many later hunks appear to be the same root cause repeated across `to_char` cases
+- [x] Fix numeric `exp()` underflow and `NULLIF`/`COALESCE` typing so extreme-negative `exp()` cases round to zero with PostgreSQL-style scale instead of producing tiny nonzero values or `text and integer` errors
 - [x] Mixed set-operation chains: accept PostgreSQL-style left-associative chains such as `SELECT 1 UNION SELECT 2 UNION ALL SELECT 2` instead of rejecting them in the parser.
 - Shared regression fixture visibility: investigate why bootstrap tables from `scripts/test_setup_pgrust.sql` like `float8_tbl`, `int8_tbl`, and `tenk1` are not consistently resolvable during regression runs.
 - privileges.sql parity:

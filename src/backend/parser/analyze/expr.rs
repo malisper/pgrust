@@ -1816,6 +1816,9 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             if name.eq_ignore_ascii_case("coalesce") {
                 return bind_coalesce_call(args, scope, catalog, outer_scopes, grouped_outer, ctes);
             }
+            if name.eq_ignore_ascii_case("nullif") {
+                return bind_nullif_call(args, scope, catalog, outer_scopes, grouped_outer, ctes);
+            }
             if let Some(target_type) = resolve_function_cast_type(catalog, name)
                 && args.len() == 1
                 && args.iter().all(|arg| arg.name.is_none())
@@ -2326,6 +2329,90 @@ fn bind_coalesce_call(
         expr = Expr::Coalesce(Box::new(arg), Box::new(expr));
     }
     Ok(expr)
+}
+
+fn bind_nullif_call(
+    args: &[SqlFunctionArg],
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Expr, ParseError> {
+    if args.iter().any(|arg| arg.name.is_some()) {
+        return Err(ParseError::UnexpectedToken {
+            expected: "positional NULLIF arguments",
+            actual: "NULLIF with named arguments".into(),
+        });
+    }
+    if args.len() != 2 {
+        return Err(ParseError::UnexpectedToken {
+            expected: "exactly two NULLIF arguments",
+            actual: format!("NULLIF({} args)", args.len()),
+        });
+    }
+
+    let lowered_args = args.iter().map(|arg| arg.value.clone()).collect::<Vec<_>>();
+    let common_type = infer_common_scalar_expr_type_with_ctes(
+        &lowered_args,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+        "NULLIF arguments with a common type",
+    )?;
+
+    let left_type = infer_sql_expr_type_with_ctes(
+        &args[0].value,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    );
+    let right_type = infer_sql_expr_type_with_ctes(
+        &args[1].value,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    );
+    let left = coerce_bound_expr(
+        bind_expr_with_outer_and_ctes(
+            &args[0].value,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        )?,
+        left_type,
+        common_type,
+    );
+    let right = coerce_bound_expr(
+        bind_expr_with_outer_and_ctes(
+            &args[1].value,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        )?,
+        right_type,
+        common_type,
+    );
+
+    Ok(Expr::Case(Box::new(BoundCaseExpr {
+        casetype: common_type,
+        arg: None,
+        args: vec![BoundCaseWhen {
+            expr: Expr::op_auto(OpExprKind::Eq, vec![left.clone(), right]),
+            result: Expr::Cast(Box::new(Expr::Const(Value::Null)), common_type),
+        }],
+        defresult: Box::new(left),
+    })))
 }
 
 fn validate_catalog_backed_explicit_cast(

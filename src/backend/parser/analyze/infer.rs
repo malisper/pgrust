@@ -382,6 +382,19 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 )
                 .unwrap_or(SqlType::new(SqlTypeKind::Text));
             }
+            if name.eq_ignore_ascii_case("nullif") {
+                let values = args.iter().map(|arg| arg.value.clone()).collect::<Vec<_>>();
+                return infer_common_scalar_expr_type_with_ctes(
+                    &values,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                    "NULLIF arguments with a common type",
+                )
+                .unwrap_or(SqlType::new(SqlTypeKind::Text));
+            }
             let actual_types = args
                 .iter()
                 .map(|arg| {
