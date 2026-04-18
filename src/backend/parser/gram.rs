@@ -2597,6 +2597,7 @@ fn build_simple_set_value_atom(pair: Pair<'_, Rule>) -> String {
 fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
     let mut analyze = false;
     let mut buffers = false;
+    let mut costs = true;
     let mut timing = true;
     let mut statement = None;
     for part in pair.into_inner() {
@@ -2625,8 +2626,9 @@ fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
                 match name_rule {
                     Some(Rule::kw_analyze) => analyze = bool_val,
                     Some(Rule::kw_buffers) => buffers = bool_val,
+                    Some(Rule::kw_costs) => costs = bool_val,
                     Some(Rule::kw_timing) => timing = bool_val,
-                    _ => {} // COSTS, VERBOSE, SUMMARY, FORMAT: parsed but ignored
+                    _ => {} // VERBOSE, SUMMARY, FORMAT: parsed but ignored
                 }
             }
             Rule::select_stmt => statement = Some(Statement::Select(build_select(part)?)),
@@ -2636,6 +2638,7 @@ fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
     Ok(ExplainStatement {
         analyze,
         buffers,
+        costs,
         timing,
         statement: Box::new(statement.ok_or(ParseError::UnexpectedEof)?),
     })

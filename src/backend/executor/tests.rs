@@ -1823,6 +1823,44 @@ fn explain_mentions_sort_and_limit_nodes() {
         other => panic!("expected query result, got {:?}", other),
     }
 }
+
+#[test]
+fn explain_costs_off_hides_plan_costs() {
+    let base = temp_dir("explain_costs_off");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "explain (costs off) select name from people",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            let rendered = rows
+                .into_iter()
+                .map(|row| match &row[0] {
+                    Value::Text(text) => text.clone(),
+                    other => panic!("expected explain text row, got {:?}", other),
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                rendered
+                    .iter()
+                    .all(|line| !line.contains("(cost=") && !line.contains(" width=")),
+                "expected costs-off explain without planner costs, got {rendered:?}"
+            );
+            assert!(
+                rendered
+                    .iter()
+                    .any(|line| line.trim_start() == "Seq Scan on people"),
+                "expected plain scan label in costs-off explain, got {rendered:?}"
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
 #[test]
 fn order_by_nulls_first_and_last_work() {
     let base = temp_dir("order_by_nulls");

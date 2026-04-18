@@ -234,11 +234,24 @@ pub trait PlanNode: std::fmt::Debug {
     fn node_stats_mut(&mut self) -> &mut NodeExecStats;
     fn plan_info(&self) -> PlanEstimate;
     fn node_label(&self) -> String;
-    fn explain_details(&self, _indent: usize, _analyze: bool, _lines: &mut Vec<String>) {}
+    fn explain_details(
+        &self,
+        _indent: usize,
+        _analyze: bool,
+        _show_costs: bool,
+        _lines: &mut Vec<String>,
+    ) {
+    }
 
     /// Format children for EXPLAIN output. The node itself is formatted by
     /// the caller; this method handles child nodes.
-    fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>);
+    fn explain_children(
+        &self,
+        indent: usize,
+        analyze: bool,
+        show_costs: bool,
+        lines: &mut Vec<String>,
+    );
 }
 
 /// Executor plan state — a trait object for dynamic dispatch.
