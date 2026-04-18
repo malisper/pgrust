@@ -362,6 +362,24 @@ fn rewrite_set_returning_call(
                 .collect::<Result<Vec<_>, _>>()?,
             output_columns,
         },
+        SetReturningCall::JsonRecordFunction {
+            func_oid,
+            func_variadic,
+            kind,
+            args,
+            output_columns,
+            record_type,
+        } => SetReturningCall::JsonRecordFunction {
+            func_oid,
+            func_variadic,
+            kind,
+            args: args
+                .into_iter()
+                .map(|expr| rewrite_semantic_expr(expr, catalog, expanded_views))
+                .collect::<Result<Vec<_>, _>>()?,
+            output_columns,
+            record_type,
+        },
         SetReturningCall::RegexTableFunction {
             func_oid,
             func_variadic,

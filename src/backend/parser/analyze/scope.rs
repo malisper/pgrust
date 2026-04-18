@@ -1,7 +1,8 @@
 use super::query::{AnalyzedFrom, JoinAliasInfo, shift_expr_rtindexes};
 use super::*;
+use crate::backend::utils::record::lookup_anonymous_record_descriptor;
 use crate::backend::storage::smgr::RelFileLocator;
-use crate::include::nodes::primnodes::{JoinType, Var, user_attrno};
+use crate::include::nodes::primnodes::{JsonRecordFunction, JoinType, Var, user_attrno};
 
 #[derive(Debug, Clone)]
 pub(crate) struct BoundScope {
@@ -755,12 +756,11 @@ fn bind_function_from_item_with_ctes(
     ctes: &[BoundCte],
 ) -> Result<(AnalyzedFrom, BoundScope, bool), ParseError> {
     let args = lower_named_table_function_args(name, args)?;
-    if name.eq_ignore_ascii_case("json_populate_record")
-        || name.eq_ignore_ascii_case("json_populate_recordset")
-    {
-        let bound = bind_json_populate_record_from_item(
+    if resolve_json_record_function(name).is_some() {
+        let bound = bind_json_record_from_item(
             name,
             &args,
+            column_definitions,
             catalog,
             outer_scopes,
             grouped_outer,
@@ -1240,50 +1240,29 @@ fn bind_function_from_item_with_ctes(
     }
 }
 
-fn bind_json_populate_record_from_item(
+fn bind_json_record_from_item(
     name: &str,
     args: &[SqlExpr],
+    column_definitions: Option<&[AliasColumnDef]>,
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
 ) -> Result<(AnalyzedFrom, BoundScope, bool), ParseError> {
+    let Some(kind) = resolve_json_record_function(name) else {
+        return Err(ParseError::UnknownTable(name.to_string()));
+    };
     if args.is_empty() {
         return Err(ParseError::UnexpectedToken {
-            expected: "json_populate_record(record, json) or json_populate_recordset(record, json)",
+            expected: "json/jsonb record-expansion function call",
             actual: format!("{name}()"),
         });
     }
     let call_scope = empty_scope();
-    let row_type = infer_sql_expr_type_with_ctes(
-        &args[0],
-        &call_scope,
-        catalog,
-        outer_scopes,
-        grouped_outer,
-        ctes,
-    );
-    if row_type.kind != SqlTypeKind::Composite || row_type.typrelid == 0 {
-        return Err(ParseError::UnknownTable(name.to_string()));
-    }
-    let relation = catalog
-        .lookup_relation_by_oid(row_type.typrelid)
-        .ok_or_else(|| ParseError::UnknownTable(name.to_string()))?;
-    let output_columns = relation
-        .desc
-        .columns
-        .iter()
-        .filter(|column| !column.dropped)
-        .map(|column| QueryColumn {
-            name: column.name.clone(),
-            sql_type: column.sql_type,
-            wire_type_oid: None,
-        })
-        .collect::<Vec<_>>();
-    let bound_args = args
+    let actual_types = args
         .iter()
         .map(|arg| {
-            bind_expr_with_outer_and_ctes(
+            infer_sql_expr_type_with_ctes(
                 arg,
                 &call_scope,
                 catalog,
@@ -1292,7 +1271,46 @@ fn bind_json_populate_record_from_item(
                 ctes,
             )
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Vec<_>>();
+    let resolved = resolve_function_call(
+        catalog,
+        name,
+        &actual_types,
+        false,
+    )?;
+    let output_columns = match kind {
+        JsonRecordFunction::ToRecord
+        | JsonRecordFunction::ToRecordSet
+        | JsonRecordFunction::JsonbToRecord
+        | JsonRecordFunction::JsonbToRecordSet => column_definitions
+            .map(|definitions| query_columns_from_alias_definitions(definitions, catalog))
+            .transpose()?
+            .ok_or_else(|| {
+                function_coldeflist_error(
+                    "a column definition list is required for functions returning \"record\"",
+                )
+            })?,
+        JsonRecordFunction::PopulateRecord
+        | JsonRecordFunction::PopulateRecordSet
+        | JsonRecordFunction::JsonbPopulateRecord
+        | JsonRecordFunction::JsonbPopulateRecordSet => {
+            let row_type = *actual_types.first().expect("json populate record row arg type");
+            output_columns_for_json_populate_record(
+                name,
+                row_type,
+                column_definitions,
+                catalog,
+            )?
+        }
+    };
+    let bound_args = bind_user_defined_table_function_args(
+        args,
+        &call_scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        &resolved.declared_arg_types,
+    )?;
     let desc = RelationDesc {
         columns: output_columns
             .iter()
@@ -1301,15 +1319,101 @@ fn bind_json_populate_record_from_item(
     };
     let scope = scope_for_relation(Some(name), &desc);
     Ok((
-        AnalyzedFrom::function(SetReturningCall::UserDefined {
-            proc_oid: 0,
-            func_variadic: false,
+        AnalyzedFrom::function(SetReturningCall::JsonRecordFunction {
+            func_oid: resolved.proc_oid,
+            func_variadic: resolved.func_variadic,
+            kind,
             args: bound_args,
             output_columns,
+            record_type: None,
         }),
         scope,
         false,
     ))
+}
+
+fn output_columns_for_json_populate_record(
+    name: &str,
+    row_type: SqlType,
+    column_definitions: Option<&[AliasColumnDef]>,
+    catalog: &dyn CatalogLookup,
+) -> Result<Vec<QueryColumn>, ParseError> {
+    match row_type.kind {
+        SqlTypeKind::Composite if row_type.typrelid != 0 => {
+            if column_definitions.is_some() {
+                return Err(function_coldeflist_error(
+                    "a column definition list is redundant for a function returning a named composite type",
+                ));
+            }
+            let relation = catalog
+                .lookup_relation_by_oid(row_type.typrelid)
+                .ok_or_else(|| ParseError::UnknownTable(name.to_string()))?;
+            Ok(relation
+                .desc
+                .columns
+                .into_iter()
+                .filter(|column| !column.dropped)
+                .map(|column| QueryColumn {
+                    name: column.name,
+                    sql_type: column.sql_type,
+                    wire_type_oid: None,
+                })
+                .collect())
+        }
+        SqlTypeKind::Record => {
+            let inferred_columns = lookup_anonymous_record_descriptor(row_type.typmod).map(
+                |descriptor| {
+                    descriptor
+                        .fields
+                        .into_iter()
+                        .map(|field| QueryColumn {
+                            name: field.name,
+                            sql_type: field.sql_type,
+                            wire_type_oid: None,
+                        })
+                        .collect::<Vec<_>>()
+                },
+            );
+            match (inferred_columns, column_definitions) {
+                (Some(columns), Some(definitions)) => {
+                    let query_columns = query_columns_from_alias_definitions(definitions, catalog)?;
+                    validate_json_record_coldef_compatibility(&columns, &query_columns)?;
+                    Ok(query_columns)
+                }
+                (Some(columns), None) => Ok(columns),
+                (None, Some(definitions)) => query_columns_from_alias_definitions(definitions, catalog),
+                (None, None) => Err(function_coldeflist_error(
+                    "a column definition list is required for functions returning \"record\"",
+                )),
+            }
+        }
+        _ => Err(ParseError::UnknownTable(name.to_string())),
+    }
+}
+
+fn validate_json_record_coldef_compatibility(
+    returned: &[QueryColumn],
+    expected: &[QueryColumn],
+) -> Result<(), ParseError> {
+    if returned.len() != expected.len() {
+        return Err(function_coldeflist_error(&format!(
+            "function return row and query-specified return row do not match: returned row contains {} attribute{}, but query expects {}",
+            returned.len(),
+            if returned.len() == 1 { "" } else { "s" },
+            expected.len()
+        )));
+    }
+    for (index, (returned, expected)) in returned.iter().zip(expected.iter()).enumerate() {
+        if returned.sql_type != expected.sql_type {
+            return Err(function_coldeflist_error(&format!(
+                "function return row and query-specified return row do not match: returned type {} at ordinal position {}, but query expects {}",
+                sql_type_name(returned.sql_type),
+                index + 1,
+                sql_type_name(expected.sql_type)
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn bind_user_defined_table_function_args(

@@ -273,6 +273,7 @@ fn query_references_local_cte(
                     } => vec![start, stop, step],
                     SetReturningCall::Unnest { args, .. }
                     | SetReturningCall::JsonTableFunction { args, .. }
+                    | SetReturningCall::JsonRecordFunction { args, .. }
                     | SetReturningCall::RegexTableFunction { args, .. }
                     | SetReturningCall::TextSearchTableFunction { args, .. }
                     | SetReturningCall::UserDefined { args, .. } => args.iter().collect(),
@@ -375,6 +376,7 @@ fn query_references_local_cte(
                     .or_else(|| expr_references_local_cte(step, local_ctes)),
                 SetReturningCall::Unnest { args, .. }
                 | SetReturningCall::JsonTableFunction { args, .. }
+                | SetReturningCall::JsonRecordFunction { args, .. }
                 | SetReturningCall::RegexTableFunction { args, .. }
                 | SetReturningCall::TextSearchTableFunction { args, .. }
                 | SetReturningCall::UserDefined { args, .. } => args
