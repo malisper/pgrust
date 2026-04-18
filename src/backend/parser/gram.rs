@@ -2462,6 +2462,7 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::truncate_table_stmt => Ok(Statement::TruncateTable(build_truncate_table(inner)?)),
         Rule::vacuum_stmt => Ok(Statement::Vacuum(build_vacuum(inner)?)),
         Rule::insert_stmt => Ok(Statement::Insert(build_insert(inner)?)),
+        Rule::merge_stmt => Ok(Statement::Merge(build_merge(inner)?)),
         Rule::update_stmt => Ok(Statement::Update(build_update(inner)?)),
         Rule::delete_stmt => Ok(Statement::Delete(build_delete(inner)?)),
         Rule::begin_stmt => Ok(Statement::Begin),
@@ -2968,6 +2969,7 @@ fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
                 }
             }
             Rule::select_stmt => statement = Some(Statement::Select(build_select(part)?)),
+            Rule::merge_stmt => statement = Some(Statement::Merge(build_merge(part)?)),
             _ => {}
         }
     }
@@ -3807,6 +3809,170 @@ fn build_insert(pair: Pair<'_, Rule>) -> Result<InsertStatement, ParseError> {
         columns,
         source: source.ok_or(ParseError::UnexpectedEof)?,
     })
+}
+
+fn build_merge(pair: Pair<'_, Rule>) -> Result<MergeStatement, ParseError> {
+    let mut with_recursive = false;
+    let mut with = Vec::new();
+    let mut target_table = None;
+    let mut target_alias = None;
+    let mut target_only = false;
+    let mut source = None;
+    let mut join_condition = None;
+    let mut when_clauses = Vec::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::cte_clause => {
+                let (recursive, ctes) = build_cte_clause(part)?;
+                with_recursive = recursive;
+                with = ctes;
+            }
+            Rule::merge_target => {
+                let (name, alias, only) = build_merge_target(part)?;
+                target_table = Some(name);
+                target_alias = alias;
+                target_only = only;
+            }
+            Rule::merge_source => {
+                let inner = part.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+                source = Some(build_from_item(inner)?);
+            }
+            Rule::merge_join_condition => {
+                let expr = part
+                    .into_inner()
+                    .find(|inner| inner.as_rule() == Rule::expr)
+                    .ok_or(ParseError::UnexpectedEof)?;
+                join_condition = Some(build_expr(expr)?);
+            }
+            Rule::merge_when_clause => when_clauses.push(build_merge_when_clause(part)?),
+            _ => {}
+        }
+    }
+    Ok(MergeStatement {
+        with_recursive,
+        with,
+        target_table: target_table.ok_or(ParseError::UnexpectedEof)?,
+        target_alias,
+        target_only,
+        source: source.ok_or(ParseError::UnexpectedEof)?,
+        join_condition: join_condition.ok_or(ParseError::UnexpectedEof)?,
+        when_clauses,
+    })
+}
+
+fn build_merge_target(
+    pair: Pair<'_, Rule>,
+) -> Result<(String, Option<String>, bool), ParseError> {
+    let mut table_name = None;
+    let mut alias = None;
+    let mut only = false;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::only_clause => only = true,
+            Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
+            Rule::merge_target_alias => {
+                let alias_pair = part.into_inner().find(|inner| {
+                    matches!(inner.as_rule(), Rule::merge_alias_identifier | Rule::identifier)
+                });
+                if let Some(alias_pair) = alias_pair {
+                    alias = Some(build_identifier(alias_pair));
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok((table_name.ok_or(ParseError::UnexpectedEof)?, alias, only))
+}
+
+fn build_merge_when_clause(pair: Pair<'_, Rule>) -> Result<MergeWhenClause, ParseError> {
+    let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+    let match_kind = match inner.as_rule() {
+        Rule::merge_when_matched_clause => MergeMatchKind::Matched,
+        Rule::merge_when_not_matched_by_source_clause => MergeMatchKind::NotMatchedBySource,
+        Rule::merge_when_not_matched_clause | Rule::merge_when_not_matched_by_target_clause => {
+            MergeMatchKind::NotMatchedByTarget
+        }
+        _ => {
+            return Err(ParseError::UnexpectedToken {
+                expected: "merge when clause",
+                actual: inner.as_str().to_string(),
+            });
+        }
+    };
+    let mut condition = None;
+    let mut action = None;
+    for part in inner.into_inner() {
+        match part.as_rule() {
+            Rule::merge_search_condition => {
+                let expr = part
+                    .into_inner()
+                    .find(|inner| inner.as_rule() == Rule::expr)
+                    .ok_or(ParseError::UnexpectedEof)?;
+                condition = Some(build_expr(expr)?);
+            }
+            Rule::merge_matched_action
+            | Rule::merge_not_matched_action
+            | Rule::merge_update_action
+            | Rule::merge_delete_action
+            | Rule::merge_do_nothing_action
+            | Rule::merge_insert_action => action = Some(build_merge_action(part)?),
+            _ => {}
+        }
+    }
+    Ok(MergeWhenClause {
+        match_kind,
+        condition,
+        action: action.ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
+fn build_merge_action(pair: Pair<'_, Rule>) -> Result<MergeAction, ParseError> {
+    match pair.as_rule() {
+        Rule::merge_matched_action | Rule::merge_not_matched_action => {
+            build_merge_action(pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?)
+        }
+        Rule::merge_update_action => Ok(MergeAction::Update {
+            assignments: pair
+                .into_inner()
+                .filter(|part| part.as_rule() == Rule::assignment)
+                .map(build_assignment)
+                .collect::<Result<Vec<_>, _>>()?,
+        }),
+        Rule::merge_delete_action => Ok(MergeAction::Delete),
+        Rule::merge_do_nothing_action => Ok(MergeAction::DoNothing),
+        Rule::merge_insert_action => {
+            let mut columns = None;
+            let mut source = None;
+            for part in pair.into_inner() {
+                match part.as_rule() {
+                    Rule::merge_insert_columns => {
+                        let mut names = Vec::new();
+                        collect_identifiers(part, &mut names);
+                        columns = Some(names);
+                    }
+                    Rule::merge_insert_values_source => {
+                        let values = part
+                            .into_inner()
+                            .find(|inner| inner.as_rule() == Rule::values_row)
+                            .ok_or(ParseError::UnexpectedEof)?;
+                        source = Some(MergeInsertSource::Values(build_values_row(values)?));
+                    }
+                    Rule::merge_insert_default_values_source => {
+                        source = Some(MergeInsertSource::DefaultValues);
+                    }
+                    _ => {}
+                }
+            }
+            Ok(MergeAction::Insert {
+                columns,
+                source: source.ok_or(ParseError::UnexpectedEof)?,
+            })
+        }
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "merge action",
+            actual: pair.as_str().to_string(),
+        }),
+    }
 }
 
 fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
