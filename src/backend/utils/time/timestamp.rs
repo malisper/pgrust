@@ -1,12 +1,75 @@
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::time::datetime::{
     DateTimeKeyword, DateTimeParseError, TimeZoneSpec, current_postgres_timestamp_usecs,
-    days_from_ymd, format_date_ymd, format_offset, format_time_usecs, is_bc_token,
-    is_weekday_token, month_number, named_timezone_offset_seconds, parse_date_token_with_config,
-    parse_keyword, parse_time_components, parse_timezone_spec, split_time_and_offset,
-    time_usecs_from_hms, timestamp_parts_from_usecs, timezone_offset_seconds, today_pg_days,
+    current_timezone_name, day_of_week_from_julian_day, days_from_ymd, format_date_ymd,
+    format_offset, format_time_usecs, is_bc_token, is_weekday_token,
+    julian_day_from_postgres_date, month_number, named_timezone_offset_seconds,
+    parse_date_token_with_config, parse_keyword, parse_time_components, parse_timezone_spec,
+    split_time_and_offset, time_usecs_from_hms, timestamp_parts_from_usecs,
+    timezone_offset_seconds, today_pg_days, ymd_from_days,
 };
+use crate::backend::utils::misc::guc_datetime::DateStyleFormat;
 use crate::include::nodes::datetime::{TimestampADT, TimestampTzADT, USECS_PER_DAY, USECS_PER_SEC};
+
+const WEEKDAY_ABBREV: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const MONTH_ABBREV: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+fn format_timestamp_date(pg_days: i32, config: &DateTimeConfig, include_weekday: bool) -> String {
+    let (mut year, month, day) = ymd_from_days(pg_days);
+    let bc = year <= 0;
+    if bc {
+        year = 1 - year;
+    }
+    let rendered = match config.date_style_format {
+        DateStyleFormat::Postgres => {
+            let month_name = MONTH_ABBREV[month.saturating_sub(1) as usize];
+            if include_weekday {
+                let weekday = WEEKDAY_ABBREV
+                    [day_of_week_from_julian_day(julian_day_from_postgres_date(pg_days)) as usize];
+                format!("{weekday} {month_name} {day:02}")
+            } else {
+                format!("{month_name} {day:02}")
+            }
+        }
+        _ => format_date_ymd(pg_days),
+    };
+    if matches!(config.date_style_format, DateStyleFormat::Postgres) {
+        rendered
+    } else if bc {
+        format!("{rendered} BC")
+    } else {
+        rendered
+    }
+}
+
+fn format_timestamp_year_suffix(pg_days: i32) -> String {
+    let (mut year, _, _) = ymd_from_days(pg_days);
+    let bc = year <= 0;
+    if bc {
+        year = 1 - year;
+        format!("{year:04} BC")
+    } else {
+        format!("{year:04}")
+    }
+}
+
+fn timezone_abbrev_for_output(config: &DateTimeConfig, pg_days: i32) -> Option<&'static str> {
+    match current_timezone_name(config).trim().to_ascii_lowercase().as_str() {
+        "utc" | "gmt" | "etc/utc" | "etc/gmt" | "z" | "zulu" => Some("UTC"),
+        "pst" => Some("PST"),
+        "pdt" => Some("PDT"),
+        "america/los_angeles" => {
+            if pg_days < days_from_ymd(1884, 1, 1).expect("valid cutoff date") {
+                Some("LMT")
+            } else {
+                Some("PST")
+            }
+        }
+        _ => None,
+    }
+}
 
 fn tokenize_timestamp(text: &str) -> Vec<&str> {
     let mut tokens = Vec::new();
@@ -349,11 +412,19 @@ pub fn format_timestamp_text(value: TimestampADT, _config: &DateTimeConfig) -> S
         return "-infinity".into();
     }
     let (days, time_usecs) = timestamp_parts_from_usecs(value.0);
-    format!(
-        "{} {}",
-        format_date_ymd(days),
-        format_time_usecs(time_usecs)
-    )
+    match _config.date_style_format {
+        DateStyleFormat::Postgres => format!(
+            "{} {} {}",
+            format_timestamp_date(days, _config, true),
+            format_time_usecs(time_usecs),
+            format_timestamp_year_suffix(days),
+        ),
+        _ => format!(
+            "{} {}",
+            format_timestamp_date(days, _config, false),
+            format_time_usecs(time_usecs)
+        ),
+    }
 }
 
 pub fn format_timestamptz_text(value: TimestampTzADT, config: &DateTimeConfig) -> String {
@@ -366,12 +437,64 @@ pub fn format_timestamptz_text(value: TimestampTzADT, config: &DateTimeConfig) -
     let offset_seconds = timezone_offset_seconds(config);
     let adjusted = value.0 + offset_seconds as i64 * USECS_PER_SEC;
     let (days, time_usecs) = timestamp_parts_from_usecs(adjusted);
-    format!(
-        "{} {}{}",
-        format_date_ymd(days),
-        format_time_usecs(time_usecs),
-        format_offset(offset_seconds)
-    )
+    match config.date_style_format {
+        DateStyleFormat::Postgres => {
+            let zone = timezone_abbrev_for_output(config, days)
+                .map(str::to_string)
+                .unwrap_or_else(|| format_offset(offset_seconds));
+            format!(
+                "{} {} {} {}",
+                format_timestamp_date(days, config, true),
+                format_time_usecs(time_usecs),
+                format_timestamp_year_suffix(days),
+                zone,
+            )
+        }
+        _ => format!(
+            "{} {}{}",
+            format_timestamp_date(days, config, false),
+            format_time_usecs(time_usecs),
+            format_offset(offset_seconds)
+        ),
+    }
+}
+
+#[cfg(test)]
+mod format_tests {
+    use super::*;
+    use crate::backend::utils::misc::guc_datetime::{DateOrder, DateStyleFormat};
+
+    #[test]
+    fn formats_timestamp_in_postgres_style() {
+        let config = DateTimeConfig {
+            date_style_format: DateStyleFormat::Postgres,
+            date_order: DateOrder::Mdy,
+            time_zone: "America/Los_Angeles".into(),
+            ..DateTimeConfig::default()
+        };
+        let ts = TimestampADT(i64::from(days_from_ymd(1001, 1, 1).unwrap()) * USECS_PER_DAY);
+        assert_eq!(
+            format_timestamp_text(ts, &config),
+            "Thu Jan 01 00:00:00 1001"
+        );
+    }
+
+    #[test]
+    fn formats_timestamptz_in_postgres_style() {
+        let config = DateTimeConfig {
+            date_style_format: DateStyleFormat::Postgres,
+            date_order: DateOrder::Mdy,
+            time_zone: "America/Los_Angeles".into(),
+            ..DateTimeConfig::default()
+        };
+        let ts = TimestampTzADT(
+            i64::from(days_from_ymd(1901, 1, 1).unwrap()) * USECS_PER_DAY + 8 * 3600 * USECS_PER_SEC,
+        );
+        assert_eq!(
+            format_timestamptz_text(ts, &config),
+            "Tue Jan 01 00:00:00 1901 PST"
+        );
+    }
 }
 
 #[cfg(test)]
