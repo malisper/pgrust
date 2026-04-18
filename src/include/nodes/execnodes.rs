@@ -16,7 +16,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::backend::executor::{AccumState, ExecError, ExecutorContext};
+use crate::backend::executor::{AggTransitionFn, ExecError, ExecutorContext};
 pub use crate::include::nodes::datum::{NumericValue, Value};
 pub use crate::include::nodes::parsenodes::{SetOperator, SqlType};
 pub use crate::include::nodes::plannodes::Plan;
@@ -478,7 +478,7 @@ pub struct AggregateState {
     pub(crate) key_buffer: Vec<Value>,
     /// Compiled transition functions resolved at plan time, like PG's
     /// aggregate transfn pointers. Avoids per-tuple enum dispatch.
-    pub(crate) trans_fns: Vec<fn(&mut AccumState, &[Value])>,
+    pub(crate) trans_fns: Vec<AggTransitionFn>,
     pub(crate) current_bindings: Vec<SystemVarBinding>,
     pub(crate) plan_info: PlanEstimate,
     pub(crate) stats: NodeExecStats,

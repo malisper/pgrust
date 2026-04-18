@@ -9701,6 +9701,119 @@ fn jsonb_object_and_pretty_functions_work() {
 }
 
 #[test]
+fn jsonb_object_and_builder_report_postgres_style_errors() {
+    let base = temp_dir("jsonb_object_errors");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_build_object('a', 'b', 'c')",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError {
+            message,
+            hint,
+            sqlstate,
+            ..
+        } if message == "argument list must have even number of elements"
+            && hint.as_deref() == Some(
+                "The arguments of jsonb_build_object() must consist of alternating keys and values."
+            )
+            && sqlstate == "22023"
+    ));
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_build_object(NULL, 'a')",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError { message, sqlstate, .. }
+            if message == "argument 1: key must not be null" && sqlstate == "22004"
+    ));
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_build_object('{1,2,3}'::int[], 3)",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError { message, sqlstate, .. }
+            if message == "key value must be scalar, not array, composite, or json"
+                && sqlstate == "22023"
+    ));
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_object(ARRAY['a','b',NULL,'d e f']::text[], ARRAY['1','2','3','a b c']::text[])",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError { message, sqlstate, .. }
+            if message == "null value not allowed for object key" && sqlstate == "22004"
+    ));
+}
+
+#[test]
+fn jsonb_object_keys_and_object_agg_reject_invalid_keys() {
+    let base = temp_dir("jsonb_object_keys_errors");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_object_keys('\"scalar\"'::jsonb)",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError { message, sqlstate, .. }
+            if message == "cannot call jsonb_object_keys on a scalar" && sqlstate == "22023"
+    ));
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_object_keys('[1,2,3]'::jsonb)",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError { message, sqlstate, .. }
+            if message == "cannot call jsonb_object_keys on an array" && sqlstate == "22023"
+    ));
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_object_agg(NULL, '{\"a\":1}'::jsonb)",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError { message, sqlstate, .. }
+            if message == "field name must not be null" && sqlstate == "22004"
+    ));
+
+}
+
+#[test]
 fn jsonb_delete_and_delete_path_functions_work() {
     let base = temp_dir("jsonb_delete");
     let txns = TransactionManager::new_durable(&base).unwrap();
