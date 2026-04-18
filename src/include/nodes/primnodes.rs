@@ -1,13 +1,13 @@
-use crate::RelFileLocator;
 use crate::backend::parser::{SqlType, SqlTypeKind, SubqueryComparisonOp};
 use crate::include::access::htup::AttributeDesc;
 use crate::include::catalog::{
-    RECORD_TYPE_OID, builtin_scalar_function_for_proc_oid, builtin_window_function_for_proc_oid,
+    builtin_scalar_function_for_proc_oid, builtin_window_function_for_proc_oid,
     proc_oid_for_builtin_scalar_function, proc_oid_for_builtin_window_function,
-    sql_type_for_range_kind,
+    sql_type_for_range_kind, RECORD_TYPE_OID,
 };
 use crate::include::nodes::datum::{RangeTypeId, RecordDescriptor, Value};
 use crate::include::nodes::parsenodes::Query;
+use crate::RelFileLocator;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScalarType {
@@ -603,6 +603,7 @@ pub struct AggAccum {
     pub aggfnoid: u32,
     pub agg_variadic: bool,
     pub args: Vec<Expr>,
+    pub order_by: Vec<OrderByEntry>,
     pub filter: Option<Expr>,
     pub distinct: bool,
     pub sql_type: SqlType,
@@ -615,6 +616,7 @@ pub struct Aggref {
     pub aggvariadic: bool,
     pub aggdistinct: bool,
     pub args: Vec<Expr>,
+    pub aggorder: Vec<OrderByEntry>,
     pub aggfilter: Option<Expr>,
     pub agglevelsup: usize,
     pub aggno: usize,
@@ -1006,6 +1008,7 @@ impl Expr {
         aggvariadic: bool,
         aggdistinct: bool,
         args: Vec<Expr>,
+        aggorder: Vec<OrderByEntry>,
         aggfilter: Option<Expr>,
         aggno: usize,
     ) -> Self {
@@ -1015,6 +1018,7 @@ impl Expr {
             aggvariadic,
             aggdistinct,
             args,
+            aggorder,
             aggfilter,
             agglevelsup: 0,
             aggno,

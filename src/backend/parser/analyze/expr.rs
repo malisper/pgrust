@@ -72,6 +72,14 @@ pub(super) fn raise_expr_varlevels(expr: Expr, levels: usize) -> Expr {
                     .into_iter()
                     .map(|arg| raise_expr_varlevels(arg, levels))
                     .collect(),
+                aggorder: aggref
+                    .aggorder
+                    .into_iter()
+                    .map(|item| crate::include::nodes::primnodes::OrderByEntry {
+                        expr: raise_expr_varlevels(item.expr, levels),
+                        ..item
+                    })
+                    .collect(),
                 aggfilter: aggref
                     .aggfilter
                     .map(|expr| raise_expr_varlevels(expr, levels)),
@@ -220,6 +228,7 @@ fn current_window_state_or_error()
 fn bind_window_agg_call(
     func: AggFunc,
     args: &[SqlFunctionArg],
+    order_by: &[OrderByItem],
     distinct: bool,
     func_variadic: bool,
     filter: Option<&SqlExpr>,
@@ -287,6 +296,27 @@ fn bind_window_agg_call(
             })
         })
         .transpose()?;
+    let bound_order_by = order_by
+        .iter()
+        .map(|item| {
+            Ok(OrderByEntry {
+                expr: bind_expr_with_outer_and_ctes(
+                    &item.expr,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?,
+                ressortgroupref: 0,
+                descending: item.descending,
+                nulls_first: item.nulls_first,
+            })
+        })
+        .collect::<Result<Vec<_>, ParseError>>()?;
+    for item in &bound_order_by {
+        reject_nested_local_ctes_in_agg_expr(&item.expr)?;
+    }
     let spec = bind_window_spec(over, |expr| {
         bind_expr_with_outer_and_ctes(expr, scope, catalog, outer_scopes, grouped_outer, ctes)
     })?;
@@ -303,6 +333,7 @@ fn bind_window_agg_call(
             .unwrap_or(func_variadic),
         aggdistinct: distinct,
         args: coerced_args.clone(),
+        aggorder: bound_order_by,
         aggfilter: bound_filter,
         agglevelsup: 0,
         aggno: 0,
@@ -384,6 +415,7 @@ fn bind_window_func_call(
         return bind_window_agg_call(
             agg_impl,
             args,
+            &[],
             false,
             resolved.func_variadic,
             None,
@@ -1535,6 +1567,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
         SqlExpr::AggCall {
             func,
             args,
+            order_by,
             distinct,
             func_variadic,
             filter,
@@ -1544,6 +1577,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 return bind_window_agg_call(
                     *func,
                     args,
+                    order_by,
                     *distinct,
                     *func_variadic,
                     filter.as_deref(),

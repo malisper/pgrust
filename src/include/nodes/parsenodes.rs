@@ -1785,6 +1785,7 @@ pub enum SqlExpr {
     AggCall {
         func: AggFunc,
         args: Vec<SqlFunctionArg>,
+        order_by: Vec<OrderByItem>,
         distinct: bool,
         func_variadic: bool,
         filter: Option<Box<SqlExpr>>,

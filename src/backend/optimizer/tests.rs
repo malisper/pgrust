@@ -2,16 +2,16 @@ use super::bestpath::{self, CostSelector};
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::optimizer::util;
 use crate::backend::parser::analyze::LiteralDefaultCatalog;
-use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::parser::{analyze_select_query_with_outer, parse_select};
+use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::pathnodes::{
     Path, PathKey, PathTarget, PlannerInfo, RelOptInfo, RelOptKind,
 };
 use crate::include::nodes::plannodes::{Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
-    Aggref, AttrNumber, Expr, INNER_VAR, JoinType, OUTER_VAR, OpExpr, OpExprKind, OrderByEntry,
-    Param, ParamKind, QueryColumn, RelationDesc, TargetEntry, Var,
+    Aggref, AttrNumber, Expr, JoinType, OpExpr, OpExprKind, OrderByEntry, Param, ParamKind,
+    QueryColumn, RelationDesc, TargetEntry, Var, INNER_VAR, OUTER_VAR,
 };
 
 fn int4() -> SqlType {
@@ -529,6 +529,7 @@ fn executable_plan_validator_reports_node_and_field() {
                 aggvariadic: false,
                 aggdistinct: false,
                 args: vec![],
+                aggorder: vec![],
                 aggfilter: None,
                 agglevelsup: 0,
                 aggno: 0,
@@ -579,7 +580,7 @@ fn required_query_pathkeys_for_path_keeps_sortgroup_identified_keys() {
         slot_id: 20,
         input: Box::new(values_path(10, 1.0, 1.0)),
         targets: vec![
-            TargetEntry::new("a", var(10, 1), int4(), 1).with_sort_group_ref(sortgroupref),
+            TargetEntry::new("a", var(10, 1), int4(), 1).with_sort_group_ref(sortgroupref)
         ],
     };
 
@@ -1058,7 +1059,7 @@ fn rel_exposes_required_pathkey_identity_only_when_a_path_matches() {
         slot_id: 20,
         input: Box::new(values_path(10, 1.0, 1.0)),
         targets: vec![
-            TargetEntry::new("a", var(10, 1), int4(), 1).with_sort_group_ref(sortgroupref),
+            TargetEntry::new("a", var(10, 1), int4(), 1).with_sort_group_ref(sortgroupref)
         ],
     };
     let non_matching_path = Path::Projection {
@@ -1119,7 +1120,7 @@ fn required_query_pathkeys_for_rel_keeps_sortgroup_identified_keys_when_rel_has_
         slot_id: 20,
         input: Box::new(values_path(10, 1.0, 1.0)),
         targets: vec![
-            TargetEntry::new("a", var(10, 1), int4(), 1).with_sort_group_ref(sortgroupref),
+            TargetEntry::new("a", var(10, 1), int4(), 1).with_sort_group_ref(sortgroupref)
         ],
     };
     let mut rel = RelOptInfo::new(
@@ -1249,16 +1250,12 @@ fn build_join_paths_emits_nested_loop_and_hash_join_for_equijoin() {
         vec![restrict(eq(var(1, 1), var(2, 1)))],
     );
 
-    assert!(
-        paths
-            .iter()
-            .any(|path| matches!(path, Path::NestedLoopJoin { .. }))
-    );
-    assert!(
-        paths
-            .iter()
-            .any(|path| matches!(path, Path::HashJoin { .. }))
-    );
+    assert!(paths
+        .iter()
+        .any(|path| matches!(path, Path::NestedLoopJoin { .. })));
+    assert!(paths
+        .iter()
+        .any(|path| matches!(path, Path::HashJoin { .. })));
 }
 
 #[test]
@@ -1295,11 +1292,9 @@ fn build_join_paths_skips_hash_join_for_cross_and_non_equi_joins() {
         JoinType::Cross,
         vec![restrict(eq(var(1, 1), var(2, 1)))],
     );
-    assert!(
-        !cross_paths
-            .iter()
-            .any(|path| matches!(path, Path::HashJoin { .. }))
-    );
+    assert!(!cross_paths
+        .iter()
+        .any(|path| matches!(path, Path::HashJoin { .. })));
 
     let non_equi_paths = super::build_join_paths(
         values_path(1, 1.0, 10.0),
@@ -1309,11 +1304,9 @@ fn build_join_paths_skips_hash_join_for_cross_and_non_equi_joins() {
         JoinType::Inner,
         vec![restrict(gt(var(1, 1), var(2, 1)))],
     );
-    assert!(
-        !non_equi_paths
-            .iter()
-            .any(|path| matches!(path, Path::HashJoin { .. }))
-    );
+    assert!(!non_equi_paths
+        .iter()
+        .any(|path| matches!(path, Path::HashJoin { .. })));
 }
 
 #[test]
