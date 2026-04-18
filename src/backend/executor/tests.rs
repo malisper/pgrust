@@ -5922,7 +5922,16 @@ fn numeric_cast_typmod_rejects_precision_overflow() {
         "select '1234.56'::numeric(5,2)",
     )
     .unwrap_err();
-    assert!(matches!(err, ExecError::NumericFieldOverflow));
+    assert!(matches!(
+        err,
+        ExecError::DetailedError {
+            ref message,
+            detail: Some(ref detail),
+            sqlstate: "22003",
+            ..
+        } if message == "numeric field overflow"
+            && detail == "A field with precision 5, scale 2 must round to an absolute value less than 10^3."
+    ));
 }
 
 #[test]
@@ -12375,7 +12384,62 @@ fn numeric_typmod_accepts_zero_in_full_scale_columns() {
         "select '1.0'::numeric(4,4)",
     )
     .unwrap_err();
-    assert!(matches!(err, ExecError::NumericFieldOverflow));
+    assert!(matches!(
+        err,
+        ExecError::DetailedError {
+            ref message,
+            detail: Some(ref detail),
+            sqlstate: "22003",
+            ..
+        } if message == "numeric field overflow"
+            && detail == "A field with precision 4, scale 4 must round to an absolute value less than 1."
+    ));
+}
+
+#[test]
+fn numeric_typmod_rejects_infinite_values_with_detail() {
+    let base = temp_dir("numeric_typmod_infinite_detail");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select 'inf'::numeric(3,-6)",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError {
+            ref message,
+            detail: Some(ref detail),
+            sqlstate: "22003",
+            ..
+        } if message == "numeric field overflow"
+            && detail == "A field with precision 3, scale -6 cannot hold an infinite value."
+    ));
+}
+
+#[test]
+fn numeric_typmod_negative_scale_overflow_includes_limit_detail() {
+    let base = temp_dir("numeric_typmod_negative_scale_detail");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select '999500000'::numeric(3,-6)",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError {
+            ref message,
+            detail: Some(ref detail),
+            sqlstate: "22003",
+            ..
+        } if message == "numeric field overflow"
+            && detail == "A field with precision 3, scale -6 must round to an absolute value less than 10^9."
+    ));
 }
 
 #[test]
