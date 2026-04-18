@@ -516,28 +516,31 @@ fn build_revoke_role_membership(sql: &str) -> Result<RevokeRoleMembershipStateme
         .get(prefix.len()..)
         .ok_or(ParseError::UnexpectedEof)?
         .trim_start();
+    let (revoke_body, cascade) = split_optional_cascade_restrict_clause(rest)?;
     let (revoke_body, granted_by_clause) =
-        split_optional_keyword(rest, "granted by").unwrap_or((rest.trim(), None));
-    let (flags, rest) = if let Some(stripped) = strip_keyword_prefix(revoke_body, "admin option for")
-    {
-        ((true, false, false), stripped)
-    } else if let Some(stripped) = strip_keyword_prefix(revoke_body, "inherit option for") {
-        ((false, true, false), stripped)
-    } else if let Some(stripped) = strip_keyword_prefix(revoke_body, "set option for") {
-        ((false, false, true), stripped)
-    } else {
-        return Err(ParseError::UnexpectedToken {
-            expected: "REVOKE <option> OPTION FOR role FROM member",
-            actual: sql.into(),
-        });
-    };
-    let (role_names, rest) = split_once_keyword(rest, "from")?;
+        split_optional_keyword(revoke_body, "granted by").unwrap_or((revoke_body.trim(), None));
+    let (role_names, rest, revoke_membership, flags) =
+        if let Some(stripped) = strip_keyword_prefix(revoke_body, "admin option for") {
+            let (role_names, rest) = split_once_keyword(stripped, "from")?;
+            (role_names, rest, false, (true, false, false))
+        } else if let Some(stripped) = strip_keyword_prefix(revoke_body, "inherit option for") {
+            let (role_names, rest) = split_once_keyword(stripped, "from")?;
+            (role_names, rest, false, (false, true, false))
+        } else if let Some(stripped) = strip_keyword_prefix(revoke_body, "set option for") {
+            let (role_names, rest) = split_once_keyword(stripped, "from")?;
+            (role_names, rest, false, (false, false, true))
+        } else {
+            let (role_names, rest) = split_once_keyword(revoke_body, "from")?;
+            (role_names, rest, true, (false, false, false))
+        };
     Ok(RevokeRoleMembershipStatement {
         role_names: parse_identifier_list(role_names)?,
         grantee_names: parse_identifier_list(rest)?,
+        revoke_membership,
         admin_option: flags.0,
         inherit_option: flags.1,
         set_option: flags.2,
+        cascade,
         granted_by: granted_by_clause.map(parse_role_grantor_spec).transpose()?,
     })
 }
@@ -551,6 +554,26 @@ fn parse_role_grantor_spec(input: &str) -> Result<RoleGrantorSpec, ParseError> {
             trimmed,
         )?)),
     }
+}
+
+fn split_optional_cascade_restrict_clause(input: &str) -> Result<(&str, bool), ParseError> {
+    let boundary =
+        find_next_top_level_keyword(input, &["cascade", "restrict"]).unwrap_or(input.len());
+    let head = input[..boundary].trim_end();
+    let tail = input[boundary..].trim();
+    if tail.is_empty() {
+        return Ok((head, false));
+    }
+    if tail.eq_ignore_ascii_case("cascade") {
+        return Ok((head, true));
+    }
+    if tail.eq_ignore_ascii_case("restrict") {
+        return Ok((head, false));
+    }
+    Err(ParseError::UnexpectedToken {
+        expected: "CASCADE, RESTRICT, or end of statement",
+        actual: tail.into(),
+    })
 }
 
 fn split_once_keyword<'a>(input: &'a str, keyword: &str) -> Result<(&'a str, &'a str), ParseError> {
