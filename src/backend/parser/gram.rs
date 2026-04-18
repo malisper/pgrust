@@ -308,12 +308,9 @@ fn try_parse_conversion_statement(sql: &str) -> Result<Option<Statement>, ParseE
 fn try_parse_create_function_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
     let trimmed = sql.trim().trim_end_matches(';').trim();
     let lowered = trimmed.to_ascii_lowercase();
-    if lowered.starts_with("create or replace function ") {
-        return Err(ParseError::FeatureNotSupported(
-            "CREATE OR REPLACE FUNCTION is not supported yet".into(),
-        ));
-    }
-    if !lowered.starts_with("create function ") {
+    if !lowered.starts_with("create function ")
+        && !lowered.starts_with("create or replace function ")
+    {
         return Ok(None);
     }
     Ok(Some(Statement::CreateFunction(
@@ -1086,7 +1083,14 @@ fn build_drop_sequence_statement(sql: &str) -> Result<DropSequenceStatement, Par
 }
 
 fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement, ParseError> {
-    let prefix = "create function";
+    let (prefix, replace_existing) = if sql
+        .to_ascii_lowercase()
+        .starts_with("create or replace function")
+    {
+        ("create or replace function", true)
+    } else {
+        ("create function", false)
+    };
     let Some(rest) = sql.get(prefix.len()..) else {
         return Err(ParseError::UnexpectedToken {
             expected: "CREATE FUNCTION name(args) ...",
@@ -1171,6 +1175,7 @@ fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement,
     Ok(CreateFunctionStatement {
         schema_name,
         function_name,
+        replace_existing,
         args,
         return_spec,
         language: language.ok_or(ParseError::UnexpectedEof)?,

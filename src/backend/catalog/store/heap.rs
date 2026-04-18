@@ -21,8 +21,8 @@ use crate::backend::catalog::toasting::{ToastCatalogChanges, new_relation_create
 use crate::backend::executor::{ColumnDesc, RelationDesc};
 use crate::include::catalog::{
     BootstrapCatalogKind, PG_AUTHID_RELATION_OID, PG_CLASS_RELATION_OID, PgConstraintRow,
-    PgDatabaseRow, PgDependRow, PgDescriptionRow, PgNamespaceRow, PgRewriteRow, PgStatisticRow,
-    PgTablespaceRow,
+    PgDatabaseRow, PgDependRow, PgDescriptionRow, PgNamespaceRow, PgProcRow, PgRewriteRow,
+    PgStatisticRow, PgTablespaceRow,
 };
 use crate::include::nodes::datum::Value;
 
@@ -448,7 +448,7 @@ impl CatalogStore {
 
     pub fn create_proc_mvcc(
         &mut self,
-        mut row: crate::include::catalog::PgProcRow,
+        mut row: PgProcRow,
         ctx: &CatalogWriteContext,
     ) -> Result<(u32, CatalogMutationEffect), CatalogError> {
         let mut catalog = self.catalog_snapshot_with_control_for_snapshot(ctx)?;
@@ -484,6 +484,51 @@ impl CatalogStore {
             &mut effect,
             &[BootstrapCatalogKind::PgProc, BootstrapCatalogKind::PgDepend],
         );
+        Ok((row.oid, effect))
+    }
+
+    pub fn replace_proc_mvcc(
+        &mut self,
+        old_row: &PgProcRow,
+        mut row: PgProcRow,
+        ctx: &CatalogWriteContext,
+    ) -> Result<(u32, CatalogMutationEffect), CatalogError> {
+        let mut old_referenced_type_oids = parse_proc_argtype_oids(&old_row.proargtypes);
+        if let Some(all_arg_types) = &old_row.proallargtypes {
+            old_referenced_type_oids.extend(all_arg_types.iter().copied());
+        }
+        let old_rows = PhysicalCatalogRows {
+            procs: vec![old_row.clone()],
+            depends: proc_depend_rows(
+                old_row.oid,
+                old_row.pronamespace,
+                old_row.prorettype,
+                &old_referenced_type_oids,
+            ),
+            ..PhysicalCatalogRows::default()
+        };
+        let kinds = [BootstrapCatalogKind::PgProc, BootstrapCatalogKind::PgDepend];
+        delete_catalog_rows_subset_mvcc(ctx, &old_rows, self.scope_db_oid(), &kinds)?;
+
+        row.oid = old_row.oid;
+        let mut referenced_type_oids = parse_proc_argtype_oids(&row.proargtypes);
+        if let Some(all_arg_types) = &row.proallargtypes {
+            referenced_type_oids.extend(all_arg_types.iter().copied());
+        }
+        let new_rows = PhysicalCatalogRows {
+            procs: vec![row.clone()],
+            depends: proc_depend_rows(
+                row.oid,
+                row.pronamespace,
+                row.prorettype,
+                &referenced_type_oids,
+            ),
+            ..PhysicalCatalogRows::default()
+        };
+        insert_catalog_rows_subset_mvcc(ctx, &new_rows, self.scope_db_oid(), &kinds)?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
         Ok((row.oid, effect))
     }
 

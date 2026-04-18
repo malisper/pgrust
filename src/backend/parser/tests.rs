@@ -1493,6 +1493,40 @@ fn parse_create_function_statement_with_returns_table() {
         Statement::CreateFunction(CreateFunctionStatement {
             schema_name: Some("public".into()),
             function_name: "pair_rows".into(),
+            replace_existing: false,
+            args: vec![CreateFunctionArg {
+                mode: FunctionArgMode::In,
+                name: "x".into(),
+                ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
+            }],
+            return_spec: CreateFunctionReturnSpec::Table(vec![
+                CreateFunctionTableColumn {
+                    name: "a".into(),
+                    ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
+                },
+                CreateFunctionTableColumn {
+                    name: "b".into(),
+                    ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Text)),
+                },
+            ]),
+            language: "plpgsql".into(),
+            body: " begin return next; end ".into(),
+        })
+    );
+}
+
+#[test]
+fn parse_create_or_replace_function_statement_with_returns_table() {
+    let stmt = parse_statement(
+        "create or replace function public.pair_rows(x int4) returns table(a int4, b text) language plpgsql as $$ begin return next; end $$",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateFunction(CreateFunctionStatement {
+            schema_name: Some("public".into()),
+            function_name: "pair_rows".into(),
+            replace_existing: true,
             args: vec![CreateFunctionArg {
                 mode: FunctionArgMode::In,
                 name: "x".into(),

@@ -10290,6 +10290,27 @@ fn create_function_scalar_calls_work_in_select_and_where() {
 }
 
 #[test]
+fn create_or_replace_function_updates_existing_body() {
+    let dir = temp_dir("create_or_replace_function");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function inc(x int4) returns int4 language plpgsql as $$ begin return x + 1; end $$",
+    )
+    .unwrap();
+    assert_eq!(query_rows(&db, 1, "select inc(4)"), vec![vec![Value::Int32(5)]]);
+
+    db.execute(
+        1,
+        "create or replace function inc(x int4) returns int4 language plpgsql as $$ begin return x + 2; end $$",
+    )
+    .unwrap();
+
+    assert_eq!(query_rows(&db, 1, "select inc(4)"), vec![vec![Value::Int32(6)]]);
+}
+
+#[test]
 fn grant_all_on_schema_public_is_accepted() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);

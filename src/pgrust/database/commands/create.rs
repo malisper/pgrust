@@ -663,11 +663,11 @@ impl Database {
             .map(u32::to_string)
             .collect::<Vec<_>>()
             .join(" ");
-        if catalog
+        let existing_proc = catalog
             .proc_rows_by_name(&function_name)
             .into_iter()
-            .any(|row| row.pronamespace == namespace_oid && row.proargtypes == proargtypes)
-        {
+            .find(|row| row.pronamespace == namespace_oid && row.proargtypes == proargtypes);
+        if existing_proc.is_some() && !create_stmt.replace_existing {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "unique function signature",
                 actual: format!("function {}({}) already exists", function_name, proargtypes),
@@ -712,9 +712,15 @@ impl Database {
         };
         let effect = {
             let mut catalog_store = self.catalog.write();
-            let (_oid, effect) = catalog_store
-                .create_proc_mvcc(proc_row, &ctx)
-                .map_err(map_catalog_error)?;
+            let (_oid, effect) = if let Some(existing) = existing_proc {
+                catalog_store
+                    .replace_proc_mvcc(&existing, proc_row, &ctx)
+                    .map_err(map_catalog_error)?
+            } else {
+                catalog_store
+                    .create_proc_mvcc(proc_row, &ctx)
+                    .map_err(map_catalog_error)?
+            };
             effect
         };
         self.apply_catalog_mutation_effect_immediate(&effect)?;
