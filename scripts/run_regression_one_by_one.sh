@@ -61,7 +61,8 @@ PORT=5433
 SKIP_SERVER=false
 SINGLE_TEST=""
 RESULTS_DIR="/tmp/pgrust_regress_one_by_one"
-DATA_DIR="/tmp/pgrust_regress_one_by_one_data"
+WORKTREE_NAME="$(basename "$PGRUST_DIR")"
+DATA_DIR="/tmp/pgrust_regress_one_by_one_data_${WORKTREE_NAME}"
 SERVER_PID=""
 USE_PGRUST_SETUP=true
 
