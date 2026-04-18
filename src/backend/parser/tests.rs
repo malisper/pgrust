@@ -3,9 +3,8 @@ use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::{AggFunc, Expr, Plan, RelationDesc, Value};
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
-    bootstrap_pg_proc_rows, sort_pg_rewrite_rows, PgProcRow, PgRewriteRow, PgTypeRow,
-    BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_PRIMARY, JSON_TYPE_OID, PUBLIC_NAMESPACE_OID,
-    RECORD_TYPE_OID,
+    BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_PRIMARY, JSON_TYPE_OID, PUBLIC_NAMESPACE_OID, PgProcRow,
+    PgRewriteRow, PgTypeRow, RECORD_TYPE_OID, bootstrap_pg_proc_rows, sort_pg_rewrite_rows,
 };
 use crate::include::nodes::parsenodes::{
     AliasColumnDef, AliasColumnSpec, ColumnConstraint, CompositeTypeAttributeDef,
@@ -13,7 +12,7 @@ use crate::include::nodes::parsenodes::{
     ForeignKeyMatchType, IndexColumnDef, InsertSource, InsertStatement, JoinTreeNode,
     RangeTblEntryKind, RawTypeName, TableConstraint,
 };
-use crate::include::nodes::primnodes::{is_system_attr, AttrNumber, JoinType, Var};
+use crate::include::nodes::primnodes::{AttrNumber, JoinType, Var, is_system_attr};
 
 fn desc() -> RelationDesc {
     RelationDesc {
@@ -44,6 +43,36 @@ fn is_outer_user_var(expr: &Expr, index: usize) -> bool {
             is_outer_user_var(left, index) && is_outer_user_var(right, index)
         }
         _ => false,
+    }
+}
+
+fn plain_inference_target(columns: &[&str]) -> OnConflictTarget {
+    OnConflictTarget::Inference(OnConflictInferenceSpec {
+        elements: columns
+            .iter()
+            .map(|column| OnConflictInferenceElem {
+                expr: SqlExpr::Column((*column).into()),
+                collation: None,
+                opclass: None,
+            })
+            .collect(),
+        predicate: None,
+    })
+}
+
+fn inference_column_names(target: &OnConflictTarget) -> Option<Vec<String>> {
+    match target {
+        OnConflictTarget::Inference(spec) if spec.predicate.is_none() => spec
+            .elements
+            .iter()
+            .map(
+                |element| match (&element.expr, &element.collation, &element.opclass) {
+                    (SqlExpr::Column(name), None, None) => Some(name.clone()),
+                    _ => None,
+                },
+            )
+            .collect(),
+        _ => None,
     }
 }
 
@@ -2907,14 +2936,16 @@ fn build_plan_accepts_catalog_backed_bit_comparisons() {
 
 #[test]
 fn build_plan_accepts_catalog_backed_bytea_comparisons() {
-    assert!(build_plan(
-        &parse_select(
-            r"select E'\\x01'::bytea = E'\\x01'::bytea, E'\\x01'::bytea < E'\\x02'::bytea"
+    assert!(
+        build_plan(
+            &parse_select(
+                r"select E'\\x01'::bytea = E'\\x01'::bytea, E'\\x01'::bytea < E'\\x02'::bytea"
+            )
+            .unwrap(),
+            &catalog(),
         )
-        .unwrap(),
-        &catalog(),
-    )
-    .is_ok());
+        .is_ok()
+    );
 }
 
 #[test]
@@ -2974,12 +3005,14 @@ fn build_plan_coerces_unknown_string_literals_for_array_ops() {
 
 #[test]
 fn build_plan_accepts_catalog_backed_text_array_casts() {
-    assert!(build_plan(
-        &parse_select("select cast('{1,2}' as int4[]), cast('{\"a\",\"b\"}' as varchar[])")
-            .unwrap(),
-        &catalog(),
-    )
-    .is_ok());
+    assert!(
+        build_plan(
+            &parse_select("select cast('{1,2}' as int4[]), cast('{\"a\",\"b\"}' as varchar[])")
+                .unwrap(),
+            &catalog(),
+        )
+        .is_ok()
+    );
 }
 
 #[test]
@@ -3399,6 +3432,10 @@ fn build_plan_resolves_order_by_ordinal_against_target_list() {
 
 #[test]
 fn parse_insert_update_delete() {
+    std::thread::Builder::new()
+        .name("parse_insert_update_delete".into())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
     assert!(matches!(
         parse_statement("explain select name from people").unwrap(),
         Statement::Explain(ExplainStatement {
@@ -3446,6 +3483,15 @@ fn parse_insert_update_delete() {
             ..
         }) if matches!(statement.as_ref(), Statement::Merge(_))
     ));
+    assert!(matches!(
+        parse_statement("explain (costs off) insert into people (id, name) values (1, 'alice')")
+            .unwrap(),
+        Statement::Explain(ExplainStatement {
+            costs: false,
+            statement,
+            ..
+        }) if matches!(statement.as_ref(), Statement::Insert(_))
+    ));
     assert!(
         matches!(parse_statement("analyze").unwrap(), Statement::Analyze(AnalyzeStatement { targets, .. }) if targets.is_empty())
     );
@@ -3464,7 +3510,8 @@ fn parse_insert_update_delete() {
             if table_name == "people" && values.len() == 2
     ));
     assert!(matches!(
-        parse_statement("insert into people (id, name) values (1, 'alice') on conflict do nothing").unwrap(),
+        parse_statement("insert into people (id, name) values (1, 'alice') on conflict do nothing")
+            .unwrap(),
         Statement::Insert(InsertStatement {
             on_conflict: Some(OnConflictClause {
                 target: None,
@@ -3478,13 +3525,13 @@ fn parse_insert_update_delete() {
         parse_statement("insert into people (id, name) values (1, 'alice') on conflict (id) do update set name = excluded.name where people.id = excluded.id").unwrap(),
         Statement::Insert(InsertStatement {
             on_conflict: Some(OnConflictClause {
-                target: Some(OnConflictTarget::Columns(columns)),
+                target: Some(target),
                 action: OnConflictAction::Update,
                 assignments,
                 where_clause: Some(SqlExpr::Eq(_, _)),
             }),
             ..
-        }) if columns == vec!["id"] && assignments.len() == 1 && assignments[0].expr == SqlExpr::Column("excluded.name".into())
+        }) if inference_column_names(&target) == Some(vec!["id".into()]) && assignments.len() == 1 && assignments[0].expr == SqlExpr::Column("excluded.name".into())
     ));
     assert!(matches!(
         parse_statement("insert into people (id, name) values (1, 'alice') on conflict on constraint people_pkey do nothing").unwrap(),
@@ -3501,12 +3548,12 @@ fn parse_insert_update_delete() {
         parse_statement("insert into people (id, name) values (1, 'alice') on conflict (id) do nothing").unwrap(),
         Statement::Insert(InsertStatement {
             on_conflict: Some(OnConflictClause {
-                target: Some(OnConflictTarget::Columns(columns)),
+                target: Some(target),
                 action: OnConflictAction::Nothing,
                 ..
             }),
             ..
-        }) if columns == vec!["id"]
+        }) if inference_column_names(&target) == Some(vec!["id".into()])
     ));
     assert!(matches!(
         parse_statement("insert into people (id, name) values (1, 'alice') on conflict on constraint people_pkey do update set name = excluded.name").unwrap(),
@@ -3531,6 +3578,20 @@ fn parse_insert_update_delete() {
             }),
             ..
         }) if assignments.len() == 1
+    ));
+    assert!(matches!(
+        parse_statement("insert into people (id, name) values (1, 'alice') on conflict (lower(name) collate \"C\" text_pattern_ops) where id > 0 do nothing").unwrap(),
+        Statement::Insert(InsertStatement {
+            on_conflict: Some(OnConflictClause {
+                target: Some(OnConflictTarget::Inference(OnConflictInferenceSpec { elements, predicate: Some(SqlExpr::Gt(_, _)) })),
+                action: OnConflictAction::Nothing,
+                ..
+            }),
+            ..
+        }) if elements.len() == 1
+            && elements[0].expr == parse_expr("lower(name)").unwrap()
+            && elements[0].collation.as_deref() == Some("C")
+            && elements[0].opclass.as_deref() == Some("text_pattern_ops")
     ));
     assert!(
         matches!(parse_statement("create table widgets (id int4 not null, name text)").unwrap(), Statement::CreateTable(ct) if ct.table_name == "widgets" && ct.columns().count() == 2)
@@ -3635,6 +3696,10 @@ fn parse_insert_update_delete() {
     assert!(
         matches!(parse_statement("delete from only people where note is null").unwrap(), Statement::Delete(DeleteStatement { table_name, only, .. }) if table_name == "people" && only)
     );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 #[test]
@@ -3660,7 +3725,10 @@ fn parse_merge_statement() {
         stmt.when_clauses[0].action,
         MergeAction::Update { ref assignments } if assignments.len() == 1
     ));
-    assert_eq!(stmt.when_clauses[1].match_kind, MergeMatchKind::NotMatchedByTarget);
+    assert_eq!(
+        stmt.when_clauses[1].match_kind,
+        MergeMatchKind::NotMatchedByTarget
+    );
     assert!(matches!(
         stmt.when_clauses[1].action,
         MergeAction::Insert {
@@ -3668,7 +3736,10 @@ fn parse_merge_statement() {
             source: MergeInsertSource::Values(ref values),
         } if columns == &vec!["tid".to_string(), "balance".to_string()] && values.len() == 2
     ));
-    assert_eq!(stmt.when_clauses[2].match_kind, MergeMatchKind::NotMatchedBySource);
+    assert_eq!(
+        stmt.when_clauses[2].match_kind,
+        MergeMatchKind::NotMatchedBySource
+    );
     assert!(matches!(stmt.when_clauses[2].action, MergeAction::Delete));
 }
 
@@ -3730,6 +3801,7 @@ fn people_insert_with_on_conflict(
         with_recursive: false,
         with: vec![],
         table_name: "people".into(),
+        table_alias: None,
         columns: Some(vec![
             crate::include::nodes::parsenodes::AssignmentTarget {
                 column: "id".into(),
@@ -3757,19 +3829,13 @@ fn people_insert_with_on_conflict(
 fn bind_insert_matches_on_conflict_columns_order_insensitively() {
     let catalog = catalog_with_people_id_name_unique_index();
     let stmt = people_insert_with_on_conflict(
-        Some(crate::include::nodes::parsenodes::OnConflictTarget::Columns(vec![
-            "name".into(),
-            "id".into(),
-            "name".into(),
-        ])),
+        Some(plain_inference_target(&["name", "id", "name"])),
         crate::include::nodes::parsenodes::OnConflictAction::Nothing,
         vec![],
         None,
     );
-    let bound = stacker::maybe_grow(32 * 1024, 32 * 1024 * 1024, || {
-        bind_insert(&stmt, &catalog)
-    })
-    .unwrap();
+    let bound =
+        stacker::maybe_grow(32 * 1024, 32 * 1024 * 1024, || bind_insert(&stmt, &catalog)).unwrap();
     let on_conflict = bound.on_conflict.expect("on conflict");
     assert_eq!(on_conflict.arbiter_indexes.len(), 1);
     assert_eq!(on_conflict.arbiter_indexes[0].name, "people_id_name_key");
@@ -3780,9 +3846,7 @@ fn bind_insert_matches_on_conflict_columns_order_insensitively() {
 fn bind_insert_resolves_on_conflict_constraint_name() {
     let catalog = catalog_with_people_primary_key();
     let stmt = people_insert_with_on_conflict(
-        Some(crate::include::nodes::parsenodes::OnConflictTarget::Constraint(
-            "people_pkey".into(),
-        )),
+        Some(crate::include::nodes::parsenodes::OnConflictTarget::Constraint("people_pkey".into())),
         crate::include::nodes::parsenodes::OnConflictAction::Update,
         vec![crate::include::nodes::parsenodes::Assignment {
             target: crate::include::nodes::parsenodes::AssignmentTarget {
@@ -3793,10 +3857,8 @@ fn bind_insert_resolves_on_conflict_constraint_name() {
         }],
         Some(parse_expr("people.id = excluded.id").unwrap()),
     );
-    let bound = stacker::maybe_grow(32 * 1024, 32 * 1024 * 1024, || {
-        bind_insert(&stmt, &catalog)
-    })
-    .unwrap();
+    let bound =
+        stacker::maybe_grow(32 * 1024, 32 * 1024 * 1024, || bind_insert(&stmt, &catalog)).unwrap();
     let on_conflict = bound.on_conflict.expect("on conflict");
     assert_eq!(on_conflict.arbiter_indexes.len(), 1);
     assert_eq!(on_conflict.arbiter_indexes[0].name, "people_pkey");
@@ -3835,9 +3897,7 @@ fn bind_insert_rejects_on_conflict_do_update_without_target() {
 fn bind_insert_rejects_non_inferable_on_conflict_indexes() {
     let partial_catalog = catalog_with_people_partial_unique_index();
     let partial_stmt = people_insert_with_on_conflict(
-        Some(crate::include::nodes::parsenodes::OnConflictTarget::Columns(vec![
-            "id".into(),
-        ])),
+        Some(plain_inference_target(&["id"])),
         crate::include::nodes::parsenodes::OnConflictAction::Nothing,
         vec![],
         None,
@@ -3848,6 +3908,95 @@ fn bind_insert_rejects_non_inferable_on_conflict_indexes() {
             if actual
                 == "there is no unique or exclusion constraint matching the ON CONFLICT specification"
     ));
+}
+
+#[test]
+fn bind_insert_rejects_richer_on_conflict_inference_syntax() {
+    std::thread::Builder::new()
+        .name("bind_insert_rejects_richer_on_conflict_inference_syntax".into())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let catalog = catalog_with_people_primary_key();
+
+            let expression_stmt = people_insert_with_on_conflict(
+                Some(OnConflictTarget::Inference(OnConflictInferenceSpec {
+                    elements: vec![OnConflictInferenceElem {
+                        expr: parse_expr("lower(name)").unwrap(),
+                        collation: None,
+                        opclass: None,
+                    }],
+                    predicate: None,
+                })),
+                OnConflictAction::Nothing,
+                vec![],
+                None,
+            );
+            assert!(matches!(
+                bind_insert(&expression_stmt, &catalog),
+                Err(ParseError::FeatureNotSupported(feature))
+                    if feature == "ON CONFLICT inference expressions"
+            ));
+
+            let collation_stmt = people_insert_with_on_conflict(
+                Some(OnConflictTarget::Inference(OnConflictInferenceSpec {
+                    elements: vec![OnConflictInferenceElem {
+                        expr: SqlExpr::Column("id".into()),
+                        collation: Some("C".into()),
+                        opclass: None,
+                    }],
+                    predicate: None,
+                })),
+                OnConflictAction::Nothing,
+                vec![],
+                None,
+            );
+            assert!(matches!(
+                bind_insert(&collation_stmt, &catalog),
+                Err(ParseError::FeatureNotSupported(feature))
+                    if feature == "ON CONFLICT inference collation"
+            ));
+
+            let opclass_stmt = people_insert_with_on_conflict(
+                Some(OnConflictTarget::Inference(OnConflictInferenceSpec {
+                    elements: vec![OnConflictInferenceElem {
+                        expr: SqlExpr::Column("id".into()),
+                        collation: None,
+                        opclass: Some("int4_ops".into()),
+                    }],
+                    predicate: None,
+                })),
+                OnConflictAction::Nothing,
+                vec![],
+                None,
+            );
+            assert!(matches!(
+                bind_insert(&opclass_stmt, &catalog),
+                Err(ParseError::FeatureNotSupported(feature))
+                    if feature == "ON CONFLICT inference operator class"
+            ));
+
+            let predicate_stmt = people_insert_with_on_conflict(
+                Some(OnConflictTarget::Inference(OnConflictInferenceSpec {
+                    elements: vec![OnConflictInferenceElem {
+                        expr: SqlExpr::Column("id".into()),
+                        collation: None,
+                        opclass: None,
+                    }],
+                    predicate: Some(parse_expr("id > 0").unwrap()),
+                })),
+                OnConflictAction::Nothing,
+                vec![],
+                None,
+            );
+            assert!(matches!(
+                bind_insert(&predicate_stmt, &catalog),
+                Err(ParseError::FeatureNotSupported(feature))
+                    if feature == "ON CONFLICT inference WHERE"
+            ));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 #[test]
@@ -6494,6 +6643,27 @@ fn parse_insert_select_default_values_and_table_stmt() {
         stmt,
         Statement::Select(SelectStatement { from: Some(FromItem::Table { name, .. }), .. })
             if name == "people"
+    ));
+}
+
+#[test]
+fn parse_insert_alias_and_begin_isolation_level() {
+    let stmt = parse_statement(
+        "insert into people as p (id, name) values (1, 'alice') on conflict (id) do update set name = p.name",
+    )
+    .unwrap();
+    assert!(matches!(
+        stmt,
+        Statement::Insert(InsertStatement {
+            table_name,
+            table_alias,
+            ..
+        }) if table_name == "people" && table_alias.as_deref() == Some("p")
+    ));
+
+    assert!(matches!(
+        parse_statement("begin transaction isolation level repeatable read").unwrap(),
+        Statement::Begin
     ));
 }
 

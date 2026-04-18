@@ -391,7 +391,8 @@ pub fn bind_insert(
     )?;
     let entry = lookup_relation(catalog, &stmt.table_name)?;
     let column_defaults = bind_insert_column_defaults(&entry.desc, catalog, &local_ctes)?;
-    let scope = scope_for_relation(Some(&stmt.table_name), &entry.desc);
+    let visible_target_name = stmt.table_alias.as_deref().unwrap_or(&stmt.table_name);
+    let scope = scope_for_relation(Some(visible_target_name), &entry.desc);
 
     let source = match &stmt.source {
         InsertSource::Values(rows) => {
@@ -509,7 +510,7 @@ pub fn bind_insert(
             .map(|clause| {
                 super::on_conflict::bind_on_conflict_clause(
                     clause,
-                    &stmt.table_name,
+                    visible_target_name,
                     entry.relation_oid,
                     &entry.desc,
                     catalog,

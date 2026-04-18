@@ -92,7 +92,7 @@ fn exec_error_sqlstate(e: &ExecError) -> &'static str {
         ExecError::DivisionByZero(_) => "22012",
         ExecError::GenerateSeriesInvalidArg(_, _) => "22023",
         ExecError::StringDataRightTruncation { .. } => "22001",
-        ExecError::CardinalityViolation(_) => "21000",
+        ExecError::CardinalityViolation { .. } => "21000",
         ExecError::Parse(_) => "42601",
         _ => "XX000",
     }
@@ -3793,9 +3793,11 @@ mod tests {
                         == b"MSQL regular expression may not contain more than two escape-double-quote separators\0"
                 })
         );
-        assert!(output.windows("WSQL function \"substring\" statement 1\0".len()).any(
-            |window| window == b"WSQL function \"substring\" statement 1\0"
-        ));
+        assert!(
+            output
+                .windows("WSQL function \"substring\" statement 1\0".len())
+                .any(|window| window == b"WSQL function \"substring\" statement 1\0")
+        );
     }
 
     #[test]

@@ -76,14 +76,17 @@ pub(super) fn eval_scalar_subquery(
             let mut values = inner_slot.values()?.iter().cloned().collect::<Vec<_>>();
             Value::materialize_all(&mut values);
             if values.len() != 1 {
-                return Err(ExecError::CardinalityViolation(
-                    "subquery must return only one column".into(),
-                ));
+                return Err(ExecError::CardinalityViolation {
+                    message: "subquery must return only one column".into(),
+                    hint: None,
+                });
             }
             if first_value.is_some() {
-                return Err(ExecError::CardinalityViolation(
-                    "more than one row returned by a subquery used as an expression".into(),
-                ));
+                return Err(ExecError::CardinalityViolation {
+                    message: "more than one row returned by a subquery used as an expression"
+                        .into(),
+                    hint: None,
+                });
             }
             first_value = Some(values[0].clone());
         }
@@ -142,9 +145,10 @@ pub(super) fn eval_quantified_subquery(
             saw_row = true;
             let values = inner_slot.values()?.iter().cloned().collect::<Vec<_>>();
             if values.len() != 1 {
-                return Err(ExecError::CardinalityViolation(
-                    "subquery must return only one column".into(),
-                ));
+                return Err(ExecError::CardinalityViolation {
+                    message: "subquery must return only one column".into(),
+                    hint: None,
+                });
             }
             match compare_subquery_values(left_value, &values[0], op)? {
                 Value::Bool(result) => {

@@ -20,9 +20,9 @@ use crate::backend::parser::{
     AnalyzeStatement, BoundArraySubscript, BoundAssignment, BoundAssignmentTarget,
     BoundDeleteStatement, BoundIndexRelation, BoundInsertSource, BoundInsertStatement,
     BoundModifyRowSource, BoundOnConflictAction, BoundReferencedByForeignKey,
-    BoundRelationConstraints, BoundUpdateStatement, Catalog, CatalogLookup,
-    DropTableStatement, ExplainStatement, MaintenanceTarget, ParseError, SqlType, SqlTypeKind,
-    Statement, TruncateTableStatement, VacuumStatement, bind_create_table,
+    BoundRelationConstraints, BoundUpdateStatement, Catalog, CatalogLookup, DropTableStatement,
+    ExplainStatement, MaintenanceTarget, ParseError, SqlType, SqlTypeKind, Statement,
+    TruncateTableStatement, VacuumStatement, bind_create_table,
 };
 use crate::backend::rewrite::pg_rewrite_query;
 use crate::backend::storage::smgr::ForkNumber;
@@ -76,45 +76,45 @@ fn finalize_bound_insert(
         ),
         BoundInsertSource::Select(query) => BoundInsertSource::Select(query),
     };
-    stmt.on_conflict = stmt
-        .on_conflict
-        .map(|clause| crate::backend::parser::BoundOnConflictClause {
-            arbiter_indexes: clause.arbiter_indexes,
-            action: match clause.action {
-                BoundOnConflictAction::Nothing => BoundOnConflictAction::Nothing,
-                BoundOnConflictAction::Update {
-                    assignments,
-                    predicate,
-                } => BoundOnConflictAction::Update {
-                    assignments: assignments
-                        .into_iter()
-                        .map(|assignment| BoundAssignment {
-                            column_index: assignment.column_index,
-                            expr: finalize_expr_subqueries(
-                                assignment.expr,
-                                catalog,
-                                &mut subplans,
-                            ),
-                            subscripts: assignment
-                                .subscripts
-                                .into_iter()
-                                .map(|subscript| BoundArraySubscript {
-                                    is_slice: subscript.is_slice,
-                                    lower: subscript.lower.map(|expr| {
-                                        finalize_expr_subqueries(expr, catalog, &mut subplans)
-                                    }),
-                                    upper: subscript.upper.map(|expr| {
-                                        finalize_expr_subqueries(expr, catalog, &mut subplans)
-                                    }),
-                                })
-                                .collect(),
-                        })
-                        .collect(),
-                    predicate: predicate
-                        .map(|expr| finalize_expr_subqueries(expr, catalog, &mut subplans)),
+    stmt.on_conflict =
+        stmt.on_conflict
+            .map(|clause| crate::backend::parser::BoundOnConflictClause {
+                arbiter_indexes: clause.arbiter_indexes,
+                action: match clause.action {
+                    BoundOnConflictAction::Nothing => BoundOnConflictAction::Nothing,
+                    BoundOnConflictAction::Update {
+                        assignments,
+                        predicate,
+                    } => BoundOnConflictAction::Update {
+                        assignments: assignments
+                            .into_iter()
+                            .map(|assignment| BoundAssignment {
+                                column_index: assignment.column_index,
+                                expr: finalize_expr_subqueries(
+                                    assignment.expr,
+                                    catalog,
+                                    &mut subplans,
+                                ),
+                                subscripts: assignment
+                                    .subscripts
+                                    .into_iter()
+                                    .map(|subscript| BoundArraySubscript {
+                                        is_slice: subscript.is_slice,
+                                        lower: subscript.lower.map(|expr| {
+                                            finalize_expr_subqueries(expr, catalog, &mut subplans)
+                                        }),
+                                        upper: subscript.upper.map(|expr| {
+                                            finalize_expr_subqueries(expr, catalog, &mut subplans)
+                                        }),
+                                    })
+                                    .collect(),
+                            })
+                            .collect(),
+                        predicate: predicate
+                            .map(|expr| finalize_expr_subqueries(expr, catalog, &mut subplans)),
+                    },
                 },
-            },
-        });
+            });
     stmt.subplans = subplans;
     stmt
 }
@@ -183,11 +183,20 @@ pub(crate) fn execute_explain(
     catalog: &dyn CatalogLookup,
     ctx: &mut ExecutorContext,
 ) -> Result<StatementResult, ExecError> {
-    let Statement::Select(select) = *stmt.statement else {
-        return Err(ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "SELECT statement after EXPLAIN",
-            actual: "non-select statement".into(),
-        }));
+    let statement = *stmt.statement;
+    let select = match statement {
+        Statement::Select(select) => select,
+        Statement::Insert(_) => {
+            return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                "EXPLAIN INSERT".into(),
+            )));
+        }
+        _ => {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "SELECT statement after EXPLAIN",
+                actual: "non-select statement".into(),
+            }));
+        }
     };
 
     ctx.pool.reset_usage_stats();
@@ -330,7 +339,9 @@ fn map_index_insert_error(err: crate::backend::catalog::CatalogError) -> ExecErr
         crate::backend::catalog::CatalogError::UniqueViolation(constraint) => {
             ExecError::UniqueViolation { constraint }
         }
-        crate::backend::catalog::CatalogError::Interrupted(reason) => ExecError::Interrupted(reason),
+        crate::backend::catalog::CatalogError::Interrupted(reason) => {
+            ExecError::Interrupted(reason)
+        }
         other => ExecError::Parse(ParseError::UnexpectedToken {
             expected: "index insertion",
             actual: format!("{other:?}"),
@@ -348,7 +359,8 @@ pub(crate) fn insert_index_key_values(
 ) -> Result<(), ExecError> {
     let insert_ctx =
         build_index_insert_context(heap_rel, heap_desc, index, key_values, heap_tid, ctx);
-    indexam::index_insert_stub(&insert_ctx, index.index_meta.am_oid).map_err(map_index_insert_error)?;
+    indexam::index_insert_stub(&insert_ctx, index.index_meta.am_oid)
+        .map_err(map_index_insert_error)?;
     Ok(())
 }
 
@@ -1015,7 +1027,9 @@ pub fn execute_truncate_table(
         {
             reinitialize_index_relation(index, ctx, xid)?;
         }
-        ctx.session_stats.write().note_relation_truncate(entry.relation_oid);
+        ctx.session_stats
+            .write()
+            .note_relation_truncate(entry.relation_oid);
     }
     Ok(StatementResult::AffectedRows(0))
 }
@@ -1151,7 +1165,9 @@ pub fn execute_insert(
                 cid,
             )?;
             for _ in 0..inserted {
-                ctx.session_stats.write().note_relation_insert(stmt.relation_oid);
+                ctx.session_stats
+                    .write()
+                    .note_relation_insert(stmt.relation_oid);
             }
             inserted
         };
