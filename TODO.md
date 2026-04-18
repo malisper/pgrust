@@ -173,7 +173,6 @@ Targeted reruns on 2026-04-17:
   - [done] stack depth limit handling for deeply nested jsonb input
   - aggregate-local `ORDER BY` support for `jsonb_agg` / `jsonb_object_agg`
   - [done] jsonb containment and existence builtin semantics (`@>`, `<@`, `?`, `?|`, `?&`, helper funcs)
-  - jsonb object/key construction semantics and SQL-visible errors (`jsonb_object_keys`, `jsonb_build_object`, `jsonb_object`, `jsonb_object_agg`)
   - jsonb subscripting semantics
   - record-expansion semantics for `jsonb_to_record` / `jsonb_populate_record`
 - jsonb_jsonpath.sql: 188/830
@@ -344,7 +343,6 @@ Targeted reruns on 2026-04-17:
 - [done] stack depth limit handling for deeply nested jsonb input
 - aggregate-local `ORDER BY` support for `jsonb_agg` / `jsonb_object_agg`
 - [done] jsonb containment and existence builtin semantics (`@>`, `<@`, `?`, `?|`, `?&`, helper funcs)
-- jsonb object/key construction semantics and SQL-visible errors (`jsonb_object_keys`, `jsonb_build_object`, `jsonb_object`, `jsonb_object_agg`)
 - jsonb subscripting semantics
 - record-expansion semantics for `jsonb_to_record` / `jsonb_populate_record`
 

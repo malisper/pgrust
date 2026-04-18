@@ -1,5 +1,6 @@
 use super::render_bit_text;
 use super::{compare_order_values, parse_numeric_text, render_datetime_value_text};
+use crate::backend::executor::ExecError;
 use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue, NumericValue, Value};
@@ -13,6 +14,8 @@ use std::collections::HashSet;
 
 use super::expr_range::{range_intersection_agg_transition, render_range_text};
 use super::jsonb::{encode_jsonb, jsonb_from_value, render_jsonb_bytes, JsonbValue};
+
+pub(crate) type AggTransitionFn = fn(&mut AccumState, &[Value]) -> Result<(), ExecError>;
 
 #[derive(Debug, Clone)]
 pub(crate) enum NumericAccum {
@@ -134,7 +137,7 @@ impl AccumState {
         func: AggFunc,
         arg_count: usize,
         distinct: bool,
-    ) -> fn(&mut AccumState, &[Value]) {
+    ) -> AggTransitionFn {
         match (func, arg_count, distinct) {
             (AggFunc::Count, _, true) => |state, values| {
                 if let AccumState::CountDistinct { seen } = state {
@@ -143,11 +146,13 @@ impl AccumState {
                         seen.insert(value.to_owned_value());
                     }
                 }
+                Ok(())
             },
             (AggFunc::Count, 0, false) => |state, _values| {
                 if let AccumState::Count { count } = state {
                     *count += 1;
                 }
+                Ok(())
             },
             (AggFunc::Count, _, false) => |state, values| {
                 if let AccumState::Count { count } = state {
@@ -156,12 +161,14 @@ impl AccumState {
                         *count += 1;
                     }
                 }
+                Ok(())
             },
             (AggFunc::Sum, _, _) => |state, values| {
                 if let AccumState::Sum { sum, result_type } = state {
                     let value = values.first().unwrap_or(&Value::Null);
                     *sum = accumulate_value(sum.take(), *result_type, value);
                 }
+                Ok(())
             },
             (AggFunc::Avg, _, _) => |state, values| {
                 if let AccumState::Avg {
@@ -176,6 +183,7 @@ impl AccumState {
                         *count += 1;
                     }
                 }
+                Ok(())
             },
             (AggFunc::Variance | AggFunc::Stddev, _, _) => |state, values| {
                 if let AccumState::NumericStats {
@@ -189,25 +197,37 @@ impl AccumState {
                         *count += 1;
                     }
                 }
+                Ok(())
             },
             (AggFunc::JsonAgg | AggFunc::JsonbAgg, _, _) => |state, arg_values| {
                 if let AccumState::JsonAgg { values, .. } = state {
                     let value = arg_values.first().unwrap_or(&Value::Null);
                     values.push(value.to_owned_value());
                 }
+                Ok(())
             },
             (AggFunc::ArrayAgg, _, _) => |state, arg_values| {
                 if let AccumState::ArrayAgg { values } = state {
                     let value = arg_values.first().unwrap_or(&Value::Null);
                     values.push(value.to_owned_value());
                 }
+                Ok(())
             },
             (AggFunc::JsonObjectAgg | AggFunc::JsonbObjectAgg, _, _) => |state, values| {
                 if let AccumState::JsonObjectAgg { pairs, .. } = state {
                     let key = values.first().unwrap_or(&Value::Null);
+                    if matches!(key, Value::Null) {
+                        return Err(ExecError::DetailedError {
+                            message: "field name must not be null".into(),
+                            detail: None,
+                            hint: None,
+                            sqlstate: "22004",
+                        });
+                    }
                     let value = values.get(1).unwrap_or(&Value::Null);
                     pairs.push((key.to_owned_value(), value.to_owned_value()));
                 }
+                Ok(())
             },
             (AggFunc::StringAgg, _, _) => |state, values| {
                 if let AccumState::StringAgg {
@@ -218,7 +238,7 @@ impl AccumState {
                 {
                     let value = values.first().unwrap_or(&Value::Null);
                     if matches!(value, Value::Null) {
-                        return;
+                        return Ok(());
                     }
                     let delimiter = values.get(1).unwrap_or(&Value::Null);
                     let delimiter_bytes = string_agg_input_bytes(delimiter, *bytea);
@@ -228,6 +248,7 @@ impl AccumState {
                     bytes.extend_from_slice(&delimiter_bytes);
                     bytes.extend_from_slice(&string_agg_input_bytes(value, *bytea));
                 }
+                Ok(())
             },
             (AggFunc::Min, _, _) => |state, values| {
                 if let AccumState::Min { min } = state {
@@ -247,6 +268,7 @@ impl AccumState {
                         });
                     }
                 }
+                Ok(())
             },
             (AggFunc::Max, _, _) => |state, values| {
                 if let AccumState::Max { max } = state {
@@ -266,6 +288,7 @@ impl AccumState {
                         });
                     }
                 }
+                Ok(())
             },
             (AggFunc::RangeIntersectAgg, _, _) => |state, values| {
                 if let AccumState::RangeIntersect { current } = state {
@@ -273,6 +296,7 @@ impl AccumState {
                     *current = range_intersection_agg_transition(current.take(), value)
                         .expect("range_intersect_agg inputs should be typechecked");
                 }
+                Ok(())
             },
         }
     }

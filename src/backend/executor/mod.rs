@@ -47,7 +47,7 @@ pub use crate::include::executor::execdesc::*;
 pub use crate::include::nodes::datum::*;
 pub use crate::include::nodes::execnodes::*;
 pub use crate::include::nodes::plannodes::*;
-pub(crate) use agg::{AccumState, AggGroup, OrderedAggInput};
+pub(crate) use agg::{AccumState, AggGroup, AggTransitionFn, OrderedAggInput};
 pub use driver::{
     exec_next, execute_plan, execute_planned_stmt, execute_readonly_statement, execute_sql,
     execute_statement,
