@@ -4566,6 +4566,40 @@ fn parse_create_table_with_multidimensional_array_types() {
 }
 
 #[test]
+fn parse_create_temp_table_with_fixed_length_array_type_syntax() {
+    match parse_statement(
+        "create temp table arrtest2 (i integer ARRAY[4], f float8[], n numeric[], t text[], d timestamp[])",
+    )
+    .unwrap()
+    {
+        Statement::CreateTable(stmt) => {
+            let columns = stmt.columns().collect::<Vec<_>>();
+            assert_eq!(
+                columns[0].ty,
+                SqlType::array_of(SqlType::new(SqlTypeKind::Int4))
+            );
+            assert_eq!(
+                columns[1].ty,
+                SqlType::array_of(SqlType::new(SqlTypeKind::Float8))
+            );
+            assert_eq!(
+                columns[2].ty,
+                SqlType::array_of(SqlType::new(SqlTypeKind::Numeric))
+            );
+            assert_eq!(
+                columns[3].ty,
+                SqlType::array_of(SqlType::new(SqlTypeKind::Text))
+            );
+            assert_eq!(
+                columns[4].ty,
+                SqlType::array_of(SqlType::new(SqlTypeKind::Timestamp))
+            );
+        }
+        other => panic!("expected create table, got {other:?}"),
+    }
+}
+
+#[test]
 fn parse_array_and_unnest_expressions() {
     let stmt =
         parse_select("select * from unnest(ARRAY['a', 'b']::varchar[], ARRAY[1, 2])").unwrap();

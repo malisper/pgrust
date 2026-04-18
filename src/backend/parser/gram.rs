@@ -5229,21 +5229,46 @@ fn build_alter_table_rename_column(
 }
 
 fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
+    fn add_array_bounds(ty: RawTypeName, bounds: usize) -> RawTypeName {
+        let mut ty = ty;
+        for _ in 0..bounds {
+            ty = match ty {
+                RawTypeName::Builtin(inner_ty) => RawTypeName::Builtin(SqlType::array_of(inner_ty)),
+                RawTypeName::Named { name, array_bounds } => RawTypeName::Named {
+                    name,
+                    array_bounds: array_bounds.saturating_add(1),
+                },
+                other => other,
+            };
+        }
+        ty
+    }
+
     match pair.as_rule() {
         Rule::type_name | Rule::known_type_name => {
             let mut inner = pair.into_inner();
             let mut ty = build_type_name(inner.next().expect("type_name base"));
-            for _ in inner {
-                ty = match ty {
-                    RawTypeName::Builtin(inner_ty) => {
-                        RawTypeName::Builtin(SqlType::array_of(inner_ty))
-                    }
-                    RawTypeName::Named { name, array_bounds } => RawTypeName::Named {
-                        name,
-                        array_bounds: array_bounds.saturating_add(1),
-                    },
-                    other => other,
+            for suffix in inner {
+                let bounds = match suffix.as_rule() {
+                    Rule::type_array_suffix => suffix
+                        .into_inner()
+                        .map(|part| match part.as_rule() {
+                            Rule::array_suffix => 1usize,
+                            Rule::array_decl_suffix => part
+                                .into_inner()
+                                .filter(|inner| inner.as_rule() == Rule::array_suffix)
+                                .count(),
+                            _ => 0,
+                        })
+                        .sum(),
+                    Rule::array_suffix => 1,
+                    Rule::array_decl_suffix => suffix
+                        .into_inner()
+                        .filter(|inner| inner.as_rule() == Rule::array_suffix)
+                        .count(),
+                    _ => 0,
                 };
+                ty = add_array_bounds(ty, bounds);
             }
             ty
         }
