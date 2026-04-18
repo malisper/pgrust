@@ -64,8 +64,8 @@ Targeted reruns on 2026-04-17:
   - [done] correct multidimensional slice shape/extent checks during assignment in `src/backend/commands/tablecmds.rs`
   - [done] PostgreSQL-compatible SQL-visible error text for array assignment/type mismatches instead of leaking raw internal `TypeMismatch` formatting
   - [done] preserve PostgreSQL's distinction between empty arrays and `NULL` results when slicing/subscripting array columns
-  - normalize SQL-visible errors for unsubscriptable and fixed-length array-like types such as `timestamp with time zone` and `point`
-  - fix scalar array assignment overflow/bounds handling that currently panics in `src/backend/commands/tablecmds.rs`
+  - [x] normalize SQL-visible errors for unsubscriptable and fixed-length array-like types such as `timestamp with time zone` and `point`
+  - [x] fix scalar array assignment overflow/bounds handling that currently panics in `src/backend/commands/tablecmds.rs`
   - support `RETURNING` with subscripted array/fixed-length assignments used by `point_tbl`
   - support `CREATE TEMP TABLE` column definitions with fixed-length array syntax like `integer ARRAY[4]`
   - support deeper array constructors and array expressions in `SELECT` targets and subqueries
