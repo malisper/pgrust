@@ -426,7 +426,7 @@ Targeted reruns on 2026-04-17:
 - date.sql:
   [done] preserve PostgreSQL-style `LINE`/caret context for date input range and syntax errors in simple-query output
 - date.sql:
-  make `EXTRACT(... FROM date)` use PostgreSQL-compatible default column labels and unsupported-unit diagnostics
+  [done] make `EXTRACT(... FROM date)` use PostgreSQL-compatible default column labels and unsupported-unit diagnostics
 - date.sql:
   support `date_trunc(text, timestamp)` and match PostgreSQL `date_trunc` output semantics for date and timestamp inputs
 - date.sql:
