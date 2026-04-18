@@ -4,7 +4,7 @@ pub use crate::backend::catalog::state::{
 use crate::backend::executor::{ColumnDesc, RelationDesc, ScalarType};
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::access::htup::{AttributeAlign, AttributeCompression, AttributeStorage};
-use crate::include::catalog::range_kind_for_sql_type;
+use crate::include::catalog::range_type_ref_for_sql_type;
 
 pub fn column_desc(name: impl Into<String>, sql_type: SqlType, nullable: bool) -> ColumnDesc {
     let name = name.into();
@@ -96,6 +96,7 @@ fn default_attribute_storage(sql_type: SqlType, attlen: i16) -> AttributeStorage
         | SqlTypeKind::Varchar
         | SqlTypeKind::Char
         | SqlTypeKind::Numeric
+        | SqlTypeKind::Range
         | SqlTypeKind::Int4Range
         | SqlTypeKind::Int8Range
         | SqlTypeKind::NumericRange
@@ -156,8 +157,8 @@ fn scalar_type_for_sql_type(sql_type: SqlType) -> ScalarType {
     if sql_type.is_array {
         return ScalarType::Array(Box::new(scalar_type_for_sql_type(sql_type.element_type())));
     }
-    if let Some(kind) = range_kind_for_sql_type(sql_type) {
-        return ScalarType::Range(kind);
+    if let Some(range_type) = range_type_ref_for_sql_type(sql_type) {
+        return ScalarType::Range(range_type);
     }
     match sql_type.kind {
         SqlTypeKind::AnyArray => ScalarType::Array(Box::new(ScalarType::Text)),
@@ -188,7 +189,8 @@ fn scalar_type_for_sql_type(sql_type: SqlType) -> ScalarType {
         SqlTypeKind::Float4 => ScalarType::Float32,
         SqlTypeKind::Float8 => ScalarType::Float64,
         SqlTypeKind::Numeric => ScalarType::Numeric,
-        SqlTypeKind::Int4Range
+        SqlTypeKind::Range
+        | SqlTypeKind::Int4Range
         | SqlTypeKind::Int8Range
         | SqlTypeKind::NumericRange
         | SqlTypeKind::DateRange

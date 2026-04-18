@@ -1,3 +1,4 @@
+use crate::include::catalog::RangeCanonicalization;
 use crate::include::nodes::datetime::{DateADT, TimeADT, TimeTzADT, TimestampADT, TimestampTzADT};
 use crate::include::nodes::parsenodes::{SqlType, SqlTypeKind};
 use crate::include::nodes::tsearch::{TsQuery, TsVector};
@@ -403,14 +404,26 @@ pub struct GeoCircle {
     pub radius: f64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum RangeTypeId {
-    Int4Range,
-    Int8Range,
-    NumericRange,
-    DateRange,
-    TimestampRange,
-    TimestampTzRange,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RangeTypeRef {
+    pub sql_type: SqlType,
+    pub subtype: SqlType,
+    pub multirange_type_oid: u32,
+    pub canonicalization: RangeCanonicalization,
+}
+
+impl RangeTypeRef {
+    pub const fn type_oid(self) -> u32 {
+        self.sql_type.type_oid
+    }
+
+    pub const fn subtype_oid(self) -> u32 {
+        self.subtype.type_oid
+    }
+
+    pub const fn is_discrete(self) -> bool {
+        matches!(self.canonicalization, RangeCanonicalization::Discrete)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -421,7 +434,7 @@ pub struct RangeBound {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RangeValue {
-    pub kind: RangeTypeId,
+    pub range_type: RangeTypeRef,
     pub empty: bool,
     pub lower: Option<RangeBound>,
     pub upper: Option<RangeBound>,
@@ -918,9 +931,7 @@ impl Value {
             Value::Box(_) => Some(SqlType::new(SqlTypeKind::Box)),
             Value::Polygon(_) => Some(SqlType::new(SqlTypeKind::Polygon)),
             Value::Circle(_) => Some(SqlType::new(SqlTypeKind::Circle)),
-            Value::Range(range) => {
-                Some(crate::include::catalog::sql_type_for_range_kind(range.kind))
-            }
+            Value::Range(range) => Some(range.range_type.sql_type),
             Value::Float64(_) => Some(SqlType::new(SqlTypeKind::Float8)),
             Value::Numeric(_) => Some(SqlType::new(SqlTypeKind::Numeric)),
             Value::Json(_) => Some(SqlType::new(SqlTypeKind::Json)),

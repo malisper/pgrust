@@ -493,7 +493,7 @@ impl Database {
                         typrelid: 0,
                         typelem: entry.oid,
                         typarray: 0,
-                        sql_type: SqlType::array_of(base_sql_type),
+                        sql_type: SqlType::array_of(base_sql_type).with_identity(entry.array_oid, 0),
                     },
                 ]
             })
@@ -516,7 +516,12 @@ impl Database {
         let mut rows = range_types
             .values()
             .flat_map(|entry| {
-                let base_sql_type = SqlType::new(SqlTypeKind::Text).with_identity(entry.oid, 0);
+                let discrete = matches!(
+                    entry.subtype.kind,
+                    SqlTypeKind::Int4 | SqlTypeKind::Int8 | SqlTypeKind::Date
+                );
+                let base_sql_type = SqlType::range(entry.oid, entry.subtype.type_oid)
+                    .with_range_metadata(entry.subtype.type_oid, 0, discrete);
                 [
                     PgTypeRow {
                         oid: entry.oid,
@@ -529,9 +534,6 @@ impl Database {
                         typrelid: 0,
                         typelem: 0,
                         typarray: entry.array_oid,
-                        // :HACK: User-defined ranges are currently text-backed. This is enough
-                        // for parser/catalog visibility and later DDL type resolution, but it
-                        // does not implement PostgreSQL's arbitrary-subtype range semantics yet.
                         sql_type: base_sql_type,
                     },
                     PgTypeRow {

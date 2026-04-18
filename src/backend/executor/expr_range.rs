@@ -4,13 +4,10 @@ use super::ExecError;
 use super::expr_casts::cast_value;
 use super::expr_datetime::render_datetime_value_text;
 use super::expr_ops::compare_order_values;
-use super::node_types::{BuiltinScalarFunction, RangeBound, RangeTypeId, RangeValue, Value};
+use super::node_types::{BuiltinScalarFunction, RangeBound, RangeTypeRef, RangeValue, Value};
 use crate::backend::parser::{SqlType, SqlTypeKind};
-use crate::include::catalog::{
-    RangeCanonicalization, builtin_range_spec, builtin_range_spec_for_sql_type,
-    range_kind_for_sql_type,
-};
-use crate::include::nodes::datetime::{DateADT, TimestampADT, TimestampTzADT};
+use crate::include::catalog::{RangeCanonicalization, range_type_ref_for_sql_type};
+use crate::include::nodes::datetime::DateADT;
 
 const RANGE_EMPTY_FLAG: u8 = 0x01;
 const RANGE_LOWER_INC_FLAG: u8 = 0x02;
@@ -18,8 +15,8 @@ const RANGE_UPPER_INC_FLAG: u8 = 0x04;
 const RANGE_LOWER_PRESENT_FLAG: u8 = 0x08;
 const RANGE_UPPER_PRESENT_FLAG: u8 = 0x10;
 
-pub(crate) fn parse_range_text(text: &str, ty: SqlTypeKind) -> Result<Value, ExecError> {
-    let Some(spec) = builtin_range_spec_for_sql_type(SqlType::new(ty)) else {
+pub(crate) fn parse_range_text(text: &str, ty: SqlType) -> Result<Value, ExecError> {
+    let Some(range_type) = range_type_ref_for_sql_type(ty) else {
         return Err(ExecError::TypeMismatch {
             op: "::range",
             left: Value::Text(text.into()),
@@ -28,29 +25,30 @@ pub(crate) fn parse_range_text(text: &str, ty: SqlTypeKind) -> Result<Value, Exe
     };
     let trimmed = text.trim();
     if trimmed.eq_ignore_ascii_case("empty") {
-        return Ok(Value::Range(empty_range(spec.kind)));
+        return Ok(Value::Range(empty_range(range_type)));
     }
     if trimmed.len() < 2 {
-        return Err(invalid_range_input(spec.name, text));
+        return Err(invalid_range_input(range_type, text));
     }
     let lower_ch = trimmed.as_bytes()[0] as char;
     let upper_ch = trimmed.as_bytes()[trimmed.len() - 1] as char;
     if !matches!(lower_ch, '[' | '(') || !matches!(upper_ch, ']' | ')') {
-        return Err(invalid_range_input(spec.name, text));
+        return Err(invalid_range_input(range_type, text));
     }
-    let (lower_raw, upper_raw) = split_range_body(&trimmed[1..trimmed.len() - 1], spec.name, text)?;
+    let (lower_raw, upper_raw) =
+        split_range_body(&trimmed[1..trimmed.len() - 1], range_type, text)?;
     let lower = if lower_raw.is_empty() {
         None
     } else {
-        Some(parse_range_bound_text(lower_raw, spec.subtype)?)
+        Some(parse_range_bound_text(lower_raw, range_type.subtype)?)
     };
     let upper = if upper_raw.is_empty() {
         None
     } else {
-        Some(parse_range_bound_text(upper_raw, spec.subtype)?)
+        Some(parse_range_bound_text(upper_raw, range_type.subtype)?)
     };
     Ok(Value::Range(normalize_range(
-        spec.kind,
+        range_type,
         lower.map(|value| RangeBound {
             value: Box::new(value),
             inclusive: lower_ch == '[',
@@ -99,7 +97,7 @@ pub(crate) fn render_range_value(range: &RangeValue) -> String {
 }
 
 pub(crate) fn compare_range_values(left: &RangeValue, right: &RangeValue) -> Ordering {
-    match left.kind.cmp(&right.kind) {
+    match left.range_type.type_oid().cmp(&right.range_type.type_oid()) {
         Ordering::Equal => {}
         other => return other,
     }
@@ -134,15 +132,18 @@ pub(crate) fn encode_range_bytes(range: &RangeValue) -> Result<Vec<u8>, ExecErro
     }
     let mut out = vec![flags];
     if let Some(lower) = &range.lower {
-        append_bound_bytes(&mut out, range.kind, lower.value.as_ref())?;
+        append_bound_bytes(&mut out, range.range_type, lower.value.as_ref())?;
     }
     if let Some(upper) = &range.upper {
-        append_bound_bytes(&mut out, range.kind, upper.value.as_ref())?;
+        append_bound_bytes(&mut out, range.range_type, upper.value.as_ref())?;
     }
     Ok(out)
 }
 
-pub(crate) fn decode_range_bytes(kind: RangeTypeId, bytes: &[u8]) -> Result<RangeValue, ExecError> {
+pub(crate) fn decode_range_bytes(
+    range_type: RangeTypeRef,
+    bytes: &[u8],
+) -> Result<RangeValue, ExecError> {
     let Some((&flags, mut rest)) = bytes.split_first() else {
         return Err(ExecError::InvalidStorageValue {
             column: "<range>".into(),
@@ -150,10 +151,10 @@ pub(crate) fn decode_range_bytes(kind: RangeTypeId, bytes: &[u8]) -> Result<Rang
         });
     };
     if flags & RANGE_EMPTY_FLAG != 0 {
-        return Ok(empty_range(kind));
+        return Ok(empty_range(range_type));
     }
     let lower = if flags & RANGE_LOWER_PRESENT_FLAG != 0 {
-        let (value, remaining) = take_bound_bytes(kind, rest)?;
+        let (value, remaining) = take_bound_bytes(range_type, rest)?;
         rest = remaining;
         Some(RangeBound {
             value: Box::new(value),
@@ -163,7 +164,7 @@ pub(crate) fn decode_range_bytes(kind: RangeTypeId, bytes: &[u8]) -> Result<Rang
         None
     };
     let upper = if flags & RANGE_UPPER_PRESENT_FLAG != 0 {
-        let (value, remaining) = take_bound_bytes(kind, rest)?;
+        let (value, remaining) = take_bound_bytes(range_type, rest)?;
         rest = remaining;
         Some(RangeBound {
             value: Box::new(value),
@@ -178,7 +179,7 @@ pub(crate) fn decode_range_bytes(kind: RangeTypeId, bytes: &[u8]) -> Result<Rang
             details: "range payload has trailing bytes".into(),
         });
     }
-    normalize_range(kind, lower, upper)
+    normalize_range(range_type, lower, upper)
 }
 
 pub(crate) fn eval_range_function(
@@ -257,7 +258,9 @@ pub(crate) fn range_intersection_agg_transition(
     match current {
         None => Ok(Some(input.to_owned_value())),
         Some(existing) => match (&existing, input) {
-            (Value::Range(left), Value::Range(right)) if left.kind == right.kind => {
+            (Value::Range(left), Value::Range(right))
+                if left.range_type.type_oid() == right.range_type.type_oid() =>
+            {
                 Ok(Some(Value::Range(range_intersection(left, right))))
             }
             _ => Err(ExecError::TypeMismatch {
@@ -273,12 +276,12 @@ fn eval_range_constructor(
     values: &[Value],
     result_type: Option<SqlType>,
 ) -> Result<Value, ExecError> {
-    let kind = if let Some(kind) = result_type.and_then(range_kind_for_sql_type) {
-        kind
+    let range_type = if let Some(range_type) = result_type.and_then(range_type_ref_for_sql_type) {
+        range_type
     } else {
         values
             .iter()
-            .find_map(|value| range_kind_for_scalar_value(value))
+            .find_map(range_type_for_scalar_value)
             .ok_or_else(|| ExecError::DetailedError {
                 message: "could not determine range type".into(),
                 detail: None,
@@ -319,7 +322,7 @@ fn eval_range_constructor(
             value: Box::new(value),
             inclusive: upper_inc,
         });
-    Ok(Value::Range(normalize_range(kind, lower, upper)?))
+    Ok(Value::Range(normalize_range(range_type, lower, upper)?))
 }
 
 fn value_to_constructor_bound(value: &Value) -> Option<Value> {
@@ -428,7 +431,7 @@ fn binary_range_range(
 }
 
 pub(crate) fn normalize_range(
-    kind: RangeTypeId,
+    range_type: RangeTypeRef,
     mut lower: Option<RangeBound>,
     mut upper: Option<RangeBound>,
 ) -> Result<RangeValue, ExecError> {
@@ -442,49 +445,48 @@ pub(crate) fn normalize_range(
             bound.inclusive = false;
         }
     }
-    let spec = builtin_range_spec(kind);
-    if matches!(spec.canonicalization, RangeCanonicalization::Discrete) {
+    if matches!(range_type.canonicalization, RangeCanonicalization::Discrete) {
         if let Some(bound) = &mut lower
             && !bound.inclusive
         {
-            *bound.value = successor_value(kind, bound.value.as_ref())?;
+            *bound.value = successor_value(range_type, bound.value.as_ref())?;
             bound.inclusive = true;
         }
         if let Some(bound) = &mut upper
             && bound.inclusive
         {
-            *bound.value = successor_value(kind, bound.value.as_ref())?;
+            *bound.value = successor_value(range_type, bound.value.as_ref())?;
             bound.inclusive = false;
         }
     }
     if let (Some(lower_bound), Some(upper_bound)) = (&lower, &upper) {
         match compare_scalar_values(lower_bound.value.as_ref(), upper_bound.value.as_ref()) {
-            Ordering::Greater => return Err(range_bounds_error(spec.name)),
+            Ordering::Greater => return Err(range_bounds_error(range_type)),
             Ordering::Equal => {
-                let non_empty = match spec.canonicalization {
+                let non_empty = match range_type.canonicalization {
                     RangeCanonicalization::Discrete => false,
                     RangeCanonicalization::Continuous => {
                         lower_bound.inclusive && upper_bound.inclusive
                     }
                 };
                 if !non_empty {
-                    return Ok(empty_range(kind));
+                    return Ok(empty_range(range_type));
                 }
             }
             Ordering::Less => {}
         }
     }
     Ok(RangeValue {
-        kind,
+        range_type,
         empty: false,
         lower,
         upper,
     })
 }
 
-pub(crate) fn empty_range(kind: RangeTypeId) -> RangeValue {
+pub(crate) fn empty_range(range_type: RangeTypeRef) -> RangeValue {
     RangeValue {
-        kind,
+        range_type,
         empty: true,
         lower: None,
         upper: None,
@@ -552,11 +554,12 @@ fn range_strict_right(left: &RangeValue, right: &RangeValue) -> bool {
 
 fn range_intersection(left: &RangeValue, right: &RangeValue) -> RangeValue {
     if !range_overlap(left, right) {
-        return empty_range(left.kind);
+        return empty_range(left.range_type);
     }
     let lower = max_lower_bound(left.lower.as_ref(), right.lower.as_ref());
     let upper = min_upper_bound(left.upper.as_ref(), right.upper.as_ref());
-    normalize_range(left.kind, lower, upper).unwrap_or_else(|_| empty_range(left.kind))
+    normalize_range(left.range_type, lower, upper)
+        .unwrap_or_else(|_| empty_range(left.range_type))
 }
 
 fn range_merge(left: &RangeValue, right: &RangeValue) -> RangeValue {
@@ -567,7 +570,7 @@ fn range_merge(left: &RangeValue, right: &RangeValue) -> RangeValue {
         return left.clone();
     }
     RangeValue {
-        kind: left.kind,
+        range_type: left.range_type,
         empty: false,
         lower: min_lower_bound(left.lower.as_ref(), right.lower.as_ref()),
         upper: max_upper_bound(left.upper.as_ref(), right.upper.as_ref()),
@@ -591,12 +594,12 @@ fn range_difference(left: &RangeValue, right: &RangeValue) -> Result<RangeValue,
         return Ok(left.clone());
     }
     if range_contains_range(right, left) {
-        return Ok(empty_range(left.kind));
+        return Ok(empty_range(left.range_type));
     }
     let left_piece =
         if compare_lower_bounds(left.lower.as_ref(), right.lower.as_ref()) == Ordering::Less {
             Some(normalize_range(
-                left.kind,
+                left.range_type,
                 left.lower.clone(),
                 right.lower.as_ref().map(toggle_lower_to_upper_bound),
             )?)
@@ -606,7 +609,7 @@ fn range_difference(left: &RangeValue, right: &RangeValue) -> Result<RangeValue,
     let right_piece =
         if compare_upper_bounds(left.upper.as_ref(), right.upper.as_ref()) == Ordering::Greater {
             Some(normalize_range(
-                left.kind,
+                left.range_type,
                 right.upper.as_ref().map(toggle_upper_to_lower_bound),
                 left.upper.clone(),
             )?)
@@ -633,7 +636,7 @@ fn range_difference(left: &RangeValue, right: &RangeValue) -> Result<RangeValue,
     {
         return Ok(range);
     }
-    Ok(empty_range(left.kind))
+    Ok(empty_range(left.range_type))
 }
 
 fn toggle_lower_to_upper_bound(bound: &RangeBound) -> RangeBound {
@@ -754,7 +757,7 @@ fn ensure_same_range_kind(
     left: &RangeValue,
     right: &RangeValue,
 ) -> Result<(), ExecError> {
-    if left.kind == right.kind {
+    if left.range_type.type_oid() == right.range_type.type_oid() {
         Ok(())
     } else {
         Err(ExecError::TypeMismatch {
@@ -766,15 +769,10 @@ fn ensure_same_range_kind(
 }
 
 fn ensure_range_subtype(range: &RangeValue, value: &Value) -> Result<(), ExecError> {
-    let matches = match (range.kind, value) {
-        (RangeTypeId::Int4Range, Value::Int32(_)) => true,
-        (RangeTypeId::Int8Range, Value::Int64(_)) => true,
-        (RangeTypeId::NumericRange, Value::Numeric(_)) => true,
-        (RangeTypeId::DateRange, Value::Date(_)) => true,
-        (RangeTypeId::TimestampRange, Value::Timestamp(_)) => true,
-        (RangeTypeId::TimestampTzRange, Value::TimestampTz(_)) => true,
-        _ => false,
-    };
+    let matches = value
+        .sql_type_hint()
+        .map(|ty| ty.element_type() == range.range_type.subtype.element_type())
+        .unwrap_or(false);
     if matches {
         Ok(())
     } else {
@@ -786,30 +784,34 @@ fn ensure_range_subtype(range: &RangeValue, value: &Value) -> Result<(), ExecErr
     }
 }
 
-fn range_kind_for_scalar_value(value: &Value) -> Option<RangeTypeId> {
+fn range_type_for_scalar_value(value: &Value) -> Option<RangeTypeRef> {
     match value {
-        Value::Range(range) => Some(range.kind),
-        Value::Int32(_) => Some(RangeTypeId::Int4Range),
-        Value::Int64(_) => Some(RangeTypeId::Int8Range),
-        Value::Numeric(_) => Some(RangeTypeId::NumericRange),
-        Value::Date(_) => Some(RangeTypeId::DateRange),
-        Value::Timestamp(_) => Some(RangeTypeId::TimestampRange),
-        Value::TimestampTz(_) => Some(RangeTypeId::TimestampTzRange),
+        Value::Range(range) => Some(range.range_type),
+        Value::Int32(_) => range_type_ref_for_sql_type(SqlType::new(SqlTypeKind::Int4Range)),
+        Value::Int64(_) => range_type_ref_for_sql_type(SqlType::new(SqlTypeKind::Int8Range)),
+        Value::Numeric(_) => range_type_ref_for_sql_type(SqlType::new(SqlTypeKind::NumericRange)),
+        Value::Date(_) => range_type_ref_for_sql_type(SqlType::new(SqlTypeKind::DateRange)),
+        Value::Timestamp(_) => {
+            range_type_ref_for_sql_type(SqlType::new(SqlTypeKind::TimestampRange))
+        }
+        Value::TimestampTz(_) => {
+            range_type_ref_for_sql_type(SqlType::new(SqlTypeKind::TimestampTzRange))
+        }
         _ => None,
     }
 }
 
-fn successor_value(kind: RangeTypeId, value: &Value) -> Result<Value, ExecError> {
-    match (kind, value) {
-        (RangeTypeId::Int4Range, Value::Int32(v)) => v
+fn successor_value(range_type: RangeTypeRef, value: &Value) -> Result<Value, ExecError> {
+    match (range_type.subtype.kind, value) {
+        (SqlTypeKind::Int4, Value::Int32(v)) => v
             .checked_add(1)
             .map(Value::Int32)
             .ok_or_else(range_bound_overflow),
-        (RangeTypeId::Int8Range, Value::Int64(v)) => v
+        (SqlTypeKind::Int8, Value::Int64(v)) => v
             .checked_add(1)
             .map(Value::Int64)
             .ok_or_else(range_bound_overflow),
-        (RangeTypeId::DateRange, Value::Date(v)) => {
+        (SqlTypeKind::Date, Value::Date(v)) => {
             v.0.checked_add(1)
                 .map(|days| Value::Date(DateADT(days)))
                 .ok_or_else(range_bound_overflow)
@@ -824,17 +826,17 @@ fn successor_value(kind: RangeTypeId, value: &Value) -> Result<Value, ExecError>
 
 fn append_bound_bytes(
     out: &mut Vec<u8>,
-    kind: RangeTypeId,
+    range_type: RangeTypeRef,
     value: &Value,
 ) -> Result<(), ExecError> {
-    let bytes = encode_bound_value(kind, value)?;
+    let bytes = encode_bound_value(range_type, value)?;
     out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
     out.extend_from_slice(&bytes);
     Ok(())
 }
 
 fn take_bound_bytes<'a>(
-    kind: RangeTypeId,
+    range_type: RangeTypeRef,
     bytes: &'a [u8],
 ) -> Result<(Value, &'a [u8]), ExecError> {
     if bytes.len() < 4 {
@@ -850,74 +852,34 @@ fn take_bound_bytes<'a>(
             details: "range bound payload truncated".into(),
         });
     }
-    let value = decode_bound_value(kind, &bytes[4..4 + len])?;
+    let value = decode_bound_value(range_type, &bytes[4..4 + len])?;
     Ok((value, &bytes[4 + len..]))
 }
 
-fn encode_bound_value(kind: RangeTypeId, value: &Value) -> Result<Vec<u8>, ExecError> {
+fn encode_bound_value(range_type: RangeTypeRef, value: &Value) -> Result<Vec<u8>, ExecError> {
     ensure_range_subtype(
         &RangeValue {
-            kind,
+            range_type,
             empty: false,
             lower: None,
             upper: None,
         },
         value,
     )?;
-    Ok(match value {
-        Value::Int32(v) => v.to_le_bytes().to_vec(),
-        Value::Int64(v) => v.to_le_bytes().to_vec(),
-        Value::Numeric(v) => v.render().into_bytes(),
-        Value::Date(v) => v.0.to_le_bytes().to_vec(),
-        Value::Timestamp(v) => v.0.to_le_bytes().to_vec(),
-        Value::TimestampTz(v) => v.0.to_le_bytes().to_vec(),
-        other => {
-            return Err(ExecError::TypeMismatch {
-                op: "range encoding",
-                left: other.clone(),
-                right: Value::Null,
-            });
-        }
-    })
+    Ok(render_bound_text(value).into_bytes())
 }
 
-fn decode_bound_value(kind: RangeTypeId, bytes: &[u8]) -> Result<Value, ExecError> {
-    match kind {
-        RangeTypeId::Int4Range if bytes.len() == 4 => {
-            Ok(Value::Int32(i32::from_le_bytes(bytes.try_into().unwrap())))
-        }
-        RangeTypeId::Int8Range if bytes.len() == 8 => {
-            Ok(Value::Int64(i64::from_le_bytes(bytes.try_into().unwrap())))
-        }
-        RangeTypeId::NumericRange => {
-            let text = std::str::from_utf8(bytes).map_err(|_| ExecError::InvalidStorageValue {
-                column: "<range>".into(),
-                details: "numeric range bound is not utf8".into(),
-            })?;
-            Ok(cast_value(
-                Value::Text(text.into()),
-                SqlType::new(SqlTypeKind::Numeric),
-            )?)
-        }
-        RangeTypeId::DateRange if bytes.len() == 4 => Ok(Value::Date(DateADT(i32::from_le_bytes(
-            bytes.try_into().unwrap(),
-        )))),
-        RangeTypeId::TimestampRange if bytes.len() == 8 => Ok(Value::Timestamp(TimestampADT(
-            i64::from_le_bytes(bytes.try_into().unwrap()),
-        ))),
-        RangeTypeId::TimestampTzRange if bytes.len() == 8 => Ok(Value::TimestampTz(
-            TimestampTzADT(i64::from_le_bytes(bytes.try_into().unwrap())),
-        )),
-        _ => Err(ExecError::InvalidStorageValue {
-            column: "<range>".into(),
-            details: "range bound payload has wrong length".into(),
-        }),
-    }
+fn decode_bound_value(range_type: RangeTypeRef, bytes: &[u8]) -> Result<Value, ExecError> {
+    let text = std::str::from_utf8(bytes).map_err(|_| ExecError::InvalidStorageValue {
+        column: "<range>".into(),
+        details: "range bound is not utf8".into(),
+    })?;
+    cast_value(Value::Text(text.into()), range_type.subtype)
 }
 
 fn split_range_body<'a>(
     body: &'a str,
-    ty: &'static str,
+    range_type: RangeTypeRef,
     original: &str,
 ) -> Result<(&'a str, &'a str), ExecError> {
     let bytes = body.as_bytes();
@@ -934,7 +896,7 @@ fn split_range_body<'a>(
             _ => idx += 1,
         }
     }
-    Err(invalid_range_input(ty, original))
+    Err(invalid_range_input(range_type, original))
 }
 
 fn parse_range_bound_text(text: &str, subtype: SqlType) -> Result<Value, ExecError> {
@@ -964,12 +926,17 @@ fn decode_range_bound_text(text: &str) -> String {
 
 fn render_bound_text(value: &Value) -> String {
     let raw = match value {
+        Value::Int16(v) => v.to_string(),
         Value::Int32(v) => v.to_string(),
         Value::Int64(v) => v.to_string(),
+        Value::Money(v) => v.to_string(),
+        Value::Float64(v) => v.to_string(),
         Value::Numeric(v) => v.render(),
         Value::Date(_) | Value::Timestamp(_) | Value::TimestampTz(_) => {
             render_datetime_value_text(value).unwrap_or_default()
         }
+        Value::Bool(v) => v.to_string(),
+        Value::Bit(bits) => bits.render(),
         other => other.as_text().unwrap_or_default().to_string(),
     };
     if needs_range_quotes(&raw) {
@@ -1009,14 +976,22 @@ fn parse_range_flags(value: &Value) -> Result<(bool, bool), ExecError> {
     }
 }
 
-fn invalid_range_input(ty: &'static str, value: &str) -> ExecError {
+fn invalid_range_input(range_type: RangeTypeRef, value: &str) -> ExecError {
     ExecError::InvalidRangeInput {
-        ty,
+        ty: match range_type.sql_type.kind {
+            SqlTypeKind::Int4Range => "int4range",
+            SqlTypeKind::Int8Range => "int8range",
+            SqlTypeKind::NumericRange => "numrange",
+            SqlTypeKind::DateRange => "daterange",
+            SqlTypeKind::TimestampRange => "tsrange",
+            SqlTypeKind::TimestampTzRange => "tstzrange",
+            _ => "range",
+        },
         value: value.to_string(),
     }
 }
 
-fn range_bounds_error(_ty: &'static str) -> ExecError {
+fn range_bounds_error(_range_type: RangeTypeRef) -> ExecError {
     ExecError::DetailedError {
         message: "range lower bound must be less than or equal to range upper bound".into(),
         detail: None,
@@ -1039,10 +1014,14 @@ mod tests {
     use super::*;
     use crate::include::nodes::datum::NumericValue;
 
+    fn test_range_type(sql_type: SqlType) -> RangeTypeRef {
+        range_type_ref_for_sql_type(sql_type).expect("range type")
+    }
+
     #[test]
     fn int4_range_canonicalizes_closed_upper() {
         let range = normalize_range(
-            RangeTypeId::Int4Range,
+            test_range_type(SqlType::new(SqlTypeKind::Int4Range)),
             Some(RangeBound {
                 value: Box::new(Value::Int32(1)),
                 inclusive: true,
@@ -1059,7 +1038,7 @@ mod tests {
     #[test]
     fn numrange_equal_closed_bounds_is_non_empty() {
         let range = normalize_range(
-            RangeTypeId::NumericRange,
+            test_range_type(SqlType::new(SqlTypeKind::NumericRange)),
             Some(RangeBound {
                 value: Box::new(Value::Numeric(NumericValue::from("1.7"))),
                 inclusive: true,
@@ -1076,7 +1055,7 @@ mod tests {
     #[test]
     fn numrange_equal_half_open_bounds_is_empty() {
         let range = normalize_range(
-            RangeTypeId::NumericRange,
+            test_range_type(SqlType::new(SqlTypeKind::NumericRange)),
             Some(RangeBound {
                 value: Box::new(Value::Numeric(NumericValue::from("1.7"))),
                 inclusive: true,
@@ -1094,7 +1073,7 @@ mod tests {
     fn parse_and_render_timestamp_range_quotes_bounds() {
         let value = parse_range_text(
             "[\"2000-01-01 00:00:00\",\"2000-01-02 00:00:00\")",
-            SqlTypeKind::TimestampRange,
+            SqlType::new(SqlTypeKind::TimestampRange),
         )
         .unwrap();
         assert_eq!(
@@ -1105,9 +1084,9 @@ mod tests {
 
     #[test]
     fn empty_range_sorts_before_non_empty() {
-        let empty = empty_range(RangeTypeId::Int4Range);
+        let empty = empty_range(test_range_type(SqlType::new(SqlTypeKind::Int4Range)));
         let non_empty = normalize_range(
-            RangeTypeId::Int4Range,
+            test_range_type(SqlType::new(SqlTypeKind::Int4Range)),
             Some(RangeBound {
                 value: Box::new(Value::Int32(1)),
                 inclusive: true,
@@ -1124,7 +1103,7 @@ mod tests {
     #[test]
     fn range_binary_storage_round_trips() {
         let range = normalize_range(
-            RangeTypeId::Int4Range,
+            test_range_type(SqlType::new(SqlTypeKind::Int4Range)),
             Some(RangeBound {
                 value: Box::new(Value::Int32(1)),
                 inclusive: true,
@@ -1136,7 +1115,9 @@ mod tests {
         )
         .unwrap();
         let encoded = encode_range_bytes(&range).unwrap();
-        let decoded = decode_range_bytes(RangeTypeId::Int4Range, &encoded).unwrap();
+        let decoded =
+            decode_range_bytes(test_range_type(SqlType::new(SqlTypeKind::Int4Range)), &encoded)
+                .unwrap();
         assert_eq!(decoded, range);
     }
 }

@@ -205,10 +205,15 @@ fn attribute_rows_for_desc(relid: u32, desc: &RelationDesc) -> Vec<PgAttributeRo
 }
 
 fn sql_type_oid(sql_type: SqlType) -> u32 {
+    if sql_type.type_oid != 0 && matches!(sql_type.kind, SqlTypeKind::Range) {
+        return sql_type.type_oid;
+    }
     if !sql_type.is_array && sql_type.type_oid != 0 {
         return sql_type.type_oid;
     }
     match (sql_type.kind, sql_type.is_array) {
+        (SqlTypeKind::Range, false) => sql_type.type_oid,
+        (SqlTypeKind::Range, true) => sql_type.type_oid,
         (SqlTypeKind::AnyArray, false) => ANYARRAYOID,
         (SqlTypeKind::AnyArray, true) => unreachable!("anyarray arrays are unsupported"),
         (SqlTypeKind::Record, false) => sql_type.type_oid,
