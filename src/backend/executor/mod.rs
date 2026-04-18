@@ -47,7 +47,7 @@ pub use crate::include::executor::execdesc::*;
 pub use crate::include::nodes::datum::*;
 pub use crate::include::nodes::execnodes::*;
 pub use crate::include::nodes::plannodes::*;
-pub(crate) use agg::{AccumState, AggGroup, AggTransitionFn, OrderedAggInput};
+pub(crate) use agg::{AccumState, AggGroup, OrderedAggInput};
 pub use driver::{
     exec_next, execute_plan, execute_planned_stmt, execute_readonly_statement, execute_sql,
     execute_statement,
@@ -134,8 +134,8 @@ pub struct ExecutorContext {
     pub checkpoint_stats: CheckpointStatsSnapshot,
     pub datetime_config: DateTimeConfig,
     pub interrupts: std::sync::Arc<InterruptState>,
-    pub(crate) stats: std::sync::Arc<parking_lot::RwLock<DatabaseStatsStore>>,
-    pub(crate) session_stats: std::sync::Arc<parking_lot::RwLock<SessionStatsState>>,
+    pub stats: std::sync::Arc<parking_lot::RwLock<DatabaseStatsStore>>,
+    pub session_stats: std::sync::Arc<parking_lot::RwLock<SessionStatsState>>,
     pub snapshot: Snapshot,
     pub client_id: ClientId,
     pub next_command_id: CommandId,
