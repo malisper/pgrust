@@ -6721,6 +6721,39 @@ fn numeric_transcendentals_match_postgres_reference_values() {
 }
 
 #[test]
+fn numeric_exp_underflow_matches_postgres_zero_semantics() {
+    let base = temp_dir("numeric_exp_underflow");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select \
+                exp(-5000::numeric) = 0, \
+                scale(exp(-5000::numeric)), \
+                exp(-10000::numeric) = 0, \
+                scale(exp(-10000::numeric)), \
+                coalesce(nullif(exp(-5000::numeric), 0), 0), \
+                coalesce(nullif(exp(-10000::numeric), 0), 0), \
+                exp(32.999::numeric), \
+                exp(-32.999::numeric)",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Bool(true),
+            Value::Int32(1000),
+            Value::Bool(true),
+            Value::Int32(1000),
+            Value::Numeric("0".into()),
+            Value::Numeric("0".into()),
+            Value::Numeric("214429043492155.053".into()),
+            Value::Numeric("0.000000000000004663547361468248".into()),
+        ]],
+    );
+}
+
+#[test]
 fn numeric_power_special_values_follow_postgres() {
     let base = temp_dir("numeric_power_special_values");
     let txns = TransactionManager::new_durable(&base).unwrap();
