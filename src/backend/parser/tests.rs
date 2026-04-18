@@ -1236,6 +1236,32 @@ fn parse_reset_session_authorization_statement() {
 }
 
 #[test]
+fn parse_set_role_statement() {
+    let stmt = parse_statement("set role regress_tenant").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::SetRole(SetRoleStatement {
+            role_name: Some("regress_tenant".into()),
+        })
+    );
+}
+
+#[test]
+fn parse_set_role_none_statement() {
+    let stmt = parse_statement("set role none").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::SetRole(SetRoleStatement { role_name: None })
+    );
+}
+
+#[test]
+fn parse_reset_role_statement() {
+    let stmt = parse_statement("reset role").unwrap();
+    assert_eq!(stmt, Statement::ResetRole(ResetRoleStatement));
+}
+
+#[test]
 fn parse_comment_on_role_statement() {
     let stmt = parse_statement("comment on role regress_hasprivs is 'some comment'").unwrap();
     assert_eq!(

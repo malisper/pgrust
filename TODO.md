@@ -441,7 +441,7 @@ Targeted reruns on 2026-04-17:
   - expose privilege-related system catalogs in SQL, including `pg_auth_members` and `pg_largeobject_metadata`
   - [done] add parser/analyzer support for role membership `GRANTED BY`
   - [done] add parser/analyzer/executor support for `CASCADE` in role membership revokes
-  - implement `SET ROLE` and `RESET ROLE`
+  - [done] implement `SET ROLE` and `RESET ROLE`
   - implement SQL-visible `session_user`, `current_user`, and `current_role` semantics used by the regression
   - add parser/executor support for `DROP OWNED`
   - add parser support for `DROP USER`, `CREATE GROUP`, and `ALTER GROUP`

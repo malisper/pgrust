@@ -496,6 +496,8 @@ fn run_statement(
         | Statement::RevokeObject(_)
         | Statement::GrantRoleMembership(_)
         | Statement::RevokeRoleMembership(_)
+        | Statement::SetRole(_)
+        | Statement::ResetRole(_)
         | Statement::SetSessionAuthorization(_)
         | Statement::ResetSessionAuthorization(_)
         | Statement::ReassignOwned(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(

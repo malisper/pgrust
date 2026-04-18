@@ -85,6 +85,14 @@ impl AuthState {
         self.current_user_oid = self.authenticated_user_oid;
     }
 
+    pub fn set_role(&mut self, role_oid: u32) {
+        self.current_user_oid = role_oid;
+    }
+
+    pub fn reset_role(&mut self) {
+        self.current_user_oid = self.session_user_oid;
+    }
+
     pub fn can_set_session_authorization(&self, target_oid: u32, catalog: &AuthCatalog) -> bool {
         target_oid == self.authenticated_user_oid
             || catalog
@@ -99,6 +107,21 @@ impl AuthState {
         self.is_superuser(catalog)
             || has_membership_path(
                 self.current_user_oid,
+                target_oid,
+                catalog.memberships(),
+                MembershipMode::Set,
+            )
+    }
+
+    pub fn can_set_role_from_session(&self, target_oid: u32, catalog: &AuthCatalog) -> bool {
+        if self.session_user_oid == target_oid {
+            return true;
+        }
+        catalog
+            .role_by_oid(self.authenticated_user_oid)
+            .is_some_and(|row| row.rolsuper)
+            || has_membership_path(
+                self.session_user_oid,
                 target_oid,
                 catalog.memberships(),
                 MembershipMode::Set,
@@ -257,6 +280,20 @@ mod tests {
     }
 
     #[test]
+    fn set_role_only_changes_current_user() {
+        let mut auth = AuthState::default();
+        auth.set_session_authorization(42);
+        auth.set_role(77);
+        assert_eq!(auth.authenticated_user_oid(), BOOTSTRAP_SUPERUSER_OID);
+        assert_eq!(auth.session_user_oid(), 42);
+        assert_eq!(auth.current_user_oid(), 77);
+
+        auth.reset_role();
+        assert_eq!(auth.session_user_oid(), 42);
+        assert_eq!(auth.current_user_oid(), 42);
+    }
+
+    #[test]
     fn auth_membership_checks_respect_inherit_and_set_bits() {
         let catalog = AuthCatalog::new(
             vec![row(10, "postgres"), row(20, "parent"), row(21, "child")],
@@ -276,6 +313,45 @@ mod tests {
         assert!(auth.has_effective_membership(20, &catalog));
         assert!(!auth.can_set_role(20, &catalog));
         assert!(auth.has_admin_option(20, &catalog));
+    }
+
+    #[test]
+    fn set_role_permissions_are_checked_from_session_user() {
+        let catalog = AuthCatalog::new(
+            vec![
+                row(10, "postgres"),
+                row(20, "parent"),
+                row(21, "child"),
+                row(22, "other"),
+            ],
+            vec![
+                PgAuthMembersRow {
+                    oid: 1,
+                    roleid: 20,
+                    member: 21,
+                    grantor: 10,
+                    admin_option: false,
+                    inherit_option: true,
+                    set_option: true,
+                },
+                PgAuthMembersRow {
+                    oid: 2,
+                    roleid: 22,
+                    member: 20,
+                    grantor: 10,
+                    admin_option: false,
+                    inherit_option: true,
+                    set_option: false,
+                },
+            ],
+        );
+        let mut auth = AuthState::default();
+        auth.assume_authenticated_user(21);
+        auth.set_role(20);
+
+        assert!(!auth.can_set_role(22, &catalog));
+        assert!(!auth.can_set_role_from_session(22, &catalog));
+        assert!(auth.can_set_role_from_session(20, &catalog));
     }
 
     #[test]

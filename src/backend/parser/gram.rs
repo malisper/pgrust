@@ -225,8 +225,6 @@ fn try_parse_unsupported_statement(sql: &str) -> Option<Statement> {
         Some("ALTER INDEX")
     } else if lowered.starts_with("alter view ") {
         Some("ALTER VIEW")
-    } else if lowered.starts_with("set role ") || lowered == "reset role" {
-        Some("ROLE management")
     } else if lowered.starts_with("drop index ") {
         Some("DROP INDEX")
     } else if lowered.starts_with("drop table ") {
@@ -2272,6 +2270,8 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::reset_session_authorization_stmt => Ok(Statement::ResetSessionAuthorization(
             build_reset_session_authorization(inner)?,
         )),
+        Rule::set_role_stmt => Ok(Statement::SetRole(build_set_role(inner)?)),
+        Rule::reset_role_stmt => Ok(Statement::ResetRole(build_reset_role(inner)?)),
         Rule::set_stmt => Ok(Statement::Set(build_set(inner)?)),
         Rule::reset_stmt => Ok(Statement::Reset(build_reset(inner)?)),
         Rule::create_role_stmt => Ok(Statement::CreateRole(build_create_role(inner)?)),
@@ -2541,6 +2541,18 @@ fn build_reset_session_authorization(
     _pair: Pair<'_, Rule>,
 ) -> Result<ResetSessionAuthorizationStatement, ParseError> {
     Ok(ResetSessionAuthorizationStatement)
+}
+
+fn build_set_role(pair: Pair<'_, Rule>) -> Result<SetRoleStatement, ParseError> {
+    let role_name = pair
+        .into_inner()
+        .find(|part| part.as_rule() == Rule::identifier)
+        .map(build_identifier);
+    Ok(SetRoleStatement { role_name })
+}
+
+fn build_reset_role(_pair: Pair<'_, Rule>) -> Result<ResetRoleStatement, ParseError> {
+    Ok(ResetRoleStatement)
 }
 
 fn build_reset(pair: Pair<'_, Rule>) -> Result<ResetStatement, ParseError> {
