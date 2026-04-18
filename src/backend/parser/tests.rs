@@ -2167,6 +2167,19 @@ fn parse_row_constructor_expression() {
     }
 }
 
+
+#[test]
+fn analyze_extract_keeps_extract_as_default_output_name() {
+    let stmt = parse_select("select extract(week from date '2020-08-11')").unwrap();
+    let (query, _) = analyze_select_query_with_outer(&stmt, &catalog(), &[], None, &[], &[])
+        .unwrap();
+
+    assert_eq!(
+        query_column_names_and_types(&query),
+        vec![("extract".into(), SqlType::new(SqlTypeKind::Float8))]
+    );
+}
+
 #[test]
 fn parse_type_cast_expression() {
     let stmt = parse_select("select (p.name)::text from people p").unwrap();
