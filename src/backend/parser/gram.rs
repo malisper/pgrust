@@ -6199,18 +6199,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
             Ok(SqlExpr::Exists(Box::new(subquery)))
         }
         Rule::case_expr => build_case_expr(pair),
-        Rule::array_expr => Ok(SqlExpr::ArrayLiteral(
-            pair.into_inner()
-                .find(|part| part.as_rule() == Rule::expr_list)
-                .map(|list| {
-                    list.into_inner()
-                        .filter(|part| part.as_rule() == Rule::expr)
-                        .map(build_expr)
-                        .collect::<Result<Vec<_>, _>>()
-                })
-                .transpose()?
-                .unwrap_or_default(),
-        )),
+        Rule::array_expr => build_array_literal(pair),
         Rule::cast_expr => {
             let mut expr = None;
             let mut ty = None;
@@ -6515,6 +6504,33 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
             actual: pair.as_str().into(),
         }),
     }
+}
+
+fn build_array_literal(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
+    let elements = pair
+        .into_inner()
+        .find(|part| part.as_rule() == Rule::array_expr_elements)
+        .map(build_array_literal_elements)
+        .transpose()?
+        .unwrap_or_default();
+    Ok(SqlExpr::ArrayLiteral(elements))
+}
+
+fn build_array_literal_elements(pair: Pair<'_, Rule>) -> Result<Vec<SqlExpr>, ParseError> {
+    pair.into_inner()
+        .filter(|part| part.as_rule() == Rule::array_expr_element)
+        .map(|element| {
+            let inner = element.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+            match inner.as_rule() {
+                Rule::nested_array_expr => build_array_literal(inner),
+                Rule::expr => build_expr(inner),
+                _ => Err(ParseError::UnexpectedToken {
+                    expected: "array expression element",
+                    actual: inner.as_str().into(),
+                }),
+            }
+        })
+        .collect()
 }
 
 fn build_agg_call(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {

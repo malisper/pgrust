@@ -4802,6 +4802,20 @@ fn parse_array_and_unnest_expressions() {
 }
 
 #[test]
+fn parse_nested_array_constructor_shorthand() {
+    let stmt = parse_select("select ARRAY[[[111,112],[121,122]],[[211,212],[221,222]]] as f")
+        .unwrap();
+    match &stmt.targets[0].expr {
+        SqlExpr::ArrayLiteral(outer) => {
+            assert_eq!(outer.len(), 2);
+            assert!(matches!(outer[0], SqlExpr::ArrayLiteral(_)));
+            assert!(matches!(outer[1], SqlExpr::ArrayLiteral(_)));
+        }
+        other => panic!("expected nested array literal, got {other:?}"),
+    }
+}
+
+#[test]
 fn build_plan_rejects_untyped_empty_array() {
     let stmt = parse_select("select ARRAY[]").unwrap();
     assert!(matches!(
