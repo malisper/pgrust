@@ -761,7 +761,7 @@ fn format_numeric_result(value: NumericValue, sql_type: SqlType) -> NumericValue
     if let Some((_, scale)) = sql_type.numeric_precision_scale() {
         value.round_to_scale(scale as u32).unwrap_or(value)
     } else {
-        value.normalize_display_scale()
+        value
     }
 }
 
