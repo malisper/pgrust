@@ -11236,6 +11236,32 @@ fn jsonpath_datetime_method_calls_parse() {
 }
 
 #[test]
+fn jsonpath_datetime_template_method_parse() {
+    let base = temp_dir("jsonpath_datetime_template_method_parse");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select '$.datetime(\"datetime template\")'::jsonpath, '$.datetime(\"dd-mm-yyyy\\\"T\\\"HH24:MI:SS\")'::jsonpath",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::JsonPath("$.datetime(\"datetime template\")".into()),
+                    Value::JsonPath("$.datetime(\"dd-mm-yyyy\\\"T\\\"HH24:MI:SS\")".into()),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn jsonpath_string_predicates_parse() {
     let base = temp_dir("jsonpath_string_predicates_parse");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -11392,7 +11418,7 @@ fn jsonpath_datetime_method_calls_work() {
             match &rows[0][4] {
                 Value::Jsonb(bytes) => assert_eq!(
                     crate::backend::executor::jsonb::render_jsonb_bytes(bytes).unwrap(),
-                    "\"2023-08-15 12:34:56.78\""
+                    "\"2023-08-15T12:34:56.78\""
                 ),
                 other => panic!("expected jsonb, got {:?}", other),
             }
@@ -11414,6 +11440,61 @@ fn jsonpath_datetime_method_calls_work() {
                 Value::Jsonb(bytes) => assert_eq!(
                     crate::backend::executor::jsonb::render_jsonb_bytes(bytes).unwrap(),
                     "[1, 2]"
+                ),
+                other => panic!("expected jsonb, got {:?}", other),
+            }
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn jsonpath_datetime_template_method_work() {
+    let base = temp_dir("jsonpath_datetime_template_method_work");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_path_query('\"10-03-2017\"', '$.datetime(\"dd-mm-yyyy\")'), jsonb_path_query('\"10-03-2017 12:34\"', '$.datetime(\"dd-mm-yyyy HH24:MI\")'), jsonb_path_query('\"10-03-2017 12:34\"', '$.datetime(\"dd-mm-yyyy HH24:MI\").type()'), jsonb_path_query('\"12:34:56 +05:20\"', '$.datetime(\"HH24:MI:SS TZH:TZM\").type()'), jsonb_path_query('\"10-03-2017T12:34:56\"', '$.datetime(\"dd-mm-yyyy\\\"T\\\"HH24:MI:SS\")')",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows.len(), 1);
+            match &rows[0][0] {
+                Value::Jsonb(bytes) => assert_eq!(
+                    crate::backend::executor::jsonb::render_jsonb_bytes(bytes).unwrap(),
+                    "\"2017-03-10\""
+                ),
+                other => panic!("expected jsonb, got {:?}", other),
+            }
+            match &rows[0][1] {
+                Value::Jsonb(bytes) => assert_eq!(
+                    crate::backend::executor::jsonb::render_jsonb_bytes(bytes).unwrap(),
+                    "\"2017-03-10T12:34:00\""
+                ),
+                other => panic!("expected jsonb, got {:?}", other),
+            }
+            match &rows[0][2] {
+                Value::Jsonb(bytes) => assert_eq!(
+                    crate::backend::executor::jsonb::render_jsonb_bytes(bytes).unwrap(),
+                    "\"timestamp without time zone\""
+                ),
+                other => panic!("expected jsonb, got {:?}", other),
+            }
+            match &rows[0][3] {
+                Value::Jsonb(bytes) => assert_eq!(
+                    crate::backend::executor::jsonb::render_jsonb_bytes(bytes).unwrap(),
+                    "\"time with time zone\""
+                ),
+                other => panic!("expected jsonb, got {:?}", other),
+            }
+            match &rows[0][4] {
+                Value::Jsonb(bytes) => assert_eq!(
+                    crate::backend::executor::jsonb::render_jsonb_bytes(bytes).unwrap(),
+                    "\"2017-03-10T12:34:56\""
                 ),
                 other => panic!("expected jsonb, got {:?}", other),
             }
@@ -11545,6 +11626,79 @@ fn jsonpath_datetime_method_calls_errors() {
         ExecError::InvalidStorageValue { column, details }
             if column == "jsonpath"
                 && details == "time precision of jsonpath item method .time() is out of range for type integer"
+    ));
+}
+
+#[test]
+fn jsonpath_datetime_template_method_errors() {
+    let base = temp_dir("jsonpath_datetime_template_method_errors");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_path_query('\"12:34\"', '$.datetime(\"aaa\")')",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::InvalidStorageValue { column, details }
+            if column == "jsonpath"
+                && details == "invalid datetime format separator: \"a\""
+    ));
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_path_query('\"aaaa\"', '$.datetime(\"HH24\")')",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError { message, detail, .. }
+            if message == "invalid value \"aa\" for \"HH24\""
+                && detail.as_deref() == Some("Value must be an integer.")
+    ));
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_path_query('\"10-03-2017 12:34\"', '$.datetime(\"dd-mm-yyyy\")')",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError { message, .. }
+            if message == "trailing characters remain in input string after datetime format"
+    ));
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_path_query('\"10-03-2017t12:34:56\"', '$.datetime(\"dd-mm-yyyy\\\"T\\\"HH24:MI:SS\")')",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError { message, .. }
+            if message == "unmatched format character \"T\""
+    ));
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_path_query('\"10-03-2017 12:34:56\"', '$.datetime(\"dd-mm-yyyy\\\"T\\\"HH24:MI:SS\")')",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError { message, .. }
+            if message == "unmatched format character \"T\""
     ));
 }
 
