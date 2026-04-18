@@ -448,6 +448,7 @@ pub enum CreateFunctionReturnSpec {
 pub struct CreateFunctionStatement {
     pub schema_name: Option<String>,
     pub function_name: String,
+    pub replace_existing: bool,
     pub args: Vec<CreateFunctionArg>,
     pub return_spec: CreateFunctionReturnSpec,
     pub language: String,
