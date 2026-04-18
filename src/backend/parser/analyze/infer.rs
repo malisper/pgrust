@@ -473,13 +473,13 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                         ..
                     })
                     | Some(SqlType {
-                        kind: SqlTypeKind::TimestampTz,
-                        ..
-                    }) => SqlType::new(SqlTypeKind::TimestampTz),
-                    Some(SqlType {
                         kind: SqlTypeKind::Timestamp,
                         ..
                     }) => SqlType::new(SqlTypeKind::Timestamp),
+                    Some(SqlType {
+                        kind: SqlTypeKind::TimestampTz,
+                        ..
+                    }) => SqlType::new(SqlTypeKind::TimestampTz),
                     _ => SqlType::new(SqlTypeKind::Timestamp),
                 },
                 Some(BuiltinScalarFunction::IsFinite) => SqlType::new(SqlTypeKind::Bool),
@@ -941,13 +941,13 @@ fn infer_sql_row_expr_type(
             && let Some(relation_fields) =
                 resolve_relation_row_expr_with_outer(scope, outer_scopes, relation_name)
         {
-            for (field_name, expr) in relation_fields {
+            for (_, expr) in relation_fields {
                 fields.push((
-                    field_name,
+                    format!("f{next_index}"),
                     expr_sql_type_hint(&expr).unwrap_or(SqlType::new(SqlTypeKind::Text)),
                 ));
+                next_index += 1;
             }
-            next_index = fields.len() + 1;
             continue;
         }
 

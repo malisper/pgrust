@@ -307,6 +307,18 @@ pub(super) fn resolve_common_scalar_type(left: SqlType, right: SqlType) -> Optio
     if left == right {
         return Some(left);
     }
+    if matches!(left.kind, SqlTypeKind::Record | SqlTypeKind::Composite)
+        && matches!(right.kind, SqlTypeKind::Record | SqlTypeKind::Composite)
+    {
+        if left.kind == SqlTypeKind::Composite
+            && right.kind == SqlTypeKind::Composite
+            && left.typrelid != 0
+            && left.typrelid == right.typrelid
+        {
+            return Some(left);
+        }
+        return Some(SqlType::record(crate::include::catalog::RECORD_TYPE_OID));
+    }
     if is_text_like_type(left) && is_text_like_type(right) {
         return Some(SqlType::new(SqlTypeKind::Text));
     }

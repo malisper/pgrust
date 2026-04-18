@@ -3618,7 +3618,11 @@ mod tests {
     fn temp_dir(name: &str) -> PathBuf {
         static NEXT_ID: AtomicU64 = AtomicU64::new(0);
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("pgrust_tcop_{name}_{id}"));
+        let dir = std::env::temp_dir().join(format!(
+            "pgrust_tcop_{name}_{}_{}",
+            std::process::id(),
+            id
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir

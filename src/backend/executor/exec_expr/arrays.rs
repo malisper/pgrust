@@ -200,10 +200,14 @@ fn apply_array_subscripts_to_value(
                     lower: clamped_lower,
                     upper: clamped_upper,
                 });
-                let result_lower_bound = if subscript.is_slice
-                    && (subscript.lower_provided ^ subscript.upper_provided)
-                {
-                    1
+                let result_lower_bound = if subscript.is_slice {
+                    match (subscript.lower_provided, subscript.upper_provided) {
+                        (false, false) => dim.lower_bound,
+                        (false, true) => 1,
+                        (true, false) if dim.lower_bound == 1 => clamped_lower,
+                        (true, false) => 1,
+                        (true, true) => clamped_lower,
+                    }
                 } else {
                     clamped_lower
                 };
