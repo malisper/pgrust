@@ -16,7 +16,14 @@ pub(super) fn bind_grouped_concat_expr(
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
-    agg_list: &[(AggFunc, Vec<SqlFunctionArg>, bool, bool, Option<SqlExpr>)],
+    agg_list: &[(
+        AggFunc,
+        Vec<SqlFunctionArg>,
+        Vec<OrderByItem>,
+        bool,
+        bool,
+        Option<SqlExpr>,
+    )],
     n_keys: usize,
 ) -> Result<Expr, ParseError> {
     let left_expr = bind_agg_output_expr(
@@ -95,7 +102,14 @@ pub(super) fn bind_grouped_in_subquery(
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
-    agg_list: &[(AggFunc, Vec<SqlFunctionArg>, bool, bool, Option<SqlExpr>)],
+    agg_list: &[(
+        AggFunc,
+        Vec<SqlFunctionArg>,
+        Vec<OrderByItem>,
+        bool,
+        bool,
+        Option<SqlExpr>,
+    )],
     n_keys: usize,
 ) -> Result<Expr, ParseError> {
     let subquery =
@@ -137,7 +151,14 @@ pub(super) fn bind_grouped_quantified_subquery(
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
-    agg_list: &[(AggFunc, Vec<SqlFunctionArg>, bool, bool, Option<SqlExpr>)],
+    agg_list: &[(
+        AggFunc,
+        Vec<SqlFunctionArg>,
+        Vec<OrderByItem>,
+        bool,
+        bool,
+        Option<SqlExpr>,
+    )],
     n_keys: usize,
 ) -> Result<Expr, ParseError> {
     let subquery =
@@ -176,7 +197,14 @@ pub(super) fn bind_grouped_quantified_array(
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
-    agg_list: &[(AggFunc, Vec<SqlFunctionArg>, bool, bool, Option<SqlExpr>)],
+    agg_list: &[(
+        AggFunc,
+        Vec<SqlFunctionArg>,
+        Vec<OrderByItem>,
+        bool,
+        bool,
+        Option<SqlExpr>,
+    )],
     n_keys: usize,
 ) -> Result<Expr, ParseError> {
     let raw_left_type =
@@ -232,7 +260,14 @@ pub(super) fn bind_grouped_func_call(
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
-    agg_list: &[(AggFunc, Vec<SqlFunctionArg>, bool, bool, Option<SqlExpr>)],
+    agg_list: &[(
+        AggFunc,
+        Vec<SqlFunctionArg>,
+        Vec<OrderByItem>,
+        bool,
+        bool,
+        Option<SqlExpr>,
+    )],
     n_keys: usize,
 ) -> Result<Expr, ParseError> {
     if name.eq_ignore_ascii_case("coalesce") {
@@ -347,7 +382,14 @@ fn bind_grouped_coalesce_call(
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
-    agg_list: &[(AggFunc, Vec<SqlFunctionArg>, bool, bool, Option<SqlExpr>)],
+    agg_list: &[(
+        AggFunc,
+        Vec<SqlFunctionArg>,
+        Vec<OrderByItem>,
+        bool,
+        bool,
+        Option<SqlExpr>,
+    )],
     n_keys: usize,
 ) -> Result<Expr, ParseError> {
     if args.iter().any(|arg| arg.name.is_some()) {
@@ -404,7 +446,14 @@ pub(super) fn bind_grouped_array_literal(
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
-    agg_list: &[(AggFunc, Vec<SqlFunctionArg>, bool, bool, Option<SqlExpr>)],
+    agg_list: &[(
+        AggFunc,
+        Vec<SqlFunctionArg>,
+        Vec<OrderByItem>,
+        bool,
+        bool,
+        Option<SqlExpr>,
+    )],
     n_keys: usize,
 ) -> Result<Expr, ParseError> {
     Ok(Expr::ArrayLiteral {

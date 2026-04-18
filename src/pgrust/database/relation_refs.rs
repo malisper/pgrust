@@ -1,16 +1,22 @@
 use std::collections::BTreeSet;
 
-use crate::RelFileLocator;
 use crate::backend::executor::{Expr, Plan};
 use crate::backend::parser::{CatalogLookup, FromItem, JoinConstraint, SqlExpr};
 use crate::include::nodes::parsenodes::{JoinTreeNode, Query, RangeTblEntryKind};
 use crate::include::nodes::plannodes::PlannedStmt;
+use crate::RelFileLocator;
 
 pub(super) fn collect_rels_from_expr(expr: &Expr, rels: &mut BTreeSet<RelFileLocator>) {
     match expr {
         Expr::Aggref(aggref) => {
             for arg in &aggref.args {
                 collect_rels_from_expr(arg, rels);
+            }
+            for item in &aggref.aggorder {
+                collect_rels_from_expr(&item.expr, rels);
+            }
+            if let Some(filter) = aggref.aggfilter.as_ref() {
+                collect_rels_from_expr(filter, rels);
             }
         }
         Expr::WindowFunc(window_func) => {
@@ -20,6 +26,9 @@ pub(super) fn collect_rels_from_expr(expr: &Expr, rels: &mut BTreeSet<RelFileLoc
             if let crate::include::nodes::primnodes::WindowFuncKind::Aggregate(aggref) =
                 &window_func.kind
             {
+                for item in &aggref.aggorder {
+                    collect_rels_from_expr(&item.expr, rels);
+                }
                 if let Some(filter) = aggref.aggfilter.as_ref() {
                     collect_rels_from_expr(filter, rels);
                 }
@@ -325,6 +334,9 @@ pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLoc
                 if let crate::include::nodes::primnodes::WindowFuncKind::Aggregate(aggref) =
                     &func.kind
                 {
+                    for item in &aggref.aggorder {
+                        collect_rels_from_expr(&item.expr, rels);
+                    }
                     if let Some(filter) = aggref.aggfilter.as_ref() {
                         collect_rels_from_expr(filter, rels);
                     }
@@ -718,7 +730,15 @@ fn collect_direct_relation_oids_from_sql_expr(
                 collect_direct_relation_oids_from_sql_expr(element, catalog, visible_ctes, rels);
             }
         }
-        SqlExpr::AggCall { args, .. } | SqlExpr::FuncCall { args, .. } => {
+        SqlExpr::AggCall { args, order_by, .. } => {
+            for arg in args {
+                collect_direct_relation_oids_from_sql_expr(&arg.value, catalog, visible_ctes, rels);
+            }
+            for item in order_by {
+                collect_direct_relation_oids_from_sql_expr(&item.expr, catalog, visible_ctes, rels);
+            }
+        }
+        SqlExpr::FuncCall { args, .. } => {
             for arg in args {
                 collect_direct_relation_oids_from_sql_expr(&arg.value, catalog, visible_ctes, rels);
             }

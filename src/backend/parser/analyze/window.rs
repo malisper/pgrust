@@ -97,10 +97,15 @@ pub(super) fn reject_window_clause(expr: &SqlExpr, clause: &'static str) -> Resu
 pub(super) fn expr_contains_window(expr: &SqlExpr) -> bool {
     match expr {
         SqlExpr::AggCall {
-            args, filter, over, ..
+            args,
+            order_by,
+            filter,
+            over,
+            ..
         } => {
             over.is_some()
                 || args.iter().any(|arg| expr_contains_window(&arg.value))
+                || order_by.iter().any(|item| expr_contains_window(&item.expr))
                 || filter.as_deref().is_some_and(expr_contains_window)
         }
         SqlExpr::FuncCall { args, over, .. } => {

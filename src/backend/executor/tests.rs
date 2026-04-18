@@ -1,5 +1,4 @@
 use super::*;
-use crate::RelFileLocator;
 use crate::backend::access::heap::heapam::{heap_flush, heap_insert_mvcc, heap_update};
 use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
 use crate::backend::libpq::pqformat::format_exec_error;
@@ -8,8 +7,9 @@ use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, StorageManager
 use crate::include::access::htup::TupleValue;
 use crate::include::access::htup::{AttributeDesc, HeapTuple};
 use crate::include::nodes::datetime::DateADT;
-use crate::include::nodes::primnodes::{Var, user_attrno};
+use crate::include::nodes::primnodes::{user_attrno, Var};
 use crate::pgrust::database::{Database, Session};
+use crate::RelFileLocator;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::PathBuf;
@@ -5000,12 +5000,12 @@ fn pg_rust_test_enc_conversion_validates_utf8_prefixes() {
     .unwrap();
     assert_query_rows(
         result,
-        vec![vec![Value::Record(crate::include::nodes::datum::RecordValue::anonymous(
-            vec![
+        vec![vec![Value::Record(
+            crate::include::nodes::datum::RecordValue::anonymous(vec![
                 ("validlen".into(), Value::Int32(1)),
                 ("result".into(), Value::Bytea(vec![0x66])),
-            ],
-        ))]],
+            ]),
+        )]],
     );
 }
 
@@ -5022,12 +5022,12 @@ fn pg_rust_test_enc_conversion_converts_euc_kr_to_utf8() {
     .unwrap();
     assert_query_rows(
         result,
-        vec![vec![Value::Record(crate::include::nodes::datum::RecordValue::anonymous(
-            vec![
+        vec![vec![Value::Record(
+            crate::include::nodes::datum::RecordValue::anonymous(vec![
                 ("validlen".into(), Value::Int32(4)),
                 ("result".into(), Value::Bytea("수학".as_bytes().to_vec())),
-            ],
-        ))]],
+            ]),
+        )]],
     );
 }
 
@@ -10664,8 +10664,7 @@ fn jsonpath_recursive_descent_includes_current_item_at_depth_zero() {
                             .unwrap()
                     )],
                     vec![Value::Jsonb(
-                        crate::backend::executor::jsonb::parse_jsonb_text("{\"b\":1}")
-                            .unwrap()
+                        crate::backend::executor::jsonb::parse_jsonb_text("{\"b\":1}").unwrap()
                     )],
                     vec![Value::Jsonb(
                         crate::backend::executor::jsonb::parse_jsonb_text("1").unwrap()
@@ -10688,8 +10687,7 @@ fn jsonpath_recursive_descent_includes_current_item_at_depth_zero() {
             assert_eq!(
                 rows,
                 vec![vec![Value::Jsonb(
-                    crate::backend::executor::jsonb::parse_jsonb_text("{\"a\":{\"b\":1}}")
-                        .unwrap()
+                    crate::backend::executor::jsonb::parse_jsonb_text("{\"a\":{\"b\":1}}").unwrap()
                 )]]
             );
         }
@@ -10713,8 +10711,7 @@ fn jsonpath_recursive_descent_includes_current_item_at_depth_zero() {
                             .unwrap()
                     )],
                     vec![Value::Jsonb(
-                        crate::backend::executor::jsonb::parse_jsonb_text("{\"b\":1}")
-                            .unwrap()
+                        crate::backend::executor::jsonb::parse_jsonb_text("{\"b\":1}").unwrap()
                     )],
                     vec![Value::Jsonb(
                         crate::backend::executor::jsonb::parse_jsonb_text("1").unwrap()
@@ -11459,6 +11456,54 @@ fn jsonb_builders_and_object_agg_work() {
 }
 
 #[test]
+fn jsonb_aggregate_local_order_by_is_respected() {
+    let base = temp_dir("jsonb_agg_local_order_by");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let xid = txns.begin();
+    run_sql(
+        &base,
+        &txns,
+        xid,
+        "insert into people (id, name, note) values \
+            (1, 'alice', 'b'), \
+            (2, 'bob', 'a'), \
+            (3, 'carol', 'c')",
+    )
+    .unwrap();
+    txns.commit(xid).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select \
+            jsonb_agg(id order by note, id desc), \
+            jsonb_object_agg(name, id order by note desc) \
+         from people",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Jsonb(
+                        crate::backend::executor::jsonb::parse_jsonb_text("[2,1,3]").unwrap()
+                    ),
+                    Value::Jsonb(
+                        crate::backend::executor::jsonb::parse_jsonb_text(
+                            "{\"carol\":3,\"alice\":1,\"bob\":2}"
+                        )
+                        .unwrap()
+                    ),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn jsonb_variadic_calls_match_supported_postgres_cases() {
     let base = temp_dir("jsonb_variadic_calls");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -12128,10 +12173,8 @@ fn scalar_subquery_multiple_rows_errors() {
         catalog_with_pets(),
     )
     .unwrap_err();
-    assert!(
-        format!("{err:?}")
-            .contains("more than one row returned by a subquery used as an expression")
-    );
+    assert!(format!("{err:?}")
+        .contains("more than one row returned by a subquery used as an expression"));
 }
 
 #[test]

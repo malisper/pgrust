@@ -67,6 +67,14 @@ pub(super) fn finalize_expr_subqueries(
                 .into_iter()
                 .map(|arg| finalize_expr_subqueries(arg, catalog, subplans))
                 .collect(),
+            aggorder: aggref
+                .aggorder
+                .into_iter()
+                .map(|item| crate::include::nodes::primnodes::OrderByEntry {
+                    expr: finalize_expr_subqueries(item.expr, catalog, subplans),
+                    ..item
+                })
+                .collect(),
             aggfilter: aggref
                 .aggfilter
                 .map(|expr| finalize_expr_subqueries(expr, catalog, subplans)),
@@ -359,6 +367,7 @@ fn finalize_agg_accum(
         aggfnoid,
         agg_variadic,
         args,
+        order_by,
         filter,
         distinct,
         sql_type,
@@ -369,6 +378,13 @@ fn finalize_agg_accum(
         args: args
             .into_iter()
             .map(|arg| finalize_expr_subqueries(arg, catalog, subplans))
+            .collect(),
+        order_by: order_by
+            .into_iter()
+            .map(|item| crate::include::nodes::primnodes::OrderByEntry {
+                expr: finalize_expr_subqueries(item.expr, catalog, subplans),
+                ..item
+            })
             .collect(),
         filter: filter.map(|expr| finalize_expr_subqueries(expr, catalog, subplans)),
         distinct,
@@ -392,6 +408,14 @@ fn rebase_expr_subplan_ids(expr: Expr, base: usize) -> Expr {
                 .args
                 .into_iter()
                 .map(|arg| rebase_expr_subplan_ids(arg, base))
+                .collect(),
+            aggorder: aggref
+                .aggorder
+                .into_iter()
+                .map(|item| crate::include::nodes::primnodes::OrderByEntry {
+                    expr: rebase_expr_subplan_ids(item.expr, base),
+                    ..item
+                })
                 .collect(),
             aggfilter: aggref
                 .aggfilter
@@ -671,6 +695,14 @@ fn rebase_agg_accum_subplan_ids(accum: AggAccum, base: usize) -> AggAccum {
             .args
             .into_iter()
             .map(|arg| rebase_expr_subplan_ids(arg, base))
+            .collect(),
+        order_by: accum
+            .order_by
+            .into_iter()
+            .map(|item| crate::include::nodes::primnodes::OrderByEntry {
+                expr: rebase_expr_subplan_ids(item.expr, base),
+                ..item
+            })
             .collect(),
         filter: accum.filter.map(|expr| rebase_expr_subplan_ids(expr, base)),
         ..accum
@@ -1208,50 +1240,46 @@ pub(super) fn finalize_plan_subqueries(
             input,
             clause,
             output_columns,
-        } => {
-            Plan::WindowAgg {
-                plan_info,
-                input: Box::new(finalize_plan_subqueries(*input, catalog, subplans)),
-                clause:
-                    crate::include::nodes::primnodes::WindowClause {
-                        spec: crate::include::nodes::primnodes::WindowSpec {
-                            partition_by: clause
-                                .spec
-                                .partition_by
-                                .into_iter()
-                                .map(|expr| finalize_expr_subqueries(expr, catalog, subplans))
-                                .collect(),
-                            order_by: clause
-                                .spec
-                                .order_by
-                                .into_iter()
-                                .map(|item| crate::include::nodes::primnodes::OrderByEntry {
-                                    expr: finalize_expr_subqueries(item.expr, catalog, subplans),
-                                    ..item
-                                })
-                                .collect(),
-                        },
-                        functions:
-                            clause
-                                .functions
-                                .into_iter()
-                                .map(|func| {
-                                    crate::include::nodes::primnodes::WindowFuncExpr {
+        } => Plan::WindowAgg {
+            plan_info,
+            input: Box::new(finalize_plan_subqueries(*input, catalog, subplans)),
+            clause: crate::include::nodes::primnodes::WindowClause {
+                spec: crate::include::nodes::primnodes::WindowSpec {
+                    partition_by: clause
+                        .spec
+                        .partition_by
+                        .into_iter()
+                        .map(|expr| finalize_expr_subqueries(expr, catalog, subplans))
+                        .collect(),
+                    order_by: clause
+                        .spec
+                        .order_by
+                        .into_iter()
+                        .map(|item| crate::include::nodes::primnodes::OrderByEntry {
+                            expr: finalize_expr_subqueries(item.expr, catalog, subplans),
+                            ..item
+                        })
+                        .collect(),
+                },
+                functions: clause
+                    .functions
+                    .into_iter()
+                    .map(|func| crate::include::nodes::primnodes::WindowFuncExpr {
                         kind: match func.kind {
-                            crate::include::nodes::primnodes::WindowFuncKind::Aggregate(
-                                aggref,
-                            ) => crate::include::nodes::primnodes::WindowFuncKind::Aggregate(
-                                match finalize_expr_subqueries(
-                                    Expr::Aggref(Box::new(aggref)),
-                                    catalog,
-                                    subplans,
-                                ) {
-                                    Expr::Aggref(aggref) => *aggref,
-                                    other => unreachable!(
+                            crate::include::nodes::primnodes::WindowFuncKind::Aggregate(aggref) => {
+                                crate::include::nodes::primnodes::WindowFuncKind::Aggregate(
+                                    match finalize_expr_subqueries(
+                                        Expr::Aggref(Box::new(aggref)),
+                                        catalog,
+                                        subplans,
+                                    ) {
+                                        Expr::Aggref(aggref) => *aggref,
+                                        other => unreachable!(
                                         "window aggregate rewrite returned non-Aggref: {other:?}"
                                     ),
-                                },
-                            ),
+                                    },
+                                )
+                            }
                             crate::include::nodes::primnodes::WindowFuncKind::Builtin(kind) => {
                                 crate::include::nodes::primnodes::WindowFuncKind::Builtin(kind)
                             }
@@ -1262,13 +1290,11 @@ pub(super) fn finalize_plan_subqueries(
                             .map(|arg| finalize_expr_subqueries(arg, catalog, subplans))
                             .collect(),
                         ..func
-                    }
-                                })
-                                .collect(),
-                    },
-                output_columns,
-            }
-        }
+                    })
+                    .collect(),
+            },
+            output_columns,
+        },
         Plan::FunctionScan { plan_info, call } => Plan::FunctionScan {
             plan_info,
             call: finalize_set_returning_call(call, catalog, subplans),

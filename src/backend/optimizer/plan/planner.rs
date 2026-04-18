@@ -187,6 +187,14 @@ fn expand_window_clause(root: &PlannerInfo, clause: &WindowClause) -> WindowClau
                                     .into_iter()
                                     .map(|arg| expand_join_rte_vars(root, arg))
                                     .collect(),
+                                aggorder: aggref
+                                    .aggorder
+                                    .into_iter()
+                                    .map(|item| crate::include::nodes::primnodes::OrderByEntry {
+                                        expr: expand_join_rte_vars(root, item.expr),
+                                        ..item
+                                    })
+                                    .collect(),
                                 aggfilter: aggref
                                     .aggfilter
                                     .map(|expr| expand_join_rte_vars(root, expr)),
