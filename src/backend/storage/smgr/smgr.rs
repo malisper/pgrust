@@ -49,6 +49,8 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 use crate::include::catalog::GLOBAL_TABLESPACE_OID;
 
 // ---------------------------------------------------------------------------
@@ -84,7 +86,7 @@ pub type BlockNumber = u32;
 ///
 /// In PostgreSQL this is `RelFileLocator` (struct with spcOid, dbOid,
 /// relNumber).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct RelFileLocator {
     pub spc_oid: u32,
     pub db_oid: u32,

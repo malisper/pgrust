@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use serde::{Deserialize, Serialize};
+
 use crate::backend::catalog::CatalogError;
 use crate::backend::catalog::bootstrap::bootstrap_catalog_rel;
 use crate::backend::catalog::catalog::{Catalog, CatalogEntry, column_desc};
@@ -13,7 +15,7 @@ use crate::include::catalog::{
     system_catalog_index_by_oid,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexRelCacheEntry {
     pub indexrelid: u32,
     pub indrelid: u32,

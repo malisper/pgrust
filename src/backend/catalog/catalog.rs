@@ -158,7 +158,7 @@ pub fn allocate_relation_object_oids(desc: &mut RelationDesc, next_oid: &mut u32
     }
 }
 
-fn scalar_type_for_sql_type(sql_type: SqlType) -> ScalarType {
+pub(crate) fn scalar_type_for_sql_type(sql_type: SqlType) -> ScalarType {
     if sql_type.is_array {
         return ScalarType::Array(Box::new(scalar_type_for_sql_type(sql_type.element_type())));
     }
