@@ -1235,6 +1235,32 @@ fn parse_reset_session_authorization_statement() {
 }
 
 #[test]
+fn parse_set_role_statement() {
+    let stmt = parse_statement("set role regress_tenant").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::SetRole(SetRoleStatement {
+            role_name: Some("regress_tenant".into()),
+        })
+    );
+}
+
+#[test]
+fn parse_set_role_none_statement() {
+    let stmt = parse_statement("set role none").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::SetRole(SetRoleStatement { role_name: None })
+    );
+}
+
+#[test]
+fn parse_reset_role_statement() {
+    let stmt = parse_statement("reset role").unwrap();
+    assert_eq!(stmt, Statement::ResetRole(ResetRoleStatement));
+}
+
+#[test]
 fn parse_comment_on_role_statement() {
     let stmt = parse_statement("comment on role regress_hasprivs is 'some comment'").unwrap();
     assert_eq!(
@@ -4253,8 +4279,7 @@ fn parse_create_drop_and_comment_on_conversion_statements() {
     let Statement::CreateConversion(create) = parse_statement(
         "create default conversion public.mydef for 'LATIN1' to 'UTF8' from iso8859_1_to_utf8",
     )
-    .unwrap()
-    else {
+    .unwrap() else {
         panic!("expected create conversion");
     };
     assert_eq!(create.conversion_name, "public.mydef");
@@ -4372,7 +4397,10 @@ fn parse_create_type_supports_enum_and_rejects_other_unsupported_forms() {
         Statement::CreateType(CreateTypeStatement::Range(stmt)) => {
             assert_eq!(stmt.schema_name, None);
             assert_eq!(stmt.type_name, "intr");
-            assert_eq!(stmt.subtype, RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)));
+            assert_eq!(
+                stmt.subtype,
+                RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4))
+            );
             assert_eq!(stmt.subtype_diff.as_deref(), Some("int4mi"));
             assert_eq!(stmt.collation.as_deref(), Some("C"));
         }

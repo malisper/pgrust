@@ -1,7 +1,7 @@
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 
 statement = { SOI ~ stmt ~ EOI }
-stmt = _{ do_stmt | explain_stmt | table_stmt | select_stmt | values_stmt | copy_stmt | analyze_stmt | checkpoint_stmt | show_stmt | set_session_authorization_stmt | reset_session_authorization_stmt | set_stmt | reset_stmt | create_role_stmt | alter_role_stmt | create_database_stmt | create_schema_stmt | create_index_stmt | alter_table_add_column_stmt | alter_table_add_constraint_stmt | alter_table_drop_constraint_stmt | alter_table_rename_constraint_stmt | alter_table_drop_column_stmt | alter_table_alter_column_type_stmt | alter_table_owner_stmt | alter_table_rename_column_stmt | alter_table_rename_stmt | alter_view_owner_stmt | alter_schema_owner_stmt | alter_table_set_stmt | alter_table_set_not_null_stmt | alter_table_drop_not_null_stmt | alter_table_validate_constraint_stmt | comment_on_role_stmt | comment_on_table_stmt | create_table_stmt | create_view_stmt | drop_role_stmt | drop_database_stmt | drop_table_stmt | drop_index_stmt | drop_view_stmt | drop_schema_stmt | reassign_owned_stmt | truncate_table_stmt | vacuum_stmt | insert_stmt | update_stmt | delete_stmt | begin_stmt | commit_stmt | rollback_stmt }
+stmt = _{ do_stmt | explain_stmt | table_stmt | select_stmt | values_stmt | copy_stmt | analyze_stmt | checkpoint_stmt | show_stmt | set_session_authorization_stmt | reset_session_authorization_stmt | set_role_stmt | reset_role_stmt | set_stmt | reset_stmt | create_role_stmt | alter_role_stmt | create_database_stmt | create_schema_stmt | create_index_stmt | alter_table_add_column_stmt | alter_table_add_constraint_stmt | alter_table_drop_constraint_stmt | alter_table_rename_constraint_stmt | alter_table_drop_column_stmt | alter_table_alter_column_type_stmt | alter_table_owner_stmt | alter_table_rename_column_stmt | alter_table_rename_stmt | alter_view_owner_stmt | alter_schema_owner_stmt | alter_table_set_stmt | alter_table_set_not_null_stmt | alter_table_drop_not_null_stmt | alter_table_validate_constraint_stmt | comment_on_role_stmt | comment_on_table_stmt | create_table_stmt | create_view_stmt | drop_role_stmt | drop_database_stmt | drop_table_stmt | drop_index_stmt | drop_view_stmt | drop_schema_stmt | reassign_owned_stmt | truncate_table_stmt | vacuum_stmt | insert_stmt | update_stmt | delete_stmt | begin_stmt | commit_stmt | rollback_stmt }
 
 do_stmt = { kw_do ~ do_body ~ do_language_clause? | kw_do ~ do_language_clause ~ do_body }
 do_body = { quoted_string_literal }
@@ -48,6 +48,8 @@ set_stmt = { kw_set ~ set_scope? ~ identifier ~ (("=" | kw_to) ~ set_value_list)
 reset_stmt = { kw_reset ~ (kw_all | identifier) }
 set_session_authorization_stmt = { kw_set ~ kw_session ~ kw_authorization ~ identifier }
 reset_session_authorization_stmt = { kw_reset ~ kw_session ~ kw_authorization }
+set_role_stmt = { kw_set ~ kw_role ~ (kw_none | identifier) }
+reset_role_stmt = { kw_reset ~ kw_role }
 set_scope = { kw_session | kw_local }
 set_value_list = { set_value_atom ~ ("," ~ set_value_atom)* }
 set_value_atom = { signed_set_value | kw_default | kw_true | kw_false | kw_on_value | kw_off | quoted_string_literal | identifier | numeric_literal | integer }
@@ -487,6 +489,7 @@ kw_truncate = _{ kw_truncate_atom }
 kw_vacuum = _{ kw_vacuum_atom }
 kw_with = _{ kw_with_atom }
 kw_without = _{ kw_without_atom }
+kw_none = _{ kw_none_atom }
 kw_if = _{ kw_if_atom }
 kw_exists = _{ kw_exists_atom }
 kw_update = _{ kw_update_atom }
@@ -732,6 +735,7 @@ kw_truncate_atom = @{ ^"truncate" ~ keyword_end }
 kw_vacuum_atom = @{ ^"vacuum" ~ keyword_end }
 kw_with_atom = @{ ^"with" ~ keyword_end }
 kw_without_atom = @{ ^"without" ~ keyword_end }
+kw_none_atom = @{ ^"none" ~ keyword_end }
 kw_if_atom = @{ ^"if" ~ keyword_end }
 kw_exists_atom = @{ ^"exists" ~ keyword_end }
 kw_update_atom = @{ ^"update" ~ keyword_end }
