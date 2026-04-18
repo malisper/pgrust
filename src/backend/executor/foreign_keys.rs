@@ -249,11 +249,12 @@ fn heap_has_matching_row(
             .pinned_buffer_rc()
             .expect("buffer must be pinned after prepare_next_page");
 
-        while let Some((_tid, tuple_bytes)) = heap_scan_page_next_tuple(page, &mut scan) {
+        while let Some((tid, tuple_bytes)) = heap_scan_page_next_tuple(page, &mut scan) {
             ctx.check_for_interrupts()?;
             slot.kind = SlotKind::BufferHeapTuple {
                 desc: Rc::clone(&desc),
                 attr_descs: Rc::clone(&attr_descs),
+                tid,
                 tuple_ptr: tuple_bytes.as_ptr(),
                 tuple_len: tuple_bytes.len(),
                 pin: Rc::clone(&pin),

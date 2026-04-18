@@ -527,7 +527,7 @@ impl PlanNode for SeqScanState {
                 let page = unsafe { ctx.pool.page_unlocked(buffer_id) }
                     .expect("pinned buffer must be valid");
 
-                if let Some((_tid, tuple_bytes)) = heap_scan_page_next_tuple(page, scan) {
+                if let Some((tid, tuple_bytes)) = heap_scan_page_next_tuple(page, scan) {
                     let raw_ptr = tuple_bytes.as_ptr();
                     let raw_len = tuple_bytes.len();
                     let pin = scan.pinned_buffer_rc().expect("buffer must be pinned");
@@ -535,6 +535,7 @@ impl PlanNode for SeqScanState {
                     self.slot.kind = SlotKind::BufferHeapTuple {
                         desc: self.desc.clone(),
                         attr_descs: self.attr_descs.clone(),
+                        tid,
                         tuple_ptr: raw_ptr,
                         tuple_len: raw_len,
                         pin,

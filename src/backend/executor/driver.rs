@@ -2,12 +2,11 @@ use super::{
     Catalog, ExecError, ExecutorContext, ParseError, Plan, PlannedStmt, QueryDesc, Statement,
     StatementResult, TransactionId, TupleSlot, Value, bind_delete, bind_insert, bind_update,
     create_query_desc, eval_expr, execute_analyze, execute_create_index, execute_create_table,
-    execute_delete, execute_drop_table, execute_explain, execute_insert, execute_truncate_table,
-    execute_update, execute_vacuum, executor_start, parse_statement, pg_plan_query,
-    pg_plan_values_query,
+    execute_delete, execute_drop_table, execute_explain, execute_insert, execute_merge,
+    execute_truncate_table, execute_update, execute_vacuum, executor_start, parse_statement,
+    pg_plan_query, pg_plan_values_query,
 };
-use crate::backend::parser::CatalogLookup;
-use crate::backend::parser::UnsupportedStatement;
+use crate::backend::parser::{CatalogLookup, UnsupportedStatement, plan_merge};
 use crate::pl::plpgsql::execute_do;
 
 fn unsupported_statement_error(stmt: &UnsupportedStatement) -> ExecError {
@@ -315,9 +314,7 @@ fn execute_statement_with_source(
         Statement::Insert(stmt) => {
             execute_insert(bind_insert(&stmt, catalog)?, catalog, ctx, xid, cid)
         }
-        Statement::Merge(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
-            "MERGE".into(),
-        ))),
+        Statement::Merge(stmt) => execute_merge(plan_merge(&stmt, catalog)?, catalog, ctx, xid, cid),
         Statement::Update(stmt) => {
             execute_update(bind_update(&stmt, catalog)?, catalog, ctx, xid, cid)
         }

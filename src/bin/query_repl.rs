@@ -10,7 +10,8 @@ use pgrust::backend::access::heap::heapam::{heap_flush, heap_insert_mvcc};
 use pgrust::backend::access::transam::xact::{INVALID_TRANSACTION_ID, TransactionManager};
 use pgrust::backend::catalog::{CatalogStore, column_desc};
 use pgrust::backend::commands::tablecmds::{
-    execute_delete_with_waiter, execute_insert, execute_truncate_table, execute_update_with_waiter,
+    execute_delete_with_waiter, execute_insert, execute_merge, execute_truncate_table,
+    execute_update_with_waiter,
 };
 use pgrust::backend::storage::smgr::{ForkNumber, MdStorageManager, StorageManager};
 use pgrust::backend::utils::cache::relcache::RelCache;
@@ -21,7 +22,7 @@ use pgrust::executor::{
 use pgrust::include::access::htup::{HeapTuple, TupleValue};
 use pgrust::parser::{
     CatalogLookup, ParseError, SqlType, SqlTypeKind, Statement, bind_delete, bind_insert,
-    bind_update, create_relation_desc, normalize_create_table_name, parse_statement,
+    bind_update, create_relation_desc, normalize_create_table_name, parse_statement, plan_merge,
 };
 use pgrust::pl::plpgsql::{RaiseLevel, clear_notices, execute_do, take_notices};
 use pgrust::{BufferPool, SmgrStorageBackend};
@@ -630,9 +631,7 @@ fn run_statement(
                     actual: format!("{other:?}"),
                 })
             })?),
-        Statement::Merge(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
-            "MERGE".into(),
-        ))),
+        Statement::Merge(stmt) => execute_merge(plan_merge(&stmt, catalog)?, catalog, ctx, xid, 0),
         Statement::Explain(stmt) => {
             let mut ctx = ExecutorContext {
                 pool: std::sync::Arc::clone(pool),
