@@ -124,6 +124,7 @@ pub fn system_catalog_index_relcache(
 ) -> IndexRelCacheEntry {
     let meta = system_catalog_index_meta(descriptor);
     IndexRelCacheEntry {
+        indexrelid: descriptor.relation_oid,
         indrelid: meta.indrelid,
         indnatts: meta.indkey.len() as i16,
         indnkeyatts: meta.indkey.len() as i16,

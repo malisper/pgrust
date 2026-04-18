@@ -357,6 +357,22 @@ pub trait CatalogLookup {
     fn pg_stat_activity_rows(&self) -> Vec<Vec<Value>> {
         Vec::new()
     }
+
+    fn pg_stat_user_tables_rows(&self) -> Vec<Vec<Value>> {
+        Vec::new()
+    }
+
+    fn pg_statio_user_tables_rows(&self) -> Vec<Vec<Value>> {
+        Vec::new()
+    }
+
+    fn pg_stat_user_functions_rows(&self) -> Vec<Vec<Value>> {
+        Vec::new()
+    }
+
+    fn pg_stat_io_rows(&self) -> Vec<Vec<Value>> {
+        Vec::new()
+    }
 }
 
 impl CatalogLookup for Catalog {

@@ -97,7 +97,9 @@ use crate::backend::utils::misc::interrupts::{
     InterruptReason, InterruptState, check_for_interrupts,
 };
 use crate::include::access::htup::TupleError;
-use crate::pgrust::database::{SequenceRuntime, TransactionWaiter};
+use crate::pgrust::database::{
+    DatabaseStatsStore, SequenceRuntime, SessionStatsState, TransactionWaiter,
+};
 use crate::pl::plpgsql::CompiledFunction;
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
 use std::cell::RefCell;
@@ -132,6 +134,8 @@ pub struct ExecutorContext {
     pub checkpoint_stats: CheckpointStatsSnapshot,
     pub datetime_config: DateTimeConfig,
     pub interrupts: std::sync::Arc<InterruptState>,
+    pub(crate) stats: std::sync::Arc<parking_lot::RwLock<DatabaseStatsStore>>,
+    pub(crate) session_stats: std::sync::Arc<parking_lot::RwLock<SessionStatsState>>,
     pub snapshot: Snapshot,
     pub client_id: ClientId,
     pub next_command_id: CommandId,

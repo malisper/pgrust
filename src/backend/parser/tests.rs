@@ -3,15 +3,16 @@ use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::{AggFunc, Expr, Plan, RelationDesc, Value};
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_PRIMARY, JSON_TYPE_OID, PUBLIC_NAMESPACE_OID, PgProcRow,
-    PgRewriteRow, PgTypeRow, RECORD_TYPE_OID, bootstrap_pg_proc_rows, sort_pg_rewrite_rows,
+    bootstrap_pg_proc_rows, sort_pg_rewrite_rows, PgProcRow, PgRewriteRow, PgTypeRow,
+    BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_PRIMARY, JSON_TYPE_OID, PUBLIC_NAMESPACE_OID,
+    RECORD_TYPE_OID,
 };
 use crate::include::nodes::parsenodes::{
     AliasColumnDef, AliasColumnSpec, ColumnConstraint, CompositeTypeAttributeDef,
     CreateCompositeTypeStatement, CreateTypeStatement, DropTypeStatement, ForeignKeyAction,
     ForeignKeyMatchType, JoinTreeNode, RangeTblEntryKind, RawTypeName, TableConstraint,
 };
-use crate::include::nodes::primnodes::{AttrNumber, JoinType, Var, is_system_attr};
+use crate::include::nodes::primnodes::{is_system_attr, AttrNumber, JoinType, Var};
 
 fn desc() -> RelationDesc {
     RelationDesc {
@@ -966,42 +967,6 @@ fn parse_alter_table_set_statement() {
                 name: "parallel_workers".into(),
                 value: "4".into(),
             }],
-        })
-    );
-}
-
-#[test]
-fn parse_alter_table_multi_statement() {
-    let stmt = parse_statement(
-        "alter table items add column note text, alter column id set not null, set (parallel_workers = 4)",
-    )
-    .unwrap();
-    assert_eq!(
-        stmt,
-        Statement::AlterTableMulti(AlterTableMultiStatement {
-            table_name: "items".into(),
-            actions: vec![
-                AlterTableMultiAction::AddColumn(AlterTableAddColumnStatement {
-                    table_name: "items".into(),
-                    column: ColumnDef {
-                        name: "note".into(),
-                        ty: builtin_type(SqlType::new(SqlTypeKind::Text)),
-                        default_expr: None,
-                        constraints: vec![],
-                    },
-                }),
-                AlterTableMultiAction::SetNotNull(AlterTableSetNotNullStatement {
-                    table_name: "items".into(),
-                    column_name: "id".into(),
-                }),
-                AlterTableMultiAction::Set(AlterTableSetStatement {
-                    table_name: "items".into(),
-                    options: vec![RelOption {
-                        name: "parallel_workers".into(),
-                        value: "4".into(),
-                    }],
-                }),
-            ],
         })
     );
 }
@@ -2747,16 +2712,14 @@ fn build_plan_accepts_catalog_backed_bit_comparisons() {
 
 #[test]
 fn build_plan_accepts_catalog_backed_bytea_comparisons() {
-    assert!(
-        build_plan(
-            &parse_select(
-                r"select E'\\x01'::bytea = E'\\x01'::bytea, E'\\x01'::bytea < E'\\x02'::bytea"
-            )
-            .unwrap(),
-            &catalog(),
+    assert!(build_plan(
+        &parse_select(
+            r"select E'\\x01'::bytea = E'\\x01'::bytea, E'\\x01'::bytea < E'\\x02'::bytea"
         )
-        .is_ok()
-    );
+        .unwrap(),
+        &catalog(),
+    )
+    .is_ok());
 }
 
 #[test]
@@ -2816,14 +2779,12 @@ fn build_plan_coerces_unknown_string_literals_for_array_ops() {
 
 #[test]
 fn build_plan_accepts_catalog_backed_text_array_casts() {
-    assert!(
-        build_plan(
-            &parse_select("select cast('{1,2}' as int4[]), cast('{\"a\",\"b\"}' as varchar[])")
-                .unwrap(),
-            &catalog(),
-        )
-        .is_ok()
-    );
+    assert!(build_plan(
+        &parse_select("select cast('{1,2}' as int4[]), cast('{\"a\",\"b\"}' as varchar[])")
+            .unwrap(),
+        &catalog(),
+    )
+    .is_ok());
 }
 
 #[test]

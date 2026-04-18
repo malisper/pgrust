@@ -7,11 +7,13 @@ use std::collections::BTreeSet;
 
 impl Database {
     fn relcache_index_meta_from_catalog(
+        indexrelid: u32,
         meta: &crate::backend::catalog::CatalogIndexMeta,
         am_oid: u32,
         am_handler_oid: u32,
     ) -> crate::backend::utils::cache::relcache::IndexRelCacheEntry {
         crate::backend::utils::cache::relcache::IndexRelCacheEntry {
+            indexrelid,
             indrelid: meta.indrelid,
             indnatts: meta.indkey.len() as i16,
             indnkeyatts: meta.indkey.len() as i16,
@@ -269,6 +271,7 @@ impl Database {
             index_name: index_name.to_string(),
             index_desc: index_entry.desc.clone(),
             index_meta: crate::backend::utils::cache::relcache::IndexRelCacheEntry {
+                indexrelid: index_entry.relation_oid,
                 indrelid: index_meta.indrelid,
                 indnatts: index_meta.indkey.len() as i16,
                 indnkeyatts: index_meta.indkey.len() as i16,
@@ -367,6 +370,8 @@ impl Database {
                 checkpoint_stats: CheckpointStatsSnapshot::default(),
                 datetime_config: DateTimeConfig::default(),
                 interrupts,
+                stats: std::sync::Arc::clone(&self.stats),
+                session_stats: self.session_stats_state(client_id),
                 snapshot: self.txns.read().snapshot_for_command(xid, cid)?,
                 client_id,
                 next_command_id: cid,
@@ -401,12 +406,14 @@ impl Database {
                 relation_oid: index_entry.relation_oid,
                 desc: index_entry.desc.clone(),
                 index_meta: Self::relcache_index_meta_from_catalog(
+                    index_entry.relation_oid,
                     &catalog_index_meta,
                     crate::include::catalog::BTREE_AM_OID,
                     access_method_handler,
                 ),
                 index_exprs: crate::backend::parser::bind_index_exprs(
                     &Self::relcache_index_meta_from_catalog(
+                        index_entry.relation_oid,
                         &catalog_index_meta,
                         crate::include::catalog::BTREE_AM_OID,
                         access_method_handler,

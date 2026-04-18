@@ -2,8 +2,8 @@ use super::{
     pg_am_desc, pg_amop_desc, pg_amproc_desc, pg_attrdef_desc, pg_auth_members_desc,
     pg_authid_desc, pg_cast_desc, pg_class_desc, pg_collation_desc, pg_constraint_desc,
     pg_database_desc, pg_depend_desc, pg_index_desc, pg_inherits_desc, pg_language_desc,
-    pg_largeobject_metadata_desc, pg_namespace_desc, pg_opclass_desc, pg_operator_desc,
-    pg_opfamily_desc, pg_proc_desc, pg_rewrite_desc, pg_tablespace_desc, pg_type_desc,
+    pg_namespace_desc, pg_opclass_desc, pg_operator_desc, pg_opfamily_desc, pg_proc_desc,
+    pg_rewrite_desc, pg_tablespace_desc, pg_type_desc,
 };
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;
@@ -26,16 +26,16 @@ use crate::include::catalog::{
     PG_CAST_RELATION_OID, PG_CLASS_RELATION_OID, PG_COLLATION_RELATION_OID,
     PG_CONSTRAINT_RELATION_OID, PG_DATABASE_RELATION_OID, PG_DEPEND_RELATION_OID,
     PG_INDEX_RELATION_OID, PG_INHERITS_RELATION_OID, PG_LANGUAGE_RELATION_OID,
-    PG_LARGEOBJECT_METADATA_RELATION_OID, PG_NAMESPACE_RELATION_OID, PG_NODE_TREE_TYPE_OID,
-    PG_OPCLASS_RELATION_OID, PG_OPERATOR_RELATION_OID, PG_OPFAMILY_RELATION_OID,
-    PG_PROC_RELATION_OID, PG_REWRITE_RELATION_OID, PG_TABLESPACE_RELATION_OID,
-    PG_TYPE_RELATION_OID, POINT_TYPE_OID, POLYGON_TYPE_OID, REGCONFIG_ARRAY_TYPE_OID,
-    REGCONFIG_TYPE_OID, REGDICTIONARY_ARRAY_TYPE_OID, REGDICTIONARY_TYPE_OID, TEXT_ARRAY_TYPE_OID,
-    TEXT_TYPE_OID, TID_ARRAY_TYPE_OID, TID_TYPE_OID, TIME_ARRAY_TYPE_OID, TIME_TYPE_OID,
-    TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_ARRAY_TYPE_OID,
-    TIMESTAMPTZ_TYPE_OID, TIMETZ_ARRAY_TYPE_OID, TIMETZ_TYPE_OID, TSQUERY_ARRAY_TYPE_OID,
-    TSQUERY_TYPE_OID, TSVECTOR_ARRAY_TYPE_OID, TSVECTOR_TYPE_OID, VARBIT_ARRAY_TYPE_OID,
-    VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID, XID_ARRAY_TYPE_OID, XID_TYPE_OID,
+    PG_NAMESPACE_RELATION_OID, PG_NODE_TREE_TYPE_OID, PG_OPCLASS_RELATION_OID,
+    PG_OPERATOR_RELATION_OID, PG_OPFAMILY_RELATION_OID, PG_PROC_RELATION_OID,
+    PG_REWRITE_RELATION_OID, PG_TABLESPACE_RELATION_OID, PG_TYPE_RELATION_OID, POINT_TYPE_OID,
+    POLYGON_TYPE_OID, REGCONFIG_ARRAY_TYPE_OID, REGCONFIG_TYPE_OID, REGDICTIONARY_ARRAY_TYPE_OID,
+    REGDICTIONARY_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TID_ARRAY_TYPE_OID, TID_TYPE_OID,
+    TIME_ARRAY_TYPE_OID, TIME_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID,
+    TIMESTAMPTZ_ARRAY_TYPE_OID, TIMESTAMPTZ_TYPE_OID, TIMETZ_ARRAY_TYPE_OID, TIMETZ_TYPE_OID,
+    TSQUERY_ARRAY_TYPE_OID, TSQUERY_TYPE_OID, TSVECTOR_ARRAY_TYPE_OID, TSVECTOR_TYPE_OID,
+    VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID,
+    XID_ARRAY_TYPE_OID, XID_TYPE_OID,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -123,10 +123,6 @@ pub fn bootstrap_pg_attribute_rows() -> Vec<PgAttributeRow> {
     rows.extend(attribute_rows_for_desc(
         PG_COLLATION_RELATION_OID,
         &pg_collation_desc(),
-    ));
-    rows.extend(attribute_rows_for_desc(
-        PG_LARGEOBJECT_METADATA_RELATION_OID,
-        &pg_largeobject_metadata_desc(),
     ));
     rows.extend(attribute_rows_for_desc(
         PG_DATABASE_RELATION_OID,

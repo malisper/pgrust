@@ -1,5 +1,5 @@
-use pest::Parser as _;
 use pest::iterators::Pair;
+use pest::Parser as _;
 use pest_derive::Parser;
 
 use super::comments::{
@@ -77,9 +77,6 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_sequence_statement(&sql)? {
         return Ok(stmt);
     }
-    if let Some(stmt) = try_parse_alter_table_multi_statement(&sql, options)? {
-        return Ok(stmt);
-    }
     if let Some(stmt) = try_parse_create_tablespace_statement(&sql)? {
         return Ok(stmt);
     }
@@ -99,77 +96,6 @@ fn parse_statement_with_options_inner(
         Err(err) => {
             try_parse_unsupported_statement(&sql).ok_or_else(|| map_pest_error("statement", err))
         }
-    }
-}
-
-fn try_parse_alter_table_multi_statement(
-    sql: &str,
-    options: ParseOptions,
-) -> Result<Option<Statement>, ParseError> {
-    let trimmed = sql.trim().trim_end_matches(';').trim();
-    let lowered = trimmed.to_ascii_lowercase();
-    if !lowered.starts_with("alter table ") {
-        return Ok(None);
-    }
-
-    let rest = consume_keyword(trimmed, "alter").trim_start();
-    let rest = consume_keyword(rest, "table").trim_start();
-    let (table_parts, action_rest) = parse_qualified_identifier_parts(rest)?;
-    let action_rest = action_rest.trim_start();
-    if action_rest.is_empty() || !action_rest.contains(',') {
-        return Ok(None);
-    }
-
-    let table_name = table_parts.join(".");
-    let consumed_table_len = rest.len() - action_rest.len();
-    let table_name_sql = rest[..consumed_table_len].trim_end();
-    let action_items = split_top_level_items(action_rest, ',')?;
-    if action_items.len() < 2 {
-        return Ok(None);
-    }
-
-    let mut actions = Vec::with_capacity(action_items.len());
-    for item in action_items {
-        let item_sql = format!("alter table {table_name_sql} {item}");
-        let action_stmt = parse_statement_with_options_inner(item_sql, options)?;
-        actions.push(alter_table_multi_action_from_statement(action_stmt)?);
-    }
-
-    Ok(Some(Statement::AlterTableMulti(AlterTableMultiStatement {
-        table_name,
-        actions,
-    })))
-}
-
-fn alter_table_multi_action_from_statement(
-    stmt: Statement,
-) -> Result<AlterTableMultiAction, ParseError> {
-    match stmt {
-        Statement::AlterTableSet(stmt) => Ok(AlterTableMultiAction::Set(stmt)),
-        Statement::AlterTableAddColumn(stmt) => Ok(AlterTableMultiAction::AddColumn(stmt)),
-        Statement::AlterTableAddConstraint(stmt) => Ok(AlterTableMultiAction::AddConstraint(stmt)),
-        Statement::AlterTableDropColumn(stmt) => Ok(AlterTableMultiAction::DropColumn(stmt)),
-        Statement::AlterTableDropConstraint(stmt) => {
-            Ok(AlterTableMultiAction::DropConstraint(stmt))
-        }
-        Statement::AlterTableAlterColumnType(stmt) => {
-            Ok(AlterTableMultiAction::AlterColumnType(stmt))
-        }
-        Statement::AlterTableSetNotNull(stmt) => Ok(AlterTableMultiAction::SetNotNull(stmt)),
-        Statement::AlterTableDropNotNull(stmt) => Ok(AlterTableMultiAction::DropNotNull(stmt)),
-        Statement::AlterTableValidateConstraint(stmt) => {
-            Ok(AlterTableMultiAction::ValidateConstraint(stmt))
-        }
-        Statement::AlterTableRename(_)
-        | Statement::AlterTableRenameColumn(_)
-        | Statement::AlterTableRenameConstraint(_)
-        | Statement::AlterTableOwner(_) => Err(ParseError::FeatureNotSupported(
-            "ALTER TABLE multi-action subcommands do not support RENAME or OWNER forms".into(),
-        )),
-        other => Err(ParseError::UnexpectedToken {
-            expected: "ALTER TABLE multi-action subcommand",
-            actual: format!("{other:?}"),
-        }),
     }
 }
 
