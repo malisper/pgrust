@@ -1,5 +1,5 @@
 use super::agg::AccumState;
-use super::{Plan, PlanState, TupleSlot, expr, tuple_decoder};
+use super::{expr, tuple_decoder, Plan, PlanState, TupleSlot};
 use crate::backend::executor::hashjoin::HashJoinPhase;
 use crate::backend::parser::SqlType;
 use crate::include::catalog::builtin_aggregate_function_for_proc_oid;
@@ -135,6 +135,10 @@ fn set_returning_call_uses_outer_columns(call: &SetReturningCall) -> bool {
 
 fn agg_accum_uses_outer_columns(accum: &crate::include::nodes::primnodes::AggAccum) -> bool {
     accum.args.iter().any(expr_uses_outer_columns)
+        || accum
+            .order_by
+            .iter()
+            .any(|item| expr_uses_outer_columns(&item.expr))
         || accum.filter.as_ref().is_some_and(expr_uses_outer_columns)
 }
 
@@ -233,6 +237,10 @@ fn plan_uses_outer_columns(plan: &Plan) -> bool {
                                     .aggfilter
                                     .as_ref()
                                     .is_some_and(expr_uses_outer_columns)
+                                    || aggref
+                                        .aggorder
+                                        .iter()
+                                        .any(|item| expr_uses_outer_columns(&item.expr))
                             }
                             crate::include::nodes::primnodes::WindowFuncKind::Builtin(_) => false,
                         }

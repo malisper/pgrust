@@ -320,6 +320,14 @@ pub(super) fn rewrite_semantic_expr_for_path(expr: Expr, path: &Path, layout: &[
                 .into_iter()
                 .map(|arg| rewrite_semantic_expr_for_path(arg, path, layout))
                 .collect(),
+            aggorder: aggref
+                .aggorder
+                .into_iter()
+                .map(|item| crate::include::nodes::primnodes::OrderByEntry {
+                    expr: rewrite_semantic_expr_for_path(item.expr, path, layout),
+                    ..item
+                })
+                .collect(),
             aggfilter: aggref
                 .aggfilter
                 .map(|expr| rewrite_semantic_expr_for_path(expr, path, layout)),

@@ -415,6 +415,7 @@ fn current_window_state_or_error()
 fn bind_grouped_window_agg_call(
     func: AggFunc,
     args: &[SqlFunctionArg],
+    order_by: &[OrderByItem],
     distinct: bool,
     func_variadic: bool,
     filter: Option<&SqlExpr>,
@@ -425,7 +426,14 @@ fn bind_grouped_window_agg_call(
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
-    agg_list: &[(AggFunc, Vec<SqlFunctionArg>, bool, bool, Option<SqlExpr>)],
+    agg_list: &[(
+        AggFunc,
+        Vec<SqlFunctionArg>,
+        Vec<OrderByItem>,
+        bool,
+        bool,
+        Option<SqlExpr>,
+    )],
     n_keys: usize,
 ) -> Result<Expr, ParseError> {
     let state = current_window_state_or_error()?;
@@ -494,6 +502,30 @@ fn bind_grouped_window_agg_call(
             })
         })
         .transpose()?;
+    let bound_order_by = order_by
+        .iter()
+        .map(|item| {
+            Ok(OrderByEntry {
+                expr: bind_agg_output_expr(
+                    &item.expr,
+                    group_by_exprs,
+                    group_key_exprs,
+                    input_scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    agg_list,
+                    n_keys,
+                )?,
+                ressortgroupref: 0,
+                descending: item.descending,
+                nulls_first: item.nulls_first,
+            })
+        })
+        .collect::<Result<Vec<_>, ParseError>>()?;
+    for item in &bound_order_by {
+        reject_nested_local_ctes_in_agg_expr(&item.expr)?;
+    }
     let spec = bind_window_spec(over, |expr| {
         bind_agg_output_expr(
             expr,
@@ -521,6 +553,7 @@ fn bind_grouped_window_agg_call(
             .unwrap_or(func_variadic),
         aggdistinct: distinct,
         args: coerced_args.clone(),
+        aggorder: bound_order_by,
         aggfilter: bound_filter,
         agglevelsup: 0,
         aggno: 0,
@@ -545,7 +578,14 @@ fn bind_grouped_window_func_call(
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
-    agg_list: &[(AggFunc, Vec<SqlFunctionArg>, bool, bool, Option<SqlExpr>)],
+    agg_list: &[(
+        AggFunc,
+        Vec<SqlFunctionArg>,
+        Vec<OrderByItem>,
+        bool,
+        bool,
+        Option<SqlExpr>,
+    )],
     n_keys: usize,
 ) -> Result<Expr, ParseError> {
     let state = current_window_state_or_error()?;
@@ -617,6 +657,7 @@ fn bind_grouped_window_func_call(
         return bind_grouped_window_agg_call(
             agg_impl,
             args,
+            &[],
             false,
             resolved.func_variadic,
             None,
@@ -654,7 +695,14 @@ pub(super) fn bind_agg_output_expr(
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
-    agg_list: &[(AggFunc, Vec<SqlFunctionArg>, bool, bool, Option<SqlExpr>)],
+    agg_list: &[(
+        AggFunc,
+        Vec<SqlFunctionArg>,
+        Vec<OrderByItem>,
+        bool,
+        bool,
+        Option<SqlExpr>,
+    )],
     n_keys: usize,
 ) -> Result<Expr, ParseError> {
     bind_agg_output_expr_in_clause(
@@ -680,7 +728,14 @@ pub(super) fn bind_agg_output_expr_in_clause(
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
-    agg_list: &[(AggFunc, Vec<SqlFunctionArg>, bool, bool, Option<SqlExpr>)],
+    agg_list: &[(
+        AggFunc,
+        Vec<SqlFunctionArg>,
+        Vec<OrderByItem>,
+        bool,
+        bool,
+        Option<SqlExpr>,
+    )],
     n_keys: usize,
 ) -> Result<Expr, ParseError> {
     for (i, gk) in group_by_exprs.iter().enumerate() {
@@ -701,6 +756,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
         SqlExpr::AggCall {
             func,
             args,
+            order_by,
             distinct,
             func_variadic,
             filter,
@@ -710,6 +766,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 return bind_grouped_window_agg_call(
                     *func,
                     args,
+                    order_by,
                     *distinct,
                     *func_variadic,
                     filter.as_deref(),
@@ -727,6 +784,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
             let entry = (
                 *func,
                 args.clone(),
+                order_by.clone(),
                 *distinct,
                 *func_variadic,
                 filter.as_deref().cloned(),
@@ -800,12 +858,33 @@ pub(super) fn bind_agg_output_expr_in_clause(
                     if let Some(filter) = &bound_filter {
                         reject_nested_local_ctes_in_agg_expr(filter)?;
                     }
+                    let bound_order_by = order_by
+                        .iter()
+                        .map(|item| {
+                            Ok(OrderByEntry {
+                                expr: bind_grouped_plain_expr(
+                                    &item.expr,
+                                    input_scope,
+                                    catalog,
+                                    outer_scopes,
+                                    grouped_outer,
+                                )?,
+                                ressortgroupref: 0,
+                                descending: item.descending,
+                                nulls_first: item.nulls_first,
+                            })
+                        })
+                        .collect::<Result<Vec<_>, ParseError>>()?;
+                    for item in &bound_order_by {
+                        reject_nested_local_ctes_in_agg_expr(&item.expr)?;
+                    }
                     return Ok(Expr::aggref(
                         aggfnoid,
                         aggregate_sql_type(*func, arg_types.first().copied()),
                         agg_variadic,
                         *distinct,
                         coerced_args,
+                        bound_order_by,
                         bound_filter,
                         i,
                     ));

@@ -263,6 +263,7 @@ fn build_grouped_target(parse: &Query) -> PathTarget {
             aggvariadic: accum.agg_variadic,
             aggdistinct: accum.distinct,
             args: accum.args.clone(),
+            aggorder: accum.order_by.clone(),
             aggfilter: accum.filter.clone(),
             agglevelsup: 0,
             aggno,

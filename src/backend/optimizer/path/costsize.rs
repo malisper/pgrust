@@ -1399,6 +1399,20 @@ pub(super) fn rewrite_semantic_expr_for_join_inputs(
                     rewrite_semantic_expr_for_join_inputs(root, arg, left, right, join_layout)
                 })
                 .collect(),
+            aggorder: aggref
+                .aggorder
+                .into_iter()
+                .map(|item| crate::include::nodes::primnodes::OrderByEntry {
+                    expr: rewrite_semantic_expr_for_join_inputs(
+                        root,
+                        item.expr,
+                        left,
+                        right,
+                        join_layout,
+                    ),
+                    ..item
+                })
+                .collect(),
             aggfilter: aggref.aggfilter.map(|expr| {
                 rewrite_semantic_expr_for_join_inputs(root, expr, left, right, join_layout)
             }),
@@ -1685,6 +1699,14 @@ fn rewrite_expr_for_path_output(
                 .args
                 .into_iter()
                 .map(|arg| rewrite_expr_for_path_output(root, arg, path, layout))
+                .collect(),
+            aggorder: aggref
+                .aggorder
+                .into_iter()
+                .map(|item| crate::include::nodes::primnodes::OrderByEntry {
+                    expr: rewrite_expr_for_path_output(root, item.expr, path, layout),
+                    ..item
+                })
                 .collect(),
             ..*aggref
         })),

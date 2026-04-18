@@ -1,4 +1,4 @@
-use super::{AccumState, AggGroup, ExecError, ExecutorContext, executor_start};
+use super::{executor_start, AccumState, AggGroup, ExecError, ExecutorContext, OrderedAggInput};
 use crate::backend::access::heap::heapam::{
     heap_fetch_visible_with_txns, heap_scan_begin_visible, heap_scan_end,
     heap_scan_page_next_tuple, heap_scan_prepare_next_page,
@@ -22,7 +22,7 @@ use crate::include::nodes::execnodes::{
     ValuesState, WindowAggState, WorkTableScanState,
 };
 use crate::include::nodes::primnodes::{
-    Expr, INDEX_VAR, INNER_VAR, JoinType, OUTER_VAR, Var, attrno_index,
+    attrno_index, Expr, JoinType, Var, INDEX_VAR, INNER_VAR, OUTER_VAR,
 };
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -1651,6 +1651,7 @@ impl PlanNode for AggregateState {
                         groups.push(AggGroup {
                             key_values: self.key_buffer.clone(),
                             accum_states,
+                            ordered_inputs: vec![Vec::new(); self.accumulators.len()],
                         });
                         groups.len() - 1
                     });
@@ -1669,7 +1670,19 @@ impl PlanNode for AggregateState {
                         .iter()
                         .map(|arg| eval_expr(arg, slot, ctx))
                         .collect::<Result<Vec<_>, _>>()?;
-                    (self.trans_fns[i])(&mut group.accum_states[i], &values);
+                    if accum.order_by.is_empty() {
+                        (self.trans_fns[i])(&mut group.accum_states[i], &values);
+                    } else {
+                        let sort_keys = accum
+                            .order_by
+                            .iter()
+                            .map(|item| eval_expr(&item.expr, slot, ctx))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        group.ordered_inputs[i].push(OrderedAggInput {
+                            sort_keys,
+                            arg_values: values,
+                        });
+                    }
                 }
             }
 
@@ -1691,7 +1704,23 @@ impl PlanNode for AggregateState {
                 groups.push(AggGroup {
                     key_values: Vec::new(),
                     accum_states,
+                    ordered_inputs: vec![Vec::new(); self.accumulators.len()],
                 });
+            }
+
+            for group in &mut groups {
+                for (i, accum) in self.accumulators.iter().enumerate() {
+                    if accum.order_by.is_empty() {
+                        continue;
+                    }
+                    let inputs = &mut group.ordered_inputs[i];
+                    inputs.sort_by(|left, right| {
+                        compare_order_by_keys(&accum.order_by, &left.sort_keys, &right.sort_keys)
+                    });
+                    for input in inputs.iter() {
+                        (self.trans_fns[i])(&mut group.accum_states[i], &input.arg_values);
+                    }
+                }
             }
 
             let mut result_rows = Vec::new();

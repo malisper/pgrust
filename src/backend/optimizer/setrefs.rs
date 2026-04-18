@@ -171,6 +171,7 @@ fn aggregate_output_expr(accum: &crate::include::nodes::primnodes::AggAccum, agg
         aggvariadic: accum.agg_variadic,
         aggdistinct: accum.distinct,
         args: accum.args.clone(),
+        aggorder: accum.order_by.clone(),
         aggfilter: accum.filter.clone(),
         agglevelsup: 0,
         aggno,
@@ -634,6 +635,14 @@ fn lower_projection_expr_by_input_target(
                 .into_iter()
                 .map(|arg| lower_projection_expr_by_input_target(root, arg, input, input_tlist))
                 .collect(),
+            aggorder: aggref
+                .aggorder
+                .into_iter()
+                .map(|item| OrderByEntry {
+                    expr: lower_projection_expr_by_input_target(root, item.expr, input, input_tlist),
+                    ..item
+                })
+                .collect(),
             aggfilter: aggref
                 .aggfilter
                 .map(|expr| lower_projection_expr_by_input_target(root, expr, input, input_tlist)),
@@ -1013,6 +1022,14 @@ fn rewrite_expr_for_append_rel(
                 .args
                 .into_iter()
                 .map(|arg| rewrite_expr_for_append_rel(arg, info))
+                .collect(),
+            aggorder: aggref
+                .aggorder
+                .into_iter()
+                .map(|item| OrderByEntry {
+                    expr: rewrite_expr_for_append_rel(item.expr, info),
+                    ..item
+                })
                 .collect(),
             aggfilter: aggref
                 .aggfilter
@@ -1609,6 +1626,17 @@ fn lower_agg_accum(
             .map(|arg| {
                 let arg = fix_upper_expr_for_input(ctx.root, arg, path, input_tlist);
                 lower_expr(ctx, arg, LowerMode::Input { tlist: input_tlist })
+            })
+            .collect(),
+        order_by: accum
+            .order_by
+            .into_iter()
+            .map(|item| crate::include::nodes::primnodes::OrderByEntry {
+                expr: {
+                    let expr = fix_upper_expr_for_input(ctx.root, item.expr, path, input_tlist);
+                    lower_expr(ctx, expr, LowerMode::Input { tlist: input_tlist })
+                },
+                ..item
             })
             .collect(),
         filter: accum.filter.map(|filter| {
@@ -2932,6 +2960,14 @@ fn lower_window_clause_for_input(
                             .into_iter()
                             .map(|arg| lower_expr_for_input(ctx, arg))
                             .collect(),
+                        aggorder: aggref
+                            .aggorder
+                            .into_iter()
+                            .map(|item| OrderByEntry {
+                                expr: lower_expr_for_input(ctx, item.expr),
+                                ..item
+                            })
+                            .collect(),
                         aggfilter: aggref.aggfilter.map(|expr| lower_expr_for_input(ctx, expr)),
                         ..aggref
                     }),
@@ -3449,6 +3485,14 @@ fn rebuild_setrefs_expr(
         Expr::Var(_) | Expr::Param(_) => expr,
         Expr::Aggref(aggref) => Expr::Aggref(Box::new(Aggref {
             args: aggref.args.into_iter().map(recurse).collect(),
+            aggorder: aggref
+                .aggorder
+                .into_iter()
+                .map(|item| OrderByEntry {
+                    expr: recurse(item.expr),
+                    ..item
+                })
+                .collect(),
             aggfilter: aggref.aggfilter.map(recurse),
             ..*aggref
         })),
@@ -3576,6 +3620,14 @@ fn fully_expand_output_expr(expr: Expr, path: &Path) -> Expr {
                 .args
                 .into_iter()
                 .map(|arg| fully_expand_output_expr(arg, path))
+                .collect(),
+            aggorder: aggref
+                .aggorder
+                .into_iter()
+                .map(|item| OrderByEntry {
+                    expr: fully_expand_output_expr(item.expr, path),
+                    ..item
+                })
                 .collect(),
             aggfilter: aggref
                 .aggfilter

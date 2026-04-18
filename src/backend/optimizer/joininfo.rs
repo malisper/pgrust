@@ -1,7 +1,7 @@
 use crate::include::nodes::parsenodes::{JoinTreeNode, Query, RangeTblEntryKind};
 use crate::include::nodes::pathnodes::{PlannerInfo, RestrictInfo, SpecialJoinInfo};
 use crate::include::nodes::primnodes::{
-    BoolExprType, Expr, ExprArraySubscript, JoinType, attrno_index,
+    attrno_index, BoolExprType, Expr, ExprArraySubscript, JoinType,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -304,6 +304,14 @@ pub(super) fn flatten_join_alias_vars_query(query: &Query, expr: Expr) -> Expr {
                 .args
                 .into_iter()
                 .map(|arg| flatten_join_alias_vars_query(query, arg))
+                .collect(),
+            aggorder: aggref
+                .aggorder
+                .into_iter()
+                .map(|item| crate::include::nodes::primnodes::OrderByEntry {
+                    expr: flatten_join_alias_vars_query(query, item.expr),
+                    ..item
+                })
                 .collect(),
             aggfilter: aggref
                 .aggfilter

@@ -1561,10 +1561,17 @@ impl<'a> RecursiveReferenceChecker<'a> {
                 Ok(())
             }
             SqlExpr::AggCall {
-                args, filter, over, ..
+                args,
+                order_by,
+                filter,
+                over,
+                ..
             } => {
                 for arg in args {
                     self.visit_expr(&arg.value, context)?;
+                }
+                for item in order_by {
+                    self.visit_expr(&item.expr, context)?;
                 }
                 if let Some(filter) = filter {
                     self.visit_expr(filter, context)?;
@@ -1838,7 +1845,14 @@ fn sql_expr_references_table(expr: &SqlExpr, table_name: &str) -> bool {
         SqlExpr::ArrayLiteral(items) | SqlExpr::Row(items) => items
             .iter()
             .any(|item| sql_expr_references_table(item, table_name)),
-        SqlExpr::AggCall { args, .. } | SqlExpr::FuncCall { args, .. } => args
+        SqlExpr::AggCall { args, order_by, .. } => {
+            args.iter()
+                .any(|arg| sql_expr_references_table(&arg.value, table_name))
+                || order_by
+                    .iter()
+                    .any(|item| sql_expr_references_table(&item.expr, table_name))
+        }
+        SqlExpr::FuncCall { args, .. } => args
             .iter()
             .any(|arg| sql_expr_references_table(&arg.value, table_name)),
         SqlExpr::ScalarSubquery(subquery) | SqlExpr::Exists(subquery) => {
@@ -2194,7 +2208,14 @@ fn bind_select_query_with_outer(
     let window_state = Rc::new(RefCell::new(WindowBindingState::default()));
 
     if needs_agg {
-        let mut aggs: Vec<(AggFunc, Vec<SqlFunctionArg>, bool, bool, Option<SqlExpr>)> = Vec::new();
+        let mut aggs: Vec<(
+            AggFunc,
+            Vec<SqlFunctionArg>,
+            Vec<OrderByItem>,
+            bool,
+            bool,
+            Option<SqlExpr>,
+        )> = Vec::new();
         for target in &stmt.targets {
             collect_aggs(&target.expr, &mut aggs);
         }
@@ -2221,7 +2242,7 @@ fn bind_select_query_with_outer(
         return with_grouped_agg_cte_context(&visible_ctes, &local_ctes, || {
             let accumulators: Vec<AggAccum> = aggs
                 .iter()
-                .map(|(func, args, distinct, func_variadic, filter)| {
+                .map(|(func, args, order_by, distinct, func_variadic, filter)| {
                     if aggregate_args_are_named(args) {
                         return Err(ParseError::UnexpectedToken {
                             expected: "aggregate arguments without names",
@@ -2278,6 +2299,27 @@ fn bind_select_query_with_outer(
                     if let Some(filter) = &bound_filter {
                         reject_nested_local_ctes_in_agg_expr(filter)?;
                     }
+                    let bound_order_by = order_by
+                        .iter()
+                        .map(|item| {
+                            Ok(OrderByEntry {
+                                expr: bind_expr_with_outer_and_ctes(
+                                    &item.expr,
+                                    &scope,
+                                    catalog,
+                                    outer_scopes,
+                                    grouped_outer.as_ref(),
+                                    &visible_ctes,
+                                )?,
+                                ressortgroupref: 0,
+                                descending: item.descending,
+                                nulls_first: item.nulls_first,
+                            })
+                        })
+                        .collect::<Result<Vec<_>, ParseError>>()?;
+                    for item in &bound_order_by {
+                        reject_nested_local_ctes_in_agg_expr(&item.expr)?;
+                    }
                     let coerced_args = if let Some(resolved) = &resolved {
                         bound_args
                             .into_iter()
@@ -2301,6 +2343,7 @@ fn bind_select_query_with_outer(
                             .map(|call| call.func_variadic)
                             .unwrap_or(*func_variadic),
                         args: coerced_args,
+                        order_by: bound_order_by,
                         filter: bound_filter,
                         distinct: *distinct,
                         sql_type: aggregate_sql_type(*func, arg_types.first().copied()),
@@ -2324,7 +2367,7 @@ fn bind_select_query_with_outer(
                     wire_type_oid: None,
                 });
             }
-            for (func, args, _, _, _) in &aggs {
+            for (func, args, _, _, _, _) in &aggs {
                 output_columns.push(QueryColumn {
                     name: func.name().to_string(),
                     sql_type: aggregate_sql_type(
@@ -2400,6 +2443,7 @@ fn bind_select_query_with_outer(
                                     accum.agg_variadic,
                                     accum.distinct,
                                     accum.args.clone(),
+                                    accum.order_by.clone(),
                                     accum.filter.clone(),
                                     i,
                                 ),

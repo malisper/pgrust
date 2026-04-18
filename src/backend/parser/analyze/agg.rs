@@ -138,9 +138,17 @@ pub(super) fn expr_references_input_scope(expr: &SqlExpr) -> bool {
         SqlExpr::BinaryOperator { left, right, .. } => {
             expr_references_input_scope(left) || expr_references_input_scope(right)
         }
-        SqlExpr::AggCall { args, filter, .. } => {
+        SqlExpr::AggCall {
+            args,
+            order_by,
+            filter,
+            ..
+        } => {
             args.iter()
                 .any(|arg| expr_references_input_scope(&arg.value))
+                || order_by
+                    .iter()
+                    .any(|item| expr_references_input_scope(&item.expr))
                 || filter.as_deref().is_some_and(expr_references_input_scope)
         }
         SqlExpr::FuncCall { args, .. } => args
@@ -263,12 +271,20 @@ pub(super) fn expr_references_input_scope(expr: &SqlExpr) -> bool {
 
 pub(super) fn collect_aggs(
     expr: &SqlExpr,
-    aggs: &mut Vec<(AggFunc, Vec<SqlFunctionArg>, bool, bool, Option<SqlExpr>)>,
+    aggs: &mut Vec<(
+        AggFunc,
+        Vec<SqlFunctionArg>,
+        Vec<OrderByItem>,
+        bool,
+        bool,
+        Option<SqlExpr>,
+    )>,
 ) {
     match expr {
         SqlExpr::AggCall {
             func,
             args,
+            order_by,
             distinct,
             func_variadic,
             filter,
@@ -278,6 +294,9 @@ pub(super) fn collect_aggs(
                 for arg in args {
                     collect_aggs(&arg.value, aggs);
                 }
+                for item in order_by {
+                    collect_aggs(&item.expr, aggs);
+                }
                 if let Some(filter) = filter.as_deref() {
                     collect_aggs(filter, aggs);
                 }
@@ -286,6 +305,7 @@ pub(super) fn collect_aggs(
             let entry = (
                 *func,
                 args.clone(),
+                order_by.clone(),
                 *distinct,
                 *func_variadic,
                 filter.as_deref().cloned(),
