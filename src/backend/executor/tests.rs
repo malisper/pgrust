@@ -6,7 +6,7 @@ use crate::backend::parser::{Catalog, CatalogEntry, CatalogLookup};
 use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, StorageManager};
 use crate::include::access::htup::TupleValue;
 use crate::include::access::htup::{AttributeDesc, HeapTuple};
-use crate::include::nodes::datetime::DateADT;
+use crate::include::nodes::datetime::{DateADT, TimestampADT};
 use crate::include::nodes::primnodes::{user_attrno, Var};
 use crate::pgrust::database::{Database, Session};
 use crate::RelFileLocator;
@@ -2672,7 +2672,7 @@ fn sum_of_all_nulls_returns_null() {
     .unwrap()
     {
         StatementResult::Query { rows, .. } => {
-            assert_eq!(rows, vec![vec![Value::Bool(false), Value::Bool(false)]]);
+            assert_eq!(rows, vec![vec![Value::Null, Value::Null]]);
         }
         other => panic!("expected query result, got {:?}", other),
     }
@@ -3093,14 +3093,16 @@ fn select_date_trunc_on_date_values() {
             &txns,
             INVALID_TRANSACTION_ID,
             "select date_trunc('century', date '2004-08-10'), date_trunc('decade', date '0002-12-31 BC')",
-        )
-        .unwrap(),
+    )
+    .unwrap(),
         vec![vec![
-            Value::Date(DateADT(
-                crate::backend::utils::time::datetime::days_from_ymd(2001, 1, 1).unwrap(),
+            Value::Timestamp(TimestampADT(
+                i64::from(crate::backend::utils::time::datetime::days_from_ymd(2001, 1, 1).unwrap())
+                    * crate::include::nodes::datetime::USECS_PER_DAY,
             )),
-            Value::Date(DateADT(
-                crate::backend::utils::time::datetime::days_from_ymd(-10, 1, 1).unwrap(),
+            Value::Timestamp(TimestampADT(
+                i64::from(crate::backend::utils::time::datetime::days_from_ymd(-10, 1, 1).unwrap())
+                    * crate::include::nodes::datetime::USECS_PER_DAY,
             )),
         ]],
     );

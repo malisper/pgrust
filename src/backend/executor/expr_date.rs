@@ -257,7 +257,7 @@ pub(crate) fn eval_date_trunc_function(
     match date_value {
         Value::Date(date) => {
             if !date.is_finite() {
-                return Ok(Value::TimestampTz(TimestampTzADT(match date.0 {
+                return Ok(Value::Timestamp(TimestampADT(match date.0 {
                     DATEVAL_NOEND => TIMESTAMP_NOEND,
                     DATEVAL_NOBEGIN => TIMESTAMP_NOBEGIN,
                     _ => unreachable!("checked finite date above"),
@@ -270,10 +270,7 @@ pub(crate) fn eval_date_trunc_function(
                     hint: None,
                     sqlstate: "0A000",
                 })?;
-            let offset_seconds = i64::from(timezone_offset_seconds(config));
-            Ok(Value::TimestampTz(TimestampTzADT(
-                i64::from(days) * USECS_PER_DAY - offset_seconds * USECS_PER_SEC,
-            )))
+            Ok(Value::Timestamp(TimestampADT(i64::from(days) * USECS_PER_DAY)))
         }
         Value::Timestamp(timestamp) => {
             if !timestamp.is_finite() {
@@ -389,7 +386,7 @@ mod tests {
                 Value::Date(DateADT(days_from_ymd(-54, 8, 10).unwrap())),
             ], &DateTimeConfig::default())
             .unwrap(),
-            Value::TimestampTz(TimestampTzADT(
+            Value::Timestamp(TimestampADT(
                 i64::from(days_from_ymd(-99, 1, 1).unwrap()) * USECS_PER_DAY,
             ))
         );
@@ -399,7 +396,7 @@ mod tests {
                 Value::Date(DateADT(days_from_ymd(4, 12, 25).unwrap())),
             ], &DateTimeConfig::default())
             .unwrap(),
-            Value::TimestampTz(TimestampTzADT(
+            Value::Timestamp(TimestampADT(
                 i64::from(days_from_ymd(0, 1, 1).unwrap()) * USECS_PER_DAY,
             ))
         );

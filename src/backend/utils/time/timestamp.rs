@@ -1,7 +1,8 @@
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::time::datetime::{
     DateTimeKeyword, DateTimeParseError, TimeZoneSpec, current_postgres_timestamp_usecs,
-    current_timezone_name, day_of_week_from_julian_day, days_from_ymd, format_date_ymd,
+    current_timezone_name, day_of_week_from_julian_day, days_from_ymd, expand_two_digit_year,
+    format_date_ymd,
     format_offset, format_time_usecs, is_bc_token, is_weekday_token,
     julian_day_from_postgres_date, month_number, named_timezone_offset_seconds,
     parse_date_token_with_config, parse_keyword, parse_time_components, parse_timezone_spec,
@@ -186,7 +187,11 @@ fn parse_date_tokens(
 ) -> Result<(i32, u32, u32), DateTimeParseError> {
     match tokens {
         [single] => {
-            parse_date_token_with_config(single, config)?.ok_or(DateTimeParseError::Invalid)
+            match parse_date_token_with_config(single, config) {
+                Ok(Some(date)) => Ok(date),
+                Err(_) | Ok(None) => parse_two_digit_year_first_timestamp_date(single)
+                    .ok_or(DateTimeParseError::Invalid),
+            }
         }
         [first, second, third] => {
             if let Some(month) = month_number(first) {
@@ -216,6 +221,33 @@ fn parse_date_tokens(
         }
         _ => Err(DateTimeParseError::Invalid),
     }
+}
+
+fn parse_two_digit_year_first_timestamp_date(token: &str) -> Option<(i32, u32, u32)> {
+    let trimmed = token.trim();
+    for delim in ['-', '/'] {
+        if !trimmed.contains(delim) {
+            continue;
+        }
+        let parts = trimmed.split(delim).collect::<Vec<_>>();
+        if parts.len() != 3
+            || !parts
+                .iter()
+                .all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit()))
+        {
+            return None;
+        }
+        let year = parts[0].parse::<i32>().ok()?;
+        if parts[0].len() > 2 || year <= 31 {
+            return None;
+        }
+        let year = expand_two_digit_year(year);
+        let month = parts[1].parse::<u32>().ok()?;
+        let day = parts[2].parse::<u32>().ok()?;
+        days_from_ymd(year, month, day)?;
+        return Some((year, month, day));
+    }
+    None
 }
 
 fn extract_timestamp_parts(

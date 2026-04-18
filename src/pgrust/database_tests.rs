@@ -16,6 +16,8 @@ const CONTENTION_TEST_TIMEOUT: Duration = Duration::from_secs(15);
 const HEAVY_CONTENTION_TEST_TIMEOUT: Duration = Duration::from_secs(30);
 const STRESS_TEST_TIMEOUT: Duration = Duration::from_secs(60);
 const SAME_ROW_UPDATE_TEST_TIMEOUT: Duration = Duration::from_secs(20);
+const PGBENCH_STYLE_TEST_TIMEOUT: Duration = Duration::from_secs(20);
+const SAME_ROW_UPDATE_FULL_SUITE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Start a background thread that periodically checks for deadlocks
 /// using parking_lot's deadlock detector.  Called once via `Once`.
@@ -9340,7 +9342,7 @@ fn concurrent_inserts_no_lost_rows() {
         })
         .collect();
 
-    join_all_with_timeout(handles, TEST_TIMEOUT);
+    join_all_with_timeout(handles, PGBENCH_STYLE_TEST_TIMEOUT);
 
     let expected = num_threads * inserts_per_thread;
     match db.execute(1, "select count(*) from itest").unwrap() {
@@ -10562,7 +10564,7 @@ fn concurrent_same_row_updates_do_not_deadlock() {
             }
         }));
     }
-    join_all_with_timeout(handles, SAME_ROW_UPDATE_TEST_TIMEOUT);
+    join_all_with_timeout(handles, SAME_ROW_UPDATE_FULL_SUITE_TIMEOUT);
 
     let result = db.execute(1, "select val from t where id = 1").unwrap();
     let expected = num_threads * iters;

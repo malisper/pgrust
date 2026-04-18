@@ -3,12 +3,15 @@ use std::cmp::Ordering;
 use num_traits::Zero;
 
 use crate::backend::executor::ExecError;
+use crate::backend::executor::expr_casts::cast_value;
 use crate::backend::executor::expr_ops::parse_numeric_text;
-use crate::backend::executor::jsonb::{JsonbValue, compare_jsonb};
+use crate::backend::executor::jsonb::{JsonbValue, compare_jsonb, jsonb_to_text_value};
 use crate::backend::executor::pg_regex::{
     eval_jsonpath_like_regex, validate_jsonpath_like_regex,
 };
+use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::nodes::datum::NumericValue;
+use crate::include::nodes::datum::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PathMode {
@@ -124,9 +127,15 @@ enum SubscriptSelection {
 #[derive(Debug, Clone, Copy)]
 enum MethodKind {
     Abs,
+    Boolean,
     Ceiling,
+    Decimal { precision: i64, scale: i64 },
+    Double,
     Floor,
+    Integer,
+    Number,
     Size,
+    String,
     Type,
 }
 
@@ -589,18 +598,25 @@ fn apply_method(value: &JsonbValue, kind: MethodKind, mode: PathMode) -> Result<
                 "jsonpath item method .abs() can only be applied to a numeric value",
             )),
         },
+        MethodKind::Boolean => jsonpath_boolean_method(value),
         MethodKind::Ceiling => match value {
             JsonbValue::Numeric(numeric) => Ok(JsonbValue::Numeric(numeric_ceiling(numeric))),
             _ => Err(exec_jsonpath_error(
                 "jsonpath item method .ceiling() can only be applied to a numeric value",
             )),
         },
+        MethodKind::Decimal { precision, scale } => {
+            jsonpath_decimal_method(value, precision, scale)
+        }
+        MethodKind::Double => jsonpath_double_method(value),
         MethodKind::Floor => match value {
             JsonbValue::Numeric(numeric) => Ok(JsonbValue::Numeric(numeric_floor(numeric))),
             _ => Err(exec_jsonpath_error(
                 "jsonpath item method .floor() can only be applied to a numeric value",
             )),
         },
+        MethodKind::Integer => jsonpath_integer_method(value),
+        MethodKind::Number => jsonpath_number_method(value),
         MethodKind::Type => Ok(JsonbValue::String(jsonb_type_name(value).to_string())),
         MethodKind::Size => match value {
             JsonbValue::Array(items) => Ok(numeric_jsonb_from_i32(items.len() as i32)),
@@ -609,7 +625,143 @@ fn apply_method(value: &JsonbValue, kind: MethodKind, mode: PathMode) -> Result<
                 "jsonpath item method .size() can only be applied to an array",
             )),
         },
+        MethodKind::String => Ok(JsonbValue::String(jsonpath_string_value(value))),
     }
+}
+
+fn jsonpath_number_method(value: &JsonbValue) -> Result<JsonbValue, ExecError> {
+    match value {
+        JsonbValue::Numeric(numeric) => Ok(JsonbValue::Numeric(numeric.clone())),
+        JsonbValue::String(text) => parse_numeric_text(text)
+            .map(JsonbValue::Numeric)
+            .ok_or_else(|| jsonpath_method_argument_error(value, "number", "numeric")),
+        _ => Err(jsonpath_method_argument_error(value, "number", "numeric")),
+    }
+}
+
+fn jsonpath_integer_method(value: &JsonbValue) -> Result<JsonbValue, ExecError> {
+    let numeric = match value {
+        JsonbValue::Numeric(numeric) => numeric.clone(),
+        JsonbValue::String(text) => parse_numeric_text(text)
+            .ok_or_else(|| jsonpath_method_argument_error(value, "integer", "integer"))?,
+        _ => return Err(jsonpath_method_argument_error(value, "integer", "integer")),
+    };
+    let rounded = numeric
+        .round_to_scale(0)
+        .ok_or_else(|| jsonpath_method_argument_error(value, "integer", "integer"))?;
+    match rounded.render().parse::<i32>() {
+        Ok(integer) => Ok(numeric_jsonb_from_i32(integer)),
+        Err(_) => Err(jsonpath_method_argument_error(value, "integer", "integer")),
+    }
+}
+
+fn jsonpath_decimal_method(
+    value: &JsonbValue,
+    precision: i64,
+    scale: i64,
+) -> Result<JsonbValue, ExecError> {
+    let precision = i32::try_from(precision).map_err(|_| {
+        exec_jsonpath_error("precision of jsonpath item method .decimal() is out of range for type integer")
+    })?;
+    let scale = i32::try_from(scale).map_err(|_| {
+        exec_jsonpath_error("scale of jsonpath item method .decimal() is out of range for type integer")
+    })?;
+    let casted = cast_value(jsonpath_scalar_input(value), SqlType::with_numeric_precision_scale(precision, scale))
+        .map_err(|_| jsonpath_method_argument_error(value, "decimal", "numeric"))?;
+    match casted {
+        Value::Numeric(numeric) => Ok(JsonbValue::Numeric(numeric)),
+        _ => Err(jsonpath_method_argument_error(value, "decimal", "numeric")),
+    }
+}
+
+fn jsonpath_double_method(value: &JsonbValue) -> Result<JsonbValue, ExecError> {
+    let rendered = match value {
+        JsonbValue::Numeric(numeric) => numeric.render(),
+        JsonbValue::String(text) => text.clone(),
+        _ => return Err(jsonpath_method_argument_error(value, "double", "double precision")),
+    };
+    let parsed = rendered
+        .parse::<f64>()
+        .map_err(|_| jsonpath_method_argument_error(value, "double", "double precision"))?;
+    if !parsed.is_finite() {
+        return Err(exec_jsonpath_error(
+            "NaN or Infinity is not allowed for jsonpath item method .double()",
+        ));
+    }
+    let numeric = parse_numeric_text(&parsed.to_string())
+        .ok_or_else(|| jsonpath_method_argument_error(value, "double", "double precision"))?;
+    Ok(JsonbValue::Numeric(numeric))
+}
+
+fn jsonpath_boolean_method(value: &JsonbValue) -> Result<JsonbValue, ExecError> {
+    match value {
+        JsonbValue::Bool(boolean) => Ok(JsonbValue::Bool(*boolean)),
+        JsonbValue::String(text) => match parse_jsonpath_bool_text(text) {
+            Some(boolean) => Ok(JsonbValue::Bool(boolean)),
+            None => Err(jsonpath_method_argument_error(value, "boolean", "boolean")),
+        },
+        JsonbValue::Numeric(numeric) => match numeric.render().as_str() {
+            "0" => Ok(JsonbValue::Bool(false)),
+            "1" => Ok(JsonbValue::Bool(true)),
+            _ => Err(jsonpath_method_argument_error(value, "boolean", "boolean")),
+        },
+        _ => Err(jsonpath_method_argument_error(value, "boolean", "boolean")),
+    }
+}
+
+fn parse_jsonpath_bool_text(raw: &str) -> Option<bool> {
+    let trimmed = raw.trim_matches(|ch: char| ch.is_ascii_whitespace());
+    if trimmed.is_empty() {
+        return None;
+    }
+    let len = trimmed.len();
+    let is_prefix = |needle: &str, min_len: usize| {
+        len >= min_len && needle.len() >= len && needle[..len].eq_ignore_ascii_case(trimmed)
+    };
+    match trimmed.as_bytes()[0].to_ascii_lowercase() {
+        b't' if is_prefix("true", 1) => Some(true),
+        b'f' if is_prefix("false", 1) => Some(false),
+        b'y' if is_prefix("yes", 1) => Some(true),
+        b'n' if is_prefix("no", 1) => Some(false),
+        b'o' if is_prefix("on", 2) => Some(true),
+        b'o' if is_prefix("off", 2) => Some(false),
+        b'1' if len == 1 => Some(true),
+        b'0' if len == 1 => Some(false),
+        _ => None,
+    }
+}
+
+fn jsonpath_string_value(value: &JsonbValue) -> String {
+    match value {
+        JsonbValue::Null => "null".into(),
+        JsonbValue::String(text) => text.clone(),
+        JsonbValue::Numeric(numeric) => numeric.render(),
+        JsonbValue::Bool(boolean) => boolean.to_string(),
+        JsonbValue::Array(_) | JsonbValue::Object(_) => value.render(),
+    }
+}
+
+fn jsonpath_scalar_input(value: &JsonbValue) -> Value {
+    match value {
+        JsonbValue::Null => Value::Null,
+        JsonbValue::String(text) => Value::Text(text.clone().into()),
+        JsonbValue::Numeric(numeric) => Value::Numeric(numeric.clone()),
+        JsonbValue::Bool(boolean) => Value::Bool(*boolean),
+        JsonbValue::Array(_) | JsonbValue::Object(_) => jsonb_to_text_value(value),
+    }
+}
+
+fn jsonpath_method_argument_error(
+    value: &JsonbValue,
+    method: &str,
+    target_type: &str,
+) -> ExecError {
+    exec_jsonpath_error(&format!(
+        "argument \"{}\" of jsonpath item method .{}() is invalid for type {}",
+        jsonpath_string_value(value),
+        method,
+        target_type
+    ))
 }
 
 fn compare_any_pair(
@@ -1090,13 +1242,7 @@ fn render_expr(expr: &Expr, out: &mut String) {
         }
         Expr::MethodCall { inner, kind } => {
             render_operand(inner, out);
-            out.push_str(match kind {
-                MethodKind::Abs => ".abs()",
-                MethodKind::Ceiling => ".ceiling()",
-                MethodKind::Floor => ".floor()",
-                MethodKind::Size => ".size()",
-                MethodKind::Type => ".type()",
-            });
+            render_method_kind(*kind, out);
         }
         Expr::Exists(inner) => {
             out.push_str("exists(");
@@ -1187,13 +1333,7 @@ fn render_step(step: &Step, out: &mut String) {
             out.push(']');
         }
         Step::IndexWildcard => out.push_str("[*]"),
-        Step::Method(kind) => out.push_str(match kind {
-            MethodKind::Abs => ".abs()",
-            MethodKind::Ceiling => ".ceiling()",
-            MethodKind::Floor => ".floor()",
-            MethodKind::Size => ".size()",
-            MethodKind::Type => ".type()",
-        }),
+        Step::Method(kind) => render_method_kind(*kind, out),
         Step::Filter(expr) => {
             out.push_str(" ? (");
             render_expr(expr, out);
@@ -1494,9 +1634,7 @@ impl<'a> Parser<'a> {
                 self.offset = saved;
                 return Ok(expr);
             }
-            self.skip_ws();
-            self.expect(")")?;
-            let kind = self.method_kind(&ident)?;
+            let kind = self.parse_method_call(&ident)?;
             expr = Expr::MethodCall {
                 inner: Box::new(expr),
                 kind,
@@ -1572,9 +1710,7 @@ impl<'a> Parser<'a> {
                 } else {
                     if let Some(ident) = self.parse_ident() {
                         if self.consume("(") {
-                            self.skip_ws();
-                            self.expect(")")?;
-                            let kind = self.method_kind(&ident)?;
+                            let kind = self.parse_method_call(&ident)?;
                             steps.push(Step::Method(kind));
                         } else {
                             steps.push(Step::Member(ident));
@@ -1678,17 +1814,61 @@ impl<'a> Parser<'a> {
     fn method_kind(&self, ident: &str) -> Result<MethodKind, ExecError> {
         match ident {
             "abs" => Ok(MethodKind::Abs),
+            "boolean" => Ok(MethodKind::Boolean),
             "ceiling" => Ok(MethodKind::Ceiling),
+            "double" => Ok(MethodKind::Double),
             "floor" => Ok(MethodKind::Floor),
+            "integer" => Ok(MethodKind::Integer),
+            "number" => Ok(MethodKind::Number),
             "size" => Ok(MethodKind::Size),
+            "string" => Ok(MethodKind::String),
             "type" => Ok(MethodKind::Type),
             _ => Err(exec_jsonpath_error("unsupported jsonpath item method")),
         }
     }
 
+    fn parse_method_call(&mut self, ident: &str) -> Result<MethodKind, ExecError> {
+        if ident.eq_ignore_ascii_case("decimal") {
+            self.skip_ws();
+            let precision = self.parse_method_int64()?;
+            self.skip_ws();
+            self.expect(",")?;
+            self.skip_ws();
+            let scale = self.parse_method_int64()?;
+            self.skip_ws();
+            self.expect(")")?;
+            return Ok(MethodKind::Decimal { precision, scale });
+        }
+        self.skip_ws();
+        self.expect(")")?;
+        self.method_kind(&ident.to_ascii_lowercase())
+    }
+
+    fn parse_method_int64(&mut self) -> Result<i64, ExecError> {
+        self.skip_ws();
+        let sign = if self.consume("-") {
+            -1_i64
+        } else {
+            let _ = self.consume("+");
+            1_i64
+        };
+        let digits = self
+            .take_while(|ch| ch.is_ascii_digit())
+            .ok_or_else(|| exec_jsonpath_error("expected integer jsonpath subscript"))?;
+        let value = digits
+            .parse::<i64>()
+            .map_err(|_| exec_jsonpath_error("jsonpath subscript is out of range"))?;
+        Ok(sign * value)
+    }
+
     fn parse_signed_int(&mut self) -> Result<i32, ExecError> {
         self.skip_ws();
-        let negative = self.consume("-");
+        let negative = if self.consume("-") {
+            true
+        } else {
+            let _ = self.consume("+");
+            false
+        };
         let digits = self
             .take_while(|ch| ch.is_ascii_digit())
             .ok_or_else(|| exec_jsonpath_error("expected integer jsonpath subscript"))?;
@@ -1910,5 +2090,22 @@ impl<'a> Parser<'a> {
 
     fn is_eof(&self) -> bool {
         self.offset >= self.input.len()
+    }
+}
+fn render_method_kind(kind: MethodKind, out: &mut String) {
+    match kind {
+        MethodKind::Abs => out.push_str(".abs()"),
+        MethodKind::Boolean => out.push_str(".boolean()"),
+        MethodKind::Ceiling => out.push_str(".ceiling()"),
+        MethodKind::Decimal { precision, scale } => {
+            out.push_str(&format!(".decimal({precision}, {scale})"));
+        }
+        MethodKind::Double => out.push_str(".double()"),
+        MethodKind::Floor => out.push_str(".floor()"),
+        MethodKind::Integer => out.push_str(".integer()"),
+        MethodKind::Number => out.push_str(".number()"),
+        MethodKind::Size => out.push_str(".size()"),
+        MethodKind::String => out.push_str(".string()"),
+        MethodKind::Type => out.push_str(".type()"),
     }
 }
