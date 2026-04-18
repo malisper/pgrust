@@ -1523,7 +1523,7 @@ fn parse_create_function_statement_with_returns_table() {
             replace_existing: false,
             args: vec![CreateFunctionArg {
                 mode: FunctionArgMode::In,
-                name: "x".into(),
+                name: Some("x".into()),
                 ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
             }],
             return_spec: CreateFunctionReturnSpec::Table(vec![
@@ -1536,8 +1536,13 @@ fn parse_create_function_statement_with_returns_table() {
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Text)),
                 },
             ]),
+            strict: false,
+            leakproof: false,
+            volatility: FunctionVolatility::Volatile,
+            parallel: FunctionParallel::Unsafe,
             language: "plpgsql".into(),
             body: " begin return next; end ".into(),
+            link_symbol: None,
         })
     );
 }
@@ -1556,7 +1561,7 @@ fn parse_create_or_replace_function_statement_with_returns_table() {
             replace_existing: true,
             args: vec![CreateFunctionArg {
                 mode: FunctionArgMode::In,
-                name: "x".into(),
+                name: Some("x".into()),
                 ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
             }],
             return_spec: CreateFunctionReturnSpec::Table(vec![
@@ -1569,8 +1574,13 @@ fn parse_create_or_replace_function_statement_with_returns_table() {
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Text)),
                 },
             ]),
+            strict: false,
+            leakproof: false,
+            volatility: FunctionVolatility::Volatile,
+            parallel: FunctionParallel::Unsafe,
             language: "plpgsql".into(),
             body: " begin return next; end ".into(),
+            link_symbol: None,
         })
     );
 }
@@ -1579,6 +1589,84 @@ fn parse_create_or_replace_function_statement_with_returns_table() {
 fn parse_expression_entrypoint_reuses_sql_expression_grammar() {
     let expr = parse_expr("1 + 2 * 3").unwrap();
     assert!(matches!(expr, SqlExpr::Add(_, _)));
+}
+
+#[test]
+fn parse_create_function_statement_with_unnamed_args() {
+    let stmt = parse_statement(
+        "create function binary_coercible(oid, oid) returns bool language plpgsql as $$ begin return true; end $$",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateFunction(CreateFunctionStatement {
+            schema_name: None,
+            function_name: "binary_coercible".into(),
+            replace_existing: false,
+            args: vec![
+                CreateFunctionArg {
+                    mode: FunctionArgMode::In,
+                    name: None,
+                    ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Oid)),
+                },
+                CreateFunctionArg {
+                    mode: FunctionArgMode::In,
+                    name: None,
+                    ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Oid)),
+                }
+            ],
+            return_spec: CreateFunctionReturnSpec::Type {
+                ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bool)),
+                setof: false,
+            },
+            strict: false,
+            leakproof: false,
+            volatility: FunctionVolatility::Volatile,
+            parallel: FunctionParallel::Unsafe,
+            language: "plpgsql".into(),
+            body: " begin return true; end ".into(),
+            link_symbol: None,
+        })
+    );
+}
+
+#[test]
+fn parse_create_function_statement_with_pg_clauses_and_link_symbol() {
+    let stmt = parse_statement(
+        "create function binary_coercible(oid, oid) returns bool as 'regress', 'binary_coercible' language c strict stable parallel safe",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateFunction(CreateFunctionStatement {
+            schema_name: None,
+            function_name: "binary_coercible".into(),
+            replace_existing: false,
+            args: vec![
+                CreateFunctionArg {
+                    mode: FunctionArgMode::In,
+                    name: None,
+                    ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Oid)),
+                },
+                CreateFunctionArg {
+                    mode: FunctionArgMode::In,
+                    name: None,
+                    ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Oid)),
+                }
+            ],
+            return_spec: CreateFunctionReturnSpec::Type {
+                ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bool)),
+                setof: false,
+            },
+            strict: true,
+            leakproof: false,
+            volatility: FunctionVolatility::Stable,
+            parallel: FunctionParallel::Safe,
+            language: "c".into(),
+            body: "regress".into(),
+            link_symbol: Some("binary_coercible".into()),
+        })
+    );
 }
 
 #[test]

@@ -1,6 +1,7 @@
 use super::super::*;
 use crate::backend::parser::{
-    CreateFunctionReturnSpec, CreateFunctionStatement, FunctionArgMode, OwnedSequenceSpec,
+            CreateFunctionReturnSpec, CreateFunctionStatement, FunctionArgMode, OwnedSequenceSpec,
+            FunctionParallel, FunctionVolatility,
     SequenceOptionsSpec, SqlTypeKind, resolve_raw_type_name,
 };
 use crate::include::catalog::{
@@ -535,28 +536,34 @@ impl Database {
             let type_oid = catalog
                 .type_oid_for_sql_type(sql_type)
                 .or_else(|| matches!(sql_type.kind, SqlTypeKind::Record).then_some(RECORD_TYPE_OID))
-                .ok_or_else(|| ExecError::Parse(ParseError::UnsupportedType(arg.name.clone())))?;
+                .ok_or_else(|| {
+                    ExecError::Parse(ParseError::UnsupportedType(
+                        arg.name.clone().unwrap_or_else(|| format!("{:?}", arg.ty)),
+                    ))
+                })?;
 
             if matches!(arg.mode, FunctionArgMode::In | FunctionArgMode::InOut) {
                 callable_arg_oids.push(type_oid);
             }
             if matches!(arg.mode, FunctionArgMode::Out | FunctionArgMode::InOut) {
                 output_args.push(QueryColumn {
-                    name: arg.name.clone(),
+                    name: arg.name.clone().unwrap_or_default(),
                     sql_type,
                     wire_type_oid: None,
                 });
             }
             all_arg_oids.push(type_oid);
             all_arg_modes.push(proc_arg_mode(arg.mode));
-            all_arg_names.push(arg.name.clone());
+            all_arg_names.push(arg.name.clone().unwrap_or_default());
         }
 
         let mut proretset = false;
         let mut prorettype = 0u32;
         let mut proallargtypes = None;
         let mut proargmodes = None;
-        let mut proargnames = (!all_arg_names.is_empty()).then_some(all_arg_names.clone());
+        let mut proargnames = all_arg_names.iter().any(|name| !name.is_empty()).then_some(
+            all_arg_names.clone(),
+        );
 
         match &create_stmt.return_spec {
             CreateFunctionReturnSpec::Type { ty, setof } => {
@@ -624,7 +631,7 @@ impl Database {
                     .args
                     .iter()
                     .filter(|arg| matches!(arg.mode, FunctionArgMode::In | FunctionArgMode::InOut))
-                    .map(|arg| arg.name.clone())
+                    .map(|arg| arg.name.clone().unwrap_or_default())
                     .collect::<Vec<_>>();
                 names.extend(table_names);
                 proargnames = Some(names);
@@ -638,7 +645,9 @@ impl Database {
                 }
                 proallargtypes = Some(all_arg_oids.clone());
                 proargmodes = Some(all_arg_modes.clone());
-                proargnames = Some(all_arg_names.clone());
+                proargnames = all_arg_names.iter().any(|name| !name.is_empty()).then_some(
+                    all_arg_names.clone(),
+                );
                 if *setof_record {
                     proretset = true;
                     prorettype = RECORD_TYPE_OID;
@@ -686,11 +695,19 @@ impl Database {
             prosupport: 0,
             prokind: 'f',
             prosecdef: false,
-            proleakproof: false,
-            proisstrict: false,
+            proleakproof: create_stmt.leakproof,
+            proisstrict: create_stmt.strict,
             proretset,
-            provolatile: 'v',
-            proparallel: 'u',
+            provolatile: match create_stmt.volatility {
+                FunctionVolatility::Volatile => 'v',
+                FunctionVolatility::Stable => 's',
+                FunctionVolatility::Immutable => 'i',
+            },
+            proparallel: match create_stmt.parallel {
+                FunctionParallel::Unsafe => 'u',
+                FunctionParallel::Restricted => 'r',
+                FunctionParallel::Safe => 's',
+            },
             pronargs: callable_arg_oids.len() as i16,
             pronargdefaults: 0,
             prorettype,
