@@ -314,6 +314,13 @@ fn match_proc_arg_type(
             .then_some((2, actual_type));
     }
     let declared_type = catalog.type_by_oid(declared_oid)?.sql_type;
+    if !actual_type.is_array
+        && declared_type.is_array
+        && is_text_like_type(actual_type)
+        && catalog_text_input_cast_exists(catalog, declared_oid)
+    {
+        return Some((3, declared_type));
+    }
     arg_type_match_cost(actual_type, declared_type).map(|cost| (cost, declared_type))
 }
 
