@@ -6,6 +6,7 @@ use crate::backend::parser::{
 };
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_PLPGSQL_OID,
+    PG_LANGUAGE_SQL_OID,
     PUBLIC_NAMESPACE_OID, PgProcRow, RECORD_TYPE_OID,
 };
 use crate::include::nodes::parsenodes::{ForeignKeyAction, ForeignKeyMatchType};
@@ -509,13 +510,13 @@ impl Database {
             .language_row_by_name(&create_stmt.language)
             .ok_or_else(|| {
                 ExecError::Parse(ParseError::UnexpectedToken {
-                    expected: "LANGUAGE plpgsql",
+                    expected: "LANGUAGE plpgsql or sql",
                     actual: format!("LANGUAGE {}", create_stmt.language),
                 })
             })?;
-        if language_row.oid != PG_LANGUAGE_PLPGSQL_OID {
+        if !matches!(language_row.oid, PG_LANGUAGE_PLPGSQL_OID | PG_LANGUAGE_SQL_OID) {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "LANGUAGE plpgsql",
+                expected: "LANGUAGE plpgsql or sql",
                 actual: format!("LANGUAGE {}", create_stmt.language),
             }));
         }
@@ -688,7 +689,7 @@ impl Database {
             proname: function_name.clone(),
             pronamespace: namespace_oid,
             proowner: BOOTSTRAP_SUPERUSER_OID,
-            prolang: PG_LANGUAGE_PLPGSQL_OID,
+            prolang: language_row.oid,
             procost: 100.0,
             prorows: if proretset { 1000.0 } else { 0.0 },
             provariadic: 0,
