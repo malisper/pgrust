@@ -3919,7 +3919,7 @@ fn plan_merge_uses_join_shape_for_explain() {
     assert_eq!(bound.target_relation_name, "p");
     assert_eq!(bound.explain_target_name, "people p");
     assert!(matches!(
-        bound.input_plan.plan_tree,
+        strip_projections(&bound.input_plan.plan_tree),
         Plan::NestedLoopJoin { .. } | Plan::HashJoin { .. }
     ));
 }
@@ -3938,7 +3938,7 @@ fn plan_merge_rejects_target_reference_in_source_subquery() {
     };
     assert!(matches!(
         plan_merge(&stmt, &catalog),
-        Err(ParseError::InvalidFromClauseReference(name)) if name == "p"
+        Err(ParseError::UnknownColumn(name)) if name == "p.id"
     ));
 }
 
