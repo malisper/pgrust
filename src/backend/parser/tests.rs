@@ -10,7 +10,8 @@ use crate::include::catalog::{
 use crate::include::nodes::parsenodes::{
     AliasColumnDef, AliasColumnSpec, ColumnConstraint, CompositeTypeAttributeDef,
     CreateCompositeTypeStatement, CreateTypeStatement, DropTypeStatement, ForeignKeyAction,
-    ForeignKeyMatchType, JoinTreeNode, RangeTblEntryKind, RawTypeName, TableConstraint,
+    ForeignKeyMatchType, IndexColumnDef, InsertSource, InsertStatement, JoinTreeNode,
+    RangeTblEntryKind, RawTypeName, TableConstraint,
 };
 use crate::include::nodes::primnodes::{is_system_attr, AttrNumber, JoinType, Var};
 
@@ -313,6 +314,80 @@ fn catalog_with_people_primary_key() -> Catalog {
     catalog
         .create_index_backed_constraint(65000, 50011, "people_pkey", CONSTRAINT_PRIMARY, &[])
         .unwrap();
+    catalog
+}
+
+fn add_ready_people_index(
+    catalog: &mut Catalog,
+    index_name: &str,
+    unique: bool,
+    primary: bool,
+    columns: &[IndexColumnDef],
+) -> CatalogEntry {
+    let relation_oid = catalog.lookup_any_relation("people").unwrap().relation_oid;
+    let entry = catalog
+        .create_index_for_relation_with_flags(index_name, relation_oid, unique, primary, columns)
+        .unwrap();
+    catalog
+        .set_index_ready_valid(entry.relation_oid, true, true)
+        .unwrap();
+    catalog.get(index_name).cloned().unwrap()
+}
+
+fn catalog_with_people_id_name_unique_index() -> Catalog {
+    let mut catalog = catalog();
+    add_ready_people_index(
+        &mut catalog,
+        "people_id_name_key",
+        true,
+        false,
+        &[IndexColumnDef::from("id"), IndexColumnDef::from("name")],
+    );
+    catalog
+}
+
+fn catalog_with_people_partial_unique_index() -> Catalog {
+    let mut catalog = catalog();
+    let people = catalog.lookup_any_relation("people").unwrap();
+    catalog.insert(
+        "people_partial_key",
+        CatalogEntry {
+            rel: crate::RelFileLocator {
+                spc_oid: 0,
+                db_oid: 1,
+                rel_number: 15013,
+            },
+            relation_oid: 50013,
+            namespace_oid: 11,
+            owner_oid: BOOTSTRAP_SUPERUSER_OID,
+            row_type_oid: 60013,
+            array_type_oid: 0,
+            reltoastrelid: 0,
+            relpersistence: 'p',
+            relkind: 'i',
+            relhassubclass: false,
+            relispartition: false,
+            relpages: 0,
+            reltuples: 0.0,
+            desc: RelationDesc {
+                columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
+            },
+            index_meta: Some(crate::backend::catalog::state::CatalogIndexMeta {
+                indrelid: people.relation_oid,
+                indisunique: true,
+                indisprimary: false,
+                indisvalid: true,
+                indisready: true,
+                indislive: true,
+                indkey: vec![1],
+                indclass: vec![crate::include::catalog::INT4_BTREE_OPCLASS_OID],
+                indcollation: vec![0],
+                indoption: vec![0],
+                indexprs: None,
+                indpred: Some("(id > 0)".into()),
+            }),
+        },
+    );
     catalog
 }
 
@@ -3388,6 +3463,75 @@ fn parse_insert_update_delete() {
         Statement::Insert(InsertStatement { table_name, source: InsertSource::Values(values), .. })
             if table_name == "people" && values.len() == 2
     ));
+    assert!(matches!(
+        parse_statement("insert into people (id, name) values (1, 'alice') on conflict do nothing").unwrap(),
+        Statement::Insert(InsertStatement {
+            on_conflict: Some(OnConflictClause {
+                target: None,
+                action: OnConflictAction::Nothing,
+                ..
+            }),
+            ..
+        })
+    ));
+    assert!(matches!(
+        parse_statement("insert into people (id, name) values (1, 'alice') on conflict (id) do update set name = excluded.name where people.id = excluded.id").unwrap(),
+        Statement::Insert(InsertStatement {
+            on_conflict: Some(OnConflictClause {
+                target: Some(OnConflictTarget::Columns(columns)),
+                action: OnConflictAction::Update,
+                assignments,
+                where_clause: Some(SqlExpr::Eq(_, _)),
+            }),
+            ..
+        }) if columns == vec!["id"] && assignments.len() == 1 && assignments[0].expr == SqlExpr::Column("excluded.name".into())
+    ));
+    assert!(matches!(
+        parse_statement("insert into people (id, name) values (1, 'alice') on conflict on constraint people_pkey do nothing").unwrap(),
+        Statement::Insert(InsertStatement {
+            on_conflict: Some(OnConflictClause {
+                target: Some(OnConflictTarget::Constraint(name)),
+                action: OnConflictAction::Nothing,
+                ..
+            }),
+            ..
+        }) if name == "people_pkey"
+    ));
+    assert!(matches!(
+        parse_statement("insert into people (id, name) values (1, 'alice') on conflict (id) do nothing").unwrap(),
+        Statement::Insert(InsertStatement {
+            on_conflict: Some(OnConflictClause {
+                target: Some(OnConflictTarget::Columns(columns)),
+                action: OnConflictAction::Nothing,
+                ..
+            }),
+            ..
+        }) if columns == vec!["id"]
+    ));
+    assert!(matches!(
+        parse_statement("insert into people (id, name) values (1, 'alice') on conflict on constraint people_pkey do update set name = excluded.name").unwrap(),
+        Statement::Insert(InsertStatement {
+            on_conflict: Some(OnConflictClause {
+                target: Some(OnConflictTarget::Constraint(name)),
+                action: OnConflictAction::Update,
+                assignments,
+                where_clause: None,
+            }),
+            ..
+        }) if name == "people_pkey" && assignments.len() == 1
+    ));
+    assert!(matches!(
+        parse_statement("insert into people (id, name) values (1, 'alice') on conflict do update set name = excluded.name").unwrap(),
+        Statement::Insert(InsertStatement {
+            on_conflict: Some(OnConflictClause {
+                target: None,
+                action: OnConflictAction::Update,
+                assignments,
+                where_clause: None,
+            }),
+            ..
+        }) if assignments.len() == 1
+    ));
     assert!(
         matches!(parse_statement("create table widgets (id int4 not null, name text)").unwrap(), Statement::CreateTable(ct) if ct.table_name == "widgets" && ct.columns().count() == 2)
     );
@@ -3573,6 +3717,136 @@ fn bind_delete_falls_back_to_heap_for_or_predicate() {
     assert!(matches!(
         bound.targets[0].row_source,
         BoundModifyRowSource::Heap
+    ));
+}
+
+fn people_insert_with_on_conflict(
+    target: Option<crate::include::nodes::parsenodes::OnConflictTarget>,
+    action: crate::include::nodes::parsenodes::OnConflictAction,
+    assignments: Vec<crate::include::nodes::parsenodes::Assignment>,
+    where_clause: Option<crate::include::nodes::parsenodes::SqlExpr>,
+) -> InsertStatement {
+    InsertStatement {
+        with_recursive: false,
+        with: vec![],
+        table_name: "people".into(),
+        columns: Some(vec![
+            crate::include::nodes::parsenodes::AssignmentTarget {
+                column: "id".into(),
+                subscripts: vec![],
+            },
+            crate::include::nodes::parsenodes::AssignmentTarget {
+                column: "name".into(),
+                subscripts: vec![],
+            },
+        ]),
+        source: InsertSource::Values(vec![vec![
+            parse_expr("1").unwrap(),
+            parse_expr("'alice'").unwrap(),
+        ]]),
+        on_conflict: Some(crate::include::nodes::parsenodes::OnConflictClause {
+            target,
+            action,
+            assignments,
+            where_clause,
+        }),
+    }
+}
+
+#[test]
+fn bind_insert_matches_on_conflict_columns_order_insensitively() {
+    let catalog = catalog_with_people_id_name_unique_index();
+    let stmt = people_insert_with_on_conflict(
+        Some(crate::include::nodes::parsenodes::OnConflictTarget::Columns(vec![
+            "name".into(),
+            "id".into(),
+            "name".into(),
+        ])),
+        crate::include::nodes::parsenodes::OnConflictAction::Nothing,
+        vec![],
+        None,
+    );
+    let bound = stacker::maybe_grow(32 * 1024, 32 * 1024 * 1024, || {
+        bind_insert(&stmt, &catalog)
+    })
+    .unwrap();
+    let on_conflict = bound.on_conflict.expect("on conflict");
+    assert_eq!(on_conflict.arbiter_indexes.len(), 1);
+    assert_eq!(on_conflict.arbiter_indexes[0].name, "people_id_name_key");
+    assert!(matches!(on_conflict.action, BoundOnConflictAction::Nothing));
+}
+
+#[test]
+fn bind_insert_resolves_on_conflict_constraint_name() {
+    let catalog = catalog_with_people_primary_key();
+    let stmt = people_insert_with_on_conflict(
+        Some(crate::include::nodes::parsenodes::OnConflictTarget::Constraint(
+            "people_pkey".into(),
+        )),
+        crate::include::nodes::parsenodes::OnConflictAction::Update,
+        vec![crate::include::nodes::parsenodes::Assignment {
+            target: crate::include::nodes::parsenodes::AssignmentTarget {
+                column: "name".into(),
+                subscripts: vec![],
+            },
+            expr: parse_expr("excluded.name").unwrap(),
+        }],
+        Some(parse_expr("people.id = excluded.id").unwrap()),
+    );
+    let bound = stacker::maybe_grow(32 * 1024, 32 * 1024 * 1024, || {
+        bind_insert(&stmt, &catalog)
+    })
+    .unwrap();
+    let on_conflict = bound.on_conflict.expect("on conflict");
+    assert_eq!(on_conflict.arbiter_indexes.len(), 1);
+    assert_eq!(on_conflict.arbiter_indexes[0].name, "people_pkey");
+    assert!(matches!(
+        on_conflict.action,
+        BoundOnConflictAction::Update { .. }
+    ));
+}
+
+#[test]
+fn bind_insert_rejects_on_conflict_do_update_without_target() {
+    let catalog = catalog_with_people_primary_key();
+    let stmt = people_insert_with_on_conflict(
+        None,
+        crate::include::nodes::parsenodes::OnConflictAction::Update,
+        vec![crate::include::nodes::parsenodes::Assignment {
+            target: crate::include::nodes::parsenodes::AssignmentTarget {
+                column: "name".into(),
+                subscripts: vec![],
+            },
+            expr: parse_expr("excluded.name").unwrap(),
+        }],
+        Some(parse_expr("people.id = excluded.id").unwrap()),
+    );
+    let err = stacker::maybe_grow(32 * 1024, 32 * 1024 * 1024, || bind_insert(&stmt, &catalog))
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ParseError::UnexpectedToken { actual, .. }
+            if actual
+                == "ON CONFLICT DO UPDATE requires inference specification or constraint name"
+    ));
+}
+
+#[test]
+fn bind_insert_rejects_non_inferable_on_conflict_indexes() {
+    let partial_catalog = catalog_with_people_partial_unique_index();
+    let partial_stmt = people_insert_with_on_conflict(
+        Some(crate::include::nodes::parsenodes::OnConflictTarget::Columns(vec![
+            "id".into(),
+        ])),
+        crate::include::nodes::parsenodes::OnConflictAction::Nothing,
+        vec![],
+        None,
+    );
+    assert!(matches!(
+        stacker::maybe_grow(32 * 1024, 32 * 1024 * 1024, || bind_insert(&partial_stmt, &partial_catalog)),
+        Err(ParseError::UnexpectedToken { actual, .. })
+            if actual
+                == "there is no unique or exclusion constraint matching the ON CONFLICT specification"
     ));
 }
 

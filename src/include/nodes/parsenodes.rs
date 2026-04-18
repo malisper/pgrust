@@ -776,6 +776,7 @@ pub struct InsertStatement {
     pub table_name: String,
     pub columns: Option<Vec<AssignmentTarget>>,
     pub source: InsertSource,
+    pub on_conflict: Option<OnConflictClause>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -828,6 +829,26 @@ pub enum MergeAction {
 pub enum MergeInsertSource {
     Values(Vec<SqlExpr>),
     DefaultValues,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OnConflictClause {
+    pub target: Option<OnConflictTarget>,
+    pub action: OnConflictAction,
+    pub assignments: Vec<Assignment>,
+    pub where_clause: Option<SqlExpr>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnConflictAction {
+    Nothing,
+    Update,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OnConflictTarget {
+    Columns(Vec<String>),
+    Constraint(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

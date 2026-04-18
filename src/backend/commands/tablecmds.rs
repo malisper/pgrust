@@ -19,9 +19,10 @@ use crate::backend::optimizer::{finalize_expr_subqueries, planner};
 use crate::backend::parser::{
     AnalyzeStatement, BoundArraySubscript, BoundAssignment, BoundAssignmentTarget,
     BoundDeleteStatement, BoundIndexRelation, BoundInsertSource, BoundInsertStatement,
-    BoundModifyRowSource, BoundUpdateStatement, Catalog, CatalogLookup, DropTableStatement,
-    ExplainStatement, MaintenanceTarget, ParseError, SqlType, SqlTypeKind, Statement,
-    TruncateTableStatement, VacuumStatement, bind_create_table,
+    BoundModifyRowSource, BoundOnConflictAction, BoundReferencedByForeignKey,
+    BoundRelationConstraints, BoundUpdateStatement, Catalog, CatalogLookup,
+    DropTableStatement, ExplainStatement, MaintenanceTarget, ParseError, SqlType, SqlTypeKind,
+    Statement, TruncateTableStatement, VacuumStatement, bind_create_table,
 };
 use crate::backend::rewrite::pg_rewrite_query;
 use crate::backend::storage::smgr::ForkNumber;
@@ -30,6 +31,7 @@ use crate::backend::utils::time::instant::Instant;
 use crate::pgrust::database::TransactionWaiter;
 
 use super::explain::{format_buffer_usage, format_explain_lines_with_costs};
+use super::upsert::execute_insert_on_conflict_rows;
 use crate::backend::executor::exec_expr::{compile_predicate_with_decoder, eval_expr};
 use crate::backend::executor::exec_tuples::CompiledTupleDecoder;
 use crate::backend::executor::value_io::{coerce_assignment_value, encode_tuple_values};
@@ -74,6 +76,45 @@ fn finalize_bound_insert(
         ),
         BoundInsertSource::Select(query) => BoundInsertSource::Select(query),
     };
+    stmt.on_conflict = stmt
+        .on_conflict
+        .map(|clause| crate::backend::parser::BoundOnConflictClause {
+            arbiter_indexes: clause.arbiter_indexes,
+            action: match clause.action {
+                BoundOnConflictAction::Nothing => BoundOnConflictAction::Nothing,
+                BoundOnConflictAction::Update {
+                    assignments,
+                    predicate,
+                } => BoundOnConflictAction::Update {
+                    assignments: assignments
+                        .into_iter()
+                        .map(|assignment| BoundAssignment {
+                            column_index: assignment.column_index,
+                            expr: finalize_expr_subqueries(
+                                assignment.expr,
+                                catalog,
+                                &mut subplans,
+                            ),
+                            subscripts: assignment
+                                .subscripts
+                                .into_iter()
+                                .map(|subscript| BoundArraySubscript {
+                                    is_slice: subscript.is_slice,
+                                    lower: subscript.lower.map(|expr| {
+                                        finalize_expr_subqueries(expr, catalog, &mut subplans)
+                                    }),
+                                    upper: subscript.upper.map(|expr| {
+                                        finalize_expr_subqueries(expr, catalog, &mut subplans)
+                                    }),
+                                })
+                                .collect(),
+                        })
+                        .collect(),
+                    predicate: predicate
+                        .map(|expr| finalize_expr_subqueries(expr, catalog, &mut subplans)),
+                },
+            },
+        });
     stmt.subplans = subplans;
     stmt
 }
@@ -241,6 +282,88 @@ fn validate_maintenance_targets(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WriteUpdatedRowResult {
+    Updated(ItemPointerData),
+    TupleUpdated(ItemPointerData),
+    AlreadyModified,
+}
+
+pub(crate) fn build_index_insert_context(
+    heap_rel: crate::backend::storage::smgr::RelFileLocator,
+    _heap_desc: &RelationDesc,
+    index: &BoundIndexRelation,
+    key_values: Vec<Value>,
+    heap_tid: ItemPointerData,
+    ctx: &ExecutorContext,
+) -> crate::include::access::amapi::IndexInsertContext {
+    let mut index_meta = index.index_meta.clone();
+    index_meta.indkey = (1..=key_values.len())
+        .map(|attnum| attnum as i16)
+        .collect::<Vec<_>>();
+    index_meta.indexprs = None;
+    crate::include::access::amapi::IndexInsertContext {
+        pool: ctx.pool.clone(),
+        txns: ctx.txns.clone(),
+        txn_waiter: ctx.txn_waiter.clone(),
+        client_id: ctx.client_id,
+        interrupts: ctx.interrupts.clone(),
+        snapshot: ctx.snapshot.clone(),
+        heap_relation: heap_rel,
+        heap_desc: index.desc.clone(),
+        index_relation: index.rel,
+        index_name: index.name.clone(),
+        index_desc: index.desc.clone(),
+        index_meta,
+        values: key_values,
+        heap_tid,
+        unique_check: if index.index_meta.indisunique {
+            IndexUniqueCheck::Yes
+        } else {
+            IndexUniqueCheck::No
+        },
+    }
+}
+
+fn map_index_insert_error(err: crate::backend::catalog::CatalogError) -> ExecError {
+    match err {
+        crate::backend::catalog::CatalogError::UniqueViolation(constraint) => {
+            ExecError::UniqueViolation { constraint }
+        }
+        crate::backend::catalog::CatalogError::Interrupted(reason) => ExecError::Interrupted(reason),
+        other => ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "index insertion",
+            actual: format!("{other:?}"),
+        }),
+    }
+}
+
+pub(crate) fn insert_index_key_values(
+    heap_rel: crate::backend::storage::smgr::RelFileLocator,
+    heap_desc: &RelationDesc,
+    index: &BoundIndexRelation,
+    key_values: Vec<Value>,
+    heap_tid: ItemPointerData,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    let insert_ctx =
+        build_index_insert_context(heap_rel, heap_desc, index, key_values, heap_tid, ctx);
+    indexam::index_insert_stub(&insert_ctx, index.index_meta.am_oid).map_err(map_index_insert_error)?;
+    Ok(())
+}
+
+pub(crate) fn insert_index_entry_for_row(
+    heap_rel: crate::backend::storage::smgr::RelFileLocator,
+    heap_desc: &RelationDesc,
+    index: &BoundIndexRelation,
+    values: &[Value],
+    heap_tid: ItemPointerData,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    let key_values = index_key_values_for_row(index, heap_desc, values, ctx)?;
+    insert_index_key_values(heap_rel, heap_desc, index, key_values, heap_tid, ctx)
+}
+
 pub(crate) fn maintain_indexes_for_row(
     heap_rel: crate::backend::storage::smgr::RelFileLocator,
     heap_desc: &RelationDesc,
@@ -254,48 +377,7 @@ pub(crate) fn maintain_indexes_for_row(
             .iter()
             .filter(|index| index.index_meta.indisvalid && index.index_meta.indisready)
         {
-            let key_values = index_key_values_for_row(index, heap_desc, values, ctx)?;
-            let mut index_meta = index.index_meta.clone();
-            index_meta.indkey = (1..=key_values.len())
-                .map(|attnum| attnum as i16)
-                .collect::<Vec<_>>();
-            index_meta.indexprs = None;
-            crate::backend::access::index::indexam::index_insert_stub(
-                &crate::include::access::amapi::IndexInsertContext {
-                    pool: ctx.pool.clone(),
-                    txns: ctx.txns.clone(),
-                    txn_waiter: ctx.txn_waiter.clone(),
-                    client_id: ctx.client_id,
-                    interrupts: ctx.interrupts.clone(),
-                    snapshot: ctx.snapshot.clone(),
-                    heap_relation: heap_rel,
-                    heap_desc: index.desc.clone(),
-                    index_relation: index.rel,
-                    index_name: index.name.clone(),
-                    index_desc: index.desc.clone(),
-                    index_meta,
-                    values: key_values,
-                    heap_tid,
-                    unique_check: if index.index_meta.indisunique {
-                        IndexUniqueCheck::Yes
-                    } else {
-                        IndexUniqueCheck::No
-                    },
-                },
-                index.index_meta.am_oid,
-            )
-            .map_err(|err| match err {
-                crate::backend::catalog::CatalogError::UniqueViolation(constraint) => {
-                    ExecError::UniqueViolation { constraint }
-                }
-                crate::backend::catalog::CatalogError::Interrupted(reason) => {
-                    ExecError::Interrupted(reason)
-                }
-                other => ExecError::Parse(ParseError::UnexpectedToken {
-                    expected: "index insertion",
-                    actual: format!("{other:?}"),
-                }),
-            })?;
+            insert_index_entry_for_row(heap_rel, heap_desc, index, values, heap_tid, ctx)?;
         }
         Ok(())
     })
@@ -351,7 +433,7 @@ pub(crate) fn index_key_values_for_row(
     })
 }
 
-fn slot_toast_context(
+pub(crate) fn slot_toast_context(
     toast: Option<ToastRelationRef>,
     ctx: &ExecutorContext,
 ) -> Option<crate::include::nodes::execnodes::ToastFetchContext> {
@@ -366,7 +448,7 @@ fn slot_toast_context(
     )
 }
 
-fn toast_tuple_for_write(
+pub(crate) fn toast_tuple_for_write(
     desc: &RelationDesc,
     values: &[Value],
     toast: Option<ToastRelationRef>,
@@ -412,7 +494,7 @@ fn toast_tuple_for_write(
     Ok((tuple, stored))
 }
 
-fn cleanup_toast_attempt(
+pub(crate) fn cleanup_toast_attempt(
     toast: Option<ToastRelationRef>,
     toasted: &[StoredToastValue],
     ctx: &ExecutorContext,
@@ -425,6 +507,150 @@ fn cleanup_toast_attempt(
         cleanup_new_toast_value(ctx, toast, &value.chunk_tids, xid)?;
     }
     Ok(())
+}
+
+pub(crate) fn write_insert_heap_row(
+    relation_name: &str,
+    rel: crate::backend::storage::smgr::RelFileLocator,
+    toast: Option<ToastRelationRef>,
+    toast_index: Option<&BoundIndexRelation>,
+    desc: &RelationDesc,
+    relation_constraints: &BoundRelationConstraints,
+    values: &[Value],
+    ctx: &mut ExecutorContext,
+    xid: TransactionId,
+    cid: CommandId,
+) -> Result<ItemPointerData, ExecError> {
+    crate::backend::executor::enforce_relation_constraints(
+        relation_name,
+        desc,
+        relation_constraints,
+        values,
+        ctx,
+    )?;
+    crate::backend::executor::enforce_outbound_foreign_keys(
+        relation_name,
+        &relation_constraints.foreign_keys,
+        None,
+        values,
+        ctx,
+    )?;
+    let (tuple, _toasted) = toast_tuple_for_write(desc, values, toast, toast_index, ctx, xid, cid)?;
+    heap_insert_mvcc_with_cid(&*ctx.pool, ctx.client_id, rel, xid, cid, &tuple).map_err(Into::into)
+}
+
+pub(crate) fn rollback_inserted_row(
+    rel: crate::backend::storage::smgr::RelFileLocator,
+    toast: Option<ToastRelationRef>,
+    desc: &RelationDesc,
+    heap_tid: ItemPointerData,
+    ctx: &mut ExecutorContext,
+    xid: TransactionId,
+) -> Result<(), ExecError> {
+    let tuple = if toast.is_some() {
+        Some(heap_fetch(&*ctx.pool, ctx.client_id, rel, heap_tid)?)
+    } else {
+        None
+    };
+    match heap_delete_with_waiter(
+        &*ctx.pool,
+        ctx.client_id,
+        rel,
+        &ctx.txns,
+        xid,
+        heap_tid,
+        &ctx.snapshot,
+        None,
+    ) {
+        Ok(()) | Err(HeapError::TupleAlreadyModified(_)) => {}
+        Err(err) => return Err(err.into()),
+    }
+    if let (Some(toast), Some(tuple)) = (toast, tuple.as_ref()) {
+        delete_external_from_tuple(ctx, toast, desc, tuple, xid)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn write_updated_row(
+    relation_name: &str,
+    rel: crate::backend::storage::smgr::RelFileLocator,
+    toast: Option<ToastRelationRef>,
+    toast_index: Option<&BoundIndexRelation>,
+    desc: &RelationDesc,
+    relation_constraints: &BoundRelationConstraints,
+    referenced_by_foreign_keys: &[BoundReferencedByForeignKey],
+    indexes: &[BoundIndexRelation],
+    current_tid: ItemPointerData,
+    current_old_values: &[Value],
+    current_values: &[Value],
+    ctx: &mut ExecutorContext,
+    xid: TransactionId,
+    cid: CommandId,
+    waiter: Option<(
+        &RwLock<TransactionManager>,
+        &TransactionWaiter,
+        &crate::backend::utils::misc::interrupts::InterruptState,
+    )>,
+) -> Result<WriteUpdatedRowResult, ExecError> {
+    let old_tuple = if toast.is_some() {
+        Some(heap_fetch(&*ctx.pool, ctx.client_id, rel, current_tid)?)
+    } else {
+        None
+    };
+    crate::backend::executor::enforce_relation_constraints(
+        relation_name,
+        desc,
+        relation_constraints,
+        current_values,
+        ctx,
+    )?;
+    crate::backend::executor::enforce_outbound_foreign_keys(
+        relation_name,
+        &relation_constraints.foreign_keys,
+        Some(current_old_values),
+        current_values,
+        ctx,
+    )?;
+    crate::backend::executor::enforce_inbound_foreign_keys_on_update(
+        relation_name,
+        referenced_by_foreign_keys,
+        current_old_values,
+        current_values,
+        ctx,
+    )?;
+    let (replacement, toasted) =
+        toast_tuple_for_write(desc, current_values, toast, toast_index, ctx, xid, cid)?;
+    match heap_update_with_waiter(
+        &*ctx.pool,
+        ctx.client_id,
+        rel,
+        &ctx.txns,
+        xid,
+        cid,
+        current_tid,
+        &replacement,
+        waiter,
+    ) {
+        Ok(new_tid) => {
+            if let (Some(toast), Some(old_tuple)) = (toast, old_tuple.as_ref()) {
+                delete_external_from_tuple(ctx, toast, desc, old_tuple, xid)?;
+            }
+            maintain_indexes_for_row(rel, desc, indexes, current_values, new_tid, ctx)?;
+            Ok(WriteUpdatedRowResult::Updated(new_tid))
+        }
+        Err(HeapError::TupleUpdated(_old_tid, new_ctid)) => {
+            cleanup_toast_attempt(toast, &toasted, ctx, xid)?;
+            Ok(WriteUpdatedRowResult::TupleUpdated(new_ctid))
+        }
+        Err(HeapError::TupleAlreadyModified(_)) => {
+            cleanup_toast_attempt(toast, &toasted, ctx, xid)?;
+            Ok(WriteUpdatedRowResult::AlreadyModified)
+        }
+        Err(err) => {
+            cleanup_toast_attempt(toast, &toasted, ctx, xid)?;
+            Err(err.into())
+        }
+    }
 }
 
 fn reinitialize_index_relation(
@@ -908,29 +1134,34 @@ pub fn execute_insert(
             }
         };
 
-        let inserted = execute_insert_values(
-            &stmt.relation_name,
-            stmt.rel,
-            stmt.toast,
-            stmt.toast_index.as_ref(),
-            &stmt.desc,
-            &stmt.relation_constraints,
-            &stmt.indexes,
-            &values,
-            ctx,
-            xid,
-            cid,
-        )?;
-        for _ in 0..inserted {
-            ctx.session_stats.write().note_relation_insert(stmt.relation_oid);
-        }
+        let inserted = if let Some(on_conflict) = stmt.on_conflict.as_ref() {
+            execute_insert_on_conflict_rows(&stmt, on_conflict, &values, ctx, xid, cid)?
+        } else {
+            let inserted = execute_insert_values(
+                &stmt.relation_name,
+                stmt.rel,
+                stmt.toast,
+                stmt.toast_index.as_ref(),
+                &stmt.desc,
+                &stmt.relation_constraints,
+                &stmt.indexes,
+                &values,
+                ctx,
+                xid,
+                cid,
+            )?;
+            for _ in 0..inserted {
+                ctx.session_stats.write().note_relation_insert(stmt.relation_oid);
+            }
+            inserted
+        };
         Ok(StatementResult::AffectedRows(inserted))
     })();
     ctx.subplans = saved_subplans;
     result
 }
 
-fn apply_assignment_target(
+pub(crate) fn apply_assignment_target(
     desc: &RelationDesc,
     values: &mut [Value],
     target: &BoundAssignmentTarget,
@@ -1573,7 +1804,7 @@ pub fn execute_insert_values(
     toast: Option<ToastRelationRef>,
     toast_index: Option<&BoundIndexRelation>,
     desc: &RelationDesc,
-    relation_constraints: &crate::backend::parser::BoundRelationConstraints,
+    relation_constraints: &BoundRelationConstraints,
     indexes: &[BoundIndexRelation],
     rows: &[Vec<Value>],
     ctx: &mut ExecutorContext,
@@ -1581,23 +1812,18 @@ pub fn execute_insert_values(
     cid: CommandId,
 ) -> Result<usize, ExecError> {
     for values in rows {
-        crate::backend::executor::enforce_relation_constraints(
+        let heap_tid = write_insert_heap_row(
             relation_name,
+            rel,
+            toast,
+            toast_index,
             desc,
             relation_constraints,
             values,
             ctx,
+            xid,
+            cid,
         )?;
-        crate::backend::executor::enforce_outbound_foreign_keys(
-            relation_name,
-            &relation_constraints.foreign_keys,
-            None,
-            values,
-            ctx,
-        )?;
-        let (tuple, _toasted) =
-            toast_tuple_for_write(desc, values, toast, toast_index, ctx, xid, cid)?;
-        let heap_tid = heap_insert_mvcc_with_cid(&*ctx.pool, ctx.client_id, rel, xid, cid, &tuple)?;
         maintain_indexes_for_row(rel, desc, indexes, values, heap_tid, ctx)?;
     }
 
@@ -1622,31 +1848,18 @@ pub fn execute_prepared_insert_row(
     for (column_index, param) in prepared.target_columns.iter().zip(params.iter()) {
         values[*column_index] = param.clone();
     }
-    crate::backend::executor::enforce_relation_constraints(
+    let heap_tid = write_insert_heap_row(
         &prepared.relation_name,
+        prepared.rel,
+        prepared.toast,
+        prepared.toast_index.as_ref(),
         &prepared.desc,
         &prepared.relation_constraints,
         &values,
         ctx,
-    )?;
-    crate::backend::executor::enforce_outbound_foreign_keys(
-        &prepared.relation_name,
-        &prepared.relation_constraints.foreign_keys,
-        None,
-        &values,
-        ctx,
-    )?;
-    let (tuple, _toasted) = toast_tuple_for_write(
-        &prepared.desc,
-        &values,
-        prepared.toast,
-        prepared.toast_index.as_ref(),
-        ctx,
         xid,
         cid,
     )?;
-    let heap_tid =
-        heap_insert_mvcc_with_cid(&*ctx.pool, ctx.client_id, prepared.rel, xid, cid, &tuple)?;
     maintain_indexes_for_row(
         prepared.rel,
         &prepared.desc,
@@ -1739,74 +1952,31 @@ pub fn execute_update_with_waiter(
                 let mut current_values = values;
                 loop {
                     ctx.check_for_interrupts()?;
-                    let old_tuple = heap_fetch(&*ctx.pool, ctx.client_id, target.rel, current_tid)?;
-                    crate::backend::executor::enforce_relation_constraints(
+                    match write_updated_row(
                         &target.relation_name,
+                        target.rel,
+                        target.toast,
+                        target.toast_index.as_ref(),
                         &target.desc,
                         &target.relation_constraints,
-                        &current_values,
-                        ctx,
-                    )?;
-                    crate::backend::executor::enforce_outbound_foreign_keys(
-                        &target.relation_name,
-                        &target.relation_constraints.foreign_keys,
-                        Some(&current_old_values),
-                        &current_values,
-                        ctx,
-                    )?;
-                    crate::backend::executor::enforce_inbound_foreign_keys_on_update(
-                        &target.relation_name,
                         &target.referenced_by_foreign_keys,
+                        &target.indexes,
+                        current_tid,
                         &current_old_values,
                         &current_values,
                         ctx,
-                    )?;
-                    let (current_replacement, toasted) = toast_tuple_for_write(
-                        &target.desc,
-                        &current_values,
-                        target.toast,
-                        target.toast_index.as_ref(),
-                        ctx,
                         xid,
                         cid,
-                    )?;
-                    match heap_update_with_waiter(
-                        &*ctx.pool,
-                        ctx.client_id,
-                        target.rel,
-                        &ctx.txns,
-                        xid,
-                        cid,
-                        current_tid,
-                        &current_replacement,
                         waiter,
                     ) {
-                        Ok(new_tid) => {
-                            if let Some(toast) = target.toast {
-                                delete_external_from_tuple(
-                                    ctx,
-                                    toast,
-                                    &target.desc,
-                                    &old_tuple,
-                                    xid,
-                                )?;
-                            }
-                            maintain_indexes_for_row(
-                                target.rel,
-                                &target.desc,
-                                &target.indexes,
-                                &current_values,
-                                new_tid,
-                                ctx,
-                            )?;
+                        Ok(WriteUpdatedRowResult::Updated(_new_tid)) => {
                             ctx.session_stats
                                 .write()
                                 .note_relation_update(target.relation_oid);
                             affected_rows += 1;
                             break;
                         }
-                        Err(HeapError::TupleUpdated(_old_tid, new_ctid)) => {
-                            cleanup_toast_attempt(target.toast, &toasted, ctx, xid)?;
+                        Ok(WriteUpdatedRowResult::TupleUpdated(new_ctid)) => {
                             let new_tuple =
                                 heap_fetch(&*ctx.pool, ctx.client_id, target.rel, new_ctid)?;
                             let mut new_slot = TupleSlot::from_heap_tuple(
@@ -1844,14 +2014,10 @@ pub fn execute_update_with_waiter(
                             current_values = new_values.clone();
                             current_tid = new_ctid;
                         }
-                        Err(HeapError::TupleAlreadyModified(_)) => {
-                            cleanup_toast_attempt(target.toast, &toasted, ctx, xid)?;
+                        Ok(WriteUpdatedRowResult::AlreadyModified) => {
                             break;
                         }
-                        Err(e) => {
-                            cleanup_toast_attempt(target.toast, &toasted, ctx, xid)?;
-                            return Err(e.into());
-                        }
+                        Err(err) => return Err(err),
                     }
                 }
             }

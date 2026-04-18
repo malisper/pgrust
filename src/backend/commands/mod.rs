@@ -4,5 +4,6 @@ pub mod explain;
 pub mod rolecmds;
 pub mod schemacmds;
 pub mod tablecmds;
+mod upsert;
 
 pub use tablecmds::*;
