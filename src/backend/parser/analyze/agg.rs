@@ -13,12 +13,12 @@ pub(super) fn expr_contains_agg(expr: &SqlExpr) -> bool {
         | SqlExpr::InSubquery { .. }
         | SqlExpr::QuantifiedSubquery { .. }
         | SqlExpr::Random
-        | SqlExpr::FuncCall { .. }
         | SqlExpr::CurrentDate
         | SqlExpr::CurrentTime { .. }
         | SqlExpr::CurrentTimestamp { .. }
         | SqlExpr::LocalTime { .. }
         | SqlExpr::LocalTimestamp { .. } => false,
+        SqlExpr::FuncCall { args, .. } => args.iter().any(|arg| expr_contains_agg(&arg.value)),
         SqlExpr::ArrayLiteral(elements) | SqlExpr::Row(elements) => {
             elements.iter().any(expr_contains_agg)
         }
