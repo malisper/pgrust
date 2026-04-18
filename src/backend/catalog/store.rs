@@ -90,9 +90,9 @@ struct CatalogControl {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
     use crate::backend::catalog::bootstrap::bootstrap_catalog_rel;
     use crate::backend::catalog::column_desc;
-    use crate::backend::catalog::indexing::vacuum_system_catalog_indexes_for_kinds_in_db;
     use crate::backend::catalog::loader::load_physical_catalog_rows;
     use crate::backend::catalog::rows::physical_catalog_rows_for_catalog_entry;
     use crate::backend::parser::{SqlType, SqlTypeKind};
@@ -124,17 +124,50 @@ mod tests {
         std::env::temp_dir().join(format!("pgrust_catalog_{label}_{nanos}"))
     }
 
+    fn durable_write_context(
+        base: &PathBuf,
+    ) -> (
+        Arc<BufferPool<SmgrStorageBackend>>,
+        Arc<RwLock<TransactionManager>>,
+        CatalogWriteContext,
+    ) {
+        let mut smgr = MdStorageManager::new(base);
+        for kind in crate::backend::catalog::bootstrap::bootstrap_catalog_kinds() {
+            smgr.open(bootstrap_catalog_rel(kind, 1)).unwrap();
+        }
+        let pool = Arc::new(BufferPool::new(SmgrStorageBackend::new(smgr), 16));
+        let txns = Arc::new(RwLock::new(
+            TransactionManager::new_durable(base.clone()).unwrap(),
+        ));
+        let xid = txns.write().begin();
+        let ctx = CatalogWriteContext {
+            pool: Arc::clone(&pool),
+            txns: Arc::clone(&txns),
+            xid,
+            cid: 0,
+            client_id: 0,
+            waiter: None,
+            interrupts: Arc::new(InterruptState::new()),
+        };
+        (pool, txns, ctx)
+    }
+
+    fn commit_catalog_write(txns: &Arc<RwLock<TransactionManager>>, xid: TransactionId) {
+        txns.write().commit(xid).unwrap();
+    }
+
     #[cfg(unix)]
     fn system_index_path(base: &PathBuf, db_oid: u32, relname: &str) -> PathBuf {
         let descriptor = system_catalog_indexes()
             .iter()
             .find(|descriptor| descriptor.relation_name == relname)
             .unwrap();
+        let heap_rel = bootstrap_catalog_rel(descriptor.heap_kind, db_oid);
         segment_path(
             base,
             RelFileLocator {
-                spc_oid: 0,
-                db_oid,
+                spc_oid: heap_rel.spc_oid,
+                db_oid: heap_rel.db_oid,
                 rel_number: descriptor.relation_oid,
             },
             ForkNumber::Main,
@@ -148,11 +181,82 @@ mod tests {
             .iter()
             .find(|descriptor| descriptor.relation_name == relname)
             .unwrap();
+        let heap_rel = bootstrap_catalog_rel(descriptor.heap_kind, db_oid);
         RelFileLocator {
-            spc_oid: 0,
-            db_oid,
+            spc_oid: heap_rel.spc_oid,
+            db_oid: heap_rel.db_oid,
             rel_number: descriptor.relation_oid,
         }
+    }
+
+    fn vacuum_relation_via_command(base: &PathBuf, scope: CatalogScope, relation_name: &str) {
+        let _ = scope;
+        // Use the database-visible catalog view so shared catalogs like pg_authid
+        // resolve through the normal pg_catalog lookup path during VACUUM.
+        let store = CatalogStore::load(base).unwrap();
+        let relcache = store.relcache().unwrap();
+
+        let mut smgr = MdStorageManager::new(base);
+        for kind in crate::backend::catalog::bootstrap::bootstrap_catalog_kinds() {
+            smgr.open(bootstrap_catalog_rel(kind, 1)).unwrap();
+        }
+        let pool = Arc::new(BufferPool::new(SmgrStorageBackend::new(smgr), 16));
+        let txns = Arc::new(RwLock::new(
+            TransactionManager::new_durable(base.clone()).unwrap(),
+        ));
+        let snapshot = txns.read().snapshot(INVALID_TRANSACTION_ID).unwrap();
+        let mut ctx = crate::backend::executor::ExecutorContext {
+            pool,
+            txns,
+            txn_waiter: None,
+            sequences: Some(Arc::new(crate::pgrust::database::SequenceRuntime::new_ephemeral())),
+            large_objects: Some(Arc::new(
+                crate::pgrust::database::LargeObjectRuntime::new_ephemeral(),
+            )),
+            checkpoint_stats:
+                crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
+            datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+            interrupts: Arc::new(InterruptState::new()),
+            stats: Arc::new(RwLock::new(
+                crate::pgrust::database::DatabaseStatsStore::with_default_io_rows(),
+            )),
+            session_stats: Arc::new(RwLock::new(
+                crate::pgrust::database::SessionStatsState::default(),
+            )),
+            snapshot,
+            client_id: 0,
+            current_user_oid: BOOTSTRAP_SUPERUSER_OID,
+            next_command_id: 0,
+            expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
+            case_test_values: Vec::new(),
+            system_bindings: Vec::new(),
+            subplans: Vec::new(),
+            timed: false,
+            allow_side_effects: true,
+            catalog: None,
+            compiled_functions: std::collections::HashMap::new(),
+            cte_tables: std::collections::HashMap::new(),
+            cte_producers: std::collections::HashMap::new(),
+            recursive_worktables: std::collections::HashMap::new(),
+            deferred_foreign_keys: None,
+        };
+        crate::backend::commands::tablecmds::execute_vacuum(
+            crate::backend::parser::VacuumStatement {
+                targets: vec![crate::backend::parser::MaintenanceTarget {
+                    table_name: relation_name.to_string(),
+                    columns: Vec::new(),
+                    only: false,
+                }],
+                analyze: false,
+                full: false,
+                verbose: false,
+                skip_locked: false,
+                buffer_usage_limit: None,
+            },
+            &relcache,
+            &mut ctx,
+        )
+        .unwrap();
     }
 
     #[cfg(unix)]
@@ -253,6 +357,58 @@ mod tests {
         assert!(
             init_path.exists(),
             "relcache init file should be regenerated on next relcache build"
+        );
+    }
+
+    #[test]
+    fn catalog_store_comment_write_preserves_relcache_init_file() {
+        let base = temp_dir("relcache_init_comment");
+        let mut store = CatalogStore::load(&base).unwrap();
+        let created = store
+            .create_table(
+                "people",
+                RelationDesc {
+                    columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
+                },
+            )
+            .unwrap();
+        let init_path =
+            super::relcache_init::relcache_init_path_for_scope(&base, CatalogScope::Database(1));
+        store.relcache().unwrap();
+        assert!(init_path.exists(), "relcache init file should be written");
+
+        let (pool, txns, ctx) = durable_write_context(&base);
+        let effect = store
+            .comment_relation_mvcc(created.relation_oid, Some("hello"), &ctx)
+            .unwrap();
+        let _ = (effect, pool);
+        commit_catalog_write(&txns, ctx.xid);
+
+        assert!(
+            init_path.exists(),
+            "comment-only writes should not invalidate relcache init files"
+        );
+    }
+
+    #[test]
+    fn catalog_store_shared_tablespace_write_preserves_relcache_init_file() {
+        let base = temp_dir("relcache_init_tablespace");
+        let mut store = CatalogStore::load_shared(&base).unwrap();
+        let init_path =
+            super::relcache_init::relcache_init_path_for_scope(&base, CatalogScope::Shared);
+        store.relcache().unwrap();
+        assert!(init_path.exists(), "shared relcache init file should be written");
+
+        let (pool, txns, ctx) = durable_write_context(&base);
+        let (_, effect) = store
+            .create_tablespace_mvcc("tblspc", BOOTSTRAP_SUPERUSER_OID, &ctx)
+            .unwrap();
+        let _ = (effect, pool);
+        commit_catalog_write(&txns, ctx.xid);
+
+        assert!(
+            init_path.exists(),
+            "tablespace rows should not invalidate shared relcache init files"
         );
     }
 
@@ -1491,7 +1647,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn catalog_store_drop_table_vacuums_dead_system_index_tuples() {
+    fn catalog_store_drop_table_requires_manual_vacuum_for_dead_system_index_tuples() {
         let base = temp_dir("catalog_index_tuple_cleanup");
         let mut store = CatalogStore::load(&base).unwrap();
         let class_index_rel = system_index_rel(1, "pg_class_relname_nsp_index");
@@ -1511,57 +1667,43 @@ mod tests {
         store.drop_table("people").unwrap();
 
         let after_drop = count_leaf_btree_items(&base, class_index_rel);
-        assert_eq!(after_drop, before);
+        assert_eq!(after_drop, before + 1);
+
+        vacuum_relation_via_command(&base, CatalogScope::Database(1), "pg_catalog.pg_class");
+
+        let after_vacuum = count_leaf_btree_items(&base, class_index_rel);
+        assert_eq!(after_vacuum, before);
     }
 
     #[cfg(unix)]
     #[test]
-    fn catalog_store_rename_table_vacuums_dead_system_index_tuples() {
-        let base = temp_dir("catalog_index_tuple_cleanup_rename");
+    fn catalog_store_rename_role_requires_manual_vacuum_for_dead_shared_system_index_tuples() {
+        let base = temp_dir("catalog_index_tuple_cleanup_role_rename");
         let mut store = CatalogStore::load(&base).unwrap();
-        let created = store
-            .create_table(
-                "people",
-                RelationDesc {
-                    columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
+        let role_index_rel = system_index_rel(1, "pg_authid_rolname_index");
+        let before = count_leaf_btree_items(&base, role_index_rel);
+
+        let _created = store
+            .create_role(
+                "app_user",
+                &crate::backend::catalog::roles::RoleAttributes {
+                    rolcanlogin: true,
+                    ..crate::backend::catalog::roles::RoleAttributes::default()
                 },
             )
             .unwrap();
-        let class_index_rel = system_index_rel(1, "pg_class_relname_nsp_index");
-        let before = count_leaf_btree_items(&base, class_index_rel);
+        let after_create = count_leaf_btree_items(&base, role_index_rel);
+        assert_eq!(after_create, before + 1);
 
-        let mut smgr = MdStorageManager::new(&base);
-        for kind in [
-            BootstrapCatalogKind::PgClass,
-            BootstrapCatalogKind::PgType,
-            BootstrapCatalogKind::PgConstraint,
-        ] {
-            smgr.open(bootstrap_catalog_rel(kind, 1)).unwrap();
-        }
-        let pool = Arc::new(BufferPool::new(SmgrStorageBackend::new(smgr), 16));
-        let txns = Arc::new(RwLock::new(
-            TransactionManager::new_durable(base.clone()).unwrap(),
-        ));
-        let xid = txns.write().begin();
-        let ctx = CatalogWriteContext {
-            pool: Arc::clone(&pool),
-            txns: Arc::clone(&txns),
-            xid,
-            cid: 0,
-            client_id: 0,
-            waiter: None,
-            interrupts: Arc::new(InterruptState::new()),
-        };
+        store.rename_role("app_user", "customer_user").unwrap();
 
-        let effect = store
-            .rename_relation_mvcc(created.relation_oid, "customers", &ctx)
-            .unwrap();
-        txns.write().commit(xid).unwrap();
-        vacuum_system_catalog_indexes_for_kinds_in_db(&pool, &txns, 1, &effect.touched_catalogs)
-            .unwrap();
+        let after_rename = count_leaf_btree_items(&base, role_index_rel);
+        assert!(after_rename > after_create);
 
-        let after_rename = count_leaf_btree_items(&base, class_index_rel);
-        assert_eq!(after_rename, before);
+        vacuum_relation_via_command(&base, CatalogScope::Shared, "pg_catalog.pg_authid");
+
+        let after_vacuum = count_leaf_btree_items(&base, role_index_rel);
+        assert_eq!(after_vacuum, after_create);
     }
 
     #[cfg(unix)]
