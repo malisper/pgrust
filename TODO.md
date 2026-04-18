@@ -476,3 +476,5 @@ Targeted reruns on 2026-04-17:
 - int2.sql
 - [done] Establish a working `numeric.sql` rerun path on current `HEAD`; `run_regression.sh` can false-fail startup because cluster bootstrap fsync work can delay TCP bind past the default readiness wait
 - [done] Normalize numeric display scale before result rendering so aggregates and scalar outputs do not keep extra trailing zeros; this affects `AVG(val)` output and many `to_char(numeric, ...)` cases
+- make bare `ANALYZE` enumerate permitted relations from catalog rows instead of search-path-visible names
+- make `ANALYZE` include PostgreSQL-style analyzable relkinds (`r`, `m`, `p`)

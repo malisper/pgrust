@@ -15,7 +15,7 @@ use crate::backend::utils::cache::syscache::{
 use crate::include::catalog::{
     CONSTRAINT_FOREIGN, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, PG_CATALOG_NAMESPACE_OID,
     PG_CLASS_RELATION_OID, PG_PROC_RELATION_OID, PG_REWRITE_RELATION_OID, PG_TYPE_RELATION_OID,
-    PUBLIC_NAMESPACE_OID, builtin_range_name_for_sql_type,
+    PUBLIC_NAMESPACE_OID, builtin_range_name_for_sql_type, relkind_is_analyzable,
 };
 use crate::include::nodes::primnodes::{Var, user_attrno};
 
@@ -42,6 +42,22 @@ pub(super) fn lookup_heap_relation_for_ddl(
     }
 }
 
+pub(super) fn lookup_analyzable_relation_for_ddl(
+    catalog: &dyn CatalogLookup,
+    name: &str,
+) -> Result<BoundRelation, ExecError> {
+    match catalog.lookup_any_relation(name) {
+        Some(entry) if relkind_is_analyzable(entry.relkind) => Ok(entry),
+        Some(_) => Err(ExecError::Parse(ParseError::WrongObjectType {
+            name: name.to_string(),
+            expected: "table",
+        })),
+        None => Err(ExecError::Parse(ParseError::TableDoesNotExist(
+            name.to_string(),
+        ))),
+    }
+}
+
 fn auth_catalog_for_ddl(
     db: &Database,
     client_id: ClientId,
@@ -57,6 +73,8 @@ fn auth_catalog_for_ddl(
 pub(super) fn relation_kind_name(relkind: char) -> &'static str {
     match relkind {
         'c' => "type",
+        'm' => "materialized view",
+        'p' => "partitioned table",
         'S' => "sequence",
         'v' => "view",
         'i' => "index",

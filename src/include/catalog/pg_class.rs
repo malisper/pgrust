@@ -57,6 +57,10 @@ pub const fn relkind_has_storage(relkind: char) -> bool {
     !matches!(relkind, 'v' | 'c')
 }
 
+pub const fn relkind_is_analyzable(relkind: char) -> bool {
+    matches!(relkind, 'r' | 'm' | 'p')
+}
+
 pub const fn relam_for_relkind(relkind: char) -> u32 {
     match relkind {
         'i' => BTREE_AM_OID,
