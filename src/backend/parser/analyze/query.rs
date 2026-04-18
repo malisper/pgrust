@@ -2,8 +2,8 @@ use super::*;
 use crate::include::executor::execdesc::CommandType;
 use crate::include::nodes::parsenodes::{JoinTreeNode, Query, RangeTblEntry, RangeTblEntryKind};
 use crate::include::nodes::primnodes::{
-    Aggref, BoolExpr, FuncExpr, OpExpr, ScalarArrayOpExpr, SubLink, attrno_index, is_system_attr,
-    user_attrno,
+    attrno_index, is_system_attr, user_attrno, Aggref, BoolExpr, FuncExpr, OpExpr, OrderByEntry,
+    ScalarArrayOpExpr, SubLink,
 };
 use crate::include::nodes::primnodes::{ExprArraySubscript, JoinType, Var};
 
@@ -434,6 +434,14 @@ pub(super) fn shift_expr_rtindexes(expr: Expr, offset: usize) -> Expr {
                 .into_iter()
                 .map(|arg| shift_expr_rtindexes(arg, offset))
                 .collect(),
+            aggorder: aggref
+                .aggorder
+                .into_iter()
+                .map(|item| OrderByEntry {
+                    expr: shift_expr_rtindexes(item.expr, offset),
+                    ..item
+                })
+                .collect(),
             aggfilter: aggref
                 .aggfilter
                 .map(|expr| shift_expr_rtindexes(expr, offset)),
@@ -659,6 +667,18 @@ pub(super) fn rewrite_local_vars_for_output_exprs(
                 .args
                 .into_iter()
                 .map(|arg| rewrite_local_vars_for_output_exprs(arg, source_varno, output_exprs))
+                .collect(),
+            aggorder: aggref
+                .aggorder
+                .into_iter()
+                .map(|item| OrderByEntry {
+                    expr: rewrite_local_vars_for_output_exprs(
+                        item.expr,
+                        source_varno,
+                        output_exprs,
+                    ),
+                    ..item
+                })
                 .collect(),
             aggfilter: aggref
                 .aggfilter

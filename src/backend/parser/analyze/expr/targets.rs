@@ -623,10 +623,26 @@ fn visit_nested_srfs(
                 );
             }
         }
-        SqlExpr::AggCall { args, filter, .. } => {
+        SqlExpr::AggCall {
+            args,
+            order_by,
+            filter,
+            ..
+        } => {
             for arg in args {
                 visit_nested_srfs(
                     &arg.value,
+                    info,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                );
+            }
+            for item in order_by {
+                visit_nested_srfs(
+                    &item.expr,
                     info,
                     scope,
                     catalog,

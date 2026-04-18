@@ -1,5 +1,5 @@
-use pest::Parser as _;
 use pest::iterators::Pair;
+use pest::Parser as _;
 use pest_derive::Parser;
 
 use super::comments::{
@@ -169,7 +169,9 @@ pub fn parse_type_name(sql: &str) -> Result<RawTypeName, ParseError> {
         "pg_node_tree" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::PgNodeTree))),
         "void" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Void))),
         "regprocedure" => {
-            return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegProcedure)));
+            return Ok(RawTypeName::Builtin(SqlType::new(
+                SqlTypeKind::RegProcedure,
+            )));
         }
         _ => {}
     }
@@ -296,7 +298,8 @@ fn try_parse_conversion_statement(sql: &str) -> Result<Option<Statement>, ParseE
             .map(|stmt| Some(Statement::CreateConversion(stmt)));
     }
     if lowered.starts_with("drop conversion ") {
-        return build_drop_conversion_statement(trimmed).map(|stmt| Some(Statement::DropConversion(stmt)));
+        return build_drop_conversion_statement(trimmed)
+            .map(|stmt| Some(Statement::DropConversion(stmt)));
     }
     if lowered.starts_with("comment on conversion ") {
         return build_comment_on_conversion_statement(trimmed)
@@ -518,19 +521,19 @@ fn build_revoke_role_membership(sql: &str) -> Result<RevokeRoleMembershipStateme
         .trim_start();
     let (revoke_body, granted_by_clause) =
         split_optional_keyword(rest, "granted by").unwrap_or((rest.trim(), None));
-    let (flags, rest) = if let Some(stripped) = strip_keyword_prefix(revoke_body, "admin option for")
-    {
-        ((true, false, false), stripped)
-    } else if let Some(stripped) = strip_keyword_prefix(revoke_body, "inherit option for") {
-        ((false, true, false), stripped)
-    } else if let Some(stripped) = strip_keyword_prefix(revoke_body, "set option for") {
-        ((false, false, true), stripped)
-    } else {
-        return Err(ParseError::UnexpectedToken {
-            expected: "REVOKE <option> OPTION FOR role FROM member",
-            actual: sql.into(),
-        });
-    };
+    let (flags, rest) =
+        if let Some(stripped) = strip_keyword_prefix(revoke_body, "admin option for") {
+            ((true, false, false), stripped)
+        } else if let Some(stripped) = strip_keyword_prefix(revoke_body, "inherit option for") {
+            ((false, true, false), stripped)
+        } else if let Some(stripped) = strip_keyword_prefix(revoke_body, "set option for") {
+            ((false, false, true), stripped)
+        } else {
+            return Err(ParseError::UnexpectedToken {
+                expected: "REVOKE <option> OPTION FOR role FROM member",
+                actual: sql.into(),
+            });
+        };
     let (role_names, rest) = split_once_keyword(rest, "from")?;
     Ok(RevokeRoleMembershipStatement {
         role_names: parse_identifier_list(role_names)?,
@@ -1216,11 +1219,9 @@ fn build_create_type_statement(sql: &str) -> Result<CreateTypeStatement, ParseEr
                 actual: rest.trim().into(),
             });
         }
-        return Ok(CreateTypeStatement::Range(parse_create_range_type_statement(
-            schema_name,
-            type_name,
-            &option_list,
-        )?));
+        return Ok(CreateTypeStatement::Range(
+            parse_create_range_type_statement(schema_name, type_name, &option_list)?,
+        ));
     }
     let (attr_list, rest) = take_parenthesized_segment(rest)?;
     if !rest.trim().is_empty() {
@@ -3047,7 +3048,10 @@ fn build_set_operation_tree(
         nested = select_statement_for_set_operation(op, nested, next_input);
     }
 
-    nested.set_operation.ok_or(ParseError::UnexpectedEof).map(|op| *op)
+    nested
+        .set_operation
+        .ok_or(ParseError::UnexpectedEof)
+        .map(|op| *op)
 }
 
 fn select_statement_for_set_operation(
@@ -6155,6 +6159,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
 fn build_agg_call(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
     let mut func = None;
     let mut parsed_args = ParsedFunctionArgs::default();
+    let mut order_by = Vec::new();
     let mut is_star = false;
     let mut distinct = false;
     let mut filter = None;
@@ -6191,6 +6196,13 @@ fn build_agg_call(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
             Rule::function_arg_list => {
                 parsed_args = build_function_arg_list(part)?;
             }
+            Rule::agg_order_by_clause => {
+                order_by = part
+                    .into_inner()
+                    .filter(|inner| inner.as_rule() == Rule::order_by_item)
+                    .map(build_order_by_item)
+                    .collect::<Result<Vec<_>, _>>()?;
+            }
             Rule::agg_filter_clause => {
                 filter = Some(build_agg_filter_clause(part)?);
             }
@@ -6207,6 +6219,7 @@ fn build_agg_call(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         } else {
             parsed_args.args
         },
+        order_by,
         distinct,
         func_variadic: !is_star && parsed_args.func_variadic,
         filter: filter.map(Box::new),

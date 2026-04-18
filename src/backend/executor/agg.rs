@@ -12,7 +12,7 @@ use std::cmp::Ordering;
 use std::collections::HashSet;
 
 use super::expr_range::{range_intersection_agg_transition, render_range_text};
-use super::jsonb::{JsonbValue, encode_jsonb, jsonb_from_value, render_jsonb_bytes};
+use super::jsonb::{encode_jsonb, jsonb_from_value, render_jsonb_bytes, JsonbValue};
 
 #[derive(Debug, Clone)]
 pub(crate) enum NumericAccum {
@@ -320,10 +320,7 @@ impl AccumState {
                         Some(NumericAccum::Numeric(v)) => {
                             let count_numeric = NumericValue::from_i64(*count);
                             let avg = v
-                                .div(
-                                    &count_numeric,
-                                    numeric_div_display_scale(v, &count_numeric),
-                                )
+                                .div(&count_numeric, numeric_div_display_scale(v, &count_numeric))
                                 .unwrap_or_else(|| v.clone());
                             Value::Numeric(format_numeric_result(avg, *result_type))
                         }
@@ -760,7 +757,11 @@ fn numeric_div_display_scale(lhs: &NumericValue, rhs: &NumericValue) -> u32 {
 
     fn normalized_weight_and_first_group(value: &NumericValue) -> (i32, i32, i32) {
         match value {
-            NumericValue::Finite { coeff, scale, dscale } if !coeff.is_zero() => {
+            NumericValue::Finite {
+                coeff,
+                scale,
+                dscale,
+            } if !coeff.is_zero() => {
                 let digits = coeff.abs().to_str_radix(10);
                 let dec_weight = digits.len() as i32 - (*scale as i32) - 1;
                 let group_weight = floor_div_i32(dec_weight, DEC_DIGITS);
@@ -797,4 +798,11 @@ fn numeric_div_display_scale(lhs: &NumericValue, rhs: &NumericValue) -> u32 {
 pub(crate) struct AggGroup {
     pub(crate) key_values: Vec<Value>,
     pub(crate) accum_states: Vec<AccumState>,
+    pub(crate) ordered_inputs: Vec<Vec<OrderedAggInput>>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct OrderedAggInput {
+    pub(crate) sort_keys: Vec<Value>,
+    pub(crate) arg_values: Vec<Value>,
 }

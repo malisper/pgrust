@@ -293,6 +293,16 @@ fn rewrite_agg_accum(
             .into_iter()
             .map(|expr| rewrite_semantic_expr(expr, catalog, expanded_views))
             .collect::<Result<Vec<_>, _>>()?,
+        order_by: accum
+            .order_by
+            .into_iter()
+            .map(|item| {
+                Ok(crate::include::nodes::primnodes::OrderByEntry {
+                    expr: rewrite_semantic_expr(item.expr, catalog, expanded_views)?,
+                    ..item
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?,
         filter: accum
             .filter
             .map(|expr| rewrite_semantic_expr(expr, catalog, expanded_views))
@@ -441,6 +451,16 @@ fn rewrite_semantic_expr(
                 .args
                 .into_iter()
                 .map(|arg| rewrite_semantic_expr(arg, catalog, expanded_views))
+                .collect::<Result<Vec<_>, _>>()?,
+            aggorder: aggref
+                .aggorder
+                .into_iter()
+                .map(|item| {
+                    Ok(crate::include::nodes::primnodes::OrderByEntry {
+                        expr: rewrite_semantic_expr(item.expr, catalog, expanded_views)?,
+                        ..item
+                    })
+                })
                 .collect::<Result<Vec<_>, _>>()?,
             aggfilter: aggref
                 .aggfilter

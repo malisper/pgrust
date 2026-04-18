@@ -3,15 +3,16 @@ use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::{AggFunc, Expr, Plan, RelationDesc, Value};
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_PRIMARY, JSON_TYPE_OID, PUBLIC_NAMESPACE_OID, PgProcRow,
-    PgRewriteRow, PgTypeRow, RECORD_TYPE_OID, bootstrap_pg_proc_rows, sort_pg_rewrite_rows,
+    bootstrap_pg_proc_rows, sort_pg_rewrite_rows, PgProcRow, PgRewriteRow, PgTypeRow,
+    BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_PRIMARY, JSON_TYPE_OID, PUBLIC_NAMESPACE_OID,
+    RECORD_TYPE_OID,
 };
 use crate::include::nodes::parsenodes::{
     AliasColumnDef, AliasColumnSpec, ColumnConstraint, CompositeTypeAttributeDef,
     CreateCompositeTypeStatement, CreateTypeStatement, DropTypeStatement, ForeignKeyAction,
     ForeignKeyMatchType, JoinTreeNode, RangeTblEntryKind, RawTypeName, TableConstraint,
 };
-use crate::include::nodes::primnodes::{AttrNumber, JoinType, Var, is_system_attr};
+use crate::include::nodes::primnodes::{is_system_attr, AttrNumber, JoinType, Var};
 
 fn desc() -> RelationDesc {
     RelationDesc {
@@ -2626,16 +2627,14 @@ fn build_plan_accepts_catalog_backed_bit_comparisons() {
 
 #[test]
 fn build_plan_accepts_catalog_backed_bytea_comparisons() {
-    assert!(
-        build_plan(
-            &parse_select(
-                r"select E'\\x01'::bytea = E'\\x01'::bytea, E'\\x01'::bytea < E'\\x02'::bytea"
-            )
-            .unwrap(),
-            &catalog(),
+    assert!(build_plan(
+        &parse_select(
+            r"select E'\\x01'::bytea = E'\\x01'::bytea, E'\\x01'::bytea < E'\\x02'::bytea"
         )
-        .is_ok()
-    );
+        .unwrap(),
+        &catalog(),
+    )
+    .is_ok());
 }
 
 #[test]
@@ -2695,14 +2694,12 @@ fn build_plan_coerces_unknown_string_literals_for_array_ops() {
 
 #[test]
 fn build_plan_accepts_catalog_backed_text_array_casts() {
-    assert!(
-        build_plan(
-            &parse_select("select cast('{1,2}' as int4[]), cast('{\"a\",\"b\"}' as varchar[])")
-                .unwrap(),
-            &catalog(),
-        )
-        .is_ok()
-    );
+    assert!(build_plan(
+        &parse_select("select cast('{1,2}' as int4[]), cast('{\"a\",\"b\"}' as varchar[])")
+            .unwrap(),
+        &catalog(),
+    )
+    .is_ok());
 }
 
 #[test]
@@ -4216,8 +4213,7 @@ fn parse_create_drop_and_comment_on_conversion_statements() {
     let Statement::CreateConversion(create) = parse_statement(
         "create default conversion public.mydef for 'LATIN1' to 'UTF8' from iso8859_1_to_utf8",
     )
-    .unwrap()
-    else {
+    .unwrap() else {
         panic!("expected create conversion");
     };
     assert_eq!(create.conversion_name, "public.mydef");
@@ -4335,7 +4331,10 @@ fn parse_create_type_supports_enum_and_rejects_other_unsupported_forms() {
         Statement::CreateType(CreateTypeStatement::Range(stmt)) => {
             assert_eq!(stmt.schema_name, None);
             assert_eq!(stmt.type_name, "intr");
-            assert_eq!(stmt.subtype, RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)));
+            assert_eq!(
+                stmt.subtype,
+                RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4))
+            );
             assert_eq!(stmt.subtype_diff.as_deref(), Some("int4mi"));
             assert_eq!(stmt.collation.as_deref(), Some("C"));
         }
@@ -4535,6 +4534,24 @@ fn parse_string_agg_select() {
         } if args.len() == 2
     ));
     assert_eq!(stmt.targets[0].output_name, "string_agg");
+}
+
+#[test]
+fn parse_jsonb_agg_with_local_order_by() {
+    let stmt = parse_select("select jsonb_agg(id order by note desc, id) from people").unwrap();
+    assert!(matches!(
+        &stmt.targets[0].expr,
+        SqlExpr::AggCall {
+            func: AggFunc::JsonbAgg,
+            args,
+            order_by,
+            ..
+        } if args.len() == 1
+            && order_by.len() == 2
+            && order_by[0].descending
+            && matches!(order_by[0].expr, SqlExpr::Column(ref name) if name == "note")
+            && matches!(order_by[1].expr, SqlExpr::Column(ref name) if name == "id")
+    ));
 }
 
 #[test]
