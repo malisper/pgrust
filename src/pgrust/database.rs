@@ -146,11 +146,22 @@ pub(crate) use foreign_keys::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DatabaseOpenOptions {
     pub pool_size: usize,
+    pub durable_shutdown: bool,
 }
 
 impl DatabaseOpenOptions {
     pub const fn new(pool_size: usize) -> Self {
-        Self { pool_size }
+        Self {
+            pool_size,
+            durable_shutdown: true,
+        }
+    }
+
+    pub const fn for_tests(pool_size: usize) -> Self {
+        Self {
+            pool_size,
+            durable_shutdown: false,
+        }
     }
 }
 
@@ -285,6 +296,12 @@ pub(crate) enum TempMutationEffect {
 }
 
 impl Database {
+    #[cfg(test)]
+    pub fn open(base_dir: impl Into<PathBuf>, pool_size: usize) -> Result<Self, DatabaseError> {
+        Self::open_with_options(base_dir, DatabaseOpenOptions::for_tests(pool_size))
+    }
+
+    #[cfg(not(test))]
     pub fn open(base_dir: impl Into<PathBuf>, pool_size: usize) -> Result<Self, DatabaseError> {
         Self::open_with_options(base_dir, DatabaseOpenOptions::new(pool_size))
     }
