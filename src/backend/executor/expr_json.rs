@@ -1,6 +1,8 @@
 use super::exec_expr::eval_expr;
 use super::node_types::*;
+use super::expr_casts::cast_value_with_config;
 use super::{ExecError, ExecutorContext};
+use crate::backend::parser::CatalogLookup;
 use crate::backend::executor::jsonb::{
     JsonbValue, decode_jsonb, encode_jsonb, jsonb_builder_key, jsonb_from_value, jsonb_get,
     jsonb_object_from_pairs, jsonb_path, jsonb_to_text_value, jsonb_to_value,
@@ -14,7 +16,13 @@ use crate::backend::executor::render_bit_text;
 use crate::backend::executor::render_datetime_value_text;
 use crate::backend::executor::render_range_text;
 use crate::backend::libpq::pqformat::format_bytea_text;
-use crate::include::nodes::primnodes::BuiltinScalarFunction;
+use crate::backend::utils::record::lookup_anonymous_record_descriptor;
+use crate::include::catalog::RECORD_TYPE_OID;
+use crate::include::nodes::datum::{ArrayValue, RecordDescriptor, RecordValue};
+use crate::include::nodes::parsenodes::{SqlType, SqlTypeKind};
+use crate::include::nodes::primnodes::{
+    BuiltinScalarFunction, Expr, JsonRecordFunction, QueryColumn, expr_sql_type_hint,
+};
 use crate::pgrust::compact_string::CompactString;
 use crate::pgrust::session::ByteaOutputFormat;
 use serde_json::Value as SerdeJsonValue;
@@ -88,6 +96,151 @@ impl ParsedJsonValue {
             },
         }
     }
+}
+
+#[derive(Clone, Default)]
+struct JsonRecordPath {
+    key: Option<String>,
+    indexes: Vec<usize>,
+}
+
+impl JsonRecordPath {
+    fn with_key(&self, key: &str) -> Self {
+        Self {
+            key: Some(key.to_string()),
+            indexes: Vec::new(),
+        }
+    }
+
+    fn with_index(&self, index: usize) -> Self {
+        let mut next = self.clone();
+        next.indexes.push(index);
+        next
+    }
+
+    fn hint(&self) -> Option<String> {
+        let key = self.key.as_deref()?;
+        if self.indexes.is_empty() {
+            Some(format!("See the value of key \"{key}\"."))
+        } else {
+            let suffix = self
+                .indexes
+                .iter()
+                .map(|index| format!("[{index}]"))
+                .collect::<String>();
+            Some(format!("See the array element {suffix} of key \"{key}\"."))
+        }
+    }
+}
+
+pub(crate) fn eval_json_record_builtin_function(
+    func: BuiltinScalarFunction,
+    result_type: Option<SqlType>,
+    args: &[Expr],
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Option<Result<Value, ExecError>> {
+    let result = match func {
+        BuiltinScalarFunction::JsonPopulateRecord => {
+            eval_json_record_scalar_function("json_populate_record", true, true, result_type, args, slot, ctx)
+        }
+        BuiltinScalarFunction::JsonPopulateRecordValid => {
+            eval_json_record_valid_function("json_populate_record_valid", true, args, slot, ctx)
+        }
+        BuiltinScalarFunction::JsonToRecord => {
+            eval_json_record_scalar_function("json_to_record", false, true, result_type, args, slot, ctx)
+        }
+        BuiltinScalarFunction::JsonbPopulateRecord => {
+            eval_json_record_scalar_function("jsonb_populate_record", true, false, result_type, args, slot, ctx)
+        }
+        BuiltinScalarFunction::JsonbPopulateRecordValid => {
+            eval_json_record_valid_function("jsonb_populate_record_valid", false, args, slot, ctx)
+        }
+        BuiltinScalarFunction::JsonbToRecord => {
+            eval_json_record_scalar_function("jsonb_to_record", false, false, result_type, args, slot, ctx)
+        }
+        _ => return None,
+    };
+    Some(result)
+}
+
+pub(crate) fn eval_json_record_set_returning_function(
+    kind: JsonRecordFunction,
+    args: &[Expr],
+    output_columns: &[QueryColumn],
+    record_type: Option<SqlType>,
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<TupleSlot>, ExecError> {
+    let func_name = kind.name();
+    let values = args
+        .iter()
+        .map(|arg| eval_expr(arg, slot, ctx))
+        .collect::<Result<Vec<_>, _>>()?;
+    let (populate, expect_json) = match kind {
+        JsonRecordFunction::PopulateRecord | JsonRecordFunction::PopulateRecordSet => (true, true),
+        JsonRecordFunction::ToRecord | JsonRecordFunction::ToRecordSet => (false, true),
+        JsonRecordFunction::JsonbPopulateRecord | JsonRecordFunction::JsonbPopulateRecordSet => {
+            (true, false)
+        }
+        JsonRecordFunction::JsonbToRecord | JsonRecordFunction::JsonbToRecordSet => (false, false),
+    };
+
+    let base_value = if populate {
+        values.first().cloned().unwrap_or(Value::Null)
+    } else {
+        Value::Null
+    };
+    let Some(json_value) = values.get(if populate { 1 } else { 0 }) else {
+        return Err(ExecError::RaiseException(format!(
+            "missing arguments for {func_name}"
+        )));
+    };
+
+    if matches!(json_value, Value::Null) {
+        if kind.is_set_returning() {
+            return Ok(Vec::new());
+        }
+        return Ok(vec![TupleSlot::virtual_row(
+            output_columns.iter().map(|_| Value::Null).collect(),
+        )]);
+    }
+
+    let parsed = parsed_json_record_input(json_value, expect_json)?;
+    let rows = if kind.is_set_returning() {
+        match parsed {
+            SerdeJsonValue::Array(items) => items
+                .iter()
+                .map(|item| {
+                    json_record_row_for_output(
+                        func_name,
+                        item,
+                        &base_value,
+                        output_columns,
+                        record_type,
+                        ctx,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            _ => {
+                return Err(expected_json_array_error(
+                    &JsonRecordPath::default(),
+                    None,
+                ))
+            }
+        }
+    } else {
+        vec![json_record_row_for_output(
+            func_name,
+            &parsed,
+            &base_value,
+            output_columns,
+            record_type,
+            ctx,
+        )?]
+    };
+
+    Ok(rows)
 }
 
 pub(crate) fn eval_json_builtin_function(
@@ -536,6 +689,514 @@ pub(crate) fn eval_json_builtin_function(
         | BuiltinScalarFunction::JsonbPathQueryArray
         | BuiltinScalarFunction::JsonbPathQueryFirst => Some(eval()),
         _ => None,
+    }
+}
+
+fn eval_json_record_scalar_function(
+    func_name: &'static str,
+    populate: bool,
+    expect_json: bool,
+    result_type: Option<SqlType>,
+    args: &[Expr],
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    let values = args
+        .iter()
+        .map(|arg| eval_expr(arg, slot, ctx))
+        .collect::<Result<Vec<_>, _>>()?;
+    let base_value = if populate {
+        values.first().cloned().unwrap_or(Value::Null)
+    } else {
+        Value::Null
+    };
+    let Some(json_value) = values.get(if populate { 1 } else { 0 }) else {
+        return Err(ExecError::RaiseException(format!(
+            "missing arguments for {func_name}"
+        )));
+    };
+    if matches!(json_value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let descriptor = scalar_json_record_descriptor(func_name, result_type, args, &base_value, ctx)?;
+    let parsed = parsed_json_record_input(json_value, expect_json)?;
+    let row = json_record_row_from_value(
+        func_name,
+        &parsed,
+        &base_value,
+        &record_columns_from_descriptor(&descriptor),
+        ctx,
+    )?;
+    Ok(Value::Record(RecordValue::from_descriptor(
+        descriptor,
+        row,
+    )))
+}
+
+fn eval_json_record_valid_function(
+    func_name: &'static str,
+    expect_json: bool,
+    args: &[Expr],
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    let values = args
+        .iter()
+        .map(|arg| eval_expr(arg, slot, ctx))
+        .collect::<Result<Vec<_>, _>>()?;
+    let base_value = values.first().cloned().unwrap_or(Value::Null);
+    let Some(json_value) = values.get(1) else {
+        return Err(ExecError::RaiseException(format!(
+            "missing arguments for {func_name}"
+        )));
+    };
+    if matches!(json_value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let row_type = args
+        .first()
+        .and_then(expr_sql_type_hint)
+        .ok_or_else(|| json_record_row_type_error(func_name))?;
+    let Some(descriptor) = record_descriptor_from_sql_type(row_type, ctx)? else {
+        return Err(json_record_row_type_error(func_name));
+    };
+    let parsed = parsed_json_record_input(json_value, expect_json)?;
+    Ok(Value::Bool(
+        json_record_row_from_value(
+            func_name,
+            &parsed,
+            &base_value,
+            &record_columns_from_descriptor(&descriptor),
+            ctx,
+        )
+        .is_ok(),
+    ))
+}
+
+fn scalar_json_record_descriptor(
+    func_name: &'static str,
+    result_type: Option<SqlType>,
+    args: &[Expr],
+    base_value: &Value,
+    ctx: &ExecutorContext,
+) -> Result<RecordDescriptor, ExecError> {
+    if let Value::Record(record) = base_value {
+        return Ok(record.descriptor.clone());
+    }
+    if let Some(descriptor) = result_type
+        .map(|ty| record_descriptor_from_sql_type(ty, ctx))
+        .transpose()?
+        .flatten()
+    {
+        return Ok(descriptor);
+    }
+    if let Some(descriptor) = args
+        .first()
+        .and_then(expr_sql_type_hint)
+        .map(|ty| record_descriptor_from_sql_type(ty, ctx))
+        .transpose()?
+        .flatten()
+    {
+        return Ok(descriptor);
+    }
+    Err(json_record_row_type_error(func_name))
+}
+
+fn parsed_json_record_input(value: &Value, expect_json: bool) -> Result<SerdeJsonValue, ExecError> {
+    match ParsedJsonValue::from_value(value)? {
+        ParsedJsonValue::Json(json) if expect_json => Ok(json),
+        ParsedJsonValue::Jsonb(jsonb) if !expect_json => Ok(jsonb.to_serde()),
+        ParsedJsonValue::Json(json) => Ok(json),
+        ParsedJsonValue::Jsonb(jsonb) => Ok(jsonb.to_serde()),
+    }
+}
+
+fn json_record_row_for_output(
+    func_name: &'static str,
+    value: &SerdeJsonValue,
+    base_value: &Value,
+    output_columns: &[QueryColumn],
+    record_type: Option<SqlType>,
+    ctx: &ExecutorContext,
+) -> Result<TupleSlot, ExecError> {
+    if let Some(record_type) = record_type {
+        let descriptor = if let Value::Record(record) = base_value {
+            record.descriptor.clone()
+        } else if let Some(descriptor) = record_descriptor_from_sql_type(record_type, ctx)? {
+            descriptor
+        } else {
+            record_descriptor_from_query_columns(output_columns)
+        };
+        let row = json_record_row_from_value(
+            func_name,
+            value,
+            base_value,
+            &record_columns_from_descriptor(&descriptor),
+            ctx,
+        )?;
+        Ok(TupleSlot::virtual_row(vec![Value::Record(
+            RecordValue::from_descriptor(descriptor, row),
+        )]))
+    } else {
+        let row = json_record_row_from_value(func_name, value, base_value, output_columns, ctx)?;
+        Ok(TupleSlot::virtual_row(row))
+    }
+}
+
+fn json_record_row_from_value(
+    func_name: &'static str,
+    value: &SerdeJsonValue,
+    base_value: &Value,
+    output_columns: &[QueryColumn],
+    ctx: &ExecutorContext,
+) -> Result<Vec<Value>, ExecError> {
+    let object = match value {
+        SerdeJsonValue::Object(object) => object,
+        _ => {
+            return Err(ExecError::DetailedError {
+                message: format!("expected JSON object for {func_name}"),
+                detail: None,
+                hint: None,
+                sqlstate: "22023",
+            })
+        }
+    };
+    let base_fields = match base_value {
+        Value::Record(record) if record.fields.len() == output_columns.len() => Some(&record.fields),
+        Value::Null => None,
+        Value::Record(_) => None,
+        other => {
+            return Err(ExecError::TypeMismatch {
+                op: func_name,
+                left: other.clone(),
+                right: Value::Null,
+            })
+        }
+    };
+    output_columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| {
+            if let Some(value) = object.get(&column.name) {
+                json_record_field_to_value(
+                    value,
+                    column.sql_type,
+                    &JsonRecordPath::default().with_key(&column.name),
+                    ctx,
+                )
+            } else {
+                Ok(base_fields
+                    .and_then(|fields| fields.get(index))
+                    .cloned()
+                    .unwrap_or(Value::Null))
+            }
+        })
+        .collect()
+}
+
+fn json_record_field_to_value(
+    value: &SerdeJsonValue,
+    ty: SqlType,
+    path: &JsonRecordPath,
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    if matches!(value, SerdeJsonValue::Null) {
+        return Ok(Value::Null);
+    }
+    if ty.is_array {
+        return json_record_array_to_value(value, ty, path, ctx);
+    }
+    match ty.kind {
+        SqlTypeKind::Json => Ok(json_value_to_value(value, false)),
+        SqlTypeKind::Jsonb => Ok(Value::Jsonb(encode_jsonb(&JsonbValue::from_serde(
+            value.clone(),
+        )?))),
+        SqlTypeKind::Record | SqlTypeKind::Composite => {
+            let Some(descriptor) = record_descriptor_from_sql_type(ty, ctx)? else {
+                return Err(json_record_row_type_error("json record expansion"));
+            };
+            match value {
+                SerdeJsonValue::Object(_) => {
+                    let fields = json_record_row_from_value(
+                        "json record expansion",
+                        value,
+                        &Value::Null,
+                        &record_columns_from_descriptor(&descriptor),
+                        ctx,
+                    )?;
+                    Ok(Value::Record(RecordValue::from_descriptor(descriptor, fields)))
+                }
+                SerdeJsonValue::String(text) => parse_record_literal_to_value(text, descriptor, ctx),
+                _ => Err(ExecError::DetailedError {
+                    message: "expected JSON object".into(),
+                    detail: None,
+                    hint: path.hint(),
+                    sqlstate: "22023",
+                }),
+            }
+        }
+        _ => cast_json_scalar_value(value, ty, path, ctx),
+    }
+}
+
+fn cast_json_scalar_value(
+    value: &SerdeJsonValue,
+    ty: SqlType,
+    path: &JsonRecordPath,
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    let text = json_record_scalar_text(value)?;
+    cast_value_with_config(
+        Value::Text(CompactString::from_owned(text)),
+        ty,
+        &ctx.datetime_config,
+    )
+    .map_err(|err| json_record_error_with_hint(err, path.hint()))
+}
+
+fn json_record_array_to_value(
+    value: &SerdeJsonValue,
+    ty: SqlType,
+    path: &JsonRecordPath,
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    match value {
+        SerdeJsonValue::String(text) => cast_value_with_config(
+            Value::Text(CompactString::from_owned(text.clone())),
+            ty,
+            &ctx.datetime_config,
+        )
+        .map_err(|err| json_record_error_with_hint(err, path.hint())),
+        SerdeJsonValue::Array(items) => {
+            let mut saw_array = false;
+            let mut saw_scalar = false;
+            let nested = items
+                .iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    let next_path = path.with_index(index);
+                    let is_array = matches!(item, SerdeJsonValue::Array(_));
+                    if is_array {
+                        if saw_scalar {
+                            return Err(expected_json_array_error(&next_path, next_path.hint()));
+                        }
+                        saw_array = true;
+                    } else if saw_array {
+                        return Err(expected_json_array_error(&next_path, next_path.hint()));
+                    } else {
+                        saw_scalar = true;
+                    }
+                    json_record_array_nested_value(item, ty.element_type(), &next_path, ctx)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let array = ArrayValue::from_nested_values(nested, vec![1]).map_err(|details| {
+                ExecError::DetailedError {
+                    message: "malformed JSON array".into(),
+                    detail: Some(details),
+                    hint: None,
+                    sqlstate: "22P02",
+                }
+            })?;
+            Ok(Value::PgArray(array))
+        }
+        _ => Err(expected_json_array_error(path, path.hint())),
+    }
+}
+
+fn json_record_array_nested_value(
+    value: &SerdeJsonValue,
+    element_type: SqlType,
+    path: &JsonRecordPath,
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    if matches!(value, SerdeJsonValue::Array(_)) {
+        return json_record_array_to_value(value, SqlType::array_of(element_type), path, ctx);
+    }
+    json_record_field_to_value(value, element_type, path, ctx)
+}
+
+fn json_record_scalar_text(value: &SerdeJsonValue) -> Result<String, ExecError> {
+    match value {
+        SerdeJsonValue::String(text) => Ok(text.clone()),
+        _ => Ok(JsonbValue::from_serde(value.clone())?.render()),
+    }
+}
+
+fn json_record_row_type_error(func_name: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("could not determine row type for result of {func_name}"),
+        detail: None,
+        hint: Some(
+            "Provide a non-null record argument, or call the function in the FROM clause using a column definition list."
+                .into(),
+        ),
+        sqlstate: "42804",
+    }
+}
+
+fn record_descriptor_from_sql_type(
+    ty: SqlType,
+    ctx: &ExecutorContext,
+) -> Result<Option<RecordDescriptor>, ExecError> {
+    match ty.kind {
+        SqlTypeKind::Composite if ty.typrelid != 0 => {
+            let catalog = ctx.catalog.as_ref().ok_or_else(|| ExecError::DetailedError {
+                message: "named composite record expansion requires catalog context".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "0A000",
+            })?;
+            let relation = catalog.lookup_relation_by_oid(ty.typrelid).ok_or_else(|| {
+                ExecError::DetailedError {
+                    message: format!("unknown composite relation oid {}", ty.typrelid),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42704",
+                }
+            })?;
+            Ok(Some(RecordDescriptor::named(
+                ty.type_oid.max(RECORD_TYPE_OID),
+                ty.typrelid,
+                ty.typmod,
+                relation
+                    .desc
+                    .columns
+                    .into_iter()
+                    .filter(|column| !column.dropped)
+                    .map(|column| (column.name, column.sql_type))
+                    .collect(),
+            )))
+        }
+        SqlTypeKind::Record if ty.typmod > 0 => Ok(lookup_anonymous_record_descriptor(ty.typmod)),
+        _ => Ok(None),
+    }
+}
+
+fn record_columns_from_descriptor(descriptor: &RecordDescriptor) -> Vec<QueryColumn> {
+    descriptor
+        .fields
+        .iter()
+        .map(|field| QueryColumn {
+            name: field.name.clone(),
+            sql_type: field.sql_type,
+            wire_type_oid: None,
+        })
+        .collect()
+}
+
+fn record_descriptor_from_query_columns(output_columns: &[QueryColumn]) -> RecordDescriptor {
+    RecordDescriptor::anonymous(
+        output_columns
+            .iter()
+            .map(|column| (column.name.clone(), column.sql_type))
+            .collect(),
+        -1,
+    )
+}
+
+fn parse_record_literal_to_value(
+    text: &str,
+    descriptor: RecordDescriptor,
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    let fields = parse_record_literal_fields(text)?;
+    if fields.len() != descriptor.fields.len() {
+        return Err(ExecError::DetailedError {
+            message: "malformed record literal".into(),
+            detail: Some(format!(
+                "record literal has {} fields but type expects {}",
+                fields.len(),
+                descriptor.fields.len()
+            )),
+            hint: None,
+            sqlstate: "22P02",
+        });
+    }
+    let converted = descriptor
+        .fields
+        .iter()
+        .zip(fields)
+        .map(|(field, raw)| match raw {
+            None => Ok(Value::Null),
+            Some(raw) => cast_value_with_config(
+                Value::Text(CompactString::from_owned(raw)),
+                field.sql_type,
+                &ctx.datetime_config,
+            ),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Value::Record(RecordValue::from_descriptor(
+        descriptor,
+        converted,
+    )))
+}
+
+fn parse_record_literal_fields(text: &str) -> Result<Vec<Option<String>>, ExecError> {
+    let body = text
+        .strip_prefix('(')
+        .and_then(|rest| rest.strip_suffix(')'))
+        .ok_or_else(|| ExecError::DetailedError {
+            message: "malformed record literal".into(),
+            detail: Some(format!("missing left parenthesis in \"{text}\"")),
+            hint: None,
+            sqlstate: "22P02",
+        })?;
+    let mut fields = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    let mut escaped = false;
+    for ch in body.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' if quoted => escaped = true,
+            '"' => quoted = !quoted,
+            ',' if !quoted => {
+                fields.push((!current.is_empty()).then(|| current.clone()));
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    if quoted {
+        return Err(ExecError::DetailedError {
+            message: "malformed record literal".into(),
+            detail: Some(format!("unterminated quoted string in \"{text}\"")),
+            hint: None,
+            sqlstate: "22P02",
+        });
+    }
+    fields.push((!current.is_empty()).then_some(current));
+    Ok(fields)
+}
+
+fn expected_json_array_error(path: &JsonRecordPath, hint: Option<String>) -> ExecError {
+    let hint = hint.or_else(|| path.hint());
+    ExecError::DetailedError {
+        message: "expected JSON array".into(),
+        detail: None,
+        hint,
+        sqlstate: "22023",
+    }
+}
+
+fn json_record_error_with_hint(err: ExecError, hint: Option<String>) -> ExecError {
+    match err {
+        ExecError::DetailedError {
+            message,
+            detail,
+            hint: None,
+            sqlstate,
+        } => ExecError::DetailedError {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        },
+        other => other,
     }
 }
 

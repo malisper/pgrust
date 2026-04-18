@@ -193,6 +193,47 @@ fn jsonb_input_respects_max_stack_depth_setting() {
 }
 
 #[test]
+fn jsonb_populate_record_named_composite_works() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create type jbpop as (a text, b int4, c timestamp)")
+        .expect("create composite type");
+
+    let result = session
+        .execute(
+            &db,
+            "select * from jsonb_populate_record(null::jbpop, '{\"a\":\"blurfl\",\"x\":43.2}') q",
+        )
+        .expect("run jsonb_populate_record");
+    let StatementResult::Query { rows, .. } = result else {
+        panic!("expected query result");
+    };
+    assert_eq!(
+        rows,
+        vec![vec![
+            Value::Text("blurfl".into()),
+            Value::Null,
+            Value::Null,
+        ]]
+    );
+}
+
+#[test]
+fn create_type_skips_temp_schema_in_search_path() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create temp table temp_rows(x int4)")
+        .expect("create temp table");
+    session
+        .execute(&db, "create type jbpop as (a text, b int4, c timestamp)")
+        .expect("create composite type with temp schema in search_path");
+}
+
+#[test]
 fn recursive_cte_union_all_counts_up() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);

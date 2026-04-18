@@ -3038,6 +3038,26 @@ fn build_plan_dispatches_jsonb_and_range_contains_independently() {
 }
 
 #[test]
+fn build_plan_dispatches_jsonb_populate_record_as_builtin() {
+    let plan = build_plan(
+        &parse_select("select jsonb_populate_record(row(1,2), '{\"f1\":0,\"f2\":1}')").unwrap(),
+        &catalog(),
+    )
+    .unwrap();
+    let Plan::Projection { targets, .. } = plan else {
+        panic!("expected projection plan");
+    };
+    assert!(matches!(
+        &targets[0].expr,
+        Expr::Func(func)
+            if func.implementation
+                == crate::include::nodes::primnodes::ScalarFunctionImpl::Builtin(
+                    crate::include::nodes::primnodes::BuiltinScalarFunction::JsonbPopulateRecord
+                )
+    ), "expr: {:#?}", targets[0].expr);
+}
+
+#[test]
 fn build_plan_dispatches_geometry_and_range_position_operators_independently() {
     let geometry_plan = build_plan(
         &parse_select("select '(0,0),(1,1)'::box &< '(2,2),(3,3)'::box").unwrap(),
@@ -5620,6 +5640,56 @@ fn analyze_json_populate_recordset_from_uses_named_composite_argument_rowtype() 
             ("c".into(), SqlType::new(SqlTypeKind::Timestamp)),
         ]
     );
+}
+
+#[test]
+fn analyze_jsonb_populate_record_from_uses_named_composite_argument_rowtype() {
+    let stmt = parse_select(
+        "select * from jsonb_populate_record(null::jpop, '{\"a\":\"blurfl\",\"x\":43.2}') q",
+    )
+    .unwrap();
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog_with_jpop(), &[], None, &[], &[]).unwrap();
+
+    assert_eq!(
+        query_column_names_and_types(&query),
+        vec![
+            ("a".into(), SqlType::new(SqlTypeKind::Text)),
+            ("b".into(), SqlType::new(SqlTypeKind::Int4)),
+            ("c".into(), SqlType::new(SqlTypeKind::Timestamp)),
+        ]
+    );
+}
+
+#[test]
+fn analyze_jsonb_to_record_from_uses_column_definition_list() {
+    let stmt = parse_select(
+        "select * from jsonb_to_record('{\"a\":1,\"b\":\"foo\"}') as x(a int, b text)",
+    )
+    .unwrap();
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, &[], &[]).unwrap();
+
+    assert_eq!(
+        query_column_names_and_types(&query),
+        vec![
+            ("a".into(), SqlType::new(SqlTypeKind::Int4)),
+            ("b".into(), SqlType::new(SqlTypeKind::Text)),
+        ]
+    );
+}
+
+#[test]
+fn analyze_jsonb_populate_recordset_rejects_mismatched_query_rowtype() {
+    let stmt = parse_select(
+        "select * from jsonb_populate_recordset(row(0::int), '[{\"a\":\"1\"}]') q (a text, b text)",
+    )
+    .unwrap();
+    let err = analyze_select_query_with_outer(&stmt, &catalog(), &[], None, &[], &[])
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("function return row and query-specified return row do not match"));
 }
 
 #[test]

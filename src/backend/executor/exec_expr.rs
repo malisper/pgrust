@@ -24,7 +24,8 @@ use super::expr_datetime::{
 };
 use super::expr_geometry::eval_geometry_function;
 use super::expr_json::{
-    eval_json_builtin_function, eval_json_get, eval_json_path, eval_jsonpath_operator,
+    eval_json_builtin_function, eval_json_get, eval_json_path,
+    eval_json_record_builtin_function, eval_jsonpath_operator,
 };
 use super::expr_math::{
     cosd, cotd, eval_abs_function, eval_acosd, eval_acosh, eval_asind, eval_atanh,
@@ -1806,6 +1807,11 @@ fn eval_builtin_function(
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
     ensure_builtin_side_effects_allowed(func, ctx)?;
+    if let Some(result) =
+        eval_json_record_builtin_function(func, result_type, args, slot, ctx)
+    {
+        return result;
+    }
     let values = args
         .iter()
         .map(|arg| eval_expr(arg, slot, ctx))
