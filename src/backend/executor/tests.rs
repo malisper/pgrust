@@ -8,7 +8,7 @@ use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, StorageManager
 use crate::include::access::htup::TupleValue;
 use crate::include::access::htup::{AttributeDesc, HeapTuple};
 use crate::include::catalog::{CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE};
-use crate::include::nodes::datetime::DateADT;
+use crate::include::nodes::datetime::{DateADT, TimestampADT};
 use crate::include::nodes::primnodes::{Var, user_attrno};
 use crate::pgrust::database::{Database, Session};
 use sha2::{Digest, Sha256};
@@ -3633,14 +3633,16 @@ fn select_date_trunc_on_date_values() {
             &txns,
             INVALID_TRANSACTION_ID,
             "select date_trunc('century', date '2004-08-10'), date_trunc('decade', date '0002-12-31 BC')",
-        )
-        .unwrap(),
+    )
+    .unwrap(),
         vec![vec![
-            Value::Date(DateADT(
-                crate::backend::utils::time::datetime::days_from_ymd(2001, 1, 1).unwrap(),
+            Value::Timestamp(TimestampADT(
+                i64::from(crate::backend::utils::time::datetime::days_from_ymd(2001, 1, 1).unwrap())
+                    * crate::include::nodes::datetime::USECS_PER_DAY,
             )),
-            Value::Date(DateADT(
-                crate::backend::utils::time::datetime::days_from_ymd(-10, 1, 1).unwrap(),
+            Value::Timestamp(TimestampADT(
+                i64::from(crate::backend::utils::time::datetime::days_from_ymd(-10, 1, 1).unwrap())
+                    * crate::include::nodes::datetime::USECS_PER_DAY,
             )),
         ]],
     );
@@ -3736,6 +3738,7 @@ fn pg_attribute_exposes_bootstrap_columns() {
             vec![Value::Text("relpersistence".into())],
             vec![Value::Text("relkind".into())],
             vec![Value::Text("relhassubclass".into())],
+            vec![Value::Text("relhastriggers".into())],
             vec![Value::Text("relispartition".into())],
             vec![Value::Text("relnatts".into())],
             vec![Value::Text("relpages".into())],

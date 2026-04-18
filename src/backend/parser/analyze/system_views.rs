@@ -5,6 +5,10 @@ fn is_pg_views_name(name: &str) -> bool {
     name.eq_ignore_ascii_case("pg_views") || name.eq_ignore_ascii_case("pg_catalog.pg_views")
 }
 
+fn is_pg_rules_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("pg_rules") || name.eq_ignore_ascii_case("pg_catalog.pg_rules")
+}
+
 fn is_pg_stats_name(name: &str) -> bool {
     name.eq_ignore_ascii_case("pg_stats") || name.eq_ignore_ascii_case("pg_catalog.pg_stats")
 }
@@ -63,6 +67,31 @@ pub(super) fn bind_builtin_system_view(
             QueryColumn::text("definition"),
         ];
         return build_values_view(name, output_columns, catalog.pg_views_rows());
+    }
+
+    if is_pg_rules_name(name) {
+        let output_columns = vec![
+            QueryColumn::text("schemaname"),
+            QueryColumn::text("tablename"),
+            QueryColumn::text("rulename"),
+            QueryColumn::text("definition"),
+        ];
+        let desc = RelationDesc {
+            columns: output_columns
+                .iter()
+                .map(|col| column_desc(col.name.clone(), col.sql_type, true))
+                .collect(),
+        };
+        let rows = catalog
+            .pg_rules_rows()
+            .into_iter()
+            .map(|row| row.into_iter().map(Expr::Const).collect())
+            .collect();
+
+        return Some((
+            AnalyzedFrom::values(rows, output_columns),
+            scope_for_relation(Some(name), &desc),
+        ));
     }
 
     if is_pg_stat_activity_name(name) {

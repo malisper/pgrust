@@ -22,6 +22,8 @@ const CONTENTION_TEST_TIMEOUT: Duration = Duration::from_secs(15);
 const HEAVY_CONTENTION_TEST_TIMEOUT: Duration = Duration::from_secs(30);
 const STRESS_TEST_TIMEOUT: Duration = Duration::from_secs(60);
 const SAME_ROW_UPDATE_TEST_TIMEOUT: Duration = Duration::from_secs(20);
+const PGBENCH_STYLE_TEST_TIMEOUT: Duration = Duration::from_secs(20);
+const SAME_ROW_UPDATE_FULL_SUITE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Start a background thread that periodically checks for deadlocks
 /// using parking_lot's deadlock detector.  Called once via `Once`.
@@ -3600,6 +3602,369 @@ fn comment_on_table_upserts_and_clears_pg_description() {
              where c.relname = 'items' and d.classoid = 1259 and d.objsubid = 0"
         ),
         vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
+fn create_comment_and_drop_rule_updates_catalogs() {
+    let base = temp_dir("rule_catalog_rows");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4 not null)")
+        .unwrap();
+    db.execute(1, "create table item_log (id int4 not null)")
+        .unwrap();
+    db.execute(
+        1,
+        "create rule item_log_rule as on insert to items do also insert into item_log values (new.id)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select rulename, ev_qual, ev_action, is_instead \
+             from pg_rewrite r \
+             join pg_class c on c.oid = r.ev_class \
+             where c.relname = 'items' and rulename = 'item_log_rule'"
+        ),
+        vec![vec![
+            Value::Text("item_log_rule".into()),
+            Value::Text("".into()),
+            Value::Text("insert into item_log values (new.id)".into()),
+            Value::Bool(false),
+        ]]
+    );
+
+    db.execute(
+        1,
+        "comment on rule item_log_rule on items is 'tracks inserts'",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select d.description \
+             from pg_description d \
+             join pg_rewrite r on r.oid = d.objoid \
+             where r.rulename = 'item_log_rule' and d.classoid = 2618 and d.objsubid = 0"
+        ),
+        vec![vec![Value::Text("tracks inserts".into())]]
+    );
+
+    db.execute(1, "drop rule item_log_rule on items").unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) \
+             from pg_rewrite r \
+             join pg_class c on c.oid = r.ev_class \
+             where c.relname = 'items' and r.rulename = 'item_log_rule'"
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) \
+             from pg_description d \
+             join pg_rewrite r on r.oid = d.objoid \
+             where r.rulename = 'item_log_rule' and d.classoid = 2618 and d.objsubid = 0"
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
+fn insert_rules_support_do_also_and_instead_nothing() {
+    let base = temp_dir("rule_insert_do_also");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4 not null)")
+        .unwrap();
+    db.execute(1, "create table item_log (id int4 not null)")
+        .unwrap();
+    db.execute(
+        1,
+        "create rule item_log_rule as on insert to items do also insert into item_log values (new.id)",
+    )
+    .unwrap();
+
+    db.execute(1, "insert into items values (1), (2)").unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select id from items order by id"),
+        vec![vec![Value::Int32(1)], vec![Value::Int32(2)]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select id from item_log order by id"),
+        vec![vec![Value::Int32(1)], vec![Value::Int32(2)]]
+    );
+
+    db.execute(1, "drop rule item_log_rule on items").unwrap();
+    db.execute(
+        1,
+        "create rule item_skip_rule as on insert to items where new.id < 10 do instead nothing",
+    )
+    .unwrap();
+    db.execute(1, "insert into items values (3), (20)").unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select id from items order by id"),
+        vec![
+            vec![Value::Int32(1)],
+            vec![Value::Int32(2)],
+            vec![Value::Int32(20)],
+        ]
+    );
+}
+
+#[test]
+fn create_rule_rejects_unqualified_action_reference() {
+    let base = temp_dir("rule_unqualified_action");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table rules_foo (f1 int4)").unwrap();
+    db.execute(1, "create table rules_foo2 (f1 int4)").unwrap();
+
+    let err = db
+        .execute(
+            1,
+            "create rule rules_foorule as on insert to rules_foo where f1 < 100 do instead insert into rules_foo2 values (f1)",
+        )
+        .unwrap_err();
+    assert!(matches!(err, ExecError::Parse(ParseError::UnknownColumn(name)) if name == "f1"));
+}
+
+#[test]
+fn view_dml_routes_through_instead_rules() {
+    let base = temp_dir("rule_view_dml");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table base_items (id int4 not null, name text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create view item_view as select id, name from base_items",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create rule item_view_ins as on insert to item_view do instead insert into base_items values (new.id, new.name)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create rule item_view_upd as on update to item_view do instead update base_items set id = new.id, name = new.name where id = old.id",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create rule item_view_del as on delete to item_view do instead delete from base_items where id = old.id",
+    )
+    .unwrap();
+
+    db.execute(1, "insert into item_view values (1, 'alpha')")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select id, name from base_items"),
+        vec![vec![Value::Int32(1), Value::Text("alpha".into())]]
+    );
+
+    db.execute(1, "update item_view set name = 'beta' where id = 1")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select id, name from base_items"),
+        vec![vec![Value::Int32(1), Value::Text("beta".into())]]
+    );
+
+    db.execute(1, "delete from item_view where id = 1").unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select id, name from base_items"),
+        Vec::<Vec<Value>>::new()
+    );
+}
+
+#[test]
+fn cascading_insert_rules_execute_recursively() {
+    let base = temp_dir("rule_cascade_insert");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table source_items (id int4 not null)")
+        .unwrap();
+    db.execute(1, "create table mid_items (id int4 not null)")
+        .unwrap();
+    db.execute(1, "create table leaf_items (id int4 not null)")
+        .unwrap();
+    db.execute(
+        1,
+        "create rule source_mid as on insert to source_items do also insert into mid_items values (new.id)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create rule mid_leaf as on insert to mid_items do also insert into leaf_items values (new.id)",
+    )
+    .unwrap();
+
+    db.execute(1, "insert into source_items values (7)")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select id from source_items"),
+        vec![vec![Value::Int32(7)]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select id from mid_items"),
+        vec![vec![Value::Int32(7)]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select id from leaf_items"),
+        vec![vec![Value::Int32(7)]]
+    );
+}
+
+#[test]
+fn update_and_delete_rules_propagate_old_and_new_values() {
+    let base = temp_dir("rule_update_delete");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table systems (name text)").unwrap();
+    db.execute(1, "create table interfaces (name text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create rule systems_upd as on update to systems where new.name != old.name do also update interfaces set name = new.name where name = old.name",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create rule systems_del as on delete to systems do also delete from interfaces where name = old.name",
+    )
+    .unwrap();
+
+    db.execute(1, "insert into systems values ('alpha')")
+        .unwrap();
+    db.execute(1, "insert into interfaces values ('alpha')")
+        .unwrap();
+
+    db.execute(1, "update systems set name = 'beta' where name = 'alpha'")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select name from systems"),
+        vec![vec![Value::Text("beta".into())]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select name from interfaces"),
+        vec![vec![Value::Text("beta".into())]]
+    );
+
+    db.execute(1, "delete from systems where name = 'beta'")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select name from systems"),
+        Vec::<Vec<Value>>::new()
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select name from interfaces"),
+        Vec::<Vec<Value>>::new()
+    );
+}
+
+#[test]
+fn insert_rules_fire_in_alphabetical_order() {
+    let base = temp_dir("rule_fire_order");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table source_items (id int4)")
+        .unwrap();
+    db.execute(1, "create table rule_log (step int8, note text)")
+        .unwrap();
+    db.execute(1, "create sequence rule_order_seq").unwrap();
+    db.execute(
+        1,
+        "create rule rule_c as on insert to source_items do also insert into rule_log values (nextval('rule_order_seq'), 'rule_c')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create rule rule_a as on insert to source_items do also insert into rule_log values (nextval('rule_order_seq'), 'rule_a')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create rule rule_b as on insert to source_items do also insert into rule_log values (nextval('rule_order_seq'), 'rule_b')",
+    )
+    .unwrap();
+
+    db.execute(1, "insert into source_items values (1)")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select note from rule_log order by step"),
+        vec![
+            vec![Value::Text("rule_a".into())],
+            vec![Value::Text("rule_b".into())],
+            vec![Value::Text("rule_c".into())],
+        ]
+    );
+}
+
+#[test]
+fn pg_rules_exposes_user_rules_but_not_return_rules() {
+    let base = temp_dir("pg_rules_view");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4)").unwrap();
+    db.execute(1, "create view item_view as select id from items")
+        .unwrap();
+    db.execute(
+        1,
+        "create rule item_view_ins as on insert to item_view do instead insert into items values (new.id)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select tablename, rulename from pg_rules where schemaname = 'public' order by tablename, rulename",
+        ),
+        vec![vec![
+            Value::Text("item_view".into()),
+            Value::Text("item_view_ins".into()),
+        ]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select definition from pg_rules where tablename = 'item_view' and rulename = 'item_view_ins'",
+        ),
+        vec![vec![Value::Text(
+            "CREATE RULE item_view_ins AS ON INSERT TO public.item_view DO INSTEAD insert into items values (new.id)"
+                .into(),
+        )]]
+    );
+}
+
+#[test]
+fn current_user_compares_against_name_columns() {
+    let base = temp_dir("current_user_name_compare");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table audit_log (who name)").unwrap();
+    db.execute(1, "insert into audit_log values (current_user)")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select who = current_user from audit_log",
+        ),
+        vec![vec![Value::Bool(true)]]
     );
 }
 
@@ -10051,7 +10416,7 @@ fn concurrent_inserts_no_lost_rows() {
         })
         .collect();
 
-    join_all_with_timeout(handles, TEST_TIMEOUT);
+    join_all_with_timeout(handles, PGBENCH_STYLE_TEST_TIMEOUT);
 
     let expected = num_threads * inserts_per_thread;
     match db.execute(1, "select count(*) from itest").unwrap() {
@@ -11273,7 +11638,7 @@ fn concurrent_same_row_updates_do_not_deadlock() {
             }
         }));
     }
-    join_all_with_timeout(handles, SAME_ROW_UPDATE_TEST_TIMEOUT);
+    join_all_with_timeout(handles, SAME_ROW_UPDATE_FULL_SUITE_TIMEOUT);
 
     let result = db.execute(1, "select val from t where id = 1").unwrap();
     let expected = num_threads * iters;

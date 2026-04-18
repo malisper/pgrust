@@ -14,7 +14,8 @@ use crate::backend::utils::cache::syscache::{
 };
 use crate::backend::utils::cache::system_views::{
     build_pg_stat_io_rows, build_pg_stat_user_functions_rows, build_pg_stat_user_tables_rows,
-    build_pg_statio_user_tables_rows, build_pg_stats_rows, build_pg_views_rows,
+    build_pg_rules_rows, build_pg_statio_user_tables_rows, build_pg_stats_rows,
+    build_pg_views_rows,
 };
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::include::catalog::{
@@ -807,6 +808,14 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         build_pg_views_rows(
             ensure_namespace_rows(self.db, self.client_id, self.txn_ctx),
             authids,
+            ensure_class_rows(self.db, self.client_id, self.txn_ctx),
+            ensure_rewrite_rows(self.db, self.client_id, self.txn_ctx),
+        )
+    }
+
+    fn pg_rules_rows(&self) -> Vec<Vec<Value>> {
+        build_pg_rules_rows(
+            ensure_namespace_rows(self.db, self.client_id, self.txn_ctx),
             ensure_class_rows(self.db, self.client_id, self.txn_ctx),
             ensure_rewrite_rows(self.db, self.client_id, self.txn_ctx),
         )

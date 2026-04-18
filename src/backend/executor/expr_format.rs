@@ -1065,6 +1065,8 @@ fn format_standard_numeric(value: &NumericValue, spec: &FormatSpec) -> String {
     if spec.angle_pr {
         if negative {
             out = format!("<{}>", out.trim().trim_start_matches('-').trim());
+        } else if spec.fill_mode {
+            out = out.trim().to_string();
         } else {
             out = format!(" {out} ");
         }

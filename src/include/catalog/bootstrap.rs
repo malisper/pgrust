@@ -590,6 +590,7 @@ mod tests {
         assert_eq!(CORE_BOOTSTRAP_RELATIONS[29].oid, PG_INHERITS_RELATION_OID);
         assert_eq!(CORE_BOOTSTRAP_RELATIONS[30].oid, PG_REWRITE_RELATION_OID);
         assert_eq!(CORE_BOOTSTRAP_RELATIONS[31].oid, PG_STATISTIC_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[32].oid, PG_TRIGGER_RELATION_OID);
     }
 
     #[test]
@@ -633,6 +634,7 @@ mod tests {
                 "pg_inherits",
                 "pg_rewrite",
                 "pg_statistic",
+                "pg_trigger",
             ]
         );
     }

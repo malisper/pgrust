@@ -9,6 +9,7 @@ pub struct BoundInsertStatement {
     pub relation_name: String,
     pub rel: RelFileLocator,
     pub relation_oid: u32,
+    pub relkind: char,
     pub toast: Option<ToastRelationRef>,
     pub toast_index: Option<BoundIndexRelation>,
     pub desc: RelationDesc,
@@ -36,6 +37,7 @@ pub struct PreparedInsert {
     pub relation_name: String,
     pub rel: RelFileLocator,
     pub relation_oid: u32,
+    pub relkind: char,
     pub toast: Option<ToastRelationRef>,
     pub toast_index: Option<BoundIndexRelation>,
     pub desc: RelationDesc,
@@ -51,6 +53,7 @@ pub struct BoundUpdateTarget {
     pub relation_name: String,
     pub rel: RelFileLocator,
     pub relation_oid: u32,
+    pub relkind: char,
     pub toast: Option<ToastRelationRef>,
     pub toast_index: Option<BoundIndexRelation>,
     pub desc: RelationDesc,
@@ -73,6 +76,7 @@ pub struct BoundDeleteTarget {
     pub relation_name: String,
     pub rel: RelFileLocator,
     pub relation_oid: u32,
+    pub relkind: char,
     pub toast: Option<ToastRelationRef>,
     pub desc: RelationDesc,
     pub referenced_by_foreign_keys: Vec<BoundReferencedByForeignKey>,
@@ -235,6 +239,7 @@ fn bind_merge_when_clause(
                             target_scope,
                             catalog,
                             local_ctes,
+                            &[],
                         )?,
                         expr: bind_expr_with_outer_and_ctes(
                             &assignment.expr,
@@ -540,6 +545,20 @@ fn relation_display_name(catalog: &dyn CatalogLookup, relation_oid: u32, fallbac
         .unwrap_or_else(|| fallback.to_string())
 }
 
+fn lookup_modify_relation(
+    catalog: &dyn CatalogLookup,
+    name: &str,
+) -> Result<BoundRelation, ParseError> {
+    match catalog.lookup_any_relation(name) {
+        Some(entry) if matches!(entry.relkind, 'r' | 'v') => Ok(entry),
+        Some(_) => Err(ParseError::WrongObjectType {
+            name: name.to_string(),
+            expected: "table or view",
+        }),
+        None => Err(ParseError::UnknownTable(name.to_string())),
+    }
+}
+
 fn inheritance_translation_indexes(
     parent_desc: &RelationDesc,
     child_desc: &RelationDesc,
@@ -636,6 +655,7 @@ fn build_update_target(
         relation_name: relation_name.clone(),
         rel: child.rel,
         relation_oid: child.relation_oid,
+        relkind: child.relkind,
         toast: child.toast,
         toast_index: first_toast_index(catalog, child.toast),
         desc: child.desc.clone(),
@@ -677,6 +697,7 @@ fn build_delete_target(
         relation_name,
         rel: child.rel,
         relation_oid: child.relation_oid,
+        relkind: child.relkind,
         toast: child.toast,
         desc: child.desc.clone(),
         referenced_by_foreign_keys: bind_referenced_by_foreign_keys(
@@ -778,6 +799,7 @@ pub fn bind_insert_prepared(
         relation_name: table_name.to_string(),
         rel: entry.rel,
         relation_oid: entry.relation_oid,
+        relkind: entry.relkind,
         toast: entry.toast,
         toast_index: first_toast_index(catalog, entry.toast),
         desc: entry.desc.clone(),
@@ -798,26 +820,37 @@ pub fn bind_insert(
     stmt: &InsertStatement,
     catalog: &dyn CatalogLookup,
 ) -> Result<BoundInsertStatement, ParseError> {
+    bind_insert_with_outer_scopes(stmt, catalog, &[])
+}
+
+pub(crate) fn bind_insert_with_outer_scopes(
+    stmt: &InsertStatement,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+) -> Result<BoundInsertStatement, ParseError> {
     let local_ctes = bind_ctes(
         stmt.with_recursive,
         &stmt.with,
         catalog,
-        &[],
+        outer_scopes,
         None,
         &[],
         &[],
     )?;
-    let entry = lookup_relation(catalog, &stmt.table_name)?;
+    let entry = lookup_modify_relation(catalog, &stmt.table_name)?;
     let column_defaults = bind_insert_column_defaults(&entry.desc, catalog, &local_ctes)?;
     let visible_target_name = stmt.table_alias.as_deref().unwrap_or(&stmt.table_name);
-    let scope = scope_for_relation(Some(visible_target_name), &entry.desc);
+    let target_scope = scope_for_relation(Some(&stmt.table_name), &entry.desc);
+    let expr_scope = empty_scope();
 
     let source = match &stmt.source {
         InsertSource::Values(rows) => {
             let target_columns = if let Some(columns) = &stmt.columns {
                 columns
                     .iter()
-                    .map(|column| bind_assignment_target(column, &scope, catalog, &local_ctes))
+                    .map(|column| {
+                        bind_assignment_target(column, &target_scope, catalog, &local_ctes)
+                    })
                     .collect::<Result<Vec<_>, _>>()?
             } else {
                 let visible_targets = visible_assignment_targets(&entry.desc);
@@ -847,9 +880,9 @@ pub fn bind_insert(
                             SqlExpr::Default => Ok(column_defaults[target.column_index].clone()),
                             _ => bind_expr_with_outer_and_ctes(
                                 expr,
-                                &scope,
+                                &expr_scope,
                                 catalog,
-                                &[],
+                                outer_scopes,
                                 None,
                                 &local_ctes,
                             ),
@@ -871,13 +904,21 @@ pub fn bind_insert(
             ),
         ),
         InsertSource::Select(select) => {
-            let (query, _) =
-                analyze_select_query_with_outer(select, catalog, &[], None, &local_ctes, &[])?;
+            let (query, _) = analyze_select_query_with_outer(
+                select,
+                catalog,
+                outer_scopes,
+                None,
+                &local_ctes,
+                &[],
+            )?;
             let actual = query.columns().len();
             let target_columns = if let Some(columns) = &stmt.columns {
                 columns
                     .iter()
-                    .map(|column| bind_assignment_target(column, &scope, catalog, &local_ctes))
+                    .map(|column| {
+                        bind_assignment_target(column, &target_scope, catalog, &local_ctes)
+                    })
                     .collect::<Result<Vec<_>, _>>()?
             } else {
                 let visible_targets = visible_assignment_targets(&entry.desc);
@@ -904,6 +945,7 @@ pub fn bind_insert(
         relation_name: stmt.table_name.clone(),
         rel: entry.rel,
         relation_oid: entry.relation_oid,
+        relkind: entry.relkind,
         toast: entry.toast,
         toast_index: first_toast_index(catalog, entry.toast),
         desc: entry.desc.clone(),
@@ -944,21 +986,31 @@ pub fn bind_update(
     stmt: &UpdateStatement,
     catalog: &dyn CatalogLookup,
 ) -> Result<BoundUpdateStatement, ParseError> {
+    bind_update_with_outer_scopes(stmt, catalog, &[])
+}
+
+pub(crate) fn bind_update_with_outer_scopes(
+    stmt: &UpdateStatement,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+) -> Result<BoundUpdateStatement, ParseError> {
     let local_ctes = bind_ctes(
         stmt.with_recursive,
         &stmt.with,
         catalog,
-        &[],
+        outer_scopes,
         None,
         &[],
         &[],
     )?;
-    let entry = lookup_relation(catalog, &stmt.table_name)?;
+    let entry = lookup_modify_relation(catalog, &stmt.table_name)?;
     let scope = scope_for_relation(Some(&stmt.table_name), &entry.desc);
     let predicate = stmt
         .where_clause
         .as_ref()
-        .map(|expr| bind_expr_with_outer_and_ctes(expr, &scope, catalog, &[], None, &local_ctes))
+        .map(|expr| {
+            bind_expr_with_outer_and_ctes(expr, &scope, catalog, outer_scopes, None, &local_ctes)
+        })
         .transpose()?;
     let assignments = stmt
         .assignments
@@ -971,12 +1023,13 @@ pub fn bind_update(
                     &scope,
                     catalog,
                     &local_ctes,
+                    outer_scopes,
                 )?,
                 expr: bind_expr_with_outer_and_ctes(
                     &assignment.expr,
                     &scope,
                     catalog,
-                    &[],
+                    outer_scopes,
                     None,
                     &local_ctes,
                 )?,
@@ -1019,7 +1072,13 @@ pub(super) fn bind_assignment_target(
 ) -> Result<BoundAssignmentTarget, ParseError> {
     Ok(BoundAssignmentTarget {
         column_index: resolve_column(scope, &target.column)?,
-        subscripts: bind_assignment_subscripts(&target.subscripts, scope, catalog, local_ctes)?,
+        subscripts: bind_assignment_subscripts(
+            &target.subscripts,
+            scope,
+            catalog,
+            local_ctes,
+            &[],
+        )?,
     })
 }
 
@@ -1028,6 +1087,7 @@ pub(super) fn bind_assignment_subscripts(
     scope: &BoundScope,
     catalog: &dyn CatalogLookup,
     local_ctes: &[BoundCte],
+    outer_scopes: &[BoundScope],
 ) -> Result<Vec<BoundArraySubscript>, ParseError> {
     subscripts
         .iter()
@@ -1038,14 +1098,28 @@ pub(super) fn bind_assignment_subscripts(
                     .lower
                     .as_deref()
                     .map(|expr| {
-                        bind_expr_with_outer_and_ctes(expr, scope, catalog, &[], None, local_ctes)
+                        bind_expr_with_outer_and_ctes(
+                            expr,
+                            scope,
+                            catalog,
+                            outer_scopes,
+                            None,
+                            local_ctes,
+                        )
                     })
                     .transpose()?,
                 upper: subscript
                     .upper
                     .as_deref()
                     .map(|expr| {
-                        bind_expr_with_outer_and_ctes(expr, scope, catalog, &[], None, local_ctes)
+                        bind_expr_with_outer_and_ctes(
+                            expr,
+                            scope,
+                            catalog,
+                            outer_scopes,
+                            None,
+                            local_ctes,
+                        )
                     })
                     .transpose()?,
             })
@@ -1057,21 +1131,31 @@ pub fn bind_delete(
     stmt: &DeleteStatement,
     catalog: &dyn CatalogLookup,
 ) -> Result<BoundDeleteStatement, ParseError> {
+    bind_delete_with_outer_scopes(stmt, catalog, &[])
+}
+
+pub(crate) fn bind_delete_with_outer_scopes(
+    stmt: &DeleteStatement,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+) -> Result<BoundDeleteStatement, ParseError> {
     let local_ctes = bind_ctes(
         stmt.with_recursive,
         &stmt.with,
         catalog,
-        &[],
+        outer_scopes,
         None,
         &[],
         &[],
     )?;
-    let entry = lookup_relation(catalog, &stmt.table_name)?;
+    let entry = lookup_modify_relation(catalog, &stmt.table_name)?;
     let scope = scope_for_relation(Some(&stmt.table_name), &entry.desc);
     let predicate = stmt
         .where_clause
         .as_ref()
-        .map(|expr| bind_expr_with_outer_and_ctes(expr, &scope, catalog, &[], None, &local_ctes))
+        .map(|expr| {
+            bind_expr_with_outer_and_ctes(expr, &scope, catalog, outer_scopes, None, &local_ctes)
+        })
         .transpose()?;
 
     let targets = if stmt.only {

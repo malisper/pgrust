@@ -449,6 +449,12 @@ impl Database {
                     comment_stmt,
                     configured_search_path,
                 ),
+            Statement::CommentOnRule(ref comment_stmt) => self
+                .execute_comment_on_rule_stmt_with_search_path(
+                    client_id,
+                    comment_stmt,
+                    configured_search_path,
+                ),
             Statement::CommentOnDomain(ref comment_stmt) => self
                 .execute_comment_on_domain_stmt_with_search_path(
                     client_id,
@@ -579,7 +585,9 @@ impl Database {
                     recursive_worktables: std::collections::HashMap::new(),
                     deferred_foreign_keys: Some(deferred_foreign_keys.clone()),
                 };
-                let result = execute_insert(bound, &catalog, &mut ctx, xid, 0);
+                let result = super::rules::execute_bound_insert_with_rules(
+                    bound, &catalog, &mut ctx, xid, 0,
+                );
                 drop(ctx);
                 let validation_catalog =
                     self.lazy_catalog_lookup(client_id, Some((xid, 1)), configured_search_path);
@@ -646,7 +654,7 @@ impl Database {
                     recursive_worktables: std::collections::HashMap::new(),
                     deferred_foreign_keys: Some(deferred_foreign_keys.clone()),
                 };
-                let result = execute_update_with_waiter(
+                let result = super::rules::execute_bound_update_with_rules(
                     bound,
                     &catalog,
                     &mut ctx,
@@ -720,7 +728,7 @@ impl Database {
                     recursive_worktables: std::collections::HashMap::new(),
                     deferred_foreign_keys: Some(deferred_foreign_keys.clone()),
                 };
-                let result = execute_delete_with_waiter(
+                let result = super::rules::execute_bound_delete_with_rules(
                     bound,
                     &catalog,
                     &mut ctx,
@@ -780,6 +788,12 @@ impl Database {
                 ),
             Statement::CreateView(ref create_stmt) => self
                 .execute_create_view_stmt_with_search_path(
+                    client_id,
+                    create_stmt,
+                    configured_search_path,
+                ),
+            Statement::CreateRule(ref create_stmt) => self
+                .execute_create_rule_stmt_with_search_path(
                     client_id,
                     create_stmt,
                     configured_search_path,
@@ -892,6 +906,11 @@ impl Database {
                 guard.disarm();
                 result
             }
+            Statement::DropRule(ref drop_stmt) => self.execute_drop_rule_stmt_with_search_path(
+                client_id,
+                drop_stmt,
+                configured_search_path,
+            ),
             Statement::DropSchema(ref drop_stmt) => {
                 let xid = self.txns.write().begin();
                 let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);

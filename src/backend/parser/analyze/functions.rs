@@ -513,6 +513,12 @@ fn arg_type_match_cost(actual_type: SqlType, target_type: SqlType) -> Option<usi
     if actual_type.is_array != target_type.is_array {
         return None;
     }
+    if !target_type.is_array
+        && target_type.kind == SqlTypeKind::Record
+        && matches!(actual_type.kind, SqlTypeKind::Record | SqlTypeKind::Composite)
+    {
+        return Some(1);
+    }
     if is_numeric_family(actual_type) && is_numeric_family(target_type) {
         return Some(1);
     }

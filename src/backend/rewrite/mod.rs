@@ -1,3 +1,7 @@
+mod rules;
+
+pub(crate) use rules::{format_stored_rule_definition, split_stored_rule_action_sql};
+
 use crate::backend::parser::analyze::analyze_view_rule_sql;
 use crate::backend::parser::{CatalogLookup, ParseError};
 use crate::include::nodes::parsenodes::{Query, RangeTblEntry, RangeTblEntryKind};

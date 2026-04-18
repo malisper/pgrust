@@ -6,7 +6,8 @@ use crate::backend::utils::time::datetime::{
     unix_days_from_postgres_date, ymd_from_days,
 };
 use crate::include::nodes::datetime::{
-    DATEVAL_NOBEGIN, DATEVAL_NOEND, TimestampADT, TimestampTzADT, USECS_PER_DAY, USECS_PER_SEC,
+    DATEVAL_NOBEGIN, DATEVAL_NOEND, TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, TimestampADT,
+    TimestampTzADT, USECS_PER_DAY, USECS_PER_SEC,
 };
 
 fn extract_year_number(astronomical_year: i32) -> i32 {
@@ -255,13 +256,11 @@ pub(crate) fn eval_date_trunc_function(
     match date_value {
         Value::Date(date) => {
             if !date.is_finite() {
-                return Ok(Value::Date(crate::include::nodes::datetime::DateADT(
-                    match date.0 {
-                        DATEVAL_NOEND => DATEVAL_NOEND,
-                        DATEVAL_NOBEGIN => DATEVAL_NOBEGIN,
-                        _ => unreachable!("checked finite date above"),
-                    },
-                )));
+                return Ok(Value::Timestamp(TimestampADT(match date.0 {
+                    DATEVAL_NOEND => TIMESTAMP_NOEND,
+                    DATEVAL_NOBEGIN => TIMESTAMP_NOBEGIN,
+                    _ => unreachable!("checked finite date above"),
+                })));
             }
             let days =
                 truncate_timestamp_local(&field, date.0).map_err(|_| ExecError::DetailedError {
@@ -270,7 +269,7 @@ pub(crate) fn eval_date_trunc_function(
                     hint: None,
                     sqlstate: "0A000",
                 })?;
-            Ok(Value::Date(crate::include::nodes::datetime::DateADT(days)))
+            Ok(Value::Timestamp(TimestampADT(i64::from(days) * USECS_PER_DAY)))
         }
         Value::Timestamp(timestamp) => {
             if !timestamp.is_finite() {
@@ -387,7 +386,7 @@ mod tests {
                 &DateTimeConfig::default()
             )
             .unwrap(),
-            Value::TimestampTz(TimestampTzADT(
+            Value::Timestamp(TimestampADT(
                 i64::from(days_from_ymd(-99, 1, 1).unwrap()) * USECS_PER_DAY,
             ))
         );
@@ -400,7 +399,7 @@ mod tests {
                 &DateTimeConfig::default()
             )
             .unwrap(),
-            Value::TimestampTz(TimestampTzADT(
+            Value::Timestamp(TimestampADT(
                 i64::from(days_from_ymd(0, 1, 1).unwrap()) * USECS_PER_DAY,
             ))
         );

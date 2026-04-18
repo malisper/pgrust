@@ -507,13 +507,13 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                         ..
                     })
                     | Some(SqlType {
-                        kind: SqlTypeKind::TimestampTz,
-                        ..
-                    }) => SqlType::new(SqlTypeKind::TimestampTz),
-                    Some(SqlType {
                         kind: SqlTypeKind::Timestamp,
                         ..
                     }) => SqlType::new(SqlTypeKind::Timestamp),
+                    Some(SqlType {
+                        kind: SqlTypeKind::TimestampTz,
+                        ..
+                    }) => SqlType::new(SqlTypeKind::TimestampTz),
                     _ => SqlType::new(SqlTypeKind::Timestamp),
                 },
                 Some(BuiltinScalarFunction::IsFinite) => SqlType::new(SqlTypeKind::Bool),
@@ -946,6 +946,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
         | SqlExpr::GeometryUnaryOp { .. }
         | SqlExpr::GeometryBinaryOp { .. } => unreachable!("handled before match"),
         SqlExpr::CurrentDate => SqlType::new(SqlTypeKind::Date),
+        SqlExpr::CurrentUser => SqlType::new(SqlTypeKind::Name),
         SqlExpr::CurrentTime { precision } => precision
             .map(|precision| SqlType::with_time_precision(SqlTypeKind::TimeTz, precision))
             .unwrap_or_else(|| SqlType::new(SqlTypeKind::TimeTz)),

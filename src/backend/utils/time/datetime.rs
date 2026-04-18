@@ -283,7 +283,7 @@ fn parse_numeric_triplet(
         .parse::<i32>()
         .map_err(|_| DateTimeParseError::Invalid)?;
 
-    if first.len() >= 3 || a > 31 {
+    if first.len() >= 3 {
         return validate_date(
             parse_year_number(first, true).unwrap_or(a),
             b,
