@@ -1470,7 +1470,7 @@ pub(super) fn scope_for_base_relation(relation_name: &str, desc: &RelationDesc) 
     scope
 }
 
-fn shift_scope_rtindexes(mut scope: BoundScope, offset: usize) -> BoundScope {
+pub(super) fn shift_scope_rtindexes(mut scope: BoundScope, offset: usize) -> BoundScope {
     if offset == 0 {
         return scope;
     }

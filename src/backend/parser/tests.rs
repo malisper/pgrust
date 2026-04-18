@@ -3577,6 +3577,44 @@ fn parse_merge_rejects_invalid_when_actions() {
 }
 
 #[test]
+fn plan_merge_uses_join_shape_for_explain() {
+    let catalog = catalog_with_pets();
+    let stmt = match parse_statement(
+        "merge into people p using pets s on p.id = s.owner_id when matched then delete",
+    )
+    .unwrap()
+    {
+        Statement::Merge(stmt) => stmt,
+        other => panic!("expected merge statement, got {other:?}"),
+    };
+    let bound = plan_merge(&stmt, &catalog).unwrap();
+    assert_eq!(bound.target_relation_name, "p");
+    assert_eq!(bound.explain_target_name, "people p");
+    assert!(matches!(
+        bound.input_plan.plan_tree,
+        Plan::NestedLoopJoin { .. } | Plan::HashJoin { .. }
+    ));
+}
+
+#[test]
+fn plan_merge_rejects_target_reference_in_source_subquery() {
+    let catalog = catalog_with_pets();
+    let stmt = match parse_statement(
+        "merge into people p using (select * from pets where p.id = owner_id) s \
+         on p.id = s.owner_id when matched then delete",
+    )
+    .unwrap()
+    {
+        Statement::Merge(stmt) => stmt,
+        other => panic!("expected merge statement, got {other:?}"),
+    };
+    assert!(matches!(
+        plan_merge(&stmt, &catalog),
+        Err(ParseError::InvalidFromClauseReference(name)) if name == "p"
+    ));
+}
+
+#[test]
 fn bind_update_prefers_index_row_source_for_equality_predicate() {
     let catalog = catalog_with_people_id_index();
     let stmt = match parse_statement("update people set name = 'x' where id = 1").unwrap() {

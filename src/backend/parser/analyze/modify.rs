@@ -1,6 +1,8 @@
 use super::paths::choose_modify_row_source;
 use super::query::rewrite_local_vars_for_output_exprs;
 use super::*;
+use crate::include::nodes::primnodes::JoinType;
+use crate::include::nodes::primnodes::{TargetEntry, Var, SELF_ITEM_POINTER_ATTR_NO};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundInsertStatement {
@@ -83,6 +85,47 @@ pub struct BoundDeleteStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundMergeStatement {
+    pub relation_name: String,
+    pub rel: RelFileLocator,
+    pub relation_oid: u32,
+    pub toast: Option<ToastRelationRef>,
+    pub toast_index: Option<BoundIndexRelation>,
+    pub desc: RelationDesc,
+    pub relation_constraints: BoundRelationConstraints,
+    pub referenced_by_foreign_keys: Vec<BoundReferencedByForeignKey>,
+    pub indexes: Vec<BoundIndexRelation>,
+    pub column_defaults: Vec<Expr>,
+    pub target_relation_name: String,
+    pub explain_target_name: String,
+    pub visible_column_count: usize,
+    pub target_ctid_index: usize,
+    pub source_present_index: usize,
+    pub when_clauses: Vec<BoundMergeWhenClause>,
+    pub input_plan: crate::include::nodes::plannodes::PlannedStmt,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundMergeWhenClause {
+    pub match_kind: MergeMatchKind,
+    pub condition: Option<Expr>,
+    pub action: BoundMergeAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BoundMergeAction {
+    DoNothing,
+    Delete,
+    Update {
+        assignments: Vec<BoundAssignment>,
+    },
+    Insert {
+        target_columns: Vec<BoundAssignmentTarget>,
+        values: Option<Vec<Expr>>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundAssignment {
     pub column_index: usize,
     pub subscripts: Vec<BoundArraySubscript>,
@@ -100,6 +143,381 @@ pub struct BoundArraySubscript {
     pub is_slice: bool,
     pub lower: Option<Expr>,
     pub upper: Option<Expr>,
+}
+
+fn merge_target_relation_name(stmt: &MergeStatement) -> String {
+    stmt.target_alias
+        .clone()
+        .unwrap_or_else(|| stmt.target_table.clone())
+}
+
+fn merge_explain_target_name(stmt: &MergeStatement) -> String {
+    stmt.target_alias
+        .as_ref()
+        .map(|alias| format!("{} {}", stmt.target_table, alias))
+        .unwrap_or_else(|| stmt.target_table.clone())
+}
+
+fn merge_hidden_ctid_name() -> String {
+    "__merge_target_ctid".into()
+}
+
+fn merge_hidden_source_present_name() -> String {
+    "__merge_source_present".into()
+}
+
+fn merge_join_type(clauses: &[MergeWhenClause]) -> JoinType {
+    let mut need_target_rows = false;
+    let mut need_source_rows = false;
+    for clause in clauses {
+        match clause.match_kind {
+            MergeMatchKind::Matched => {}
+            MergeMatchKind::NotMatchedBySource => need_target_rows = true,
+            MergeMatchKind::NotMatchedByTarget => need_source_rows = true,
+        }
+    }
+    match (need_target_rows, need_source_rows) {
+        (false, false) => JoinType::Inner,
+        (true, false) => JoinType::Left,
+        (false, true) => JoinType::Right,
+        (true, true) => JoinType::Full,
+    }
+}
+
+fn merge_visible_insert_targets(
+    desc: &RelationDesc,
+    width: usize,
+) -> Result<Vec<BoundAssignmentTarget>, ParseError> {
+    let visible_targets = visible_assignment_targets(desc);
+    if width > visible_targets.len() {
+        return Err(ParseError::InvalidInsertTargetCount {
+            expected: visible_targets.len(),
+            actual: width,
+        });
+    }
+    Ok(visible_targets.into_iter().take(width).collect())
+}
+
+fn bind_merge_when_clause(
+    clause: &MergeWhenClause,
+    target_scope: &BoundScope,
+    source_scope: &BoundScope,
+    merged_scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    local_ctes: &[BoundCte],
+    target_desc: &RelationDesc,
+) -> Result<BoundMergeWhenClause, ParseError> {
+    let action_scope = match clause.match_kind {
+        MergeMatchKind::Matched => merged_scope,
+        MergeMatchKind::NotMatchedBySource => target_scope,
+        MergeMatchKind::NotMatchedByTarget => source_scope,
+    };
+    let condition = clause
+        .condition
+        .as_ref()
+        .map(|condition| {
+            bind_expr_with_outer_and_ctes(condition, action_scope, catalog, &[], None, local_ctes)
+        })
+        .transpose()?;
+    let action = match &clause.action {
+        MergeAction::DoNothing => BoundMergeAction::DoNothing,
+        MergeAction::Delete => BoundMergeAction::Delete,
+        MergeAction::Update { assignments } => {
+            let assignments = assignments
+                .iter()
+                .map(|assignment| {
+                    Ok(BoundAssignment {
+                        column_index: resolve_column(target_scope, &assignment.target.column)?,
+                        subscripts: bind_assignment_subscripts(
+                            &assignment.target.subscripts,
+                            target_scope,
+                            catalog,
+                            local_ctes,
+                        )?,
+                        expr: bind_expr_with_outer_and_ctes(
+                            &assignment.expr,
+                            action_scope,
+                            catalog,
+                            &[],
+                            None,
+                            local_ctes,
+                        )?,
+                    })
+                })
+                .collect::<Result<Vec<_>, ParseError>>()?;
+            BoundMergeAction::Update { assignments }
+        }
+        MergeAction::Insert { columns, source } => {
+            let target_columns = if let Some(columns) = columns {
+                columns
+                    .iter()
+                    .map(|column| {
+                        Ok(BoundAssignmentTarget {
+                            column_index: resolve_column(target_scope, column)?,
+                            subscripts: Vec::new(),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, ParseError>>()?
+            } else {
+                let width = match source {
+                    MergeInsertSource::Values(values) => values.len(),
+                    MergeInsertSource::DefaultValues => target_desc.visible_column_indexes().len(),
+                };
+                merge_visible_insert_targets(target_desc, width)?
+            };
+            let values = match source {
+                MergeInsertSource::Values(values) => {
+                    if values.len() != target_columns.len() {
+                        return Err(ParseError::InvalidInsertTargetCount {
+                            expected: target_columns.len(),
+                            actual: values.len(),
+                        });
+                    }
+                    Some(
+                        values
+                            .iter()
+                            .map(|expr| {
+                                bind_expr_with_outer_and_ctes(
+                                    expr,
+                                    action_scope,
+                                    catalog,
+                                    &[],
+                                    None,
+                                    local_ctes,
+                                )
+                            })
+                            .collect::<Result<Vec<_>, ParseError>>()?,
+                    )
+                }
+                MergeInsertSource::DefaultValues => None,
+            };
+            BoundMergeAction::Insert {
+                target_columns,
+                values,
+            }
+        }
+    };
+    Ok(BoundMergeWhenClause {
+        match_kind: clause.match_kind,
+        condition,
+        action,
+    })
+}
+
+fn merge_projection_targets(
+    columns: &[QueryColumn],
+    output_exprs: &[Expr],
+) -> Vec<TargetEntry> {
+    columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| {
+            TargetEntry::new(
+                column.name.clone(),
+                output_exprs[index].clone(),
+                column.sql_type,
+                index + 1,
+            )
+            .with_input_resno(index + 1)
+        })
+        .collect()
+}
+
+fn with_merge_target_ctid(
+    from: AnalyzedFrom,
+    target_desc: &RelationDesc,
+) -> (AnalyzedFrom, usize) {
+    let mut targets = merge_projection_targets(&from.output_columns, &from.output_exprs);
+    let ctid_resno = targets.len() + 1;
+    targets.push(
+        TargetEntry::new(
+            merge_hidden_ctid_name(),
+            Expr::Var(Var {
+                varno: 1,
+                varattno: SELF_ITEM_POINTER_ATTR_NO,
+                varlevelsup: 0,
+                vartype: SqlType::new(SqlTypeKind::Text),
+            }),
+            SqlType::new(SqlTypeKind::Text),
+            ctid_resno,
+        )
+        .with_input_resno(ctid_resno),
+    );
+    let projected = from.with_projection(targets);
+    (projected, target_desc.columns.len())
+}
+
+fn with_merge_source_present(from: AnalyzedFrom) -> (AnalyzedFrom, usize) {
+    let source_visible_count = from.output_columns.len();
+    let mut targets = merge_projection_targets(&from.output_columns, &from.output_exprs);
+    let marker_resno = targets.len() + 1;
+    targets.push(
+        TargetEntry::new(
+            merge_hidden_source_present_name(),
+            Expr::Const(Value::Bool(true)),
+            SqlType::new(SqlTypeKind::Bool),
+            marker_resno,
+        )
+        .with_input_resno(marker_resno),
+    );
+    let projected = from.with_projection(targets);
+    (projected, source_visible_count)
+}
+
+pub fn plan_merge(
+    stmt: &MergeStatement,
+    catalog: &dyn CatalogLookup,
+) -> Result<BoundMergeStatement, ParseError> {
+    let local_ctes = bind_ctes(
+        stmt.with_recursive,
+        &stmt.with,
+        catalog,
+        &[],
+        None,
+        &[],
+        &[],
+    )?;
+    let entry = lookup_relation(catalog, &stmt.target_table)?;
+    let column_defaults = bind_insert_column_defaults(&entry.desc, catalog, &local_ctes)?;
+    let target_relation_name = merge_target_relation_name(stmt);
+    let explain_target_name = merge_explain_target_name(stmt);
+    let target_base = AnalyzedFrom::relation(
+        target_relation_name.clone(),
+        entry.rel,
+        entry.relation_oid,
+        entry.relkind,
+        entry.toast,
+        !stmt.target_only,
+        entry.desc.clone(),
+    );
+    let (target_from, target_visible_count) = with_merge_target_ctid(target_base, &entry.desc);
+    let target_scope = scope_for_base_relation(&target_relation_name, &entry.desc);
+    let (source_base, source_scope_raw) =
+        bind_from_item_with_ctes(&stmt.source, catalog, &[], None, &local_ctes, &[])?;
+    let (source_from, source_visible_count) = with_merge_source_present(source_base);
+
+    if source_scope_raw.relations.iter().any(|relation| {
+        relation
+            .relation_names
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(&target_relation_name))
+    }) {
+        return Err(ParseError::DuplicateTableName(target_relation_name));
+    }
+
+    let source_scope = shift_scope_rtindexes(source_scope_raw, target_from.rtable.len());
+    let merged_scope = combine_scopes(&target_scope, &source_scope);
+    let join_condition = bind_expr_with_outer_and_ctes(
+        &stmt.join_condition,
+        &merged_scope,
+        catalog,
+        &[],
+        None,
+        &local_ctes,
+    )?;
+
+    let when_clauses = stmt
+        .when_clauses
+        .iter()
+        .map(|clause| {
+            bind_merge_when_clause(
+                clause,
+                &target_scope,
+                &source_scope,
+                &merged_scope,
+                catalog,
+                &local_ctes,
+                &entry.desc,
+            )
+        })
+        .collect::<Result<Vec<_>, ParseError>>()?;
+
+    let joined = AnalyzedFrom::join(
+        target_from,
+        source_from,
+        merge_join_type(&stmt.when_clauses),
+        join_condition,
+        None,
+    );
+    let visible_column_count = entry.desc.columns.len() + source_visible_count;
+    let target_ctid_index = visible_column_count;
+    let source_present_index = visible_column_count + 1;
+    let joined_target_columns = joined.output_columns.clone();
+    let joined_output_exprs = joined.output_exprs.clone();
+    let mut projection_targets = Vec::with_capacity(visible_column_count + 2);
+    for index in 0..entry.desc.columns.len() {
+        projection_targets.push(
+            TargetEntry::new(
+                joined_target_columns[index].name.clone(),
+                joined_output_exprs[index].clone(),
+                joined_target_columns[index].sql_type,
+                projection_targets.len() + 1,
+            )
+            .with_input_resno(index + 1),
+        );
+    }
+    let source_start = target_visible_count + 1;
+    for source_index in 0..source_visible_count {
+        let input_index = source_start + source_index;
+        projection_targets.push(
+            TargetEntry::new(
+                joined_target_columns[input_index - 1].name.clone(),
+                joined_output_exprs[input_index - 1].clone(),
+                joined_target_columns[input_index - 1].sql_type,
+                projection_targets.len() + 1,
+            )
+            .with_input_resno(input_index),
+        );
+    }
+    projection_targets.push(
+        TargetEntry::new(
+            merge_hidden_ctid_name(),
+            joined_output_exprs[target_visible_count].clone(),
+            SqlType::new(SqlTypeKind::Text),
+            projection_targets.len() + 1,
+        )
+        .with_input_resno(target_visible_count + 1),
+    );
+    let source_marker_input = target_visible_count + 1 + source_visible_count;
+    projection_targets.push(
+        TargetEntry::new(
+            merge_hidden_source_present_name(),
+            joined_output_exprs[source_marker_input - 1].clone(),
+            SqlType::new(SqlTypeKind::Bool),
+            projection_targets.len() + 1,
+        )
+        .with_input_resno(source_marker_input),
+    );
+    let query = query_from_from_projection(joined, projection_targets);
+
+    Ok(BoundMergeStatement {
+        relation_name: stmt.target_table.clone(),
+        rel: entry.rel,
+        relation_oid: entry.relation_oid,
+        toast: entry.toast,
+        toast_index: first_toast_index(catalog, entry.toast),
+        desc: entry.desc.clone(),
+        relation_constraints: bind_relation_constraints(
+            Some(&stmt.target_table),
+            entry.relation_oid,
+            &entry.desc,
+            catalog,
+        )?,
+        referenced_by_foreign_keys: bind_referenced_by_foreign_keys(
+            entry.relation_oid,
+            &entry.desc,
+            catalog,
+        )?,
+        indexes: catalog.index_relations_for_heap(entry.relation_oid),
+        column_defaults,
+        target_relation_name,
+        explain_target_name,
+        visible_column_count,
+        target_ctid_index,
+        source_present_index,
+        when_clauses,
+        input_plan: planner(query, catalog),
+    })
 }
 
 fn first_toast_index(
