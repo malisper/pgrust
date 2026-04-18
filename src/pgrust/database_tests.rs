@@ -7843,6 +7843,56 @@ fn lazy_index_catalog_helpers_resolve_am_and_opclass_metadata() {
 }
 
 #[test]
+fn create_operator_class_persists_catalog_rows() {
+    let base = temp_dir("create_operator_class_rows");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create function part_hashint4_noop(value int4, seed int8) returns int8 as $$ select value + seed; $$ language sql strict immutable parallel safe",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create operator class part_test_int4_ops for type int4 using hash as operator 1 =, function 2 part_hashint4_noop(int4, int8)",
+    )
+    .unwrap();
+
+    match db
+        .execute(
+            1,
+            "select opcname, opcintype, opcdefault from pg_opclass where opcname = 'part_test_int4_ops'",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Text("part_test_int4_ops".into()),
+                    Value::Int32(crate::include::catalog::INT4_TYPE_OID as i32),
+                    Value::Bool(false),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match db
+        .execute(
+            1,
+            "select amopstrategy, amprocnum from pg_opclass c join pg_amop o on o.amopfamily = c.opcfamily join pg_amproc p on p.amprocfamily = c.opcfamily where c.opcname = 'part_test_int4_ops'",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int16(1), Value::Int16(2)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn copy_from_rows_respects_active_transaction() {
     let base = temp_dir("copy_from_rows_txn");
     let db = Database::open(&base, 16).unwrap();

@@ -229,6 +229,7 @@ pub enum Statement {
     CreateSequence(CreateSequenceStatement),
     CreateView(CreateViewStatement),
     CreateIndex(CreateIndexStatement),
+    CreateOperatorClass(CreateOperatorClassStatement),
     AlterSequence(AlterSequenceStatement),
     AlterSequenceOwner(AlterRelationOwnerStatement),
     AlterSequenceRename(AlterTableRenameStatement),
@@ -914,6 +915,30 @@ pub struct CreateIndexStatement {
     pub include_columns: Vec<String>,
     pub predicate: Option<SqlExpr>,
     pub options: Vec<RelOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateOperatorClassStatement {
+    pub schema_name: Option<String>,
+    pub opclass_name: String,
+    pub data_type: RawTypeName,
+    pub access_method: String,
+    pub is_default: bool,
+    pub items: Vec<CreateOperatorClassItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CreateOperatorClassItem {
+    Operator {
+        strategy_number: i16,
+        operator_name: String,
+    },
+    Function {
+        support_number: i16,
+        schema_name: Option<String>,
+        function_name: String,
+        arg_types: Vec<RawTypeName>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
