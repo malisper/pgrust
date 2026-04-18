@@ -1620,7 +1620,9 @@ impl<'a> RecursiveReferenceChecker<'a> {
                 }
                 Ok(())
             }
-            SqlExpr::ScalarSubquery(subquery) | SqlExpr::Exists(subquery) => {
+            SqlExpr::ScalarSubquery(subquery)
+            | SqlExpr::ArraySubquery(subquery)
+            | SqlExpr::Exists(subquery) => {
                 self.visit_select(subquery, RecursiveReferenceContext::Subquery)
             }
             SqlExpr::InSubquery {
@@ -1875,7 +1877,9 @@ fn sql_expr_references_table(expr: &SqlExpr, table_name: &str) -> bool {
         SqlExpr::FuncCall { args, .. } => args
             .iter()
             .any(|arg| sql_expr_references_table(&arg.value, table_name)),
-        SqlExpr::ScalarSubquery(subquery) | SqlExpr::Exists(subquery) => {
+        SqlExpr::ScalarSubquery(subquery)
+        | SqlExpr::ArraySubquery(subquery)
+        | SqlExpr::Exists(subquery) => {
             select_statement_references_table(subquery, table_name)
         }
         SqlExpr::InSubquery {

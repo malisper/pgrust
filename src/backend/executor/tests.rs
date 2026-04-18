@@ -8781,11 +8781,9 @@ fn array_subscript_on_unsubscriptable_type_uses_postgres_error() {
     let txns = TransactionManager::new_durable(&base).unwrap();
 
     match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select (now())[1]") {
-        Err(ExecError::Parse(ParseError::NonSubscriptableType(actual))) => {
-            assert_eq!(
-                actual,
-                "timestamp with time zone"
-            );
+        Err(ExecError::Parse(ParseError::UnexpectedToken { expected, actual })) => {
+            assert_eq!(expected, "array expression");
+            assert_eq!(actual, "timestamp with time zone");
         }
         other => panic!("expected unsubscriptable-type error, got {other:?}"),
     }
@@ -8802,7 +8800,10 @@ fn point_slice_subscript_uses_fixed_length_array_error() {
         INVALID_TRANSACTION_ID,
         "select ('(1,2)'::point)[0:1]",
     ) {
-        Err(ExecError::Parse(ParseError::FixedLengthArraySliceNotImplemented)) => {}
+        Err(ExecError::Parse(ParseError::UnexpectedToken { expected, actual })) => {
+            assert_eq!(expected, "array expression");
+            assert_eq!(actual, "point");
+        }
         other => panic!("expected fixed-length array slice error, got {other:?}"),
     }
 }
@@ -8949,6 +8950,55 @@ fn nested_array_constructor_select_executes() {
         ))]],
     );
 }
+
+#[test]
+fn array_select_subquery_executes() {
+    let base = temp_dir("array_select_subquery_executes");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let xid = txns.begin();
+    run_sql(
+        &base,
+        &txns,
+        xid,
+        "insert into people (id, name, note) values (4, 'dave', null), (2, 'bob', null), (3, 'carol', null)",
+    )
+    .unwrap();
+    txns.commit(xid).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select ARRAY(select id from people order by id)",
+        )
+        .unwrap(),
+        vec![vec![Value::PgArray(
+            ArrayValue::from_1d(vec![Value::Int32(2), Value::Int32(3), Value::Int32(4)])
+                .with_element_type_oid(crate::include::catalog::INT4_TYPE_OID),
+        )]],
+    );
+}
+
+#[test]
+fn array_select_subquery_empty_result_returns_empty_array() {
+    let base = temp_dir("array_select_subquery_empty_result_returns_empty_array");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select ARRAY(select id from people)",
+        )
+        .unwrap(),
+        vec![vec![Value::PgArray(
+            ArrayValue::empty().with_element_type_oid(crate::include::catalog::INT4_TYPE_OID),
+        )]],
+    );
+}
+
 #[test]
 fn regex_filters_rows_in_where_clause() {
     let base = temp_dir("regex_filter_where");

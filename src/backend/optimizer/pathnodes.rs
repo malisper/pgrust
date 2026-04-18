@@ -886,6 +886,14 @@ pub(super) fn expr_sql_type(expr: &Expr) -> SqlType {
             SubLinkType::ExistsSubLink
             | SubLinkType::AnySubLink(_)
             | SubLinkType::AllSubLink(_) => SqlType::new(SqlTypeKind::Bool),
+            SubLinkType::ArraySubLink => SqlType::array_of(
+                sublink
+                    .subselect
+                    .target_list
+                    .first()
+                    .map(|target| target.sql_type)
+                    .unwrap_or(SqlType::new(SqlTypeKind::Text)),
+            ),
             SubLinkType::ExprSubLink => sublink
                 .subselect
                 .target_list
@@ -897,6 +905,11 @@ pub(super) fn expr_sql_type(expr: &Expr) -> SqlType {
             SubLinkType::ExistsSubLink
             | SubLinkType::AnySubLink(_)
             | SubLinkType::AllSubLink(_) => SqlType::new(SqlTypeKind::Bool),
+            SubLinkType::ArraySubLink => SqlType::array_of(
+                subplan
+                    .first_col_type
+                    .unwrap_or(SqlType::new(SqlTypeKind::Text)),
+            ),
             SubLinkType::ExprSubLink => subplan
                 .first_col_type
                 .unwrap_or(SqlType::new(SqlTypeKind::Text)),

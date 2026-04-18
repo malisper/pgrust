@@ -9,6 +9,7 @@ pub(super) fn expr_contains_agg(expr: &SqlExpr) -> bool {
         | SqlExpr::IntegerLiteral(_)
         | SqlExpr::NumericLiteral(_)
         | SqlExpr::ScalarSubquery(_)
+        | SqlExpr::ArraySubquery(_)
         | SqlExpr::Exists(_)
         | SqlExpr::InSubquery { .. }
         | SqlExpr::QuantifiedSubquery { .. }
@@ -174,6 +175,7 @@ pub(super) fn expr_references_input_scope(expr: &SqlExpr) -> bool {
                 })
         }
         SqlExpr::ScalarSubquery(_)
+        | SqlExpr::ArraySubquery(_)
         | SqlExpr::Exists(_)
         | SqlExpr::InSubquery { .. }
         | SqlExpr::QuantifiedSubquery { .. } => true,
@@ -320,6 +322,7 @@ pub(super) fn collect_aggs(
         | SqlExpr::IntegerLiteral(_)
         | SqlExpr::NumericLiteral(_)
         | SqlExpr::ScalarSubquery(_)
+        | SqlExpr::ArraySubquery(_)
         | SqlExpr::Exists(_)
         | SqlExpr::InSubquery { .. }
         | SqlExpr::QuantifiedSubquery { .. }
@@ -461,6 +464,7 @@ pub(super) fn sql_expr_name(expr: &SqlExpr) -> String {
         SqlExpr::Column(name) => name.clone(),
         SqlExpr::AggCall { func, .. } => func.name().to_string(),
         SqlExpr::ScalarSubquery(_)
+        | SqlExpr::ArraySubquery(_)
         | SqlExpr::Exists(_)
         | SqlExpr::InSubquery { .. }
         | SqlExpr::QuantifiedSubquery { .. }

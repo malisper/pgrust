@@ -21,8 +21,9 @@ fn bind_subquery_query(
     Ok(query)
 }
 
-pub(super) fn bind_scalar_subquery_expr(
+fn bind_single_column_sublink(
     select: &SelectStatement,
+    sublink_type: SubLinkType,
     scope: &BoundScope,
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
@@ -31,10 +32,44 @@ pub(super) fn bind_scalar_subquery_expr(
     let query = bind_subquery_query(select, scope, catalog, outer_scopes, ctes)?;
     ensure_single_column_subquery(query.columns().len())?;
     Ok(Expr::SubLink(Box::new(SubLink {
-        sublink_type: SubLinkType::ExprSubLink,
+        sublink_type,
         testexpr: None,
         subselect: Box::new(query),
     })))
+}
+
+pub(super) fn bind_scalar_subquery_expr(
+    select: &SelectStatement,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    ctes: &[BoundCte],
+) -> Result<Expr, ParseError> {
+    bind_single_column_sublink(
+        select,
+        SubLinkType::ExprSubLink,
+        scope,
+        catalog,
+        outer_scopes,
+        ctes,
+    )
+}
+
+pub(super) fn bind_array_subquery_expr(
+    select: &SelectStatement,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    ctes: &[BoundCte],
+) -> Result<Expr, ParseError> {
+    bind_single_column_sublink(
+        select,
+        SubLinkType::ArraySubLink,
+        scope,
+        catalog,
+        outer_scopes,
+        ctes,
+    )
 }
 
 pub(super) fn bind_exists_subquery_expr(

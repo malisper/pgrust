@@ -69,7 +69,7 @@ Targeted reruns on 2026-04-17:
   - support `RETURNING` with subscripted array/fixed-length assignments used by `point_tbl`
   - [done] support `CREATE TEMP TABLE` column definitions with fixed-length array syntax like `integer ARRAY[4]`
   - [done] support deeper array constructors and nested `ARRAY[...]` expressions in `SELECT` targets and `INSERT` values
-  - support `ARRAY(SELECT ...)` forms used later in `arrays.sql`
+  - [done] support `ARRAY(SELECT ...)` forms used later in `arrays.sql`
   - implement missing array builtins exercised by `arrays.sql` such as `array_append`, `array_prepend`, and `array_cat`
   - support row/composite array expressions and comparisons, including `ARRAY(SELECT ...)` and `array_agg(record) || array_agg(record)`
 - async.sql: 0/11
