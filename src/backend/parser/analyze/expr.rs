@@ -928,7 +928,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             if !matches!(inner.as_ref(), SqlExpr::Const(Value::Null)) {
                 validate_catalog_backed_explicit_cast(source_type, target_type, catalog)?;
             }
-            Expr::Cast(Box::new(bound_inner), target_type)
+            coerce_bound_expr(bound_inner, source_type, target_type)
         }
         SqlExpr::Eq(left, right) => {
             if let Some(result) = bind_maybe_range_comparison(

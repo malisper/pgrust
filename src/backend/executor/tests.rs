@@ -1504,6 +1504,47 @@ fn setop_join_branch_executes_with_child_local_vars() {
         vec![vec![Value::Int32(1)], vec![Value::Int32(3)]],
     );
 }
+
+#[test]
+fn union_distinct_deduplicates_bpchar_trailing_spaces() {
+    let base = temp_dir("union_distinct_bpchar_spaces");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select 'a'::char(4) union select 'a   '::char(4)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Text("a   ".into())]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn cast_bpchar_to_varchar_trims_trailing_spaces() {
+    let base = temp_dir("cast_bpchar_to_varchar");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select cast('ab  '::char(4) as varchar)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Text("ab".into())]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
 #[test]
 fn select_sql_plain_varchar_cast_preserves_text() {
     let base = temp_dir("select_sql_plain_varchar_cast");

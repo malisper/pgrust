@@ -38,17 +38,18 @@ pub fn is_binary_coercible_type(from: SqlType, to: SqlType) -> bool {
 }
 
 fn lower_special_cast(expr: &Expr, from: SqlType, to: SqlType) -> Option<Expr> {
-    if matches!(from.element_type().kind, SqlTypeKind::Char)
-        && matches!(to.element_type().kind, SqlTypeKind::Text)
-        && !from.is_array
-        && !to.is_array
-    {
-        return Some(Expr::builtin_func(
+    if matches!(from.element_type().kind, SqlTypeKind::Char) && !from.is_array && !to.is_array {
+        let trimmed = Expr::builtin_func(
             BuiltinScalarFunction::BpcharToText,
             Some(SqlType::new(SqlTypeKind::Text)),
             false,
             vec![expr.clone()],
-        ));
+        );
+        return match to.element_type().kind {
+            SqlTypeKind::Text => Some(trimmed),
+            SqlTypeKind::Varchar => Some(Expr::Cast(Box::new(trimmed), to)),
+            _ => None,
+        };
     }
     None
 }
