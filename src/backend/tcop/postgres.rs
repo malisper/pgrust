@@ -65,10 +65,6 @@ fn exec_error_sqlstate(e: &ExecError) -> &'static str {
         ExecError::Parse(crate::backend::parser::ParseError::UnknownConfigurationParameter(_)) => {
             "42704"
         }
-        ExecError::Parse(crate::backend::parser::ParseError::NonSubscriptableType(_)) => "42804",
-        ExecError::Parse(crate::backend::parser::ParseError::FixedLengthArraySliceNotImplemented) => {
-            "0A000"
-        }
         ExecError::Parse(crate::backend::parser::ParseError::CantChangeRuntimeParam(_)) => "55P02",
         ExecError::Parse(crate::backend::parser::ParseError::NoSchemaSelectedForCreate) => "3F000",
         ExecError::Parse(crate::backend::parser::ParseError::WindowingError(_)) => "42P20",

@@ -215,32 +215,8 @@ fn materialize_cte_row(slot: &mut TupleSlot) -> Result<MaterializedRow, ExecErro
     ))
 }
 
-fn setop_value_equal_for_type(sql_type: crate::backend::parser::SqlType, left: &Value, right: &Value) -> bool {
-    match sql_type.kind {
-        crate::backend::parser::SqlTypeKind::Char => match (left.as_text(), right.as_text()) {
-            (Some(left), Some(right)) => left.trim_end_matches(' ') == right.trim_end_matches(' '),
-            _ => !crate::backend::executor::expr_ops::values_are_distinct(left, right),
-        },
-        _ => !crate::backend::executor::expr_ops::values_are_distinct(left, right),
-    }
-}
-
-fn setop_row_equal_for_types(
-    output_types: &[crate::backend::parser::SqlType],
-    left: &[Value],
-    right: &[Value],
-) -> bool {
-    left.len() == right.len()
-        && left.len() == output_types.len()
-        && output_types
-            .iter()
-            .zip(left.iter().zip(right.iter()))
-            .all(|(sql_type, (left, right))| setop_value_equal_for_type(*sql_type, left, right))
-}
-
 fn set_op_result_rows(
     op: crate::include::nodes::parsenodes::SetOperator,
-    output_types: &[crate::backend::parser::SqlType],
     children: &mut [PlanState],
     ctx: &mut ExecutorContext,
 ) -> Result<Vec<MaterializedRow>, ExecError> {
@@ -264,13 +240,7 @@ fn set_op_result_rows(
 
             if let Some(bucket) = buckets
                 .iter_mut()
-                .find(|bucket| {
-                    setop_row_equal_for_types(
-                        output_types,
-                        &bucket.row.slot.tts_values,
-                        &values,
-                    )
-                })
+                .find(|bucket| bucket.row.slot.tts_values == values)
             {
                 bucket.counts[child_index] += 1;
             } else {
@@ -2328,12 +2298,7 @@ impl PlanNode for SetOpState {
         begin_node(&mut self.stats, ctx);
 
         if self.result_rows.is_none() {
-            self.result_rows = Some(set_op_result_rows(
-                self.op,
-                &self.output_types,
-                &mut self.children,
-                ctx,
-            )?);
+            self.result_rows = Some(set_op_result_rows(self.op, &mut self.children, ctx)?);
         }
 
         let Some(rows) = self.result_rows.as_ref() else {

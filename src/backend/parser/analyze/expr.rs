@@ -937,7 +937,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             if !matches!(inner.as_ref(), SqlExpr::Const(Value::Null)) {
                 validate_catalog_backed_explicit_cast(source_type, target_type, catalog)?;
             }
-            coerce_bound_expr(bound_inner, source_type, target_type)
+            Expr::Cast(Box::new(bound_inner), target_type)
         }
         SqlExpr::Eq(left, right) => {
             if let Some(result) = bind_maybe_range_comparison(
@@ -1398,12 +1398,16 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             if array_type.kind == SqlTypeKind::Point
                 && subscripts.iter().any(|subscript| subscript.is_slice)
             {
-                return Err(ParseError::FixedLengthArraySliceNotImplemented);
+                return Err(ParseError::UnexpectedToken {
+                    expected: "array expression",
+                    actual: "point".into(),
+                });
             }
             if !array_type.is_array {
-                return Err(ParseError::NonSubscriptableType(
-                    sql_type_name(array_type).into(),
-                ));
+                return Err(ParseError::UnexpectedToken {
+                    expected: "array expression",
+                    actual: sql_type_name(array_type).into(),
+                });
             }
             Expr::ArraySubscript {
                 array: Box::new(bind_expr_with_outer_and_ctes(
