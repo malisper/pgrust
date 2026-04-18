@@ -142,29 +142,27 @@ pub(crate) fn to_number_numeric(input: &str, format: &str) -> Result<NumericValu
     if digits_before.is_empty() {
         digits_before.push('0');
     }
-    let rendered = if spec.scale_digits > 0 {
+    if spec.scale_digits > 0 {
         let mut all_digits = digits_before;
         all_digits.push_str(&digits_after);
         if all_digits.is_empty() {
             all_digits.push('0');
         }
-        if spec.scale_digits >= all_digits.len() {
-            format!(
-                "{}0.{}{}",
-                if negative { "-" } else { "" },
-                "0".repeat(spec.scale_digits - all_digits.len()),
-                all_digits
-            )
-        } else {
-            let split = all_digits.len() - spec.scale_digits;
-            format!(
-                "{}{}.{}",
-                if negative { "-" } else { "" },
-                &all_digits[..split],
-                &all_digits[split..]
-            )
-        }
-    } else if digits_after.is_empty() {
+        let mut scaled = parse_numeric_text(&format!(
+            "{}{all_digits}",
+            if negative { "-" } else { "" }
+        ))
+        .ok_or_else(|| ExecError::InvalidNumericInput(input.to_string()))?;
+        let divisor_text = format!("1{}", "0".repeat(spec.scale_digits));
+        let divisor = parse_numeric_text(&divisor_text)
+            .expect("power-of-ten divisor for to_number V format should parse");
+        scaled = scaled.div(&divisor, 18).ok_or_else(|| ExecError::InvalidNumericInput(
+            input.to_string(),
+        ))?;
+        return Ok(scaled);
+    }
+
+    let rendered = if digits_after.is_empty() {
         format!("{}{digits_before}", if negative { "-" } else { "" })
     } else {
         format!(
@@ -1154,7 +1152,12 @@ fn format_roman_numeric(value: &NumericValue, fill_mode: bool, lower: bool) -> S
 fn parse_roman_to_number(input: &str, format: &str) -> Result<NumericValue, ExecError> {
     let trimmed = input.trim_matches(' ');
     if input.is_empty() {
-        return Err(ExecError::InvalidNumericInput(" ".to_string()));
+        return Err(ExecError::DetailedError {
+            message: "invalid input syntax for type numeric: \" \"".to_string(),
+            detail: None,
+            hint: None,
+            sqlstate: "22P02",
+        });
     }
     let normalized_format = format.trim_matches(' ');
     if normalized_format.eq_ignore_ascii_case("rn") {
@@ -1185,9 +1188,11 @@ fn parse_roman_to_number(input: &str, format: &str) -> Result<NumericValue, Exec
                 details: "cannot use \"RN\" twice".to_string(),
             });
         }
-        return Err(ExecError::InvalidStorageValue {
-            column: String::new(),
-            details: "\"RN\" is incompatible with other formats".to_string(),
+        return Err(ExecError::DetailedError {
+            message: "\"RN\" is incompatible with other formats".to_string(),
+            detail: Some("\"RN\" may only be used together with \"FM\".".to_string()),
+            hint: None,
+            sqlstate: "22023",
         });
     }
     Err(ExecError::InvalidStorageValue {
@@ -1530,7 +1535,7 @@ mod tests {
         );
         assert_eq!(
             to_number_numeric("123456", "99999V99").unwrap().render(),
-            "1234.56"
+            "1234.560000000000000000"
         );
         assert_eq!(to_number_numeric("42nd", "99th").unwrap().render(), "42");
     }
@@ -1542,6 +1547,25 @@ mod tests {
         assert!(matches!(
             to_number_numeric("viv", "RN"),
             Err(ExecError::InvalidStorageValue { .. })
+        ));
+        assert!(matches!(
+            to_number_numeric("CM", "MIRN"),
+            Err(ExecError::DetailedError {
+                message,
+                detail: Some(detail),
+                sqlstate: "22023",
+                ..
+            }) if message == "\"RN\" is incompatible with other formats"
+                && detail == "\"RN\" may only be used together with \"FM\"."
+        ));
+        assert!(matches!(
+            to_number_numeric("", "RN"),
+            Err(ExecError::DetailedError {
+                message,
+                detail: None,
+                sqlstate: "22P02",
+                ..
+            }) if message == "invalid input syntax for type numeric: \" \""
         ));
     }
 }

@@ -435,7 +435,7 @@ Targeted reruns on 2026-04-17:
 - numeric.sql:
   Retest source: `/tmp/pgrust_numeric_regress_55433/diff/numeric.diff`
 - Preserve PostgreSQL-compatible row order for the unordered `WITH v AS (VALUES ...) FROM v1, v2` cross-join cases in `numeric.sql`, or otherwise make the planner/executor match upstream join/input ordering closely enough for regression parity
-- Remaining `to_number(...)` / Roman numeral formatting and validation parity in `expr_format.rs`, including `V`-scaled output, `RN` aggregate validation, and PostgreSQL-style `DETAIL` / caret output for invalid Roman formats
+- [x] Remaining `to_number(...)` / Roman numeral formatting and validation parity in `expr_format.rs`, including `V`-scaled output, `RN` aggregate validation, and PostgreSQL-style `DETAIL` / caret output for invalid Roman formats
 - [x] Fix `width_bucket(float8, low, high, count)` boundary behavior for huge ranges; current float math can round into bucket `count + 1` or the wrong descending bucket near the upper edge
 - [x] Make `to_char(numeric, ...)` formatting match PostgreSQL more closely when the input numeric carries excess display scale
 - [x] Add PostgreSQL-style `DETAIL` output for numeric typmod overflow, including fractional-only numerics and infinite values rejected by typmod constraints
