@@ -308,6 +308,7 @@ Targeted reruns on 2026-04-17:
   `.abs()`, `.ceiling()`, and `.floor()`.
   Done: builtin item methods `.double()`, `.boolean()`, and `.string()`.
   Done: builtin numeric cast methods `.number()`, `.integer()`, and `.decimal(...)`.
+  Done: string predicate operators `starts with` and `like_regex ... flag ...`.
   Remaining: other currently-rejected valid jsonpath syntax.
 - In progress: PostgreSQL lax-mode auto-unwrapping for array/scalar access.
   Done: `lax $[0]` on scalar values now matches upstream behavior.
@@ -325,7 +326,6 @@ Targeted reruns on 2026-04-17:
   - [done] accept PostgreSQL-style mixed set-operation chains such as `SELECT 1 UNION SELECT 2 UNION ALL SELECT 2` instead of rejecting them in the parser
   - [done] support `SELECT DISTINCT` in set-operation inputs such as `EXCEPT ALL SELECT DISTINCT ...`
   - [done] match PostgreSQL's `FOR NO KEY UPDATE` set-operation error text instead of routing it through the generic unsupported-feature wrapper
-  - [done] align char/varchar set-operation coercion and duplicate-elimination semantics with PostgreSQL so padded `char(n)` inputs do not survive as distinct `varchar` rows
   - investigate why bootstrap fixture tables from `scripts/test_setup_pgrust.sql` like `float8_tbl`, `int8_tbl`, and `tenk1` are not consistently resolvable during regression runs
 - updatable_views.sql: 109/1139
 - update.sql: 28/300
@@ -419,6 +419,8 @@ Targeted reruns on 2026-04-17:
 - date.sql:
   make `EXTRACT(... FROM date)` use PostgreSQL-compatible default column labels and unsupported-unit diagnostics
 - date.sql:
+  support `date_trunc(text, timestamp)` and match PostgreSQL `date_trunc` output semantics for date and timestamp inputs
+- date.sql:
   fix `make_date` / `make_time` SQL-visible behavior, including overflow handling and proper error messages for invalid arguments
 
 - stats.sql
@@ -434,8 +436,8 @@ Targeted reruns on 2026-04-17:
   Retest source: `/tmp/pgrust_numeric_regress_55433/diff/numeric.diff`
 - Preserve PostgreSQL-compatible row order for the unordered `WITH v AS (VALUES ...) FROM v1, v2` cross-join cases in `numeric.sql`, or otherwise make the planner/executor match upstream join/input ordering closely enough for regression parity
 - [x] Fix `width_bucket(float8, low, high, count)` boundary behavior for huge ranges; current float math can round into bucket `count + 1` or the wrong descending bucket near the upper edge
-- [x] Make `to_char(numeric, ...)` formatting match PostgreSQL more closely when the input numeric carries excess display scale
-- [x] Add PostgreSQL-style `DETAIL` output for numeric typmod overflow, including fractional-only numerics and infinite values rejected by typmod constraints
+- Make `to_char(numeric, ...)` formatting match PostgreSQL more closely when the input numeric carries excess display scale
+- Add PostgreSQL-style `DETAIL` output for numeric typmod overflow, including fractional-only numerics and infinite values rejected by typmod constraints
 - Add dedicated numeric-to-integer cast errors for `NaN` and `Infinity` instead of collapsing them into generic `smallint/integer/bigint out of range`
 - Audit the remaining `numeric.sql` formatting mismatches after the display-scale fix; many later hunks appear to be the same root cause repeated across `to_char` cases
 - Mixed set-operation chains: accept PostgreSQL-style left-associative chains such as `SELECT 1 UNION SELECT 2 UNION ALL SELECT 2` instead of rejecting them in the parser.
@@ -443,12 +445,12 @@ Targeted reruns on 2026-04-17:
 - privileges.sql parity:
   - expose privilege-related system catalogs in SQL, including `pg_auth_members` and `pg_largeobject_metadata`
   - [done] add parser/analyzer support for role membership `GRANTED BY`
-  - [done] add parser/analyzer/executor support for `CASCADE` in role membership revokes
+  - add parser/analyzer/executor support for `CASCADE` in role membership revokes
   - implement `SET ROLE` and `RESET ROLE`
   - implement SQL-visible `session_user`, `current_user`, and `current_role` semantics used by the regression
   - add parser/executor support for `DROP OWNED`
   - add parser support for `DROP USER`, `CREATE GROUP`, and `ALTER GROUP`
-  - [done] make role membership grant/revoke execution honor explicit grantors and dependent membership chains
+  - make role membership grant/revoke execution honor explicit grantors and dependent membership chains
   - align duplicate-role and role-grant error text with PostgreSQL where practical
 
 ## DONE

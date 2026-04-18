@@ -282,6 +282,22 @@ pub(super) fn eval_regexp_like(values: &[Value]) -> Result<Value, ExecError> {
     Ok(Value::Bool(compiled.is_match(text)?))
 }
 
+pub(crate) fn eval_jsonpath_like_regex(
+    text: &str,
+    pattern: &str,
+    flags: &str,
+) -> Result<bool, ExecError> {
+    let flags = parse_jsonpath_like_regex_flags(flags)?;
+    let compiled = compile_pg_regex(pattern, &flags, PgRegexPurpose::Boolean)?;
+    Ok(compiled.is_match(text)?)
+}
+
+pub(crate) fn validate_jsonpath_like_regex(pattern: &str, flags: &str) -> Result<(), ExecError> {
+    let flags = parse_jsonpath_like_regex_flags(flags)?;
+    let _ = compile_pg_regex(pattern, &flags, PgRegexPurpose::Boolean)?;
+    Ok(())
+}
+
 pub(super) fn eval_regexp_match(values: &[Value]) -> Result<Value, ExecError> {
     let Some(text_value) = values.first() else {
         return Ok(Value::Null);
@@ -961,6 +977,32 @@ fn parse_pg_regex_flags(flags: &str) -> Result<PgRegexFlags, ExecError> {
         }
     }
     Ok(parsed)
+}
+
+fn parse_jsonpath_like_regex_flags(flags: &str) -> Result<PgRegexFlags, ExecError> {
+    let mut mapped = String::new();
+    for flag in flags.chars() {
+        match flag {
+            'i' => mapped.push('i'),
+            's' => {}
+            'm' => mapped.push('m'),
+            'q' => mapped.push('q'),
+            'x' => {
+                return Err(regex_invalid(
+                    "XQuery \"x\" flag (expanded regular expressions) is not implemented",
+                ));
+            }
+            other => {
+                return Err(ExecError::InvalidStorageValue {
+                    column: "jsonpath".to_string(),
+                    details: format!(
+                        "Unrecognized flag character \"{other}\" in LIKE_REGEX predicate."
+                    ),
+                });
+            }
+        }
+    }
+    parse_pg_regex_flags(&mapped)
 }
 
 fn reject_global_option(
