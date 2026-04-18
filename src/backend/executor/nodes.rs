@@ -507,6 +507,9 @@ impl PlanNode for SeqScanState {
                 self.rel,
                 ctx.snapshot.clone(),
             )?);
+            ctx.session_stats
+                .write()
+                .note_relation_scan(self.relation_oid);
         }
 
         let start = if ctx.timed {
@@ -558,6 +561,9 @@ impl PlanNode for SeqScanState {
                         }
                     }
 
+                    ctx.session_stats
+                        .write()
+                        .note_relation_tuple_returned(self.relation_oid);
                     finish_row(&mut self.stats, start);
                     return Ok(Some(&mut self.slot));
                 }
@@ -569,6 +575,10 @@ impl PlanNode for SeqScanState {
                 heap_scan_end::<ExecError>(&*ctx.pool, ctx.client_id, scan)?;
                 finish_eof(&mut self.stats, start, ctx);
                 return Ok(None);
+            } else {
+                let mut session_stats = ctx.session_stats.write();
+                session_stats.note_relation_block_fetched(self.relation_oid);
+                session_stats.note_io_read("client backend", "relation", "bulkread", 8192);
             }
         }
     }
@@ -660,6 +670,9 @@ impl PlanNode for IndexScanState {
                     })
                 })?,
             );
+            let mut session_stats = ctx.session_stats.write();
+            session_stats.note_relation_scan(self.index_meta.indexrelid);
+            session_stats.note_io_read("client backend", "relation", "normal", 8192);
         }
 
         let start = if ctx.timed {
@@ -697,6 +710,11 @@ impl PlanNode for IndexScanState {
                 .as_ref()
                 .and_then(|scan| scan.xs_heaptid)
                 .expect("index scan tuple must set heap tid");
+            {
+                let mut session_stats = ctx.session_stats.write();
+                session_stats.note_relation_tuple_returned(self.index_meta.indexrelid);
+                session_stats.note_relation_block_fetched(self.index_meta.indexrelid);
+            }
             let visible = heap_fetch_visible_with_txns(
                 &ctx.pool,
                 ctx.client_id,
@@ -708,6 +726,12 @@ impl PlanNode for IndexScanState {
             let Some(tuple) = visible else {
                 continue;
             };
+            {
+                let mut session_stats = ctx.session_stats.write();
+                session_stats.note_relation_tuple_fetched(self.relation_oid);
+                session_stats.note_relation_block_fetched(self.relation_oid);
+                session_stats.note_io_read("client backend", "relation", "normal", 8192);
+            }
             self.slot.kind = SlotKind::HeapTuple {
                 desc: self.desc.clone(),
                 attr_descs: self.attr_descs.clone(),

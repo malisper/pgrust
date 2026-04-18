@@ -14,6 +14,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let mut rewrite_oids = Vec::new();
+        let mut truncated_relation_oids = Vec::new();
 
         for table_name in &stmt.table_names {
             let entry = match catalog.lookup_any_relation(table_name) {
@@ -34,6 +35,9 @@ impl Database {
                 return Err(ExecError::Parse(ParseError::FeatureNotSupported(
                     "TRUNCATE on inherited parents is not supported yet".into(),
                 )));
+            }
+            if !truncated_relation_oids.contains(&entry.relation_oid) {
+                truncated_relation_oids.push(entry.relation_oid);
             }
 
             if !rewrite_oids.contains(&entry.relation_oid) {
@@ -70,6 +74,13 @@ impl Database {
             .write()
             .rewrite_relation_storage_mvcc(&rewrite_oids, &ctx)?;
         self.apply_catalog_mutation_effect_immediate(&effect)?;
+        {
+            let stats_state = self.session_stats_state(client_id);
+            let mut stats_state = stats_state.write();
+            for relation_oid in truncated_relation_oids {
+                stats_state.note_relation_truncate(relation_oid);
+            }
+        }
         catalog_effects.push(effect);
         Ok(StatementResult::AffectedRows(0))
     }
@@ -130,6 +141,28 @@ impl Database {
     }
 
     pub(crate) fn execute_statement_with_search_path_and_datetime_config(
+        &self,
+        client_id: ClientId,
+        stmt: Statement,
+        configured_search_path: Option<&[String]>,
+        datetime_config: &DateTimeConfig,
+    ) -> Result<StatementResult, ExecError> {
+        let stats_state = self.session_stats_state(client_id);
+        stats_state.write().begin_top_level_xact();
+        let result = self.execute_statement_with_search_path_inner(
+            client_id,
+            stmt,
+            configured_search_path,
+            datetime_config,
+        );
+        match &result {
+            Ok(_) => stats_state.write().commit_top_level_xact(&self.stats),
+            Err(_) => stats_state.write().rollback_top_level_xact(),
+        }
+        result
+    }
+
+    fn execute_statement_with_search_path_inner(
         &self,
         client_id: ClientId,
         stmt: Statement,
@@ -258,12 +291,6 @@ impl Database {
                 ),
             Statement::AlterTableValidateConstraint(ref alter_stmt) => self
                 .execute_alter_table_validate_constraint_stmt_with_search_path(
-                    client_id,
-                    alter_stmt,
-                    configured_search_path,
-                ),
-            Statement::AlterTableMulti(ref alter_stmt) => self
-                .execute_alter_table_multi_stmt_with_search_path(
                     client_id,
                     alter_stmt,
                     configured_search_path,
@@ -424,6 +451,8 @@ impl Database {
                     checkpoint_stats: self.checkpoint_stats_snapshot(),
                     datetime_config: datetime_config.clone(),
                     interrupts: Arc::clone(&interrupts),
+                    stats: std::sync::Arc::clone(&self.stats),
+                    session_stats: self.session_stats_state(client_id),
                     snapshot,
                     client_id,
                     next_command_id: 0,
@@ -471,6 +500,8 @@ impl Database {
                     checkpoint_stats: self.checkpoint_stats_snapshot(),
                     datetime_config: datetime_config.clone(),
                     interrupts: Arc::clone(&interrupts),
+                    stats: std::sync::Arc::clone(&self.stats),
+                    session_stats: self.session_stats_state(client_id),
                     snapshot,
                     client_id,
                     next_command_id: 0,
@@ -516,6 +547,8 @@ impl Database {
                     checkpoint_stats: self.checkpoint_stats_snapshot(),
                     datetime_config: datetime_config.clone(),
                     interrupts: Arc::clone(&interrupts),
+                    stats: std::sync::Arc::clone(&self.stats),
+                    session_stats: self.session_stats_state(client_id),
                     snapshot,
                     client_id,
                     next_command_id: 0,
@@ -568,6 +601,8 @@ impl Database {
                     checkpoint_stats: self.checkpoint_stats_snapshot(),
                     datetime_config: datetime_config.clone(),
                     interrupts: Arc::clone(&interrupts),
+                    stats: std::sync::Arc::clone(&self.stats),
+                    session_stats: self.session_stats_state(client_id),
                     snapshot,
                     client_id,
                     next_command_id: 0,
@@ -796,6 +831,8 @@ impl Database {
                     checkpoint_stats: self.checkpoint_stats_snapshot(),
                     datetime_config: datetime_config.clone(),
                     interrupts: Arc::clone(&interrupts),
+                    stats: std::sync::Arc::clone(&self.stats),
+                    session_stats: self.session_stats_state(client_id),
                     snapshot,
                     client_id,
                     next_command_id: 0,
@@ -850,6 +887,8 @@ impl Database {
                     sequences: Some(self.sequences.clone()),
                     checkpoint_stats: self.checkpoint_stats_snapshot(),
                     interrupts: Arc::clone(&interrupts),
+                    stats: std::sync::Arc::clone(&self.stats),
+                    session_stats: self.session_stats_state(client_id),
                     snapshot,
                     client_id,
                     next_command_id: 0,
@@ -949,6 +988,8 @@ impl Database {
             checkpoint_stats: self.checkpoint_stats_snapshot(),
             datetime_config: datetime_config.clone(),
             interrupts,
+            stats: std::sync::Arc::clone(&self.stats),
+            session_stats: self.session_stats_state(client_id),
             snapshot,
             client_id,
             next_command_id: command_id,

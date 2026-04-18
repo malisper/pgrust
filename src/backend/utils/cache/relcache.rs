@@ -15,6 +15,7 @@ use crate::include::catalog::{
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexRelCacheEntry {
+    pub indexrelid: u32,
     pub indrelid: u32,
     pub indnatts: i16,
     pub indnkeyatts: i16,
@@ -158,6 +159,7 @@ impl RelCache {
                         .find(|row| row.indexrelid == class.oid)
                     else {
                         return IndexRelCacheEntry {
+                            indexrelid: class.oid,
                             indrelid: 0,
                             indnatts: 0,
                             indnkeyatts: 0,
@@ -195,6 +197,7 @@ impl RelCache {
                         .filter_map(|oid| opclass_rows.iter().find(|row| row.oid == *oid))
                         .collect::<Vec<_>>();
                     IndexRelCacheEntry {
+                        indexrelid: class.oid,
                         indrelid: index.indrelid,
                         indnatts: index.indnatts,
                         indnkeyatts: index.indnkeyatts,
@@ -339,6 +342,7 @@ fn from_catalog_entry(entry: &CatalogEntry) -> RelCacheEntry {
         relkind: entry.relkind,
         desc: entry.desc.clone(),
         index: entry.index_meta.as_ref().map(|index| IndexRelCacheEntry {
+            indexrelid: entry.relation_oid,
             indrelid: index.indrelid,
             indnatts: index.indkey.len() as i16,
             indnkeyatts: index.indkey.len() as i16,

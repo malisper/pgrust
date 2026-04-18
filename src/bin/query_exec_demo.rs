@@ -188,6 +188,12 @@ fn main() -> Result<(), ExecError> {
 
     let mut state = executor_start(plan);
     let interrupts = Arc::new(InterruptState::new());
+    let stats = std::sync::Arc::new(parking_lot::RwLock::new(
+        pgrust::pgrust::database::DatabaseStatsStore::with_default_io_rows(),
+    ));
+    let session_stats = std::sync::Arc::new(parking_lot::RwLock::new(
+        pgrust::pgrust::database::SessionStatsState::default(),
+    ));
     let mut ctx = ExecutorContext {
         pool: std::sync::Arc::clone(&pool),
         txns: txns.clone(),
@@ -197,6 +203,8 @@ fn main() -> Result<(), ExecError> {
             pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
         datetime_config: pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
         interrupts,
+        stats,
+        session_stats,
         snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID).unwrap(),
         client_id: 7,
         next_command_id: 0,

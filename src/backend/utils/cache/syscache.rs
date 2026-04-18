@@ -8,7 +8,7 @@ use crate::backend::utils::time::snapmgr::{Snapshot, get_catalog_snapshot};
 use crate::include::catalog::{
     PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow, PgClassRow, PgCollationRow,
     PgConstraintRow, PgDependRow, PgIndexRow, PgInheritsRow, PgNamespaceRow, PgOpclassRow,
-    PgOpfamilyRow, PgRewriteRow, PgStatisticRow, PgTypeRow,
+    PgOpfamilyRow, PgProcRow, PgRewriteRow, PgStatisticRow, PgTypeRow,
 };
 use crate::pgrust::database::Database;
 
@@ -321,5 +321,15 @@ pub fn ensure_collation_rows(
 ) -> Vec<PgCollationRow> {
     backend_catcache(db, client_id, txn_ctx)
         .map(|catcache| catcache.collation_rows())
+        .unwrap_or_default()
+}
+
+pub fn ensure_proc_rows(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+) -> Vec<PgProcRow> {
+    backend_catcache(db, client_id, txn_ctx)
+        .map(|catcache| catcache.proc_rows())
         .unwrap_or_default()
 }

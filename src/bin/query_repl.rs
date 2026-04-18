@@ -450,6 +450,12 @@ fn run_statement(
 ) -> Result<StatementResult, ExecError> {
     let stmt = parse_statement(sql)?;
     let interrupts = Arc::new(InterruptState::new());
+    let stats = Arc::new(parking_lot::RwLock::new(
+        pgrust::pgrust::database::DatabaseStatsStore::with_default_io_rows(),
+    ));
+    let session_stats = Arc::new(parking_lot::RwLock::new(
+        pgrust::pgrust::database::SessionStatsState::default(),
+    ));
     let relcache = catalog_store.relcache().map_err(|err| {
         ExecError::Parse(ParseError::UnexpectedToken {
             expected: "physical relcache",
@@ -472,8 +478,7 @@ fn run_statement(
         | Statement::AlterTableRenameConstraint(_)
         | Statement::AlterTableSetNotNull(_)
         | Statement::AlterTableDropNotNull(_)
-        | Statement::AlterTableValidateConstraint(_)
-        | Statement::AlterTableMulti(_) => Ok(StatementResult::AffectedRows(0)),
+        | Statement::AlterTableValidateConstraint(_) => Ok(StatementResult::AffectedRows(0)),
         Statement::AlterTableOwner(stmt) => {
             Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
                 "ALTER TABLE OWNER in query_repl: {} -> {}",
@@ -636,6 +641,8 @@ fn run_statement(
                 datetime_config:
                     pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                 interrupts: Arc::clone(&interrupts),
+                stats: Arc::clone(&stats),
+                session_stats: Arc::clone(&session_stats),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
                 next_command_id: 0,
@@ -664,6 +671,8 @@ fn run_statement(
                 datetime_config:
                     pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                 interrupts: Arc::clone(&interrupts),
+                stats: Arc::clone(&stats),
+                session_stats: Arc::clone(&session_stats),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
                 next_command_id: 0,
@@ -692,6 +701,8 @@ fn run_statement(
                 datetime_config:
                     pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                 interrupts: Arc::clone(&interrupts),
+                stats: Arc::clone(&stats),
+                session_stats: Arc::clone(&session_stats),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
                 next_command_id: 0,
@@ -720,6 +731,8 @@ fn run_statement(
                 datetime_config:
                     pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                 interrupts: Arc::clone(&interrupts),
+                stats: Arc::clone(&stats),
+                session_stats: Arc::clone(&session_stats),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
                 next_command_id: 0,
@@ -825,6 +838,8 @@ fn run_statement(
                 datetime_config:
                     pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                 interrupts: Arc::clone(&interrupts),
+                stats: Arc::clone(&stats),
+                session_stats: Arc::clone(&session_stats),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
                 next_command_id: 0,
@@ -853,6 +868,8 @@ fn run_statement(
                 datetime_config:
                     pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                 interrupts: Arc::clone(&interrupts),
+                stats: Arc::clone(&stats),
+                session_stats: Arc::clone(&session_stats),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
                 next_command_id: 0,
@@ -884,6 +901,8 @@ fn run_statement(
                     datetime_config:
                         pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                     interrupts: Arc::clone(&interrupts),
+                    stats: Arc::clone(&stats),
+                    session_stats: Arc::clone(&session_stats),
                     snapshot: txns.read().snapshot(xid)?,
                     client_id: 21,
                     next_command_id: 0,
@@ -926,6 +945,8 @@ fn run_statement(
                     datetime_config:
                         pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                     interrupts: Arc::clone(&interrupts),
+                    stats: Arc::clone(&stats),
+                    session_stats: Arc::clone(&session_stats),
                     snapshot: txns.read().snapshot(xid)?,
                     client_id: 21,
                     next_command_id: 0,
@@ -968,6 +989,8 @@ fn run_statement(
                     datetime_config:
                         pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                     interrupts: Arc::clone(&interrupts),
+                    stats: Arc::clone(&stats),
+                    session_stats: Arc::clone(&session_stats),
                     snapshot: txns.read().snapshot(xid)?,
                     client_id: 21,
                     next_command_id: 0,

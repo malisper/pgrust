@@ -34,7 +34,9 @@ use crate::include::catalog::PG_CHECKPOINT_OID;
 use crate::include::nodes::execnodes::ScalarType;
 use crate::pgrust::auth::AuthState;
 use crate::pgrust::database::{
-    Database, SequenceMutationEffect, TempMutationEffect, alter_table_add_constraint_lock_requests,
+    Database, SequenceMutationEffect, SessionStatsState, StatsFetchConsistency,
+    TrackFunctionsSetting,
+    TempMutationEffect, alter_table_add_constraint_lock_requests,
     alter_table_validate_constraint_lock_requests, delete_foreign_key_lock_requests,
     insert_foreign_key_lock_requests, prepared_insert_foreign_key_lock_requests,
     reject_relation_with_referencing_foreign_keys, relation_foreign_key_lock_requests,
@@ -42,6 +44,7 @@ use crate::pgrust::database::{
 };
 use crate::pl::plpgsql::execute_do;
 use crate::{ClientId, RelFileLocator};
+use parking_lot::RwLock;
 
 pub struct SelectGuard<'a> {
     pub state: crate::include::nodes::execnodes::PlanState,
@@ -79,6 +82,7 @@ pub struct Session {
     datetime_config: DateTimeConfig,
     interrupts: Arc<InterruptState>,
     auth: AuthState,
+    stats_state: Arc<RwLock<SessionStatsState>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -107,6 +111,7 @@ impl Session {
             datetime_config: DateTimeConfig::default(),
             interrupts: Arc::new(InterruptState::new()),
             auth: AuthState::default(),
+            stats_state: Arc::new(RwLock::new(SessionStatsState::default())),
         }
     }
 
@@ -262,6 +267,40 @@ impl Session {
         db.lazy_catalog_lookup(self.client_id, Some((xid, cid)), search_path.as_deref())
     }
 
+    fn executor_context_for_catalog(
+        &self,
+        db: &Database,
+        snapshot: crate::backend::access::transam::xact::Snapshot,
+        cid: u32,
+        catalog: &crate::backend::utils::cache::lsyscache::LazyCatalogLookup<'_>,
+    ) -> ExecutorContext {
+        ExecutorContext {
+            pool: Arc::clone(&db.pool),
+            txns: db.txns.clone(),
+            txn_waiter: Some(db.txn_waiter.clone()),
+            sequences: Some(db.sequences.clone()),
+            checkpoint_stats: db.checkpoint_stats_snapshot(),
+            datetime_config: self.datetime_config.clone(),
+            interrupts: self.interrupts(),
+            stats: Arc::clone(&db.stats),
+            session_stats: Arc::clone(&self.stats_state),
+            snapshot,
+            client_id: self.client_id,
+            next_command_id: cid,
+            timed: false,
+            allow_side_effects: true,
+            expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
+            case_test_values: Vec::new(),
+            system_bindings: Vec::new(),
+            subplans: Vec::new(),
+            catalog: catalog.materialize_visible_catalog(),
+            compiled_functions: std::collections::HashMap::new(),
+            cte_tables: std::collections::HashMap::new(),
+            cte_producers: std::collections::HashMap::new(),
+            recursive_worktables: std::collections::HashMap::new(),
+        }
+    }
+
     fn process_catalog_command_end(&mut self, db: &Database, effect_start: usize) {
         let client_id = self.client_id;
         let Some(txn) = self.active_txn.as_mut() else {
@@ -286,6 +325,7 @@ impl Session {
     pub fn execute(&mut self, db: &Database, sql: &str) -> Result<StatementResult, ExecError> {
         let _interrupt_guard = self.statement_interrupt_guard()?;
         db.install_auth_state(self.client_id, self.auth.clone());
+        db.install_stats_state(self.client_id, Arc::clone(&self.stats_state));
         self.execute_internal(db, sql)
     }
 
@@ -659,24 +699,6 @@ impl Session {
                     )
                 }
             }
-            Statement::AlterTableMulti(ref alter_stmt) => {
-                if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
-                    if result.is_err() {
-                        if let Some(ref mut txn) = self.active_txn {
-                            txn.failed = true;
-                        }
-                    }
-                    result
-                } else {
-                    let search_path = self.configured_search_path();
-                    db.execute_alter_table_multi_stmt_with_search_path(
-                        self.client_id,
-                        alter_stmt,
-                        search_path.as_deref(),
-                    )
-                }
-            }
             Statement::CreateRole(ref create_stmt) => {
                 if self.active_txn.is_some() {
                     let result = self.execute_in_transaction(db, stmt);
@@ -922,6 +944,7 @@ impl Session {
                     temp_effects: Vec::new(),
                     sequence_effects: Vec::new(),
                 });
+                self.stats_state.write().begin_top_level_xact();
                 Ok(StatementResult::AffectedRows(0))
             }
             Statement::Commit => {
@@ -965,6 +988,7 @@ impl Session {
                     db.table_locks.unlock_table(rel, self.client_id);
                 }
                 db.finalize_committed_sequence_effects(&txn.sequence_effects)?;
+                self.stats_state.write().commit_top_level_xact(&db.stats);
                 result
             }
             Statement::Rollback => {
@@ -989,6 +1013,7 @@ impl Session {
                     db.table_locks.unlock_table(rel, self.client_id);
                 }
                 db.finalize_aborted_sequence_effects(&txn.sequence_effects);
+                self.stats_state.write().rollback_top_level_xact();
                 result
             }
             _ => {
@@ -1579,12 +1604,6 @@ impl Session {
                     &mut txn.catalog_effects,
                 )
             }
-            Statement::AlterTableMulti(ref alter_stmt) => {
-                for action in &alter_stmt.actions {
-                    self.execute_in_transaction(db, action.to_statement())?;
-                }
-                Ok(StatementResult::AffectedRows(0))
-            }
             Statement::AlterTableSet(_) => Ok(StatementResult::AffectedRows(0)),
             Statement::CreateRole(ref create_stmt) => db.execute_create_role_stmt(
                 client_id,
@@ -1724,29 +1743,7 @@ impl Session {
                 let search_path = self.configured_search_path();
                 let catalog =
                     db.lazy_catalog_lookup(client_id, Some((xid, cid)), search_path.as_deref());
-                let mut ctx = ExecutorContext {
-                    pool: Arc::clone(&db.pool),
-                    txns: db.txns.clone(),
-                    txn_waiter: Some(db.txn_waiter.clone()),
-                    sequences: Some(db.sequences.clone()),
-                    checkpoint_stats: db.checkpoint_stats_snapshot(),
-                    datetime_config: self.datetime_config.clone(),
-                    interrupts: self.interrupts(),
-                    snapshot,
-                    client_id,
-                    next_command_id: cid,
-                    timed: false,
-                    allow_side_effects: true,
-                    expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
-                    case_test_values: Vec::new(),
-                    system_bindings: Vec::new(),
-                    subplans: Vec::new(),
-                    catalog: catalog.materialize_visible_catalog(),
-                    compiled_functions: std::collections::HashMap::new(),
-                    cte_tables: std::collections::HashMap::new(),
-                    cte_producers: std::collections::HashMap::new(),
-                    recursive_worktables: std::collections::HashMap::new(),
-                };
+                let mut ctx = self.executor_context_for_catalog(db, snapshot, cid, &catalog);
                 execute_readonly_statement(stmt, &catalog, &mut ctx)
             }
             Statement::Insert(ref insert_stmt) => {
@@ -1755,30 +1752,7 @@ impl Session {
                 let lock_requests = insert_foreign_key_lock_requests(&bound);
                 self.lock_table_requests_if_needed(db, &lock_requests)?;
                 let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
-                let interrupts = self.interrupts();
-                let mut ctx = ExecutorContext {
-                    pool: Arc::clone(&db.pool),
-                    txns: db.txns.clone(),
-                    txn_waiter: Some(db.txn_waiter.clone()),
-                    sequences: Some(db.sequences.clone()),
-                    checkpoint_stats: db.checkpoint_stats_snapshot(),
-                    datetime_config: self.datetime_config.clone(),
-                    interrupts,
-                    snapshot,
-                    client_id,
-                    next_command_id: cid,
-                    timed: false,
-                    allow_side_effects: true,
-                    expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
-                    case_test_values: Vec::new(),
-                    system_bindings: Vec::new(),
-                    subplans: Vec::new(),
-                    catalog: catalog.materialize_visible_catalog(),
-                    compiled_functions: std::collections::HashMap::new(),
-                    cte_tables: std::collections::HashMap::new(),
-                    cte_producers: std::collections::HashMap::new(),
-                    recursive_worktables: std::collections::HashMap::new(),
-                };
+                let mut ctx = self.executor_context_for_catalog(db, snapshot, cid, &catalog);
                 execute_insert(bound, &catalog, &mut ctx, xid, cid)
             }
             Statement::Update(ref update_stmt) => {
@@ -1788,29 +1762,8 @@ impl Session {
                 self.lock_table_requests_if_needed(db, &lock_requests)?;
                 let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
                 let interrupts = self.interrupts();
-                let mut ctx = ExecutorContext {
-                    pool: Arc::clone(&db.pool),
-                    txns: db.txns.clone(),
-                    txn_waiter: Some(db.txn_waiter.clone()),
-                    sequences: Some(db.sequences.clone()),
-                    checkpoint_stats: db.checkpoint_stats_snapshot(),
-                    datetime_config: self.datetime_config.clone(),
-                    interrupts: Arc::clone(&interrupts),
-                    snapshot,
-                    client_id,
-                    next_command_id: cid,
-                    timed: false,
-                    allow_side_effects: true,
-                    expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
-                    case_test_values: Vec::new(),
-                    system_bindings: Vec::new(),
-                    subplans: Vec::new(),
-                    catalog: catalog.materialize_visible_catalog(),
-                    compiled_functions: std::collections::HashMap::new(),
-                    cte_tables: std::collections::HashMap::new(),
-                    cte_producers: std::collections::HashMap::new(),
-                    recursive_worktables: std::collections::HashMap::new(),
-                };
+                let mut ctx = self.executor_context_for_catalog(db, snapshot, cid, &catalog);
+                ctx.interrupts = Arc::clone(&interrupts);
                 execute_update_with_waiter(
                     bound,
                     &catalog,
@@ -1827,29 +1780,8 @@ impl Session {
                 self.lock_table_requests_if_needed(db, &lock_requests)?;
                 let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
                 let interrupts = self.interrupts();
-                let mut ctx = ExecutorContext {
-                    pool: Arc::clone(&db.pool),
-                    txns: db.txns.clone(),
-                    txn_waiter: Some(db.txn_waiter.clone()),
-                    sequences: Some(db.sequences.clone()),
-                    checkpoint_stats: db.checkpoint_stats_snapshot(),
-                    datetime_config: self.datetime_config.clone(),
-                    interrupts: Arc::clone(&interrupts),
-                    snapshot,
-                    client_id,
-                    next_command_id: cid,
-                    timed: false,
-                    allow_side_effects: true,
-                    expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
-                    case_test_values: Vec::new(),
-                    system_bindings: Vec::new(),
-                    subplans: Vec::new(),
-                    catalog: catalog.materialize_visible_catalog(),
-                    compiled_functions: std::collections::HashMap::new(),
-                    cte_tables: std::collections::HashMap::new(),
-                    cte_producers: std::collections::HashMap::new(),
-                    recursive_worktables: std::collections::HashMap::new(),
-                };
+                let mut ctx = self.executor_context_for_catalog(db, snapshot, cid, &catalog);
+                ctx.interrupts = Arc::clone(&interrupts);
                 execute_delete_with_waiter(
                     bound,
                     &catalog,
@@ -2160,6 +2092,14 @@ impl Session {
             match normalized.as_str() {
                 "datestyle" => self.guc_reset_datestyle(),
                 "timezone" => self.guc_reset_timezone(),
+                "stats_fetch_consistency" => self
+                    .stats_state
+                    .write()
+                    .set_fetch_consistency(StatsFetchConsistency::Cache),
+                "track_functions" => self
+                    .stats_state
+                    .write()
+                    .set_track_functions(TrackFunctionsSetting::None),
                 _ => {}
             }
             self.gucs.remove(&normalized);
@@ -2167,6 +2107,9 @@ impl Session {
             self.gucs.clear();
             self.guc_reset_datestyle();
             self.guc_reset_timezone();
+            self.stats_state
+                .write()
+                .set_fetch_consistency(StatsFetchConsistency::Cache);
         }
         Ok(StatementResult::AffectedRows(0))
     }
@@ -2301,6 +2244,24 @@ impl Session {
             "max_stack_depth" => {
                 self.datetime_config.max_stack_depth_kb = parse_max_stack_depth(value)?;
             }
+            "stats_fetch_consistency" => {
+                let Some(fetch_consistency) = StatsFetchConsistency::parse(value) else {
+                    return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+                        value.to_string(),
+                    )));
+                };
+                self.stats_state
+                    .write()
+                    .set_fetch_consistency(fetch_consistency);
+            }
+            "track_functions" => {
+                let Some(track_functions) = TrackFunctionsSetting::parse(value) else {
+                    return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+                        value.to_string(),
+                    )));
+                };
+                self.stats_state.write().set_track_functions(track_functions);
+            }
             _ => {}
         }
         self.gucs.insert(normalized, value.to_string());
@@ -2341,31 +2302,8 @@ impl Session {
         self.lock_table_requests_if_needed(db, &lock_requests)?;
 
         let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
-        let interrupts = self.interrupts();
         let catalog = self.catalog_lookup_for_command(db, xid, cid);
-        let mut ctx = ExecutorContext {
-            pool: Arc::clone(&db.pool),
-            txns: db.txns.clone(),
-            txn_waiter: Some(db.txn_waiter.clone()),
-            sequences: Some(db.sequences.clone()),
-            checkpoint_stats: db.checkpoint_stats_snapshot(),
-            datetime_config: self.datetime_config.clone(),
-            interrupts,
-            snapshot,
-            client_id,
-            next_command_id: cid,
-            timed: false,
-            allow_side_effects: true,
-            expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
-            case_test_values: Vec::new(),
-            system_bindings: Vec::new(),
-            subplans: Vec::new(),
-            catalog: catalog.materialize_visible_catalog(),
-            compiled_functions: std::collections::HashMap::new(),
-            cte_tables: std::collections::HashMap::new(),
-            cte_producers: std::collections::HashMap::new(),
-            recursive_worktables: std::collections::HashMap::new(),
-        };
+        let mut ctx = self.executor_context_for_catalog(db, snapshot, cid, &catalog);
         execute_prepared_insert_row(prepared, params, &mut ctx, xid, cid)
     }
 
@@ -2411,6 +2349,7 @@ impl Session {
                 temp_effects: Vec::new(),
                 sequence_effects: Vec::new(),
             });
+            self.stats_state.write().begin_top_level_xact();
             true
         } else {
             false
@@ -2580,31 +2519,8 @@ impl Session {
                 .collect::<Result<Vec<_>, ExecError>>()?;
 
             let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
-            let interrupts = self.interrupts();
             let catalog = self.catalog_lookup_for_command(db, xid, cid);
-            let mut ctx = ExecutorContext {
-                pool: Arc::clone(&db.pool),
-                txns: db.txns.clone(),
-                txn_waiter: Some(db.txn_waiter.clone()),
-                sequences: Some(db.sequences.clone()),
-                checkpoint_stats: db.checkpoint_stats_snapshot(),
-                datetime_config: self.datetime_config.clone(),
-                interrupts,
-                snapshot,
-                client_id: self.client_id,
-                next_command_id: cid,
-                timed: false,
-                allow_side_effects: true,
-                expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
-                case_test_values: Vec::new(),
-                system_bindings: Vec::new(),
-                subplans: Vec::new(),
-                catalog: catalog.materialize_visible_catalog(),
-                compiled_functions: std::collections::HashMap::new(),
-                cte_tables: std::collections::HashMap::new(),
-                cte_producers: std::collections::HashMap::new(),
-                recursive_worktables: std::collections::HashMap::new(),
-            };
+            let mut ctx = self.executor_context_for_catalog(db, snapshot, cid, &catalog);
             crate::backend::commands::tablecmds::execute_insert_values(
                 table_name,
                 rel,
@@ -2659,6 +2575,7 @@ impl Session {
                         db.table_locks.unlock_table(rel, self.client_id);
                     }
                     commit_result?;
+                    self.stats_state.write().commit_top_level_xact(&db.stats);
                     Ok(n)
                 }
                 Err(e) => {
@@ -2667,6 +2584,7 @@ impl Session {
                     for rel in held_locks {
                         db.table_locks.unlock_table(rel, self.client_id);
                     }
+                    self.stats_state.write().rollback_top_level_xact();
                     Err(e)
                 }
             }

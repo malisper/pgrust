@@ -789,6 +789,7 @@ pub fn execute_truncate_table(
         {
             reinitialize_index_relation(index, ctx, xid)?;
         }
+        ctx.session_stats.write().note_relation_truncate(entry.relation_oid);
     }
     Ok(StatementResult::AffectedRows(0))
 }
@@ -920,6 +921,9 @@ pub fn execute_insert(
             xid,
             cid,
         )?;
+        for _ in 0..inserted {
+            ctx.session_stats.write().note_relation_insert(stmt.relation_oid);
+        }
         Ok(StatementResult::AffectedRows(inserted))
     })();
     ctx.subplans = saved_subplans;
@@ -1651,6 +1655,9 @@ pub fn execute_prepared_insert_row(
         heap_tid,
         ctx,
     )?;
+    ctx.session_stats
+        .write()
+        .note_relation_insert(prepared.relation_oid);
     Ok(())
 }
 
@@ -1792,6 +1799,9 @@ pub fn execute_update_with_waiter(
                                 new_tid,
                                 ctx,
                             )?;
+                            ctx.session_stats
+                                .write()
+                                .note_relation_update(target.relation_oid);
                             affected_rows += 1;
                             break;
                         }
@@ -1949,6 +1959,9 @@ pub fn execute_delete_with_waiter(
                                     xid,
                                 )?;
                             }
+                            ctx.session_stats
+                                .write()
+                                .note_relation_delete(target.relation_oid);
                             affected_rows += 1;
                             break;
                         }

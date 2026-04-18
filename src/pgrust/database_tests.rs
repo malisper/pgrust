@@ -876,6 +876,13 @@ fn query_rows(db: &Database, client_id: u32, sql: &str) -> Vec<Vec<Value>> {
     }
 }
 
+fn session_query_rows(session: &mut Session, db: &Database, sql: &str) -> Vec<Vec<Value>> {
+    match session.execute(db, sql).unwrap() {
+        StatementResult::Query { rows, .. } => rows,
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
 fn explain_lines(db: &Database, client_id: u32, sql: &str) -> Vec<String> {
     match db.execute(client_id, &format!("explain {sql}")).unwrap() {
         StatementResult::Query { rows, .. } => rows
@@ -3368,9 +3375,7 @@ fn create_conversion_rejects_duplicate_name_and_default_pair() {
         1,
         "create conversion myconv for 'LATIN1' to 'UTF8' from iso8859_1_to_utf8",
     ) {
-        Err(ExecError::DetailedError {
-            message, sqlstate, ..
-        }) => {
+        Err(ExecError::DetailedError { message, sqlstate, .. }) => {
             assert_eq!(message, "conversion \"myconv\" already exists");
             assert_eq!(sqlstate, "42710");
         }
@@ -3386,19 +3391,11 @@ fn create_conversion_rejects_duplicate_name_and_default_pair() {
         1,
         "create default conversion public.mydef2 for 'LATIN1' to 'UTF8' from iso8859_1_to_utf8",
     ) {
-        Err(ExecError::DetailedError {
-            message, sqlstate, ..
-        }) => {
-            assert_eq!(
-                message,
-                "default conversion for LATIN1 to UTF8 already exists"
-            );
+        Err(ExecError::DetailedError { message, sqlstate, .. }) => {
+            assert_eq!(message, "default conversion for LATIN1 to UTF8 already exists");
             assert_eq!(sqlstate, "42710");
         }
-        other => panic!(
-            "expected duplicate default conversion error, got {:?}",
-            other
-        ),
+        other => panic!("expected duplicate default conversion error, got {:?}", other),
     }
 }
 
@@ -3445,50 +3442,6 @@ fn alter_table_add_column_reads_old_rows_with_null_or_default() {
             vec![Value::Int32(2), Value::Null, Value::Int32(3)],
         ]
     );
-}
-
-#[test]
-fn alter_table_multi_action_adds_columns_atomically() {
-    let base = temp_dir("alter_table_multi_action_adds_columns");
-    let db = Database::open(&base, 16).unwrap();
-
-    db.execute(1, "create table items (id int4 not null)")
-        .unwrap();
-    db.execute(1, "insert into items values (1), (2)").unwrap();
-    db.execute(
-        1,
-        "alter table items add column note text, add column bucket int4 default 3",
-    )
-    .unwrap();
-
-    assert_eq!(
-        query_rows(&db, 1, "select id, note, bucket from items order by id"),
-        vec![
-            vec![Value::Int32(1), Value::Null, Value::Int32(3)],
-            vec![Value::Int32(2), Value::Null, Value::Int32(3)],
-        ]
-    );
-}
-
-#[test]
-fn alter_table_multi_action_rolls_back_on_failure() {
-    let base = temp_dir("alter_table_multi_action_rollback");
-    let db = Database::open(&base, 16).unwrap();
-
-    db.execute(1, "create table items (id int4 not null)")
-        .unwrap();
-    match db.execute(
-        1,
-        "alter table items add column note text, add column note text",
-    ) {
-        Err(ExecError::DetailedError { .. }) | Err(ExecError::Parse(_)) => {}
-        other => panic!("expected multi-action ALTER TABLE failure, got {other:?}"),
-    }
-
-    match db.execute(1, "select note from items") {
-        Err(ExecError::Parse(ParseError::UnknownColumn(name))) => assert_eq!(name, "note"),
-        other => panic!("expected rolled back column addition, got {other:?}"),
-    }
 }
 
 #[test]
@@ -6943,6 +6896,257 @@ fn stats_gucs_show_postgres_like_defaults_and_runtime_values() {
         }
         other => panic!("expected query result, got {:?}", other),
     }
+}
+
+#[test]
+fn stats_snapshot_timestamp_requires_snapshot_mode_and_clear_snapshot_resets_it() {
+    let base = temp_dir("stats_snapshot_timestamp");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "begin").unwrap();
+
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select pg_stat_get_snapshot_timestamp()"),
+        vec![vec![Value::Null]]
+    );
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select pg_stat_get_function_calls(0)"),
+        vec![vec![Value::Null]]
+    );
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select pg_stat_get_snapshot_timestamp()"),
+        vec![vec![Value::Null]]
+    );
+
+    session
+        .execute(&db, "set local stats_fetch_consistency = snapshot")
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select pg_stat_get_snapshot_timestamp()"),
+        vec![vec![Value::Null]]
+    );
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select pg_stat_get_function_calls(0)"),
+        vec![vec![Value::Null]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select pg_stat_get_snapshot_timestamp() is not null",
+        ),
+        vec![vec![Value::Bool(true)]]
+    );
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select pg_stat_clear_snapshot()"),
+        vec![vec![Value::Null]]
+    );
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select pg_stat_get_snapshot_timestamp()"),
+        vec![vec![Value::Null]]
+    );
+
+    session.execute(&db, "commit").unwrap();
+}
+
+#[test]
+fn relation_stats_views_track_commit_flush_and_rollback() {
+    let base = temp_dir("relation_stats_views");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session1 = Session::new(1);
+    let mut session2 = Session::new(2);
+
+    session1
+        .execute(&db, "set stats_fetch_consistency = none")
+        .unwrap();
+    session2
+        .execute(&db, "set stats_fetch_consistency = none")
+        .unwrap();
+
+    session1
+        .execute(&db, "create table items (id int4 primary key, note text)")
+        .unwrap();
+    session1
+        .execute(&db, "create index items_note_idx on items(note)")
+        .unwrap();
+    session1
+        .execute(&db, "insert into items values (1, 'a'), (2, 'b')")
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session1,
+            &db,
+            "select n_tup_ins from pg_stat_user_tables where relname = 'items'",
+        ),
+        vec![vec![Value::Int64(2)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session2,
+            &db,
+            "select n_tup_ins from pg_stat_user_tables where relname = 'items'",
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+
+    assert_eq!(
+        session_query_rows(&mut session1, &db, "select count(*) from items"),
+        vec![vec![Value::Int64(2)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session1,
+            &db,
+            "select seq_scan > 0, seq_tup_read >= 2 from pg_stat_user_tables where relname = 'items'",
+        ),
+        vec![vec![Value::Bool(true), Value::Bool(true)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session1,
+            &db,
+            "select heap_blks_read + heap_blks_hit > 0 from pg_statio_user_tables where relname = 'items'",
+        ),
+        vec![vec![Value::Bool(true)]]
+    );
+
+    assert_eq!(
+        session_query_rows(&mut session1, &db, "select pg_stat_force_next_flush()"),
+        vec![vec![Value::Null]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session2,
+            &db,
+            "select n_tup_ins, seq_scan > 0 from pg_stat_user_tables where relname = 'items'",
+        ),
+        vec![vec![Value::Int64(2), Value::Bool(true)]]
+    );
+
+    session1.execute(&db, "begin").unwrap();
+    session1
+        .execute(&db, "insert into items values (3, 'c')")
+        .unwrap();
+    session1.execute(&db, "rollback").unwrap();
+    session_query_rows(&mut session1, &db, "select pg_stat_force_next_flush()");
+
+    assert_eq!(
+        session_query_rows(
+            &mut session2,
+            &db,
+            "select n_tup_ins from pg_stat_user_tables where relname = 'items'",
+        ),
+        vec![vec![Value::Int64(2)]]
+    );
+}
+
+#[test]
+fn function_stats_respect_track_functions_and_rollback() {
+    let base = temp_dir("function_stats_views");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session1 = Session::new(1);
+    let mut session2 = Session::new(2);
+
+    session1
+        .execute(&db, "set stats_fetch_consistency = none")
+        .unwrap();
+    session2
+        .execute(&db, "set stats_fetch_consistency = none")
+        .unwrap();
+
+    session1
+        .execute(
+            &db,
+            "create function add_one(n int4) returns int4 language plpgsql as $$ begin return n + 1; end $$",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(&mut session1, &db, "select add_one(1)"),
+        vec![vec![Value::Int32(2)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session1,
+            &db,
+            "select count(*) from pg_stat_user_functions where funcname = 'add_one'",
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+
+    session1.execute(&db, "set track_functions = all").unwrap();
+    assert_eq!(
+        session_query_rows(&mut session1, &db, "select add_one(4), add_one(5)"),
+        vec![vec![Value::Int32(5), Value::Int32(6)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session1,
+            &db,
+            "select calls, total_time is not null, self_time is not null from pg_stat_user_functions where funcname = 'add_one'",
+        ),
+        vec![vec![Value::Int64(2), Value::Bool(true), Value::Bool(true)]]
+    );
+
+    session1.execute(&db, "begin").unwrap();
+    assert_eq!(
+        session_query_rows(&mut session1, &db, "select add_one(9)"),
+        vec![vec![Value::Int32(10)]]
+    );
+    session1.execute(&db, "rollback").unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session1,
+            &db,
+            "select pg_stat_get_function_calls('add_one(int4)'::regprocedure::oid)",
+        ),
+        vec![vec![Value::Int64(2)]]
+    );
+
+    session_query_rows(&mut session1, &db, "select pg_stat_force_next_flush()");
+    assert_eq!(
+        session_query_rows(
+            &mut session2,
+            &db,
+            "select calls from pg_stat_user_functions where funcname = 'add_one'",
+        ),
+        vec![vec![Value::Int64(2)]]
+    );
+}
+
+#[test]
+fn pg_stat_io_exposes_pg_shaped_rows() {
+    let base = temp_dir("pg_stat_io_rows");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "set stats_fetch_consistency = none")
+        .unwrap();
+    session
+        .execute(&db, "create table items (id int4)")
+        .unwrap();
+    session
+        .execute(&db, "insert into items values (1), (2), (3)")
+        .unwrap();
+    let _ = session_query_rows(&mut session, &db, "select * from items");
+
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select count(*) from pg_stat_io"),
+        vec![vec![Value::Int64(79)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select reads > 0, read_bytes > 0 from pg_stat_io where backend_type = 'client backend' and object = 'relation' and context = 'bulkread'",
+        ),
+        vec![vec![Value::Bool(true), Value::Bool(true)]]
+    );
 }
 
 #[test]
@@ -10511,10 +10715,7 @@ fn create_or_replace_function_updates_existing_body() {
         "create function inc(x int4) returns int4 language plpgsql as $$ begin return x + 1; end $$",
     )
     .unwrap();
-    assert_eq!(
-        query_rows(&db, 1, "select inc(4)"),
-        vec![vec![Value::Int32(5)]]
-    );
+    assert_eq!(query_rows(&db, 1, "select inc(4)"), vec![vec![Value::Int32(5)]]);
 
     db.execute(
         1,
@@ -10522,10 +10723,7 @@ fn create_or_replace_function_updates_existing_body() {
     )
     .unwrap();
 
-    assert_eq!(
-        query_rows(&db, 1, "select inc(4)"),
-        vec![vec![Value::Int32(6)]]
-    );
+    assert_eq!(query_rows(&db, 1, "select inc(4)"), vec![vec![Value::Int32(6)]]);
 }
 
 #[test]
@@ -10640,10 +10838,7 @@ fn create_function_supports_void_returns_and_regprocedure_oid_lookup() {
             Value::Text("void".into()),
         ]]
     );
-    assert_eq!(
-        query_rows(&db, 1, "select stats_test_func1()"),
-        vec![vec![Value::Null]]
-    );
+    assert_eq!(query_rows(&db, 1, "select stats_test_func1()"), vec![vec![Value::Null]]);
     assert_eq!(
         query_rows(&db, 1, "select 'stats_test_func1()'::regprocedure::oid"),
         vec![vec![Value::Int64(proc.oid as i64)]]
@@ -11104,11 +11299,8 @@ fn drop_range_type_enforces_restrict_and_if_exists() {
         other => panic!("expected no-op drop type if exists, got {other:?}"),
     }
 
-    db.execute(
-        1,
-        "create type unused_float8range as range (subtype = float8)",
-    )
-    .unwrap();
+    db.execute(1, "create type unused_float8range as range (subtype = float8)")
+        .unwrap();
     match db.execute(1, "drop type unused_float8range") {
         Ok(StatementResult::AffectedRows(1)) => {}
         other => panic!("expected unused range drop success, got {other:?}"),

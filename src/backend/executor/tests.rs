@@ -610,6 +610,12 @@ fn empty_executor_context(base: &PathBuf) -> ExecutorContext {
         interrupts: std::sync::Arc::new(
             crate::backend::utils::misc::interrupts::InterruptState::new(),
         ),
+        stats: std::sync::Arc::new(parking_lot::RwLock::new(
+            crate::pgrust::database::DatabaseStatsStore::with_default_io_rows(),
+        )),
+        session_stats: std::sync::Arc::new(parking_lot::RwLock::new(
+            crate::pgrust::database::SessionStatsState::default(),
+        )),
         snapshot,
         client_id: 1,
         next_command_id: 0,
@@ -648,6 +654,12 @@ fn run_plan(
         interrupts: std::sync::Arc::new(
             crate::backend::utils::misc::interrupts::InterruptState::new(),
         ),
+        stats: std::sync::Arc::new(parking_lot::RwLock::new(
+            crate::pgrust::database::DatabaseStatsStore::with_default_io_rows(),
+        )),
+        session_stats: std::sync::Arc::new(parking_lot::RwLock::new(
+            crate::pgrust::database::SessionStatsState::default(),
+        )),
         snapshot: txns.snapshot(INVALID_TRANSACTION_ID).unwrap(),
         client_id: 42,
         next_command_id: 0,
@@ -724,6 +736,12 @@ fn run_sql_with_catalog(
             interrupts: std::sync::Arc::new(
                 crate::backend::utils::misc::interrupts::InterruptState::new(),
             ),
+            stats: std::sync::Arc::new(parking_lot::RwLock::new(
+                crate::pgrust::database::DatabaseStatsStore::with_default_io_rows(),
+            )),
+            session_stats: std::sync::Arc::new(parking_lot::RwLock::new(
+                crate::pgrust::database::SessionStatsState::default(),
+            )),
             snapshot: txns.snapshot(xid).unwrap(),
             client_id: 77,
             next_command_id: 0,
@@ -5755,6 +5773,12 @@ fn prepared_insert_uses_defaults_for_omitted_columns() {
         interrupts: std::sync::Arc::new(
             crate::backend::utils::misc::interrupts::InterruptState::new(),
         ),
+        stats: std::sync::Arc::new(parking_lot::RwLock::new(
+            crate::pgrust::database::DatabaseStatsStore::with_default_io_rows(),
+        )),
+        session_stats: std::sync::Arc::new(parking_lot::RwLock::new(
+            crate::pgrust::database::SessionStatsState::default(),
+        )),
         snapshot: txns.snapshot(INVALID_TRANSACTION_ID).unwrap(),
         client_id: 77,
         next_command_id: 0,

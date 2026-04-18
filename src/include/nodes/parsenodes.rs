@@ -244,7 +244,6 @@ pub enum Statement {
     AlterViewOwner(AlterRelationOwnerStatement),
     AlterSchemaOwner(AlterSchemaOwnerStatement),
     AlterTableSet(AlterTableSetStatement),
-    AlterTableMulti(AlterTableMultiStatement),
     AlterTableSetNotNull(AlterTableSetNotNullStatement),
     AlterTableDropNotNull(AlterTableDropNotNullStatement),
     AlterTableValidateConstraint(AlterTableValidateConstraintStatement),
@@ -887,55 +886,6 @@ impl From<String> for IndexColumnDef {
 pub struct AlterTableSetStatement {
     pub table_name: String,
     pub options: Vec<RelOption>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AlterTableMultiAction {
-    Set(AlterTableSetStatement),
-    AddColumn(AlterTableAddColumnStatement),
-    AddConstraint(AlterTableAddConstraintStatement),
-    DropColumn(AlterTableDropColumnStatement),
-    DropConstraint(AlterTableDropConstraintStatement),
-    AlterColumnType(AlterTableAlterColumnTypeStatement),
-    SetNotNull(AlterTableSetNotNullStatement),
-    DropNotNull(AlterTableDropNotNullStatement),
-    ValidateConstraint(AlterTableValidateConstraintStatement),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AlterTableMultiStatement {
-    pub table_name: String,
-    pub actions: Vec<AlterTableMultiAction>,
-}
-
-impl AlterTableMultiAction {
-    pub fn table_name(&self) -> &str {
-        match self {
-            Self::Set(stmt) => &stmt.table_name,
-            Self::AddColumn(stmt) => &stmt.table_name,
-            Self::AddConstraint(stmt) => &stmt.table_name,
-            Self::DropColumn(stmt) => &stmt.table_name,
-            Self::DropConstraint(stmt) => &stmt.table_name,
-            Self::AlterColumnType(stmt) => &stmt.table_name,
-            Self::SetNotNull(stmt) => &stmt.table_name,
-            Self::DropNotNull(stmt) => &stmt.table_name,
-            Self::ValidateConstraint(stmt) => &stmt.table_name,
-        }
-    }
-
-    pub fn to_statement(&self) -> Statement {
-        match self {
-            Self::Set(stmt) => Statement::AlterTableSet(stmt.clone()),
-            Self::AddColumn(stmt) => Statement::AlterTableAddColumn(stmt.clone()),
-            Self::AddConstraint(stmt) => Statement::AlterTableAddConstraint(stmt.clone()),
-            Self::DropColumn(stmt) => Statement::AlterTableDropColumn(stmt.clone()),
-            Self::DropConstraint(stmt) => Statement::AlterTableDropConstraint(stmt.clone()),
-            Self::AlterColumnType(stmt) => Statement::AlterTableAlterColumnType(stmt.clone()),
-            Self::SetNotNull(stmt) => Statement::AlterTableSetNotNull(stmt.clone()),
-            Self::DropNotNull(stmt) => Statement::AlterTableDropNotNull(stmt.clone()),
-            Self::ValidateConstraint(stmt) => Statement::AlterTableValidateConstraint(stmt.clone()),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -14,6 +14,7 @@ fn toast_index_relation_from_changes(changes: &ToastCatalogChanges) -> Option<Bo
         relation_oid: changes.index_entry.relation_oid,
         desc: changes.index_entry.desc.clone(),
         index_meta: IndexRelCacheEntry {
+            indexrelid: changes.index_entry.relation_oid,
             indrelid: meta.indrelid,
             indnatts: meta.indkey.len() as i16,
             indnkeyatts: meta.indkey.len() as i16,

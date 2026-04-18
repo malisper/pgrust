@@ -2,13 +2,17 @@ use crate::backend::catalog::pg_constraint::derived_pg_constraint_rows;
 use crate::backend::parser::{BoundRelation, CatalogLookup, SqlType};
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::relcache::RelCache;
-use crate::backend::utils::cache::system_views::{build_pg_stats_rows, build_pg_views_rows};
+use crate::backend::utils::cache::system_views::{
+    build_pg_stat_io_rows, build_pg_stat_user_functions_rows, build_pg_stat_user_tables_rows,
+    build_pg_stats_rows, build_pg_statio_user_tables_rows, build_pg_views_rows,
+};
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, PgCastRow, PgClassRow, PgConstraintRow, PgInheritsRow, PgLanguageRow,
-    PgOperatorRow, PgProcRow, PgRangeRow, PgRewriteRow, PgStatisticRow, PgTypeRow,
+    BOOTSTRAP_SUPERUSER_OID, PgCastRow, PgClassRow, PgConstraintRow, PgInheritsRow, PgIndexRow,
+    PgLanguageRow, PgOperatorRow, PgProcRow, PgRangeRow, PgRewriteRow, PgStatisticRow, PgTypeRow,
     bootstrap_pg_cast_rows, bootstrap_pg_language_rows, bootstrap_pg_operator_rows,
     bootstrap_pg_proc_rows, builtin_range_rows, builtin_type_rows,
 };
+use crate::pgrust::database::DatabaseStatsStore;
 
 #[derive(Debug, Clone)]
 pub struct VisibleCatalog {
@@ -285,6 +289,44 @@ impl CatalogLookup for VisibleCatalog {
 
     fn pg_stat_activity_rows(&self) -> Vec<Vec<crate::backend::executor::Value>> {
         Vec::new()
+    }
+
+    fn pg_stat_user_tables_rows(&self) -> Vec<Vec<crate::backend::executor::Value>> {
+        let Some(catcache) = &self.catcache else {
+            return Vec::new();
+        };
+        let stats = DatabaseStatsStore::with_default_io_rows();
+        build_pg_stat_user_tables_rows(
+            catcache.namespace_rows(),
+            catcache.class_rows(),
+            catcache.index_rows(),
+            &stats,
+        )
+    }
+
+    fn pg_statio_user_tables_rows(&self) -> Vec<Vec<crate::backend::executor::Value>> {
+        let Some(catcache) = &self.catcache else {
+            return Vec::new();
+        };
+        let stats = DatabaseStatsStore::with_default_io_rows();
+        build_pg_statio_user_tables_rows(
+            catcache.namespace_rows(),
+            catcache.class_rows(),
+            catcache.index_rows(),
+            &stats,
+        )
+    }
+
+    fn pg_stat_user_functions_rows(&self) -> Vec<Vec<crate::backend::executor::Value>> {
+        let Some(catcache) = &self.catcache else {
+            return Vec::new();
+        };
+        let stats = DatabaseStatsStore::with_default_io_rows();
+        build_pg_stat_user_functions_rows(catcache.namespace_rows(), catcache.proc_rows(), &stats)
+    }
+
+    fn pg_stat_io_rows(&self) -> Vec<Vec<crate::backend::executor::Value>> {
+        build_pg_stat_io_rows(&DatabaseStatsStore::with_default_io_rows())
     }
 
     fn materialize_visible_catalog(&self) -> Option<VisibleCatalog> {

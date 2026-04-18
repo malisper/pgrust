@@ -297,7 +297,7 @@ Targeted reruns on 2026-04-17:
 - [done] Match PostgreSQL `bytea` input diagnostics for malformed hex and escape sequences, including `pg_input_error_info()` messages and SQLSTATEs.
 - [done] Tighten `SIMILAR TO` and `SUBSTRING ... SIMILAR` behavior for one-separator patterns, `ESCAPE NULL`, and PostgreSQL-compatible error text.
 - [done] Match POSIX regexp function behavior in `strings.sql`, especially `regexp_replace`, `regexp_like`, and `regexp_matches` flag handling, replacement escaping, and PostgreSQL-compatible error text.
-- [done] Restore PostgreSQL-style cursor position reporting for remaining `strings.sql` execution errors such as invalid `bytea` escape input.
+- Restore PostgreSQL-style cursor position reporting for remaining `strings.sql` execution errors such as invalid `bytea` escape input.
 
 ## JSONPath follow-ups
 
@@ -422,8 +422,8 @@ Targeted reruns on 2026-04-17:
 - stats.sql
   - [done] Teach `SHOW`/stats GUC handling to return PostgreSQL-like values for `track_counts`, `track_functions`, and `stats_fetch_consistency` instead of the generic `"default"` fallback.
   - Add parser support for transaction savepoint statements: `SAVEPOINT`, `RELEASE SAVEPOINT`, and `ROLLBACK TO SAVEPOINT`.
-  - Add SQL-visible stats relations/views needed by the test: `pg_stat_io`, `pg_stat_user_tables`, `pg_statio_user_tables`, and `pg_stat_user_functions`.
-  - Implement the builtin stats functions used by the test, including `pg_stat_force_next_flush()`, `pg_stat_get_snapshot_timestamp()`, function-call stats accessors, and relation tuple/block counters.
+  - [done] Add SQL-visible stats relations/views needed by the test: `pg_stat_io`, `pg_stat_user_tables`, `pg_statio_user_tables`, and `pg_stat_user_functions`.
+  - [done] Implement the builtin stats functions used by the test, including `pg_stat_force_next_flush()`, `pg_stat_get_snapshot_timestamp()`, function-call stats accessors, and relation tuple/block counters.
   - Add runtime tracking and transactional accounting for relation stats: seq/index scan counts, tuple read/fetch counts, block read/hit counts, tuple insert/update/delete counts, live/dead tuple counts, and `TRUNCATE` effects across commit/rollback/savepoint boundaries.
   - Add runtime tracking for function execution stats, including xact-local counters and correct visibility/drop behavior across rollback, subtransactions, and committed drops.
   - [done] Add support for SQL-visible object lookup/types used by the file’s function-stat queries: `void`, `regprocedure`, and the corresponding cast/lookup path for `'func()'::regprocedure::oid`.
@@ -439,7 +439,7 @@ Targeted reruns on 2026-04-17:
 - Mixed set-operation chains: accept PostgreSQL-style left-associative chains such as `SELECT 1 UNION SELECT 2 UNION ALL SELECT 2` instead of rejecting them in the parser.
 - Shared regression fixture visibility: investigate why bootstrap tables from `scripts/test_setup_pgrust.sql` like `float8_tbl`, `int8_tbl`, and `tenk1` are not consistently resolvable during regression runs.
 - privileges.sql parity:
-  - [done] expose privilege-related system catalogs in SQL, including `pg_auth_members` and `pg_largeobject_metadata`
+  - expose privilege-related system catalogs in SQL, including `pg_auth_members` and `pg_largeobject_metadata`
   - [done] add parser/analyzer support for role membership `GRANTED BY`
   - [done] add parser/analyzer/executor support for `CASCADE` in role membership revokes
   - [done] implement `SET ROLE` and `RESET ROLE`
