@@ -62,11 +62,46 @@ pub(super) fn bind_grouped_scalar_subquery(
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
 ) -> Result<Expr, ParseError> {
+    bind_grouped_single_column_sublink(
+        select,
+        SubLinkType::ExprSubLink,
+        group_by_exprs,
+        input_scope,
+        catalog,
+        outer_scopes,
+    )
+}
+
+pub(super) fn bind_grouped_array_subquery(
+    select: &SelectStatement,
+    group_by_exprs: &[SqlExpr],
+    input_scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+) -> Result<Expr, ParseError> {
+    bind_grouped_single_column_sublink(
+        select,
+        SubLinkType::ArraySubLink,
+        group_by_exprs,
+        input_scope,
+        catalog,
+        outer_scopes,
+    )
+}
+
+fn bind_grouped_single_column_sublink(
+    select: &SelectStatement,
+    sublink_type: SubLinkType,
+    group_by_exprs: &[SqlExpr],
+    input_scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+) -> Result<Expr, ParseError> {
     let query =
         build_grouped_subquery_plan(select, group_by_exprs, input_scope, catalog, outer_scopes)?;
     ensure_single_column_subquery(query.columns().len())?;
     Ok(Expr::SubLink(Box::new(SubLink {
-        sublink_type: SubLinkType::ExprSubLink,
+        sublink_type,
         testexpr: None,
         subselect: Box::new(query),
     })))

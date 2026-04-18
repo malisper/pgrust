@@ -709,6 +709,7 @@ fn visit_nested_srfs(
         | SqlExpr::IntegerLiteral(_)
         | SqlExpr::NumericLiteral(_)
         | SqlExpr::ScalarSubquery(_)
+        | SqlExpr::ArraySubquery(_)
         | SqlExpr::Exists(_)
         | SqlExpr::Random
         | SqlExpr::CurrentDate
