@@ -277,6 +277,7 @@ pub enum Statement {
     TruncateTable(TruncateTableStatement),
     Vacuum(VacuumStatement),
     Insert(InsertStatement),
+    Merge(MergeStatement),
     Update(UpdateStatement),
     Delete(DeleteStatement),
     Unsupported(UnsupportedStatement),
@@ -763,6 +764,51 @@ pub enum InsertSource {
     Values(Vec<Vec<SqlExpr>>),
     DefaultValues,
     Select(Box<SelectStatement>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergeStatement {
+    pub with_recursive: bool,
+    pub with: Vec<CommonTableExpr>,
+    pub target_table: String,
+    pub target_alias: Option<String>,
+    pub target_only: bool,
+    pub source: FromItem,
+    pub join_condition: SqlExpr,
+    pub when_clauses: Vec<MergeWhenClause>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergeWhenClause {
+    pub match_kind: MergeMatchKind,
+    pub condition: Option<SqlExpr>,
+    pub action: MergeAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeMatchKind {
+    Matched,
+    NotMatchedBySource,
+    NotMatchedByTarget,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MergeAction {
+    DoNothing,
+    Delete,
+    Update {
+        assignments: Vec<Assignment>,
+    },
+    Insert {
+        columns: Option<Vec<String>>,
+        source: MergeInsertSource,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MergeInsertSource {
+    Values(Vec<SqlExpr>),
+    DefaultValues,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

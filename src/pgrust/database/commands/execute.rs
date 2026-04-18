@@ -356,6 +356,9 @@ impl Database {
                     create_stmt,
                     configured_search_path,
                 ),
+            Statement::Merge(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                "MERGE".into(),
+            ))),
             Statement::CommentOnTable(ref comment_stmt) => self
                 .execute_comment_on_table_stmt_with_search_path(
                     client_id,

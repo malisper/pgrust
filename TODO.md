@@ -191,6 +191,12 @@ Targeted reruns on 2026-04-17:
 - md5.sql: 14/14
 - memoize.sql: 38/88
 - merge.sql: 206/641
+  1. `MERGE` grammar and AST support (`MERGE INTO`, `USING`, `WHEN MATCHED`, `WHEN NOT MATCHED`, `DO NOTHING`, `UPDATE`, `DELETE`, `INSERT`)
+  2. `MERGE` binder/planner support, including PostgreSQL-compatible name resolution, branch validation, and `EXPLAIN` output
+  3. `MERGE` executor support, including branch execution, permissions, and SQL-visible errors
+  4. Table-object `GRANT`/`REVOKE` privilege parsing for forms used by `merge.sql` (`INSERT`, `UPDATE`, `DELETE` on tables)
+  5. Data-modifying statement integration for `MERGE` in `WITH`/`COPY` contexts and the corresponding `RETURNING` validation errors
+  6. Materialized view DDL/support checks needed by the `MERGE` unsupported-relation tests
 - misc.sql: 0/61
 - misc_functions.sql: 23/160
 - misc_sanity.sql: 0/5
