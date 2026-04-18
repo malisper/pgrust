@@ -308,6 +308,9 @@ Targeted reruns on 2026-04-17:
 - In progress: jsonpath expression/forms support.
   Done: `exists(...)`, `.size()`, `.type()`, and expression-level method chaining for
   `.abs()`, `.ceiling()`, and `.floor()`.
+  Done: builtin item methods `.double()`, `.boolean()`, and `.string()`.
+  Done: builtin numeric cast methods `.number()`, `.integer()`, and `.decimal(...)`.
+  Done: string predicate operators `starts with` and `like_regex ... flag ...`.
   Remaining: other currently-rejected valid jsonpath syntax.
 - In progress: PostgreSQL lax-mode auto-unwrapping for array/scalar access.
   Done: `lax $[0]` on scalar values now matches upstream behavior.
@@ -416,6 +419,8 @@ Targeted reruns on 2026-04-17:
 - date.sql:
   make `EXTRACT(... FROM date)` use PostgreSQL-compatible default column labels and unsupported-unit diagnostics
 - date.sql:
+  support `date_trunc(text, timestamp)` and match PostgreSQL `date_trunc` output semantics for date and timestamp inputs
+- date.sql:
   fix `make_date` / `make_time` SQL-visible behavior, including overflow handling and proper error messages for invalid arguments
 
 - stats.sql
@@ -445,7 +450,7 @@ Targeted reruns on 2026-04-17:
   - implement SQL-visible `session_user`, `current_user`, and `current_role` semantics used by the regression
   - add parser/executor support for `DROP OWNED`
   - add parser support for `DROP USER`, `CREATE GROUP`, and `ALTER GROUP`
-  - [done] make role membership grant/revoke execution honor explicit grantors and dependent membership chains
+  - make role membership grant/revoke execution honor explicit grantors and dependent membership chains
   - align duplicate-role and role-grant error text with PostgreSQL where practical
 
 ## DONE
