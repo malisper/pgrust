@@ -5,6 +5,9 @@ use num_traits::Zero;
 use crate::backend::executor::ExecError;
 use crate::backend::executor::expr_ops::parse_numeric_text;
 use crate::backend::executor::jsonb::{JsonbValue, compare_jsonb};
+use crate::backend::executor::pg_regex::{
+    eval_jsonpath_like_regex, validate_jsonpath_like_regex,
+};
 use crate::include::nodes::datum::NumericValue;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,6 +33,15 @@ enum Expr {
         op: CompareOp,
         left: Box<Expr>,
         right: Box<Expr>,
+    },
+    StartsWith {
+        left: Box<Expr>,
+        right: Box<Expr>,
+    },
+    LikeRegex {
+        expr: Box<Expr>,
+        pattern: String,
+        flags: String,
     },
     Arithmetic {
         op: ArithmeticOp,
@@ -194,7 +206,13 @@ fn eval_expr(expr: &Expr, ctx: &RuntimeContext<'_>) -> Result<Vec<JsonbValue>, E
             }
             Ok(values)
         }
-        Expr::Compare { .. } | Expr::And(..) | Expr::Or(..) | Expr::Not(..) | Expr::IsUnknown(..) => {
+        Expr::Compare { .. }
+        | Expr::StartsWith { .. }
+        | Expr::LikeRegex { .. }
+        | Expr::And(..)
+        | Expr::Or(..)
+        | Expr::Not(..)
+        | Expr::IsUnknown(..) => {
             Ok(vec![predicate_value_to_jsonb(eval_predicate(expr, ctx)?)])
         }
         Expr::Exists(..) => Ok(vec![predicate_value_to_jsonb(eval_predicate(expr, ctx)?)]),
@@ -234,6 +252,28 @@ fn eval_predicate(expr: &Expr, ctx: &RuntimeContext<'_>) -> Result<PredicateValu
                 Err(_) => return Ok(PredicateValue::Unknown),
             };
             Ok(compare_any_pair(&left_values, &right_values, *op, ctx.mode))
+        }
+        Expr::StartsWith { left, right } => {
+            let left_values = match eval_expr(left, ctx) {
+                Ok(values) => values,
+                Err(_) => return Ok(PredicateValue::Unknown),
+            };
+            let right_values = match eval_expr(right, ctx) {
+                Ok(values) => values,
+                Err(_) => return Ok(PredicateValue::Unknown),
+            };
+            Ok(starts_with_any_pair(&left_values, &right_values))
+        }
+        Expr::LikeRegex {
+            expr,
+            pattern,
+            flags,
+        } => {
+            let values = match eval_expr(expr, ctx) {
+                Ok(values) => values,
+                Err(_) => return Ok(PredicateValue::Unknown),
+            };
+            like_regex_any(&values, pattern, flags)
         }
         Expr::And(left, right) => {
             let left_value = eval_predicate(left, ctx)?;
@@ -608,6 +648,72 @@ fn compare_any_pair(
     }
 }
 
+fn starts_with_any_pair(left: &[JsonbValue], right: &[JsonbValue]) -> PredicateValue {
+    let mut unknown = false;
+    for left_value in left {
+        for right_value in right {
+            match starts_with_values(left_value, right_value) {
+                PredicateValue::True => return PredicateValue::True,
+                PredicateValue::Unknown => unknown = true,
+                PredicateValue::False => {}
+            }
+        }
+    }
+    if unknown {
+        PredicateValue::Unknown
+    } else {
+        PredicateValue::False
+    }
+}
+
+fn starts_with_values(left: &JsonbValue, right: &JsonbValue) -> PredicateValue {
+    match (left, right) {
+        (JsonbValue::String(left), JsonbValue::String(right)) => {
+            if left.starts_with(right.as_str()) {
+                PredicateValue::True
+            } else {
+                PredicateValue::False
+            }
+        }
+        _ => PredicateValue::Unknown,
+    }
+}
+
+fn like_regex_any(
+    values: &[JsonbValue],
+    pattern: &str,
+    flags: &str,
+) -> Result<PredicateValue, ExecError> {
+    let mut unknown = false;
+    for value in values {
+        match like_regex_value(value, pattern, flags)? {
+            PredicateValue::True => return Ok(PredicateValue::True),
+            PredicateValue::Unknown => unknown = true,
+            PredicateValue::False => {}
+        }
+    }
+    Ok(if unknown {
+        PredicateValue::Unknown
+    } else {
+        PredicateValue::False
+    })
+}
+
+fn like_regex_value(
+    value: &JsonbValue,
+    pattern: &str,
+    flags: &str,
+) -> Result<PredicateValue, ExecError> {
+    let JsonbValue::String(text) = value else {
+        return Ok(PredicateValue::Unknown);
+    };
+    Ok(if eval_jsonpath_like_regex(text, pattern, flags)? {
+        PredicateValue::True
+    } else {
+        PredicateValue::False
+    })
+}
+
 fn compare_values(left: &JsonbValue, right: &JsonbValue, op: CompareOp) -> PredicateValue {
     if !same_jsonb_type(left, right) {
         return PredicateValue::Unknown;
@@ -946,6 +1052,24 @@ fn render_expr(expr: &Expr, out: &mut String) {
             });
             render_operand(right, out);
         }
+        Expr::StartsWith { left, right } => {
+            render_operand(left, out);
+            out.push_str(" starts with ");
+            render_operand(right, out);
+        }
+        Expr::LikeRegex {
+            expr,
+            pattern,
+            flags,
+        } => {
+            render_operand(expr, out);
+            out.push_str(" like_regex ");
+            render_quoted_string(pattern, out);
+            if !flags.is_empty() {
+                out.push_str(" flag ");
+                render_quoted_string(flags, out);
+            }
+        }
         Expr::Arithmetic { op, left, right } => {
             render_operand(left, out);
             out.push_str(match op {
@@ -1002,7 +1126,12 @@ fn render_expr(expr: &Expr, out: &mut String) {
 
 fn render_operand(expr: &Expr, out: &mut String) {
     match expr {
-        Expr::Compare { .. } | Expr::Arithmetic { .. } | Expr::And(..) | Expr::Or(..) => {
+        Expr::Compare { .. }
+        | Expr::StartsWith { .. }
+        | Expr::LikeRegex { .. }
+        | Expr::Arithmetic { .. }
+        | Expr::And(..)
+        | Expr::Or(..) => {
             out.push('(');
             render_expr(expr, out);
             out.push(')');
@@ -1223,6 +1352,39 @@ impl<'a> Parser<'a> {
     fn parse_compare_expr(&mut self) -> Result<Expr, ExecError> {
         let left = self.parse_additive_expr()?;
         self.skip_ws();
+        let saved = self.offset;
+        if self.consume_keyword("starts") {
+            self.require_ws()?;
+            if !self.consume_keyword("with") {
+                return Err(exec_jsonpath_error("expected WITH after STARTS"));
+            }
+            let right = self.parse_additive_expr()?;
+            return Ok(Expr::StartsWith {
+                left: Box::new(left),
+                right: Box::new(right),
+            });
+        }
+        self.offset = saved;
+        if self.consume_keyword("like_regex") {
+            self.skip_ws();
+            let pattern = self
+                .parse_string()?
+                .ok_or_else(|| exec_jsonpath_error("expected jsonpath like_regex pattern"))?;
+            self.skip_ws();
+            let flags = if self.consume_keyword("flag") {
+                self.skip_ws();
+                self.parse_string()?
+                    .ok_or_else(|| exec_jsonpath_error("expected jsonpath like_regex flags"))?
+            } else {
+                String::new()
+            };
+            validate_jsonpath_like_regex(&pattern, &flags)?;
+            return Ok(Expr::LikeRegex {
+                expr: Box::new(left),
+                pattern,
+                flags,
+            });
+        }
         let op = if self.consume("==") {
             Some(CompareOp::Eq)
         } else if self.consume("!=") {
