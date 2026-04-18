@@ -90,9 +90,9 @@ struct CatalogControl {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::catalog::indexing::vacuum_system_catalog_indexes_for_kinds_in_db;
     use crate::backend::catalog::bootstrap::bootstrap_catalog_rel;
     use crate::backend::catalog::column_desc;
+    use crate::backend::catalog::indexing::vacuum_system_catalog_indexes_for_kinds_in_db;
     use crate::backend::catalog::loader::load_physical_catalog_rows;
     use crate::backend::catalog::rows::physical_catalog_rows_for_catalog_entry;
     use crate::backend::parser::{SqlType, SqlTypeKind};
@@ -611,10 +611,9 @@ mod tests {
         assert_eq!(dropped.rolname, "app_owner");
 
         let reopened = CatalogStore::load(&base).unwrap();
-        let rows = load_physical_catalog_rows(reopened.base_dir()).unwrap();
+        let rows = reopened.catcache().unwrap().authid_rows();
         assert!(
             !rows
-                .authids
                 .iter()
                 .any(|row| row.rolname == "app_user" || row.rolname == "app_owner")
         );
@@ -1540,7 +1539,9 @@ mod tests {
             smgr.open(bootstrap_catalog_rel(kind, 1)).unwrap();
         }
         let pool = Arc::new(BufferPool::new(SmgrStorageBackend::new(smgr), 16));
-        let txns = Arc::new(RwLock::new(TransactionManager::new_durable(base.clone()).unwrap()));
+        let txns = Arc::new(RwLock::new(
+            TransactionManager::new_durable(base.clone()).unwrap(),
+        ));
         let xid = txns.write().begin();
         let ctx = CatalogWriteContext {
             pool: Arc::clone(&pool),
