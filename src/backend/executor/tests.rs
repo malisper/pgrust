@@ -11044,6 +11044,33 @@ fn jsonpath_builtin_method_calls_parse() {
 }
 
 #[test]
+fn jsonpath_numeric_method_calls_parse() {
+    let base = temp_dir("jsonpath_numeric_method_calls_parse");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select '$.number()'::jsonpath, '$.integer()'::jsonpath, '$.decimal(4,2)'::jsonpath",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::JsonPath("$.number()".into()),
+                    Value::JsonPath("$.integer()".into()),
+                    Value::JsonPath("$.decimal(4, 2)".into()),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn jsonpath_expression_method_calls_work() {
     let base = temp_dir("jsonpath_expression_method_calls");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -11080,6 +11107,47 @@ fn jsonpath_expression_method_calls_work() {
                     ),
                     other => panic!("expected jsonb, got {:?}", other),
                 }
+            }
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn jsonpath_numeric_method_calls_work() {
+    let base = temp_dir("jsonpath_numeric_method_calls");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_path_query('1e1000', '$.number()'), jsonb_path_query('1.83', '$.integer()'), jsonb_path_query('1234.5678', '$.decimal(+6, -2)')",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows.len(), 1);
+            match &rows[0][0] {
+                Value::Jsonb(bytes) => assert_eq!(
+                    crate::backend::executor::jsonb::render_jsonb_bytes(bytes).unwrap(),
+                    "10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+                ),
+                other => panic!("expected jsonb, got {:?}", other),
+            }
+            match &rows[0][1] {
+                Value::Jsonb(bytes) => assert_eq!(
+                    crate::backend::executor::jsonb::render_jsonb_bytes(bytes).unwrap(),
+                    "2"
+                ),
+                other => panic!("expected jsonb, got {:?}", other),
+            }
+            match &rows[0][2] {
+                Value::Jsonb(bytes) => assert_eq!(
+                    crate::backend::executor::jsonb::render_jsonb_bytes(bytes).unwrap(),
+                    "1200"
+                ),
+                other => panic!("expected jsonb, got {:?}", other),
             }
         }
         other => panic!("expected query result, got {:?}", other),
@@ -11125,6 +11193,54 @@ fn jsonpath_builtin_method_calls_work() {
         }
         other => panic!("expected query result, got {:?}", other),
     }
+}
+
+#[test]
+fn jsonpath_numeric_method_calls_errors() {
+    let base = temp_dir("jsonpath_numeric_method_calls_errors");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_path_query('\"1.23aaa\"', '$.number()')",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::InvalidStorageValue { column, details }
+            if column == "jsonpath"
+                && details == "argument \"1.23aaa\" of jsonpath item method .number() is invalid for type numeric"
+    ));
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_path_query('12345678901', '$.integer()')",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::InvalidStorageValue { column, details }
+            if column == "jsonpath"
+                && details == "argument \"12345678901\" of jsonpath item method .integer() is invalid for type integer"
+    ));
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_path_query('12.3', '$.decimal(12345678901,1)')",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::InvalidStorageValue { column, details }
+            if column == "jsonpath"
+                && details == "precision of jsonpath item method .decimal() is out of range for type integer"
+    ));
 }
 
 #[test]
