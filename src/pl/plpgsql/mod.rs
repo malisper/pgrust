@@ -8,9 +8,13 @@ use crate::backend::parser::{Catalog, DoStatement, ParseError};
 
 pub use ast::*;
 pub use compile::CompiledFunction;
-pub use exec::{PlpgsqlNotice, clear_notices, take_notices};
+pub use exec::{
+    PlpgsqlNotice, TriggerCallContext, TriggerFunctionResult, TriggerOperation, clear_notices,
+    take_notices,
+};
 pub(crate) use exec::{
     execute_user_defined_scalar_function, execute_user_defined_set_returning_function,
+    execute_user_defined_trigger_function,
 };
 pub use gram::parse_block;
 

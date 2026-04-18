@@ -55,6 +55,15 @@ fn unsupported_record_input() -> ExecError {
     }
 }
 
+fn unsupported_trigger_input() -> ExecError {
+    ExecError::DetailedError {
+        message: "cannot accept a value of type trigger".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "0A000",
+    }
+}
+
 fn parse_pg_integer_text(text: &str, ty: &'static str) -> Result<i128, ExecError> {
     let trimmed = text.trim_matches(|ch: char| ch.is_ascii_whitespace());
     if trimmed.is_empty() {
@@ -1252,6 +1261,10 @@ pub(crate) fn cast_value_with_config(
                 kind: SqlTypeKind::Record | SqlTypeKind::Composite,
                 ..
             } => Err(unsupported_record_input()),
+            SqlType {
+                kind: SqlTypeKind::Trigger,
+                ..
+            } => Err(unsupported_trigger_input()),
         },
         Value::Int32(v) => match ty {
             SqlType {
@@ -1353,6 +1366,10 @@ pub(crate) fn cast_value_with_config(
                 kind: SqlTypeKind::Record | SqlTypeKind::Composite,
                 ..
             } => Err(unsupported_record_input()),
+            SqlType {
+                kind: SqlTypeKind::Trigger,
+                ..
+            } => Err(unsupported_trigger_input()),
         },
         Value::Bool(v) => match ty {
             SqlType {
@@ -1429,6 +1446,10 @@ pub(crate) fn cast_value_with_config(
                 kind: SqlTypeKind::Record | SqlTypeKind::Composite,
                 ..
             } => Err(unsupported_record_input()),
+            SqlType {
+                kind: SqlTypeKind::Trigger,
+                ..
+            } => Err(unsupported_trigger_input()),
         },
         Value::Date(v) => match ty.kind {
             SqlTypeKind::Date => Ok(Value::Date(v)),
@@ -1831,6 +1852,10 @@ pub(crate) fn cast_value_with_config(
                 kind: SqlTypeKind::Record | SqlTypeKind::Composite,
                 ..
             } => Err(unsupported_record_input()),
+            SqlType {
+                kind: SqlTypeKind::Trigger,
+                ..
+            } => Err(unsupported_trigger_input()),
         },
         Value::Float64(v) => match ty {
             SqlType {
@@ -1936,6 +1961,10 @@ pub(crate) fn cast_value_with_config(
                 kind: SqlTypeKind::Record | SqlTypeKind::Composite,
                 ..
             } => Err(unsupported_record_input()),
+            SqlType {
+                kind: SqlTypeKind::Trigger,
+                ..
+            } => Err(unsupported_trigger_input()),
         },
         Value::Numeric(numeric) => cast_numeric_value(numeric, ty, true),
         Value::Money(v) => match ty.kind {
@@ -1996,6 +2025,7 @@ pub(super) fn cast_text_value_with_config(
     match ty.kind {
         SqlTypeKind::AnyArray => Err(unsupported_anyarray_input()),
         SqlTypeKind::Record | SqlTypeKind::Composite => Err(unsupported_record_input()),
+        SqlTypeKind::Trigger => Err(unsupported_trigger_input()),
         SqlTypeKind::Text
         | SqlTypeKind::Range
         | SqlTypeKind::Int2Vector
@@ -2115,6 +2145,7 @@ pub(super) fn cast_numeric_value(
     match ty.kind {
         SqlTypeKind::AnyArray => Err(unsupported_anyarray_input()),
         SqlTypeKind::Record | SqlTypeKind::Composite => Err(unsupported_record_input()),
+        SqlTypeKind::Trigger => Err(unsupported_trigger_input()),
         SqlTypeKind::Void => Err(ExecError::TypeMismatch {
             op: "::void",
             left: Value::Numeric(value),

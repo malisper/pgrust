@@ -1,5 +1,5 @@
-use pest::iterators::Pair;
 use pest::Parser as _;
+use pest::iterators::Pair;
 use pest_derive::Parser;
 
 use super::comments::{
@@ -68,6 +68,9 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_create_function_statement(&sql)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_trigger_statement(&sql)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_create_type_statement(&sql)? {
         return Ok(stmt);
     }
@@ -108,6 +111,24 @@ fn try_parse_create_tablespace_statement(sql: &str) -> Result<Option<Statement>,
     Ok(Some(Statement::CreateTablespace(
         build_create_tablespace_statement(trimmed)?,
     )))
+}
+
+fn try_parse_trigger_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if lowered.starts_with("create trigger ")
+        || lowered.starts_with("create or replace trigger ")
+        || lowered.starts_with("create constraint trigger ")
+        || lowered.starts_with("drop trigger ")
+    {
+        if lowered.starts_with("drop trigger ") {
+            return build_drop_trigger_statement(trimmed)
+                .map(|stmt| Some(Statement::DropTrigger(stmt)));
+        }
+        return build_create_trigger_statement(trimmed)
+            .map(|stmt| Some(Statement::CreateTrigger(stmt)));
+    }
+    Ok(None)
 }
 
 fn build_create_tablespace_statement(sql: &str) -> Result<CreateTablespaceStatement, ParseError> {
@@ -167,6 +188,7 @@ pub fn parse_type_name(sql: &str) -> Result<RawTypeName, ParseError> {
         "oidvector" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::OidVector))),
         "name" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Name))),
         "pg_node_tree" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::PgNodeTree))),
+        "trigger" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Trigger))),
         "void" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Void))),
         "regprocedure" => {
             return Ok(RawTypeName::Builtin(SqlType::new(
@@ -1181,6 +1203,289 @@ fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement,
         return_spec,
         language: language.ok_or(ParseError::UnexpectedEof)?,
         body: body.ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
+fn build_create_trigger_statement(sql: &str) -> Result<CreateTriggerStatement, ParseError> {
+    let lowered = sql.to_ascii_lowercase();
+    if lowered.starts_with("create constraint trigger") {
+        return Err(ParseError::FeatureNotSupported(
+            "CONSTRAINT TRIGGER is not supported".into(),
+        ));
+    }
+    let (prefix, replace_existing) = if lowered.starts_with("create or replace trigger") {
+        ("create or replace trigger", true)
+    } else {
+        ("create trigger", false)
+    };
+    let Some(rest) = sql.get(prefix.len()..) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "CREATE TRIGGER name ...",
+            actual: sql.into(),
+        });
+    };
+    let (trigger_name, rest) = parse_sql_identifier(rest.trim_start())?;
+    let rest = rest.trim_start();
+    let (timing, rest) = if keyword_at_start(rest, "before") {
+        (TriggerTiming::Before, consume_keyword(rest, "before"))
+    } else if keyword_at_start(rest, "after") {
+        (TriggerTiming::After, consume_keyword(rest, "after"))
+    } else if keyword_at_start(rest, "instead") {
+        return Err(ParseError::FeatureNotSupported(
+            "INSTEAD OF triggers are not supported".into(),
+        ));
+    } else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "BEFORE or AFTER",
+            actual: rest.into(),
+        });
+    };
+    let rest = rest.trim_start();
+    let on_boundary =
+        find_next_top_level_keyword(rest, &["on"]).ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "trigger event list followed by ON",
+            actual: sql.into(),
+        })?;
+    let events = parse_trigger_events(rest[..on_boundary].trim())?;
+    let mut rest = rest[on_boundary..].trim_start();
+    rest = consume_keyword(rest, "on").trim_start();
+    let ((schema_name, table_name), mut rest) = parse_schema_qualified_name(rest)?;
+
+    let mut level = TriggerLevel::Statement;
+    let mut when_clause_sql = None;
+    loop {
+        rest = rest.trim_start();
+        if rest.is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "EXECUTE FUNCTION",
+                actual: sql.into(),
+            });
+        }
+        if keyword_at_start(rest, "execute") {
+            break;
+        }
+        if keyword_at_start(rest, "for") {
+            let mut next = consume_keyword(rest, "for").trim_start();
+            next = consume_keyword(next, "each").trim_start();
+            if keyword_at_start(next, "row") {
+                level = TriggerLevel::Row;
+                rest = consume_keyword(next, "row");
+                continue;
+            }
+            if keyword_at_start(next, "statement") {
+                level = TriggerLevel::Statement;
+                rest = consume_keyword(next, "statement");
+                continue;
+            }
+            return Err(ParseError::UnexpectedToken {
+                expected: "ROW or STATEMENT",
+                actual: next.into(),
+            });
+        }
+        if keyword_at_start(rest, "when") {
+            let rest_after_when = consume_keyword(rest, "when");
+            let (when_sql, next_rest) = take_parenthesized_segment(rest_after_when)?;
+            when_clause_sql = Some(when_sql.trim().to_string());
+            rest = next_rest;
+            continue;
+        }
+        if keyword_at_start(rest, "referencing") {
+            return Err(ParseError::FeatureNotSupported(
+                "REFERENCING is not supported for triggers".into(),
+            ));
+        }
+        return Err(ParseError::FeatureNotSupported(format!(
+            "unsupported CREATE TRIGGER clause: {}",
+            rest.split_whitespace().next().unwrap_or(rest)
+        )));
+    }
+
+    rest = consume_keyword(rest.trim_start(), "execute").trim_start();
+    if keyword_at_start(rest, "function") {
+        rest = consume_keyword(rest, "function").trim_start();
+    } else if keyword_at_start(rest, "procedure") {
+        rest = consume_keyword(rest, "procedure").trim_start();
+    } else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "FUNCTION or PROCEDURE",
+            actual: rest.into(),
+        });
+    }
+    let ((function_schema_name, function_name), rest) = parse_qualified_sql_name(rest)?;
+    let (args_sql, rest) = take_parenthesized_segment(rest)?;
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of CREATE TRIGGER statement",
+            actual: rest.trim().into(),
+        });
+    }
+
+    Ok(CreateTriggerStatement {
+        replace_existing,
+        trigger_name,
+        schema_name,
+        table_name,
+        timing,
+        level,
+        events,
+        when_clause_sql,
+        function_schema_name,
+        function_name,
+        func_args: parse_trigger_function_args(&args_sql)?,
+    })
+}
+
+fn parse_trigger_events(input: &str) -> Result<Vec<TriggerEventSpec>, ParseError> {
+    let mut rest = input.trim();
+    let mut events = Vec::new();
+    while !rest.is_empty() {
+        if keyword_at_start(rest, "insert") {
+            rest = consume_keyword(rest, "insert");
+            events.push(TriggerEventSpec {
+                event: TriggerEvent::Insert,
+                update_columns: Vec::new(),
+            });
+        } else if keyword_at_start(rest, "update") {
+            rest = consume_keyword(rest, "update").trim_start();
+            let update_columns = if keyword_at_start(rest, "of") {
+                let rest_after_of = consume_keyword(rest, "of").trim_start();
+                let boundary = find_next_top_level_keyword(rest_after_of, &["or"])
+                    .unwrap_or(rest_after_of.len());
+                let columns_sql = rest_after_of[..boundary].trim();
+                if columns_sql.is_empty() {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "column list after UPDATE OF",
+                        actual: input.into(),
+                    });
+                }
+                rest = &rest_after_of[boundary..];
+                parse_identifier_list(columns_sql)?
+            } else {
+                Vec::new()
+            };
+            events.push(TriggerEventSpec {
+                event: TriggerEvent::Update,
+                update_columns,
+            });
+        } else if keyword_at_start(rest, "delete") {
+            rest = consume_keyword(rest, "delete");
+            events.push(TriggerEventSpec {
+                event: TriggerEvent::Delete,
+                update_columns: Vec::new(),
+            });
+        } else if keyword_at_start(rest, "truncate") {
+            return Err(ParseError::FeatureNotSupported(
+                "TRUNCATE triggers are not supported".into(),
+            ));
+        } else {
+            return Err(ParseError::UnexpectedToken {
+                expected: "INSERT, UPDATE, or DELETE",
+                actual: rest.into(),
+            });
+        }
+        rest = rest.trim_start();
+        if keyword_at_start(rest, "or") {
+            rest = consume_keyword(rest, "or").trim_start();
+            continue;
+        }
+        break;
+    }
+    if events.is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "trigger event",
+            actual: input.into(),
+        });
+    }
+    Ok(events)
+}
+
+fn parse_trigger_function_args(input: &str) -> Result<Vec<String>, ParseError> {
+    let items = split_top_level_items(input, ',')?;
+    if items.len() == 1 && items[0].trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    items
+        .into_iter()
+        .filter(|item| !item.trim().is_empty())
+        .map(|item| {
+            let trimmed = item.trim();
+            if let Some(token_len) = scan_string_literal_token_len(trimmed) {
+                if token_len == trimmed.len() {
+                    return decode_string_literal(trimmed);
+                }
+            }
+            if let Ok((ident, rest)) = parse_sql_identifier(trimmed)
+                && rest.trim().is_empty()
+            {
+                return Ok(ident);
+            }
+            Ok(trimmed.to_string())
+        })
+        .collect()
+}
+
+fn build_drop_trigger_statement(sql: &str) -> Result<DropTriggerStatement, ParseError> {
+    let prefix = "drop trigger";
+    let Some(rest) = sql.get(prefix.len()..) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "DROP TRIGGER [IF EXISTS] name ON table",
+            actual: sql.into(),
+        });
+    };
+    let mut rest = rest.trim_start();
+    let mut if_exists = false;
+    if keyword_at_start(rest, "if") {
+        rest = consume_keyword(rest, "if").trim_start();
+        if !keyword_at_start(rest, "exists") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "IF EXISTS",
+                actual: sql.into(),
+            });
+        }
+        rest = consume_keyword(rest, "exists").trim_start();
+        if_exists = true;
+    }
+    let (trigger_name, rest_after_name) = parse_sql_identifier(rest)?;
+    let mut rest = rest_after_name.trim_start();
+    if !keyword_at_start(rest, "on") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "ON",
+            actual: rest.into(),
+        });
+    }
+    rest = consume_keyword(rest, "on").trim_start();
+    let ((schema_name, table_name), rest) = parse_schema_qualified_name(rest)?;
+    let rest = rest.trim_start();
+    let cascade = if rest.is_empty() {
+        false
+    } else if keyword_at_start(rest, "cascade") {
+        if !consume_keyword(rest, "cascade").trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of statement",
+                actual: rest.into(),
+            });
+        }
+        true
+    } else if keyword_at_start(rest, "restrict") {
+        if !consume_keyword(rest, "restrict").trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of statement",
+                actual: rest.into(),
+            });
+        }
+        false
+    } else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "CASCADE, RESTRICT, or end of statement",
+            actual: rest.into(),
+        });
+    };
+    Ok(DropTriggerStatement {
+        if_exists,
+        trigger_name,
+        schema_name,
+        table_name,
+        cascade,
     })
 }
 
@@ -4823,6 +5128,7 @@ fn sql_type_output_name(ty: SqlType) -> &'static str {
     match ty.kind {
         SqlTypeKind::Record => "record",
         SqlTypeKind::Composite => "record",
+        SqlTypeKind::Trigger => "trigger",
         SqlTypeKind::Void => "void",
         SqlTypeKind::Int2 => "int2",
         SqlTypeKind::Int2Vector => "int2vector",

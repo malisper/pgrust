@@ -154,6 +154,7 @@ fn main() -> Result<(), ExecError> {
             reltoastrelid: 0,
             relpersistence: 'p',
             relkind: 'r',
+            relhastriggers: false,
             desc: desc(),
             index: None,
         },

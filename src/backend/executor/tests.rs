@@ -1,4 +1,5 @@
 use super::*;
+use crate::RelFileLocator;
 use crate::backend::access::heap::heapam::{heap_flush, heap_insert_mvcc, heap_update};
 use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
 use crate::backend::libpq::pqformat::format_exec_error;
@@ -7,9 +8,8 @@ use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, StorageManager
 use crate::include::access::htup::TupleValue;
 use crate::include::access::htup::{AttributeDesc, HeapTuple};
 use crate::include::nodes::datetime::DateADT;
-use crate::include::nodes::primnodes::{user_attrno, Var};
+use crate::include::nodes::primnodes::{Var, user_attrno};
 use crate::pgrust::database::{Database, Session};
-use crate::RelFileLocator;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::PathBuf;
@@ -139,6 +139,7 @@ fn test_catalog_entry(rel: RelFileLocator, desc: RelationDesc) -> CatalogEntry {
         reltoastrelid: 0,
         relpersistence: 'p',
         relkind: 'r',
+        relhastriggers: false,
         relhassubclass: false,
         relispartition: false,
         relpages: 0,
@@ -11341,11 +11342,11 @@ fn jsonpath_string_predicates_errors() {
     .unwrap_err();
     assert!(
         matches!(
-        &err,
-        ExecError::InvalidStorageValue { column, details }
-            if column == "jsonpath"
-                && details == "invalid input syntax for type jsonpath: \"$ ? (@ like_regex \"pattern\" flag \"a\")\""
-    ),
+            &err,
+            ExecError::InvalidStorageValue { column, details }
+                if column == "jsonpath"
+                    && details == "invalid input syntax for type jsonpath: \"$ ? (@ like_regex \"pattern\" flag \"a\")\""
+        ),
         "{err:?}"
     );
 }
@@ -12529,8 +12530,10 @@ fn scalar_subquery_multiple_rows_errors() {
         catalog_with_pets(),
     )
     .unwrap_err();
-    assert!(format!("{err:?}")
-        .contains("more than one row returned by a subquery used as an expression"));
+    assert!(
+        format!("{err:?}")
+            .contains("more than one row returned by a subquery used as an expression")
+    );
 }
 
 #[test]

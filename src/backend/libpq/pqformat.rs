@@ -13,7 +13,7 @@ use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::include::access::htup::TupleError;
 use crate::include::catalog::{
     DATERANGE_TYPE_OID, INT4RANGE_TYPE_OID, INT8RANGE_TYPE_OID, NUMRANGE_TYPE_OID,
-    TSRANGE_TYPE_OID, TSTZRANGE_TYPE_OID,
+    TRIGGER_TYPE_OID, TSRANGE_TYPE_OID, TSTZRANGE_TYPE_OID,
 };
 use crate::pgrust::session::ByteaOutputFormat;
 use num_bigint::BigInt;
@@ -174,8 +174,10 @@ pub(crate) fn infer_command_tag(sql: &str, affected: usize) -> String {
         ("INSERT", _) => format!("INSERT 0 {affected}"),
         ("UPDATE", _) => format!("UPDATE {affected}"),
         ("DELETE", _) => format!("DELETE {affected}"),
+        ("CREATE", "TRIGGER") => "CREATE TRIGGER".to_string(),
         ("CREATE", "TYPE") => "CREATE TYPE".to_string(),
         ("CREATE", _) => "CREATE TABLE".to_string(),
+        ("DROP", "TRIGGER") => "DROP TRIGGER".to_string(),
         ("DROP", "TYPE") => "DROP TYPE".to_string(),
         ("DROP", _) => "DROP TABLE".to_string(),
         ("ANALYZE", _) => "ANALYZE".to_string(),
@@ -397,7 +399,9 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
             | SqlTypeKind::TimestampTzRange => unreachable!("range arrays are unsupported"),
             SqlTypeKind::Void => unreachable!("void arrays are unsupported"),
             SqlTypeKind::Oid => 1028,
-            SqlTypeKind::RegProcedure => crate::include::catalog::REGPROCEDURE_ARRAY_TYPE_OID as i32,
+            SqlTypeKind::RegProcedure => {
+                crate::include::catalog::REGPROCEDURE_ARRAY_TYPE_OID as i32
+            }
             SqlTypeKind::Tid => 1010,
             SqlTypeKind::Xid => 1011,
             SqlTypeKind::Bit => 1561,
@@ -437,6 +441,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
             SqlTypeKind::Bool => 1000,
             SqlTypeKind::Varchar => 1015,
             SqlTypeKind::AnyArray => unreachable!("anyarray is not a concrete SQL array type"),
+            SqlTypeKind::Trigger => unreachable!("trigger arrays are unsupported"),
             SqlTypeKind::Record | SqlTypeKind::Composite => {
                 crate::include::catalog::RECORD_ARRAY_TYPE_OID as i32
             }
@@ -446,6 +451,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
     match col.sql_type.kind {
         SqlTypeKind::Range => (col.sql_type.type_oid as i32, -1, col.sql_type.typmod),
         SqlTypeKind::AnyArray => (2277, -1, -1),
+        SqlTypeKind::Trigger => (TRIGGER_TYPE_OID as i32, -1, -1),
         SqlTypeKind::Record | SqlTypeKind::Composite => {
             (col.sql_type.type_oid as i32, -1, col.sql_type.typmod)
         }

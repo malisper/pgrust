@@ -165,6 +165,7 @@ fn sql_type_kind_tag(kind: SqlTypeKind) -> u8 {
         SqlTypeKind::AnyArray => 0,
         SqlTypeKind::Record => 1,
         SqlTypeKind::Composite => 2,
+        SqlTypeKind::Trigger => 54,
         SqlTypeKind::Void => 51,
         SqlTypeKind::Int2 => 3,
         SqlTypeKind::Int2Vector => 4,
@@ -224,6 +225,7 @@ fn sql_type_kind_from_tag(tag: u8) -> Result<SqlTypeKind, ExecError> {
         0 => SqlTypeKind::AnyArray,
         1 => SqlTypeKind::Record,
         2 => SqlTypeKind::Composite,
+        54 => SqlTypeKind::Trigger,
         51 => SqlTypeKind::Void,
         3 => SqlTypeKind::Int2,
         4 => SqlTypeKind::Int2Vector,
@@ -314,8 +316,7 @@ fn decode_sql_type_identity(bytes: &[u8], offset: &mut usize) -> Result<SqlType,
     *offset += 4;
     let range_subtype_oid = u32::from_le_bytes(bytes[*offset..*offset + 4].try_into().unwrap());
     *offset += 4;
-    let range_multitype_oid =
-        u32::from_le_bytes(bytes[*offset..*offset + 4].try_into().unwrap());
+    let range_multitype_oid = u32::from_le_bytes(bytes[*offset..*offset + 4].try_into().unwrap());
     *offset += 4;
     let range_discrete = bytes[*offset] != 0;
     *offset += 1;

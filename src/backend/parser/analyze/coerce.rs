@@ -113,6 +113,7 @@ pub(super) fn sql_type_name(ty: SqlType) -> String {
         SqlTypeKind::AnyArray => "anyarray",
         SqlTypeKind::Record => "record",
         SqlTypeKind::Composite => "record",
+        SqlTypeKind::Trigger => "trigger",
         SqlTypeKind::Void => "void",
         SqlTypeKind::Int2 => "smallint",
         SqlTypeKind::Int2Vector => "int2vector",

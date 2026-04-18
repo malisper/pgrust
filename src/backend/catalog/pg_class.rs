@@ -14,6 +14,7 @@ pub fn relkind_for_plain_table() -> PgClassRow {
         relpersistence: 'p',
         relkind: 'r',
         relhassubclass: false,
+        relhastriggers: false,
         relispartition: false,
         relnatts: 0,
         relpages: 0,

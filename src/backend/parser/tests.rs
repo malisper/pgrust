@@ -3,16 +3,17 @@ use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::{AggFunc, Expr, Plan, RelationDesc, Value};
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
-    bootstrap_pg_proc_rows, sort_pg_rewrite_rows, PgProcRow, PgRewriteRow, PgTypeRow,
-    BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_PRIMARY, JSON_TYPE_OID, PUBLIC_NAMESPACE_OID,
-    RECORD_TYPE_OID,
+    BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_PRIMARY, JSON_TYPE_OID, PUBLIC_NAMESPACE_OID, PgProcRow,
+    PgRewriteRow, PgTypeRow, RECORD_TYPE_OID, bootstrap_pg_proc_rows, sort_pg_rewrite_rows,
 };
 use crate::include::nodes::parsenodes::{
     AliasColumnDef, AliasColumnSpec, ColumnConstraint, CompositeTypeAttributeDef,
-    CreateCompositeTypeStatement, CreateTypeStatement, DropTypeStatement, ForeignKeyAction,
-    ForeignKeyMatchType, JoinTreeNode, RangeTblEntryKind, RawTypeName, TableConstraint,
+    CreateCompositeTypeStatement, CreateTriggerStatement, CreateTypeStatement,
+    DropTriggerStatement, DropTypeStatement, ForeignKeyAction, ForeignKeyMatchType, JoinTreeNode,
+    RangeTblEntryKind, RawTypeName, TableConstraint, TriggerEvent, TriggerEventSpec, TriggerLevel,
+    TriggerTiming,
 };
-use crate::include::nodes::primnodes::{is_system_attr, AttrNumber, JoinType, Var};
+use crate::include::nodes::primnodes::{AttrNumber, JoinType, Var, is_system_attr};
 
 fn desc() -> RelationDesc {
     RelationDesc {
@@ -85,6 +86,7 @@ fn test_catalog_entry(rel_number: u32, desc: RelationDesc) -> CatalogEntry {
         reltoastrelid: 0,
         relpersistence: 'p',
         relkind: 'r',
+        relhastriggers: false,
         relhassubclass: false,
         relispartition: false,
         relpages: 0,
@@ -134,6 +136,7 @@ fn people_view_entry() -> CatalogEntry {
         reltoastrelid: 0,
         relpersistence: 'p',
         relkind: 'v',
+        relhastriggers: false,
         relhassubclass: false,
         relispartition: false,
         relpages: 0,
@@ -243,6 +246,7 @@ fn catalog_with_people_id_index() -> Catalog {
             reltoastrelid: 0,
             relpersistence: 'p',
             relkind: 'i',
+            relhastriggers: false,
             relhassubclass: false,
             relispartition: false,
             relpages: 0,
@@ -287,6 +291,7 @@ fn catalog_with_people_primary_key() -> Catalog {
             reltoastrelid: 0,
             relpersistence: 'p',
             relkind: 'i',
+            relhastriggers: false,
             relhassubclass: false,
             relispartition: false,
             relpages: 0,
@@ -343,6 +348,7 @@ fn catalog_with_text_parent_primary_key() -> Catalog {
             reltoastrelid: 0,
             relpersistence: 'p',
             relkind: 'i',
+            relhastriggers: false,
             relhassubclass: false,
             relispartition: false,
             relpages: 0,
@@ -387,6 +393,7 @@ fn visible_catalog_without_text_input_cast(
         base.inherit_rows(),
         base.index_rows(),
         base.rewrite_rows(),
+        base.trigger_rows(),
         base.am_rows(),
         base.amop_rows(),
         base.amproc_rows(),
@@ -437,6 +444,7 @@ fn visible_catalog_without_operator(
         base.inherit_rows(),
         base.index_rows(),
         base.rewrite_rows(),
+        base.trigger_rows(),
         base.am_rows(),
         base.amop_rows(),
         base.amproc_rows(),
@@ -1572,6 +1580,66 @@ fn parse_create_or_replace_function_statement_with_returns_table() {
             language: "plpgsql".into(),
             body: " begin return next; end ".into(),
         })
+    );
+}
+
+#[test]
+fn parse_create_trigger_statement_with_when_and_update_of() {
+    let stmt = parse_statement(
+        "create or replace trigger audit_row before insert or update of name, note on public.people for each row when (new.name is not null) execute function public.audit_people('x', arg2)",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateTrigger(CreateTriggerStatement {
+            replace_existing: true,
+            trigger_name: "audit_row".into(),
+            schema_name: Some("public".into()),
+            table_name: "people".into(),
+            timing: TriggerTiming::Before,
+            level: TriggerLevel::Row,
+            events: vec![
+                TriggerEventSpec {
+                    event: TriggerEvent::Insert,
+                    update_columns: Vec::new(),
+                },
+                TriggerEventSpec {
+                    event: TriggerEvent::Update,
+                    update_columns: vec!["name".into(), "note".into()],
+                },
+            ],
+            when_clause_sql: Some("new.name is not null".into()),
+            function_schema_name: Some("public".into()),
+            function_name: "audit_people".into(),
+            func_args: vec!["x".into(), "arg2".into()],
+        })
+    );
+}
+
+#[test]
+fn parse_drop_trigger_statement_on_table() {
+    let stmt =
+        parse_statement("drop trigger if exists audit_row on public.people cascade").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::DropTrigger(DropTriggerStatement {
+            if_exists: true,
+            trigger_name: "audit_row".into(),
+            schema_name: Some("public".into()),
+            table_name: "people".into(),
+            cascade: true,
+        })
+    );
+}
+
+#[test]
+fn parse_create_trigger_rejects_unsupported_truncate() {
+    let err = parse_statement(
+        "create trigger bad_truncate before truncate on people for each statement execute function bad()",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ParseError::FeatureNotSupported(message) if message.contains("TRUNCATE triggers are not supported"))
     );
 }
 
@@ -2712,14 +2780,16 @@ fn build_plan_accepts_catalog_backed_bit_comparisons() {
 
 #[test]
 fn build_plan_accepts_catalog_backed_bytea_comparisons() {
-    assert!(build_plan(
-        &parse_select(
-            r"select E'\\x01'::bytea = E'\\x01'::bytea, E'\\x01'::bytea < E'\\x02'::bytea"
+    assert!(
+        build_plan(
+            &parse_select(
+                r"select E'\\x01'::bytea = E'\\x01'::bytea, E'\\x01'::bytea < E'\\x02'::bytea"
+            )
+            .unwrap(),
+            &catalog(),
         )
-        .unwrap(),
-        &catalog(),
-    )
-    .is_ok());
+        .is_ok()
+    );
 }
 
 #[test]
@@ -2779,12 +2849,14 @@ fn build_plan_coerces_unknown_string_literals_for_array_ops() {
 
 #[test]
 fn build_plan_accepts_catalog_backed_text_array_casts() {
-    assert!(build_plan(
-        &parse_select("select cast('{1,2}' as int4[]), cast('{\"a\",\"b\"}' as varchar[])")
-            .unwrap(),
-        &catalog(),
-    )
-    .is_ok());
+    assert!(
+        build_plan(
+            &parse_select("select cast('{1,2}' as int4[]), cast('{\"a\",\"b\"}' as varchar[])")
+                .unwrap(),
+            &catalog(),
+        )
+        .is_ok()
+    );
 }
 
 #[test]

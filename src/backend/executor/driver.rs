@@ -151,6 +151,12 @@ fn execute_statement_with_source(
             expected: "COPY handled by session layer",
             actual: "COPY".into(),
         })),
+        Statement::CreateTrigger(_) | Statement::DropTrigger(_) => {
+            Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "TRIGGER handled by database/session layer",
+                actual: "TRIGGER".into(),
+            }))
+        }
         Statement::AlterTableRename(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "ALTER TABLE RENAME handled by database/session layer",
             actual: "ALTER TABLE RENAME".into(),
@@ -387,6 +393,14 @@ pub fn execute_readonly_statement(
         Statement::CreateConversion(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "CREATE CONVERSION".into(),
+        })),
+        Statement::CreateTrigger(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "CREATE TRIGGER".into(),
+        })),
+        Statement::DropTrigger(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "DROP TRIGGER".into(),
         })),
         Statement::CreateTablespace(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",

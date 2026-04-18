@@ -1123,7 +1123,7 @@ impl Database {
                 .collect(),
         };
 
-        let (rel, toast, toast_index) = match persistence {
+        let (relation_oid, rel, toast, toast_index) = match persistence {
             TablePersistence::Permanent => {
                 let stmt = CreateTableStatement {
                     schema_name: None,
@@ -1176,7 +1176,12 @@ impl Database {
                 self.apply_catalog_mutation_effect_immediate(&effect)?;
                 catalog_effects.push(effect);
                 let (toast, toast_index) = toast_bindings_from_create_result(&created);
-                (created.entry.rel, toast, toast_index)
+                (
+                    created.entry.relation_oid,
+                    created.entry.rel,
+                    toast,
+                    toast_index,
+                )
             }
             TablePersistence::Temporary => {
                 let created = self.create_temp_relation_in_transaction(
@@ -1190,7 +1195,12 @@ impl Database {
                     temp_effects,
                 )?;
                 let (toast, toast_index) = toast_bindings_from_temp_relation(&created);
-                (created.entry.rel, toast, toast_index)
+                (
+                    created.entry.relation_oid,
+                    created.entry.rel,
+                    toast,
+                    toast_index,
+                )
             }
         };
         if rows.is_empty() {
@@ -1223,6 +1233,7 @@ impl Database {
         };
         let inserted = crate::backend::commands::tablecmds::execute_insert_values(
             &table_name,
+            relation_oid,
             rel,
             toast,
             toast_index.as_ref(),
