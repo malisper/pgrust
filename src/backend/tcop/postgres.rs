@@ -161,13 +161,25 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         ExecError::Parse(crate::backend::parser::ParseError::UndefinedOperator { op, .. }) => {
             return sql.find(op).map(|index| index + 1);
         }
+        ExecError::InvalidByteaInput { value } => {
+            return find_bytea_cast_literal_position(sql).or_else(|| {
+                find_exec_error_value_position(sql, value)
+            });
+        }
+        ExecError::InvalidByteaHexDigit { value, .. } => {
+            return find_bytea_cast_literal_position(sql).or_else(|| {
+                find_exec_error_value_position(sql, value)
+            });
+        }
+        ExecError::InvalidByteaHexOddDigits { value } => {
+            return find_bytea_cast_literal_position(sql).or_else(|| {
+                find_exec_error_value_position(sql, value)
+            });
+        }
         ExecError::InvalidIntegerInput { value, .. } => value.as_str(),
         ExecError::ArrayInput { value, .. } => value.as_str(),
         ExecError::IntegerOutOfRange { value, .. } => value.as_str(),
         ExecError::InvalidNumericInput(value) => value.as_str(),
-        ExecError::InvalidByteaInput { value } => value.as_str(),
-        ExecError::InvalidByteaHexDigit { value, .. } => value.as_str(),
-        ExecError::InvalidByteaHexOddDigits { value } => value.as_str(),
         ExecError::InvalidGeometryInput { value, .. } => value.as_str(),
         ExecError::InvalidBooleanInput { value } => value.as_str(),
         ExecError::InvalidFloatInput { value, .. } => value.as_str(),
@@ -182,10 +194,7 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         ExecError::JsonInput { raw_input, .. } => raw_input.as_str(),
         _ => return None,
     };
-    sql.find(value).map(|index| index + 1).or_else(|| {
-        let needle = format!("'{}'", value.replace('\'', "''"));
-        sql.rfind(&needle).map(|index| index + 1)
-    })
+    find_exec_error_value_position(sql, value)
 }
 
 fn extract_quoted_error_value(message: &str) -> Option<&str> {
@@ -201,6 +210,73 @@ fn extract_syntax_error_token(message: &str) -> Option<&str> {
     let start = message.strip_prefix(prefix)?;
     let end = start.rfind('"')?;
     Some(&start[..end])
+}
+
+fn find_exec_error_value_position(sql: &str, value: &str) -> Option<usize> {
+    sql.find(value).map(|index| index + 1).or_else(|| {
+        let needle = format!("'{}'", value.replace('\'', "''"));
+        sql.rfind(&needle).map(|index| index + 1)
+    })
+}
+
+fn find_bytea_cast_literal_position(sql: &str) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        let (literal_start, quote_idx, escape_string) = match bytes[idx] {
+            b'\'' => (idx, idx, false),
+            b'e' | b'E' if idx + 1 < bytes.len() && bytes[idx + 1] == b'\'' => {
+                (idx, idx + 1, true)
+            }
+            _ => {
+                idx += 1;
+                continue;
+            }
+        };
+        let literal_end = scan_sql_string_literal(bytes, quote_idx, escape_string)?;
+        let mut tail = literal_end;
+        while tail < bytes.len() && bytes[tail].is_ascii_whitespace() {
+            tail += 1;
+        }
+        if bytea_cast_starts_at(bytes, tail) {
+            return Some(literal_start + 1);
+        }
+        idx = literal_end;
+    }
+    None
+}
+
+fn scan_sql_string_literal(bytes: &[u8], quote_idx: usize, escape_string: bool) -> Option<usize> {
+    let mut idx = quote_idx + 1;
+    while idx < bytes.len() {
+        match bytes[idx] {
+            b'\\' if escape_string => {
+                idx = idx.saturating_add(2);
+            }
+            b'\'' => {
+                if idx + 1 < bytes.len() && bytes[idx + 1] == b'\'' {
+                    idx += 2;
+                } else {
+                    return Some(idx + 1);
+                }
+            }
+            _ => idx += 1,
+        }
+    }
+    None
+}
+
+fn bytea_cast_starts_at(bytes: &[u8], idx: usize) -> bool {
+    if idx + 2 > bytes.len() || &bytes[idx..idx + 2] != b"::" {
+        return false;
+    }
+    let mut name_idx = idx + 2;
+    while name_idx < bytes.len() && bytes[name_idx].is_ascii_whitespace() {
+        name_idx += 1;
+    }
+    let cast_name = b"bytea";
+    name_idx + cast_name.len() <= bytes.len()
+        && bytes[name_idx..name_idx + cast_name.len()].eq_ignore_ascii_case(cast_name)
 }
 
 struct ExecErrorResponse {
@@ -3649,6 +3725,60 @@ mod tests {
         let mut packet = vec![b'X'];
         packet.extend_from_slice(&4_i32.to_be_bytes());
         packet
+    }
+
+    #[test]
+    fn exec_error_response_points_to_escape_bytea_literal_start() {
+        let sql = "SELECT E'De\\\\678dBeEf'::bytea;";
+        let response = exec_error_response(
+            sql,
+            &ExecError::InvalidByteaInput {
+                value: "De\\678dBeEf".into(),
+            },
+        );
+        assert_eq!(response.position, Some(8));
+    }
+
+    #[test]
+    fn exec_error_response_points_to_hex_bytea_literal_start() {
+        let sql = "SELECT E'\\\\x123'::bytea;";
+        let response = exec_error_response(
+            sql,
+            &ExecError::InvalidByteaHexOddDigits {
+                value: "\\x123".into(),
+            },
+        );
+        assert_eq!(response.position, Some(8));
+    }
+
+    #[test]
+    fn simple_query_bytea_input_error_includes_position_field() {
+        let db = Database::open(temp_dir("bytea_error_position"), 16).unwrap();
+        let mut state = ConnectionState {
+            session: Session::new(2),
+            prepared: HashMap::new(),
+            portals: HashMap::new(),
+            copy_in: None,
+        };
+        let mut output = Vec::new();
+
+        handle_query(
+            &mut output,
+            &db,
+            &mut state,
+            "SELECT E'De\\\\678dBeEf'::bytea;",
+        )
+        .unwrap();
+
+        assert!(
+            output
+                .windows("Minvalid input syntax for type bytea\0".len())
+                .any(|window| window == b"Minvalid input syntax for type bytea\0")
+        );
+        assert!(
+            output.windows(3).any(|window| window == b"P8\0"),
+            "expected bytea error response to include position 8, got {output:?}"
+        );
     }
 
     #[test]
