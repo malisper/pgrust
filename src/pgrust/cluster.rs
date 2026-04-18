@@ -21,8 +21,8 @@ use crate::backend::utils::misc::checkpoint::{CheckpointConfig, CheckpointStatsS
 use crate::backend::utils::misc::interrupts::InterruptState;
 use crate::pgrust::auth::AuthState;
 use crate::pgrust::database::{
-    Database, DatabaseCreateGrant, DatabaseError, DatabaseOpenOptions, DomainEntry, EnumTypeEntry,
-    SequenceRuntime, TempNamespace,
+    Database, DatabaseCreateGrant, DatabaseError, DatabaseOpenOptions, DatabaseStatsStore,
+    DomainEntry, EnumTypeEntry, SequenceRuntime, SessionStatsState, TempNamespace,
 };
 use crate::{BufferPool, ClientId};
 
@@ -79,11 +79,13 @@ pub(crate) struct OpenDatabaseState {
     pub backend_cache_states: Arc<RwLock<HashMap<ClientId, BackendCacheState>>>,
     pub session_interrupt_states: Arc<RwLock<HashMap<ClientId, Arc<InterruptState>>>>,
     pub session_auth_states: Arc<RwLock<HashMap<ClientId, AuthState>>>,
+    pub session_stats_states: Arc<RwLock<HashMap<ClientId, Arc<RwLock<SessionStatsState>>>>>,
     pub database_create_grants: Arc<RwLock<Vec<DatabaseCreateGrant>>>,
     pub temp_relations: Arc<RwLock<HashMap<ClientId, TempNamespace>>>,
     pub domains: Arc<RwLock<BTreeMap<String, DomainEntry>>>,
     pub enum_types: Arc<RwLock<BTreeMap<String, EnumTypeEntry>>>,
     pub sequences: Arc<SequenceRuntime>,
+    pub stats: Arc<RwLock<DatabaseStatsStore>>,
 }
 
 impl OpenDatabaseState {
@@ -96,11 +98,13 @@ impl OpenDatabaseState {
             backend_cache_states: Arc::new(RwLock::new(HashMap::new())),
             session_interrupt_states: Arc::new(RwLock::new(HashMap::new())),
             session_auth_states: Arc::new(RwLock::new(HashMap::new())),
+            session_stats_states: Arc::new(RwLock::new(HashMap::new())),
             database_create_grants: Arc::new(RwLock::new(Vec::new())),
             temp_relations: Arc::new(RwLock::new(HashMap::new())),
             domains: Arc::new(RwLock::new(BTreeMap::new())),
             enum_types: Arc::new(RwLock::new(BTreeMap::new())),
             sequences,
+            stats: Arc::new(RwLock::new(DatabaseStatsStore::with_default_io_rows())),
         })
     }
 }
@@ -311,11 +315,13 @@ impl Cluster {
             backend_cache_states: Arc::clone(&state.backend_cache_states),
             session_interrupt_states: Arc::clone(&state.session_interrupt_states),
             session_auth_states: Arc::clone(&state.session_auth_states),
+            session_stats_states: Arc::clone(&state.session_stats_states),
             database_create_grants: Arc::clone(&state.database_create_grants),
             temp_relations: Arc::clone(&state.temp_relations),
             domains: Arc::clone(&state.domains),
             enum_types: Arc::clone(&state.enum_types),
             sequences: Arc::clone(&state.sequences),
+            stats: Arc::clone(&state.stats),
             _wal_bg_writer: self.shared.wal_bg_writer.clone(),
         })
     }

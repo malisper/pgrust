@@ -323,6 +323,11 @@ impl Database {
                     if expected_relkind != 'v' {
                         self.apply_catalog_mutation_effect_immediate(&effect)?;
                     }
+                    if expected_relkind == 'r' {
+                        self.session_stats_state(client_id)
+                            .write()
+                            .note_relation_drop(relation_oid, &self.stats);
+                    }
                     catalog_effects.push(effect);
                     dropped += 1;
                 }

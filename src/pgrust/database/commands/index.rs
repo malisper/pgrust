@@ -159,6 +159,7 @@ impl Database {
             index_name: index_name.to_string(),
             index_desc: index_entry.desc.clone(),
             index_meta: crate::backend::utils::cache::relcache::IndexRelCacheEntry {
+                indexrelid: index_entry.relation_oid,
                 indrelid: index_meta.indrelid,
                 indnatts: index_meta.indkey.len() as i16,
                 indnkeyatts: index_meta.indkey.len() as i16,

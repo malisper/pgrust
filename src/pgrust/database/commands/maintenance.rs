@@ -206,6 +206,8 @@ impl Database {
             checkpoint_stats: self.checkpoint_stats_snapshot(),
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
             interrupts: Arc::clone(&interrupts),
+            stats: Arc::clone(&self.stats),
+            session_stats: self.session_stats_state(client_id),
             snapshot,
             client_id,
             next_command_id: cid,
@@ -364,6 +366,8 @@ impl Database {
                 datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(
                 ),
                 interrupts: Arc::clone(&interrupts),
+                stats: Arc::clone(&self.stats),
+                session_stats: self.session_stats_state(client_id),
                 snapshot,
                 client_id,
                 next_command_id: cid,
