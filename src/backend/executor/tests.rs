@@ -13235,9 +13235,16 @@ fn generate_series_supports_numeric_arguments() {
     .unwrap()
     {
         StatementResult::Query { rows, .. } => {
-            assert_eq!(rows.len(), 5);
-            assert_eq!(rows[0], vec![Value::Numeric("0.0".into())]);
-            assert_eq!(rows[4], vec![Value::Numeric("4.0".into())]);
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Numeric("0.0".into())],
+                    vec![Value::Numeric("1.0".into())],
+                    vec![Value::Numeric("2.0".into())],
+                    vec![Value::Numeric("3.0".into())],
+                    vec![Value::Numeric("4.0".into())],
+                ]
+            );
         }
         other => panic!("expected query result, got {:?}", other),
     }
@@ -13251,9 +13258,15 @@ fn generate_series_supports_numeric_arguments() {
     .unwrap()
     {
         StatementResult::Query { rows, .. } => {
-            assert_eq!(rows.len(), 4);
-            assert_eq!(rows[0], vec![Value::Numeric("0.0".into())]);
-            assert_eq!(rows[3], vec![Value::Numeric("0.9".into())]);
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Numeric("0.0".into())],
+                    vec![Value::Numeric("0.3".into())],
+                    vec![Value::Numeric("0.6".into())],
+                    vec![Value::Numeric("0.9".into())],
+                ]
+            );
         }
         other => panic!("expected query result, got {:?}", other),
     }
@@ -13278,6 +13291,41 @@ fn generate_series_supports_numeric_arguments() {
         }
         other => panic!("expected query result, got {:?}", other),
     }
+}
+
+#[test]
+fn generate_series_preserves_numeric_display_scale_and_descending_rows() {
+    let base = temp_dir("generate_series_numeric_display_scale");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select * from generate_series(0.1::numeric, 4.0::numeric, 1.3::numeric)",
+        )
+        .unwrap(),
+        vec![
+            vec![Value::Numeric("0.1".into())],
+            vec![Value::Numeric("1.4".into())],
+            vec![Value::Numeric("2.7".into())],
+            vec![Value::Numeric("4.0".into())],
+        ],
+    );
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select * from generate_series(4.0::numeric, -1.5::numeric, -2.2::numeric)",
+        )
+        .unwrap(),
+        vec![
+            vec![Value::Numeric("4.0".into())],
+            vec![Value::Numeric("1.8".into())],
+            vec![Value::Numeric("-0.4".into())],
+        ],
+    );
 }
 
 #[test]
