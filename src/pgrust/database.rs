@@ -404,7 +404,11 @@ impl Database {
                     _ => PUBLIC_NAMESPACE_OID,
                 };
                 Ok((
-                    format!("{}.{}", schema.to_ascii_lowercase(), object.to_ascii_lowercase()),
+                    format!(
+                        "{}.{}",
+                        schema.to_ascii_lowercase(),
+                        object.to_ascii_lowercase()
+                    ),
                     object.to_ascii_lowercase(),
                     namespace_oid,
                 ))
@@ -493,7 +497,8 @@ impl Database {
                         typrelid: 0,
                         typelem: entry.oid,
                         typarray: 0,
-                        sql_type: SqlType::array_of(base_sql_type).with_identity(entry.array_oid, 0),
+                        sql_type: SqlType::array_of(base_sql_type)
+                            .with_identity(entry.array_oid, 0),
                     },
                 ]
             })

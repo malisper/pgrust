@@ -20,8 +20,8 @@ use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_NOTNULL, PUBLIC_NAMESPACE_OID, PgAuthIdRow,
     PgAuthMembersRow, PgConstraintRow, PgDatabaseRow, PgDependRow, PgInheritsRow, PgRewriteRow,
     PgTablespaceRow, bootstrap_pg_auth_members_rows, bootstrap_pg_authid_rows,
-    bootstrap_pg_database_rows, bootstrap_pg_tablespace_rows, builtin_type_rows,
-    relkind_has_storage, sort_pg_rewrite_rows,
+    bootstrap_pg_database_rows, bootstrap_pg_tablespace_rows, builtin_range_name_for_sql_type,
+    builtin_type_rows, relkind_has_storage, sort_pg_rewrite_rows,
 };
 
 const DEFAULT_SPC_OID: u32 = 0;
@@ -1871,6 +1871,9 @@ fn validate_builtin_type_rows(desc: &RelationDesc) -> Result<(), CatalogError> {
 
 fn format_sql_type_name(sql_type: SqlType) -> &'static str {
     if sql_type.is_array {
+        if sql_type.element_type().is_range() {
+            return "unsupported array";
+        }
         return match sql_type.kind {
             SqlTypeKind::AnyArray => "anyarray",
             SqlTypeKind::Record => "unsupported array",
@@ -1885,8 +1888,6 @@ fn format_sql_type_name(sql_type: SqlType) -> &'static str {
             SqlTypeKind::Name => "_name",
             SqlTypeKind::Int2 => "_int2",
             SqlTypeKind::Int4 => "_int4",
-            SqlTypeKind::Range => "unsupported array",
-            SqlTypeKind::Int4Range => "unsupported array",
             SqlTypeKind::Text => "_text",
             SqlTypeKind::Oid => "_oid",
             SqlTypeKind::RegProcedure => "_regprocedure",
@@ -1898,17 +1899,12 @@ fn format_sql_type_name(sql_type: SqlType) -> &'static str {
             SqlTypeKind::Varchar => "_varchar",
             SqlTypeKind::Char => "_bpchar",
             SqlTypeKind::Date => "_date",
-            SqlTypeKind::DateRange => "unsupported array",
             SqlTypeKind::Time => "_time",
             SqlTypeKind::TimeTz => "_timetz",
             SqlTypeKind::Interval => "_interval",
             SqlTypeKind::Timestamp => "_timestamp",
-            SqlTypeKind::TimestampRange => "unsupported array",
             SqlTypeKind::TimestampTz => "_timestamptz",
-            SqlTypeKind::TimestampTzRange => "unsupported array",
             SqlTypeKind::Numeric => "_numeric",
-            SqlTypeKind::NumericRange => "unsupported array",
-            SqlTypeKind::Int8Range => "unsupported array",
             SqlTypeKind::Json => "_json",
             SqlTypeKind::Jsonb => "_jsonb",
             SqlTypeKind::JsonPath => "_jsonpath",
@@ -1926,7 +1922,18 @@ fn format_sql_type_name(sql_type: SqlType) -> &'static str {
             | SqlTypeKind::Polygon
             | SqlTypeKind::Circle
             | SqlTypeKind::PgNodeTree => "unsupported array",
+            SqlTypeKind::Range
+            | SqlTypeKind::Int4Range
+            | SqlTypeKind::Int8Range
+            | SqlTypeKind::NumericRange
+            | SqlTypeKind::DateRange
+            | SqlTypeKind::TimestampRange
+            | SqlTypeKind::TimestampTzRange => unreachable!("range handled above"),
         };
+    }
+
+    if sql_type.is_range() {
+        return builtin_range_name_for_sql_type(sql_type).unwrap_or("range");
     }
 
     match sql_type.kind {
@@ -1944,8 +1951,6 @@ fn format_sql_type_name(sql_type: SqlType) -> &'static str {
         SqlTypeKind::Int2 => "int2",
         SqlTypeKind::Int2Vector => "int2vector",
         SqlTypeKind::Int4 => "int4",
-        SqlTypeKind::Range => "range",
-        SqlTypeKind::Int4Range => "int4range",
         SqlTypeKind::Text => "text",
         SqlTypeKind::Oid => "oid",
         SqlTypeKind::RegProcedure => "regprocedure",
@@ -1958,17 +1963,12 @@ fn format_sql_type_name(sql_type: SqlType) -> &'static str {
         SqlTypeKind::Varchar => "varchar",
         SqlTypeKind::Char => "bpchar",
         SqlTypeKind::Date => "date",
-        SqlTypeKind::DateRange => "daterange",
         SqlTypeKind::Time => "time",
         SqlTypeKind::TimeTz => "timetz",
         SqlTypeKind::Interval => "interval",
         SqlTypeKind::Timestamp => "timestamp",
-        SqlTypeKind::TimestampRange => "tsrange",
         SqlTypeKind::TimestampTz => "timestamptz",
-        SqlTypeKind::TimestampTzRange => "tstzrange",
         SqlTypeKind::Numeric => "numeric",
-        SqlTypeKind::NumericRange => "numrange",
-        SqlTypeKind::Int8Range => "int8range",
         SqlTypeKind::Json => "json",
         SqlTypeKind::Jsonb => "jsonb",
         SqlTypeKind::JsonPath => "jsonpath",
@@ -1984,6 +1984,13 @@ fn format_sql_type_name(sql_type: SqlType) -> &'static str {
         SqlTypeKind::RegConfig => "regconfig",
         SqlTypeKind::RegDictionary => "regdictionary",
         SqlTypeKind::PgNodeTree => "pg_node_tree",
+        SqlTypeKind::Range
+        | SqlTypeKind::Int4Range
+        | SqlTypeKind::Int8Range
+        | SqlTypeKind::NumericRange
+        | SqlTypeKind::DateRange
+        | SqlTypeKind::TimestampRange
+        | SqlTypeKind::TimestampTzRange => unreachable!("range handled above"),
     }
 }
 

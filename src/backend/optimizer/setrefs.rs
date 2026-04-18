@@ -639,7 +639,12 @@ fn lower_projection_expr_by_input_target(
                 .aggorder
                 .into_iter()
                 .map(|item| OrderByEntry {
-                    expr: lower_projection_expr_by_input_target(root, item.expr, input, input_tlist),
+                    expr: lower_projection_expr_by_input_target(
+                        root,
+                        item.expr,
+                        input,
+                        input_tlist,
+                    ),
                     ..item
                 })
                 .collect(),

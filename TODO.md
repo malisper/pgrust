@@ -403,7 +403,9 @@ Targeted reruns on 2026-04-17:
 
 - test_setup.sql: emit PostgreSQL-compatible inheritance merge notices for multi-parent `INHERITS` merges like `stud_emp`
 - test_setup.sql: done - support `CREATE TYPE ... AS ENUM`
-- test_setup.sql: support `CREATE TYPE ... AS RANGE`
+- test_setup.sql: done - support `CREATE TYPE ... AS RANGE` with catalog-backed range descriptors and generic runtime identity
+- rangetypes.sql / rangefuncs.sql: add first-class multirange types and runtime semantics for builtin and user-defined ranges
+- rangetypes.sql / rangefuncs.sql: add `anyrange` / `anymultirange` polymorphic resolution and generic range proc/operator coverage
 - test_setup.sql: extend `CREATE FUNCTION` parsing to accept unnamed arguments such as `binary_coercible(oid, oid)` and `fipshash(bytea)`
 - test_setup.sql: extend `CREATE FUNCTION` parsing/catalog writes for routine attributes used by upstream setup: `STRICT`, `IMMUTABLE`, `STABLE`, `PARALLEL SAFE`, and `LEAKPROOF`
 - test_setup.sql: support `LANGUAGE sql` functions in addition to the current `LANGUAGE plpgsql` path

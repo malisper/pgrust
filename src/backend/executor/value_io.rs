@@ -20,6 +20,7 @@ use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::record::register_anonymous_record_descriptor;
 use crate::include::access::htup::{HeapTuple, TupleValue};
+use crate::include::catalog::range_type_ref_for_sql_type;
 use crate::include::nodes::execnodes::ToastFetchContext;
 use crate::pgrust::compact_string::CompactString;
 
@@ -219,6 +220,23 @@ fn sql_type_kind_tag(kind: SqlTypeKind) -> u8 {
     }
 }
 
+fn canonical_sql_type_identity(sql_type: SqlType) -> SqlType {
+    let Some(range_type) = range_type_ref_for_sql_type(sql_type) else {
+        return sql_type;
+    };
+    let mut canonical = range_type.sql_type.with_typmod(sql_type.typmod);
+    canonical.is_array = sql_type.is_array;
+    canonical.type_oid = if sql_type.is_array {
+        sql_type.type_oid
+    } else if sql_type.type_oid != 0 {
+        sql_type.type_oid
+    } else {
+        canonical.type_oid
+    };
+    canonical.typrelid = sql_type.typrelid;
+    canonical
+}
+
 fn sql_type_kind_from_tag(tag: u8) -> Result<SqlTypeKind, ExecError> {
     Ok(match tag {
         0 => SqlTypeKind::AnyArray,
@@ -285,6 +303,7 @@ fn sql_type_kind_from_tag(tag: u8) -> Result<SqlTypeKind, ExecError> {
 }
 
 fn encode_sql_type_identity(sql_type: SqlType, out: &mut Vec<u8>) {
+    let sql_type = canonical_sql_type_identity(sql_type);
     out.push(sql_type_kind_tag(sql_type.kind));
     out.extend_from_slice(&sql_type.typmod.to_le_bytes());
     out.push(u8::from(sql_type.is_array));
@@ -314,8 +333,7 @@ fn decode_sql_type_identity(bytes: &[u8], offset: &mut usize) -> Result<SqlType,
     *offset += 4;
     let range_subtype_oid = u32::from_le_bytes(bytes[*offset..*offset + 4].try_into().unwrap());
     *offset += 4;
-    let range_multitype_oid =
-        u32::from_le_bytes(bytes[*offset..*offset + 4].try_into().unwrap());
+    let range_multitype_oid = u32::from_le_bytes(bytes[*offset..*offset + 4].try_into().unwrap());
     *offset += 4;
     let range_discrete = bytes[*offset] != 0;
     *offset += 1;
@@ -1788,7 +1806,9 @@ pub(crate) fn missing_column_value(column: &ColumnDesc) -> Value {
 mod tests {
     use super::*;
     use crate::backend::catalog::catalog::column_desc;
-    use crate::include::nodes::datum::{ArrayDimension, RecordValue};
+    use crate::backend::executor::expr_range::parse_range_text;
+    use crate::include::catalog::{INT4_TYPE_OID, INT4RANGE_TYPE_OID};
+    use crate::include::nodes::datum::{ArrayDimension, RecordDescriptor, RecordValue};
 
     #[test]
     fn anyarray_value_roundtrips_through_tuple_storage() {
@@ -1863,6 +1883,84 @@ mod tests {
         let decoded = decode_value(&desc.columns[0], raw[0]).unwrap();
 
         assert_eq!(decoded, value);
+    }
+
+    #[test]
+    fn record_storage_roundtrip_preserves_generic_range_identity() {
+        let desc = RelationDesc {
+            columns: vec![column_desc(
+                "v",
+                SqlType::record(crate::include::catalog::RECORD_TYPE_OID),
+                true,
+            )],
+        };
+        let range_sql_type = SqlType::range(INT4RANGE_TYPE_OID, INT4_TYPE_OID).with_range_metadata(
+            INT4_TYPE_OID,
+            0,
+            true,
+        );
+        let range = parse_range_text("[1,5)", range_sql_type)
+            .expect("parse builtin range through generic identity");
+        let expected_range = range.clone();
+        let value = Value::Record(RecordValue::anonymous(vec![("span".into(), range)]));
+
+        let tuple = tuple_from_values(&desc, std::slice::from_ref(&value)).unwrap();
+        let raw = tuple.deform(&desc.attribute_descs()).unwrap();
+        let decoded = decode_value(&desc.columns[0], raw[0]).unwrap();
+        let Value::Record(decoded) = decoded else {
+            panic!("expected record");
+        };
+
+        assert_eq!(
+            decoded.descriptor.fields[0].sql_type.kind,
+            SqlTypeKind::Range
+        );
+        assert_eq!(
+            decoded.descriptor.fields[0].sql_type.type_oid,
+            INT4RANGE_TYPE_OID
+        );
+        assert_eq!(
+            decoded.descriptor.fields[0].sql_type.range_subtype_oid,
+            INT4_TYPE_OID
+        );
+        assert_eq!(decoded.fields[0], expected_range);
+    }
+
+    #[test]
+    fn record_storage_canonicalizes_legacy_range_alias_identity() {
+        let desc = RelationDesc {
+            columns: vec![column_desc(
+                "v",
+                SqlType::record(crate::include::catalog::RECORD_TYPE_OID),
+                true,
+            )],
+        };
+        let range =
+            parse_range_text("[1,5)", SqlType::new(SqlTypeKind::Int4Range)).expect("parse legacy alias range");
+        let descriptor = RecordDescriptor::anonymous(
+            vec![("span".into(), SqlType::new(SqlTypeKind::Int4Range))],
+            -1,
+        );
+        let expected_range = range.clone();
+        let value = Value::Record(RecordValue::from_descriptor(descriptor, vec![range]));
+
+        let tuple = tuple_from_values(&desc, std::slice::from_ref(&value)).unwrap();
+        let raw = tuple.deform(&desc.attribute_descs()).unwrap();
+        let decoded = decode_value(&desc.columns[0], raw[0]).unwrap();
+        let Value::Record(decoded) = decoded else {
+            panic!("expected record");
+        };
+
+        assert_eq!(decoded.descriptor.fields[0].sql_type.kind, SqlTypeKind::Range);
+        assert_eq!(
+            decoded.descriptor.fields[0].sql_type.type_oid,
+            crate::include::catalog::INT4RANGE_TYPE_OID
+        );
+        assert_eq!(
+            decoded.descriptor.fields[0].sql_type.range_subtype_oid,
+            crate::include::catalog::INT4_TYPE_OID
+        );
+        assert_eq!(decoded.fields[0], expected_range);
     }
 
     #[test]

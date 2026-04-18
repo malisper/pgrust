@@ -279,9 +279,8 @@ pub(crate) fn eval_date_trunc_function(
             if !timestamp.is_finite() {
                 return Ok(Value::Timestamp(*timestamp));
             }
-            let (days, _) = crate::backend::utils::time::datetime::timestamp_parts_from_usecs(
-                timestamp.0,
-            );
+            let (days, _) =
+                crate::backend::utils::time::datetime::timestamp_parts_from_usecs(timestamp.0);
             let truncated_days = truncate_timestamp_local(&field, days)?;
             Ok(Value::Timestamp(TimestampADT(
                 i64::from(truncated_days) * USECS_PER_DAY,
@@ -293,9 +292,8 @@ pub(crate) fn eval_date_trunc_function(
             }
             let offset_seconds = i64::from(timezone_offset_seconds(config));
             let local_usecs = timestamp.0 + offset_seconds * USECS_PER_SEC;
-            let (days, _) = crate::backend::utils::time::datetime::timestamp_parts_from_usecs(
-                local_usecs,
-            );
+            let (days, _) =
+                crate::backend::utils::time::datetime::timestamp_parts_from_usecs(local_usecs);
             let truncated_days = truncate_timestamp_local(&field, days)?;
             Ok(Value::TimestampTz(TimestampTzADT(
                 i64::from(truncated_days) * USECS_PER_DAY - offset_seconds * USECS_PER_SEC,
@@ -384,20 +382,26 @@ mod tests {
     #[test]
     fn date_trunc_handles_bc_boundaries() {
         assert_eq!(
-            eval_date_trunc_function(&[
-                Value::Text("century".into()),
-                Value::Date(DateADT(days_from_ymd(-54, 8, 10).unwrap())),
-            ], &DateTimeConfig::default())
+            eval_date_trunc_function(
+                &[
+                    Value::Text("century".into()),
+                    Value::Date(DateADT(days_from_ymd(-54, 8, 10).unwrap())),
+                ],
+                &DateTimeConfig::default()
+            )
             .unwrap(),
             Value::TimestampTz(TimestampTzADT(
                 i64::from(days_from_ymd(-99, 1, 1).unwrap()) * USECS_PER_DAY,
             ))
         );
         assert_eq!(
-            eval_date_trunc_function(&[
-                Value::Text("decade".into()),
-                Value::Date(DateADT(days_from_ymd(4, 12, 25).unwrap())),
-            ], &DateTimeConfig::default())
+            eval_date_trunc_function(
+                &[
+                    Value::Text("decade".into()),
+                    Value::Date(DateADT(days_from_ymd(4, 12, 25).unwrap())),
+                ],
+                &DateTimeConfig::default()
+            )
             .unwrap(),
             Value::TimestampTz(TimestampTzADT(
                 i64::from(days_from_ymd(0, 1, 1).unwrap()) * USECS_PER_DAY,

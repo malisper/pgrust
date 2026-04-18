@@ -1,7 +1,7 @@
 use crate::include::nodes::parsenodes::{JoinTreeNode, Query, RangeTblEntryKind};
 use crate::include::nodes::pathnodes::{PlannerInfo, RestrictInfo, SpecialJoinInfo};
 use crate::include::nodes::primnodes::{
-    attrno_index, BoolExprType, Expr, ExprArraySubscript, JoinType,
+    BoolExprType, Expr, ExprArraySubscript, JoinType, attrno_index,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
