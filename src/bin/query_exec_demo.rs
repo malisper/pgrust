@@ -199,6 +199,7 @@ fn main() -> Result<(), ExecError> {
         txns: txns.clone(),
         txn_waiter: None,
         sequences: None,
+        large_objects: None,
         checkpoint_stats:
             pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
         datetime_config: pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
@@ -207,6 +208,7 @@ fn main() -> Result<(), ExecError> {
         session_stats,
         snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID).unwrap(),
         client_id: 7,
+        current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         next_command_id: 0,
         expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
         case_test_values: Vec::new(),

@@ -6,7 +6,7 @@ use crate::include::catalog::{
     bootstrap_relation_desc,
 };
 
-pub fn bootstrap_catalog_kinds() -> [BootstrapCatalogKind; 31] {
+pub fn bootstrap_catalog_kinds() -> [BootstrapCatalogKind; 32] {
     shared_bootstrap_catalog_kinds()
 }
 

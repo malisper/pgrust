@@ -604,6 +604,9 @@ fn empty_executor_context(base: &PathBuf) -> ExecutorContext {
         sequences: Some(std::sync::Arc::new(
             crate::pgrust::database::SequenceRuntime::new_ephemeral(),
         )),
+        large_objects: Some(std::sync::Arc::new(
+            crate::pgrust::database::LargeObjectRuntime::new_ephemeral(),
+        )),
         checkpoint_stats: crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(
         ),
         datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
@@ -618,6 +621,7 @@ fn empty_executor_context(base: &PathBuf) -> ExecutorContext {
         )),
         snapshot,
         client_id: 1,
+        current_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         next_command_id: 0,
         expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
         case_test_values: Vec::new(),
@@ -648,6 +652,9 @@ fn run_plan(
         sequences: Some(std::sync::Arc::new(
             crate::pgrust::database::SequenceRuntime::new_ephemeral(),
         )),
+        large_objects: Some(std::sync::Arc::new(
+            crate::pgrust::database::LargeObjectRuntime::new_ephemeral(),
+        )),
         checkpoint_stats: crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(
         ),
         datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
@@ -662,6 +669,7 @@ fn run_plan(
         )),
         snapshot: txns.snapshot(INVALID_TRANSACTION_ID).unwrap(),
         client_id: 42,
+        current_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         next_command_id: 0,
         expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
         case_test_values: Vec::new(),
@@ -730,6 +738,9 @@ fn run_sql_with_catalog(
             sequences: Some(std::sync::Arc::new(
                 crate::pgrust::database::SequenceRuntime::new_ephemeral(),
             )),
+            large_objects: Some(std::sync::Arc::new(
+                crate::pgrust::database::LargeObjectRuntime::new_ephemeral(),
+            )),
             checkpoint_stats:
                 crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
@@ -744,6 +755,7 @@ fn run_sql_with_catalog(
             )),
             snapshot: txns.snapshot(xid).unwrap(),
             client_id: 77,
+            current_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
             next_command_id: 0,
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
             case_test_values: Vec::new(),
@@ -5729,6 +5741,9 @@ fn prepared_insert_uses_defaults_for_omitted_columns() {
         sequences: Some(std::sync::Arc::new(
             crate::pgrust::database::SequenceRuntime::new_ephemeral(),
         )),
+        large_objects: Some(std::sync::Arc::new(
+            crate::pgrust::database::LargeObjectRuntime::new_ephemeral(),
+        )),
         checkpoint_stats: crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(
         ),
         datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
@@ -5743,6 +5758,7 @@ fn prepared_insert_uses_defaults_for_omitted_columns() {
         )),
         snapshot: txns.snapshot(INVALID_TRANSACTION_ID).unwrap(),
         client_id: 77,
+        current_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         next_command_id: 0,
         expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
         case_test_values: Vec::new(),
@@ -13566,6 +13582,99 @@ fn trunc_and_round_large_negative_scale_short_circuit_to_zero() {
                 rows,
                 vec![vec![Value::Numeric("0".into()), Value::Numeric("0".into())]]
             );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn large_object_metadata_tracks_create_and_unlink() {
+    let base = temp_dir("large_object_metadata_tracks_create_and_unlink");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    let large_objects = std::sync::Arc::new(crate::pgrust::database::LargeObjectRuntime::new_ephemeral());
+    let run_large_object_sql = |sql: &str| -> Result<StatementResult, ExecError> {
+        let mut catalog = catalog();
+        crate::backend::catalog::store::sync_catalog_heaps_for_tests(&base, &catalog).unwrap();
+        let smgr = MdStorageManager::new(&base);
+        let pool = std::sync::Arc::new(BufferPool::new(SmgrStorageBackend::new(smgr), 8));
+        for name in catalog.table_names().collect::<Vec<_>>() {
+            if let Some(entry) = catalog.get(&name) {
+                create_fork(&*pool, entry.rel);
+            }
+        }
+        let txns_arc = std::sync::Arc::new(parking_lot::RwLock::new(txns.clone()));
+        let mut ctx = ExecutorContext {
+            pool,
+            txns: txns_arc,
+            txn_waiter: None,
+            sequences: Some(std::sync::Arc::new(
+                crate::pgrust::database::SequenceRuntime::new_ephemeral(),
+            )),
+            large_objects: Some(large_objects.clone()),
+            checkpoint_stats:
+                crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
+            datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+            interrupts: std::sync::Arc::new(
+                crate::backend::utils::misc::interrupts::InterruptState::new(),
+            ),
+            snapshot: txns.snapshot(INVALID_TRANSACTION_ID).unwrap(),
+            client_id: 77,
+            current_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+            next_command_id: 0,
+            expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
+            case_test_values: Vec::new(),
+            system_bindings: Vec::new(),
+            subplans: Vec::new(),
+            timed: false,
+            allow_side_effects: true,
+            catalog: catalog.materialize_visible_catalog(),
+            compiled_functions: std::collections::HashMap::new(),
+            cte_tables: std::collections::HashMap::new(),
+            cte_producers: std::collections::HashMap::new(),
+            recursive_worktables: std::collections::HashMap::new(),
+        };
+        execute_sql(sql, &mut catalog, &mut ctx, INVALID_TRANSACTION_ID)
+    };
+
+    match run_large_object_sql("select lo_create(1001)").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(1001)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match run_large_object_sql(
+        "select oid, lomowner, lomacl from pg_largeobject_metadata order by oid",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Int64(1001),
+                    Value::Int64(i64::from(
+                        crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+                    )),
+                    Value::Null,
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match run_large_object_sql("select lo_unlink(1001)").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int32(1)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match run_large_object_sql("select oid from pg_largeobject_metadata")
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert!(rows.is_empty());
         }
         other => panic!("expected query result, got {:?}", other),
     }

@@ -7,6 +7,7 @@ mod catalog_access;
 mod commands;
 mod ddl;
 pub(crate) mod foreign_keys;
+mod large_objects;
 mod relation_refs;
 mod sequences;
 mod temp;
@@ -102,6 +103,7 @@ pub(crate) use sequences::{
     resolve_sequence_options_spec, sequence_type_oid_for_serial_kind,
     sequence_type_oid_for_sql_type,
 };
+pub(crate) use large_objects::LargeObjectRuntime;
 use toast::{toast_bindings_from_create_result, toast_bindings_from_temp_relation};
 use txn::AutoCommitGuard;
 
@@ -180,6 +182,7 @@ pub struct Database {
     pub(crate) conversions: Arc<RwLock<BTreeMap<String, ConversionEntry>>>,
     pub(crate) sequences: Arc<SequenceRuntime>,
     pub(crate) stats: Arc<RwLock<DatabaseStatsStore>>,
+    pub(crate) large_objects: Arc<LargeObjectRuntime>,
     pub(crate) _wal_bg_writer: Option<Arc<WalBgWriter>>,
 }
 
