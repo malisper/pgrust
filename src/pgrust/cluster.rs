@@ -19,6 +19,7 @@ use crate::backend::utils::cache::plancache::PlanCache;
 use crate::backend::utils::cache::syscache::BackendCacheState;
 use crate::backend::utils::misc::checkpoint::{CheckpointConfig, CheckpointStatsSnapshot};
 use crate::backend::utils::misc::interrupts::InterruptState;
+use crate::include::catalog::relkind_has_storage;
 use crate::pgrust::auth::AuthState;
 use crate::pgrust::database::{
     ConversionEntry, Database, DatabaseCreateGrant, DatabaseError, DatabaseOpenOptions,
@@ -441,11 +442,12 @@ fn open_relfiles_for_store(
 ) -> Result<(), CatalogError> {
     let relcache = store.relcache()?;
     for (_, entry) in relcache.entries() {
+        if !relkind_has_storage(entry.relkind) {
+            continue;
+        }
         let rel = entry.rel;
-        pool.with_storage_mut(|s| {
-            let _ = s.smgr.open(rel);
-            let _ = s.smgr.create(rel, ForkNumber::Main, true);
-        });
+        pool.with_storage_mut(|s| s.smgr.open(rel))
+            .map_err(|e| CatalogError::Io(e.to_string()))?;
     }
     Ok(())
 }
@@ -456,6 +458,9 @@ fn create_relfiles_for_store_with_smg(
 ) -> Result<(), CatalogError> {
     let relcache = store.relcache()?;
     for (_, entry) in relcache.entries() {
+        if !relkind_has_storage(entry.relkind) {
+            continue;
+        }
         let rel = entry.rel;
         let _ = smgr.open(rel);
         let _ = smgr.create(rel, ForkNumber::Main, false);

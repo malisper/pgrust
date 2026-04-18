@@ -18,6 +18,8 @@ use crate::include::catalog::{BootstrapCatalogKind, CatalogScope};
 mod heap;
 #[path = "store/roles.rs"]
 mod roles;
+#[path = "store/relcache_init.rs"]
+mod relcache_init;
 #[path = "store/storage.rs"]
 mod storage;
 #[cfg(test)]
@@ -88,6 +90,7 @@ struct CatalogControl {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::catalog::bootstrap::bootstrap_catalog_rel;
     use crate::backend::catalog::column_desc;
     use crate::backend::catalog::loader::load_physical_catalog_rows;
     use crate::backend::catalog::rows::physical_catalog_rows_for_catalog_entry;
@@ -96,8 +99,8 @@ mod tests {
     use crate::backend::storage::smgr::segment_path;
     use crate::include::catalog::{
         BOOTSTRAP_SUPERUSER_NAME, BOOTSTRAP_SUPERUSER_OID, BTREE_AM_OID, C_COLLATION_OID,
-        CURRENT_DATABASE_NAME, DEFAULT_COLLATION_OID, DEFAULT_TABLESPACE_OID, DEPENDENCY_AUTO,
-        DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, GLOBAL_TABLESPACE_OID, HEAP_TABLE_AM_OID,
+        CURRENT_DATABASE_NAME, CatalogScope, DEFAULT_COLLATION_OID, DEFAULT_TABLESPACE_OID,
+        DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, HEAP_TABLE_AM_OID,
         INT4_TYPE_OID, INT8_TYPE_OID, JSON_TYPE_OID, OID_TYPE_OID, PG_ATTRDEF_RELATION_OID,
         PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID, PG_LANGUAGE_INTERNAL_OID,
         PG_NAMESPACE_RELATION_OID, PG_TOAST_NAMESPACE_OID, PG_TYPE_RELATION_OID,
@@ -142,6 +145,56 @@ mod tests {
         let reopened_entry = reopened_catalog.get("people").unwrap();
         assert_eq!(reopened_entry.rel.rel_number, DEFAULT_FIRST_REL_NUMBER);
         assert_eq!(reopened_entry.desc.columns.len(), 3);
+    }
+
+    #[test]
+    fn catalog_store_relcache_init_file_recovers_from_corruption() {
+        let base = temp_dir("relcache_init_corrupt");
+        let store = CatalogStore::load(&base).unwrap();
+        let init_path =
+            super::relcache_init::relcache_init_path_for_scope(&base, CatalogScope::Database(1));
+        assert!(store.relcache().unwrap().get_by_name("pg_class").is_some());
+        assert!(init_path.exists(), "relcache init file should be written");
+
+        fs::write(&init_path, b"corrupt").unwrap();
+
+        let reopened = CatalogStore::load(&base).unwrap();
+        assert!(reopened.relcache().unwrap().get_by_name("pg_class").is_some());
+        let rewritten = fs::read_to_string(&init_path).unwrap();
+        assert!(
+            rewritten.contains("\"magic\""),
+            "corrupt relcache init file should be regenerated"
+        );
+    }
+
+    #[test]
+    fn catalog_store_relcache_init_file_is_invalidated_on_catalog_write() {
+        let base = temp_dir("relcache_init_invalidate");
+        let mut store = CatalogStore::load(&base).unwrap();
+        let init_path =
+            super::relcache_init::relcache_init_path_for_scope(&base, CatalogScope::Database(1));
+        store.relcache().unwrap();
+        assert!(init_path.exists(), "relcache init file should be written");
+
+        store
+            .create_table(
+                "people",
+                RelationDesc {
+                    columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
+                },
+            )
+            .unwrap();
+        assert!(
+            !init_path.exists(),
+            "catalog writes should invalidate relcache init files"
+        );
+
+        let relcache = store.relcache().unwrap();
+        assert!(relcache.get_by_name("people").is_some());
+        assert!(
+            init_path.exists(),
+            "relcache init file should be regenerated on next relcache build"
+        );
     }
 
     #[test]
@@ -1237,6 +1290,70 @@ mod tests {
         assert_eq!(index_meta_before.ino(), index_meta_after.ino());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn catalog_store_load_reuses_existing_catalog_relfiles() {
+        let base = temp_dir("load_existing_catalog_relfiles");
+        let _ = CatalogStore::load(&base).unwrap();
+
+        let proc_path = segment_path(
+            &base,
+            RelFileLocator {
+                spc_oid: 0,
+                db_oid: 1,
+                rel_number: BootstrapCatalogKind::PgProc.relation_oid(),
+            },
+            ForkNumber::Main,
+            0,
+        );
+        let class_path = segment_path(
+            &base,
+            RelFileLocator {
+                spc_oid: 0,
+                db_oid: 1,
+                rel_number: BootstrapCatalogKind::PgClass.relation_oid(),
+            },
+            ForkNumber::Main,
+            0,
+        );
+        let index_path = segment_path(
+            &base,
+            RelFileLocator {
+                spc_oid: 0,
+                db_oid: 1,
+                rel_number: BootstrapCatalogKind::PgIndex.relation_oid(),
+            },
+            ForkNumber::Main,
+            0,
+        );
+
+        let proc_meta_before = fs::metadata(&proc_path).unwrap();
+        let class_meta_before = fs::metadata(&class_path).unwrap();
+        let index_meta_before = fs::metadata(&index_path).unwrap();
+
+        let reopened = CatalogStore::load(&base).unwrap();
+        assert!(reopened.catalog_snapshot().unwrap().get("pg_class").is_some());
+
+        let proc_meta_after = fs::metadata(&proc_path).unwrap();
+        let class_meta_after = fs::metadata(&class_path).unwrap();
+        let index_meta_after = fs::metadata(&index_path).unwrap();
+        assert_eq!(proc_meta_before.ino(), proc_meta_after.ino());
+        assert_eq!(class_meta_before.ino(), class_meta_after.ino());
+        assert_eq!(index_meta_before.ino(), index_meta_after.ino());
+        assert_eq!(
+            proc_meta_before.modified().unwrap(),
+            proc_meta_after.modified().unwrap()
+        );
+        assert_eq!(
+            class_meta_before.modified().unwrap(),
+            class_meta_after.modified().unwrap()
+        );
+        assert_eq!(
+            index_meta_before.modified().unwrap(),
+            index_meta_after.modified().unwrap()
+        );
+    }
+
     #[test]
     fn catalog_store_bootstraps_physical_core_catalog_relfiles() {
         let base = temp_dir("physical_bootstrap");
@@ -1430,11 +1547,10 @@ mod tests {
         assert!(attrdef.oid > entry.row_type_oid);
     }
 
-    #[test]
-    fn catalog_store_rebuilds_missing_pg_depend_relation() {
-        let base = temp_dir("missing_depend_reload");
+    fn assert_missing_bootstrap_relfile_fails(label: &str, kind: BootstrapCatalogKind) {
+        let base = temp_dir(label);
         let mut store = CatalogStore::load(&base).unwrap();
-        let entry = store
+        store
             .create_table(
                 "people",
                 RelationDesc {
@@ -1443,509 +1559,42 @@ mod tests {
             )
             .unwrap();
 
-        let depend_path = segment_path(
-            &base,
-            RelFileLocator {
-                spc_oid: 0,
-                db_oid: 1,
-                rel_number: BootstrapCatalogKind::PgDepend.relation_oid(),
-            },
-            ForkNumber::Main,
-            0,
-        );
-        fs::remove_file(&depend_path).unwrap();
+        let path = segment_path(&base, bootstrap_catalog_rel(kind, 1), ForkNumber::Main, 0);
+        fs::remove_file(&path).unwrap();
 
-        let reopened = CatalogStore::load(&base).unwrap();
-        let rows = load_physical_catalog_rows(reopened.base_dir()).unwrap();
-        assert!(rows.depends.iter().any(|row| {
-            row.classid == PG_CLASS_RELATION_OID
-                && row.objid == entry.relation_oid
-                && row.refclassid == PG_NAMESPACE_RELATION_OID
-                && row.refobjid == PUBLIC_NAMESPACE_OID
-        }));
+        let err = CatalogStore::load(&base).unwrap_err();
+        assert!(matches!(
+            err,
+            CatalogError::Corrupt("missing physical relation relfile")
+        ));
     }
 
     #[test]
-    fn catalog_store_rebuilds_missing_pg_index_relation() {
-        let base = temp_dir("missing_index_reload");
-        let mut store = CatalogStore::load(&base).unwrap();
-        let entry = store
-            .create_table(
-                "people",
-                RelationDesc {
-                    columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
-                },
-            )
-            .unwrap();
-
-        let index_path = segment_path(
-            &base,
-            RelFileLocator {
-                spc_oid: 0,
-                db_oid: 1,
-                rel_number: BootstrapCatalogKind::PgIndex.relation_oid(),
-            },
-            ForkNumber::Main,
-            0,
-        );
-        fs::remove_file(&index_path).unwrap();
-
-        let reopened = CatalogStore::load(&base).unwrap();
-        let reopened_catalog = reopened.catalog_snapshot().unwrap();
-        assert!(reopened_catalog.get("people").is_some());
-        assert!(index_path.exists(), "pg_index relfile should be recreated");
-
-        let rows = load_physical_catalog_rows(&base).unwrap();
-        assert!(rows.indexes.is_empty());
-        assert!(rows.classes.iter().any(|row| row.oid == entry.relation_oid));
+    fn catalog_store_load_fails_when_local_bootstrap_relfile_is_missing() {
+        for (label, kind) in [
+            ("missing_depend_reload", BootstrapCatalogKind::PgDepend),
+            ("missing_index_reload", BootstrapCatalogKind::PgIndex),
+            ("missing_am_reload", BootstrapCatalogKind::PgAm),
+            ("missing_collation_reload", BootstrapCatalogKind::PgCollation),
+            ("missing_cast_reload", BootstrapCatalogKind::PgCast),
+            ("missing_proc_reload", BootstrapCatalogKind::PgProc),
+            ("missing_language_reload", BootstrapCatalogKind::PgLanguage),
+            ("missing_operator_reload", BootstrapCatalogKind::PgOperator),
+            ("missing_constraint_reload", BootstrapCatalogKind::PgConstraint),
+        ] {
+            assert_missing_bootstrap_relfile_fails(label, kind);
+        }
     }
 
     #[test]
-    fn catalog_store_rebuilds_missing_pg_am_relation() {
-        let base = temp_dir("missing_am_reload");
-        let mut store = CatalogStore::load(&base).unwrap();
-        let entry = store
-            .create_table(
-                "people",
-                RelationDesc {
-                    columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
-                },
-            )
-            .unwrap();
-
-        let am_path = segment_path(
-            &base,
-            RelFileLocator {
-                spc_oid: 0,
-                db_oid: 1,
-                rel_number: BootstrapCatalogKind::PgAm.relation_oid(),
-            },
-            ForkNumber::Main,
-            0,
-        );
-        fs::remove_file(&am_path).unwrap();
-
-        let reopened = CatalogStore::load(&base).unwrap();
-        let reopened_catalog = reopened.catalog_snapshot().unwrap();
-        assert!(reopened_catalog.get("people").is_some());
-        assert!(am_path.exists(), "pg_am relfile should be recreated");
-
-        let rows = load_physical_catalog_rows(&base).unwrap();
-        assert!(
-            rows.ams
-                .iter()
-                .any(|row| row.oid == HEAP_TABLE_AM_OID && row.amname == "heap")
-        );
-        assert!(rows.classes.iter().any(|row| row.oid == entry.relation_oid));
-    }
-
-    #[test]
-    fn catalog_store_rebuilds_missing_pg_database_relation() {
-        let base = temp_dir("missing_database_reload");
-        let mut store = CatalogStore::load(&base).unwrap();
-        let entry = store
-            .create_table(
-                "people",
-                RelationDesc {
-                    columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
-                },
-            )
-            .unwrap();
-
-        let database_path = segment_path(
-            &base,
-            RelFileLocator {
-                spc_oid: GLOBAL_TABLESPACE_OID,
-                db_oid: 0,
-                rel_number: BootstrapCatalogKind::PgDatabase.relation_oid(),
-            },
-            ForkNumber::Main,
-            0,
-        );
-        fs::remove_file(&database_path).unwrap();
-
-        let reopened = CatalogStore::load(&base).unwrap();
-        let reopened_catalog = reopened.catalog_snapshot().unwrap();
-        assert!(reopened_catalog.get("people").is_some());
-        assert!(
-            database_path.exists(),
-            "pg_database relfile should be recreated"
-        );
-
-        let rows = load_physical_catalog_rows(&base).unwrap();
-        assert!(
-            rows.databases
-                .iter()
-                .any(|row| row.datname == CURRENT_DATABASE_NAME)
-        );
-        assert!(rows.classes.iter().any(|row| row.oid == entry.relation_oid));
-    }
-
-    #[test]
-    fn catalog_store_rebuilds_missing_pg_authid_relation() {
-        let base = temp_dir("missing_authid_reload");
-        let mut store = CatalogStore::load(&base).unwrap();
-        let entry = store
-            .create_table(
-                "people",
-                RelationDesc {
-                    columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
-                },
-            )
-            .unwrap();
-
-        let authid_path = segment_path(
-            &base,
-            RelFileLocator {
-                spc_oid: GLOBAL_TABLESPACE_OID,
-                db_oid: 0,
-                rel_number: BootstrapCatalogKind::PgAuthId.relation_oid(),
-            },
-            ForkNumber::Main,
-            0,
-        );
-        fs::remove_file(&authid_path).unwrap();
-
-        let reopened = CatalogStore::load(&base).unwrap();
-        let reopened_catalog = reopened.catalog_snapshot().unwrap();
-        assert!(reopened_catalog.get("people").is_some());
-        assert!(
-            authid_path.exists(),
-            "pg_authid relfile should be recreated"
-        );
-
-        let rows = load_physical_catalog_rows(&base).unwrap();
-        assert!(rows.authids.iter().any(|row| {
-            row.oid == BOOTSTRAP_SUPERUSER_OID && row.rolname == BOOTSTRAP_SUPERUSER_NAME
-        }));
-        assert!(rows.classes.iter().any(|row| row.oid == entry.relation_oid));
-    }
-
-    #[test]
-    fn catalog_store_rebuilds_missing_pg_auth_members_relation() {
-        let base = temp_dir("missing_auth_members_reload");
-        let mut store = CatalogStore::load(&base).unwrap();
-        let entry = store
-            .create_table(
-                "people",
-                RelationDesc {
-                    columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
-                },
-            )
-            .unwrap();
-
-        let auth_members_path = segment_path(
-            &base,
-            RelFileLocator {
-                spc_oid: GLOBAL_TABLESPACE_OID,
-                db_oid: 0,
-                rel_number: BootstrapCatalogKind::PgAuthMembers.relation_oid(),
-            },
-            ForkNumber::Main,
-            0,
-        );
-        fs::remove_file(&auth_members_path).unwrap();
-
-        let reopened = CatalogStore::load(&base).unwrap();
-        let reopened_catalog = reopened.catalog_snapshot().unwrap();
-        assert!(reopened_catalog.get("people").is_some());
-        assert!(
-            auth_members_path.exists(),
-            "pg_auth_members relfile should be recreated"
-        );
-
-        let rows = load_physical_catalog_rows(&base).unwrap();
-        assert!(rows.auth_members.is_empty());
-        assert!(rows.classes.iter().any(|row| row.oid == entry.relation_oid));
-    }
-
-    #[test]
-    fn catalog_store_rebuilds_missing_pg_collation_relation() {
-        let base = temp_dir("missing_collation_reload");
-        let mut store = CatalogStore::load(&base).unwrap();
-        let entry = store
-            .create_table(
-                "people",
-                RelationDesc {
-                    columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
-                },
-            )
-            .unwrap();
-
-        let collation_path = segment_path(
-            &base,
-            RelFileLocator {
-                spc_oid: 0,
-                db_oid: 1,
-                rel_number: BootstrapCatalogKind::PgCollation.relation_oid(),
-            },
-            ForkNumber::Main,
-            0,
-        );
-        fs::remove_file(&collation_path).unwrap();
-
-        let reopened = CatalogStore::load(&base).unwrap();
-        let reopened_catalog = reopened.catalog_snapshot().unwrap();
-        assert!(reopened_catalog.get("people").is_some());
-        assert!(
-            collation_path.exists(),
-            "pg_collation relfile should be recreated"
-        );
-
-        let rows = load_physical_catalog_rows(&base).unwrap();
-        assert!(
-            rows.collations
-                .iter()
-                .any(|row| row.oid == DEFAULT_COLLATION_OID && row.collname == "default")
-        );
-        assert!(rows.classes.iter().any(|row| row.oid == entry.relation_oid));
-    }
-
-    #[test]
-    fn catalog_store_rebuilds_missing_pg_cast_relation() {
-        let base = temp_dir("missing_cast_reload");
-        let mut store = CatalogStore::load(&base).unwrap();
-        let entry = store
-            .create_table(
-                "people",
-                RelationDesc {
-                    columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
-                },
-            )
-            .unwrap();
-
-        let cast_path = segment_path(
-            &base,
-            RelFileLocator {
-                spc_oid: 0,
-                db_oid: 1,
-                rel_number: BootstrapCatalogKind::PgCast.relation_oid(),
-            },
-            ForkNumber::Main,
-            0,
-        );
-        fs::remove_file(&cast_path).unwrap();
-
-        let reopened = CatalogStore::load(&base).unwrap();
-        let reopened_catalog = reopened.catalog_snapshot().unwrap();
-        assert!(reopened_catalog.get("people").is_some());
-        assert!(cast_path.exists(), "pg_cast relfile should be recreated");
-
-        let rows = load_physical_catalog_rows(&base).unwrap();
-        assert!(
-            rows.casts
-                .iter()
-                .any(|row| { row.castsource == INT4_TYPE_OID && row.casttarget == OID_TYPE_OID })
-        );
-        assert!(rows.classes.iter().any(|row| row.oid == entry.relation_oid));
-    }
-
-    #[test]
-    fn catalog_store_rebuilds_missing_pg_proc_relation() {
-        let base = temp_dir("missing_proc_reload");
-        let mut store = CatalogStore::load(&base).unwrap();
-        let entry = store
-            .create_table(
-                "people",
-                RelationDesc {
-                    columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
-                },
-            )
-            .unwrap();
-
-        let proc_path = segment_path(
-            &base,
-            RelFileLocator {
-                spc_oid: 0,
-                db_oid: 1,
-                rel_number: BootstrapCatalogKind::PgProc.relation_oid(),
-            },
-            ForkNumber::Main,
-            0,
-        );
-        fs::remove_file(&proc_path).unwrap();
-
-        let reopened = CatalogStore::load(&base).unwrap();
-        let reopened_catalog = reopened.catalog_snapshot().unwrap();
-        assert!(reopened_catalog.get("people").is_some());
-        assert!(proc_path.exists(), "pg_proc relfile should be recreated");
-
-        let rows = load_physical_catalog_rows(&base).unwrap();
-        assert!(
-            rows.procs
-                .iter()
-                .any(|row| row.proname == "lower" && row.prorettype == TEXT_TYPE_OID)
-        );
-        assert!(rows.classes.iter().any(|row| row.oid == entry.relation_oid));
-    }
-
-    #[test]
-    fn catalog_store_rebuilds_missing_pg_language_relation() {
-        let base = temp_dir("missing_language_reload");
-        let mut store = CatalogStore::load(&base).unwrap();
-        let entry = store
-            .create_table(
-                "people",
-                RelationDesc {
-                    columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
-                },
-            )
-            .unwrap();
-
-        let language_path = segment_path(
-            &base,
-            RelFileLocator {
-                spc_oid: 0,
-                db_oid: 1,
-                rel_number: BootstrapCatalogKind::PgLanguage.relation_oid(),
-            },
-            ForkNumber::Main,
-            0,
-        );
-        fs::remove_file(&language_path).unwrap();
-
-        let reopened = CatalogStore::load(&base).unwrap();
-        let reopened_catalog = reopened.catalog_snapshot().unwrap();
-        assert!(reopened_catalog.get("people").is_some());
-        assert!(
-            language_path.exists(),
-            "pg_language relfile should be recreated"
-        );
-
-        let rows = load_physical_catalog_rows(&base).unwrap();
-        assert!(
-            rows.languages
-                .iter()
-                .any(|row| row.oid == PG_LANGUAGE_INTERNAL_OID && row.lanname == "internal")
-        );
-        assert!(rows.classes.iter().any(|row| row.oid == entry.relation_oid));
-    }
-
-    #[test]
-    fn catalog_store_rebuilds_missing_pg_operator_relation() {
-        let base = temp_dir("missing_operator_reload");
-        let mut store = CatalogStore::load(&base).unwrap();
-        let entry = store
-            .create_table(
-                "people",
-                RelationDesc {
-                    columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
-                },
-            )
-            .unwrap();
-
-        let operator_path = segment_path(
-            &base,
-            RelFileLocator {
-                spc_oid: 0,
-                db_oid: 1,
-                rel_number: BootstrapCatalogKind::PgOperator.relation_oid(),
-            },
-            ForkNumber::Main,
-            0,
-        );
-        fs::remove_file(&operator_path).unwrap();
-
-        let reopened = CatalogStore::load(&base).unwrap();
-        let reopened_catalog = reopened.catalog_snapshot().unwrap();
-        assert!(reopened_catalog.get("people").is_some());
-        assert!(
-            operator_path.exists(),
-            "pg_operator relfile should be recreated"
-        );
-
-        let rows = load_physical_catalog_rows(&base).unwrap();
-        assert!(rows.operators.iter().any(|row| {
-            row.oid == 96
-                && row.oprname == "="
-                && row.oprleft == INT4_TYPE_OID
-                && row.oprright == INT4_TYPE_OID
-                && row.oprcode == crate::include::catalog::INT4_CMP_EQ_PROC_OID
-        }));
-        assert!(rows.classes.iter().any(|row| row.oid == entry.relation_oid));
-    }
-
-    #[test]
-    fn catalog_store_rebuilds_missing_pg_constraint_relation() {
-        let base = temp_dir("missing_constraint_reload");
-        let mut store = CatalogStore::load(&base).unwrap();
-        let entry = store
-            .create_table(
-                "people",
-                RelationDesc {
-                    columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
-                },
-            )
-            .unwrap();
-
-        let constraint_path = segment_path(
-            &base,
-            RelFileLocator {
-                spc_oid: 0,
-                db_oid: 1,
-                rel_number: BootstrapCatalogKind::PgConstraint.relation_oid(),
-            },
-            ForkNumber::Main,
-            0,
-        );
-        fs::remove_file(&constraint_path).unwrap();
-
-        let reopened = CatalogStore::load(&base).unwrap();
-        let reopened_catalog = reopened.catalog_snapshot().unwrap();
-        assert!(reopened_catalog.get("people").is_some());
-        assert!(
-            constraint_path.exists(),
-            "pg_constraint relfile should be recreated"
-        );
-
-        let rows = load_physical_catalog_rows(&base).unwrap();
-        assert!(rows.constraints.iter().any(|row| {
-            row.conname == "people_id_not_null"
-                && row.contype == 'n'
-                && row.conrelid == entry.relation_oid
-        }));
-        assert!(rows.classes.iter().any(|row| row.oid == entry.relation_oid));
-    }
-
-    #[test]
-    fn catalog_store_rebuilds_missing_pg_tablespace_relation() {
-        let base = temp_dir("missing_tablespace_reload");
-        let mut store = CatalogStore::load(&base).unwrap();
-        let entry = store
-            .create_table(
-                "people",
-                RelationDesc {
-                    columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
-                },
-            )
-            .unwrap();
-
-        let tablespace_path = segment_path(
-            &base,
-            RelFileLocator {
-                spc_oid: GLOBAL_TABLESPACE_OID,
-                db_oid: 0,
-                rel_number: BootstrapCatalogKind::PgTablespace.relation_oid(),
-            },
-            ForkNumber::Main,
-            0,
-        );
-        fs::remove_file(&tablespace_path).unwrap();
-
-        let reopened = CatalogStore::load(&base).unwrap();
-        let reopened_catalog = reopened.catalog_snapshot().unwrap();
-        assert!(reopened_catalog.get("people").is_some());
-        assert!(
-            tablespace_path.exists(),
-            "pg_tablespace relfile should be recreated"
-        );
-
-        let rows = load_physical_catalog_rows(&base).unwrap();
-        assert!(rows.tablespaces.iter().any(|row| {
-            row.oid == DEFAULT_TABLESPACE_OID
-                && row.spcname == "pg_default"
-                && row.spcowner == BOOTSTRAP_SUPERUSER_OID
-        }));
-        assert!(rows.classes.iter().any(|row| row.oid == entry.relation_oid));
+    fn catalog_store_load_fails_when_shared_bootstrap_relfile_is_missing() {
+        for (label, kind) in [
+            ("missing_database_reload", BootstrapCatalogKind::PgDatabase),
+            ("missing_authid_reload", BootstrapCatalogKind::PgAuthId),
+            ("missing_auth_members_reload", BootstrapCatalogKind::PgAuthMembers),
+            ("missing_tablespace_reload", BootstrapCatalogKind::PgTablespace),
+        ] {
+            assert_missing_bootstrap_relfile_fails(label, kind);
+        }
     }
 }
