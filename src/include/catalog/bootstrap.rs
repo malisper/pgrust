@@ -571,21 +571,25 @@ mod tests {
             PG_AUTH_MEMBERS_RELATION_OID
         );
         assert_eq!(CORE_BOOTSTRAP_RELATIONS[18].oid, PG_COLLATION_RELATION_OID);
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[19].oid, PG_DATABASE_RELATION_OID);
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[20].oid, PG_TABLESPACE_RELATION_OID);
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[21].oid, PG_AM_RELATION_OID);
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[22].oid, PG_ATTRDEF_RELATION_OID);
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[23].oid, PG_CAST_RELATION_OID);
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[24].oid, PG_CONSTRAINT_RELATION_OID);
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[25].oid, PG_DEPEND_RELATION_OID);
         assert_eq!(
-            CORE_BOOTSTRAP_RELATIONS[26].oid,
+            CORE_BOOTSTRAP_RELATIONS[19].oid,
+            PG_LARGEOBJECT_METADATA_RELATION_OID
+        );
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[20].oid, PG_DATABASE_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[21].oid, PG_TABLESPACE_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[22].oid, PG_AM_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[23].oid, PG_ATTRDEF_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[24].oid, PG_CAST_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[25].oid, PG_CONSTRAINT_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[26].oid, PG_DEPEND_RELATION_OID);
+        assert_eq!(
+            CORE_BOOTSTRAP_RELATIONS[27].oid,
             PG_DESCRIPTION_RELATION_OID
         );
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[27].oid, PG_INDEX_RELATION_OID);
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[28].oid, PG_INHERITS_RELATION_OID);
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[29].oid, PG_REWRITE_RELATION_OID);
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[30].oid, PG_STATISTIC_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[28].oid, PG_INDEX_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[29].oid, PG_INHERITS_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[30].oid, PG_REWRITE_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[31].oid, PG_STATISTIC_RELATION_OID);
     }
 
     #[test]
@@ -616,6 +620,7 @@ mod tests {
                 "pg_authid",
                 "pg_auth_members",
                 "pg_collation",
+                "pg_largeobject_metadata",
                 "pg_database",
                 "pg_tablespace",
                 "pg_am",

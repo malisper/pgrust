@@ -355,6 +355,7 @@ mod tests {
             pg_authid_desc().columns.len(),
             pg_auth_members_desc().columns.len(),
             pg_collation_desc().columns.len(),
+            pg_largeobject_metadata_desc().columns.len(),
             pg_database_desc().columns.len(),
             pg_tablespace_desc().columns.len(),
             pg_am_desc().columns.len(),

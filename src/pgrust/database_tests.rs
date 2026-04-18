@@ -8616,7 +8616,7 @@ fn create_operator_class_persists_catalog_rows() {
                 rows,
                 vec![vec![
                     Value::Text("part_test_int4_ops".into()),
-                    Value::Int32(crate::include::catalog::INT4_TYPE_OID as i32),
+                    Value::Int64(i64::from(crate::include::catalog::INT4_TYPE_OID)),
                     Value::Bool(false),
                 ]]
             );

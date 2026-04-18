@@ -508,7 +508,10 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     let fields =
                         resolve_relation_row_expr_with_outer(scope, outer_scopes, relation_name)
                             .ok_or_else(|| ParseError::UnknownColumn(name.clone()))?;
-                    field_exprs.extend(fields);
+                    for (_, expr) in fields {
+                        let field_name = format!("f{}", field_exprs.len() + 1);
+                        field_exprs.push((field_name, expr));
+                    }
                     continue;
                 }
                 let expr = bind_expr_with_outer_and_ctes(
