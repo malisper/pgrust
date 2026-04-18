@@ -3,7 +3,9 @@ use crate::include::catalog::{
     ANYARRAYOID, ANYOID, TEXT_TYPE_OID, bootstrap_pg_proc_rows, builtin_type_rows,
     builtin_window_function_for_proc_oid,
 };
-use crate::include::nodes::primnodes::{BuiltinWindowFunction, RegexTableFunction};
+use crate::include::nodes::primnodes::{
+    BuiltinWindowFunction, JsonRecordFunction, RegexTableFunction,
+};
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
@@ -200,6 +202,20 @@ pub(super) fn resolve_regex_table_function(name: &str) -> Option<RegexTableFunct
     }
 }
 
+pub(super) fn resolve_json_record_function(name: &str) -> Option<JsonRecordFunction> {
+    match name.to_ascii_lowercase().as_str() {
+        "json_populate_record" => Some(JsonRecordFunction::PopulateRecord),
+        "json_populate_recordset" => Some(JsonRecordFunction::PopulateRecordSet),
+        "json_to_record" => Some(JsonRecordFunction::ToRecord),
+        "json_to_recordset" => Some(JsonRecordFunction::ToRecordSet),
+        "jsonb_populate_record" => Some(JsonRecordFunction::JsonbPopulateRecord),
+        "jsonb_populate_recordset" => Some(JsonRecordFunction::JsonbPopulateRecordSet),
+        "jsonb_to_record" => Some(JsonRecordFunction::JsonbToRecord),
+        "jsonb_to_recordset" => Some(JsonRecordFunction::JsonbToRecordSet),
+        _ => None,
+    }
+}
+
 fn builtin_scalar_function_for_proc_row(row: &PgProcRow) -> Option<BuiltinScalarFunction> {
     builtin_scalar_function_for_proc_src(&row.prosrc)
         .or_else(|| builtin_scalar_function_for_proc_src(&row.proname))
@@ -314,6 +330,11 @@ fn match_proc_arg_type(
             .then_some((2, actual_type));
     }
     let declared_type = catalog.type_by_oid(declared_oid)?.sql_type;
+    if is_text_like_type(actual_type)
+        && catalog_text_input_cast_exists(catalog, declared_oid)
+    {
+        return Some((3, declared_type));
+    }
     if !actual_type.is_array
         && declared_type.is_array
         && is_text_like_type(actual_type)
@@ -725,8 +746,14 @@ pub(super) fn validate_scalar_function_arity(
             }
             BuiltinScalarFunction::JsonBuildArray | BuiltinScalarFunction::JsonBuildObject => true,
             BuiltinScalarFunction::JsonObject => matches!(args.len(), 1 | 2),
+            BuiltinScalarFunction::JsonPopulateRecord
+            | BuiltinScalarFunction::JsonPopulateRecordValid => args.len() == 2,
+            BuiltinScalarFunction::JsonToRecord => args.len() == 1,
             BuiltinScalarFunction::JsonStripNulls => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::JsonbObject => matches!(args.len(), 1 | 2),
+            BuiltinScalarFunction::JsonbPopulateRecord
+            | BuiltinScalarFunction::JsonbPopulateRecordValid => args.len() == 2,
+            BuiltinScalarFunction::JsonbToRecord => args.len() == 1,
             BuiltinScalarFunction::JsonbStripNulls => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::JsonbPretty => args.len() == 1,
             BuiltinScalarFunction::JsonbContains
@@ -1366,6 +1393,15 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("json_build_array", BuiltinScalarFunction::JsonBuildArray),
         ("json_build_object", BuiltinScalarFunction::JsonBuildObject),
         ("json_object", BuiltinScalarFunction::JsonObject),
+        (
+            "json_populate_record",
+            BuiltinScalarFunction::JsonPopulateRecord,
+        ),
+        (
+            "json_populate_record_valid",
+            BuiltinScalarFunction::JsonPopulateRecordValid,
+        ),
+        ("json_to_record", BuiltinScalarFunction::JsonToRecord),
         ("json_strip_nulls", BuiltinScalarFunction::JsonStripNulls),
         ("json_typeof", BuiltinScalarFunction::JsonTypeof),
         ("json_array_length", BuiltinScalarFunction::JsonArrayLength),
@@ -1388,6 +1424,15 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::JsonbExtractPathText,
         ),
         ("jsonb_object", BuiltinScalarFunction::JsonbObject),
+        (
+            "jsonb_populate_record",
+            BuiltinScalarFunction::JsonbPopulateRecord,
+        ),
+        (
+            "jsonb_populate_record_valid",
+            BuiltinScalarFunction::JsonbPopulateRecordValid,
+        ),
+        ("jsonb_to_record", BuiltinScalarFunction::JsonbToRecord),
         ("jsonb_strip_nulls", BuiltinScalarFunction::JsonbStripNulls),
         ("jsonb_pretty", BuiltinScalarFunction::JsonbPretty),
         ("jsonb_build_array", BuiltinScalarFunction::JsonbBuildArray),

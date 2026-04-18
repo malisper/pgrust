@@ -281,12 +281,18 @@ pub enum BuiltinScalarFunction {
     JsonBuildArray,
     JsonBuildObject,
     JsonObject,
+    JsonPopulateRecord,
+    JsonPopulateRecordValid,
+    JsonToRecord,
     JsonStripNulls,
     JsonTypeof,
     JsonArrayLength,
     JsonExtractPath,
     JsonExtractPathText,
     JsonbObject,
+    JsonbPopulateRecord,
+    JsonbPopulateRecordValid,
+    JsonbToRecord,
     JsonbStripNulls,
     JsonbPretty,
     JsonbTypeof,
@@ -550,6 +556,43 @@ pub enum JsonTableFunction {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JsonRecordFunction {
+    PopulateRecord,
+    PopulateRecordSet,
+    ToRecord,
+    ToRecordSet,
+    JsonbPopulateRecord,
+    JsonbPopulateRecordSet,
+    JsonbToRecord,
+    JsonbToRecordSet,
+}
+
+impl JsonRecordFunction {
+    pub fn name(&self) -> &'static str {
+        match self {
+            JsonRecordFunction::PopulateRecord => "json_populate_record",
+            JsonRecordFunction::PopulateRecordSet => "json_populate_recordset",
+            JsonRecordFunction::ToRecord => "json_to_record",
+            JsonRecordFunction::ToRecordSet => "json_to_recordset",
+            JsonRecordFunction::JsonbPopulateRecord => "jsonb_populate_record",
+            JsonRecordFunction::JsonbPopulateRecordSet => "jsonb_populate_recordset",
+            JsonRecordFunction::JsonbToRecord => "jsonb_to_record",
+            JsonRecordFunction::JsonbToRecordSet => "jsonb_to_recordset",
+        }
+    }
+
+    pub fn is_set_returning(&self) -> bool {
+        matches!(
+            self,
+            JsonRecordFunction::PopulateRecordSet
+                | JsonRecordFunction::ToRecordSet
+                | JsonRecordFunction::JsonbPopulateRecordSet
+                | JsonRecordFunction::JsonbToRecordSet
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegexTableFunction {
     Matches,
     SplitToTable,
@@ -585,6 +628,14 @@ pub enum SetReturningCall {
         args: Vec<Expr>,
         output_columns: Vec<QueryColumn>,
     },
+    JsonRecordFunction {
+        func_oid: u32,
+        func_variadic: bool,
+        kind: JsonRecordFunction,
+        args: Vec<Expr>,
+        output_columns: Vec<QueryColumn>,
+        record_type: Option<SqlType>,
+    },
     RegexTableFunction {
         func_oid: u32,
         func_variadic: bool,
@@ -611,6 +662,7 @@ impl SetReturningCall {
             SetReturningCall::GenerateSeries { output, .. } => std::slice::from_ref(output),
             SetReturningCall::Unnest { output_columns, .. }
             | SetReturningCall::JsonTableFunction { output_columns, .. }
+            | SetReturningCall::JsonRecordFunction { output_columns, .. }
             | SetReturningCall::RegexTableFunction { output_columns, .. }
             | SetReturningCall::TextSearchTableFunction { output_columns, .. }
             | SetReturningCall::UserDefined { output_columns, .. } => output_columns,

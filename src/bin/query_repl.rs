@@ -763,6 +763,7 @@ fn run_statement(
         Statement::CommentOnDomain(_)
         | Statement::CreateConversion(_)
         | Statement::CreateFunction(_)
+        | Statement::CreateOperatorClass(_)
         | Statement::CreateSchema(_)
         | Statement::CreateTablespace(_)
         | Statement::CreateDomain(_)

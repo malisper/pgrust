@@ -313,6 +313,24 @@ fn finalize_set_returning_call(
                 .collect(),
             output_columns,
         },
+        SetReturningCall::JsonRecordFunction {
+            func_oid,
+            func_variadic,
+            kind,
+            args,
+            output_columns,
+            record_type,
+        } => SetReturningCall::JsonRecordFunction {
+            func_oid,
+            func_variadic,
+            kind,
+            args: args
+                .into_iter()
+                .map(|arg| finalize_expr_subqueries(arg, catalog, subplans))
+                .collect(),
+            output_columns,
+            record_type,
+        },
         SetReturningCall::RegexTableFunction {
             func_oid,
             func_variadic,
@@ -643,6 +661,24 @@ fn rebase_set_returning_call_subplan_ids(call: SetReturningCall, base: usize) ->
                 .map(|arg| rebase_expr_subplan_ids(arg, base))
                 .collect(),
             output_columns,
+        },
+        SetReturningCall::JsonRecordFunction {
+            func_oid,
+            func_variadic,
+            kind,
+            args,
+            output_columns,
+            record_type,
+        } => SetReturningCall::JsonRecordFunction {
+            func_oid,
+            func_variadic,
+            kind,
+            args: args
+                .into_iter()
+                .map(|arg| rebase_expr_subplan_ids(arg, base))
+                .collect(),
+            output_columns,
+            record_type,
         },
         SetReturningCall::RegexTableFunction {
             func_oid,

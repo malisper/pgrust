@@ -7776,6 +7776,83 @@ fn select_list_composite_srf_is_rejected() {
         ExecError::Parse(ParseError::UnexpectedToken { .. })
     ));
 }
+
+#[test]
+fn jsonb_record_expansion_functions_work() {
+    let base = temp_dir("jsonb_record_expansion");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select * from jsonb_populate_record(null::record, '{\"x\":776}') as q(x int, y int)",
+        )
+        .unwrap(),
+        vec![vec![Value::Int32(776), Value::Null]],
+    );
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select * from jsonb_to_record('{\"a\":1,\"b\":\"foo\"}') as x(a int, b text)",
+        )
+        .unwrap(),
+        vec![vec![Value::Int32(1), Value::Text("foo".into())]],
+    );
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select jsonb_populate_record(row(1,2), '{\"f1\":0,\"f2\":1}')",
+        )
+        .unwrap(),
+        vec![vec![Value::Record(RecordValue::anonymous(vec![
+            ("f1".into(), Value::Int32(0)),
+            ("f2".into(), Value::Int32(1)),
+        ]))]],
+    );
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select jsonb_populate_recordset(row(1,2), '[{\"f1\":0},{\"f2\":3}]')",
+        )
+        .unwrap(),
+        vec![
+            vec![Value::Record(RecordValue::anonymous(vec![
+                ("f1".into(), Value::Int32(0)),
+                ("f2".into(), Value::Int32(2)),
+            ]))],
+            vec![Value::Record(RecordValue::anonymous(vec![
+                ("f1".into(), Value::Int32(1)),
+                ("f2".into(), Value::Int32(3)),
+            ]))],
+        ],
+    );
+}
+
+#[test]
+fn jsonb_populate_record_valid_checks_conversion_errors() {
+    let base = temp_dir("jsonb_populate_record_valid");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select jsonb_populate_record_valid(row(1,2), '{\"f1\":0,\"f2\":1}'), \
+                    jsonb_populate_record_valid(row(1,2), '{\"f1\":[1]}')",
+        )
+        .unwrap(),
+        vec![vec![Value::Bool(true), Value::Bool(false)]],
+    );
+}
 #[test]
 fn join_alias_hides_inner_relation_names() {
     let base = temp_dir("join_alias_hides_inner");
