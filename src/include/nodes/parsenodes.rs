@@ -415,10 +415,24 @@ pub enum FunctionArgMode {
     InOut,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FunctionVolatility {
+    Volatile,
+    Stable,
+    Immutable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FunctionParallel {
+    Unsafe,
+    Restricted,
+    Safe,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateFunctionArg {
     pub mode: FunctionArgMode,
-    pub name: String,
+    pub name: Option<String>,
     pub ty: RawTypeName,
 }
 
@@ -442,8 +456,13 @@ pub struct CreateFunctionStatement {
     pub replace_existing: bool,
     pub args: Vec<CreateFunctionArg>,
     pub return_spec: CreateFunctionReturnSpec,
+    pub strict: bool,
+    pub leakproof: bool,
+    pub volatility: FunctionVolatility,
+    pub parallel: FunctionParallel,
     pub language: String,
     pub body: String,
+    pub link_symbol: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
