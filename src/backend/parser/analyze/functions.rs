@@ -643,6 +643,9 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::Gamma
             | BuiltinScalarFunction::Lgamma
             | BuiltinScalarFunction::Md5
+            | BuiltinScalarFunction::ToBin
+            | BuiltinScalarFunction::ToOct
+            | BuiltinScalarFunction::ToHex
             | BuiltinScalarFunction::QuoteLiteral
             | BuiltinScalarFunction::BitcastIntegerToFloat4
             | BuiltinScalarFunction::BitcastBigintToFloat8
@@ -1479,6 +1482,9 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("sha512", BuiltinScalarFunction::Sha512),
         ("crc32", BuiltinScalarFunction::Crc32),
         ("crc32c", BuiltinScalarFunction::Crc32c),
+        ("to_bin", BuiltinScalarFunction::ToBin),
+        ("to_oct", BuiltinScalarFunction::ToOct),
+        ("to_hex", BuiltinScalarFunction::ToHex),
         ("to_char", BuiltinScalarFunction::ToChar),
         ("to_number", BuiltinScalarFunction::ToNumber),
         ("abs", BuiltinScalarFunction::Abs),
@@ -1854,6 +1860,9 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::Sha512
             | BuiltinScalarFunction::Crc32
             | BuiltinScalarFunction::Crc32c
+            | BuiltinScalarFunction::ToBin
+            | BuiltinScalarFunction::ToOct
+            | BuiltinScalarFunction::ToHex
             | BuiltinScalarFunction::ToChar
             | BuiltinScalarFunction::ToNumber
             | BuiltinScalarFunction::RegexpMatch

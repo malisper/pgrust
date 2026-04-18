@@ -571,6 +571,9 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 | Some(BuiltinScalarFunction::RegexpSubstr)
                 | Some(BuiltinScalarFunction::RegexpReplace)
                 | Some(BuiltinScalarFunction::SimilarSubstring)
+                | Some(BuiltinScalarFunction::ToBin)
+                | Some(BuiltinScalarFunction::ToOct)
+                | Some(BuiltinScalarFunction::ToHex)
                 | Some(BuiltinScalarFunction::PgLsn) => SqlType::new(SqlTypeKind::Text),
                 Some(BuiltinScalarFunction::Decode)
                 | Some(BuiltinScalarFunction::Sha224)
