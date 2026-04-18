@@ -368,6 +368,12 @@ impl Database {
                     create_stmt,
                     configured_search_path,
                 ),
+            Statement::CreateOperatorClass(ref create_stmt) => self
+                .execute_create_operator_class_stmt_with_search_path(
+                    client_id,
+                    create_stmt,
+                    configured_search_path,
+                ),
             Statement::CreateSchema(ref create_stmt) => self
                 .execute_create_schema_stmt_with_search_path(
                     client_id,

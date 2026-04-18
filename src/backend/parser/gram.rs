@@ -68,6 +68,9 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_create_function_statement(&sql)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_create_operator_class_statement(&sql)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_create_type_statement(&sql)? {
         return Ok(stmt);
     }
@@ -316,6 +319,17 @@ fn try_parse_create_function_statement(sql: &str) -> Result<Option<Statement>, P
     }
     Ok(Some(Statement::CreateFunction(
         build_create_function_statement(trimmed)?,
+    )))
+}
+
+fn try_parse_create_operator_class_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if !lowered.starts_with("create operator class ") {
+        return Ok(None);
+    }
+    Ok(Some(Statement::CreateOperatorClass(
+        build_create_operator_class_statement(trimmed)?,
     )))
 }
 
@@ -1321,6 +1335,126 @@ fn build_create_type_statement(sql: &str) -> Result<CreateTypeStatement, ParseEr
     ))
 }
 
+fn build_create_operator_class_statement(
+    sql: &str,
+) -> Result<CreateOperatorClassStatement, ParseError> {
+    let prefix = "create operator class";
+    let Some(rest) = sql.get(prefix.len()..) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "CREATE OPERATOR CLASS name FOR TYPE ... USING ... AS ...",
+            actual: sql.into(),
+        });
+    };
+    let rest = rest.trim_start();
+    let ((schema_name, opclass_name), rest) = parse_qualified_sql_name(rest)?;
+    let rest = rest.trim_start();
+    if !keyword_at_start(rest, "for") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "FOR TYPE",
+            actual: rest.into(),
+        });
+    }
+    let rest = consume_keyword(rest, "for").trim_start();
+    if !keyword_at_start(rest, "type") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "TYPE",
+            actual: rest.into(),
+        });
+    }
+    let rest = consume_keyword(rest, "type").trim_start();
+    let data_type_end = keyword_boundary(rest, "using").ok_or(ParseError::UnexpectedToken {
+        expected: "USING access method",
+        actual: rest.into(),
+    })?;
+    let data_type = parse_type_name(rest[..data_type_end].trim())?;
+    let rest = rest[data_type_end..].trim_start();
+    let rest = consume_keyword(rest, "using").trim_start();
+    let (access_method, rest) = parse_sql_identifier(rest)?;
+    let rest = rest.trim_start();
+    let mut is_default = false;
+    let rest = if keyword_at_start(rest, "default") {
+        is_default = true;
+        consume_keyword(rest, "default").trim_start()
+    } else {
+        rest
+    };
+    if !keyword_at_start(rest, "as") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "AS",
+            actual: rest.into(),
+        });
+    }
+    let items = parse_create_operator_class_items(consume_keyword(rest, "as").trim_start())?;
+    Ok(CreateOperatorClassStatement {
+        schema_name,
+        opclass_name,
+        data_type,
+        access_method,
+        is_default,
+        items,
+    })
+}
+
+fn parse_create_operator_class_items(
+    input: &str,
+) -> Result<Vec<CreateOperatorClassItem>, ParseError> {
+    split_top_level_items(input, ',')?
+        .into_iter()
+        .filter(|item| !item.trim().is_empty())
+        .map(|item| parse_create_operator_class_item(&item))
+        .collect()
+}
+
+fn parse_create_operator_class_item(input: &str) -> Result<CreateOperatorClassItem, ParseError> {
+    let trimmed = input.trim();
+    if keyword_at_start(trimmed, "operator") {
+        let rest = consume_keyword(trimmed, "operator").trim_start();
+        let (strategy_number, rest) = parse_smallint(rest, "operator strategy number")?;
+        let operator_name = rest.trim();
+        if operator_name.is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "operator name",
+                actual: trimmed.into(),
+            });
+        }
+        return Ok(CreateOperatorClassItem::Operator {
+            strategy_number,
+            operator_name: operator_name.to_string(),
+        });
+    }
+    if keyword_at_start(trimmed, "function") {
+        let rest = consume_keyword(trimmed, "function").trim_start();
+        let (support_number, rest) = parse_smallint(rest, "support function number")?;
+        let rest = rest.trim_start();
+        let ((schema_name, function_name), rest) = parse_qualified_sql_name(rest)?;
+        let (arg_types_sql, rest) = take_parenthesized_segment(rest.trim_start())?;
+        if !rest.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of function item",
+                actual: rest.trim().into(),
+            });
+        }
+        let arg_types = if arg_types_sql.trim().is_empty() {
+            Vec::new()
+        } else {
+            split_top_level_items(&arg_types_sql, ',')?
+                .into_iter()
+                .map(|item| parse_type_name(item.trim()))
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        return Ok(CreateOperatorClassItem::Function {
+            support_number,
+            schema_name,
+            function_name,
+            arg_types,
+        });
+    }
+    Err(ParseError::FeatureNotSupported(format!(
+        "unsupported CREATE OPERATOR CLASS item: {}",
+        trimmed.split_whitespace().next().unwrap_or(trimmed)
+    )))
+}
+
 fn parse_create_type_attributes(input: &str) -> Result<Vec<CompositeTypeAttributeDef>, ParseError> {
     let items = split_top_level_items(input, ',')?;
     if items.len() == 1 && items[0].trim().is_empty() {
@@ -1887,6 +2021,85 @@ fn find_next_top_level_keyword(input: &str, keywords: &[&str]) -> Option<usize> 
         i += 1;
     }
     None
+}
+
+fn keyword_boundary(input: &str, keyword: &str) -> Option<usize> {
+    let lowered = input.to_ascii_lowercase();
+    let keyword = keyword.to_ascii_lowercase();
+    let bytes = lowered.as_bytes();
+    let keyword_bytes = keyword.as_bytes();
+    let mut depth = 0usize;
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let ch = bytes[i] as char;
+        if in_single_quote {
+            if ch == '\'' {
+                if i + 1 < bytes.len() && bytes[i + 1] as char == '\'' {
+                    i += 2;
+                    continue;
+                }
+                in_single_quote = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_double_quote {
+            if ch == '"' {
+                if i + 1 < bytes.len() && bytes[i + 1] as char == '"' {
+                    i += 2;
+                    continue;
+                }
+                in_double_quote = false;
+            }
+            i += 1;
+            continue;
+        }
+        match ch {
+            '\'' => in_single_quote = true,
+            '"' => in_double_quote = true,
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        if depth == 0
+            && lowered[i..].starts_with(&keyword)
+            && (i == 0 || !is_identifier_char(bytes[i.saturating_sub(1)] as char))
+        {
+            let end = i + keyword_bytes.len();
+            if end == bytes.len() || !is_identifier_char(bytes[end] as char) {
+                return Some(i);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn is_identifier_char(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphanumeric()
+}
+
+fn parse_smallint<'a>(input: &'a str, expected: &'static str) -> Result<(i16, &'a str), ParseError> {
+    let input = input.trim_start();
+    let digits = input
+        .char_indices()
+        .take_while(|(_, ch)| ch.is_ascii_digit())
+        .map(|(idx, ch)| idx + ch.len_utf8())
+        .last()
+        .unwrap_or(0);
+    if digits == 0 {
+        return Err(ParseError::UnexpectedToken {
+            expected,
+            actual: input.into(),
+        });
+    }
+    let value = input[..digits].parse::<i16>().map_err(|_| ParseError::UnexpectedToken {
+        expected,
+        actual: input[..digits].into(),
+    })?;
+    Ok((value, &input[digits..]))
 }
 
 fn scan_string_literal_token_len(input: &str) -> Option<usize> {

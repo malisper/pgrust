@@ -7,7 +7,7 @@ use crate::backend::catalog::indexing::probe_system_catalog_rows_visible_in_db;
 use crate::backend::catalog::persistence::{
     append_catalog_entry_rows, delete_catalog_rows_subset_mvcc, insert_catalog_rows_subset_mvcc,
 };
-use crate::backend::catalog::pg_depend::{proc_depend_rows, view_rewrite_depend_rows};
+use crate::backend::catalog::pg_depend::{proc_depend_rows, sort_pg_depend_rows, view_rewrite_depend_rows};
 use crate::backend::catalog::rowcodec::{
     pg_description_row_from_values, pg_statistic_row_from_values,
 };
@@ -20,9 +20,12 @@ use crate::backend::catalog::rows::{
 use crate::backend::catalog::toasting::{ToastCatalogChanges, new_relation_create_toast_table};
 use crate::backend::executor::{ColumnDesc, RelationDesc};
 use crate::include::catalog::{
-    BootstrapCatalogKind, PG_AUTHID_RELATION_OID, PG_CLASS_RELATION_OID, PgConstraintRow,
-    PgDatabaseRow, PgDependRow, PgDescriptionRow, PgNamespaceRow, PgProcRow, PgRewriteRow,
-    PgStatisticRow, PgTablespaceRow,
+    BootstrapCatalogKind, PG_AMPROC_RELATION_OID, PG_AMOP_RELATION_OID, PG_AM_RELATION_OID,
+    PG_AUTHID_RELATION_OID, PG_CLASS_RELATION_OID, PG_NAMESPACE_RELATION_OID,
+    PG_OPERATOR_RELATION_OID, PG_OPCLASS_RELATION_OID, PG_OPFAMILY_RELATION_OID,
+    PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID, PgAmopRow, PgAmprocRow, PgConstraintRow,
+    PgDatabaseRow, PgDependRow, PgDescriptionRow, PgNamespaceRow, PgOpclassRow, PgOpfamilyRow,
+    PgProcRow, PgRewriteRow, PgStatisticRow, PgTablespaceRow,
 };
 use crate::include::nodes::datum::Value;
 
@@ -530,6 +533,164 @@ impl CatalogStore {
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
         Ok((row.oid, effect))
+    }
+
+    pub fn create_operator_class_mvcc(
+        &mut self,
+        mut opfamily_row: PgOpfamilyRow,
+        mut opclass_row: PgOpclassRow,
+        mut amop_rows: Vec<PgAmopRow>,
+        mut amproc_rows: Vec<PgAmprocRow>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<(u32, CatalogMutationEffect), CatalogError> {
+        let mut catalog = self.catalog_snapshot_with_control_for_snapshot(ctx)?;
+        if opfamily_row.oid == 0 {
+            opfamily_row.oid = catalog.next_oid();
+        }
+        catalog.next_oid = catalog.next_oid.max(opfamily_row.oid.saturating_add(1));
+        if opclass_row.oid == 0 {
+            opclass_row.oid = catalog.next_oid();
+        }
+        catalog.next_oid = catalog.next_oid.max(opclass_row.oid.saturating_add(1));
+        opclass_row.opcfamily = opfamily_row.oid;
+        for row in &mut amop_rows {
+            if row.oid == 0 {
+                row.oid = catalog.next_oid();
+            }
+            catalog.next_oid = catalog.next_oid.max(row.oid.saturating_add(1));
+            row.amopfamily = opfamily_row.oid;
+        }
+        for row in &mut amproc_rows {
+            if row.oid == 0 {
+                row.oid = catalog.next_oid();
+            }
+            catalog.next_oid = catalog.next_oid.max(row.oid.saturating_add(1));
+            row.amprocfamily = opfamily_row.oid;
+        }
+        self.persist_control_state(&catalog)?;
+
+        let mut depends = vec![
+            PgDependRow {
+                classid: PG_OPFAMILY_RELATION_OID,
+                objid: opfamily_row.oid,
+                objsubid: 0,
+                refclassid: PG_NAMESPACE_RELATION_OID,
+                refobjid: opfamily_row.opfnamespace,
+                refobjsubid: 0,
+                deptype: 'n',
+            },
+            PgDependRow {
+                classid: PG_OPFAMILY_RELATION_OID,
+                objid: opfamily_row.oid,
+                objsubid: 0,
+                refclassid: PG_AM_RELATION_OID,
+                refobjid: opfamily_row.opfmethod,
+                refobjsubid: 0,
+                deptype: 'n',
+            },
+            PgDependRow {
+                classid: PG_OPCLASS_RELATION_OID,
+                objid: opclass_row.oid,
+                objsubid: 0,
+                refclassid: PG_OPFAMILY_RELATION_OID,
+                refobjid: opfamily_row.oid,
+                refobjsubid: 0,
+                deptype: 'n',
+            },
+            PgDependRow {
+                classid: PG_OPCLASS_RELATION_OID,
+                objid: opclass_row.oid,
+                objsubid: 0,
+                refclassid: PG_NAMESPACE_RELATION_OID,
+                refobjid: opclass_row.opcnamespace,
+                refobjsubid: 0,
+                deptype: 'n',
+            },
+            PgDependRow {
+                classid: PG_OPCLASS_RELATION_OID,
+                objid: opclass_row.oid,
+                objsubid: 0,
+                refclassid: PG_TYPE_RELATION_OID,
+                refobjid: opclass_row.opcintype,
+                refobjsubid: 0,
+                deptype: 'n',
+            },
+            PgDependRow {
+                classid: PG_OPCLASS_RELATION_OID,
+                objid: opclass_row.oid,
+                objsubid: 0,
+                refclassid: PG_AM_RELATION_OID,
+                refobjid: opclass_row.opcmethod,
+                refobjsubid: 0,
+                deptype: 'n',
+            },
+        ];
+        depends.extend(amop_rows.iter().flat_map(|row| {
+            [
+                PgDependRow {
+                    classid: PG_AMOP_RELATION_OID,
+                    objid: row.oid,
+                    objsubid: 0,
+                    refclassid: PG_OPFAMILY_RELATION_OID,
+                    refobjid: row.amopfamily,
+                    refobjsubid: 0,
+                    deptype: 'n',
+                },
+                PgDependRow {
+                    classid: PG_AMOP_RELATION_OID,
+                    objid: row.oid,
+                    objsubid: 0,
+                    refclassid: PG_OPERATOR_RELATION_OID,
+                    refobjid: row.amopopr,
+                    refobjsubid: 0,
+                    deptype: 'n',
+                },
+            ]
+        }));
+        depends.extend(amproc_rows.iter().flat_map(|row| {
+            [
+                PgDependRow {
+                    classid: PG_AMPROC_RELATION_OID,
+                    objid: row.oid,
+                    objsubid: 0,
+                    refclassid: PG_OPFAMILY_RELATION_OID,
+                    refobjid: row.amprocfamily,
+                    refobjsubid: 0,
+                    deptype: 'n',
+                },
+                PgDependRow {
+                    classid: PG_AMPROC_RELATION_OID,
+                    objid: row.oid,
+                    objsubid: 0,
+                    refclassid: PG_PROC_RELATION_OID,
+                    refobjid: row.amproc,
+                    refobjsubid: 0,
+                    deptype: 'n',
+                },
+            ]
+        }));
+        sort_pg_depend_rows(&mut depends);
+
+        let kinds = [
+            BootstrapCatalogKind::PgOpfamily,
+            BootstrapCatalogKind::PgOpclass,
+            BootstrapCatalogKind::PgAmop,
+            BootstrapCatalogKind::PgAmproc,
+            BootstrapCatalogKind::PgDepend,
+        ];
+        let rows = PhysicalCatalogRows {
+            opfamilies: vec![opfamily_row],
+            opclasses: vec![opclass_row.clone()],
+            amops: amop_rows,
+            amprocs: amproc_rows,
+            depends,
+            ..PhysicalCatalogRows::default()
+        };
+        insert_catalog_rows_subset_mvcc(ctx, &rows, self.scope_db_oid(), &kinds)?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        Ok((opclass_row.oid, effect))
     }
 
     pub fn create_relation_inheritance_mvcc(
