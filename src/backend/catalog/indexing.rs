@@ -163,6 +163,8 @@ pub fn rebuild_system_catalog_indexes_for_db(
     base_dir: &Path,
     db_oid: u32,
 ) -> Result<(), CatalogError> {
+    // Bootstrap/template-copy path only. Normal catalog writes should preserve
+    // existing index relfiles and maintain them incrementally.
     let mut smgr = MdStorageManager::new(base_dir);
     for descriptor in system_catalog_indexes() {
         let rel = system_catalog_index_rel(*descriptor, db_oid);

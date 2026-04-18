@@ -8,6 +8,7 @@ use crate::backend::catalog::roles::{
     RoleAttributes, alter_role_attributes as alter_role_row, create_role as create_role_row,
     drop_roles as drop_role_rows, rename_role as rename_role_row,
 };
+use crate::backend::catalog::rows::PhysicalCatalogRows;
 use crate::include::catalog::{BootstrapCatalogKind, PgAuthIdRow, PgAuthMembersRow};
 
 use super::CatalogStore;
@@ -25,7 +26,15 @@ impl CatalogStore {
             role_name,
             attrs,
         )?;
-        self.persist_catalog_kinds(&catalog, &[BootstrapCatalogKind::PgAuthId])?;
+        self.persist_catalog_row_changes(
+            &catalog,
+            &PhysicalCatalogRows::default(),
+            &PhysicalCatalogRows {
+                authids: vec![row.clone()],
+                ..PhysicalCatalogRows::default()
+            },
+            &[BootstrapCatalogKind::PgAuthId],
+        )?;
         self.catalog = catalog.clone();
         self.control.next_oid = catalog.next_oid;
         self.control.next_rel_number = catalog.next_rel_number;
@@ -38,8 +47,25 @@ impl CatalogStore {
         new_name: &str,
     ) -> Result<PgAuthIdRow, CatalogError> {
         let mut catalog = self.catalog_snapshot_with_control()?;
+        let old_row = catalog
+            .authids
+            .iter()
+            .find(|row| row.rolname.eq_ignore_ascii_case(role_name))
+            .cloned()
+            .ok_or_else(|| CatalogError::UnknownTable(role_name.to_string()))?;
         let row = rename_role_row(&mut catalog.authids, role_name, new_name)?;
-        self.persist_catalog_kinds(&catalog, &[BootstrapCatalogKind::PgAuthId])?;
+        self.persist_catalog_row_changes(
+            &catalog,
+            &PhysicalCatalogRows {
+                authids: vec![old_row],
+                ..PhysicalCatalogRows::default()
+            },
+            &PhysicalCatalogRows {
+                authids: vec![row.clone()],
+                ..PhysicalCatalogRows::default()
+            },
+            &[BootstrapCatalogKind::PgAuthId],
+        )?;
         self.catalog = catalog.clone();
         Ok(row)
     }
@@ -50,8 +76,25 @@ impl CatalogStore {
         attrs: &RoleAttributes,
     ) -> Result<PgAuthIdRow, CatalogError> {
         let mut catalog = self.catalog_snapshot_with_control()?;
+        let old_row = catalog
+            .authids
+            .iter()
+            .find(|row| row.rolname.eq_ignore_ascii_case(role_name))
+            .cloned()
+            .ok_or_else(|| CatalogError::UnknownTable(role_name.to_string()))?;
         let row = alter_role_row(&mut catalog.authids, role_name, attrs)?;
-        self.persist_catalog_kinds(&catalog, &[BootstrapCatalogKind::PgAuthId])?;
+        self.persist_catalog_row_changes(
+            &catalog,
+            &PhysicalCatalogRows {
+                authids: vec![old_row],
+                ..PhysicalCatalogRows::default()
+            },
+            &PhysicalCatalogRows {
+                authids: vec![row.clone()],
+                ..PhysicalCatalogRows::default()
+            },
+            &[BootstrapCatalogKind::PgAuthId],
+        )?;
         self.catalog = catalog.clone();
         Ok(row)
     }
@@ -63,13 +106,29 @@ impl CatalogStore {
             .into_iter()
             .next()
             .ok_or_else(|| CatalogError::UnknownTable(role_name.to_string()))?;
+        let removed_members = catalog
+            .auth_members
+            .iter()
+            .filter(|row| {
+                row.roleid == removed_row.oid
+                    || row.member == removed_row.oid
+                    || row.grantor == removed_row.oid
+            })
+            .cloned()
+            .collect::<Vec<_>>();
         catalog.auth_members.retain(|row| {
             row.roleid != removed_row.oid
                 && row.member != removed_row.oid
                 && row.grantor != removed_row.oid
         });
-        self.persist_catalog_kinds(
+        self.persist_catalog_row_changes(
             &catalog,
+            &PhysicalCatalogRows {
+                authids: vec![removed_row.clone()],
+                auth_members: removed_members,
+                ..PhysicalCatalogRows::default()
+            },
+            &PhysicalCatalogRows::default(),
             &[
                 BootstrapCatalogKind::PgAuthId,
                 BootstrapCatalogKind::PgAuthMembers,
@@ -89,7 +148,15 @@ impl CatalogStore {
             &mut catalog.next_oid,
             membership,
         )?;
-        self.persist_catalog_kinds(&catalog, &[BootstrapCatalogKind::PgAuthMembers])?;
+        self.persist_catalog_row_changes(
+            &catalog,
+            &PhysicalCatalogRows::default(),
+            &PhysicalCatalogRows {
+                auth_members: vec![row.clone()],
+                ..PhysicalCatalogRows::default()
+            },
+            &[BootstrapCatalogKind::PgAuthMembers],
+        )?;
         self.catalog = catalog.clone();
         self.control.next_oid = catalog.next_oid;
         Ok(row)
@@ -105,6 +172,12 @@ impl CatalogStore {
         set_option: bool,
     ) -> Result<PgAuthMembersRow, CatalogError> {
         let mut catalog = self.catalog_snapshot_with_control()?;
+        let old_row = catalog
+            .auth_members
+            .iter()
+            .find(|row| row.roleid == roleid && row.member == member && row.grantor == grantor)
+            .cloned()
+            .ok_or_else(|| CatalogError::UnknownTable(roleid.to_string()))?;
         let row = update_role_membership_row(
             &mut catalog.auth_members,
             roleid,
@@ -114,7 +187,18 @@ impl CatalogStore {
             inherit_option,
             set_option,
         )?;
-        self.persist_catalog_kinds(&catalog, &[BootstrapCatalogKind::PgAuthMembers])?;
+        self.persist_catalog_row_changes(
+            &catalog,
+            &PhysicalCatalogRows {
+                auth_members: vec![old_row],
+                ..PhysicalCatalogRows::default()
+            },
+            &PhysicalCatalogRows {
+                auth_members: vec![row.clone()],
+                ..PhysicalCatalogRows::default()
+            },
+            &[BootstrapCatalogKind::PgAuthMembers],
+        )?;
         self.catalog = catalog.clone();
         Ok(row)
     }
@@ -127,7 +211,15 @@ impl CatalogStore {
     ) -> Result<PgAuthMembersRow, CatalogError> {
         let mut catalog = self.catalog_snapshot_with_control()?;
         let row = delete_role_membership_row(&mut catalog.auth_members, roleid, member, grantor)?;
-        self.persist_catalog_kinds(&catalog, &[BootstrapCatalogKind::PgAuthMembers])?;
+        self.persist_catalog_row_changes(
+            &catalog,
+            &PhysicalCatalogRows {
+                auth_members: vec![row.clone()],
+                ..PhysicalCatalogRows::default()
+            },
+            &PhysicalCatalogRows::default(),
+            &[BootstrapCatalogKind::PgAuthMembers],
+        )?;
         self.catalog = catalog.clone();
         Ok(row)
     }
