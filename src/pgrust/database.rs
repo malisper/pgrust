@@ -53,11 +53,12 @@ use crate::backend::storage::lmgr::{
     unlock_relations,
 };
 use crate::backend::storage::smgr::{RelFileLocator, StorageManager};
+pub use crate::backend::utils::activity::{DatabaseStatsStore, SessionStatsState};
 #[allow(unused_imports)]
 pub(crate) use crate::backend::utils::activity::{
-    DatabaseStatsStore, FunctionStatsDelta, FunctionStatsEntry, IoStatsEntry, IoStatsKey,
-    RelationStatsDelta, RelationStatsEntry, SessionStatsState, StatsDelta, StatsFetchConsistency,
-    StatsMutationEffect, TrackFunctionsSetting, default_pg_stat_io_keys, now_timestamptz,
+    FunctionStatsDelta, FunctionStatsEntry, IoStatsEntry, IoStatsKey, RelationStatsDelta,
+    RelationStatsEntry, StatsDelta, StatsFetchConsistency, StatsMutationEffect,
+    TrackFunctionsSetting, default_pg_stat_io_keys, now_timestamptz,
 };
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::inval::{
