@@ -30,7 +30,7 @@ use crate::include::catalog::{
     PgOperatorRow, PgProcRow, PgRangeRow, PgRewriteRow, PgStatisticRow, PgTypeRow, RECORD_TYPE_OID,
     bootstrap_pg_cast_rows, bootstrap_pg_language_rows, bootstrap_pg_operator_rows,
     bootstrap_pg_proc_rows, builtin_range_rows, builtin_type_rows,
-    proc_oid_for_builtin_aggregate_function,
+    proc_oid_for_builtin_aggregate_function, relkind_is_analyzable,
 };
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{
@@ -190,6 +190,11 @@ pub trait CatalogLookup {
     fn lookup_relation(&self, name: &str) -> Option<BoundRelation> {
         self.lookup_any_relation(name)
             .filter(|entry| entry.relkind == 'r')
+    }
+
+    fn lookup_analyzable_relation(&self, name: &str) -> Option<BoundRelation> {
+        self.lookup_any_relation(name)
+            .filter(|entry| relkind_is_analyzable(entry.relkind))
     }
 
     fn lookup_relation_by_oid(&self, _relation_oid: u32) -> Option<BoundRelation> {
