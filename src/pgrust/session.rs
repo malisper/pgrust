@@ -1740,10 +1740,16 @@ impl Session {
             }
             Statement::Analyze(ref analyze_stmt) => {
                 let search_path = self.configured_search_path();
+                let targets = db.effective_analyze_targets_with_search_path(
+                    client_id,
+                    Some((xid, cid)),
+                    search_path.as_deref(),
+                    analyze_stmt,
+                )?;
                 let txn = self.active_txn.as_mut().unwrap();
                 db.execute_analyze_stmt_in_transaction_with_search_path(
                     client_id,
-                    analyze_stmt,
+                    &targets,
                     xid,
                     cid,
                     search_path.as_deref(),
