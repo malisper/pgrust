@@ -71,7 +71,9 @@ pub struct BoundCheckConstraint {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundForeignKeyConstraint {
+    pub constraint_oid: u32,
     pub constraint_name: String,
+    pub relation_name: String,
     pub column_names: Vec<String>,
     pub column_indexes: Vec<usize>,
     pub referenced_relation_name: String,
@@ -80,10 +82,13 @@ pub struct BoundForeignKeyConstraint {
     pub referenced_desc: RelationDesc,
     pub referenced_column_indexes: Vec<usize>,
     pub referenced_index: super::BoundIndexRelation,
+    pub deferrable: bool,
+    pub initially_deferred: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundReferencedByForeignKey {
+    pub constraint_oid: u32,
     pub constraint_name: String,
     pub child_relation_name: String,
     pub child_relation_oid: u32,
@@ -96,6 +101,8 @@ pub struct BoundReferencedByForeignKey {
     pub child_index: Option<super::BoundIndexRelation>,
     pub on_delete: ForeignKeyAction,
     pub on_update: ForeignKeyAction,
+    pub deferrable: bool,
+    pub initially_deferred: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1064,7 +1071,7 @@ fn resolve_referenced_key(
 }
 
 fn bind_outbound_foreign_key_constraint(
-    _relation_oid: u32,
+    relation_oid: u32,
     desc: &RelationDesc,
     row: PgConstraintRow,
     catalog: &dyn super::CatalogLookup,
@@ -1091,7 +1098,9 @@ fn bind_outbound_foreign_key_constraint(
             actual: format!("missing referenced index {}", row.conindid),
         })?;
     Ok(BoundForeignKeyConstraint {
+        constraint_oid: row.oid,
         constraint_name: row.conname,
+        relation_name: relation_display_name(catalog, relation_oid, &relation_oid.to_string()),
         column_names: attnums_to_column_names(desc, &local_attnums)?,
         column_indexes: attnums_to_column_indexes(desc, &local_attnums)?,
         referenced_relation_name: relation_display_name(
@@ -1107,6 +1116,8 @@ fn bind_outbound_foreign_key_constraint(
             &referenced_attnums,
         )?,
         referenced_index,
+        deferrable: row.condeferrable,
+        initially_deferred: row.condeferred,
     })
 }
 
@@ -1130,6 +1141,7 @@ fn bind_inbound_foreign_key_constraint(
             actual: format!("missing confkey for constraint {}", row.conname),
         })?;
     Ok(BoundReferencedByForeignKey {
+        constraint_oid: row.oid,
         constraint_name: row.conname,
         child_relation_name: relation_display_name(catalog, child_relation.relation_oid, "<child>"),
         child_relation_oid: child_relation.relation_oid,
@@ -1147,6 +1159,8 @@ fn bind_inbound_foreign_key_constraint(
         ),
         on_delete: foreign_key_action_from_code(row.confdeltype)?,
         on_update: foreign_key_action_from_code(row.confupdtype)?,
+        deferrable: row.condeferrable,
+        initially_deferred: row.condeferred,
     })
 }
 

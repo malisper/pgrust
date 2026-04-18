@@ -624,6 +624,7 @@ fn empty_executor_context(base: &PathBuf) -> ExecutorContext {
         cte_tables: std::collections::HashMap::new(),
         cte_producers: std::collections::HashMap::new(),
         recursive_worktables: std::collections::HashMap::new(),
+        deferred_foreign_keys: None,
     }
 }
 
@@ -662,6 +663,7 @@ fn run_plan(
         cte_tables: std::collections::HashMap::new(),
         cte_producers: std::collections::HashMap::new(),
         recursive_worktables: std::collections::HashMap::new(),
+        deferred_foreign_keys: None,
     };
 
     let names = state.column_names().to_vec();
@@ -738,6 +740,7 @@ fn run_sql_with_catalog(
             cte_tables: std::collections::HashMap::new(),
             cte_producers: std::collections::HashMap::new(),
             recursive_worktables: std::collections::HashMap::new(),
+            deferred_foreign_keys: None,
         };
         execute_sql(&sql, &mut catalog, &mut ctx, xid)
     })
@@ -5769,6 +5772,7 @@ fn prepared_insert_uses_defaults_for_omitted_columns() {
         cte_tables: std::collections::HashMap::new(),
         cte_producers: std::collections::HashMap::new(),
         recursive_worktables: std::collections::HashMap::new(),
+        deferred_foreign_keys: None,
     };
 
     let prepared = crate::backend::parser::bind_insert_prepared(

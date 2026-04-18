@@ -1093,6 +1093,7 @@ impl Database {
             cte_tables: std::collections::HashMap::new(),
             cte_producers: std::collections::HashMap::new(),
             recursive_worktables: std::collections::HashMap::new(),
+            deferred_foreign_keys: None,
         };
         let query_result = execute_readonly_statement(
             Statement::Select(create_stmt.query.clone()),
@@ -1220,6 +1221,7 @@ impl Database {
             cte_tables: std::collections::HashMap::new(),
             cte_producers: std::collections::HashMap::new(),
             recursive_worktables: std::collections::HashMap::new(),
+            deferred_foreign_keys: None,
         };
         let inserted = crate::backend::commands::tablecmds::execute_insert_values(
             &table_name,

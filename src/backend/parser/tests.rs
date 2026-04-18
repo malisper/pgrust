@@ -915,6 +915,20 @@ fn parse_alter_table_constraint_statements() {
         })
     );
 
+    let stmt = parse_statement(
+        "alter table items alter constraint items_id_check deferrable initially deferred",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableAlterConstraint(AlterTableAlterConstraintStatement {
+            table_name: "items".into(),
+            constraint_name: "items_id_check".into(),
+            deferrable: Some(true),
+            initially_deferred: Some(true),
+        })
+    );
+
     let stmt =
         parse_statement("alter table items rename constraint items_id_check to items_id_guard")
             .unwrap();
@@ -973,7 +987,7 @@ fn parse_alter_table_set_statement() {
 #[test]
 fn parse_alter_table_multi_statement() {
     let stmt = parse_statement(
-        "alter table items add column note text, alter column id set not null, set (parallel_workers = 4)",
+        "alter table items add column note text, alter column id set not null, alter constraint items_fk not deferrable, set (parallel_workers = 4)",
     )
     .unwrap();
     assert_eq!(
@@ -993,6 +1007,12 @@ fn parse_alter_table_multi_statement() {
                 AlterTableMultiAction::SetNotNull(AlterTableSetNotNullStatement {
                     table_name: "items".into(),
                     column_name: "id".into(),
+                }),
+                AlterTableMultiAction::AlterConstraint(AlterTableAlterConstraintStatement {
+                    table_name: "items".into(),
+                    constraint_name: "items_fk".into(),
+                    deferrable: Some(false),
+                    initially_deferred: None,
                 }),
                 AlterTableMultiAction::Set(AlterTableSetStatement {
                     table_name: "items".into(),

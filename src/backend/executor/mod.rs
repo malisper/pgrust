@@ -101,7 +101,7 @@ use crate::pgrust::database::{SequenceRuntime, TransactionWaiter};
 use crate::pl::plpgsql::CompiledFunction;
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -122,6 +122,32 @@ pub struct ExprEvalBindings {
     pub inner_system_bindings: Vec<SystemVarBinding>,
     pub index_tuple: Option<Vec<Value>>,
     pub index_system_bindings: Vec<SystemVarBinding>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct DeferredForeignKeyTracker {
+    affected_constraint_oids: Arc<parking_lot::Mutex<BTreeSet<u32>>>,
+}
+
+impl DeferredForeignKeyTracker {
+    pub fn record(&self, constraint_oid: u32) {
+        if constraint_oid == 0 {
+            return;
+        }
+        self.affected_constraint_oids.lock().insert(constraint_oid);
+    }
+
+    pub fn affected_constraint_oids(&self) -> Vec<u32> {
+        self.affected_constraint_oids
+            .lock()
+            .iter()
+            .copied()
+            .collect()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.affected_constraint_oids.lock().is_empty()
+    }
 }
 
 pub struct ExecutorContext {
@@ -147,6 +173,7 @@ pub struct ExecutorContext {
     pub cte_tables: HashMap<usize, Rc<RefCell<MaterializedCteTable>>>,
     pub cte_producers: HashMap<usize, Rc<RefCell<PlanState>>>,
     pub recursive_worktables: HashMap<usize, Rc<RefCell<RecursiveWorkTable>>>,
+    pub deferred_foreign_keys: Option<DeferredForeignKeyTracker>,
 }
 
 impl ExecutorContext {

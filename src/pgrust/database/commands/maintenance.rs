@@ -220,6 +220,7 @@ impl Database {
             cte_tables: std::collections::HashMap::new(),
             cte_producers: std::collections::HashMap::new(),
             recursive_worktables: std::collections::HashMap::new(),
+            deferred_foreign_keys: None,
         };
         let analyzed = collect_analyze_stats(&analyze_stmt.targets, &catalog, &mut ctx)?;
         drop(ctx);
@@ -378,6 +379,7 @@ impl Database {
                 cte_tables: std::collections::HashMap::new(),
                 cte_producers: std::collections::HashMap::new(),
                 recursive_worktables: std::collections::HashMap::new(),
+                deferred_foreign_keys: None,
             };
             rewrite_heap_rows_for_added_serial_column(
                 self,

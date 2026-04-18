@@ -145,6 +145,16 @@ impl Database {
                         catalog_effects,
                     )?;
                 }
+                AlterTableMultiAction::AlterConstraint(stmt) => {
+                    self.execute_alter_table_alter_constraint_stmt_in_transaction_with_search_path(
+                        client_id,
+                        stmt,
+                        xid,
+                        cid,
+                        configured_search_path,
+                        catalog_effects,
+                    )?;
+                }
                 AlterTableMultiAction::AlterColumnType(stmt) => {
                     self.execute_alter_table_alter_column_type_stmt_in_transaction_with_search_path(
                         client_id,

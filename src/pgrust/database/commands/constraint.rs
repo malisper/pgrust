@@ -64,6 +64,7 @@ fn ddl_executor_context(
         cte_tables: std::collections::HashMap::new(),
         cte_producers: std::collections::HashMap::new(),
         recursive_worktables: std::collections::HashMap::new(),
+        deferred_foreign_keys: None,
     })
 }
 
@@ -211,7 +212,9 @@ fn validate_foreign_key_rows(
             })
         })?;
     let constraint = BoundForeignKeyConstraint {
+        constraint_oid: 0,
         constraint_name: action.constraint_name.clone(),
+        relation_name: relation_name.to_string(),
         column_names: action.columns.clone(),
         column_indexes: action
             .columns
@@ -250,6 +253,8 @@ fn validate_foreign_key_rows(
             })
             .collect::<Result<Vec<_>, _>>()?,
         referenced_index,
+        deferrable: false,
+        initially_deferred: false,
     };
     let mut ctx = ddl_executor_context(db, catalog, client_id, xid, cid, interrupts)?;
     let rows =
@@ -316,6 +321,28 @@ fn normalize_constraint_rename_target_name(name: &str) -> Result<String, ExecErr
     Ok(name.to_ascii_lowercase())
 }
 
+fn resolve_alter_constraint_deferrability(
+    row: &PgConstraintRow,
+    alter_stmt: &crate::backend::parser::AlterTableAlterConstraintStatement,
+) -> Result<(bool, bool), ExecError> {
+    let deferrable = alter_stmt.deferrable.unwrap_or(row.condeferrable);
+    let initially_deferred =
+        if alter_stmt.deferrable == Some(false) && alter_stmt.initially_deferred.is_none() {
+            false
+        } else {
+            alter_stmt.initially_deferred.unwrap_or(row.condeferred)
+        };
+    if !deferrable && initially_deferred {
+        return Err(ExecError::DetailedError {
+            message: format!("constraint \"{}\" is not deferrable", row.conname),
+            detail: None,
+            hint: None,
+            sqlstate: "55000",
+        });
+    }
+    Ok((deferrable, initially_deferred))
+}
+
 fn ensure_constraint_relation(
     db: &Database,
     client_id: ClientId,
@@ -351,6 +378,105 @@ fn primary_constraint_for_attnum<'a>(
 }
 
 impl Database {
+    pub(crate) fn execute_alter_table_alter_constraint_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        alter_stmt: &crate::backend::parser::AlterTableAlterConstraintStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let interrupts = self.interrupt_state(client_id);
+        let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+        let relation = lookup_heap_relation_for_ddl(&catalog, &alter_stmt.table_name)?;
+        self.table_locks.lock_table_interruptible(
+            relation.rel,
+            TableLockMode::AccessExclusive,
+            client_id,
+            interrupts.as_ref(),
+        )?;
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self
+            .execute_alter_table_alter_constraint_stmt_in_transaction_with_search_path(
+                client_id,
+                alter_stmt,
+                xid,
+                0,
+                configured_search_path,
+                &mut catalog_effects,
+            );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        self.table_locks.unlock_table(relation.rel, client_id);
+        result
+    }
+
+    pub(crate) fn execute_alter_table_alter_constraint_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        alter_stmt: &crate::backend::parser::AlterTableAlterConstraintStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let interrupts = self.interrupt_state(client_id);
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let relation = lookup_heap_relation_for_ddl(&catalog, &alter_stmt.table_name)?;
+        ensure_constraint_relation(self, client_id, &relation, &alter_stmt.table_name)?;
+        let rows = catalog.constraint_rows_for_relation(relation.relation_oid);
+        let row = find_constraint_row(&rows, &alter_stmt.constraint_name)
+            .cloned()
+            .ok_or_else(|| {
+                ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "existing table constraint",
+                    actual: format!(
+                        "constraint \"{}\" does not exist",
+                        alter_stmt.constraint_name
+                    ),
+                })
+            })?;
+        if row.contype != CONSTRAINT_FOREIGN {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "constraint \"{}\" of relation \"{}\" is not a foreign key constraint",
+                    alter_stmt.constraint_name,
+                    relation_basename(&alter_stmt.table_name)
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42809",
+            });
+        }
+        let (deferrable, initially_deferred) =
+            resolve_alter_constraint_deferrability(&row, alter_stmt)?;
+        if row.condeferrable == deferrable && row.condeferred == initially_deferred {
+            return Ok(StatementResult::AffectedRows(0));
+        }
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+            interrupts,
+        };
+        let effect = self
+            .catalog
+            .write()
+            .alter_foreign_key_constraint_deferrability_mvcc(
+                relation.relation_oid,
+                &alter_stmt.constraint_name,
+                deferrable,
+                initially_deferred,
+                &ctx,
+            )
+            .map_err(map_catalog_error)?;
+        catalog_effects.push(effect);
+        Ok(StatementResult::AffectedRows(0))
+    }
+
     pub(crate) fn execute_alter_table_rename_constraint_stmt_with_search_path(
         &self,
         client_id: ClientId,
