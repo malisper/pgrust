@@ -8,6 +8,7 @@ const INVALID_REGULAR_EXPRESSION: &str = "2201B";
 const INVALID_PARAMETER_VALUE: &str = "22023";
 const INVALID_ESCAPE_SEQUENCE: &str = "22025";
 const INVALID_USE_OF_ESCAPE_CHARACTER: &str = "2200C";
+const SUBSTRING_SQL_FUNCTION_CONTEXT: &str = "SQL function \"substring\" statement 1";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum PgRegexFlavor {
@@ -231,13 +232,16 @@ pub(super) fn eval_similar_substring(values: &[Value]) -> Result<Value, ExecErro
     if matches!(escape, SimilarEscape::Null) {
         return Ok(Value::Null);
     }
-    let regex_pattern = translate_similar_pattern(pattern, escape)?;
+    let regex_pattern =
+        translate_similar_pattern(pattern, escape).map_err(substring_regex_error_with_context)?;
     let compiled = compile_pg_regex(
         &regex_pattern,
         &PgRegexFlags::default(),
         PgRegexPurpose::MatchSpans,
-    )?;
-    let context = build_regex_match_context(text, &compiled, 0, true, false, false, false)?;
+    )
+    .map_err(substring_regex_error_with_context)?;
+    let context = build_regex_match_context(text, &compiled, 0, true, false, false, false)
+        .map_err(substring_regex_error_with_context)?;
     let Some(first) = context.matches.first() else {
         return Ok(Value::Null);
     };
@@ -1044,9 +1048,20 @@ fn reject_global_option(
             message: format!("{function_name} does not support the \"global\" option"),
             detail: None,
             hint: hint.map(str::to_string),
+            context: None,
         }));
     }
     Ok(())
+}
+
+fn substring_regex_error_with_context(error: ExecError) -> ExecError {
+    match error {
+        ExecError::Regex(mut err) => {
+            err.context = Some(SUBSTRING_SQL_FUNCTION_CONTEXT.to_string());
+            ExecError::Regex(err)
+        }
+        other => other,
+    }
 }
 
 fn regex_invalid(message: impl Into<String>) -> ExecError {
@@ -1055,6 +1070,7 @@ fn regex_invalid(message: impl Into<String>) -> ExecError {
         message: format!("invalid regular expression: {}", message.into()),
         detail: None,
         hint: None,
+        context: None,
     })
 }
 
@@ -1068,6 +1084,7 @@ fn regex_invalid_with_hint(
         message: message.into(),
         detail: None,
         hint: Some(hint.into()),
+        context: None,
     })
 }
 
@@ -1077,6 +1094,7 @@ fn regex_plain_error(sqlstate: &'static str, message: impl Into<String>) -> Exec
         message: message.into(),
         detail: None,
         hint: None,
+        context: None,
     })
 }
 
@@ -1086,6 +1104,7 @@ fn regex_invalid_parameter(message: impl Into<String>) -> ExecError {
         message: message.into(),
         detail: None,
         hint: None,
+        context: None,
     })
 }
 

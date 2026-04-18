@@ -10383,6 +10383,31 @@ fn sql_regex_substring_forms_work() {
 }
 
 #[test]
+fn sql_regex_substring_errors_include_substring_context() {
+    let base = temp_dir("sql_regex_substring_errors_include_context");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select substring('abcdefg' similar 'a*#\"%#\"g*#\"x' escape '#')",
+    )
+    .expect_err("substring similar with too many separators should error");
+
+    assert!(matches!(
+        err,
+        ExecError::Regex(RegexError {
+            message,
+            context,
+            ..
+        }) if message
+            == "SQL regular expression may not contain more than two escape-double-quote separators"
+            && context.as_deref() == Some("SQL function \"substring\" statement 1")
+    ));
+}
+
+#[test]
 fn regexp_set_returning_functions_work() {
     let base = temp_dir("regexp_set_returning_functions");
     let txns = TransactionManager::new_durable(&base).unwrap();
