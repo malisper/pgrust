@@ -13,7 +13,6 @@ use crate::backend::catalog::bootstrap::bootstrap_catalog_rel;
 use crate::backend::catalog::catalog::CatalogError;
 use crate::backend::catalog::indexing::{
     maintain_catalog_indexes_for_insert_in_db, rebuild_system_catalog_indexes_for_db,
-    vacuum_system_catalog_indexes_for_kinds_in_db,
 };
 use crate::backend::catalog::rowcodec::{catalog_row_values_for_kind, decode_catalog_tuple_values};
 use crate::backend::catalog::rows::PhysicalCatalogRows;
@@ -162,9 +161,8 @@ pub(crate) fn apply_catalog_row_changes_subset_incremental(
             .commit(xid)
             .map_err(|e| CatalogError::Io(format!("catalog transaction commit failed: {e:?}")))?;
         committed = true;
-        // Dead heap tuples only become reclaimable after commit, so index cleanup
-        // is best-effort follow-up work rather than part of the transaction result.
-        let _ = vacuum_system_catalog_indexes_for_kinds_in_db(&ctx.pool, &ctx.txns, db_oid, kinds);
+        // PostgreSQL leaves dead catalog index tuples behind here and expects a
+        // later VACUUM to reclaim them once their deleting xid is old enough.
         Ok(())
     })();
 
