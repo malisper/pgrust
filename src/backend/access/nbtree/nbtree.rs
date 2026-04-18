@@ -3,18 +3,13 @@ use std::sync::Arc;
 
 use parking_lot::RwLockWriteGuard;
 
-use crate::backend::access::heap::heapam::{
-    heap_fetch, heap_scan_begin_visible, heap_scan_next_visible,
-};
-use crate::backend::access::index::indexam;
+use crate::backend::access::heap::heapam::{heap_scan_begin_visible, heap_scan_next_visible};
+use crate::backend::access::index::unique::probe_unique_conflict;
 use crate::backend::access::nbtree::nbtcompare::{compare_bt_keyspace, compare_bt_values};
 use crate::backend::access::nbtree::nbtpreprocesskeys::preprocess_scan_keys;
 use crate::backend::access::nbtree::nbtsplitloc::choose_split_index;
 use crate::backend::access::nbtree::nbtutils::BtSortTuple;
 use crate::backend::access::nbtree::nbtxlog::log_btree_record;
-use crate::backend::access::transam::xact::{
-    INVALID_TRANSACTION_ID, TransactionId, TransactionStatus,
-};
 use crate::backend::access::transam::xlog::{
     INVALID_LSN, XLOG_BTREE_INSERT_LEAF, XLOG_BTREE_INSERT_META, XLOG_BTREE_INSERT_UPPER,
     XLOG_BTREE_NEWROOT, XLOG_BTREE_SPLIT_L, XLOG_BTREE_SPLIT_R, XLOG_FPI,
@@ -28,7 +23,7 @@ use crate::backend::storage::smgr::{ForkNumber, RelFileLocator, StorageManager};
 use crate::backend::utils::misc::interrupts::check_for_interrupts;
 use crate::include::access::amapi::{
     IndexAmRoutine, IndexBeginScanContext, IndexBuildContext, IndexBuildEmptyContext,
-    IndexBuildResult, IndexInsertContext, IndexUniqueCheck,
+    IndexBuildResult, IndexInsertContext,
 };
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::access::itup::IndexTupleData;
@@ -1917,108 +1912,10 @@ fn finish_incomplete_split(
 }
 
 fn bt_check_unique(ctx: &IndexInsertContext, key_values: &[Value]) -> Result<(), CatalogError> {
-    if !matches!(ctx.unique_check, IndexUniqueCheck::Yes) || keys_contain_null(key_values) {
-        return Ok(());
+    if probe_unique_conflict(ctx, key_values)?.is_some() {
+        return Err(CatalogError::UniqueViolation(ctx.index_name.clone()));
     }
-    loop {
-        let begin = IndexBeginScanContext {
-            pool: ctx.pool.clone(),
-            client_id: ctx.client_id,
-            snapshot: ctx.snapshot.clone(),
-            heap_relation: ctx.heap_relation,
-            index_relation: ctx.index_relation,
-            index_desc: ctx.index_desc.clone(),
-            index_meta: ctx.index_meta.clone(),
-            key_data: key_values
-                .iter()
-                .enumerate()
-                .map(|(idx, value)| ScanKeyData {
-                    attribute_number: idx as i16 + 1,
-                    strategy: 3,
-                    argument: value.clone(),
-                })
-                .collect(),
-            direction: ScanDirection::Forward,
-        };
-        let mut scan = indexam::index_beginscan(&begin, ctx.index_meta.am_oid)?;
-        let mut wait_for_xid = None;
-        while indexam::index_getnext(&mut scan, ctx.index_meta.am_oid)? {
-            let tid = scan
-                .xs_heaptid
-                .ok_or(CatalogError::Corrupt("index scan tuple missing heap tid"))?;
-            match classify_unique_candidate(ctx, tid)? {
-                UniqueCandidateResult::NoConflict => {}
-                UniqueCandidateResult::Conflict => {
-                    let _ = indexam::index_endscan(scan, ctx.index_meta.am_oid);
-                    return Err(CatalogError::UniqueViolation(ctx.index_name.clone()));
-                }
-                UniqueCandidateResult::WaitFor(xid) => {
-                    wait_for_xid = Some(xid);
-                    break;
-                }
-            }
-        }
-        indexam::index_endscan(scan, ctx.index_meta.am_oid)?;
-        let Some(xid) = wait_for_xid else {
-            return Ok(());
-        };
-        let waiter = ctx.txn_waiter.as_ref().ok_or_else(|| {
-            CatalogError::Io("btree unique check missing transaction waiter".into())
-        })?;
-        match waiter.wait_for(&ctx.txns, xid, ctx.interrupts.as_ref()) {
-            crate::backend::storage::lmgr::WaitOutcome::Completed => {}
-            crate::backend::storage::lmgr::WaitOutcome::DeadlockTimeout => {
-                return Err(CatalogError::Io(format!(
-                    "btree unique check timed out waiting for transaction {xid}"
-                )));
-            }
-            crate::backend::storage::lmgr::WaitOutcome::Interrupted(reason) => {
-                return Err(CatalogError::Interrupted(reason));
-            }
-        }
-    }
-}
-
-enum UniqueCandidateResult {
-    NoConflict,
-    Conflict,
-    WaitFor(TransactionId),
-}
-
-fn classify_unique_candidate(
-    ctx: &IndexInsertContext,
-    tid: ItemPointerData,
-) -> Result<UniqueCandidateResult, CatalogError> {
-    let tuple = heap_fetch(&ctx.pool, ctx.client_id, ctx.heap_relation, tid)
-        .map_err(|err| CatalogError::Io(format!("heap unique probe failed: {err:?}")))?;
-    let txns = ctx.txns.read();
-    let xmin = tuple.header.xmin;
-    let xmax = tuple.header.xmax;
-
-    if xmin == INVALID_TRANSACTION_ID {
-        return Ok(UniqueCandidateResult::NoConflict);
-    }
-    if xmin != ctx.snapshot.current_xid {
-        match txns.status(xmin) {
-            Some(TransactionStatus::Committed) => {}
-            Some(TransactionStatus::Aborted) => return Ok(UniqueCandidateResult::NoConflict),
-            Some(TransactionStatus::InProgress) | None => {
-                return Ok(UniqueCandidateResult::WaitFor(xmin));
-            }
-        }
-    }
-
-    if xmax == INVALID_TRANSACTION_ID {
-        return Ok(UniqueCandidateResult::Conflict);
-    }
-    if xmax == ctx.snapshot.current_xid {
-        return Ok(UniqueCandidateResult::NoConflict);
-    }
-    match txns.status(xmax) {
-        Some(TransactionStatus::Committed) => Ok(UniqueCandidateResult::NoConflict),
-        Some(TransactionStatus::Aborted) => Ok(UniqueCandidateResult::Conflict),
-        Some(TransactionStatus::InProgress) | None => Ok(UniqueCandidateResult::WaitFor(xmax)),
-    }
+    Ok(())
 }
 
 fn btinsert(ctx: &IndexInsertContext) -> Result<bool, CatalogError> {

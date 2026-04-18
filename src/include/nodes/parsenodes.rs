@@ -776,8 +776,10 @@ pub struct InsertStatement {
     pub with_recursive: bool,
     pub with: Vec<CommonTableExpr>,
     pub table_name: String,
+    pub table_alias: Option<String>,
     pub columns: Option<Vec<AssignmentTarget>>,
     pub source: InsertSource,
+    pub on_conflict: Option<OnConflictClause>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -830,6 +832,39 @@ pub enum MergeAction {
 pub enum MergeInsertSource {
     Values(Vec<SqlExpr>),
     DefaultValues,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OnConflictClause {
+    pub target: Option<OnConflictTarget>,
+    pub action: OnConflictAction,
+    pub assignments: Vec<Assignment>,
+    pub where_clause: Option<SqlExpr>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnConflictAction {
+    Nothing,
+    Update,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OnConflictTarget {
+    Inference(OnConflictInferenceSpec),
+    Constraint(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OnConflictInferenceSpec {
+    pub elements: Vec<OnConflictInferenceElem>,
+    pub predicate: Option<SqlExpr>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OnConflictInferenceElem {
+    pub expr: SqlExpr,
+    pub collation: Option<String>,
+    pub opclass: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

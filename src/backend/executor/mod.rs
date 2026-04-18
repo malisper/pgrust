@@ -26,8 +26,8 @@ mod node_hash;
 mod node_hashjoin;
 mod nodes;
 mod pg_regex;
-mod srf;
 mod sqlfunc;
+mod srf;
 mod startup;
 mod tsearch;
 pub(crate) mod value_io;
@@ -99,8 +99,7 @@ use crate::backend::utils::misc::interrupts::{
 };
 use crate::include::access::htup::TupleError;
 use crate::pgrust::database::{
-    DatabaseStatsStore, LargeObjectRuntime, SequenceRuntime, SessionStatsState,
-    TransactionWaiter,
+    DatabaseStatsStore, LargeObjectRuntime, SequenceRuntime, SessionStatsState, TransactionWaiter,
 };
 use crate::pl::plpgsql::CompiledFunction;
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
@@ -259,7 +258,10 @@ pub enum ExecError {
     StringDataRightTruncation {
         ty: String,
     },
-    CardinalityViolation(String),
+    CardinalityViolation {
+        message: String,
+        hint: Option<String>,
+    },
     UnboundOuterColumn {
         depth: usize,
         index: usize,

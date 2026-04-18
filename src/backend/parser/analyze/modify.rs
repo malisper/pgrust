@@ -13,10 +13,12 @@ pub struct BoundInsertStatement {
     pub toast_index: Option<BoundIndexRelation>,
     pub desc: RelationDesc,
     pub relation_constraints: BoundRelationConstraints,
+    pub referenced_by_foreign_keys: Vec<BoundReferencedByForeignKey>,
     pub indexes: Vec<BoundIndexRelation>,
     pub column_defaults: Vec<Expr>,
     pub target_columns: Vec<BoundAssignmentTarget>,
     pub source: BoundInsertSource,
+    pub on_conflict: Option<BoundOnConflictClause>,
     pub subplans: Vec<Plan>,
 }
 
@@ -807,7 +809,8 @@ pub fn bind_insert(
     )?;
     let entry = lookup_relation(catalog, &stmt.table_name)?;
     let column_defaults = bind_insert_column_defaults(&entry.desc, catalog, &local_ctes)?;
-    let scope = scope_for_relation(Some(&stmt.table_name), &entry.desc);
+    let visible_target_name = stmt.table_alias.as_deref().unwrap_or(&stmt.table_name);
+    let scope = scope_for_relation(Some(visible_target_name), &entry.desc);
 
     let source = match &stmt.source {
         InsertSource::Values(rows) => {
@@ -914,6 +917,25 @@ pub fn bind_insert(
         column_defaults,
         target_columns,
         source,
+        referenced_by_foreign_keys: bind_referenced_by_foreign_keys(
+            entry.relation_oid,
+            &entry.desc,
+            catalog,
+        )?,
+        on_conflict: stmt
+            .on_conflict
+            .as_ref()
+            .map(|clause| {
+                super::on_conflict::bind_on_conflict_clause(
+                    clause,
+                    visible_target_name,
+                    entry.relation_oid,
+                    &entry.desc,
+                    catalog,
+                    &local_ctes,
+                )
+            })
+            .transpose()?,
         subplans: Vec::new(),
     })
 }
@@ -989,7 +1011,7 @@ pub fn bind_update(
     })
 }
 
-fn bind_assignment_target(
+pub(super) fn bind_assignment_target(
     target: &crate::include::nodes::parsenodes::AssignmentTarget,
     scope: &BoundScope,
     catalog: &dyn CatalogLookup,
@@ -1001,7 +1023,7 @@ fn bind_assignment_target(
     })
 }
 
-fn bind_assignment_subscripts(
+pub(super) fn bind_assignment_subscripts(
     subscripts: &[crate::include::nodes::parsenodes::ArraySubscript],
     scope: &BoundScope,
     catalog: &dyn CatalogLookup,
