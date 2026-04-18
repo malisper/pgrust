@@ -190,11 +190,14 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
 }
 
 fn extract_quoted_error_value(message: &str) -> Option<&str> {
-    let prefix = "value \"";
-    let start = message.find(prefix)? + prefix.len();
-    let rest = &message[start..];
-    let end = rest.find('"')?;
-    Some(&rest[..end])
+    if let Some(start) = message.find("value \"") {
+        let rest = &message[start + "value \"".len()..];
+        let end = rest.find('"')?;
+        return Some(&rest[..end]);
+    }
+
+    let (_, rest) = message.rsplit_once(": \"")?;
+    rest.strip_suffix('"')
 }
 
 fn extract_syntax_error_token(message: &str) -> Option<&str> {
@@ -3652,6 +3655,44 @@ mod tests {
         packet
     }
 
+    fn first_error_response_position(output: &[u8]) -> Option<usize> {
+        let mut offset = 0;
+        while offset + 5 <= output.len() {
+            let tag = output[offset];
+            let len = i32::from_be_bytes(output[offset + 1..offset + 5].try_into().ok()?) as usize;
+            if len < 4 || offset + 1 + len > output.len() {
+                return None;
+            }
+            let body = &output[offset + 5..offset + 1 + len];
+            offset += 1 + len;
+
+            if tag != b'E' {
+                continue;
+            }
+
+            let mut body_offset = 0;
+            while body_offset < body.len() {
+                let field_type = *body.get(body_offset)?;
+                body_offset += 1;
+                if field_type == 0 {
+                    break;
+                }
+                let field_end = body[body_offset..]
+                    .iter()
+                    .position(|byte| *byte == 0)
+                    .map(|pos| body_offset + pos)?;
+                if field_type == b'P' {
+                    return std::str::from_utf8(&body[body_offset..field_end])
+                        .ok()?
+                        .parse()
+                        .ok();
+                }
+                body_offset = field_end + 1;
+            }
+        }
+        None
+    }
+
     #[test]
     fn simple_query_role_creation_is_visible_to_next_query() {
         let db = Database::open(temp_dir("role_visibility"), 16).unwrap();
@@ -4347,5 +4388,50 @@ mod tests {
         );
         let (_, rows) = execute_psql_describe_query(&db, &session, &sql).unwrap();
         assert_eq!(rows[0][14], Value::Text("btree".into()));
+    }
+
+    #[test]
+    fn extract_quoted_error_value_handles_date_input_messages() {
+        assert_eq!(
+            extract_quoted_error_value("invalid input syntax for type date: \"garbage\""),
+            Some("garbage")
+        );
+        assert_eq!(
+            extract_quoted_error_value("date/time field value out of range: \"1997-02-29\""),
+            Some("1997-02-29")
+        );
+        assert_eq!(
+            extract_quoted_error_value("date out of range: \"5874898-01-01\""),
+            Some("5874898-01-01")
+        );
+    }
+
+    #[test]
+    fn exec_error_position_points_at_date_literal_contents() {
+        let sql = "select date '1997-02-29';";
+        let err = ExecError::DetailedError {
+            message: "date/time field value out of range: \"1997-02-29\"".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22008",
+        };
+
+        assert_eq!(exec_error_position(sql, &err), Some(14));
+    }
+
+    #[test]
+    fn simple_query_reports_position_for_date_input_error() {
+        let db = Database::open(temp_dir("date_error_position"), 16).unwrap();
+        let mut state = ConnectionState {
+            session: Session::new(2),
+            prepared: HashMap::new(),
+            portals: HashMap::new(),
+            copy_in: None,
+        };
+        let mut output = Vec::new();
+
+        handle_query(&mut output, &db, &mut state, "select date '1997-02-29';").unwrap();
+
+        assert_eq!(first_error_response_position(&output), Some(14));
     }
 }

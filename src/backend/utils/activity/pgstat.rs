@@ -55,14 +55,14 @@ impl StatsDelta {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct DatabaseStatsStore {
-    pub relations: BTreeMap<u32, RelationStatsEntry>,
-    pub functions: BTreeMap<u32, FunctionStatsEntry>,
-    pub io: BTreeMap<IoStatsKey, IoStatsEntry>,
+pub struct DatabaseStatsStore {
+    pub(crate) relations: BTreeMap<u32, RelationStatsEntry>,
+    pub(crate) functions: BTreeMap<u32, FunctionStatsEntry>,
+    pub(crate) io: BTreeMap<IoStatsKey, IoStatsEntry>,
 }
 
 impl DatabaseStatsStore {
-    pub(crate) fn with_default_io_rows() -> Self {
+    pub fn with_default_io_rows() -> Self {
         let mut store = Self::default();
         for key in default_pg_stat_io_keys() {
             store.io.insert(
@@ -112,19 +112,19 @@ impl DatabaseStatsStore {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct SessionStatsState {
-    pub pending_flush: StatsDelta,
-    pub fetch_consistency: StatsFetchConsistency,
-    pub track_functions: TrackFunctionsSetting,
-    pub cache_snapshot: Option<DatabaseStatsStore>,
-    pub full_snapshot: Option<DatabaseStatsStore>,
-    pub snapshot_timestamp: Option<TimestampTzADT>,
-    pub relation_xact: BTreeMap<u32, RelationTransactionState>,
-    pub function_xact: BTreeMap<u32, FunctionStatsDelta>,
-    pub stats_effects: Vec<StatsMutationEffect>,
-    pub dropped_relations_in_xact: BTreeSet<u32>,
-    pub dropped_functions_in_xact: BTreeSet<u32>,
-    pub xact_active: bool,
+pub struct SessionStatsState {
+    pub(crate) pending_flush: StatsDelta,
+    pub(crate) fetch_consistency: StatsFetchConsistency,
+    pub(crate) track_functions: TrackFunctionsSetting,
+    pub(crate) cache_snapshot: Option<DatabaseStatsStore>,
+    pub(crate) full_snapshot: Option<DatabaseStatsStore>,
+    pub(crate) snapshot_timestamp: Option<TimestampTzADT>,
+    pub(crate) relation_xact: BTreeMap<u32, RelationTransactionState>,
+    pub(crate) function_xact: BTreeMap<u32, FunctionStatsDelta>,
+    pub(crate) stats_effects: Vec<StatsMutationEffect>,
+    pub(crate) dropped_relations_in_xact: BTreeSet<u32>,
+    pub(crate) dropped_functions_in_xact: BTreeSet<u32>,
+    pub(crate) xact_active: bool,
     pub(super) call_stack: Vec<FunctionCallFrame>,
 }
 
