@@ -10,12 +10,14 @@ use super::node_types::{NumericValue, Value};
 const NUMERIC_MIN_SIG_DIGITS: i32 = 16;
 const NUMERIC_MIN_DISPLAY_SCALE: i32 = 0;
 const NUMERIC_MAX_DISPLAY_SCALE: i32 = 16383;
+const NUMERIC_MAX_TRANSCENDENTAL_DISPLAY_SCALE: i32 = 1000;
+const NUMERIC_MAX_TRANSCENDENTAL_RESULT_SCALE: i32 = 2000;
 const NUMERIC_MAX_RESULT_WEIGHT: f64 = 131072.0;
 const NUMERIC_GUARD_DIGITS: i32 = 20;
 const LOG10_E: f64 = 0.434294481903252;
 const LOG10_2: f64 = 0.301029995663981;
 const LN_10: f64 = 2.302585092994046;
-const NUMERIC_EXP_LIMIT: i64 = (NUMERIC_MAX_DISPLAY_SCALE as i64) * 3;
+const NUMERIC_EXP_LIMIT: i64 = (NUMERIC_MAX_TRANSCENDENTAL_RESULT_SCALE as i64) * 3;
 
 fn numeric_domain_error(message: impl Into<String>) -> ExecError {
     ExecError::InvalidStorageValue {
@@ -318,19 +320,25 @@ fn estimate_ln_dweight(value: &NumericValue) -> i32 {
 fn exp_result_scale(value: &NumericValue) -> u32 {
     let mut approx_weight = numeric_to_f64_approx(value) * LOG10_E;
     approx_weight = approx_weight.clamp(
-        -(NUMERIC_MAX_DISPLAY_SCALE as f64),
-        NUMERIC_MAX_DISPLAY_SCALE as f64,
+        -(NUMERIC_MAX_TRANSCENDENTAL_RESULT_SCALE as f64),
+        NUMERIC_MAX_TRANSCENDENTAL_RESULT_SCALE as f64,
     );
 
     let mut rscale = NUMERIC_MIN_SIG_DIGITS - approx_weight as i32;
     rscale = rscale.max(finite_dscale(value) as i32);
-    clamp_display_scale(rscale)
+    rscale.clamp(
+        NUMERIC_MIN_DISPLAY_SCALE,
+        NUMERIC_MAX_TRANSCENDENTAL_DISPLAY_SCALE,
+    ) as u32
 }
 
 fn ln_result_scale(value: &NumericValue) -> u32 {
     let mut rscale = NUMERIC_MIN_SIG_DIGITS - estimate_ln_dweight(value);
     rscale = rscale.max(finite_dscale(value) as i32);
-    clamp_display_scale(rscale)
+    rscale.clamp(
+        NUMERIC_MIN_DISPLAY_SCALE,
+        NUMERIC_MAX_TRANSCENDENTAL_DISPLAY_SCALE,
+    ) as u32
 }
 
 fn bigint_sqrt_floor(value: &BigInt) -> BigInt {
@@ -516,9 +524,9 @@ fn eval_exp_numeric_with_scale(
         finite if finite.cmp(&NumericValue::from_i64(NUMERIC_EXP_LIMIT)) == Ordering::Greater => {
             Err(numeric_domain_error("value overflows numeric format"))
         }
-        finite if finite.cmp(&NumericValue::from_i64(-NUMERIC_EXP_LIMIT)) == Ordering::Less => {
-            Ok(NumericValue::zero())
-        }
+        finite if finite.cmp(&NumericValue::from_i64(-NUMERIC_EXP_LIMIT)) == Ordering::Less => Ok(
+            NumericValue::zero().with_dscale(exp_result_scale(finite)),
+        ),
         finite => {
             let mut x = finite.clone();
             let mut ndiv2 = 0;
