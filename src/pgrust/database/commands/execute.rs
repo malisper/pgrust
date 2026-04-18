@@ -271,6 +271,12 @@ impl Database {
                     alter_stmt,
                     configured_search_path,
                 ),
+            Statement::AlterTableAlterConstraint(ref alter_stmt) => self
+                .execute_alter_table_alter_constraint_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
             Statement::AlterTableRenameConstraint(ref alter_stmt) => self
                 .execute_alter_table_rename_constraint_stmt_with_search_path(
                     client_id,
@@ -427,6 +433,7 @@ impl Database {
                     cte_tables: std::collections::HashMap::new(),
                     cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
+                    deferred_foreign_keys: None,
                 };
                 let result = crate::backend::commands::tablecmds::execute_merge(
                     bound, &catalog, &mut ctx, xid, 0,
@@ -516,6 +523,7 @@ impl Database {
                     cte_tables: std::collections::HashMap::new(),
                     cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
+                    deferred_foreign_keys: None,
                 };
                 let result = match planned_select {
                     Some(planned_stmt) => execute_planned_stmt(planned_stmt, &mut ctx),
@@ -540,6 +548,8 @@ impl Database {
 
                 let xid = self.txns.write().begin();
                 let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+                let deferred_foreign_keys =
+                    crate::backend::executor::DeferredForeignKeyTracker::default();
                 let snapshot = self.txns.read().snapshot_for_command(xid, 0)?;
                 let mut ctx = ExecutorContext {
                     pool: std::sync::Arc::clone(&self.pool),
@@ -567,9 +577,25 @@ impl Database {
                     cte_tables: std::collections::HashMap::new(),
                     cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
+                    deferred_foreign_keys: Some(deferred_foreign_keys.clone()),
                 };
                 let result = execute_insert(bound, &catalog, &mut ctx, xid, 0);
                 drop(ctx);
+                let validation_catalog =
+                    self.lazy_catalog_lookup(client_id, Some((xid, 1)), configured_search_path);
+                let result = result.and_then(|result| {
+                    crate::pgrust::database::foreign_keys::validate_deferred_foreign_key_constraints(
+                        self,
+                        client_id,
+                        &validation_catalog,
+                        xid,
+                        1,
+                        Arc::clone(&interrupts),
+                        datetime_config,
+                        &deferred_foreign_keys,
+                    )?;
+                    Ok(result)
+                });
                 let result = self.finish_txn(client_id, xid, result, &[], &[], &[]);
                 guard.disarm();
                 unlock_relations(&self.table_locks, client_id, &locked_rels);
@@ -589,6 +615,8 @@ impl Database {
 
                 let xid = self.txns.write().begin();
                 let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+                let deferred_foreign_keys =
+                    crate::backend::executor::DeferredForeignKeyTracker::default();
                 let snapshot = self.txns.read().snapshot_for_command(xid, 0)?;
                 let mut ctx = ExecutorContext {
                     pool: std::sync::Arc::clone(&self.pool),
@@ -616,6 +644,7 @@ impl Database {
                     cte_tables: std::collections::HashMap::new(),
                     cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
+                    deferred_foreign_keys: Some(deferred_foreign_keys.clone()),
                 };
                 let result = execute_update_with_waiter(
                     bound,
@@ -626,6 +655,21 @@ impl Database {
                     Some((&self.txns, &self.txn_waiter, interrupts.as_ref())),
                 );
                 drop(ctx);
+                let validation_catalog =
+                    self.lazy_catalog_lookup(client_id, Some((xid, 1)), configured_search_path);
+                let result = result.and_then(|result| {
+                    crate::pgrust::database::foreign_keys::validate_deferred_foreign_key_constraints(
+                        self,
+                        client_id,
+                        &validation_catalog,
+                        xid,
+                        1,
+                        Arc::clone(&interrupts),
+                        datetime_config,
+                        &deferred_foreign_keys,
+                    )?;
+                    Ok(result)
+                });
                 let result = self.finish_txn(client_id, xid, result, &[], &[], &[]);
                 guard.disarm();
                 unlock_relations(&self.table_locks, client_id, &locked_rels);
@@ -645,6 +689,8 @@ impl Database {
 
                 let xid = self.txns.write().begin();
                 let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+                let deferred_foreign_keys =
+                    crate::backend::executor::DeferredForeignKeyTracker::default();
                 let snapshot = self.txns.read().snapshot_for_command(xid, 0)?;
                 let mut ctx = ExecutorContext {
                     pool: std::sync::Arc::clone(&self.pool),
@@ -672,6 +718,7 @@ impl Database {
                     cte_tables: std::collections::HashMap::new(),
                     cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
+                    deferred_foreign_keys: Some(deferred_foreign_keys.clone()),
                 };
                 let result = execute_delete_with_waiter(
                     bound,
@@ -681,6 +728,21 @@ impl Database {
                     Some((&self.txns, &self.txn_waiter, interrupts.as_ref())),
                 );
                 drop(ctx);
+                let validation_catalog =
+                    self.lazy_catalog_lookup(client_id, Some((xid, 1)), configured_search_path);
+                let result = result.and_then(|result| {
+                    crate::pgrust::database::foreign_keys::validate_deferred_foreign_key_constraints(
+                        self,
+                        client_id,
+                        &validation_catalog,
+                        xid,
+                        1,
+                        Arc::clone(&interrupts),
+                        datetime_config,
+                        &deferred_foreign_keys,
+                    )?;
+                    Ok(result)
+                });
                 let result = self.finish_txn(client_id, xid, result, &[], &[], &[]);
                 guard.disarm();
                 unlock_relations(&self.table_locks, client_id, &locked_rels);
@@ -904,6 +966,7 @@ impl Database {
                     cte_tables: std::collections::HashMap::new(),
                     cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
+                    deferred_foreign_keys: None,
                 };
                 let result = execute_truncate_table(
                     truncate_stmt.clone(),
@@ -963,6 +1026,7 @@ impl Database {
                     cte_tables: std::collections::HashMap::new(),
                     cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
+                    deferred_foreign_keys: None,
                 };
                 let result = execute_vacuum(vacuum_stmt.clone(), &catalog, &mut ctx);
                 drop(ctx);
@@ -1065,6 +1129,7 @@ impl Database {
             cte_tables: std::collections::HashMap::new(),
             cte_producers: std::collections::HashMap::new(),
             recursive_worktables: std::collections::HashMap::new(),
+            deferred_foreign_keys: None,
         };
 
         Ok(SelectGuard {
