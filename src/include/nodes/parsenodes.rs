@@ -1348,6 +1348,7 @@ pub enum SqlTypeKind {
     Float8,
     Money,
     Numeric,
+    Range,
     Int4Range,
     Int8Range,
     NumericRange,
@@ -1423,6 +1424,9 @@ pub struct SqlType {
     pub is_array: bool,
     pub type_oid: u32,
     pub typrelid: u32,
+    pub range_subtype_oid: u32,
+    pub range_multitype_oid: u32,
+    pub range_discrete: bool,
 }
 
 impl SqlType {
@@ -1436,6 +1440,9 @@ impl SqlType {
             is_array: false,
             type_oid: 0,
             typrelid: 0,
+            range_subtype_oid: 0,
+            range_multitype_oid: 0,
+            range_discrete: false,
         }
     }
 
@@ -1446,6 +1453,9 @@ impl SqlType {
             is_array: false,
             type_oid: 0,
             typrelid: 0,
+            range_subtype_oid: 0,
+            range_multitype_oid: 0,
+            range_discrete: false,
         }
     }
 
@@ -1456,6 +1466,9 @@ impl SqlType {
             is_array: false,
             type_oid: 0,
             typrelid: 0,
+            range_subtype_oid: 0,
+            range_multitype_oid: 0,
+            range_discrete: false,
         }
     }
 
@@ -1466,6 +1479,9 @@ impl SqlType {
             is_array: false,
             type_oid: 0,
             typrelid: 0,
+            range_subtype_oid: 0,
+            range_multitype_oid: 0,
+            range_discrete: false,
         }
     }
 
@@ -1476,12 +1492,40 @@ impl SqlType {
             is_array: false,
             type_oid: 0,
             typrelid: 0,
+            range_subtype_oid: 0,
+            range_multitype_oid: 0,
+            range_discrete: false,
+        }
+    }
+
+    pub const fn range(type_oid: u32, subtype_oid: u32) -> Self {
+        Self {
+            kind: SqlTypeKind::Range,
+            typmod: Self::NO_TYPEMOD,
+            is_array: false,
+            type_oid,
+            typrelid: 0,
+            range_subtype_oid: subtype_oid,
+            range_multitype_oid: 0,
+            range_discrete: false,
         }
     }
 
     pub const fn with_identity(mut self, type_oid: u32, typrelid: u32) -> Self {
         self.type_oid = type_oid;
         self.typrelid = typrelid;
+        self
+    }
+
+    pub const fn with_range_metadata(
+        mut self,
+        subtype_oid: u32,
+        multitype_oid: u32,
+        discrete: bool,
+    ) -> Self {
+        self.range_subtype_oid = subtype_oid;
+        self.range_multitype_oid = multitype_oid;
+        self.range_discrete = discrete;
         self
     }
 
@@ -1510,7 +1554,24 @@ impl SqlType {
             is_array: false,
             type_oid: self.type_oid,
             typrelid: self.typrelid,
+            range_subtype_oid: self.range_subtype_oid,
+            range_multitype_oid: self.range_multitype_oid,
+            range_discrete: self.range_discrete,
         }
+    }
+
+    pub const fn is_range(self) -> bool {
+        !self.is_array
+            && matches!(
+                self.kind,
+                SqlTypeKind::Range
+                    | SqlTypeKind::Int4Range
+                    | SqlTypeKind::Int8Range
+                    | SqlTypeKind::NumericRange
+                    | SqlTypeKind::DateRange
+                    | SqlTypeKind::TimestampRange
+                    | SqlTypeKind::TimestampTzRange
+            )
     }
 
     pub const fn char_len(self) -> Option<i32> {

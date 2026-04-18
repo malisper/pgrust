@@ -377,6 +377,9 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
     {
         return (oid as i32, -1, col.sql_type.typmod);
     }
+    if col.sql_type.type_oid != 0 && matches!(col.sql_type.kind, SqlTypeKind::Range) {
+        return (col.sql_type.type_oid as i32, -1, col.sql_type.typmod);
+    }
     if !col.sql_type.is_array && col.sql_type.type_oid != 0 {
         return (col.sql_type.type_oid as i32, -1, col.sql_type.typmod);
     }
@@ -385,6 +388,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
             SqlTypeKind::Int2 => 1005,
             SqlTypeKind::Int4 => 1007,
             SqlTypeKind::Int8 => 1016,
+            SqlTypeKind::Range => col.sql_type.type_oid as i32,
             SqlTypeKind::Int4Range
             | SqlTypeKind::Int8Range
             | SqlTypeKind::NumericRange
@@ -440,6 +444,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
         return (oid, -1, -1);
     }
     match col.sql_type.kind {
+        SqlTypeKind::Range => (col.sql_type.type_oid as i32, -1, col.sql_type.typmod),
         SqlTypeKind::AnyArray => (2277, -1, -1),
         SqlTypeKind::Record | SqlTypeKind::Composite => {
             (col.sql_type.type_oid as i32, -1, col.sql_type.typmod)

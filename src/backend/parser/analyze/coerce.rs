@@ -131,6 +131,7 @@ pub(super) fn sql_type_name(ty: SqlType) -> String {
         SqlTypeKind::Float8 => "double precision",
         SqlTypeKind::Money => "money",
         SqlTypeKind::Numeric => "numeric",
+        SqlTypeKind::Range => "range",
         SqlTypeKind::Int4Range => "int4range",
         SqlTypeKind::Int8Range => "int8range",
         SqlTypeKind::NumericRange => "numrange",

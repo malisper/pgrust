@@ -81,6 +81,7 @@ fn type_maximum_size(column: &crate::backend::executor::ColumnDesc) -> Option<us
         | crate::backend::parser::SqlTypeKind::Path
         | crate::backend::parser::SqlTypeKind::Polygon
         | crate::backend::parser::SqlTypeKind::Numeric
+        | crate::backend::parser::SqlTypeKind::Range
         | crate::backend::parser::SqlTypeKind::Int4Range
         | crate::backend::parser::SqlTypeKind::Int8Range
         | crate::backend::parser::SqlTypeKind::NumericRange
