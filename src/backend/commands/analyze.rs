@@ -32,6 +32,12 @@ pub(crate) struct AnalyzeRelationStats {
 }
 
 #[derive(Debug, Clone)]
+struct InheritanceAnalyzeStats {
+    reltuples: f64,
+    statistics: Vec<PgStatisticRow>,
+}
+
+#[derive(Debug, Clone)]
 struct AnalyzeRng {
     state: u64,
 }
@@ -150,13 +156,30 @@ pub(crate) fn collect_analyze_stats(
     for target in targets {
         ctx.check_for_interrupts()?;
         let relation = catalog
-            .lookup_relation(&target.table_name)
+            .lookup_analyzable_relation(&target.table_name)
             .ok_or_else(|| ExecError::Parse(ParseError::UnknownTable(target.table_name.clone())))?;
         let selected = selected_columns(&relation, target)?;
+        if relation.relkind == 'p' {
+            let inherited = if target.only {
+                InheritanceAnalyzeStats {
+                    reltuples: 0.0,
+                    statistics: Vec::new(),
+                }
+            } else {
+                sample_inheritance_tree(&relation, &selected, catalog, ctx)?
+            };
+            out.push(AnalyzeRelationStats {
+                relation_oid: relation.relation_oid,
+                relpages: -1,
+                reltuples: inherited.reltuples,
+                statistics: inherited.statistics,
+            });
+            continue;
+        }
         let root_stats = sample_relation(&relation, &selected, catalog, ctx)?;
         let mut statistics = root_stats.statistics;
         if !target.only && catalog.has_subclass(relation.relation_oid) {
-            statistics.extend(sample_inheritance_tree(&relation, &selected, catalog, ctx)?);
+            statistics.extend(sample_inheritance_tree(&relation, &selected, catalog, ctx)?.statistics);
         }
         out.push(AnalyzeRelationStats {
             relation_oid: relation.relation_oid,
@@ -319,7 +342,7 @@ fn sample_inheritance_tree(
     selected_columns: &[usize],
     catalog: &dyn CatalogLookup,
     ctx: &mut ExecutorContext,
-) -> Result<Vec<PgStatisticRow>, ExecError> {
+) -> Result<InheritanceAnalyzeStats, ExecError> {
     let stats_target = selected_columns
         .iter()
         .map(|index| relation.desc.columns[*index].attstattarget)
@@ -418,15 +441,18 @@ fn sample_inheritance_tree(
         }
     }
 
-    build_statistics_rows(
-        relation.relation_oid,
-        &relation.desc,
-        selected_columns,
-        &reservoir.into_inner(),
-        visible_rows as f64,
-        catalog,
-        true,
-    )
+    Ok(InheritanceAnalyzeStats {
+        reltuples: visible_rows as f64,
+        statistics: build_statistics_rows(
+            relation.relation_oid,
+            &relation.desc,
+            selected_columns,
+            &reservoir.into_inner(),
+            visible_rows as f64,
+            catalog,
+            true,
+        )?,
+    })
 }
 
 fn inherited_selected_column_mapping(

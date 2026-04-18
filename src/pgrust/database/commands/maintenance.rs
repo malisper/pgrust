@@ -3,8 +3,10 @@ use crate::backend::access::heap::heapam::heap_update_with_waiter;
 use crate::backend::commands::tablecmds::{collect_matching_rows_heap, maintain_indexes_for_row};
 use crate::backend::executor::value_io::{coerce_assignment_value, tuple_from_values};
 use crate::backend::executor::{ExecutorContext, RelationDesc};
+use crate::include::catalog::relkind_is_analyzable;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::MaintenanceTarget;
+use crate::pgrust::database::ddl::lookup_analyzable_relation_for_ddl;
 
 fn rewrite_heap_rows_for_added_serial_column(
     db: &Database,
@@ -91,9 +93,7 @@ fn collect_catalog_analyze_targets(
 
     let mut targets = Vec::new();
     for class in class_rows {
-        // :HACK: PostgreSQL also includes matviews and partitioned tables here,
-        // but pgrust ANALYZE currently only supports heap tables.
-        if class.relkind != 'r' {
+        if !relkind_is_analyzable(class.relkind) {
             continue;
         }
         if db.other_session_temp_namespace_oid(client_id, class.relnamespace) {
@@ -253,7 +253,7 @@ impl Database {
             .collect::<Vec<_>>();
         let rels = relation_names
             .iter()
-            .map(|name| lookup_heap_relation_for_ddl(&catalog, name))
+            .map(|name| lookup_analyzable_relation_for_ddl(&catalog, name))
             .collect::<Result<Vec<_>, _>>()?;
         let rel_locs = rels.iter().map(|rel| rel.rel).collect::<Vec<_>>();
         lock_tables_interruptible(
