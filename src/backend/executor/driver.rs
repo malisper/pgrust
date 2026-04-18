@@ -315,6 +315,9 @@ fn execute_statement_with_source(
         Statement::Insert(stmt) => {
             execute_insert(bind_insert(&stmt, catalog)?, catalog, ctx, xid, cid)
         }
+        Statement::Merge(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
+            "MERGE".into(),
+        ))),
         Statement::Update(stmt) => {
             execute_update(bind_update(&stmt, catalog)?, catalog, ctx, xid, cid)
         }
@@ -351,6 +354,9 @@ pub fn execute_readonly_statement(
         | Statement::AlterTableDropColumn(_)
         | Statement::AlterTableAlterColumnType(_) => Ok(StatementResult::AffectedRows(0)),
         Statement::AlterTableRename(_) => Ok(StatementResult::AffectedRows(0)),
+        Statement::Merge(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
+            "MERGE".into(),
+        ))),
         Statement::Unsupported(stmt) => Err(unsupported_statement_error(&stmt)),
         Statement::CommentOnTable(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",

@@ -624,6 +624,9 @@ fn run_statement(
                     actual: format!("{other:?}"),
                 })
             })?),
+        Statement::Merge(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
+            "MERGE".into(),
+        ))),
         Statement::Explain(stmt) => {
             let mut ctx = ExecutorContext {
                 pool: std::sync::Arc::clone(pool),

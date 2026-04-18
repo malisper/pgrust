@@ -3240,6 +3240,17 @@ fn parse_insert_update_delete() {
             ..
         })
     ));
+    assert!(matches!(
+        parse_statement(
+            "explain (costs off) merge into target t using source as s on t.id = s.id when matched then delete"
+        )
+        .unwrap(),
+        Statement::Explain(ExplainStatement {
+            costs: false,
+            statement,
+            ..
+        }) if matches!(statement.as_ref(), Statement::Merge(_))
+    ));
     assert!(
         matches!(parse_statement("analyze").unwrap(), Statement::Analyze(AnalyzeStatement { targets, .. }) if targets.is_empty())
     );
@@ -3360,6 +3371,53 @@ fn parse_insert_update_delete() {
     assert!(
         matches!(parse_statement("delete from only people where note is null").unwrap(), Statement::Delete(DeleteStatement { table_name, only, .. }) if table_name == "people" && only)
     );
+}
+
+#[test]
+fn parse_merge_statement() {
+    let stmt = parse_statement(
+        "merge into only target t using source as s on t.tid = s.sid \
+         when matched and s.delta > 0 then update set balance = s.delta \
+         when not matched then insert (tid, balance) values (s.sid, s.delta) \
+         when not matched by source then delete",
+    )
+    .unwrap();
+    let stmt = match stmt {
+        Statement::Merge(stmt) => stmt,
+        other => panic!("expected merge statement, got {other:?}"),
+    };
+    assert!(stmt.target_only);
+    assert_eq!(stmt.target_table, "target");
+    assert_eq!(stmt.target_alias.as_deref(), Some("t"));
+    assert_eq!(stmt.when_clauses.len(), 3);
+    assert_eq!(stmt.when_clauses[0].match_kind, MergeMatchKind::Matched);
+    assert!(stmt.when_clauses[0].condition.is_some());
+    assert!(matches!(
+        stmt.when_clauses[0].action,
+        MergeAction::Update { ref assignments } if assignments.len() == 1
+    ));
+    assert_eq!(stmt.when_clauses[1].match_kind, MergeMatchKind::NotMatchedByTarget);
+    assert!(matches!(
+        stmt.when_clauses[1].action,
+        MergeAction::Insert {
+            columns: Some(ref columns),
+            source: MergeInsertSource::Values(ref values),
+        } if columns == &vec!["tid".to_string(), "balance".to_string()] && values.len() == 2
+    ));
+    assert_eq!(stmt.when_clauses[2].match_kind, MergeMatchKind::NotMatchedBySource);
+    assert!(matches!(stmt.when_clauses[2].action, MergeAction::Delete));
+}
+
+#[test]
+fn parse_merge_rejects_invalid_when_actions() {
+    for sql in [
+        "merge into target t using source s on t.id = s.id when matched then insert default values",
+        "merge into target t using source s on t.id = s.id when not matched then update set balance = 0",
+        "merge into target t using source s on t.id = s.id when matched then update target set balance = 0",
+        "merge into target t using source s on t.id = s.id when not matched then insert values (1), (2)",
+    ] {
+        assert!(parse_statement(sql).is_err(), "{sql}");
+    }
 }
 
 #[test]
