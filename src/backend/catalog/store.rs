@@ -189,8 +189,11 @@ mod tests {
         }
     }
 
-    fn vacuum_relation_via_command(base: &PathBuf, scope: CatalogScope, relation_name: &str) {
-        let _ = scope;
+    fn vacuum_relation_via_command(
+        base: &PathBuf,
+        relation_name: &str,
+        txns: Option<Arc<RwLock<TransactionManager>>>,
+    ) {
         // Use the database-visible catalog view so shared catalogs like pg_authid
         // resolve through the normal pg_catalog lookup path during VACUUM.
         let store = CatalogStore::load(base).unwrap();
@@ -201,9 +204,14 @@ mod tests {
             smgr.open(bootstrap_catalog_rel(kind, 1)).unwrap();
         }
         let pool = Arc::new(BufferPool::new(SmgrStorageBackend::new(smgr), 16));
-        let txns = Arc::new(RwLock::new(
-            TransactionManager::new_durable(base.clone()).unwrap(),
-        ));
+        // :HACK: Tests that keep a durable TransactionManager alive after
+        // commit must reuse it here; reopening from disk can miss unflushed
+        // status bits that the live server would still have in memory.
+        let txns = txns.unwrap_or_else(|| {
+            Arc::new(RwLock::new(
+                TransactionManager::new_durable(base.clone()).unwrap(),
+            ))
+        });
         let snapshot = txns.read().snapshot(INVALID_TRANSACTION_ID).unwrap();
         let mut ctx = crate::backend::executor::ExecutorContext {
             pool,
@@ -1669,7 +1677,42 @@ mod tests {
         let after_drop = count_leaf_btree_items(&base, class_index_rel);
         assert_eq!(after_drop, before + 1);
 
-        vacuum_relation_via_command(&base, CatalogScope::Database(1), "pg_catalog.pg_class");
+        vacuum_relation_via_command(&base, "pg_catalog.pg_class", None);
+
+        let after_vacuum = count_leaf_btree_items(&base, class_index_rel);
+        assert_eq!(after_vacuum, before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn catalog_store_rename_table_manual_vacuum_cleans_pg_class_relname_index() {
+        let base = temp_dir("catalog_index_tuple_cleanup_rename");
+        let mut store = CatalogStore::load(&base).unwrap();
+        let created = store
+            .create_table(
+                "people",
+                RelationDesc {
+                    columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
+                },
+            )
+            .unwrap();
+        let class_index_rel = system_index_rel(1, "pg_class_relname_nsp_index");
+        let before = count_leaf_btree_items(&base, class_index_rel);
+
+        let (_pool, txns, ctx) = durable_write_context(&base);
+        let _effect = store
+            .rename_relation_mvcc(created.relation_oid, "customers", &ctx)
+            .unwrap();
+        txns.write().commit(ctx.xid).unwrap();
+
+        let after_rename = count_leaf_btree_items(&base, class_index_rel);
+        assert!(after_rename > before);
+
+        vacuum_relation_via_command(
+            &base,
+            "pg_catalog.pg_class",
+            Some(Arc::clone(&txns)),
+        );
 
         let after_vacuum = count_leaf_btree_items(&base, class_index_rel);
         assert_eq!(after_vacuum, before);
@@ -1700,7 +1743,7 @@ mod tests {
         let after_rename = count_leaf_btree_items(&base, role_index_rel);
         assert!(after_rename > after_create);
 
-        vacuum_relation_via_command(&base, CatalogScope::Shared, "pg_catalog.pg_authid");
+        vacuum_relation_via_command(&base, "pg_catalog.pg_authid", None);
 
         let after_vacuum = count_leaf_btree_items(&base, role_index_rel);
         assert_eq!(after_vacuum, after_create);
