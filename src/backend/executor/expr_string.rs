@@ -1367,6 +1367,83 @@ pub(super) fn eval_bytea_overlay(values: &[Value]) -> Result<Value, ExecError> {
     Ok(Value::Bytea(out))
 }
 
+pub(super) fn eval_text_overlay(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(text_value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    let Some(place_value) = values.get(1) else {
+        return Ok(Value::Null);
+    };
+    let Some(start_value) = values.get(2) else {
+        return Ok(Value::Null);
+    };
+    if matches!(text_value, Value::Null)
+        || matches!(place_value, Value::Null)
+        || matches!(start_value, Value::Null)
+    {
+        return Ok(Value::Null);
+    }
+    let text = text_value
+        .as_text()
+        .ok_or_else(|| ExecError::TypeMismatch {
+            op: "overlay",
+            left: text_value.clone(),
+            right: place_value.clone(),
+        })?;
+    let place = place_value
+        .as_text()
+        .ok_or_else(|| ExecError::TypeMismatch {
+            op: "overlay",
+            left: place_value.clone(),
+            right: text_value.clone(),
+        })?;
+    let start = match start_value {
+        Value::Int32(v) => *v,
+        other => {
+            return Err(ExecError::TypeMismatch {
+                op: "overlay",
+                left: text_value.clone(),
+                right: other.clone(),
+            });
+        }
+    };
+    let len = match values.get(3) {
+        Some(Value::Null) => return Ok(Value::Null),
+        Some(Value::Int32(v)) => Some(*v),
+        Some(other) => {
+            return Err(ExecError::TypeMismatch {
+                op: "overlay",
+                left: text_value.clone(),
+                right: other.clone(),
+            });
+        }
+        None => None,
+    };
+    if start <= 0 {
+        return Err(ExecError::NegativeSubstringLength);
+    }
+    let replace_len = match len {
+        Some(len) => {
+            if len < 0 {
+                return Err(ExecError::NegativeSubstringLength);
+            }
+            len
+        }
+        None => i32::try_from(place.chars().count()).map_err(|_| ExecError::Int4OutOfRange)?,
+    };
+    let suffix_position = start
+        .checked_add(replace_len)
+        .ok_or(ExecError::Int4OutOfRange)?;
+    let chars: Vec<char> = text.chars().collect();
+    let prefix_len = usize::min((start - 1) as usize, chars.len());
+    let suffix_start = usize::min((suffix_position - 1) as usize, chars.len());
+    let mut out = String::with_capacity(text.len() + place.len());
+    out.extend(chars[..prefix_len].iter());
+    out.push_str(place);
+    out.extend(chars[suffix_start..].iter());
+    Ok(Value::Text(CompactString::from_owned(out)))
+}
+
 pub(super) fn eval_get_bit_bytes(values: &[Value]) -> Result<Value, ExecError> {
     let Some(bytes_value) = values.first() else {
         return Ok(Value::Null);

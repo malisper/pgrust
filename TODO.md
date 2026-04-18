@@ -305,6 +305,7 @@ Targeted reruns on 2026-04-17:
 - [done] Match PostgreSQL `bytea` input diagnostics for malformed hex and escape sequences, including `pg_input_error_info()` messages and SQLSTATEs.
 - Tighten `SIMILAR TO` and `SUBSTRING ... SIMILAR` behavior for one-separator patterns, `ESCAPE NULL`, and PostgreSQL-compatible error text.
 - [done] Add PostgreSQL `CONTEXT` output for the `SUBSTRING ... SIMILAR` too-many-separators error.
+- [done] Implement `OVERLAY(text, text, integer[/FOR ...])` semantics to match PostgreSQL in `strings.sql`.
 
 ## JSONPath follow-ups
 

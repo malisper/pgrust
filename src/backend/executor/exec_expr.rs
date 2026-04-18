@@ -60,8 +60,9 @@ use super::expr_string::{
     eval_repeat_function, eval_replace_function, eval_reverse_function, eval_right_function,
     eval_rpad_function, eval_set_bit_bytes, eval_set_byte, eval_sha224_function,
     eval_sha256_function, eval_sha384_function, eval_sha512_function,
-    eval_split_part_function, eval_strpos_function, eval_text_substring, eval_to_char_function,
-    eval_to_number_function, eval_translate_function, eval_trim_function, eval_unistr_function,
+    eval_split_part_function, eval_strpos_function, eval_text_overlay, eval_text_substring,
+    eval_to_char_function, eval_to_number_function, eval_translate_function, eval_trim_function,
+    eval_unistr_function,
 };
 use super::node_types::*;
 use super::pg_regex::{
@@ -1449,6 +1450,10 @@ fn eval_plpgsql_builtin_function(
                 Value::Int32(_),
                 Value::Int32(_),
             ] => eval_bytea_overlay(&values),
+            [Value::Text(_), Value::Text(_), Value::Int32(_)]
+            | [Value::Text(_), Value::Text(_), Value::Int32(_), Value::Int32(_)] => {
+                eval_text_overlay(&values)
+            }
             _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "plpgsql builtin function supported by the standalone evaluator",
                 actual: format!("{func:?}"),
@@ -2244,7 +2249,11 @@ fn eval_builtin_function(
                 Value::Int32(_),
                 Value::Int32(_),
             ] => eval_bytea_overlay(&values),
-            _ => unreachable!("validated bit overlay arguments"),
+            [Value::Text(_), Value::Text(_), Value::Int32(_)]
+            | [Value::Text(_), Value::Text(_), Value::Int32(_), Value::Int32(_)] => {
+                eval_text_overlay(&values)
+            }
+            _ => unreachable!("validated overlay arguments"),
         },
         BuiltinScalarFunction::GetBit => match values.as_slice() {
             [Value::Bit(bits), Value::Int32(index)] => {

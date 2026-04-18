@@ -10577,6 +10577,37 @@ fn text_helper_functions_work() {
 }
 
 #[test]
+fn text_overlay_follows_postgres_rules() {
+    let base = temp_dir("strings_text_overlay");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select overlay('abcdef' placing '45' from 4), overlay('yabadoo' placing 'daba' from 5), overlay('yabadoo' placing 'daba' from 5 for 0), overlay('babosa' placing 'ubb' from 2 for 4)",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Text("abc45f".into()),
+            Value::Text("yabadaba".into()),
+            Value::Text("yabadabadoo".into()),
+            Value::Text("bubba".into()),
+        ]],
+    );
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select overlay('abcdef' placing '45' from 0)",
+    )
+    .unwrap_err();
+    assert!(matches!(err, ExecError::NegativeSubstringLength));
+}
+
+#[test]
 fn unistr_function_decodes_and_validates_unicode_escapes() {
     let base = temp_dir("strings_unistr");
     let txns = TransactionManager::new_durable(&base).unwrap();
