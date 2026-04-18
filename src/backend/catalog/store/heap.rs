@@ -7,7 +7,9 @@ use crate::backend::catalog::indexing::probe_system_catalog_rows_visible_in_db;
 use crate::backend::catalog::persistence::{
     append_catalog_entry_rows, delete_catalog_rows_subset_mvcc, insert_catalog_rows_subset_mvcc,
 };
-use crate::backend::catalog::pg_depend::{proc_depend_rows, view_rewrite_depend_rows};
+use crate::backend::catalog::pg_depend::{
+    proc_depend_rows, relation_rule_depend_rows, view_rewrite_depend_rows,
+};
 use crate::backend::catalog::rowcodec::{
     pg_description_row_from_values, pg_statistic_row_from_values,
 };
@@ -20,8 +22,9 @@ use crate::backend::catalog::rows::{
 use crate::backend::catalog::toasting::{ToastCatalogChanges, new_relation_create_toast_table};
 use crate::backend::executor::{ColumnDesc, RelationDesc};
 use crate::include::catalog::{
-    BootstrapCatalogKind, PG_AUTHID_RELATION_OID, PG_CLASS_RELATION_OID, PgConstraintRow,
-    PgDatabaseRow, PgDependRow, PgDescriptionRow, PgNamespaceRow, PgProcRow, PgRewriteRow,
+    BootstrapCatalogKind, PG_AUTHID_RELATION_OID, PG_CLASS_RELATION_OID, PG_REWRITE_RELATION_OID,
+    PgConstraintRow, PgDatabaseRow, PgDependRow, PgDescriptionRow, PgNamespaceRow, PgProcRow,
+    PgRewriteRow,
     PgStatisticRow, PgTablespaceRow,
 };
 use crate::include::nodes::datum::Value;
@@ -690,6 +693,60 @@ impl CatalogStore {
         effect_record_oid(&mut effect.namespace_oids, entry.namespace_oid);
         effect_record_oid(&mut effect.type_oids, entry.row_type_oid);
         Ok((entry, effect))
+    }
+
+    pub fn create_rule_mvcc(
+        &mut self,
+        relation_oid: u32,
+        rule_name: impl Into<String>,
+        ev_type: char,
+        is_instead: bool,
+        ev_qual: String,
+        ev_action: String,
+        referenced_relation_oids: &[u32],
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let rule_name = rule_name.into();
+        let mut catalog = self.catalog_snapshot_with_control_for_snapshot(ctx)?;
+        let rewrite_row = PgRewriteRow {
+            oid: catalog.next_oid(),
+            rulename: rule_name,
+            ev_class: relation_oid,
+            ev_type,
+            ev_enabled: 'O',
+            is_instead,
+            ev_qual,
+            ev_action,
+        };
+        catalog.add_rewrite_row(rewrite_row.clone());
+        let mut referenced = referenced_relation_oids.to_vec();
+        referenced.sort_unstable();
+        referenced.dedup();
+        for row in relation_rule_depend_rows(rewrite_row.oid, relation_oid, &referenced) {
+            catalog.add_depend_row(row);
+        }
+
+        self.persist_control_state(&catalog)?;
+        let rows = PhysicalCatalogRows {
+            rewrites: vec![rewrite_row.clone()],
+            depends: catalog
+                .depend_rows()
+                .iter()
+                .filter(|row| row.objid == rewrite_row.oid)
+                .cloned()
+                .collect(),
+            ..PhysicalCatalogRows::default()
+        };
+        let kinds = vec![
+            BootstrapCatalogKind::PgDepend,
+            BootstrapCatalogKind::PgRewrite,
+        ];
+        insert_catalog_rows_subset_mvcc(ctx, &rows, self.scope_db_oid(), &kinds)?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        Ok(effect)
     }
 
     pub fn create_composite_type_mvcc(
@@ -1812,6 +1869,86 @@ impl CatalogStore {
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
         self.comment_shared_object_mvcc(role_oid, PG_AUTHID_RELATION_OID, comment, ctx)
+    }
+
+    pub fn comment_rule_mvcc(
+        &mut self,
+        rewrite_oid: u32,
+        comment: Option<&str>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        self.comment_shared_object_mvcc(rewrite_oid, PG_REWRITE_RELATION_OID, comment, ctx)
+    }
+
+    pub fn drop_rule_mvcc(
+        &mut self,
+        rewrite_oid: u32,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let snapshot = ctx
+            .txns
+            .read()
+            .snapshot_for_command(ctx.xid, ctx.cid)
+            .map_err(|e| CatalogError::Io(format!("catalog snapshot failed: {e:?}")))?;
+        let description_rows = probe_system_catalog_rows_visible_in_db(
+            &ctx.pool,
+            &ctx.txns,
+            &snapshot,
+            ctx.client_id,
+            self.scope_db_oid(),
+            PG_DESCRIPTION_O_C_O_INDEX_OID,
+            vec![
+                crate::include::access::scankey::ScanKeyData {
+                    attribute_number: 1,
+                    strategy: crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER,
+                    argument: Value::Int64(i64::from(rewrite_oid)),
+                },
+                crate::include::access::scankey::ScanKeyData {
+                    attribute_number: 2,
+                    strategy: crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER,
+                    argument: Value::Int64(i64::from(PG_REWRITE_RELATION_OID)),
+                },
+                crate::include::access::scankey::ScanKeyData {
+                    attribute_number: 3,
+                    strategy: crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER,
+                    argument: Value::Int32(0),
+                },
+            ],
+        )?
+        .into_iter()
+        .map(pg_description_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?;
+
+        let mut catalog = self.catalog_snapshot_with_control_for_snapshot(ctx)?;
+        let removed_rewrite = catalog
+            .remove_rewrite_row_by_oid(rewrite_oid)
+            .ok_or_else(|| CatalogError::UnknownTable(rewrite_oid.to_string()))?;
+        let removed_depends = catalog
+            .depend_rows()
+            .iter()
+            .filter(|row| row.objid == rewrite_oid)
+            .cloned()
+            .collect::<Vec<_>>();
+        catalog.depends.retain(|row| row.objid != rewrite_oid);
+        self.persist_control_state(&catalog)?;
+
+        let rows = PhysicalCatalogRows {
+            rewrites: vec![removed_rewrite.clone()],
+            depends: removed_depends,
+            descriptions: description_rows,
+            ..PhysicalCatalogRows::default()
+        };
+        let kinds = vec![
+            BootstrapCatalogKind::PgDepend,
+            BootstrapCatalogKind::PgDescription,
+            BootstrapCatalogKind::PgRewrite,
+        ];
+        delete_catalog_rows_subset_mvcc(ctx, &rows, self.scope_db_oid(), &kinds)?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, removed_rewrite.ev_class);
+        Ok(effect)
     }
 
     fn comment_shared_object_mvcc(

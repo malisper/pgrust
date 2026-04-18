@@ -1,0 +1,878 @@
+use std::collections::BTreeSet;
+use std::sync::Arc;
+
+use parking_lot::RwLock;
+
+use crate::ClientId;
+use crate::backend::access::transam::xact::{CommandId, TransactionId};
+use crate::backend::catalog::CatalogMutationEffect;
+use crate::backend::catalog::store::CatalogWriteContext;
+use crate::backend::commands::tablecmds::{
+    apply_base_delete_row, apply_base_update_row, execute_delete_with_waiter, execute_insert,
+    execute_insert_values, execute_update_with_waiter, finalize_bound_delete_stmt,
+    finalize_bound_insert_stmt, finalize_bound_update_stmt, materialize_delete_row_events,
+    materialize_insert_rows, materialize_update_row_events,
+};
+use crate::backend::executor::{
+    ExecError, ExecutorContext, StatementResult, TupleSlot, Value, eval_expr,
+};
+use crate::backend::parser::{
+    CatalogLookup, CommentOnRuleStatement, CreateRuleStatement, DropRuleStatement, FromItem,
+    ParseError, RuleDoKind, RuleEvent, SelectItem, SelectStatement, Statement,
+    bind_rule_action_statement, bind_rule_qual, validate_rule_definition,
+};
+use crate::backend::rewrite::split_stored_rule_action_sql;
+use crate::backend::storage::lmgr::TableLockMode;
+use crate::include::catalog::PgRewriteRow;
+use crate::include::nodes::primnodes::RelationDesc;
+use crate::pgrust::database::TransactionWaiter;
+use crate::pgrust::database::ddl::map_catalog_error;
+use crate::pgrust::database::ddl::{ensure_relation_owner, lookup_rule_relation_for_ddl};
+use crate::pgrust::database::{AutoCommitGuard, Database};
+
+impl Database {
+    pub(crate) fn execute_create_rule_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        create_stmt: &CreateRuleStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let interrupts = self.interrupt_state(client_id);
+        let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+        let relation = lookup_rule_relation_for_ddl(&catalog, &create_stmt.relation_name)?;
+        self.table_locks.lock_table_interruptible(
+            relation.rel,
+            TableLockMode::AccessExclusive,
+            client_id,
+            interrupts.as_ref(),
+        )?;
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_create_rule_stmt_in_transaction_with_search_path(
+            client_id,
+            create_stmt,
+            xid,
+            0,
+            configured_search_path,
+            &mut catalog_effects,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        self.table_locks.unlock_table(relation.rel, client_id);
+        result
+    }
+
+    pub(crate) fn execute_create_rule_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        create_stmt: &CreateRuleStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let relation = lookup_rule_relation_for_ddl(&catalog, &create_stmt.relation_name)?;
+        ensure_relation_owner(self, client_id, &relation, &create_stmt.relation_name)?;
+        validate_create_rule_stmt(create_stmt, &relation, &catalog)?;
+        validate_rule_definition(create_stmt, &relation.desc, &catalog)
+            .map_err(ExecError::Parse)?;
+
+        let referenced_relation_oids =
+            referenced_relation_oids_for_rule(create_stmt, relation.relation_oid, &catalog)?;
+        let ev_action = create_stmt
+            .actions
+            .iter()
+            .map(|action| action.sql.as_str())
+            .collect::<Vec<_>>()
+            .join(";\n");
+        let ev_qual = create_stmt.where_sql.clone().unwrap_or_default();
+
+        let mut catalog_guard = self.catalog.write();
+        let ctx = CatalogWriteContext {
+            pool: Arc::clone(&self.pool),
+            txns: Arc::clone(&self.txns),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+            interrupts: Arc::clone(&self.interrupt_state(client_id)),
+        };
+        let effect = catalog_guard
+            .create_rule_mvcc(
+                relation.relation_oid,
+                create_stmt.rule_name.clone(),
+                rule_event_code(create_stmt.event),
+                create_stmt.do_kind == RuleDoKind::Instead,
+                ev_qual,
+                ev_action,
+                &referenced_relation_oids,
+                &ctx,
+            )
+            .map_err(map_catalog_error)?;
+        catalog_effects.push(effect);
+        Ok(StatementResult::AffectedRows(0))
+    }
+
+    pub(crate) fn execute_comment_on_rule_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        comment_stmt: &CommentOnRuleStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let interrupts = self.interrupt_state(client_id);
+        let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+        let relation = lookup_rule_relation_for_ddl(&catalog, &comment_stmt.relation_name)?;
+        self.table_locks.lock_table_interruptible(
+            relation.rel,
+            TableLockMode::AccessExclusive,
+            client_id,
+            interrupts.as_ref(),
+        )?;
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_comment_on_rule_stmt_in_transaction_with_search_path(
+            client_id,
+            comment_stmt,
+            xid,
+            0,
+            configured_search_path,
+            &mut catalog_effects,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        self.table_locks.unlock_table(relation.rel, client_id);
+        result
+    }
+
+    pub(crate) fn execute_comment_on_rule_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        comment_stmt: &CommentOnRuleStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let relation = lookup_rule_relation_for_ddl(&catalog, &comment_stmt.relation_name)?;
+        ensure_relation_owner(self, client_id, &relation, &comment_stmt.relation_name)?;
+        let rewrite = lookup_rule_row(&catalog, relation.relation_oid, &comment_stmt.rule_name)
+            .ok_or_else(|| {
+                missing_rule_error(&comment_stmt.rule_name, &comment_stmt.relation_name)
+            })?;
+
+        let mut catalog_guard = self.catalog.write();
+        let ctx = CatalogWriteContext {
+            pool: Arc::clone(&self.pool),
+            txns: Arc::clone(&self.txns),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+            interrupts: Arc::clone(&self.interrupt_state(client_id)),
+        };
+        let effect = catalog_guard
+            .comment_rule_mvcc(rewrite.oid, comment_stmt.comment.as_deref(), &ctx)
+            .map_err(map_catalog_error)?;
+        catalog_effects.push(effect);
+        Ok(StatementResult::AffectedRows(0))
+    }
+
+    pub(crate) fn execute_drop_rule_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        drop_stmt: &DropRuleStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let maybe_relation = {
+            let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+            catalog.lookup_any_relation(&drop_stmt.relation_name)
+        };
+        if let Some(relation) = maybe_relation {
+            let interrupts = self.interrupt_state(client_id);
+            self.table_locks.lock_table_interruptible(
+                relation.rel,
+                TableLockMode::AccessExclusive,
+                client_id,
+                interrupts.as_ref(),
+            )?;
+            let xid = self.txns.write().begin();
+            let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+            let mut catalog_effects = Vec::new();
+            let result = self.execute_drop_rule_stmt_in_transaction_with_search_path(
+                client_id,
+                drop_stmt,
+                xid,
+                0,
+                configured_search_path,
+                &mut catalog_effects,
+            );
+            let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+            guard.disarm();
+            self.table_locks.unlock_table(relation.rel, client_id);
+            result
+        } else if drop_stmt.if_exists {
+            Ok(StatementResult::AffectedRows(0))
+        } else {
+            Err(ExecError::Parse(ParseError::TableDoesNotExist(
+                drop_stmt.relation_name.clone(),
+            )))
+        }
+    }
+
+    pub(crate) fn execute_drop_rule_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        drop_stmt: &DropRuleStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let relation = match lookup_rule_relation_for_ddl(&catalog, &drop_stmt.relation_name) {
+            Ok(relation) => relation,
+            Err(err) if drop_stmt.if_exists => return Ok(StatementResult::AffectedRows(0)),
+            Err(err) => return Err(err),
+        };
+        ensure_relation_owner(self, client_id, &relation, &drop_stmt.relation_name)?;
+        let Some(rewrite) = lookup_rule_row(&catalog, relation.relation_oid, &drop_stmt.rule_name)
+        else {
+            return if drop_stmt.if_exists {
+                Ok(StatementResult::AffectedRows(0))
+            } else {
+                Err(missing_rule_error(
+                    &drop_stmt.rule_name,
+                    &drop_stmt.relation_name,
+                ))
+            };
+        };
+        if rewrite.rulename.eq_ignore_ascii_case("_RETURN") {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "rule \"{}\" for relation \"{}\" cannot be dropped",
+                    drop_stmt.rule_name, drop_stmt.relation_name
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "2BP01",
+            });
+        }
+
+        let mut catalog_guard = self.catalog.write();
+        let ctx = CatalogWriteContext {
+            pool: Arc::clone(&self.pool),
+            txns: Arc::clone(&self.txns),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+            interrupts: Arc::clone(&self.interrupt_state(client_id)),
+        };
+        let effect = catalog_guard
+            .drop_rule_mvcc(rewrite.oid, &ctx)
+            .map_err(map_catalog_error)?;
+        catalog_effects.push(effect);
+        Ok(StatementResult::AffectedRows(0))
+    }
+}
+
+fn validate_create_rule_stmt(
+    create_stmt: &CreateRuleStatement,
+    relation: &crate::backend::parser::BoundRelation,
+    catalog: &dyn CatalogLookup,
+) -> Result<(), ExecError> {
+    if create_stmt.rule_name.eq_ignore_ascii_case("_RETURN") {
+        return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+            "_RETURN rules".into(),
+        )));
+    }
+    if create_stmt.event == RuleEvent::Select {
+        return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+            "CREATE RULE ... ON SELECT".into(),
+        )));
+    }
+    if create_stmt.actions.is_empty() && create_stmt.do_kind != RuleDoKind::Instead {
+        return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+            "DO ALSO NOTHING".into(),
+        )));
+    }
+    if lookup_rule_row(catalog, relation.relation_oid, &create_stmt.rule_name).is_some() {
+        return Err(ExecError::DetailedError {
+            message: format!(
+                "rule \"{}\" for relation \"{}\" already exists",
+                create_stmt.rule_name, create_stmt.relation_name
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "42710",
+        });
+    }
+    Ok(())
+}
+
+fn referenced_relation_oids_for_rule(
+    create_stmt: &CreateRuleStatement,
+    owner_relation_oid: u32,
+    catalog: &dyn CatalogLookup,
+) -> Result<Vec<u32>, ExecError> {
+    let mut referenced = BTreeSet::new();
+    for action in &create_stmt.actions {
+        let maybe_name = match &action.statement {
+            Statement::Insert(stmt) => Some(stmt.table_name.as_str()),
+            Statement::Update(stmt) => Some(stmt.table_name.as_str()),
+            Statement::Delete(stmt) => Some(stmt.table_name.as_str()),
+            _ => None,
+        };
+        if let Some(name) = maybe_name {
+            let relation = catalog
+                .lookup_any_relation(name)
+                .ok_or_else(|| ExecError::Parse(ParseError::TableDoesNotExist(name.to_string())))?;
+            if relation.relation_oid != owner_relation_oid {
+                referenced.insert(relation.relation_oid);
+            }
+        }
+    }
+    Ok(referenced.into_iter().collect())
+}
+
+fn lookup_rule_row(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+    rule_name: &str,
+) -> Option<PgRewriteRow> {
+    catalog
+        .rewrite_rows_for_relation(relation_oid)
+        .into_iter()
+        .find(|row| row.rulename.eq_ignore_ascii_case(rule_name))
+}
+
+fn rule_event_code(event: RuleEvent) -> char {
+    match event {
+        RuleEvent::Select => '1',
+        RuleEvent::Update => '2',
+        RuleEvent::Insert => '3',
+        RuleEvent::Delete => '4',
+    }
+}
+
+fn missing_rule_error(rule_name: &str, relation_name: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!(
+            "rule \"{}\" for relation \"{}\" does not exist",
+            rule_name, relation_name
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "42704",
+    }
+}
+
+#[derive(Clone)]
+struct PreparedRule {
+    is_instead: bool,
+    qual: Option<crate::backend::executor::Expr>,
+    actions: Vec<crate::backend::parser::BoundRuleAction>,
+}
+
+pub(crate) fn execute_bound_insert_with_rules(
+    stmt: crate::backend::parser::BoundInsertStatement,
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+    xid: TransactionId,
+    cid: CommandId,
+) -> Result<StatementResult, ExecError> {
+    if stmt.relkind == 'r'
+        && catalog
+            .rewrite_rows_for_relation(stmt.relation_oid)
+            .into_iter()
+            .all(|row| {
+                row.ev_type != rule_event_code(RuleEvent::Insert) || row.rulename == "_RETURN"
+            })
+    {
+        return execute_insert(stmt, catalog, ctx, xid, cid);
+    }
+
+    let stmt = finalize_bound_insert_stmt(stmt, catalog);
+    let saved_subplans = std::mem::replace(&mut ctx.subplans, stmt.subplans.clone());
+    let result = (|| {
+        let rules = load_prepared_rules(stmt.relation_oid, RuleEvent::Insert, &stmt.desc, catalog)?;
+        let rows = materialize_insert_rows(&stmt, catalog, ctx)?;
+        let mut affected_rows = 0usize;
+        let null_old = vec![Value::Null; stmt.desc.columns.len()];
+
+        for row in rows {
+            let (matched_instead, matched_actions) =
+                execute_matching_rules(&rules, &null_old, &row, catalog, ctx, xid, cid, None)?;
+            if matched_instead {
+                if matched_actions {
+                    affected_rows += 1;
+                }
+                continue;
+            }
+            if stmt.relkind != 'r' {
+                return Err(ExecError::Parse(ParseError::WrongObjectType {
+                    name: stmt.relation_name.clone(),
+                    expected: "table",
+                }));
+            }
+            execute_insert_values(
+                &stmt.relation_name,
+                stmt.rel,
+                stmt.toast,
+                stmt.toast_index.as_ref(),
+                &stmt.desc,
+                &stmt.relation_constraints,
+                &stmt.indexes,
+                std::slice::from_ref(&row),
+                ctx,
+                xid,
+                cid,
+            )?;
+            affected_rows += 1;
+        }
+        Ok(StatementResult::AffectedRows(affected_rows))
+    })();
+    ctx.subplans = saved_subplans;
+    result
+}
+
+pub(crate) fn execute_bound_update_with_rules(
+    stmt: crate::backend::parser::BoundUpdateStatement,
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+    xid: TransactionId,
+    cid: CommandId,
+    waiter: Option<(
+        &RwLock<crate::backend::access::transam::xact::TransactionManager>,
+        &TransactionWaiter,
+        &crate::backend::utils::misc::interrupts::InterruptState,
+    )>,
+) -> Result<StatementResult, ExecError> {
+    let has_rule_target = stmt.targets.iter().any(|target| {
+        target.relkind == 'v'
+            || catalog
+                .rewrite_rows_for_relation(target.relation_oid)
+                .into_iter()
+                .any(|row| {
+                    row.ev_type == rule_event_code(RuleEvent::Update) && row.rulename != "_RETURN"
+                })
+    });
+    if !has_rule_target {
+        return execute_update_with_waiter(stmt, catalog, ctx, xid, cid, waiter);
+    }
+
+    let stmt = finalize_bound_update_stmt(stmt, catalog);
+    let saved_subplans = std::mem::replace(&mut ctx.subplans, stmt.subplans.clone());
+    let result = (|| {
+        let mut affected_rows = 0usize;
+        for target in &stmt.targets {
+            let rules = load_prepared_rules(
+                target.relation_oid,
+                RuleEvent::Update,
+                &target.desc,
+                catalog,
+            )?;
+            if target.relkind == 'v' {
+                for (old_values, new_values) in
+                    materialize_view_update_events(target, catalog, ctx)?
+                {
+                    let (matched_instead, matched_actions) = execute_matching_rules(
+                        &rules,
+                        &old_values,
+                        &new_values,
+                        catalog,
+                        ctx,
+                        xid,
+                        cid,
+                        waiter,
+                    )?;
+                    if !matched_instead {
+                        return Err(ExecError::Parse(ParseError::WrongObjectType {
+                            name: target.relation_name.clone(),
+                            expected: "table",
+                        }));
+                    }
+                    if matched_actions {
+                        affected_rows += 1;
+                    }
+                }
+                continue;
+            }
+
+            for event in materialize_update_row_events(
+                &crate::backend::parser::BoundUpdateStatement {
+                    targets: vec![target.clone()],
+                    subplans: Vec::new(),
+                },
+                ctx,
+            )? {
+                let (matched_instead, matched_actions) = execute_matching_rules(
+                    &rules,
+                    &event.old_values,
+                    &event.new_values,
+                    catalog,
+                    ctx,
+                    xid,
+                    cid,
+                    waiter,
+                )?;
+                if matched_instead {
+                    if matched_actions {
+                        affected_rows += 1;
+                    }
+                    continue;
+                }
+                if apply_base_update_row(
+                    &event.target,
+                    event.tid,
+                    event.old_values,
+                    event.new_values,
+                    ctx,
+                    xid,
+                    cid,
+                    waiter,
+                )? {
+                    affected_rows += 1;
+                }
+            }
+        }
+        Ok(StatementResult::AffectedRows(affected_rows))
+    })();
+    ctx.subplans = saved_subplans;
+    result
+}
+
+pub(crate) fn execute_bound_delete_with_rules(
+    stmt: crate::backend::parser::BoundDeleteStatement,
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+    xid: TransactionId,
+    waiter: Option<(
+        &RwLock<crate::backend::access::transam::xact::TransactionManager>,
+        &TransactionWaiter,
+        &crate::backend::utils::misc::interrupts::InterruptState,
+    )>,
+) -> Result<StatementResult, ExecError> {
+    let has_rule_target = stmt.targets.iter().any(|target| {
+        target.relkind == 'v'
+            || catalog
+                .rewrite_rows_for_relation(target.relation_oid)
+                .into_iter()
+                .any(|row| {
+                    row.ev_type == rule_event_code(RuleEvent::Delete) && row.rulename != "_RETURN"
+                })
+    });
+    if !has_rule_target {
+        return execute_delete_with_waiter(stmt, catalog, ctx, xid, waiter);
+    }
+
+    let stmt = finalize_bound_delete_stmt(stmt, catalog);
+    let saved_subplans = std::mem::replace(&mut ctx.subplans, stmt.subplans.clone());
+    let result = (|| {
+        let mut affected_rows = 0usize;
+        for target in &stmt.targets {
+            let rules = load_prepared_rules(
+                target.relation_oid,
+                RuleEvent::Delete,
+                &target.desc,
+                catalog,
+            )?;
+            if target.relkind == 'v' {
+                for old_values in materialize_view_delete_events(target, catalog, ctx)? {
+                    let (matched_instead, matched_actions) = execute_matching_rules(
+                        &rules,
+                        &old_values,
+                        &vec![Value::Null; target.desc.columns.len()],
+                        catalog,
+                        ctx,
+                        xid,
+                        0,
+                        waiter,
+                    )?;
+                    if !matched_instead {
+                        return Err(ExecError::Parse(ParseError::WrongObjectType {
+                            name: target.relation_name.clone(),
+                            expected: "table",
+                        }));
+                    }
+                    if matched_actions {
+                        affected_rows += 1;
+                    }
+                }
+                continue;
+            }
+
+            for event in materialize_delete_row_events(
+                &crate::backend::parser::BoundDeleteStatement {
+                    targets: vec![target.clone()],
+                    subplans: Vec::new(),
+                },
+                ctx,
+            )? {
+                let null_new = vec![Value::Null; event.target.desc.columns.len()];
+                let (matched_instead, matched_actions) = execute_matching_rules(
+                    &rules,
+                    &event.old_values,
+                    &null_new,
+                    catalog,
+                    ctx,
+                    xid,
+                    0,
+                    waiter,
+                )?;
+                if matched_instead {
+                    if matched_actions {
+                        affected_rows += 1;
+                    }
+                    continue;
+                }
+                if apply_base_delete_row(
+                    &event.target,
+                    event.tid,
+                    event.old_values,
+                    ctx,
+                    xid,
+                    waiter,
+                )? {
+                    affected_rows += 1;
+                }
+            }
+        }
+        Ok(StatementResult::AffectedRows(affected_rows))
+    })();
+    ctx.subplans = saved_subplans;
+    result
+}
+
+fn execute_matching_rules(
+    rules: &[PreparedRule],
+    old_values: &[Value],
+    new_values: &[Value],
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+    xid: TransactionId,
+    cid: CommandId,
+    waiter: Option<(
+        &RwLock<crate::backend::access::transam::xact::TransactionManager>,
+        &TransactionWaiter,
+        &crate::backend::utils::misc::interrupts::InterruptState,
+    )>,
+) -> Result<(bool, bool), ExecError> {
+    let mut matched_instead = false;
+    let mut matched_actions = false;
+    for rule in rules {
+        if let Some(qual) = &rule.qual
+            && !evaluate_rule_qual(qual, old_values, new_values, ctx)?
+        {
+            continue;
+        }
+        matched_instead |= rule.is_instead;
+        if !rule.actions.is_empty() {
+            matched_actions = true;
+        }
+        for action in &rule.actions {
+            with_rule_bindings(ctx, old_values, new_values, |ctx| {
+                execute_rule_action(action, catalog, ctx, xid, cid, waiter)
+            })?;
+        }
+    }
+    Ok((matched_instead, matched_actions))
+}
+
+fn execute_rule_action(
+    action: &crate::backend::parser::BoundRuleAction,
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+    xid: TransactionId,
+    cid: CommandId,
+    waiter: Option<(
+        &RwLock<crate::backend::access::transam::xact::TransactionManager>,
+        &TransactionWaiter,
+        &crate::backend::utils::misc::interrupts::InterruptState,
+    )>,
+) -> Result<StatementResult, ExecError> {
+    match action {
+        crate::backend::parser::BoundRuleAction::Insert(stmt) => {
+            execute_bound_insert_with_rules(stmt.clone(), catalog, ctx, xid, cid)
+        }
+        crate::backend::parser::BoundRuleAction::Update(stmt) => {
+            execute_bound_update_with_rules(stmt.clone(), catalog, ctx, xid, cid, waiter)
+        }
+        crate::backend::parser::BoundRuleAction::Delete(stmt) => {
+            execute_bound_delete_with_rules(stmt.clone(), catalog, ctx, xid, waiter)
+        }
+    }
+}
+
+fn evaluate_rule_qual(
+    qual: &crate::backend::executor::Expr,
+    old_values: &[Value],
+    new_values: &[Value],
+    ctx: &mut ExecutorContext,
+) -> Result<bool, ExecError> {
+    with_rule_bindings(ctx, old_values, new_values, |ctx| {
+        let mut slot = TupleSlot::virtual_row(Vec::new());
+        match eval_expr(qual, &mut slot, ctx)? {
+            Value::Bool(value) => Ok(value),
+            Value::Null => Ok(false),
+            other => Err(ExecError::NonBoolQual(other)),
+        }
+    })
+}
+
+fn with_rule_bindings<T>(
+    ctx: &mut ExecutorContext,
+    old_values: &[Value],
+    new_values: &[Value],
+    f: impl FnOnce(&mut ExecutorContext) -> Result<T, ExecError>,
+) -> Result<T, ExecError> {
+    let saved_outer = ctx.expr_bindings.outer_tuple.clone();
+    let saved_inner = ctx.expr_bindings.inner_tuple.clone();
+    ctx.expr_bindings.outer_tuple = Some(old_values.to_vec());
+    ctx.expr_bindings.inner_tuple = Some(new_values.to_vec());
+    let result = f(ctx);
+    ctx.expr_bindings.outer_tuple = saved_outer;
+    ctx.expr_bindings.inner_tuple = saved_inner;
+    result
+}
+
+fn load_prepared_rules(
+    relation_oid: u32,
+    event: RuleEvent,
+    relation_desc: &RelationDesc,
+    catalog: &dyn CatalogLookup,
+) -> Result<Vec<PreparedRule>, ExecError> {
+    catalog
+        .rewrite_rows_for_relation(relation_oid)
+        .into_iter()
+        .filter(|row| row.rulename != "_RETURN" && row.ev_type == rule_event_code(event))
+        .map(|row| {
+            let qual = if row.ev_qual.is_empty() {
+                None
+            } else {
+                let parsed = crate::backend::parser::parse_expr(&row.ev_qual)?;
+                Some(bind_rule_qual(&parsed, relation_desc, event, catalog)?)
+            };
+            let mut actions = Vec::new();
+            for sql in split_stored_rule_action_sql(&row.ev_action) {
+                let statement = crate::backend::parser::parse_statement(sql)?;
+                actions.push(bind_rule_action_statement(
+                    &statement,
+                    relation_desc,
+                    catalog,
+                )?);
+            }
+            Ok(PreparedRule {
+                is_instead: row.is_instead,
+                qual,
+                actions,
+            })
+        })
+        .collect::<Result<Vec<_>, ParseError>>()
+        .map_err(ExecError::Parse)
+}
+
+fn materialize_view_update_events(
+    target: &crate::backend::parser::BoundUpdateTarget,
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<(Vec<Value>, Vec<Value>)>, ExecError> {
+    let rows = materialize_view_rows(&target.relation_name, &target.desc, catalog, ctx)?;
+    let mut out = Vec::new();
+    for row in rows {
+        if !row_passes_predicate(target.predicate.as_ref(), &row, ctx)? {
+            continue;
+        }
+        let mut eval_slot = TupleSlot::virtual_row(row.clone());
+        let mut new_values = row.clone();
+        for assignment in &target.assignments {
+            let value = eval_expr(&assignment.expr, &mut eval_slot, ctx)?;
+            new_values[assignment.column_index] = value;
+        }
+        out.push((row, new_values));
+    }
+    Ok(out)
+}
+
+fn materialize_view_delete_events(
+    target: &crate::backend::parser::BoundDeleteTarget,
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<Vec<Value>>, ExecError> {
+    let rows = materialize_view_rows(&target.relation_name, &target.desc, catalog, ctx)?;
+    rows.into_iter()
+        .filter_map(
+            |row| match row_passes_predicate(target.predicate.as_ref(), &row, ctx) {
+                Ok(true) => Some(Ok(row)),
+                Ok(false) => None,
+                Err(err) => Some(Err(err)),
+            },
+        )
+        .collect()
+}
+
+fn materialize_view_rows(
+    relation_name: &str,
+    desc: &RelationDesc,
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<Vec<Value>>, ExecError> {
+    let visible_columns = desc
+        .columns
+        .iter()
+        .filter(|column| !column.dropped)
+        .map(|column| SelectItem {
+            output_name: column.name.clone(),
+            expr: crate::backend::parser::SqlExpr::Column(column.name.clone()),
+        })
+        .collect();
+    let select = SelectStatement {
+        with_recursive: false,
+        with: Vec::new(),
+        from: Some(FromItem::Table {
+            name: relation_name.to_string(),
+            only: false,
+        }),
+        targets: visible_columns,
+        where_clause: None,
+        group_by: Vec::new(),
+        having: None,
+        order_by: Vec::new(),
+        limit: None,
+        offset: None,
+        locking_clause: None,
+        set_operation: None,
+    };
+    let planned = crate::backend::parser::pg_plan_query(&select, catalog)?;
+    let saved_subplans = std::mem::replace(&mut ctx.subplans, planned.subplans.clone());
+    let result: Result<Vec<Vec<Value>>, ExecError> = (|| {
+        let mut state = crate::backend::executor::executor_start(planned.plan_tree);
+        let mut rows = Vec::new();
+        while let Some(slot) = crate::backend::executor::exec_next(&mut state, ctx)? {
+            rows.push(slot.values()?.to_vec());
+        }
+        Ok(rows)
+    })();
+    ctx.subplans = saved_subplans;
+    result
+}
+
+fn row_passes_predicate(
+    predicate: Option<&crate::backend::executor::Expr>,
+    row: &[Value],
+    ctx: &mut ExecutorContext,
+) -> Result<bool, ExecError> {
+    let Some(predicate) = predicate else {
+        return Ok(true);
+    };
+    let mut slot = TupleSlot::virtual_row(row.to_vec());
+    match eval_expr(predicate, &mut slot, ctx)? {
+        Value::Bool(value) => Ok(value),
+        Value::Null => Ok(false),
+        other => Err(ExecError::NonBoolQual(other)),
+    }
+}

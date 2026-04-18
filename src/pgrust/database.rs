@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 mod catalog_access;
-mod commands;
+pub(crate) mod commands;
 mod ddl;
 pub(crate) mod foreign_keys;
 mod relation_refs;

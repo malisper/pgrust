@@ -2521,6 +2521,9 @@ pub(super) fn bind_agg_output_expr_in_clause(
             actual: format!("unsupported field selection .{field}"),
         }),
         SqlExpr::CurrentDate => Ok(Expr::CurrentDate),
+        SqlExpr::CurrentUser => Ok(Expr::Const(Value::Text(
+            crate::include::catalog::BOOTSTRAP_SUPERUSER_NAME.into(),
+        ))),
         SqlExpr::CurrentTime { precision } => Ok(Expr::CurrentTime {
             precision: *precision,
         }),

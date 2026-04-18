@@ -228,6 +228,7 @@ pub enum Statement {
     CreateTableAs(CreateTableAsStatement),
     CreateSequence(CreateSequenceStatement),
     CreateView(CreateViewStatement),
+    CreateRule(CreateRuleStatement),
     CreateIndex(CreateIndexStatement),
     AlterSequence(AlterSequenceStatement),
     AlterSequenceOwner(AlterRelationOwnerStatement),
@@ -248,6 +249,7 @@ pub enum Statement {
     AlterTableDropNotNull(AlterTableDropNotNullStatement),
     AlterTableValidateConstraint(AlterTableValidateConstraintStatement),
     CommentOnTable(CommentOnTableStatement),
+    CommentOnRule(CommentOnRuleStatement),
     CommentOnDomain(CommentOnDomainStatement),
     CommentOnConversion(CommentOnConversionStatement),
     CreateDomain(CreateDomainStatement),
@@ -265,6 +267,7 @@ pub enum Statement {
     DropIndex(DropIndexStatement),
     DropDomain(DropDomainStatement),
     DropView(DropViewStatement),
+    DropRule(DropRuleStatement),
     DropSchema(DropSchemaStatement),
     CreateRole(CreateRoleStatement),
     AlterRole(AlterRoleStatement),
@@ -838,6 +841,37 @@ pub struct CreateViewStatement {
     pub query_sql: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleEvent {
+    Insert,
+    Update,
+    Delete,
+    Select,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleDoKind {
+    Also,
+    Instead,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuleActionStatement {
+    pub statement: Statement,
+    pub sql: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateRuleStatement {
+    pub rule_name: String,
+    pub relation_name: String,
+    pub event: RuleEvent,
+    pub do_kind: RuleDoKind,
+    pub where_clause: Option<SqlExpr>,
+    pub where_sql: Option<String>,
+    pub actions: Vec<RuleActionStatement>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateIndexStatement {
     pub unique: bool,
@@ -979,6 +1013,13 @@ pub struct AlterTableValidateConstraintStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommentOnTableStatement {
     pub table_name: String,
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentOnRuleStatement {
+    pub rule_name: String,
+    pub relation_name: String,
     pub comment: Option<String>,
 }
 
@@ -1182,6 +1223,13 @@ pub struct DropTypeStatement {
 pub struct DropViewStatement {
     pub if_exists: bool,
     pub view_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropRuleStatement {
+    pub if_exists: bool,
+    pub rule_name: String,
+    pub relation_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1902,6 +1950,7 @@ pub enum SqlExpr {
         field: String,
     },
     CurrentDate,
+    CurrentUser,
     CurrentTime {
         precision: Option<i32>,
     },

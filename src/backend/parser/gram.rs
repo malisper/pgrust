@@ -231,8 +231,6 @@ fn try_parse_unsupported_statement(sql: &str) -> Option<Statement> {
         Some("DROP TABLE form")
     } else if lowered.starts_with("drop domain ") {
         Some("DROP DOMAIN")
-    } else if lowered.starts_with("drop rule ") {
-        Some("DROP RULE")
     } else if lowered.starts_with("comment on column ") {
         Some("COMMENT ON COLUMN")
     } else if lowered.starts_with("comment on constraint ") {
@@ -241,8 +239,6 @@ fn try_parse_unsupported_statement(sql: &str) -> Option<Statement> {
         Some("COMMENT ON INDEX")
     } else if lowered.starts_with("create domain ") {
         Some("CREATE DOMAIN")
-    } else if lowered.starts_with("create rule ") {
-        Some("CREATE RULE")
     } else if lowered.starts_with("copy ") && lowered.contains(" to ") {
         Some("COPY TO")
     } else if lowered.starts_with("create unique index ") {
@@ -2325,14 +2321,17 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::comment_on_table_stmt => {
             Ok(Statement::CommentOnTable(build_comment_on_table(inner)?))
         }
+        Rule::comment_on_rule_stmt => Ok(Statement::CommentOnRule(build_comment_on_rule(inner)?)),
         Rule::create_schema_stmt => Ok(Statement::CreateSchema(build_create_schema(inner)?)),
         Rule::create_table_stmt => build_create_table(inner),
         Rule::create_view_stmt => Ok(Statement::CreateView(build_create_view(inner)?)),
+        Rule::create_rule_stmt => Ok(Statement::CreateRule(build_create_rule(inner)?)),
         Rule::drop_role_stmt => Ok(Statement::DropRole(build_drop_role(inner)?)),
         Rule::drop_database_stmt => Ok(Statement::DropDatabase(build_drop_database(inner)?)),
         Rule::drop_table_stmt => Ok(Statement::DropTable(build_drop_table(inner)?)),
         Rule::drop_index_stmt => Ok(Statement::DropIndex(build_drop_index(inner)?)),
         Rule::drop_view_stmt => Ok(Statement::DropView(build_drop_view(inner)?)),
+        Rule::drop_rule_stmt => Ok(Statement::DropRule(build_drop_rule(inner)?)),
         Rule::drop_schema_stmt => Ok(Statement::DropSchema(build_drop_schema(inner)?)),
         Rule::reassign_owned_stmt => Ok(Statement::ReassignOwned(build_reassign_owned(inner)?)),
         Rule::truncate_table_stmt => Ok(Statement::TruncateTable(build_truncate_table(inner)?)),
@@ -3839,6 +3838,204 @@ fn build_create_view(pair: Pair<'_, Rule>) -> Result<CreateViewStatement, ParseE
     })
 }
 
+fn build_create_rule(pair: Pair<'_, Rule>) -> Result<CreateRuleStatement, ParseError> {
+    let mut rule_name = None;
+    let mut relation_name = None;
+    let mut event = None;
+    let mut do_kind = RuleDoKind::Also;
+    let mut where_clause = None;
+    let mut where_sql = None;
+    let mut actions = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier if rule_name.is_none() => rule_name = Some(build_identifier(part)),
+            Rule::identifier if relation_name.is_none() => {
+                relation_name = Some(build_identifier(part));
+            }
+            Rule::rule_event => event = Some(build_rule_event(part)?),
+            Rule::rule_do_kind => do_kind = build_rule_do_kind(part)?,
+            Rule::rule_where_clause => {
+                let expr = part
+                    .clone()
+                    .into_inner()
+                    .find(|inner| inner.as_rule() == Rule::expr)
+                    .ok_or(ParseError::UnexpectedEof)?;
+                where_clause = Some(build_expr(expr)?);
+                let raw = part.as_str().trim();
+                where_sql = Some(raw["where".len()..].trim().to_string());
+            }
+            Rule::rule_action_body => actions = Some(build_rule_action_body(part)?),
+            _ => {}
+        }
+    }
+    Ok(CreateRuleStatement {
+        rule_name: rule_name.ok_or(ParseError::UnexpectedEof)?,
+        relation_name: relation_name.ok_or(ParseError::UnexpectedEof)?,
+        event: event.ok_or(ParseError::UnexpectedEof)?,
+        do_kind,
+        where_clause,
+        where_sql,
+        actions: actions.ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
+fn build_rule_event(pair: Pair<'_, Rule>) -> Result<RuleEvent, ParseError> {
+    match pair.as_str().trim().to_ascii_lowercase().as_str() {
+        "insert" => Ok(RuleEvent::Insert),
+        "update" => Ok(RuleEvent::Update),
+        "delete" => Ok(RuleEvent::Delete),
+        "select" => Ok(RuleEvent::Select),
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "rule event",
+            actual: pair.as_str().into(),
+        }),
+    }
+}
+
+fn build_rule_do_kind(pair: Pair<'_, Rule>) -> Result<RuleDoKind, ParseError> {
+    match pair.as_str().trim().to_ascii_lowercase().as_str() {
+        "also" => Ok(RuleDoKind::Also),
+        "instead" => Ok(RuleDoKind::Instead),
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "rule kind",
+            actual: pair.as_str().into(),
+        }),
+    }
+}
+
+fn build_rule_action_body(pair: Pair<'_, Rule>) -> Result<Vec<RuleActionStatement>, ParseError> {
+    let mut actions = Vec::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::kw_nothing => return Ok(Vec::new()),
+            Rule::rule_action_list => {
+                for action_sql in split_rule_action_list(part.as_str())? {
+                    actions.push(build_rule_action_statement_sql(&action_sql)?);
+                }
+            }
+            Rule::rule_action_stmt => actions.push(build_rule_action_statement(part)?),
+            _ => {}
+        }
+    }
+    Ok(actions)
+}
+
+fn build_rule_action_statement(pair: Pair<'_, Rule>) -> Result<RuleActionStatement, ParseError> {
+    let inner = if pair.as_rule() == Rule::rule_action_stmt {
+        pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?
+    } else {
+        pair
+    };
+    build_rule_action_statement_sql(inner.as_str())
+}
+
+fn build_rule_action_statement_sql(sql: &str) -> Result<RuleActionStatement, ParseError> {
+    let sql = sql.trim().trim_end_matches(';').trim().to_string();
+    let statement = parse_statement(&sql)?;
+    match &statement {
+        Statement::Insert(stmt) if stmt.with_recursive || !stmt.with.is_empty() => {
+            return Err(ParseError::FeatureNotSupported(
+                "WITH in rule actions".into(),
+            ));
+        }
+        Statement::Update(stmt) if stmt.with_recursive || !stmt.with.is_empty() => {
+            return Err(ParseError::FeatureNotSupported(
+                "WITH in rule actions".into(),
+            ));
+        }
+        Statement::Delete(stmt) if stmt.with_recursive || !stmt.with.is_empty() => {
+            return Err(ParseError::FeatureNotSupported(
+                "WITH in rule actions".into(),
+            ));
+        }
+        Statement::Unsupported(_) => {
+            return Err(ParseError::FeatureNotSupported(
+                "rule action statement".into(),
+            ));
+        }
+        Statement::Insert(_) | Statement::Update(_) | Statement::Delete(_) => {}
+        _ => {
+            return Err(ParseError::FeatureNotSupported(
+                "rule action statement".into(),
+            ));
+        }
+    }
+    Ok(RuleActionStatement { statement, sql })
+}
+
+fn split_rule_action_list(list_sql: &str) -> Result<Vec<String>, ParseError> {
+    let inner = list_sql
+        .trim()
+        .strip_prefix('(')
+        .and_then(|sql| sql.strip_suffix(')'))
+        .ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "parenthesized rule action list",
+            actual: list_sql.into(),
+        })?;
+
+    let mut actions = Vec::new();
+    let mut start = 0usize;
+    let mut paren_depth = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    let chars = inner.char_indices().collect::<Vec<_>>();
+    let mut index = 0usize;
+    while index < chars.len() {
+        let (offset, ch) = chars[index];
+        if in_single {
+            if ch == '\'' {
+                let next_is_quote = chars
+                    .get(index + 1)
+                    .map(|(_, next)| *next == '\'')
+                    .unwrap_or(false);
+                if next_is_quote {
+                    index += 1;
+                } else {
+                    in_single = false;
+                }
+            }
+            index += 1;
+            continue;
+        }
+        if in_double {
+            if ch == '"' {
+                let next_is_quote = chars
+                    .get(index + 1)
+                    .map(|(_, next)| *next == '"')
+                    .unwrap_or(false);
+                if next_is_quote {
+                    index += 1;
+                } else {
+                    in_double = false;
+                }
+            }
+            index += 1;
+            continue;
+        }
+        match ch {
+            '\'' => in_single = true,
+            '"' => in_double = true,
+            '(' => paren_depth += 1,
+            ')' => paren_depth = paren_depth.saturating_sub(1),
+            ';' if paren_depth == 0 => {
+                let action = inner[start..offset].trim();
+                if !action.is_empty() {
+                    actions.push(action.to_string());
+                }
+                start = offset + ch.len_utf8();
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+
+    let tail = inner[start..].trim();
+    if !tail.is_empty() {
+        actions.push(tail.to_string());
+    }
+    Ok(actions)
+}
+
 fn build_create_table_element(pair: Pair<'_, Rule>) -> Result<CreateTableElement, ParseError> {
     let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
     match inner.as_rule() {
@@ -4344,6 +4541,34 @@ fn build_comment_on_table(pair: Pair<'_, Rule>) -> Result<CommentOnTableStatemen
     })
 }
 
+fn build_comment_on_rule(pair: Pair<'_, Rule>) -> Result<CommentOnRuleStatement, ParseError> {
+    let mut rule_name = None;
+    let mut relation_name = None;
+    let mut comment = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier if rule_name.is_none() => rule_name = Some(build_identifier(part)),
+            Rule::identifier if relation_name.is_none() => {
+                relation_name = Some(build_identifier(part));
+            }
+            Rule::quoted_string_literal
+            | Rule::string_literal
+            | Rule::unicode_string_literal
+            | Rule::escape_string_literal
+            | Rule::dollar_string_literal => {
+                comment = Some(Some(decode_string_literal_pair(part)?))
+            }
+            Rule::kw_null => comment = Some(None),
+            _ => {}
+        }
+    }
+    Ok(CommentOnRuleStatement {
+        rule_name: rule_name.ok_or(ParseError::UnexpectedEof)?,
+        relation_name: relation_name.ok_or(ParseError::UnexpectedEof)?,
+        comment: comment.ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
 fn build_comment_on_role(pair: Pair<'_, Rule>) -> Result<CommentOnRoleStatement, ParseError> {
     let mut role_name = None;
     let mut comment = None;
@@ -4558,6 +4783,27 @@ fn build_drop_view(pair: Pair<'_, Rule>) -> Result<DropViewStatement, ParseError
     Ok(DropViewStatement {
         if_exists,
         view_names,
+    })
+}
+
+fn build_drop_rule(pair: Pair<'_, Rule>) -> Result<DropRuleStatement, ParseError> {
+    let mut if_exists = false;
+    let mut rule_name = None;
+    let mut relation_name = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::if_exists_clause => if_exists = true,
+            Rule::identifier if rule_name.is_none() => rule_name = Some(build_identifier(part)),
+            Rule::identifier if relation_name.is_none() => {
+                relation_name = Some(build_identifier(part));
+            }
+            _ => {}
+        }
+    }
+    Ok(DropRuleStatement {
+        if_exists,
+        rule_name: rule_name.ok_or(ParseError::UnexpectedEof)?,
+        relation_name: relation_name.ok_or(ParseError::UnexpectedEof)?,
     })
 }
 
@@ -6167,6 +6413,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         Rule::kw_true => Ok(SqlExpr::Const(Value::Bool(true))),
         Rule::kw_false => Ok(SqlExpr::Const(Value::Bool(false))),
         Rule::kw_current_date => Ok(SqlExpr::CurrentDate),
+        Rule::kw_current_user => Ok(SqlExpr::CurrentUser),
         Rule::kw_current_time => Ok(SqlExpr::CurrentTime {
             precision: pair
                 .into_inner()
@@ -6421,10 +6668,10 @@ fn build_null_predicate(left: SqlExpr, pair: Pair<'_, Rule>) -> Result<SqlExpr, 
         pair
     };
     let raw = pair.as_str().to_ascii_lowercase();
-    if raw == "is null" {
+    if raw == "is null" || raw == "isnull" {
         return Ok(SqlExpr::IsNull(Box::new(left)));
     }
-    if raw == "is not null" {
+    if raw == "is not null" || raw == "notnull" {
         return Ok(SqlExpr::IsNotNull(Box::new(left)));
     }
     if raw == "is true" {
