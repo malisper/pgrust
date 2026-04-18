@@ -24,6 +24,9 @@ use crate::backend::parser::UngroupedColumnClause;
 use crate::backend::parser::comments::sql_is_effectively_empty_after_comments;
 use crate::backend::parser::{SqlType, SqlTypeKind, parse_expr};
 use crate::backend::utils::misc::guc_datetime::{DateTimeConfig, format_datestyle};
+use crate::backend::utils::misc::notices::{
+    clear_notices as clear_backend_notices, take_notices as take_backend_notices,
+};
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::include::access::htup::TupleError;
 use crate::include::catalog::RECORD_TYPE_OID;
@@ -882,6 +885,7 @@ fn execute_query_statement(
         .map_err(|e| io::Error::other(format!("{e:?}")))
     };
     if let Ok(Statement::Select(ref select_stmt)) = parsed {
+        clear_backend_notices();
         clear_notices();
         match state.session.execute_streaming(db, select_stmt) {
             Ok(mut guard) => {
@@ -936,12 +940,12 @@ fn execute_query_statement(
                 drop(guard);
 
                 if let Some(e) = err {
-                    send_plpgsql_notices(stream, &take_notices())?;
+                    send_queued_notices(stream)?;
                     send_exec_error(stream, &sql, &e)?;
                     return Ok(QueryStatementFlow::Stop);
                 }
 
-                send_plpgsql_notices(stream, &take_notices())?;
+                send_queued_notices(stream)?;
                 if !header_sent {
                     send_row_description(stream, &columns)?;
                 }
@@ -949,13 +953,14 @@ fn execute_query_statement(
                 return Ok(QueryStatementFlow::Continue);
             }
             Err(e) => {
-                send_plpgsql_notices(stream, &take_notices())?;
+                send_queued_notices(stream)?;
                 send_exec_error(stream, &sql, &e)?;
                 return Ok(QueryStatementFlow::Stop);
             }
         }
     }
 
+    clear_backend_notices();
     clear_notices();
     match state.session.execute(db, &sql) {
         Ok(StatementResult::Query {
@@ -963,7 +968,7 @@ fn execute_query_statement(
         }) => {
             let catalog = state.session.catalog_lookup(db);
             annotate_query_columns_with_wire_type_oids(&mut columns, &catalog);
-            send_plpgsql_notices(stream, &take_notices())?;
+            send_queued_notices(stream)?;
             send_query_result(
                 stream,
                 &columns,
@@ -978,12 +983,12 @@ fn execute_query_statement(
             Ok(QueryStatementFlow::Continue)
         }
         Ok(StatementResult::AffectedRows(n)) => {
-            send_plpgsql_notices(stream, &take_notices())?;
+            send_queued_notices(stream)?;
             send_command_complete(stream, &infer_command_tag(&sql, n))?;
             Ok(QueryStatementFlow::Continue)
         }
         Err(e) => {
-            send_plpgsql_notices(stream, &take_notices())?;
+            send_queued_notices(stream)?;
             send_exec_error(stream, &sql, &e)?;
             Ok(QueryStatementFlow::Stop)
         }
@@ -2733,13 +2738,14 @@ fn execute_portal(
     let catalog = session.catalog_lookup(db);
     let sql = rewrite_regression_sql(&substitute_params(&portal.sql, &portal.params, &catalog))
         .into_owned();
+    clear_backend_notices();
     clear_notices();
     match session.execute(db, &sql) {
         Ok(StatementResult::Query {
             rows, mut columns, ..
         }) => {
             annotate_query_columns_with_wire_type_oids(&mut columns, &catalog);
-            send_plpgsql_notices(stream, &take_notices())?;
+            send_queued_notices(stream)?;
             if let Err(e) = validate_binary_result_formats(&rows, &columns, &portal.result_formats)
             {
                 let message = format_exec_error(&e);
@@ -2770,11 +2776,11 @@ fn execute_portal(
             send_command_complete(stream, &format!("SELECT {}", rows.len()))?;
         }
         Ok(StatementResult::AffectedRows(n)) => {
-            send_plpgsql_notices(stream, &take_notices())?;
+            send_queued_notices(stream)?;
             send_command_complete(stream, &infer_command_tag(&sql, n))?;
         }
         Err(e) => {
-            send_plpgsql_notices(stream, &take_notices())?;
+            send_queued_notices(stream)?;
             let message = format_exec_error(&e);
             let hint = format_exec_error_hint(&e);
             send_error_with_hint(
@@ -2799,6 +2805,13 @@ fn send_plpgsql_notices(stream: &mut impl Write, notices: &[PlpgsqlNotice]) -> i
         send_notice_with_severity(stream, severity, sqlstate, &notice.message, None, None)?;
     }
     Ok(())
+}
+
+fn send_queued_notices(stream: &mut impl Write) -> io::Result<()> {
+    for notice in take_backend_notices() {
+        send_notice(stream, &notice, None, None)?;
+    }
+    send_plpgsql_notices(stream, &take_notices())
 }
 
 fn rewrite_regression_sql(sql: &str) -> std::borrow::Cow<'_, str> {
@@ -3752,9 +3765,11 @@ mod tests {
                         == b"MSQL regular expression may not contain more than two escape-double-quote separators\0"
                 })
         );
-        assert!(output.windows("WSQL function \"substring\" statement 1\0".len()).any(
-            |window| window == b"WSQL function \"substring\" statement 1\0"
-        ));
+        assert!(
+            output
+                .windows("WSQL function \"substring\" statement 1\0".len())
+                .any(|window| window == b"WSQL function \"substring\" statement 1\0")
+        );
     }
 
     #[test]
