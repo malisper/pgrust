@@ -436,10 +436,10 @@ Targeted reruns on 2026-04-17:
   Retest source: `/tmp/pgrust_numeric_regress_55433/diff/numeric.diff`
 - Preserve PostgreSQL-compatible row order for the unordered `WITH v AS (VALUES ...) FROM v1, v2` cross-join cases in `numeric.sql`, or otherwise make the planner/executor match upstream join/input ordering closely enough for regression parity
 - [x] Fix `width_bucket(float8, low, high, count)` boundary behavior for huge ranges; current float math can round into bucket `count + 1` or the wrong descending bucket near the upper edge
-- Make `to_char(numeric, ...)` formatting match PostgreSQL more closely when the input numeric carries excess display scale
-- Add PostgreSQL-style `DETAIL` output for numeric typmod overflow, including fractional-only numerics and infinite values rejected by typmod constraints
-- Add dedicated numeric-to-integer cast errors for `NaN` and `Infinity` instead of collapsing them into generic `smallint/integer/bigint out of range`
-- Audit the remaining `numeric.sql` formatting mismatches after the display-scale fix; many later hunks appear to be the same root cause repeated across `to_char` cases
+- [x] Make `to_char(numeric, ...)` formatting match PostgreSQL more closely when the input numeric carries excess display scale
+- [x] Add PostgreSQL-style `DETAIL` output for numeric typmod overflow, including fractional-only numerics and infinite values rejected by typmod constraints
+- [x] Add dedicated numeric-to-integer cast errors for `NaN` and `Infinity` instead of collapsing them into generic `smallint/integer/bigint out of range`
+- [x] Audit the remaining `numeric.sql` formatting mismatches after the display-scale fix; many later hunks appear to be the same root cause repeated across `to_char` cases
 - Mixed set-operation chains: accept PostgreSQL-style left-associative chains such as `SELECT 1 UNION SELECT 2 UNION ALL SELECT 2` instead of rejecting them in the parser.
 - Shared regression fixture visibility: investigate why bootstrap tables from `scripts/test_setup_pgrust.sql` like `float8_tbl`, `int8_tbl`, and `tenk1` are not consistently resolvable during regression runs.
 - privileges.sql parity:
