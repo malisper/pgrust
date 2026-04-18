@@ -6018,7 +6018,7 @@ fn sum_and_avg_bigint_promote_to_numeric() {
 }
 
 #[test]
-fn sum_and_avg_numeric_preserve_numeric_results() {
+fn sum_and_avg_numeric_preserve_postgres_display_scale() {
     let base = temp_dir("sum_avg_numeric");
     let txns = TransactionManager::new_durable(&base).unwrap();
     match run_sql(
@@ -6040,7 +6040,10 @@ fn sum_and_avg_numeric_preserve_numeric_results() {
             );
             assert_eq!(
                 rows,
-                vec![vec![Value::Numeric("4".into()), Value::Numeric("2".into())]]
+                vec![vec![
+                    Value::Numeric("4.0".into()),
+                    Value::Numeric("2.0000000000000000".into()),
+                ]]
             );
         }
         other => panic!("expected query result, got {:?}", other),
@@ -6048,7 +6051,7 @@ fn sum_and_avg_numeric_preserve_numeric_results() {
 }
 
 #[test]
-fn avg_numeric_drops_display_only_trailing_zeros() {
+fn avg_numeric_preserves_postgres_display_scale() {
     let base = temp_dir("avg_numeric_display_scale");
     let txns = TransactionManager::new_durable(&base).unwrap();
     match run_sql(
@@ -6060,7 +6063,10 @@ fn avg_numeric_drops_display_only_trailing_zeros() {
     .unwrap()
     {
         StatementResult::Query { rows, .. } => {
-            assert_eq!(rows, vec![vec![Value::Numeric("1.15".into())]]);
+            assert_eq!(
+                rows,
+                vec![vec![Value::Numeric("1.15000000000000000000".into())]]
+            );
         }
         other => panic!("expected query result, got {:?}", other),
     }
@@ -6518,7 +6524,7 @@ fn numeric_scalar_helpers_follow_postgres_basics() {
             &base,
             &txns,
             INVALID_TRANSACTION_ID,
-            "select round(42.4382::numeric, 2), trunc(42.4382::numeric, 2), div(4.2::numeric, 1::numeric), scale(0.00::numeric), min_scale(1.1000::numeric), trim_scale(1.120::numeric)",
+            "select round(42.4382::numeric, 2), trunc(42.4382::numeric, 2), div(4.2::numeric, 1::numeric), scale(0.00::numeric), scale(-13.000000000000000::numeric), min_scale(1.1000::numeric), trim_scale(1.120::numeric), mod(70.0::numeric, 70::numeric)",
         )
         .unwrap()
         {
@@ -6530,13 +6536,40 @@ fn numeric_scalar_helpers_follow_postgres_basics() {
                         Value::Numeric("42.43".into()),
                         Value::Numeric("4".into()),
                         Value::Int32(2),
+                        Value::Int32(15),
                         Value::Int32(1),
                         Value::Numeric("1.12".into()),
+                        Value::Numeric("0.0".into()),
                     ]]
                 );
             }
             other => panic!("expected query result, got {:?}", other),
         }
+}
+
+#[test]
+fn numeric_gcd_and_lcm_preserve_postgres_display_scale() {
+    let base = temp_dir("numeric_gcd_lcm_display_scale");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select gcd(4331.250::numeric, 463.75000::numeric), lcm(4232.820::numeric, 132.72000::numeric)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Numeric("8.75000".into()),
+                    Value::Numeric("118518.96000".into()),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
 }
 
 #[test]
