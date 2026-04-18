@@ -169,11 +169,12 @@ Targeted reruns on 2026-04-17:
 - join_hash.sql: 162/315
 - json.sql: 138/470
 - json_encoding.sql: 23/44
-- jsonb.sql: 353/1084
+- jsonb.sql: 577/1084
   - [done] PostgreSQL-compatible jsonb input errors with `LINE` / `DETAIL` / `CONTEXT`
   - [done] stack depth limit handling for deeply nested jsonb input
-  - aggregate-local `ORDER BY` support for `jsonb_agg` / `jsonb_object_agg`
+  - [done] aggregate-local `ORDER BY` support for `jsonb_agg` / `jsonb_object_agg`
   - [done] jsonb containment and existence builtin semantics (`@>`, `<@`, `?`, `?|`, `?&`, helper funcs)
+  - [done] jsonb object/key construction semantics and SQL-visible errors (`jsonb_object_keys`, `jsonb_build_object`, `jsonb_object`, `jsonb_object_agg`)
   - jsonb subscripting semantics
   - record-expansion semantics for `jsonb_to_record` / `jsonb_populate_record`
 - jsonb_jsonpath.sql: 188/830
@@ -356,8 +357,9 @@ Targeted reruns on 2026-04-17:
 
 - [done] PostgreSQL-compatible jsonb input errors with `LINE` / `DETAIL` / `CONTEXT`
 - [done] stack depth limit handling for deeply nested jsonb input
-- aggregate-local `ORDER BY` support for `jsonb_agg` / `jsonb_object_agg`
+- [done] aggregate-local `ORDER BY` support for `jsonb_agg` / `jsonb_object_agg`
 - [done] jsonb containment and existence builtin semantics (`@>`, `<@`, `?`, `?|`, `?&`, helper funcs)
+- [done] jsonb object/key construction semantics and SQL-visible errors (`jsonb_object_keys`, `jsonb_build_object`, `jsonb_object`, `jsonb_object_agg`)
 - jsonb subscripting semantics
 - record-expansion semantics for `jsonb_to_record` / `jsonb_populate_record`
 
