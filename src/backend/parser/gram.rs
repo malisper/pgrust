@@ -1151,6 +1151,19 @@ fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement,
             rest = next_rest;
             continue;
         }
+        if keyword_at_start(rest, "return") {
+            if body.is_some() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "single function body",
+                    actual: rest.into(),
+                });
+            }
+            let (parsed, next_rest) = parse_create_function_return_body(rest)?;
+            body = Some(parsed);
+            language.get_or_insert_with(|| "sql".into());
+            rest = next_rest;
+            continue;
+        }
         if keyword_at_start(rest, "strict") {
             strict = true;
             rest = consume_keyword(rest, "strict");
@@ -1707,6 +1720,20 @@ fn parse_create_function_body(input: &str) -> Result<(String, Option<String>, &s
         ));
     }
     Ok((body, None, rest))
+}
+
+fn parse_create_function_return_body(input: &str) -> Result<(String, &str), ParseError> {
+    let rest = consume_keyword(input.trim_start(), "return").trim_start();
+    if rest.is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "RETURN expression",
+            actual: input.into(),
+        });
+    }
+
+    // SQL-function shorthand uses a single expression body.
+    let _ = parse_expr(rest)?;
+    Ok((format!("select {rest}"), ""))
 }
 
 fn parse_sql_identifier(input: &str) -> Result<(String, &str), ParseError> {
