@@ -8856,6 +8856,48 @@ fn array_subscript_null_scalar_index_returns_null() {
         vec![vec![Value::Null]],
     );
 }
+
+#[test]
+fn nested_array_constructor_select_executes() {
+    let base = temp_dir("nested_array_constructor_select_executes");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select ARRAY[[[111,112],[121,122]],[[211,212],[221,222]]]",
+        )
+        .unwrap(),
+        vec![vec![Value::PgArray(ArrayValue::from_dimensions(
+            vec![
+                ArrayDimension {
+                    lower_bound: 1,
+                    length: 2,
+                },
+                ArrayDimension {
+                    lower_bound: 1,
+                    length: 2,
+                },
+                ArrayDimension {
+                    lower_bound: 1,
+                    length: 2,
+                },
+            ],
+            vec![
+                Value::Int32(111),
+                Value::Int32(112),
+                Value::Int32(121),
+                Value::Int32(122),
+                Value::Int32(211),
+                Value::Int32(212),
+                Value::Int32(221),
+                Value::Int32(222),
+            ],
+        ))]],
+    );
+}
 #[test]
 fn regex_filters_rows_in_where_clause() {
     let base = temp_dir("regex_filter_where");
