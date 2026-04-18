@@ -44,5 +44,9 @@ console_error_panic_hook = "0.1"
 wasm-bindgen = "0.2"
 web-time = "1"
 
+[profile.dev]
+split-debuginfo = "unpacked"
+
 [profile.release]
 debug = true
+split-debuginfo = "unpacked"

@@ -13,6 +13,7 @@ use crate::backend::executor::srf::{
 use crate::backend::executor::value_io::{decode_value_with_toast, missing_column_value};
 use crate::backend::executor::window::execute_window_clause;
 use crate::backend::utils::time::instant::Instant;
+use crate::include::catalog::PG_LARGEOBJECT_METADATA_RELATION_OID;
 use crate::include::catalog::builtin_aggregate_function_for_proc_oid;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::{
@@ -116,6 +117,19 @@ fn sequence_scan_runtime(
         .as_deref()
         .ok_or_else(|| ExecError::DetailedError {
             message: "sequence runtime unavailable".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        })
+}
+
+fn large_object_runtime(
+    ctx: &ExecutorContext,
+) -> Result<&crate::pgrust::database::LargeObjectRuntime, ExecError> {
+    ctx.large_objects
+        .as_deref()
+        .ok_or_else(|| ExecError::DetailedError {
+            message: "large object runtime unavailable".into(),
             detail: None,
             hint: None,
             sqlstate: "XX000",
@@ -450,6 +464,47 @@ impl PlanNode for SeqScanState {
         &'a mut self,
         ctx: &mut ExecutorContext,
     ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        if self.relation_oid == PG_LARGEOBJECT_METADATA_RELATION_OID {
+            let start = if ctx.timed {
+                Some(Instant::now())
+            } else {
+                None
+            };
+            begin_node(&mut self.stats, ctx);
+            if self.scan_rows.is_empty() {
+                self.scan_rows = large_object_runtime(ctx)?.metadata_rows();
+            }
+            loop {
+                let Some(values) = self.scan_rows.get(self.scan_index).cloned() else {
+                    finish_eof(&mut self.stats, start, ctx);
+                    return Ok(None);
+                };
+                self.scan_index += 1;
+                self.slot.kind = SlotKind::Virtual;
+                self.slot.tts_values = values;
+                self.slot.tts_nvalid = self.slot.tts_values.len();
+                self.slot.decode_offset = 0;
+                self.slot.toast = None;
+                self.slot.table_oid = Some(self.relation_oid);
+                self.current_bindings = vec![SystemVarBinding {
+                    varno: self.source_id,
+                    table_oid: self.relation_oid,
+                }];
+                set_active_system_bindings(ctx, &self.current_bindings);
+                if let Some(qual) = &self.qual {
+                    let outer_values = materialize_slot_values(&mut self.slot)?;
+                    let current_bindings = self.current_bindings.clone();
+                    set_outer_expr_bindings(ctx, outer_values, &current_bindings);
+                    clear_inner_expr_bindings(ctx);
+                    if !qual(&mut self.slot, ctx)? {
+                        note_filtered_row(&mut self.stats);
+                        continue;
+                    }
+                }
+                finish_row(&mut self.stats, start);
+                return Ok(Some(&mut self.slot));
+            }
+        }
         if self.relkind == 'S' {
             let start = if ctx.timed {
                 Some(Instant::now())
