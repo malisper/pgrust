@@ -1,12 +1,12 @@
 use crate::backend::utils::misc::guc_datetime::{DateOrder, DateStyleFormat, DateTimeConfig};
 use crate::backend::utils::time::datetime::{
-    DateTimeKeyword, DateTimeParseError, days_from_ymd, format_offset, format_time_usecs,
-    month_number, parse_date_token_with_config, parse_keyword, parse_offset_seconds,
-    parse_time_components, split_time_and_offset, time_usecs_from_hms, timezone_offset_seconds,
-    today_pg_days, ymd_from_days,
+    days_from_ymd, format_offset, format_time_usecs, month_number, parse_date_token_with_config,
+    parse_keyword, parse_offset_seconds, parse_time_components, split_time_and_offset,
+    time_usecs_from_hms, timezone_offset_seconds, today_pg_days, ymd_from_days, DateTimeKeyword,
+    DateTimeParseError,
 };
 use crate::include::nodes::datetime::{
-    DATEVAL_NOBEGIN, DATEVAL_NOEND, DateADT, POSTGRES_EPOCH_JDATE, TimeADT, TimeTzADT,
+    DateADT, TimeADT, TimeTzADT, DATEVAL_NOBEGIN, DATEVAL_NOEND, POSTGRES_EPOCH_JDATE,
 };
 use std::sync::OnceLock;
 
@@ -77,7 +77,7 @@ fn parse_numeric_tokens(
     let b = second.parse::<u32>().map_err(|_| DateParseError::Invalid)?;
     let c = third.parse::<i32>().map_err(|_| DateParseError::Invalid)?;
 
-    if first.len() >= 3 || a > 31 {
+    if first.len() >= 3 {
         return build_date(
             parse_year_number(first, true)?,
             b,
@@ -492,6 +492,12 @@ mod tests {
             time_zone: "UTC".into(),
             max_stack_depth_kb: 100,
         };
+        let mdy = DateTimeConfig {
+            date_style_format: DateStyleFormat::Iso,
+            date_order: DateOrder::Mdy,
+            time_zone: "UTC".into(),
+            max_stack_depth_kb: 100,
+        };
 
         assert_eq!(
             parse_date_text("99-01-08", &ymd),
@@ -502,6 +508,30 @@ mod tests {
             parse_date_text("1999-08-01", &ymd)
         );
         assert_eq!(
+            parse_date_text("99-01-08", &dmy),
+            Err(DateParseError::FieldOutOfRange {
+                datestyle_hint: true,
+            })
+        );
+        assert_eq!(
+            parse_date_text("99-08-01", &dmy),
+            Err(DateParseError::FieldOutOfRange {
+                datestyle_hint: true,
+            })
+        );
+        assert_eq!(
+            parse_date_text("99-01-08", &mdy),
+            Err(DateParseError::FieldOutOfRange {
+                datestyle_hint: true,
+            })
+        );
+        assert_eq!(
+            parse_date_text("99-08-01", &mdy),
+            Err(DateParseError::FieldOutOfRange {
+                datestyle_hint: true,
+            })
+        );
+        assert_eq!(
             parse_date_text("1/8/1999", &ymd),
             Err(DateParseError::FieldOutOfRange {
                 datestyle_hint: true,
@@ -510,6 +540,22 @@ mod tests {
         assert_eq!(
             parse_date_text("1/8/1999", &dmy),
             parse_date_text("1999-08-01", &dmy)
+        );
+        assert_eq!(
+            parse_date_text("1/8/1999", &mdy),
+            parse_date_text("1999-01-08", &mdy)
+        );
+        assert_eq!(
+            parse_date_text("01/02/03", &ymd),
+            parse_date_text("2001-02-03", &ymd)
+        );
+        assert_eq!(
+            parse_date_text("01/02/03", &dmy),
+            parse_date_text("2003-02-01", &dmy)
+        );
+        assert_eq!(
+            parse_date_text("01/02/03", &mdy),
+            parse_date_text("2003-01-02", &mdy)
         );
         assert_eq!(
             parse_date_text("January 8, 99 BC", &ymd),
