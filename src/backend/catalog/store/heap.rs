@@ -32,7 +32,9 @@ use crate::include::catalog::{
 };
 use crate::include::nodes::datum::Value;
 
-use super::{CatalogMutationEffect, CatalogStore, CatalogWriteContext, CreateTableResult};
+use super::{
+    CatalogMutationEffect, CatalogStore, CatalogStoreMode, CatalogWriteContext, CreateTableResult,
+};
 
 const PG_DESCRIPTION_O_C_O_INDEX_OID: u32 = 2675;
 const PG_NAMESPACE_OID_INDEX_OID: u32 = 2685;
@@ -79,6 +81,35 @@ impl CatalogStore {
         &mut self,
         mut row: PgDatabaseRow,
     ) -> Result<PgDatabaseRow, CatalogError> {
+        if matches!(&self.mode, CatalogStoreMode::Durable { .. }) {
+            let mut control = self.control_state()?;
+            let databases = self.catcache()?.database_rows();
+            if databases
+                .iter()
+                .any(|existing| existing.datname.eq_ignore_ascii_case(&row.datname))
+            {
+                return Err(CatalogError::UniqueViolation(
+                    "pg_database_datname_index".into(),
+                ));
+            }
+            if row.oid == 0 {
+                row.oid = control.next_oid;
+            }
+            control.next_oid = control.next_oid.max(row.oid.saturating_add(1));
+            self.persist_catalog_row_changes_with_control(
+                control.next_oid,
+                control.next_rel_number,
+                &PhysicalCatalogRows::default(),
+                &PhysicalCatalogRows {
+                    databases: vec![row.clone()],
+                    ..PhysicalCatalogRows::default()
+                },
+                &[BootstrapCatalogKind::PgDatabase],
+            )?;
+            self.control = control;
+            return Ok(row);
+        }
+
         let mut catalog = self.catalog_snapshot_with_control()?;
         if catalog
             .databases
@@ -107,6 +138,28 @@ impl CatalogStore {
     }
 
     pub fn drop_database_row(&mut self, name: &str) -> Result<PgDatabaseRow, CatalogError> {
+        if matches!(&self.mode, CatalogStoreMode::Durable { .. }) {
+            let mut databases = self.catcache()?.database_rows();
+            let control = self.control_state()?;
+            let position = databases
+                .iter()
+                .position(|row| row.datname.eq_ignore_ascii_case(name))
+                .ok_or_else(|| CatalogError::UnknownTable(name.to_string()))?;
+            let row = databases.remove(position);
+            self.persist_catalog_row_changes_with_control(
+                control.next_oid,
+                control.next_rel_number,
+                &PhysicalCatalogRows {
+                    databases: vec![row.clone()],
+                    ..PhysicalCatalogRows::default()
+                },
+                &PhysicalCatalogRows::default(),
+                &[BootstrapCatalogKind::PgDatabase],
+            )?;
+            self.control = control;
+            return Ok(row);
+        }
+
         let mut catalog = self.catalog_snapshot_with_control()?;
         let position = catalog
             .databases
