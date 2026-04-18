@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 
 use crate::ClientId;
 use crate::backend::catalog::bootstrap::bootstrap_catalog_entry;
+use crate::backend::catalog::indexing::vacuum_system_catalog_indexes_for_kinds_in_db;
 use crate::backend::catalog::store::CatalogMutationEffect;
 use crate::backend::storage::smgr::StorageManager;
 use crate::backend::utils::cache::syscache::{BackendCacheState, drain_pending_invalidations};
@@ -145,6 +146,18 @@ pub fn finalize_committed_catalog_effects(
             let _ = crate::backend::access::heap::heapam::heap_flush(&db.pool, 0, rel, block);
         }
     }
+    let touched_catalogs = effects
+        .iter()
+        .flat_map(|effect| effect.touched_catalogs.iter().copied())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let _ = vacuum_system_catalog_indexes_for_kinds_in_db(
+        &db.pool,
+        &db.txns,
+        db.database_oid,
+        &touched_catalogs,
+    );
     for effect in effects {
         for rel in &effect.dropped_rels {
             let _ = db.pool.invalidate_relation(*rel);

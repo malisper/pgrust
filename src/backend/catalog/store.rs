@@ -90,13 +90,16 @@ struct CatalogControl {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::catalog::indexing::vacuum_system_catalog_indexes_for_kinds_in_db;
     use crate::backend::catalog::bootstrap::bootstrap_catalog_rel;
     use crate::backend::catalog::column_desc;
     use crate::backend::catalog::loader::load_physical_catalog_rows;
     use crate::backend::catalog::rows::physical_catalog_rows_for_catalog_entry;
     use crate::backend::parser::{SqlType, SqlTypeKind};
-    use crate::backend::storage::smgr::ForkNumber;
-    use crate::backend::storage::smgr::segment_path;
+    use crate::backend::storage::smgr::{
+        BLCKSZ, ForkNumber, MdStorageManager, StorageManager, segment_path,
+    };
+    use crate::include::access::nbtree::{BTP_DELETED, bt_page_data_items, bt_page_get_opaque};
     use crate::include::catalog::{
         BOOTSTRAP_SUPERUSER_NAME, BOOTSTRAP_SUPERUSER_OID, BTREE_AM_OID, C_COLLATION_OID,
         CURRENT_DATABASE_NAME, CatalogScope, DEFAULT_COLLATION_OID, DEFAULT_TABLESPACE_OID,
@@ -110,6 +113,7 @@ mod tests {
     use std::fs;
     #[cfg(unix)]
     use std::os::unix::fs::MetadataExt;
+    use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_dir(label: &str) -> PathBuf {
@@ -136,6 +140,37 @@ mod tests {
             ForkNumber::Main,
             0,
         )
+    }
+
+    #[cfg(unix)]
+    fn system_index_rel(db_oid: u32, relname: &str) -> RelFileLocator {
+        let descriptor = system_catalog_indexes()
+            .iter()
+            .find(|descriptor| descriptor.relation_name == relname)
+            .unwrap();
+        RelFileLocator {
+            spc_oid: 0,
+            db_oid,
+            rel_number: descriptor.relation_oid,
+        }
+    }
+
+    #[cfg(unix)]
+    fn count_leaf_btree_items(base: &PathBuf, rel: RelFileLocator) -> usize {
+        let mut smgr = MdStorageManager::new(base);
+        let nblocks = smgr.nblocks(rel, ForkNumber::Main).unwrap();
+        let mut page = [0u8; BLCKSZ];
+        let mut count = 0usize;
+        for block in 1..nblocks {
+            smgr.read_block(rel, ForkNumber::Main, block, &mut page)
+                .unwrap();
+            let opaque = bt_page_get_opaque(&page).unwrap();
+            if !opaque.is_leaf() || opaque.btpo_flags & BTP_DELETED != 0 {
+                continue;
+            }
+            count += bt_page_data_items(&page).unwrap().len();
+        }
+        count
     }
 
     #[test]
@@ -1346,6 +1381,79 @@ mod tests {
         let type_index_meta_after = fs::metadata(&type_index_path).unwrap();
         assert_eq!(class_index_meta_before.ino(), class_index_meta_after.ino());
         assert_eq!(type_index_meta_before.ino(), type_index_meta_after.ino());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn catalog_store_drop_table_vacuums_dead_system_index_tuples() {
+        let base = temp_dir("catalog_index_tuple_cleanup");
+        let mut store = CatalogStore::load(&base).unwrap();
+        let class_index_rel = system_index_rel(1, "pg_class_relname_nsp_index");
+        let before = count_leaf_btree_items(&base, class_index_rel);
+
+        store
+            .create_table(
+                "people",
+                RelationDesc {
+                    columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
+                },
+            )
+            .unwrap();
+        let after_create = count_leaf_btree_items(&base, class_index_rel);
+        assert_eq!(after_create, before + 1);
+
+        store.drop_table("people").unwrap();
+
+        let after_drop = count_leaf_btree_items(&base, class_index_rel);
+        assert_eq!(after_drop, before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn catalog_store_rename_table_vacuums_dead_system_index_tuples() {
+        let base = temp_dir("catalog_index_tuple_cleanup_rename");
+        let mut store = CatalogStore::load(&base).unwrap();
+        let created = store
+            .create_table(
+                "people",
+                RelationDesc {
+                    columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
+                },
+            )
+            .unwrap();
+        let class_index_rel = system_index_rel(1, "pg_class_relname_nsp_index");
+        let before = count_leaf_btree_items(&base, class_index_rel);
+
+        let mut smgr = MdStorageManager::new(&base);
+        for kind in [
+            BootstrapCatalogKind::PgClass,
+            BootstrapCatalogKind::PgType,
+            BootstrapCatalogKind::PgConstraint,
+        ] {
+            smgr.open(bootstrap_catalog_rel(kind, 1)).unwrap();
+        }
+        let pool = Arc::new(BufferPool::new(SmgrStorageBackend::new(smgr), 16));
+        let txns = Arc::new(RwLock::new(TransactionManager::new_durable(base.clone()).unwrap()));
+        let xid = txns.write().begin();
+        let ctx = CatalogWriteContext {
+            pool: Arc::clone(&pool),
+            txns: Arc::clone(&txns),
+            xid,
+            cid: 0,
+            client_id: 0,
+            waiter: None,
+            interrupts: Arc::new(InterruptState::new()),
+        };
+
+        let effect = store
+            .rename_relation_mvcc(created.relation_oid, "customers", &ctx)
+            .unwrap();
+        txns.write().commit(xid).unwrap();
+        vacuum_system_catalog_indexes_for_kinds_in_db(&pool, &txns, 1, &effect.touched_catalogs)
+            .unwrap();
+
+        let after_rename = count_leaf_btree_items(&base, class_index_rel);
+        assert_eq!(after_rename, before);
     }
 
     #[cfg(unix)]
