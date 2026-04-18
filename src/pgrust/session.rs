@@ -8,7 +8,7 @@ use crate::backend::access::transam::xact::TransactionId;
 use crate::backend::catalog::store::CatalogMutationEffect;
 use crate::backend::commands::copyfrom::parse_text_array_literal;
 use crate::backend::commands::tablecmds::{
-    execute_delete_with_waiter, execute_insert, execute_prepared_insert_row,
+    execute_delete_with_waiter, execute_insert, execute_merge, execute_prepared_insert_row,
     execute_update_with_waiter,
 };
 use crate::backend::executor::jsonpath::canonicalize_jsonpath;
@@ -19,6 +19,7 @@ use crate::backend::executor::{
 use crate::backend::parser::{
     CatalogLookup, CopyFromStatement, CopySource, ParseError, ParseOptions, PreparedInsert,
     SelectStatement, Statement, bind_delete, bind_insert, bind_insert_prepared, bind_update,
+    plan_merge,
 };
 use crate::backend::storage::lmgr::{TableLockManager, TableLockMode, unlock_relations};
 use crate::backend::utils::cache::inval::CatalogInvalidation;
@@ -925,9 +926,11 @@ impl Session {
                     )
                 }
             }
-            Statement::Merge(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                "MERGE".into(),
-            ))),
+            Statement::Merge(ref merge_stmt) => {
+                let _ = merge_stmt;
+                let search_path = self.configured_search_path();
+                db.execute_statement_with_search_path(self.client_id, stmt, search_path.as_deref())
+            }
             Statement::Begin => {
                 if self.active_txn.is_some() {
                     return Err(ExecError::Parse(ParseError::UnexpectedToken {
@@ -1741,9 +1744,13 @@ impl Session {
             Statement::Vacuum(_) => {
                 Err(ExecError::Parse(ParseError::ActiveSqlTransaction("VACUUM")))
             }
-            Statement::Merge(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                "MERGE".into(),
-            ))),
+            Statement::Merge(ref merge_stmt) => {
+                let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                let bound = plan_merge(merge_stmt, &catalog)?;
+                let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
+                let mut ctx = self.executor_context_for_catalog(db, snapshot, cid, &catalog);
+                execute_merge(bound, &catalog, &mut ctx, xid, cid)
+            }
             Statement::Select(_) | Statement::Values(_) | Statement::Explain(_) => {
                 let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
                 let search_path = self.configured_search_path();

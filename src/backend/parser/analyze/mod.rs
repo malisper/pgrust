@@ -60,14 +60,16 @@ use geometry::*;
 use infer::*;
 pub use modify::{
     BoundArraySubscript, BoundAssignment, BoundAssignmentTarget, BoundDeleteStatement,
-    BoundDeleteTarget, BoundInsertSource, BoundInsertStatement, BoundUpdateStatement,
-    BoundUpdateTarget, PreparedInsert, bind_delete, bind_insert, bind_insert_prepared, bind_update,
+    BoundDeleteTarget, BoundInsertSource, BoundInsertStatement, BoundMergeAction,
+    BoundMergeStatement, BoundMergeWhenClause, BoundUpdateStatement, BoundUpdateTarget,
+    PreparedInsert, bind_delete, bind_insert, bind_insert_prepared, bind_update, plan_merge,
 };
 pub use paths::BoundModifyRowSource;
 use paths::bind_order_by_items;
 pub(crate) use query::analyze_select_query_with_outer;
 use query::{
     AnalyzedFrom, analyze_values_query_with_outer, identity_target_list, normalize_target_list,
+    query_from_from_projection,
 };
 pub use scope::BoundRelation;
 use scope::*;

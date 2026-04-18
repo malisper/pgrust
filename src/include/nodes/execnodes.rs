@@ -90,6 +90,7 @@ pub(crate) enum SlotKind {
     BufferHeapTuple {
         desc: Rc<RelationDesc>,
         attr_descs: Rc<[AttributeDesc]>,
+        tid: ItemPointerData,
         tuple_ptr: *const u8,
         tuple_len: usize,
         pin: Rc<OwnedBufferPin<SmgrStorageBackend>>,
@@ -104,8 +105,14 @@ impl std::fmt::Debug for SlotKind {
             SlotKind::HeapTuple { tid, .. } => {
                 f.debug_struct("HeapTuple").field("tid", tid).finish()
             }
-            SlotKind::BufferHeapTuple { tuple_len, pin, .. } => f
+            SlotKind::BufferHeapTuple {
+                tid,
+                tuple_len,
+                pin,
+                ..
+            } => f
                 .debug_struct("BufferHeapTuple")
+                .field("tid", tid)
                 .field("tuple_len", tuple_len)
                 .field("buffer_id", &pin.buffer_id())
                 .finish(),
@@ -714,7 +721,7 @@ impl TupleSlot {
 
     pub fn tid(&self) -> Option<ItemPointerData> {
         match &self.kind {
-            SlotKind::HeapTuple { tid, .. } => Some(*tid),
+            SlotKind::HeapTuple { tid, .. } | SlotKind::BufferHeapTuple { tid, .. } => Some(*tid),
             _ => None,
         }
     }
