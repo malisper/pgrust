@@ -200,15 +200,8 @@ fn apply_array_subscripts_to_value(
                     lower: clamped_lower,
                     upper: clamped_upper,
                 });
-                let result_lower_bound = if subscript.is_slice
-                    && (subscript.lower_provided ^ subscript.upper_provided)
-                {
-                    1
-                } else {
-                    clamped_lower
-                };
                 result_dimensions.push(ArrayDimension {
-                    lower_bound: result_lower_bound,
+                    lower_bound: clamped_lower,
                     length,
                 });
             } else {

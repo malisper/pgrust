@@ -1069,6 +1069,9 @@ fn format_standard_numeric(value: &NumericValue, spec: &FormatSpec) -> String {
             out = format!(" {out} ");
         }
     }
+    if spec.fill_mode {
+        out = out.trim().to_string();
+    }
     out
 }
 

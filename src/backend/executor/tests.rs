@@ -13974,6 +13974,12 @@ fn large_object_metadata_tracks_create_and_unlink() {
             interrupts: std::sync::Arc::new(
                 crate::backend::utils::misc::interrupts::InterruptState::new(),
             ),
+            stats: std::sync::Arc::new(parking_lot::RwLock::new(
+                crate::pgrust::database::DatabaseStatsStore::with_default_io_rows(),
+            )),
+            session_stats: std::sync::Arc::new(parking_lot::RwLock::new(
+                crate::pgrust::database::SessionStatsState::default(),
+            )),
             snapshot: txns.snapshot(INVALID_TRANSACTION_ID).unwrap(),
             client_id: 77,
             current_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
