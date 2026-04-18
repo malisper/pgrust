@@ -55,47 +55,6 @@ fn unsupported_record_input() -> ExecError {
     }
 }
 
-fn numeric_typmod_overflow_detail(precision: i32, scale: i32) -> String {
-    let max_exponent = precision - scale;
-    let limit = if max_exponent == 0 {
-        "1".to_string()
-    } else {
-        format!("10^{max_exponent}")
-    };
-    format!(
-        "A field with precision {precision}, scale {scale} must round to an absolute value less than {limit}."
-    )
-}
-
-fn numeric_typmod_overflow_error(precision: i32, scale: i32) -> ExecError {
-    ExecError::DetailedError {
-        message: "numeric field overflow".into(),
-        detail: Some(numeric_typmod_overflow_detail(precision, scale)),
-        hint: None,
-        sqlstate: "22003",
-    }
-}
-
-fn numeric_typmod_infinite_error(precision: i32, scale: i32) -> ExecError {
-    ExecError::DetailedError {
-        message: "numeric field overflow".into(),
-        detail: Some(format!(
-            "A field with precision {precision}, scale {scale} cannot hold an infinite value."
-        )),
-        hint: None,
-        sqlstate: "22003",
-    }
-}
-
-fn numeric_to_integer_cast_error(message: impl Into<String>) -> ExecError {
-    ExecError::DetailedError {
-        message: message.into(),
-        detail: None,
-        hint: None,
-        sqlstate: "22P02",
-    }
-}
-
 fn parse_pg_integer_text(text: &str, ty: &'static str) -> Result<i128, ExecError> {
     let trimmed = text.trim_matches(|ch: char| ch.is_ascii_whitespace());
     if trimmed.is_empty() {
@@ -2211,43 +2170,21 @@ pub(super) fn cast_numeric_value(
             let v = parse_pg_float(&rendered, SqlTypeKind::Float8)?;
             Ok(Value::Float64(v))
         }
-        SqlTypeKind::Int2 => match value {
-            NumericValue::NaN => Err(numeric_to_integer_cast_error(
-                "cannot convert NaN to smallint",
-            )),
-            NumericValue::PosInf | NumericValue::NegInf => Err(numeric_to_integer_cast_error(
-                "cannot convert infinity to smallint",
-            )),
-            _ => value
-                .round_to_scale(0)
-                .and_then(|rounded| rounded.render().parse::<i16>().ok())
-                .map(Value::Int16)
-                .ok_or(ExecError::Int2OutOfRange),
-        },
-        SqlTypeKind::Int4 => match value {
-            NumericValue::NaN => Err(numeric_to_integer_cast_error(
-                "cannot convert NaN to integer",
-            )),
-            NumericValue::PosInf | NumericValue::NegInf => Err(numeric_to_integer_cast_error(
-                "cannot convert infinity to integer",
-            )),
-            _ => value
-                .round_to_scale(0)
-                .and_then(|rounded| rounded.render().parse::<i32>().ok())
-                .map(Value::Int32)
-                .ok_or(ExecError::Int4OutOfRange),
-        },
-        SqlTypeKind::Int8 => match value {
-            NumericValue::NaN => Err(numeric_to_integer_cast_error("cannot convert NaN to bigint")),
-            NumericValue::PosInf | NumericValue::NegInf => Err(numeric_to_integer_cast_error(
-                "cannot convert infinity to bigint",
-            )),
-            _ => value
-                .round_to_scale(0)
-                .and_then(|rounded| rounded.render().parse::<i64>().ok())
-                .map(Value::Int64)
-                .ok_or(ExecError::Int8OutOfRange),
-        },
+        SqlTypeKind::Int2 => value
+            .round_to_scale(0)
+            .and_then(|rounded| rounded.render().parse::<i16>().ok())
+            .map(Value::Int16)
+            .ok_or(ExecError::Int2OutOfRange),
+        SqlTypeKind::Int4 => value
+            .round_to_scale(0)
+            .and_then(|rounded| rounded.render().parse::<i32>().ok())
+            .map(Value::Int32)
+            .ok_or(ExecError::Int4OutOfRange),
+        SqlTypeKind::Int8 => value
+            .round_to_scale(0)
+            .and_then(|rounded| rounded.render().parse::<i64>().ok())
+            .map(Value::Int64)
+            .ok_or(ExecError::Int8OutOfRange),
         SqlTypeKind::Oid | SqlTypeKind::RegProcedure | SqlTypeKind::Xid => value
             .round_to_scale(0)
             .and_then(|rounded| rounded.render().parse::<u32>().ok())
@@ -2368,20 +2305,18 @@ fn coerce_numeric_value(parsed: NumericValue, ty: SqlType) -> Result<NumericValu
     let rounded = if scale >= 0 {
         parsed
             .round_to_scale(scale as u32)
-            .ok_or_else(|| numeric_typmod_overflow_error(precision, scale))?
+            .ok_or(ExecError::NumericFieldOverflow)?
     } else {
         coerce_numeric_negative_scale(parsed, scale)?
     };
 
     match rounded {
         NumericValue::NaN => Ok(NumericValue::NaN),
-        NumericValue::PosInf | NumericValue::NegInf => {
-            Err(numeric_typmod_infinite_error(precision, scale))
-        }
+        NumericValue::PosInf | NumericValue::NegInf => Err(ExecError::NumericFieldOverflow),
         NumericValue::Finite { .. } if numeric_fits_precision_scale(&rounded, precision, scale) => {
             Ok(rounded)
         }
-        NumericValue::Finite { .. } => Err(numeric_typmod_overflow_error(precision, scale)),
+        NumericValue::Finite { .. } => Err(ExecError::NumericFieldOverflow),
     }
 }
 

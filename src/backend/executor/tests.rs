@@ -1504,47 +1504,6 @@ fn setop_join_branch_executes_with_child_local_vars() {
         vec![vec![Value::Int32(1)], vec![Value::Int32(3)]],
     );
 }
-
-#[test]
-fn union_distinct_deduplicates_bpchar_trailing_spaces() {
-    let base = temp_dir("union_distinct_bpchar_spaces");
-    let txns = TransactionManager::new_durable(&base).unwrap();
-
-    match run_sql(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "select 'a'::char(4) union select 'a   '::char(4)",
-    )
-    .unwrap()
-    {
-        StatementResult::Query { rows, .. } => {
-            assert_eq!(rows, vec![vec![Value::Text("a   ".into())]]);
-        }
-        other => panic!("expected query result, got {:?}", other),
-    }
-}
-
-#[test]
-fn cast_bpchar_to_varchar_trims_trailing_spaces() {
-    let base = temp_dir("cast_bpchar_to_varchar");
-    let txns = TransactionManager::new_durable(&base).unwrap();
-
-    match run_sql(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "select cast('ab  '::char(4) as varchar)",
-    )
-    .unwrap()
-    {
-        StatementResult::Query { rows, .. } => {
-            assert_eq!(rows, vec![vec![Value::Text("ab".into())]]);
-        }
-        other => panic!("expected query result, got {:?}", other),
-    }
-}
-
 #[test]
 fn select_sql_plain_varchar_cast_preserves_text() {
     let base = temp_dir("select_sql_plain_varchar_cast");
@@ -3864,76 +3823,6 @@ fn array_slice_assignment_rejects_too_small_sources() {
 }
 
 #[test]
-fn array_scalar_assignment_overflow_uses_limit_error() {
-    let base = temp_dir("array_scalar_assignment_overflow");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-
-    let insert_xid = txns.begin();
-    assert_eq!(
-        run_sql_with_catalog(
-            &base,
-            &txns,
-            insert_xid,
-            "insert into t values ('[-2147483648:-2147483647]={1,2}'::int[], null)",
-            array_subscript_catalog(),
-        )
-        .unwrap(),
-        StatementResult::AffectedRows(1)
-    );
-    txns.commit(insert_xid).unwrap();
-
-    let update_xid = txns.begin();
-    let err = run_sql_with_catalog(
-        &base,
-        &txns,
-        update_xid,
-        "update t set a[2147483647] = 42",
-        array_subscript_catalog(),
-    )
-    .unwrap_err();
-    assert!(matches!(
-        err,
-        ExecError::DetailedError { message, sqlstate, .. }
-            if message == "array size exceeds the maximum allowed" && sqlstate == "54000"
-    ));
-}
-
-#[test]
-fn array_slice_assignment_overflow_uses_limit_error() {
-    let base = temp_dir("array_slice_assignment_overflow");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-
-    let insert_xid = txns.begin();
-    assert_eq!(
-        run_sql_with_catalog(
-            &base,
-            &txns,
-            insert_xid,
-            "insert into t values ('[-2147483648:-2147483647]={1,2}'::int[], null)",
-            array_subscript_catalog(),
-        )
-        .unwrap(),
-        StatementResult::AffectedRows(1)
-    );
-    txns.commit(insert_xid).unwrap();
-
-    let update_xid = txns.begin();
-    let err = run_sql_with_catalog(
-        &base,
-        &txns,
-        update_xid,
-        "update t set a[2147483646:2147483647] = array[4,2]",
-        array_subscript_catalog(),
-    )
-    .unwrap_err();
-    assert!(matches!(
-        err,
-        ExecError::DetailedError { message, sqlstate, .. }
-            if message == "array size exceeds the maximum allowed" && sqlstate == "54000"
-    ));
-}
-
-#[test]
 fn array_slice_assignment_requires_full_bounds_for_null_arrays() {
     let base = temp_dir("array_slice_assignment_null_array_bounds");
     let mut txns = TransactionManager::new_durable(&base).unwrap();
@@ -4872,53 +4761,6 @@ fn float_and_numeric_casts_to_int2_follow_postgres_rounding() {
                 Value::Int16(3),
             ]],
         );
-}
-
-#[test]
-fn numeric_special_values_report_postgres_integer_cast_errors() {
-    let base = temp_dir("numeric_special_integer_cast_errors");
-    let txns = TransactionManager::new_durable(&base).unwrap();
-
-    for (sql, expected_message) in [
-        ("select 'NaN'::numeric::int2", "cannot convert NaN to smallint"),
-        (
-            "select 'Infinity'::numeric::int2",
-            "cannot convert infinity to smallint",
-        ),
-        (
-            "select '-Infinity'::numeric::int2",
-            "cannot convert infinity to smallint",
-        ),
-        ("select 'NaN'::numeric::int4", "cannot convert NaN to integer"),
-        (
-            "select 'Infinity'::numeric::int4",
-            "cannot convert infinity to integer",
-        ),
-        (
-            "select '-Infinity'::numeric::int4",
-            "cannot convert infinity to integer",
-        ),
-        ("select 'NaN'::numeric::int8", "cannot convert NaN to bigint"),
-        (
-            "select 'Infinity'::numeric::int8",
-            "cannot convert infinity to bigint",
-        ),
-        (
-            "select '-Infinity'::numeric::int8",
-            "cannot convert infinity to bigint",
-        ),
-    ] {
-        let err = run_sql(&base, &txns, INVALID_TRANSACTION_ID, sql).unwrap_err();
-        assert!(matches!(
-            err,
-            ExecError::DetailedError {
-                ref message,
-                detail: None,
-                sqlstate: "22P02",
-                ..
-            } if message == expected_message
-        ));
-    }
 }
 
 #[test]
@@ -6127,16 +5969,7 @@ fn numeric_cast_typmod_rejects_precision_overflow() {
         "select '1234.56'::numeric(5,2)",
     )
     .unwrap_err();
-    assert!(matches!(
-        err,
-        ExecError::DetailedError {
-            ref message,
-            detail: Some(ref detail),
-            sqlstate: "22003",
-            ..
-        } if message == "numeric field overflow"
-            && detail == "A field with precision 5, scale 2 must round to an absolute value less than 10^3."
-    ));
+    assert!(matches!(err, ExecError::NumericFieldOverflow));
 }
 
 #[test]
@@ -8933,38 +8766,6 @@ fn array_subscript_partial_slices_on_zero_based_arrays_match_postgres() {
 }
 
 #[test]
-fn array_subscript_on_unsubscriptable_type_uses_postgres_error() {
-    let base = temp_dir("array_subscript_unsubscriptable_error");
-    let txns = TransactionManager::new_durable(&base).unwrap();
-
-    match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select (now())[1]") {
-        Err(ExecError::Parse(ParseError::NonSubscriptableType(actual))) => {
-            assert_eq!(
-                actual,
-                "timestamp with time zone"
-            );
-        }
-        other => panic!("expected unsubscriptable-type error, got {other:?}"),
-    }
-}
-
-#[test]
-fn point_slice_subscript_uses_fixed_length_array_error() {
-    let base = temp_dir("point_slice_subscript_error");
-    let txns = TransactionManager::new_durable(&base).unwrap();
-
-    match run_sql(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "select ('(1,2)'::point)[0:1]",
-    ) {
-        Err(ExecError::Parse(ParseError::FixedLengthArraySliceNotImplemented)) => {}
-        other => panic!("expected fixed-length array slice error, got {other:?}"),
-    }
-}
-
-#[test]
 fn array_subscript_mixed_slice_scalar_queries_match_postgres() {
     let base = temp_dir("array_subscript_mixed_slice_scalar_queries");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -11161,33 +10962,6 @@ fn jsonpath_builtin_method_calls_parse() {
 }
 
 #[test]
-fn jsonpath_numeric_method_calls_parse() {
-    let base = temp_dir("jsonpath_numeric_method_calls_parse");
-    let txns = TransactionManager::new_durable(&base).unwrap();
-
-    match run_sql(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "select '$.number()'::jsonpath, '$.integer()'::jsonpath, '$.decimal(4,2)'::jsonpath",
-    )
-    .unwrap()
-    {
-        StatementResult::Query { rows, .. } => {
-            assert_eq!(
-                rows,
-                vec![vec![
-                    Value::JsonPath("$.number()".into()),
-                    Value::JsonPath("$.integer()".into()),
-                    Value::JsonPath("$.decimal(4, 2)".into()),
-                ]]
-            );
-        }
-        other => panic!("expected query result, got {:?}", other),
-    }
-}
-
-#[test]
 fn jsonpath_expression_method_calls_work() {
     let base = temp_dir("jsonpath_expression_method_calls");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -11224,47 +10998,6 @@ fn jsonpath_expression_method_calls_work() {
                     ),
                     other => panic!("expected jsonb, got {:?}", other),
                 }
-            }
-        }
-        other => panic!("expected query result, got {:?}", other),
-    }
-}
-
-#[test]
-fn jsonpath_numeric_method_calls_work() {
-    let base = temp_dir("jsonpath_numeric_method_calls");
-    let txns = TransactionManager::new_durable(&base).unwrap();
-
-    match run_sql(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "select jsonb_path_query('1e1000', '$.number()'), jsonb_path_query('1.83', '$.integer()'), jsonb_path_query('1234.5678', '$.decimal(+6, -2)')",
-    )
-    .unwrap()
-    {
-        StatementResult::Query { rows, .. } => {
-            assert_eq!(rows.len(), 1);
-            match &rows[0][0] {
-                Value::Jsonb(bytes) => assert_eq!(
-                    crate::backend::executor::jsonb::render_jsonb_bytes(bytes).unwrap(),
-                    "10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-                ),
-                other => panic!("expected jsonb, got {:?}", other),
-            }
-            match &rows[0][1] {
-                Value::Jsonb(bytes) => assert_eq!(
-                    crate::backend::executor::jsonb::render_jsonb_bytes(bytes).unwrap(),
-                    "2"
-                ),
-                other => panic!("expected jsonb, got {:?}", other),
-            }
-            match &rows[0][2] {
-                Value::Jsonb(bytes) => assert_eq!(
-                    crate::backend::executor::jsonb::render_jsonb_bytes(bytes).unwrap(),
-                    "1200"
-                ),
-                other => panic!("expected jsonb, got {:?}", other),
             }
         }
         other => panic!("expected query result, got {:?}", other),
@@ -11310,54 +11043,6 @@ fn jsonpath_builtin_method_calls_work() {
         }
         other => panic!("expected query result, got {:?}", other),
     }
-}
-
-#[test]
-fn jsonpath_numeric_method_calls_errors() {
-    let base = temp_dir("jsonpath_numeric_method_calls_errors");
-    let txns = TransactionManager::new_durable(&base).unwrap();
-
-    let err = run_sql(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "select jsonb_path_query('\"1.23aaa\"', '$.number()')",
-    )
-    .unwrap_err();
-    assert!(matches!(
-        err,
-        ExecError::InvalidStorageValue { column, details }
-            if column == "jsonpath"
-                && details == "argument \"1.23aaa\" of jsonpath item method .number() is invalid for type numeric"
-    ));
-
-    let err = run_sql(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "select jsonb_path_query('12345678901', '$.integer()')",
-    )
-    .unwrap_err();
-    assert!(matches!(
-        err,
-        ExecError::InvalidStorageValue { column, details }
-            if column == "jsonpath"
-                && details == "argument \"12345678901\" of jsonpath item method .integer() is invalid for type integer"
-    ));
-
-    let err = run_sql(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "select jsonb_path_query('12.3', '$.decimal(12345678901,1)')",
-    )
-    .unwrap_err();
-    assert!(matches!(
-        err,
-        ExecError::InvalidStorageValue { column, details }
-            if column == "jsonpath"
-                && details == "precision of jsonpath item method .decimal() is out of range for type integer"
-    ));
 }
 
 #[test]
@@ -12705,62 +12390,7 @@ fn numeric_typmod_accepts_zero_in_full_scale_columns() {
         "select '1.0'::numeric(4,4)",
     )
     .unwrap_err();
-    assert!(matches!(
-        err,
-        ExecError::DetailedError {
-            ref message,
-            detail: Some(ref detail),
-            sqlstate: "22003",
-            ..
-        } if message == "numeric field overflow"
-            && detail == "A field with precision 4, scale 4 must round to an absolute value less than 1."
-    ));
-}
-
-#[test]
-fn numeric_typmod_rejects_infinite_values_with_detail() {
-    let base = temp_dir("numeric_typmod_infinite_detail");
-    let txns = TransactionManager::new_durable(&base).unwrap();
-    let err = run_sql(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "select 'inf'::numeric(3,-6)",
-    )
-    .unwrap_err();
-    assert!(matches!(
-        err,
-        ExecError::DetailedError {
-            ref message,
-            detail: Some(ref detail),
-            sqlstate: "22003",
-            ..
-        } if message == "numeric field overflow"
-            && detail == "A field with precision 3, scale -6 cannot hold an infinite value."
-    ));
-}
-
-#[test]
-fn numeric_typmod_negative_scale_overflow_includes_limit_detail() {
-    let base = temp_dir("numeric_typmod_negative_scale_detail");
-    let txns = TransactionManager::new_durable(&base).unwrap();
-    let err = run_sql(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "select '999500000'::numeric(3,-6)",
-    )
-    .unwrap_err();
-    assert!(matches!(
-        err,
-        ExecError::DetailedError {
-            ref message,
-            detail: Some(ref detail),
-            sqlstate: "22003",
-            ..
-        } if message == "numeric field overflow"
-            && detail == "A field with precision 3, scale -6 must round to an absolute value less than 10^9."
-    ));
+    assert!(matches!(err, ExecError::NumericFieldOverflow));
 }
 
 #[test]

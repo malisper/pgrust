@@ -739,7 +739,6 @@ pub fn executor_start(plan: Plan) -> PlanState {
             Box::new(SetOpState {
                 op,
                 children: children.into_iter().map(executor_start).collect(),
-                output_types: output_columns.iter().map(|c| c.sql_type).collect(),
                 output_columns: output_columns.into_iter().map(|c| c.name).collect(),
                 result_rows: None,
                 next_index: 0,
