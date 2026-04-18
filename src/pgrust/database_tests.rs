@@ -148,6 +148,26 @@ fn ephemeral_database_executes_basic_sql() {
 }
 
 #[test]
+fn create_temp_table_accepts_fixed_length_array_column_syntax() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create temp table arrtest2 (i integer ARRAY[4], f float8[], n numeric[], t text[], d timestamp[])",
+        )
+        .expect("create temp array table");
+
+    session
+        .execute(
+            &db,
+            "insert into arrtest2 values ('{1,2,3,4}', '{1.5}', '{2.5}', '{hi}', '{2001-01-01 00:00:00}')",
+        )
+        .expect("insert temp array row");
+}
+
+#[test]
 fn jsonb_input_respects_max_stack_depth_setting() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);

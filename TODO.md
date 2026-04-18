@@ -67,7 +67,7 @@ Targeted reruns on 2026-04-17:
   - [x] normalize SQL-visible errors for unsubscriptable and fixed-length array-like types such as `timestamp with time zone` and `point`
   - [x] fix scalar array assignment overflow/bounds handling that currently panics in `src/backend/commands/tablecmds.rs`
   - support `RETURNING` with subscripted array/fixed-length assignments used by `point_tbl`
-  - support `CREATE TEMP TABLE` column definitions with fixed-length array syntax like `integer ARRAY[4]`
+  - [done] support `CREATE TEMP TABLE` column definitions with fixed-length array syntax like `integer ARRAY[4]`
   - support deeper array constructors and array expressions in `SELECT` targets and subqueries
   - implement missing array builtins exercised by `arrays.sql` such as `array_append`, `array_prepend`, and `array_cat`
   - support row/composite array expressions and comparisons, including `ARRAY(SELECT ...)` and `array_agg(record) || array_agg(record)`
