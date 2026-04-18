@@ -282,10 +282,7 @@ fn recursive_cte_intermediate_setop_with_can_read_worktable() {
 
     match result {
         StatementResult::Query { rows, .. } => {
-            assert_eq!(
-                rows,
-                vec![vec![Value::Int32(1)], vec![Value::Int32(2)]]
-            );
+            assert_eq!(rows, vec![vec![Value::Int32(1)], vec![Value::Int32(2)]]);
         }
         other => panic!("expected query result, got {:?}", other),
     }
@@ -791,6 +788,25 @@ fn explain_lines(db: &Database, client_id: u32, sql: &str) -> Vec<String> {
     }
 }
 
+fn explain_estimated_rows(db: &Database, client_id: u32, sql: &str) -> u64 {
+    let first = explain_lines(db, client_id, sql)
+        .into_iter()
+        .next()
+        .expect("expected explain output");
+    let marker = " rows=";
+    let start = first
+        .find(marker)
+        .map(|index| index + marker.len())
+        .expect("expected rows marker in explain output");
+    let end = first[start..]
+        .find(' ')
+        .map(|index| start + index)
+        .expect("expected rows terminator in explain output");
+    first[start..end]
+        .parse()
+        .expect("expected integer rows value")
+}
+
 #[test]
 fn copy_from_file_loads_tsvector_rows() {
     let dir = temp_dir("copy_from_file");
@@ -1076,7 +1092,6 @@ fn disconnect_cleanup_aborts_open_transaction_and_releases_table_locks() {
         }
         other => panic!("expected query result, got {other:?}"),
     }
-
 }
 
 #[test]
@@ -1128,6 +1143,125 @@ fn analyze_populates_pg_statistic_and_pg_class_stats() {
     assert!(float_value(&column_stats[0][1]) > 0.0);
     assert!(int_value(&column_stats[0][2]) > 0);
     assert!(float_value(&column_stats[0][3]).abs() > 0.0);
+}
+
+#[test]
+fn new_tables_report_never_analyzed_reltuples() {
+    let dir = temp_dir("new_table_reltuples");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table fresh_items(id int4)")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relpages, reltuples from pg_class where relname = 'fresh_items'",
+        ),
+        vec![vec![Value::Int32(0), Value::Float64(-1.0)]]
+    );
+}
+
+#[test]
+fn new_indexes_report_never_analyzed_reltuples() {
+    let dir = temp_dir("new_index_reltuples");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table fresh_items(id int4)")
+        .unwrap();
+    session
+        .execute(&db, "create index fresh_items_id_idx on fresh_items(id)")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select reltuples from pg_class where relname = 'fresh_items_id_idx'",
+        ),
+        vec![vec![Value::Float64(-1.0)]]
+    );
+}
+
+#[test]
+fn explain_uses_pg_style_width_density_for_unanalyzed_heaps() {
+    let dir = temp_dir("explain_unanalyzed_width_density");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table narrow_items(id int4)")
+        .unwrap();
+    session
+        .execute(&db, "create table wide_items(id int4, note text)")
+        .unwrap();
+    session
+        .execute(&db, "insert into narrow_items values (1)")
+        .unwrap();
+    session
+        .execute(&db, "insert into wide_items values (1, 'wide')")
+        .unwrap();
+
+    let narrow_rows = explain_estimated_rows(&db, 1, "select * from narrow_items");
+    let wide_rows = explain_estimated_rows(&db, 1, "select * from wide_items");
+
+    assert!(
+        narrow_rows > wide_rows,
+        "expected narrower heap to estimate more rows, got narrow={narrow_rows}, wide={wide_rows}"
+    );
+    assert_ne!(
+        narrow_rows, 1000,
+        "expected planner to avoid DEFAULT_NUM_ROWS fallback"
+    );
+    assert_ne!(
+        wide_rows, 1000,
+        "expected planner to avoid DEFAULT_NUM_ROWS fallback"
+    );
+}
+
+#[test]
+fn explain_uses_minimum_pages_for_never_analyzed_empty_heap() {
+    let dir = temp_dir("explain_never_analyzed_empty_heap");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table empty_items(id int4)")
+        .unwrap();
+
+    let rows = explain_estimated_rows(&db, 1, "select * from empty_items");
+    assert!(
+        rows > 1000,
+        "expected never-analyzed empty heap to use the minimum-pages heuristic, got rows={rows}"
+    );
+}
+
+#[test]
+fn explain_skips_minimum_pages_for_never_analyzed_parent_with_subclass() {
+    let dir = temp_dir("explain_never_analyzed_parent_with_subclass");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table parent_items(id int4)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table child_items(extra int4) inherits (parent_items)",
+        )
+        .unwrap();
+
+    let rows = explain_estimated_rows(&db, 1, "select * from only parent_items");
+    assert_eq!(
+        rows, 1,
+        "expected inherited parent to skip the minimum-pages heuristic, got rows={rows}"
+    );
 }
 
 #[test]
@@ -5590,21 +5724,14 @@ fn create_temp_table_constraints_are_supported_with_postgres_persistence_rules()
     db.execute(1, "insert into department values (1, 0, 'A')")
         .unwrap();
 
-    match db.execute(
-        1,
-        "insert into department values (2, 9, 'bad parent')",
-    ) {
+    match db.execute(1, "insert into department values (2, 9, 'bad parent')") {
         Err(ExecError::ForeignKeyViolation { constraint, .. })
             if constraint == "department_parent_department_fkey" => {}
         other => panic!("expected temp self-reference foreign-key violation, got {other:?}"),
     }
 
-    match db.execute(
-        1,
-        "insert into department values (2, 0, 'A')",
-    ) {
-        Err(ExecError::UniqueViolation { constraint })
-            if constraint == "department_name_key" => {}
+    match db.execute(1, "insert into department values (2, 0, 'A')") {
+        Err(ExecError::UniqueViolation { constraint }) if constraint == "department_name_key" => {}
         other => panic!("expected temp unique violation, got {other:?}"),
     }
 
@@ -5613,7 +5740,8 @@ fn create_temp_table_constraints_are_supported_with_postgres_persistence_rules()
         "create temp table temp_children (id int4, parent_id int4 references parents)",
     ) {
         Err(ExecError::Parse(ParseError::InvalidTableDefinition(message)))
-            if message == "constraints on temporary tables may reference only temporary tables" => {}
+            if message == "constraints on temporary tables may reference only temporary tables" => {
+        }
         other => panic!("expected postgres-style temp foreign-key rejection, got {other:?}"),
     }
 }

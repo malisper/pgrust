@@ -1,4 +1,5 @@
 use super::bestpath::{self, CostSelector};
+use crate::backend::catalog::Catalog;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::optimizer::util;
 use crate::backend::parser::analyze::LiteralDefaultCatalog;
@@ -351,6 +352,34 @@ fn plan_contains(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> bool 
             recursive: right,
             ..
         } => plan_contains(left, predicate) || plan_contains(right, predicate),
+    }
+}
+
+fn find_seq_scan(plan: &Plan) -> Option<&Plan> {
+    match plan {
+        Plan::SeqScan { .. } => Some(plan),
+        Plan::Hash { input, .. }
+        | Plan::Filter { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::Aggregate { input, .. }
+        | Plan::WindowAgg { input, .. }
+        | Plan::ProjectSet { input, .. }
+        | Plan::SubqueryScan { input, .. } => find_seq_scan(input),
+        Plan::Append { children, .. } | Plan::SetOp { children, .. } => {
+            children.iter().find_map(find_seq_scan)
+        }
+        Plan::NestedLoopJoin { left, right, .. } | Plan::HashJoin { left, right, .. } => {
+            find_seq_scan(left).or_else(|| find_seq_scan(right))
+        }
+        Plan::Result { .. }
+        | Plan::IndexScan { .. }
+        | Plan::Values { .. }
+        | Plan::FunctionScan { .. }
+        | Plan::WorkTableScan { .. }
+        | Plan::RecursiveUnion { .. }
+        | Plan::CteScan { .. } => None,
     }
 }
 
@@ -867,6 +896,29 @@ fn planner_lowers_setop_children_with_their_own_roots() {
     );
 
     assert!(matches!(planned.plan_tree, Plan::SetOp { .. }));
+}
+
+#[test]
+fn planner_uses_metadata_fallback_when_live_pages_are_unavailable() {
+    let mut catalog = Catalog::default();
+    catalog
+        .create_table(
+            "items",
+            RelationDesc {
+                columns: vec![column_desc("id", int4(), false)],
+            },
+        )
+        .expect("create test catalog relation");
+
+    let stmt = parse_select("select * from items").expect("parse");
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog, &[], None, &[], &[]).expect("analyze");
+    let planned = super::planner(query, &catalog);
+
+    match find_seq_scan(&planned.plan_tree).expect("seq scan plan") {
+        Plan::SeqScan { plan_info, .. } => assert_eq!(plan_info.plan_rows.as_f64(), 1000.0),
+        other => panic!("expected seq scan plan, got {other:?}"),
+    }
 }
 
 #[test]

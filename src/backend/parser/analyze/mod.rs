@@ -158,6 +158,10 @@ pub trait CatalogLookup {
         None
     }
 
+    fn current_relation_pages(&self, _relation_oid: u32) -> Option<u32> {
+        None
+    }
+
     fn index_relations_for_heap(&self, _relation_oid: u32) -> Vec<BoundIndexRelation> {
         Vec::new()
     }
