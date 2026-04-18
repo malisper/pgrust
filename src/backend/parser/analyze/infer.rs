@@ -2,7 +2,7 @@ use super::functions::{resolve_function_call, resolve_scalar_function};
 use super::ranges::infer_range_special_expr_type_with_ctes;
 use super::*;
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
-use crate::include::catalog::builtin_range_spec_for_sql_type;
+use crate::include::catalog::range_type_ref_for_sql_type;
 use crate::include::nodes::primnodes::expr_sql_type_hint;
 
 pub(super) fn infer_sql_expr_type(
@@ -233,7 +233,8 @@ pub(super) fn infer_sql_expr_type_with_ctes(
         }
         SqlExpr::FieldSelect { expr, field } => {
             if let SqlExpr::Column(name) = expr.as_ref()
-                && let Some(fields) = resolve_relation_row_expr_with_outer(scope, outer_scopes, name)
+                && let Some(fields) =
+                    resolve_relation_row_expr_with_outer(scope, outer_scopes, name)
                 && let Some((_, field_expr)) = fields
                     .iter()
                     .find(|(candidate, _)| candidate.eq_ignore_ascii_case(field))
@@ -402,7 +403,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
             let resolved = resolve_scalar_function(name);
             if let Some(BuiltinScalarFunction::RangeConstructor) = resolved
                 && let Some(target_type) = resolve_function_cast_type(catalog, name)
-                && builtin_range_spec_for_sql_type(target_type).is_some()
+                && range_type_ref_for_sql_type(target_type).is_some()
             {
                 return target_type;
             }

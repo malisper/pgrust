@@ -1,12 +1,12 @@
+use crate::RelFileLocator;
 use crate::backend::parser::{SqlType, SqlTypeKind, SubqueryComparisonOp};
 use crate::include::access::htup::AttributeDesc;
 use crate::include::catalog::{
-    builtin_scalar_function_for_proc_oid, builtin_window_function_for_proc_oid,
-    proc_oid_for_builtin_scalar_function, proc_oid_for_builtin_window_function, RECORD_TYPE_OID,
+    RECORD_TYPE_OID, builtin_scalar_function_for_proc_oid, builtin_window_function_for_proc_oid,
+    proc_oid_for_builtin_scalar_function, proc_oid_for_builtin_window_function,
 };
 use crate::include::nodes::datum::{RangeTypeRef, RecordDescriptor, Value};
 use crate::include::nodes::parsenodes::Query;
-use crate::RelFileLocator;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScalarType {

@@ -140,5 +140,7 @@ fn conversion_lookup_storage_key(
     } else {
         format!("public.{lowered}")
     };
-    conversions.contains_key(&public_name).then_some(public_name)
+    conversions
+        .contains_key(&public_name)
+        .then_some(public_name)
 }

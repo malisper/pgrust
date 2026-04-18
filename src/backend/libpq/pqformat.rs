@@ -11,10 +11,7 @@ use crate::backend::executor::{
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::include::access::htup::TupleError;
-use crate::include::catalog::{
-    DATERANGE_TYPE_OID, INT4RANGE_TYPE_OID, INT8RANGE_TYPE_OID, NUMRANGE_TYPE_OID,
-    TSRANGE_TYPE_OID, TSTZRANGE_TYPE_OID,
-};
+use crate::include::catalog::{builtin_type_rows, range_type_ref_for_sql_type};
 use crate::pgrust::session::ByteaOutputFormat;
 use num_bigint::BigInt;
 use num_traits::One;
@@ -370,6 +367,18 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
     {
         return (oid as i32, -1, -1);
     }
+    if col.sql_type.is_array {
+        if col.sql_type.type_oid != 0 && matches!(col.sql_type.kind, SqlTypeKind::Range) {
+            return (col.sql_type.type_oid as i32, -1, -1);
+        }
+        if let Some(range_type) = range_type_ref_for_sql_type(col.sql_type)
+            && let Some(array_row) = builtin_type_rows()
+                .into_iter()
+                .find(|row| row.typelem == range_type.type_oid())
+        {
+            return (array_row.oid as i32, -1, -1);
+        }
+    }
     if matches!(
         col.sql_type.kind,
         SqlTypeKind::Record | SqlTypeKind::Composite
@@ -377,8 +386,8 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
     {
         return (oid as i32, -1, col.sql_type.typmod);
     }
-    if col.sql_type.type_oid != 0 && matches!(col.sql_type.kind, SqlTypeKind::Range) {
-        return (col.sql_type.type_oid as i32, -1, col.sql_type.typmod);
+    if let Some(range_type) = range_type_ref_for_sql_type(col.sql_type) {
+        return (range_type.type_oid() as i32, -1, col.sql_type.typmod);
     }
     if !col.sql_type.is_array && col.sql_type.type_oid != 0 {
         return (col.sql_type.type_oid as i32, -1, col.sql_type.typmod);
@@ -389,15 +398,11 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
             SqlTypeKind::Int4 => 1007,
             SqlTypeKind::Int8 => 1016,
             SqlTypeKind::Range => col.sql_type.type_oid as i32,
-            SqlTypeKind::Int4Range
-            | SqlTypeKind::Int8Range
-            | SqlTypeKind::NumericRange
-            | SqlTypeKind::DateRange
-            | SqlTypeKind::TimestampRange
-            | SqlTypeKind::TimestampTzRange => unreachable!("range arrays are unsupported"),
             SqlTypeKind::Void => unreachable!("void arrays are unsupported"),
             SqlTypeKind::Oid => 1028,
-            SqlTypeKind::RegProcedure => crate::include::catalog::REGPROCEDURE_ARRAY_TYPE_OID as i32,
+            SqlTypeKind::RegProcedure => {
+                crate::include::catalog::REGPROCEDURE_ARRAY_TYPE_OID as i32
+            }
             SqlTypeKind::Tid => 1010,
             SqlTypeKind::Xid => 1011,
             SqlTypeKind::Bit => 1561,
@@ -440,11 +445,16 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
             SqlTypeKind::Record | SqlTypeKind::Composite => {
                 crate::include::catalog::RECORD_ARRAY_TYPE_OID as i32
             }
+            SqlTypeKind::Int4Range
+            | SqlTypeKind::Int8Range
+            | SqlTypeKind::NumericRange
+            | SqlTypeKind::DateRange
+            | SqlTypeKind::TimestampRange
+            | SqlTypeKind::TimestampTzRange => unreachable!("range handled above"),
         };
         return (oid, -1, -1);
     }
     match col.sql_type.kind {
-        SqlTypeKind::Range => (col.sql_type.type_oid as i32, -1, col.sql_type.typmod),
         SqlTypeKind::AnyArray => (2277, -1, -1),
         SqlTypeKind::Record | SqlTypeKind::Composite => {
             (col.sql_type.type_oid as i32, -1, col.sql_type.typmod)
@@ -452,8 +462,6 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
         SqlTypeKind::Int2 => (21, 2, -1),
         SqlTypeKind::Int4 => (23, 4, -1),
         SqlTypeKind::Int8 => (20, 8, -1),
-        SqlTypeKind::Int4Range => (INT4RANGE_TYPE_OID as i32, -1, -1),
-        SqlTypeKind::Int8Range => (INT8RANGE_TYPE_OID as i32, -1, -1),
         SqlTypeKind::Void => (crate::include::catalog::VOID_TYPE_OID as i32, 4, -1),
         SqlTypeKind::Oid => (26, 4, -1),
         SqlTypeKind::RegProcedure => (crate::include::catalog::REGPROCEDURE_TYPE_OID as i32, 4, -1),
@@ -466,12 +474,10 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
         SqlTypeKind::Float8 => (701, 8, -1),
         SqlTypeKind::Money => (790, 8, -1),
         SqlTypeKind::Numeric => (1700, -1, col.sql_type.typmod),
-        SqlTypeKind::NumericRange => (NUMRANGE_TYPE_OID as i32, -1, -1),
         SqlTypeKind::Json => (114, -1, -1),
         SqlTypeKind::Jsonb => (3802, -1, -1),
         SqlTypeKind::JsonPath => (4072, -1, -1),
         SqlTypeKind::Date => (1082, 4, -1),
-        SqlTypeKind::DateRange => (DATERANGE_TYPE_OID as i32, -1, -1),
         SqlTypeKind::Time => (1083, 8, col.sql_type.typmod),
         SqlTypeKind::TimeTz => (1266, 12, col.sql_type.typmod),
         SqlTypeKind::Interval => (1186, 16, col.sql_type.typmod),
@@ -496,9 +502,14 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
         | SqlTypeKind::Char
         | SqlTypeKind::PgNodeTree => (25, -1, col.sql_type.typmod),
         SqlTypeKind::Timestamp => (1114, 8, col.sql_type.typmod),
-        SqlTypeKind::TimestampRange => (TSRANGE_TYPE_OID as i32, -1, -1),
         SqlTypeKind::TimestampTz => (1184, 8, col.sql_type.typmod),
-        SqlTypeKind::TimestampTzRange => (TSTZRANGE_TYPE_OID as i32, -1, -1),
+        SqlTypeKind::Range
+        | SqlTypeKind::Int4Range
+        | SqlTypeKind::Int8Range
+        | SqlTypeKind::NumericRange
+        | SqlTypeKind::DateRange
+        | SqlTypeKind::TimestampRange
+        | SqlTypeKind::TimestampTzRange => unreachable!("range handled above"),
     }
 }
 

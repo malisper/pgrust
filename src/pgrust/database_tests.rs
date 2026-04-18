@@ -2,7 +2,8 @@ use super::*;
 use crate::backend::executor::{ExecError, Value};
 use crate::backend::parser::{CatalogLookup, ParseError, SqlType, SqlTypeKind};
 use crate::include::catalog::{
-    FLOAT8_TYPE_OID, PG_CLASS_RELATION_OID, PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID,
+    FLOAT8_TYPE_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID, PG_CLASS_RELATION_OID,
+    PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID,
 };
 use crate::include::nodes::primnodes::QueryColumn;
 use std::sync::Arc;
@@ -3375,7 +3376,9 @@ fn create_conversion_rejects_duplicate_name_and_default_pair() {
         1,
         "create conversion myconv for 'LATIN1' to 'UTF8' from iso8859_1_to_utf8",
     ) {
-        Err(ExecError::DetailedError { message, sqlstate, .. }) => {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
             assert_eq!(message, "conversion \"myconv\" already exists");
             assert_eq!(sqlstate, "42710");
         }
@@ -3391,11 +3394,19 @@ fn create_conversion_rejects_duplicate_name_and_default_pair() {
         1,
         "create default conversion public.mydef2 for 'LATIN1' to 'UTF8' from iso8859_1_to_utf8",
     ) {
-        Err(ExecError::DetailedError { message, sqlstate, .. }) => {
-            assert_eq!(message, "default conversion for LATIN1 to UTF8 already exists");
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(
+                message,
+                "default conversion for LATIN1 to UTF8 already exists"
+            );
             assert_eq!(sqlstate, "42710");
         }
-        other => panic!("expected duplicate default conversion error, got {:?}", other),
+        other => panic!(
+            "expected duplicate default conversion error, got {:?}",
+            other
+        ),
     }
 }
 
@@ -10715,7 +10726,10 @@ fn create_or_replace_function_updates_existing_body() {
         "create function inc(x int4) returns int4 language plpgsql as $$ begin return x + 1; end $$",
     )
     .unwrap();
-    assert_eq!(query_rows(&db, 1, "select inc(4)"), vec![vec![Value::Int32(5)]]);
+    assert_eq!(
+        query_rows(&db, 1, "select inc(4)"),
+        vec![vec![Value::Int32(5)]]
+    );
 
     db.execute(
         1,
@@ -10723,7 +10737,10 @@ fn create_or_replace_function_updates_existing_body() {
     )
     .unwrap();
 
-    assert_eq!(query_rows(&db, 1, "select inc(4)"), vec![vec![Value::Int32(6)]]);
+    assert_eq!(
+        query_rows(&db, 1, "select inc(4)"),
+        vec![vec![Value::Int32(6)]]
+    );
 }
 
 #[test]
@@ -10838,7 +10855,10 @@ fn create_function_supports_void_returns_and_regprocedure_oid_lookup() {
             Value::Text("void".into()),
         ]]
     );
-    assert_eq!(query_rows(&db, 1, "select stats_test_func1()"), vec![vec![Value::Null]]);
+    assert_eq!(
+        query_rows(&db, 1, "select stats_test_func1()"),
+        vec![vec![Value::Null]]
+    );
     assert_eq!(
         query_rows(&db, 1, "select 'stats_test_func1()'::regprocedure::oid"),
         vec![vec![Value::Int64(proc.oid as i64)]]
@@ -11086,6 +11106,32 @@ fn user_defined_ranges_resolve_constructor_and_accessor_calls() {
 }
 
 #[test]
+fn builtin_range_aliases_resolve_through_generic_range_catalog_rows() {
+    let dir = temp_dir("builtin_range_alias_generic_catalog");
+    let db = Database::open(&dir, 64).unwrap();
+
+    let visible = db.lazy_catalog_lookup(1, None, None);
+    let int4range_row = visible
+        .type_rows()
+        .into_iter()
+        .find(|row| row.typname == "int4range")
+        .unwrap();
+
+    assert_eq!(int4range_row.oid, INT4RANGE_TYPE_OID);
+    assert_eq!(int4range_row.sql_type.kind, SqlTypeKind::Range);
+    assert_eq!(int4range_row.sql_type.range_subtype_oid, INT4_TYPE_OID);
+
+    db.execute(1, "create table t (span int4range)").unwrap();
+    db.execute(1, "insert into t values ('[1,5)'::int4range)")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select span::text, lower(span)::text from t"),
+        vec![vec![Value::Text("[1,5)".into()), Value::Text("1".into())]],
+    );
+}
+
+#[test]
 fn create_type_nested_dependencies_and_named_composite_arrays_work() {
     let dir = temp_dir("create_type_nested_dependencies");
     let db = Database::open(&dir, 64).unwrap();
@@ -11299,8 +11345,11 @@ fn drop_range_type_enforces_restrict_and_if_exists() {
         other => panic!("expected no-op drop type if exists, got {other:?}"),
     }
 
-    db.execute(1, "create type unused_float8range as range (subtype = float8)")
-        .unwrap();
+    db.execute(
+        1,
+        "create type unused_float8range as range (subtype = float8)",
+    )
+    .unwrap();
     match db.execute(1, "drop type unused_float8range") {
         Ok(StatementResult::AffectedRows(1)) => {}
         other => panic!("expected unused range drop success, got {other:?}"),

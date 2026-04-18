@@ -309,23 +309,20 @@ pub(crate) fn eval_json_builtin_function(
             BuiltinScalarFunction::JsonbContains => {
                 let left =
                     parse_jsonb_target(values.first().unwrap_or(&Value::Null), "jsonb_contains")?;
-                let right = parse_jsonb_target(values.get(1).unwrap_or(&Value::Null), "jsonb_contains")?;
-                Ok(Value::Bool(crate::backend::executor::jsonb::jsonb_contains(
-                    &left, &right,
-                )))
+                let right =
+                    parse_jsonb_target(values.get(1).unwrap_or(&Value::Null), "jsonb_contains")?;
+                Ok(Value::Bool(
+                    crate::backend::executor::jsonb::jsonb_contains(&left, &right),
+                ))
             }
             BuiltinScalarFunction::JsonbContained => {
-                let left = parse_jsonb_target(
-                    values.first().unwrap_or(&Value::Null),
-                    "jsonb_contained",
-                )?;
-                let right = parse_jsonb_target(
-                    values.get(1).unwrap_or(&Value::Null),
-                    "jsonb_contained",
-                )?;
-                Ok(Value::Bool(crate::backend::executor::jsonb::jsonb_contains(
-                    &right, &left,
-                )))
+                let left =
+                    parse_jsonb_target(values.first().unwrap_or(&Value::Null), "jsonb_contained")?;
+                let right =
+                    parse_jsonb_target(values.get(1).unwrap_or(&Value::Null), "jsonb_contained")?;
+                Ok(Value::Bool(
+                    crate::backend::executor::jsonb::jsonb_contains(&right, &left),
+                ))
             }
             BuiltinScalarFunction::JsonbObject => Ok(Value::Jsonb(encode_jsonb(
                 &render_jsonb_object_function(values)?,
@@ -360,36 +357,35 @@ pub(crate) fn eval_json_builtin_function(
             BuiltinScalarFunction::JsonbExists => {
                 let json =
                     parse_jsonb_target(values.first().unwrap_or(&Value::Null), "jsonb_exists")?;
-                let key = values
-                    .get(1)
-                    .and_then(Value::as_text)
-                    .ok_or_else(|| ExecError::TypeMismatch {
+                let key = values.get(1).and_then(Value::as_text).ok_or_else(|| {
+                    ExecError::TypeMismatch {
                         op: "jsonb_exists",
                         left: values.get(1).cloned().unwrap_or(Value::Null),
                         right: Value::Text("key".into()),
-                    })?;
+                    }
+                })?;
                 Ok(Value::Bool(crate::backend::executor::jsonb::jsonb_exists(
                     &json, key,
                 )))
             }
             BuiltinScalarFunction::JsonbExistsAny => {
-                let json = parse_jsonb_target(
-                    values.first().unwrap_or(&Value::Null),
+                let json =
+                    parse_jsonb_target(values.first().unwrap_or(&Value::Null), "jsonb_exists_any")?;
+                let keys = parse_text_array_arg(
+                    values.get(1).unwrap_or(&Value::Null),
                     "jsonb_exists_any",
                 )?;
-                let keys =
-                    parse_text_array_arg(values.get(1).unwrap_or(&Value::Null), "jsonb_exists_any")?;
                 Ok(Value::Bool(
                     crate::backend::executor::jsonb::jsonb_exists_any(&json, &keys),
                 ))
             }
             BuiltinScalarFunction::JsonbExistsAll => {
-                let json = parse_jsonb_target(
-                    values.first().unwrap_or(&Value::Null),
+                let json =
+                    parse_jsonb_target(values.first().unwrap_or(&Value::Null), "jsonb_exists_all")?;
+                let keys = parse_text_array_arg(
+                    values.get(1).unwrap_or(&Value::Null),
                     "jsonb_exists_all",
                 )?;
-                let keys =
-                    parse_text_array_arg(values.get(1).unwrap_or(&Value::Null), "jsonb_exists_all")?;
                 Ok(Value::Bool(
                     crate::backend::executor::jsonb::jsonb_exists_all(&json, &keys),
                 ))
@@ -1201,7 +1197,8 @@ fn parse_text_array_arg(value: &Value, op: &'static str) -> Result<Vec<String>, 
             });
         }
     };
-    items.iter()
+    items
+        .iter()
         .map(|item| match item {
             Value::Text(_) | Value::TextRef(_, _) => Ok(item.as_text().unwrap().to_string()),
             other => Err(ExecError::TypeMismatch {

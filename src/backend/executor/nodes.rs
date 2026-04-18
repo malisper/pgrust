@@ -1,4 +1,4 @@
-use super::{executor_start, AccumState, AggGroup, ExecError, ExecutorContext, OrderedAggInput};
+use super::{AccumState, AggGroup, ExecError, ExecutorContext, OrderedAggInput, executor_start};
 use crate::backend::access::heap::heapam::{
     heap_fetch_visible_with_txns, heap_scan_begin_visible, heap_scan_end,
     heap_scan_page_next_tuple, heap_scan_prepare_next_page,
@@ -24,7 +24,7 @@ use crate::include::nodes::execnodes::{
     ValuesState, WindowAggState, WorkTableScanState,
 };
 use crate::include::nodes::primnodes::{
-    attrno_index, Expr, JoinType, Var, INDEX_VAR, INNER_VAR, OUTER_VAR,
+    Expr, INDEX_VAR, INNER_VAR, JoinType, OUTER_VAR, Var, attrno_index,
 };
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -448,13 +448,7 @@ impl PlanNode for AppendState {
         lines: &mut Vec<String>,
     ) {
         for child in &self.children {
-            format_explain_lines_with_costs(
-                child.as_ref(),
-                indent + 1,
-                analyze,
-                show_costs,
-                lines,
-            );
+            format_explain_lines_with_costs(child.as_ref(), indent + 1, analyze, show_costs, lines);
         }
     }
 }

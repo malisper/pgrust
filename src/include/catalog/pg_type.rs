@@ -220,11 +220,7 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
             SqlType::array_of(SqlType::new(SqlTypeKind::Char)),
         ),
         builtin_type_row("date", DATE_TYPE_OID, SqlType::new(SqlTypeKind::Date)),
-        builtin_type_row(
-            "daterange",
-            DATERANGE_TYPE_OID,
-            SqlType::new(SqlTypeKind::DateRange),
-        ),
+        builtin_range_type_row("daterange", DATERANGE_TYPE_OID, DATE_TYPE_OID, true),
         builtin_type_row(
             "_date",
             DATE_ARRAY_TYPE_OID,
@@ -247,11 +243,7 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
             TIMESTAMP_TYPE_OID,
             SqlType::new(SqlTypeKind::Timestamp),
         ),
-        builtin_type_row(
-            "tsrange",
-            TSRANGE_TYPE_OID,
-            SqlType::new(SqlTypeKind::TimestampRange),
-        ),
+        builtin_range_type_row("tsrange", TSRANGE_TYPE_OID, TIMESTAMP_TYPE_OID, false),
         builtin_type_row(
             "_timestamp",
             TIMESTAMP_ARRAY_TYPE_OID,
@@ -262,11 +254,7 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
             TIMESTAMPTZ_TYPE_OID,
             SqlType::new(SqlTypeKind::TimestampTz),
         ),
-        builtin_type_row(
-            "tstzrange",
-            TSTZRANGE_TYPE_OID,
-            SqlType::new(SqlTypeKind::TimestampTzRange),
-        ),
+        builtin_range_type_row("tstzrange", TSTZRANGE_TYPE_OID, TIMESTAMPTZ_TYPE_OID, false),
         builtin_type_row(
             "_timestamptz",
             TIMESTAMPTZ_ARRAY_TYPE_OID,
@@ -287,26 +275,14 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
             NUMERIC_TYPE_OID,
             SqlType::new(SqlTypeKind::Numeric),
         ),
-        builtin_type_row(
-            "numrange",
-            NUMRANGE_TYPE_OID,
-            SqlType::new(SqlTypeKind::NumericRange),
-        ),
+        builtin_range_type_row("numrange", NUMRANGE_TYPE_OID, NUMERIC_TYPE_OID, false),
         builtin_type_row(
             "_numeric",
             NUMERIC_ARRAY_TYPE_OID,
             SqlType::array_of(SqlType::new(SqlTypeKind::Numeric)),
         ),
-        builtin_type_row(
-            "int4range",
-            INT4RANGE_TYPE_OID,
-            SqlType::new(SqlTypeKind::Int4Range),
-        ),
-        builtin_type_row(
-            "int8range",
-            INT8RANGE_TYPE_OID,
-            SqlType::new(SqlTypeKind::Int8Range),
-        ),
+        builtin_range_type_row("int4range", INT4RANGE_TYPE_OID, INT4_TYPE_OID, true),
+        builtin_range_type_row("int8range", INT8RANGE_TYPE_OID, INT8_TYPE_OID, true),
         builtin_type_row("json", JSON_TYPE_OID, SqlType::new(SqlTypeKind::Json)),
         builtin_type_row(
             "_json",
@@ -441,6 +417,14 @@ fn builtin_type_row(name: &str, oid: u32, sql_type: SqlType) -> PgTypeRow {
         typarray: 0,
         sql_type,
     }
+}
+
+fn builtin_range_type_row(name: &str, oid: u32, subtype_oid: u32, discrete: bool) -> PgTypeRow {
+    builtin_type_row(
+        name,
+        oid,
+        SqlType::range(oid, subtype_oid).with_range_metadata(subtype_oid, 0, discrete),
+    )
 }
 
 pub fn composite_type_row(

@@ -1,11 +1,11 @@
 use crate::backend::parser::{SqlType, SqlTypeKind};
-use crate::include::catalog::{PgProcRow, PgRangeRow, PgTypeRow};
 use crate::include::catalog::{
-    BOOL_TYPE_OID, BOOTSTRAP_SUPERUSER_OID, DATERANGE_TYPE_OID, DATE_TYPE_OID, INT4RANGE_TYPE_OID,
-    INT4_TYPE_OID, INT8RANGE_TYPE_OID, INT8_TYPE_OID, NUMERIC_TYPE_OID, NUMRANGE_TYPE_OID,
-    PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_INTERNAL_OID, TEXT_TYPE_OID, TSRANGE_TYPE_OID,
-    TSTZRANGE_TYPE_OID, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID,
+    BOOL_TYPE_OID, BOOTSTRAP_SUPERUSER_OID, DATE_TYPE_OID, DATERANGE_TYPE_OID, INT4_TYPE_OID,
+    INT4RANGE_TYPE_OID, INT8_TYPE_OID, INT8RANGE_TYPE_OID, NUMERIC_TYPE_OID, NUMRANGE_TYPE_OID,
+    PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_INTERNAL_OID, TEXT_TYPE_OID, TIMESTAMP_TYPE_OID,
+    TIMESTAMPTZ_TYPE_OID, TSRANGE_TYPE_OID, TSTZRANGE_TYPE_OID,
 };
+use crate::include::catalog::{PgProcRow, PgRangeRow, PgTypeRow};
 use crate::include::nodes::datum::RangeTypeRef;
 use std::collections::BTreeSet;
 
@@ -22,80 +22,91 @@ pub struct BuiltinRangeSpec {
     pub name: &'static str,
 }
 
-const BUILTIN_RANGE_SPECS: [BuiltinRangeSpec; 6] = [
-    BuiltinRangeSpec {
-        range_type: RangeTypeRef {
-            sql_type: SqlType::new(SqlTypeKind::Int4Range)
-                .with_identity(INT4RANGE_TYPE_OID, 0)
-                .with_range_metadata(INT4_TYPE_OID, 0, true),
-            subtype: SqlType::new(SqlTypeKind::Int4).with_identity(INT4_TYPE_OID, 0),
-            multirange_type_oid: 0,
-            canonicalization: RangeCanonicalization::Discrete,
+const BUILTIN_RANGE_SPECS: [BuiltinRangeSpec; 6] =
+    [
+        BuiltinRangeSpec {
+            range_type: RangeTypeRef {
+                sql_type: SqlType::range(INT4RANGE_TYPE_OID, INT4_TYPE_OID).with_range_metadata(
+                    INT4_TYPE_OID,
+                    0,
+                    true,
+                ),
+                subtype: SqlType::new(SqlTypeKind::Int4).with_identity(INT4_TYPE_OID, 0),
+                multirange_type_oid: 0,
+                canonicalization: RangeCanonicalization::Discrete,
+            },
+            oid: INT4RANGE_TYPE_OID,
+            name: "int4range",
         },
-        oid: INT4RANGE_TYPE_OID,
-        name: "int4range",
-    },
-    BuiltinRangeSpec {
-        range_type: RangeTypeRef {
-            sql_type: SqlType::new(SqlTypeKind::Int8Range)
-                .with_identity(INT8RANGE_TYPE_OID, 0)
-                .with_range_metadata(INT8_TYPE_OID, 0, true),
-            subtype: SqlType::new(SqlTypeKind::Int8).with_identity(INT8_TYPE_OID, 0),
-            multirange_type_oid: 0,
-            canonicalization: RangeCanonicalization::Discrete,
+        BuiltinRangeSpec {
+            range_type: RangeTypeRef {
+                sql_type: SqlType::range(INT8RANGE_TYPE_OID, INT8_TYPE_OID).with_range_metadata(
+                    INT8_TYPE_OID,
+                    0,
+                    true,
+                ),
+                subtype: SqlType::new(SqlTypeKind::Int8).with_identity(INT8_TYPE_OID, 0),
+                multirange_type_oid: 0,
+                canonicalization: RangeCanonicalization::Discrete,
+            },
+            oid: INT8RANGE_TYPE_OID,
+            name: "int8range",
         },
-        oid: INT8RANGE_TYPE_OID,
-        name: "int8range",
-    },
-    BuiltinRangeSpec {
-        range_type: RangeTypeRef {
-            sql_type: SqlType::new(SqlTypeKind::NumericRange)
-                .with_identity(NUMRANGE_TYPE_OID, 0)
-                .with_range_metadata(NUMERIC_TYPE_OID, 0, false),
-            subtype: SqlType::new(SqlTypeKind::Numeric).with_identity(NUMERIC_TYPE_OID, 0),
-            multirange_type_oid: 0,
-            canonicalization: RangeCanonicalization::Continuous,
+        BuiltinRangeSpec {
+            range_type: RangeTypeRef {
+                sql_type: SqlType::range(NUMRANGE_TYPE_OID, NUMERIC_TYPE_OID).with_range_metadata(
+                    NUMERIC_TYPE_OID,
+                    0,
+                    false,
+                ),
+                subtype: SqlType::new(SqlTypeKind::Numeric).with_identity(NUMERIC_TYPE_OID, 0),
+                multirange_type_oid: 0,
+                canonicalization: RangeCanonicalization::Continuous,
+            },
+            oid: NUMRANGE_TYPE_OID,
+            name: "numrange",
         },
-        oid: NUMRANGE_TYPE_OID,
-        name: "numrange",
-    },
-    BuiltinRangeSpec {
-        range_type: RangeTypeRef {
-            sql_type: SqlType::new(SqlTypeKind::DateRange)
-                .with_identity(DATERANGE_TYPE_OID, 0)
-                .with_range_metadata(DATE_TYPE_OID, 0, true),
-            subtype: SqlType::new(SqlTypeKind::Date).with_identity(DATE_TYPE_OID, 0),
-            multirange_type_oid: 0,
-            canonicalization: RangeCanonicalization::Discrete,
+        BuiltinRangeSpec {
+            range_type: RangeTypeRef {
+                sql_type: SqlType::range(DATERANGE_TYPE_OID, DATE_TYPE_OID).with_range_metadata(
+                    DATE_TYPE_OID,
+                    0,
+                    true,
+                ),
+                subtype: SqlType::new(SqlTypeKind::Date).with_identity(DATE_TYPE_OID, 0),
+                multirange_type_oid: 0,
+                canonicalization: RangeCanonicalization::Discrete,
+            },
+            oid: DATERANGE_TYPE_OID,
+            name: "daterange",
         },
-        oid: DATERANGE_TYPE_OID,
-        name: "daterange",
-    },
-    BuiltinRangeSpec {
-        range_type: RangeTypeRef {
-            sql_type: SqlType::new(SqlTypeKind::TimestampRange)
-                .with_identity(TSRANGE_TYPE_OID, 0)
-                .with_range_metadata(TIMESTAMP_TYPE_OID, 0, false),
-            subtype: SqlType::new(SqlTypeKind::Timestamp).with_identity(TIMESTAMP_TYPE_OID, 0),
-            multirange_type_oid: 0,
-            canonicalization: RangeCanonicalization::Continuous,
+        BuiltinRangeSpec {
+            range_type: RangeTypeRef {
+                sql_type: SqlType::range(TSRANGE_TYPE_OID, TIMESTAMP_TYPE_OID).with_range_metadata(
+                    TIMESTAMP_TYPE_OID,
+                    0,
+                    false,
+                ),
+                subtype: SqlType::new(SqlTypeKind::Timestamp).with_identity(TIMESTAMP_TYPE_OID, 0),
+                multirange_type_oid: 0,
+                canonicalization: RangeCanonicalization::Continuous,
+            },
+            oid: TSRANGE_TYPE_OID,
+            name: "tsrange",
         },
-        oid: TSRANGE_TYPE_OID,
-        name: "tsrange",
-    },
-    BuiltinRangeSpec {
-        range_type: RangeTypeRef {
-            sql_type: SqlType::new(SqlTypeKind::TimestampTzRange)
-                .with_identity(TSTZRANGE_TYPE_OID, 0)
-                .with_range_metadata(TIMESTAMPTZ_TYPE_OID, 0, false),
-            subtype: SqlType::new(SqlTypeKind::TimestampTz).with_identity(TIMESTAMPTZ_TYPE_OID, 0),
-            multirange_type_oid: 0,
-            canonicalization: RangeCanonicalization::Continuous,
+        BuiltinRangeSpec {
+            range_type: RangeTypeRef {
+                sql_type: SqlType::range(TSTZRANGE_TYPE_OID, TIMESTAMPTZ_TYPE_OID)
+                    .with_range_metadata(TIMESTAMPTZ_TYPE_OID, 0, false),
+                subtype: SqlType::new(SqlTypeKind::TimestampTz)
+                    .with_identity(TIMESTAMPTZ_TYPE_OID, 0),
+                multirange_type_oid: 0,
+                canonicalization: RangeCanonicalization::Continuous,
+            },
+            oid: TSTZRANGE_TYPE_OID,
+            name: "tstzrange",
         },
-        oid: TSTZRANGE_TYPE_OID,
-        name: "tstzrange",
-    },
-];
+    ];
 
 const DYNAMIC_RANGE_PROC_OID_BASE: u32 = 0x6000_0000;
 const DYNAMIC_RANGE_PROC_OID_MASK: u32 = 0x007f_ffff;
@@ -140,25 +151,36 @@ pub fn builtin_range_spec_by_oid(oid: u32) -> Option<&'static BuiltinRangeSpec> 
     builtin_range_specs().iter().find(|spec| spec.oid == oid)
 }
 
+fn legacy_builtin_range_oid(kind: SqlTypeKind) -> Option<u32> {
+    match kind {
+        SqlTypeKind::Int4Range => Some(INT4RANGE_TYPE_OID),
+        SqlTypeKind::Int8Range => Some(INT8RANGE_TYPE_OID),
+        SqlTypeKind::NumericRange => Some(NUMRANGE_TYPE_OID),
+        SqlTypeKind::DateRange => Some(DATERANGE_TYPE_OID),
+        SqlTypeKind::TimestampRange => Some(TSRANGE_TYPE_OID),
+        SqlTypeKind::TimestampTzRange => Some(TSTZRANGE_TYPE_OID),
+        _ => None,
+    }
+}
+
 pub fn builtin_range_spec_for_sql_type(sql_type: SqlType) -> Option<&'static BuiltinRangeSpec> {
     let sql_type = sql_type.element_type();
-    if matches!(
-        sql_type.kind,
-        SqlTypeKind::Int4Range
-            | SqlTypeKind::Int8Range
-            | SqlTypeKind::NumericRange
-            | SqlTypeKind::DateRange
-            | SqlTypeKind::TimestampRange
-            | SqlTypeKind::TimestampTzRange
-    ) {
-        return builtin_range_specs()
-            .iter()
-            .find(|spec| spec.range_type.sql_type.kind == sql_type.kind);
+    if sql_type.type_oid != 0 {
+        if let Some(spec) = builtin_range_spec_by_oid(sql_type.type_oid) {
+            return Some(spec);
+        }
+    }
+    if let Some(oid) = legacy_builtin_range_oid(sql_type.kind) {
+        return builtin_range_spec_by_oid(oid);
     }
     builtin_range_specs().iter().find(|spec| {
         spec.range_type.sql_type == sql_type
             || (sql_type.type_oid != 0 && spec.range_type.type_oid() == sql_type.type_oid)
     })
+}
+
+pub fn builtin_range_name_for_sql_type(sql_type: SqlType) -> Option<&'static str> {
+    builtin_range_spec_for_sql_type(sql_type).map(|spec| spec.name)
 }
 
 pub fn range_type_ref_for_sql_type(sql_type: SqlType) -> Option<RangeTypeRef> {
@@ -185,15 +207,10 @@ pub fn range_type_ref_for_sql_type(sql_type: SqlType) -> Option<RangeTypeRef> {
     })
 }
 
-pub fn range_kind_for_sql_type(sql_type: SqlType) -> Option<RangeTypeRef> {
-    range_type_ref_for_sql_type(sql_type)
-}
-
-pub fn sql_type_for_range_kind(range_type: RangeTypeRef) -> SqlType {
-    range_type.sql_type
-}
-
-pub fn synthetic_range_proc_rows(type_rows: &[PgTypeRow], range_rows: &[PgRangeRow]) -> Vec<PgProcRow> {
+pub fn synthetic_range_proc_rows(
+    type_rows: &[PgTypeRow],
+    range_rows: &[PgRangeRow],
+) -> Vec<PgProcRow> {
     let mut rows = Vec::new();
     let mut seen_constructor_names = BTreeSet::new();
     for type_row in type_rows.iter().filter(|row| row.typelem == 0) {

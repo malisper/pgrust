@@ -7,10 +7,10 @@ use super::expr_ops::parse_numeric_text;
 use super::expr_range::render_range_text;
 use super::node_types::Value;
 use super::value_io::format_array_text;
-use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::backend::executor::jsonb::render_jsonb_bytes;
 use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::backend::parser::{ParseError, SqlType, SqlTypeKind};
+use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::pgrust::compact_string::CompactString;
 use crate::pgrust::session::ByteaOutputFormat;
 use base64::Engine as _;
@@ -1704,16 +1704,20 @@ pub(super) fn eval_pg_rust_test_enc_conversion(values: &[Value]) -> Result<Value
             });
         }
     };
-    let src_name = src_encoding.as_text().ok_or_else(|| ExecError::TypeMismatch {
-        op: "pg_rust_test_enc_conversion",
-        left: src_encoding.clone(),
-        right: dst_encoding.clone(),
-    })?;
-    let dst_name = dst_encoding.as_text().ok_or_else(|| ExecError::TypeMismatch {
-        op: "pg_rust_test_enc_conversion",
-        left: dst_encoding.clone(),
-        right: no_error.clone(),
-    })?;
+    let src_name = src_encoding
+        .as_text()
+        .ok_or_else(|| ExecError::TypeMismatch {
+            op: "pg_rust_test_enc_conversion",
+            left: src_encoding.clone(),
+            right: dst_encoding.clone(),
+        })?;
+    let dst_name = dst_encoding
+        .as_text()
+        .ok_or_else(|| ExecError::TypeMismatch {
+            op: "pg_rust_test_enc_conversion",
+            left: dst_encoding.clone(),
+            right: no_error.clone(),
+        })?;
     let no_error = match no_error {
         Value::Bool(value) => *value,
         _ => {
@@ -1725,8 +1729,10 @@ pub(super) fn eval_pg_rust_test_enc_conversion(values: &[Value]) -> Result<Value
         }
     };
 
-    let src = lookup_pg_encoding(src_name).ok_or_else(|| invalid_encoding_name("source", src_name))?;
-    let dst = lookup_pg_encoding(dst_name).ok_or_else(|| invalid_encoding_name("destination", dst_name))?;
+    let src =
+        lookup_pg_encoding(src_name).ok_or_else(|| invalid_encoding_name("source", src_name))?;
+    let dst = lookup_pg_encoding(dst_name)
+        .ok_or_else(|| invalid_encoding_name("destination", dst_name))?;
 
     let prefix = decode_valid_prefix(bytes, src);
     match prefix.status {
@@ -1751,7 +1757,10 @@ pub(super) fn eval_pg_rust_test_enc_conversion(values: &[Value]) -> Result<Value
     }
 
     if std::ptr::eq(src, dst) {
-        return Ok(build_test_enc_conversion_record(bytes.len(), bytes.to_vec()));
+        return Ok(build_test_enc_conversion_record(
+            bytes.len(),
+            bytes.to_vec(),
+        ));
     }
 
     match encode_without_replacement(&prefix.decoded, dst) {
