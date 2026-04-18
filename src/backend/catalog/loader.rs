@@ -654,6 +654,7 @@ fn append_catalog_kind_rows(
                 .map(pg_collation_row_from_values)
                 .collect::<Result<Vec<_>, _>>()?;
         }
+        BootstrapCatalogKind::PgLargeobjectMetadata => {}
         BootstrapCatalogKind::PgTablespace => {
             rows.tablespaces = values
                 .into_iter()
