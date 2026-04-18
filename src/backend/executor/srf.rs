@@ -170,6 +170,10 @@ fn eval_generate_series(
         validate(&start, "start")?;
         validate(&stop, "stop")?;
         validate(&step, "step size")?;
+        let series_dscale = [start.dscale(), stop.dscale(), step.dscale()]
+            .into_iter()
+            .max()
+            .unwrap_or(0);
 
         use std::cmp::Ordering;
         let step_cmp = step.cmp(&NumericValue::zero());
@@ -190,9 +194,9 @@ fn eval_generate_series(
                 break;
             }
             rows.push(TupleSlot::virtual_row(vec![Value::Numeric(
-                current.clone(),
+                current.clone().with_dscale(series_dscale),
             )]));
-            current = current.add(&step);
+            current = current.add(&step).with_dscale(series_dscale);
         }
         return Ok(rows);
     }
