@@ -562,4 +562,126 @@ mod tests {
             parse_date_text("0099-01-08 BC", &ymd)
         );
     }
+
+    #[test]
+    fn parse_date_text_matches_postgres_for_ambiguous_numeric_forms() {
+        let ymd = DateTimeConfig {
+            date_style_format: DateStyleFormat::Iso,
+            date_order: DateOrder::Ymd,
+            time_zone: "UTC".into(),
+            max_stack_depth_kb: 100,
+        };
+        let dmy = DateTimeConfig {
+            date_style_format: DateStyleFormat::Iso,
+            date_order: DateOrder::Dmy,
+            time_zone: "UTC".into(),
+            max_stack_depth_kb: 100,
+        };
+        let mdy = DateTimeConfig {
+            date_style_format: DateStyleFormat::Iso,
+            date_order: DateOrder::Mdy,
+            time_zone: "UTC".into(),
+            max_stack_depth_kb: 100,
+        };
+
+        let out_of_range = Err(DateParseError::FieldOutOfRange {
+            datestyle_hint: true,
+        });
+
+        assert_eq!(parse_date_text("1/8/1999", &ymd), out_of_range);
+        assert_eq!(parse_date_text("1/18/1999", &ymd), out_of_range);
+        assert_eq!(parse_date_text("18/1/1999", &ymd), out_of_range);
+        assert_eq!(
+            parse_date_text("01/02/03", &ymd),
+            parse_date_text("2001-02-03", &ymd)
+        );
+        assert_eq!(
+            parse_date_text("99-01-08", &ymd),
+            parse_date_text("1999-01-08", &ymd)
+        );
+        assert_eq!(parse_date_text("08-01-99", &ymd), out_of_range);
+        assert_eq!(parse_date_text("01-08-99", &ymd), out_of_range);
+        assert_eq!(
+            parse_date_text("99-08-01", &ymd),
+            parse_date_text("1999-08-01", &ymd)
+        );
+        assert_eq!(
+            parse_date_text("99 01 08", &ymd),
+            parse_date_text("1999-01-08", &ymd)
+        );
+        assert_eq!(parse_date_text("08 01 99", &ymd), out_of_range);
+        assert_eq!(parse_date_text("01 08 99", &ymd), out_of_range);
+        assert_eq!(
+            parse_date_text("99 08 01", &ymd),
+            parse_date_text("1999-08-01", &ymd)
+        );
+
+        assert_eq!(
+            parse_date_text("1/8/1999", &dmy),
+            parse_date_text("1999-08-01", &dmy)
+        );
+        assert_eq!(parse_date_text("1/18/1999", &dmy), out_of_range);
+        assert_eq!(
+            parse_date_text("18/1/1999", &dmy),
+            parse_date_text("1999-01-18", &dmy)
+        );
+        assert_eq!(
+            parse_date_text("01/02/03", &dmy),
+            parse_date_text("2003-02-01", &dmy)
+        );
+        assert_eq!(parse_date_text("99-01-08", &dmy), out_of_range);
+        assert_eq!(
+            parse_date_text("08-01-99", &dmy),
+            parse_date_text("1999-01-08", &dmy)
+        );
+        assert_eq!(
+            parse_date_text("01-08-99", &dmy),
+            parse_date_text("1999-08-01", &dmy)
+        );
+        assert_eq!(parse_date_text("99-08-01", &dmy), out_of_range);
+        assert_eq!(parse_date_text("99 01 08", &dmy), out_of_range);
+        assert_eq!(
+            parse_date_text("08 01 99", &dmy),
+            parse_date_text("1999-01-08", &dmy)
+        );
+        assert_eq!(
+            parse_date_text("01 08 99", &dmy),
+            parse_date_text("1999-08-01", &dmy)
+        );
+        assert_eq!(parse_date_text("99 08 01", &dmy), out_of_range);
+
+        assert_eq!(
+            parse_date_text("1/8/1999", &mdy),
+            parse_date_text("1999-01-08", &mdy)
+        );
+        assert_eq!(
+            parse_date_text("1/18/1999", &mdy),
+            parse_date_text("1999-01-18", &mdy)
+        );
+        assert_eq!(parse_date_text("18/1/1999", &mdy), out_of_range);
+        assert_eq!(
+            parse_date_text("01/02/03", &mdy),
+            parse_date_text("2003-01-02", &mdy)
+        );
+        assert_eq!(parse_date_text("99-01-08", &mdy), out_of_range);
+        assert_eq!(
+            parse_date_text("08-01-99", &mdy),
+            parse_date_text("1999-08-01", &mdy)
+        );
+        assert_eq!(
+            parse_date_text("01-08-99", &mdy),
+            parse_date_text("1999-01-08", &mdy)
+        );
+        assert_eq!(parse_date_text("99-08-01", &mdy), out_of_range);
+        assert_eq!(parse_date_text("99 01 08", &mdy), out_of_range);
+        assert_eq!(
+            parse_date_text("08 01 99", &mdy),
+            parse_date_text("1999-08-01", &mdy)
+        );
+        assert_eq!(
+            parse_date_text("01 08 99", &mdy),
+            parse_date_text("1999-01-08", &mdy)
+        );
+        assert_eq!(parse_date_text("99 08 01", &mdy), out_of_range);
+    }
 }
