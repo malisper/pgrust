@@ -133,7 +133,10 @@ wait_for_server_ready() {
     local pid="$1"
 
     echo "Waiting for server to accept connections..."
-    for i in $(seq 1 30); do
+    # Fresh durable clusters can take noticeably longer than 15s to finish
+    # startup on this branch, so keep the readiness window generous enough
+    # for regression runs to avoid false negatives.
+    for i in $(seq 1 120); do
         if psql -X -h 127.0.0.1 -p "$PORT" -U postgres -c "SELECT 1" >/dev/null 2>&1; then
             echo "Server ready."
             return 0

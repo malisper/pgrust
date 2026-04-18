@@ -128,6 +128,81 @@ fn bind_row_to_json_arg_expr(
     }
 }
 
+fn bind_json_constructor_arg_expr(
+    arg: &SqlExpr,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<(Expr, SqlType), ParseError> {
+    match arg {
+        SqlExpr::Column(name) => {
+            if let Some(fields) = resolve_relation_row_expr_with_outer(scope, outer_scopes, name) {
+                let descriptor = assign_anonymous_record_descriptor(
+                    fields
+                        .iter()
+                        .map(|(field_name, expr)| {
+                            (
+                                field_name.clone(),
+                                expr_sql_type_hint(expr).unwrap_or(SqlType::new(SqlTypeKind::Text)),
+                            )
+                        })
+                        .collect(),
+                );
+                Ok((
+                    Expr::Row {
+                        descriptor: descriptor.clone(),
+                        fields,
+                    },
+                    descriptor.sql_type(),
+                ))
+            } else {
+                let sql_type = infer_sql_expr_type_with_ctes(
+                    arg,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                );
+                Ok((
+                    bind_expr_with_outer_and_ctes(
+                        arg,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )?,
+                    sql_type,
+                ))
+            }
+        }
+        _ => {
+            let sql_type = infer_sql_expr_type_with_ctes(
+                arg,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            Ok((
+                bind_expr_with_outer_and_ctes(
+                    arg,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?,
+                sql_type,
+            ))
+        }
+    }
+}
+
 pub(super) fn bind_user_defined_scalar_function_call(
     proc_oid: u32,
     result_type: SqlType,
@@ -201,18 +276,56 @@ pub(super) fn bind_scalar_function_call(
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
 ) -> Result<Expr, ParseError> {
-    let arg_types = args
+    let bound_args_with_types = if matches!(
+        func,
+        BuiltinScalarFunction::JsonBuildArray
+            | BuiltinScalarFunction::JsonBuildObject
+            | BuiltinScalarFunction::JsonbBuildArray
+            | BuiltinScalarFunction::JsonbBuildObject
+    ) {
+        args.iter()
+            .map(|arg| {
+                bind_json_constructor_arg_expr(
+                    arg,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        args.iter()
+            .map(|arg| {
+                let sql_type = infer_sql_expr_type_with_ctes(
+                    arg,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                );
+                let bound = bind_expr_with_outer_and_ctes(
+                    arg,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?;
+                Ok((bound, sql_type))
+            })
+            .collect::<Result<Vec<_>, ParseError>>()?
+    };
+    let arg_types = bound_args_with_types
         .iter()
-        .map(|arg| {
-            infer_sql_expr_type_with_ctes(arg, scope, catalog, outer_scopes, grouped_outer, ctes)
-        })
+        .map(|(_, sql_type)| *sql_type)
         .collect::<Vec<_>>();
-    let bound_args = args
-        .iter()
-        .map(|arg| {
-            bind_expr_with_outer_and_ctes(arg, scope, catalog, outer_scopes, grouped_outer, ctes)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let bound_args = bound_args_with_types
+        .into_iter()
+        .map(|(bound, _)| bound)
+        .collect::<Vec<_>>();
     let rewritten_bound_args = rewrite_variadic_bound_args(
         bound_args.clone(),
         &arg_types,
@@ -817,9 +930,12 @@ pub(super) fn bind_scalar_function_call(
             let same_bit_kind = is_bit_string_type(value_type) && is_bit_string_type(place_type);
             let same_bytea_kind =
                 value_type.kind == SqlTypeKind::Bytea && place_type.kind == SqlTypeKind::Bytea;
-            if (!same_bit_kind && !same_bytea_kind) || !is_integer_family(start_type) {
+            let same_text_kind = is_text_like_type(value_type) && is_text_like_type(place_type);
+            if (!same_bit_kind && !same_bytea_kind && !same_text_kind)
+                || !is_integer_family(start_type)
+            {
                 return Err(ParseError::UnexpectedToken {
-                    expected: "overlay(bit, bit, int4[, int4]) or overlay(bytea, bytea, int4[, int4])",
+                    expected: "overlay(text, text, int4[, int4]), overlay(bit, bit, int4[, int4]) or overlay(bytea, bytea, int4[, int4])",
                     actual: format!(
                         "{func:?}({}, {}, {})",
                         sql_type_name(value_type),
@@ -832,6 +948,24 @@ pub(super) fn bind_scalar_function_call(
                 vec![
                     bound_args[0].clone(),
                     bound_args[1].clone(),
+                    coerce_bound_expr(
+                        bound_args[2].clone(),
+                        start_type,
+                        SqlType::new(SqlTypeKind::Int4),
+                    ),
+                ]
+            } else if same_text_kind {
+                vec![
+                    coerce_bound_expr(
+                        bound_args[0].clone(),
+                        raw_value_type,
+                        SqlType::new(SqlTypeKind::Text),
+                    ),
+                    coerce_bound_expr(
+                        bound_args[1].clone(),
+                        raw_place_type,
+                        SqlType::new(SqlTypeKind::Text),
+                    ),
                     coerce_bound_expr(
                         bound_args[2].clone(),
                         start_type,

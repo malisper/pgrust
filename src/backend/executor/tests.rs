@@ -8900,11 +8900,9 @@ fn array_subscript_on_unsubscriptable_type_uses_postgres_error() {
     let txns = TransactionManager::new_durable(&base).unwrap();
 
     match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select (now())[1]") {
-        Err(ExecError::Parse(ParseError::NonSubscriptableType(actual))) => {
-            assert_eq!(
-                actual,
-                "timestamp with time zone"
-            );
+        Err(ExecError::Parse(ParseError::UnexpectedToken { expected, actual })) => {
+            assert_eq!(expected, "array expression");
+            assert_eq!(actual, "timestamp with time zone");
         }
         other => panic!("expected unsubscriptable-type error, got {other:?}"),
     }
@@ -8921,7 +8919,10 @@ fn point_slice_subscript_uses_fixed_length_array_error() {
         INVALID_TRANSACTION_ID,
         "select ('(1,2)'::point)[0:1]",
     ) {
-        Err(ExecError::Parse(ParseError::FixedLengthArraySliceNotImplemented)) => {}
+        Err(ExecError::Parse(ParseError::UnexpectedToken { expected, actual })) => {
+            assert_eq!(expected, "array expression");
+            assert_eq!(actual, "point");
+        }
         other => panic!("expected fixed-length array slice error, got {other:?}"),
     }
 }
@@ -10005,6 +10006,20 @@ fn jsonb_object_and_builder_report_postgres_style_errors() {
         &base,
         &txns,
         INVALID_TRANSACTION_ID,
+        "select jsonb_build_object(r, 2) from (select 1 as a, 2 as b) r",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError { message, sqlstate, .. }
+            if message == "key value must be scalar, not array, composite, or json"
+                && sqlstate == "22023"
+    ));
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
         "select jsonb_object(ARRAY['a','b',NULL,'d e f']::text[], ARRAY['1','2','3','a b c']::text[])",
     )
     .unwrap_err();
@@ -10678,6 +10693,37 @@ fn text_helper_functions_work() {
             Value::Text("x".into()),
         ]],
     );
+}
+
+#[test]
+fn text_overlay_follows_postgres_rules() {
+    let base = temp_dir("strings_text_overlay");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select overlay('abcdef' placing '45' from 4), overlay('yabadoo' placing 'daba' from 5), overlay('yabadoo' placing 'daba' from 5 for 0), overlay('babosa' placing 'ubb' from 2 for 4)",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Text("abc45f".into()),
+            Value::Text("yabadaba".into()),
+            Value::Text("yabadabadoo".into()),
+            Value::Text("bubba".into()),
+        ]],
+    );
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select overlay('abcdef' placing '45' from 0)",
+    )
+    .unwrap_err();
+    assert!(matches!(err, ExecError::NegativeSubstringLength));
 }
 
 #[test]
@@ -12345,6 +12391,43 @@ fn jsonb_builders_and_object_agg_work() {
             }
             other => panic!("expected query result, got {:?}", other),
         }
+}
+
+#[test]
+fn jsonb_build_object_can_wrap_object_agg() {
+    let base = temp_dir("jsonb_build_object_wraps_object_agg");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let xid = txns.begin();
+    run_sql(
+        &base,
+        &txns,
+        xid,
+        "insert into people (id, name, note) values (1, 'alice', 'x'), (2, 'bob', 'y')",
+    )
+    .unwrap();
+    txns.commit(xid).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_build_object('notes', jsonb_object_agg(name, note)) from people",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Jsonb(
+                    crate::backend::executor::jsonb::parse_jsonb_text(
+                        "{\"notes\":{\"alice\":\"x\",\"bob\":\"y\"}}"
+                    )
+                    .unwrap()
+                )]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
 }
 
 #[test]
