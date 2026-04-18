@@ -413,7 +413,7 @@ Targeted reruns on 2026-04-17:
 - date.sql:
   reject ambiguous slash-, dash-, and space-separated date forms that PostgreSQL rejects, and parse accepted forms with PostgreSQL-compatible field ordering and two-digit year rules
 - date.sql:
-  tighten named-month and BC-date acceptance rules to match PostgreSQL for forms like `99-Jan-08`, `08-Jan-99`, `99-08-Jan`, and `January 8, 99 BC`
+  [done] tighten named-month and BC-date acceptance rules to match PostgreSQL for forms like `99-Jan-08`, `08-Jan-99`, `99-08-Jan`, and `January 8, 99 BC`
 - date.sql:
   preserve PostgreSQL-style `LINE`/caret context for date input range and syntax errors in simple-query output
 - date.sql:
