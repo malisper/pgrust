@@ -663,7 +663,7 @@ fn render_jsonb_object_function(values: &[Value]) -> Result<JsonbValue, ExecErro
                             details: "array must have two columns".into(),
                         });
                     }
-                    pairs.push((jsonb_builder_key(&parts[0])?, parts[1].clone()));
+                    pairs.push((json_object_function_key(&parts[0], "jsonb")?, parts[1].clone()));
                 }
                 return jsonb_object_from_pairs(&pairs);
             }
@@ -675,7 +675,12 @@ fn render_jsonb_object_function(values: &[Value]) -> Result<JsonbValue, ExecErro
             }
             let pairs = items
                 .chunks(2)
-                .map(|chunk| Ok((jsonb_builder_key(&chunk[0])?, chunk[1].clone())))
+                .map(|chunk| {
+                    Ok((
+                        json_object_function_key(&chunk[0], "jsonb")?,
+                        chunk[1].clone(),
+                    ))
+                })
                 .collect::<Result<Vec<_>, ExecError>>()?;
             jsonb_object_from_pairs(&pairs)
         }
@@ -691,7 +696,7 @@ fn render_jsonb_object_function(values: &[Value]) -> Result<JsonbValue, ExecErro
             let pairs = keys
                 .into_iter()
                 .zip(vals)
-                .map(|(k, v)| Ok((jsonb_builder_key(&k)?, v)))
+                .map(|(k, v)| Ok((json_object_function_key(&k, "jsonb")?, v)))
                 .collect::<Result<Vec<_>, ExecError>>()?;
             jsonb_object_from_pairs(&pairs)
         }
@@ -707,16 +712,21 @@ fn json_builder_pairs(
     op: &'static str,
 ) -> Result<Vec<(String, Value)>, ExecError> {
     if values.len() % 2 != 0 {
-        return Err(ExecError::InvalidStorageValue {
-            column: "json".into(),
-            details: format!("{op} arguments must alternate keys and values"),
+        return Err(ExecError::DetailedError {
+            message: "argument list must have even number of elements".into(),
+            detail: None,
+            hint: Some(format!(
+                "The arguments of {op}() must consist of alternating keys and values."
+            )),
+            sqlstate: "22023",
         });
     }
     values
         .chunks(2)
-        .map(|chunk| {
+        .enumerate()
+        .map(|(index, chunk)| {
             Ok((
-                jsonb_builder_key(&chunk[0])?,
+                json_builder_key_for_object_constructor(&chunk[0], op, index * 2 + 1)?,
                 chunk.get(1).cloned().unwrap_or(Value::Null),
             ))
         })
@@ -801,6 +811,45 @@ fn json_object_key_text(value: &Value, op: &'static str) -> Result<String, ExecE
             left: value.clone(),
             right: Value::Null,
         }),
+    }
+}
+
+fn json_builder_key_for_object_constructor(
+    value: &Value,
+    _op: &'static str,
+    arg_index: usize,
+) -> Result<String, ExecError> {
+    match value {
+        Value::Null => Err(ExecError::DetailedError {
+            message: format!("argument {arg_index}: key must not be null"),
+            detail: None,
+            hint: None,
+            sqlstate: "22004",
+        }),
+        Value::Array(_) | Value::PgArray(_) | Value::Record(_) | Value::Json(_) | Value::Jsonb(_) => {
+            Err(ExecError::DetailedError {
+                message: "key value must be scalar, not array, composite, or json".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "22023",
+            })
+        }
+        _ => jsonb_builder_key(value),
+    }
+}
+
+fn json_object_function_key(value: &Value, json_kind: &'static str) -> Result<String, ExecError> {
+    match value {
+        Value::Null => Err(ExecError::DetailedError {
+            message: "null value not allowed for object key".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22004",
+        }),
+        _ => match json_kind {
+            "jsonb" => jsonb_builder_key(value),
+            _ => json_object_key_text(value, "json_object"),
+        },
     }
 }
 
@@ -2006,11 +2055,20 @@ pub(crate) fn eval_json_table_function(
         (JsonTableFunction::JsonbObjectKeys, ParsedJsonValue::Jsonb(json)) => {
             let items = match json {
                 JsonbValue::Object(items) => items,
-                other => {
-                    return Err(ExecError::TypeMismatch {
-                        op: "jsonb_object_keys",
-                        left: jsonb_to_value(&other),
-                        right: Value::Null,
+                JsonbValue::Array(_) => {
+                    return Err(ExecError::DetailedError {
+                        message: "cannot call jsonb_object_keys on an array".into(),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "22023",
+                    });
+                }
+                _ => {
+                    return Err(ExecError::DetailedError {
+                        message: "cannot call jsonb_object_keys on a scalar".into(),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "22023",
                     });
                 }
             };

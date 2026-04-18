@@ -605,7 +605,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
         } => {
             let output_column_names = output_columns.iter().map(|c| c.name.clone()).collect();
             let key_buffer = Vec::with_capacity(group_by.len());
-            let trans_fns: Vec<fn(&mut AccumState, &[super::Value])> = accumulators
+            let trans_fns: Vec<super::AggTransitionFn> = accumulators
                 .iter()
                 .map(|a| {
                     let func =
