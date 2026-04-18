@@ -1670,6 +1670,38 @@ fn parse_create_function_statement_with_pg_clauses_and_link_symbol() {
 }
 
 #[test]
+fn parse_create_function_statement_with_sql_return_shorthand() {
+    let stmt = parse_statement(
+        "create function fipshash(bytea) returns text strict immutable parallel safe leakproof return substr(encode(sha256($1), 'hex'), 1, 32)",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateFunction(CreateFunctionStatement {
+            schema_name: None,
+            function_name: "fipshash".into(),
+            replace_existing: false,
+            args: vec![CreateFunctionArg {
+                mode: FunctionArgMode::In,
+                name: None,
+                ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bytea)),
+            }],
+            return_spec: CreateFunctionReturnSpec::Type {
+                ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Text)),
+                setof: false,
+            },
+            strict: true,
+            leakproof: true,
+            volatility: FunctionVolatility::Immutable,
+            parallel: FunctionParallel::Safe,
+            language: "sql".into(),
+            body: "select substr(encode(sha256($1), 'hex'), 1, 32)".into(),
+            link_symbol: None,
+        })
+    );
+}
+
+#[test]
 fn parse_set_local_statement() {
     let stmt = parse_statement("set local client_min_messages to 'warning'").unwrap();
     assert_eq!(
