@@ -3834,6 +3834,41 @@ fn array_scalar_assignment_overflow_uses_limit_error() {
 }
 
 #[test]
+fn array_slice_assignment_overflow_uses_limit_error() {
+    let base = temp_dir("array_slice_assignment_overflow");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+
+    let insert_xid = txns.begin();
+    assert_eq!(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            insert_xid,
+            "insert into t values ('[-2147483648:-2147483647]={1,2}'::int[], null)",
+            array_subscript_catalog(),
+        )
+        .unwrap(),
+        StatementResult::AffectedRows(1)
+    );
+    txns.commit(insert_xid).unwrap();
+
+    let update_xid = txns.begin();
+    let err = run_sql_with_catalog(
+        &base,
+        &txns,
+        update_xid,
+        "update t set a[2147483646:2147483647] = array[4,2]",
+        array_subscript_catalog(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError { message, sqlstate, .. }
+            if message == "array size exceeds the maximum allowed" && sqlstate == "54000"
+    ));
+}
+
+#[test]
 fn array_slice_assignment_requires_full_bounds_for_null_arrays() {
     let base = temp_dir("array_slice_assignment_null_array_bounds");
     let mut txns = TransactionManager::new_durable(&base).unwrap();
