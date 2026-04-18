@@ -10618,6 +10618,38 @@ fn regexp_set_returning_functions_work() {
 }
 
 #[test]
+fn integer_base_rendering_matches_postgres() {
+    let base = temp_dir("strings_integer_base_rendering");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select to_bin(-1234), to_bin(-1234::bigint), to_bin(256*256*256 - 1), to_bin(256::bigint*256::bigint*256::bigint*256::bigint - 1), to_oct(-1234), to_oct(-1234::bigint), to_oct(256*256*256 - 1), to_oct(256::bigint*256::bigint*256::bigint*256::bigint - 1), to_hex(-1234), to_hex(-1234::bigint), to_hex(256*256*256 - 1), to_hex(256::bigint*256::bigint*256::bigint*256::bigint - 1)",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Text("11111111111111111111101100101110".into()),
+            Value::Text(
+                "1111111111111111111111111111111111111111111111111111101100101110".into(),
+            ),
+            Value::Text("111111111111111111111111".into()),
+            Value::Text("11111111111111111111111111111111".into()),
+            Value::Text("37777775456".into()),
+            Value::Text("1777777777777777775456".into()),
+            Value::Text("77777777".into()),
+            Value::Text("37777777777".into()),
+            Value::Text("fffffb2e".into()),
+            Value::Text("fffffffffffffb2e".into()),
+            Value::Text("ffffff".into()),
+            Value::Text("ffffffff".into()),
+        ]],
+    );
+}
+
+#[test]
 fn similar_to_predicates_work() {
     let base = temp_dir("similar_to_predicates");
     let txns = TransactionManager::new_durable(&base).unwrap();

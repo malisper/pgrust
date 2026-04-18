@@ -59,9 +59,10 @@ use super::expr_string::{
     eval_pg_rust_test_enc_setup, eval_position_function, eval_quote_literal_function,
     eval_repeat_function, eval_replace_function, eval_reverse_function, eval_right_function,
     eval_rpad_function, eval_set_bit_bytes, eval_set_byte, eval_sha224_function,
-    eval_sha256_function, eval_sha384_function, eval_sha512_function, eval_split_part_function,
-    eval_strpos_function, eval_text_overlay, eval_text_substring, eval_to_char_function,
-    eval_to_number_function, eval_translate_function, eval_trim_function, eval_unistr_function,
+    eval_sha256_function, eval_sha384_function, eval_sha512_function, eval_to_bin_function,
+    eval_to_hex_function, eval_to_oct_function, eval_split_part_function, eval_strpos_function,
+    eval_text_overlay, eval_text_substring, eval_to_char_function, eval_to_number_function,
+    eval_translate_function, eval_trim_function, eval_unistr_function,
 };
 use super::node_types::*;
 use super::pg_regex::{
@@ -1563,6 +1564,9 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::Sha512 => eval_sha512_function(&values),
         BuiltinScalarFunction::Crc32 => eval_crc32_function(&values),
         BuiltinScalarFunction::Crc32c => eval_crc32c_function(&values),
+        BuiltinScalarFunction::ToBin => eval_to_bin_function(&values),
+        BuiltinScalarFunction::ToOct => eval_to_oct_function(&values),
+        BuiltinScalarFunction::ToHex => eval_to_hex_function(&values),
         BuiltinScalarFunction::RegexpMatch => eval_regexp_match(&values),
         BuiltinScalarFunction::RegexpLike => eval_regexp_like(&values),
         BuiltinScalarFunction::RegexpReplace => eval_regexp_replace(&values),
@@ -2352,6 +2356,9 @@ fn eval_builtin_function(
         BuiltinScalarFunction::Sha512 => eval_sha512_function(&values),
         BuiltinScalarFunction::Crc32 => eval_crc32_function(&values),
         BuiltinScalarFunction::Crc32c => eval_crc32c_function(&values),
+        BuiltinScalarFunction::ToBin => eval_to_bin_function(&values),
+        BuiltinScalarFunction::ToOct => eval_to_oct_function(&values),
+        BuiltinScalarFunction::ToHex => eval_to_hex_function(&values),
         BuiltinScalarFunction::RegexpMatch => eval_regexp_match(&values),
         BuiltinScalarFunction::RegexpLike => eval_regexp_like(&values),
         BuiltinScalarFunction::RegexpReplace => eval_regexp_replace(&values),
