@@ -1146,6 +1146,53 @@ impl CatalogStore {
         Ok(effect)
     }
 
+    pub fn alter_foreign_key_constraint_deferrability_mvcc(
+        &mut self,
+        relation_oid: u32,
+        constraint_name: &str,
+        deferrable: bool,
+        initially_deferred: bool,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let mut catalog = self.catalog_snapshot_with_control_for_snapshot(ctx)?;
+        let (old_row, new_row) = catalog.alter_foreign_key_constraint_deferrability(
+            relation_oid,
+            constraint_name,
+            deferrable,
+            initially_deferred,
+        )?;
+        self.persist_control_state(&catalog)?;
+
+        let kinds = vec![BootstrapCatalogKind::PgConstraint];
+        delete_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                constraints: vec![old_row.clone()],
+                ..PhysicalCatalogRows::default()
+            },
+            1,
+            &kinds,
+        )?;
+        insert_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                constraints: vec![new_row.clone()],
+                ..PhysicalCatalogRows::default()
+            },
+            1,
+            &kinds,
+        )?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        effect_record_oid(&mut effect.relation_oids, new_row.confrelid);
+        if new_row.conindid != 0 {
+            effect_record_oid(&mut effect.relation_oids, new_row.conindid);
+        }
+        Ok(effect)
+    }
+
     pub fn rename_relation_constraint_mvcc(
         &mut self,
         relation_oid: u32,

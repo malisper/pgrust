@@ -144,6 +144,7 @@ fn execute_statement_with_source(
         | Statement::Reset(_)
         | Statement::SetRole(_)
         | Statement::ResetRole(_)
+        | Statement::AlterTableAlterConstraint(_)
         // :HACK: ALTER TABLE ... SET (...) is accepted narrowly for numeric.sql and ignored
         // until table reloptions are modeled for real.
         | Statement::AlterTableSet(_)

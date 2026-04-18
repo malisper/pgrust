@@ -5599,6 +5599,308 @@ fn alter_table_add_validate_and_drop_foreign_keys() {
 }
 
 #[test]
+fn alter_table_alter_constraint_updates_foreign_key_deferrability_flags() {
+    let base = temp_dir("alter_table_alter_constraint_fk_deferrability");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table parents (id int4 primary key)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table children (id int4 primary key, parent_id int4 references parents)",
+    )
+    .unwrap();
+
+    db.execute(
+        1,
+        "alter table children alter constraint children_parent_id_fkey deferrable initially deferred",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select condeferrable, condeferred from pg_constraint where conname = 'children_parent_id_fkey'",
+        ),
+        vec![vec![Value::Bool(true), Value::Bool(true)]]
+    );
+
+    db.execute(
+        1,
+        "alter table children alter constraint children_parent_id_fkey not deferrable initially immediate",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select condeferrable, condeferred from pg_constraint where conname = 'children_parent_id_fkey'",
+        ),
+        vec![vec![Value::Bool(false), Value::Bool(false)]]
+    );
+}
+
+#[test]
+fn alter_table_alter_constraint_rejects_non_foreign_keys() {
+    let base = temp_dir("alter_table_alter_constraint_non_fk");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4 primary key)")
+        .unwrap();
+
+    match db.execute(
+        1,
+        "alter table items alter constraint items_pkey deferrable",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(
+                message,
+                "constraint \"items_pkey\" of relation \"items\" is not a foreign key constraint"
+            );
+            assert_eq!(sqlstate, "42809");
+        }
+        other => panic!("expected ALTER CONSTRAINT wrong-object-type error, got {other:?}"),
+    }
+}
+
+#[test]
+fn alter_table_alter_constraint_initially_deferred_defers_until_commit() {
+    let base = temp_dir("alter_table_alter_constraint_deferred_commit");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table parents (id int4 primary key)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table children (id int4 primary key, parent_id int4 references parents)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table children alter constraint children_parent_id_fkey deferrable initially deferred",
+        )
+        .unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "insert into children values (1, 42)")
+        .unwrap();
+    match session.execute(&db, "commit") {
+        Err(ExecError::ForeignKeyViolation { constraint, .. }) => {
+            assert_eq!(constraint, "children_parent_id_fkey");
+        }
+        other => panic!("expected deferred foreign-key violation at commit, got {other:?}"),
+    }
+
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from children"),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
+fn alter_table_alter_constraint_initially_deferred_allows_fixup_before_commit() {
+    let base = temp_dir("alter_table_alter_constraint_fixup_before_commit");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table parents (id int4 primary key)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table children (id int4 primary key, parent_id int4 references parents)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table children alter constraint children_parent_id_fkey deferrable initially deferred",
+        )
+        .unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "insert into children values (1, 42)")
+        .unwrap();
+    session
+        .execute(&db, "insert into parents values (42)")
+        .unwrap();
+    session.execute(&db, "commit").unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select id, parent_id from children order by id",),
+        vec![vec![Value::Int32(1), Value::Int32(42)]]
+    );
+}
+
+#[test]
+fn alter_table_alter_constraint_initially_deferred_parent_delete_fails_at_commit() {
+    let base = temp_dir("alter_table_alter_constraint_parent_delete_commit");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table parents (id int4 primary key)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table children (id int4 primary key, parent_id int4 references parents)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into parents values (1)")
+        .unwrap();
+    session
+        .execute(&db, "insert into children values (1, 1)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table children alter constraint children_parent_id_fkey deferrable initially deferred",
+        )
+        .unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "delete from parents where id = 1")
+        .unwrap();
+    match session.execute(&db, "commit") {
+        Err(ExecError::ForeignKeyViolation { constraint, .. }) => {
+            assert_eq!(constraint, "children_parent_id_fkey");
+        }
+        other => panic!("expected deferred parent-delete violation at commit, got {other:?}"),
+    }
+
+    assert_eq!(
+        query_rows(&db, 1, "select id from parents order by id"),
+        vec![vec![Value::Int32(1)]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select id, parent_id from children order by id",),
+        vec![vec![Value::Int32(1), Value::Int32(1)]]
+    );
+}
+
+#[test]
+fn alter_table_alter_constraint_initially_deferred_parent_update_allows_fixup_before_commit() {
+    let base = temp_dir("alter_table_alter_constraint_parent_update_fixup");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table parents (id int4 primary key)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table children (id int4 primary key, parent_id int4 references parents)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into parents values (1)")
+        .unwrap();
+    session
+        .execute(&db, "insert into children values (1, 1)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table children alter constraint children_parent_id_fkey deferrable initially deferred",
+        )
+        .unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "update parents set id = 2 where id = 1")
+        .unwrap();
+    session
+        .execute(&db, "update children set parent_id = 2 where id = 1")
+        .unwrap();
+    session.execute(&db, "commit").unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select id from parents order by id"),
+        vec![vec![Value::Int32(2)]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select id, parent_id from children order by id",),
+        vec![vec![Value::Int32(1), Value::Int32(2)]]
+    );
+}
+
+#[test]
+fn alter_table_alter_constraint_initially_immediate_keeps_checks_immediate() {
+    let base = temp_dir("alter_table_alter_constraint_immediate_runtime");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table parents (id int4 primary key)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table children (id int4 primary key, parent_id int4 references parents)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table children alter constraint children_parent_id_fkey deferrable initially immediate",
+        )
+        .unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    match session.execute(&db, "insert into children values (1, 42)") {
+        Err(ExecError::ForeignKeyViolation { constraint, .. }) => {
+            assert_eq!(constraint, "children_parent_id_fkey");
+        }
+        other => panic!("expected immediate foreign-key violation, got {other:?}"),
+    }
+    session.execute(&db, "rollback").unwrap();
+}
+
+#[test]
+fn alter_table_alter_constraint_deferred_auto_commit_validates_before_implicit_commit() {
+    let base = temp_dir("alter_table_alter_constraint_autocommit");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table parents (id int4 primary key)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table children (id int4 primary key, parent_id int4 references parents)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table children alter constraint children_parent_id_fkey deferrable initially deferred",
+    )
+    .unwrap();
+
+    match db.execute(1, "insert into children values (1, 42)") {
+        Err(ExecError::ForeignKeyViolation { constraint, .. }) => {
+            assert_eq!(constraint, "children_parent_id_fkey");
+        }
+        other => panic!("expected implicit-commit foreign-key violation, got {other:?}"),
+    }
+
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from children"),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
 fn foreign_keys_restrict_parent_updates_and_deletes() {
     let base = temp_dir("foreign_key_parent_restrict");
     let db = Database::open(&base, 16).unwrap();

@@ -1,6 +1,12 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
-use crate::backend::executor::ExecError;
+use crate::ClientId;
+use crate::backend::access::transam::xact::{CommandId, TransactionId};
+use crate::backend::commands::tablecmds::collect_matching_rows_heap;
+use crate::backend::executor::{
+    DeferredForeignKeyTracker, ExecError, ExecutorContext, enforce_outbound_foreign_keys,
+};
 use crate::backend::parser::{
     AlterTableAddConstraintStatement, AlterTableValidateConstraintStatement, BoundDeleteStatement,
     BoundInsertStatement, BoundRelation, BoundRelationConstraints, BoundUpdateStatement,
@@ -9,7 +15,12 @@ use crate::backend::parser::{
 };
 use crate::backend::storage::lmgr::TableLockMode;
 use crate::backend::storage::smgr::RelFileLocator;
+use crate::backend::utils::cache::lsyscache::LazyCatalogLookup;
+use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
+use crate::backend::utils::misc::interrupts::InterruptState;
 use crate::include::catalog::CONSTRAINT_FOREIGN;
+
+use super::Database;
 
 pub(crate) type TableLockRequest = (RelFileLocator, TableLockMode);
 
@@ -162,6 +173,89 @@ pub(crate) fn alter_table_validate_constraint_lock_requests(
 
 pub(crate) fn table_lock_relations(requests: &[TableLockRequest]) -> Vec<RelFileLocator> {
     requests.iter().map(|(rel, _)| *rel).collect()
+}
+
+pub(crate) fn validate_deferred_foreign_key_constraints(
+    db: &Database,
+    client_id: ClientId,
+    catalog: &LazyCatalogLookup<'_>,
+    xid: TransactionId,
+    cid: CommandId,
+    interrupts: Arc<InterruptState>,
+    datetime_config: &DateTimeConfig,
+    tracker: &DeferredForeignKeyTracker,
+) -> Result<(), ExecError> {
+    let affected_constraint_oids = tracker.affected_constraint_oids();
+    if affected_constraint_oids.is_empty() {
+        return Ok(());
+    }
+
+    let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
+    let mut ctx = ExecutorContext {
+        pool: db.pool.clone(),
+        txns: db.txns.clone(),
+        txn_waiter: Some(db.txn_waiter.clone()),
+        sequences: Some(db.sequences.clone()),
+        checkpoint_stats: db.checkpoint_stats_snapshot(),
+        datetime_config: datetime_config.clone(),
+        interrupts,
+        snapshot,
+        client_id,
+        next_command_id: cid,
+        expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
+        case_test_values: Vec::new(),
+        system_bindings: Vec::new(),
+        subplans: Vec::new(),
+        timed: false,
+        allow_side_effects: true,
+        catalog: catalog.materialize_visible_catalog(),
+        compiled_functions: std::collections::HashMap::new(),
+        cte_tables: std::collections::HashMap::new(),
+        cte_producers: std::collections::HashMap::new(),
+        recursive_worktables: std::collections::HashMap::new(),
+        deferred_foreign_keys: None,
+    };
+
+    for constraint_oid in affected_constraint_oids {
+        let Some(row) = catalog
+            .constraint_rows()
+            .into_iter()
+            .find(|row| row.oid == constraint_oid && row.contype == CONSTRAINT_FOREIGN)
+        else {
+            continue;
+        };
+        let Some(relation) = catalog.lookup_relation_by_oid(row.conrelid) else {
+            continue;
+        };
+        let constraints =
+            bind_relation_constraints(None, relation.relation_oid, &relation.desc, catalog)
+                .map_err(ExecError::Parse)?;
+        let Some(constraint) = constraints
+            .foreign_keys
+            .iter()
+            .find(|constraint| constraint.constraint_oid == constraint_oid)
+        else {
+            continue;
+        };
+        let rows = collect_matching_rows_heap(
+            relation.rel,
+            &relation.desc,
+            relation.toast,
+            None,
+            &mut ctx,
+        )?;
+        for (_, values) in rows {
+            enforce_outbound_foreign_keys(
+                &constraint.relation_name,
+                std::slice::from_ref(constraint),
+                None,
+                &values,
+                &mut ctx,
+            )?;
+        }
+    }
+
+    Ok(())
 }
 
 fn add_relation_foreign_key_partner_locks(

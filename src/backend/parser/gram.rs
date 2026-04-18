@@ -152,6 +152,9 @@ fn alter_table_multi_action_from_statement(
         Statement::AlterTableDropConstraint(stmt) => {
             Ok(AlterTableMultiAction::DropConstraint(stmt))
         }
+        Statement::AlterTableAlterConstraint(stmt) => {
+            Ok(AlterTableMultiAction::AlterConstraint(stmt))
+        }
         Statement::AlterTableAlterColumnType(stmt) => {
             Ok(AlterTableMultiAction::AlterColumnType(stmt))
         }
@@ -2360,6 +2363,9 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         )),
         Rule::alter_table_drop_constraint_stmt => Ok(Statement::AlterTableDropConstraint(
             build_alter_table_drop_constraint(inner)?,
+        )),
+        Rule::alter_table_alter_constraint_stmt => Ok(Statement::AlterTableAlterConstraint(
+            build_alter_table_alter_constraint(inner)?,
         )),
         Rule::alter_table_rename_constraint_stmt => Ok(Statement::AlterTableRenameConstraint(
             build_alter_table_rename_constraint(inner)?,
@@ -5160,6 +5166,45 @@ fn build_alter_table_drop_constraint(
     Ok(AlterTableDropConstraintStatement {
         table_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
         constraint_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
+fn build_alter_table_alter_constraint(
+    pair: Pair<'_, Rule>,
+) -> Result<AlterTableAlterConstraintStatement, ParseError> {
+    let mut table_name = None;
+    let mut constraint_name = None;
+    let mut deferrable = None;
+    let mut initially_deferred = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
+            Rule::identifier if constraint_name.is_none() => {
+                constraint_name = Some(build_identifier(part))
+            }
+            Rule::alter_table_constraint_action => {
+                for inner in part.into_inner() {
+                    match inner.as_rule() {
+                        Rule::deferrable_constraint_attribute => deferrable = Some(true),
+                        Rule::not_deferrable_constraint_attribute => deferrable = Some(false),
+                        Rule::initially_deferred_constraint_attribute => {
+                            initially_deferred = Some(true)
+                        }
+                        Rule::initially_immediate_constraint_attribute => {
+                            initially_deferred = Some(false)
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(AlterTableAlterConstraintStatement {
+        table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
+        constraint_name: constraint_name.ok_or(ParseError::UnexpectedEof)?,
+        deferrable,
+        initially_deferred,
     })
 }
 

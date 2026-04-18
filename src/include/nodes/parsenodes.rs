@@ -236,6 +236,7 @@ pub enum Statement {
     AlterTableAddConstraint(AlterTableAddConstraintStatement),
     AlterTableDropColumn(AlterTableDropColumnStatement),
     AlterTableDropConstraint(AlterTableDropConstraintStatement),
+    AlterTableAlterConstraint(AlterTableAlterConstraintStatement),
     AlterTableRenameConstraint(AlterTableRenameConstraintStatement),
     AlterTableAlterColumnType(AlterTableAlterColumnTypeStatement),
     AlterTableOwner(AlterRelationOwnerStatement),
@@ -896,6 +897,7 @@ pub enum AlterTableMultiAction {
     AddConstraint(AlterTableAddConstraintStatement),
     DropColumn(AlterTableDropColumnStatement),
     DropConstraint(AlterTableDropConstraintStatement),
+    AlterConstraint(AlterTableAlterConstraintStatement),
     AlterColumnType(AlterTableAlterColumnTypeStatement),
     SetNotNull(AlterTableSetNotNullStatement),
     DropNotNull(AlterTableDropNotNullStatement),
@@ -916,6 +918,7 @@ impl AlterTableMultiAction {
             Self::AddConstraint(stmt) => &stmt.table_name,
             Self::DropColumn(stmt) => &stmt.table_name,
             Self::DropConstraint(stmt) => &stmt.table_name,
+            Self::AlterConstraint(stmt) => &stmt.table_name,
             Self::AlterColumnType(stmt) => &stmt.table_name,
             Self::SetNotNull(stmt) => &stmt.table_name,
             Self::DropNotNull(stmt) => &stmt.table_name,
@@ -930,6 +933,7 @@ impl AlterTableMultiAction {
             Self::AddConstraint(stmt) => Statement::AlterTableAddConstraint(stmt.clone()),
             Self::DropColumn(stmt) => Statement::AlterTableDropColumn(stmt.clone()),
             Self::DropConstraint(stmt) => Statement::AlterTableDropConstraint(stmt.clone()),
+            Self::AlterConstraint(stmt) => Statement::AlterTableAlterConstraint(stmt.clone()),
             Self::AlterColumnType(stmt) => Statement::AlterTableAlterColumnType(stmt.clone()),
             Self::SetNotNull(stmt) => Statement::AlterTableSetNotNull(stmt.clone()),
             Self::DropNotNull(stmt) => Statement::AlterTableDropNotNull(stmt.clone()),
@@ -966,6 +970,14 @@ pub struct AlterTableDropColumnStatement {
 pub struct AlterTableDropConstraintStatement {
     pub table_name: String,
     pub constraint_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableAlterConstraintStatement {
+    pub table_name: String,
+    pub constraint_name: String,
+    pub deferrable: Option<bool>,
+    pub initially_deferred: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
