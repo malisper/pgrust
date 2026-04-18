@@ -995,6 +995,7 @@ fn split_simple_query_statements(sql: &str) -> Vec<&str> {
     let bytes = sql.as_bytes();
     let mut i = 0usize;
     let mut block_comment_depth = 0usize;
+    let mut paren_depth = 0usize;
     let mut single_quote = false;
     let mut double_quote = false;
     let mut line_comment = false;
@@ -1091,7 +1092,17 @@ fn split_simple_query_statements(sql: &str) -> Vec<&str> {
                 }
             }
         }
-        if bytes[i] == b';' {
+        if bytes[i] == b'(' {
+            paren_depth += 1;
+            i += 1;
+            continue;
+        }
+        if bytes[i] == b')' {
+            paren_depth = paren_depth.saturating_sub(1);
+            i += 1;
+            continue;
+        }
+        if bytes[i] == b';' && paren_depth == 0 {
             statements.push(&sql[start..=i]);
             start = i + 1;
         }
@@ -4311,5 +4322,19 @@ mod tests {
         );
         let (_, rows) = execute_psql_describe_query(&db, &session, &sql).unwrap();
         assert_eq!(rows[0][14], Value::Text("btree".into()));
+    }
+
+    #[test]
+    fn split_simple_query_statements_keeps_rule_action_lists_together() {
+        let sql = "create rule r as on update to widgets do also (\n    update other set id = new.id where id = old.id;\n    delete from audit where id = old.id\n);\nselect 1;\n";
+
+        assert_eq!(
+            split_simple_query_statements(sql),
+            vec![
+                "create rule r as on update to widgets do also (\n    update other set id = new.id where id = old.id;\n    delete from audit where id = old.id\n);",
+                "\nselect 1;",
+                "\n",
+            ]
+        );
     }
 }

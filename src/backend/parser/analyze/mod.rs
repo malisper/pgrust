@@ -13,6 +13,7 @@ mod modify;
 mod paths;
 mod query;
 mod ranges;
+mod rules;
 mod scope;
 mod system_views;
 mod views;
@@ -46,7 +47,9 @@ pub use crate::backend::catalog::catalog::{Catalog, CatalogEntry};
 static NEXT_WORKTABLE_ID: AtomicUsize = AtomicUsize::new(1);
 static NEXT_CTE_ID: AtomicUsize = AtomicUsize::new(1);
 use crate::backend::utils::cache::relcache::RelCache;
-use crate::backend::utils::cache::system_views::{build_pg_stats_rows, build_pg_views_rows};
+use crate::backend::utils::cache::system_views::{
+    build_pg_rules_rows, build_pg_stats_rows, build_pg_views_rows,
+};
 use agg::*;
 use agg_output::*;
 pub use coerce::is_binary_coercible_type;
@@ -63,11 +66,17 @@ pub use modify::{
     BoundDeleteTarget, BoundInsertSource, BoundInsertStatement, BoundUpdateStatement,
     BoundUpdateTarget, PreparedInsert, bind_delete, bind_insert, bind_insert_prepared, bind_update,
 };
+pub(crate) use modify::{
+    bind_delete_with_outer_scopes, bind_insert_with_outer_scopes, bind_update_with_outer_scopes,
+};
 pub use paths::BoundModifyRowSource;
 use paths::bind_order_by_items;
 pub(crate) use query::analyze_select_query_with_outer;
 use query::{
     AnalyzedFrom, analyze_values_query_with_outer, identity_target_list, normalize_target_list,
+};
+pub(crate) use rules::{
+    BoundRuleAction, bind_rule_action_statement, bind_rule_qual, validate_rule_definition,
 };
 pub use scope::BoundRelation;
 use scope::*;
@@ -350,6 +359,10 @@ pub trait CatalogLookup {
         Vec::new()
     }
 
+    fn pg_rules_rows(&self) -> Vec<Vec<Value>> {
+        Vec::new()
+    }
+
     fn pg_stats_rows(&self) -> Vec<Vec<Value>> {
         Vec::new()
     }
@@ -489,6 +502,15 @@ impl CatalogLookup for Catalog {
         build_pg_views_rows(
             catcache.namespace_rows(),
             catcache.authid_rows(),
+            catcache.class_rows(),
+            catcache.rewrite_rows(),
+        )
+    }
+
+    fn pg_rules_rows(&self) -> Vec<Vec<Value>> {
+        let catcache = crate::backend::utils::cache::catcache::CatCache::from_catalog(self);
+        build_pg_rules_rows(
+            catcache.namespace_rows(),
             catcache.class_rows(),
             catcache.rewrite_rows(),
         )
@@ -1465,6 +1487,7 @@ impl<'a> RecursiveReferenceChecker<'a> {
             | SqlExpr::NumericLiteral(_)
             | SqlExpr::Random
             | SqlExpr::CurrentDate
+            | SqlExpr::CurrentUser
             | SqlExpr::CurrentTime { .. }
             | SqlExpr::CurrentTimestamp { .. }
             | SqlExpr::LocalTime { .. }
@@ -1755,6 +1778,7 @@ fn sql_expr_references_table(expr: &SqlExpr, table_name: &str) -> bool {
         | SqlExpr::NumericLiteral(_)
         | SqlExpr::Random
         | SqlExpr::CurrentDate
+        | SqlExpr::CurrentUser
         | SqlExpr::CurrentTime { .. }
         | SqlExpr::CurrentTimestamp { .. }
         | SqlExpr::LocalTime { .. }

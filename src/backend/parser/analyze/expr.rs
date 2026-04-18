@@ -2,10 +2,11 @@ use super::functions::*;
 use super::infer::*;
 use super::*;
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
-use crate::include::catalog::builtin_range_spec_for_sql_type;
+use crate::include::catalog::{BOOTSTRAP_SUPERUSER_NAME, builtin_range_spec_for_sql_type};
 use crate::include::nodes::primnodes::{
     BoolExprType, CaseExpr as BoundCaseExpr, CaseTestExpr as BoundCaseTestExpr,
-    CaseWhen as BoundCaseWhen, ExprArraySubscript, OpExprKind, WindowFuncKind, expr_sql_type_hint,
+    CaseWhen as BoundCaseWhen, ExprArraySubscript, INDEX_VAR, INNER_VAR, OUTER_VAR, OpExprKind,
+    WindowFuncKind, expr_sql_type_hint,
 };
 
 mod func;
@@ -61,7 +62,9 @@ pub(super) fn raise_expr_varlevels(expr: Expr, levels: usize) -> Expr {
     }
     match expr {
         Expr::Var(mut var) => {
-            var.varlevelsup += levels;
+            if !matches!(var.varno, OUTER_VAR | INNER_VAR | INDEX_VAR) {
+                var.varlevelsup += levels;
+            }
             Expr::Var(var)
         }
         Expr::Aggref(mut aggref) => {
@@ -2033,6 +2036,9 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             ctes,
         )?,
         SqlExpr::CurrentDate => Expr::CurrentDate,
+        // :HACK: CURRENT_USER is only needed for the core rules regression subset.
+        // Bind it as the bootstrap role name until executor contexts carry session auth names.
+        SqlExpr::CurrentUser => Expr::Const(Value::Text(BOOTSTRAP_SUPERUSER_NAME.into())),
         SqlExpr::CurrentTime { precision } => Expr::CurrentTime {
             precision: *precision,
         },

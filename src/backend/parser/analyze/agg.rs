@@ -15,6 +15,7 @@ pub(super) fn expr_contains_agg(expr: &SqlExpr) -> bool {
         | SqlExpr::Random
         | SqlExpr::FuncCall { .. }
         | SqlExpr::CurrentDate
+        | SqlExpr::CurrentUser
         | SqlExpr::CurrentTime { .. }
         | SqlExpr::CurrentTimestamp { .. }
         | SqlExpr::LocalTime { .. }
@@ -131,6 +132,7 @@ pub(super) fn expr_references_input_scope(expr: &SqlExpr) -> bool {
         | SqlExpr::NumericLiteral(_)
         | SqlExpr::Random
         | SqlExpr::CurrentDate
+        | SqlExpr::CurrentUser
         | SqlExpr::CurrentTime { .. }
         | SqlExpr::CurrentTimestamp { .. }
         | SqlExpr::LocalTime { .. }
@@ -325,6 +327,7 @@ pub(super) fn collect_aggs(
         | SqlExpr::QuantifiedSubquery { .. }
         | SqlExpr::Random
         | SqlExpr::CurrentDate
+        | SqlExpr::CurrentUser
         | SqlExpr::CurrentTime { .. }
         | SqlExpr::CurrentTimestamp { .. }
         | SqlExpr::LocalTime { .. }

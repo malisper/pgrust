@@ -42,6 +42,22 @@ pub(super) fn lookup_heap_relation_for_ddl(
     }
 }
 
+pub(super) fn lookup_rule_relation_for_ddl(
+    catalog: &dyn CatalogLookup,
+    name: &str,
+) -> Result<BoundRelation, ExecError> {
+    match catalog.lookup_any_relation(name) {
+        Some(entry) if matches!(entry.relkind, 'r' | 'v') => Ok(entry),
+        Some(_) => Err(ExecError::Parse(ParseError::WrongObjectType {
+            name: name.to_string(),
+            expected: "table or view",
+        })),
+        None => Err(ExecError::Parse(ParseError::TableDoesNotExist(
+            name.to_string(),
+        ))),
+    }
+}
+
 fn auth_catalog_for_ddl(
     db: &Database,
     client_id: ClientId,

@@ -10,7 +10,9 @@ use crate::backend::utils::cache::syscache::{
     ensure_constraint_rows, ensure_inherit_rows, ensure_namespace_rows, ensure_rewrite_rows,
     ensure_statistic_rows, ensure_type_rows,
 };
-use crate::backend::utils::cache::system_views::{build_pg_stats_rows, build_pg_views_rows};
+use crate::backend::utils::cache::system_views::{
+    build_pg_rules_rows, build_pg_stats_rows, build_pg_views_rows,
+};
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::include::catalog::{
     PgAmRow, PgAmopRow, PgAmprocRow, PgClassRow, PgCollationRow, PgConstraintRow, PgIndexRow,
@@ -785,6 +787,14 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         build_pg_views_rows(
             ensure_namespace_rows(self.db, self.client_id, self.txn_ctx),
             authids,
+            ensure_class_rows(self.db, self.client_id, self.txn_ctx),
+            ensure_rewrite_rows(self.db, self.client_id, self.txn_ctx),
+        )
+    }
+
+    fn pg_rules_rows(&self) -> Vec<Vec<Value>> {
+        build_pg_rules_rows(
+            ensure_namespace_rows(self.db, self.client_id, self.txn_ctx),
             ensure_class_rows(self.db, self.client_id, self.txn_ctx),
             ensure_rewrite_rows(self.db, self.client_id, self.txn_ctx),
         )

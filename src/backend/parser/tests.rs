@@ -686,6 +686,19 @@ fn parse_comment_on_table_null_statement() {
 }
 
 #[test]
+fn parse_comment_on_rule_statement() {
+    let stmt = parse_statement("comment on rule r1 on public.items is 'hello'").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CommentOnRule(CommentOnRuleStatement {
+            rule_name: "r1".into(),
+            relation_name: "public.items".into(),
+            comment: Some("hello".into()),
+        })
+    );
+}
+
+#[test]
 fn parse_create_index_with_method_and_ordering() {
     let stmt = parse_statement(
         "create index num_exp_add_idx on num_exp_add using btree (id1 desc nulls first, id2 asc)",
@@ -3363,6 +3376,147 @@ fn parse_insert_update_delete() {
 }
 
 #[test]
+fn parse_create_rule_single_action() {
+    let stmt = parse_statement(
+        "create rule r1 as on insert to people where new.id > 0 do instead insert into pets values (new.id, new.id)",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateRule(CreateRuleStatement {
+            rule_name: "r1".into(),
+            relation_name: "people".into(),
+            event: RuleEvent::Insert,
+            do_kind: RuleDoKind::Instead,
+            where_clause: Some(SqlExpr::Gt(
+                Box::new(SqlExpr::Column("new.id".into())),
+                Box::new(SqlExpr::IntegerLiteral("0".into())),
+            )),
+            where_sql: Some("new.id > 0".into()),
+            actions: vec![RuleActionStatement {
+                statement: Statement::Insert(InsertStatement {
+                    with_recursive: false,
+                    with: vec![],
+                    table_name: "pets".into(),
+                    columns: None,
+                    source: InsertSource::Values(vec![vec![
+                        SqlExpr::Column("new.id".into()),
+                        SqlExpr::Column("new.id".into()),
+                    ]]),
+                }),
+                sql: "insert into pets values (new.id, new.id)".into(),
+            }],
+        })
+    );
+}
+
+#[test]
+fn parse_create_rule_multiple_actions() {
+    let stmt = parse_statement(
+        "create rule r1 as on update to people do also (insert into pets values (new.id, old.id); delete from pets where id = old.id;)",
+    )
+    .unwrap();
+    let Statement::CreateRule(stmt) = stmt else {
+        panic!("expected create rule");
+    };
+    assert_eq!(stmt.rule_name, "r1");
+    assert_eq!(stmt.relation_name, "people");
+    assert_eq!(stmt.event, RuleEvent::Update);
+    assert_eq!(stmt.do_kind, RuleDoKind::Also);
+    assert_eq!(stmt.actions.len(), 2);
+    assert!(matches!(stmt.actions[0].statement, Statement::Insert(_)));
+    assert_eq!(
+        stmt.actions[0].sql,
+        "insert into pets values (new.id, old.id)"
+    );
+    assert!(matches!(stmt.actions[1].statement, Statement::Delete(_)));
+    assert_eq!(stmt.actions[1].sql, "delete from pets where id = old.id");
+}
+
+#[test]
+fn parse_create_rule_multiple_actions_multiline() {
+    let stmt = parse_statement(
+        "create rule r1 as on update to people do also (\n\
+\tupdate pets set id = new.id\n\
+\t\twhere id = old.id;\n\
+\tdelete from toys where id = old.id\n\
+)",
+    )
+    .unwrap();
+    let Statement::CreateRule(stmt) = stmt else {
+        panic!("expected create rule");
+    };
+    assert_eq!(stmt.actions.len(), 2);
+    assert_eq!(
+        stmt.actions[0].sql,
+        "update pets set id = new.id\n\t\twhere id = old.id"
+    );
+    assert_eq!(stmt.actions[1].sql, "delete from toys where id = old.id");
+}
+
+#[test]
+fn parse_create_rule_multiple_actions_regression_shape() {
+    let stmt = parse_statement(
+        "create rule rtest_sys_upd as on update to rtest_system do also (\n\
+\tupdate rtest_interface set sysname = new.sysname\n\
+\t\twhere sysname = old.sysname;\n\
+\tupdate rtest_admin set sysname = new.sysname\n\
+\t\twhere sysname = old.sysname\n\
+\t)",
+    )
+    .unwrap();
+    let Statement::CreateRule(stmt) = stmt else {
+        panic!("expected create rule");
+    };
+    assert_eq!(stmt.actions.len(), 2);
+    assert_eq!(
+        stmt.actions[0].sql,
+        "update rtest_interface set sysname = new.sysname\n\t\twhere sysname = old.sysname"
+    );
+    assert_eq!(
+        stmt.actions[1].sql,
+        "update rtest_admin set sysname = new.sysname\n\t\twhere sysname = old.sysname"
+    );
+}
+
+#[test]
+fn parse_create_rule_instead_nothing() {
+    let stmt = parse_statement("create rule r1 as on delete to people do instead nothing").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateRule(CreateRuleStatement {
+            rule_name: "r1".into(),
+            relation_name: "people".into(),
+            event: RuleEvent::Delete,
+            do_kind: RuleDoKind::Instead,
+            where_clause: None,
+            where_sql: None,
+            actions: vec![],
+        })
+    );
+}
+
+#[test]
+fn parse_drop_rule_statement() {
+    let stmt = parse_statement("drop rule if exists r1 on people").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::DropRule(DropRuleStatement {
+            if_exists: true,
+            rule_name: "r1".into(),
+            relation_name: "people".into(),
+        })
+    );
+}
+
+#[test]
+fn parse_rejects_unsupported_rule_action_statement() {
+    let err =
+        parse_statement("create rule r1 as on insert to people do instead select 1").unwrap_err();
+    assert!(matches!(err, ParseError::FeatureNotSupported(_)));
+}
+
+#[test]
 fn bind_update_prefers_index_row_source_for_equality_predicate() {
     let catalog = catalog_with_people_id_index();
     let stmt = match parse_statement("update people set name = 'x' where id = 1").unwrap() {
@@ -3453,6 +3607,14 @@ fn parse_current_datetime_forms() {
         stmt.targets[4].expr,
         SqlExpr::LocalTimestamp { precision: Some(4) }
     ));
+}
+
+#[test]
+fn parse_current_user_and_legacy_null_predicates() {
+    let stmt = parse_select("select current_user, note isnull, note notnull from people").unwrap();
+    assert!(matches!(stmt.targets[0].expr, SqlExpr::CurrentUser));
+    assert!(matches!(stmt.targets[1].expr, SqlExpr::IsNull(_)));
+    assert!(matches!(stmt.targets[2].expr, SqlExpr::IsNotNull(_)));
 }
 
 #[test]

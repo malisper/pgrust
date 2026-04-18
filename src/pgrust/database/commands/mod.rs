@@ -12,6 +12,7 @@ mod owner;
 mod privilege;
 mod rename;
 mod role;
+pub(crate) mod rules;
 mod schema;
 mod sequence;
 mod session_auth;

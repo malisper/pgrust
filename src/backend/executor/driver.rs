@@ -202,6 +202,10 @@ fn execute_statement_with_source(
             expected: "COMMENT ON TABLE handled by database/session layer",
             actual: "COMMENT ON TABLE".into(),
         })),
+        Statement::CommentOnRule(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "COMMENT ON RULE handled by database/session layer",
+            actual: "COMMENT ON RULE".into(),
+        })),
         Statement::CommentOnDomain(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "COMMENT ON DOMAIN handled by database/session layer",
             actual: "COMMENT ON DOMAIN".into(),
@@ -265,6 +269,10 @@ fn execute_statement_with_source(
             expected: "CREATE VIEW handled by database/session layer",
             actual: "CREATE VIEW".into(),
         })),
+        Statement::CreateRule(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "CREATE RULE handled by database/session layer",
+            actual: "CREATE RULE".into(),
+        })),
         Statement::DropTable(stmt) => execute_drop_table(stmt, catalog, ctx),
         Statement::DropIndex(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "DROP INDEX handled by database/session layer",
@@ -293,6 +301,10 @@ fn execute_statement_with_source(
         Statement::DropView(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "DROP VIEW handled by database/session layer",
             actual: "DROP VIEW".into(),
+        })),
+        Statement::DropRule(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "DROP RULE handled by database/session layer",
+            actual: "DROP RULE".into(),
         })),
         Statement::DropSchema(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "DROP SCHEMA handled by database/session layer",
@@ -356,6 +368,10 @@ pub fn execute_readonly_statement(
             expected: "read-only statement",
             actual: "COMMENT ON TABLE".into(),
         })),
+        Statement::CommentOnRule(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "COMMENT ON RULE".into(),
+        })),
         Statement::CommentOnDomain(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "COMMENT ON DOMAIN".into(),
@@ -408,10 +424,18 @@ pub fn execute_readonly_statement(
             expected: "read-only statement",
             actual: "CREATE VIEW".into(),
         })),
+        Statement::CreateRule(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "CREATE RULE".into(),
+        })),
         Statement::Vacuum(stmt) => execute_vacuum(stmt, catalog, ctx),
         Statement::DropView(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "DROP VIEW".into(),
+        })),
+        Statement::DropRule(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "DROP RULE".into(),
         })),
         Statement::DropDomain(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",

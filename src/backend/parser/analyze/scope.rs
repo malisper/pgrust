@@ -15,6 +15,7 @@ pub(crate) struct BoundScope {
 pub(crate) struct ScopeColumn {
     pub(crate) output_name: String,
     pub(crate) hidden: bool,
+    pub(crate) qualified_only: bool,
     pub(crate) relation_names: Vec<String>,
     pub(crate) hidden_invalid_relation_names: Vec<String>,
     pub(crate) hidden_missing_relation_names: Vec<String>,
@@ -236,7 +237,7 @@ pub(super) fn resolve_column(scope: &BoundScope, name: &str) -> Result<usize, Pa
     }
     if let Some((relation, column_name)) = name.rsplit_once('.') {
         let mut matches = scope.columns.iter().enumerate().filter(|(_, column)| {
-            !column.hidden
+            (!column.hidden || column.qualified_only)
                 && column
                     .relation_names
                     .iter()
@@ -281,14 +282,13 @@ pub(super) fn resolve_column(scope: &BoundScope, name: &str) -> Result<usize, Pa
         return Err(ParseError::UnknownColumn(name.to_string()));
     }
 
-    let mut matches = scope
-        .columns
-        .iter()
-        .enumerate()
-        .filter(|(_, column)| !column.hidden && column.output_name.eq_ignore_ascii_case(name));
+    let mut matches = scope.columns.iter().enumerate().filter(|(_, column)| {
+        !column.hidden && !column.qualified_only && column.output_name.eq_ignore_ascii_case(name)
+    });
     let Some(first) = matches.next() else {
         let mut relation_matches = scope.columns.iter().enumerate().filter(|(_, column)| {
             !column.hidden
+                && !column.qualified_only
                 && column
                     .relation_names
                     .iter()
@@ -469,7 +469,7 @@ fn resolve_relation_row_expr_in_scope(
         .iter()
         .zip(scope.output_exprs.iter())
         .filter_map(|(column, expr)| {
-            if column.hidden
+            if (column.hidden && !column.qualified_only)
                 || !column
                     .relation_names
                     .iter()
@@ -1440,6 +1440,7 @@ pub(super) fn scope_for_relation(relation_name: Option<&str>, desc: &RelationDes
             .map(|column| ScopeColumn {
                 output_name: column.name.clone(),
                 hidden: column.dropped,
+                qualified_only: false,
                 relation_names: relation_name.into_iter().map(str::to_string).collect(),
                 hidden_invalid_relation_names: vec![],
                 hidden_missing_relation_names: vec![],
@@ -1638,6 +1639,7 @@ fn bind_join_using_projection(
         scope_columns.push(ScopeColumn {
             output_name: name.clone(),
             hidden: false,
+            qualified_only: false,
             relation_names: vec![],
             hidden_invalid_relation_names: vec![],
             hidden_missing_relation_names: vec![],

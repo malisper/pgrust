@@ -122,6 +122,7 @@ pub(super) fn expr_contains_window(expr: &SqlExpr) -> bool {
         | SqlExpr::QuantifiedSubquery { .. }
         | SqlExpr::Random
         | SqlExpr::CurrentDate
+        | SqlExpr::CurrentUser
         | SqlExpr::CurrentTime { .. }
         | SqlExpr::CurrentTimestamp { .. }
         | SqlExpr::LocalTime { .. }
