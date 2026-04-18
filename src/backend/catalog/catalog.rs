@@ -83,6 +83,7 @@ fn default_attribute_storage(sql_type: SqlType, attlen: i16) -> AttributeStorage
         SqlTypeKind::AnyArray => AttributeStorage::Extended,
         SqlTypeKind::Name
         | SqlTypeKind::Void
+        | SqlTypeKind::Trigger
         | SqlTypeKind::Int2Vector
         | SqlTypeKind::OidVector
         | SqlTypeKind::Date
@@ -167,6 +168,7 @@ fn scalar_type_for_sql_type(sql_type: SqlType) -> ScalarType {
     match sql_type.kind {
         SqlTypeKind::AnyArray => ScalarType::Array(Box::new(ScalarType::Text)),
         SqlTypeKind::Void => ScalarType::Text,
+        SqlTypeKind::Trigger => ScalarType::Text,
         SqlTypeKind::Int2 => ScalarType::Int16,
         SqlTypeKind::Int2Vector => ScalarType::Text,
         SqlTypeKind::Int4 => ScalarType::Int32,

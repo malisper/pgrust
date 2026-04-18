@@ -24,6 +24,7 @@ use crate::backend::catalog::pg_operator::sort_pg_operator_rows;
 use crate::backend::catalog::pg_opfamily::sort_pg_opfamily_rows;
 use crate::backend::catalog::pg_proc::sort_pg_proc_rows;
 use crate::backend::catalog::pg_tablespace::sort_pg_tablespace_rows;
+use crate::backend::catalog::pg_trigger::sort_pg_trigger_rows;
 use crate::backend::catalog::pg_ts_config::sort_pg_ts_config_rows;
 use crate::backend::catalog::pg_ts_config_map::sort_pg_ts_config_map_rows;
 use crate::backend::catalog::pg_ts_dict::sort_pg_ts_dict_rows;
@@ -44,8 +45,8 @@ use crate::include::catalog::{
     PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow,
     PgConstraintRow, PgDatabaseRow, PgDependRow, PgIndexRow, PgInheritsRow, PgLanguageRow,
     PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow, PgRewriteRow,
-    PgStatisticRow, PgTablespaceRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow,
-    PgTsTemplateRow, PgTypeRow, REGCONFIG_ARRAY_TYPE_OID, REGCONFIG_TYPE_OID,
+    PgStatisticRow, PgTablespaceRow, PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow,
+    PgTsParserRow, PgTsTemplateRow, PgTypeRow, REGCONFIG_ARRAY_TYPE_OID, REGCONFIG_TYPE_OID,
     REGDICTIONARY_ARRAY_TYPE_OID, REGDICTIONARY_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID,
     TID_ARRAY_TYPE_OID, TID_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID,
     TSQUERY_ARRAY_TYPE_OID, TSQUERY_TYPE_OID, TSVECTOR_ARRAY_TYPE_OID, TSVECTOR_TYPE_OID,
@@ -74,6 +75,7 @@ pub struct CatCache {
     inherit_rows: Vec<PgInheritsRow>,
     index_rows: Vec<PgIndexRow>,
     rewrite_rows: Vec<PgRewriteRow>,
+    trigger_rows: Vec<PgTriggerRow>,
     am_rows: Vec<PgAmRow>,
     amop_rows: Vec<PgAmopRow>,
     amproc_rows: Vec<PgAmprocRow>,
@@ -229,6 +231,7 @@ impl CatCache {
                 relpersistence: entry.relpersistence,
                 relkind: entry.relkind,
                 relhassubclass: entry.relhassubclass,
+                relhastriggers: entry.relhastriggers,
                 relispartition: entry.relispartition,
                 relnatts: entry.desc.columns.len() as i16,
                 relpages: entry.relpages,
@@ -353,10 +356,12 @@ impl CatCache {
         cache
             .rewrite_rows
             .extend(catalog.rewrite_rows().iter().cloned());
+        cache.trigger_rows.extend(catalog.triggers.iter().cloned());
         sort_pg_constraint_rows(&mut cache.constraint_rows);
         sort_pg_depend_rows(&mut cache.depend_rows);
         sort_pg_inherits_rows(&mut cache.inherit_rows);
         sort_pg_rewrite_rows(&mut cache.rewrite_rows);
+        sort_pg_trigger_rows(&mut cache.trigger_rows);
         sort_pg_index_rows(&mut cache.index_rows);
 
         cache.normalize_composite_array_types();
@@ -374,6 +379,7 @@ impl CatCache {
             rows.inherits,
             rows.indexes,
             rows.rewrites,
+            rows.triggers,
             rows.ams,
             rows.amops,
             rows.amprocs,
@@ -408,6 +414,7 @@ impl CatCache {
         inherit_rows: Vec<PgInheritsRow>,
         index_rows: Vec<PgIndexRow>,
         rewrite_rows: Vec<PgRewriteRow>,
+        trigger_rows: Vec<PgTriggerRow>,
         am_rows: Vec<PgAmRow>,
         amop_rows: Vec<PgAmopRow>,
         amproc_rows: Vec<PgAmprocRow>,
@@ -471,6 +478,8 @@ impl CatCache {
         sort_pg_index_rows(&mut cache.index_rows);
         cache.rewrite_rows = rewrite_rows;
         sort_pg_rewrite_rows(&mut cache.rewrite_rows);
+        cache.trigger_rows = trigger_rows;
+        sort_pg_trigger_rows(&mut cache.trigger_rows);
         cache.am_rows = am_rows;
         sort_pg_am_rows(&mut cache.am_rows);
         cache.amop_rows = amop_rows;
@@ -588,6 +597,18 @@ impl CatCache {
 
     pub fn rewrite_rows(&self) -> Vec<PgRewriteRow> {
         self.rewrite_rows.clone()
+    }
+
+    pub fn trigger_rows(&self) -> Vec<PgTriggerRow> {
+        self.trigger_rows.clone()
+    }
+
+    pub fn trigger_rows_for_relation(&self, relation_oid: u32) -> Vec<PgTriggerRow> {
+        self.trigger_rows
+            .iter()
+            .filter(|row| row.tgrelid == relation_oid)
+            .cloned()
+            .collect()
     }
 
     pub fn rewrite_rows_for_relation(&self, relation_oid: u32) -> Vec<PgRewriteRow> {
@@ -798,6 +819,8 @@ pub fn sql_type_oid(sql_type: SqlType) -> u32 {
         (SqlTypeKind::InternalChar, true) => INTERNAL_CHAR_ARRAY_TYPE_OID,
         (SqlTypeKind::Void, false) => crate::include::catalog::VOID_TYPE_OID,
         (SqlTypeKind::Void, true) => unreachable!("void arrays are unsupported"),
+        (SqlTypeKind::Trigger, false) => crate::include::catalog::TRIGGER_TYPE_OID,
+        (SqlTypeKind::Trigger, true) => unreachable!("trigger arrays are unsupported"),
         (SqlTypeKind::Int8, false) => INT8_TYPE_OID,
         (SqlTypeKind::Int8, true) => INT8_ARRAY_TYPE_OID,
         (SqlTypeKind::Name, false) => crate::include::catalog::NAME_TYPE_OID,

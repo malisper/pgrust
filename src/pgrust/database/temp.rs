@@ -90,6 +90,7 @@ impl Database {
                 reltoastrelid: 0,
                 relpersistence: 't',
                 relkind: 'n',
+                relhastriggers: false,
                 desc: crate::backend::executor::RelationDesc {
                     columns: Vec::new(),
                 },
@@ -202,6 +203,7 @@ impl Database {
             reltoastrelid: created.entry.reltoastrelid,
             relpersistence: created.entry.relpersistence,
             relkind: created.entry.relkind,
+            relhastriggers: created.entry.relhastriggers,
             desc: created.entry.desc.clone(),
             index: None,
         };

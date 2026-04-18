@@ -20,7 +20,7 @@ use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::include::catalog::{
     PgAmRow, PgAmopRow, PgAmprocRow, PgClassRow, PgCollationRow, PgConstraintRow, PgIndexRow,
     PgInheritsRow, PgLanguageRow, PgOpclassRow, PgOpfamilyRow, PgProcRow, PgRewriteRow,
-    PgStatisticRow, PgTypeRow,
+    PgStatisticRow, PgTriggerRow, PgTypeRow,
 };
 use crate::include::nodes::datum::Value;
 use crate::pgrust::database::{
@@ -116,6 +116,17 @@ fn attrdef_rows_for_relation(
         .unwrap_or_default();
     rows.sort_by_key(|row| row.adnum);
     rows
+}
+
+fn trigger_rows_for_relation(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    relation_oid: u32,
+) -> Vec<PgTriggerRow> {
+    visible_catcache(db, client_id, txn_ctx)
+        .map(|catcache| catcache.trigger_rows_for_relation(relation_oid))
+        .unwrap_or_default()
 }
 
 fn type_row_by_oid(
@@ -756,6 +767,10 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
             .into_iter()
             .filter(|row| row.ev_class == relation_oid)
             .collect()
+    }
+
+    fn trigger_rows_for_relation(&self, relation_oid: u32) -> Vec<PgTriggerRow> {
+        trigger_rows_for_relation(self.db, self.client_id, self.txn_ctx, relation_oid)
     }
 
     fn class_row_by_oid(&self, relation_oid: u32) -> Option<PgClassRow> {

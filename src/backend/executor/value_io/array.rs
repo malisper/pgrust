@@ -478,6 +478,12 @@ fn array_element_layout(
                 details: "void arrays are unsupported".into(),
             });
         }
+        SqlTypeKind::Trigger => {
+            return Err(ExecError::InvalidStorageValue {
+                column: column.into(),
+                details: "trigger arrays are unsupported".into(),
+            });
+        }
         SqlTypeKind::Record | SqlTypeKind::Composite => (-1, AttributeAlign::Double),
         SqlTypeKind::Int2 => (2, AttributeAlign::Short),
         SqlTypeKind::Int4
@@ -741,6 +747,10 @@ fn decode_array_element_value(
         SqlTypeKind::Void => Err(ExecError::InvalidStorageValue {
             column: column.into(),
             details: "void arrays are unsupported".into(),
+        }),
+        SqlTypeKind::Trigger => Err(ExecError::InvalidStorageValue {
+            column: column.into(),
+            details: "trigger arrays are unsupported".into(),
         }),
         SqlTypeKind::Record | SqlTypeKind::Composite => {
             decode_composite_datum(bytes).map(Value::Record)

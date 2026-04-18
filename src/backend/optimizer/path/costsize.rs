@@ -2783,7 +2783,8 @@ pub(super) fn estimate_sql_type_width(sql_type: SqlType) -> usize {
         | SqlTypeKind::OidVector
         | SqlTypeKind::PgNodeTree
         | SqlTypeKind::Record
-        | SqlTypeKind::Composite => 32,
+        | SqlTypeKind::Composite
+        | SqlTypeKind::Trigger => 32,
         SqlTypeKind::Range
         | SqlTypeKind::Int4Range
         | SqlTypeKind::Int8Range

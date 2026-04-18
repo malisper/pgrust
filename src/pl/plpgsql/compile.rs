@@ -1,16 +1,17 @@
 use std::collections::HashMap;
 
 use crate::backend::executor::Expr;
+use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{
-    CatalogLookup, ParseError, SqlType, SqlTypeKind, Statement, bind_scalar_expr_in_scope,
-    parse_expr, parse_statement, parse_type_name, pg_plan_query_with_outer,
-    pg_plan_values_query_with_outer,
+    CatalogLookup, ParseError, SlotScopeColumn, SqlType, SqlTypeKind, Statement,
+    bind_scalar_expr_in_named_slot_scope, parse_expr, parse_statement, parse_type_name,
+    pg_plan_query_with_outer, pg_plan_values_query_with_outer,
 };
 use crate::include::catalog::{PgProcRow, RECORD_TYPE_OID};
 use crate::include::nodes::plannodes::PlannedStmt;
 use crate::include::nodes::primnodes::QueryColumn;
 
-use super::ast::{Block, RaiseLevel, ReturnQueryKind, Stmt, VarDecl};
+use super::ast::{AssignTarget, Block, RaiseLevel, ReturnQueryKind, Stmt, VarDecl};
 use super::gram::parse_block;
 
 #[derive(Debug, Clone)]
@@ -69,6 +70,35 @@ pub(crate) enum FunctionReturnContract {
     AnonymousRecord {
         setof: bool,
     },
+    Trigger {
+        bindings: CompiledTriggerBindings,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CompiledTriggerBindings {
+    pub(crate) new_row: CompiledTriggerRelation,
+    pub(crate) old_row: CompiledTriggerRelation,
+    pub(crate) tg_name_slot: usize,
+    pub(crate) tg_op_slot: usize,
+    pub(crate) tg_when_slot: usize,
+    pub(crate) tg_level_slot: usize,
+    pub(crate) tg_relid_slot: usize,
+    pub(crate) tg_nargs_slot: usize,
+    pub(crate) tg_argv_slot: usize,
+    pub(crate) tg_table_name_slot: usize,
+    pub(crate) tg_table_schema_slot: usize,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CompiledTriggerRelation {
+    pub(crate) slots: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TriggerReturnedRow {
+    New,
+    Old,
 }
 
 #[derive(Debug, Clone)]
@@ -101,6 +131,11 @@ pub(crate) enum CompiledStmt {
     ReturnNext {
         expr: Option<CompiledExpr>,
     },
+    ReturnTriggerRow {
+        row: TriggerReturnedRow,
+    },
+    ReturnTriggerNull,
+    ReturnTriggerNoValue,
     ReturnQuery {
         plan: PlannedStmt,
         kind: ReturnQueryKind,
@@ -113,9 +148,16 @@ struct ScopeVar {
     ty: SqlType,
 }
 
+#[derive(Debug, Clone)]
+struct RelationScopeVar {
+    name: String,
+    columns: Vec<SlotScopeColumn>,
+}
+
 #[derive(Debug, Clone, Default)]
 struct CompileEnv {
     vars: HashMap<String, ScopeVar>,
+    relation_scopes: Vec<RelationScopeVar>,
     next_slot: usize,
 }
 
@@ -136,6 +178,43 @@ impl CompileEnv {
         self.vars.get(&name.to_ascii_lowercase())
     }
 
+    fn define_relation_scope(
+        &mut self,
+        name: &str,
+        desc: &RelationDesc,
+    ) -> CompiledTriggerRelation {
+        let mut slots = Vec::with_capacity(desc.columns.len());
+        let mut columns = Vec::with_capacity(desc.columns.len());
+        for column in &desc.columns {
+            let slot = self.next_slot;
+            self.next_slot += 1;
+            slots.push(slot);
+            columns.push(SlotScopeColumn {
+                slot,
+                name: column.name.clone(),
+                sql_type: column.sql_type,
+                hidden: column.dropped,
+            });
+        }
+        self.relation_scopes.push(RelationScopeVar {
+            name: name.to_ascii_lowercase(),
+            columns,
+        });
+        CompiledTriggerRelation { slots }
+    }
+
+    fn get_relation_field(&self, relation: &str, field: &str) -> Option<&SlotScopeColumn> {
+        self.relation_scopes
+            .iter()
+            .find(|scope| scope.name.eq_ignore_ascii_case(relation))
+            .and_then(|scope| {
+                scope
+                    .columns
+                    .iter()
+                    .find(|column| !column.hidden && column.name.eq_ignore_ascii_case(field))
+            })
+    }
+
     fn visible_columns(&self) -> Vec<(String, SqlType)> {
         let mut ordered = self
             .vars
@@ -146,6 +225,28 @@ impl CompileEnv {
         ordered
             .into_iter()
             .map(|(_, name, ty)| (name, ty))
+            .collect()
+    }
+
+    fn slot_columns(&self) -> Vec<SlotScopeColumn> {
+        let mut ordered = self
+            .vars
+            .iter()
+            .map(|(name, var)| SlotScopeColumn {
+                slot: var.slot,
+                name: name.clone(),
+                sql_type: var.ty,
+                hidden: false,
+            })
+            .collect::<Vec<_>>();
+        ordered.sort_by_key(|column| column.slot);
+        ordered
+    }
+
+    fn relation_slot_scopes(&self) -> Vec<(String, Vec<SlotScopeColumn>)> {
+        self.relation_scopes
+            .iter()
+            .map(|scope| (scope.name.clone(), scope.columns.clone()))
             .collect()
     }
 }
@@ -262,6 +363,24 @@ pub(crate) fn compile_function_from_proc(
     })
 }
 
+pub(crate) fn compile_trigger_function_from_proc(
+    row: &PgProcRow,
+    relation_desc: &RelationDesc,
+    catalog: &dyn CatalogLookup,
+) -> Result<CompiledFunction, ParseError> {
+    let block = parse_block(&row.prosrc)?;
+    let mut env = CompileEnv::default();
+    let bindings = seed_trigger_env(&mut env, relation_desc);
+    let return_contract = FunctionReturnContract::Trigger { bindings };
+    let body = compile_block(&block, catalog, &mut env, Some(&return_contract))?;
+    Ok(CompiledFunction {
+        parameter_slots: Vec::new(),
+        output_slots: Vec::new(),
+        body,
+        return_contract,
+    })
+}
+
 fn function_return_contract(
     row: &PgProcRow,
     catalog: &dyn CatalogLookup,
@@ -316,6 +435,9 @@ fn function_return_contract(
     }
 
     match result_type.kind {
+        SqlTypeKind::Trigger => Err(ParseError::FeatureNotSupported(
+            "trigger functions cannot be called in SQL expressions".into(),
+        )),
         SqlTypeKind::Record | SqlTypeKind::Composite => Err(ParseError::FeatureNotSupported(
             "non-set record/composite returns are not supported yet".into(),
         )),
@@ -379,13 +501,11 @@ fn compile_stmt(
         Stmt::Block(block) => {
             CompiledStmt::Block(compile_block(block, catalog, env, return_contract)?)
         }
-        Stmt::Assign { name, expr } => {
-            let var = env
-                .get_var(name)
-                .ok_or_else(|| ParseError::UnknownColumn(name.clone()))?;
+        Stmt::Assign { target, expr } => {
+            let (slot, ty) = resolve_assign_target(target, env)?;
             CompiledStmt::Assign {
-                slot: var.slot,
-                ty: var.ty,
+                slot,
+                ty,
                 expr: compile_expr_text(expr, catalog, env)?,
             }
         }
@@ -470,6 +590,29 @@ fn compile_return_stmt(
         ));
     };
     match (contract, expr) {
+        (FunctionReturnContract::Trigger { .. }, Some(expr))
+            if expr.trim().eq_ignore_ascii_case("new") =>
+        {
+            Ok(CompiledStmt::ReturnTriggerRow {
+                row: TriggerReturnedRow::New,
+            })
+        }
+        (FunctionReturnContract::Trigger { .. }, Some(expr))
+            if expr.trim().eq_ignore_ascii_case("old") =>
+        {
+            Ok(CompiledStmt::ReturnTriggerRow {
+                row: TriggerReturnedRow::Old,
+            })
+        }
+        (FunctionReturnContract::Trigger { .. }, Some(expr))
+            if expr.trim().eq_ignore_ascii_case("null") =>
+        {
+            Ok(CompiledStmt::ReturnTriggerNull)
+        }
+        (FunctionReturnContract::Trigger { .. }, None) => Ok(CompiledStmt::ReturnTriggerNoValue),
+        (FunctionReturnContract::Trigger { .. }, Some(_)) => Err(ParseError::FeatureNotSupported(
+            "trigger RETURN expressions must be NEW, OLD, or NULL".into(),
+        )),
         (FunctionReturnContract::Scalar { setof: false, .. }, Some(expr)) => {
             Ok(CompiledStmt::Return {
                 expr: Some(compile_expr_text(expr, catalog, env)?),
@@ -508,6 +651,9 @@ fn compile_return_next_stmt(
         ));
     };
     match (contract, expr) {
+        (FunctionReturnContract::Trigger { .. }, _) => Err(ParseError::FeatureNotSupported(
+            "RETURN NEXT is not valid in trigger functions".into(),
+        )),
         (FunctionReturnContract::Scalar { setof: true, .. }, Some(expr)) => {
             Ok(CompiledStmt::ReturnNext {
                 expr: Some(compile_expr_text(expr, catalog, env)?),
@@ -543,6 +689,7 @@ fn compile_return_query_stmt(
         FunctionReturnContract::Scalar { setof, .. }
         | FunctionReturnContract::FixedRow { setof, .. }
         | FunctionReturnContract::AnonymousRecord { setof } => *setof,
+        FunctionReturnContract::Trigger { .. } => false,
     };
     if !is_setof {
         return Err(ParseError::FeatureNotSupported(
@@ -588,9 +735,61 @@ fn compile_expr_text(
     env: &CompileEnv,
 ) -> Result<CompiledExpr, ParseError> {
     let parsed = parse_expr(sql)?;
-    let (expr, sql_type) = bind_scalar_expr_in_scope(&parsed, &env.visible_columns(), catalog)?;
+    let (expr, sql_type) = bind_scalar_expr_in_named_slot_scope(
+        &parsed,
+        &env.relation_slot_scopes(),
+        &env.slot_columns(),
+        catalog,
+    )?;
     let _ = sql_type;
     Ok(CompiledExpr { expr })
+}
+
+fn seed_trigger_env(env: &mut CompileEnv, relation_desc: &RelationDesc) -> CompiledTriggerBindings {
+    let new_row = env.define_relation_scope("new", relation_desc);
+    let old_row = env.define_relation_scope("old", relation_desc);
+    let tg_name_slot = env.define_var("tg_name", SqlType::new(SqlTypeKind::Text));
+    let tg_op_slot = env.define_var("tg_op", SqlType::new(SqlTypeKind::Text));
+    let tg_when_slot = env.define_var("tg_when", SqlType::new(SqlTypeKind::Text));
+    let tg_level_slot = env.define_var("tg_level", SqlType::new(SqlTypeKind::Text));
+    let tg_relid_slot = env.define_var("tg_relid", SqlType::new(SqlTypeKind::Oid));
+    let tg_nargs_slot = env.define_var("tg_nargs", SqlType::new(SqlTypeKind::Int4));
+    let tg_argv_slot = env.define_var(
+        "tg_argv",
+        SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
+    );
+    let tg_table_name_slot = env.define_var("tg_table_name", SqlType::new(SqlTypeKind::Text));
+    let tg_table_schema_slot = env.define_var("tg_table_schema", SqlType::new(SqlTypeKind::Text));
+
+    CompiledTriggerBindings {
+        new_row,
+        old_row,
+        tg_name_slot,
+        tg_op_slot,
+        tg_when_slot,
+        tg_level_slot,
+        tg_relid_slot,
+        tg_nargs_slot,
+        tg_argv_slot,
+        tg_table_name_slot,
+        tg_table_schema_slot,
+    }
+}
+
+fn resolve_assign_target(
+    target: &AssignTarget,
+    env: &CompileEnv,
+) -> Result<(usize, SqlType), ParseError> {
+    match target {
+        AssignTarget::Name(name) => env
+            .get_var(name)
+            .map(|var| (var.slot, var.ty))
+            .ok_or_else(|| ParseError::UnknownColumn(name.clone())),
+        AssignTarget::Field { relation, field } => env
+            .get_relation_field(relation, field)
+            .map(|column| (column.slot, column.sql_type))
+            .ok_or_else(|| ParseError::UnknownColumn(format!("{relation}.{field}"))),
+    }
 }
 
 fn parse_proc_argtype_oids(argtypes: &str) -> Option<Vec<u32>> {

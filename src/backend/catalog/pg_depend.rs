@@ -5,7 +5,8 @@ use crate::backend::utils::cache::catcache::sql_type_oid;
 use crate::include::catalog::{
     DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, PG_ATTRDEF_RELATION_OID,
     PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID, PG_NAMESPACE_RELATION_OID,
-    PG_PROC_RELATION_OID, PG_REWRITE_RELATION_OID, PG_TYPE_RELATION_OID, PgDependRow,
+    PG_PROC_RELATION_OID, PG_REWRITE_RELATION_OID, PG_TRIGGER_RELATION_OID, PG_TYPE_RELATION_OID,
+    PgDependRow,
 };
 use std::collections::BTreeSet;
 
@@ -277,6 +278,31 @@ pub fn proc_depend_rows(
                 deptype: DEPENDENCY_NORMAL,
             }),
     );
+    sort_pg_depend_rows(&mut rows);
+    rows
+}
+
+pub fn trigger_depend_rows(trigger_oid: u32, relation_oid: u32, proc_oid: u32) -> Vec<PgDependRow> {
+    let mut rows = vec![
+        PgDependRow {
+            classid: PG_TRIGGER_RELATION_OID,
+            objid: trigger_oid,
+            objsubid: 0,
+            refclassid: PG_CLASS_RELATION_OID,
+            refobjid: relation_oid,
+            refobjsubid: 0,
+            deptype: DEPENDENCY_AUTO,
+        },
+        PgDependRow {
+            classid: PG_TRIGGER_RELATION_OID,
+            objid: trigger_oid,
+            objsubid: 0,
+            refclassid: PG_PROC_RELATION_OID,
+            refobjid: proc_oid,
+            refobjsubid: 0,
+            deptype: DEPENDENCY_NORMAL,
+        },
+    ];
     sort_pg_depend_rows(&mut rows);
     rows
 }

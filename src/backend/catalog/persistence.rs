@@ -280,7 +280,8 @@ fn catalog_row_identity_matches(
     match kind {
         BootstrapCatalogKind::PgClass
         | BootstrapCatalogKind::PgType
-        | BootstrapCatalogKind::PgAttrdef => catalog_value_eq(left.first(), right.first()),
+        | BootstrapCatalogKind::PgAttrdef
+        | BootstrapCatalogKind::PgTrigger => catalog_value_eq(left.first(), right.first()),
         BootstrapCatalogKind::PgAttribute => {
             catalog_value_eq(left.first(), right.first())
                 && catalog_value_eq(left.get(4), right.get(4))

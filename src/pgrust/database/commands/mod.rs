@@ -17,4 +17,5 @@ mod schema;
 mod sequence;
 mod session_auth;
 mod tablespace;
+mod trigger;
 mod typecmds;

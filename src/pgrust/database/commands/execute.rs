@@ -766,6 +766,12 @@ impl Database {
                     create_stmt,
                     configured_search_path,
                 ),
+            Statement::CreateTrigger(ref create_stmt) => self
+                .execute_create_trigger_stmt_with_search_path(
+                    client_id,
+                    create_stmt,
+                    configured_search_path,
+                ),
             Statement::CreateType(ref create_stmt) => self
                 .execute_create_type_stmt_with_search_path(
                     client_id,
@@ -828,6 +834,12 @@ impl Database {
             ),
             Statement::DropConversion(ref drop_stmt) => self
                 .execute_drop_conversion_stmt_with_search_path(
+                    client_id,
+                    drop_stmt,
+                    configured_search_path,
+                ),
+            Statement::DropTrigger(ref drop_stmt) => self
+                .execute_drop_trigger_stmt_with_search_path(
                     client_id,
                     drop_stmt,
                     configured_search_path,

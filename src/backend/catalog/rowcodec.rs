@@ -10,8 +10,8 @@ use crate::include::catalog::{
     PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow,
     PgDatabaseRow, PgDependRow, PgDescriptionRow, PgIndexRow, PgInheritsRow, PgLanguageRow,
     PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow, PgRewriteRow,
-    PgStatisticRow, PgTablespaceRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow,
-    PgTsTemplateRow, PgTypeRow, bootstrap_composite_type_rows, builtin_type_rows,
+    PgStatisticRow, PgTablespaceRow, PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow,
+    PgTsParserRow, PgTsTemplateRow, PgTypeRow, bootstrap_composite_type_rows, builtin_type_rows,
 };
 use crate::include::nodes::datum::{ArrayValue, Value};
 
@@ -172,6 +172,12 @@ pub(crate) fn catalog_row_values_for_kind(
             .cloned()
             .map(pg_rewrite_row_values)
             .collect(),
+        BootstrapCatalogKind::PgTrigger => rows
+            .triggers
+            .iter()
+            .cloned()
+            .map(pg_trigger_row_values)
+            .collect(),
         BootstrapCatalogKind::PgStatistic => rows
             .statistics
             .iter()
@@ -246,10 +252,11 @@ pub(crate) fn pg_class_row_from_values(values: Vec<Value>) -> Result<PgClassRow,
         relpersistence,
         relkind,
         relhassubclass: expect_bool(&values[11])?,
-        relispartition: expect_bool(&values[12])?,
-        relnatts: expect_int16(&values[13])?,
-        relpages: expect_int32(&values[14])?,
-        reltuples: expect_float64(&values[15])?,
+        relhastriggers: expect_bool(&values[12])?,
+        relispartition: expect_bool(&values[13])?,
+        relnatts: expect_int16(&values[14])?,
+        relpages: expect_int32(&values[15])?,
+        reltuples: expect_float64(&values[16])?,
     })
 }
 
@@ -259,6 +266,32 @@ pub(crate) fn pg_am_row_from_values(values: Vec<Value>) -> Result<PgAmRow, Catal
         amname: expect_text(&values[1])?,
         amhandler: expect_oid(&values[2])?,
         amtype: expect_char(&values[3], "amtype")?,
+    })
+}
+
+pub(crate) fn pg_trigger_row_from_values(values: Vec<Value>) -> Result<PgTriggerRow, CatalogError> {
+    Ok(PgTriggerRow {
+        oid: expect_oid(&values[0])?,
+        tgrelid: expect_oid(&values[1])?,
+        tgparentid: expect_oid(&values[2])?,
+        tgname: expect_text(&values[3])?,
+        tgfoid: expect_oid(&values[4])?,
+        tgtype: expect_int16(&values[5])?,
+        tgenabled: expect_char(&values[6], "tgenabled")?,
+        tgisinternal: expect_bool(&values[7])?,
+        tgconstrrelid: expect_oid(&values[8])?,
+        tgconstrindid: expect_oid(&values[9])?,
+        tgconstraint: expect_oid(&values[10])?,
+        tgdeferrable: expect_bool(&values[11])?,
+        tginitdeferred: expect_bool(&values[12])?,
+        tgnargs: expect_int16(&values[13])?,
+        tgattr: nullable_int16_array(&values[14])?
+            .ok_or(CatalogError::Corrupt("expected tgattr array"))?,
+        tgargs: nullable_text_array(&values[15])?
+            .ok_or(CatalogError::Corrupt("expected tgargs array"))?,
+        tgqual: nullable_text(&values[16])?,
+        tgoldtable: nullable_text(&values[17])?,
+        tgnewtable: nullable_text(&values[18])?,
     })
 }
 
@@ -780,6 +813,7 @@ fn pg_class_row_values(row: PgClassRow) -> Vec<Value> {
         Value::Text(row.relpersistence.to_string().into()),
         Value::Text(row.relkind.to_string().into()),
         Value::Bool(row.relhassubclass),
+        Value::Bool(row.relhastriggers),
         Value::Bool(row.relispartition),
         Value::Int16(row.relnatts),
         Value::Int32(row.relpages),
@@ -1139,6 +1173,35 @@ fn pg_rewrite_row_values(row: PgRewriteRow) -> Vec<Value> {
         Value::Bool(row.is_instead),
         Value::Text(row.ev_qual.into()),
         Value::Text(row.ev_action.into()),
+    ]
+}
+
+fn pg_trigger_row_values(row: PgTriggerRow) -> Vec<Value> {
+    vec![
+        Value::Int32(row.oid as i32),
+        Value::Int32(row.tgrelid as i32),
+        Value::Int32(row.tgparentid as i32),
+        Value::Text(row.tgname.into()),
+        Value::Int32(row.tgfoid as i32),
+        Value::Int16(row.tgtype),
+        Value::InternalChar(row.tgenabled as u8),
+        Value::Bool(row.tgisinternal),
+        Value::Int32(row.tgconstrrelid as i32),
+        Value::Int32(row.tgconstrindid as i32),
+        Value::Int32(row.tgconstraint as i32),
+        Value::Bool(row.tgdeferrable),
+        Value::Bool(row.tginitdeferred),
+        Value::Int16(row.tgnargs),
+        Value::PgArray(int16_array_value(row.tgattr)),
+        Value::PgArray(ArrayValue::from_1d(
+            row.tgargs
+                .into_iter()
+                .map(|arg| Value::Text(arg.into()))
+                .collect::<Vec<_>>(),
+        )),
+        nullable_text_value(row.tgqual),
+        nullable_text_value(row.tgoldtable),
+        nullable_text_value(row.tgnewtable),
     ]
 }
 

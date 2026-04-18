@@ -59,6 +59,7 @@ pub fn system_catalog_index_entry_for_db(
         relpersistence: 'p',
         relkind: 'i',
         relhassubclass: false,
+        relhastriggers: false,
         relispartition: false,
         relpages: 0,
         reltuples: 0.0,

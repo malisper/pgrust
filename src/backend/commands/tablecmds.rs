@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::rc::Rc;
 
 use parking_lot::RwLock;
@@ -30,9 +30,11 @@ use crate::backend::storage::smgr::ForkNumber;
 use crate::backend::storage::smgr::StorageManager;
 use crate::backend::utils::time::instant::Instant;
 use crate::pgrust::database::TransactionWaiter;
+use crate::pl::plpgsql::TriggerOperation;
 
 use super::explain::{format_buffer_usage, format_explain_lines_with_costs};
 use super::upsert::execute_insert_on_conflict_rows;
+use super::trigger::RuntimeTriggers;
 use crate::backend::executor::exec_expr::{compile_predicate_with_decoder, eval_expr};
 use crate::backend::executor::exec_tuples::CompiledTupleDecoder;
 use crate::backend::executor::value_io::{coerce_assignment_value, encode_tuple_values};
@@ -1253,6 +1255,7 @@ pub fn execute_insert(
         } else {
             let inserted = execute_insert_values(
                 &stmt.relation_name,
+                stmt.relation_oid,
                 stmt.rel,
                 stmt.toast,
                 stmt.toast_index.as_ref(),
@@ -1375,6 +1378,7 @@ fn execute_merge_insert_action(
     }
     let inserted = execute_insert_values(
         &stmt.relation_name,
+        stmt.relation_oid,
         stmt.rel,
         stmt.toast,
         stmt.toast_index.as_ref(),
@@ -1728,6 +1732,7 @@ fn sql_type_display_name(ty: SqlType) -> String {
         SqlTypeKind::AnyArray => "anyarray",
         SqlTypeKind::Record | SqlTypeKind::Composite => "record",
         SqlTypeKind::Void => "void",
+        SqlTypeKind::Trigger => "trigger",
         SqlTypeKind::Int2 => "smallint",
         SqlTypeKind::Int2Vector => "int2vector",
         SqlTypeKind::Int4 => "integer",
@@ -2293,8 +2298,18 @@ fn assignment_subscript_index(value: Option<&Value>) -> Result<Option<i32>, Exec
     }
 }
 
+fn modified_attnums_for_update(assignments: &[BoundAssignment]) -> Vec<i16> {
+    assignments
+        .iter()
+        .map(|assignment| assignment.column_index as i16 + 1)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 pub fn execute_insert_values(
     relation_name: &str,
+    relation_oid: u32,
     rel: crate::backend::storage::smgr::RelFileLocator,
     toast: Option<ToastRelationRef>,
     toast_index: Option<&BoundIndexRelation>,
@@ -2306,7 +2321,32 @@ pub fn execute_insert_values(
     xid: TransactionId,
     cid: CommandId,
 ) -> Result<usize, ExecError> {
+    let triggers = ctx
+        .catalog
+        .as_ref()
+        .map(|catalog| {
+            RuntimeTriggers::load(
+                catalog,
+                relation_oid,
+                relation_name,
+                desc,
+                TriggerOperation::Insert,
+                &[],
+            )
+        })
+        .transpose()?;
+    if let Some(triggers) = &triggers {
+        triggers.before_statement(ctx)?;
+    }
+
+    let mut inserted = 0usize;
     for values in rows {
+        let Some(values) = (match &triggers {
+            Some(triggers) => triggers.before_row_insert(values.clone(), ctx)?,
+            None => Some(values.clone()),
+        }) else {
+            continue;
+        };
         let heap_tid = write_insert_heap_row(
             relation_name,
             rel,
@@ -2314,15 +2354,23 @@ pub fn execute_insert_values(
             toast_index,
             desc,
             relation_constraints,
-            values,
+            &values,
             ctx,
             xid,
             cid,
         )?;
-        maintain_indexes_for_row(rel, desc, indexes, values, heap_tid, ctx)?;
+        maintain_indexes_for_row(rel, desc, indexes, &values, heap_tid, ctx)?;
+        inserted += 1;
+        if let Some(triggers) = &triggers {
+            triggers.after_row_insert(&values, ctx)?;
+        }
     }
 
-    Ok(rows.len())
+    if let Some(triggers) = &triggers {
+        triggers.after_statement(ctx)?;
+    }
+
+    Ok(inserted)
 }
 
 /// Execute a single-row insert from a prepared insert plan and parameter values.
@@ -2334,6 +2382,24 @@ pub fn execute_prepared_insert_row(
     xid: TransactionId,
     cid: CommandId,
 ) -> Result<(), ExecError> {
+    let triggers = ctx
+        .catalog
+        .as_ref()
+        .map(|catalog| {
+            RuntimeTriggers::load(
+                catalog,
+                prepared.relation_oid,
+                &prepared.relation_name,
+                &prepared.desc,
+                TriggerOperation::Insert,
+                &[],
+            )
+        })
+        .transpose()?;
+    if let Some(triggers) = &triggers {
+        triggers.before_statement(ctx)?;
+    }
+
     let mut slot = TupleSlot::virtual_row(vec![Value::Null; prepared.desc.columns.len()]);
     let mut values = prepared
         .column_defaults
@@ -2343,6 +2409,15 @@ pub fn execute_prepared_insert_row(
     for (column_index, param) in prepared.target_columns.iter().zip(params.iter()) {
         values[*column_index] = param.clone();
     }
+    let Some(values) = (match &triggers {
+        Some(triggers) => triggers.before_row_insert(values, ctx)?,
+        None => Some(values),
+    }) else {
+        if let Some(triggers) = &triggers {
+            triggers.after_statement(ctx)?;
+        }
+        return Ok(());
+    };
     let heap_tid = write_insert_heap_row(
         &prepared.relation_name,
         prepared.rel,
@@ -2366,6 +2441,10 @@ pub fn execute_prepared_insert_row(
     ctx.session_stats
         .write()
         .note_relation_insert(prepared.relation_oid);
+    if let Some(triggers) = &triggers {
+        triggers.after_row_insert(&values, ctx)?;
+        triggers.after_statement(ctx)?;
+    }
     Ok(())
 }
 
@@ -2397,6 +2476,25 @@ pub fn execute_update_with_waiter(
         let mut affected_rows = 0;
 
         for target in &stmt.targets {
+            let modified_attnums = modified_attnums_for_update(&target.assignments);
+            let triggers = ctx
+                .catalog
+                .as_ref()
+                .map(|catalog| {
+                    RuntimeTriggers::load(
+                        catalog,
+                        target.relation_oid,
+                        &target.relation_name,
+                        &target.desc,
+                        TriggerOperation::Update,
+                        &modified_attnums,
+                    )
+                })
+                .transpose()?;
+            if let Some(triggers) = &triggers {
+                triggers.before_statement(ctx)?;
+            }
+
             let desc = Rc::new(target.desc.clone());
             let attr_descs: Rc<[_]> = desc.attribute_descs().into();
             let decoder = Rc::new(CompiledTupleDecoder::compile(&desc, &attr_descs));
@@ -2447,6 +2545,16 @@ pub fn execute_update_with_waiter(
                 let mut current_values = values;
                 loop {
                     ctx.check_for_interrupts()?;
+                    let Some(triggered_values) = (match &triggers {
+                        Some(triggers) => triggers.before_row_update(
+                            &current_old_values,
+                            current_values.clone(),
+                            ctx,
+                        )?,
+                        None => Some(current_values.clone()),
+                    }) else {
+                        break;
+                    };
                     match write_updated_row(
                         &target.relation_name,
                         target.rel,
@@ -2458,7 +2566,7 @@ pub fn execute_update_with_waiter(
                         &target.indexes,
                         current_tid,
                         &current_old_values,
-                        &current_values,
+                        &triggered_values,
                         ctx,
                         xid,
                         cid,
@@ -2468,6 +2576,13 @@ pub fn execute_update_with_waiter(
                             ctx.session_stats
                                 .write()
                                 .note_relation_update(target.relation_oid);
+                            if let Some(triggers) = &triggers {
+                                triggers.after_row_update(
+                                    &current_old_values,
+                                    &triggered_values,
+                                    ctx,
+                                )?;
+                            }
                             affected_rows += 1;
                             break;
                         }
@@ -2516,6 +2631,10 @@ pub fn execute_update_with_waiter(
                     }
                 }
             }
+
+            if let Some(triggers) = &triggers {
+                triggers.after_statement(ctx)?;
+            }
         }
 
         Ok(StatementResult::AffectedRows(affected_rows))
@@ -2549,6 +2668,24 @@ pub fn execute_delete_with_waiter(
     let result = (|| {
         let mut affected_rows = 0;
         for target in &stmt.targets {
+            let triggers = ctx
+                .catalog
+                .as_ref()
+                .map(|catalog| {
+                    RuntimeTriggers::load(
+                        catalog,
+                        target.relation_oid,
+                        &target.relation_name,
+                        &target.desc,
+                        TriggerOperation::Delete,
+                        &[],
+                    )
+                })
+                .transpose()?;
+            if let Some(triggers) = &triggers {
+                triggers.before_statement(ctx)?;
+            }
+
             let desc = Rc::new(target.desc.clone());
             let attr_descs: Rc<[_]> = desc.attribute_descs().into();
             let decoder = Rc::new(CompiledTupleDecoder::compile(&desc, &attr_descs));
@@ -2582,6 +2719,11 @@ pub fn execute_delete_with_waiter(
                 let mut current_values = values.clone();
                 loop {
                     ctx.check_for_interrupts()?;
+                    if let Some(triggers) = &triggers {
+                        if !triggers.before_row_delete(&current_values, ctx)? {
+                            break;
+                        }
+                    }
                     crate::backend::executor::enforce_inbound_foreign_keys_on_delete(
                         &target.relation_name,
                         &target.referenced_by_foreign_keys,
@@ -2623,6 +2765,9 @@ pub fn execute_delete_with_waiter(
                             ctx.session_stats
                                 .write()
                                 .note_relation_delete(target.relation_oid);
+                            if let Some(triggers) = &triggers {
+                                triggers.after_row_delete(&current_values, ctx)?;
+                            }
                             affected_rows += 1;
                             break;
                         }
@@ -2652,6 +2797,10 @@ pub fn execute_delete_with_waiter(
                         Err(e) => return Err(e.into()),
                     }
                 }
+            }
+
+            if let Some(triggers) = &triggers {
+                triggers.after_statement(ctx)?;
             }
         }
 

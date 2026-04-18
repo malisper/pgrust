@@ -27,10 +27,16 @@ pub enum ReturnQueryKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AssignTarget {
+    Name(String),
+    Field { relation: String, field: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stmt {
     Block(Block),
     Assign {
-        name: String,
+        target: AssignTarget,
         expr: String,
     },
     Null,
