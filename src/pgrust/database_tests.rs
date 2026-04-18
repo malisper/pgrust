@@ -1,11 +1,15 @@
 use super::*;
+use crate::backend::commands::analyze::collect_analyze_stats;
 use crate::backend::executor::{ExecError, Value};
-use crate::backend::parser::{CatalogLookup, ParseError, SqlType, SqlTypeKind};
+use crate::backend::parser::{BoundRelation, CatalogLookup, ParseError, SqlType, SqlTypeKind};
+use crate::backend::utils::cache::lsyscache::LazyCatalogLookup;
 use crate::include::catalog::{
     FLOAT8_TYPE_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID, PG_CLASS_RELATION_OID,
     PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID,
 };
+use crate::include::nodes::parsenodes::MaintenanceTarget;
 use crate::include::nodes::primnodes::QueryColumn;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
@@ -119,6 +123,76 @@ fn role_oid(db: &Database, role_name: &str) -> u32 {
         .find(|row| row.rolname.eq_ignore_ascii_case(role_name))
         .map(|row| row.oid)
         .unwrap()
+}
+
+struct AnalyzeRelkindOverrideCatalog<'a> {
+    inner: LazyCatalogLookup<'a>,
+    relkind_overrides: HashMap<u32, char>,
+}
+
+impl AnalyzeRelkindOverrideCatalog<'_> {
+    fn apply_override(&self, mut relation: BoundRelation) -> BoundRelation {
+        if let Some(relkind) = self.relkind_overrides.get(&relation.relation_oid) {
+            relation.relkind = *relkind;
+        }
+        relation
+    }
+}
+
+impl CatalogLookup for AnalyzeRelkindOverrideCatalog<'_> {
+    fn lookup_any_relation(&self, name: &str) -> Option<BoundRelation> {
+        self.inner
+            .lookup_any_relation(name)
+            .map(|relation| self.apply_override(relation))
+    }
+
+    fn relation_by_oid(&self, relation_oid: u32) -> Option<BoundRelation> {
+        self.inner
+            .relation_by_oid(relation_oid)
+            .map(|relation| self.apply_override(relation))
+    }
+
+    fn find_all_inheritors(&self, relation_oid: u32) -> Vec<u32> {
+        self.inner.find_all_inheritors(relation_oid)
+    }
+
+    fn has_subclass(&self, relation_oid: u32) -> bool {
+        self.inner.has_subclass(relation_oid)
+    }
+}
+
+fn analyze_executor_context(
+    db: &Database,
+    client_id: ClientId,
+    xid: TransactionId,
+    cid: CommandId,
+    visible_catalog: Option<crate::backend::utils::cache::visible_catalog::VisibleCatalog>,
+) -> crate::backend::executor::ExecutorContext {
+    crate::backend::executor::ExecutorContext {
+        pool: Arc::clone(&db.pool),
+        txns: db.txns.clone(),
+        txn_waiter: Some(db.txn_waiter.clone()),
+        sequences: Some(db.sequences.clone()),
+        checkpoint_stats: db.checkpoint_stats_snapshot(),
+        datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+        interrupts: db.interrupt_state(client_id),
+        stats: Arc::clone(&db.stats),
+        session_stats: db.session_stats_state(client_id),
+        snapshot: db.txns.read().snapshot_for_command(xid, cid).unwrap(),
+        client_id,
+        next_command_id: cid,
+        timed: false,
+        allow_side_effects: false,
+        expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
+        case_test_values: Vec::new(),
+        system_bindings: Vec::new(),
+        subplans: Vec::new(),
+        catalog: visible_catalog,
+        compiled_functions: HashMap::new(),
+        cte_tables: HashMap::new(),
+        cte_producers: HashMap::new(),
+        recursive_worktables: HashMap::new(),
+    }
 }
 
 #[test]
@@ -1252,6 +1326,195 @@ fn analyze_populates_pg_statistic_and_pg_class_stats() {
     assert!(float_value(&column_stats[0][1]) > 0.0);
     assert!(int_value(&column_stats[0][2]) > 0);
     assert!(float_value(&column_stats[0][3]).abs() > 0.0);
+}
+
+#[test]
+fn analyze_without_targets_scans_permitted_heap_relations() {
+    let dir = temp_dir("analyze_permitted_relations");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut bootstrap = Session::new(1);
+    let mut session = Session::new(2);
+
+    bootstrap
+        .execute(&db, "create role analyze_owner login")
+        .unwrap();
+    bootstrap
+        .execute(&db, "create schema hidden authorization analyze_owner")
+        .unwrap();
+    bootstrap
+        .execute(&db, "create table public.not_owned(id int4)")
+        .unwrap();
+    bootstrap
+        .execute(&db, "insert into public.not_owned values (99)")
+        .unwrap();
+
+    session
+        .execute(&db, "set session authorization analyze_owner")
+        .unwrap();
+    session
+        .execute(&db, "create table visible_a(id int4)")
+        .unwrap();
+    session
+        .execute(&db, "create table hidden.hidden_c(id int4)")
+        .unwrap();
+    session
+        .execute(&db, "create table visible_b(id int4)")
+        .unwrap();
+    session
+        .execute(&db, "insert into visible_a values (1), (2)")
+        .unwrap();
+    session
+        .execute(&db, "insert into visible_b values (3)")
+        .unwrap();
+    session
+        .execute(&db, "insert into hidden.hidden_c values (4)")
+        .unwrap();
+
+    match session.execute(&db, "analyze").unwrap() {
+        StatementResult::AffectedRows(count) => assert_eq!(count, 0),
+        other => panic!("expected affected rows, got {other:?}"),
+    }
+
+    let visible_a = query_rows(
+        &db,
+        1,
+        "select relpages, reltuples from pg_class
+         where relname = 'visible_a'
+           and relnamespace = (select oid from pg_namespace where nspname = 'public')",
+    );
+    assert_eq!(visible_a.len(), 1);
+    assert!(int_value(&visible_a[0][0]) >= 1);
+    assert!(float_value(&visible_a[0][1]) >= 2.0);
+
+    let visible_b = query_rows(
+        &db,
+        1,
+        "select relpages, reltuples from pg_class
+         where relname = 'visible_b'
+           and relnamespace = (select oid from pg_namespace where nspname = 'public')",
+    );
+    assert_eq!(visible_b.len(), 1);
+    assert!(int_value(&visible_b[0][0]) >= 1);
+    assert!(float_value(&visible_b[0][1]) >= 1.0);
+
+    let hidden_c = query_rows(
+        &db,
+        1,
+        "select relpages, reltuples from pg_class
+         where relname = 'hidden_c'
+           and relnamespace = (select oid from pg_namespace where nspname = 'hidden')",
+    );
+    assert_eq!(hidden_c.len(), 1);
+    assert!(int_value(&hidden_c[0][0]) >= 1);
+    assert!(float_value(&hidden_c[0][1]) >= 1.0);
+
+    let not_owned = query_rows(
+        &db,
+        1,
+        "select relpages, reltuples from pg_class
+         where relname = 'not_owned'
+           and relnamespace = (select oid from pg_namespace where nspname = 'public')",
+    );
+    assert_eq!(not_owned.len(), 1);
+    assert_eq!(int_value(&not_owned[0][0]), 0);
+    assert_eq!(float_value(&not_owned[0][1]), -1.0);
+}
+
+#[test]
+fn collect_analyze_stats_accepts_materialized_view_relkind() {
+    let dir = temp_dir("analyze_matview_relkind");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table analyze_matview(a int4, b text)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into analyze_matview values (1, 'one'), (2, 'two')",
+        )
+        .unwrap();
+
+    let xid = db.txns.write().begin();
+    let cid = 0;
+    let base = db.lazy_catalog_lookup(1, Some((xid, cid)), None);
+    let visible_catalog = base.materialize_visible_catalog();
+    let relation = base.lookup_any_relation("analyze_matview").unwrap();
+    let catalog = AnalyzeRelkindOverrideCatalog {
+        inner: base,
+        relkind_overrides: HashMap::from([(relation.relation_oid, 'm')]),
+    };
+    let mut ctx = analyze_executor_context(&db, 1, xid, cid, visible_catalog);
+
+    let stats = collect_analyze_stats(
+        &[MaintenanceTarget {
+            table_name: "analyze_matview".into(),
+            columns: Vec::new(),
+            only: false,
+        }],
+        &catalog,
+        &mut ctx,
+    )
+    .unwrap();
+
+    assert_eq!(stats.len(), 1);
+    assert!(stats[0].relpages >= 1);
+    assert!(stats[0].reltuples >= 2.0);
+    assert!(!stats[0].statistics.is_empty());
+    assert!(stats[0].statistics.iter().all(|row| !row.stainherit));
+
+    db.txns.write().abort(xid).unwrap();
+}
+
+#[test]
+fn collect_analyze_stats_treats_partitioned_relkind_as_inherited_only() {
+    let dir = temp_dir("analyze_partitioned_relkind");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table analyze_parent(a int4, b text)")
+        .unwrap();
+    session
+        .execute(&db, "create table analyze_child() inherits (analyze_parent)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into analyze_child values (1, 'one'), (2, 'two'), (3, 'three')",
+        )
+        .unwrap();
+
+    let xid = db.txns.write().begin();
+    let cid = 0;
+    let base = db.lazy_catalog_lookup(1, Some((xid, cid)), None);
+    let visible_catalog = base.materialize_visible_catalog();
+    let relation = base.lookup_any_relation("analyze_parent").unwrap();
+    let catalog = AnalyzeRelkindOverrideCatalog {
+        inner: base,
+        relkind_overrides: HashMap::from([(relation.relation_oid, 'p')]),
+    };
+    let mut ctx = analyze_executor_context(&db, 1, xid, cid, visible_catalog);
+
+    let stats = collect_analyze_stats(
+        &[MaintenanceTarget {
+            table_name: "analyze_parent".into(),
+            columns: Vec::new(),
+            only: false,
+        }],
+        &catalog,
+        &mut ctx,
+    )
+    .unwrap();
+
+    assert_eq!(stats.len(), 1);
+    assert_eq!(stats[0].relpages, -1);
+    assert_eq!(stats[0].reltuples, 3.0);
+    assert!(!stats[0].statistics.is_empty());
+    assert!(stats[0].statistics.iter().all(|row| row.stainherit));
+
+    db.txns.write().abort(xid).unwrap();
 }
 
 #[test]

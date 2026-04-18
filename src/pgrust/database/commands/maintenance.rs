@@ -3,7 +3,10 @@ use crate::backend::access::heap::heapam::heap_update_with_waiter;
 use crate::backend::commands::tablecmds::{collect_matching_rows_heap, maintain_indexes_for_row};
 use crate::backend::executor::value_io::{coerce_assignment_value, tuple_from_values};
 use crate::backend::executor::{ExecutorContext, RelationDesc};
+use crate::include::catalog::relkind_is_analyzable;
 use crate::include::nodes::datum::Value;
+use crate::include::nodes::parsenodes::MaintenanceTarget;
+use crate::pgrust::database::ddl::lookup_analyzable_relation_for_ddl;
 
 fn rewrite_heap_rows_for_added_serial_column(
     db: &Database,
@@ -47,7 +50,96 @@ fn rewrite_heap_rows_for_added_serial_column(
     Ok(())
 }
 
+fn current_database_owner_oid(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+) -> Result<u32, ExecError> {
+    db.backend_catcache(client_id, txn_ctx)
+        .map_err(map_catalog_error)?
+        .database_rows()
+        .into_iter()
+        .find(|row| row.oid == db.database_oid)
+        .map(|row| row.datdba)
+        .ok_or_else(|| ExecError::DetailedError {
+            message: "current database does not exist".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "3D000",
+        })
+}
+
+fn collect_catalog_analyze_targets(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    configured_search_path: Option<&[String]>,
+    analyze_stmt: &AnalyzeStatement,
+) -> Result<Vec<MaintenanceTarget>, ExecError> {
+    if !analyze_stmt.targets.is_empty() {
+        return Ok(analyze_stmt.targets.clone());
+    }
+
+    let auth = db.auth_state(client_id);
+    let auth_catalog = db.auth_catalog(client_id, txn_ctx).map_err(map_catalog_error)?;
+    let is_superuser = auth_catalog
+        .role_by_oid(auth.current_user_oid())
+        .is_some_and(|row| row.rolsuper);
+    let database_owner_oid = current_database_owner_oid(db, client_id, txn_ctx)?;
+    let class_rows = db
+        .backend_catcache(client_id, txn_ctx)
+        .map_err(map_catalog_error)?
+        .class_rows();
+
+    let mut targets = Vec::new();
+    for class in class_rows {
+        if !relkind_is_analyzable(class.relkind) {
+            continue;
+        }
+        if db.other_session_temp_namespace_oid(client_id, class.relnamespace) {
+            continue;
+        }
+        if !is_superuser
+            && auth.current_user_oid() != database_owner_oid
+            && !auth.has_effective_membership(class.relowner, &auth_catalog)
+        {
+            continue;
+        }
+        let Some(table_name) = crate::backend::utils::cache::lsyscache::relation_display_name(
+            db,
+            client_id,
+            txn_ctx,
+            configured_search_path,
+            class.oid,
+        ) else {
+            continue;
+        };
+        targets.push(MaintenanceTarget {
+            table_name,
+            columns: Vec::new(),
+            only: false,
+        });
+    }
+    Ok(targets)
+}
+
 impl Database {
+    pub(crate) fn effective_analyze_targets_with_search_path(
+        &self,
+        client_id: ClientId,
+        txn_ctx: CatalogTxnContext,
+        configured_search_path: Option<&[String]>,
+        analyze_stmt: &AnalyzeStatement,
+    ) -> Result<Vec<MaintenanceTarget>, ExecError> {
+        collect_catalog_analyze_targets(
+            self,
+            client_id,
+            txn_ctx,
+            configured_search_path,
+            analyze_stmt,
+        )
+    }
+
     pub(crate) fn execute_comment_on_domain_stmt_with_search_path(
         &self,
         _client_id: ClientId,
@@ -148,15 +240,20 @@ impl Database {
         configured_search_path: Option<&[String]>,
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
-        let relation_names = analyze_stmt
-            .targets
+        let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+        let targets = self.effective_analyze_targets_with_search_path(
+            client_id,
+            None,
+            configured_search_path,
+            analyze_stmt,
+        )?;
+        let relation_names = targets
             .iter()
             .map(|target| target.table_name.clone())
             .collect::<Vec<_>>();
-        let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
         let rels = relation_names
             .iter()
-            .map(|name| lookup_heap_relation_for_ddl(&catalog, name))
+            .map(|name| lookup_analyzable_relation_for_ddl(&catalog, name))
             .collect::<Result<Vec<_>, _>>()?;
         let rel_locs = rels.iter().map(|rel| rel.rel).collect::<Vec<_>>();
         lock_tables_interruptible(
@@ -172,7 +269,7 @@ impl Database {
         let mut catalog_effects = Vec::new();
         let result = self.execute_analyze_stmt_in_transaction_with_search_path(
             client_id,
-            analyze_stmt,
+            &targets,
             xid,
             0,
             configured_search_path,
@@ -189,7 +286,7 @@ impl Database {
     pub(crate) fn execute_analyze_stmt_in_transaction_with_search_path(
         &self,
         client_id: ClientId,
-        analyze_stmt: &AnalyzeStatement,
+        targets: &[MaintenanceTarget],
         xid: TransactionId,
         cid: CommandId,
         configured_search_path: Option<&[String]>,
@@ -225,7 +322,7 @@ impl Database {
             cte_producers: std::collections::HashMap::new(),
             recursive_worktables: std::collections::HashMap::new(),
         };
-        let analyzed = collect_analyze_stats(&analyze_stmt.targets, &catalog, &mut ctx)?;
+        let analyzed = collect_analyze_stats(targets, &catalog, &mut ctx)?;
         drop(ctx);
 
         let write_ctx = CatalogWriteContext {
