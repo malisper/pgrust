@@ -10748,7 +10748,8 @@ fn create_range_type_exposes_catalog_rows_and_can_back_table_columns() {
     assert_eq!(range_type.typelem, 0);
     assert_eq!(range_type.typarray, range_array_type.oid);
     assert_eq!(range_array_type.typelem, range_type.oid);
-    assert_eq!(range_type.sql_type.kind, SqlTypeKind::Text);
+    assert_eq!(range_type.sql_type.kind, SqlTypeKind::Range);
+    assert_eq!(range_type.sql_type.range_subtype_oid, FLOAT8_TYPE_OID);
 }
 
 #[test]
@@ -10776,6 +10777,34 @@ fn create_range_type_exposes_pg_range_metadata() {
 
     assert_eq!(range_row.rngsubtype, FLOAT8_TYPE_OID);
     assert_eq!(range_row.rngsubdiff.as_deref(), Some("float8mi"));
+}
+
+#[test]
+fn user_defined_ranges_resolve_constructor_and_accessor_calls() {
+    let dir = temp_dir("user_defined_range_function_resolution");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create type float8range as range (subtype = float8, subtype_diff = float8mi)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select \
+                float8range(1.5, 3.5)::text, \
+                lower(float8range(1.5, 3.5))::text, \
+                upper(float8range(1.5, 3.5))::text",
+        ),
+        vec![vec![
+            Value::Text("[1.5,3.5)".into()),
+            Value::Text("1.5".into()),
+            Value::Text("3.5".into()),
+        ]],
+    );
 }
 
 #[test]

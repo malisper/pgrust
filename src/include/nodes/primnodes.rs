@@ -2,10 +2,9 @@ use crate::backend::parser::{SqlType, SqlTypeKind, SubqueryComparisonOp};
 use crate::include::access::htup::AttributeDesc;
 use crate::include::catalog::{
     builtin_scalar_function_for_proc_oid, builtin_window_function_for_proc_oid,
-    proc_oid_for_builtin_scalar_function, proc_oid_for_builtin_window_function,
-    sql_type_for_range_kind, RECORD_TYPE_OID,
+    proc_oid_for_builtin_scalar_function, proc_oid_for_builtin_window_function, RECORD_TYPE_OID,
 };
-use crate::include::nodes::datum::{RangeTypeId, RecordDescriptor, Value};
+use crate::include::nodes::datum::{RangeTypeRef, RecordDescriptor, Value};
 use crate::include::nodes::parsenodes::Query;
 use crate::RelFileLocator;
 
@@ -29,7 +28,7 @@ pub enum ScalarType {
     Box,
     Polygon,
     Circle,
-    Range(RangeTypeId),
+    Range(RangeTypeRef),
     Float32,
     Float64,
     Numeric,

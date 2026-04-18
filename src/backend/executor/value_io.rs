@@ -183,6 +183,7 @@ fn sql_type_kind_tag(kind: SqlTypeKind) -> u8 {
         SqlTypeKind::Float8 => 16,
         SqlTypeKind::Money => 17,
         SqlTypeKind::Numeric => 18,
+        SqlTypeKind::Range => 53,
         SqlTypeKind::Int4Range => 19,
         SqlTypeKind::Int8Range => 20,
         SqlTypeKind::NumericRange => 21,
@@ -241,6 +242,7 @@ fn sql_type_kind_from_tag(tag: u8) -> Result<SqlTypeKind, ExecError> {
         16 => SqlTypeKind::Float8,
         17 => SqlTypeKind::Money,
         18 => SqlTypeKind::Numeric,
+        53 => SqlTypeKind::Range,
         19 => SqlTypeKind::Int4Range,
         20 => SqlTypeKind::Int8Range,
         21 => SqlTypeKind::NumericRange,
@@ -288,10 +290,13 @@ fn encode_sql_type_identity(sql_type: SqlType, out: &mut Vec<u8>) {
     out.push(u8::from(sql_type.is_array));
     out.extend_from_slice(&sql_type.type_oid.to_le_bytes());
     out.extend_from_slice(&sql_type.typrelid.to_le_bytes());
+    out.extend_from_slice(&sql_type.range_subtype_oid.to_le_bytes());
+    out.extend_from_slice(&sql_type.range_multitype_oid.to_le_bytes());
+    out.push(u8::from(sql_type.range_discrete));
 }
 
 fn decode_sql_type_identity(bytes: &[u8], offset: &mut usize) -> Result<SqlType, ExecError> {
-    if *offset + 14 > bytes.len() {
+    if *offset + 23 > bytes.len() {
         return Err(ExecError::InvalidStorageValue {
             column: "<record>".into(),
             details: "truncated composite field type".into(),
@@ -307,12 +312,22 @@ fn decode_sql_type_identity(bytes: &[u8], offset: &mut usize) -> Result<SqlType,
     *offset += 4;
     let typrelid = u32::from_le_bytes(bytes[*offset..*offset + 4].try_into().unwrap());
     *offset += 4;
+    let range_subtype_oid = u32::from_le_bytes(bytes[*offset..*offset + 4].try_into().unwrap());
+    *offset += 4;
+    let range_multitype_oid =
+        u32::from_le_bytes(bytes[*offset..*offset + 4].try_into().unwrap());
+    *offset += 4;
+    let range_discrete = bytes[*offset] != 0;
+    *offset += 1;
     Ok(SqlType {
         kind,
         typmod,
         is_array,
         type_oid,
         typrelid,
+        range_subtype_oid,
+        range_multitype_oid,
+        range_discrete,
     })
 }
 
@@ -615,14 +630,7 @@ fn encode_internal_value(value: &Value) -> Result<Vec<u8>, ExecError> {
         }
         Value::Range(v) => {
             out.push(INTERNAL_VALUE_TAG_RANGE);
-            out.push(match v.kind {
-                crate::include::nodes::datum::RangeTypeId::Int4Range => 0,
-                crate::include::nodes::datum::RangeTypeId::Int8Range => 1,
-                crate::include::nodes::datum::RangeTypeId::NumericRange => 2,
-                crate::include::nodes::datum::RangeTypeId::DateRange => 3,
-                crate::include::nodes::datum::RangeTypeId::TimestampRange => 4,
-                crate::include::nodes::datum::RangeTypeId::TimestampTzRange => 5,
-            });
+            encode_sql_type_identity(v.range_type.sql_type, &mut out);
             encode_internal_text(
                 crate::backend::executor::render_range_text(&Value::Range(v))
                     .unwrap_or_default()
@@ -920,29 +928,10 @@ fn decode_internal_value(bytes: &[u8]) -> Result<Value, ExecError> {
         }
         INTERNAL_VALUE_TAG_RANGE => {
             let mut offset = 0usize;
-            let kind = match *rest
-                .get(offset)
-                .ok_or_else(|| ExecError::InvalidStorageValue {
-                    column: "<record>".into(),
-                    details: "missing range kind".into(),
-                })? {
-                0 => SqlTypeKind::Int4Range,
-                1 => SqlTypeKind::Int8Range,
-                2 => SqlTypeKind::NumericRange,
-                3 => SqlTypeKind::DateRange,
-                4 => SqlTypeKind::TimestampRange,
-                5 => SqlTypeKind::TimestampTzRange,
-                _ => {
-                    return Err(ExecError::InvalidStorageValue {
-                        column: "<record>".into(),
-                        details: "invalid range kind".into(),
-                    });
-                }
-            };
-            offset += 1;
+            let sql_type = decode_sql_type_identity(rest, &mut offset)?;
             let text =
                 std::str::from_utf8(decode_internal_text(rest, &mut offset)?).unwrap_or_default();
-            crate::backend::executor::expr_range::parse_range_text(text, kind)?
+            crate::backend::executor::expr_range::parse_range_text(text, sql_type)?
         }
         INTERNAL_VALUE_TAG_FLOAT64 => {
             Value::Float64(f64::from_le_bytes(rest.try_into().map_err(|_| {
@@ -1767,7 +1756,7 @@ pub(crate) fn decode_value_with_toast(
                 decode_array_bytes(column.sql_type.element_type(), bytes)
             }
         }
-        ScalarType::Range(kind) => {
+        ScalarType::Range(range_type) => {
             if column.storage.attlen != -1 && column.storage.attlen != -2 {
                 return Err(ExecError::UnsupportedStorageType {
                     column: column.name.clone(),
@@ -1775,7 +1764,7 @@ pub(crate) fn decode_value_with_toast(
                     attlen: column.storage.attlen,
                 });
             }
-            Ok(Value::Range(decode_range_bytes(kind, bytes)?))
+            Ok(Value::Range(decode_range_bytes(range_type, bytes)?))
         }
     }
 }

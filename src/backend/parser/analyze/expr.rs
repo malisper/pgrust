@@ -1930,7 +1930,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 };
             let legacy_declared_arg_types =
                 if let Some(spec) = legacy_result_type.and_then(builtin_range_spec_for_sql_type) {
-                    let mut declared = vec![spec.subtype, spec.subtype];
+                    let mut declared = vec![spec.range_type.subtype, spec.range_type.subtype];
                     if lowered_args.len() == 3 {
                         declared.push(SqlType::new(SqlTypeKind::Text));
                     }

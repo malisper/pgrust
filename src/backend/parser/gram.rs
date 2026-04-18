@@ -4827,6 +4827,7 @@ fn sql_type_output_name(ty: SqlType) -> &'static str {
         SqlTypeKind::Int2 => "int2",
         SqlTypeKind::Int2Vector => "int2vector",
         SqlTypeKind::Int4 => "int4",
+        SqlTypeKind::Range => "range",
         SqlTypeKind::Int4Range => "int4range",
         SqlTypeKind::Int8 => "int8",
         SqlTypeKind::Int8Range => "int8range",

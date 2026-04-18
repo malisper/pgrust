@@ -94,7 +94,8 @@ impl CatalogLookup for VisibleCatalog {
     }
 
     fn proc_rows_by_name(&self, name: &str) -> Vec<PgProcRow> {
-        self.catcache
+        let mut rows = self
+            .catcache
             .as_ref()
             .map(|catcache| {
                 catcache
@@ -109,7 +110,13 @@ impl CatalogLookup for VisibleCatalog {
                     .into_iter()
                     .filter(|row| row.proname.eq_ignore_ascii_case(normalized))
                     .collect()
-            })
+            });
+        rows.extend(crate::include::catalog::synthetic_range_proc_rows_by_name(
+            name,
+            &self.type_rows(),
+            &self.range_rows(),
+        ));
+        rows
     }
 
     fn proc_row_by_oid(&self, oid: u32) -> Option<PgProcRow> {
@@ -120,6 +127,13 @@ impl CatalogLookup for VisibleCatalog {
                 bootstrap_pg_proc_rows()
                     .into_iter()
                     .find(|row| row.oid == oid)
+            })
+            .or_else(|| {
+                crate::include::catalog::synthetic_range_proc_row_by_oid(
+                    oid,
+                    &self.type_rows(),
+                    &self.range_rows(),
+                )
             })
     }
 
