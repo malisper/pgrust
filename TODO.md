@@ -292,12 +292,10 @@ Targeted reruns on 2026-04-17:
 
 ## strings.sql follow-up
 
-- [done] Raise a PostgreSQL-style syntax error for illegal string continuation when a comment appears between adjacent string literals across lines.
+- Raise a PostgreSQL-style syntax error for illegal string continuation when a comment appears between adjacent string literals across lines.
 - [done] Fold unquoted identifiers consistently so `CHAR_TBL`, `VARCHAR_TBL`, and `TEXT_TBL` resolve like PostgreSQL in `strings.sql`.
 - [done] Match PostgreSQL `bytea` input diagnostics for malformed hex and escape sequences, including `pg_input_error_info()` messages and SQLSTATEs.
-- [done] Tighten `SIMILAR TO` and `SUBSTRING ... SIMILAR` behavior for one-separator patterns, `ESCAPE NULL`, and PostgreSQL-compatible error text.
-- [done] Match POSIX regexp function behavior in `strings.sql`, especially `regexp_replace`, `regexp_like`, and `regexp_matches` flag handling, replacement escaping, and PostgreSQL-compatible error text.
-- Restore PostgreSQL-style cursor position reporting for remaining `strings.sql` execution errors such as invalid `bytea` escape input.
+- Tighten `SIMILAR TO` and `SUBSTRING ... SIMILAR` behavior for one-separator patterns, `ESCAPE NULL`, and PostgreSQL-compatible error text.
 
 ## JSONPath follow-ups
 
@@ -309,6 +307,8 @@ Targeted reruns on 2026-04-17:
   `.abs()`, `.ceiling()`, and `.floor()`.
   Done: builtin item methods `.double()`, `.boolean()`, and `.string()`.
   Done: builtin numeric cast methods `.number()`, `.integer()`, and `.decimal(...)`.
+  Done: builtin datetime-related methods `.bigint()`, `.date()`, `.time()`, `.time_tz()`,
+  `.timestamp()`, `.timestamp_tz()`, and `.datetime()`.
   Done: string predicate operators `starts with` and `like_regex ... flag ...`.
   Remaining: other currently-rejected valid jsonpath syntax.
 - In progress: PostgreSQL lax-mode auto-unwrapping for array/scalar access.
@@ -409,6 +409,10 @@ Targeted reruns on 2026-04-17:
 - test_setup.sql: add either real `LANGUAGE C` function registration or a narrow compatibility shim for upstream `binary_coercible`
 - test_setup.sql: support `CREATE OPERATOR CLASS` for the hash opclass forms used by upstream setup
 - date.sql:
+  make ambiguous date input parsing respect PostgreSQL `DateStyle` semantics across `YMD`, `DMY`, and `MDY`
+- date.sql:
+  reject ambiguous slash-, dash-, and space-separated date forms that PostgreSQL rejects, and parse accepted forms with PostgreSQL-compatible field ordering and two-digit year rules
+- date.sql:
   tighten named-month and BC-date acceptance rules to match PostgreSQL for forms like `99-Jan-08`, `08-Jan-99`, `99-08-Jan`, and `January 8, 99 BC`
 - date.sql:
   preserve PostgreSQL-style `LINE`/caret context for date input range and syntax errors in simple-query output
@@ -441,8 +445,8 @@ Targeted reruns on 2026-04-17:
 - privileges.sql parity:
   - expose privilege-related system catalogs in SQL, including `pg_auth_members` and `pg_largeobject_metadata`
   - [done] add parser/analyzer support for role membership `GRANTED BY`
-  - [done] add parser/analyzer/executor support for `CASCADE` in role membership revokes
-  - [done] implement `SET ROLE` and `RESET ROLE`
+  - add parser/analyzer/executor support for `CASCADE` in role membership revokes
+  - implement `SET ROLE` and `RESET ROLE`
   - implement SQL-visible `session_user`, `current_user`, and `current_role` semantics used by the regression
   - add parser/executor support for `DROP OWNED`
   - add parser support for `DROP USER`, `CREATE GROUP`, and `ALTER GROUP`
