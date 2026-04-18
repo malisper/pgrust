@@ -4805,6 +4805,53 @@ fn float_and_numeric_casts_to_int2_follow_postgres_rounding() {
 }
 
 #[test]
+fn numeric_special_values_report_postgres_integer_cast_errors() {
+    let base = temp_dir("numeric_special_integer_cast_errors");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    for (sql, expected_message) in [
+        ("select 'NaN'::numeric::int2", "cannot convert NaN to smallint"),
+        (
+            "select 'Infinity'::numeric::int2",
+            "cannot convert infinity to smallint",
+        ),
+        (
+            "select '-Infinity'::numeric::int2",
+            "cannot convert infinity to smallint",
+        ),
+        ("select 'NaN'::numeric::int4", "cannot convert NaN to integer"),
+        (
+            "select 'Infinity'::numeric::int4",
+            "cannot convert infinity to integer",
+        ),
+        (
+            "select '-Infinity'::numeric::int4",
+            "cannot convert infinity to integer",
+        ),
+        ("select 'NaN'::numeric::int8", "cannot convert NaN to bigint"),
+        (
+            "select 'Infinity'::numeric::int8",
+            "cannot convert infinity to bigint",
+        ),
+        (
+            "select '-Infinity'::numeric::int8",
+            "cannot convert infinity to bigint",
+        ),
+    ] {
+        let err = run_sql(&base, &txns, INVALID_TRANSACTION_ID, sql).unwrap_err();
+        assert!(matches!(
+            err,
+            ExecError::DetailedError {
+                ref message,
+                detail: None,
+                sqlstate: "22P02",
+                ..
+            } if message == expected_message
+        ));
+    }
+}
+
+#[test]
 fn abs_builtin_supports_smallint_filters() {
     let base = temp_dir("abs_builtin_smallint");
     let txns = TransactionManager::new_durable(&base).unwrap();
