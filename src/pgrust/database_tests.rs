@@ -9908,6 +9908,135 @@ fn temp_tables_are_removed_on_client_cleanup() {
 }
 
 #[test]
+fn temp_cleanup_keeps_namespace_rows_and_permanent_catalogs_visible() {
+    let base = temp_dir("temp_cleanup_keeps_namespace");
+    let db = Database::open(&base, 16).unwrap();
+    let mut temp_session = Session::new(1);
+    let mut other_session = Session::new(2);
+
+    other_session
+        .execute(&db, "create table items (id int4 not null)")
+        .unwrap();
+    other_session
+        .execute(&db, "insert into items (id) values (1)")
+        .unwrap();
+
+    temp_session
+        .execute(&db, "create temp table items (id int4 not null)")
+        .unwrap();
+    temp_session
+        .execute(&db, "insert into items (id) values (2)")
+        .unwrap();
+
+    match temp_session.execute(&db, "select id from items").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int32(2)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    db.cleanup_client_temp_relations(1);
+    db.clear_temp_backend_id(1);
+
+    match other_session.execute(&db, "select id from items").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int32(1)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match other_session
+        .execute(
+            &db,
+            "select nspname from pg_namespace \
+             where nspname in ('pg_temp_1', 'pg_toast_temp_1') \
+             order by nspname",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Text("pg_temp_1".into())],
+                    vec![Value::Text("pg_toast_temp_1".into())],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    assert!(
+        db.execute(2, "select count(*) from pg_namespace").is_ok(),
+        "catalog lookups must stay intact after temp cleanup"
+    );
+}
+
+#[test]
+fn temp_slot_reuse_starts_from_clean_namespace_contents() {
+    let base = temp_dir("temp_slot_reuse_cleanup");
+    let db = Database::open(&base, 16).unwrap();
+    let mut first_session = Session::with_temp_backend_id(10, 1);
+    let mut reused_session = Session::with_temp_backend_id(11, 1);
+
+    first_session
+        .execute(&db, "create temp table temp_old (id int4 not null)")
+        .unwrap();
+    first_session
+        .execute(&db, "insert into temp_old (id) values (7)")
+        .unwrap();
+
+    db.cleanup_client_temp_relations(10);
+    db.clear_temp_backend_id(10);
+
+    let err = reused_session
+        .execute(&db, "select count(*) from temp_old")
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::Parse(ParseError::UnknownTable(name)) if name == "temp_old"
+    ));
+
+    reused_session
+        .execute(&db, "create temp table temp_new (id int4 not null)")
+        .unwrap();
+    reused_session
+        .execute(&db, "insert into temp_new (id) values (9)")
+        .unwrap();
+
+    match reused_session
+        .execute(&db, "select count(*) from temp_new")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(1)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match reused_session
+        .execute(
+            &db,
+            "select nspname from pg_namespace \
+             where nspname in ('pg_temp_1', 'pg_toast_temp_1') \
+             order by nspname",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Text("pg_temp_1".into())],
+                    vec![Value::Text("pg_toast_temp_1".into())],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn copy_from_rows_parses_extended_numeric_types() {
     let base = temp_dir("copy_from_rows_extended_numeric");
     let db = Database::open(&base, 16).unwrap();

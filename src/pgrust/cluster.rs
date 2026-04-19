@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -25,7 +25,7 @@ use crate::pgrust::auth::AuthState;
 use crate::pgrust::database::{
     ConversionEntry, Database, DatabaseCreateGrant, DatabaseError, DatabaseOpenOptions,
     DatabaseStatsStore, DomainEntry, EnumTypeEntry, LargeObjectRuntime, RangeTypeEntry,
-    SequenceRuntime, SessionStatsState, TempNamespace,
+    SequenceRuntime, SessionStatsState, TempBackendId, TempNamespace,
 };
 use crate::{BufferPool, ClientId};
 
@@ -47,6 +47,8 @@ pub(crate) struct ClusterShared {
     pub open_databases: Arc<RwLock<HashMap<u32, Arc<OpenDatabaseState>>>>,
     pub active_connections: Arc<RwLock<HashMap<u32, usize>>>,
     pub session_activity: Arc<RwLock<HashMap<ClientId, SessionActivityEntry>>>,
+    pub next_temp_backend_id: AtomicU64,
+    pub free_temp_backend_ids: Arc<RwLock<BTreeSet<TempBackendId>>>,
     pub checkpoint_config: Arc<CheckpointConfig>,
     pub checkpoint_stats: Arc<RwLock<CheckpointStatsSnapshot>>,
     pub control_file: Arc<ControlFileStore>,
@@ -86,8 +88,9 @@ pub(crate) struct OpenDatabaseState {
     pub session_interrupt_states: Arc<RwLock<HashMap<ClientId, Arc<InterruptState>>>>,
     pub session_auth_states: Arc<RwLock<HashMap<ClientId, AuthState>>>,
     pub session_stats_states: Arc<RwLock<HashMap<ClientId, Arc<RwLock<SessionStatsState>>>>>,
+    pub session_temp_backend_ids: Arc<RwLock<HashMap<ClientId, TempBackendId>>>,
     pub database_create_grants: Arc<RwLock<Vec<DatabaseCreateGrant>>>,
-    pub temp_relations: Arc<RwLock<HashMap<ClientId, TempNamespace>>>,
+    pub temp_relations: Arc<RwLock<HashMap<TempBackendId, TempNamespace>>>,
     pub domains: Arc<RwLock<BTreeMap<String, DomainEntry>>>,
     pub enum_types: Arc<RwLock<BTreeMap<String, EnumTypeEntry>>>,
     pub range_types: Arc<RwLock<BTreeMap<String, RangeTypeEntry>>>,
@@ -108,6 +111,7 @@ impl OpenDatabaseState {
             session_interrupt_states: Arc::new(RwLock::new(HashMap::new())),
             session_auth_states: Arc::new(RwLock::new(HashMap::new())),
             session_stats_states: Arc::new(RwLock::new(HashMap::new())),
+            session_temp_backend_ids: Arc::new(RwLock::new(HashMap::new())),
             database_create_grants: Arc::new(RwLock::new(Vec::new())),
             temp_relations: Arc::new(RwLock::new(HashMap::new())),
             domains: Arc::new(RwLock::new(BTreeMap::new())),
@@ -272,6 +276,8 @@ impl Cluster {
                 open_databases: Arc::new(RwLock::new(open_databases)),
                 active_connections: Arc::new(RwLock::new(HashMap::new())),
                 session_activity: Arc::new(RwLock::new(HashMap::new())),
+                next_temp_backend_id: AtomicU64::new(1),
+                free_temp_backend_ids: Arc::new(RwLock::new(BTreeSet::new())),
                 checkpoint_config,
                 checkpoint_stats,
                 control_file,
@@ -343,6 +349,7 @@ impl Cluster {
             session_interrupt_states: Arc::clone(&state.session_interrupt_states),
             session_auth_states: Arc::clone(&state.session_auth_states),
             session_stats_states: Arc::clone(&state.session_stats_states),
+            session_temp_backend_ids: Arc::clone(&state.session_temp_backend_ids),
             database_create_grants: Arc::clone(&state.database_create_grants),
             temp_relations: Arc::clone(&state.temp_relations),
             domains: Arc::clone(&state.domains),
@@ -384,6 +391,22 @@ impl Cluster {
             .get(&db_oid)
             .copied()
             .unwrap_or(0)
+    }
+
+    pub(crate) fn allocate_temp_backend_id(&self) -> TempBackendId {
+        if let Some(id) = self.shared.free_temp_backend_ids.write().pop_first() {
+            return id;
+        }
+        self.shared
+            .next_temp_backend_id
+            .fetch_add(1, Ordering::Relaxed) as TempBackendId
+    }
+
+    pub(crate) fn release_temp_backend_id(&self, temp_backend_id: TempBackendId) {
+        self.shared
+            .free_temp_backend_ids
+            .write()
+            .insert(temp_backend_id);
     }
 
     pub(crate) fn shared(&self) -> &Arc<ClusterShared> {

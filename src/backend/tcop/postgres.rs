@@ -520,11 +520,14 @@ struct ConnectionCleanupGuard<'a> {
 impl Drop for ConnectionCleanupGuard<'_> {
     fn drop(&mut self) {
         let client_id = self.state.session.client_id;
+        let temp_backend_id = self.state.session.temp_backend_id;
         self.state.session.cleanup_on_disconnect(self.db);
         self.db.cleanup_client_temp_relations(client_id);
+        self.db.clear_temp_backend_id(client_id);
         self.db.clear_session_activity(client_id);
         self.db.clear_interrupt_state(client_id);
         self.cluster.unregister_connection(self.db.database_oid);
+        self.cluster.release_temp_backend_id(temp_backend_id);
     }
 }
 
@@ -641,14 +644,18 @@ where
         }
     };
     cluster.register_connection(db.database_oid);
+    let temp_backend_id = cluster.allocate_temp_backend_id();
+    db.install_temp_backend_id(client_id, temp_backend_id);
 
     let mut state = ConnectionState {
-        session: Session::new(client_id),
+        session: Session::with_temp_backend_id(client_id, temp_backend_id),
         prepared: HashMap::new(),
         portals: HashMap::new(),
         copy_in: None,
     };
     if let Err(err) = state.session.apply_startup_parameters(&startup_params) {
+        db.clear_temp_backend_id(client_id);
+        cluster.release_temp_backend_id(temp_backend_id);
         cluster.unregister_connection(db.database_oid);
         send_error(
             &mut writer,

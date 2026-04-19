@@ -1,33 +1,38 @@
 use super::*;
 
 impl Database {
-    pub(crate) fn temp_db_oid(client_id: ClientId) -> u32 {
-        TEMP_DB_OID_BASE.saturating_add(client_id)
+    pub(crate) fn temp_db_oid(temp_backend_id: TempBackendId) -> u32 {
+        TEMP_DB_OID_BASE.saturating_add(temp_backend_id)
     }
 
-    pub(crate) fn temp_namespace_name(client_id: ClientId) -> String {
-        format!("pg_temp_{client_id}")
+    pub(crate) fn temp_namespace_name(temp_backend_id: TempBackendId) -> String {
+        format!("pg_temp_{temp_backend_id}")
     }
 
-    pub(crate) fn temp_namespace_oid(client_id: ClientId) -> u32 {
-        Self::temp_db_oid(client_id)
+    pub(crate) fn temp_namespace_oid(temp_backend_id: TempBackendId) -> u32 {
+        Self::temp_db_oid(temp_backend_id)
     }
 
-    pub(crate) fn temp_toast_namespace_name(client_id: ClientId) -> String {
-        format!("pg_toast_temp_{client_id}")
+    pub(crate) fn temp_toast_namespace_name(temp_backend_id: TempBackendId) -> String {
+        format!("pg_toast_temp_{temp_backend_id}")
     }
 
-    pub(crate) fn temp_toast_namespace_oid(client_id: ClientId) -> u32 {
-        TEMP_TOAST_NAMESPACE_OID_BASE.saturating_add(client_id)
+    pub(crate) fn temp_toast_namespace_oid(temp_backend_id: TempBackendId) -> u32 {
+        TEMP_TOAST_NAMESPACE_OID_BASE.saturating_add(temp_backend_id)
     }
 
     #[cfg(test)]
     pub(super) fn has_active_temp_namespace(&self, client_id: ClientId) -> bool {
-        self.temp_relations.read().contains_key(&client_id)
+        self.temp_relations
+            .read()
+            .contains_key(&self.temp_backend_id(client_id))
     }
 
     pub(super) fn owned_temp_namespace(&self, client_id: ClientId) -> Option<TempNamespace> {
-        self.temp_relations.read().get(&client_id).cloned()
+        self.temp_relations
+            .read()
+            .get(&self.temp_backend_id(client_id))
+            .cloned()
     }
 
     pub(crate) fn other_session_temp_namespace_oid(
@@ -35,11 +40,12 @@ impl Database {
         client_id: ClientId,
         namespace_oid: u32,
     ) -> bool {
+        let temp_backend_id = self.temp_backend_id(client_id);
         (namespace_oid >= TEMP_DB_OID_BASE
             && namespace_oid < TEMP_TOAST_NAMESPACE_OID_BASE
-            && namespace_oid != Self::temp_namespace_oid(client_id))
+            && namespace_oid != Self::temp_namespace_oid(temp_backend_id))
             || (namespace_oid >= TEMP_TOAST_NAMESPACE_OID_BASE
-                && namespace_oid != Self::temp_toast_namespace_oid(client_id))
+                && namespace_oid != Self::temp_toast_namespace_oid(temp_backend_id))
     }
 
     pub(super) fn invalidate_backend_cache_state(&self, client_id: ClientId) {
@@ -70,6 +76,7 @@ impl Database {
         allow_temporary_namespace: bool,
     ) -> Result<(String, u32, TablePersistence), ParseError> {
         let lowered_name = object_name.to_ascii_lowercase();
+        let temp_backend_id = self.temp_backend_id(client_id);
         let temp_namespace = self.owned_temp_namespace(client_id);
         let is_temp_schema_name = |schema: &str| {
             schema.eq_ignore_ascii_case("pg_temp")
@@ -94,7 +101,7 @@ impl Database {
                 }
                 return Ok((
                     lowered_name,
-                    Self::temp_namespace_oid(client_id),
+                    Self::temp_namespace_oid(temp_backend_id),
                     TablePersistence::Temporary,
                 ));
             }
@@ -115,7 +122,7 @@ impl Database {
         if allow_temporary_namespace && persistence == TablePersistence::Temporary {
             return Ok((
                 lowered_name,
-                Self::temp_namespace_oid(client_id),
+                Self::temp_namespace_oid(temp_backend_id),
                 TablePersistence::Temporary,
             ));
         }
@@ -138,7 +145,7 @@ impl Database {
             if allow_temporary_namespace && is_temp_schema_name(&schema_name) {
                 return Ok((
                     lowered_name,
-                    Self::temp_namespace_oid(client_id),
+                    Self::temp_namespace_oid(temp_backend_id),
                     TablePersistence::Temporary,
                 ));
             }
