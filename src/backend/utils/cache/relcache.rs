@@ -123,7 +123,7 @@ impl RelCache {
             .collect::<BTreeSet<_>>();
         for class in catcache.class_rows() {
             let attrs = catcache.attributes_by_relid(class.oid).unwrap_or(&[]);
-            let columns = attrs
+            let columns = match attrs
                 .iter()
                 .map(|attr| {
                     let sql_type = catcache
@@ -173,7 +173,21 @@ impl RelCache {
                     }
                     Ok(desc)
                 })
-                .collect::<Result<Vec<_>, CatalogError>>()?;
+                .collect::<Result<Vec<_>, CatalogError>>()
+            {
+                Ok(columns) => columns,
+                // :HACK: RelCache currently rebuilds eagerly from every relation in the
+                // catalog. Skip non-system relations with dangling type refs so one broken
+                // user relation cannot make the entire catalog unreadable. The PG-like end
+                // state is to open relcache entries lazily and surface corruption per
+                // relation instead of failing the whole cache rebuild.
+                Err(CatalogError::Corrupt("unknown atttypid"))
+                    if class.relnamespace != PG_CATALOG_NAMESPACE_OID =>
+                {
+                    continue;
+                }
+                Err(err) => return Err(err),
+            };
             let entry = RelCacheEntry {
                 rel: relation_locator_for_class_row(class.oid, class.relfilenode, current_db_oid),
                 relation_oid: class.oid,
@@ -506,5 +520,64 @@ mod tests {
             Some(0)
         );
         assert!(cache.get_by_name("zerocol").is_some());
+    }
+
+    #[test]
+    fn relcache_skips_user_relations_with_dangling_type_oids() {
+        let base = temp_dir("relcache_dangling_type");
+        let mut store = CatalogStore::load(&base).unwrap();
+        let entry = store
+            .create_table(
+                "people",
+                RelationDesc {
+                    columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
+                },
+            )
+            .unwrap();
+
+        let mut rows =
+            crate::backend::catalog::rows::physical_catalog_rows_from_catcache(&store.catcache().unwrap());
+        rows.attributes
+            .iter_mut()
+            .find(|row| row.attrelid == entry.relation_oid && row.attname == "id")
+            .unwrap()
+            .atttypid = 999_999;
+        let broken = crate::backend::utils::cache::catcache::CatCache::from_rows(
+            rows.namespaces,
+            rows.classes,
+            rows.attributes,
+            rows.attrdefs,
+            rows.depends,
+            rows.inherits,
+            rows.indexes,
+            rows.rewrites,
+            rows.triggers,
+            rows.ams,
+            rows.amops,
+            rows.amprocs,
+            rows.authids,
+            rows.auth_members,
+            rows.languages,
+            rows.ts_parsers,
+            rows.ts_templates,
+            rows.ts_dicts,
+            rows.ts_configs,
+            rows.ts_config_maps,
+            rows.constraints,
+            rows.operators,
+            rows.opclasses,
+            rows.opfamilies,
+            rows.procs,
+            rows.casts,
+            rows.collations,
+            rows.databases,
+            rows.tablespaces,
+            rows.statistics,
+            rows.types,
+        );
+
+        let cache = RelCache::from_catcache_in_db(&broken, 1).unwrap();
+        assert!(cache.get_by_name("people").is_none());
+        assert!(cache.get_by_name("pg_namespace").is_some());
     }
 }

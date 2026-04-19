@@ -5913,6 +5913,56 @@ fn drop_sequence_restrict_and_cascade_respect_serial_dependencies() {
 }
 
 #[test]
+fn drop_sequence_restrict_and_cascade_respect_row_type_dependencies() {
+    let base = temp_dir("drop_sequence_row_type_dependencies");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(1, "create sequence depseq").unwrap();
+    db.execute(1, "create table dep_table (payload depseq)")
+        .unwrap();
+
+    match db.execute(1, "drop sequence depseq") {
+        Err(ExecError::DetailedError { sqlstate, .. }) => assert_eq!(sqlstate, "2BP01"),
+        other => panic!("expected dependent-object error, got {:?}", other),
+    }
+
+    db.execute(1, "drop sequence depseq cascade").unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_class where relname = 'dep_table'"
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
+fn unsupported_create_table_like_does_not_poison_catalog_after_sequence_drop() {
+    let base = temp_dir("unsupported_create_table_like_sequence");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(1, "create table items (id int4)").unwrap();
+    db.execute(1, "create sequence ctlseq1").unwrap();
+    match db.execute(1, "create table ctlt10 (like ctlseq1)") {
+        Err(ExecError::Parse(ParseError::FeatureNotSupported(feature))) => {
+            assert_eq!(feature, "CREATE TABLE ... LIKE")
+        }
+        other => panic!("expected unsupported CREATE TABLE LIKE error, got {:?}", other),
+    }
+    db.execute(1, "drop sequence ctlseq1").unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from items"),
+        vec![vec![Value::Int64(0)]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from pg_namespace"),
+        vec![vec![Value::Int64(3)]]
+    );
+}
+
+#[test]
 fn update_and_copy_from_enforce_check_and_not_null_constraints() {
     let base = temp_dir("update_and_copy_constraint_checks");
     let db = Database::open(&base, 16).unwrap();
