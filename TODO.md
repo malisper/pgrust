@@ -2,18 +2,24 @@
 
 ## Regression test files
 
-Counts from `/tmp/pgrust_regress_todo_20260417` on 2026-04-17; `test_setup.sql` comes from `/tmp/pgrust_regress_test_setup_todo_20260417` with `--upstream-setup`.
+Counts from `/tmp/pgrust_regress_after_sequence_fix` on 2026-04-18 using the default `scripts/test_setup_pgrust.sql` bootstrap.
 
-Targeted reruns on 2026-04-17:
+- test files: 14 passed, 212 failed, 5 errored, 231 total
+- queries: 17794 matched, 33318 mismatched, 51112 total
+- pass rate: 6%
+- query match rate: 34%
+- machine-readable summary: `/tmp/pgrust_regress_after_sequence_fix/summary.json`
 
-- numeric.sql: FAIL, 957/1057 queries matched from `/tmp/pgrust_numeric_regress_55433`
+Targeted reruns and notes:
+
+- numeric.sql: 945/1057
 - numeric.sql first mismatch is unordered cross-join row order; substantive mismatches are `width_bucket(float8, ...)`, numeric display scale/rendering, and PostgreSQL-specific error text/detail for numeric overflow and numeric-to-int casts
 
 - advisory_lock.sql: 8/38
-- aggregates.sql: 215/583
-- alter_generic.sql: 54/333
-- alter_operator.sql: 3/65
-- alter_table.sql: 433/1683
+- aggregates.sql: 149/583
+- alter_generic.sql: 65/333
+- alter_operator.sql: 7/65
+- alter_table.sql: 476/1683
   - [done] expression indexes and `ALTER INDEX` operations used by `alter_table.sql`
   - partitioned tables, including `PARTITION OF`, `ATTACH PARTITION`, and `DETACH PARTITION`
   - `SET ROLE` / `RESET ROLE`
@@ -56,7 +62,7 @@ Targeted reruns on 2026-04-17:
   - `lseg` input syntax used by `alter_table.sql`
   - table rename handling for array-type name collisions in `pg_type`
 - amutils.sql: 0/10
-- arrays.sql: ERROR, 187/526 queries matched from `/tmp/pgrust_nested_arrays_regress_fresh`
+- arrays.sql: 207/526
   - [done] array subscript result names should inherit the base column name instead of defaulting to `?column?`
   - [done] array read semantics need executor fixes for slice/subscript edge cases
   - [done] widen verification for array read semantics against more `arrays.sql` slice/subscript cases
@@ -73,103 +79,103 @@ Targeted reruns on 2026-04-17:
   - implement missing array builtins exercised by `arrays.sql` such as `array_append`, `array_prepend`, and `array_cat`
   - support row/composite array expressions and comparisons, including `ARRAY(SELECT ...)` and `array_agg(record) || array_agg(record)`
 - async.sql: 0/11
-- bit.sql: 74/132
-- bitmapops.sql: 3/12
-- boolean.sql: 46/98
-- box.sql: 17/101
-- brin.sql: 56/125
-- brin_bloom.sql: 50/88
-- brin_multi.sql: 67/220
-- btree_index.sql: 22/133
-- case.sql: 17/67
-- char.sql: 12/32
-- circle.sql: 1/22
-- cluster.sql: 26/204
-- collate.icu.utf8.sql: 0/588
+- bit.sql: 132/132
+- bitmapops.sql: 11/12
+- boolean.sql: 98/98
+- box.sql: 58/101
+- brin.sql: 81/125
+- brin_bloom.sql: 56/88
+- brin_multi.sql: 135/220
+- btree_index.sql: 71/133
+- case.sql: 49/67
+- char.sql: 21/32
+- circle.sql: 22/22
+- cluster.sql: 122/204
+- collate.icu.utf8.sql: 588/588
 - collate.linux.utf8.sql: 0/211
 - collate.sql: 7/144
 - collate.utf8.sql: 0/59
 - collate.windows.win1252.sql: 0/182
-- combocid.sql: 8/62
-- comments.sql: 11/13
-- compression.sql: 2/87
-- constraints.sql: 30/565
-- conversion.sql: 84/149
-- copy.sql: 11/113
-- copy2.sql: 48/215
-- copydml.sql: 5/64
-- copyencoding.sql: 7/17
-- copyselect.sql: 0/21
-- create_aggregate.sql: 0/59
-- create_am.sql: 25/142
-- create_cast.sql: 0/24
+- combocid.sql: 13/62
+- comments.sql: 13/13
+- compression.sql: 7/87
+- constraints.sql: 158/565
+- conversion.sql: 108/149
+- copy.sql: 27/113
+- copy2.sql: 56/215
+- copydml.sql: 39/64
+- copyencoding.sql: 9/17
+- copyselect.sql: 14/21
+- create_aggregate.sql: 6/59
+- create_am.sql: 27/142
+- create_cast.sql: 1/24
 - create_function_c.sql: 0/5
-- create_function_sql.sql: 22/180
-- create_index.sql: 58/687
-- create_index_spgist.sql: 14/202
-- create_misc.sql: 0/88
+- create_function_sql.sql: 47/180
+- create_index.sql: 222/687
+- create_index_spgist.sql: 21/202
+- create_misc.sql: 62/88
 - create_operator.sql: 38/99
-- create_procedure.sql: 23/125
-- create_role.sql: 95/144
-- create_schema.sql: 2/27
-- create_table.sql: 10/330
-- create_table_like.sql: 3/152
+- create_procedure.sql: 33/125
+- create_role.sql: 126/144
+- create_schema.sql: 6/27
+- create_table.sql: 29/330
+- create_table_like.sql: 21/152
 - create_type.sql: 2/86
-- create_view.sql: 14/311
+- create_view.sql: 73/311
 - database.sql: 7/16
-- date.sql: 117/271
+- date.sql: 213/271
 - dbsize.sql: 0/25
-- delete.sql: 0/10
-- dependency.sql: 11/62
-- domain.sql: 70/507
-- drop_if_exists.sql: 14/161
+- delete.sql: 7/10
+- dependency.sql: 28/62
+- domain.sql: 145/507
+- drop_if_exists.sql: 29/161
 - drop_operator.sql: 0/12
 - encoding.sql: 0/133
-- enum.sql: 16/172
-- equivclass.sql: 20/96
-- errors.sql: 13/87
+- enum.sql: 17/172
+- equivclass.sql: 22/96
+- errors.sql: 14/87
 - euc_kr.sql: 3/3
-- event_trigger.sql: 64/281
-- event_trigger_login.sql: 3/14
-- explain.sql: 31/75
-- expressions.sql: 21/81
-- fast_default.sql: 27/296
-- float4.sql: 57/100
-- float8.sql: 131/184
-- foreign_data.sql: 16/540
-- foreign_key.sql: 78/1252
+- event_trigger.sql: 84/281
+- event_trigger_login.sql: 5/14
+- explain.sql: 33/75
+- expressions.sql: 24/81
+- fast_default.sql: 32/296
+- float4.sql: 79/100
+- float8.sql: 145/184
+- foreign_data.sql: 83/540
+- foreign_key.sql: 283/1252
 - functional_deps.sql: 0/40
-- generated_stored.sql: 1/131
-- generated_virtual.sql: 1/131
-- geometry.sql: 5/162
-- gin.sql: 21/71
-- gist.sql: 6/62
-- groupingsets.sql: 28/219
-- guc.sql: 72/229
-- hash_func.sql: 0/43
-- hash_index.sql: 10/100
+- generated_stored.sql: 2/131
+- generated_virtual.sql: 2/131
+- geometry.sql: 43/162
+- gin.sql: 37/71
+- gist.sql: 26/62
+- groupingsets.sql: 36/219
+- guc.sql: 76/229
+- hash_func.sql: 4/43
+- hash_index.sql: 75/100
 - hash_part.sql: 0/28
-- horology.sql: 15/399
-- identity.sql: 3/271
-- incremental_sort.sql: 79/169
-- index_including.sql: 4/135
-- index_including_gist.sql: 4/50
-- indexing.sql: 7/570
-- indirect_toast.sql: 4/30
+- horology.sql: 21/399
+- identity.sql: 29/271
+- incremental_sort.sql: 125/169
+- index_including.sql: 35/135
+- index_including_gist.sql: 27/50
+- indexing.sql: 33/570
+- indirect_toast.sql: 12/30
 - inet.sql: 6/116
-- infinite_recurse.sql: 0/3
-- inherit.sql: 42/884
+- infinite_recurse.sql: 1/3
+- inherit.sql: 280/884
 - init_privs.sql: 0/4
-- insert.sql: 7/390
-- insert_conflict.sql: 15/266
-- int4.sql: 57/94
-- int8.sql: 87/174
-- interval.sql: 23/450
-- join.sql: 110/918
-- join_hash.sql: 162/315
-- json.sql: 138/470
+- insert.sql: 54/390
+- insert_conflict.sql: 104/266
+- int4.sql: 94/94
+- int8.sql: 145/174
+- interval.sql: 38/450
+- join.sql: 292/918
+- join_hash.sql: 195/315
+- json.sql: 237/470
 - json_encoding.sql: 23/44
-- jsonb.sql: 577/1084
+- jsonb.sql: 598/1084
   - [done] PostgreSQL-compatible jsonb input errors with `LINE` / `DETAIL` / `CONTEXT`
   - [done] stack depth limit handling for deeply nested jsonb input
   - [done] aggregate-local `ORDER BY` support for `jsonb_agg` / `jsonb_object_agg`
@@ -177,124 +183,124 @@ Targeted reruns on 2026-04-17:
   - [done] jsonb object/key construction semantics and SQL-visible errors (`jsonb_object_keys`, `jsonb_build_object`, `jsonb_object`, `jsonb_object_agg`)
   - jsonb subscripting semantics
   - record-expansion semantics for `jsonb_to_record` / `jsonb_populate_record`
-- jsonb_jsonpath.sql: 188/830
-- jsonpath.sql: 31/224
+- jsonb_jsonpath.sql: 552/830
+- jsonpath.sql: 49/224
 - jsonpath_encoding.sql: 0/32
-- largeobject.sql: 27/129
-- limit.sql: 3/80
-- line.sql: 11/35
-- lock.sql: 42/131
+- largeobject.sql: 32/129
+- limit.sql: 6/80
+- line.sql: 35/35
+- lock.sql: 54/131
 - lseg.sql: 16/16
 - macaddr.sql: 0/35
 - macaddr8.sql: 0/71
-- maintain_every.sql: 5/16
-- matview.sql: 18/185
+- maintain_every.sql: 7/16
+- matview.sql: 41/185
 - md5.sql: 14/14
-- memoize.sql: 38/88
-- merge.sql: 206/641
+- memoize.sql: 58/88
+- merge.sql: 374/641
   1. Finish remaining `MERGE` execution parity, especially permissions and PostgreSQL-compatible runtime errors not covered by the initial executor path
   2. Table-object `GRANT`/`REVOKE` privilege parsing for forms used by `merge.sql` (`INSERT`, `UPDATE`, `DELETE` on tables)
   3. Data-modifying statement integration for `MERGE` in `WITH`/`COPY` contexts and the corresponding `RETURNING` validation errors
   4. Materialized view DDL/support checks needed by the `MERGE` unsupported-relation tests
-- misc.sql: 0/61
-- misc_functions.sql: 23/160
-- misc_sanity.sql: 0/5
-- money.sql: 53/109
-- multirangetypes.sql: 23/605
-- mvcc.sql: 11/17
-- name.sql: 6/46
-- namespace.sql: 14/45
+- misc.sql: 12/61
+- misc_functions.sql: 26/160
+- misc_sanity.sql: 1/5
+- money.sql: 89/109
+- multirangetypes.sql: 36/605
+- mvcc.sql: 13/17
+- name.sql: 19/46
+- namespace.sql: 17/45
 - numa.sql: 0/3
-- numeric.sql: 335/1057
-- numeric_big.sql: 16/552
-- numerology.sql: 3/92
-- object_address.sql: 23/97
-- oid.sql: 10/37
+- numeric.sql: 945/1057
+- numeric_big.sql: 537/552
+- numerology.sql: 23/92
+- object_address.sql: 25/97
+- oid.sql: 37/37
 - oidjoins.sql: 29/30
-- opr_sanity.sql: 0/131
-- partition_aggregate.sql: 19/137
-- partition_info.sql: 0/73
+- opr_sanity.sql: 39/131
+- partition_aggregate.sql: 20/137
+- partition_info.sql: 6/73
 - partition_join.sql: 16/614
-- partition_prune.sql: 68/750
+- partition_prune.sql: 100/750
 - password.sql: 37/55
-- path.sql: 4/23
+- path.sql: 23/23
 - pg_lsn.sql: 0/31
-- plancache.sql: 23/113
-- plpgsql.sql: 1589/2271
+- plancache.sql: 31/113
+- plpgsql.sql: 1633/2271
   - typmod-aware `bpchar`/`char(n)` type resolution during index creation
   - explicit index opclass handling for `CREATE INDEX ... (col bpchar_ops)`
   - `trigger` pseudotype support in `CREATE FUNCTION ... RETURNS trigger`
   - `CREATE TRIGGER` parser, binder, catalog, and execution support
   - PL/pgSQL trigger runtime support for row triggers (`NEW`/`OLD`, trigger invocation)
-- point.sql: 12/43
-- polygon.sql: 15/62
-- polymorphism.sql: 37/455
-- portals.sql: 70/349
+- point.sql: 26/43
+- polygon.sql: 38/62
+- polymorphism.sql: 49/455
+- portals.sql: 87/349
 - portals_p2.sql: 2/41
-- predicate.sql: 0/42
+- predicate.sql: 16/42
 - prepare.sql: 0/33
 - prepared_xacts.sql: 0/96
-- privileges.sql: 303/1295
-- psql.sql: 141/464
-- psql_crosstab.sql: 13/35
-- psql_pipeline.sql: 73/124
-- publication.sql: 80/710
-- random.sql: 47/73
-- rangefuncs.sql: 24/437
-- rangetypes.sql: 70/407
-- regex.sql: 96/105
+- privileges.sql: 520/1295
+- psql.sql: 171/464
+- psql_crosstab.sql: 19/35
+- psql_pipeline.sql: 75/124
+- publication.sql: 168/710
+- random.sql: 55/73
+- rangefuncs.sql: 68/437
+- rangetypes.sql: 202/407
+- regex.sql: 98/105
 - regproc.sql: 0/105
 - reindex_catalog.sql: 3/20
-- reloptions.sql: 2/66
-- replica_identity.sql: 0/66
-- returning.sql: 9/150
-- roleattributes.sql: 15/80
-- rowsecurity.sql: 222/774
-- rowtypes.sql: 12/241
-- rules.sql: 17/626
-- sanity_check.sql: 0/3
-- security_label.sql: 7/28
-- select.sql: 11/87
-- select_distinct.sql: 50/105
-- select_distinct_on.sql: 2/23
-- select_having.sql: 0/23
-- select_implicit.sql: 0/44
-- select_into.sql: 8/70
-- select_parallel.sql: 110/265
-- select_views.sql: 6/52
-- sequence.sql: 25/261
-- spgist.sql: 1/31
-- sqljson.sql: 3/221
-- sqljson_jsontable.sql: 1/117
-- sqljson_queryfuncs.sql: 5/314
-- stats.sql: 103/479
-- stats_ext.sql: 50/866
-- stats_import.sql: 5/132
-- strings.sql: 363/508
-- subscription.sql: 37/158
-- subselect.sql: 37/334
+- reloptions.sql: 6/66
+- replica_identity.sql: 13/66
+- returning.sql: 21/150
+- roleattributes.sql: 32/80
+- rowsecurity.sql: 234/774
+- rowtypes.sql: 41/241
+- rules.sql: 431/626
+- sanity_check.sql: 1/3
+- security_label.sql: 17/28
+- select.sql: 21/87
+- select_distinct.sql: 72/105
+- select_distinct_on.sql: 7/23
+- select_having.sql: 23/23
+- select_implicit.sql: 34/44
+- select_into.sql: 22/70
+- select_parallel.sql: 126/265
+- select_views.sql: 14/52
+- sequence.sql: 113/261
+- spgist.sql: 14/31
+- sqljson.sql: 11/221
+- sqljson_jsontable.sql: 5/117
+- sqljson_queryfuncs.sql: 11/314
+- stats.sql: 252/479
+- stats_ext.sql: 199/866
+- stats_import.sql: 6/132
+- strings.sql: 451/508
+- subscription.sql: 29/158
+- subselect.sql: 88/334
 - sysviews.sql: 4/29
-- tablesample.sql: 2/56
-- tablespace.sql: 26/205
-- temp.sql: 56/216
-- test_setup.sql: 58/69
-- text.sql: 57/73
-- tid.sql: 0/41
-- tidrangescan.sql: 4/45
-- tidscan.sql: 9/49
-- time.sql: 0/44
-- timestamp.sql: 12/177
-- timestamptz.sql: 41/404
-- timetz.sql: 3/57
-- transactions.sql: 78/439
-- triggers.sql: 259/1262
-- truncate.sql: 22/201
+- tablesample.sql: 4/56
+- tablespace.sql: 36/205
+- temp.sql: 104/216
+- test_setup.sql: 58/69 (separate upstream-setup run, not part of the latest default-bootstrap suite)
+- text.sql: 58/73
+- tid.sql: 15/41
+- tidrangescan.sql: 8/45
+- tidscan.sql: 13/49
+- time.sql: 6/44
+- timestamp.sql: 90/177
+- timestamptz.sql: 120/404
+- timetz.sql: 4/57
+- transactions.sql: 159/439
+- triggers.sql: 496/1262
+- truncate.sql: 80/201
 - tsdicts.sql: 0/131
-- tsearch.sql: 43/464
-- tsrf.sql: 8/74
+- tsearch.sql: 111/464
+- tsrf.sql: 18/74
 - tstypes.sql: 69/238
-- tuplesort.sql: 31/108
-- txid.sql: 14/51
+- tuplesort.sql: 32/108
+- txid.sql: 15/51
 
 ## strings.sql follow-up
 
@@ -330,28 +336,28 @@ Targeted reruns on 2026-04-17:
 - Done: jsonpath comparison semantics for mixed types and multi-item sequences no longer incorrectly return `true` in strict comparisons.
 - Done: recursive descent depth handling for `**` now includes the current item at depth `0`, matching `$.**`, `$.**{0}`, and `$.**{0 to last}`.
 - Align jsonpath runtime error behavior and messages with PostgreSQL where possible, especially around structural errors, out-of-range subscripts, and numeric/arithmetic failures.
-- type_sanity.sql: 0/63
-- typed_table.sql: 1/32
+- type_sanity.sql: 4/63
+- typed_table.sql: 5/32
 - unicode.sql: 0/17
-- union.sql: 75/197
+- union.sql: 110/197
 - union.sql follow-up:
   - [done] accept PostgreSQL-style mixed set-operation chains such as `SELECT 1 UNION SELECT 2 UNION ALL SELECT 2` instead of rejecting them in the parser
   - [done] support `SELECT DISTINCT` in set-operation inputs such as `EXCEPT ALL SELECT DISTINCT ...`
   - [done] match PostgreSQL's `FOR NO KEY UPDATE` set-operation error text instead of routing it through the generic unsupported-feature wrapper
   - investigate why bootstrap fixture tables from `scripts/test_setup_pgrust.sql` like `float8_tbl`, `int8_tbl`, and `tenk1` are not consistently resolvable during regression runs
-- updatable_views.sql: 109/1139
-- update.sql: 28/300
+- updatable_views.sql: 130/1139
+- update.sql: 72/300
 - uuid.sql: 0/63
-- vacuum.sql: 26/328
-- vacuum_parallel.sql: 4/14
-- varchar.sql: DONE
-- window.sql: 7/388
-- with.sql: 31/312
-- without_overlaps.sql: 24/643
-- write_parallel.sql: 6/22
+- vacuum.sql: 135/328
+- vacuum_parallel.sql: 11/14
+- varchar.sql: 12/22
+- window.sql: 0/388
+- with.sql: 37/312
+- without_overlaps.sql: 125/643
+- write_parallel.sql: 8/22
 - xid.sql: 14/88
-- xml.sql: 15/281
-- xmlmap.sql: 3/40
+- xml.sql: 17/281
+- xmlmap.sql: 1/40
 
 ## Features
 
