@@ -843,17 +843,16 @@ impl Database {
     }
 }
 
-fn bootstrap_ephemeral_catalog(
+pub(crate) fn bootstrap_ephemeral_catalog(
     pool: &Arc<BufferPool<SmgrStorageBackend>>,
     txns: &Arc<RwLock<TransactionManager>>,
 ) -> Result<(), DatabaseError> {
+    use crate::backend::catalog::bootstrap::bootstrap_catalog_rel;
+    use crate::backend::catalog::indexing::system_catalog_index_rel_for_db;
+
     pool.with_storage_mut(|storage| {
         for kind in bootstrap_catalog_kinds() {
-            let rel = RelFileLocator {
-                spc_oid: 0,
-                db_oid: 1,
-                rel_number: kind.relation_oid(),
-            };
+            let rel = bootstrap_catalog_rel(kind, 1);
             let _ = storage.smgr.open(rel);
             let _ =
                 storage
@@ -861,11 +860,7 @@ fn bootstrap_ephemeral_catalog(
                     .create(rel, crate::backend::storage::smgr::ForkNumber::Main, false);
         }
         for descriptor in system_catalog_indexes() {
-            let rel = RelFileLocator {
-                spc_oid: 0,
-                db_oid: 1,
-                rel_number: descriptor.relation_oid,
-            };
+            let rel = system_catalog_index_rel_for_db(*descriptor, 1);
             let _ = storage.smgr.open(rel);
             let _ =
                 storage

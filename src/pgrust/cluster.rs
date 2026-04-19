@@ -57,6 +57,7 @@ pub(crate) struct ClusterShared {
     pub wal_bg_writer: Option<Arc<WalBgWriter>>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 static NEXT_EPHEMERAL_CLUSTER_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -288,6 +289,7 @@ impl Cluster {
         })
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn open_ephemeral(pool_size: usize) -> Result<Self, DatabaseError> {
         use crate::backend::utils::time::system_time::{SystemTime, UNIX_EPOCH};
         let nanos = SystemTime::now()
@@ -301,6 +303,82 @@ impl Cluster {
             NEXT_EPHEMERAL_CLUSTER_ID.fetch_add(1, Ordering::Relaxed),
         ));
         Self::open(base_dir, pool_size)
+    }
+
+    /// Wasm-only ephemeral constructor: builds a fully in-memory Cluster
+    /// without touching the filesystem or spawning background threads.
+    #[cfg(target_arch = "wasm32")]
+    pub fn open_ephemeral(pool_size: usize) -> Result<Self, DatabaseError> {
+        use crate::include::catalog::{CatalogScope, POSTGRES_DATABASE_OID};
+        use crate::pgrust::database::bootstrap_ephemeral_catalog;
+
+        let checkpoint_config = Arc::new(CheckpointConfig::default());
+        let txns = TransactionManager::new_ephemeral();
+        let next_xid = txns.next_xid();
+        let control_file = Arc::new(ControlFileStore::new_in_memory(
+            next_xid,
+            checkpoint_config.as_ref(),
+        ));
+        let txns = Arc::new(RwLock::new(txns));
+
+        let pool = Arc::new(BufferPool::new(SmgrStorageBackend::new_mem(), pool_size));
+
+        // Seed the in-memory relfiles, rows, and catalog indexes.
+        bootstrap_ephemeral_catalog(&pool, &txns)?;
+
+        let shared_catalog = CatalogStore::new_ephemeral_scope(CatalogScope::Shared);
+        let default_db =
+            CatalogStore::new_ephemeral_scope(CatalogScope::Database(POSTGRES_DATABASE_OID));
+
+        let mut open_databases = HashMap::new();
+        open_databases.insert(
+            POSTGRES_DATABASE_OID,
+            Arc::new(OpenDatabaseState {
+                catalog: Arc::new(RwLock::new(default_db)),
+                backend_cache_states: Arc::new(RwLock::new(HashMap::new())),
+                session_interrupt_states: Arc::new(RwLock::new(HashMap::new())),
+                session_auth_states: Arc::new(RwLock::new(HashMap::new())),
+                session_stats_states: Arc::new(RwLock::new(HashMap::new())),
+                session_temp_backend_ids: Arc::new(RwLock::new(HashMap::new())),
+                database_create_grants: Arc::new(RwLock::new(Vec::new())),
+                temp_relations: Arc::new(RwLock::new(HashMap::new())),
+                domains: Arc::new(RwLock::new(BTreeMap::new())),
+                enum_types: Arc::new(RwLock::new(BTreeMap::new())),
+                range_types: Arc::new(RwLock::new(BTreeMap::new())),
+                conversions: Arc::new(RwLock::new(BTreeMap::new())),
+                sequences: Arc::new(SequenceRuntime::new_ephemeral()),
+                stats: Arc::new(RwLock::new(DatabaseStatsStore::with_default_io_rows())),
+                large_objects: Arc::new(LargeObjectRuntime::new_ephemeral()),
+            }),
+        );
+
+        let checkpoint_stats = Arc::new(RwLock::new(CheckpointStatsSnapshot::default()));
+        let checkpoint_commit_barrier = Arc::new(CheckpointCommitBarrier::new());
+
+        Ok(Self {
+            shared: Arc::new(ClusterShared {
+                base_dir: PathBuf::new(),
+                durable_shutdown: false,
+                pool,
+                wal: None,
+                txns,
+                shared_catalog: Arc::new(RwLock::new(shared_catalog)),
+                txn_waiter: Arc::new(TransactionWaiter::new()),
+                table_locks: Arc::new(TableLockManager::new()),
+                plan_cache: Arc::new(PlanCache::new()),
+                open_databases: Arc::new(RwLock::new(open_databases)),
+                active_connections: Arc::new(RwLock::new(HashMap::new())),
+                session_activity: Arc::new(RwLock::new(HashMap::new())),
+                next_temp_backend_id: AtomicU64::new(1),
+                free_temp_backend_ids: Arc::new(RwLock::new(BTreeSet::new())),
+                checkpoint_config,
+                checkpoint_stats,
+                control_file,
+                checkpoint_commit_barrier,
+                checkpointer: None,
+                wal_bg_writer: None,
+            }),
+        })
     }
 
     pub fn connect_database(&self, name: &str) -> Result<Database, ExecError> {
