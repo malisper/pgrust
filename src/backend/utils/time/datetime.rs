@@ -4,7 +4,8 @@ use crate::include::nodes::datetime::{
     USECS_PER_SEC,
 };
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::backend::utils::time::system_time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DateTimeKeyword {

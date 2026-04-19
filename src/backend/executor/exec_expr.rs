@@ -1,6 +1,6 @@
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use num_bigint::{BigInt, Sign};
+
+use crate::backend::utils::time::system_time::{SystemTime, UNIX_EPOCH};
 use rand::{Rng, RngCore};
 
 use super::expr_bit::{
