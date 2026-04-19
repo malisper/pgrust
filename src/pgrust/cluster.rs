@@ -283,8 +283,9 @@ impl Cluster {
     }
 
     pub fn open_ephemeral(pool_size: usize) -> Result<Self, DatabaseError> {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        use crate::backend::utils::time::system_time::{SystemTime, UNIX_EPOCH};
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
             .map(|duration| duration.as_nanos())
             .unwrap_or_default();
         let base_dir = std::env::temp_dir().join(format!(
