@@ -1,65 +1,49 @@
 ---
 name: pgrust-wasm-deploy
-description: Deploy the pgrust wasm demo to the pgrust S3 bucket when the user asks to publish, push, or redeploy the browser demo or wasm app. Use this for the static site under web/wasm-demo and the S3 bucket s3://pgrust.
+description: Deploy the pgrust wasm demo to https://pgrust.com (CloudFront + S3). Use this when the user asks to publish, push, or redeploy the browser demo or wasm app. Single script handles build + sync + CloudFront invalidation.
 ---
 
 # Pgrust Wasm Deploy
 
 Use this skill when the user asks to deploy or redeploy the browser wasm demo.
 
-## Target
-
-- Bucket: `s3://pgrust`
-- Region: `us-west-2`
-- Site root: bucket root
-- Website config: `index.html` for both index and error documents
-
-The deployed files mirror `web/wasm-demo/`:
-- root files like `index.html`, `main.js`, `env.js`, `README.md`, `build.sh`
-- generated browser package under `web/wasm-demo/pkg/`
-
 ## Default workflow
 
-1. Check whether the worktree is already dirty in `web/wasm-demo`.
-2. If the user wants the current checked-out demo published, deploy those files as-is.
-3. If the user wants a fresh build, run:
+Run the deploy script:
 
 ```bash
-./web/wasm-demo/build.sh
+./web/wasm-demo/deploy.sh
 ```
 
-4. Sync the site:
+That script does the full flow:
 
-```bash
-aws s3 sync web/wasm-demo/ s3://pgrust/ --delete
-```
+1. `./web/wasm-demo/build.sh` — rebuilds the wasm bundle
+2. `aws s3 sync web/wasm-demo/ s3://pgrust/ --delete` — pushes files, excluding scripts and build artifacts
+3. Second sync pass with `--content-type application/wasm` for `.wasm` files (browsers need this for `WebAssembly.compileStreaming`)
+4. `aws cloudfront create-invalidation --paths /*` — busts edge caches
 
-5. Re-upload the wasm binary with the correct MIME type. Do this even after `sync`:
+The script uses `AWS_PROFILE=mfa` internally and reads the CloudFront distribution id from `pgrust/domains/` terraform output.
 
-```bash
-aws s3 cp web/wasm-demo/pkg/pgrust_bg.wasm s3://pgrust/pkg/pgrust_bg.wasm --content-type application/wasm
-```
+## Target
+
+- Site: `https://pgrust.com`
+- Bucket: `s3://pgrust` (us-west-2, private — read through CloudFront OAC)
+- CDN: CloudFront (distribution id in `pgrust/domains/` terraform output)
+- DNS / TLS / redirect infra: managed in `pgrust/domains/` (terraform)
 
 ## Verification
 
-Run:
-
 ```bash
-aws s3 ls s3://pgrust/ --recursive
-aws s3api head-object --bucket pgrust --key pkg/pgrust_bg.wasm
+curl -sI https://pgrust.com | head -5                              # 2xx via CloudFront
+curl -sI https://pgrust.com/pkg/pgrust_bg.wasm | grep -i content-  # application/wasm
 ```
 
-The wasm object must report:
-- `ContentType: application/wasm`
-
-Optional metadata check for JS:
-
-```bash
-aws s3api head-object --bucket pgrust --key main.js
-```
+Open the site and run a query end-to-end.
 
 ## Notes
 
-- Do not guess a different bucket or prefix; this demo currently deploys to bucket root.
+- Do not bypass `deploy.sh` — syncing without re-setting wasm content-type breaks the demo.
+- Do not bypass CloudFront invalidation — edge caches will serve stale content.
+- Infra changes (not content) live in `pgrust/domains/main.tf`. See `pgrust/domains/README.md`.
 - Avoid reverting unrelated local changes in `web/wasm-demo`; deploy the requested state.
-- If `aws` fails in the sandbox, rerun with network escalation.
+- If `aws` fails due to missing MFA session, `aws sts get-session-token` into the `mfa` profile and retry.
