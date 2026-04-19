@@ -133,7 +133,7 @@ impl Database {
                 });
             }
             let auth = self.auth_state(client_id);
-            let auth_catalog = self.auth_catalog(client_id, None).map_err(|err| {
+            let auth_catalog = self.txn_auth_catalog(client_id, xid, cid).map_err(|err| {
                 ExecError::Parse(ParseError::UnexpectedToken {
                     expected: "authorization catalog",
                     actual: format!("{err:?}"),

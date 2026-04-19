@@ -153,9 +153,9 @@ pub fn finalize_committed_catalog_effects(
         }
     }
     // PostgreSQL invalidates catcache/relcache entries at commit and reloads
-    // them lazily on the next lookup. Avoid rebuilding the shared catalog
-    // snapshot here; some readers already resolve visible catalog state on
-    // demand, and eager refresh introduces lock-order and hot-path costs.
+    // them lazily on the next lookup. It also leaves dead catalog index tuples
+    // behind for a later VACUUM once the visibility horizon advances, rather
+    // than running a special post-commit cleanup pass here.
     for invalidation in invalidations {
         publish_committed_catalog_invalidation(db, source_client_id, invalidation);
     }

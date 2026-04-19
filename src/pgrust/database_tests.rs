@@ -9,8 +9,8 @@ use crate::include::catalog::{
 };
 use crate::include::nodes::parsenodes::MaintenanceTarget;
 use crate::include::nodes::primnodes::QueryColumn;
-use std::collections::HashMap;
 use crate::pl::plpgsql::{clear_notices, take_notices};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
@@ -105,15 +105,13 @@ fn log_deadlocks() {
 }
 
 fn temp_dir(label: &str) -> PathBuf {
-    let p = std::env::temp_dir().join(format!(
-        "pgrust_database_{}_{}_{}",
-        label,
-        std::process::id(),
-        NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = std::fs::remove_dir_all(&p);
-    std::fs::create_dir_all(&p).unwrap();
-    p
+    let _ = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+    crate::pgrust::test_support::seeded_temp_dir("database", label)
+}
+
+fn scratch_temp_dir(label: &str) -> PathBuf {
+    let _ = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+    crate::pgrust::test_support::scratch_temp_dir("database", label)
 }
 
 fn role_oid(db: &Database, role_name: &str) -> u32 {
@@ -293,11 +291,7 @@ fn jsonb_populate_record_named_composite_works() {
     };
     assert_eq!(
         rows,
-        vec![vec![
-            Value::Text("blurfl".into()),
-            Value::Null,
-            Value::Null,
-        ]]
+        vec![vec![Value::Text("blurfl".into()), Value::Null, Value::Null,]]
     );
 }
 
@@ -1531,7 +1525,10 @@ fn collect_analyze_stats_treats_partitioned_relkind_as_inherited_only() {
         .execute(&db, "create table analyze_parent(a int4, b text)")
         .unwrap();
     session
-        .execute(&db, "create table analyze_child() inherits (analyze_parent)")
+        .execute(
+            &db,
+            "create table analyze_child() inherits (analyze_parent)",
+        )
         .unwrap();
     session
         .execute(
@@ -3210,7 +3207,7 @@ fn create_index_and_alter_table_set_are_noops() {
 
 #[test]
 fn cluster_bootstraps_multiple_databases_and_connection_rules() {
-    let base = temp_dir("cluster_bootstrap_databases");
+    let base = scratch_temp_dir("cluster_bootstrap_databases");
     let cluster = Cluster::open(&base, 16).unwrap();
     let postgres = cluster.connect_database("postgres").unwrap();
 
@@ -3959,11 +3956,7 @@ fn current_user_compares_against_name_columns() {
         .unwrap();
 
     assert_eq!(
-        query_rows(
-            &db,
-            1,
-            "select who = current_user from audit_log",
-        ),
+        query_rows(&db, 1, "select who = current_user from audit_log",),
         vec![vec![Value::Bool(true)]]
     );
 }
@@ -7658,7 +7651,7 @@ fn reopening_database_replays_btree_wal() {
 fn durable_open_bootstraps_control_file_and_clean_shutdown_marks_shutdown() {
     use crate::backend::access::transam::{ControlFileState, ControlFileStore};
 
-    let base = temp_dir("control_file_bootstrap");
+    let base = scratch_temp_dir("control_file_bootstrap");
     let control_path = ControlFileStore::path(&base);
 
     {
@@ -8321,20 +8314,7 @@ fn checkpoint_requires_pg_checkpoint_membership() {
     bootstrap
         .execute(&db, "create role outsider login")
         .unwrap();
-    let tenant_oid = role_oid(&db, "tenant");
-    db.catalog
-        .write()
-        .grant_role_membership(
-            &crate::backend::catalog::role_memberships::NewRoleMembership {
-                roleid: crate::include::catalog::PG_CHECKPOINT_OID,
-                member: tenant_oid,
-                grantor: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
-                admin_option: false,
-                inherit_option: true,
-                set_option: true,
-            },
-        )
-        .unwrap();
+    bootstrap.execute(&db, "grant pg_checkpoint to tenant").unwrap();
 
     let mut session = Session::new(2);
     session

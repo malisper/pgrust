@@ -64,7 +64,7 @@ use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::inval::{
     CatalogInvalidation, accept_invalidation_messages, catalog_invalidation_from_effect,
     finalize_aborted_local_catalog_invalidations, finalize_command_end_local_catalog_invalidations,
-    finalize_committed_catalog_effects, publish_committed_catalog_invalidation,
+    finalize_committed_catalog_effects,
 };
 use crate::backend::utils::cache::lsyscache::{
     LazyCatalogLookup, access_method_name_for_relation, constraint_rows_for_relation,
@@ -94,6 +94,7 @@ use ddl::{
     reject_inheritance_tree_ddl, reject_relation_with_dependent_views,
     validate_alter_table_add_column,
 };
+pub(crate) use large_objects::LargeObjectRuntime;
 use relation_refs::{collect_direct_relation_oids_from_select, collect_rels_from_planned_stmt};
 pub(crate) use sequences::{
     SequenceData, SequenceMutationEffect, SequenceOptions, SequenceOwnedByRef, SequenceRuntime,
@@ -102,7 +103,6 @@ pub(crate) use sequences::{
     resolve_sequence_options_spec, sequence_type_oid_for_serial_kind,
     sequence_type_oid_for_sql_type,
 };
-pub(crate) use large_objects::LargeObjectRuntime;
 use toast::{toast_bindings_from_create_result, toast_bindings_from_temp_relation};
 use txn::AutoCommitGuard;
 
@@ -408,6 +408,24 @@ impl Database {
         txn_ctx: CatalogTxnContext,
     ) -> Result<CatCache, CatalogError> {
         syscache_backend_catcache(self, client_id, txn_ctx)
+    }
+
+    pub(crate) fn txn_auth_catalog(
+        &self,
+        client_id: ClientId,
+        xid: TransactionId,
+        cid: CommandId,
+    ) -> Result<AuthCatalog, CatalogError> {
+        self.auth_catalog(client_id, Some((xid, cid)))
+    }
+
+    pub(crate) fn txn_backend_catcache(
+        &self,
+        client_id: ClientId,
+        xid: TransactionId,
+        cid: CommandId,
+    ) -> Result<CatCache, CatalogError> {
+        self.backend_catcache(client_id, Some((xid, cid)))
     }
 
     pub(crate) fn normalize_domain_name_for_create(

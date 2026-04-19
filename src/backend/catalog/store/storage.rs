@@ -10,11 +10,12 @@ use crate::backend::catalog::indexing::{
 };
 use crate::backend::catalog::loader::{
     catalog_from_physical_rows_scoped, load_catalog_from_visible_pool,
-    load_physical_catalog_rows_scoped, load_physical_catalog_rows_visible_in_pool,
-    load_physical_catalog_rows_visible_scoped,
+    load_physical_catalog_rows_visible_in_pool, load_physical_catalog_rows_visible_scoped,
 };
-use crate::backend::catalog::persistence::sync_catalog_rows_subset;
-use crate::backend::catalog::rows::physical_catalog_rows_from_catcache;
+use crate::backend::catalog::persistence::{
+    apply_catalog_row_changes_subset_incremental, sync_catalog_rows_subset,
+};
+use crate::backend::catalog::rows::{PhysicalCatalogRows, physical_catalog_rows_from_catcache};
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
 use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, StorageManager};
 use crate::backend::utils::cache::catcache::CatCache;
@@ -23,11 +24,11 @@ use crate::include::catalog::{
     BootstrapCatalogKind, CatalogScope, bootstrap_catalog_kinds, system_catalog_indexes,
 };
 
-use super::{
-    CONTROL_FILE_MAGIC, CatalogControl, CatalogStore, CatalogStoreMode, CatalogWriteContext,
-};
 use super::relcache_init::{
     invalidate_relcache_init_file, load_relcache_init_file, persist_relcache_init_file,
+};
+use super::{
+    CONTROL_FILE_MAGIC, CatalogControl, CatalogStore, CatalogStoreMode, CatalogWriteContext,
 };
 
 fn scope_db_oid(scope: CatalogScope) -> u32 {
@@ -186,7 +187,8 @@ impl CatalogStore {
                 if let Some(relcache) = load_relcache_init_file(base_dir, self.scope) {
                     return Ok(relcache);
                 }
-                let relcache = RelCache::from_catcache_in_db(&self.catcache()?, self.scope_db_oid())?;
+                let relcache =
+                    RelCache::from_catcache_in_db(&self.catcache()?, self.scope_db_oid())?;
                 persist_relcache_init_file(base_dir, self.scope, &relcache);
                 Ok(relcache)
             }
@@ -200,11 +202,7 @@ impl CatalogStore {
     pub fn catcache(&self) -> Result<CatCache, CatalogError> {
         match &self.mode {
             CatalogStoreMode::Durable { base_dir, .. } => {
-                let rows = load_physical_catalog_rows_scoped(
-                    base_dir,
-                    scope_db_oid(self.scope),
-                    &visible_kinds(self.scope),
-                )?;
+                let rows = load_visible_physical_rows_startup_scoped(base_dir, self.scope)?;
                 Ok(CatCache::from_rows(
                     rows.namespaces,
                     rows.classes,
@@ -339,21 +337,54 @@ impl CatalogStore {
         }
     }
 
-    pub(super) fn persist_catalog_kinds(
+    pub(super) fn persist_catalog_row_changes(
         &self,
         catalog: &Catalog,
+        rows_to_delete: &PhysicalCatalogRows,
+        rows_to_insert: &PhysicalCatalogRows,
+        kinds: &[BootstrapCatalogKind],
+    ) -> Result<(), CatalogError> {
+        self.persist_catalog_row_changes_with_control(
+            catalog.next_oid,
+            catalog.next_rel_number,
+            rows_to_delete,
+            rows_to_insert,
+            kinds,
+        )
+    }
+
+    pub(super) fn persist_catalog_row_changes_with_control(
+        &self,
+        next_oid: u32,
+        next_rel_number: u32,
+        rows_to_delete: &PhysicalCatalogRows,
+        rows_to_insert: &PhysicalCatalogRows,
         kinds: &[BootstrapCatalogKind],
     ) -> Result<(), CatalogError> {
         match &self.mode {
             CatalogStoreMode::Durable { base_dir, .. } => {
-                self.persist_control_state(catalog)?;
-                sync_physical_catalogs_scoped(base_dir, catalog, self.scope, kinds)
+                self.persist_control_values(next_oid, next_rel_number)?;
+                apply_catalog_row_changes_subset_incremental(
+                    base_dir,
+                    rows_to_delete,
+                    rows_to_insert,
+                    scope_db_oid(self.scope),
+                    kinds,
+                )
             }
             CatalogStoreMode::Ephemeral => Ok(()),
         }
     }
 
     pub(super) fn persist_control_state(&self, catalog: &Catalog) -> Result<(), CatalogError> {
+        self.persist_control_values(catalog.next_oid, catalog.next_rel_number)
+    }
+
+    pub(super) fn persist_control_values(
+        &self,
+        next_oid: u32,
+        next_rel_number: u32,
+    ) -> Result<(), CatalogError> {
         match &self.mode {
             CatalogStoreMode::Durable {
                 base_dir,
@@ -365,13 +396,27 @@ impl CatalogStore {
                     self.oid_control_path.as_deref(),
                     self.scope,
                     &CatalogControl {
-                        next_oid: catalog.next_oid,
-                        next_rel_number: catalog.next_rel_number,
+                        next_oid,
+                        next_rel_number,
                         bootstrap_complete: true,
                     },
                 )
             }
             CatalogStoreMode::Ephemeral => Ok(()),
+        }
+    }
+
+    pub(super) fn control_state(&self) -> Result<CatalogControl, CatalogError> {
+        match &self.mode {
+            CatalogStoreMode::Durable { control_path, .. } => {
+                let mut control = load_control_file(control_path)?;
+                control.next_oid = control.next_oid.max(load_effective_next_oid(
+                    control_path,
+                    self.oid_control_path.as_deref(),
+                )?);
+                Ok(control)
+            }
+            CatalogStoreMode::Ephemeral => Ok(self.control.clone()),
         }
     }
 
@@ -381,13 +426,8 @@ impl CatalogStore {
                 base_dir,
                 control_path,
             } => {
-                let rows = load_physical_catalog_rows_scoped(
-                    base_dir,
-                    self.scope_db_oid(),
-                    &visible_kinds(self.scope),
-                )?;
                 let mut catalog =
-                    catalog_from_physical_rows_scoped(base_dir, rows, self.scope_db_oid())?;
+                    load_catalog_from_visible_physical_startup_scoped(base_dir, self.scope)?;
                 let control = load_control_file(control_path)?;
                 catalog.next_oid = catalog.next_oid.max(load_effective_next_oid(
                     control_path,
@@ -478,7 +518,10 @@ fn insert_missing_bootstrap_relations(
     }
 }
 
-fn validate_storage_relfiles_exist(base_dir: &Path, scope: CatalogScope) -> Result<(), CatalogError> {
+fn validate_storage_relfiles_exist(
+    base_dir: &Path,
+    scope: CatalogScope,
+) -> Result<(), CatalogError> {
     let mut smgr = MdStorageManager::new(base_dir);
 
     let db_oid = scope_db_oid(scope);
@@ -505,13 +548,21 @@ fn load_catalog_from_visible_physical_startup_scoped(
     base_dir: &Path,
     scope: CatalogScope,
 ) -> Result<Catalog, CatalogError> {
+    let rows = load_visible_physical_rows_startup_scoped(base_dir, scope)?;
+    catalog_from_physical_rows_scoped(base_dir, rows, scope_db_oid(scope))
+}
+
+fn load_visible_physical_rows_startup_scoped(
+    base_dir: &Path,
+    scope: CatalogScope,
+) -> Result<PhysicalCatalogRows, CatalogError> {
     let txns = TransactionManager::new_durable(base_dir.to_path_buf())
         .map_err(|e| CatalogError::Io(format!("transaction status load failed: {e:?}")))?;
     let snapshot = txns
         .snapshot(INVALID_TRANSACTION_ID)
         .map_err(|e| CatalogError::Io(format!("startup catalog snapshot failed: {e:?}")))?;
     let pool = BufferPool::new(SmgrStorageBackend::new(MdStorageManager::new(base_dir)), 64);
-    let rows = load_physical_catalog_rows_visible_scoped(
+    load_physical_catalog_rows_visible_scoped(
         base_dir,
         &pool,
         &txns,
@@ -519,8 +570,7 @@ fn load_catalog_from_visible_physical_startup_scoped(
         0,
         scope_db_oid(scope),
         &visible_kinds(scope),
-    )?;
-    catalog_from_physical_rows_scoped(base_dir, rows, scope_db_oid(scope))
+    )
 }
 
 fn sync_physical_catalogs_scoped(
