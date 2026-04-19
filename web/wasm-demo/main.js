@@ -11,101 +11,67 @@ const exampleNote = document.getElementById("example-note");
 
 const EXAMPLES = [
   {
-    id: "seq-scan",
-    label: "Sequential Scan",
+    id: "upserts",
+    label: "Upsert",
     note:
-      "A plain table filter with no index. `EXPLAIN (ANALYZE, BUFFERS)` should stay on a sequential scan path.",
-    sql: `create table if not exists wasm_seq_scan_demo (
-  id int4,
-  region text,
-  score int4
+      "Shows `INSERT ... ON CONFLICT DO UPDATE` using both `excluded` values and the current table row.",
+    sql: `create table if not exists upsert_demo (
+  id int4 primary key,
+  name text,
+  note text
 );
-delete from wasm_seq_scan_demo;
-insert into wasm_seq_scan_demo values
-  (1, 'west', 5),
-  (2, 'east', 18),
-  (3, 'west', 12),
-  (4, 'central', 27),
-  (5, 'east', 9);
-explain (analyze, buffers)
-select id, region, score
-from wasm_seq_scan_demo
-where score >= 12
+delete from upsert_demo;
+insert into upsert_demo values
+  (1, 'alice', 'alpha'),
+  (2, 'ben', 'beta');
+insert into upsert_demo (id, name, note) values
+  (1, 'bob', 'fresh'),
+  (3, 'cy', 'new')
+on conflict (id) do update
+set name = excluded.name,
+    note = upsert_demo.name;
+select id, name, note
+from upsert_demo
 order by id;`,
   },
   {
-    id: "hash-join",
-    label: "Hash Join",
+    id: "window-functions",
+    label: "Window Functions",
     note:
-      "Two tables joined on an integer key. This is a compact way to inspect hash-join planning and output.",
-    sql: `create table if not exists wasm_hash_customers (
-  customer_id int4,
-  name text,
-  tier text
+      "A compact windowing example with `row_number`, `rank`, and a running sum partitioned by department.",
+    sql: `create table if not exists window_demo (
+  dept text,
+  employee text,
+  salary int4
 );
-create table if not exists wasm_hash_orders (
-  order_id int4,
-  customer_id int4,
-  total int4
-);
-delete from wasm_hash_customers;
-delete from wasm_hash_orders;
-insert into wasm_hash_customers values
-  (1, 'Ada', 'gold'),
-  (2, 'Ben', 'silver'),
-  (3, 'Cora', 'gold');
-insert into wasm_hash_orders values
-  (101, 1, 44),
-  (102, 1, 65),
-  (103, 3, 27),
-  (104, 2, 18);
-explain (analyze, buffers)
-select c.name, o.order_id, o.total
-from wasm_hash_customers c
-join wasm_hash_orders o on o.customer_id = c.customer_id
-where o.total >= 25
-order by o.order_id;`,
-  },
-  {
-    id: "plpgsql-function",
-    label: "Custom PL/pgSQL Function",
-    note:
-      "Builds a FizzBuzz-style `LANGUAGE plpgsql` table function using `FOR ... LOOP`, `ELSIF`, and `RETURN NEXT`. Use `Reset Database` before rerunning this example unchanged, because `CREATE FUNCTION` here does not support `IF NOT EXISTS` yet.",
-    sql: `create function wasm_fizzbuzz(limit int4)
-returns table(n int4, label text)
-language plpgsql
-as $fn$
-begin
-  for i in 1..limit loop
-    n := i;
-    if i % 15 = 0 then
-      label := 'fizzbuzz';
-    elsif i % 3 = 0 then
-      label := 'fizz';
-    elsif i % 5 = 0 then
-      label := 'buzz';
-    else
-      label := i::text;
-    end if;
-    return next;
-  end loop;
-  return;
-end
-$fn$;
-select *
-from wasm_fizzbuzz(100);`,
+delete from window_demo;
+insert into window_demo values
+  ('eng', 'Ada', 120),
+  ('eng', 'Ben', 95),
+  ('eng', 'Cy', 95),
+  ('sales', 'Dia', 80),
+  ('sales', 'Eli', 105);
+select
+  dept,
+  employee,
+  salary,
+  row_number() over (partition by dept order by salary desc, employee) as row_number,
+  rank() over (partition by dept order by salary desc) as salary_rank,
+  sum(salary) over (partition by dept order by salary desc, employee) as running_total
+from window_demo
+order by dept, salary desc, employee;`,
   },
   {
     id: "json",
-    label: "JSON and JSONB",
+    label: "JSON",
     note:
-      "Loads json/jsonb values and queries nested fields, containment, and scalar extraction.",
-    sql: `create table if not exists wasm_json_demo (
+      "Loads jsonb values and queries nested fields, containment, and scalar extraction.",
+    sql: `create table if not exists json_demo (
   id int4,
   payload jsonb
 );
-delete from wasm_json_demo;
-insert into wasm_json_demo values
+delete from json_demo;
+insert into json_demo values
   (1, '{"user":"ana","active":true,"tags":["sql","wasm"]}'),
   (2, '{"user":"ben","active":false,"tags":["planner"]}'),
   (3, '{"user":"cy","active":true,"tags":["executor","json"]}');
@@ -114,207 +80,96 @@ select
   payload ->> 'user' as user_name,
   payload @> '{"active": true}'::jsonb as active,
   payload -> 'tags' as tags
-from wasm_json_demo
+from json_demo
 order by id;`,
   },
   {
-    id: "lisp-fibonacci",
-    label: "Lisp Interpreter - Fibonacci Numbers",
+    id: "foreign-keys",
+    label: "Foreign Keys",
     note:
-      "Evaluates a tiny Lisp-style program encoded in JSONB. This example uses a recursive CTE plus JSONB state transitions to produce Fibonacci numbers.",
-    sql: `with recursive loop as (
-  select '{"stack": [{"type": "expr", "env": {"+": "+", "-": "-", "*": "*", "/": "/", ">": ">", "<": "<", "=": "=", "head": "head", "tail": "tail", "cons": "cons", "empty": "empty"}, "expr": [["lambda", ["f"], ["f", "f", 1, 0, 0]], ["lambda", ["self", "a", "b", "i"], ["if", [">", "i", 10], ["empty"], ["cons", "a", ["self", "self", ["+", "a", "b"], "a", ["+", "i", 1]]]]]]}]}'::jsonb as state
-  union all
-  select
-    case
-      when frame_type = 'expr'
-      then case
-        when jsonb_typeof(expr) = 'number'
-        then jsonb_build_object('stack', stack - 0, 'result', expr)
-        when jsonb_typeof(expr) = 'string'
-        then jsonb_build_object('stack', stack - 0, 'result', env -> expr_string)
-        when op_string = 'if'
-        then jsonb_build_object('stack', jsonb_build_array(jsonb_build_object('type', 'eval_if', 'expr', expr, 'env', env)) || (stack - 0))
-        when op_string = 'lambda'
-        then jsonb_build_object('stack', stack - 0, 'result', jsonb_build_object('args', arg1, 'body', arg2, 'env', env))
-        else jsonb_build_object('stack', jsonb_build_array(jsonb_build_object('type', 'eval_args', 'left', expr, 'done', '[]'::jsonb, 'env', env)) || (stack - 0))
-      end
-      when frame_type = 'eval_args'
-      then case
-        when result is null and jsonb_array_length(args_left) = 0
-        then jsonb_build_object('stack', jsonb_build_array(jsonb_build_object('type', 'eval_call', 'expr', args_done, 'env', env)) || (stack - 0))
-        when result is null
-        then jsonb_build_object('stack', jsonb_build_array(jsonb_build_object('type', 'expr', 'expr', args_left -> 0, 'env', env), jsonb_build_object('type', 'eval_args', 'left', args_left - 0, 'done', args_done, 'env', env)) || stack - 0)
-        else jsonb_build_object('stack', jsonb_build_array(jsonb_build_object('type', 'eval_args', 'left', args_left, 'done', args_done || jsonb_build_array(result), 'env', env)) || (stack - 0))
-      end
-      when frame_type = 'eval_call'
-      then case
-        when op_string = '+'
-        then jsonb_build_object('stack', stack - 0, 'result', arg1::text::bigint + arg2::text::bigint)
-        when op_string = '*'
-        then jsonb_build_object('stack', stack - 0, 'result', arg1::text::bigint * arg2::text::bigint)
-        when op_string = '-'
-        then jsonb_build_object('stack', stack - 0, 'result', arg1::text::bigint - arg2::text::bigint)
-        when op_string = '/'
-        then jsonb_build_object('stack', stack - 0, 'result', arg1::text::bigint / arg2::text::bigint)
-        when op_string = '>'
-        then jsonb_build_object('stack', stack - 0, 'result', arg1::text::bigint > arg2::text::bigint)
-        when op_string = '<'
-        then jsonb_build_object('stack', stack - 0, 'result', arg1::text::bigint < arg2::text::bigint)
-        when op_string = '='
-        then jsonb_build_object('stack', stack - 0, 'result', arg1 = arg2)
-        when op_string = 'head'
-        then jsonb_build_object('stack', stack - 0, 'result', arg1 -> 0)
-        when op_string = 'tail'
-        then jsonb_build_object('stack', stack - 0, 'result', arg1 - 0)
-        when op_string = 'cons'
-        then jsonb_build_object('stack', stack - 0, 'result', jsonb_build_array(arg1) || arg2)
-        when op_string = 'empty'
-        then jsonb_build_object('stack', stack - 0, 'result', '[]'::jsonb)
-        else jsonb_build_object(
-          'stack',
-          jsonb_build_array(
-            jsonb_build_object(
-              'type', 'expr',
-              'expr', (op -> 'body'),
-              'env', (op -> 'env') || jsonb_build_object(
-                coalesce(op -> 'args' ->> 0, 'null'), arg1,
-                coalesce(op -> 'args' ->> 1, 'null'), arg2,
-                coalesce(op -> 'args' ->> 2, 'null'), arg3,
-                coalesce(op -> 'args' ->> 3, 'null'), arg4
-              )
-            )
-          ) || (stack - 0)
-        )
-      end
-      when frame_type = 'eval_if'
-      then case
-        when result is null
-        then jsonb_build_object('stack', jsonb_build_array(jsonb_build_object('type', 'expr', 'expr', arg1, 'env', env)) || stack)
-        when result is not null and result::text::boolean
-        then jsonb_build_object('stack', jsonb_build_array(jsonb_build_object('type', 'expr', 'expr', arg2, 'env', env)) || (stack - 0))
-        when result is not null and not result::text::boolean
-        then jsonb_build_object('stack', jsonb_build_array(jsonb_build_object('type', 'expr', 'expr', arg3, 'env', env)) || (stack - 0))
-      end
-    end
-  from (
-    select
-      state -> 'stack' -> 0 ->> 'type' as frame_type,
-      state -> 'stack' -> 0 -> 'expr' as expr,
-      state -> 'stack' -> 0 ->> 'expr' as expr_string,
-      state -> 'stack' -> 0 -> 'expr' -> 0 as op,
-      state -> 'stack' -> 0 -> 'expr' ->> 0 as op_string,
-      state -> 'stack' -> 0 -> 'expr' -> 1 as arg1,
-      state -> 'stack' -> 0 -> 'expr' -> 2 as arg2,
-      state -> 'stack' -> 0 -> 'expr' -> 3 as arg3,
-      state -> 'stack' -> 0 -> 'expr' -> 4 as arg4,
-      state -> 'stack' -> 0 -> 'left' as args_left,
-      state -> 'stack' -> 0 -> 'done' as args_done,
-      state -> 'stack' -> 0 -> 'env' as env,
-      state -> 'result' as result,
-      state -> 'stack' as stack
-    from loop
-  ) sub
-)
-select jsonb_pretty(state -> 'result')
-from loop
-where jsonb_array_length(state -> 'stack') = 0
-limit 1;`,
+      "Shows that a child row cannot be inserted unless its referenced parent row already exists.",
+    sql: `create table if not exists departments (
+  id int4 primary key,
+  name text
+);
+create table if not exists employees (
+  id int4 primary key,
+  department_id int4 references departments(id),
+  name text
+);
+delete from employees;
+delete from departments;
+insert into departments values
+  (1, 'engineering'),
+  (2, 'sales'),
+  (3, 'support');
+insert into employees values (1, 1, 'Ada');
+insert into employees values (2, 99, 'Orphan');`,
   },
   {
-    id: "mandelbrot",
-    label: "Mandelbrot Set",
+    id: "explain-analyze-joins",
+    label: "EXPLAIN ANALYZE Joins",
     note:
-      "Renders a compact ASCII Mandelbrot set with recursive CTEs. This version uses half-resolution sampling so the final image is smaller and faster to display in the demo.",
-    sql: `with recursive points as (
-  select r, c from generate_series(-2, 2, 0.1) a(r)
-  cross join generate_series(-2, 1, 0.1) b(c)
-  order by r desc, c asc
-), iterations as (
-  select r,
-         c,
-         0.0::float as zr,
-         0.0::float as zc,
-         0 as iteration
-  from points
-  union all
-  select r,
-         c,
-         zr*zr - zc*zc + c as zr,
-         2*zr*zc + r as zc,
-         iteration+1 as iteration
-  from iterations where zr*zr + zc*zc < 4 and iteration < 1000
-), final_iteration as (
-  select * from iterations where iteration = 1000
-), marked_points as (
-  select r,
-         c,
-         (case when exists (select 1 from final_iteration i where p.r = i.r and p.c = i.c)
-               then '**'
-               else '  '
-          end) as marker
-  from points p
-  order by r desc, c asc
-), lines as (
-  select r, string_agg(marker, '') as r_text
-  from marked_points
-  group by r
-  order by r desc
-)
-select string_agg(r_text, E'\\n') from lines;`,
-  },
-  {
-    id: "stats",
-    label: "Stats and ANALYZE",
-    note:
-      "Runs `ANALYZE` and then queries `pg_stats` so you can inspect collected statistics for a demo table.",
-    sql: `create table if not exists wasm_stats_demo (
-  bucket int4,
+      "Runs `EXPLAIN (ANALYZE, BUFFERS)` over a three-table join so you can inspect join order, row counts, and buffer activity.",
+    sql: `create table if not exists join_big (
+  id int4,
+  note text
+);
+create table if not exists join_medium (
+  id int4,
   category text
 );
-delete from wasm_stats_demo;
-insert into wasm_stats_demo values
-  (1, 'alpha'),
+create table if not exists join_small (
+  id int4,
+  weight int4
+);
+delete from join_big;
+delete from join_medium;
+delete from join_small;
+insert into join_big values
   (1, 'alpha'),
   (2, 'beta'),
-  (2, 'beta'),
-  (2, 'gamma'),
-  (3, 'gamma'),
   (3, 'gamma'),
   (4, 'delta');
-analyze wasm_stats_demo;
-select
-  attname,
-  n_distinct,
-  null_frac
-from pg_stats
-where tablename = 'wasm_stats_demo'
-order by attname;`,
+insert into join_medium values
+  (1, 'red'),
+  (2, 'blue'),
+  (3, 'red'),
+  (4, 'green');
+insert into join_small values
+  (1, 10),
+  (2, 20),
+  (3, 30),
+  (4, 40);
+explain (analyze, buffers)
+select b.id, b.note, m.category, s.weight
+from join_big b
+join join_medium m on b.id = m.id
+join join_small s on m.id = s.id
+where s.weight >= 20
+order by b.id;`,
   },
   {
-    id: "aggregate",
-    label: "Aggregate and Group By",
+    id: "regular-expressions",
+    label: "Regular Expressions",
     note:
-      "A grouped aggregate over a small fact table. Good for checking grouping and aggregate output.",
-    sql: `create table if not exists wasm_agg_demo (
-  day text,
-  amount int4
+      "Demonstrates regex matching, replacement, and substring extraction with PostgreSQL-style regexp functions.",
+    sql: `create table if not exists regex_demo (
+  input text
 );
-delete from wasm_agg_demo;
-insert into wasm_agg_demo values
-  ('mon', 12),
-  ('mon', 5),
-  ('tue', 9),
-  ('wed', 4),
-  ('wed', 11);
+delete from regex_demo;
+insert into regex_demo values
+  ('Order-1001'),
+  ('draft-note'),
+  ('Order-2450'),
+  ('invoice-77');
 select
-  day,
-  count(*) as rows_seen,
-  sum(amount) as total_amount,
-  avg(amount) as avg_amount
-from wasm_agg_demo
-group by day
-order by day;`,
+  input,
+  regexp_like(input, '^Order-[0-9]+$') as is_order,
+  regexp_replace(input, '[0-9]+', '###') as masked,
+  regexp_substr(input, '[0-9]+') as digits
+from regex_demo
+order by input;`,
   },
 ];
 
