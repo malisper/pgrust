@@ -1,9 +1,9 @@
 use super::super::*;
-use crate::backend::utils::cache::lsyscache::access_method_row_by_name;
 use crate::backend::parser::{
     CatalogLookup, CreateOperatorClassItem, CreateOperatorClassStatement, ParseError,
     resolve_raw_type_name,
 };
+use crate::backend::utils::cache::lsyscache::access_method_row_by_name;
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, PUBLIC_NAMESPACE_OID, PgAmopRow, PgAmprocRow, PgOpclassRow,
     PgOpfamilyRow,
@@ -109,23 +109,22 @@ impl Database {
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let (opclass_name, namespace_oid) =
             normalize_create_opclass_name_for_search_path(stmt, configured_search_path)?;
-        let access_method = access_method_row_by_name(
-            self,
-            client_id,
-            Some((xid, cid)),
-            &stmt.access_method,
-        )
-        .ok_or_else(|| ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "supported access method",
-            actual: format!("USING {}", stmt.access_method),
-        }))?;
+        let access_method =
+            access_method_row_by_name(self, client_id, Some((xid, cid)), &stmt.access_method)
+                .ok_or_else(|| {
+                    ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "supported access method",
+                        actual: format!("USING {}", stmt.access_method),
+                    })
+                })?;
         if access_method.amtype != 'i' {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "index access method",
                 actual: format!("USING {}", stmt.access_method),
             }));
         }
-        let input_type = resolve_raw_type_name(&stmt.data_type, &catalog).map_err(ExecError::Parse)?;
+        let input_type =
+            resolve_raw_type_name(&stmt.data_type, &catalog).map_err(ExecError::Parse)?;
         let input_type_oid = catalog.type_oid_for_sql_type(input_type).ok_or_else(|| {
             ExecError::Parse(ParseError::UnsupportedType(format!("{:?}", stmt.data_type)))
         })?;

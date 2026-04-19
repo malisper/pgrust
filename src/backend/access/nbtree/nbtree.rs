@@ -4,7 +4,9 @@ use std::sync::Arc;
 use parking_lot::RwLockWriteGuard;
 
 use crate::backend::access::heap::heapam::{heap_scan_begin_visible, heap_scan_next_visible};
-use crate::backend::access::index::unique::probe_unique_conflict;
+use crate::backend::access::index::unique::{
+    UniqueCandidateResult, classify_unique_candidate,
+};
 use crate::backend::access::nbtree::nbtcompare::{compare_bt_keyspace, compare_bt_values};
 use crate::backend::access::nbtree::nbtpreprocesskeys::preprocess_scan_keys;
 use crate::backend::access::nbtree::nbtsplitloc::choose_split_index;
@@ -21,6 +23,7 @@ use crate::backend::storage::fsm::get_free_index_page;
 use crate::backend::storage::page::bufpage::page_header;
 use crate::backend::storage::smgr::{ForkNumber, RelFileLocator, StorageManager};
 use crate::backend::utils::misc::interrupts::check_for_interrupts;
+use crate::backend::access::transam::xact::TransactionId;
 use crate::include::access::amapi::{
     IndexAmRoutine, IndexBeginScanContext, IndexBuildContext, IndexBuildEmptyContext,
     IndexBuildResult, IndexInsertContext,
@@ -76,6 +79,21 @@ struct InsertStackEntry {
 struct InsertSearchPath {
     leaf_block: u32,
     parent_stack: Vec<InsertStackEntry>,
+}
+
+struct LockedUniqueInsertPath<'a> {
+    leaf_block: u32,
+    parent_stack: Vec<InsertStackEntry>,
+    pin: PinnedBuffer<'a, SmgrStorageBackend>,
+    guard: RwLockWriteGuard<'a, Page>,
+}
+
+enum LockedUniqueCheckResult {
+    Clear,
+    WaitFor(TransactionId),
+    Restart {
+        split_block: Option<u32>,
+    },
 }
 
 fn encode_index_value(
@@ -352,6 +370,18 @@ fn pin_btree_block<'a>(
         .map_err(|err| CatalogError::Io(format!("btree pin block failed: {err:?}")))
 }
 
+fn lock_btree_block_exclusive<'a>(
+    ctx: &'a IndexInsertContext,
+    block: u32,
+) -> Result<(PinnedBuffer<'a, SmgrStorageBackend>, RwLockWriteGuard<'a, Page>), CatalogError> {
+    let pin = pin_btree_block(&ctx.pool, ctx.client_id, ctx.index_relation, block)?;
+    let guard = ctx
+        .pool
+        .lock_buffer_exclusive(pin.buffer_id())
+        .map_err(|err| CatalogError::Io(format!("btree exclusive lock failed: {err:?}")))?;
+    Ok((pin, guard))
+}
+
 fn read_buffered_page(
     pool: &BufferPool<SmgrStorageBackend>,
     client_id: ClientId,
@@ -494,6 +524,18 @@ fn page_lower_bound(
         .first()
         .ok_or(CatalogError::Corrupt("btree page unexpectedly empty"))?;
     tuple_key_values(desc, tuple)
+}
+
+fn page_first_key_values(
+    desc: &RelationDesc,
+    page: &Page,
+) -> Result<Option<Vec<Value>>, CatalogError> {
+    let items = bt_page_data_items(page)
+        .map_err(|err| CatalogError::Io(format!("btree page parse failed: {err:?}")))?;
+    let Some(tuple) = items.first() else {
+        return Ok(None);
+    };
+    tuple_key_values(desc, tuple).map(Some)
 }
 
 fn ensure_empty_btree(
@@ -972,6 +1014,33 @@ fn leaf_upper_bound(
     tuple_key_values(&ctx.index_desc, first_tuple).map(Some)
 }
 
+fn left_sibling_may_contain_key(
+    ctx: &IndexInsertContext,
+    left_page: &Page,
+    left_opaque: crate::include::access::nbtree::BTPageOpaqueData,
+    right_block: u32,
+    right_first_key: Option<&[Value]>,
+    key_values: &[Value],
+) -> Result<bool, CatalogError> {
+    let upper_bound = if let Some(high_key) = bt_page_high_key(left_page)
+        .map_err(|err| CatalogError::Io(format!("btree high-key read failed: {err:?}")))?
+    {
+        tuple_key_values(&ctx.index_desc, &high_key)?
+    } else if left_opaque.btpo_next == right_block {
+        let Some(right_first_key) = right_first_key else {
+            return Ok(false);
+        };
+        right_first_key.to_vec()
+    } else if left_opaque.btpo_next == P_NONE {
+        return Ok(false);
+    } else {
+        return Err(CatalogError::Corrupt(
+            "btree leaf missing high key without adjacent sibling bound",
+        ));
+    };
+    Ok(compare_key_arrays(key_values, &upper_bound) != Ordering::Greater)
+}
+
 fn find_parent_from_stack(
     ctx: &IndexInsertContext,
     parent_stack: &mut Vec<InsertStackEntry>,
@@ -1120,6 +1189,80 @@ fn find_leaf_for_insert(
                 });
             }
             block = opaque.btpo_next;
+        }
+    }
+}
+
+fn find_locked_unique_insert_path<'a>(
+    ctx: &'a IndexInsertContext,
+    key_values: &[Value],
+) -> Result<LockedUniqueInsertPath<'a>, CatalogError> {
+    'search: loop {
+        let search = find_leaf_for_insert(ctx, key_values)?;
+        let mut block = search.leaf_block;
+        let mut used_original_stack = true;
+
+        loop {
+            let (pin, guard) = lock_btree_block_exclusive(ctx, block)?;
+            let page = *guard;
+            let opaque = bt_page_get_opaque(&page)
+                .map_err(|err| CatalogError::Io(format!("btree opaque read failed: {err:?}")))?;
+            if opaque.btpo_flags & BTP_INCOMPLETE_SPLIT != 0 {
+                drop(guard);
+                drop(pin);
+                finish_incomplete_split(ctx, block, &[])?;
+                continue 'search;
+            }
+            if let Some(upper_bound) = leaf_upper_bound(ctx, &page, opaque)?
+                && compare_key_arrays(key_values, &upper_bound) == Ordering::Greater
+            {
+                drop(guard);
+                drop(pin);
+                continue 'search;
+            }
+            if opaque.btpo_prev != P_NONE {
+                let left_block = opaque.btpo_prev;
+                let left_page = read_page(&ctx.pool, ctx.index_relation, left_block)?;
+                let left_opaque = bt_page_get_opaque(&left_page).map_err(|err| {
+                    CatalogError::Io(format!("btree opaque read failed: {err:?}"))
+                })?;
+                if left_opaque.btpo_flags & BTP_INCOMPLETE_SPLIT != 0 {
+                    drop(guard);
+                    drop(pin);
+                    finish_incomplete_split(ctx, left_block, &[])?;
+                    continue 'search;
+                }
+                let current_first_key = page_first_key_values(&ctx.index_desc, &page)?;
+                if left_sibling_may_contain_key(
+                    ctx,
+                    &left_page,
+                    left_opaque,
+                    block,
+                    current_first_key.as_deref(),
+                    key_values,
+                )? {
+                    drop(guard);
+                    drop(pin);
+                    block = left_block;
+                    used_original_stack = false;
+                    continue;
+                }
+            }
+
+            // PostgreSQL reuses the descent stack only when the locked leaf is
+            // still the exact first candidate page from the original search.
+            // If we had to walk left to settle on the true first candidate
+            // leaf, refresh parent discovery lazily during split propagation.
+            return Ok(LockedUniqueInsertPath {
+                leaf_block: block,
+                parent_stack: if used_original_stack {
+                    search.parent_stack
+                } else {
+                    Vec::new()
+                },
+                pin,
+                guard,
+            });
         }
     }
 }
@@ -1744,11 +1887,7 @@ fn insert_tuple_into_page(
     key_values: &[Value],
     is_leaf: bool,
 ) -> Result<Option<PageSplitResult>, CatalogError> {
-    let pin = pin_btree_block(&ctx.pool, ctx.client_id, ctx.index_relation, block)?;
-    let guard = ctx
-        .pool
-        .lock_buffer_exclusive(pin.buffer_id())
-        .map_err(|err| CatalogError::Io(format!("btree exclusive lock failed: {err:?}")))?;
+    let (pin, guard) = lock_btree_block_exclusive(ctx, block)?;
     insert_tuple_into_locked_page(ctx, pin, guard, block, new_tuple, key_values, is_leaf)
 }
 
@@ -1911,11 +2050,54 @@ fn finish_incomplete_split(
     )
 }
 
-fn bt_check_unique(ctx: &IndexInsertContext, key_values: &[Value]) -> Result<(), CatalogError> {
-    if probe_unique_conflict(ctx, key_values)?.is_some() {
-        return Err(CatalogError::UniqueViolation(ctx.index_name.clone()));
+fn bt_check_unique_locked(
+    ctx: &IndexInsertContext,
+    locked_page: &Page,
+    locked_opaque: crate::include::access::nbtree::BTPageOpaqueData,
+    key_values: &[Value],
+) -> Result<LockedUniqueCheckResult, CatalogError> {
+    let mut page = *locked_page;
+    let mut opaque = locked_opaque;
+
+    loop {
+        let items = bt_page_data_items(&page)
+            .map_err(|err| CatalogError::Io(format!("btree page parse failed: {err:?}")))?;
+        for tuple in items {
+            let tuple_keys = tuple_key_values(&ctx.index_desc, &tuple)?;
+            match compare_key_arrays(&tuple_keys, key_values) {
+                Ordering::Less => continue,
+                Ordering::Greater => return Ok(LockedUniqueCheckResult::Clear),
+                Ordering::Equal => match classify_unique_candidate(ctx, tuple.t_tid)? {
+                    UniqueCandidateResult::NoConflict => {}
+                    UniqueCandidateResult::Conflict(_) => {
+                        return Err(CatalogError::UniqueViolation(ctx.index_name.clone()));
+                    }
+                    UniqueCandidateResult::WaitFor(xid) => {
+                        return Ok(LockedUniqueCheckResult::WaitFor(xid));
+                    }
+                },
+            }
+        }
+
+        let Some(upper_bound) = leaf_upper_bound(ctx, &page, opaque)? else {
+            return Ok(LockedUniqueCheckResult::Clear);
+        };
+        if compare_key_arrays(key_values, &upper_bound) != Ordering::Equal
+            || opaque.btpo_next == P_NONE
+        {
+            return Ok(LockedUniqueCheckResult::Clear);
+        }
+
+        let next_block = opaque.btpo_next;
+        page = read_page(&ctx.pool, ctx.index_relation, next_block)?;
+        opaque = bt_page_get_opaque(&page)
+            .map_err(|err| CatalogError::Io(format!("btree opaque read failed: {err:?}")))?;
+        if opaque.btpo_flags & BTP_INCOMPLETE_SPLIT != 0 {
+            return Ok(LockedUniqueCheckResult::Restart {
+                split_block: Some(next_block),
+            });
+        }
     }
-    Ok(())
 }
 
 fn btinsert(ctx: &IndexInsertContext) -> Result<bool, CatalogError> {
@@ -1934,12 +2116,68 @@ fn btinsert(ctx: &IndexInsertContext) -> Result<bool, CatalogError> {
         &ctx.index_meta.indkey,
         &ctx.values,
     )?;
-    bt_check_unique(ctx, &key_values)?;
-
     let payload = encode_key_payload(&ctx.index_desc, &key_values)?;
     let new_tuple = IndexTupleData::new_raw(ctx.heap_tid, false, false, false, payload);
-    let search = find_leaf_for_insert(ctx, &key_values)?;
 
+    let check_unique = matches!(ctx.unique_check, crate::include::access::amapi::IndexUniqueCheck::Yes)
+        && (ctx.index_meta.indnullsnotdistinct || !keys_contain_null(&key_values));
+    if check_unique {
+        // PostgreSQL checks uniqueness while holding the write lock on the
+        // first leaf page the key could live on, and keeps that lock through
+        // insertion so a concurrent inserter of the same key cannot race past
+        // the uniqueness probe.
+        loop {
+            let locked = find_locked_unique_insert_path(ctx, &key_values)?;
+            let page = *locked.guard;
+            let opaque = bt_page_get_opaque(&page)
+                .map_err(|err| CatalogError::Io(format!("btree opaque read failed: {err:?}")))?;
+            match bt_check_unique_locked(ctx, &page, opaque, &key_values)? {
+                LockedUniqueCheckResult::Clear => {
+                    if let Some(mut split) = insert_tuple_into_locked_page(
+                        ctx,
+                        locked.pin,
+                        locked.guard,
+                        locked.leaf_block,
+                        new_tuple,
+                        &key_values,
+                        true,
+                    )? {
+                        split.parent_stack = locked.parent_stack;
+                        check_catalog_interrupts(ctx.interrupts.as_ref())?;
+                        propagate_split_upwards(ctx, split)?;
+                    }
+                    return Ok(true);
+                }
+                LockedUniqueCheckResult::WaitFor(xid) => {
+                    drop(locked.guard);
+                    drop(locked.pin);
+                    let waiter = ctx.txn_waiter.as_ref().ok_or_else(|| {
+                        CatalogError::Io("btree unique check missing transaction waiter".into())
+                    })?;
+                    match waiter.wait_for(&ctx.txns, xid, ctx.interrupts.as_ref()) {
+                        crate::backend::storage::lmgr::WaitOutcome::Completed => {}
+                        crate::backend::storage::lmgr::WaitOutcome::DeadlockTimeout => {
+                            return Err(CatalogError::Io(format!(
+                                "btree unique check timed out waiting for transaction {xid}"
+                            )));
+                        }
+                        crate::backend::storage::lmgr::WaitOutcome::Interrupted(reason) => {
+                            return Err(CatalogError::Interrupted(reason));
+                        }
+                    }
+                }
+                LockedUniqueCheckResult::Restart { split_block } => {
+                    drop(locked.guard);
+                    drop(locked.pin);
+                    if let Some(split_block) = split_block {
+                        finish_incomplete_split(ctx, split_block, &[])?;
+                    }
+                }
+            }
+        }
+    }
+
+    let search = find_leaf_for_insert(ctx, &key_values)?;
     if let Some(mut split) =
         insert_tuple_into_page(ctx, search.leaf_block, new_tuple, &key_values, true)?
     {
@@ -1947,7 +2185,6 @@ fn btinsert(ctx: &IndexInsertContext) -> Result<bool, CatalogError> {
         check_catalog_interrupts(ctx.interrupts.as_ref())?;
         propagate_split_upwards(ctx, split)?;
     }
-
     Ok(true)
 }
 

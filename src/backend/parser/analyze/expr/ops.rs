@@ -392,7 +392,10 @@ fn supports_builtin_text_like_comparison(op: &str, left: SqlType, right: SqlType
         && left.kind == right.kind
         && matches!(
             left.kind,
-            SqlTypeKind::Name | SqlTypeKind::Char | SqlTypeKind::Varchar | SqlTypeKind::InternalChar
+            SqlTypeKind::Name
+                | SqlTypeKind::Char
+                | SqlTypeKind::Varchar
+                | SqlTypeKind::InternalChar
         )
         && matches!(op, "=" | "<>" | "<" | "<=" | ">" | ">=")
 }

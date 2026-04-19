@@ -1959,8 +1959,8 @@ mod tests {
                 true,
             )],
         };
-        let range =
-            parse_range_text("[1,5)", SqlType::new(SqlTypeKind::Int4Range)).expect("parse legacy alias range");
+        let range = parse_range_text("[1,5)", SqlType::new(SqlTypeKind::Int4Range))
+            .expect("parse legacy alias range");
         let descriptor = RecordDescriptor::anonymous(
             vec![("span".into(), SqlType::new(SqlTypeKind::Int4Range))],
             -1,
@@ -1975,7 +1975,10 @@ mod tests {
             panic!("expected record");
         };
 
-        assert_eq!(decoded.descriptor.fields[0].sql_type.kind, SqlTypeKind::Range);
+        assert_eq!(
+            decoded.descriptor.fields[0].sql_type.kind,
+            SqlTypeKind::Range
+        );
         assert_eq!(
             decoded.descriptor.fields[0].sql_type.type_oid,
             crate::include::catalog::INT4RANGE_TYPE_OID

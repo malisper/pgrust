@@ -1,22 +1,14 @@
 use super::*;
 use crate::backend::access::heap::heapam::{heap_scan_begin, heap_scan_next};
 use crate::backend::executor::{StatementResult, Value};
-use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
 
 fn temp_dir(label: &str) -> PathBuf {
-    let path = std::env::temp_dir().join(format!(
-        "pgrust_toast_{}_{}_{}",
-        label,
-        std::process::id(),
-        NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = fs::remove_dir_all(&path);
-    fs::create_dir_all(&path).unwrap();
-    path
+    let _ = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+    crate::pgrust::test_support::seeded_temp_dir("toast", label)
 }
 
 fn query_rows(db: &Database, client_id: u32, sql: &str) -> Vec<Vec<Value>> {

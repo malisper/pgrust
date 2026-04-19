@@ -69,10 +69,10 @@ pub use modify::{
     BoundMergeStatement, BoundMergeWhenClause, BoundUpdateStatement, BoundUpdateTarget,
     PreparedInsert, bind_delete, bind_insert, bind_insert_prepared, bind_update, plan_merge,
 };
-pub use on_conflict::{BoundOnConflictAction, BoundOnConflictClause};
 pub(crate) use modify::{
     bind_delete_with_outer_scopes, bind_insert_with_outer_scopes, bind_update_with_outer_scopes,
 };
+pub use on_conflict::{BoundOnConflictAction, BoundOnConflictClause};
 pub use paths::BoundModifyRowSource;
 use paths::bind_order_by_items;
 pub(crate) use query::analyze_select_query_with_outer;
@@ -2126,9 +2126,7 @@ fn sql_expr_references_table(expr: &SqlExpr, table_name: &str) -> bool {
             .any(|arg| sql_expr_references_table(&arg.value, table_name)),
         SqlExpr::ScalarSubquery(subquery)
         | SqlExpr::ArraySubquery(subquery)
-        | SqlExpr::Exists(subquery) => {
-            select_statement_references_table(subquery, table_name)
-        }
+        | SqlExpr::Exists(subquery) => select_statement_references_table(subquery, table_name),
         SqlExpr::InSubquery {
             expr,
             subquery,

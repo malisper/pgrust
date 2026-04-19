@@ -215,13 +215,13 @@ pub(crate) fn build_pg_stat_user_tables_rows(
         .into_iter()
         .map(|row| (row.oid, row.nspname))
         .collect::<BTreeMap<_, _>>();
-    let index_rows_by_heap = indexes.into_iter().fold(
-        BTreeMap::<u32, Vec<u32>>::new(),
-        |mut acc, row| {
-            acc.entry(row.indrelid).or_default().push(row.indexrelid);
-            acc
-        },
-    );
+    let index_rows_by_heap =
+        indexes
+            .into_iter()
+            .fold(BTreeMap::<u32, Vec<u32>>::new(), |mut acc, row| {
+                acc.entry(row.indrelid).or_default().push(row.indexrelid);
+                acc
+            });
 
     let mut rows = classes
         .into_iter()
@@ -253,7 +253,8 @@ pub(crate) fn build_pg_stat_user_tables_rows(
                 .into_iter()
                 .flatten()
                 .map(|index_oid| {
-                    stats.relations
+                    stats
+                        .relations
                         .get(index_oid)
                         .map(|entry| entry.tuples_fetched)
                         .unwrap_or(0)
@@ -315,13 +316,13 @@ pub(crate) fn build_pg_statio_user_tables_rows(
         .into_iter()
         .map(|row| (row.oid, row.nspname))
         .collect::<BTreeMap<_, _>>();
-    let index_rows_by_heap = indexes.into_iter().fold(
-        BTreeMap::<u32, Vec<u32>>::new(),
-        |mut acc, row| {
-            acc.entry(row.indrelid).or_default().push(row.indexrelid);
-            acc
-        },
-    );
+    let index_rows_by_heap =
+        indexes
+            .into_iter()
+            .fold(BTreeMap::<u32, Vec<u32>>::new(), |mut acc, row| {
+                acc.entry(row.indrelid).or_default().push(row.indexrelid);
+                acc
+            });
 
     let mut rows = classes
         .into_iter()

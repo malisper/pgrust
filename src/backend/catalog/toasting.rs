@@ -142,7 +142,7 @@ pub fn relation_needs_toast_table(desc: &RelationDesc) -> bool {
     tuple_length > TOAST_TUPLE_THRESHOLD
 }
 
-fn toast_relation_desc() -> RelationDesc {
+pub(crate) fn toast_relation_desc() -> RelationDesc {
     let mut chunk_id = column_desc("chunk_id", SqlType::new(SqlTypeKind::Oid), false);
     chunk_id.storage.attstorage = AttributeStorage::Plain;
     chunk_id.storage.attcompression = AttributeCompression::Default;

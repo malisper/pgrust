@@ -269,7 +269,9 @@ pub(crate) fn eval_date_trunc_function(
                     hint: None,
                     sqlstate: "0A000",
                 })?;
-            Ok(Value::Timestamp(TimestampADT(i64::from(days) * USECS_PER_DAY)))
+            Ok(Value::Timestamp(TimestampADT(
+                i64::from(days) * USECS_PER_DAY,
+            )))
         }
         Value::Timestamp(timestamp) => {
             if !timestamp.is_finite() {

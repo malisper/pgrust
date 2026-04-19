@@ -81,7 +81,9 @@ fn collect_catalog_analyze_targets(
     }
 
     let auth = db.auth_state(client_id);
-    let auth_catalog = db.auth_catalog(client_id, txn_ctx).map_err(map_catalog_error)?;
+    let auth_catalog = db
+        .auth_catalog(client_id, txn_ctx)
+        .map_err(map_catalog_error)?;
     let is_superuser = auth_catalog
         .role_by_oid(auth.current_user_oid())
         .is_some_and(|row| row.rolsuper);

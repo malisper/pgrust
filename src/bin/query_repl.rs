@@ -10,8 +10,7 @@ use pgrust::backend::access::heap::heapam::{heap_flush, heap_insert_mvcc};
 use pgrust::backend::access::transam::xact::{INVALID_TRANSACTION_ID, TransactionManager};
 use pgrust::backend::catalog::{CatalogStore, column_desc};
 use pgrust::backend::commands::tablecmds::{
-    execute_delete_with_waiter, execute_insert, execute_truncate_table,
-    execute_update_with_waiter,
+    execute_delete_with_waiter, execute_insert, execute_truncate_table, execute_update_with_waiter,
 };
 use pgrust::backend::storage::smgr::{ForkNumber, MdStorageManager, StorageManager};
 use pgrust::backend::utils::cache::relcache::RelCache;

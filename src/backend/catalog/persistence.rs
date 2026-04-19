@@ -24,9 +24,7 @@ use crate::backend::storage::smgr::ForkNumber;
 use crate::backend::storage::smgr::{MdStorageManager, RelFileLocator, StorageManager};
 use crate::backend::utils::misc::interrupts::InterruptState;
 use crate::include::access::itemptr::ItemPointerData;
-use crate::include::catalog::{
-    BootstrapCatalogKind, bootstrap_catalog_kinds, bootstrap_relation_desc,
-};
+use crate::include::catalog::{BootstrapCatalogKind, bootstrap_catalog_kinds, bootstrap_relation_desc};
 use crate::include::nodes::datum::Value;
 
 #[allow(dead_code)]
@@ -160,6 +158,13 @@ pub(crate) fn apply_catalog_row_changes_subset_incremental(
         txns.write()
             .commit(xid)
             .map_err(|e| CatalogError::Io(format!("catalog transaction commit failed: {e:?}")))?;
+        // :HACK: Steady-state direct catalog writers still use a standalone
+        // durable transaction manager here. Flush its CLOG before returning so
+        // fresh durable readers immediately observe the committed xid instead
+        // of depending on drop-time writeback timing.
+        txns.write()
+            .flush_clog()
+            .map_err(|e| CatalogError::Io(format!("catalog transaction flush failed: {e:?}")))?;
         committed = true;
         // PostgreSQL leaves dead catalog index tuples behind here and expects a
         // later VACUUM to reclaim them once their deleting xid is old enough.
@@ -281,11 +286,11 @@ fn find_catalog_tuple_tid(
     while let Some((tid, tuple)) = heap_scan_next(&ctx.pool, ctx.client_id, &mut scan)
         .map_err(|e| CatalogError::Io(format!("catalog scan failed: {e:?}")))?
     {
-        if !snapshot.tuple_visible(&txns, &tuple) {
+        let decoded = decode_catalog_tuple_values(desc, &tuple)?;
+        if !catalog_row_identity_matches(kind, &decoded, values) {
             continue;
         }
-        let decoded = decode_catalog_tuple_values(desc, &tuple)?;
-        if catalog_row_identity_matches(kind, &decoded, values) {
+        if snapshot.tuple_visible(&txns, &tuple) {
             return Ok(Some(tid));
         }
     }
