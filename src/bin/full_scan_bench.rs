@@ -213,6 +213,11 @@ fn parse_args() -> Result<Args, String> {
             "--query" => {
                 args.query = take_value(&raw, &mut i, "--query")?;
             }
+            "--query-file" => {
+                let path = take_value(&raw, &mut i, "--query-file")?;
+                args.query = std::fs::read_to_string(&path)
+                    .map_err(|err| format!("read {path}: {err}"))?;
+            }
             "--count" => {
                 args.count = true;
                 args.query = "select count(*) from scanbench".to_string();

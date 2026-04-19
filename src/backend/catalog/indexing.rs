@@ -82,6 +82,15 @@ fn system_catalog_index_rel(
     }
 }
 
+/// Public accessor so that the wasm ephemeral bootstrap path can resolve
+/// system-catalog index locators with the correct shared/db scope.
+pub fn system_catalog_index_rel_for_db(
+    descriptor: crate::include::catalog::CatalogIndexDescriptor,
+    db_oid: u32,
+) -> RelFileLocator {
+    system_catalog_index_rel(descriptor, db_oid)
+}
+
 pub fn system_catalog_index_desc(
     descriptor: crate::include::catalog::CatalogIndexDescriptor,
 ) -> RelationDesc {

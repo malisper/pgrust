@@ -91,7 +91,7 @@ impl std::fmt::Display for ControlFileError {
 impl std::error::Error for ControlFileError {}
 
 pub struct ControlFileStore {
-    path: PathBuf,
+    path: Option<PathBuf>,
     inner: RwLock<ControlFile>,
 }
 
@@ -105,7 +105,7 @@ impl ControlFileStore {
         let bytes = fs::read(&path).map_err(|err| ControlFileError::Io(err.to_string()))?;
         let control = decode_control_file(&bytes)?;
         Ok(Self {
-            path,
+            path: Some(path),
             inner: RwLock::new(control),
         })
     }
@@ -120,11 +120,22 @@ impl ControlFileStore {
             fs::create_dir_all(parent).map_err(|err| ControlFileError::Io(err.to_string()))?;
         }
         let store = Self {
-            path,
+            path: Some(path),
             inner: RwLock::new(ControlFile::bootstrap(next_xid, config)),
         };
         store.persist()?;
         Ok(store)
+    }
+
+    /// Create an in-memory control file store. Used by wasm, tests, and any
+    /// embedded/ephemeral cluster that has no filesystem backing. `update()`
+    /// and `persist()` become no-ops on the disk side (they still mutate the
+    /// in-memory snapshot for `update`).
+    pub fn new_in_memory(next_xid: TransactionId, config: &CheckpointConfig) -> Self {
+        Self {
+            path: None,
+            inner: RwLock::new(ControlFile::bootstrap(next_xid, config)),
+        }
     }
 
     pub fn snapshot(&self) -> ControlFile {
@@ -138,13 +149,18 @@ impl ControlFileStore {
         let mut control = self.inner.write();
         f(&mut control);
         control.checkpoint_timestamp_usecs = current_postgres_timestamp_usecs();
-        persist_control_file(&self.path, &control)?;
+        if let Some(path) = self.path.as_ref() {
+            persist_control_file(path, &control)?;
+        }
         Ok(control.clone())
     }
 
     pub fn persist(&self) -> Result<(), ControlFileError> {
+        let Some(path) = self.path.as_ref() else {
+            return Ok(());
+        };
         let control = self.inner.read();
-        persist_control_file(&self.path, &control)
+        persist_control_file(path, &control)
     }
 }
 
