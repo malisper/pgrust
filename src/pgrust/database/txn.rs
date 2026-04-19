@@ -85,6 +85,7 @@ impl Database {
         client_id: ClientId,
         effects: &[TempMutationEffect],
     ) {
+        let temp_backend_id = self.temp_backend_id(client_id);
         let mut namespaces = self.temp_relations.write();
         for effect in effects.iter().rev() {
             match effect {
@@ -94,10 +95,10 @@ impl Database {
                     ..
                 } => {
                     if *namespace_created {
-                        namespaces.remove(&client_id);
+                        namespaces.remove(&temp_backend_id);
                         continue;
                     }
-                    if let Some(namespace) = namespaces.get_mut(&client_id) {
+                    if let Some(namespace) = namespaces.get_mut(&temp_backend_id) {
                         namespace.tables.remove(name);
                         namespace.generation = namespace.generation.saturating_add(1);
                     }
@@ -107,7 +108,7 @@ impl Database {
                     entry,
                     on_commit,
                 } => {
-                    if let Some(namespace) = namespaces.get_mut(&client_id) {
+                    if let Some(namespace) = namespaces.get_mut(&temp_backend_id) {
                         namespace.tables.insert(
                             name.clone(),
                             TempCatalogEntry {
@@ -119,7 +120,7 @@ impl Database {
                     }
                 }
                 TempMutationEffect::Rename { old_name, new_name } => {
-                    if let Some(namespace) = namespaces.get_mut(&client_id)
+                    if let Some(namespace) = namespaces.get_mut(&temp_backend_id)
                         && let Some(entry) = namespace.tables.remove(new_name)
                     {
                         namespace.tables.insert(old_name.clone(), entry);

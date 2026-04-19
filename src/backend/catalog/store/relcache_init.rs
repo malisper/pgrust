@@ -14,7 +14,7 @@ use crate::include::nodes::primnodes::{ColumnDesc, RelationDesc};
 use crate::pgrust::database::default_sequence_oid_from_default_expr;
 
 const RELCACHE_INIT_MAGIC: u32 = 0x5052_494E;
-const RELCACHE_INIT_VERSION: u32 = 1;
+const RELCACHE_INIT_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 enum RelCacheInitScopeFile {
@@ -104,7 +104,10 @@ pub(super) fn load_relcache_init_file(base_dir: &Path, scope: CatalogScope) -> O
 
     let mut cache = RelCache::default();
     for entry in file.entries {
-        cache.insert(entry.name, relcache_entry_from_file(entry.entry));
+        let relcache_entry = relcache_entry_from_file(entry.entry);
+        if relcache_entry_belongs_in_init(&relcache_entry) {
+            cache.insert(entry.name, relcache_entry);
+        }
     }
     Some(cache)
 }
@@ -124,6 +127,7 @@ pub(super) fn persist_relcache_init_file(
         scope: scope_to_file(scope),
         entries: relcache
             .entries()
+            .filter(|(_, entry)| relcache_entry_belongs_in_init(entry))
             .map(|(name, entry)| RelCacheInitNameEntry {
                 name: name.to_string(),
                 entry: relcache_entry_to_file(entry),
@@ -154,6 +158,10 @@ pub(super) fn relcache_init_needs_invalidation(kinds: &[BootstrapCatalogKind]) -
                 | BootstrapCatalogKind::PgIndex
         )
     })
+}
+
+fn relcache_entry_belongs_in_init(entry: &RelCacheEntry) -> bool {
+    entry.relpersistence != 't'
 }
 
 fn scope_to_file(scope: CatalogScope) -> RelCacheInitScopeFile {

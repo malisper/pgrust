@@ -270,7 +270,9 @@ impl RelCache {
                 }),
             };
             let relname = class.relname.to_ascii_lowercase();
-            cache.by_name.insert(relname.clone(), entry.clone());
+            if class.relpersistence != 't' {
+                cache.by_name.insert(relname.clone(), entry.clone());
+            }
             if let Some(namespace) = catcache.namespace_by_oid(class.relnamespace) {
                 let qualified = format!("{}.{}", namespace.nspname.to_ascii_lowercase(), relname);
                 cache.by_name.insert(qualified, entry.clone());

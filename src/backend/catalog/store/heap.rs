@@ -824,7 +824,10 @@ impl CatalogStore {
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let namespace_oid = self.allocate_next_oid(namespace_oid)?;
         let kinds = [BootstrapCatalogKind::PgNamespace];
-        self.invalidate_relcache_init_for_kinds(&kinds);
+        if !namespace_name.starts_with("pg_temp_") && !namespace_name.starts_with("pg_toast_temp_")
+        {
+            self.invalidate_relcache_init_for_kinds(&kinds);
+        }
         let rows = PhysicalCatalogRows {
             namespaces: vec![PgNamespaceRow {
                 oid: namespace_oid,
@@ -1407,6 +1410,10 @@ impl CatalogStore {
         owner_oid: u32,
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
+        if !namespace_name.starts_with("pg_temp_") && !namespace_name.starts_with("pg_toast_temp_")
+        {
+            self.invalidate_relcache_init_for_kinds(&[BootstrapCatalogKind::PgNamespace]);
+        }
         let rows = PhysicalCatalogRows {
             namespaces: vec![PgNamespaceRow {
                 oid: namespace_oid,
