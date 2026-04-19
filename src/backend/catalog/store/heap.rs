@@ -99,14 +99,16 @@ impl CatalogStore {
         Ok((entry, effect))
     }
 
-    pub fn create_database_row(
+    #[cfg(test)]
+    pub fn create_database_row_direct(
         &mut self,
         mut row: PgDatabaseRow,
     ) -> Result<PgDatabaseRow, CatalogError> {
         if matches!(&self.mode, CatalogStoreMode::Durable { .. }) {
             let mut control = self.control_state()?;
-            let databases = self.catcache()?.database_rows();
-            if databases
+            if self
+                .catalog
+                .databases
                 .iter()
                 .any(|existing| existing.datname.eq_ignore_ascii_case(&row.datname))
             {
@@ -128,6 +130,12 @@ impl CatalogStore {
                 },
                 &[BootstrapCatalogKind::PgDatabase],
             )?;
+            self.catalog.databases.push(row.clone());
+            self.catalog
+                .databases
+                .sort_by_key(|existing| (existing.oid, existing.datname.clone()));
+            self.catalog.next_oid = control.next_oid;
+            self.catalog.next_rel_number = control.next_rel_number;
             self.control = control;
             return Ok(row);
         }
@@ -156,12 +164,16 @@ impl CatalogStore {
             },
             &[BootstrapCatalogKind::PgDatabase],
         )?;
+        self.catalog = catalog.clone();
+        self.control.next_oid = catalog.next_oid;
+        self.control.next_rel_number = catalog.next_rel_number;
         Ok(row)
     }
 
-    pub fn drop_database_row(&mut self, name: &str) -> Result<PgDatabaseRow, CatalogError> {
+    #[cfg(test)]
+    pub fn drop_database_row_direct(&mut self, name: &str) -> Result<PgDatabaseRow, CatalogError> {
         if matches!(&self.mode, CatalogStoreMode::Durable { .. }) {
-            let mut databases = self.catcache()?.database_rows();
+            let mut databases = self.catalog.databases.clone();
             let control = self.control_state()?;
             let position = databases
                 .iter()
@@ -178,6 +190,9 @@ impl CatalogStore {
                 &PhysicalCatalogRows::default(),
                 &[BootstrapCatalogKind::PgDatabase],
             )?;
+            self.catalog.databases = databases;
+            self.catalog.next_oid = control.next_oid;
+            self.catalog.next_rel_number = control.next_rel_number;
             self.control = control;
             return Ok(row);
         }
@@ -198,7 +213,67 @@ impl CatalogStore {
             &PhysicalCatalogRows::default(),
             &[BootstrapCatalogKind::PgDatabase],
         )?;
+        self.catalog = catalog.clone();
+        self.control.next_oid = catalog.next_oid;
+        self.control.next_rel_number = catalog.next_rel_number;
         Ok(row)
+    }
+
+    pub fn create_database_row_mvcc(
+        &mut self,
+        mut row: PgDatabaseRow,
+        ctx: &CatalogWriteContext,
+    ) -> Result<(PgDatabaseRow, CatalogMutationEffect), CatalogError> {
+        let catcache = visible_catalog_caches_for_ctx(self, ctx)?.0;
+        if catcache
+            .database_rows()
+            .iter()
+            .any(|existing| existing.datname.eq_ignore_ascii_case(&row.datname))
+        {
+            return Err(CatalogError::UniqueViolation(
+                "pg_database_datname_index".into(),
+            ));
+        }
+        row.oid = self.allocate_next_oid(row.oid)?;
+        let kinds = [BootstrapCatalogKind::PgDatabase];
+        insert_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                databases: vec![row.clone()],
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &kinds,
+        )?;
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        Ok((row, effect))
+    }
+
+    pub fn drop_database_row_mvcc(
+        &mut self,
+        name: &str,
+        ctx: &CatalogWriteContext,
+    ) -> Result<(PgDatabaseRow, CatalogMutationEffect), CatalogError> {
+        let catcache = visible_catalog_caches_for_ctx(self, ctx)?.0;
+        let row = catcache
+            .database_rows()
+            .into_iter()
+            .find(|row| row.datname.eq_ignore_ascii_case(name))
+            .ok_or_else(|| CatalogError::UnknownTable(name.to_string()))?;
+        let kinds = [BootstrapCatalogKind::PgDatabase];
+        delete_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                databases: vec![row.clone()],
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &kinds,
+        )?;
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        Ok((row, effect))
     }
 
     pub fn create_table(

@@ -1,8 +1,7 @@
 use super::super::*;
 use crate::backend::catalog::roles::find_role_by_name;
 use crate::backend::commands::rolecmds::{
-    GrantMembershipAuthorizationError, build_alter_role_spec, build_create_role_spec,
-    can_rename_role, grant_membership_authorized, grant_membership_authorized_with_detail,
+    build_alter_role_spec, build_create_role_spec, can_rename_role, grant_membership_authorized,
     membership_row, normalize_drop_role_names, parse_createrole_self_grant, role_management_error,
 };
 use crate::backend::parser::{
@@ -18,9 +17,34 @@ impl Database {
         stmt: &CreateRoleStatement,
         createrole_self_grant: Option<&str>,
     ) -> Result<StatementResult, ExecError> {
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_create_role_stmt_in_transaction(
+            client_id,
+            stmt,
+            createrole_self_grant,
+            xid,
+            0,
+            &mut catalog_effects,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        result
+    }
+
+    pub(crate) fn execute_create_role_stmt_in_transaction(
+        &self,
+        client_id: ClientId,
+        stmt: &CreateRoleStatement,
+        createrole_self_grant: Option<&str>,
+        xid: TransactionId,
+        cid: CommandId,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
         let auth = self.auth_state(client_id);
         let auth_catalog = self
-            .auth_catalog(client_id, None)
+            .auth_catalog(client_id, Some((xid, cid)))
             .map_err(map_role_catalog_error)?;
         let spec = build_create_role_spec(stmt).map_err(ExecError::Parse)?;
         if !auth.can_create_role_with_attrs(&spec.attrs, &auth_catalog) {
@@ -30,73 +54,116 @@ impl Database {
                 &spec.attrs,
             ));
         }
-        let mut touched_catalogs = vec![crate::include::catalog::BootstrapCatalogKind::PgAuthId];
-        self.shared_catalog
+        let interrupts = self.interrupt_state(client_id);
+        let mut current_cid = cid;
+        let create_ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid: current_cid,
+            client_id,
+            waiter: None,
+            interrupts: interrupts.clone(),
+        };
+        let (created, effect) = self
+            .shared_catalog
             .write()
-            .create_role(&stmt.role_name, &spec.attrs)
+            .create_role_mvcc(&stmt.role_name, &spec.attrs, &create_ctx)
             .map_err(map_role_catalog_error)?;
+        catalog_effects.push(effect);
+        current_cid = current_cid.saturating_add(1);
+
+        let grant_membership = |db: &Database,
+                                current_cid: &mut CommandId,
+                                membership: crate::backend::catalog::role_memberships::NewRoleMembership,
+                                catalog_effects: &mut Vec<CatalogMutationEffect>|
+         -> Result<(), ExecError> {
+            let ctx = CatalogWriteContext {
+                pool: db.pool.clone(),
+                txns: db.txns.clone(),
+                xid,
+                cid: *current_cid,
+                client_id,
+                waiter: None,
+                interrupts: interrupts.clone(),
+            };
+            let (_, effect) = db
+                .shared_catalog
+                .write()
+                .grant_role_membership_mvcc(&membership, &ctx)
+                .map_err(map_role_catalog_error)?;
+            catalog_effects.push(effect);
+            *current_cid = current_cid.saturating_add(1);
+            Ok(())
+        };
 
         let current_user_oid = auth.current_user_oid();
-        let created = self
-            .shared_catalog
-            .read()
-            .catcache()
-            .map_err(map_role_catalog_error)?
-            .authid_rows()
-            .into_iter()
-            .find(|row| row.rolname.eq_ignore_ascii_case(&stmt.role_name))
-            .ok_or_else(|| ExecError::Parse(role_management_error("created role missing")))?;
-
         if !auth_catalog
             .role_by_oid(current_user_oid)
             .is_some_and(|row| row.rolsuper)
         {
-            self.shared_catalog
-                .write()
-                .grant_role_membership(&membership_row(
+            grant_membership(
+                self,
+                &mut current_cid,
+                membership_row(
                     created.oid,
                     current_user_oid,
                     crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                     true,
                     false,
                     false,
-                ))
-                .map_err(map_role_catalog_error)?;
-            touched_catalogs.push(crate::include::catalog::BootstrapCatalogKind::PgAuthMembers);
+                ),
+                catalog_effects,
+            )?;
 
             if let Some(raw) = createrole_self_grant {
                 if let Some(options) = parse_createrole_self_grant(raw).map_err(ExecError::Parse)? {
-                    self.shared_catalog
-                        .write()
-                        .grant_role_membership(&membership_row(
+                    grant_membership(
+                        self,
+                        &mut current_cid,
+                        membership_row(
                             created.oid,
                             current_user_oid,
                             current_user_oid,
                             false,
                             options.inherit,
                             options.set,
-                        ))
-                        .map_err(map_role_catalog_error)?;
-                    touched_catalogs
-                        .push(crate::include::catalog::BootstrapCatalogKind::PgAuthMembers);
+                        ),
+                        catalog_effects,
+                    )?;
                 }
             }
         }
 
-        let live_catalog = live_auth_catalog(self).map_err(map_role_catalog_error)?;
         for role_name in &spec.add_role_to {
+            let live_catalog = self
+                .auth_catalog(client_id, Some((xid, current_cid)))
+                .map_err(map_role_catalog_error)?;
             let parent = grant_membership_authorized(&auth, &live_catalog, role_name)
                 .map_err(ExecError::Parse)?;
-            self.shared_catalog
+            let ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid: current_cid,
+                client_id,
+                waiter: None,
+                interrupts: interrupts.clone(),
+            };
+            let (_, effect) = self
+                .shared_catalog
                 .write()
-                .grant_role_membership(&membership_row(
-                    parent.oid,
-                    created.oid,
-                    current_user_oid,
-                    false,
-                    false,
-                    true,
-                ))
+                .grant_role_membership_mvcc(
+                    &membership_row(
+                        parent.oid,
+                        created.oid,
+                        current_user_oid,
+                        false,
+                        false,
+                        true,
+                    ),
+                    &ctx,
+                )
                 .map_err(|err| {
                     map_named_role_membership_error(
                         err,
@@ -106,20 +173,37 @@ impl Database {
                         &parent.rolname,
                     )
                 })?;
-            touched_catalogs.push(crate::include::catalog::BootstrapCatalogKind::PgAuthMembers);
+            catalog_effects.push(effect);
+            current_cid = current_cid.saturating_add(1);
         }
         for member_name in &spec.role_members {
+            let live_catalog = self
+                .auth_catalog(client_id, Some((xid, current_cid)))
+                .map_err(map_role_catalog_error)?;
             let member = lookup_membership_member(&live_catalog, member_name)?;
-            self.shared_catalog
+            let ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid: current_cid,
+                client_id,
+                waiter: None,
+                interrupts: interrupts.clone(),
+            };
+            let (_, effect) = self
+                .shared_catalog
                 .write()
-                .grant_role_membership(&membership_row(
-                    created.oid,
-                    member.oid,
-                    current_user_oid,
-                    false,
-                    false,
-                    true,
-                ))
+                .grant_role_membership_mvcc(
+                    &membership_row(
+                        created.oid,
+                        member.oid,
+                        current_user_oid,
+                        false,
+                        false,
+                        true,
+                    ),
+                    &ctx,
+                )
                 .map_err(|err| {
                     map_named_role_membership_error(
                         err,
@@ -129,20 +213,37 @@ impl Database {
                         &created.rolname,
                     )
                 })?;
-            touched_catalogs.push(crate::include::catalog::BootstrapCatalogKind::PgAuthMembers);
+            catalog_effects.push(effect);
+            current_cid = current_cid.saturating_add(1);
         }
         for member_name in &spec.admin_members {
+            let live_catalog = self
+                .auth_catalog(client_id, Some((xid, current_cid)))
+                .map_err(map_role_catalog_error)?;
             let member = lookup_membership_member(&live_catalog, member_name)?;
-            self.shared_catalog
+            let ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid: current_cid,
+                client_id,
+                waiter: None,
+                interrupts: interrupts.clone(),
+            };
+            let (_, effect) = self
+                .shared_catalog
                 .write()
-                .grant_role_membership(&membership_row(
-                    created.oid,
-                    member.oid,
-                    current_user_oid,
-                    true,
-                    false,
-                    true,
-                ))
+                .grant_role_membership_mvcc(
+                    &membership_row(
+                        created.oid,
+                        member.oid,
+                        current_user_oid,
+                        true,
+                        false,
+                        true,
+                    ),
+                    &ctx,
+                )
                 .map_err(|err| {
                     map_named_role_membership_error(
                         err,
@@ -152,9 +253,9 @@ impl Database {
                         &created.rolname,
                     )
                 })?;
-            touched_catalogs.push(crate::include::catalog::BootstrapCatalogKind::PgAuthMembers);
+            catalog_effects.push(effect);
+            current_cid = current_cid.saturating_add(1);
         }
-        publish_direct_catalog_invalidation(self, client_id, &touched_catalogs);
         Ok(StatementResult::AffectedRows(0))
     }
 
@@ -163,9 +264,27 @@ impl Database {
         client_id: ClientId,
         stmt: &AlterRoleStatement,
     ) -> Result<StatementResult, ExecError> {
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result =
+            self.execute_alter_role_stmt_in_transaction(client_id, stmt, xid, 0, &mut catalog_effects);
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        result
+    }
+
+    pub(crate) fn execute_alter_role_stmt_in_transaction(
+        &self,
+        client_id: ClientId,
+        stmt: &AlterRoleStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
         let auth = self.auth_state(client_id);
         let auth_catalog = self
-            .auth_catalog(client_id, None)
+            .auth_catalog(client_id, Some((xid, cid)))
             .map_err(map_role_catalog_error)?;
         let existing = find_role_by_name(auth_catalog.roles(), &stmt.role_name)
             .cloned()
@@ -175,21 +294,26 @@ impl Database {
                     stmt.role_name
                 )))
             })?;
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+            interrupts: self.interrupt_state(client_id),
+        };
 
-        match &stmt.action {
+        let effect = match &stmt.action {
             AlterRoleAction::Rename { new_name } => {
                 if !can_rename_role(&auth, existing.oid, &auth_catalog) {
                     return Err(rename_role_permission_error(&existing));
                 }
                 self.shared_catalog
                     .write()
-                    .rename_role(&stmt.role_name, new_name)
-                    .map_err(map_role_catalog_error)?;
-                publish_direct_catalog_invalidation(
-                    self,
-                    client_id,
-                    &[crate::include::catalog::BootstrapCatalogKind::PgAuthId],
-                );
+                    .rename_role_mvcc(&stmt.role_name, new_name, &ctx)
+                    .map_err(map_role_catalog_error)?
+                    .1
             }
             AlterRoleAction::Options(_) => {
                 let spec = build_alter_role_spec(stmt, &existing)
@@ -205,16 +329,13 @@ impl Database {
                 }
                 self.shared_catalog
                     .write()
-                    .alter_role_attributes(&stmt.role_name, &spec.attrs)
-                    .map_err(map_role_catalog_error)?;
-                publish_direct_catalog_invalidation(
-                    self,
-                    client_id,
-                    &[crate::include::catalog::BootstrapCatalogKind::PgAuthId],
-                );
+                    .alter_role_attributes_mvcc(&stmt.role_name, &spec.attrs, &ctx)
+                    .map_err(map_role_catalog_error)?
+                    .1
             }
-        }
+        };
 
+        catalog_effects.push(effect);
         Ok(StatementResult::AffectedRows(0))
     }
 
@@ -291,13 +412,32 @@ impl Database {
         client_id: ClientId,
         stmt: &DropRoleStatement,
     ) -> Result<StatementResult, ExecError> {
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result =
+            self.execute_drop_role_stmt_in_transaction(client_id, stmt, xid, 0, &mut catalog_effects);
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        result
+    }
+
+    pub(crate) fn execute_drop_role_stmt_in_transaction(
+        &self,
+        client_id: ClientId,
+        stmt: &DropRoleStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
         let auth = self.auth_state(client_id);
-        let auth_catalog = self
-            .auth_catalog(client_id, None)
-            .map_err(map_role_catalog_error)?;
-        let mut dropped_any = false;
+        let interrupts = self.interrupt_state(client_id);
+        let mut current_cid = cid;
 
         for role_name in normalize_drop_role_names(stmt) {
+            let auth_catalog = self
+                .auth_catalog(client_id, Some((xid, current_cid)))
+                .map_err(map_role_catalog_error)?;
             let Some(existing) = find_role_by_name(auth_catalog.roles(), &role_name).cloned()
             else {
                 if stmt.if_exists {
@@ -315,7 +455,8 @@ impl Database {
             if !auth.can_drop_role(existing.oid, &auth_catalog) {
                 return Err(drop_role_permission_error(&existing));
             }
-            let owned_objects = owned_objects_for_roles(self, client_id, &[existing.oid])?;
+            let owned_objects =
+                owned_objects_for_roles(self, client_id, Some((xid, current_cid)), &[existing.oid])?;
             if !owned_objects.is_empty() {
                 let detail = owned_objects
                     .iter()
@@ -333,22 +474,22 @@ impl Database {
                     sqlstate: "2BP01",
                 });
             }
-            self.shared_catalog
-                .write()
-                .drop_role(&role_name)
-                .map_err(map_role_catalog_error)?;
-            dropped_any = true;
-        }
-
-        if dropped_any {
-            publish_direct_catalog_invalidation(
-                self,
+            let ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid: current_cid,
                 client_id,
-                &[
-                    crate::include::catalog::BootstrapCatalogKind::PgAuthId,
-                    crate::include::catalog::BootstrapCatalogKind::PgAuthMembers,
-                ],
-            );
+                waiter: None,
+                interrupts: interrupts.clone(),
+            };
+            let (_, effect) = self
+                .shared_catalog
+                .write()
+                .drop_role_mvcc(&role_name, &ctx)
+                .map_err(map_role_catalog_error)?;
+            catalog_effects.push(effect);
+            current_cid = current_cid.saturating_add(1);
         }
 
         Ok(StatementResult::AffectedRows(0))
@@ -384,7 +525,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let auth = self.auth_state(client_id);
         let auth_catalog = self
-            .auth_catalog(client_id, None)
+            .txn_auth_catalog(client_id, xid, cid)
             .map_err(map_role_catalog_error)?;
         let old_roles = stmt
             .old_roles
@@ -414,6 +555,7 @@ impl Database {
         let owned_objects = owned_objects_for_roles(
             self,
             client_id,
+            Some((xid, cid)),
             &old_role_oids.into_iter().collect::<Vec<_>>(),
         )?;
         if owned_objects.is_empty() {
@@ -455,14 +597,6 @@ fn map_role_catalog_error(err: crate::backend::catalog::CatalogError) -> ExecErr
     }
 }
 
-fn live_auth_catalog(db: &Database) -> Result<crate::pgrust::auth::AuthCatalog, CatalogError> {
-    let cache = db.shared_catalog.read().catcache()?;
-    Ok(crate::pgrust::auth::AuthCatalog::new(
-        cache.authid_rows(),
-        cache.auth_members_rows(),
-    ))
-}
-
 fn map_named_role_membership_error(
     err: crate::backend::catalog::CatalogError,
     member_oid: u32,
@@ -480,40 +614,6 @@ fn map_named_role_membership_error(
         }
         other => map_role_catalog_error(other),
     }
-}
-
-fn authorize_grant_membership(
-    auth: &crate::pgrust::auth::AuthState,
-    catalog: &crate::pgrust::auth::AuthCatalog,
-    role_name: &str,
-) -> Result<crate::include::catalog::PgAuthIdRow, ExecError> {
-    grant_membership_authorized_with_detail(auth, catalog, role_name).map_err(|err| match err {
-        GrantMembershipAuthorizationError::Parse(err) => ExecError::Parse(err),
-        GrantMembershipAuthorizationError::PermissionDenied { role_name, detail } => {
-            ExecError::DetailedError {
-                message: format!("permission denied to grant role \"{role_name}\""),
-                detail,
-                hint: None,
-                sqlstate: "42501",
-            }
-        }
-    })
-}
-
-fn publish_direct_catalog_invalidation(
-    db: &Database,
-    client_id: ClientId,
-    kinds: &[crate::include::catalog::BootstrapCatalogKind],
-) {
-    for &kind in kinds {
-        let rel = crate::backend::catalog::bootstrap::bootstrap_catalog_rel(kind, db.database_oid);
-        let _ = db.pool.invalidate_relation(rel);
-    }
-    let invalidation = crate::backend::utils::cache::inval::CatalogInvalidation {
-        touched_catalogs: kinds.iter().copied().collect(),
-        ..Default::default()
-    };
-    db.publish_committed_catalog_invalidation(client_id, &invalidation);
 }
 
 fn lookup_membership_member(
@@ -662,12 +762,15 @@ impl OwnedObject {
 fn owned_objects_for_roles(
     db: &Database,
     client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
     role_oids: &[u32],
 ) -> Result<Vec<OwnedObject>, ExecError> {
     let role_oids = role_oids.iter().copied().collect::<BTreeSet<_>>();
-    let catcache = db
-        .backend_catcache(client_id, None)
-        .map_err(map_role_catalog_error)?;
+    let catcache = match txn_ctx {
+        Some((xid, cid)) => db.txn_backend_catcache(client_id, xid, cid),
+        None => db.backend_catcache(client_id, None),
+    }
+    .map_err(map_role_catalog_error)?;
     let namespaces = catcache
         .namespace_rows()
         .into_iter()
@@ -820,22 +923,17 @@ mod tests {
         db: &Database,
         role_name: &str,
         member_name: &str,
-        grantor_name: &str,
+        _grantor_name: &str,
         inherit_option: bool,
         set_option: bool,
     ) {
-        let role_id = role_oid(db, role_name);
-        let member_id = role_oid(db, member_name);
-        let grantor_id = role_oid(db, grantor_name);
-        db.shared_catalog
-            .write()
-            .update_role_membership_options(
-                role_id,
-                member_id,
-                grantor_id,
-                false,
-                inherit_option,
-                set_option,
+        let mut session = Session::new(99);
+        session
+            .execute(
+                db,
+                &format!(
+                    "grant {role_name} to {member_name} with inherit {inherit_option}, set {set_option}"
+                ),
             )
             .unwrap();
     }
@@ -1120,8 +1218,6 @@ mod tests {
 
         let limited_oid = role_oid(&db, "limited_admin");
         let tenant_oid = role_oid(&db, "tenant");
-        let target_oid = role_oid(&db, "target");
-        let target2_oid = role_oid(&db, "target2");
 
         let mut tenant = Session::new(2);
         tenant.set_session_authorization_oid(tenant_oid);
@@ -1135,17 +1231,14 @@ mod tests {
             )
             .unwrap();
 
-        for role_oid in [tenant_oid, target_oid, target2_oid] {
-            db.shared_catalog
-                .write()
-                .grant_role_membership(&membership_row(
-                    role_oid,
-                    limited_oid,
-                    limited_oid,
-                    false,
-                    true,
-                    true,
-                ))
+        for role_name in ["tenant", "target", "target2"] {
+            superuser
+                .execute(
+                    &db,
+                    &format!(
+                        "grant {role_name} to limited_admin with inherit true, set true"
+                    ),
+                )
                 .unwrap();
         }
 
@@ -1252,30 +1345,11 @@ mod tests {
             .unwrap_err();
         assert!(format!("{err:?}").contains("permission denied to reassign objects"));
 
-        let limited_oid = role_oid(&db, "limited_admin");
-        let tenant2_oid = role_oid(&db, "tenant2");
-        let target2_oid = role_oid(&db, "target2");
-        db.shared_catalog
-            .write()
-            .grant_role_membership(&membership_row(
-                tenant2_oid,
-                limited_oid,
-                limited_oid,
-                false,
-                true,
-                true,
-            ))
+        superuser
+            .execute(&db, "grant tenant2 to limited_admin with inherit true, set true")
             .unwrap();
-        db.shared_catalog
-            .write()
-            .grant_role_membership(&membership_row(
-                target2_oid,
-                limited_oid,
-                limited_oid,
-                false,
-                true,
-                true,
-            ))
+        superuser
+            .execute(&db, "grant target2 to limited_admin with inherit true, set true")
             .unwrap();
 
         superuser
