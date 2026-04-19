@@ -185,8 +185,9 @@ pub struct Database {
     pub(crate) session_interrupt_states: Arc<RwLock<HashMap<ClientId, Arc<InterruptState>>>>,
     pub(crate) session_auth_states: Arc<RwLock<HashMap<ClientId, AuthState>>>,
     pub(crate) session_stats_states: Arc<RwLock<HashMap<ClientId, Arc<RwLock<SessionStatsState>>>>>,
+    pub(crate) session_temp_backend_ids: Arc<RwLock<HashMap<ClientId, TempBackendId>>>,
     pub(crate) database_create_grants: Arc<RwLock<Vec<DatabaseCreateGrant>>>,
-    pub(crate) temp_relations: Arc<RwLock<HashMap<ClientId, TempNamespace>>>,
+    pub(crate) temp_relations: Arc<RwLock<HashMap<TempBackendId, TempNamespace>>>,
     pub(crate) domains: Arc<RwLock<BTreeMap<String, DomainEntry>>>,
     pub(crate) enum_types: Arc<RwLock<BTreeMap<String, EnumTypeEntry>>>,
     pub(crate) range_types: Arc<RwLock<BTreeMap<String, RangeTypeEntry>>>,
@@ -199,6 +200,7 @@ pub struct Database {
 
 const TEMP_DB_OID_BASE: u32 = 0x7000_0000;
 const TEMP_TOAST_NAMESPACE_OID_BASE: u32 = 0x7800_0000;
+pub(crate) type TempBackendId = u32;
 type CatalogTxnContext = Option<(TransactionId, CommandId)>;
 
 #[derive(Debug, Clone)]
@@ -363,6 +365,24 @@ impl Database {
             .insert(client_id, stats_state);
     }
 
+    pub(crate) fn install_temp_backend_id(
+        &self,
+        client_id: ClientId,
+        temp_backend_id: TempBackendId,
+    ) {
+        self.session_temp_backend_ids
+            .write()
+            .insert(client_id, temp_backend_id);
+    }
+
+    pub(crate) fn temp_backend_id(&self, client_id: ClientId) -> TempBackendId {
+        self.session_temp_backend_ids
+            .read()
+            .get(&client_id)
+            .copied()
+            .unwrap_or(client_id)
+    }
+
     pub(crate) fn auth_state(&self, client_id: ClientId) -> AuthState {
         self.session_auth_states
             .read()
@@ -388,6 +408,10 @@ impl Database {
 
     pub(crate) fn clear_stats_state(&self, client_id: ClientId) {
         self.session_stats_states.write().remove(&client_id);
+    }
+
+    pub(crate) fn clear_temp_backend_id(&self, client_id: ClientId) {
+        self.session_temp_backend_ids.write().remove(&client_id);
     }
 
     pub(crate) fn auth_catalog(
