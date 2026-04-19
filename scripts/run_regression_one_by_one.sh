@@ -94,39 +94,52 @@ cleanup() {
 }
 trap cleanup EXIT
 
-run_pgrust_setup_one_by_one() {
-    if [[ "$USE_PGRUST_SETUP" != true ]]; then
-        return 0
+run_bootstrap_setup_one_by_one() {
+    local setup_sql=""
+    local setup_out=""
+    local setup_raw=""
+    local setup_timings=""
+    local setup_tmp=""
+    local setup_label=""
+
+    if [[ "$USE_PGRUST_SETUP" == true ]]; then
+        setup_sql="$PGRUST_DIR/scripts/test_setup_pgrust.sql"
+        setup_out="$RESULTS_DIR/output/test_setup_pgrust.out"
+        setup_raw="$RESULTS_DIR/output_raw/test_setup_pgrust.out"
+        setup_timings="$RESULTS_DIR/timings/test_setup_pgrust.tsv"
+        setup_tmp="$RESULTS_DIR/tmp/test_setup_pgrust"
+        setup_label="pgrust setup bootstrap"
+    else
+        setup_sql="$SQL_DIR/test_setup.sql"
+        setup_out="$RESULTS_DIR/output/test_setup.out"
+        setup_raw="$RESULTS_DIR/output_raw/test_setup.out"
+        setup_timings="$RESULTS_DIR/timings/test_setup.tsv"
+        setup_tmp="$RESULTS_DIR/tmp/test_setup"
+        setup_label="upstream setup bootstrap"
     fi
 
-    PGRUST_SETUP_SQL="$PGRUST_DIR/scripts/test_setup_pgrust.sql"
-    PGRUST_SETUP_OUT="$RESULTS_DIR/output/test_setup_pgrust.out"
-    PGRUST_SETUP_RAW="$RESULTS_DIR/output_raw/test_setup_pgrust.out"
-    PGRUST_SETUP_TIMINGS="$RESULTS_DIR/timings/test_setup_pgrust.tsv"
-    PGRUST_SETUP_TMP="$RESULTS_DIR/tmp/test_setup_pgrust"
-
-    if [[ ! -f "$PGRUST_SETUP_SQL" ]]; then
-        echo "ERROR: pgrust setup file not found: $PGRUST_SETUP_SQL"
+    if [[ ! -f "$setup_sql" ]]; then
+        echo "ERROR: setup file not found: $setup_sql"
         exit 1
     fi
 
-    echo "Running pgrust setup bootstrap one statement at a time..."
+    echo "Running $setup_label one statement at a time..."
     if ! run_sql_one_by_one \
-        "$PGRUST_SETUP_SQL" \
-        "$PGRUST_SETUP_OUT" \
-        "$PGRUST_SETUP_RAW" \
-        "$PGRUST_SETUP_TIMINGS" \
-        "$PGRUST_SETUP_TMP" \
+        "$setup_sql" \
+        "$setup_out" \
+        "$setup_raw" \
+        "$setup_timings" \
+        "$setup_tmp" \
         true >/dev/null; then
         :
     fi
 
-    if grep -qi "statement timeout\|could not connect\|server closed the connection unexpectedly" "$PGRUST_SETUP_RAW"; then
-        echo "ERROR: pgrust setup bootstrap failed"
+    if grep -qi "statement timeout\|could not connect\|server closed the connection unexpectedly" "$setup_raw"; then
+        echo "ERROR: $setup_label failed"
         echo "See:"
-        echo "  output:  $PGRUST_SETUP_OUT"
-        echo "  raw:     $PGRUST_SETUP_RAW"
-        echo "  timings: $PGRUST_SETUP_TIMINGS"
+        echo "  output:  $setup_out"
+        echo "  raw:     $setup_raw"
+        echo "  timings: $setup_timings"
         exit 1
     fi
 }
@@ -169,6 +182,11 @@ restart_server() {
 
     if ! start_server; then
         echo "  -> Restart failed; aborting run to avoid contaminating later results."
+        return 1
+    fi
+
+    if ! run_bootstrap_setup_one_by_one; then
+        echo "  -> Bootstrap replay failed after restart; aborting run."
         return 1
     fi
 
@@ -507,7 +525,7 @@ run_sql_one_by_one() {
             if [[ "$on_error_stop" == true ]]; then
                 break
             fi
-            run_pgrust_setup_one_by_one
+            run_bootstrap_setup_one_by_one
         else
             break
         fi
@@ -518,7 +536,7 @@ run_sql_one_by_one() {
     echo "$stmt_count"
 }
 
-run_pgrust_setup_one_by_one
+run_bootstrap_setup_one_by_one
 
 if [[ -n "$SINGLE_TEST" ]]; then
     TEST_FILES=("$SQL_DIR/${SINGLE_TEST}.sql")
@@ -791,21 +809,6 @@ for sql_file in "${TEST_FILES[@]}"; do
         printf "%-40s SKIP (no expected output)\n" "$test_name"
         TOTAL=$((TOTAL - 1))
         continue
-    fi
-
-    # :HACK: Some earlier regression files currently leave the cluster in a
-    # state where shared setup fixtures are no longer visible to int2.sql.
-    # Rehydrate the baseline cluster state before int2 so the one-by-one
-    # harness reports int2 semantics instead of unrelated prior-suite fallout.
-    if [[ "$USE_PGRUST_SETUP" == true && "$SKIP_SERVER" == false && "$test_name" == "int2" ]]; then
-        cleanup
-        rm -rf "$DATA_DIR"
-        mkdir -p "$DATA_DIR"
-        if ! start_server; then
-            echo "ERROR: Server did not become ready in time"
-            exit 1
-        fi
-        run_pgrust_setup_one_by_one
     fi
 
     stmt_count="$(run_sql_one_by_one \
