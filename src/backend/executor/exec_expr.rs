@@ -24,8 +24,8 @@ use super::expr_datetime::{
 };
 use super::expr_geometry::eval_geometry_function;
 use super::expr_json::{
-    eval_json_builtin_function, eval_json_get, eval_json_path,
-    eval_json_record_builtin_function, eval_jsonpath_operator,
+    eval_json_builtin_function, eval_json_get, eval_json_path, eval_json_record_builtin_function,
+    eval_jsonpath_operator,
 };
 use super::expr_math::{
     cosd, cotd, eval_abs_function, eval_acosd, eval_acosh, eval_asind, eval_atanh,
@@ -60,9 +60,9 @@ use super::expr_string::{
     eval_pg_rust_test_enc_setup, eval_position_function, eval_quote_literal_function,
     eval_repeat_function, eval_replace_function, eval_reverse_function, eval_right_function,
     eval_rpad_function, eval_set_bit_bytes, eval_set_byte, eval_sha224_function,
-    eval_sha256_function, eval_sha384_function, eval_sha512_function, eval_to_bin_function,
-    eval_to_hex_function, eval_to_oct_function, eval_split_part_function, eval_strpos_function,
-    eval_text_overlay, eval_text_substring, eval_to_char_function, eval_to_number_function,
+    eval_sha256_function, eval_sha384_function, eval_sha512_function, eval_split_part_function,
+    eval_strpos_function, eval_text_overlay, eval_text_substring, eval_to_bin_function,
+    eval_to_char_function, eval_to_hex_function, eval_to_number_function, eval_to_oct_function,
     eval_translate_function, eval_trim_function, eval_unistr_function,
 };
 use super::node_types::*;
@@ -76,11 +76,11 @@ use super::{ExecError, ExecutorContext, exec_next, executor_start};
 use crate::backend::executor::jsonb::{
     JsonbValue, jsonb_contains, jsonb_exists, jsonb_exists_all, jsonb_exists_any, jsonb_from_value,
 };
+use crate::backend::executor::sqlfunc::execute_user_defined_sql_scalar_function;
 use crate::backend::parser::analyze::is_binary_coercible_type;
 use crate::backend::parser::{
     CatalogLookup, ParseError, SqlType, SqlTypeKind, SubqueryComparisonOp,
 };
-use crate::backend::executor::sqlfunc::execute_user_defined_sql_scalar_function;
 use crate::backend::utils::misc::checkpoint::checkpoint_stats_value;
 use crate::include::catalog::builtin_scalar_function_for_proc_oid;
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue, NumericValue};
@@ -777,18 +777,24 @@ fn eval_func_expr(
             ctx,
         ),
         ScalarFunctionImpl::UserDefined { proc_oid } => {
-            let catalog = ctx.catalog.as_ref().ok_or_else(|| ExecError::DetailedError {
-                message: "user-defined functions require executor catalog context".into(),
-                detail: None,
-                hint: None,
-                sqlstate: "0A000",
-            })?;
-            let row = catalog.proc_row_by_oid(proc_oid).ok_or_else(|| ExecError::DetailedError {
-                message: format!("unknown function oid {proc_oid}"),
-                detail: None,
-                hint: None,
-                sqlstate: "42883",
-            })?;
+            let catalog = ctx
+                .catalog
+                .as_ref()
+                .ok_or_else(|| ExecError::DetailedError {
+                    message: "user-defined functions require executor catalog context".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "0A000",
+                })?;
+            let row =
+                catalog
+                    .proc_row_by_oid(proc_oid)
+                    .ok_or_else(|| ExecError::DetailedError {
+                        message: format!("unknown function oid {proc_oid}"),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42883",
+                    })?;
             match row.prolang {
                 crate::include::catalog::PG_LANGUAGE_SQL_OID => {
                     execute_user_defined_sql_scalar_function(&row, &func.args, slot, ctx)
@@ -1523,9 +1529,12 @@ fn eval_plpgsql_builtin_function(
                 Value::Int32(_),
             ] => eval_bytea_overlay(&values),
             [Value::Text(_), Value::Text(_), Value::Int32(_)]
-            | [Value::Text(_), Value::Text(_), Value::Int32(_), Value::Int32(_)] => {
-                eval_text_overlay(&values)
-            }
+            | [
+                Value::Text(_),
+                Value::Text(_),
+                Value::Int32(_),
+                Value::Int32(_),
+            ] => eval_text_overlay(&values),
             _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "plpgsql builtin function supported by the standalone evaluator",
                 actual: format!("{func:?}"),
@@ -1886,9 +1895,7 @@ fn eval_builtin_function(
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
     ensure_builtin_side_effects_allowed(func, ctx)?;
-    if let Some(result) =
-        eval_json_record_builtin_function(func, result_type, args, slot, ctx)
-    {
+    if let Some(result) = eval_json_record_builtin_function(func, result_type, args, slot, ctx) {
         return result;
     }
     let values = args
@@ -2340,9 +2347,12 @@ fn eval_builtin_function(
                 Value::Int32(_),
             ] => eval_bytea_overlay(&values),
             [Value::Text(_), Value::Text(_), Value::Int32(_)]
-            | [Value::Text(_), Value::Text(_), Value::Int32(_), Value::Int32(_)] => {
-                eval_text_overlay(&values)
-            }
+            | [
+                Value::Text(_),
+                Value::Text(_),
+                Value::Int32(_),
+                Value::Int32(_),
+            ] => eval_text_overlay(&values),
             _ => unreachable!("validated overlay arguments"),
         },
         BuiltinScalarFunction::GetBit => match values.as_slice() {

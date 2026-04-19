@@ -37,14 +37,15 @@ impl LargeObjectRuntime {
     }
 
     pub(crate) fn unlink(&self, oid: u32) -> Result<i32, ExecError> {
-        self.metadata.write().remove(&oid).ok_or_else(|| {
-            ExecError::DetailedError {
+        self.metadata
+            .write()
+            .remove(&oid)
+            .ok_or_else(|| ExecError::DetailedError {
                 message: format!("large object {oid} does not exist"),
                 detail: None,
                 hint: None,
                 sqlstate: "42704",
-            }
-        })?;
+            })?;
         Ok(1)
     }
 

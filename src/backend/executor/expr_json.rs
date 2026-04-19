@@ -1,8 +1,7 @@
 use super::exec_expr::eval_expr;
-use super::node_types::*;
 use super::expr_casts::cast_value_with_config;
+use super::node_types::*;
 use super::{ExecError, ExecutorContext};
-use crate::backend::parser::CatalogLookup;
 use crate::backend::executor::jsonb::{
     JsonbValue, decode_jsonb, encode_jsonb, jsonb_builder_key, jsonb_from_value, jsonb_get,
     jsonb_object_from_pairs, jsonb_path, jsonb_to_text_value, jsonb_to_value,
@@ -16,6 +15,7 @@ use crate::backend::executor::render_bit_text;
 use crate::backend::executor::render_datetime_value_text;
 use crate::backend::executor::render_range_text;
 use crate::backend::libpq::pqformat::format_bytea_text;
+use crate::backend::parser::CatalogLookup;
 use crate::backend::utils::record::lookup_anonymous_record_descriptor;
 use crate::include::catalog::RECORD_TYPE_OID;
 use crate::include::nodes::datum::{ArrayValue, RecordDescriptor, RecordValue};
@@ -141,24 +141,48 @@ pub(crate) fn eval_json_record_builtin_function(
     ctx: &mut ExecutorContext,
 ) -> Option<Result<Value, ExecError>> {
     let result = match func {
-        BuiltinScalarFunction::JsonPopulateRecord => {
-            eval_json_record_scalar_function("json_populate_record", true, true, result_type, args, slot, ctx)
-        }
+        BuiltinScalarFunction::JsonPopulateRecord => eval_json_record_scalar_function(
+            "json_populate_record",
+            true,
+            true,
+            result_type,
+            args,
+            slot,
+            ctx,
+        ),
         BuiltinScalarFunction::JsonPopulateRecordValid => {
             eval_json_record_valid_function("json_populate_record_valid", true, args, slot, ctx)
         }
-        BuiltinScalarFunction::JsonToRecord => {
-            eval_json_record_scalar_function("json_to_record", false, true, result_type, args, slot, ctx)
-        }
-        BuiltinScalarFunction::JsonbPopulateRecord => {
-            eval_json_record_scalar_function("jsonb_populate_record", true, false, result_type, args, slot, ctx)
-        }
+        BuiltinScalarFunction::JsonToRecord => eval_json_record_scalar_function(
+            "json_to_record",
+            false,
+            true,
+            result_type,
+            args,
+            slot,
+            ctx,
+        ),
+        BuiltinScalarFunction::JsonbPopulateRecord => eval_json_record_scalar_function(
+            "jsonb_populate_record",
+            true,
+            false,
+            result_type,
+            args,
+            slot,
+            ctx,
+        ),
         BuiltinScalarFunction::JsonbPopulateRecordValid => {
             eval_json_record_valid_function("jsonb_populate_record_valid", false, args, slot, ctx)
         }
-        BuiltinScalarFunction::JsonbToRecord => {
-            eval_json_record_scalar_function("jsonb_to_record", false, false, result_type, args, slot, ctx)
-        }
+        BuiltinScalarFunction::JsonbToRecord => eval_json_record_scalar_function(
+            "jsonb_to_record",
+            false,
+            false,
+            result_type,
+            args,
+            slot,
+            ctx,
+        ),
         _ => return None,
     };
     Some(result)
@@ -222,12 +246,7 @@ pub(crate) fn eval_json_record_set_returning_function(
                     )
                 })
                 .collect::<Result<Vec<_>, _>>()?,
-            _ => {
-                return Err(expected_json_array_error(
-                    &JsonRecordPath::default(),
-                    None,
-                ))
-            }
+            _ => return Err(expected_json_array_error(&JsonRecordPath::default(), None)),
         }
     } else {
         vec![json_record_row_for_output(
@@ -723,10 +742,7 @@ fn eval_json_record_scalar_function(
         &record_columns_from_descriptor(&descriptor),
         ctx,
     )?;
-    Ok(Value::Record(RecordValue::from_descriptor(
-        descriptor,
-        row,
-    )))
+    Ok(Value::Record(RecordValue::from_descriptor(descriptor, row)))
 }
 
 fn eval_json_record_valid_function(
@@ -854,11 +870,13 @@ fn json_record_row_from_value(
                 detail: None,
                 hint: None,
                 sqlstate: "22023",
-            })
+            });
         }
     };
     let base_fields = match base_value {
-        Value::Record(record) if record.fields.len() == output_columns.len() => Some(&record.fields),
+        Value::Record(record) if record.fields.len() == output_columns.len() => {
+            Some(&record.fields)
+        }
         Value::Null => None,
         Value::Record(_) => None,
         other => {
@@ -866,7 +884,7 @@ fn json_record_row_from_value(
                 op: func_name,
                 left: other.clone(),
                 right: Value::Null,
-            })
+            });
         }
     };
     output_columns
@@ -920,9 +938,13 @@ fn json_record_field_to_value(
                         &record_columns_from_descriptor(&descriptor),
                         ctx,
                     )?;
-                    Ok(Value::Record(RecordValue::from_descriptor(descriptor, fields)))
+                    Ok(Value::Record(RecordValue::from_descriptor(
+                        descriptor, fields,
+                    )))
                 }
-                SerdeJsonValue::String(text) => parse_record_literal_to_value(text, descriptor, ctx),
+                SerdeJsonValue::String(text) => {
+                    parse_record_literal_to_value(text, descriptor, ctx)
+                }
                 _ => Err(ExecError::DetailedError {
                     message: "expected JSON object".into(),
                     detail: None,
@@ -1036,12 +1058,15 @@ fn record_descriptor_from_sql_type(
 ) -> Result<Option<RecordDescriptor>, ExecError> {
     match ty.kind {
         SqlTypeKind::Composite if ty.typrelid != 0 => {
-            let catalog = ctx.catalog.as_ref().ok_or_else(|| ExecError::DetailedError {
-                message: "named composite record expansion requires catalog context".into(),
-                detail: None,
-                hint: None,
-                sqlstate: "0A000",
-            })?;
+            let catalog = ctx
+                .catalog
+                .as_ref()
+                .ok_or_else(|| ExecError::DetailedError {
+                    message: "named composite record expansion requires catalog context".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "0A000",
+                })?;
             let relation = catalog.lookup_relation_by_oid(ty.typrelid).ok_or_else(|| {
                 ExecError::DetailedError {
                     message: format!("unknown composite relation oid {}", ty.typrelid),
@@ -1122,8 +1147,7 @@ fn parse_record_literal_to_value(
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Value::Record(RecordValue::from_descriptor(
-        descriptor,
-        converted,
+        descriptor, converted,
     )))
 }
 
@@ -1325,7 +1349,10 @@ fn render_jsonb_object_function(values: &[Value]) -> Result<JsonbValue, ExecErro
                             details: "array must have two columns".into(),
                         });
                     }
-                    pairs.push((json_object_function_key(&parts[0], "jsonb")?, parts[1].clone()));
+                    pairs.push((
+                        json_object_function_key(&parts[0], "jsonb")?,
+                        parts[1].clone(),
+                    ));
                 }
                 return jsonb_object_from_pairs(&pairs);
             }
@@ -1488,14 +1515,16 @@ fn json_builder_key_for_object_constructor(
             hint: None,
             sqlstate: "22004",
         }),
-        Value::Array(_) | Value::PgArray(_) | Value::Record(_) | Value::Json(_) | Value::Jsonb(_) => {
-            Err(ExecError::DetailedError {
-                message: "key value must be scalar, not array, composite, or json".into(),
-                detail: None,
-                hint: None,
-                sqlstate: "22023",
-            })
-        }
+        Value::Array(_)
+        | Value::PgArray(_)
+        | Value::Record(_)
+        | Value::Json(_)
+        | Value::Jsonb(_) => Err(ExecError::DetailedError {
+            message: "key value must be scalar, not array, composite, or json".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22023",
+        }),
         _ => jsonb_builder_key(value),
     }
 }

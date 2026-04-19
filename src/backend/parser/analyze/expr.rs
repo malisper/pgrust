@@ -31,8 +31,7 @@ use self::ops::{
 };
 use self::subquery::{
     bind_array_subquery_expr, bind_exists_subquery_expr, bind_in_subquery_expr,
-    bind_quantified_array_expr,
-    bind_quantified_subquery_expr, bind_scalar_subquery_expr,
+    bind_quantified_array_expr, bind_quantified_subquery_expr, bind_scalar_subquery_expr,
 };
 pub(crate) use self::targets::{
     BoundSelectTargets, bind_select_targets, select_targets_contain_set_returning_call,

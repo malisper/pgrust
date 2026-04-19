@@ -98,13 +98,25 @@ impl DatabaseStatsStore {
     pub(crate) fn snapshot_with_pending(&self, pending: &StatsDelta) -> Self {
         let mut snapshot = self.clone();
         for (oid, delta) in &pending.relations {
-            snapshot.relations.entry(*oid).or_default().apply_delta(delta);
+            snapshot
+                .relations
+                .entry(*oid)
+                .or_default()
+                .apply_delta(delta);
         }
         for (oid, delta) in &pending.functions {
-            snapshot.functions.entry(*oid).or_default().apply_delta(delta);
+            snapshot
+                .functions
+                .entry(*oid)
+                .or_default()
+                .apply_delta(delta);
         }
         for (key, delta) in &pending.io {
-            snapshot.io.entry(key.clone()).or_default().apply_delta(delta);
+            snapshot
+                .io
+                .entry(key.clone())
+                .or_default()
+                .apply_delta(delta);
         }
         snapshot
     }
@@ -482,9 +494,7 @@ impl SessionStatsState {
                 };
                 requested
                     .into_iter()
-                    .filter_map(|key| {
-                        snapshot.io.get(&key).cloned().map(|entry| (key, entry))
-                    })
+                    .filter_map(|key| snapshot.io.get(&key).cloned().map(|entry| (key, entry)))
                     .collect()
             }
         }

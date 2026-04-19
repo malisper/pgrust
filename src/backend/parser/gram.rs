@@ -2382,7 +2382,10 @@ fn is_identifier_char(ch: char) -> bool {
     ch == '_' || ch.is_ascii_alphanumeric()
 }
 
-fn parse_smallint<'a>(input: &'a str, expected: &'static str) -> Result<(i16, &'a str), ParseError> {
+fn parse_smallint<'a>(
+    input: &'a str,
+    expected: &'static str,
+) -> Result<(i16, &'a str), ParseError> {
     let input = input.trim_start();
     let digits = input
         .char_indices()
@@ -2396,10 +2399,12 @@ fn parse_smallint<'a>(input: &'a str, expected: &'static str) -> Result<(i16, &'
             actual: input.into(),
         });
     }
-    let value = input[..digits].parse::<i16>().map_err(|_| ParseError::UnexpectedToken {
-        expected,
-        actual: input[..digits].into(),
-    })?;
+    let value = input[..digits]
+        .parse::<i16>()
+        .map_err(|_| ParseError::UnexpectedToken {
+            expected,
+            actual: input[..digits].into(),
+        })?;
     Ok((value, &input[digits..]))
 }
 
@@ -6004,7 +6009,6 @@ fn build_select_list(pair: Pair<'_, Rule>) -> Result<Vec<SelectItem>, ParseError
     Ok(items)
 }
 
-
 fn top_level_extract_expr(pair: Pair<'_, Rule>) -> bool {
     match pair.as_rule() {
         Rule::extract_expr => true,
@@ -7518,7 +7522,10 @@ fn build_array_literal_elements(pair: Pair<'_, Rule>) -> Result<Vec<SqlExpr>, Pa
     pair.into_inner()
         .filter(|part| part.as_rule() == Rule::array_expr_element)
         .map(|element| {
-            let inner = element.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+            let inner = element
+                .into_inner()
+                .next()
+                .ok_or(ParseError::UnexpectedEof)?;
             match inner.as_rule() {
                 Rule::nested_array_expr => build_array_literal(inner),
                 Rule::expr => build_expr(inner),

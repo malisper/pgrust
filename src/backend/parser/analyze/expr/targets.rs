@@ -1000,10 +1000,12 @@ fn bind_select_list_srf_call(
                         actual: other.to_string(),
                     });
                 }
-                let resolved = resolved.as_ref().ok_or_else(|| ParseError::UnexpectedToken {
-                    expected: "supported set-returning function",
-                    actual: other.to_string(),
-                })?;
+                let resolved = resolved
+                    .as_ref()
+                    .ok_or_else(|| ParseError::UnexpectedToken {
+                        expected: "supported set-returning function",
+                        actual: other.to_string(),
+                    })?;
                 let bound_args = bind_user_defined_srf_args(
                     &args,
                     scope,

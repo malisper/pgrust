@@ -8,7 +8,7 @@ use crate::backend::parser::derive_literal_default_value;
 use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::cache::relcache::{IndexRelCacheEntry, RelCache, RelCacheEntry};
 use crate::include::access::tupdesc::AttributeDesc;
-use crate::include::catalog::CatalogScope;
+use crate::include::catalog::{BootstrapCatalogKind, CatalogScope};
 use crate::include::nodes::parsenodes::SqlType;
 use crate::include::nodes::primnodes::{ColumnDesc, RelationDesc};
 use crate::pgrust::database::default_sequence_oid_from_default_expr;
@@ -109,7 +109,11 @@ pub(super) fn load_relcache_init_file(base_dir: &Path, scope: CatalogScope) -> O
     Some(cache)
 }
 
-pub(super) fn persist_relcache_init_file(base_dir: &Path, scope: CatalogScope, relcache: &RelCache) {
+pub(super) fn persist_relcache_init_file(
+    base_dir: &Path,
+    scope: CatalogScope,
+    relcache: &RelCache,
+) {
     let path = relcache_init_path_for_scope(base_dir, scope);
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
@@ -134,6 +138,22 @@ pub(super) fn persist_relcache_init_file(base_dir: &Path, scope: CatalogScope, r
 pub(super) fn invalidate_relcache_init_file(base_dir: &Path, scope: CatalogScope) {
     let path = relcache_init_path_for_scope(base_dir, scope);
     let _ = fs::remove_file(path);
+}
+
+pub(super) fn relcache_init_needs_invalidation(kinds: &[BootstrapCatalogKind]) -> bool {
+    kinds.iter().any(|kind| {
+        matches!(
+            kind,
+            BootstrapCatalogKind::PgNamespace
+                | BootstrapCatalogKind::PgClass
+                | BootstrapCatalogKind::PgAttribute
+                | BootstrapCatalogKind::PgAttrdef
+                | BootstrapCatalogKind::PgType
+                | BootstrapCatalogKind::PgConstraint
+                | BootstrapCatalogKind::PgInherits
+                | BootstrapCatalogKind::PgIndex
+        )
+    })
 }
 
 fn scope_to_file(scope: CatalogScope) -> RelCacheInitScopeFile {
@@ -185,7 +205,12 @@ fn relcache_entry_from_file(entry: RelCacheEntryFile) -> RelCacheEntry {
         relkind: entry.relkind,
         relhastriggers: entry.relhastriggers,
         desc: RelationDesc {
-            columns: entry.desc.columns.into_iter().map(column_desc_from_file).collect(),
+            columns: entry
+                .desc
+                .columns
+                .into_iter()
+                .map(column_desc_from_file)
+                .collect(),
         },
         index: entry.index,
     }

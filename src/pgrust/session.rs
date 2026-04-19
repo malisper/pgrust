@@ -35,9 +35,8 @@ use crate::include::catalog::PG_CHECKPOINT_OID;
 use crate::include::nodes::execnodes::ScalarType;
 use crate::pgrust::auth::AuthState;
 use crate::pgrust::database::{
-    Database, SequenceMutationEffect, SessionStatsState, StatsFetchConsistency,
-    TrackFunctionsSetting,
-    TempMutationEffect, alter_table_add_constraint_lock_requests,
+    Database, SequenceMutationEffect, SessionStatsState, StatsFetchConsistency, TempMutationEffect,
+    TrackFunctionsSetting, alter_table_add_constraint_lock_requests,
     alter_table_validate_constraint_lock_requests, delete_foreign_key_lock_requests,
     insert_foreign_key_lock_requests, prepared_insert_foreign_key_lock_requests,
     reject_relation_with_referencing_foreign_keys, relation_foreign_key_lock_requests,
@@ -358,6 +357,12 @@ impl Session {
                         ))
                     })?;
                     db.txns.write().commit(txn.xid).map_err(|e| {
+                        ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Mvcc(e))
+                    })?;
+                    // :HACK: See `Database::finish_txn()`: session commit also needs the
+                    // transaction status flushed so fresh durable snapshot readers observe
+                    // catalog changes immediately.
+                    db.txns.write().flush_clog().map_err(|e| {
                         ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Mvcc(e))
                     })?;
                     db.finalize_committed_catalog_effects(
@@ -1942,8 +1947,7 @@ impl Session {
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);
                 let bound = plan_merge(merge_stmt, &catalog)?;
                 let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
-                let mut ctx =
-                    self.executor_context_for_catalog(db, snapshot, cid, &catalog, None);
+                let mut ctx = self.executor_context_for_catalog(db, snapshot, cid, &catalog, None);
                 execute_merge(bound, &catalog, &mut ctx, xid, cid)
             }
             Statement::Select(_) | Statement::Values(_) | Statement::Explain(_) => {
@@ -1951,8 +1955,7 @@ impl Session {
                 let search_path = self.configured_search_path();
                 let catalog =
                     db.lazy_catalog_lookup(client_id, Some((xid, cid)), search_path.as_deref());
-                let mut ctx =
-                    self.executor_context_for_catalog(db, snapshot, cid, &catalog, None);
+                let mut ctx = self.executor_context_for_catalog(db, snapshot, cid, &catalog, None);
                 execute_readonly_statement(stmt, &catalog, &mut ctx)
             }
             Statement::Insert(ref insert_stmt) => {
@@ -2551,7 +2554,9 @@ impl Session {
                         value.to_string(),
                     )));
                 };
-                self.stats_state.write().set_track_functions(track_functions);
+                self.stats_state
+                    .write()
+                    .set_track_functions(track_functions);
             }
             _ => {}
         }

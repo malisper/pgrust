@@ -2,7 +2,7 @@ use super::paths::choose_modify_row_source;
 use super::query::rewrite_local_vars_for_output_exprs;
 use super::*;
 use crate::include::nodes::primnodes::JoinType;
-use crate::include::nodes::primnodes::{TargetEntry, Var, SELF_ITEM_POINTER_ATTR_NO};
+use crate::include::nodes::primnodes::{SELF_ITEM_POINTER_ATTR_NO, TargetEntry, Var};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundInsertStatement {
@@ -311,10 +311,7 @@ fn bind_merge_when_clause(
     })
 }
 
-fn merge_projection_targets(
-    columns: &[QueryColumn],
-    output_exprs: &[Expr],
-) -> Vec<TargetEntry> {
+fn merge_projection_targets(columns: &[QueryColumn], output_exprs: &[Expr]) -> Vec<TargetEntry> {
     columns
         .iter()
         .enumerate()
@@ -330,10 +327,7 @@ fn merge_projection_targets(
         .collect()
 }
 
-fn with_merge_target_ctid(
-    from: AnalyzedFrom,
-    target_desc: &RelationDesc,
-) -> (AnalyzedFrom, usize) {
+fn with_merge_target_ctid(from: AnalyzedFrom, target_desc: &RelationDesc) -> (AnalyzedFrom, usize) {
     let mut targets = merge_projection_targets(&from.output_columns, &from.output_exprs);
     let ctid_resno = targets.len() + 1;
     targets.push(

@@ -34,8 +34,8 @@ use crate::pgrust::database::TransactionWaiter;
 use crate::pl::plpgsql::TriggerOperation;
 
 use super::explain::{format_buffer_usage, format_explain_lines_with_costs};
-use super::upsert::execute_insert_on_conflict_rows;
 use super::trigger::RuntimeTriggers;
+use super::upsert::execute_insert_on_conflict_rows;
 use crate::backend::executor::exec_expr::{compile_predicate_with_decoder, eval_expr};
 use crate::backend::executor::exec_tuples::CompiledTupleDecoder;
 use crate::backend::executor::value_io::{coerce_assignment_value, encode_tuple_values};
@@ -297,7 +297,10 @@ pub(crate) fn execute_explain(
     let plan_start = Instant::now();
     let (query_desc, merge_target_name) = match explain_target {
         EitherExplainTarget::Select(select) => (
-            create_query_desc(crate::backend::parser::pg_plan_query(&select, catalog)?, None),
+            create_query_desc(
+                crate::backend::parser::pg_plan_query(&select, catalog)?,
+                None,
+            ),
             None,
         ),
         EitherExplainTarget::Merge(merge) => {
@@ -1273,7 +1276,10 @@ fn merge_condition_matches(
     let Some(condition) = condition else {
         return Ok(true);
     };
-    Ok(matches!(eval_expr(condition, slot, ctx)?, Value::Bool(true)))
+    Ok(matches!(
+        eval_expr(condition, slot, ctx)?,
+        Value::Bool(true)
+    ))
 }
 
 fn execute_merge_insert_action(
@@ -1512,7 +1518,9 @@ pub(crate) fn execute_merge(
 
             for clause in &stmt.when_clauses {
                 let matches = match clause.match_kind {
-                    crate::backend::parser::MergeMatchKind::Matched => target_matched && source_present,
+                    crate::backend::parser::MergeMatchKind::Matched => {
+                        target_matched && source_present
+                    }
                     crate::backend::parser::MergeMatchKind::NotMatchedBySource => {
                         target_matched && !source_present
                     }
@@ -1520,7 +1528,9 @@ pub(crate) fn execute_merge(
                         !target_matched && source_present
                     }
                 };
-                if !matches || !merge_condition_matches(clause.condition.as_ref(), &mut eval_slot, ctx)? {
+                if !matches
+                    || !merge_condition_matches(clause.condition.as_ref(), &mut eval_slot, ctx)?
+                {
                     continue;
                 }
                 let changed = match &clause.action {

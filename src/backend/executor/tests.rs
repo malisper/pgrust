@@ -3552,7 +3552,6 @@ fn select_extract_uses_date_part_runtime() {
     );
 }
 
-
 #[test]
 fn select_extract_uses_extract_as_default_column_name() {
     let base = temp_dir("select_extract_column_name");
@@ -9433,11 +9432,7 @@ fn array_subscript_partial_slices_on_zero_based_arrays_match_postgres() {
                 lower_bound: 2,
                 length: 3,
             }],
-            vec![
-                Value::Int32(3),
-                Value::Int32(4),
-                Value::Int32(5),
-            ],
+            vec![Value::Int32(3), Value::Int32(4), Value::Int32(5)],
         ))]],
     );
 

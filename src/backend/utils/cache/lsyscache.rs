@@ -13,8 +13,8 @@ use crate::backend::utils::cache::syscache::{
     ensure_proc_rows, ensure_rewrite_rows, ensure_statistic_rows, ensure_type_rows,
 };
 use crate::backend::utils::cache::system_views::{
-    build_pg_stat_io_rows, build_pg_stat_user_functions_rows, build_pg_stat_user_tables_rows,
-    build_pg_rules_rows, build_pg_statio_user_tables_rows, build_pg_stats_rows,
+    build_pg_rules_rows, build_pg_stat_io_rows, build_pg_stat_user_functions_rows,
+    build_pg_stat_user_tables_rows, build_pg_statio_user_tables_rows, build_pg_stats_rows,
     build_pg_views_rows,
 };
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
