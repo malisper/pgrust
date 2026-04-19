@@ -2646,8 +2646,14 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::PgStatClearSnapshot,
         ),
         ("pg_stat_have_stats", BuiltinScalarFunction::PgStatHaveStats),
-        ("pg_stat_get_numscans", BuiltinScalarFunction::PgStatGetNumscans),
-        ("pg_stat_get_lastscan", BuiltinScalarFunction::PgStatGetLastscan),
+        (
+            "pg_stat_get_numscans",
+            BuiltinScalarFunction::PgStatGetNumscans,
+        ),
+        (
+            "pg_stat_get_lastscan",
+            BuiltinScalarFunction::PgStatGetLastscan,
+        ),
         (
             "pg_stat_get_tuples_returned",
             BuiltinScalarFunction::PgStatGetTuplesReturned,

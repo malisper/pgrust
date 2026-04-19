@@ -85,17 +85,17 @@ pub fn probe_unique_conflict(
     }
 }
 
-fn keys_contain_null(values: &[Value]) -> bool {
+pub(crate) fn keys_contain_null(values: &[Value]) -> bool {
     values.iter().any(|value| matches!(value, Value::Null))
 }
 
-enum UniqueCandidateResult {
+pub(crate) enum UniqueCandidateResult {
     NoConflict,
     Conflict(HeapTuple),
     WaitFor(TransactionId),
 }
 
-fn classify_unique_candidate(
+pub(crate) fn classify_unique_candidate(
     ctx: &IndexInsertContext,
     tid: ItemPointerData,
 ) -> Result<UniqueCandidateResult, CatalogError> {

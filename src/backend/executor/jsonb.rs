@@ -140,11 +140,9 @@ pub(crate) fn render_temporal_jsonb_value(value: &JsonbValue) -> String {
         JsonbValue::Date(v) => render_datetime_value_text(&Value::Date(*v)),
         JsonbValue::Time(v) => render_datetime_value_text(&Value::Time(*v)),
         JsonbValue::TimeTz(v) => render_datetime_value_text(&Value::TimeTz(*v)),
-        JsonbValue::Timestamp(v) => {
-            render_jsonpath_timestamp_text(render_datetime_value_text(&Value::Timestamp(*v)).expect(
-                "datetime values render",
-            ))
-        }
+        JsonbValue::Timestamp(v) => render_jsonpath_timestamp_text(
+            render_datetime_value_text(&Value::Timestamp(*v)).expect("datetime values render"),
+        ),
         JsonbValue::TimestampTz(v) => render_jsonpath_timestamp_text(
             render_datetime_value_text(&Value::TimestampTz(*v)).expect("datetime values render"),
         ),
@@ -781,9 +779,9 @@ pub(crate) fn jsonb_to_text_value(value: &JsonbValue) -> Value {
         | JsonbValue::Time(_)
         | JsonbValue::TimeTz(_)
         | JsonbValue::Timestamp(_)
-        | JsonbValue::TimestampTz(_) => {
-            Value::Text(CompactString::from_owned(render_temporal_jsonb_value(value)))
-        }
+        | JsonbValue::TimestampTz(_) => Value::Text(CompactString::from_owned(
+            render_temporal_jsonb_value(value),
+        )),
         other => Value::Text(CompactString::from_owned(other.render())),
     }
 }
@@ -801,9 +799,10 @@ pub(crate) fn compare_jsonb(left: &JsonbValue, right: &JsonbValue) -> Ordering {
         (JsonbValue::Bool(l), JsonbValue::Bool(r)) => l.cmp(r),
         (JsonbValue::Date(l), JsonbValue::Date(r)) => l.cmp(r),
         (JsonbValue::Time(l), JsonbValue::Time(r)) => l.cmp(r),
-        (JsonbValue::TimeTz(l), JsonbValue::TimeTz(r)) => {
-            l.time.cmp(&r.time).then_with(|| l.offset_seconds.cmp(&r.offset_seconds))
-        }
+        (JsonbValue::TimeTz(l), JsonbValue::TimeTz(r)) => l
+            .time
+            .cmp(&r.time)
+            .then_with(|| l.offset_seconds.cmp(&r.offset_seconds)),
         (JsonbValue::Timestamp(l), JsonbValue::Timestamp(r)) => l.cmp(r),
         (JsonbValue::TimestampTz(l), JsonbValue::TimestampTz(r)) => l.cmp(r),
         (JsonbValue::Array(l), JsonbValue::Array(r)) => {

@@ -1,13 +1,11 @@
 use super::super::*;
 use crate::backend::parser::{
-            CreateFunctionReturnSpec, CreateFunctionStatement, FunctionArgMode, OwnedSequenceSpec,
-            FunctionParallel, FunctionVolatility,
-    SequenceOptionsSpec, SqlTypeKind, resolve_raw_type_name,
+    CreateFunctionReturnSpec, CreateFunctionStatement, FunctionArgMode, FunctionParallel,
+    FunctionVolatility, OwnedSequenceSpec, SequenceOptionsSpec, SqlTypeKind, resolve_raw_type_name,
 };
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_PLPGSQL_OID,
-    PG_LANGUAGE_SQL_OID,
-    PUBLIC_NAMESPACE_OID, PgProcRow, RECORD_TYPE_OID,
+    PG_LANGUAGE_SQL_OID, PUBLIC_NAMESPACE_OID, PgProcRow, RECORD_TYPE_OID,
 };
 use crate::include::nodes::parsenodes::{ForeignKeyAction, ForeignKeyMatchType};
 use crate::include::nodes::primnodes::{QueryColumn, ToastRelationRef};
@@ -514,7 +512,10 @@ impl Database {
                     actual: format!("LANGUAGE {}", create_stmt.language),
                 })
             })?;
-        if !matches!(language_row.oid, PG_LANGUAGE_PLPGSQL_OID | PG_LANGUAGE_SQL_OID) {
+        if !matches!(
+            language_row.oid,
+            PG_LANGUAGE_PLPGSQL_OID | PG_LANGUAGE_SQL_OID
+        ) {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "LANGUAGE plpgsql or sql",
                 actual: format!("LANGUAGE {}", create_stmt.language),
@@ -562,9 +563,10 @@ impl Database {
         let mut prorettype = 0u32;
         let mut proallargtypes = None;
         let mut proargmodes = None;
-        let mut proargnames = all_arg_names.iter().any(|name| !name.is_empty()).then_some(
-            all_arg_names.clone(),
-        );
+        let mut proargnames = all_arg_names
+            .iter()
+            .any(|name| !name.is_empty())
+            .then_some(all_arg_names.clone());
 
         match &create_stmt.return_spec {
             CreateFunctionReturnSpec::Type { ty, setof } => {
@@ -646,9 +648,10 @@ impl Database {
                 }
                 proallargtypes = Some(all_arg_oids.clone());
                 proargmodes = Some(all_arg_modes.clone());
-                proargnames = all_arg_names.iter().any(|name| !name.is_empty()).then_some(
-                    all_arg_names.clone(),
-                );
+                proargnames = all_arg_names
+                    .iter()
+                    .any(|name| !name.is_empty())
+                    .then_some(all_arg_names.clone());
                 if *setof_record {
                     proretset = true;
                     prorettype = RECORD_TYPE_OID;

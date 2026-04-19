@@ -1967,7 +1967,7 @@ fn not_null_constraint_column_index(
         .ok_or_else(|| CatalogError::UnknownTable(constraint_name.to_string()))
 }
 
-fn validate_builtin_type_rows(desc: &RelationDesc) -> Result<(), CatalogError> {
+pub(crate) fn validate_builtin_type_rows(desc: &RelationDesc) -> Result<(), CatalogError> {
     let builtin_rows = builtin_type_rows();
     for column in &desc.columns {
         if matches!(column.sql_type.kind, SqlTypeKind::Trigger) {

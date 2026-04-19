@@ -108,21 +108,21 @@ fn render_integer_base(op: &'static str, value: &Value, base: u32) -> Result<Val
 }
 
 pub(super) fn eval_to_bin_function(values: &[Value]) -> Result<Value, ExecError> {
-    values
-        .first()
-        .map_or(Ok(Value::Null), |value| render_integer_base("to_bin", value, 2))
+    values.first().map_or(Ok(Value::Null), |value| {
+        render_integer_base("to_bin", value, 2)
+    })
 }
 
 pub(super) fn eval_to_oct_function(values: &[Value]) -> Result<Value, ExecError> {
-    values
-        .first()
-        .map_or(Ok(Value::Null), |value| render_integer_base("to_oct", value, 8))
+    values.first().map_or(Ok(Value::Null), |value| {
+        render_integer_base("to_oct", value, 8)
+    })
 }
 
 pub(super) fn eval_to_hex_function(values: &[Value]) -> Result<Value, ExecError> {
-    values
-        .first()
-        .map_or(Ok(Value::Null), |value| render_integer_base("to_hex", value, 16))
+    values.first().map_or(Ok(Value::Null), |value| {
+        render_integer_base("to_hex", value, 16)
+    })
 }
 
 fn value_output_text(value: &Value) -> Result<String, ExecError> {

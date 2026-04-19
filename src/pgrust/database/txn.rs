@@ -42,14 +42,6 @@ impl Database {
         finalize_committed_catalog_effects(self, source_client_id, effects, invalidations);
     }
 
-    pub(crate) fn publish_committed_catalog_invalidation(
-        &self,
-        source_client_id: ClientId,
-        invalidation: &CatalogInvalidation,
-    ) {
-        publish_committed_catalog_invalidation(self, source_client_id, invalidation);
-    }
-
     pub(crate) fn finalize_aborted_catalog_effects(&self, effects: &[CatalogMutationEffect]) {
         for effect in effects {
             for rel in &effect.created_rels {
@@ -173,6 +165,13 @@ impl Database {
                     ))
                 })?;
                 self.txns.write().commit(xid).map_err(|e| {
+                    ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Mvcc(e))
+                })?;
+                // :HACK: `CatalogStore::catalog_snapshot()` currently rebuilds durable
+                // visibility from a fresh on-disk transaction-status reader, so make the
+                // just-committed xid visible there immediately instead of waiting for drop
+                // or checkpoint-time CLOG flush.
+                self.txns.write().flush_clog().map_err(|e| {
                     ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Mvcc(e))
                 })?;
                 let invalidations = catalog_effects

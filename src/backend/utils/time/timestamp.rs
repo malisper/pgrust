@@ -189,13 +189,12 @@ fn parse_date_tokens(
     config: &DateTimeConfig,
 ) -> Result<(i32, u32, u32), DateTimeParseError> {
     match tokens {
-        [single] => {
-            match parse_date_token_with_config(single, config) {
-                Ok(Some(date)) => Ok(date),
-                Err(_) | Ok(None) => parse_two_digit_year_first_timestamp_date(single)
-                    .ok_or(DateTimeParseError::Invalid),
+        [single] => match parse_date_token_with_config(single, config) {
+            Ok(Some(date)) => Ok(date),
+            Err(_) | Ok(None) => {
+                parse_two_digit_year_first_timestamp_date(single).ok_or(DateTimeParseError::Invalid)
             }
-        }
+        },
         [first, second, third] => {
             if let Some(month) = month_number(first) {
                 let day = second

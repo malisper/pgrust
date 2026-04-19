@@ -524,9 +524,9 @@ fn eval_exp_numeric_with_scale(
         finite if finite.cmp(&NumericValue::from_i64(NUMERIC_EXP_LIMIT)) == Ordering::Greater => {
             Err(numeric_domain_error("value overflows numeric format"))
         }
-        finite if finite.cmp(&NumericValue::from_i64(-NUMERIC_EXP_LIMIT)) == Ordering::Less => Ok(
-            NumericValue::zero().with_dscale(exp_result_scale(finite)),
-        ),
+        finite if finite.cmp(&NumericValue::from_i64(-NUMERIC_EXP_LIMIT)) == Ordering::Less => {
+            Ok(NumericValue::zero().with_dscale(exp_result_scale(finite)))
+        }
         finite => {
             let mut x = finite.clone();
             let mut ndiv2 = 0;

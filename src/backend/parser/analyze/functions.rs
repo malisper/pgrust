@@ -330,9 +330,7 @@ fn match_proc_arg_type(
             .then_some((2, actual_type));
     }
     let declared_type = catalog.type_by_oid(declared_oid)?.sql_type;
-    if is_text_like_type(actual_type)
-        && catalog_text_input_cast_exists(catalog, declared_oid)
-    {
+    if is_text_like_type(actual_type) && catalog_text_input_cast_exists(catalog, declared_oid) {
         return Some((3, declared_type));
     }
     if !actual_type.is_array
@@ -515,7 +513,10 @@ fn arg_type_match_cost(actual_type: SqlType, target_type: SqlType) -> Option<usi
     }
     if !target_type.is_array
         && target_type.kind == SqlTypeKind::Record
-        && matches!(actual_type.kind, SqlTypeKind::Record | SqlTypeKind::Composite)
+        && matches!(
+            actual_type.kind,
+            SqlTypeKind::Record | SqlTypeKind::Composite
+        )
     {
         return Some(1);
     }
@@ -1298,8 +1299,14 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::PgStatClearSnapshot,
         ),
         ("pg_stat_have_stats", BuiltinScalarFunction::PgStatHaveStats),
-        ("pg_stat_get_numscans", BuiltinScalarFunction::PgStatGetNumscans),
-        ("pg_stat_get_lastscan", BuiltinScalarFunction::PgStatGetLastscan),
+        (
+            "pg_stat_get_numscans",
+            BuiltinScalarFunction::PgStatGetNumscans,
+        ),
+        (
+            "pg_stat_get_lastscan",
+            BuiltinScalarFunction::PgStatGetLastscan,
+        ),
         (
             "pg_stat_get_tuples_returned",
             BuiltinScalarFunction::PgStatGetTuplesReturned,

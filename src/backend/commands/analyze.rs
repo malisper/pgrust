@@ -179,7 +179,8 @@ pub(crate) fn collect_analyze_stats(
         let root_stats = sample_relation(&relation, &selected, catalog, ctx)?;
         let mut statistics = root_stats.statistics;
         if !target.only && catalog.has_subclass(relation.relation_oid) {
-            statistics.extend(sample_inheritance_tree(&relation, &selected, catalog, ctx)?.statistics);
+            statistics
+                .extend(sample_inheritance_tree(&relation, &selected, catalog, ctx)?.statistics);
         }
         out.push(AnalyzeRelationStats {
             relation_oid: relation.relation_oid,

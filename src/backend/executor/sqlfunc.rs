@@ -1,5 +1,5 @@
-use crate::backend::executor::{ExecError, ExecutorContext, StatementResult, TupleSlot, Value};
 use crate::backend::executor::execute_readonly_statement;
+use crate::backend::executor::{ExecError, ExecutorContext, StatementResult, TupleSlot, Value};
 use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::backend::parser::parse_statement;
 use crate::include::catalog::PG_LANGUAGE_SQL_OID;
@@ -145,7 +145,11 @@ fn substitute_positional_args(input: &str, args: &[Value]) -> Result<String, Exe
                     continue;
                 }
                 let position = input[start..end].parse::<usize>().map_err(|_| {
-                    sql_function_runtime_error("invalid SQL function parameter reference", None, "42P02")
+                    sql_function_runtime_error(
+                        "invalid SQL function parameter reference",
+                        None,
+                        "42P02",
+                    )
                 })?;
                 let arg = args.get(position.saturating_sub(1)).ok_or_else(|| {
                     sql_function_runtime_error(
@@ -262,7 +266,11 @@ fn render_sql_literal(value: &Value) -> Result<String, ExecError> {
         Value::Jsonb(bytes) => format!(
             "{}::jsonb",
             quote_sql_string(std::str::from_utf8(bytes).map_err(|_| {
-                sql_function_runtime_error("invalid JSONB UTF-8 while rendering SQL literal", None, "XX000")
+                sql_function_runtime_error(
+                    "invalid JSONB UTF-8 while rendering SQL literal",
+                    None,
+                    "XX000",
+                )
             })?)
         ),
         _ => {
@@ -320,7 +328,10 @@ mod tests {
             proretset: false,
             provolatile: 'i',
             proparallel: 's',
-            pronargs: argnames.as_ref().map(|names| names.len() as i16).unwrap_or(0),
+            pronargs: argnames
+                .as_ref()
+                .map(|names| names.len() as i16)
+                .unwrap_or(0),
             pronargdefaults: 0,
             prorettype: 25,
             proargtypes: String::new(),
@@ -338,20 +349,14 @@ mod tests {
 
     #[test]
     fn inline_sql_function_substitutes_positional_and_named_args() {
-        let row = test_proc_row(
-            "select value + $2",
-            Some(vec!["value", "seed"]),
-        );
+        let row = test_proc_row("select value + $2", Some(vec!["value", "seed"]));
         let sql = inline_sql_function_body(&row, &[Value::Int32(4), Value::Int64(10)]).unwrap();
         assert_eq!(sql, "select 4 + 10");
     }
 
     #[test]
     fn inline_sql_function_does_not_replace_identifiers_inside_quotes() {
-        let row = test_proc_row(
-            "select 'value', \"$1\", value",
-            Some(vec!["value"]),
-        );
+        let row = test_proc_row("select 'value', \"$1\", value", Some(vec!["value"]));
         let sql = inline_sql_function_body(&row, &[Value::Text("abc".into())]).unwrap();
         assert_eq!(sql, "select 'value', \"$1\", 'abc'::text");
     }

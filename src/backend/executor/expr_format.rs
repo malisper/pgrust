@@ -148,17 +148,15 @@ pub(crate) fn to_number_numeric(input: &str, format: &str) -> Result<NumericValu
         if all_digits.is_empty() {
             all_digits.push('0');
         }
-        let mut scaled = parse_numeric_text(&format!(
-            "{}{all_digits}",
-            if negative { "-" } else { "" }
-        ))
-        .ok_or_else(|| ExecError::InvalidNumericInput(input.to_string()))?;
+        let mut scaled =
+            parse_numeric_text(&format!("{}{all_digits}", if negative { "-" } else { "" }))
+                .ok_or_else(|| ExecError::InvalidNumericInput(input.to_string()))?;
         let divisor_text = format!("1{}", "0".repeat(spec.scale_digits));
         let divisor = parse_numeric_text(&divisor_text)
             .expect("power-of-ten divisor for to_number V format should parse");
-        scaled = scaled.div(&divisor, 18).ok_or_else(|| ExecError::InvalidNumericInput(
-            input.to_string(),
-        ))?;
+        scaled = scaled
+            .div(&divisor, 18)
+            .ok_or_else(|| ExecError::InvalidNumericInput(input.to_string()))?;
         return Ok(scaled);
     }
 

@@ -9,10 +9,9 @@ use crate::include::catalog::{
 use crate::include::nodes::parsenodes::{
     AliasColumnDef, AliasColumnSpec, ColumnConstraint, CompositeTypeAttributeDef,
     CreateCompositeTypeStatement, CreateTriggerStatement, CreateTypeStatement,
-    DropTriggerStatement, DropTypeStatement, ForeignKeyAction, ForeignKeyMatchType, JoinTreeNode,
-    RangeTblEntryKind, RawTypeName, TableConstraint, TriggerEvent, TriggerEventSpec, TriggerLevel,
-    TriggerTiming,
-    IndexColumnDef, InsertSource, InsertStatement,
+    DropTriggerStatement, DropTypeStatement, ForeignKeyAction, ForeignKeyMatchType, IndexColumnDef,
+    InsertSource, InsertStatement, JoinTreeNode, RangeTblEntryKind, RawTypeName, TableConstraint,
+    TriggerEvent, TriggerEventSpec, TriggerLevel, TriggerTiming,
 };
 use crate::include::nodes::primnodes::{AttrNumber, JoinType, Var, is_system_attr};
 
@@ -2368,12 +2367,11 @@ fn parse_row_constructor_expression() {
     }
 }
 
-
 #[test]
 fn analyze_extract_keeps_extract_as_default_output_name() {
     let stmt = parse_select("select extract(week from date '2020-08-11')").unwrap();
-    let (query, _) = analyze_select_query_with_outer(&stmt, &catalog(), &[], None, &[], &[])
-        .unwrap();
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, &[], &[]).unwrap();
 
     assert_eq!(
         query_column_names_and_types(&query),
@@ -3264,14 +3262,18 @@ fn build_plan_dispatches_jsonb_populate_record_as_builtin() {
     let Plan::Projection { targets, .. } = plan else {
         panic!("expected projection plan");
     };
-    assert!(matches!(
-        &targets[0].expr,
-        Expr::Func(func)
-            if func.implementation
-                == crate::include::nodes::primnodes::ScalarFunctionImpl::Builtin(
-                    crate::include::nodes::primnodes::BuiltinScalarFunction::JsonbPopulateRecord
-                )
-    ), "expr: {:#?}", targets[0].expr);
+    assert!(
+        matches!(
+            &targets[0].expr,
+            Expr::Func(func)
+                if func.implementation
+                    == crate::include::nodes::primnodes::ScalarFunctionImpl::Builtin(
+                        crate::include::nodes::primnodes::BuiltinScalarFunction::JsonbPopulateRecord
+                    )
+        ),
+        "expr: {:#?}",
+        targets[0].expr
+    );
 }
 
 #[test]
@@ -5577,8 +5579,8 @@ fn parse_array_and_unnest_expressions() {
 
 #[test]
 fn parse_nested_array_constructor_shorthand() {
-    let stmt = parse_select("select ARRAY[[[111,112],[121,122]],[[211,212],[221,222]]] as f")
-        .unwrap();
+    let stmt =
+        parse_select("select ARRAY[[[111,112],[121,122]],[[211,212],[221,222]]] as f").unwrap();
     match &stmt.targets[0].expr {
         SqlExpr::ArrayLiteral(outer) => {
             assert_eq!(outer.len(), 2);

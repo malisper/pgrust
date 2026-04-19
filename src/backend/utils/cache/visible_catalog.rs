@@ -3,16 +3,15 @@ use crate::backend::parser::{BoundRelation, CatalogLookup, SqlType};
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::relcache::RelCache;
 use crate::backend::utils::cache::system_views::{
-    build_pg_stat_io_rows, build_pg_stat_user_functions_rows, build_pg_stat_user_tables_rows,
-    build_pg_rules_rows, build_pg_stats_rows, build_pg_statio_user_tables_rows,
+    build_pg_rules_rows, build_pg_stat_io_rows, build_pg_stat_user_functions_rows,
+    build_pg_stat_user_tables_rows, build_pg_statio_user_tables_rows, build_pg_stats_rows,
     build_pg_views_rows,
 };
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, PgCastRow, PgClassRow, PgConstraintRow, PgInheritsRow, PgIndexRow,
+    BOOTSTRAP_SUPERUSER_OID, PgCastRow, PgClassRow, PgConstraintRow, PgIndexRow, PgInheritsRow,
     PgLanguageRow, PgOperatorRow, PgProcRow, PgRangeRow, PgRewriteRow, PgStatisticRow,
-    PgTriggerRow, PgTypeRow,
-    bootstrap_pg_cast_rows, bootstrap_pg_language_rows, bootstrap_pg_operator_rows,
-    bootstrap_pg_proc_rows, builtin_range_rows, builtin_type_rows,
+    PgTriggerRow, PgTypeRow, bootstrap_pg_cast_rows, bootstrap_pg_language_rows,
+    bootstrap_pg_operator_rows, bootstrap_pg_proc_rows, builtin_range_rows, builtin_type_rows,
 };
 use crate::pgrust::database::DatabaseStatsStore;
 

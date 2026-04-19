@@ -4,3 +4,5 @@ pub mod compact_string;
 pub mod database;
 pub mod server;
 pub mod session;
+#[cfg(test)]
+pub(crate) mod test_support;
