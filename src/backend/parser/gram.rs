@@ -4997,6 +4997,15 @@ fn split_rule_action_list(list_sql: &str) -> Result<Vec<String>, ParseError> {
 }
 
 fn build_create_table_element(pair: Pair<'_, Rule>) -> Result<CreateTableElement, ParseError> {
+    let raw = pair.as_str().trim_start();
+    if raw.len() > 4
+        && raw[..4].eq_ignore_ascii_case("like")
+        && raw[4..].chars().next().is_some_and(char::is_whitespace)
+    {
+        return Err(ParseError::FeatureNotSupported(
+            "CREATE TABLE ... LIKE".into(),
+        ));
+    }
     let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
     match inner.as_rule() {
         Rule::column_def => Ok(CreateTableElement::Column(build_column_def(inner)?)),

@@ -1,11 +1,12 @@
 use super::super::*;
-use crate::backend::parser::{BoundRelation, SequenceOwnedByClause};
+use crate::backend::parser::{BoundRelation, CatalogLookup, SequenceOwnedByClause};
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::include::catalog::INT8_TYPE_OID;
 use crate::pgrust::database::ddl::{ensure_relation_owner, relation_kind_name};
 use crate::pgrust::database::sequences::{
     apply_sequence_option_patch, initial_sequence_state, resolve_sequence_options_spec,
 };
+use std::collections::BTreeMap;
 
 fn lookup_sequence_relation_for_ddl(
     catalog: &dyn CatalogLookup,
@@ -67,6 +68,57 @@ fn find_sequence_default_refs(catalog: &VisibleCatalog, sequence_oid: u32) -> Ve
         }
     }
     refs
+}
+
+fn find_sequence_type_relation_refs(
+    catalog: &VisibleCatalog,
+    sequence_oid: u32,
+) -> Vec<(u32, String)> {
+    let Some(class_row) = catalog.class_row_by_oid(sequence_oid) else {
+        return Vec::new();
+    };
+    if class_row.reltype == 0 {
+        return Vec::new();
+    }
+
+    let mut referenced_type_oids = vec![class_row.reltype];
+    if let Some(row_type) = catalog.type_by_oid(class_row.reltype)
+        && row_type.typarray != 0
+    {
+        referenced_type_oids.push(row_type.typarray);
+    }
+
+    let mut refs = BTreeMap::new();
+    for (name, entry) in catalog.relcache().entries() {
+        if entry.relation_oid == sequence_oid {
+            continue;
+        }
+        if !matches!(entry.relkind, 'r' | 'S' | 'i' | 't' | 'v' | 'c') {
+            continue;
+        }
+        let uses_sequence_type = entry.desc.columns.iter().any(|column| {
+            CatalogLookup::type_oid_for_sql_type(catalog, column.sql_type)
+                .is_some_and(|oid| referenced_type_oids.contains(&oid))
+                || (column.sql_type.type_oid != 0
+                    && referenced_type_oids.contains(&column.sql_type.type_oid))
+        });
+        if !uses_sequence_type {
+            continue;
+        }
+        let display_name = if name.contains('.') {
+            name.to_string()
+        } else {
+            name.to_string()
+        };
+        refs.entry(entry.relation_oid)
+            .and_modify(|existing: &mut String| {
+                if !existing.contains('.') && display_name.contains('.') {
+                    *existing = display_name.clone();
+                }
+            })
+            .or_insert(display_name);
+    }
+    refs.into_iter().collect()
 }
 
 impl Database {
@@ -141,7 +193,7 @@ impl Database {
                     cid,
                     client_id,
                     waiter: None,
-                    interrupts,
+                    interrupts: Arc::clone(&interrupts),
                 };
                 let result = self.catalog.write().create_relation_mvcc_with_relkind(
                     sequence_name.clone(),
@@ -326,14 +378,20 @@ impl Database {
             ensure_relation_owner(self, client_id, &relation, sequence_name)?;
 
             let refs = find_sequence_default_refs(&visible, relation.relation_oid);
-            if !refs.is_empty() && !drop_stmt.cascade {
+            let type_refs = find_sequence_type_relation_refs(&visible, relation.relation_oid);
+            if (!refs.is_empty() || !type_refs.is_empty()) && !drop_stmt.cascade {
+                let mut dependents = refs
+                    .iter()
+                    .map(|(_, column_name)| format!("default for column {column_name}"))
+                    .collect::<Vec<_>>();
+                dependents.extend(type_refs.iter().map(|(_, name)| name.clone()));
                 result = Err(ExecError::DetailedError {
                     message: format!(
                         "cannot drop sequence {} because other objects depend on it",
                         sequence_name
                     )
                     .into(),
-                    detail: None,
+                    detail: Some(format!("Dependent objects: {}", dependents.join(", ")).into()),
                     hint: Some(
                         "Use DROP SEQUENCE ... CASCADE to drop the dependent objects too.".into(),
                     ),
@@ -350,7 +408,7 @@ impl Database {
                     cid,
                     client_id,
                     waiter: None,
-                    interrupts,
+                    interrupts: Arc::clone(&interrupts),
                 };
                 for (table_oid, column_name) in refs {
                     let effect = self
@@ -365,6 +423,34 @@ impl Database {
                         )
                         .map_err(map_catalog_error)?;
                     catalog_effects.push(effect);
+                }
+                let ctx = CatalogWriteContext {
+                    pool: self.pool.clone(),
+                    txns: self.txns.clone(),
+                    xid,
+                    cid,
+                    client_id,
+                    waiter: Some(self.txn_waiter.clone()),
+                    interrupts: Arc::clone(&interrupts),
+                };
+                for (relation_oid, _) in type_refs {
+                    let effect = match self
+                        .catalog
+                        .write()
+                        .drop_relation_by_oid_mvcc(relation_oid, &ctx)
+                    {
+                        Ok((_, effect)) => effect,
+                        Err(CatalogError::UnknownTable(_)) => continue,
+                        Err(err) => {
+                            result = Err(map_catalog_error(err));
+                            break;
+                        }
+                    };
+                    self.apply_catalog_mutation_effect_immediate(&effect)?;
+                    catalog_effects.push(effect);
+                }
+                if result.is_err() {
+                    break;
                 }
             }
 
