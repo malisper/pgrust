@@ -16,10 +16,10 @@ use crate::include::catalog::{BootstrapCatalogKind, CatalogScope};
 // while relation DDL and catalog row mutation paths live in `heap`.
 #[path = "store/heap.rs"]
 mod heap;
-#[path = "store/roles.rs"]
-mod roles;
 #[path = "store/relcache_init.rs"]
 mod relcache_init;
+#[path = "store/roles.rs"]
+mod roles;
 #[path = "store/storage.rs"]
 mod storage;
 #[cfg(test)]
@@ -90,26 +90,30 @@ struct CatalogControl {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
     use crate::backend::catalog::bootstrap::bootstrap_catalog_rel;
     use crate::backend::catalog::column_desc;
     use crate::backend::catalog::loader::load_physical_catalog_rows;
     use crate::backend::catalog::rows::physical_catalog_rows_for_catalog_entry;
     use crate::backend::parser::{SqlType, SqlTypeKind};
-    use crate::backend::storage::smgr::ForkNumber;
-    use crate::backend::storage::smgr::segment_path;
+    use crate::backend::storage::smgr::{
+        BLCKSZ, ForkNumber, MdStorageManager, StorageManager, segment_path,
+    };
+    use crate::include::access::nbtree::{BTP_DELETED, bt_page_data_items, bt_page_get_opaque};
     use crate::include::catalog::{
         BOOTSTRAP_SUPERUSER_NAME, BOOTSTRAP_SUPERUSER_OID, BTREE_AM_OID, C_COLLATION_OID,
         CURRENT_DATABASE_NAME, CatalogScope, DEFAULT_COLLATION_OID, DEFAULT_TABLESPACE_OID,
-        DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, HEAP_TABLE_AM_OID,
-        INT4_TYPE_OID, INT8_TYPE_OID, JSON_TYPE_OID, OID_TYPE_OID, PG_ATTRDEF_RELATION_OID,
-        PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID, PG_LANGUAGE_INTERNAL_OID,
-        PG_NAMESPACE_RELATION_OID, PG_TOAST_NAMESPACE_OID, PG_TYPE_RELATION_OID,
-        POSIX_COLLATION_OID, PUBLIC_NAMESPACE_OID, TEXT_TYPE_OID, VARCHAR_TYPE_OID,
+        DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, HEAP_TABLE_AM_OID, INT4_TYPE_OID,
+        INT8_TYPE_OID, JSON_TYPE_OID, OID_TYPE_OID, PG_ATTRDEF_RELATION_OID, PG_CLASS_RELATION_OID,
+        PG_CONSTRAINT_RELATION_OID, PG_LANGUAGE_INTERNAL_OID, PG_NAMESPACE_RELATION_OID,
+        PG_TOAST_NAMESPACE_OID, PG_TYPE_RELATION_OID, POSIX_COLLATION_OID, PUBLIC_NAMESPACE_OID,
+        TEXT_TYPE_OID, VARCHAR_TYPE_OID, system_catalog_indexes,
     };
     use crate::include::nodes::primnodes::RelationDesc;
     use std::fs;
     #[cfg(unix)]
     use std::os::unix::fs::MetadataExt;
+    use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_dir(label: &str) -> PathBuf {
@@ -118,6 +122,167 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("pgrust_catalog_{label}_{nanos}"))
+    }
+
+    fn durable_write_context(
+        base: &PathBuf,
+    ) -> (
+        Arc<BufferPool<SmgrStorageBackend>>,
+        Arc<RwLock<TransactionManager>>,
+        CatalogWriteContext,
+    ) {
+        let mut smgr = MdStorageManager::new(base);
+        for kind in crate::backend::catalog::bootstrap::bootstrap_catalog_kinds() {
+            smgr.open(bootstrap_catalog_rel(kind, 1)).unwrap();
+        }
+        let pool = Arc::new(BufferPool::new(SmgrStorageBackend::new(smgr), 16));
+        let txns = Arc::new(RwLock::new(
+            TransactionManager::new_durable(base.clone()).unwrap(),
+        ));
+        let xid = txns.write().begin();
+        let ctx = CatalogWriteContext {
+            pool: Arc::clone(&pool),
+            txns: Arc::clone(&txns),
+            xid,
+            cid: 0,
+            client_id: 0,
+            waiter: None,
+            interrupts: Arc::new(InterruptState::new()),
+        };
+        (pool, txns, ctx)
+    }
+
+    fn commit_catalog_write(txns: &Arc<RwLock<TransactionManager>>, xid: TransactionId) {
+        txns.write().commit(xid).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn system_index_path(base: &PathBuf, db_oid: u32, relname: &str) -> PathBuf {
+        let descriptor = system_catalog_indexes()
+            .iter()
+            .find(|descriptor| descriptor.relation_name == relname)
+            .unwrap();
+        let heap_rel = bootstrap_catalog_rel(descriptor.heap_kind, db_oid);
+        segment_path(
+            base,
+            RelFileLocator {
+                spc_oid: heap_rel.spc_oid,
+                db_oid: heap_rel.db_oid,
+                rel_number: descriptor.relation_oid,
+            },
+            ForkNumber::Main,
+            0,
+        )
+    }
+
+    #[cfg(unix)]
+    fn system_index_rel(db_oid: u32, relname: &str) -> RelFileLocator {
+        let descriptor = system_catalog_indexes()
+            .iter()
+            .find(|descriptor| descriptor.relation_name == relname)
+            .unwrap();
+        let heap_rel = bootstrap_catalog_rel(descriptor.heap_kind, db_oid);
+        RelFileLocator {
+            spc_oid: heap_rel.spc_oid,
+            db_oid: heap_rel.db_oid,
+            rel_number: descriptor.relation_oid,
+        }
+    }
+
+    fn vacuum_relation_via_command(
+        base: &PathBuf,
+        relation_name: &str,
+        txns: Option<Arc<RwLock<TransactionManager>>>,
+    ) {
+        // Use the database-visible catalog view so shared catalogs like pg_authid
+        // resolve through the normal pg_catalog lookup path during VACUUM.
+        let store = CatalogStore::load(base).unwrap();
+        let relcache = store.relcache().unwrap();
+
+        let mut smgr = MdStorageManager::new(base);
+        for kind in crate::backend::catalog::bootstrap::bootstrap_catalog_kinds() {
+            smgr.open(bootstrap_catalog_rel(kind, 1)).unwrap();
+        }
+        let pool = Arc::new(BufferPool::new(SmgrStorageBackend::new(smgr), 16));
+        // :HACK: Tests that keep a durable TransactionManager alive after
+        // commit must reuse it here; reopening from disk can miss unflushed
+        // status bits that the live server would still have in memory.
+        let txns = txns.unwrap_or_else(|| {
+            Arc::new(RwLock::new(
+                TransactionManager::new_durable(base.clone()).unwrap(),
+            ))
+        });
+        let snapshot = txns.read().snapshot(INVALID_TRANSACTION_ID).unwrap();
+        let mut ctx = crate::backend::executor::ExecutorContext {
+            pool,
+            txns,
+            txn_waiter: None,
+            sequences: Some(Arc::new(crate::pgrust::database::SequenceRuntime::new_ephemeral())),
+            large_objects: Some(Arc::new(
+                crate::pgrust::database::LargeObjectRuntime::new_ephemeral(),
+            )),
+            checkpoint_stats:
+                crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
+            datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+            interrupts: Arc::new(InterruptState::new()),
+            stats: Arc::new(RwLock::new(
+                crate::pgrust::database::DatabaseStatsStore::with_default_io_rows(),
+            )),
+            session_stats: Arc::new(RwLock::new(
+                crate::pgrust::database::SessionStatsState::default(),
+            )),
+            snapshot,
+            client_id: 0,
+            current_user_oid: BOOTSTRAP_SUPERUSER_OID,
+            next_command_id: 0,
+            expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
+            case_test_values: Vec::new(),
+            system_bindings: Vec::new(),
+            subplans: Vec::new(),
+            timed: false,
+            allow_side_effects: true,
+            catalog: None,
+            compiled_functions: std::collections::HashMap::new(),
+            cte_tables: std::collections::HashMap::new(),
+            cte_producers: std::collections::HashMap::new(),
+            recursive_worktables: std::collections::HashMap::new(),
+            deferred_foreign_keys: None,
+        };
+        crate::backend::commands::tablecmds::execute_vacuum(
+            crate::backend::parser::VacuumStatement {
+                targets: vec![crate::backend::parser::MaintenanceTarget {
+                    table_name: relation_name.to_string(),
+                    columns: Vec::new(),
+                    only: false,
+                }],
+                analyze: false,
+                full: false,
+                verbose: false,
+                skip_locked: false,
+                buffer_usage_limit: None,
+            },
+            &relcache,
+            &mut ctx,
+        )
+        .unwrap();
+    }
+
+    #[cfg(unix)]
+    fn count_leaf_btree_items(base: &PathBuf, rel: RelFileLocator) -> usize {
+        let mut smgr = MdStorageManager::new(base);
+        let nblocks = smgr.nblocks(rel, ForkNumber::Main).unwrap();
+        let mut page = [0u8; BLCKSZ];
+        let mut count = 0usize;
+        for block in 1..nblocks {
+            smgr.read_block(rel, ForkNumber::Main, block, &mut page)
+                .unwrap();
+            let opaque = bt_page_get_opaque(&page).unwrap();
+            if !opaque.is_leaf() || opaque.btpo_flags & BTP_DELETED != 0 {
+                continue;
+            }
+            count += bt_page_data_items(&page).unwrap().len();
+        }
+        count
     }
 
     #[test]
@@ -159,7 +324,13 @@ mod tests {
         fs::write(&init_path, b"corrupt").unwrap();
 
         let reopened = CatalogStore::load(&base).unwrap();
-        assert!(reopened.relcache().unwrap().get_by_name("pg_class").is_some());
+        assert!(
+            reopened
+                .relcache()
+                .unwrap()
+                .get_by_name("pg_class")
+                .is_some()
+        );
         let rewritten = fs::read_to_string(&init_path).unwrap();
         assert!(
             rewritten.contains("\"magic\""),
@@ -194,6 +365,58 @@ mod tests {
         assert!(
             init_path.exists(),
             "relcache init file should be regenerated on next relcache build"
+        );
+    }
+
+    #[test]
+    fn catalog_store_comment_write_preserves_relcache_init_file() {
+        let base = temp_dir("relcache_init_comment");
+        let mut store = CatalogStore::load(&base).unwrap();
+        let created = store
+            .create_table(
+                "people",
+                RelationDesc {
+                    columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
+                },
+            )
+            .unwrap();
+        let init_path =
+            super::relcache_init::relcache_init_path_for_scope(&base, CatalogScope::Database(1));
+        store.relcache().unwrap();
+        assert!(init_path.exists(), "relcache init file should be written");
+
+        let (pool, txns, ctx) = durable_write_context(&base);
+        let effect = store
+            .comment_relation_mvcc(created.relation_oid, Some("hello"), &ctx)
+            .unwrap();
+        let _ = (effect, pool);
+        commit_catalog_write(&txns, ctx.xid);
+
+        assert!(
+            init_path.exists(),
+            "comment-only writes should not invalidate relcache init files"
+        );
+    }
+
+    #[test]
+    fn catalog_store_shared_tablespace_write_preserves_relcache_init_file() {
+        let base = temp_dir("relcache_init_tablespace");
+        let mut store = CatalogStore::load_shared(&base).unwrap();
+        let init_path =
+            super::relcache_init::relcache_init_path_for_scope(&base, CatalogScope::Shared);
+        store.relcache().unwrap();
+        assert!(init_path.exists(), "shared relcache init file should be written");
+
+        let (pool, txns, ctx) = durable_write_context(&base);
+        let (_, effect) = store
+            .create_tablespace_mvcc("tblspc", BOOTSTRAP_SUPERUSER_OID, &ctx)
+            .unwrap();
+        let _ = (effect, pool);
+        commit_catalog_write(&txns, ctx.xid);
+
+        assert!(
+            init_path.exists(),
+            "tablespace rows should not invalidate shared relcache init files"
         );
     }
 
@@ -519,7 +742,7 @@ mod tests {
         let base = temp_dir("create_role_rows");
         let mut store = CatalogStore::load(&base).unwrap();
         let created = store
-            .create_role(
+            .create_role_direct(
                 "app_user",
                 &crate::backend::catalog::roles::RoleAttributes {
                     rolcanlogin: true,
@@ -541,24 +764,92 @@ mod tests {
         let base = temp_dir("rename_drop_role_rows");
         let mut store = CatalogStore::load(&base).unwrap();
         store
-            .create_role(
+            .create_role_direct(
                 "app_user",
                 &crate::backend::catalog::roles::RoleAttributes::default(),
             )
             .unwrap();
-        let renamed = store.rename_role("app_user", "app_owner").unwrap();
+        let renamed = store.rename_role_direct("app_user", "app_owner").unwrap();
         assert_eq!(renamed.rolname, "app_owner");
-        let dropped = store.drop_role("app_owner").unwrap();
+        let dropped = store.drop_role_direct("app_owner").unwrap();
         assert_eq!(dropped.rolname, "app_owner");
 
         let reopened = CatalogStore::load(&base).unwrap();
-        let rows = load_physical_catalog_rows(reopened.base_dir()).unwrap();
+        let rows = reopened.catcache().unwrap().authid_rows();
         assert!(
             !rows
-                .authids
                 .iter()
                 .any(|row| row.rolname == "app_user" || row.rolname == "app_owner")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn catalog_store_role_mutations_reuse_shared_auth_relfiles() {
+        let base = temp_dir("role_relfile_reuse");
+        let mut store = CatalogStore::load_shared(&base).unwrap();
+        let authid_path = segment_path(
+            &base,
+            bootstrap_catalog_rel(BootstrapCatalogKind::PgAuthId, 1),
+            ForkNumber::Main,
+            0,
+        );
+        let auth_members_path = segment_path(
+            &base,
+            bootstrap_catalog_rel(BootstrapCatalogKind::PgAuthMembers, 1),
+            ForkNumber::Main,
+            0,
+        );
+        let authid_before = fs::metadata(&authid_path).unwrap();
+        let auth_members_before = fs::metadata(&auth_members_path).unwrap();
+
+        let parent = store
+            .create_role_direct(
+                "parent_role",
+                &crate::backend::catalog::roles::RoleAttributes::default(),
+            )
+            .unwrap();
+        let member = store
+            .create_role_direct(
+                "member_role",
+                &crate::backend::catalog::roles::RoleAttributes::default(),
+            )
+            .unwrap();
+        store
+            .rename_role_direct("member_role", "member_owner")
+            .unwrap();
+        store
+            .grant_role_membership_direct(
+                &crate::backend::catalog::role_memberships::NewRoleMembership {
+                    roleid: parent.oid,
+                    member: member.oid,
+                    grantor: BOOTSTRAP_SUPERUSER_OID,
+                    admin_option: false,
+                    inherit_option: true,
+                    set_option: true,
+                },
+            )
+            .unwrap();
+        store
+            .update_role_membership_options_direct(
+                parent.oid,
+                member.oid,
+                BOOTSTRAP_SUPERUSER_OID,
+                true,
+                false,
+                false,
+            )
+            .unwrap();
+        store
+            .revoke_role_membership_direct(parent.oid, member.oid, BOOTSTRAP_SUPERUSER_OID)
+            .unwrap();
+        store.drop_role_direct("member_owner").unwrap();
+        store.drop_role_direct("parent_role").unwrap();
+
+        let authid_after = fs::metadata(&authid_path).unwrap();
+        let auth_members_after = fs::metadata(&auth_members_path).unwrap();
+        assert_eq!(authid_before.ino(), authid_after.ino());
+        assert_eq!(auth_members_before.ino(), auth_members_after.ino());
     }
 
     #[test]
@@ -566,19 +857,19 @@ mod tests {
         let base = temp_dir("auth_membership_mutations");
         let mut store = CatalogStore::load(&base).unwrap();
         let parent = store
-            .create_role(
+            .create_role_direct(
                 "parent_role",
                 &crate::backend::catalog::roles::RoleAttributes::default(),
             )
             .unwrap();
         let member = store
-            .create_role(
+            .create_role_direct(
                 "member_role",
                 &crate::backend::catalog::roles::RoleAttributes::default(),
             )
             .unwrap();
         let created = store
-            .grant_role_membership(
+            .grant_role_membership_direct(
                 &crate::backend::catalog::role_memberships::NewRoleMembership {
                     roleid: parent.oid,
                     member: member.oid,
@@ -590,7 +881,7 @@ mod tests {
             )
             .unwrap();
         let updated = store
-            .update_role_membership_options(
+            .update_role_membership_options_direct(
                 parent.oid,
                 member.oid,
                 BOOTSTRAP_SUPERUSER_OID,
@@ -612,6 +903,46 @@ mod tests {
                 && !row.inherit_option
                 && !row.set_option
         }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn catalog_store_database_row_mutations_reuse_shared_database_relfile() {
+        let base = temp_dir("database_relfile_reuse");
+        let mut store = CatalogStore::load_shared(&base).unwrap();
+        let database_path = segment_path(
+            &base,
+            bootstrap_catalog_rel(BootstrapCatalogKind::PgDatabase, 1),
+            ForkNumber::Main,
+            0,
+        );
+        let before = fs::metadata(&database_path).unwrap();
+
+        let created = store
+            .create_database_row_direct(crate::include::catalog::PgDatabaseRow {
+                oid: 0,
+                datname: "tenant".into(),
+                datdba: BOOTSTRAP_SUPERUSER_OID,
+                encoding: 6,
+                datlocprovider: 'c',
+                dattablespace: DEFAULT_TABLESPACE_OID,
+                datistemplate: false,
+                datallowconn: true,
+                datconnlimit: -1,
+                datcollate: "C".into(),
+                datctype: "C".into(),
+                datlocale: None,
+                daticurules: None,
+                datcollversion: None,
+                datacl: None,
+            })
+            .unwrap();
+        assert_eq!(created.datname, "tenant");
+        let dropped = store.drop_database_row_direct("tenant").unwrap();
+        assert_eq!(dropped.datname, "tenant");
+
+        let after = fs::metadata(&database_path).unwrap();
+        assert_eq!(before.ino(), after.ino());
     }
 
     #[test]
@@ -1073,19 +1404,18 @@ mod tests {
         let reopened_catalog = reopened.catalog_snapshot().unwrap();
         assert!(reopened_catalog.get("people").is_none());
         assert!(reopened_catalog.get("people_name_idx").is_none());
-
-        let rows = load_physical_catalog_rows(&base).unwrap();
-        assert!(!rows.classes.iter().any(|row| row.oid == table.relation_oid));
-        assert!(!rows.classes.iter().any(|row| row.oid == index.relation_oid));
+        let catcache = reopened.catcache().unwrap();
+        assert!(!catcache.class_rows().iter().any(|row| row.oid == table.relation_oid));
+        assert!(!catcache.class_rows().iter().any(|row| row.oid == index.relation_oid));
         assert!(
-            !rows
-                .indexes
+            !catcache
+                .index_rows()
                 .iter()
                 .any(|row| row.indexrelid == index.relation_oid)
         );
         assert!(
-            !rows
-                .depends
+            !catcache
+                .depend_rows()
                 .iter()
                 .any(|row| row.objid == index.relation_oid)
         );
@@ -1166,13 +1496,14 @@ mod tests {
                 && row.objid != constraint_oid
         }));
 
-        let rows = load_physical_catalog_rows(&base).unwrap();
+        let catcache = reopened.catcache().unwrap();
         assert!(
-            rows.constraints
+            catcache
+                .constraint_rows()
                 .iter()
                 .all(|row| row.conrelid != entry.relation_oid)
         );
-        assert!(rows.depends.iter().all(|row| {
+        assert!(catcache.depend_rows().iter().all(|row| {
             row.objid != entry.relation_oid
                 && row.refobjid != entry.relation_oid
                 && row.objid != attrdef_oid
@@ -1205,8 +1536,10 @@ mod tests {
             ForkNumber::Main,
             0,
         );
+        let class_index_path = system_index_path(&base, 1, "pg_class_relname_nsp_index");
         let proc_meta_before = fs::metadata(&proc_path).unwrap();
         let class_meta_before = fs::metadata(&class_path).unwrap();
+        let class_index_meta_before = fs::metadata(&class_index_path).unwrap();
 
         store
             .create_table(
@@ -1219,12 +1552,14 @@ mod tests {
 
         let proc_meta_after = fs::metadata(&proc_path).unwrap();
         let class_meta_after = fs::metadata(&class_path).unwrap();
+        let class_index_meta_after = fs::metadata(&class_index_path).unwrap();
         assert_eq!(proc_meta_before.ino(), proc_meta_after.ino());
         assert_eq!(
             proc_meta_before.modified().unwrap(),
             proc_meta_after.modified().unwrap()
         );
         assert_eq!(class_meta_before.ino(), class_meta_after.ino());
+        assert_eq!(class_index_meta_before.ino(), class_index_meta_after.ino());
     }
 
     #[cfg(unix)]
@@ -1270,9 +1605,11 @@ mod tests {
             ForkNumber::Main,
             0,
         );
+        let class_index_path = system_index_path(&base, 1, "pg_class_relname_nsp_index");
         let proc_meta_before = fs::metadata(&proc_path).unwrap();
         let class_meta_before = fs::metadata(&class_path).unwrap();
         let index_meta_before = fs::metadata(&index_path).unwrap();
+        let class_index_meta_before = fs::metadata(&class_index_path).unwrap();
 
         store
             .create_index("people_id_idx", "people", false, &["id".into()])
@@ -1281,6 +1618,7 @@ mod tests {
         let proc_meta_after = fs::metadata(&proc_path).unwrap();
         let class_meta_after = fs::metadata(&class_path).unwrap();
         let index_meta_after = fs::metadata(&index_path).unwrap();
+        let class_index_meta_after = fs::metadata(&class_index_path).unwrap();
         assert_eq!(proc_meta_before.ino(), proc_meta_after.ino());
         assert_eq!(
             proc_meta_before.modified().unwrap(),
@@ -1288,6 +1626,131 @@ mod tests {
         );
         assert_eq!(class_meta_before.ino(), class_meta_after.ino());
         assert_eq!(index_meta_before.ino(), index_meta_after.ino());
+        assert_eq!(class_index_meta_before.ino(), class_index_meta_after.ino());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn catalog_store_drop_table_updates_catalog_indexes_in_place() {
+        let base = temp_dir("selective_catalog_sync_drop_table");
+        let mut store = CatalogStore::load(&base).unwrap();
+        store
+            .create_table(
+                "people",
+                RelationDesc {
+                    columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
+                },
+            )
+            .unwrap();
+        let class_index_path = system_index_path(&base, 1, "pg_class_relname_nsp_index");
+        let type_index_path = system_index_path(&base, 1, "pg_type_typname_nsp_index");
+        let class_index_meta_before = fs::metadata(&class_index_path).unwrap();
+        let type_index_meta_before = fs::metadata(&type_index_path).unwrap();
+
+        store.drop_table("people").unwrap();
+
+        let class_index_meta_after = fs::metadata(&class_index_path).unwrap();
+        let type_index_meta_after = fs::metadata(&type_index_path).unwrap();
+        assert_eq!(class_index_meta_before.ino(), class_index_meta_after.ino());
+        assert_eq!(type_index_meta_before.ino(), type_index_meta_after.ino());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn catalog_store_drop_table_requires_manual_vacuum_for_dead_system_index_tuples() {
+        let base = temp_dir("catalog_index_tuple_cleanup");
+        let mut store = CatalogStore::load(&base).unwrap();
+        let class_index_rel = system_index_rel(1, "pg_class_relname_nsp_index");
+        let before = count_leaf_btree_items(&base, class_index_rel);
+
+        store
+            .create_table(
+                "people",
+                RelationDesc {
+                    columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
+                },
+            )
+            .unwrap();
+        let after_create = count_leaf_btree_items(&base, class_index_rel);
+        assert_eq!(after_create, before + 1);
+
+        store.drop_table("people").unwrap();
+
+        let after_drop = count_leaf_btree_items(&base, class_index_rel);
+        assert_eq!(after_drop, before + 1);
+
+        vacuum_relation_via_command(&base, "pg_catalog.pg_class", None);
+
+        let after_vacuum = count_leaf_btree_items(&base, class_index_rel);
+        assert_eq!(after_vacuum, before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn catalog_store_rename_table_manual_vacuum_cleans_pg_class_relname_index() {
+        let base = temp_dir("catalog_index_tuple_cleanup_rename");
+        let mut store = CatalogStore::load(&base).unwrap();
+        let created = store
+            .create_table(
+                "people",
+                RelationDesc {
+                    columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
+                },
+            )
+            .unwrap();
+        let class_index_rel = system_index_rel(1, "pg_class_relname_nsp_index");
+        let before = count_leaf_btree_items(&base, class_index_rel);
+
+        let (_pool, txns, ctx) = durable_write_context(&base);
+        let _effect = store
+            .rename_relation_mvcc(created.relation_oid, "customers", &ctx)
+            .unwrap();
+        txns.write().commit(ctx.xid).unwrap();
+
+        let after_rename = count_leaf_btree_items(&base, class_index_rel);
+        assert!(after_rename > before);
+
+        vacuum_relation_via_command(
+            &base,
+            "pg_catalog.pg_class",
+            Some(Arc::clone(&txns)),
+        );
+
+        let after_vacuum = count_leaf_btree_items(&base, class_index_rel);
+        assert_eq!(after_vacuum, before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn catalog_store_rename_role_requires_manual_vacuum_for_dead_shared_system_index_tuples() {
+        let base = temp_dir("catalog_index_tuple_cleanup_role_rename");
+        let mut store = CatalogStore::load(&base).unwrap();
+        let role_index_rel = system_index_rel(1, "pg_authid_rolname_index");
+        let before = count_leaf_btree_items(&base, role_index_rel);
+
+        let _created = store
+            .create_role_direct(
+                "app_user",
+                &crate::backend::catalog::roles::RoleAttributes {
+                    rolcanlogin: true,
+                    ..crate::backend::catalog::roles::RoleAttributes::default()
+                },
+            )
+            .unwrap();
+        let after_create = count_leaf_btree_items(&base, role_index_rel);
+        assert_eq!(after_create, before + 1);
+
+        store
+            .rename_role_direct("app_user", "customer_user")
+            .unwrap();
+
+        let after_rename = count_leaf_btree_items(&base, role_index_rel);
+        assert!(after_rename > after_create);
+
+        vacuum_relation_via_command(&base, "pg_catalog.pg_authid", None);
+
+        let after_vacuum = count_leaf_btree_items(&base, role_index_rel);
+        assert_eq!(after_vacuum, after_create);
     }
 
     #[cfg(unix)]
@@ -1332,7 +1795,13 @@ mod tests {
         let index_meta_before = fs::metadata(&index_path).unwrap();
 
         let reopened = CatalogStore::load(&base).unwrap();
-        assert!(reopened.catalog_snapshot().unwrap().get("pg_class").is_some());
+        assert!(
+            reopened
+                .catalog_snapshot()
+                .unwrap()
+                .get("pg_class")
+                .is_some()
+        );
 
         let proc_meta_after = fs::metadata(&proc_path).unwrap();
         let class_meta_after = fs::metadata(&class_path).unwrap();
@@ -1575,12 +2044,18 @@ mod tests {
             ("missing_depend_reload", BootstrapCatalogKind::PgDepend),
             ("missing_index_reload", BootstrapCatalogKind::PgIndex),
             ("missing_am_reload", BootstrapCatalogKind::PgAm),
-            ("missing_collation_reload", BootstrapCatalogKind::PgCollation),
+            (
+                "missing_collation_reload",
+                BootstrapCatalogKind::PgCollation,
+            ),
             ("missing_cast_reload", BootstrapCatalogKind::PgCast),
             ("missing_proc_reload", BootstrapCatalogKind::PgProc),
             ("missing_language_reload", BootstrapCatalogKind::PgLanguage),
             ("missing_operator_reload", BootstrapCatalogKind::PgOperator),
-            ("missing_constraint_reload", BootstrapCatalogKind::PgConstraint),
+            (
+                "missing_constraint_reload",
+                BootstrapCatalogKind::PgConstraint,
+            ),
         ] {
             assert_missing_bootstrap_relfile_fails(label, kind);
         }
@@ -1591,8 +2066,14 @@ mod tests {
         for (label, kind) in [
             ("missing_database_reload", BootstrapCatalogKind::PgDatabase),
             ("missing_authid_reload", BootstrapCatalogKind::PgAuthId),
-            ("missing_auth_members_reload", BootstrapCatalogKind::PgAuthMembers),
-            ("missing_tablespace_reload", BootstrapCatalogKind::PgTablespace),
+            (
+                "missing_auth_members_reload",
+                BootstrapCatalogKind::PgAuthMembers,
+            ),
+            (
+                "missing_tablespace_reload",
+                BootstrapCatalogKind::PgTablespace,
+            ),
         ] {
             assert_missing_bootstrap_relfile_fails(label, kind);
         }

@@ -154,7 +154,7 @@ impl Database {
                 hint: None,
                 sqlstate: "3F000",
             })?;
-        let auth_catalog = self.auth_catalog(client_id, None).map_err(|err| {
+        let auth_catalog = self.txn_auth_catalog(client_id, xid, cid).map_err(|err| {
             ExecError::Parse(role_management_error(format!(
                 "authorization catalog unavailable: {err:?}"
             )))
@@ -282,7 +282,7 @@ impl Database {
         }
         ensure_relation_owner(self, client_id, &relation, &alter_stmt.relation_name)?;
 
-        let auth_catalog = self.auth_catalog(client_id, None).map_err(|err| {
+        let auth_catalog = self.txn_auth_catalog(client_id, xid, cid).map_err(|err| {
             ExecError::Parse(role_management_error(format!(
                 "authorization catalog unavailable: {err:?}"
             )))

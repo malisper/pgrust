@@ -1,10 +1,8 @@
 use super::super::*;
 use crate::backend::parser::{CreateDatabaseStatement, DropDatabaseStatement};
-use crate::include::catalog::{
-    BootstrapCatalogKind, TEMPLATE0_DATABASE_NAME, TEMPLATE1_DATABASE_NAME,
-};
+use crate::include::catalog::{TEMPLATE0_DATABASE_NAME, TEMPLATE1_DATABASE_NAME};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 impl Database {
     pub(crate) fn execute_create_database_stmt(
@@ -12,9 +10,14 @@ impl Database {
         client_id: ClientId,
         stmt: &CreateDatabaseStatement,
     ) -> Result<StatementResult, ExecError> {
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let mut target_dir_to_cleanup: Option<PathBuf> = None;
+        let result = (|| {
         let auth = self.auth_state(client_id);
         let auth_catalog = self
-            .auth_catalog(client_id, None)
+            .auth_catalog(client_id, Some((xid, 0)))
             .map_err(map_catalog_error)?;
         let current_role = auth_catalog
             .role_by_oid(auth.current_user_oid())
@@ -34,8 +37,9 @@ impl Database {
         }
 
         let template = {
-            let shared_catalog = self.shared_catalog.read();
-            let cache = shared_catalog.catcache().map_err(map_catalog_error)?;
+            let cache = self
+                .backend_catcache(client_id, Some((xid, 0)))
+                .map_err(map_catalog_error)?;
             if cache
                 .database_rows()
                 .into_iter()
@@ -72,12 +76,21 @@ impl Database {
         row.datallowconn = true;
         row.datacl = None;
 
-        let row = self
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid: 0,
+            client_id,
+            waiter: None,
+            interrupts: self.interrupt_state(client_id),
+        };
+        let (row, effect) = self
             .shared_catalog
             .write()
-            .create_database_row(row)
+            .create_database_row_mvcc(row, &ctx)
             .map_err(map_catalog_error)?;
-        invalidate_direct_shared_catalog(self, &[BootstrapCatalogKind::PgDatabase]);
+        catalog_effects.push(effect);
 
         let template_dir = self
             .cluster
@@ -85,20 +98,25 @@ impl Database {
             .join("base")
             .join(template.oid.to_string());
         let target_dir = self.cluster.base_dir.join("base").join(row.oid.to_string());
-        if let Err(e) = copy_dir_all(&template_dir, &target_dir) {
-            let _ = self.shared_catalog.write().drop_database_row(&row.datname);
-            invalidate_direct_shared_catalog(self, &[BootstrapCatalogKind::PgDatabase]);
-            let _ = fs::remove_dir_all(&target_dir);
-            return Err(ExecError::DetailedError {
+        target_dir_to_cleanup = Some(target_dir.clone());
+        copy_dir_all(&template_dir, &target_dir).map_err(|e| ExecError::DetailedError {
                 message: format!("could not initialize database directory: {e}"),
                 detail: None,
                 hint: None,
                 sqlstate: "58030",
-            });
-        }
+            })?;
         sync_cloned_local_catalogs(self, template.oid, row.oid)?;
 
         Ok(StatementResult::AffectedRows(0))
+        })();
+        if result.is_err()
+            && let Some(target_dir) = &target_dir_to_cleanup
+        {
+            let _ = fs::remove_dir_all(target_dir);
+        }
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        result
     }
 
     pub(crate) fn execute_drop_database_stmt(
@@ -106,9 +124,13 @@ impl Database {
         client_id: ClientId,
         stmt: &DropDatabaseStatement,
     ) -> Result<StatementResult, ExecError> {
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = (|| {
         let auth = self.auth_state(client_id);
         let auth_catalog = self
-            .auth_catalog(client_id, None)
+            .auth_catalog(client_id, Some((xid, 0)))
             .map_err(map_catalog_error)?;
         let current_role = auth_catalog
             .role_by_oid(auth.current_user_oid())
@@ -128,9 +150,7 @@ impl Database {
         }
 
         let cache = self
-            .shared_catalog
-            .read()
-            .catcache()
+            .backend_catcache(client_id, Some((xid, 0)))
             .map_err(map_catalog_error)?;
         let Some(row) = cache
             .database_rows()
@@ -190,15 +210,25 @@ impl Database {
             });
         }
 
-        self.shared_catalog
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid: 0,
+            client_id,
+            waiter: None,
+            interrupts: self.interrupt_state(client_id),
+        };
+        let (_, effect) = self
+            .shared_catalog
             .write()
-            .drop_database_row(&row.datname)
+            .drop_database_row_mvcc(&row.datname, &ctx)
             .map_err(map_catalog_error)?;
-        invalidate_direct_shared_catalog(self, &[BootstrapCatalogKind::PgDatabase]);
-        if let Some(state) = self.cluster.open_databases.write().remove(&row.oid) {
+        catalog_effects.push(effect);
+
+        if let Some(state) = self.cluster.open_databases.read().get(&row.oid).cloned() {
             invalidate_database_buffers(self, &state.catalog.read(), row.oid);
         }
-
         let db_dir = self.cluster.base_dir.join("base").join(row.oid.to_string());
         if db_dir.exists() {
             fs::remove_dir_all(&db_dir).map_err(|e| ExecError::DetailedError {
@@ -208,15 +238,13 @@ impl Database {
                 sqlstate: "58030",
             })?;
         }
+        self.cluster.open_databases.write().remove(&row.oid);
 
         Ok(StatementResult::AffectedRows(0))
-    }
-}
-
-fn invalidate_direct_shared_catalog(db: &Database, kinds: &[BootstrapCatalogKind]) {
-    for &kind in kinds {
-        let rel = crate::backend::catalog::bootstrap::bootstrap_catalog_rel(kind, db.database_oid);
-        let _ = db.pool.invalidate_relation(rel);
+        })();
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        result
     }
 }
 
@@ -278,20 +306,6 @@ fn sync_cloned_local_catalogs(
     source_db_oid: u32,
     target_db_oid: u32,
 ) -> Result<(), ExecError> {
-    let source_catalog = if let Some(state) = db.cluster.open_databases.read().get(&source_db_oid) {
-        state
-            .catalog
-            .read()
-            .catalog_snapshot()
-            .map_err(map_catalog_error)?
-    } else {
-        crate::backend::catalog::CatalogStore::load_database(&db.cluster.base_dir, source_db_oid)
-            .and_then(|store| store.catalog_snapshot())
-            .map_err(map_catalog_error)?
-    };
-    let rows = crate::backend::catalog::rows::physical_catalog_rows_from_catcache(
-        &crate::backend::utils::cache::catcache::CatCache::from_catalog(&source_catalog),
-    );
     let kinds = crate::backend::catalog::bootstrap::bootstrap_catalog_kinds()
         .into_iter()
         .filter(|kind| {
@@ -301,6 +315,12 @@ fn sync_cloned_local_catalogs(
             )
         })
         .collect::<Vec<_>>();
+    let rows = crate::backend::catalog::loader::load_physical_catalog_rows_scoped(
+        &db.cluster.base_dir,
+        source_db_oid,
+        &kinds,
+    )
+    .map_err(map_catalog_error)?;
     crate::backend::catalog::persistence::sync_catalog_rows_subset(
         &db.cluster.base_dir,
         &rows,
