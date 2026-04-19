@@ -1,8 +1,8 @@
 use super::query::{AnalyzedFrom, JoinAliasInfo, shift_expr_rtindexes};
 use super::*;
-use crate::backend::utils::record::lookup_anonymous_record_descriptor;
 use crate::backend::storage::smgr::RelFileLocator;
-use crate::include::nodes::primnodes::{JsonRecordFunction, JoinType, Var, user_attrno};
+use crate::backend::utils::record::lookup_anonymous_record_descriptor;
+use crate::include::nodes::primnodes::{JoinType, JsonRecordFunction, Var, user_attrno};
 
 #[derive(Debug, Clone)]
 pub(crate) struct BoundScope {
@@ -1272,12 +1272,7 @@ fn bind_json_record_from_item(
             )
         })
         .collect::<Vec<_>>();
-    let resolved = resolve_function_call(
-        catalog,
-        name,
-        &actual_types,
-        false,
-    )?;
+    let resolved = resolve_function_call(catalog, name, &actual_types, false)?;
     let output_columns = match kind {
         JsonRecordFunction::ToRecord
         | JsonRecordFunction::ToRecordSet
@@ -1294,13 +1289,10 @@ fn bind_json_record_from_item(
         | JsonRecordFunction::PopulateRecordSet
         | JsonRecordFunction::JsonbPopulateRecord
         | JsonRecordFunction::JsonbPopulateRecordSet => {
-            let row_type = *actual_types.first().expect("json populate record row arg type");
-            output_columns_for_json_populate_record(
-                name,
-                row_type,
-                column_definitions,
-                catalog,
-            )?
+            let row_type = *actual_types
+                .first()
+                .expect("json populate record row arg type");
+            output_columns_for_json_populate_record(name, row_type, column_definitions, catalog)?
         }
     };
     let bound_args = bind_user_defined_table_function_args(
@@ -1361,8 +1353,8 @@ fn output_columns_for_json_populate_record(
                 .collect())
         }
         SqlTypeKind::Record => {
-            let inferred_columns = lookup_anonymous_record_descriptor(row_type.typmod).map(
-                |descriptor| {
+            let inferred_columns =
+                lookup_anonymous_record_descriptor(row_type.typmod).map(|descriptor| {
                     descriptor
                         .fields
                         .into_iter()
@@ -1372,8 +1364,7 @@ fn output_columns_for_json_populate_record(
                             wire_type_oid: None,
                         })
                         .collect::<Vec<_>>()
-                },
-            );
+                });
             match (inferred_columns, column_definitions) {
                 (Some(columns), Some(definitions)) => {
                     let query_columns = query_columns_from_alias_definitions(definitions, catalog)?;
@@ -1381,7 +1372,9 @@ fn output_columns_for_json_populate_record(
                     Ok(query_columns)
                 }
                 (Some(columns), None) => Ok(columns),
-                (None, Some(definitions)) => query_columns_from_alias_definitions(definitions, catalog),
+                (None, Some(definitions)) => {
+                    query_columns_from_alias_definitions(definitions, catalog)
+                }
                 (None, None) => Err(function_coldeflist_error(
                     "a column definition list is required for functions returning \"record\"",
                 )),

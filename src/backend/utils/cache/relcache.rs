@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -11,7 +11,8 @@ use crate::backend::parser::SqlType;
 use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::cache::catcache::{CatCache, normalize_catalog_name};
 use crate::include::catalog::{
-    PG_CATALOG_NAMESPACE_OID, bootstrap_catalog_kinds, relam_for_relkind,
+    CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY, PG_CATALOG_NAMESPACE_OID, PG_CONSTRAINT_RELATION_OID,
+    bootstrap_catalog_kinds, relam_for_relkind,
     system_catalog_index_by_oid,
 };
 
@@ -95,6 +96,31 @@ impl RelCache {
         current_db_oid: u32,
     ) -> Result<Self, CatalogError> {
         let mut cache = Self::default();
+        let not_null_constraints = catcache
+            .constraint_rows()
+            .into_iter()
+            .filter(|row| row.contype == CONSTRAINT_NOTNULL)
+            .filter_map(|row| {
+                let attnum = *row.conkey.as_ref()?.first()?;
+                Some(((row.conrelid, attnum), row))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let primary_constraint_oids = catcache
+            .constraint_rows()
+            .into_iter()
+            .filter(|row| row.contype == CONSTRAINT_PRIMARY)
+            .map(|row| row.oid)
+            .collect::<BTreeSet<_>>();
+        let pk_owned_not_null = catcache
+            .depend_rows()
+            .into_iter()
+            .filter(|row| {
+                row.classid == PG_CONSTRAINT_RELATION_OID
+                    && row.refclassid == PG_CONSTRAINT_RELATION_OID
+                    && primary_constraint_oids.contains(&row.refobjid)
+            })
+            .map(|row| row.objid)
+            .collect::<BTreeSet<_>>();
         for class in catcache.class_rows() {
             let attrs = catcache.attributes_by_relid(class.oid).unwrap_or(&[]);
             let columns = attrs
@@ -120,6 +146,13 @@ impl RelCache {
                     desc.attinhcount = attr.attinhcount;
                     desc.attislocal = attr.attislocal;
                     desc.dropped = attr.attisdropped;
+                    if let Some(constraint) = not_null_constraints.get(&(class.oid, attr.attnum)) {
+                        desc.not_null_constraint_oid = Some(constraint.oid);
+                        desc.not_null_constraint_name = Some(constraint.conname.clone());
+                        desc.not_null_constraint_validated = constraint.convalidated;
+                        desc.not_null_primary_key_owned =
+                            pk_owned_not_null.contains(&constraint.oid);
+                    }
                     if let Some(attrdef) = catcache.attrdef_by_relid_attnum(class.oid, attr.attnum)
                     {
                         desc.attrdef_oid = Some(attrdef.oid);

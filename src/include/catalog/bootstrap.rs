@@ -310,9 +310,7 @@ impl BootstrapCatalogKind {
             | Self::PgAuthId
             | Self::PgAuthMembers
             | Self::PgLargeobjectMetadata
-            | Self::PgTablespace => {
-                CatalogScope::Shared
-            }
+            | Self::PgTablespace => CatalogScope::Shared,
             _ => CatalogScope::Database(0),
         }
     }

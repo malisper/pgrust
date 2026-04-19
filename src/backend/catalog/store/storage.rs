@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use crate::BufferPool;
 use crate::backend::access::transam::xact::{INVALID_TRANSACTION_ID, Snapshot, TransactionManager};
+use crate::backend::catalog::bootstrap::bootstrap_catalog_rel;
 use crate::backend::catalog::bootstrap::bootstrap_catalog_entry;
 use crate::backend::catalog::catalog::{Catalog, CatalogError};
 use crate::backend::catalog::indexing::{
@@ -22,10 +23,12 @@ use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::relcache::{RelCache, RelCacheEntry};
 use crate::include::catalog::{
     BootstrapCatalogKind, CatalogScope, bootstrap_catalog_kinds, system_catalog_indexes,
+    system_catalog_indexes_for_heap,
 };
 
 use super::relcache_init::{
     invalidate_relcache_init_file, load_relcache_init_file, persist_relcache_init_file,
+    relcache_init_needs_invalidation,
 };
 use super::{
     CONTROL_FILE_MAGIC, CatalogControl, CatalogStore, CatalogStoreMode, CatalogWriteContext,
@@ -114,7 +117,6 @@ impl CatalogStore {
                 insert_bootstrap_system_indexes(&mut catalog);
             }
             catalog.next_rel_number = catalog.next_rel_number.max(control.next_rel_number);
-            validate_storage_relfiles_exist(&base_dir, scope)?;
             (catalog, control, false)
         } else {
             let catalog = Catalog::default();
@@ -126,6 +128,11 @@ impl CatalogStore {
             persist_control_file(&control_path, &control)?;
             (catalog, control, true)
         };
+        let migrated_legacy_attrdefs =
+            migrate_legacy_attrdef_defaults_if_needed(&base_dir, scope, &catalog)?;
+        if !needs_bootstrap_sync {
+            validate_storage_relfiles_exist(&base_dir, scope)?;
+        }
 
         let oid_next = load_effective_next_oid(&control_path, oid_control_path.as_deref())?;
         catalog.next_oid = catalog.next_oid.max(oid_next);
@@ -135,13 +142,15 @@ impl CatalogStore {
             next_oid: catalog.next_oid.max(oid_next),
             bootstrap_complete: control.bootstrap_complete,
         };
-        if needs_bootstrap_sync {
+        if needs_bootstrap_sync || migrated_legacy_attrdefs {
             persist_scope_control_file(
                 &control_path,
                 oid_control_path.as_deref(),
                 scope,
                 &effective_control,
             )?;
+        }
+        if needs_bootstrap_sync {
             sync_physical_catalogs_scoped(&base_dir, &catalog, scope, &kinds)?;
         }
 
@@ -380,17 +389,29 @@ impl CatalogStore {
         self.persist_control_values(catalog.next_oid, catalog.next_rel_number)
     }
 
-    pub(super) fn persist_control_values(
+    pub(super) fn invalidate_relcache_init_for_kinds(&self, kinds: &[BootstrapCatalogKind]) {
+        if !relcache_init_needs_invalidation(kinds) {
+            return;
+        }
+        if let CatalogStoreMode::Durable { base_dir, .. } = &self.mode {
+            invalidate_relcache_init_file(base_dir, self.scope);
+        }
+    }
+
+    fn persist_control_values_internal(
         &self,
         next_oid: u32,
         next_rel_number: u32,
+        invalidate_relcache: bool,
     ) -> Result<(), CatalogError> {
         match &self.mode {
             CatalogStoreMode::Durable {
                 base_dir,
                 control_path,
             } => {
-                invalidate_relcache_init_file(base_dir, self.scope);
+                if invalidate_relcache {
+                    invalidate_relcache_init_file(base_dir, self.scope);
+                }
                 persist_scope_control_file(
                     control_path,
                     self.oid_control_path.as_deref(),
@@ -406,6 +427,22 @@ impl CatalogStore {
         }
     }
 
+    pub(super) fn persist_control_values(
+        &self,
+        next_oid: u32,
+        next_rel_number: u32,
+    ) -> Result<(), CatalogError> {
+        self.persist_control_values_internal(next_oid, next_rel_number, true)
+    }
+
+    pub(super) fn persist_control_values_without_relcache_invalidation(
+        &self,
+        next_oid: u32,
+        next_rel_number: u32,
+    ) -> Result<(), CatalogError> {
+        self.persist_control_values_internal(next_oid, next_rel_number, false)
+    }
+
     pub(super) fn control_state(&self) -> Result<CatalogControl, CatalogError> {
         match &self.mode {
             CatalogStoreMode::Durable { control_path, .. } => {
@@ -418,6 +455,22 @@ impl CatalogStore {
             }
             CatalogStoreMode::Ephemeral => Ok(self.control.clone()),
         }
+    }
+
+    pub(super) fn allocate_next_oid(&mut self, requested_oid: u32) -> Result<u32, CatalogError> {
+        let mut control = self.control_state()?;
+        let oid = if requested_oid == 0 {
+            control.next_oid
+        } else {
+            requested_oid
+        };
+        control.next_oid = control.next_oid.max(oid.saturating_add(1));
+        self.persist_control_values_without_relcache_invalidation(
+            control.next_oid,
+            control.next_rel_number,
+        )?;
+        self.control = control;
+        Ok(oid)
     }
 
     pub(super) fn catalog_snapshot_with_control(&self) -> Result<Catalog, CatalogError> {
@@ -528,6 +581,11 @@ fn validate_storage_relfiles_exist(
     for kind in scope_kinds(scope) {
         let rel = crate::backend::catalog::bootstrap::bootstrap_catalog_rel(kind, db_oid);
         if !smgr.exists(rel, ForkNumber::Main) {
+            if matches!(kind, BootstrapCatalogKind::PgAttrdef)
+                && base_dir.join("catalog").join("defaults.json").exists()
+            {
+                continue;
+            }
             return Err(CatalogError::Corrupt("missing physical relation relfile"));
         }
     }
@@ -542,6 +600,54 @@ fn validate_storage_relfiles_exist(
     }
 
     Ok(())
+}
+
+fn migrate_legacy_attrdef_defaults_if_needed(
+    base_dir: &Path,
+    scope: CatalogScope,
+    catalog: &Catalog,
+) -> Result<bool, CatalogError> {
+    let CatalogScope::Database(db_oid) = scope else {
+        return Ok(false);
+    };
+    let defaults_path = base_dir.join("catalog").join("defaults.json");
+    if !defaults_path.exists() {
+        return Ok(false);
+    }
+
+    let rel = bootstrap_catalog_rel(BootstrapCatalogKind::PgAttrdef, db_oid);
+    let mut smgr = MdStorageManager::new(base_dir);
+    if smgr.exists(rel, ForkNumber::Main) {
+        return Ok(false);
+    }
+
+    smgr.open(rel).map_err(|e| CatalogError::Io(e.to_string()))?;
+    smgr.create(rel, ForkNumber::Main, false)
+        .map_err(|e| CatalogError::Io(e.to_string()))?;
+    for descriptor in system_catalog_indexes_for_heap(BootstrapCatalogKind::PgAttrdef) {
+        let entry = system_catalog_index_entry_for_db(*descriptor, db_oid);
+        smgr.open(entry.rel)
+            .map_err(|e| CatalogError::Io(e.to_string()))?;
+        smgr.unlink(entry.rel, Some(ForkNumber::Main), false);
+        smgr.create(entry.rel, ForkNumber::Main, false)
+            .map_err(|e| CatalogError::Io(e.to_string()))?;
+    }
+
+    let catcache = CatCache::from_catalog(catalog);
+    let all_rows = physical_catalog_rows_from_catcache(&catcache);
+    apply_catalog_row_changes_subset_incremental(
+        base_dir,
+        &PhysicalCatalogRows::default(),
+        &PhysicalCatalogRows {
+            attrdefs: all_rows.attrdefs,
+            ..PhysicalCatalogRows::default()
+        },
+        db_oid,
+        &[BootstrapCatalogKind::PgAttrdef],
+    )?;
+    invalidate_relcache_init_file(base_dir, scope);
+    fs::remove_file(defaults_path).map_err(|e| CatalogError::Io(e.to_string()))?;
+    Ok(true)
 }
 
 fn load_catalog_from_visible_physical_startup_scoped(

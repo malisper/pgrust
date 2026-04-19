@@ -1138,14 +1138,15 @@ pub(crate) fn cast_value_with_config(
                     .iter()
                     .any(|item| matches!(item, Value::Array(_) | Value::PgArray(_)))
                 {
-                    let array = ArrayValue::from_nested_values(items, vec![1]).map_err(|details| {
-                        ExecError::DetailedError {
-                            message: "malformed array literal".into(),
-                            detail: Some(details),
-                            hint: None,
-                            sqlstate: "22P02",
-                        }
-                    })?;
+                    let array =
+                        ArrayValue::from_nested_values(items, vec![1]).map_err(|details| {
+                            ExecError::DetailedError {
+                                message: "malformed array literal".into(),
+                                detail: Some(details),
+                                hint: None,
+                                sqlstate: "22P02",
+                            }
+                        })?;
                     let mut casted = Vec::with_capacity(array.elements.len());
                     for item in array.elements {
                         casted.push(cast_value_with_config(item, element_type, config)?);

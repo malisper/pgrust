@@ -28,15 +28,8 @@ mod tests {
     type TestStream = TcpStream;
 
     fn temp_dir(label: &str) -> std::path::PathBuf {
-        let id = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "pgrust_server_test_{label}_{}_{}",
-            std::process::id(),
-            id
-        ));
-        let _ = std::fs::remove_dir_all(&path);
-        std::fs::create_dir_all(&path).unwrap();
-        path
+        let _ = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+        crate::pgrust::test_support::seeded_temp_dir("server", label)
     }
 
     #[cfg(unix)]
