@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use parking_lot::RwLock;
@@ -23,8 +24,8 @@ use crate::include::catalog::relkind_has_storage;
 use crate::pgrust::auth::AuthState;
 use crate::pgrust::database::{
     ConversionEntry, Database, DatabaseCreateGrant, DatabaseError, DatabaseOpenOptions,
-    DatabaseStatsStore, DomainEntry, EnumTypeEntry, RangeTypeEntry, SequenceRuntime,
-    SessionStatsState, TempNamespace, LargeObjectRuntime,
+    DatabaseStatsStore, DomainEntry, EnumTypeEntry, LargeObjectRuntime, RangeTypeEntry,
+    SequenceRuntime, SessionStatsState, TempNamespace,
 };
 use crate::{BufferPool, ClientId};
 
@@ -53,6 +54,8 @@ pub(crate) struct ClusterShared {
     pub checkpointer: Option<Arc<Checkpointer>>,
     pub wal_bg_writer: Option<Arc<WalBgWriter>>,
 }
+
+static NEXT_EPHEMERAL_CLUSTER_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SessionActivityState {
@@ -284,7 +287,12 @@ impl Cluster {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|duration| duration.as_nanos())
             .unwrap_or_default();
-        let base_dir = std::env::temp_dir().join(format!("pgrust_cluster_ephemeral_{nanos}"));
+        let base_dir = std::env::temp_dir().join(format!(
+            "pgrust_cluster_ephemeral_{}_{}_{}",
+            std::process::id(),
+            nanos,
+            NEXT_EPHEMERAL_CLUSTER_ID.fetch_add(1, Ordering::Relaxed),
+        ));
         Self::open(base_dir, pool_size)
     }
 

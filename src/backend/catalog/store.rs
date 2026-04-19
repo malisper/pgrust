@@ -742,7 +742,7 @@ mod tests {
         let base = temp_dir("create_role_rows");
         let mut store = CatalogStore::load(&base).unwrap();
         let created = store
-            .create_role(
+            .create_role_direct(
                 "app_user",
                 &crate::backend::catalog::roles::RoleAttributes {
                     rolcanlogin: true,
@@ -764,14 +764,14 @@ mod tests {
         let base = temp_dir("rename_drop_role_rows");
         let mut store = CatalogStore::load(&base).unwrap();
         store
-            .create_role(
+            .create_role_direct(
                 "app_user",
                 &crate::backend::catalog::roles::RoleAttributes::default(),
             )
             .unwrap();
-        let renamed = store.rename_role("app_user", "app_owner").unwrap();
+        let renamed = store.rename_role_direct("app_user", "app_owner").unwrap();
         assert_eq!(renamed.rolname, "app_owner");
-        let dropped = store.drop_role("app_owner").unwrap();
+        let dropped = store.drop_role_direct("app_owner").unwrap();
         assert_eq!(dropped.rolname, "app_owner");
 
         let reopened = CatalogStore::load(&base).unwrap();
@@ -804,20 +804,22 @@ mod tests {
         let auth_members_before = fs::metadata(&auth_members_path).unwrap();
 
         let parent = store
-            .create_role(
+            .create_role_direct(
                 "parent_role",
                 &crate::backend::catalog::roles::RoleAttributes::default(),
             )
             .unwrap();
         let member = store
-            .create_role(
+            .create_role_direct(
                 "member_role",
                 &crate::backend::catalog::roles::RoleAttributes::default(),
             )
             .unwrap();
-        store.rename_role("member_role", "member_owner").unwrap();
         store
-            .grant_role_membership(
+            .rename_role_direct("member_role", "member_owner")
+            .unwrap();
+        store
+            .grant_role_membership_direct(
                 &crate::backend::catalog::role_memberships::NewRoleMembership {
                     roleid: parent.oid,
                     member: member.oid,
@@ -829,7 +831,7 @@ mod tests {
             )
             .unwrap();
         store
-            .update_role_membership_options(
+            .update_role_membership_options_direct(
                 parent.oid,
                 member.oid,
                 BOOTSTRAP_SUPERUSER_OID,
@@ -839,10 +841,10 @@ mod tests {
             )
             .unwrap();
         store
-            .revoke_role_membership(parent.oid, member.oid, BOOTSTRAP_SUPERUSER_OID)
+            .revoke_role_membership_direct(parent.oid, member.oid, BOOTSTRAP_SUPERUSER_OID)
             .unwrap();
-        store.drop_role("member_owner").unwrap();
-        store.drop_role("parent_role").unwrap();
+        store.drop_role_direct("member_owner").unwrap();
+        store.drop_role_direct("parent_role").unwrap();
 
         let authid_after = fs::metadata(&authid_path).unwrap();
         let auth_members_after = fs::metadata(&auth_members_path).unwrap();
@@ -855,19 +857,19 @@ mod tests {
         let base = temp_dir("auth_membership_mutations");
         let mut store = CatalogStore::load(&base).unwrap();
         let parent = store
-            .create_role(
+            .create_role_direct(
                 "parent_role",
                 &crate::backend::catalog::roles::RoleAttributes::default(),
             )
             .unwrap();
         let member = store
-            .create_role(
+            .create_role_direct(
                 "member_role",
                 &crate::backend::catalog::roles::RoleAttributes::default(),
             )
             .unwrap();
         let created = store
-            .grant_role_membership(
+            .grant_role_membership_direct(
                 &crate::backend::catalog::role_memberships::NewRoleMembership {
                     roleid: parent.oid,
                     member: member.oid,
@@ -879,7 +881,7 @@ mod tests {
             )
             .unwrap();
         let updated = store
-            .update_role_membership_options(
+            .update_role_membership_options_direct(
                 parent.oid,
                 member.oid,
                 BOOTSTRAP_SUPERUSER_OID,
@@ -917,7 +919,7 @@ mod tests {
         let before = fs::metadata(&database_path).unwrap();
 
         let created = store
-            .create_database_row(crate::include::catalog::PgDatabaseRow {
+            .create_database_row_direct(crate::include::catalog::PgDatabaseRow {
                 oid: 0,
                 datname: "tenant".into(),
                 datdba: BOOTSTRAP_SUPERUSER_OID,
@@ -936,7 +938,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(created.datname, "tenant");
-        let dropped = store.drop_database_row("tenant").unwrap();
+        let dropped = store.drop_database_row_direct("tenant").unwrap();
         assert_eq!(dropped.datname, "tenant");
 
         let after = fs::metadata(&database_path).unwrap();
@@ -1402,19 +1404,18 @@ mod tests {
         let reopened_catalog = reopened.catalog_snapshot().unwrap();
         assert!(reopened_catalog.get("people").is_none());
         assert!(reopened_catalog.get("people_name_idx").is_none());
-
-        let rows = load_physical_catalog_rows(&base).unwrap();
-        assert!(!rows.classes.iter().any(|row| row.oid == table.relation_oid));
-        assert!(!rows.classes.iter().any(|row| row.oid == index.relation_oid));
+        let catcache = reopened.catcache().unwrap();
+        assert!(!catcache.class_rows().iter().any(|row| row.oid == table.relation_oid));
+        assert!(!catcache.class_rows().iter().any(|row| row.oid == index.relation_oid));
         assert!(
-            !rows
-                .indexes
+            !catcache
+                .index_rows()
                 .iter()
                 .any(|row| row.indexrelid == index.relation_oid)
         );
         assert!(
-            !rows
-                .depends
+            !catcache
+                .depend_rows()
                 .iter()
                 .any(|row| row.objid == index.relation_oid)
         );
@@ -1495,13 +1496,14 @@ mod tests {
                 && row.objid != constraint_oid
         }));
 
-        let rows = load_physical_catalog_rows(&base).unwrap();
+        let catcache = reopened.catcache().unwrap();
         assert!(
-            rows.constraints
+            catcache
+                .constraint_rows()
                 .iter()
                 .all(|row| row.conrelid != entry.relation_oid)
         );
-        assert!(rows.depends.iter().all(|row| {
+        assert!(catcache.depend_rows().iter().all(|row| {
             row.objid != entry.relation_oid
                 && row.refobjid != entry.relation_oid
                 && row.objid != attrdef_oid
@@ -1727,7 +1729,7 @@ mod tests {
         let before = count_leaf_btree_items(&base, role_index_rel);
 
         let _created = store
-            .create_role(
+            .create_role_direct(
                 "app_user",
                 &crate::backend::catalog::roles::RoleAttributes {
                     rolcanlogin: true,
@@ -1738,7 +1740,9 @@ mod tests {
         let after_create = count_leaf_btree_items(&base, role_index_rel);
         assert_eq!(after_create, before + 1);
 
-        store.rename_role("app_user", "customer_user").unwrap();
+        store
+            .rename_role_direct("app_user", "customer_user")
+            .unwrap();
 
         let after_rename = count_leaf_btree_items(&base, role_index_rel);
         assert!(after_rename > after_create);
