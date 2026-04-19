@@ -173,6 +173,14 @@ restart_server() {
         return 1
     fi
 
+    # Rebuild the shared regression fixtures after wiping the data directory.
+    # Otherwise later tests run against an empty cluster and report misleading
+    # "unknown table" failures for setup objects like INT2_TBL.
+    if ! run_bootstrap_setup; then
+        echo "  -> Bootstrap replay failed after restart; aborting run."
+        return 1
+    fi
+
     return 0
 }
 
@@ -223,31 +231,48 @@ setup_pg_regress_env
 export PGOPTIONS="${PGOPTIONS:+$PGOPTIONS }-c statement_timeout=5s"
 PG_ARGS=(-X -h 127.0.0.1 -p "$PORT" -U postgres -v "abs_srcdir=$PG_REGRESS_ABS")
 
-echo "Per-query statement_timeout: 5s"
+run_bootstrap_setup() {
+    local setup_sql=""
+    local setup_out=""
+    local setup_label=""
 
-if [[ "$USE_PGRUST_SETUP" == true ]]; then
-    PGRUST_SETUP_SQL="$PGRUST_DIR/scripts/test_setup_pgrust.sql"
-    PGRUST_SETUP_OUT="$RESULTS_DIR/output/test_setup_pgrust.out"
-
-    if [[ ! -f "$PGRUST_SETUP_SQL" ]]; then
-        echo "ERROR: pgrust setup file not found: $PGRUST_SETUP_SQL"
-        exit 1
+    if [[ "$USE_PGRUST_SETUP" == true ]]; then
+        setup_sql="$PGRUST_DIR/scripts/test_setup_pgrust.sql"
+        setup_out="$RESULTS_DIR/output/test_setup_pgrust.out"
+        setup_label="pgrust setup bootstrap"
+    else
+        setup_sql="$SQL_DIR/test_setup.sql"
+        setup_out="$RESULTS_DIR/output/test_setup.out"
+        setup_label="upstream setup bootstrap"
     fi
 
-    echo "Running pgrust setup bootstrap..."
+    if [[ ! -f "$setup_sql" ]]; then
+        echo "ERROR: setup file not found: $setup_sql"
+        return 1
+    fi
+
+    echo "Running $setup_label..."
     if [[ -n "$TIMEOUT_CMD" ]]; then
-        if ! $TIMEOUT_CMD "$TIMEOUT" psql "${PG_ARGS[@]}" -v ON_ERROR_STOP=1 -a -q < "$PGRUST_SETUP_SQL" > "$PGRUST_SETUP_OUT" 2>&1; then
-            echo "ERROR: pgrust setup bootstrap failed"
-            echo "See: $PGRUST_SETUP_OUT"
-            exit 1
+        if ! $TIMEOUT_CMD "$TIMEOUT" psql "${PG_ARGS[@]}" -v ON_ERROR_STOP=1 -a -q < "$setup_sql" > "$setup_out" 2>&1; then
+            echo "ERROR: $setup_label failed"
+            echo "See: $setup_out"
+            return 1
         fi
     else
-        if ! psql "${PG_ARGS[@]}" -v ON_ERROR_STOP=1 -a -q < "$PGRUST_SETUP_SQL" > "$PGRUST_SETUP_OUT" 2>&1; then
-            echo "ERROR: pgrust setup bootstrap failed"
-            echo "See: $PGRUST_SETUP_OUT"
-            exit 1
+        if ! psql "${PG_ARGS[@]}" -v ON_ERROR_STOP=1 -a -q < "$setup_sql" > "$setup_out" 2>&1; then
+            echo "ERROR: $setup_label failed"
+            echo "See: $setup_out"
+            return 1
         fi
     fi
+
+    return 0
+}
+
+echo "Per-query statement_timeout: 5s"
+
+if ! run_bootstrap_setup; then
+    exit 1
 fi
 
 # Collect test files
