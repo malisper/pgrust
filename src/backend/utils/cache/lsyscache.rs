@@ -255,7 +255,10 @@ pub struct LazyCatalogLookup<'a> {
 }
 
 fn owned_temp_namespace(db: &Database, client_id: ClientId) -> Option<TempNamespace> {
-    db.temp_relations.read().get(&client_id).cloned()
+    db.temp_relations
+        .read()
+        .get(&db.temp_backend_id(client_id))
+        .cloned()
 }
 
 fn namespace_oid_for_name(
@@ -414,7 +417,7 @@ pub fn relation_entry_by_oid(
     if let Some(entry) = db
         .temp_relations
         .read()
-        .get(&client_id)
+        .get(&db.temp_backend_id(client_id))
         .and_then(|namespace| {
             namespace
                 .tables
@@ -492,7 +495,7 @@ pub fn lookup_any_relation(
     if let Some(temp) = db
         .temp_relations
         .read()
-        .get(&client_id)
+        .get(&db.temp_backend_id(client_id))
         .and_then(|namespace| {
             namespace
                 .tables

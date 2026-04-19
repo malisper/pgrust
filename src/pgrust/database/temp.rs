@@ -17,29 +17,102 @@ impl Database {
         let normalized = normalize_temp_lookup_name(table_name);
         self.temp_relations
             .read()
-            .get(&client_id)
+            .get(&self.temp_backend_id(client_id))
             .and_then(|ns| ns.tables.get(&normalized).map(|entry| entry.entry.clone()))
+    }
+
+    fn cleanup_stale_temp_relations_in_transaction(
+        &self,
+        client_id: ClientId,
+        temp_backend_id: TempBackendId,
+        xid: TransactionId,
+        cid: &mut CommandId,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<(), ExecError> {
+        let namespace_oids = [
+            Self::temp_namespace_oid(temp_backend_id),
+            Self::temp_toast_namespace_oid(temp_backend_id),
+        ];
+        for include_indexes in [false, true] {
+            let relation_oids = self
+                .txn_backend_catcache(client_id, xid, *cid)
+                .map_err(map_catalog_error)?
+                .class_rows()
+                .into_iter()
+                .filter(|row| {
+                    row.relpersistence == 't'
+                        && namespace_oids.contains(&row.relnamespace)
+                        && (include_indexes == (row.relkind == 'i'))
+                })
+                .map(|row| row.oid)
+                .collect::<Vec<_>>();
+            for relation_oid in relation_oids {
+                let ctx = CatalogWriteContext {
+                    pool: self.pool.clone(),
+                    txns: self.txns.clone(),
+                    xid,
+                    cid: *cid,
+                    client_id,
+                    waiter: Some(self.txn_waiter.clone()),
+                    interrupts: self.interrupt_state(client_id),
+                };
+                let effect = self
+                    .catalog
+                    .write()
+                    .drop_relation_by_oid_mvcc(relation_oid, &ctx)
+                    .map_err(map_catalog_error)?
+                    .1;
+                catalog_effects.push(effect);
+                *cid = (*cid).saturating_add(1);
+            }
+        }
+        Ok(())
     }
 
     pub(super) fn ensure_temp_namespace(
         &self,
         client_id: ClientId,
         xid: TransactionId,
-        cid: CommandId,
+        cid: &mut CommandId,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
         temp_effects: &mut Vec<TempMutationEffect>,
     ) -> Result<TempNamespace, ExecError> {
         let interrupts = self.interrupt_state(client_id);
+        let temp_backend_id = self.temp_backend_id(client_id);
         if let Some(namespace) = self.owned_temp_namespace(client_id) {
             return Ok(namespace);
         }
 
+        let temp_oid = Self::temp_namespace_oid(temp_backend_id);
+        let temp_name = Self::temp_namespace_name(temp_backend_id);
+        let temp_toast_oid = Self::temp_toast_namespace_oid(temp_backend_id);
+        let temp_toast_name = Self::temp_toast_namespace_name(temp_backend_id);
+        let catcache = self
+            .txn_backend_catcache(client_id, xid, *cid)
+            .map_err(map_catalog_error)?;
+        let existing_namespace = catcache.namespace_by_oid(temp_oid).cloned();
+        let existing_toast_namespace = catcache.namespace_by_oid(temp_toast_oid).cloned();
+
+        if existing_namespace.is_some() || existing_toast_namespace.is_some() {
+            self.cleanup_stale_temp_relations_in_transaction(
+                client_id,
+                temp_backend_id,
+                xid,
+                cid,
+                catalog_effects,
+            )?;
+        }
+
         let namespace = TempNamespace {
-            oid: Self::temp_namespace_oid(client_id),
-            name: Self::temp_namespace_name(client_id),
-            owner_oid: self.auth_state(client_id).current_user_oid(),
-            toast_oid: Self::temp_toast_namespace_oid(client_id),
-            toast_name: Self::temp_toast_namespace_name(client_id),
+            oid: temp_oid,
+            name: temp_name,
+            owner_oid: existing_namespace
+                .as_ref()
+                .or(existing_toast_namespace.as_ref())
+                .map(|row| row.nspowner)
+                .unwrap_or_else(|| self.auth_state(client_id).current_user_oid()),
+            toast_oid: temp_toast_oid,
+            toast_name: temp_toast_name,
             tables: BTreeMap::new(),
             generation: 0,
         };
@@ -47,31 +120,35 @@ impl Database {
             pool: self.pool.clone(),
             txns: self.txns.clone(),
             xid,
-            cid,
+            cid: *cid,
             client_id,
             waiter: None,
             interrupts,
         };
-        let effect = self
-            .catalog
-            .write()
-            .create_namespace_mvcc(namespace.oid, &namespace.name, namespace.owner_oid, &ctx)
-            .map_err(map_catalog_error)?;
-        catalog_effects.push(effect);
-        let effect = self
-            .catalog
-            .write()
-            .create_namespace_mvcc(
-                namespace.toast_oid,
-                &namespace.toast_name,
-                namespace.owner_oid,
-                &ctx,
-            )
-            .map_err(map_catalog_error)?;
-        catalog_effects.push(effect);
+        if existing_namespace.is_none() {
+            let effect = self
+                .catalog
+                .write()
+                .create_namespace_mvcc(namespace.oid, &namespace.name, namespace.owner_oid, &ctx)
+                .map_err(map_catalog_error)?;
+            catalog_effects.push(effect);
+        }
+        if existing_toast_namespace.is_none() {
+            let effect = self
+                .catalog
+                .write()
+                .create_namespace_mvcc(
+                    namespace.toast_oid,
+                    &namespace.toast_name,
+                    namespace.owner_oid,
+                    &ctx,
+                )
+                .map_err(map_catalog_error)?;
+            catalog_effects.push(effect);
+        }
         {
             let mut namespaces = self.temp_relations.write();
-            namespaces.insert(client_id, namespace.clone());
+            namespaces.insert(temp_backend_id, namespace.clone());
         }
         temp_effects.push(TempMutationEffect::Create {
             name: namespace.name.clone(),
@@ -134,15 +211,16 @@ impl Database {
         desc: crate::backend::executor::RelationDesc,
         on_commit: OnCommitAction,
         xid: TransactionId,
-        cid: CommandId,
+        mut cid: CommandId,
         relkind: char,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
         temp_effects: &mut Vec<TempMutationEffect>,
     ) -> Result<CreatedTempRelation, ExecError> {
         let interrupts = self.interrupt_state(client_id);
+        let temp_backend_id = self.temp_backend_id(client_id);
         let normalized = normalize_temp_lookup_name(&table_name);
         let namespace =
-            self.ensure_temp_namespace(client_id, xid, cid, catalog_effects, temp_effects)?;
+            self.ensure_temp_namespace(client_id, xid, &mut cid, catalog_effects, temp_effects)?;
         if namespace.tables.contains_key(&normalized) {
             return Err(ExecError::Parse(ParseError::TableAlreadyExists(normalized)));
         }
@@ -163,7 +241,7 @@ impl Database {
                     format!("{}.{}", namespace.name, normalized),
                     desc,
                     namespace.oid,
-                    Self::temp_db_oid(client_id),
+                    Self::temp_db_oid(temp_backend_id),
                     't',
                     namespace.toast_oid,
                     &namespace.toast_name,
@@ -179,7 +257,7 @@ impl Database {
                     format!("{}.{}", namespace.name, normalized),
                     desc,
                     namespace.oid,
-                    Self::temp_db_oid(client_id),
+                    Self::temp_db_oid(temp_backend_id),
                     't',
                     relkind,
                     self.auth_state(client_id).current_user_oid(),
@@ -209,7 +287,7 @@ impl Database {
         };
         {
             let mut namespaces = self.temp_relations.write();
-            let namespace = namespaces.get_mut(&client_id).ok_or_else(|| {
+            let namespace = namespaces.get_mut(&temp_backend_id).ok_or_else(|| {
                 ExecError::Parse(ParseError::TableDoesNotExist(normalized.clone()))
             })?;
             namespace.tables.insert(
@@ -244,10 +322,11 @@ impl Database {
         temp_effects: &mut Vec<TempMutationEffect>,
     ) -> Result<RelCacheEntry, ExecError> {
         let interrupts = self.interrupt_state(client_id);
+        let temp_backend_id = self.temp_backend_id(client_id);
         let normalized = normalize_temp_lookup_name(table_name);
         let removed = {
             let mut namespaces = self.temp_relations.write();
-            let namespace = namespaces.get_mut(&client_id).ok_or_else(|| {
+            let namespace = namespaces.get_mut(&temp_backend_id).ok_or_else(|| {
                 ExecError::Parse(ParseError::TableDoesNotExist(normalized.clone()))
             })?;
             let removed = namespace.tables.remove(&normalized).ok_or_else(|| {
@@ -294,9 +373,10 @@ impl Database {
     ) -> Result<RelCacheEntry, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let normalized_new = normalize_temp_lookup_name(new_table_name);
+        let temp_backend_id = self.temp_backend_id(client_id);
         let old_name = {
             let namespaces = self.temp_relations.read();
-            let namespace = namespaces.get(&client_id).ok_or_else(|| {
+            let namespace = namespaces.get(&temp_backend_id).ok_or_else(|| {
                 ExecError::Parse(ParseError::TableDoesNotExist(normalized_new.clone()))
             })?;
             namespace
@@ -313,7 +393,7 @@ impl Database {
         if old_name != normalized_new {
             let namespaces = self.temp_relations.read();
             let namespace = namespaces
-                .get(&client_id)
+                .get(&temp_backend_id)
                 .ok_or_else(|| ExecError::Parse(ParseError::TableDoesNotExist(old_name.clone())))?;
             if namespace.tables.contains_key(&normalized_new) {
                 return Err(ExecError::Parse(ParseError::TableAlreadyExists(
@@ -341,7 +421,7 @@ impl Database {
         let renamed = {
             let mut namespaces = self.temp_relations.write();
             let namespace = namespaces
-                .get_mut(&client_id)
+                .get_mut(&temp_backend_id)
                 .ok_or_else(|| ExecError::Parse(ParseError::TableDoesNotExist(old_name.clone())))?;
             let entry = namespace
                 .tables
@@ -361,11 +441,12 @@ impl Database {
     }
 
     pub(crate) fn apply_temp_on_commit(&self, client_id: ClientId) -> Result<(), ExecError> {
+        let temp_backend_id = self.temp_backend_id(client_id);
         let mut to_delete = Vec::new();
         let mut to_drop = Vec::new();
         {
             let namespaces = self.temp_relations.read();
-            if let Some(namespace) = namespaces.get(&client_id) {
+            if let Some(namespace) = namespaces.get(&temp_backend_id) {
                 for (name, entry) in &namespace.tables {
                     match entry.on_commit {
                         OnCommitAction::PreserveRows => {}
@@ -414,72 +495,32 @@ impl Database {
     }
 
     pub(crate) fn cleanup_client_temp_relations(&self, client_id: ClientId) {
-        let Some(namespace) = self.owned_temp_namespace(client_id) else {
+        let temp_backend_id = self.temp_backend_id(client_id);
+        let Some(_namespace) = self.owned_temp_namespace(client_id) else {
+            self.temp_relations.write().remove(&temp_backend_id);
             return;
         };
-        for name in namespace.tables.keys().cloned().collect::<Vec<_>>() {
-            let xid = self.txns.write().begin();
-            let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
-            let mut catalog_effects = Vec::new();
-            let mut temp_effects = Vec::new();
-            let result = self.drop_temp_relation_in_transaction(
-                client_id,
-                &name,
-                xid,
-                0,
-                &mut catalog_effects,
-                &mut temp_effects,
-            );
-            let _ = self.finish_txn(
-                client_id,
-                xid,
-                result.map(|_| StatementResult::AffectedRows(0)),
-                &catalog_effects,
-                &temp_effects,
-                &[],
-            );
-            guard.disarm();
-        }
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
-        let ctx = CatalogWriteContext {
-            pool: self.pool.clone(),
-            txns: self.txns.clone(),
-            xid,
-            cid: 0,
-            client_id,
-            waiter: None,
-            interrupts: self.interrupt_state(client_id),
-        };
+        let mut cid = 0;
         let mut effects = Vec::new();
-        if let Ok(effect) = self.catalog.write().drop_namespace_mvcc(
-            namespace.oid,
-            &namespace.name,
-            namespace.owner_oid,
-            &ctx,
-        ) {
-            effects.push(effect);
-        }
-        if let Ok(effect) = self.catalog.write().drop_namespace_mvcc(
-            namespace.toast_oid,
-            &namespace.toast_name,
-            namespace.owner_oid,
-            &ctx,
-        ) {
-            effects.push(effect);
-        }
-        if !effects.is_empty() {
-            let _ = self.finish_txn(
-                client_id,
-                xid,
-                Ok(StatementResult::AffectedRows(0)),
-                &effects,
-                &[],
-                &[],
-            );
-            guard.disarm();
-        }
-        self.temp_relations.write().remove(&client_id);
+        let result = self.cleanup_stale_temp_relations_in_transaction(
+            client_id,
+            temp_backend_id,
+            xid,
+            &mut cid,
+            &mut effects,
+        );
+        let _ = self.finish_txn(
+            client_id,
+            xid,
+            result.map(|_| StatementResult::AffectedRows(0)),
+            &effects,
+            &[],
+            &[],
+        );
+        guard.disarm();
+        self.temp_relations.write().remove(&temp_backend_id);
         self.invalidate_backend_cache_state(client_id);
     }
 }

@@ -78,6 +78,7 @@ struct ActiveTransaction {
 
 pub struct Session {
     pub client_id: ClientId,
+    pub(crate) temp_backend_id: crate::pgrust::database::TempBackendId,
     active_txn: Option<ActiveTransaction>,
     gucs: HashMap<String, String>,
     datetime_config: DateTimeConfig,
@@ -105,8 +106,16 @@ impl Session {
     const DEFAULT_MAINTENANCE_WORK_MEM_KB: usize = 65_536;
 
     pub fn new(client_id: ClientId) -> Self {
+        Self::with_temp_backend_id(client_id, client_id)
+    }
+
+    pub fn with_temp_backend_id(
+        client_id: ClientId,
+        temp_backend_id: crate::pgrust::database::TempBackendId,
+    ) -> Self {
         Self {
             client_id,
+            temp_backend_id,
             active_txn: None,
             gucs: HashMap::new(),
             datetime_config: DateTimeConfig::default(),
@@ -428,6 +437,7 @@ impl Session {
     pub fn execute(&mut self, db: &Database, sql: &str) -> Result<StatementResult, ExecError> {
         let _interrupt_guard = self.statement_interrupt_guard()?;
         db.install_auth_state(self.client_id, self.auth.clone());
+        db.install_temp_backend_id(self.client_id, self.temp_backend_id);
         db.install_stats_state(self.client_id, Arc::clone(&self.stats_state));
         self.execute_internal(db, sql)
     }
@@ -1280,6 +1290,7 @@ impl Session {
     ) -> Result<SelectGuard<'a>, ExecError> {
         let interrupt_guard = self.statement_interrupt_guard()?;
         db.install_auth_state(self.client_id, self.auth.clone());
+        db.install_temp_backend_id(self.client_id, self.temp_backend_id);
         db.install_interrupt_state(self.client_id, self.interrupts());
         let txn_ctx = if let Some(ref mut txn) = self.active_txn {
             let xid = txn.xid;
