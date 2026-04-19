@@ -3776,6 +3776,10 @@ fn parse_insert_update_delete() {
         matches!(parse_statement("create temp table withoutoid() with (oids = false)").unwrap(), Statement::CreateTable(ct) if ct.persistence == TablePersistence::Temporary && ct.table_name == "withoutoid" && ct.columns().count() == 0)
     );
     assert!(matches!(
+        parse_statement("create table widgets (like source_table)"),
+        Err(ParseError::FeatureNotSupported(feature)) if feature == "CREATE TABLE ... LIKE"
+    ));
+    assert!(matches!(
         parse_statement("create table withoid() with (oids)"),
         Err(ParseError::TablesDeclaredWithOidsNotSupported)
     ));
