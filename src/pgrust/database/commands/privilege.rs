@@ -81,42 +81,76 @@ impl Database {
         client_id: ClientId,
         stmt: &GrantRoleMembershipStatement,
     ) -> Result<StatementResult, ExecError> {
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_grant_role_membership_stmt_in_transaction(
+            client_id,
+            stmt,
+            xid,
+            0,
+            &mut catalog_effects,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        result
+    }
+
+    pub(crate) fn execute_grant_role_membership_stmt_in_transaction(
+        &self,
+        client_id: ClientId,
+        stmt: &GrantRoleMembershipStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
         let auth = self.auth_state(client_id);
-        let auth_catalog = self
-            .auth_catalog(client_id, None)
-            .map_err(map_role_grant_error)?;
-        let mut touched = false;
+        let interrupts = self.interrupt_state(client_id);
+        let mut current_cid = cid;
 
         for role_name in &stmt.role_names {
-            let role = if stmt.granted_by.is_some() {
-                lookup_membership_role(&auth_catalog, role_name)?
-            } else {
-                authorize_grant_membership(&auth, &auth_catalog, role_name)?
-            };
-            let grantor_oid =
-                resolve_role_grantor(&auth, &auth_catalog, &role, stmt.granted_by.as_ref(), true)?;
             for grantee_name in &stmt.grantee_names {
+                let auth_catalog = self
+                    .auth_catalog(client_id, Some((xid, current_cid)))
+                    .map_err(map_role_grant_error)?;
+                let role = if stmt.granted_by.is_some() {
+                    lookup_membership_role(&auth_catalog, role_name)?
+                } else {
+                    authorize_grant_membership(&auth, &auth_catalog, role_name)?
+                };
+                let grantor_oid = resolve_role_grantor(
+                    &auth,
+                    &auth_catalog,
+                    &role,
+                    stmt.granted_by.as_ref(),
+                    true,
+                )?;
                 let grantee = lookup_membership_grantee(&auth_catalog, grantee_name)?;
-                let admin_option = stmt.admin_option;
-                let inherit_option = stmt.inherit_option.unwrap_or(true);
-                let set_option = stmt.set_option.unwrap_or(true);
-                upsert_role_membership(
+                let ctx = CatalogWriteContext {
+                    pool: self.pool.clone(),
+                    txns: self.txns.clone(),
+                    xid,
+                    cid: current_cid,
+                    client_id,
+                    waiter: None,
+                    interrupts: interrupts.clone(),
+                };
+                upsert_role_membership_in_transaction(
                     self,
                     &auth_catalog,
                     role.oid,
                     grantee.oid,
                     grantor_oid,
-                    admin_option,
-                    inherit_option,
-                    set_option,
+                    stmt.admin_option,
+                    stmt.inherit_option.unwrap_or(true),
+                    stmt.set_option.unwrap_or(true),
+                    &ctx,
+                    catalog_effects,
                 )?;
-                touched = true;
+                current_cid = current_cid.saturating_add(1);
             }
         }
 
-        if touched {
-            publish_direct_auth_members_invalidation(self, client_id);
-        }
         Ok(StatementResult::AffectedRows(0))
     }
 
@@ -125,23 +159,52 @@ impl Database {
         client_id: ClientId,
         stmt: &RevokeRoleMembershipStatement,
     ) -> Result<StatementResult, ExecError> {
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_revoke_role_membership_stmt_in_transaction(
+            client_id,
+            stmt,
+            xid,
+            0,
+            &mut catalog_effects,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        result
+    }
+
+    pub(crate) fn execute_revoke_role_membership_stmt_in_transaction(
+        &self,
+        client_id: ClientId,
+        stmt: &RevokeRoleMembershipStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
         let auth = self.auth_state(client_id);
-        let auth_catalog = self
-            .auth_catalog(client_id, None)
-            .map_err(map_role_grant_error)?;
-        let mut touched = false;
+        let interrupts = self.interrupt_state(client_id);
+        let mut current_cid = cid;
 
         for role_name in &stmt.role_names {
-            let role = lookup_membership_role(&auth_catalog, role_name)?;
-            let grantor_oid =
-                resolve_role_grantor(&auth, &auth_catalog, &role, stmt.granted_by.as_ref(), false)?;
-            let role_rows = auth_catalog
-                .memberships()
-                .iter()
-                .filter(|row| row.roleid == role.oid)
-                .cloned()
-                .collect::<Vec<_>>();
             for grantee_name in &stmt.grantee_names {
+                let auth_catalog = self
+                    .auth_catalog(client_id, Some((xid, current_cid)))
+                    .map_err(map_role_grant_error)?;
+                let role = lookup_membership_role(&auth_catalog, role_name)?;
+                let grantor_oid = resolve_role_grantor(
+                    &auth,
+                    &auth_catalog,
+                    &role,
+                    stmt.granted_by.as_ref(),
+                    false,
+                )?;
+                let role_rows = auth_catalog
+                    .memberships()
+                    .iter()
+                    .filter(|row| row.roleid == role.oid)
+                    .cloned()
+                    .collect::<Vec<_>>();
                 let grantee = lookup_membership_grantee(&auth_catalog, grantee_name)?;
                 let existing_index = role_rows
                     .iter()
@@ -155,65 +218,87 @@ impl Database {
                 let planned_actions =
                     plan_role_membership_revoke(&role_rows, existing_index, stmt)?;
                 for (row, action) in role_rows.iter().zip(planned_actions.iter()) {
+                    let ctx = CatalogWriteContext {
+                        pool: self.pool.clone(),
+                        txns: self.txns.clone(),
+                        xid,
+                        cid: current_cid,
+                        client_id,
+                        waiter: None,
+                        interrupts: interrupts.clone(),
+                    };
                     match action {
                         PlannedRoleMembershipRevoke::Noop => {}
                         PlannedRoleMembershipRevoke::DeleteGrant => {
-                            self.catalog
+                            let (_, effect) = self
+                                .shared_catalog
                                 .write()
-                                .revoke_role_membership(row.roleid, row.member, row.grantor)
+                                .revoke_role_membership_mvcc(
+                                    row.roleid,
+                                    row.member,
+                                    row.grantor,
+                                    &ctx,
+                                )
                                 .map_err(map_role_grant_error)?;
-                            touched = true;
+                            catalog_effects.push(effect);
+                            current_cid = current_cid.saturating_add(1);
                         }
                         PlannedRoleMembershipRevoke::RemoveAdminOption => {
-                            self.catalog
+                            let (_, effect) = self
+                                .shared_catalog
                                 .write()
-                                .update_role_membership_options(
+                                .update_role_membership_options_mvcc(
                                     row.roleid,
                                     row.member,
                                     row.grantor,
                                     false,
                                     row.inherit_option,
                                     row.set_option,
+                                    &ctx,
                                 )
                                 .map_err(map_role_grant_error)?;
-                            touched = true;
+                            catalog_effects.push(effect);
+                            current_cid = current_cid.saturating_add(1);
                         }
                         PlannedRoleMembershipRevoke::RemoveInheritOption => {
-                            self.catalog
+                            let (_, effect) = self
+                                .shared_catalog
                                 .write()
-                                .update_role_membership_options(
+                                .update_role_membership_options_mvcc(
                                     row.roleid,
                                     row.member,
                                     row.grantor,
                                     row.admin_option,
                                     false,
                                     row.set_option,
+                                    &ctx,
                                 )
                                 .map_err(map_role_grant_error)?;
-                            touched = true;
+                            catalog_effects.push(effect);
+                            current_cid = current_cid.saturating_add(1);
                         }
                         PlannedRoleMembershipRevoke::RemoveSetOption => {
-                            self.catalog
+                            let (_, effect) = self
+                                .shared_catalog
                                 .write()
-                                .update_role_membership_options(
+                                .update_role_membership_options_mvcc(
                                     row.roleid,
                                     row.member,
                                     row.grantor,
                                     row.admin_option,
                                     row.inherit_option,
                                     false,
+                                    &ctx,
                                 )
                                 .map_err(map_role_grant_error)?;
-                            touched = true;
+                            catalog_effects.push(effect);
+                            current_cid = current_cid.saturating_add(1);
                         }
                     }
                 }
             }
         }
 
-        if touched {
-            publish_direct_auth_members_invalidation(self, client_id);
-        }
         Ok(StatementResult::AffectedRows(0))
     }
 
@@ -411,7 +496,7 @@ impl Database {
     }
 }
 
-fn upsert_role_membership(
+fn upsert_role_membership_in_transaction(
     db: &Database,
     auth_catalog: &AuthCatalog,
     roleid: u32,
@@ -420,34 +505,43 @@ fn upsert_role_membership(
     admin_option: bool,
     inherit_option: bool,
     set_option: bool,
+    ctx: &CatalogWriteContext,
+    catalog_effects: &mut Vec<CatalogMutationEffect>,
 ) -> Result<(), ExecError> {
     if auth_catalog
         .memberships()
         .iter()
         .any(|row| row.roleid == roleid && row.member == member && row.grantor == grantor)
     {
-        db.catalog
+        let (_, effect) = db
+            .shared_catalog
             .write()
-            .update_role_membership_options(
+            .update_role_membership_options_mvcc(
                 roleid,
                 member,
                 grantor,
                 admin_option,
                 inherit_option,
                 set_option,
+                ctx,
             )
             .map_err(map_role_grant_error)?;
+        catalog_effects.push(effect);
     } else {
-        db.catalog
+        let (_, effect) = db
+            .shared_catalog
             .write()
-            .grant_role_membership(&membership_row(
-                roleid,
-                member,
-                grantor,
-                admin_option,
-                inherit_option,
-                set_option,
-            ))
+            .grant_role_membership_mvcc(
+                &membership_row(
+                    roleid,
+                    member,
+                    grantor,
+                    admin_option,
+                    inherit_option,
+                    set_option,
+                ),
+                ctx,
+            )
             .map_err(|err| {
                 map_named_role_membership_error(
                     err,
@@ -457,6 +551,7 @@ fn upsert_role_membership(
                     &role_name(db, auth_catalog, roleid),
                 )
             })?;
+        catalog_effects.push(effect);
     }
     Ok(())
 }
@@ -734,22 +829,6 @@ fn role_name(_db: &Database, auth_catalog: &AuthCatalog, role_oid: u32) -> Strin
 
 fn member_name(db: &Database, auth_catalog: &AuthCatalog, member_oid: u32) -> String {
     role_name(db, auth_catalog, member_oid)
-}
-
-fn publish_direct_auth_members_invalidation(db: &Database, client_id: ClientId) {
-    let kind = crate::include::catalog::BootstrapCatalogKind::PgAuthMembers;
-    let _ = db
-        .pool
-        .invalidate_relation(crate::backend::storage::smgr::RelFileLocator {
-            spc_oid: 0,
-            db_oid: 1,
-            rel_number: kind.relation_oid(),
-        });
-    let invalidation = crate::backend::utils::cache::inval::CatalogInvalidation {
-        touched_catalogs: [kind].into_iter().collect(),
-        ..Default::default()
-    };
-    db.publish_committed_catalog_invalidation(client_id, &invalidation);
 }
 
 #[cfg(test)]
