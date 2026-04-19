@@ -3,6 +3,18 @@ perl5/
 .DS_Store
 web/wasm-demo/pkg/pgrust_bg.wasm
 
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfvars
+*.tfplan
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
 # Beads / Dolt files (added by bd init)
 .dolt/
 *.db
