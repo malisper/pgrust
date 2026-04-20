@@ -1051,20 +1051,44 @@ impl Database {
             waiter: None,
             interrupts,
         };
-        let (_entry, effect) = self
+        let (entry, create_effect) = self
             .catalog
             .write()
-            .create_view_mvcc(
+            .create_view_relation_mvcc(
                 view_name.clone(),
                 desc,
                 namespace_oid,
                 self.auth_state(client_id).current_user_oid(),
-                create_stmt.query_sql.clone(),
-                &referenced_relation_oids.into_iter().collect::<Vec<_>>(),
                 &ctx,
             )
             .map_err(map_catalog_error)?;
-        catalog_effects.push(effect);
+        catalog_effects.push(create_effect);
+
+        let rule_ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid: cid.saturating_add(1),
+            client_id,
+            waiter: None,
+            interrupts: Arc::clone(&ctx.interrupts),
+        };
+        let rule_effect = self
+            .catalog
+            .write()
+            .create_rule_mvcc_with_owner_dependency(
+                entry.relation_oid,
+                "_RETURN",
+                '1',
+                true,
+                String::new(),
+                create_stmt.query_sql.clone(),
+                &referenced_relation_oids.into_iter().collect::<Vec<_>>(),
+                crate::backend::catalog::store::RuleOwnerDependency::Internal,
+                &rule_ctx,
+            )
+            .map_err(map_catalog_error)?;
+        catalog_effects.push(rule_effect);
         Ok(StatementResult::AffectedRows(0))
     }
 

@@ -1,4 +1,7 @@
-use super::*;
+use crate::backend::parser::analyze::analyze_select_query_with_outer;
+use crate::backend::parser::{CatalogLookup, ParseError, Statement};
+use crate::include::nodes::parsenodes::Query;
+use crate::include::nodes::primnodes::RelationDesc;
 
 const RETURN_RULE_NAME: &str = "_RETURN";
 
@@ -8,7 +11,7 @@ fn view_display_name(relation_oid: u32, alias: Option<&str>) -> String {
         .unwrap_or_else(|| format!("view {relation_oid}"))
 }
 
-pub(crate) fn return_rule_sql(
+fn return_rule_sql(
     catalog: &dyn CatalogLookup,
     relation_oid: u32,
     display_name: &str,
@@ -28,7 +31,7 @@ pub(crate) fn return_rule_sql(
     }
 }
 
-pub(crate) fn validate_view_shape(
+fn validate_view_shape(
     query: &Query,
     relation_desc: &RelationDesc,
     display_name: &str,
@@ -55,7 +58,7 @@ pub(crate) fn validate_view_shape(
     Ok(())
 }
 
-pub(crate) fn analyze_view_rule_sql(
+pub(crate) fn rewrite_view_relation_query(
     relation_oid: u32,
     relation_desc: &RelationDesc,
     alias: Option<&str>,
@@ -67,6 +70,9 @@ pub(crate) fn analyze_view_rule_sql(
         return Err(ParseError::RecursiveView(display_name));
     }
     let sql = return_rule_sql(catalog, relation_oid, &display_name)?;
+    // :HACK: PostgreSQL stores analyzed rule query trees in `pg_rewrite`.
+    // pgrust still stores SQL text and reparses it here until the catalog
+    // format is upgraded to preserve analyzed query trees directly.
     let stmt = crate::backend::parser::parse_statement(&sql)?;
     let Statement::Select(select) = stmt else {
         return Err(ParseError::UnexpectedToken {

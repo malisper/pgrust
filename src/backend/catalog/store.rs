@@ -64,6 +64,12 @@ pub struct CreateTableResult {
     pub toast: Option<ToastCatalogChanges>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleOwnerDependency {
+    Auto,
+    Internal,
+}
+
 pub struct CatalogWriteContext {
     pub pool: std::sync::Arc<BufferPool<SmgrStorageBackend>>,
     pub txns: std::sync::Arc<RwLock<TransactionManager>>,
