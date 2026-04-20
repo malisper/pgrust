@@ -385,7 +385,21 @@ fn role_catalog(
         })
 }
 
->>>>>>> malisper/array-sql-gap-audit
+fn auth_role_name(ctx: &ExecutorContext, role_oid: u32) -> Result<Value, ExecError> {
+    let catalog = role_catalog(ctx)?;
+    catalog
+        .authid_rows()
+        .into_iter()
+        .find(|row| row.oid == role_oid)
+        .map(|row| Value::Text(row.rolname.into()))
+        .ok_or_else(|| ExecError::DetailedError {
+            message: format!("role with OID {role_oid} does not exist"),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        })
+}
+
 fn sequence_runtime(
     ctx: &ExecutorContext,
 ) -> Result<&crate::pgrust::database::SequenceRuntime, ExecError> {

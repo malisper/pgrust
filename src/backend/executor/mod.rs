@@ -34,6 +34,9 @@ pub(crate) mod value_io;
 mod window;
 pub(crate) mod expr {
     pub(crate) use super::exec_expr::*;
+    pub(crate) use super::expr_compile::{
+        CompiledPredicate, compile_predicate, compile_predicate_with_decoder,
+    };
 }
 pub(crate) mod node_types {
     pub(crate) use crate::include::nodes::datum::*;
