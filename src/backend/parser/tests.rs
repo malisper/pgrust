@@ -1536,6 +1536,14 @@ fn parse_set_session_authorization_statement() {
             role_name: "regress_tenant".into(),
         })
     );
+
+    let stmt = parse_statement("set session authorization 'regress_tenant'").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::SetSessionAuthorization(SetSessionAuthorizationStatement {
+            role_name: "regress_tenant".into(),
+        })
+    );
 }
 
 #[test]

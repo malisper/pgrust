@@ -3653,8 +3653,26 @@ fn build_set_session_authorization(
 ) -> Result<SetSessionAuthorizationStatement, ParseError> {
     let role_name = pair
         .into_inner()
-        .find(|part| part.as_rule() == Rule::identifier)
-        .map(build_identifier)
+        .find_map(|part| match part.as_rule() {
+            Rule::identifier => Some(Ok(build_identifier(part))),
+            Rule::set_session_authorization_target => {
+                let inner = part.into_inner().next().ok_or(ParseError::UnexpectedEof);
+                Some(inner.and_then(|inner| match inner.as_rule() {
+                    Rule::identifier => Ok(build_identifier(inner)),
+                    Rule::quoted_string_literal
+                    | Rule::string_literal
+                    | Rule::unicode_string_literal
+                    | Rule::escape_string_literal
+                    | Rule::dollar_string_literal => decode_string_literal_pair(inner),
+                    _ => Err(ParseError::UnexpectedToken {
+                        expected: "role name",
+                        actual: inner.as_str().into(),
+                    }),
+                }))
+            }
+            _ => None,
+        })
+        .transpose()?
         .ok_or(ParseError::UnexpectedEof)?;
     Ok(SetSessionAuthorizationStatement { role_name })
 }
