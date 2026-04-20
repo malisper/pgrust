@@ -1,0 +1,12 @@
+title = "pgrust gitleaks config"
+
+# Extend the default ruleset rather than replace it.
+[extend]
+useDefault = true
+
+# PostHog project keys (prefix "phc_") are designed for client-side exposure —
+# they're meant to be shipped in the browser bundle. Marking them as allowed
+# so `gitleaks detect` reports clean.
+[[allowlists]]
+description = "PostHog public project keys — client-side by design"
+regexes = ['''phc_[A-Za-z0-9]{40,}''']

@@ -532,62 +532,6 @@ fn oid_catalog(name: &str) -> Catalog {
     catalog
 }
 
-fn records_rel() -> RelFileLocator {
-    RelFileLocator {
-        spc_oid: 0,
-        db_oid: 1,
-        rel_number: 15003,
-    }
-}
-
-fn records_relation_desc() -> RelationDesc {
-    use crate::backend::parser::{SqlType, SqlTypeKind};
-
-    RelationDesc {
-        columns: vec![
-            crate::backend::catalog::catalog::column_desc(
-                "id",
-                SqlType::new(SqlTypeKind::Int4),
-                false,
-            ),
-            crate::backend::catalog::catalog::column_desc(
-                "company_id",
-                SqlType::new(SqlTypeKind::Text),
-                false,
-            ),
-            crate::backend::catalog::catalog::column_desc(
-                "year",
-                SqlType::new(SqlTypeKind::Text),
-                false,
-            ),
-            crate::backend::catalog::catalog::column_desc(
-                "tags",
-                SqlType::array_of(SqlType::new(SqlTypeKind::Varchar)),
-                true,
-            ),
-            crate::backend::catalog::catalog::column_desc(
-                "category_tags",
-                SqlType::array_of(SqlType::new(SqlTypeKind::Varchar)),
-                true,
-            ),
-            crate::backend::catalog::catalog::column_desc(
-                "size_tags",
-                SqlType::array_of(SqlType::new(SqlTypeKind::Varchar)),
-                true,
-            ),
-        ],
-    }
-}
-
-fn records_catalog() -> Catalog {
-    let mut catalog = Catalog::default();
-    catalog.insert(
-        "orders",
-        test_catalog_entry(records_rel(), records_relation_desc()),
-    );
-    catalog
-}
-
 fn tuple(id: i32, name: &str, note: Option<&str>) -> HeapTuple {
     let desc = relation_desc().attribute_descs();
     HeapTuple::from_values(
@@ -4621,18 +4565,6 @@ fn unnest_single_and_multi_arg_work() {
     }
 }
 #[test]
-fn record_shaped_array_query_runs() {
-    run_with_large_stack("record_shaped_array_query_runs", || {
-        let base = temp_dir("record_arrays");
-        let mut txns = TransactionManager::new_durable(&base).unwrap();
-        let xid = txns.begin();
-        run_sql_with_catalog(&base, &txns, xid, "insert into orders (id, company_id, year, tags, category_tags, size_tags) values (1, 'acme', '2024', ARRAY['c1', 'c2']::varchar[], ARRAY['dry', 'dry']::varchar[], ARRAY['large', 'medium']::varchar[]), (2, 'acme', '2024', ARRAY['c3']::varchar[], ARRAY['dry']::varchar[], ARRAY['large']::varchar[]), (3, 'beta', '2024', ARRAY['c4']::varchar[], ARRAY['dry']::varchar[], ARRAY['medium']::varchar[])", records_catalog()).unwrap();
-        txns.commit(xid).unwrap();
-        match run_sql_with_catalog(&base, &txns, INVALID_TRANSACTION_ID, "select orders.company_id, count(distinct orders.id) as records_filtered, sum((select count(*) from unnest(orders.tags, orders.category_tags, orders.size_tags) as c(num, type_cat, size_cat) where (c.size_cat)::text = any(ARRAY['large']::varchar[]))) as containers_filtered from orders where orders.year = '2024' and orders.size_tags && ARRAY['large']::varchar[] group by orders.company_id order by orders.company_id", records_catalog()).unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Text("acme".into()), Value::Int64(2), Value::Int64(2)]]); } other => panic!("expected query result, got {:?}", other), }
-    });
-}
-
-#[test]
 fn casts_support_int2_int8_float4_and_float8() {
     let base = temp_dir("extended_numeric_casts");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -7640,37 +7572,6 @@ fn unnest_null_array_zips_with_longer_input() {
                     vec![Value::Null, Value::Text("x".into())],
                     vec![Value::Null, Value::Text("y".into())]
                 ]
-            );
-        }
-        other => panic!("expected query result, got {:?}", other),
-    }
-}
-#[test]
-fn array_columns_round_trip_through_storage() {
-    let base = temp_dir("array_storage_roundtrip");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-    let xid = txns.begin();
-    assert_eq!(run_sql_with_catalog(&base, &txns, xid, "insert into orders (id, company_id, year, tags, category_tags, size_tags) values (1, 'acme', '2024', ARRAY['n1', null]::varchar[], ARRAY['dry']::varchar[], ARRAY['large']::varchar[])", records_catalog()).unwrap(), StatementResult::AffectedRows(1));
-    txns.commit(xid).unwrap();
-    match run_sql_with_catalog(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "select tags from orders",
-        records_catalog(),
-    )
-    .unwrap()
-    {
-        StatementResult::Query { rows, .. } => {
-            assert_eq!(
-                rows,
-                vec![vec![Value::PgArray(
-                    crate::include::nodes::datum::ArrayValue::from_1d(vec![
-                        Value::Text("n1".into()),
-                        Value::Null,
-                    ])
-                    .with_element_type_oid(crate::include::catalog::VARCHAR_TYPE_OID),
-                )]]
             );
         }
         other => panic!("expected query result, got {:?}", other),

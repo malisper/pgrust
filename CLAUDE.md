@@ -1,4 +1,4 @@
-# AGENTS
+# pgrust — project guide for AI agents
 
 ## Overview
 
