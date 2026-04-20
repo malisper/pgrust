@@ -522,9 +522,10 @@ fn visible_catalog_without_text_input_cast(
                 !(row.castsource == crate::include::catalog::TEXT_TYPE_OID
                     && row.casttarget == target_oid
                     && row.castmethod == 'i')
-            })
+        })
             .collect(),
         base.collation_rows(),
+        base.foreign_data_wrapper_rows(),
         base.database_rows(),
         base.tablespace_rows(),
         base.statistic_rows(),
@@ -574,6 +575,7 @@ fn visible_catalog_without_operator(
         base.proc_rows(),
         base.cast_rows(),
         base.collation_rows(),
+        base.foreign_data_wrapper_rows(),
         base.database_rows(),
         base.tablespace_rows(),
         base.statistic_rows(),
@@ -5524,6 +5526,98 @@ fn parse_create_drop_and_comment_on_conversion_statements() {
     };
     assert_eq!(comment.conversion_name, "myconv");
     assert_eq!(comment.comment.as_deref(), Some("hello"));
+}
+
+#[test]
+fn parse_foreign_data_wrapper_statements() {
+    let Statement::CreateForeignDataWrapper(create) = parse_statement(
+        "create foreign data wrapper foo handler pg_rust_test_fdw_handler validator postgresql_fdw_validator options (testing '1', another '2')",
+    )
+    .unwrap() else {
+        panic!("expected create foreign data wrapper");
+    };
+    assert_eq!(create.fdw_name, "foo");
+    assert_eq!(create.handler_name.as_deref(), Some("pg_rust_test_fdw_handler"));
+    assert_eq!(create.validator_name.as_deref(), Some("postgresql_fdw_validator"));
+    assert_eq!(
+        create.options,
+        vec![
+            RelOption {
+                name: "testing".into(),
+                value: "1".into(),
+            },
+            RelOption {
+                name: "another".into(),
+                value: "2".into(),
+            },
+        ]
+    );
+
+    let Statement::AlterForeignDataWrapper(alter) = parse_statement(
+        "alter foreign data wrapper foo no validator options (drop a, set b '2', add c '3')",
+    )
+    .unwrap() else {
+        panic!("expected alter foreign data wrapper");
+    };
+    assert_eq!(alter.fdw_name, "foo");
+    assert_eq!(alter.validator_name, Some(None));
+    assert_eq!(alter.options.len(), 3);
+
+    let Statement::AlterForeignDataWrapperOwner(owner) =
+        parse_statement("alter foreign data wrapper foo owner to regress_test_role").unwrap()
+    else {
+        panic!("expected alter foreign data wrapper owner");
+    };
+    assert_eq!(owner.fdw_name, "foo");
+    assert_eq!(owner.new_owner, "regress_test_role");
+
+    let Statement::AlterForeignDataWrapperRename(rename) =
+        parse_statement("alter foreign data wrapper foo rename to bar").unwrap()
+    else {
+        panic!("expected alter foreign data wrapper rename");
+    };
+    assert_eq!(rename.fdw_name, "foo");
+    assert_eq!(rename.new_name, "bar");
+
+    let Statement::DropForeignDataWrapper(drop_stmt) =
+        parse_statement("drop foreign data wrapper if exists foo cascade").unwrap()
+    else {
+        panic!("expected drop foreign data wrapper");
+    };
+    assert!(drop_stmt.if_exists);
+    assert!(drop_stmt.cascade);
+    assert_eq!(drop_stmt.fdw_name, "foo");
+
+    let Statement::CommentOnForeignDataWrapper(comment) =
+        parse_statement("comment on foreign data wrapper foo is 'hello'").unwrap()
+    else {
+        panic!("expected comment on foreign data wrapper");
+    };
+    assert_eq!(comment.fdw_name, "foo");
+    assert_eq!(comment.comment.as_deref(), Some("hello"));
+}
+
+#[test]
+fn parse_foreign_data_wrapper_rejects_duplicate_clauses() {
+    let err = parse_statement(
+        "create foreign data wrapper foo handler pg_rust_test_fdw_handler handler invalid_fdw_handler",
+    )
+    .expect_err("duplicate handler should fail");
+    assert!(matches!(
+        err,
+        ParseError::FeatureNotSupportedMessage(message)
+            if message == "conflicting or redundant options"
+    ));
+
+    let err = parse_statement(
+        "alter foreign data wrapper foo validator postgresql_fdw_validator no validator",
+    )
+    .expect_err("duplicate validator should fail");
+    assert!(matches!(
+        err,
+        ParseError::FeatureNotSupportedMessage(message)
+            if message == "conflicting or redundant options"
+    ));
 }
 
 #[test]

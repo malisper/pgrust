@@ -221,6 +221,17 @@ fn execute_statement_with_source(
             expected: "COMMENT ON CONVERSION handled by database/session layer",
             actual: "COMMENT ON CONVERSION".into(),
         })),
+        Statement::CommentOnForeignDataWrapper(_)
+        | Statement::CreateForeignDataWrapper(_)
+        | Statement::AlterForeignDataWrapper(_)
+        | Statement::AlterForeignDataWrapperOwner(_)
+        | Statement::AlterForeignDataWrapperRename(_)
+        | Statement::DropForeignDataWrapper(_) => {
+            Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "FOREIGN DATA WRAPPER handled by database/session layer",
+                actual: "FOREIGN DATA WRAPPER".into(),
+            }))
+        }
         Statement::CommentOnRole(_)
         | Statement::CreateRole(_)
         | Statement::AlterRole(_)
