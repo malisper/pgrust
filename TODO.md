@@ -79,8 +79,10 @@ Targeted reruns and notes:
   - support `RETURNING` with subscripted array/fixed-length assignments used by `point_tbl`
   - [done] support `CREATE TEMP TABLE` column definitions with fixed-length array syntax like `integer ARRAY[4]`
   - [done] support deeper array constructors and nested `ARRAY[...]` expressions in `SELECT` targets and `INSERT` values
+  - [done] support omitted-bound slice reads and updates like `a[:3]`, `a[2:]`, and `a[:]`
+  - [done] support one-dimensional array extension behavior for scalar and slice assignments
   - [done] support `ARRAY(SELECT ...)` forms used later in `arrays.sql`
-  - implement missing array builtins exercised by `arrays.sql` such as `array_append`, `array_prepend`, and `array_cat`
+  - [done] implement missing array builtins exercised by `arrays.sql` such as `array_append`, `array_prepend`, and `array_cat`
   - support row/composite array expressions and comparisons, including `ARRAY(SELECT ...)` and `array_agg(record) || array_agg(record)`
 - async.sql: 0/11
 - bit.sql: 132/132
