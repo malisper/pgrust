@@ -320,6 +320,9 @@ fn expr_contains_sublink(expr: &Expr) -> bool {
         | Expr::CaseTest(_)
         | Expr::Random
         | Expr::CurrentDate
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
         | Expr::LocalTime { .. }

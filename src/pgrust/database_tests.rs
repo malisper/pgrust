@@ -2177,9 +2177,17 @@ fn inheritance_multi_parent_create_and_drop_clean_up_catalog_rows() {
     session
         .execute(&db, "create table c (cc text) inherits (a)")
         .unwrap();
+    clear_backend_notices();
     session
         .execute(&db, "create table d (dd text) inherits (b, c, a)")
         .unwrap();
+    assert_eq!(
+        take_backend_notices().into_iter().collect::<Vec<_>>(),
+        vec![
+            r#"merging multiple inherited definitions of column "aa""#.to_string(),
+            r#"merging multiple inherited definitions of column "aa""#.to_string(),
+        ]
+    );
 
     assert_eq!(
         query_rows(
