@@ -3004,6 +3004,9 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::alter_table_alter_column_type_stmt => Ok(Statement::AlterTableAlterColumnType(
             build_alter_table_alter_column_type(inner)?,
         )),
+        Rule::alter_table_alter_column_default_stmt => Ok(Statement::AlterTableAlterColumnDefault(
+            build_alter_table_alter_column_default(inner)?,
+        )),
         Rule::alter_table_owner_stmt => Ok(Statement::AlterTableOwner(build_alter_relation_owner(
             inner,
         )?)),
@@ -6620,6 +6623,58 @@ fn build_alter_table_alter_column_type(
         column_name: column_name.ok_or(ParseError::UnexpectedEof)?,
         ty: ty.ok_or(ParseError::UnexpectedEof)?,
         using_expr,
+    })
+}
+
+fn build_alter_table_alter_column_default(
+    pair: Pair<'_, Rule>,
+) -> Result<AlterTableAlterColumnDefaultStatement, ParseError> {
+    let mut if_exists = false;
+    let mut only = false;
+    let mut table_name = None;
+    let mut column_name = None;
+    let mut default_expr = None;
+    let mut default_expr_sql = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::alter_table_target => {
+                let (parsed_if_exists, parsed_only, parsed_table_name) =
+                    build_alter_table_target(part)?;
+                if_exists = parsed_if_exists;
+                only = parsed_only;
+                table_name = Some(parsed_table_name);
+            }
+            Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
+            Rule::identifier if column_name.is_none() => column_name = Some(build_identifier(part)),
+            Rule::alter_table_column_default_action => {
+                for inner in part.into_inner() {
+                    match inner.as_rule() {
+                        Rule::alter_table_set_default_action => {
+                            let expr = inner
+                                .into_inner()
+                                .find(|item| item.as_rule() == Rule::expr)
+                                .ok_or(ParseError::UnexpectedEof)?;
+                            default_expr_sql = Some(expr.as_str().trim().to_string());
+                            default_expr = Some(build_expr(expr)?);
+                        }
+                        Rule::alter_table_drop_default_action => {
+                            default_expr = None;
+                            default_expr_sql = None;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(AlterTableAlterColumnDefaultStatement {
+        if_exists,
+        only,
+        table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
+        column_name: column_name.ok_or(ParseError::UnexpectedEof)?,
+        default_expr,
+        default_expr_sql,
     })
 }
 

@@ -4341,6 +4341,14 @@ fn alter_table_if_exists_ignores_missing_table() {
             .unwrap(),
         StatementResult::AffectedRows(0)
     );
+    assert_eq!(
+        db.execute(
+            1,
+            "alter table if exists missing alter column note set default 'hello'",
+        )
+        .unwrap(),
+        StatementResult::AffectedRows(0)
+    );
 }
 
 #[test]
@@ -4359,6 +4367,64 @@ fn alter_table_only_is_accepted_for_supported_operations() {
         query_rows(&db, 1, "select id, summary, body from items"),
         Vec::<Vec<Value>>::new()
     );
+}
+
+#[test]
+fn alter_table_alter_column_set_default_applies_to_future_rows() {
+    let base = temp_dir("alter_table_set_default");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4, note text)")
+        .unwrap();
+    db.execute(1, "alter table items alter column note set default 'hello'")
+        .unwrap();
+    db.execute(1, "insert into items (id) values (1), (2)")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select id, note from items order by id"),
+        vec![
+            vec![Value::Int32(1), Value::Text("hello".into())],
+            vec![Value::Int32(2), Value::Text("hello".into())],
+        ]
+    );
+}
+
+#[test]
+fn alter_table_alter_column_drop_default_removes_future_default() {
+    let base = temp_dir("alter_table_drop_default");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4, note text)")
+        .unwrap();
+    db.execute(1, "alter table items alter column note set default 'hello'")
+        .unwrap();
+    db.execute(1, "alter table items alter column note drop default")
+        .unwrap();
+    db.execute(1, "insert into items (id) values (1)").unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select id, note from items"),
+        vec![vec![Value::Int32(1), Value::Null]]
+    );
+}
+
+#[test]
+fn alter_table_alter_column_set_default_rejects_mismatched_type() {
+    let base = temp_dir("alter_table_set_default_type_error");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4, note text)")
+        .unwrap();
+
+    match db.execute(1, "alter table items alter column id set default 'oops'") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) if message
+            == "column \"id\" is of type integer but default expression is of type text"
+            && sqlstate == "42804" => {}
+        other => panic!("expected default type mismatch error, got {other:?}"),
+    }
 }
 
 #[test]
