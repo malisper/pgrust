@@ -672,6 +672,18 @@ pub(super) fn bind_overloaded_binary_expr(
             }
         }
         "&&" => {
+            if let Some(result) = bind_maybe_geometry_comparison(
+                "&&",
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ) {
+                return result;
+            }
             if left_type.is_array && right_type.is_array {
                 let left_expr = coerce_bound_expr(left_bound, raw_left_type, left_type);
                 let left_expr = if left_is_string_literal {
