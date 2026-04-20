@@ -905,7 +905,10 @@ fn render_raise_value(value: &Value) -> String {
         }
         Value::PgArray(array) => crate::backend::executor::value_io::format_array_value_text(array),
         Value::Record(record) => {
-            crate::backend::executor::jsonb::jsonb_from_value(&Value::Record(record.clone()))
+            crate::backend::executor::jsonb::jsonb_from_value(
+                &Value::Record(record.clone()),
+                &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+            )
                 .map(|value| value.to_serde().to_string())
                 .unwrap_or_default()
         }
