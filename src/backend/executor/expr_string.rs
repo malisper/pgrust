@@ -2,8 +2,7 @@ use super::ExecError;
 use super::expr_bit::render_bit_text;
 use super::expr_casts::{cast_value, parse_bytea_text, render_internal_char_text};
 use super::expr_datetime::render_datetime_value_text;
-use super::expr_format::{to_char_int, to_char_numeric, to_number_numeric};
-use super::expr_ops::parse_numeric_text;
+use super::expr_format::{to_char_float, to_char_int, to_char_numeric, to_number_numeric};
 use super::expr_range::render_range_text;
 use super::node_types::Value;
 use super::value_io::format_array_text;
@@ -35,15 +34,7 @@ pub(super) fn eval_to_char_function(values: &[Value]) -> Result<Value, ExecError
         Value::Int32(v) => to_char_int(*v as i128, fmt)?,
         Value::Int64(v) => to_char_int(*v as i128, fmt)?,
         Value::Numeric(v) => to_char_numeric(v, fmt)?,
-        Value::Float64(v) => {
-            let numeric =
-                parse_numeric_text(&v.to_string()).ok_or_else(|| ExecError::TypeMismatch {
-                    op: "to_char",
-                    left: value.clone(),
-                    right: Value::Text("".into()),
-                })?;
-            to_char_numeric(&numeric, fmt)?
-        }
+        Value::Float64(v) => to_char_float(*v, fmt)?,
         _ => {
             return Err(ExecError::TypeMismatch {
                 op: "to_char",

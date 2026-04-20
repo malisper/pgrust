@@ -7217,6 +7217,44 @@ fn to_char_numeric_fill_mode_respects_integer_zero_masks() {
 }
 
 #[test]
+fn to_char_float_overflow_mask_matches_postgres() {
+    let base = temp_dir("to_char_float_overflow_mask");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select to_char('12345678901'::float8, 'FM9999999999D9999900000000000000000')",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Text("##########.####".into())]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn to_number_roman_roundtrips_across_generate_series() {
+    let base = temp_dir("to_number_roman_roundtrip");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "with rows as (select i, to_char(i, 'RN') as roman from generate_series(1, 3999) as i) select bool_and(to_number(roman, 'RN') = i) from rows",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Bool(true)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn width_bucket_supports_numeric_and_float_special_cases() {
     let base = temp_dir("width_bucket_numeric_float");
     let txns = TransactionManager::new_durable(&base).unwrap();
