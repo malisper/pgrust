@@ -243,6 +243,9 @@ pub enum Statement {
     AlterTableAlterConstraint(AlterTableAlterConstraintStatement),
     AlterTableRenameConstraint(AlterTableRenameConstraintStatement),
     AlterTableAlterColumnType(AlterTableAlterColumnTypeStatement),
+    AlterTableAlterColumnDefault(AlterTableAlterColumnDefaultStatement),
+    AlterTableAlterColumnOptions(AlterTableAlterColumnOptionsStatement),
+    AlterTableAlterColumnStatistics(AlterTableAlterColumnStatisticsStatement),
     AlterTableOwner(AlterRelationOwnerStatement),
     AlterTableRenameColumn(AlterTableRenameColumnStatement),
     AlterTableRename(AlterTableRenameStatement),
@@ -256,8 +259,10 @@ pub enum Statement {
     CommentOnRule(CommentOnRuleStatement),
     CommentOnDomain(CommentOnDomainStatement),
     CommentOnConversion(CommentOnConversionStatement),
+    CommentOnForeignDataWrapper(CommentOnForeignDataWrapperStatement),
     CreateDomain(CreateDomainStatement),
     CreateConversion(CreateConversionStatement),
+    CreateForeignDataWrapper(CreateForeignDataWrapperStatement),
     CommentOnRole(CommentOnRoleStatement),
     GrantObject(GrantObjectStatement),
     RevokeObject(RevokeObjectStatement),
@@ -271,11 +276,15 @@ pub enum Statement {
     DropTrigger(DropTriggerStatement),
     DropIndex(DropIndexStatement),
     DropDomain(DropDomainStatement),
+    DropForeignDataWrapper(DropForeignDataWrapperStatement),
     DropView(DropViewStatement),
     DropRule(DropRuleStatement),
     DropSchema(DropSchemaStatement),
     CreateRole(CreateRoleStatement),
     AlterRole(AlterRoleStatement),
+    AlterForeignDataWrapper(AlterForeignDataWrapperStatement),
+    AlterForeignDataWrapperOwner(AlterForeignDataWrapperOwnerStatement),
+    AlterForeignDataWrapperRename(AlterForeignDataWrapperRenameStatement),
     DropRole(DropRoleStatement),
     SetRole(SetRoleStatement),
     ResetRole(ResetRoleStatement),
@@ -834,6 +843,7 @@ pub struct InsertStatement {
     pub columns: Option<Vec<AssignmentTarget>>,
     pub source: InsertSource,
     pub on_conflict: Option<OnConflictClause>,
+    pub returning_all: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1170,6 +1180,40 @@ pub struct AlterTableAlterColumnTypeStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableAlterColumnDefaultStatement {
+    pub if_exists: bool,
+    pub only: bool,
+    pub table_name: String,
+    pub column_name: String,
+    pub default_expr: Option<SqlExpr>,
+    pub default_expr_sql: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlterColumnOptionsAction {
+    Set(Vec<RelOption>),
+    Reset(Vec<String>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableAlterColumnOptionsStatement {
+    pub if_exists: bool,
+    pub only: bool,
+    pub table_name: String,
+    pub column_name: String,
+    pub action: AlterColumnOptionsAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableAlterColumnStatisticsStatement {
+    pub if_exists: bool,
+    pub only: bool,
+    pub table_name: String,
+    pub column_name: String,
+    pub statistics_target: i16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterRelationOwnerStatement {
     pub if_exists: bool,
     pub only: bool,
@@ -1250,12 +1294,26 @@ pub struct CommentOnConversionStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentOnForeignDataWrapperStatement {
+    pub fdw_name: String,
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateConversionStatement {
     pub conversion_name: String,
     pub for_encoding: String,
     pub to_encoding: String,
     pub function_name: String,
     pub is_default: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateForeignDataWrapperStatement {
+    pub fdw_name: String,
+    pub handler_name: Option<String>,
+    pub validator_name: Option<String>,
+    pub options: Vec<RelOption>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1322,7 +1380,9 @@ pub struct CommentOnRoleStatement {
 pub enum GrantObjectPrivilege {
     CreateOnDatabase,
     AllPrivilegesOnTable,
+    SelectOnTable,
     AllPrivilegesOnSchema,
+    ExecuteOnFunction,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1401,6 +1461,20 @@ pub struct RelOption {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlterGenericOptionAction {
+    Add,
+    Set,
+    Drop,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterGenericOption {
+    pub action: AlterGenericOptionAction,
+    pub name: String,
+    pub value: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DropTableStatement {
     pub if_exists: bool,
     pub table_names: Vec<String>,
@@ -1436,6 +1510,13 @@ pub struct DropDomainStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropForeignDataWrapperStatement {
+    pub if_exists: bool,
+    pub fdw_name: String,
+    pub cascade: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DropTypeStatement {
     pub if_exists: bool,
     pub type_names: Vec<String>,
@@ -1459,6 +1540,27 @@ pub struct DropRuleStatement {
 pub struct DropSchemaStatement {
     pub if_exists: bool,
     pub schema_names: Vec<String>,
+    pub cascade: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterForeignDataWrapperStatement {
+    pub fdw_name: String,
+    pub handler_name: Option<Option<String>>,
+    pub validator_name: Option<Option<String>>,
+    pub options: Vec<AlterGenericOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterForeignDataWrapperOwnerStatement {
+    pub fdw_name: String,
+    pub new_owner: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterForeignDataWrapperRenameStatement {
+    pub fdw_name: String,
+    pub new_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1523,6 +1625,7 @@ pub enum CreateTableElement {
 pub struct ConstraintAttributes {
     pub name: Option<String>,
     pub not_valid: bool,
+    pub no_inherit: bool,
     pub deferrable: Option<bool>,
     pub initially_deferred: Option<bool>,
     pub enforced: Option<bool>,
@@ -1533,6 +1636,7 @@ impl Default for ConstraintAttributes {
         Self {
             name: None,
             not_valid: false,
+            no_inherit: false,
             deferrable: None,
             initially_deferred: None,
             enforced: None,
@@ -1648,6 +1752,7 @@ pub enum SqlTypeKind {
     Int8,
     Name,
     Oid,
+    RegRole,
     RegProcedure,
     Tid,
     Xid,
@@ -2000,6 +2105,7 @@ pub struct UpdateStatement {
     pub only: bool,
     pub assignments: Vec<Assignment>,
     pub where_clause: Option<SqlExpr>,
+    pub returning_all: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2043,6 +2149,8 @@ pub enum SubqueryComparisonOp {
     NotLike,
     ILike,
     NotILike,
+    Similar,
+    NotSimilar,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2181,6 +2289,8 @@ pub enum SqlExpr {
     },
     CurrentDate,
     CurrentUser,
+    SessionUser,
+    CurrentRole,
     CurrentTime {
         precision: Option<i32>,
     },

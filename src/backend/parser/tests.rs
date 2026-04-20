@@ -521,9 +521,10 @@ fn visible_catalog_without_text_input_cast(
                 !(row.castsource == crate::include::catalog::TEXT_TYPE_OID
                     && row.casttarget == target_oid
                     && row.castmethod == 'i')
-            })
+        })
             .collect(),
         base.collation_rows(),
+        base.foreign_data_wrapper_rows(),
         base.database_rows(),
         base.tablespace_rows(),
         base.statistic_rows(),
@@ -573,6 +574,7 @@ fn visible_catalog_without_operator(
         base.proc_rows(),
         base.cast_rows(),
         base.collation_rows(),
+        base.foreign_data_wrapper_rows(),
         base.database_rows(),
         base.tablespace_rows(),
         base.statistic_rows(),
@@ -1040,6 +1042,7 @@ fn parse_alter_table_constraint_statements() {
                 attributes: ConstraintAttributes {
                     name: Some("items_id_check".into()),
                     not_valid: true,
+                    no_inherit: false,
                     deferrable: None,
                     initially_deferred: None,
                     enforced: None,
@@ -1063,6 +1066,7 @@ fn parse_alter_table_constraint_statements() {
                 attributes: ConstraintAttributes {
                     name: Some("items_note_required".into()),
                     not_valid: true,
+                    no_inherit: false,
                     deferrable: None,
                     initially_deferred: None,
                     enforced: None,
@@ -1163,6 +1167,75 @@ fn parse_alter_table_constraint_statements() {
             column_name: "note".into(),
         })
     );
+
+    let stmt = parse_statement("alter table items alter column note set default 'hello'").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableAlterColumnDefault(AlterTableAlterColumnDefaultStatement {
+            if_exists: false,
+            only: false,
+            table_name: "items".into(),
+            column_name: "note".into(),
+            default_expr: Some(SqlExpr::Const(Value::Text("hello".into()))),
+            default_expr_sql: Some("'hello'".into()),
+        })
+    );
+
+    let stmt = parse_statement("alter table items alter note drop default").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableAlterColumnDefault(AlterTableAlterColumnDefaultStatement {
+            if_exists: false,
+            only: false,
+            table_name: "items".into(),
+            column_name: "note".into(),
+            default_expr: None,
+            default_expr_sql: None,
+        })
+    );
+}
+
+#[test]
+fn parse_check_constraint_no_inherit() {
+    let stmt = parse_statement(
+        "alter table items add constraint items_id_check check (id > 0) no inherit",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableAddConstraint(AlterTableAddConstraintStatement {
+            if_exists: false,
+            only: false,
+            table_name: "items".into(),
+            constraint: TableConstraint::Check {
+                attributes: ConstraintAttributes {
+                    name: Some("items_id_check".into()),
+                    no_inherit: true,
+                    ..attrs()
+                },
+                expr_sql: "id > 0".into(),
+            },
+        })
+    );
+
+    let stmt = parse_statement(
+        "create table items (id int4 constraint id_positive check (id > 0) no inherit)",
+    )
+    .unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+    assert_eq!(
+        ct.columns().collect::<Vec<_>>()[0].constraints,
+        vec![ColumnConstraint::Check {
+            attributes: ConstraintAttributes {
+                name: Some("id_positive".into()),
+                no_inherit: true,
+                ..attrs()
+            },
+            expr_sql: "id > 0".into(),
+        }]
+    );
 }
 
 #[test]
@@ -1178,6 +1251,57 @@ fn parse_alter_table_set_statement() {
                 name: "parallel_workers".into(),
                 value: "4".into(),
             }],
+        })
+    );
+
+    let stmt = parse_statement(
+        "alter table attmp alter column i set (n_distinct = 1, n_distinct_inherited = 2)",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableAlterColumnOptions(AlterTableAlterColumnOptionsStatement {
+            if_exists: false,
+            only: false,
+            table_name: "attmp".into(),
+            column_name: "i".into(),
+            action: AlterColumnOptionsAction::Set(vec![
+                RelOption {
+                    name: "n_distinct".into(),
+                    value: "1".into(),
+                },
+                RelOption {
+                    name: "n_distinct_inherited".into(),
+                    value: "2".into(),
+                },
+            ]),
+        })
+    );
+
+    let stmt = parse_statement(
+        "alter table if exists only attmp alter column i reset (n_distinct_inherited)",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableAlterColumnOptions(AlterTableAlterColumnOptionsStatement {
+            if_exists: true,
+            only: true,
+            table_name: "attmp".into(),
+            column_name: "i".into(),
+            action: AlterColumnOptionsAction::Reset(vec!["n_distinct_inherited".into()]),
+        })
+    );
+
+    let stmt = parse_statement("alter table attmp alter column i set statistics 150").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableAlterColumnStatistics(AlterTableAlterColumnStatisticsStatement {
+            if_exists: false,
+            only: false,
+            table_name: "attmp".into(),
+            column_name: "i".into(),
+            statistics_target: 150,
         })
     );
 }
@@ -1462,6 +1586,14 @@ fn parse_set_session_authorization_statement() {
             role_name: "regress_tenant".into(),
         })
     );
+
+    let stmt = parse_statement("set session authorization 'regress_tenant'").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::SetSessionAuthorization(SetSessionAuthorizationStatement {
+            role_name: "regress_tenant".into(),
+        })
+    );
 }
 
 #[test]
@@ -1548,6 +1680,48 @@ fn parse_grant_all_on_schema_statement() {
         Statement::GrantObject(GrantObjectStatement {
             privilege: GrantObjectPrivilege::AllPrivilegesOnSchema,
             object_name: "public".into(),
+            grantee_names: vec!["public".into()],
+            with_grant_option: false,
+        })
+    );
+}
+
+#[test]
+fn parse_grant_select_on_table_statement() {
+    let stmt = parse_statement("grant select on uaccount to public").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::GrantObject(GrantObjectStatement {
+            privilege: GrantObjectPrivilege::SelectOnTable,
+            object_name: "uaccount".into(),
+            grantee_names: vec!["public".into()],
+            with_grant_option: false,
+        })
+    );
+}
+
+#[test]
+fn parse_grant_all_on_table_statement() {
+    let stmt = parse_statement("grant all on uaccount to public").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::GrantObject(GrantObjectStatement {
+            privilege: GrantObjectPrivilege::AllPrivilegesOnTable,
+            object_name: "uaccount".into(),
+            grantee_names: vec!["public".into()],
+            with_grant_option: false,
+        })
+    );
+}
+
+#[test]
+fn parse_grant_execute_on_function_statement() {
+    let stmt = parse_statement("grant execute on function f_leak(text) to public").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::GrantObject(GrantObjectStatement {
+            privilege: GrantObjectPrivilege::ExecuteOnFunction,
+            object_name: "f_leak(text)".into(),
             grantee_names: vec!["public".into()],
             with_grant_option: false,
         })
@@ -3904,7 +4078,10 @@ fn parse_insert_update_delete() {
         matches!(parse_statement("drop index tenant_idx").unwrap(), Statement::DropIndex(DropIndexStatement { if_exists: false, index_names }) if index_names == vec!["tenant_idx"])
     );
     assert!(
-        matches!(parse_statement("drop schema if exists tenant_a, tenant_b").unwrap(), Statement::DropSchema(DropSchemaStatement { if_exists: true, schema_names }) if schema_names == vec!["tenant_a", "tenant_b"])
+        matches!(parse_statement("drop schema if exists tenant_a, tenant_b").unwrap(), Statement::DropSchema(DropSchemaStatement { if_exists: true, schema_names, cascade: false }) if schema_names == vec!["tenant_a", "tenant_b"])
+    );
+    assert!(
+        matches!(parse_statement("drop schema if exists tenant_a cascade").unwrap(), Statement::DropSchema(DropSchemaStatement { if_exists: true, schema_names, cascade: true }) if schema_names == vec!["tenant_a"])
     );
     assert!(
         matches!(parse_statement("create view item_names as select id, name from people").unwrap(), Statement::CreateView(CreateViewStatement { schema_name: None, view_name, query_sql, .. }) if view_name == "item_names" && query_sql == "select id, name from people")
@@ -4078,6 +4255,7 @@ fn parse_create_rule_single_action() {
                         SqlExpr::Column("new.id".into()),
                     ]]),
                     on_conflict: None,
+                    returning_all: false,
                 }),
                 sql: "insert into pets values (new.id, new.id)".into(),
             }],
@@ -4258,6 +4436,7 @@ fn people_insert_with_on_conflict(
             assignments,
             where_clause,
         }),
+        returning_all: false,
     }
 }
 
@@ -4498,6 +4677,13 @@ fn parse_current_user_and_legacy_null_predicates() {
     assert!(matches!(stmt.targets[0].expr, SqlExpr::CurrentUser));
     assert!(matches!(stmt.targets[1].expr, SqlExpr::IsNull(_)));
     assert!(matches!(stmt.targets[2].expr, SqlExpr::IsNotNull(_)));
+}
+
+#[test]
+fn parse_session_user_and_current_role() {
+    let stmt = parse_select("select session_user, current_role from people").unwrap();
+    assert!(matches!(stmt.targets[0].expr, SqlExpr::SessionUser));
+    assert!(matches!(stmt.targets[1].expr, SqlExpr::CurrentRole));
 }
 
 #[test]
@@ -5081,6 +5267,7 @@ fn parse_create_table_named_check_and_not_null_constraints() {
             attributes: ConstraintAttributes {
                 name: Some("id_positive".into()),
                 not_valid: true,
+                no_inherit: false,
                 deferrable: Some(true),
                 initially_deferred: Some(true),
                 enforced: Some(false),
@@ -5095,6 +5282,7 @@ fn parse_create_table_named_check_and_not_null_constraints() {
                 attributes: ConstraintAttributes {
                     name: Some("note_present".into()),
                     not_valid: true,
+                    no_inherit: false,
                     deferrable: None,
                     initially_deferred: None,
                     enforced: None,
@@ -5105,6 +5293,7 @@ fn parse_create_table_named_check_and_not_null_constraints() {
                 attributes: ConstraintAttributes {
                     name: Some("note_nonempty".into()),
                     not_valid: false,
+                    no_inherit: false,
                     deferrable: Some(false),
                     initially_deferred: Some(false),
                     enforced: Some(true),
@@ -5242,10 +5431,9 @@ fn lower_create_table_rejects_unsupported_constraint_attributes() {
     let Statement::CreateTable(ct) = stmt else {
         panic!("expected create table");
     };
-    assert!(matches!(
-        lower_create_table(&ct, &catalog_with_people_primary_key()),
-        Err(ParseError::FeatureNotSupported(feature)) if feature == "FOREIGN KEY NOT VALID"
-    ));
+    let lowered = lower_create_table(&ct, &catalog_with_people_id_name_unique_index()).unwrap();
+    assert_eq!(lowered.foreign_key_actions.len(), 1);
+    assert!(lowered.foreign_key_actions[0].not_valid);
 }
 
 #[test]
@@ -5274,7 +5462,7 @@ fn lower_create_table_resolves_foreign_keys_against_primary_keys() {
     let Statement::CreateTable(ct) = stmt else {
         panic!("expected create table");
     };
-    let lowered = lower_create_table(&ct, &catalog_with_people_primary_key()).unwrap();
+    let lowered = lower_create_table(&ct, &catalog_with_people_id_name_unique_index()).unwrap();
     assert_eq!(lowered.foreign_key_actions.len(), 1);
     let foreign_key = &lowered.foreign_key_actions[0];
     assert_eq!(foreign_key.constraint_name, "pets_owner_id_fkey");
@@ -5285,6 +5473,23 @@ fn lower_create_table_resolves_foreign_keys_against_primary_keys() {
     assert_eq!(foreign_key.on_delete, ForeignKeyAction::NoAction);
     assert_eq!(foreign_key.on_update, ForeignKeyAction::NoAction);
     assert!(!foreign_key.self_referential);
+}
+
+#[test]
+fn lower_create_table_supports_match_full_and_foreign_key_actions() {
+    let stmt = parse_statement(
+        "create table pets (owner_id int4, owner_name text, foreign key (owner_id, owner_name) references people(id, name) match full on delete set null on update cascade)",
+    )
+    .unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+    let lowered = lower_create_table(&ct, &catalog_with_people_id_name_unique_index()).unwrap();
+    assert_eq!(lowered.foreign_key_actions.len(), 1);
+    let foreign_key = &lowered.foreign_key_actions[0];
+    assert_eq!(foreign_key.match_type, ForeignKeyMatchType::Full);
+    assert_eq!(foreign_key.on_delete, ForeignKeyAction::SetNull);
+    assert_eq!(foreign_key.on_update, ForeignKeyAction::Cascade);
 }
 
 #[test]
@@ -5392,6 +5597,98 @@ fn parse_create_drop_and_comment_on_conversion_statements() {
     };
     assert_eq!(comment.conversion_name, "myconv");
     assert_eq!(comment.comment.as_deref(), Some("hello"));
+}
+
+#[test]
+fn parse_foreign_data_wrapper_statements() {
+    let Statement::CreateForeignDataWrapper(create) = parse_statement(
+        "create foreign data wrapper foo handler pg_rust_test_fdw_handler validator postgresql_fdw_validator options (testing '1', another '2')",
+    )
+    .unwrap() else {
+        panic!("expected create foreign data wrapper");
+    };
+    assert_eq!(create.fdw_name, "foo");
+    assert_eq!(create.handler_name.as_deref(), Some("pg_rust_test_fdw_handler"));
+    assert_eq!(create.validator_name.as_deref(), Some("postgresql_fdw_validator"));
+    assert_eq!(
+        create.options,
+        vec![
+            RelOption {
+                name: "testing".into(),
+                value: "1".into(),
+            },
+            RelOption {
+                name: "another".into(),
+                value: "2".into(),
+            },
+        ]
+    );
+
+    let Statement::AlterForeignDataWrapper(alter) = parse_statement(
+        "alter foreign data wrapper foo no validator options (drop a, set b '2', add c '3')",
+    )
+    .unwrap() else {
+        panic!("expected alter foreign data wrapper");
+    };
+    assert_eq!(alter.fdw_name, "foo");
+    assert_eq!(alter.validator_name, Some(None));
+    assert_eq!(alter.options.len(), 3);
+
+    let Statement::AlterForeignDataWrapperOwner(owner) =
+        parse_statement("alter foreign data wrapper foo owner to regress_test_role").unwrap()
+    else {
+        panic!("expected alter foreign data wrapper owner");
+    };
+    assert_eq!(owner.fdw_name, "foo");
+    assert_eq!(owner.new_owner, "regress_test_role");
+
+    let Statement::AlterForeignDataWrapperRename(rename) =
+        parse_statement("alter foreign data wrapper foo rename to bar").unwrap()
+    else {
+        panic!("expected alter foreign data wrapper rename");
+    };
+    assert_eq!(rename.fdw_name, "foo");
+    assert_eq!(rename.new_name, "bar");
+
+    let Statement::DropForeignDataWrapper(drop_stmt) =
+        parse_statement("drop foreign data wrapper if exists foo cascade").unwrap()
+    else {
+        panic!("expected drop foreign data wrapper");
+    };
+    assert!(drop_stmt.if_exists);
+    assert!(drop_stmt.cascade);
+    assert_eq!(drop_stmt.fdw_name, "foo");
+
+    let Statement::CommentOnForeignDataWrapper(comment) =
+        parse_statement("comment on foreign data wrapper foo is 'hello'").unwrap()
+    else {
+        panic!("expected comment on foreign data wrapper");
+    };
+    assert_eq!(comment.fdw_name, "foo");
+    assert_eq!(comment.comment.as_deref(), Some("hello"));
+}
+
+#[test]
+fn parse_foreign_data_wrapper_rejects_duplicate_clauses() {
+    let err = parse_statement(
+        "create foreign data wrapper foo handler pg_rust_test_fdw_handler handler invalid_fdw_handler",
+    )
+    .expect_err("duplicate handler should fail");
+    assert!(matches!(
+        err,
+        ParseError::FeatureNotSupportedMessage(message)
+            if message == "conflicting or redundant options"
+    ));
+
+    let err = parse_statement(
+        "alter foreign data wrapper foo validator postgresql_fdw_validator no validator",
+    )
+    .expect_err("duplicate validator should fail");
+    assert!(matches!(
+        err,
+        ParseError::FeatureNotSupportedMessage(message)
+            if message == "conflicting or redundant options"
+    ));
 }
 
 #[test]
@@ -7362,6 +7659,27 @@ fn parse_insert_alias_and_begin_isolation_level() {
 }
 
 #[test]
+fn parse_insert_and_update_returning_star() {
+    assert!(matches!(
+        parse_statement("insert into people (id) values (1) returning *").unwrap(),
+        Statement::Insert(InsertStatement {
+            table_name,
+            returning_all,
+            ..
+        }) if table_name == "people" && returning_all
+    ));
+
+    assert!(matches!(
+        parse_statement("update people set name = 'alice' returning *").unwrap(),
+        Statement::Update(UpdateStatement {
+            table_name,
+            returning_all,
+            ..
+        }) if table_name == "people" && returning_all
+    ));
+}
+
+#[test]
 fn parse_create_table_column_defaults() {
     let stmt = parse_statement(
         "create table bit_defaults (b1 bit(4) default '1001', b2 bit varying(5) default B'0101')",
@@ -7672,6 +7990,30 @@ fn parse_quantified_like_syntax() {
         &stmt.targets[1].expr,
         SqlExpr::QuantifiedArray {
             op: SubqueryComparisonOp::NotILike,
+            is_all: true,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn parse_quantified_similar_syntax() {
+    let stmt = parse_select(
+        "select 'foo' similar to any (array['f..', 'b..']), 'foo' not similar to all (array['bar', 'baz'])",
+    )
+    .unwrap();
+    assert!(matches!(
+        &stmt.targets[0].expr,
+        SqlExpr::QuantifiedArray {
+            op: SubqueryComparisonOp::Similar,
+            is_all: false,
+            ..
+        }
+    ));
+    assert!(matches!(
+        &stmt.targets[1].expr,
+        SqlExpr::QuantifiedArray {
+            op: SubqueryComparisonOp::NotSimilar,
             is_all: true,
             ..
         }

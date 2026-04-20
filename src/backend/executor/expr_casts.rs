@@ -236,9 +236,7 @@ fn numeric_input_would_overflow(text: &str) -> bool {
         return false;
     }
 
-    let unsigned = trimmed
-        .strip_prefix(['+', '-'])
-        .unwrap_or(trimmed);
+    let unsigned = trimmed.strip_prefix(['+', '-']).unwrap_or(trimmed);
 
     if let Some(rest) = unsigned
         .strip_prefix("0x")
@@ -248,27 +246,32 @@ fn numeric_input_would_overflow(text: &str) -> bool {
         let Some(digits) = normalize_numeric_input_digits(rest, |ch| ch.is_ascii_hexdigit()) else {
             return false;
         };
-        return digits.trim_start_matches('0').len() as i32 > NUMERIC_MAX_INPUT_DIGITS_BEFORE_DECIMAL;
+        return digits.trim_start_matches('0').len() as i32
+            > NUMERIC_MAX_INPUT_DIGITS_BEFORE_DECIMAL;
     }
     if let Some(rest) = unsigned
         .strip_prefix("0o")
         .or_else(|| unsigned.strip_prefix("0O"))
     {
         let rest = rest.strip_prefix('_').unwrap_or(rest);
-        let Some(digits) = normalize_numeric_input_digits(rest, |ch| matches!(ch, '0'..='7')) else {
+        let Some(digits) = normalize_numeric_input_digits(rest, |ch| matches!(ch, '0'..='7'))
+        else {
             return false;
         };
-        return digits.trim_start_matches('0').len() as i32 > NUMERIC_MAX_INPUT_DIGITS_BEFORE_DECIMAL;
+        return digits.trim_start_matches('0').len() as i32
+            > NUMERIC_MAX_INPUT_DIGITS_BEFORE_DECIMAL;
     }
     if let Some(rest) = unsigned
         .strip_prefix("0b")
         .or_else(|| unsigned.strip_prefix("0B"))
     {
         let rest = rest.strip_prefix('_').unwrap_or(rest);
-        let Some(digits) = normalize_numeric_input_digits(rest, |ch| matches!(ch, '0' | '1')) else {
+        let Some(digits) = normalize_numeric_input_digits(rest, |ch| matches!(ch, '0' | '1'))
+        else {
             return false;
         };
-        return digits.trim_start_matches('0').len() as i32 > NUMERIC_MAX_INPUT_DIGITS_BEFORE_DECIMAL;
+        return digits.trim_start_matches('0').len() as i32
+            > NUMERIC_MAX_INPUT_DIGITS_BEFORE_DECIMAL;
     }
 
     let (mantissa, exponent) = match trimmed.find(['e', 'E']) {
@@ -310,7 +313,9 @@ fn numeric_input_would_overflow(text: &str) -> bool {
     digits_before_decimal > NUMERIC_MAX_INPUT_DIGITS_BEFORE_DECIMAL
 }
 
-fn parse_numeric_input_value(text: &str) -> Result<crate::include::nodes::datum::NumericValue, ExecError> {
+fn parse_numeric_input_value(
+    text: &str,
+) -> Result<crate::include::nodes::datum::NumericValue, ExecError> {
     if numeric_input_would_overflow(text) {
         return Err(ExecError::NumericFieldOverflow);
     }
@@ -1343,7 +1348,10 @@ pub(crate) fn cast_value_with_config(
                 ..
             } => Ok(Value::Int64(v as i64)),
             SqlType {
-                kind: SqlTypeKind::Oid | SqlTypeKind::RegProcedure | SqlTypeKind::Xid,
+                kind: SqlTypeKind::Oid
+                    | SqlTypeKind::RegRole
+                    | SqlTypeKind::RegProcedure
+                    | SqlTypeKind::Xid,
                 ..
             } => {
                 if v < 0 {
@@ -1454,7 +1462,10 @@ pub(crate) fn cast_value_with_config(
                 ..
             } => Ok(Value::Int64(v as i64)),
             SqlType {
-                kind: SqlTypeKind::Oid | SqlTypeKind::RegProcedure | SqlTypeKind::Xid,
+                kind: SqlTypeKind::Oid
+                    | SqlTypeKind::RegRole
+                    | SqlTypeKind::RegProcedure
+                    | SqlTypeKind::Xid,
                 ..
             } => {
                 if v < 0 {
@@ -1597,6 +1608,7 @@ pub(crate) fn cast_value_with_config(
                     | SqlTypeKind::Int4
                     | SqlTypeKind::Int8
                     | SqlTypeKind::Oid
+                    | SqlTypeKind::RegRole
                     | SqlTypeKind::RegProcedure
                     | SqlTypeKind::Xid
                     | SqlTypeKind::Bytea
@@ -1943,7 +1955,10 @@ pub(crate) fn cast_value_with_config(
                 ..
             } => Ok(Value::Int64(v)),
             SqlType {
-                kind: SqlTypeKind::Oid | SqlTypeKind::RegProcedure | SqlTypeKind::Xid,
+                kind: SqlTypeKind::Oid
+                    | SqlTypeKind::RegRole
+                    | SqlTypeKind::RegProcedure
+                    | SqlTypeKind::Xid,
                 ..
             } => {
                 if !(0..=i32::MAX as i64).contains(&v) {
@@ -2117,7 +2132,10 @@ pub(crate) fn cast_value_with_config(
                 ..
             } => cast_float_to_int(v, ty),
             SqlType {
-                kind: SqlTypeKind::Oid | SqlTypeKind::RegProcedure | SqlTypeKind::Xid,
+                kind: SqlTypeKind::Oid
+                    | SqlTypeKind::RegRole
+                    | SqlTypeKind::RegProcedure
+                    | SqlTypeKind::Xid,
                 ..
             } => cast_float_to_int(v, ty),
             SqlType {
@@ -2293,7 +2311,10 @@ pub(super) fn cast_text_value_with_config(
             left: Value::Text(CompactString::new(text)),
             right: Value::Null,
         }),
-        SqlTypeKind::RegProcedure | SqlTypeKind::RegConfig | SqlTypeKind::RegDictionary => {
+        SqlTypeKind::RegRole
+        | SqlTypeKind::RegProcedure
+        | SqlTypeKind::RegConfig
+        | SqlTypeKind::RegDictionary => {
             cast_text_to_oid(text)
         }
         SqlTypeKind::Tid => Ok(Value::Text(CompactString::from_owned(
@@ -2411,22 +2432,40 @@ pub(super) fn cast_numeric_value(
             let v = parse_pg_float(&rendered, SqlTypeKind::Float8)?;
             Ok(Value::Float64(v))
         }
-        SqlTypeKind::Int2 => value
-            .round_to_scale(0)
-            .and_then(|rounded| rounded.render().parse::<i16>().ok())
-            .map(Value::Int16)
-            .ok_or(ExecError::Int2OutOfRange),
-        SqlTypeKind::Int4 => value
-            .round_to_scale(0)
-            .and_then(|rounded| rounded.render().parse::<i32>().ok())
-            .map(Value::Int32)
-            .ok_or(ExecError::Int4OutOfRange),
-        SqlTypeKind::Int8 => value
-            .round_to_scale(0)
-            .and_then(|rounded| rounded.render().parse::<i64>().ok())
-            .map(Value::Int64)
-            .ok_or(ExecError::Int8OutOfRange),
-        SqlTypeKind::Oid | SqlTypeKind::RegProcedure | SqlTypeKind::Xid => value
+        SqlTypeKind::Int2 => match value {
+            NumericValue::NaN => Err(ExecError::NumericNaNToInt { ty: "smallint" }),
+            NumericValue::PosInf | NumericValue::NegInf => {
+                Err(ExecError::NumericInfinityToInt { ty: "smallint" })
+            }
+            NumericValue::Finite { .. } => value
+                .round_to_scale(0)
+                .and_then(|rounded| rounded.render().parse::<i16>().ok())
+                .map(Value::Int16)
+                .ok_or(ExecError::Int2OutOfRange),
+        },
+        SqlTypeKind::Int4 => match value {
+            NumericValue::NaN => Err(ExecError::NumericNaNToInt { ty: "integer" }),
+            NumericValue::PosInf | NumericValue::NegInf => {
+                Err(ExecError::NumericInfinityToInt { ty: "integer" })
+            }
+            NumericValue::Finite { .. } => value
+                .round_to_scale(0)
+                .and_then(|rounded| rounded.render().parse::<i32>().ok())
+                .map(Value::Int32)
+                .ok_or(ExecError::Int4OutOfRange),
+        },
+        SqlTypeKind::Int8 => match value {
+            NumericValue::NaN => Err(ExecError::NumericNaNToInt { ty: "bigint" }),
+            NumericValue::PosInf | NumericValue::NegInf => {
+                Err(ExecError::NumericInfinityToInt { ty: "bigint" })
+            }
+            NumericValue::Finite { .. } => value
+                .round_to_scale(0)
+                .and_then(|rounded| rounded.render().parse::<i64>().ok())
+                .map(Value::Int64)
+                .ok_or(ExecError::Int8OutOfRange),
+        },
+        SqlTypeKind::Oid | SqlTypeKind::RegRole | SqlTypeKind::RegProcedure | SqlTypeKind::Xid => value
             .round_to_scale(0)
             .and_then(|rounded| rounded.render().parse::<u32>().ok())
             .and_then(|rounded| Some(Value::Int64(rounded as i64)))

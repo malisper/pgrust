@@ -104,8 +104,11 @@ fn numeric_const(text: &str) -> NumericValue {
 }
 
 fn finite_integer(value: &NumericValue) -> Option<i64> {
-    match value {
-        NumericValue::Finite { coeff, scale, .. } if *scale == 0 => coeff.to_i64(),
+    if matches!(value, NumericValue::Finite { coeff, .. } if coeff.is_zero()) {
+        return Some(0);
+    }
+    match value.clone().normalize() {
+        NumericValue::Finite { coeff, scale: 0, .. } => coeff.to_i64(),
         _ => None,
     }
 }
@@ -137,6 +140,9 @@ fn numeric_is_zero(value: &NumericValue) -> bool {
 }
 
 fn numeric_is_integral(value: &NumericValue) -> bool {
+    if matches!(value, NumericValue::Finite { coeff, .. } if coeff.is_zero()) {
+        return true;
+    }
     matches!(
         value.clone().normalize(),
         NumericValue::Finite { scale: 0, .. }

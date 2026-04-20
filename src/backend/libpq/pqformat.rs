@@ -120,6 +120,8 @@ pub(crate) fn format_exec_error(e: &ExecError) -> String {
         }
         ExecError::FloatOverflow => "value out of range: overflow".to_string(),
         ExecError::FloatUnderflow => "value out of range: underflow".to_string(),
+        ExecError::NumericNaNToInt { ty } => format!("cannot convert NaN to {ty}"),
+        ExecError::NumericInfinityToInt { ty } => format!("cannot convert infinity to {ty}"),
         ExecError::InvalidStorageValue { details, .. } => details.clone(),
         ExecError::Int2OutOfRange => "smallint out of range".to_string(),
         ExecError::Int4OutOfRange => "integer out of range".to_string(),
@@ -405,6 +407,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
             SqlTypeKind::Void => unreachable!("void arrays are unsupported"),
             SqlTypeKind::FdwHandler => unreachable!("fdw_handler arrays are unsupported"),
             SqlTypeKind::Oid => 1028,
+            SqlTypeKind::RegRole => unreachable!("regrole arrays are unsupported"),
             SqlTypeKind::RegProcedure => {
                 crate::include::catalog::REGPROCEDURE_ARRAY_TYPE_OID as i32
             }
@@ -472,6 +475,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
         SqlTypeKind::Int8 => (20, 8, -1),
         SqlTypeKind::Void => (crate::include::catalog::VOID_TYPE_OID as i32, 4, -1),
         SqlTypeKind::Oid => (26, 4, -1),
+        SqlTypeKind::RegRole => (crate::include::catalog::REGROLE_TYPE_OID as i32, 4, -1),
         SqlTypeKind::RegProcedure => (crate::include::catalog::REGPROCEDURE_TYPE_OID as i32, 4, -1),
         SqlTypeKind::Tid => (27, 6, -1),
         SqlTypeKind::Xid => (28, 4, -1),

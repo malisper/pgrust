@@ -1,14 +1,15 @@
 mod rules;
+mod views;
 
 pub(crate) use rules::{format_stored_rule_definition, split_stored_rule_action_sql};
 
-use crate::backend::parser::analyze::analyze_view_rule_sql;
 use crate::backend::parser::{CatalogLookup, ParseError};
 use crate::include::nodes::parsenodes::{Query, RangeTblEntry, RangeTblEntryKind};
 use crate::include::nodes::primnodes::{
     AggAccum, Expr, ExprArraySubscript, ProjectSetTarget, SetReturningCall, SortGroupClause,
     SubLink, TargetEntry, WindowClause, WindowFuncExpr, WindowFuncKind, WindowSpec,
 };
+use views::rewrite_view_relation_query;
 
 pub(crate) fn pg_rewrite_query(
     query: Query,
@@ -106,7 +107,7 @@ fn rewrite_rte(
             relkind,
             toast,
         } if relkind == 'v' => {
-            let analyzed = analyze_view_rule_sql(
+            let analyzed = rewrite_view_relation_query(
                 relation_oid,
                 &rte.desc,
                 rte.alias.as_deref(),
@@ -440,6 +441,9 @@ fn rewrite_semantic_expr(
         | Expr::Const(_)
         | Expr::Random
         | Expr::CurrentDate
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
         | Expr::LocalTime { .. }

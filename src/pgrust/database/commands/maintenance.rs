@@ -3,12 +3,20 @@ use crate::backend::access::heap::heapam::heap_update_with_waiter;
 use crate::backend::commands::tablecmds::{collect_matching_rows_heap, maintain_indexes_for_row};
 use crate::backend::executor::value_io::{coerce_assignment_value, tuple_from_values};
 use crate::backend::executor::{ExecutorContext, RelationDesc};
+use crate::backend::utils::misc::notices::push_notice;
 use crate::include::catalog::relkind_is_analyzable;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::MaintenanceTarget;
 use crate::pgrust::database::ddl::{
     lookup_analyzable_relation_for_ddl, lookup_heap_relation_for_alter_table,
 };
+use std::collections::BTreeSet;
+
+struct AddColumnTarget {
+    relation: crate::backend::parser::BoundRelation,
+    column: crate::backend::executor::ColumnDesc,
+    new_desc: RelationDesc,
+}
 
 fn rewrite_heap_rows_for_added_serial_column(
     db: &Database,
@@ -124,6 +132,79 @@ fn collect_catalog_analyze_targets(
             only: false,
         });
     }
+    Ok(targets)
+}
+
+fn relation_name_for_add_column_notice(catalog: &dyn CatalogLookup, relation_oid: u32) -> String {
+    catalog
+        .class_row_by_oid(relation_oid)
+        .map(|row| row.relname)
+        .unwrap_or_else(|| relation_oid.to_string())
+}
+
+fn collect_add_column_targets(
+    catalog: &dyn CatalogLookup,
+    relation: &crate::backend::parser::BoundRelation,
+    base_column: &crate::backend::executor::ColumnDesc,
+    only: bool,
+) -> Result<Vec<AddColumnTarget>, ExecError> {
+    let target_relation_oids = if only {
+        vec![relation.relation_oid]
+    } else {
+        catalog.find_all_inheritors(relation.relation_oid)
+    };
+    let target_relation_oids = target_relation_oids.into_iter().collect::<BTreeSet<_>>();
+    let mut targets = Vec::with_capacity(target_relation_oids.len());
+
+    for relation_oid in &target_relation_oids {
+        let target_relation = if *relation_oid == relation.relation_oid {
+            relation.clone()
+        } else {
+            catalog.lookup_relation_by_oid(*relation_oid).ok_or_else(|| {
+                ExecError::Parse(ParseError::UnknownTable(relation_oid.to_string()))
+            })?
+        };
+        if target_relation
+            .desc
+            .columns
+            .iter()
+            .any(|existing| !existing.dropped && existing.name.eq_ignore_ascii_case(&base_column.name))
+        {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "new column name",
+                actual: format!("column already exists: {}", base_column.name),
+            }));
+        }
+        let direct_parent_count = if *relation_oid == relation.relation_oid {
+            0
+        } else {
+            catalog
+                .inheritance_parents(*relation_oid)
+                .into_iter()
+                .filter(|parent| target_relation_oids.contains(&parent.inhparent))
+                .count()
+        };
+        let mut column = base_column.clone();
+        if direct_parent_count > 0 {
+            column.attinhcount = direct_parent_count as i16;
+            column.attislocal = false;
+            if direct_parent_count > 1 {
+                push_notice(format!(
+                    "merging definition of column \"{}\" for child \"{}\"",
+                    column.name,
+                    relation_name_for_add_column_notice(catalog, target_relation.relation_oid)
+                ));
+            }
+        }
+        let mut new_desc = target_relation.desc.clone();
+        new_desc.columns.push(column.clone());
+        targets.push(AddColumnTarget {
+            relation: target_relation,
+            column,
+            new_desc,
+        });
+    }
+
     Ok(targets)
 }
 
@@ -319,6 +400,7 @@ impl Database {
             session_stats: self.session_stats_state(client_id),
             snapshot,
             client_id,
+            session_user_oid: self.auth_state(client_id).session_user_oid(),
             current_user_oid: self.auth_state(client_id).current_user_oid(),
             next_command_id: cid,
             timed: false,
@@ -428,18 +510,14 @@ impl Database {
         else {
             return Ok(StatementResult::AffectedRows(0));
         };
-        if relation.relpersistence == 't' {
-            return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "permanent table for ALTER TABLE ADD COLUMN",
-                actual: "temporary table".into(),
-            }));
-        }
         ensure_relation_owner(self, client_id, &relation, &alter_stmt.table_name)?;
-        reject_inheritance_tree_ddl(
-            &catalog,
-            relation.relation_oid,
-            "ALTER TABLE ADD COLUMN on inheritance tree members is not supported yet",
-        )?;
+        if relation.relpersistence != 't' {
+            reject_inheritance_tree_ddl(
+                &catalog,
+                relation.relation_oid,
+                "ALTER TABLE ADD COLUMN on inheritance tree members is not supported yet",
+            )?;
+        }
         reject_relation_with_dependent_views(
             self,
             client_id,
@@ -455,7 +533,11 @@ impl Database {
                 client_id,
                 &alter_stmt.table_name,
                 relation.namespace_oid,
-                TablePersistence::Permanent,
+                if relation.relpersistence == 't' {
+                    TablePersistence::Temporary
+                } else {
+                    TablePersistence::Permanent
+                },
                 serial_column,
                 xid,
                 cid,
@@ -470,9 +552,16 @@ impl Database {
             ));
             column.default_sequence_oid = Some(created.sequence_oid);
         }
-        let mut new_desc = relation.desc.clone();
-        new_desc.columns.push(column.clone());
-        let indexes = catalog.index_relations_for_heap(relation.relation_oid);
+        let targets = collect_add_column_targets(&catalog, &relation, &column, alter_stmt.only)?;
+        let indexes = targets
+            .iter()
+            .map(|target| {
+                (
+                    target.relation.relation_oid,
+                    catalog.index_relations_for_heap(target.relation.relation_oid),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
         if let Some(sequence_oid) = column.default_sequence_oid {
             let snapshot = self.txns.read().snapshot_for_command(xid, cid)?;
             let mut ctx = ExecutorContext {
@@ -489,6 +578,7 @@ impl Database {
                 session_stats: self.session_stats_state(client_id),
                 snapshot,
                 client_id,
+                session_user_oid: self.auth_state(client_id).session_user_oid(),
                 current_user_oid: self.auth_state(client_id).current_user_oid(),
                 next_command_id: cid,
                 timed: false,
@@ -504,16 +594,20 @@ impl Database {
                 recursive_worktables: std::collections::HashMap::new(),
                 deferred_foreign_keys: None,
             };
-            rewrite_heap_rows_for_added_serial_column(
-                self,
-                &relation,
-                &new_desc,
-                &indexes,
-                sequence_oid,
-                &mut ctx,
-                xid,
-                cid,
-            )?;
+            for target in &targets {
+                rewrite_heap_rows_for_added_serial_column(
+                    self,
+                    &target.relation,
+                    &target.new_desc,
+                    indexes
+                        .get(&target.relation.relation_oid)
+                        .expect("indexes for add-column target"),
+                    sequence_oid,
+                    &mut ctx,
+                    xid,
+                    cid,
+                )?;
+            }
         }
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
@@ -524,12 +618,21 @@ impl Database {
             waiter: None,
             interrupts,
         };
-        let effect = self
-            .catalog
-            .write()
-            .alter_table_add_column_mvcc(relation.relation_oid, column, &ctx)
-            .map_err(map_catalog_error)?;
-        catalog_effects.push(effect);
+        for target in targets {
+            let effect = self
+                .catalog
+                .write()
+                .alter_table_add_column_mvcc(target.relation.relation_oid, target.column, &ctx)
+                .map_err(map_catalog_error)?;
+            catalog_effects.push(effect);
+            if target.relation.relpersistence == 't' {
+                self.replace_temp_entry_desc(
+                    client_id,
+                    target.relation.relation_oid,
+                    target.new_desc,
+                )?;
+            }
+        }
         Ok(StatementResult::AffectedRows(0))
     }
 }

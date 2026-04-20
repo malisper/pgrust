@@ -356,6 +356,8 @@ pub(super) fn compare_subquery_values(
         SubqueryComparisonOp::NotLike => eval_like(&left, &right, None, false, true),
         SubqueryComparisonOp::ILike => eval_like(&left, &right, None, true, false),
         SubqueryComparisonOp::NotILike => eval_like(&left, &right, None, true, true),
+        SubqueryComparisonOp::Similar => eval_similar(&left, &right, None, false),
+        SubqueryComparisonOp::NotSimilar => eval_similar(&left, &right, None, true),
     }
 }
 

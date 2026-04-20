@@ -298,6 +298,7 @@ impl Session {
             session_stats: Arc::clone(&self.stats_state),
             snapshot,
             client_id: self.client_id,
+            session_user_oid: self.session_user_oid(),
             current_user_oid: self.current_user_oid(),
             next_command_id: cid,
             timed: false,
@@ -714,6 +715,60 @@ impl Session {
                 } else {
                     let search_path = self.configured_search_path();
                     db.execute_alter_table_alter_column_type_stmt_with_search_path(
+                        self.client_id,
+                        alter_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
+            Statement::AlterTableAlterColumnDefault(ref alter_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_alter_table_alter_column_default_stmt_with_search_path(
+                        self.client_id,
+                        alter_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
+            Statement::AlterTableAlterColumnOptions(ref alter_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_alter_table_alter_column_options_stmt_with_search_path(
+                        self.client_id,
+                        alter_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
+            Statement::AlterTableAlterColumnStatistics(ref alter_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_alter_table_alter_column_statistics_stmt_with_search_path(
                         self.client_id,
                         alter_stmt,
                         search_path.as_deref(),
@@ -1353,6 +1408,9 @@ impl Session {
                     search_path.as_deref(),
                 )
             }
+            Statement::CommentOnForeignDataWrapper(ref comment_stmt) => {
+                db.execute_comment_on_foreign_data_wrapper_stmt(client_id, comment_stmt)
+            }
             Statement::CopyFrom(ref copy_stmt) => self.execute_copy_from_file(db, copy_stmt),
             Statement::CreateDomain(ref create_stmt) => {
                 let search_path = self.configured_search_path();
@@ -1369,6 +1427,31 @@ impl Session {
                     create_stmt,
                     search_path.as_deref(),
                 )
+            }
+            Statement::CreateForeignDataWrapper(ref create_stmt) => {
+                let search_path = self.configured_search_path();
+                db.execute_create_foreign_data_wrapper_stmt_with_search_path(
+                    client_id,
+                    create_stmt,
+                    search_path.as_deref(),
+                )
+            }
+            Statement::AlterForeignDataWrapper(ref alter_stmt) => {
+                let search_path = self.configured_search_path();
+                db.execute_alter_foreign_data_wrapper_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    search_path.as_deref(),
+                )
+            }
+            Statement::AlterForeignDataWrapperOwner(ref alter_stmt) => {
+                db.execute_alter_foreign_data_wrapper_owner_stmt(client_id, alter_stmt)
+            }
+            Statement::AlterForeignDataWrapperRename(ref alter_stmt) => {
+                db.execute_alter_foreign_data_wrapper_rename_stmt(client_id, alter_stmt)
+            }
+            Statement::DropForeignDataWrapper(ref drop_stmt) => {
+                db.execute_drop_foreign_data_wrapper_stmt(client_id, drop_stmt)
             }
             Statement::CreateTrigger(ref create_stmt) => {
                 let search_path = self.configured_search_path();
@@ -1615,6 +1698,69 @@ impl Session {
                 let search_path = self.configured_search_path();
                 let txn = self.active_txn.as_mut().unwrap();
                 db.execute_alter_table_alter_column_type_stmt_in_transaction_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
+            Statement::AlterTableAlterColumnDefault(ref alter_stmt) => {
+                let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                let relation = catalog
+                    .lookup_any_relation(&alter_stmt.table_name)
+                    .ok_or_else(|| {
+                        ExecError::Parse(ParseError::TableDoesNotExist(
+                            alter_stmt.table_name.clone(),
+                        ))
+                    })?;
+                self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_alter_table_alter_column_default_stmt_in_transaction_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
+            Statement::AlterTableAlterColumnOptions(ref alter_stmt) => {
+                let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                let relation = catalog
+                    .lookup_any_relation(&alter_stmt.table_name)
+                    .ok_or_else(|| {
+                        ExecError::Parse(ParseError::TableDoesNotExist(
+                            alter_stmt.table_name.clone(),
+                        ))
+                    })?;
+                self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_alter_table_alter_column_options_stmt_in_transaction_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
+            Statement::AlterTableAlterColumnStatistics(ref alter_stmt) => {
+                let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                let relation = catalog
+                    .lookup_any_relation(&alter_stmt.table_name)
+                    .ok_or_else(|| {
+                        ExecError::Parse(ParseError::TableDoesNotExist(
+                            alter_stmt.table_name.clone(),
+                        ))
+                    })?;
+                self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_alter_table_alter_column_statistics_stmt_in_transaction_with_search_path(
                     client_id,
                     alter_stmt,
                     xid,
