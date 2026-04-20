@@ -5033,6 +5033,62 @@ fn alter_table_alter_column_type_rejects_indexed_target_column() {
 }
 
 #[test]
+fn alter_table_alter_column_type_updates_temp_inherited_children() {
+    let base = temp_dir("alter_table_alter_column_type_temp_inherits");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create temp table parent1 (f1 int4, f2 int4)")
+        .unwrap();
+    session
+        .execute(&db, "create temp table childtab (f4 int4) inherits (parent1)")
+        .unwrap();
+    session
+        .execute(&db, "insert into childtab values (1, 7, 9)")
+        .unwrap();
+    session
+        .execute(&db, "alter table parent1 alter column f2 type int8")
+        .unwrap();
+
+    match session
+        .execute(&db, "select f2 from childtab")
+        .expect("select rewritten child rows")
+    {
+        StatementResult::Query { columns, rows, .. } => {
+            assert_eq!(columns[0].sql_type, SqlType::new(SqlTypeKind::Int8));
+            assert_eq!(rows, vec![vec![Value::Int64(7)]]);
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+}
+
+#[test]
+fn alter_table_alter_column_type_rejects_temp_inherited_conflicts() {
+    let base = temp_dir("alter_table_alter_column_type_temp_conflict");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create temp table parent1 (f1 int4, f2 int4)")
+        .unwrap();
+    session
+        .execute(&db, "create temp table parent2 (f1 int4, f3 int8)")
+        .unwrap();
+    session
+        .execute(&db, "create temp table childtab (f4 int4) inherits (parent1, parent2)")
+        .unwrap();
+
+    match session.execute(&db, "alter table parent1 alter column f1 type int8") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) if message == "cannot alter inherited column \"f1\" of relation \"childtab\""
+            && sqlstate == "0A000" => {}
+        other => panic!("expected inherited-column conflict, got {other:?}"),
+    }
+}
+
+#[test]
 fn create_index_builds_ready_valid_btree_and_explain_uses_it() {
     let base = temp_dir("btree_index_scan_explain");
     let db = Database::open(&base, 16).unwrap();
