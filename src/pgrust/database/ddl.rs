@@ -5,9 +5,10 @@ use crate::backend::catalog::CatalogError;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::{ColumnDesc, ExecError, Expr, RelationDesc};
 use crate::backend::parser::{
-    BoundRelation, CatalogLookup, ColumnDef, OwnedSequenceSpec, ParseError, RawTypeName, SqlExpr,
-    SqlType, SqlTypeKind, bind_scalar_expr_in_scope, derive_literal_default_value,
-    raw_type_name_hint, resolve_raw_type_name,
+    BoundRelation, CatalogLookup, CheckConstraintAction, ColumnDef, NotNullConstraintAction,
+    OwnedSequenceSpec, ParseError, RawTypeName, SqlExpr, SqlType, SqlTypeKind,
+    bind_scalar_expr_in_scope, derive_literal_default_value,
+    normalize_alter_table_add_column_constraints, raw_type_name_hint, resolve_raw_type_name,
 };
 use crate::backend::utils::cache::syscache::{
     ensure_class_rows, ensure_depend_rows, ensure_namespace_rows, ensure_rewrite_rows,
@@ -417,20 +418,16 @@ pub(super) fn reject_inheritance_tree_ddl(
 }
 
 pub(super) fn validate_alter_table_add_column(
+    table_name: &str,
     relation_desc: &RelationDesc,
     column: &ColumnDef,
+    existing_constraints: &[crate::include::catalog::PgConstraintRow],
     catalog: &dyn CatalogLookup,
 ) -> Result<AlterTableAddColumnPlan, ExecError> {
     let serial_kind = match column.ty {
         RawTypeName::Serial(kind) => Some(kind),
         _ => None,
     };
-    if !column.nullable() && serial_kind.is_none() {
-        return Err(ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "ADD COLUMN without NOT NULL",
-            actual: "NOT NULL".into(),
-        }));
-    }
     if column.primary_key() {
         return Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "ADD COLUMN without PRIMARY KEY",
@@ -485,6 +482,9 @@ pub(super) fn validate_alter_table_add_column(
             desc.missing_default_value = Some(derive_literal_default_value(sql, desc.sql_type)?);
         }
     }
+    let constraint_actions =
+        normalize_alter_table_add_column_constraints(table_name, column, existing_constraints)
+            .map_err(ExecError::Parse)?;
     Ok(AlterTableAddColumnPlan {
         column: desc,
         owned_sequence: serial_kind.map(|serial_kind| OwnedSequenceSpec {
@@ -493,6 +493,8 @@ pub(super) fn validate_alter_table_add_column(
             serial_kind,
             sql_type,
         }),
+        not_null_action: constraint_actions.not_null,
+        check_actions: constraint_actions.checks,
     })
 }
 
@@ -547,6 +549,8 @@ pub(super) fn validate_alter_table_rename_column(
 pub(super) struct AlterTableAddColumnPlan {
     pub column: ColumnDesc,
     pub owned_sequence: Option<OwnedSequenceSpec>,
+    pub not_null_action: Option<NotNullConstraintAction>,
+    pub check_actions: Vec<CheckConstraintAction>,
 }
 
 #[derive(Debug, Clone)]

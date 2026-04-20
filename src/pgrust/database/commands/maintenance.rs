@@ -1,4 +1,5 @@
 use super::super::*;
+use super::constraint::{validate_check_rows, validate_not_null_rows};
 use crate::backend::access::heap::heapam::heap_update_with_waiter;
 use crate::backend::commands::tablecmds::{collect_matching_rows_heap, maintain_indexes_for_row};
 use crate::backend::executor::value_io::{coerce_assignment_value, tuple_from_values};
@@ -16,6 +17,10 @@ struct AddColumnTarget {
     relation: crate::backend::parser::BoundRelation,
     column: crate::backend::executor::ColumnDesc,
     new_desc: RelationDesc,
+}
+
+fn relation_basename(name: &str) -> &str {
+    name.rsplit('.').next().unwrap_or(name)
 }
 
 fn rewrite_heap_rows_for_added_serial_column(
@@ -160,16 +165,15 @@ fn collect_add_column_targets(
         let target_relation = if *relation_oid == relation.relation_oid {
             relation.clone()
         } else {
-            catalog.lookup_relation_by_oid(*relation_oid).ok_or_else(|| {
-                ExecError::Parse(ParseError::UnknownTable(relation_oid.to_string()))
-            })?
+            catalog
+                .lookup_relation_by_oid(*relation_oid)
+                .ok_or_else(|| {
+                    ExecError::Parse(ParseError::UnknownTable(relation_oid.to_string()))
+                })?
         };
-        if target_relation
-            .desc
-            .columns
-            .iter()
-            .any(|existing| !existing.dropped && existing.name.eq_ignore_ascii_case(&base_column.name))
-        {
+        if target_relation.desc.columns.iter().any(|existing| {
+            !existing.dropped && existing.name.eq_ignore_ascii_case(&base_column.name)
+        }) {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "new column name",
                 actual: format!("column already exists: {}", base_column.name),
@@ -525,9 +529,22 @@ impl Database {
             relation.relation_oid,
             "ALTER TABLE on relation without dependent views",
         )?;
-        let plan = validate_alter_table_add_column(&relation.desc, &alter_stmt.column, &catalog)?;
-        let mut column = plan.column;
-        if let Some(serial_column) = plan.owned_sequence.as_ref() {
+        let table_name = relation_basename(&alter_stmt.table_name).to_string();
+        let existing_constraints = catalog.constraint_rows_for_relation(relation.relation_oid);
+        let plan = validate_alter_table_add_column(
+            &table_name,
+            &relation.desc,
+            &alter_stmt.column,
+            &existing_constraints,
+            &catalog,
+        )?;
+        let crate::pgrust::database::ddl::AlterTableAddColumnPlan {
+            mut column,
+            owned_sequence,
+            not_null_action,
+            check_actions,
+        } = plan;
+        if let Some(serial_column) = owned_sequence.as_ref() {
             let mut used_names = std::collections::BTreeSet::new();
             let created = self.create_owned_sequence_for_serial_column(
                 client_id,
@@ -616,21 +633,143 @@ impl Database {
             cid,
             client_id,
             waiter: None,
-            interrupts,
+            interrupts: std::sync::Arc::clone(&interrupts),
         };
-        for target in targets {
+        for target in &targets {
             let effect = self
                 .catalog
                 .write()
-                .alter_table_add_column_mvcc(target.relation.relation_oid, target.column, &ctx)
+                .alter_table_add_column_mvcc(
+                    target.relation.relation_oid,
+                    target.column.clone(),
+                    &ctx,
+                )
                 .map_err(map_catalog_error)?;
+            self.apply_catalog_mutation_effect_immediate(&effect)?;
             catalog_effects.push(effect);
             if target.relation.relpersistence == 't' {
                 self.replace_temp_entry_desc(
                     client_id,
                     target.relation.relation_oid,
-                    target.new_desc,
+                    target.new_desc.clone(),
                 )?;
+            }
+        }
+        for target in targets {
+            let mut target_desc = target.new_desc.clone();
+            let mut target_relation = target.relation.clone();
+            target_relation.desc = target_desc.clone();
+            let target_name =
+                relation_name_for_add_column_notice(&catalog, target.relation.relation_oid);
+            let new_column_index = target_desc
+                .columns
+                .len()
+                .checked_sub(1)
+                .expect("add-column target has appended column");
+
+            if let Some(action) = not_null_action.as_ref() {
+                if !action.not_valid {
+                    validate_not_null_rows(
+                        self,
+                        &target_relation,
+                        &target_name,
+                        new_column_index,
+                        &action.constraint_name,
+                        &catalog,
+                        client_id,
+                        xid,
+                        cid,
+                        std::sync::Arc::clone(&interrupts),
+                    )?;
+                }
+                let set_ctx = CatalogWriteContext {
+                    pool: self.pool.clone(),
+                    txns: self.txns.clone(),
+                    xid,
+                    cid: cid
+                        .saturating_add(1)
+                        .saturating_add(catalog_effects.len() as u32),
+                    client_id,
+                    waiter: None,
+                    interrupts: std::sync::Arc::clone(&interrupts),
+                };
+                let (constraint_oid, effect) = self
+                    .catalog
+                    .write()
+                    .set_column_not_null_mvcc(
+                        target.relation.relation_oid,
+                        &action.column,
+                        action.constraint_name.clone(),
+                        !action.not_valid,
+                        false,
+                        &set_ctx,
+                    )
+                    .map_err(map_catalog_error)?;
+                self.apply_catalog_mutation_effect_immediate(&effect)?;
+                catalog_effects.push(effect);
+                let column = target_desc
+                    .columns
+                    .get_mut(new_column_index)
+                    .expect("new column present in target desc");
+                column.storage.nullable = false;
+                column.not_null_constraint_oid = Some(constraint_oid);
+                column.not_null_constraint_name = Some(action.constraint_name.clone());
+                column.not_null_constraint_validated = !action.not_valid;
+                column.not_null_primary_key_owned = false;
+                target_relation.desc = target_desc.clone();
+            }
+
+            for action in &check_actions {
+                crate::backend::parser::bind_check_constraint_expr(
+                    &action.expr_sql,
+                    Some(&target_name),
+                    &target_relation.desc,
+                    &catalog,
+                )
+                .map_err(ExecError::Parse)?;
+                if !action.not_valid {
+                    validate_check_rows(
+                        self,
+                        &target_relation,
+                        &target_name,
+                        &action.constraint_name,
+                        &action.expr_sql,
+                        &catalog,
+                        client_id,
+                        xid,
+                        cid,
+                        std::sync::Arc::clone(&interrupts),
+                    )?;
+                }
+                let constraint_ctx = CatalogWriteContext {
+                    pool: self.pool.clone(),
+                    txns: self.txns.clone(),
+                    xid,
+                    cid: cid
+                        .saturating_add(1)
+                        .saturating_add(catalog_effects.len() as u32),
+                    client_id,
+                    waiter: None,
+                    interrupts: std::sync::Arc::clone(&interrupts),
+                };
+                let effect = self
+                    .catalog
+                    .write()
+                    .create_check_constraint_mvcc(
+                        target.relation.relation_oid,
+                        action.constraint_name.clone(),
+                        !action.not_valid,
+                        action.no_inherit,
+                        action.expr_sql.clone(),
+                        &constraint_ctx,
+                    )
+                    .map_err(map_catalog_error)?;
+                self.apply_catalog_mutation_effect_immediate(&effect)?;
+                catalog_effects.push(effect);
+            }
+
+            if target.relation.relpersistence == 't' {
+                self.replace_temp_entry_desc(client_id, target.relation.relation_oid, target_desc)?;
             }
         }
         Ok(StatementResult::AffectedRows(0))
