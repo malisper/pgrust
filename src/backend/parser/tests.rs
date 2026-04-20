@@ -1343,6 +1343,18 @@ fn parse_alter_table_set_statement() {
             statistics_target: 150,
         })
     );
+
+    let stmt = parse_statement("alter table attmp alter column note set storage external").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableAlterColumnStorage(AlterTableAlterColumnStorageStatement {
+            if_exists: false,
+            only: false,
+            table_name: "attmp".into(),
+            column_name: "note".into(),
+            storage: AttributeStorage::External,
+        })
+    );
 }
 
 #[test]
