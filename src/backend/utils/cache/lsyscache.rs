@@ -19,9 +19,9 @@ use crate::backend::utils::cache::system_views::{
 };
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::include::catalog::{
-    PgAmRow, PgAmopRow, PgAmprocRow, PgClassRow, PgCollationRow, PgConstraintRow, PgIndexRow,
-    PgInheritsRow, PgLanguageRow, PgOpclassRow, PgOpfamilyRow, PgProcRow, PgRewriteRow,
-    PgStatisticRow, PgTriggerRow, PgTypeRow,
+    PgAmRow, PgAmopRow, PgAmprocRow, PgAuthIdRow, PgClassRow, PgCollationRow, PgConstraintRow,
+    PgIndexRow, PgInheritsRow, PgLanguageRow, PgOpclassRow, PgOpfamilyRow, PgProcRow,
+    PgRewriteRow, PgStatisticRow, PgTriggerRow, PgTypeRow,
 };
 use crate::include::nodes::datum::Value;
 use crate::pgrust::database::{
@@ -911,6 +911,12 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
             ..DatabaseStatsStore::default()
         };
         build_pg_stat_io_rows(&stats)
+    }
+
+    fn authid_rows(&self) -> Vec<PgAuthIdRow> {
+        backend_catcache(self.db, self.client_id, self.txn_ctx)
+            .map(|cache| cache.authid_rows())
+            .unwrap_or_default()
     }
 
     fn index_relations_for_heap(

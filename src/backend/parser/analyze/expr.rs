@@ -966,6 +966,11 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 )?
             };
             let target_type = resolve_raw_type_name(ty, catalog)?;
+            if target_type.kind == SqlTypeKind::RegRole
+                && let Some(bound_regrole) = bind_regrole_literal_cast(inner, target_type, catalog)?
+            {
+                return Ok(bound_regrole);
+            }
             if target_type.kind == SqlTypeKind::RegProcedure
                 && let Some(bound_regprocedure) =
                     bind_regprocedure_literal_cast(inner, target_type, catalog)?
@@ -2465,6 +2470,31 @@ fn bind_regprocedure_literal_cast(
     let proc_oid = resolve_regprocedure_signature(signature, catalog)?;
     Ok(Some(Expr::Cast(
         Box::new(Expr::Const(Value::Int64(proc_oid as i64))),
+        target_type,
+    )))
+}
+
+fn bind_regrole_literal_cast(
+    expr: &SqlExpr,
+    target_type: SqlType,
+    catalog: &dyn CatalogLookup,
+) -> Result<Option<Expr>, ParseError> {
+    let Some(role_name) = regprocedure_literal_text(expr) else {
+        return Ok(None);
+    };
+    let Some(role_oid) = catalog
+        .authid_rows()
+        .into_iter()
+        .find(|row| row.rolname.eq_ignore_ascii_case(role_name))
+        .map(|row| row.oid)
+    else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "role name",
+            actual: format!("role \"{role_name}\" does not exist"),
+        });
+    };
+    Ok(Some(Expr::Cast(
+        Box::new(Expr::Const(Value::Int64(role_oid as i64))),
         target_type,
     )))
 }

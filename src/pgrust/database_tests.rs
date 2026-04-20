@@ -12287,6 +12287,19 @@ fn create_function_supports_void_returns_and_regprocedure_oid_lookup() {
 }
 
 #[test]
+fn role_name_literal_cast_supports_regrole() {
+    let dir = temp_dir("regrole_literal_cast");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create role app_role").unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select 'app_role'::regrole::oid"),
+        vec![vec![Value::Int64(role_oid(&db, "app_role") as i64)]]
+    );
+}
+
+#[test]
 fn create_function_row_returns_work_for_table_and_record() {
     let dir = temp_dir("create_function_row_returns");
     let db = Database::open(&dir, 64).unwrap();
