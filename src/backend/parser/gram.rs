@@ -6426,6 +6426,7 @@ fn build_delete(pair: Pair<'_, Rule>) -> Result<DeleteStatement, ParseError> {
     let mut table_name = None;
     let mut only = false;
     let mut where_clause = None;
+    let mut returning = Vec::new();
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::cte_clause => {
@@ -6436,6 +6437,7 @@ fn build_delete(pair: Pair<'_, Rule>) -> Result<DeleteStatement, ParseError> {
             Rule::only_clause => only = true,
             Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
             Rule::expr => where_clause = Some(build_expr(part)?),
+            Rule::returning_clause => returning = build_returning_clause(part)?,
             _ => {}
         }
     }
@@ -6445,6 +6447,7 @@ fn build_delete(pair: Pair<'_, Rule>) -> Result<DeleteStatement, ParseError> {
         table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
         only,
         where_clause,
+        returning,
     })
 }
 
