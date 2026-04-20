@@ -889,6 +889,7 @@ pub(super) fn validate_alter_table_alter_column_type(
         current_column.storage.nullable,
     );
     new_column.attstattarget = current_column.attstattarget;
+    new_column.attoptions = current_column.attoptions.clone();
     new_column.not_null_constraint_oid = current_column.not_null_constraint_oid;
     new_column.not_null_constraint_name = current_column.not_null_constraint_name.clone();
     new_column.not_null_constraint_validated = current_column.not_null_constraint_validated;

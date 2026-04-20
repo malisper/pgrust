@@ -51,6 +51,7 @@ pub struct ColumnDesc {
     pub sql_type: SqlType,
     pub dropped: bool,
     pub attstattarget: i16,
+    pub attoptions: Option<Vec<String>>,
     pub attinhcount: i16,
     pub attislocal: bool,
     pub not_null_constraint_oid: Option<u32>,
