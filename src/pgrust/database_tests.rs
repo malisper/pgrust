@@ -9935,6 +9935,34 @@ fn create_table_errors_when_search_path_selects_no_creatable_schema() {
 }
 
 #[test]
+fn create_function_uses_search_path_for_unqualified_creation() {
+    let base = temp_dir("search_path_function_create");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create schema tenant_fn").unwrap();
+    session.execute(&db, "set search_path = tenant_fn").unwrap();
+    session
+        .execute(
+            &db,
+            "create function add_one(x int4) returns int4 language sql as $$ select x + 1 $$",
+        )
+        .unwrap();
+
+    let visible = db.backend_catcache(1, None).unwrap();
+    let proc = visible
+        .proc_rows_by_name("add_one")
+        .into_iter()
+        .find(|row| row.proname == "add_one")
+        .expect("function row");
+    let tenant_ns = visible
+        .namespace_by_name("tenant_fn")
+        .expect("tenant namespace")
+        .oid;
+    assert_eq!(proc.pronamespace, tenant_ns);
+}
+
+#[test]
 fn create_table_uses_pg_temp_search_path_for_unqualified_creation() {
     let base = temp_dir("search_path_pg_temp_create");
     let db = Database::open(&base, 16).unwrap();
@@ -12391,6 +12419,38 @@ fn grant_all_on_schema_public_is_accepted() {
 
     match session
         .execute(&db, "grant all on schema public to public")
+        .unwrap()
+    {
+        StatementResult::AffectedRows(0) => {}
+        other => panic!("expected grant affected rows, got {other:?}"),
+    }
+}
+
+#[test]
+fn grant_select_on_table_is_accepted() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create table widgets (id int4)").unwrap();
+    match session.execute(&db, "grant select on widgets to public").unwrap() {
+        StatementResult::AffectedRows(0) => {}
+        other => panic!("expected grant affected rows, got {other:?}"),
+    }
+}
+
+#[test]
+fn grant_execute_on_function_is_accepted() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create function add_one(x int4) returns int4 language sql as $$ select x + 1 $$",
+        )
+        .unwrap();
+    match session
+        .execute(&db, "grant execute on function add_one(int4) to public")
         .unwrap()
     {
         StatementResult::AffectedRows(0) => {}
