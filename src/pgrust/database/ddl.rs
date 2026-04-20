@@ -589,6 +589,7 @@ pub(super) fn format_sql_type_name(sql_type: SqlType) -> &'static str {
         SqlTypeKind::Tid => "tid",
         SqlTypeKind::Xid => "xid",
         SqlTypeKind::Oid => "oid",
+        SqlTypeKind::RegRole => "regrole",
         SqlTypeKind::RegProcedure => "regprocedure",
         SqlTypeKind::OidVector => "oidvector",
         SqlTypeKind::Bit => "bit",

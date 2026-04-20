@@ -371,6 +371,7 @@ pub enum BuiltinScalarFunction {
     SetBit,
     GetByte,
     SetByte,
+    RegRoleToText,
     BitCount,
     Encode,
     Decode,
