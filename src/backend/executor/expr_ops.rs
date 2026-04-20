@@ -1214,6 +1214,7 @@ pub(crate) fn parse_numeric_text(text: &str) -> Option<NumericValue> {
         .strip_prefix("0x")
         .or_else(|| unsigned.strip_prefix("0X"))
     {
+        let rest = rest.strip_prefix('_').unwrap_or(rest);
         let digits = normalize_numeric_digits(rest, |ch| ch.is_ascii_hexdigit())?;
         let mut coeff = BigInt::parse_bytes(digits.as_bytes(), 16)?;
         if negative {
@@ -1225,6 +1226,7 @@ pub(crate) fn parse_numeric_text(text: &str) -> Option<NumericValue> {
         .strip_prefix("0o")
         .or_else(|| unsigned.strip_prefix("0O"))
     {
+        let rest = rest.strip_prefix('_').unwrap_or(rest);
         let digits = normalize_numeric_digits(rest, |ch| matches!(ch, '0'..='7'))?;
         let mut coeff = BigInt::parse_bytes(digits.as_bytes(), 8)?;
         if negative {
@@ -1236,6 +1238,7 @@ pub(crate) fn parse_numeric_text(text: &str) -> Option<NumericValue> {
         .strip_prefix("0b")
         .or_else(|| unsigned.strip_prefix("0B"))
     {
+        let rest = rest.strip_prefix('_').unwrap_or(rest);
         let digits = normalize_numeric_digits(rest, |ch| matches!(ch, '0' | '1'))?;
         let mut coeff = BigInt::parse_bytes(digits.as_bytes(), 2)?;
         if negative {
