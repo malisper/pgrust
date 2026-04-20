@@ -2885,6 +2885,8 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("replace", BuiltinScalarFunction::Replace),
         ("split_part", BuiltinScalarFunction::SplitPart),
         ("translate", BuiltinScalarFunction::Translate),
+        ("regrole_to_text", BuiltinScalarFunction::RegRoleToText),
+        ("regroleout", BuiltinScalarFunction::RegRoleToText),
         ("ascii", BuiltinScalarFunction::Ascii),
         ("chr", BuiltinScalarFunction::Chr),
         ("quote_literal", BuiltinScalarFunction::QuoteLiteral),

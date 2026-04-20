@@ -359,6 +359,7 @@ pub enum BuiltinScalarFunction {
     Replace,
     SplitPart,
     Translate,
+    RegRoleToText,
     BpcharToText,
     Position,
     Substring,
