@@ -476,13 +476,14 @@ impl Database {
         }
         let (deferrable, initially_deferred, enforced) =
             resolve_alter_constraint_deferrability(&row, alter_stmt)?;
+        let validating_enable = alter_stmt.enforced == Some(true) && !row.convalidated;
         if row.condeferrable == deferrable
             && row.condeferred == initially_deferred
             && row.conenforced == enforced
+            && !validating_enable
         {
             return Ok(StatementResult::AffectedRows(0));
         }
-        let validating_enable = alter_stmt.enforced == Some(true) && !row.convalidated;
         if enforced && (!row.conenforced || validating_enable) {
             let constraints = crate::backend::parser::bind_relation_constraints(
                 Some(relation_basename(&alter_stmt.table_name)),

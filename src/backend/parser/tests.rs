@@ -1107,6 +1107,8 @@ fn parse_alter_table_constraint_statements() {
     assert_eq!(
         stmt,
         Statement::AlterTableAlterConstraint(AlterTableAlterConstraintStatement {
+            if_exists: false,
+            only: false,
             table_name: "items".into(),
             constraint_name: "items_id_check".into(),
             deferrable: Some(false),
