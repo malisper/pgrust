@@ -5271,6 +5271,48 @@ fn float_and_numeric_casts_to_int2_follow_postgres_rounding() {
 }
 
 #[test]
+fn numeric_special_values_to_integer_casts_raise_postgres_style_errors() {
+    let base = temp_dir("numeric_special_values_to_int_casts");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select 'NaN'::numeric::int2",
+    )
+    .unwrap_err();
+    assert!(matches!(err, ExecError::NumericNaNToInt { ty: "smallint" }));
+    assert_eq!(format_exec_error(&err), "cannot convert NaN to smallint");
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select 'Infinity'::numeric::int4",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::NumericInfinityToInt { ty: "integer" }
+    ));
+    assert_eq!(format_exec_error(&err), "cannot convert infinity to integer");
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select '-Infinity'::numeric::int8",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::NumericInfinityToInt { ty: "bigint" }
+    ));
+    assert_eq!(format_exec_error(&err), "cannot convert infinity to bigint");
+}
+
+#[test]
 fn abs_builtin_supports_smallint_filters() {
     let base = temp_dir("abs_builtin_smallint");
     let txns = TransactionManager::new_durable(&base).unwrap();

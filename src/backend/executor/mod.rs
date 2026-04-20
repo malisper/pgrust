@@ -333,6 +333,12 @@ pub enum ExecError {
     },
     FloatOverflow,
     FloatUnderflow,
+    NumericNaNToInt {
+        ty: &'static str,
+    },
+    NumericInfinityToInt {
+        ty: &'static str,
+    },
     Int2OutOfRange,
     Int4OutOfRange,
     Int8OutOfRange,
