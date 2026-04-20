@@ -1,7 +1,7 @@
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 
 statement = { SOI ~ stmt ~ EOI }
-stmt = _{ do_stmt | explain_stmt | table_stmt | select_stmt | values_stmt | copy_stmt | analyze_stmt | checkpoint_stmt | show_stmt | set_session_authorization_stmt | reset_session_authorization_stmt | set_role_stmt | reset_role_stmt | set_stmt | reset_stmt | create_role_stmt | alter_role_stmt | create_database_stmt | create_schema_stmt | create_policy_stmt | create_index_stmt | alter_table_add_column_stmt | alter_table_add_constraint_stmt | alter_table_drop_constraint_stmt | alter_table_alter_constraint_stmt | alter_table_rename_constraint_stmt | alter_table_drop_column_stmt | alter_table_alter_column_type_stmt | alter_table_alter_column_default_stmt | alter_table_alter_column_options_stmt | alter_table_alter_column_statistics_stmt | alter_table_owner_stmt | alter_table_rename_column_stmt | alter_table_rename_stmt | alter_view_owner_stmt | alter_schema_owner_stmt | alter_table_set_stmt | alter_table_set_row_security_stmt | alter_policy_stmt | alter_table_set_not_null_stmt | alter_table_drop_not_null_stmt | alter_table_validate_constraint_stmt | comment_on_role_stmt | comment_on_table_stmt | comment_on_rule_stmt | create_table_stmt | create_view_stmt | create_rule_stmt | drop_role_stmt | drop_database_stmt | drop_table_stmt | drop_index_stmt | drop_view_stmt | drop_rule_stmt | drop_policy_stmt | drop_schema_stmt | reassign_owned_stmt | truncate_table_stmt | vacuum_stmt | insert_stmt | merge_stmt | update_stmt | delete_stmt | begin_stmt | commit_stmt | rollback_stmt }
+stmt = _{ do_stmt | explain_stmt | table_stmt | select_stmt | values_stmt | copy_stmt | analyze_stmt | checkpoint_stmt | show_stmt | set_session_authorization_stmt | reset_session_authorization_stmt | set_role_stmt | reset_role_stmt | set_stmt | reset_stmt | create_role_stmt | alter_role_stmt | alter_group_stmt | create_database_stmt | create_schema_stmt | create_policy_stmt | create_index_stmt | alter_table_add_column_stmt | alter_table_add_constraint_stmt | alter_table_drop_constraint_stmt | alter_table_alter_constraint_stmt | alter_table_rename_constraint_stmt | alter_table_drop_column_stmt | alter_table_alter_column_type_stmt | alter_table_alter_column_default_stmt | alter_table_alter_column_options_stmt | alter_table_alter_column_statistics_stmt | alter_table_owner_stmt | alter_table_rename_column_stmt | alter_table_rename_stmt | alter_view_owner_stmt | alter_schema_owner_stmt | alter_table_set_stmt | alter_table_set_row_security_stmt | alter_policy_stmt | alter_table_set_not_null_stmt | alter_table_drop_not_null_stmt | alter_table_validate_constraint_stmt | comment_on_role_stmt | comment_on_table_stmt | comment_on_rule_stmt | create_table_stmt | create_view_stmt | create_rule_stmt | drop_role_stmt | drop_database_stmt | drop_table_stmt | drop_index_stmt | drop_view_stmt | drop_rule_stmt | drop_policy_stmt | drop_schema_stmt | reassign_owned_stmt | truncate_table_stmt | vacuum_stmt | insert_stmt | merge_stmt | update_stmt | delete_stmt | begin_stmt | commit_stmt | rollback_stmt }
 
 do_stmt = { kw_do ~ do_body ~ do_language_clause? | kw_do ~ do_language_clause ~ do_body }
 do_body = { quoted_string_literal }
@@ -92,8 +92,10 @@ on_conflict_inference_elem = { on_conflict_inference_expr ~ on_conflict_inferenc
 on_conflict_inference_expr = { expr }
 on_conflict_inference_collation = { kw_collate ~ identifier }
 on_conflict_inference_opclass = { create_index_opclass }
-create_role_stmt = { kw_create ~ (kw_role | kw_user) ~ identifier ~ (kw_with ~ role_option*)? ~ role_option* }
+create_role_stmt = { kw_create ~ (kw_role | kw_user | kw_group) ~ identifier ~ (kw_with ~ role_option*)? ~ role_option* }
 alter_role_stmt = { kw_alter ~ kw_role ~ identifier ~ (alter_role_rename_clause | alter_role_option+) }
+alter_group_stmt = { kw_alter ~ kw_group ~ identifier ~ alter_group_action }
+alter_group_action = { (kw_add | kw_drop) ~ kw_user ~ ident_list }
 alter_role_rename_clause = { kw_rename ~ kw_to ~ identifier }
 create_database_stmt = { kw_create ~ kw_database ~ identifier ~ create_database_options? }
 create_database_options = { (!EOI ~ ANY)+ }
@@ -159,7 +161,7 @@ role_attr_option = { kw_superuser | kw_nosuperuser | kw_createdb | kw_nocreatedb
 role_connection_limit_option = { kw_connection ~ kw_limit ~ signed_integer }
 role_password_option = { kw_password ~ (quoted_string_literal | kw_null) }
 role_encrypted_password_option = { kw_encrypted ~ kw_password ~ quoted_string_literal }
-role_membership_option = { ((kw_in ~ kw_role) | kw_role | kw_admin) ~ ident_list }
+role_membership_option = { ((kw_in ~ kw_role) | kw_role | kw_admin | kw_user) ~ ident_list }
 role_sysid_option = { kw_sysid ~ integer }
 reloption = { identifier ~ "=" ~ set_value_atom }
 temp_clause = { kw_temp | kw_temporary }
