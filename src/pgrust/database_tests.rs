@@ -274,6 +274,31 @@ fn quantified_like_any_all_array_operators_work() {
 }
 
 #[test]
+fn quantified_similar_any_all_array_operators_work() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select \
+                'foo' similar to any (array['f..', 'b..']), \
+                'foo' similar to all (array['f..', 'fo.']), \
+                'foo' similar to all (array['f..', 'b..']), \
+                'foo' not similar to any (array['bar', 'baz']), \
+                'foo' not similar to all (array['foo', 'bar'])",
+        ),
+        vec![vec![
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(false),
+            Value::Bool(true),
+            Value::Bool(false),
+        ]]
+    );
+}
+
+#[test]
 fn jsonb_input_respects_max_stack_depth_setting() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);

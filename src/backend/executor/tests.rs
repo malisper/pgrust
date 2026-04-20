@@ -5552,7 +5552,11 @@ fn pg_input_is_valid_reports_numeric_overflow_and_prefixed_literals() {
                 pg_input_is_valid('  +0X_FF  ', 'numeric')",
         )
         .unwrap(),
-        vec![vec![Value::Bool(false), Value::Bool(true), Value::Bool(true)]],
+        vec![vec![
+            Value::Bool(false),
+            Value::Bool(true),
+            Value::Bool(true),
+        ]],
     );
 }
 
@@ -6765,7 +6769,10 @@ fn numeric_prefixed_literals_allow_space_and_prefix_underscore() {
         StatementResult::Query { rows, .. } => {
             assert_eq!(
                 rows,
-                vec![vec![Value::Numeric("-10".into()), Value::Numeric("255".into())]]
+                vec![vec![
+                    Value::Numeric("-10".into()),
+                    Value::Numeric("255".into())
+                ]]
             );
         }
         other => panic!("expected query result, got {:?}", other),

@@ -308,7 +308,7 @@ expr = { or_expr }
 or_expr = { and_expr ~ (kw_or ~ and_expr)* }
 and_expr = { not_expr ~ (kw_and ~ not_expr)* }
 not_expr = { kw_not ~ not_expr | cmp_expr }
-cmp_expr = { json_access_expr ~ (null_predicate_suffix | between_suffix | in_expr_list_suffix | in_subquery_suffix | quantified_suffix | quantified_like_suffix | like_suffix | similar_suffix | comp_op ~ json_access_expr)? }
+cmp_expr = { json_access_expr ~ (null_predicate_suffix | between_suffix | in_expr_list_suffix | in_subquery_suffix | quantified_suffix | quantified_like_suffix | quantified_similar_suffix | like_suffix | similar_suffix | comp_op ~ json_access_expr)? }
 json_access_expr = { concat_expr ~ (json_access_op ~ concat_expr)* }
 concat_expr = { add_expr ~ (concat_op ~ add_expr)* }
 add_expr = { bit_expr ~ (add_op ~ bit_expr)* }
@@ -342,6 +342,7 @@ in_subquery_suffix = { kw_not? ~ kw_in ~ "(" ~ select_stmt ~ ")" }
 quantified_suffix = { quantified_comp_op ~ (kw_any | kw_all) ~ "(" ~ (select_stmt | expr) ~ ")" }
 quantified_comp_op = { "@@" | "&&" | "=" | "<>" | "!=" | "<=" | ">=" | "<" | ">" | "~" }
 quantified_like_suffix = { kw_not? ~ (kw_ilike | kw_like) ~ (kw_any | kw_all) ~ "(" ~ (select_stmt | expr) ~ ")" }
+quantified_similar_suffix = { kw_not? ~ kw_similar ~ kw_to ~ (kw_any | kw_all) ~ "(" ~ (select_stmt | expr) ~ ")" }
 like_suffix = { kw_not? ~ (kw_ilike | kw_like) ~ concat_expr ~ escape_clause? }
 similar_suffix = { kw_not? ~ kw_similar ~ kw_to ~ concat_expr ~ escape_clause? }
 escape_clause = { kw_escape ~ concat_expr }
