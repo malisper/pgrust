@@ -22,7 +22,7 @@ Targeted reruns and notes:
 - alter_table.sql: 476/1683
   - [done] expression indexes and `ALTER INDEX` operations used by `alter_table.sql`
   - partitioned tables, including `PARTITION OF`, `ATTACH PARTITION`, and `DETACH PARTITION`
-  - `SET ROLE` / `RESET ROLE`
+  - [done] `SET ROLE` / `RESET ROLE`
   - `ALTER VIEW` forms exercised by `alter_table.sql`
   - `ALTER TABLE` `NO INHERIT` / `INHERIT`
   - multi-action `ALTER TABLE` statements
@@ -405,7 +405,7 @@ Targeted reruns and notes:
 - record-expansion semantics for `jsonb_to_record` / `jsonb_populate_record`
 
 - partitioned tables, including `PARTITION OF`, `ATTACH PARTITION`, and `DETACH PARTITION`
-- `SET ROLE` / `RESET ROLE`
+- [done] `SET ROLE` / `RESET ROLE`
 - `ALTER VIEW` forms exercised by `alter_table.sql`
 - `ALTER TABLE` `NO INHERIT` / `INHERIT`
 - multi-action `ALTER TABLE` statements
@@ -508,7 +508,7 @@ Targeted reruns and notes:
   - [done] implement `lo_create` / `lo_unlink` and surface `pg_largeobject_metadata` rows from runtime state
   - [done] add parser/analyzer support for role membership `GRANTED BY`
   - add parser/analyzer/executor support for `CASCADE` in role membership revokes
-  - implement `SET ROLE` and `RESET ROLE`
+  - [done] implement `SET ROLE` and `RESET ROLE`
   - [done] implement SQL-visible `session_user`, `current_user`, and `current_role` semantics used by the regression
   - add parser/executor support for `DROP OWNED`
   - add parser support for `DROP USER`, `CREATE GROUP`, and `ALTER GROUP`

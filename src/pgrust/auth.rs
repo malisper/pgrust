@@ -118,7 +118,7 @@ impl AuthState {
             return true;
         }
         catalog
-            .role_by_oid(self.authenticated_user_oid)
+            .role_by_oid(self.session_user_oid)
             .is_some_and(|row| row.rolsuper)
             || has_membership_path(
                 self.session_user_oid,
