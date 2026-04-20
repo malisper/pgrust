@@ -3007,6 +3007,9 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::alter_table_alter_column_default_stmt => Ok(Statement::AlterTableAlterColumnDefault(
             build_alter_table_alter_column_default(inner)?,
         )),
+        Rule::alter_table_alter_column_options_stmt => Ok(Statement::AlterTableAlterColumnOptions(
+            build_alter_table_alter_column_options(inner)?,
+        )),
         Rule::alter_table_owner_stmt => Ok(Statement::AlterTableOwner(build_alter_relation_owner(
             inner,
         )?)),
@@ -5862,9 +5865,7 @@ fn build_drop_schema(pair: Pair<'_, Rule>) -> Result<DropSchemaStatement, ParseE
             Rule::if_exists_clause => if_exists = true,
             Rule::ident_list => schema_names.extend(part.into_inner().map(build_identifier)),
             Rule::identifier => schema_names.push(build_identifier(part)),
-            Rule::drop_behavior => {
-                cascade = part.as_str().eq_ignore_ascii_case("cascade")
-            }
+            Rule::drop_behavior => cascade = part.as_str().eq_ignore_ascii_case("cascade"),
             _ => {}
         }
     }
@@ -6657,6 +6658,60 @@ fn build_alter_table_alter_column_default(
         column_name: column_name.ok_or(ParseError::UnexpectedEof)?,
         default_expr,
         default_expr_sql,
+    })
+}
+
+fn build_alter_table_alter_column_options(
+    pair: Pair<'_, Rule>,
+) -> Result<AlterTableAlterColumnOptionsStatement, ParseError> {
+    let mut if_exists = false;
+    let mut only = false;
+    let mut table_name = None;
+    let mut column_name = None;
+    let mut action = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::alter_table_target => {
+                let (parsed_if_exists, parsed_only, parsed_table_name) =
+                    build_alter_table_target(part)?;
+                if_exists = parsed_if_exists;
+                only = parsed_only;
+                table_name = Some(parsed_table_name);
+            }
+            Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
+            Rule::identifier if column_name.is_none() => column_name = Some(build_identifier(part)),
+            Rule::alter_table_column_options_action => {
+                for inner in part.into_inner() {
+                    match inner.as_rule() {
+                        Rule::alter_table_set_options_action => {
+                            let options = inner
+                                .into_inner()
+                                .filter(|item| item.as_rule() == Rule::reloption)
+                                .map(build_reloption)
+                                .collect::<Result<Vec<_>, _>>()?;
+                            action = Some(AlterColumnOptionsAction::Set(options));
+                        }
+                        Rule::alter_table_reset_options_action => {
+                            let options = inner
+                                .into_inner()
+                                .find(|item| item.as_rule() == Rule::ident_list)
+                                .map(|list| list.into_inner().map(build_identifier).collect())
+                                .ok_or(ParseError::UnexpectedEof)?;
+                            action = Some(AlterColumnOptionsAction::Reset(options));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(AlterTableAlterColumnOptionsStatement {
+        if_exists,
+        only,
+        table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
+        column_name: column_name.ok_or(ParseError::UnexpectedEof)?,
+        action: action.ok_or(ParseError::UnexpectedEof)?,
     })
 }
 
