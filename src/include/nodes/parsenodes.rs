@@ -5,6 +5,7 @@ use crate::include::nodes::primnodes::{
     AggAccum, Expr, JoinType, ProjectSetTarget, QueryColumn, RelationDesc, SetReturningCall,
     SortGroupClause, TargetEntry, ToastRelationRef, WindowClause,
 };
+use crate::include::catalog::PolicyCommand;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -231,6 +232,7 @@ pub enum Statement {
     CreateSequence(CreateSequenceStatement),
     CreateView(CreateViewStatement),
     CreateRule(CreateRuleStatement),
+    CreatePolicy(CreatePolicyStatement),
     CreateIndex(CreateIndexStatement),
     CreateOperatorClass(CreateOperatorClassStatement),
     AlterSequence(AlterSequenceStatement),
@@ -251,6 +253,7 @@ pub enum Statement {
     AlterSchemaOwner(AlterSchemaOwnerStatement),
     AlterTableSet(AlterTableSetStatement),
     AlterTableSetRowSecurity(AlterTableSetRowSecurityStatement),
+    AlterPolicy(AlterPolicyStatement),
     AlterTableSetNotNull(AlterTableSetNotNullStatement),
     AlterTableDropNotNull(AlterTableDropNotNullStatement),
     AlterTableValidateConstraint(AlterTableValidateConstraintStatement),
@@ -275,6 +278,7 @@ pub enum Statement {
     DropDomain(DropDomainStatement),
     DropView(DropViewStatement),
     DropRule(DropRuleStatement),
+    DropPolicy(DropPolicyStatement),
     DropSchema(DropSchemaStatement),
     CreateRole(CreateRoleStatement),
     AlterRole(AlterRoleStatement),
@@ -1020,6 +1024,19 @@ pub struct CreateRuleStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreatePolicyStatement {
+    pub policy_name: String,
+    pub table_name: String,
+    pub permissive: bool,
+    pub command: PolicyCommand,
+    pub role_names: Vec<String>,
+    pub using_expr: Option<SqlExpr>,
+    pub using_sql: Option<String>,
+    pub with_check_expr: Option<SqlExpr>,
+    pub with_check_sql: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateIndexStatement {
     pub unique: bool,
     pub if_not_exists: bool,
@@ -1218,6 +1235,27 @@ pub struct AlterTableRenameStatement {
     pub only: bool,
     pub table_name: String,
     pub new_table_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlterPolicyAction {
+    Rename {
+        new_name: String,
+    },
+    Update {
+        role_names: Option<Vec<String>>,
+        using_expr: Option<SqlExpr>,
+        using_sql: Option<String>,
+        with_check_expr: Option<SqlExpr>,
+        with_check_sql: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterPolicyStatement {
+    pub policy_name: String,
+    pub table_name: String,
+    pub action: AlterPolicyAction,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1475,6 +1513,13 @@ pub struct DropRuleStatement {
     pub if_exists: bool,
     pub rule_name: String,
     pub relation_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropPolicyStatement {
+    pub if_exists: bool,
+    pub policy_name: String,
+    pub table_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

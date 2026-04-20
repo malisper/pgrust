@@ -8,6 +8,7 @@ use super::comments::{
 };
 use super::parsenodes::*;
 use crate::backend::executor::{AggFunc, Value};
+use crate::include::catalog::PolicyCommand;
 use crate::include::nodes::datum::BitString;
 
 #[derive(Parser)]
@@ -86,6 +87,9 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_create_tablespace_statement(&sql)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_policy_statement(&sql)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_unsupported_statement(&sql) {
         if matches!(
             stmt,
@@ -114,6 +118,21 @@ fn try_parse_create_tablespace_statement(sql: &str) -> Result<Option<Statement>,
     Ok(Some(Statement::CreateTablespace(
         build_create_tablespace_statement(trimmed)?,
     )))
+}
+
+fn try_parse_policy_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if lowered.starts_with("create policy ") {
+        return build_create_policy_statement(trimmed).map(|stmt| Some(Statement::CreatePolicy(stmt)));
+    }
+    if lowered.starts_with("alter policy ") {
+        return build_alter_policy_statement(trimmed).map(|stmt| Some(Statement::AlterPolicy(stmt)));
+    }
+    if lowered.starts_with("drop policy ") {
+        return build_drop_policy_statement(trimmed).map(|stmt| Some(Statement::DropPolicy(stmt)));
+    }
+    Ok(None)
 }
 
 fn try_parse_trigger_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
@@ -1617,6 +1636,317 @@ fn build_drop_trigger_statement(sql: &str) -> Result<DropTriggerStatement, Parse
     })
 }
 
+fn build_create_policy_statement(sql: &str) -> Result<CreatePolicyStatement, ParseError> {
+    let prefix = "create policy";
+    let Some(rest) = sql.get(prefix.len()..) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "CREATE POLICY name ON table",
+            actual: sql.into(),
+        });
+    };
+    let mut rest = rest.trim_start();
+    let (policy_name, after_name) = parse_sql_identifier(rest)?;
+    rest = after_name.trim_start();
+    if !keyword_at_start(rest, "on") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "ON",
+            actual: rest.into(),
+        });
+    }
+    rest = consume_keyword(rest, "on").trim_start();
+    let ((schema_name, table_name), after_table) = parse_schema_qualified_name(rest)?;
+    let _ = schema_name;
+    rest = after_table.trim_start();
+
+    let mut permissive = true;
+    let mut command = PolicyCommand::All;
+    let mut role_names = vec!["public".to_string()];
+    let mut using_expr = None;
+    let mut using_sql = None;
+    let mut with_check_expr = None;
+    let mut with_check_sql = None;
+
+    while !rest.is_empty() {
+        if keyword_at_start(rest, "as") {
+            rest = consume_keyword(rest, "as").trim_start();
+            if keyword_at_start(rest, "permissive") {
+                permissive = true;
+                rest = consume_keyword(rest, "permissive").trim_start();
+                continue;
+            }
+            if keyword_at_start(rest, "restrictive") {
+                permissive = false;
+                rest = consume_keyword(rest, "restrictive").trim_start();
+                continue;
+            }
+            return Err(ParseError::UnexpectedToken {
+                expected: "PERMISSIVE or RESTRICTIVE",
+                actual: rest.into(),
+            });
+        }
+        if keyword_at_start(rest, "for") {
+            rest = consume_keyword(rest, "for").trim_start();
+            let (parsed_command, next_rest) = parse_policy_command(rest)?;
+            command = parsed_command;
+            rest = next_rest.trim_start();
+            continue;
+        }
+        if keyword_at_start(rest, "to") {
+            rest = consume_keyword(rest, "to").trim_start();
+            let boundary =
+                find_next_top_level_keyword(rest, &["using", "with"]).unwrap_or(rest.len());
+            role_names = parse_policy_role_list(&rest[..boundary])?;
+            rest = rest[boundary..].trim_start();
+            continue;
+        }
+        if keyword_at_start(rest, "using") {
+            rest = consume_keyword(rest, "using");
+            let (sql, next_rest) = take_parenthesized_segment(rest)?;
+            using_expr = Some(parse_expr(&sql)?);
+            using_sql = Some(sql.trim().to_string());
+            rest = next_rest.trim_start();
+            continue;
+        }
+        if keyword_at_start(rest, "with") {
+            rest = consume_keyword(rest, "with").trim_start();
+            if !keyword_at_start(rest, "check") {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "CHECK",
+                    actual: rest.into(),
+                });
+            }
+            rest = consume_keyword(rest, "check");
+            let (sql, next_rest) = take_parenthesized_segment(rest)?;
+            with_check_expr = Some(parse_expr(&sql)?);
+            with_check_sql = Some(sql.trim().to_string());
+            rest = next_rest.trim_start();
+            continue;
+        }
+        return Err(ParseError::UnexpectedToken {
+            expected: "AS, FOR, TO, USING, or WITH CHECK",
+            actual: rest.into(),
+        });
+    }
+
+    Ok(CreatePolicyStatement {
+        policy_name,
+        table_name,
+        permissive,
+        command,
+        role_names,
+        using_expr,
+        using_sql,
+        with_check_expr,
+        with_check_sql,
+    })
+}
+
+fn build_alter_policy_statement(sql: &str) -> Result<AlterPolicyStatement, ParseError> {
+    let prefix = "alter policy";
+    let Some(rest) = sql.get(prefix.len()..) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "ALTER POLICY name ON table",
+            actual: sql.into(),
+        });
+    };
+    let mut rest = rest.trim_start();
+    let (policy_name, after_name) = parse_sql_identifier(rest)?;
+    rest = after_name.trim_start();
+    if !keyword_at_start(rest, "on") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "ON",
+            actual: rest.into(),
+        });
+    }
+    rest = consume_keyword(rest, "on").trim_start();
+    let ((schema_name, table_name), after_table) = parse_schema_qualified_name(rest)?;
+    let _ = schema_name;
+    rest = after_table.trim_start();
+
+    if keyword_at_start(rest, "rename") {
+        rest = consume_keyword(rest, "rename").trim_start();
+        if !keyword_at_start(rest, "to") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "TO",
+                actual: rest.into(),
+            });
+        }
+        rest = consume_keyword(rest, "to").trim_start();
+        let (new_name, remainder) = parse_sql_identifier(rest)?;
+        if !remainder.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of statement",
+                actual: remainder.trim().into(),
+            });
+        }
+        return Ok(AlterPolicyStatement {
+            policy_name,
+            table_name,
+            action: AlterPolicyAction::Rename { new_name },
+        });
+    }
+
+    let mut role_names = None;
+    let mut using_expr = None;
+    let mut using_sql = None;
+    let mut with_check_expr = None;
+    let mut with_check_sql = None;
+    let mut saw_clause = false;
+
+    while !rest.is_empty() {
+        if keyword_at_start(rest, "to") {
+            rest = consume_keyword(rest, "to").trim_start();
+            let boundary =
+                find_next_top_level_keyword(rest, &["using", "with"]).unwrap_or(rest.len());
+            role_names = Some(parse_policy_role_list(&rest[..boundary])?);
+            rest = rest[boundary..].trim_start();
+            saw_clause = true;
+            continue;
+        }
+        if keyword_at_start(rest, "using") {
+            rest = consume_keyword(rest, "using");
+            let (sql, next_rest) = take_parenthesized_segment(rest)?;
+            using_expr = Some(parse_expr(&sql)?);
+            using_sql = Some(sql.trim().to_string());
+            rest = next_rest.trim_start();
+            saw_clause = true;
+            continue;
+        }
+        if keyword_at_start(rest, "with") {
+            rest = consume_keyword(rest, "with").trim_start();
+            if !keyword_at_start(rest, "check") {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "CHECK",
+                    actual: rest.into(),
+                });
+            }
+            rest = consume_keyword(rest, "check");
+            let (sql, next_rest) = take_parenthesized_segment(rest)?;
+            with_check_expr = Some(parse_expr(&sql)?);
+            with_check_sql = Some(sql.trim().to_string());
+            rest = next_rest.trim_start();
+            saw_clause = true;
+            continue;
+        }
+        return Err(ParseError::UnexpectedToken {
+            expected: "RENAME, TO, USING, or WITH CHECK",
+            actual: rest.into(),
+        });
+    }
+
+    if !saw_clause {
+        return Err(ParseError::UnexpectedToken {
+            expected: "policy alteration clause",
+            actual: sql.into(),
+        });
+    }
+
+    Ok(AlterPolicyStatement {
+        policy_name,
+        table_name,
+        action: AlterPolicyAction::Update {
+            role_names,
+            using_expr,
+            using_sql,
+            with_check_expr,
+            with_check_sql,
+        },
+    })
+}
+
+fn build_drop_policy_statement(sql: &str) -> Result<DropPolicyStatement, ParseError> {
+    let prefix = "drop policy";
+    let Some(rest) = sql.get(prefix.len()..) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "DROP POLICY [IF EXISTS] name ON table",
+            actual: sql.into(),
+        });
+    };
+    let mut rest = rest.trim_start();
+    let mut if_exists = false;
+    if keyword_at_start(rest, "if") {
+        rest = consume_keyword(rest, "if").trim_start();
+        if !keyword_at_start(rest, "exists") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "IF EXISTS",
+                actual: sql.into(),
+            });
+        }
+        rest = consume_keyword(rest, "exists").trim_start();
+        if_exists = true;
+    }
+    let (policy_name, after_name) = parse_sql_identifier(rest)?;
+    rest = after_name.trim_start();
+    if !keyword_at_start(rest, "on") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "ON",
+            actual: rest.into(),
+        });
+    }
+    rest = consume_keyword(rest, "on").trim_start();
+    let ((schema_name, table_name), remainder) = parse_schema_qualified_name(rest)?;
+    let _ = schema_name;
+    if !remainder.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of statement",
+            actual: remainder.trim().into(),
+        });
+    }
+    Ok(DropPolicyStatement {
+        if_exists,
+        policy_name,
+        table_name,
+    })
+}
+
+fn parse_policy_command(input: &str) -> Result<(PolicyCommand, &str), ParseError> {
+    if keyword_at_start(input, "all") {
+        return Ok((PolicyCommand::All, consume_keyword(input, "all")));
+    }
+    if keyword_at_start(input, "select") {
+        return Ok((PolicyCommand::Select, consume_keyword(input, "select")));
+    }
+    if keyword_at_start(input, "insert") {
+        return Ok((PolicyCommand::Insert, consume_keyword(input, "insert")));
+    }
+    if keyword_at_start(input, "update") {
+        return Ok((PolicyCommand::Update, consume_keyword(input, "update")));
+    }
+    if keyword_at_start(input, "delete") {
+        return Ok((PolicyCommand::Delete, consume_keyword(input, "delete")));
+    }
+    Err(ParseError::UnexpectedToken {
+        expected: "ALL, SELECT, INSERT, UPDATE, or DELETE",
+        actual: input.into(),
+    })
+}
+
+fn parse_policy_role_list(input: &str) -> Result<Vec<String>, ParseError> {
+    let items = split_top_level_items(input.trim(), ',')?;
+    let mut out = Vec::new();
+    for item in items {
+        let trimmed = item.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let (role_name, rest) = parse_sql_identifier(trimmed)?;
+        if !rest.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "role name",
+                actual: trimmed.into(),
+            });
+        }
+        out.push(role_name);
+    }
+    if out.is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "role name",
+            actual: input.into(),
+        });
+    }
+    Ok(out)
+}
+
 fn parse_qualified_sql_name(input: &str) -> Result<((Option<String>, String), &str), ParseError> {
     let (first, mut rest) = parse_sql_identifier(input)?;
     rest = rest.trim_start();
@@ -3027,6 +3357,9 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::alter_table_set_row_security_stmt => Ok(Statement::AlterTableSetRowSecurity(
             build_alter_table_set_row_security(inner)?,
         )),
+        Rule::alter_policy_stmt => Ok(Statement::AlterPolicy(
+            build_alter_policy_statement(inner.as_str())?,
+        )),
         Rule::alter_table_set_not_null_stmt => Ok(Statement::AlterTableSetNotNull(
             build_alter_table_set_not_null(inner)?,
         )),
@@ -3042,6 +3375,9 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         }
         Rule::comment_on_rule_stmt => Ok(Statement::CommentOnRule(build_comment_on_rule(inner)?)),
         Rule::create_schema_stmt => Ok(Statement::CreateSchema(build_create_schema(inner)?)),
+        Rule::create_policy_stmt => Ok(Statement::CreatePolicy(
+            build_create_policy_statement(inner.as_str())?,
+        )),
         Rule::create_table_stmt => build_create_table(inner),
         Rule::create_view_stmt => Ok(Statement::CreateView(build_create_view(inner)?)),
         Rule::create_rule_stmt => Ok(Statement::CreateRule(build_create_rule(inner)?)),
@@ -3051,6 +3387,9 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::drop_index_stmt => Ok(Statement::DropIndex(build_drop_index(inner)?)),
         Rule::drop_view_stmt => Ok(Statement::DropView(build_drop_view(inner)?)),
         Rule::drop_rule_stmt => Ok(Statement::DropRule(build_drop_rule(inner)?)),
+        Rule::drop_policy_stmt => Ok(Statement::DropPolicy(
+            build_drop_policy_statement(inner.as_str())?,
+        )),
         Rule::drop_schema_stmt => Ok(Statement::DropSchema(build_drop_schema(inner)?)),
         Rule::reassign_owned_stmt => Ok(Statement::ReassignOwned(build_reassign_owned(inner)?)),
         Rule::truncate_table_stmt => Ok(Statement::TruncateTable(build_truncate_table(inner)?)),

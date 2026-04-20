@@ -12903,6 +12903,63 @@ fn grant_execute_on_function_is_accepted() {
 }
 
 #[test]
+fn create_alter_and_drop_policy_updates_pg_policy() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create role app_role nologin")
+        .unwrap();
+    session
+        .execute(&db, "create table items (a int4, owner text)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create policy p1 on items as restrictive for select to app_role using (a > 0)",
+        )
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select polname, polqual from pg_policy where polname = 'p1'",
+        ),
+        vec![vec![Value::Text("p1".into()), Value::Text("a > 0".into())]]
+    );
+
+    session
+        .execute(&db, "alter policy p1 on items rename to p2")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter policy p2 on items using (a > 1) with check (a > 2)",
+        )
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select polname, polqual, polwithcheck from pg_policy where polname = 'p2'",
+        ),
+        vec![vec![
+            Value::Text("p2".into()),
+            Value::Text("a > 1".into()),
+            Value::Text("a > 2".into()),
+        ]]
+    );
+
+    session.execute(&db, "drop policy p2 on items").unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from pg_policy where polname = 'p2'"),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
 fn create_tablespace_adds_pg_tablespace_row() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);

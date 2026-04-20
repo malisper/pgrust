@@ -558,6 +558,7 @@ mod tests {
             rows.indexes,
             rows.rewrites,
             rows.triggers,
+            rows.policies,
             rows.ams,
             rows.amops,
             rows.amprocs,
