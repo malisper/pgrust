@@ -26,6 +26,7 @@ pub const PG_CAST_RELATION_OID: u32 = 2605;
 pub const PG_CONSTRAINT_RELATION_OID: u32 = 2606;
 pub const PG_DEPEND_RELATION_OID: u32 = 2608;
 pub const PG_DESCRIPTION_RELATION_OID: u32 = 2609;
+pub const PG_FOREIGN_DATA_WRAPPER_RELATION_OID: u32 = 2328;
 pub const PG_INDEX_RELATION_OID: u32 = 2610;
 pub const PG_INHERITS_RELATION_OID: u32 = 2611;
 pub const PG_REWRITE_RELATION_OID: u32 = 2618;
@@ -176,6 +177,7 @@ pub enum BootstrapCatalogKind {
     PgConstraint,
     PgDepend,
     PgDescription,
+    PgForeignDataWrapper,
     PgIndex,
     PgInherits,
     PgRewrite,
@@ -220,6 +222,7 @@ impl BootstrapCatalogKind {
             Self::PgConstraint => PG_CONSTRAINT_RELATION_OID,
             Self::PgDepend => PG_DEPEND_RELATION_OID,
             Self::PgDescription => PG_DESCRIPTION_RELATION_OID,
+            Self::PgForeignDataWrapper => PG_FOREIGN_DATA_WRAPPER_RELATION_OID,
             Self::PgIndex => PG_INDEX_RELATION_OID,
             Self::PgInherits => PG_INHERITS_RELATION_OID,
             Self::PgRewrite => PG_REWRITE_RELATION_OID,
@@ -258,6 +261,7 @@ impl BootstrapCatalogKind {
             Self::PgConstraint => "pg_constraint",
             Self::PgDepend => "pg_depend",
             Self::PgDescription => "pg_description",
+            Self::PgForeignDataWrapper => "pg_foreign_data_wrapper",
             Self::PgIndex => "pg_index",
             Self::PgInherits => "pg_inherits",
             Self::PgRewrite => "pg_rewrite",
@@ -296,6 +300,7 @@ impl BootstrapCatalogKind {
             Self::PgConstraint => 0,
             Self::PgDepend => PG_DEPEND_ROWTYPE_OID,
             Self::PgDescription => 0,
+            Self::PgForeignDataWrapper => 0,
             Self::PgIndex => PG_INDEX_ROWTYPE_OID,
             Self::PgInherits => PG_INHERITS_ROWTYPE_OID,
             Self::PgRewrite => PG_REWRITE_ROWTYPE_OID,
@@ -318,7 +323,7 @@ impl BootstrapCatalogKind {
     }
 }
 
-pub const CORE_BOOTSTRAP_KINDS: [BootstrapCatalogKind; 33] = [
+pub const CORE_BOOTSTRAP_KINDS: [BootstrapCatalogKind; 34] = [
     BootstrapCatalogKind::PgNamespace,
     BootstrapCatalogKind::PgType,
     BootstrapCatalogKind::PgProc,
@@ -347,6 +352,7 @@ pub const CORE_BOOTSTRAP_KINDS: [BootstrapCatalogKind; 33] = [
     BootstrapCatalogKind::PgConstraint,
     BootstrapCatalogKind::PgDepend,
     BootstrapCatalogKind::PgDescription,
+    BootstrapCatalogKind::PgForeignDataWrapper,
     BootstrapCatalogKind::PgIndex,
     BootstrapCatalogKind::PgInherits,
     BootstrapCatalogKind::PgRewrite,
@@ -354,13 +360,13 @@ pub const CORE_BOOTSTRAP_KINDS: [BootstrapCatalogKind; 33] = [
     BootstrapCatalogKind::PgTrigger,
 ];
 
-pub const fn bootstrap_catalog_kinds() -> [BootstrapCatalogKind; 33] {
+pub const fn bootstrap_catalog_kinds() -> [BootstrapCatalogKind; 34] {
     CORE_BOOTSTRAP_KINDS
 }
 
 use crate::include::catalog::{
-    pg_description_desc, pg_inherits_desc, pg_largeobject_metadata_desc, pg_rewrite_desc,
-    pg_statistic_desc, pg_trigger_desc,
+    pg_description_desc, pg_foreign_data_wrapper_desc, pg_inherits_desc,
+    pg_largeobject_metadata_desc, pg_rewrite_desc, pg_statistic_desc, pg_trigger_desc,
 };
 
 pub fn bootstrap_relation_desc(kind: BootstrapCatalogKind) -> RelationDesc {
@@ -391,6 +397,7 @@ pub fn bootstrap_relation_desc(kind: BootstrapCatalogKind) -> RelationDesc {
         BootstrapCatalogKind::PgConstraint => pg_constraint_desc(),
         BootstrapCatalogKind::PgDepend => pg_depend_desc(),
         BootstrapCatalogKind::PgDescription => pg_description_desc(),
+        BootstrapCatalogKind::PgForeignDataWrapper => pg_foreign_data_wrapper_desc(),
         BootstrapCatalogKind::PgIndex => pg_index_desc(),
         BootstrapCatalogKind::PgInherits => pg_inherits_desc(),
         BootstrapCatalogKind::PgRewrite => pg_rewrite_desc(),
@@ -405,7 +412,7 @@ pub const fn bootstrap_namespace_oid() -> u32 {
     PG_CATALOG_NAMESPACE_OID
 }
 
-pub const CORE_BOOTSTRAP_RELATIONS: [BootstrapCatalogRelation; 33] = [
+pub const CORE_BOOTSTRAP_RELATIONS: [BootstrapCatalogRelation; 34] = [
     BootstrapCatalogRelation {
         oid: PG_NAMESPACE_RELATION_OID,
         name: "pg_namespace",
@@ -517,6 +524,10 @@ pub const CORE_BOOTSTRAP_RELATIONS: [BootstrapCatalogRelation; 33] = [
     BootstrapCatalogRelation {
         oid: PG_DESCRIPTION_RELATION_OID,
         name: "pg_description",
+    },
+    BootstrapCatalogRelation {
+        oid: PG_FOREIGN_DATA_WRAPPER_RELATION_OID,
+        name: "pg_foreign_data_wrapper",
     },
     BootstrapCatalogRelation {
         oid: PG_INDEX_RELATION_OID,

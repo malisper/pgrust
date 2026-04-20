@@ -497,6 +497,12 @@ fn run_statement(
         }
         Statement::CommentOnRole(_)
         | Statement::CommentOnConversion(_)
+        | Statement::CommentOnForeignDataWrapper(_)
+        | Statement::CreateForeignDataWrapper(_)
+        | Statement::AlterForeignDataWrapper(_)
+        | Statement::AlterForeignDataWrapperOwner(_)
+        | Statement::AlterForeignDataWrapperRename(_)
+        | Statement::DropForeignDataWrapper(_)
         | Statement::CreateRole(_)
         | Statement::CreateDatabase(_)
         | Statement::AlterRole(_)

@@ -7,6 +7,7 @@ mod database_cmds;
 mod drop;
 mod drop_column;
 mod execute;
+mod foreign_data_wrapper;
 mod index;
 mod maintenance;
 mod opclass;
