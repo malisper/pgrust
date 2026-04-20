@@ -114,6 +114,18 @@ fn scratch_temp_dir(label: &str) -> PathBuf {
     crate::pgrust::test_support::scratch_temp_dir("database", label)
 }
 
+fn role_oid(db: &Database, role_name: &str) -> u32 {
+    db.catalog
+        .read()
+        .catcache()
+        .unwrap()
+        .authid_rows()
+        .into_iter()
+        .find(|row| row.rolname.eq_ignore_ascii_case(role_name))
+        .map(|row| row.oid)
+        .unwrap()
+}
+
 struct AnalyzeRelkindOverrideCatalog<'a> {
     inner: LazyCatalogLookup<'a>,
     relkind_overrides: HashMap<u32, char>,

@@ -153,6 +153,15 @@ mod tests {
         assert_eq!(session.session_user_oid(), role_oid(&db, "tenant"));
 
         assert_eq!(
+            session
+                .execute(&db, "set session authorization 'tenant'")
+                .unwrap(),
+            StatementResult::AffectedRows(0)
+        );
+        assert_eq!(session.current_user_oid(), role_oid(&db, "tenant"));
+        assert_eq!(session.session_user_oid(), role_oid(&db, "tenant"));
+
+        assert_eq!(
             session.execute(&db, "reset session authorization").unwrap(),
             StatementResult::AffectedRows(0)
         );
