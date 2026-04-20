@@ -171,6 +171,110 @@ select
 from regex_demo
 order by input;`,
   },
+  {
+    id: "lisp-fibonacci",
+    label: "Lisp Interpreter - Fibonacci Numbers",
+    note:
+      "Evaluates a tiny Lisp-style program encoded in JSONB. This example uses a recursive CTE plus JSONB state transitions to produce Fibonacci numbers.",
+    sql: `with recursive loop as (
+  select '{"stack": [{"type": "expr", "env": {"+": "+", "-": "-", "*": "*", "/": "/", ">": ">", "<": "<", "=": "=", "head": "head", "tail": "tail", "cons": "cons", "empty": "empty"}, "expr": [["lambda", ["f"], ["f", "f", 1, 0, 0]], ["lambda", ["self", "a", "b", "i"], ["if", [">", "i", 10], ["empty"], ["cons", "a", ["self", "self", ["+", "a", "b"], "a", ["+", "i", 1]]]]]]}]}'::jsonb as state
+  union all
+  select
+    case
+      when frame_type = 'expr'
+      then case
+        when jsonb_typeof(expr) = 'number'
+        then jsonb_build_object('stack', stack - 0, 'result', expr)
+        when jsonb_typeof(expr) = 'string'
+        then jsonb_build_object('stack', stack - 0, 'result', env -> expr_string)
+        when op_string = 'if'
+        then jsonb_build_object('stack', jsonb_build_array(jsonb_build_object('type', 'eval_if', 'expr', expr, 'env', env)) || (stack - 0))
+        when op_string = 'lambda'
+        then jsonb_build_object('stack', stack - 0, 'result', jsonb_build_object('args', arg1, 'body', arg2, 'env', env))
+        else jsonb_build_object('stack', jsonb_build_array(jsonb_build_object('type', 'eval_args', 'left', expr, 'done', '[]'::jsonb, 'env', env)) || (stack - 0))
+      end
+      when frame_type = 'eval_args'
+      then case
+        when result is null and jsonb_array_length(args_left) = 0
+        then jsonb_build_object('stack', jsonb_build_array(jsonb_build_object('type', 'eval_call', 'expr', args_done, 'env', env)) || (stack - 0))
+        when result is null
+        then jsonb_build_object('stack', jsonb_build_array(jsonb_build_object('type', 'expr', 'expr', args_left -> 0, 'env', env), jsonb_build_object('type', 'eval_args', 'left', args_left - 0, 'done', args_done, 'env', env)) || stack - 0)
+        else jsonb_build_object('stack', jsonb_build_array(jsonb_build_object('type', 'eval_args', 'left', args_left, 'done', args_done || jsonb_build_array(result), 'env', env)) || (stack - 0))
+      end
+      when frame_type = 'eval_call'
+      then case
+        when op_string = '+'
+        then jsonb_build_object('stack', stack - 0, 'result', arg1::text::bigint + arg2::text::bigint)
+        when op_string = '*'
+        then jsonb_build_object('stack', stack - 0, 'result', arg1::text::bigint * arg2::text::bigint)
+        when op_string = '-'
+        then jsonb_build_object('stack', stack - 0, 'result', arg1::text::bigint - arg2::text::bigint)
+        when op_string = '/'
+        then jsonb_build_object('stack', stack - 0, 'result', arg1::text::bigint / arg2::text::bigint)
+        when op_string = '>'
+        then jsonb_build_object('stack', stack - 0, 'result', arg1::text::bigint > arg2::text::bigint)
+        when op_string = '<'
+        then jsonb_build_object('stack', stack - 0, 'result', arg1::text::bigint < arg2::text::bigint)
+        when op_string = '='
+        then jsonb_build_object('stack', stack - 0, 'result', arg1 = arg2)
+        when op_string = 'head'
+        then jsonb_build_object('stack', stack - 0, 'result', arg1 -> 0)
+        when op_string = 'tail'
+        then jsonb_build_object('stack', stack - 0, 'result', arg1 - 0)
+        when op_string = 'cons'
+        then jsonb_build_object('stack', stack - 0, 'result', jsonb_build_array(arg1) || arg2)
+        when op_string = 'empty'
+        then jsonb_build_object('stack', stack - 0, 'result', '[]'::jsonb)
+        else jsonb_build_object(
+          'stack',
+          jsonb_build_array(
+            jsonb_build_object(
+              'type', 'expr',
+              'expr', (op -> 'body'),
+              'env', (op -> 'env') || jsonb_build_object(
+                coalesce(op -> 'args' ->> 0, 'null'), arg1,
+                coalesce(op -> 'args' ->> 1, 'null'), arg2,
+                coalesce(op -> 'args' ->> 2, 'null'), arg3,
+                coalesce(op -> 'args' ->> 3, 'null'), arg4
+              )
+            )
+          ) || (stack - 0)
+        )
+      end
+      when frame_type = 'eval_if'
+      then case
+        when result is null
+        then jsonb_build_object('stack', jsonb_build_array(jsonb_build_object('type', 'expr', 'expr', arg1, 'env', env)) || stack)
+        when result is not null and result::text::boolean
+        then jsonb_build_object('stack', jsonb_build_array(jsonb_build_object('type', 'expr', 'expr', arg2, 'env', env)) || (stack - 0))
+        when result is not null and not result::text::boolean
+        then jsonb_build_object('stack', jsonb_build_array(jsonb_build_object('type', 'expr', 'expr', arg3, 'env', env)) || (stack - 0))
+      end
+    end
+  from (
+    select
+      state -> 'stack' -> 0 ->> 'type' as frame_type,
+      state -> 'stack' -> 0 -> 'expr' as expr,
+      state -> 'stack' -> 0 ->> 'expr' as expr_string,
+      state -> 'stack' -> 0 -> 'expr' -> 0 as op,
+      state -> 'stack' -> 0 -> 'expr' ->> 0 as op_string,
+      state -> 'stack' -> 0 -> 'expr' -> 1 as arg1,
+      state -> 'stack' -> 0 -> 'expr' -> 2 as arg2,
+      state -> 'stack' -> 0 -> 'expr' -> 3 as arg3,
+      state -> 'stack' -> 0 -> 'expr' -> 4 as arg4,
+      state -> 'stack' -> 0 -> 'left' as args_left,
+      state -> 'stack' -> 0 -> 'done' as args_done,
+      state -> 'stack' -> 0 -> 'env' as env,
+      state -> 'result' as result,
+      state -> 'stack' as stack
+    from loop
+  ) sub
+)
+select jsonb_pretty(state -> 'result')
+from loop
+where jsonb_array_length(state -> 'stack') = 0
+limit 1;`,
+  },
 ];
 
 let engine;
