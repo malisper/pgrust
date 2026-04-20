@@ -1559,20 +1559,15 @@ pub fn execute_insert(
     let result = (|| {
         let values = materialize_insert_rows(&stmt, catalog, ctx)?;
 
-        if !stmt.returning.is_empty() && stmt.on_conflict.is_some() {
-            return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                "INSERT ... ON CONFLICT ... RETURNING is not supported yet".into(),
-            )));
-        }
-
         let returned_rows = if let Some(on_conflict) = stmt.on_conflict.as_ref() {
-            let inserted = execute_insert_on_conflict_rows(&stmt, on_conflict, &values, ctx, xid, cid)?;
-            for _ in 0..inserted {
+            let returned_rows =
+                execute_insert_on_conflict_rows(&stmt, on_conflict, &values, ctx, xid, cid)?;
+            for _ in 0..returned_rows.len() {
                 ctx.session_stats
                     .write()
                     .note_relation_insert(stmt.relation_oid);
             }
-            return Ok(StatementResult::AffectedRows(inserted));
+            returned_rows
         } else {
             let returned_rows = execute_insert_rows(
                 &stmt.relation_name,
