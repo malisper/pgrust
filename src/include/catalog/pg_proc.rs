@@ -1947,6 +1947,13 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             2,
         ),
         aggregate_row(
+            6293,
+            "bool_and",
+            BOOL_TYPE_OID,
+            &oid_argtypes(&[BOOL_TYPE_OID]),
+            1,
+        ),
+        aggregate_row(
             3538,
             "string_agg",
             TEXT_TYPE_OID,
@@ -2679,6 +2686,7 @@ fn aggregate_func_for_proname(name: &str) -> Option<AggFunc> {
     match name.to_ascii_lowercase().as_str() {
         "count" => Some(AggFunc::Count),
         "any_value" => Some(AggFunc::AnyValue),
+        "bool_and" => Some(AggFunc::BoolAnd),
         "sum" => Some(AggFunc::Sum),
         "avg" => Some(AggFunc::Avg),
         "var_pop" => Some(AggFunc::VarPop),
