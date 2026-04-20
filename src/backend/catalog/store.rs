@@ -241,6 +241,7 @@ mod tests {
             )),
             snapshot,
             client_id: 0,
+            session_user_oid: BOOTSTRAP_SUPERUSER_OID,
             current_user_oid: BOOTSTRAP_SUPERUSER_OID,
             next_command_id: 0,
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),

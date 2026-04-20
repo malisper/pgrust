@@ -715,6 +715,8 @@ fn visit_nested_srfs(
         | SqlExpr::Random
         | SqlExpr::CurrentDate
         | SqlExpr::CurrentUser
+        | SqlExpr::SessionUser
+        | SqlExpr::CurrentRole
         | SqlExpr::CurrentTime { .. }
         | SqlExpr::CurrentTimestamp { .. }
         | SqlExpr::LocalTime { .. }

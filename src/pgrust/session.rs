@@ -298,6 +298,7 @@ impl Session {
             session_stats: Arc::clone(&self.stats_state),
             snapshot,
             client_id: self.client_id,
+            session_user_oid: self.session_user_oid(),
             current_user_oid: self.current_user_oid(),
             next_command_id: cid,
             timed: false,
