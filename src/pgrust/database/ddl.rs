@@ -708,6 +708,24 @@ pub(super) fn validate_alter_table_alter_column_default(
     })
 }
 
+pub(super) fn validate_alter_table_alter_column_options(
+    desc: &RelationDesc,
+    column_name: &str,
+) -> Result<String, ExecError> {
+    if is_system_column_name(column_name) {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "user column name for ALTER COLUMN SET/RESET options",
+            actual: column_name.to_string(),
+        }));
+    }
+    let column = desc
+        .columns
+        .iter()
+        .find(|column| !column.dropped && column.name.eq_ignore_ascii_case(column_name))
+        .ok_or_else(|| ExecError::Parse(ParseError::UnknownColumn(column_name.to_string())))?;
+    Ok(column.name.clone())
+}
+
 fn alter_column_type_error(
     message: String,
     hint: Option<String>,
