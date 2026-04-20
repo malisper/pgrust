@@ -4,15 +4,15 @@ use crate::backend::executor::{ExecError, Value};
 use crate::backend::parser::{BoundRelation, CatalogLookup, ParseError, SqlType, SqlTypeKind};
 use crate::backend::utils::cache::lsyscache::LazyCatalogLookup;
 use crate::include::catalog::{
-    FLOAT8_TYPE_OID, INT4RANGE_TYPE_OID, INT4_TYPE_OID, PG_CLASS_RELATION_OID,
+    FLOAT8_TYPE_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID, PG_CLASS_RELATION_OID,
     PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID,
 };
 use crate::include::nodes::parsenodes::MaintenanceTarget;
 use crate::include::nodes::primnodes::QueryColumn;
 use crate::pl::plpgsql::{clear_notices, take_notices};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 
 use std::time::{Duration, Instant};
@@ -1976,9 +1976,11 @@ fn analyze_populates_pg_stats_view_and_anyarray_columns() {
          order by 1",
     );
     assert!(!histogram_dims.is_empty());
-    assert!(histogram_dims
-        .iter()
-        .all(|row| row.as_slice() == [Value::Int32(1)]));
+    assert!(
+        histogram_dims
+            .iter()
+            .all(|row| row.as_slice() == [Value::Int32(1)])
+    );
 }
 
 #[test]
@@ -2294,7 +2296,9 @@ fn temp_table_check_constraint_no_inherit_sets_pg_constraint_flag() {
     let db = Database::open(&dir, 128).unwrap();
     let mut session = Session::new(1);
 
-    session.execute(&db, "create temp table p1 (ff1 int)").unwrap();
+    session
+        .execute(&db, "create temp table p1 (ff1 int)")
+        .unwrap();
     session
         .execute(
             &db,
@@ -2905,14 +2909,16 @@ fn committed_catalog_invalidation_evicts_other_sessions_without_global_reset() {
     let mut writer = Session::new(1);
     let mut reader = Session::new(2);
 
-    assert!(db
-        .lazy_catalog_lookup(1, None, None)
-        .lookup_any_relation("fanout_test")
-        .is_none());
-    assert!(db
-        .lazy_catalog_lookup(2, None, None)
-        .lookup_any_relation("fanout_test")
-        .is_none());
+    assert!(
+        db.lazy_catalog_lookup(1, None, None)
+            .lookup_any_relation("fanout_test")
+            .is_none()
+    );
+    assert!(
+        db.lazy_catalog_lookup(2, None, None)
+            .lookup_any_relation("fanout_test")
+            .is_none()
+    );
     {
         let states = db.backend_cache_states.read();
         let writer_state = states.get(&1).unwrap();
@@ -4468,6 +4474,14 @@ fn alter_table_if_exists_ignores_missing_table() {
         .unwrap(),
         StatementResult::AffectedRows(0)
     );
+    assert_eq!(
+        db.execute(
+            1,
+            "alter table if exists missing alter column note set (n_distinct = 1)",
+        )
+        .unwrap(),
+        StatementResult::AffectedRows(0)
+    );
 }
 
 #[test]
@@ -4544,6 +4558,30 @@ fn alter_table_alter_column_set_default_rejects_mismatched_type() {
             && sqlstate == "42804" => {}
         other => panic!("expected default type mismatch error, got {other:?}"),
     }
+}
+
+#[test]
+fn alter_table_alter_column_set_options_is_accepted() {
+    let base = temp_dir("alter_table_column_options");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table attmp(i int4)").unwrap();
+    assert_eq!(
+        db.execute(
+            1,
+            "alter table attmp alter column i set (n_distinct = 1, n_distinct_inherited = 2)",
+        )
+        .unwrap(),
+        StatementResult::AffectedRows(0)
+    );
+    assert_eq!(
+        db.execute(
+            1,
+            "alter table attmp alter column i reset (n_distinct_inherited)",
+        )
+        .unwrap(),
+        StatementResult::AffectedRows(0)
+    );
 }
 
 #[test]
@@ -6136,7 +6174,8 @@ fn foreign_keys_support_match_full() {
         )",
     )
     .unwrap();
-    db.execute(1, "insert into parents values (1, 'one')").unwrap();
+    db.execute(1, "insert into parents values (1, 'one')")
+        .unwrap();
     db.execute(1, "insert into children values (1, 1, 'one')")
         .unwrap();
     db.execute(1, "insert into children values (2, null, null)")
@@ -6164,7 +6203,8 @@ fn foreign_keys_apply_referential_actions() {
 
     db.execute(1, "create table parents (id int4 primary key)")
         .unwrap();
-    db.execute(1, "insert into parents values (0), (1)").unwrap();
+    db.execute(1, "insert into parents values (0), (1)")
+        .unwrap();
     db.execute(
         1,
         "create table cascade_children (
@@ -6205,7 +6245,8 @@ fn foreign_keys_apply_referential_actions() {
     db.execute(1, "insert into set_default_update_children values (1, 1)")
         .unwrap();
 
-    db.execute(1, "update parents set id = 2 where id = 1").unwrap();
+    db.execute(1, "update parents set id = 2 where id = 1")
+        .unwrap();
     assert_eq!(
         query_rows(&db, 1, "select parent_id from cascade_children"),
         vec![vec![Value::Int32(2)]]
@@ -6942,7 +6983,8 @@ fn foreign_keys_support_not_enforced_and_alter_enforced_state() {
     )
     .unwrap();
 
-    db.execute(1, "insert into children values (1, 42)").unwrap();
+    db.execute(1, "insert into children values (1, 42)")
+        .unwrap();
     assert_eq!(
         query_rows(
             &db,
@@ -7003,7 +7045,8 @@ fn foreign_keys_support_not_enforced_and_alter_enforced_state() {
         ]]
     );
 
-    db.execute(1, "insert into children values (2, 99)").unwrap();
+    db.execute(1, "insert into children values (2, 99)")
+        .unwrap();
 }
 
 #[test]
@@ -9179,7 +9222,7 @@ fn checkpoint_updates_checkpointer_stats() {
 #[test]
 fn checkpoint_flushes_dirty_pages_and_clog_to_disk() {
     use crate::backend::access::transam::xact::{
-        TransactionManager, TransactionStatus, INVALID_TRANSACTION_ID,
+        INVALID_TRANSACTION_ID, TransactionManager, TransactionStatus,
     };
     use crate::backend::storage::smgr::ForkNumber;
 
@@ -10371,13 +10414,14 @@ fn create_table_uses_pg_temp_search_path_for_unqualified_creation() {
         .unwrap();
 
     assert!(db.temp_entry(1, "tempy").is_some());
-    assert!(db
-        .catalog
-        .read()
-        .catalog_snapshot()
-        .unwrap()
-        .get("tempy")
-        .is_none());
+    assert!(
+        db.catalog
+            .read()
+            .catalog_snapshot()
+            .unwrap()
+            .get("tempy")
+            .is_none()
+    );
 }
 
 #[test]
@@ -12819,8 +12863,13 @@ fn grant_select_on_table_is_accepted() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);
 
-    session.execute(&db, "create table widgets (id int4)").unwrap();
-    match session.execute(&db, "grant select on widgets to public").unwrap() {
+    session
+        .execute(&db, "create table widgets (id int4)")
+        .unwrap();
+    match session
+        .execute(&db, "grant select on widgets to public")
+        .unwrap()
+    {
         StatementResult::AffectedRows(0) => {}
         other => panic!("expected grant affected rows, got {other:?}"),
     }
@@ -13363,17 +13412,18 @@ fn create_type_exposes_catalog_rows_and_function_row_expansion() {
             vec![Value::Text("label".into())],
         ]
     );
-    assert!(db
-        .backend_catcache(1, None)
-        .unwrap()
-        .depend_rows()
-        .iter()
-        .any(|row| {
-            row.classid == PG_PROC_RELATION_OID
-                && row.objid == widget_proc.oid
-                && row.refclassid == PG_TYPE_RELATION_OID
-                && row.refobjid == widget_type.oid
-        }));
+    assert!(
+        db.backend_catcache(1, None)
+            .unwrap()
+            .depend_rows()
+            .iter()
+            .any(|row| {
+                row.classid == PG_PROC_RELATION_OID
+                    && row.objid == widget_proc.oid
+                    && row.refclassid == PG_TYPE_RELATION_OID
+                    && row.refobjid == widget_type.oid
+            })
+    );
     assert_eq!(
         query_rows(&db, 1, "select * from widget_rows(5)"),
         vec![vec![Value::Int32(5), Value::Text("widget".into())]]
@@ -13577,9 +13627,11 @@ fn create_type_nested_dependencies_and_named_composite_arrays_work() {
         }) => {
             assert_eq!(sqlstate, "2BP01");
             assert!(message.contains("cannot drop type complex"));
-            assert!(detail
-                .unwrap_or_default()
-                .contains("type holder depends on type complex"));
+            assert!(
+                detail
+                    .unwrap_or_default()
+                    .contains("type holder depends on type complex")
+            );
         }
         other => panic!("expected dependent-type drop restriction, got {other:?}"),
     }
@@ -13672,9 +13724,11 @@ fn drop_type_enforces_restrict_and_if_exists() {
         }) => {
             assert_eq!(sqlstate, "2BP01");
             assert!(message.contains("cannot drop type widget"));
-            assert!(detail
-                .unwrap_or_default()
-                .contains("function widget_rows depends on type widget"));
+            assert!(
+                detail
+                    .unwrap_or_default()
+                    .contains("function widget_rows depends on type widget")
+            );
         }
         other => panic!("expected dependent-function drop restriction, got {other:?}"),
     }
@@ -13711,9 +13765,11 @@ fn drop_enum_type_enforces_restrict_and_if_exists() {
         }) => {
             assert_eq!(sqlstate, "2BP01");
             assert!(message.contains("cannot drop type mood"));
-            assert!(detail
-                .unwrap_or_default()
-                .contains("table feelings depends on type mood"));
+            assert!(
+                detail
+                    .unwrap_or_default()
+                    .contains("table feelings depends on type mood")
+            );
         }
         other => panic!("expected dependent enum drop restriction, got {other:?}"),
     }
@@ -13753,9 +13809,11 @@ fn drop_range_type_enforces_restrict_and_if_exists() {
         }) => {
             assert_eq!(sqlstate, "2BP01");
             assert!(message.contains("cannot drop type float8range"));
-            assert!(detail
-                .unwrap_or_default()
-                .contains("table measurements depends on type float8range"));
+            assert!(
+                detail
+                    .unwrap_or_default()
+                    .contains("table measurements depends on type float8range")
+            );
         }
         other => panic!("expected dependent range drop restriction, got {other:?}"),
     }
