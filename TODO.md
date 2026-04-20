@@ -85,6 +85,7 @@ Targeted reruns and notes:
   - [done] support one-dimensional array extension behavior for scalar and slice assignments
   - [done] support `ARRAY(SELECT ...)` forms used later in `arrays.sql`
   - [done] support general `RETURNING` target lists for `INSERT` and `UPDATE`, not just `RETURNING *`
+  - [done] support `DELETE ... RETURNING` target lists
   - [done] implement missing array builtins exercised by `arrays.sql` such as `array_append`, `array_prepend`, and `array_cat`
   - support row/composite array expressions and comparisons, including `ARRAY(SELECT ...)` and `array_agg(record) || array_agg(record)`
 - async.sql: 0/11

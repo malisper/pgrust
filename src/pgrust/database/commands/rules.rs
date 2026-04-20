@@ -697,6 +697,7 @@ pub(crate) fn execute_bound_delete_with_rules(
             for event in materialize_delete_row_events(
                 &crate::backend::parser::BoundDeleteStatement {
                     targets: vec![target.clone()],
+                    returning: Vec::new(),
                     subplans: Vec::new(),
                 },
                 ctx,
