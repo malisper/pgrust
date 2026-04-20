@@ -12849,6 +12849,41 @@ fn role_name_literal_cast_supports_regrole() {
 }
 
 #[test]
+fn regrole_cast_to_text_renders_role_name() {
+    let dir = temp_dir("regrole_text_cast");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create role app_role").unwrap();
+    db.execute(1, "create role app_member").unwrap();
+    db.execute(1, "grant app_role to app_member").unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select 'app_role'::regrole::text"),
+        vec![vec![Value::Text("app_role".into())]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select oid::regrole::text from pg_authid where rolname = 'app_role'",
+        ),
+        vec![vec![Value::Text("app_role".into())]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select member::regrole::text, grantor::regrole::text \
+             from pg_auth_members where roleid = 'app_role'::regrole",
+        ),
+        vec![vec![
+            Value::Text("app_member".into()),
+            Value::Text("postgres".into()),
+        ]]
+    );
+}
+
+#[test]
 fn create_function_row_returns_work_for_table_and_record() {
     let dir = temp_dir("create_function_row_returns");
     let db = Database::open(&dir, 64).unwrap();
