@@ -5729,6 +5729,7 @@ fn build_on_commit_action(pair: Pair<'_, Rule>) -> Result<OnCommitAction, ParseE
 fn build_drop_table(pair: Pair<'_, Rule>) -> Result<DropTableStatement, ParseError> {
     let mut if_exists = false;
     let mut table_names = Vec::new();
+    let mut cascade = false;
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::if_exists_clause => if_exists = true,
@@ -5736,6 +5737,9 @@ fn build_drop_table(pair: Pair<'_, Rule>) -> Result<DropTableStatement, ParseErr
                 table_names.extend(part.into_inner().map(build_identifier));
             }
             Rule::identifier => table_names.push(build_identifier(part)),
+            Rule::drop_behavior => {
+                cascade = part.as_str().eq_ignore_ascii_case("cascade");
+            }
             _ => {}
         }
     }
@@ -5745,6 +5749,7 @@ fn build_drop_table(pair: Pair<'_, Rule>) -> Result<DropTableStatement, ParseErr
     Ok(DropTableStatement {
         if_exists,
         table_names,
+        cascade,
     })
 }
 

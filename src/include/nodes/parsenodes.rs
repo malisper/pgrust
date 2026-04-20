@@ -1398,6 +1398,7 @@ pub struct RelOption {
 pub struct DropTableStatement {
     pub if_exists: bool,
     pub table_names: Vec<String>,
+    pub cascade: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
