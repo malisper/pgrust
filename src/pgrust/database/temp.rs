@@ -21,6 +21,21 @@ impl Database {
             .and_then(|ns| ns.tables.get(&normalized).map(|entry| entry.entry.clone()))
     }
 
+    pub(super) fn temp_relation_name_for_oid(
+        &self,
+        client_id: ClientId,
+        relation_oid: u32,
+    ) -> Option<String> {
+        self.temp_relations
+            .read()
+            .get(&self.temp_backend_id(client_id))
+            .and_then(|ns| {
+                ns.tables.iter().find_map(|(name, entry)| {
+                    (entry.entry.relation_oid == relation_oid).then(|| name.clone())
+                })
+            })
+    }
+
     fn cleanup_stale_temp_relations_in_transaction(
         &self,
         client_id: ClientId,

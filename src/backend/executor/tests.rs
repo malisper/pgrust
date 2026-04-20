@@ -9527,6 +9527,22 @@ fn point_slice_subscript_uses_fixed_length_array_error() {
 }
 
 #[test]
+fn legacy_executor_rejects_drop_table_cascade() {
+    let base = temp_dir("legacy_drop_table_cascade_rejected");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    run_sql(&base, &txns, INVALID_TRANSACTION_ID, "create table items (id int4)").unwrap();
+
+    match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "drop table items cascade") {
+        Err(ExecError::Parse(ParseError::UnexpectedToken { expected, actual })) => {
+            assert_eq!(expected, "DROP TABLE CASCADE handled by database/session layer");
+            assert_eq!(actual, "DROP TABLE ... CASCADE");
+        }
+        other => panic!("expected DROP TABLE CASCADE rejection, got {other:?}"),
+    }
+}
+
+#[test]
 fn array_subscript_mixed_slice_scalar_queries_match_postgres() {
     let base = temp_dir("array_subscript_mixed_slice_scalar_queries");
     let txns = TransactionManager::new_durable(&base).unwrap();
