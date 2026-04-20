@@ -1127,6 +1127,7 @@ pub struct AlterTableAlterConstraintStatement {
     pub constraint_name: String,
     pub deferrable: Option<bool>,
     pub initially_deferred: Option<bool>,
+    pub enforced: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

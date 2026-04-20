@@ -26,7 +26,8 @@ Targeted reruns and notes:
   - `ALTER VIEW` forms exercised by `alter_table.sql`
   - `ALTER TABLE` `NO INHERIT` / `INHERIT`
   - multi-action `ALTER TABLE` statements
-  - `ALTER TABLE ... ALTER CONSTRAINT` deferrability changes
+  - `ALTER TABLE ... ADD FOREIGN KEY (...) REFERENCES ...` without `ADD CONSTRAINT name`
+  - `ALTER TABLE ... ALTER CONSTRAINT` support beyond deferrability-only changes, including `ENFORCED` / `NOT ENFORCED`
   - `ALTER TABLE ... ALTER COLUMN ... SET/DROP DEFAULT`
   - `ALTER TABLE ... ALTER COLUMN ... SET STORAGE`
   - `ALTER TABLE ... ALTER COLUMN ... SET STATISTICS`
@@ -41,7 +42,10 @@ Targeted reruns and notes:
   - `CHECK ... NO INHERIT`
   - `CHECK ENFORCED` / `NOT ENFORCED`
   - foreign keys with `MATCH FULL`
+  - foreign keys with `NOT VALID`
+  - foreign keys with `ENFORCED` / `NOT ENFORCED`
   - deferrable foreign keys
+  - foreign keys with `ON DELETE` / `ON UPDATE` actions beyond `NO ACTION` and `RESTRICT`
   - `COMMENT ON COLUMN`
   - `COMMENT ON INDEX`
   - `COMMENT ON CONSTRAINT`
@@ -148,6 +152,16 @@ Targeted reruns and notes:
 - float8.sql: 145/184
 - foreign_data.sql: 83/540
 - foreign_key.sql: 283/1252
+  - upstream `foreign_key.sql` now starts with unsupported FK surface, so the first create-table failures cascade into most later `unknown table: fktable` mismatches
+  - foreign keys with `MATCH FULL`
+  - foreign keys with `NOT VALID`
+  - foreign keys with `ENFORCED` / `NOT ENFORCED`
+  - foreign keys with `ON DELETE` / `ON UPDATE` actions beyond `NO ACTION` and `RESTRICT`
+  - `ALTER TABLE ... ADD FOREIGN KEY (...) REFERENCES ...` without `ADD CONSTRAINT name`
+  - `ALTER TABLE ... ALTER CONSTRAINT ... ENFORCED|NOT ENFORCED`
+  - `COMMENT ON CONSTRAINT`
+  - `DROP TABLE ... CASCADE`
+  - `ALTER TABLE ... ALTER COLUMN TYPE` when dependent indexes/constraints exist
 - functional_deps.sql: 0/40
 - generated_stored.sql: 2/131
 - generated_virtual.sql: 2/131

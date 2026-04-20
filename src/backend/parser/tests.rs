@@ -1086,6 +1086,22 @@ fn parse_alter_table_constraint_statements() {
             constraint_name: "items_id_check".into(),
             deferrable: Some(true),
             initially_deferred: Some(true),
+            enforced: None,
+        })
+    );
+
+    let stmt = parse_statement(
+        "alter table items alter constraint items_id_check not enforced not deferrable",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableAlterConstraint(AlterTableAlterConstraintStatement {
+            table_name: "items".into(),
+            constraint_name: "items_id_check".into(),
+            deferrable: Some(false),
+            initially_deferred: None,
+            enforced: Some(false),
         })
     );
 

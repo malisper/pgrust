@@ -48,6 +48,7 @@ pub struct ForeignKeyConstraintAction {
     pub on_delete: ForeignKeyAction,
     pub on_update: ForeignKeyAction,
     pub not_valid: bool,
+    pub enforced: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -84,6 +85,7 @@ pub struct BoundForeignKeyConstraint {
     pub referenced_index: super::BoundIndexRelation,
     pub deferrable: bool,
     pub initially_deferred: bool,
+    pub enforced: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,6 +105,7 @@ pub struct BoundReferencedByForeignKey {
     pub on_update: ForeignKeyAction,
     pub deferrable: bool,
     pub initially_deferred: bool,
+    pub enforced: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,6 +161,7 @@ struct PendingForeignKeyConstraint {
     on_delete: ForeignKeyAction,
     on_update: ForeignKeyAction,
     not_valid: bool,
+    enforced: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -268,6 +272,7 @@ pub fn normalize_create_table_constraints(
                         on_delete: *on_delete,
                         on_update: *on_update,
                         not_valid: attributes.not_valid,
+                        enforced: attributes.enforced.unwrap_or(true),
                     });
                 }
             }
@@ -345,6 +350,7 @@ pub fn normalize_create_table_constraints(
                     on_delete: *on_delete,
                     on_update: *on_update,
                     not_valid: attributes.not_valid,
+                    enforced: attributes.enforced.unwrap_or(true),
                 });
             }
         }
@@ -510,6 +516,7 @@ pub fn normalize_create_table_constraints(
                 on_delete: constraint.on_delete,
                 on_update: constraint.on_update,
                 not_valid: constraint.not_valid,
+                enforced: constraint.enforced,
             })
         })
         .collect::<Result<Vec<_>, ParseError>>()?;
@@ -736,6 +743,7 @@ pub fn normalize_alter_table_add_constraint(
                     on_delete: *on_delete,
                     on_update: *on_update,
                     not_valid: attributes.not_valid,
+                    enforced: attributes.enforced.unwrap_or(true),
                 },
             ))
         }
@@ -853,7 +861,7 @@ fn validate_create_foreign_key(
     on_delete: ForeignKeyAction,
     on_update: ForeignKeyAction,
 ) -> Result<(), ParseError> {
-    if attributes.not_valid {
+    if attributes.not_valid && attributes.enforced != Some(false) {
         return Err(ParseError::FeatureNotSupported(
             "FOREIGN KEY NOT VALID".into(),
         ));
@@ -876,7 +884,13 @@ fn validate_foreign_key(
     on_delete: ForeignKeyAction,
     on_update: ForeignKeyAction,
 ) -> Result<(), ParseError> {
-    validate_not_null_or_check_attributes(attributes, "FOREIGN KEY")?;
+    if attributes.deferrable.is_some() || attributes.initially_deferred.is_some() {
+        if attributes.enforced == Some(false) {
+            return Err(ParseError::FeatureNotSupported(
+                "FOREIGN KEY NOT ENFORCED with DEFERRABLE/INITIALLY".into(),
+            ));
+        }
+    }
     if match_type != ForeignKeyMatchType::Simple {
         return Err(ParseError::FeatureNotSupported(format!(
             "FOREIGN KEY MATCH {}",
@@ -1118,6 +1132,7 @@ fn bind_outbound_foreign_key_constraint(
         referenced_index,
         deferrable: row.condeferrable,
         initially_deferred: row.condeferred,
+        enforced: row.conenforced,
     })
 }
 
@@ -1161,6 +1176,7 @@ fn bind_inbound_foreign_key_constraint(
         on_update: foreign_key_action_from_code(row.confupdtype)?,
         deferrable: row.condeferrable,
         initially_deferred: row.condeferred,
+        enforced: row.conenforced,
     })
 }
 

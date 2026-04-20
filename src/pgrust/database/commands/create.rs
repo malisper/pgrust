@@ -313,7 +313,8 @@ impl Database {
                 .create_foreign_key_constraint_mvcc(
                     relation.relation_oid,
                     action.constraint_name.clone(),
-                    !action.not_valid,
+                    action.enforced,
+                    action.enforced && !action.not_valid,
                     &local_attnums,
                     referenced_relation.relation_oid,
                     referenced_index_oid,
