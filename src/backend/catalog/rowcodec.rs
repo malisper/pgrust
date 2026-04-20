@@ -613,8 +613,9 @@ pub(crate) fn pg_attribute_row_from_values(
         attcompression: AttributeCompression::from_char(attcompression)
             .ok_or(CatalogError::Corrupt("unknown attcompression"))?,
         attstattarget: expect_int16(&values[11])?,
-        attinhcount: expect_int16(&values[12])?,
-        attislocal: expect_bool(&values[13])?,
+        attoptions: nullable_text_array(&values[12])?,
+        attinhcount: expect_int16(&values[13])?,
+        attislocal: expect_bool(&values[14])?,
         sql_type: SqlType::new(SqlTypeKind::Text),
     })
 }
@@ -1167,6 +1168,10 @@ fn pg_attribute_row_values(row: PgAttributeRow) -> Vec<Value> {
         Value::InternalChar(row.attstorage.as_char() as u8),
         Value::InternalChar(row.attcompression.as_char() as u8),
         Value::Int16(row.attstattarget),
+        row.attoptions
+            .map(text_array_value)
+            .map(Value::PgArray)
+            .unwrap_or(Value::Null),
         Value::Int16(row.attinhcount),
         Value::Bool(row.attislocal),
     ]
@@ -1539,8 +1544,13 @@ fn int16_array_value(values: Vec<i16>) -> ArrayValue {
 }
 
 fn text_array_value(values: Vec<String>) -> ArrayValue {
-    ArrayValue::from_1d(values.into_iter().map(|value| Value::Text(value.into())).collect())
-        .with_element_type_oid(crate::include::catalog::TEXT_TYPE_OID)
+    ArrayValue::from_1d(
+        values
+            .into_iter()
+            .map(|value| Value::Text(value.into()))
+            .collect(),
+    )
+    .with_element_type_oid(crate::include::catalog::TEXT_TYPE_OID)
 }
 
 fn nullable_text_value(value: Option<String>) -> Value {

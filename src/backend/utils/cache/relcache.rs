@@ -142,6 +142,7 @@ impl RelCache {
                     desc.storage.attstorage = attr.attstorage;
                     desc.storage.attcompression = attr.attcompression;
                     desc.attstattarget = attr.attstattarget;
+                    desc.attoptions = attr.attoptions.clone();
                     desc.attinhcount = attr.attinhcount;
                     desc.attislocal = attr.attislocal;
                     desc.dropped = attr.attisdropped;
