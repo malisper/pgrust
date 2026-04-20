@@ -1,6 +1,6 @@
 use super::super::*;
 use crate::include::catalog::PG_CATALOG_NAMESPACE_OID;
-use crate::pgrust::database::ddl::is_system_column_name;
+use crate::pgrust::database::ddl::{is_system_column_name, lookup_heap_relation_for_alter_table};
 
 impl Database {
     pub(crate) fn execute_alter_table_drop_column_stmt_with_search_path(
@@ -10,7 +10,14 @@ impl Database {
         configured_search_path: Option<&[String]>,
     ) -> Result<StatementResult, ExecError> {
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let relation = lookup_heap_relation_for_ddl(&catalog, &drop_stmt.table_name)?;
+        let Some(relation) = lookup_heap_relation_for_alter_table(
+            &catalog,
+            &drop_stmt.table_name,
+            drop_stmt.if_exists,
+        )?
+        else {
+            return Ok(StatementResult::AffectedRows(0));
+        };
         self.table_locks
             .lock_table(relation.rel, TableLockMode::AccessExclusive, client_id);
         let xid = self.txns.write().begin();
@@ -41,7 +48,14 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let relation = lookup_heap_relation_for_ddl(&catalog, &drop_stmt.table_name)?;
+        let Some(relation) = lookup_heap_relation_for_alter_table(
+            &catalog,
+            &drop_stmt.table_name,
+            drop_stmt.if_exists,
+        )?
+        else {
+            return Ok(StatementResult::AffectedRows(0));
+        };
         if relation.namespace_oid == PG_CATALOG_NAMESPACE_OID {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "user table for ALTER TABLE DROP COLUMN",

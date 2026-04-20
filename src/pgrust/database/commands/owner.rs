@@ -4,7 +4,7 @@ use crate::backend::commands::rolecmds::role_management_error;
 use crate::backend::parser::{
     AlterRelationOwnerStatement, AlterSchemaOwnerStatement, BoundRelation,
 };
-use crate::pgrust::database::ddl::relation_kind_name;
+use crate::pgrust::database::ddl::{lookup_heap_relation_for_alter_table, relation_kind_name};
 
 fn lookup_relation_for_owner_change(
     catalog: &dyn CatalogLookup,
@@ -51,6 +51,12 @@ impl Database {
         alter_stmt: &AlterRelationOwnerStatement,
         configured_search_path: Option<&[String]>,
     ) -> Result<StatementResult, ExecError> {
+        let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+        if lookup_heap_relation_for_alter_table(&catalog, &alter_stmt.relation_name, alter_stmt.if_exists)?
+            .is_none()
+        {
+            return Ok(StatementResult::AffectedRows(0));
+        }
         self.execute_alter_relation_owner_stmt_with_search_path(
             client_id,
             alter_stmt,
@@ -99,6 +105,12 @@ impl Database {
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        if lookup_heap_relation_for_alter_table(&catalog, &alter_stmt.relation_name, alter_stmt.if_exists)?
+            .is_none()
+        {
+            return Ok(StatementResult::AffectedRows(0));
+        }
         self.execute_alter_relation_owner_stmt_in_transaction_with_search_path(
             client_id,
             alter_stmt,
