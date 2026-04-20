@@ -2689,8 +2689,15 @@ fn dependent_views_block_alter_and_drop() {
     }
 
     match session.execute(&db, "drop table base_items") {
-        Err(ExecError::Parse(ParseError::UnexpectedToken { actual, .. }))
-            if actual.contains("view depends on it: base_view") => {}
+        Err(ExecError::DetailedError {
+            message,
+            detail: Some(detail),
+            hint: Some(hint),
+            sqlstate,
+        }) if message == "cannot drop table base_items because other objects depend on it"
+            && detail == "view base_view depends on table base_items"
+            && hint == "Use DROP ... CASCADE to drop the dependent objects too."
+            && sqlstate == "2BP01" => {}
         other => panic!("expected dependent-view drop-table error, got {other:?}"),
     }
 }
@@ -7652,6 +7659,10 @@ fn foreign_keys_block_parent_ddl_and_allow_child_drop() {
         "alter table parents drop constraint parents_pkey",
     ] {
         match db.execute(1, sql) {
+            Err(ExecError::DetailedError { detail: Some(detail), .. })
+                if detail.contains("foreign key constraint")
+                    || detail.contains("depends on table")
+                    || detail.contains("depends on") => {}
             Err(ExecError::Parse(ParseError::UnexpectedToken { actual, .. }))
                 if actual.contains("foreign key constraint")
                     || actual.contains("referenced by foreign key")

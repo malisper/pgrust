@@ -58,7 +58,7 @@ Targeted reruns and notes:
   - enum creation forms required by `alter_table.sql`
   - domain constraints/defaults required by `alter_table.sql`
   - `CREATE OR REPLACE FUNCTION`
-  - `DROP TABLE ... CASCADE`
+  - [done] `DROP TABLE ... CASCADE` for ordinary, inherited, and temporary tables
   - `DROP TYPE ... CASCADE`
   - `CREATE TEMP TABLE ... PARTITION BY ...`
   - `regtype` support
@@ -155,7 +155,7 @@ Targeted reruns and notes:
 - float4.sql: 79/100
 - float8.sql: 145/184
 - foreign_data.sql: 83/540
-- foreign_key.sql: 283/1252
+- foreign_key.sql: 459/1252
   - upstream `foreign_key.sql` now starts with unsupported FK surface, so the first create-table failures cascade into most later `unknown table: fktable` mismatches
   - foreign keys with `MATCH FULL`
   - foreign keys with `NOT VALID`
@@ -164,7 +164,7 @@ Targeted reruns and notes:
   - `ALTER TABLE ... ADD FOREIGN KEY (...) REFERENCES ...` without `ADD CONSTRAINT name`
   - `ALTER TABLE ... ALTER CONSTRAINT ... ENFORCED|NOT ENFORCED`
   - `COMMENT ON CONSTRAINT`
-  - `DROP TABLE ... CASCADE`
+  - [done] `DROP TABLE ... CASCADE` for ordinary, inherited, and temporary tables
   - `ALTER TABLE ... ALTER COLUMN TYPE` when dependent indexes/constraints exist
 - functional_deps.sql: 0/40
 - generated_stored.sql: 2/131
@@ -191,7 +191,7 @@ Targeted reruns and notes:
   - Preserve PostgreSQL inheritance traversal order for inherited scans and inherited `UPDATE`/`DELETE` target expansion instead of sorting `find_all_inheritors()` output by OID
   - [done] temp `ALTER TABLE ... ADD COLUMN` inheritance propagation, including propagated defaults and merged `attinhcount`/notice handling for multi-parent temp children
   - [done] temp `ALTER TABLE ... ADD COLUMN` inline `NOT NULL` / `CHECK` propagation, including inherited child-row validation and propagated child constraint enforcement
-  - Large remaining failure buckets are unsupported inheritance-adjacent features: `CHECK ... NO INHERIT`, `DROP TABLE ... CASCADE`, partitioned-table DDL/attach, `ALTER TABLE ... NO INHERIT`, inherited constraint display via `pg_get_expr`, and some table `GRANT`/`REVOKE` parsing
+  - Large remaining failure buckets are unsupported inheritance-adjacent features: `CHECK ... NO INHERIT`, partitioned-table DDL/attach, `ALTER TABLE ... NO INHERIT`, inherited constraint display via `pg_get_expr`, and some table `GRANT`/`REVOKE` parsing
 - init_privs.sql: 0/4
 - insert.sql: 54/390
 - insert_conflict.sql: 104/266
@@ -438,7 +438,7 @@ Targeted reruns and notes:
 - enum creation forms required by `alter_table.sql`
 - domain constraints/defaults required by `alter_table.sql`
 - `CREATE OR REPLACE FUNCTION`
-- `DROP TABLE ... CASCADE`
+- [done] `DROP TABLE ... CASCADE` for ordinary, inherited, and temporary tables
 - `DROP TYPE ... CASCADE`
 - `CREATE TEMP TABLE ... PARTITION BY ...`
 - `regtype` support
