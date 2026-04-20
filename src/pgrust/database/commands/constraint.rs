@@ -10,9 +10,9 @@ use crate::include::catalog::{
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::TupleSlot;
-use crate::pgrust::database::ddl::lookup_heap_relation_for_alter_table;
 use crate::include::nodes::parsenodes::{ForeignKeyAction, ForeignKeyMatchType};
 use crate::pgrust::database::ddl::is_system_column_name;
+use crate::pgrust::database::ddl::lookup_heap_relation_for_alter_table;
 
 fn relation_basename(name: &str) -> &str {
     name.rsplit('.').next().unwrap_or(name)

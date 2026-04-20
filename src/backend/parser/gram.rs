@@ -7275,6 +7275,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                     })
                 }
                 Rule::quantified_like_suffix => build_quantified_like_predicate(left, next),
+                Rule::quantified_similar_suffix => build_quantified_similar_predicate(left, next),
                 Rule::like_suffix => build_like_predicate(left, next),
                 Rule::similar_suffix => build_similar_predicate(left, next),
                 Rule::comp_op => {
@@ -8117,6 +8118,56 @@ fn build_quantified_like_predicate(
             subquery: Box::new(subquery),
         }),
         QuantifiedLikeRhs::Expr(array) => Ok(SqlExpr::QuantifiedArray {
+            left: Box::new(left),
+            op,
+            is_all,
+            array: Box::new(array),
+        }),
+    }
+}
+
+fn build_quantified_similar_predicate(
+    left: SqlExpr,
+    pair: Pair<'_, Rule>,
+) -> Result<SqlExpr, ParseError> {
+    enum QuantifiedSimilarRhs {
+        Subquery(SelectStatement),
+        Expr(SqlExpr),
+    }
+
+    let mut negated = false;
+    let lowered = pair.as_str().to_ascii_lowercase();
+    let is_all = if lowered.contains(" all ") {
+        Some(true)
+    } else if lowered.contains(" any ") {
+        Some(false)
+    } else {
+        None
+    };
+    let mut rhs = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::kw_not => negated = true,
+            Rule::select_stmt => rhs = Some(QuantifiedSimilarRhs::Subquery(build_select(part)?)),
+            Rule::expr => rhs = Some(QuantifiedSimilarRhs::Expr(build_expr(part)?)),
+            _ => {}
+        }
+    }
+
+    let op = if negated {
+        SubqueryComparisonOp::NotSimilar
+    } else {
+        SubqueryComparisonOp::Similar
+    };
+    let is_all = is_all.ok_or(ParseError::UnexpectedEof)?;
+    match rhs.ok_or(ParseError::UnexpectedEof)? {
+        QuantifiedSimilarRhs::Subquery(subquery) => Ok(SqlExpr::QuantifiedSubquery {
+            left: Box::new(left),
+            op,
+            is_all,
+            subquery: Box::new(subquery),
+        }),
+        QuantifiedSimilarRhs::Expr(array) => Ok(SqlExpr::QuantifiedArray {
             left: Box::new(left),
             op,
             is_all,

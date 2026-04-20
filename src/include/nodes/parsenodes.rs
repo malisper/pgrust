@@ -2034,6 +2034,8 @@ pub enum SubqueryComparisonOp {
     NotLike,
     ILike,
     NotILike,
+    Similar,
+    NotSimilar,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

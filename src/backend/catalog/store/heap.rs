@@ -13,8 +13,7 @@ use crate::backend::catalog::pg_depend::{
     derived_pg_depend_rows, foreign_key_constraint_depend_rows,
     index_backed_constraint_depend_rows, inheritance_depend_rows,
     primary_key_owned_not_null_depend_rows, proc_depend_rows, relation_constraint_depend_rows,
-    relation_rule_depend_rows, sort_pg_depend_rows, trigger_depend_rows,
-    view_rewrite_depend_rows,
+    relation_rule_depend_rows, sort_pg_depend_rows, trigger_depend_rows, view_rewrite_depend_rows,
 };
 use crate::backend::catalog::rowcodec::{
     pg_description_row_from_values, pg_statistic_row_from_values,
@@ -38,7 +37,7 @@ use crate::include::catalog::{
     PG_AUTHID_RELATION_OID, PG_CLASS_RELATION_OID, PG_NAMESPACE_RELATION_OID,
     PG_OPCLASS_RELATION_OID, PG_OPERATOR_RELATION_OID, PG_OPFAMILY_RELATION_OID,
     PG_PROC_RELATION_OID, PG_REWRITE_RELATION_OID, PG_TYPE_RELATION_OID, PgAmopRow, PgAmprocRow,
-    PgAttributeRow, PgAttrdefRow, PgClassRow, PgConstraintRow, PgDatabaseRow, PgDependRow,
+    PgAttrdefRow, PgAttributeRow, PgClassRow, PgConstraintRow, PgDatabaseRow, PgDependRow,
     PgDescriptionRow, PgInheritsRow, PgNamespaceRow, PgOpclassRow, PgOpfamilyRow, PgProcRow,
     PgRewriteRow, PgStatisticRow, PgTablespaceRow, relkind_has_storage,
 };
@@ -1170,19 +1169,18 @@ impl CatalogStore {
         ctx: &CatalogWriteContext,
     ) -> Result<(u32, CatalogMutationEffect), CatalogError> {
         let catcache = visible_catalog_caches_for_ctx(self, ctx)?.0;
-        let old_visible =
-            trigger_row_visible(&catcache, old_row.tgrelid, &old_row.tgname)?;
+        let old_visible = trigger_row_visible(&catcache, old_row.tgrelid, &old_row.tgname)?;
         let new_relation_triggers = catcache.trigger_rows_for_relation(row.tgrelid);
         if new_relation_triggers.iter().any(|existing| {
-            existing.oid != old_visible.oid
-                && existing.tgname.eq_ignore_ascii_case(&row.tgname)
+            existing.oid != old_visible.oid && existing.tgname.eq_ignore_ascii_case(&row.tgname)
         }) {
             return Err(CatalogError::UniqueViolation(
                 "pg_trigger_tgrelid_tgname_index".into(),
             ));
         }
         row.oid = old_visible.oid;
-        let old_depends = trigger_depend_rows(old_visible.oid, old_visible.tgrelid, old_visible.tgfoid);
+        let old_depends =
+            trigger_depend_rows(old_visible.oid, old_visible.tgrelid, old_visible.tgfoid);
         let new_depends = trigger_depend_rows(row.oid, row.tgrelid, row.tgfoid);
 
         let old_class = catcache
@@ -1386,7 +1384,10 @@ impl CatalogStore {
             });
         }
 
-        let mut kinds = vec![BootstrapCatalogKind::PgDepend, BootstrapCatalogKind::PgInherits];
+        let mut kinds = vec![
+            BootstrapCatalogKind::PgDepend,
+            BootstrapCatalogKind::PgInherits,
+        ];
         if !rows_to_delete.classes.is_empty() {
             kinds.push(BootstrapCatalogKind::PgClass);
         }
@@ -1447,9 +1448,11 @@ impl CatalogStore {
     ) -> Result<(CatalogEntry, CatalogMutationEffect), CatalogError> {
         let name = name.into();
         let catcache = visible_catalog_caches_for_ctx(self, ctx)?.0;
-        if catcache.class_rows().iter().any(|row| {
-            row.relnamespace == namespace_oid && row.relname.eq_ignore_ascii_case(&name)
-        }) {
+        if catcache
+            .class_rows()
+            .iter()
+            .any(|row| row.relnamespace == namespace_oid && row.relname.eq_ignore_ascii_case(&name))
+        {
             return Err(CatalogError::TableAlreadyExists(
                 normalize_catalog_name(&name).to_ascii_lowercase(),
             ));
@@ -1563,9 +1566,11 @@ impl CatalogStore {
     ) -> Result<(CatalogEntry, CatalogMutationEffect), CatalogError> {
         let name = name.into();
         let catcache = visible_catalog_caches_for_ctx(self, ctx)?.0;
-        if catcache.class_rows().iter().any(|row| {
-            row.relnamespace == namespace_oid && row.relname.eq_ignore_ascii_case(&name)
-        }) {
+        if catcache
+            .class_rows()
+            .iter()
+            .any(|row| row.relnamespace == namespace_oid && row.relname.eq_ignore_ascii_case(&name))
+        {
             return Err(CatalogError::TableAlreadyExists(
                 normalize_catalog_name(&name).to_ascii_lowercase(),
             ));
@@ -1753,7 +1758,8 @@ impl CatalogStore {
         };
         control.next_oid = control.next_oid.saturating_add(1);
 
-        let mut depends = index_backed_constraint_depend_rows(constraint.oid, relation_oid, index_oid);
+        let mut depends =
+            index_backed_constraint_depend_rows(constraint.oid, relation_oid, index_oid);
         if contype == crate::include::catalog::CONSTRAINT_PRIMARY {
             for &not_null_constraint_oid in primary_key_owned_not_null_oids {
                 depends.extend(primary_key_owned_not_null_depend_rows(
@@ -2334,9 +2340,9 @@ impl CatalogStore {
             ctx,
             &PhysicalCatalogRows {
                 constraints: vec![removed.clone()],
-                    depends: removed_depends,
-                    ..PhysicalCatalogRows::default()
-                },
+                depends: removed_depends,
+                ..PhysicalCatalogRows::default()
+            },
             self.scope_db_oid(),
             &kinds,
         )?;
@@ -2733,7 +2739,9 @@ impl CatalogStore {
                 && row.relnamespace == relation.namespace_oid
                 && row.relname.eq_ignore_ascii_case(new_name)
         }) {
-            return Err(CatalogError::TableAlreadyExists(new_name.to_ascii_lowercase()));
+            return Err(CatalogError::TableAlreadyExists(
+                new_name.to_ascii_lowercase(),
+            ));
         }
         let entry = catalog_entry_from_visible_relation(&catcache, relation)?;
         let old_rows = rows_for_existing_relation(&catcache, &entry)?;
@@ -3366,7 +3374,9 @@ fn build_toast_catalog_changes(
     toast_namespace_oid: u32,
     control: &mut CatalogControl,
 ) -> Result<Option<ToastCatalogChanges>, CatalogError> {
-    if parent.relkind != 'r' || parent.reltoastrelid != 0 || !relation_needs_toast_table(&parent.desc)
+    if parent.relkind != 'r'
+        || parent.reltoastrelid != 0
+        || !relation_needs_toast_table(&parent.desc)
     {
         return Ok(None);
     }
@@ -3390,7 +3400,10 @@ fn build_toast_catalog_changes(
     )?;
     new_parent.reltoastrelid = toast_entry.relation_oid;
 
-    let index_name = format!("{toast_namespace_name}.{}", toast_index_name(parent.relation_oid));
+    let index_name = format!(
+        "{toast_namespace_name}.{}",
+        toast_index_name(parent.relation_oid)
+    );
     let mut index_entry = build_index_entry(
         catcache,
         index_name.clone(),
@@ -3472,7 +3485,10 @@ fn mutate_visible_relation_entry_mvcc<T, F>(
     mutator: F,
 ) -> Result<(CatalogEntry, CatalogEntry, T, Vec<BootstrapCatalogKind>), CatalogError>
 where
-    F: FnOnce(&mut CatalogEntry, &mut CatalogControl) -> Result<(T, Vec<BootstrapCatalogKind>), CatalogError>,
+    F: FnOnce(
+        &mut CatalogEntry,
+        &mut CatalogControl,
+    ) -> Result<(T, Vec<BootstrapCatalogKind>), CatalogError>,
 {
     let (catcache, relcache) = visible_catalog_caches_for_ctx(store, ctx)?;
     let relation = relcache
@@ -3496,7 +3512,10 @@ where
     Ok((old_entry, new_entry, extra, kinds))
 }
 
-fn relation_column_index_visible(desc: &RelationDesc, column_name: &str) -> Result<usize, CatalogError> {
+fn relation_column_index_visible(
+    desc: &RelationDesc,
+    column_name: &str,
+) -> Result<usize, CatalogError> {
     desc.columns
         .iter()
         .enumerate()
@@ -3530,10 +3549,13 @@ fn relation_constraint_exists_visible(
     constraint_name: &str,
     contype: Option<char>,
 ) -> bool {
-    catcache.constraint_rows_for_relation(relation_oid).into_iter().any(|row| {
-        contype.is_none_or(|expected| row.contype == expected)
-            && row.conname.eq_ignore_ascii_case(constraint_name)
-    })
+    catcache
+        .constraint_rows_for_relation(relation_oid)
+        .into_iter()
+        .any(|row| {
+            contype.is_none_or(|expected| row.contype == expected)
+                && row.conname.eq_ignore_ascii_case(constraint_name)
+        })
 }
 
 fn relation_constraint_row_visible(
@@ -3574,7 +3596,10 @@ fn trigger_row_visible(
         .ok_or_else(|| CatalogError::UnknownTable(trigger_name.to_string()))
 }
 
-fn rewrite_row_visible(catcache: &CatCache, rewrite_oid: u32) -> Result<PgRewriteRow, CatalogError> {
+fn rewrite_row_visible(
+    catcache: &CatCache,
+    rewrite_oid: u32,
+) -> Result<PgRewriteRow, CatalogError> {
     catcache
         .rewrite_rows()
         .into_iter()
@@ -3649,30 +3674,31 @@ fn rows_for_new_relation_entry(
     rows.types
         .extend(type_rows_for_relation_name(relation_name, entry));
 
-    rows.attributes.extend(
-        entry
-            .desc
-            .columns
-            .iter()
-            .enumerate()
-            .map(|(idx, column)| PgAttributeRow {
-                attrelid: entry.relation_oid,
-                attname: column.name.clone(),
-                atttypid: resolved_sql_type_oid(catcache, entry, column.sql_type),
-                attlen: column.storage.attlen,
-                attnum: idx.saturating_add(1) as i16,
-                attnotnull: !column.storage.nullable,
-                attisdropped: column.dropped,
-                atttypmod: column.sql_type.typmod,
-                attalign: column.storage.attalign,
-                attstorage: column.storage.attstorage,
-                attcompression: column.storage.attcompression,
-                attstattarget: column.attstattarget,
-                attinhcount: column.attinhcount,
-                attislocal: column.attislocal,
-                sql_type: column.sql_type,
-            }),
-    );
+    rows.attributes
+        .extend(
+            entry
+                .desc
+                .columns
+                .iter()
+                .enumerate()
+                .map(|(idx, column)| PgAttributeRow {
+                    attrelid: entry.relation_oid,
+                    attname: column.name.clone(),
+                    atttypid: resolved_sql_type_oid(catcache, entry, column.sql_type),
+                    attlen: column.storage.attlen,
+                    attnum: idx.saturating_add(1) as i16,
+                    attnotnull: !column.storage.nullable,
+                    attisdropped: column.dropped,
+                    atttypmod: column.sql_type.typmod,
+                    attalign: column.storage.attalign,
+                    attstorage: column.storage.attstorage,
+                    attcompression: column.storage.attcompression,
+                    attstattarget: column.attstattarget,
+                    attinhcount: column.attinhcount,
+                    attislocal: column.attislocal,
+                    sql_type: column.sql_type,
+                }),
+        );
     rows.attrdefs.extend(
         entry
             .desc
@@ -3727,7 +3753,10 @@ fn class_row_for_relation_name(relation_name: &str, entry: &CatalogEntry) -> PgC
     }
 }
 
-fn type_rows_for_relation_name(relation_name: &str, entry: &CatalogEntry) -> Vec<crate::include::catalog::PgTypeRow> {
+fn type_rows_for_relation_name(
+    relation_name: &str,
+    entry: &CatalogEntry,
+) -> Vec<crate::include::catalog::PgTypeRow> {
     let relname = relation_object_name(relation_name);
     let mut rows = Vec::new();
     if entry.row_type_oid != 0 {
@@ -3835,7 +3864,10 @@ fn rows_for_existing_relation(
     object_oids.extend(attrdefs.iter().map(|row| row.oid));
     object_oids.extend(rewrites.iter().map(|row| row.oid));
     object_oids.extend(triggers.iter().map(|row| row.oid));
-    let constraint_oids = constraints.iter().map(|row| row.oid).collect::<BTreeSet<_>>();
+    let constraint_oids = constraints
+        .iter()
+        .map(|row| row.oid)
+        .collect::<BTreeSet<_>>();
 
     let mut rows = PhysicalCatalogRows {
         classes: vec![class_row],
@@ -3915,7 +3947,11 @@ fn catalog_entry_from_visible_relation(
     })
 }
 
-fn resolved_sql_type_oid(catcache: &CatCache, entry: &CatalogEntry, sql_type: crate::backend::parser::SqlType) -> u32 {
+fn resolved_sql_type_oid(
+    catcache: &CatCache,
+    entry: &CatalogEntry,
+    sql_type: crate::backend::parser::SqlType,
+) -> u32 {
     if sql_type.is_array
         && matches!(
             sql_type.kind,
@@ -3940,8 +3976,15 @@ fn drop_relation_entries_visible(
     catcache: &CatCache,
     relcache: &RelCache,
     relation_oid: u32,
-) -> Result<(PhysicalCatalogRows, PhysicalCatalogRows, Vec<CatalogEntry>, Vec<u32>), CatalogError>
-{
+) -> Result<
+    (
+        PhysicalCatalogRows,
+        PhysicalCatalogRows,
+        Vec<CatalogEntry>,
+        Vec<u32>,
+    ),
+    CatalogError,
+> {
     let oids = drop_relation_oids_by_oid_visible(relcache, &catcache.depend_rows(), relation_oid)?;
     let dropped = oids
         .iter()
@@ -3971,7 +4014,10 @@ fn drop_relation_entries_visible(
 
     let mut rows_to_delete = PhysicalCatalogRows::default();
     for entry in &dropped {
-        extend_physical_catalog_rows(&mut rows_to_delete, rows_for_existing_relation(catcache, entry)?);
+        extend_physical_catalog_rows(
+            &mut rows_to_delete,
+            rows_for_existing_relation(catcache, entry)?,
+        );
     }
 
     let mut rows_to_insert = PhysicalCatalogRows::default();
