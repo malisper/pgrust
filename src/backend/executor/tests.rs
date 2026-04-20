@@ -5537,6 +5537,26 @@ fn pg_input_is_valid_reports_varchar_typmod_results() {
 }
 
 #[test]
+fn pg_input_is_valid_reports_numeric_overflow_and_prefixed_literals() {
+    let base = temp_dir("pg_input_is_valid_numeric");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select \
+                pg_input_is_valid('1e400000', 'numeric'), \
+                pg_input_is_valid('  -0B_1010  ', 'numeric'), \
+                pg_input_is_valid('  +0X_FF  ', 'numeric')",
+        )
+        .unwrap(),
+        vec![vec![Value::Bool(false), Value::Bool(true), Value::Bool(true)]],
+    );
+}
+
+#[test]
 fn pg_input_error_info_returns_one_row_with_structured_fields() {
     let base = temp_dir("pg_input_error_info_int2");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -5584,6 +5604,28 @@ fn pg_input_error_info_reports_float_out_of_range() {
         .unwrap(),
         vec![vec![
             Value::Text("\"1e400\" is out of range for type real".into()),
+            Value::Null,
+            Value::Null,
+            Value::Text("22003".into()),
+        ]],
+    );
+}
+
+#[test]
+fn pg_input_error_info_reports_numeric_overflow() {
+    let base = temp_dir("pg_input_error_info_numeric_overflow");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select * from pg_input_error_info('1e400000', 'numeric')",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Text("value overflows numeric format".into()),
             Value::Null,
             Value::Null,
             Value::Text("22003".into()),
@@ -6706,6 +6748,28 @@ fn numeric_special_values_and_extended_input_forms_parse() {
             }
             other => panic!("expected query result, got {:?}", other),
         }
+}
+
+#[test]
+fn numeric_prefixed_literals_allow_space_and_prefix_underscore() {
+    let base = temp_dir("numeric_prefixed_literals_spaced");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select '  -0B_1010  '::numeric, '  +0X_FF  '::numeric",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Numeric("-10".into()), Value::Numeric("255".into())]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
 }
 
 #[test]
