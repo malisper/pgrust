@@ -44,13 +44,16 @@ nulls_ordering = { kw_nulls ~ (kw_first | kw_last) }
 limit_clause = { kw_limit ~ integer }
 offset_clause = { kw_offset ~ integer }
 locking_clause = { kw_for ~ ((kw_no ~ kw_key ~ kw_update) | (kw_key ~ kw_share) | kw_update | kw_share) }
-set_stmt = { kw_set ~ set_scope? ~ identifier ~ (("=" | kw_to) ~ set_value_list) }
+set_stmt = { kw_set ~ set_scope? ~ (set_time_zone_clause | set_standard_clause) }
 reset_stmt = { kw_reset ~ (kw_all | identifier) }
 set_session_authorization_stmt = { kw_set ~ kw_session ~ kw_authorization ~ identifier }
 reset_session_authorization_stmt = { kw_reset ~ kw_session ~ kw_authorization }
 set_role_stmt = { kw_set ~ kw_role ~ (kw_none | identifier) }
 reset_role_stmt = { kw_reset ~ kw_role }
 set_scope = { kw_session | kw_local }
+set_standard_clause = { identifier ~ (("=" | kw_to) ~ set_value_list) }
+set_time_zone_clause = { time_zone_guc_name ~ ((("=" | kw_to) ~ set_value_list) | set_value_list) }
+time_zone_guc_name = { kw_time ~ kw_zone }
 set_value_list = { set_value_atom ~ ("," ~ set_value_atom)* }
 set_value_atom = { signed_set_value | kw_default | kw_true | kw_false | kw_on_value | kw_off | quoted_string_literal | identifier | numeric_literal | integer }
 signed_set_value = { ("+" | "-") ~ (numeric_literal | integer | identifier) }

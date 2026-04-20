@@ -570,6 +570,7 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::IsFinite => args.len() == 1,
             BuiltinScalarFunction::MakeDate => args.len() == 3,
             BuiltinScalarFunction::GetDatabaseEncoding => args.is_empty(),
+            BuiltinScalarFunction::PgMyTempSchema => args.is_empty(),
             BuiltinScalarFunction::PgRustInternalBinaryCoercible => args.len() == 2,
             BuiltinScalarFunction::PgRustTestFdwHandler => args.is_empty(),
             BuiltinScalarFunction::PgRustTestEncSetup => args.is_empty(),
@@ -1255,6 +1256,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "getdatabaseencoding",
             BuiltinScalarFunction::GetDatabaseEncoding,
         ),
+        ("pg_my_temp_schema", BuiltinScalarFunction::PgMyTempSchema),
         (
             "pg_rust_internal_binary_coercible",
             BuiltinScalarFunction::PgRustInternalBinaryCoercible,
@@ -1881,6 +1883,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::SetVal
             | BuiltinScalarFunction::PgGetSerialSequence
             | BuiltinScalarFunction::GetDatabaseEncoding
+            | BuiltinScalarFunction::PgMyTempSchema
             | BuiltinScalarFunction::PgRustTestFdwHandler
             | BuiltinScalarFunction::PgStatGetCheckpointerNumTimed
             | BuiltinScalarFunction::PgStatGetCheckpointerNumRequested
@@ -2346,6 +2349,14 @@ mod tests {
         ));
         assert!(explicit_text_input_cast_exists(
             &Catalog::default(),
+            SqlType::new(SqlTypeKind::TimeTz)
+        ));
+        assert!(explicit_text_input_cast_exists(
+            &Catalog::default(),
+            SqlType::new(SqlTypeKind::TimestampTz)
+        ));
+        assert!(explicit_text_input_cast_exists(
+            &Catalog::default(),
             SqlType::new(SqlTypeKind::Name)
         ));
         assert!(explicit_text_input_cast_exists(
@@ -2374,6 +2385,7 @@ mod tests {
         );
         assert!(validate_scalar_function_arity(BuiltinScalarFunction::Lower, &[]).is_err());
         assert!(validate_scalar_function_arity(BuiltinScalarFunction::Random, &[]).is_ok());
+        assert!(validate_scalar_function_arity(BuiltinScalarFunction::PgMyTempSchema, &[]).is_ok());
         assert!(
             validate_scalar_function_arity(BuiltinScalarFunction::Random, &[SqlExpr::Default])
                 .is_err()
@@ -2487,6 +2499,10 @@ mod tests {
         assert_eq!(
             fixed_scalar_return_type(BuiltinScalarFunction::BoolEq),
             Some(SqlType::new(SqlTypeKind::Bool))
+        );
+        assert_eq!(
+            fixed_scalar_return_type(BuiltinScalarFunction::PgMyTempSchema),
+            Some(SqlType::new(SqlTypeKind::Text))
         );
         assert_eq!(
             fixed_scalar_return_type(BuiltinScalarFunction::ToJsonb),

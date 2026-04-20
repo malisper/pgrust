@@ -516,7 +516,13 @@ impl AccumState {
                 if *jsonb {
                     let mut items = Vec::with_capacity(values.len());
                     for value in values {
-                        items.push(jsonb_from_value(value).unwrap_or(JsonbValue::Null));
+                        items.push(
+                            jsonb_from_value(
+                                value,
+                                &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+                            )
+                            .unwrap_or(JsonbValue::Null),
+                        );
                     }
                     Value::Jsonb(encode_jsonb(&JsonbValue::Array(items)))
                 } else {
@@ -534,7 +540,11 @@ impl AccumState {
                             .map(|(k, v)| {
                                 (
                                     json_object_agg_key(k),
-                                    jsonb_from_value(v).unwrap_or(JsonbValue::Null),
+                                    jsonb_from_value(
+                                        v,
+                                        &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+                                    )
+                                    .unwrap_or(JsonbValue::Null),
                                 )
                             })
                             .collect(),

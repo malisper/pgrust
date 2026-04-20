@@ -3216,7 +3216,17 @@ fn build_set(pair: Pair<'_, Rule>) -> Result<SetStatement, ParseError> {
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::set_scope => is_local = part.as_str().eq_ignore_ascii_case("local"),
-            Rule::identifier if name.is_none() => name = Some(build_identifier(part)),
+            Rule::set_standard_clause | Rule::set_time_zone_clause => {
+                for clause_part in part.into_inner() {
+                    match clause_part.as_rule() {
+                        Rule::identifier | Rule::time_zone_guc_name if name.is_none() => {
+                            name = Some(build_set_guc_name(clause_part));
+                        }
+                        Rule::set_value_list => value = Some(build_set_value_list(clause_part)),
+                        _ => {}
+                    }
+                }
+            }
             Rule::set_value_list => value = Some(build_set_value_list(part)),
             _ => {}
         }
@@ -3226,6 +3236,14 @@ fn build_set(pair: Pair<'_, Rule>) -> Result<SetStatement, ParseError> {
         value: value.ok_or(ParseError::UnexpectedEof)?,
         is_local,
     })
+}
+
+fn build_set_guc_name(pair: Pair<'_, Rule>) -> String {
+    match pair.as_rule() {
+        Rule::time_zone_guc_name => "timezone".to_string(),
+        Rule::identifier => build_identifier(pair),
+        _ => pair.as_str().to_ascii_lowercase(),
+    }
 }
 
 fn build_show(pair: Pair<'_, Rule>) -> Result<ShowStatement, ParseError> {
@@ -7058,7 +7076,12 @@ fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
         Rule::kw_regdictionary => RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegDictionary)),
         Rule::kw_bool | Rule::kw_boolean => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bool)),
         Rule::date_type | Rule::kw_date => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Date)),
-        Rule::time_type => {
+        Rule::time_type
+        | Rule::kw_timetz
+        | Rule::kw_timetz_atom
+        | Rule::kw_time
+        | Rule::kw_time_atom => {
+            let normalized = pair.as_str().trim().to_ascii_lowercase();
             let precision = pair
                 .clone()
                 .into_inner()
@@ -7066,12 +7089,7 @@ fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
                 .map(build_type_len)
                 .transpose()
                 .expect("time precision");
-            let kind = if pair.as_str().eq_ignore_ascii_case("timetz")
-                || pair
-                    .as_str()
-                    .to_ascii_lowercase()
-                    .contains("with time zone")
-            {
+            let kind = if normalized == "timetz" || normalized.contains("with time zone") {
                 SqlTypeKind::TimeTz
             } else {
                 SqlTypeKind::Time
@@ -7082,7 +7100,12 @@ fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
                     .unwrap_or_else(|| SqlType::new(kind)),
             )
         }
-        Rule::timestamp_type | Rule::kw_timestamp => {
+        Rule::timestamp_type
+        | Rule::kw_timestamptz
+        | Rule::kw_timestamptz_atom
+        | Rule::kw_timestamp
+        | Rule::kw_timestamp_atom => {
+            let normalized = pair.as_str().trim().to_ascii_lowercase();
             let precision = pair
                 .clone()
                 .into_inner()
@@ -7090,12 +7113,7 @@ fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
                 .map(build_type_len)
                 .transpose()
                 .expect("timestamp precision");
-            let kind = if pair.as_str().eq_ignore_ascii_case("timestamptz")
-                || pair
-                    .as_str()
-                    .to_ascii_lowercase()
-                    .contains("with time zone")
-            {
+            let kind = if normalized == "timestamptz" || normalized.contains("with time zone") {
                 SqlTypeKind::TimestampTz
             } else {
                 SqlTypeKind::Timestamp

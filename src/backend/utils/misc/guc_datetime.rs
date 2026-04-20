@@ -83,8 +83,28 @@ pub fn format_datestyle(config: &DateTimeConfig) -> String {
 pub fn parse_timezone(value: &str) -> Option<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
+        return None;
+    }
+
+    if let Ok(hours) = trimmed.parse::<f64>() {
+        if !hours.is_finite() {
+            return None;
+        }
+        return Some(format_offset((hours * 3600.0).round() as i32));
+    }
+
+    Some(trimmed.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_numeric_timezones_as_fixed_offsets() {
+        assert_eq!(parse_timezone("10.5"), Some("+10:30".into()));
+        assert_eq!(parse_timezone("-8"), Some("-08".into()));
+        assert_eq!(parse_timezone("+9.75"), Some("+09:45".into()));
     }
 }
+use crate::backend::utils::time::datetime::format_offset;
