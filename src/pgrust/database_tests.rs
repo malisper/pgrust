@@ -5760,6 +5760,129 @@ fn create_table_foreign_keys_are_enforced_and_persisted() {
 }
 
 #[test]
+fn foreign_keys_support_match_full() {
+    let base = temp_dir("foreign_keys_match_full");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table parents (id int4, code text, primary key (id, code))",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table children (
+            id int4 primary key,
+            parent_id int4,
+            parent_code text,
+            constraint children_parent_fk
+                foreign key (parent_id, parent_code) references parents(id, code) match full
+        )",
+    )
+    .unwrap();
+    db.execute(1, "insert into parents values (1, 'one')").unwrap();
+    db.execute(1, "insert into children values (1, 1, 'one')")
+        .unwrap();
+    db.execute(1, "insert into children values (2, null, null)")
+        .unwrap();
+
+    match db.execute(1, "insert into children values (3, 1, null)") {
+        Err(ExecError::ForeignKeyViolation {
+            constraint, detail, ..
+        }) => {
+            assert_eq!(constraint, "children_parent_fk");
+            assert!(
+                detail
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("MATCH FULL"))
+            );
+        }
+        other => panic!("expected MATCH FULL foreign-key violation, got {other:?}"),
+    }
+}
+
+#[test]
+fn foreign_keys_apply_referential_actions() {
+    let base = temp_dir("foreign_keys_referential_actions");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table parents (id int4 primary key)")
+        .unwrap();
+    db.execute(1, "insert into parents values (0), (1)").unwrap();
+    db.execute(
+        1,
+        "create table cascade_children (
+            id int4 primary key,
+            parent_id int4 references parents(id) on update cascade on delete cascade
+        )",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table set_null_children (
+            id int4 primary key,
+            parent_id int4 references parents(id) on update set null on delete set null
+        )",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table set_default_update_children (
+            id int4 primary key,
+            parent_id int4 default 0 references parents(id) on update set default
+        )",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table set_default_delete_children (
+            id int4 primary key,
+            parent_id int4 default 0 references parents(id) on delete set default
+        )",
+    )
+    .unwrap();
+
+    db.execute(1, "insert into cascade_children values (1, 1)")
+        .unwrap();
+    db.execute(1, "insert into set_null_children values (1, 1)")
+        .unwrap();
+    db.execute(1, "insert into set_default_update_children values (1, 1)")
+        .unwrap();
+
+    db.execute(1, "update parents set id = 2 where id = 1").unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select parent_id from cascade_children"),
+        vec![vec![Value::Int32(2)]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select parent_id from set_null_children"),
+        vec![vec![Value::Null]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select parent_id from set_default_update_children"),
+        vec![vec![Value::Int32(0)]]
+    );
+
+    db.execute(1, "insert into set_default_delete_children values (1, 2)")
+        .unwrap();
+    db.execute(1, "delete from parents where id = 2").unwrap();
+
+    assert!(query_rows(&db, 1, "select * from cascade_children").is_empty());
+    assert_eq!(
+        query_rows(&db, 1, "select parent_id from set_null_children"),
+        vec![vec![Value::Null]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select parent_id from set_default_update_children"),
+        vec![vec![Value::Int32(0)]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select parent_id from set_default_delete_children"),
+        vec![vec![Value::Int32(0)]]
+    );
+}
+
+#[test]
 fn create_table_serial_creates_sequence_defaults_and_persists_state() {
     let base = temp_dir("create_table_serial_defaults");
     let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();

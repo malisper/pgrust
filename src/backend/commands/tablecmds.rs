@@ -22,9 +22,10 @@ use crate::backend::parser::{
     BoundInsertStatement, BoundMergeAction, BoundMergeStatement, BoundMergeWhenClause,
     BoundModifyRowSource, BoundOnConflictAction, BoundReferencedByForeignKey,
     BoundRelationConstraints, BoundUpdateStatement, BoundUpdateTarget, Catalog, CatalogLookup,
-    DropTableStatement, ExplainStatement, MaintenanceTarget, MergeStatement, ParseError,
-    SelectStatement, SqlType, SqlTypeKind, Statement, TruncateTableStatement, VacuumStatement,
-    bind_create_table,
+    DropTableStatement, ExplainStatement, ForeignKeyAction, MaintenanceTarget, MergeStatement,
+    ParseError, SelectStatement, SqlType, SqlTypeKind, Statement, TruncateTableStatement,
+    VacuumStatement, bind_create_table, bind_referenced_by_foreign_keys,
+    bind_scalar_expr_in_scope,
 };
 use crate::backend::rewrite::pg_rewrite_query;
 use crate::backend::storage::smgr::ForkNumber;
@@ -40,8 +41,8 @@ use crate::backend::executor::exec_expr::{compile_predicate_with_decoder, eval_e
 use crate::backend::executor::exec_tuples::CompiledTupleDecoder;
 use crate::backend::executor::value_io::{coerce_assignment_value, encode_tuple_values};
 use crate::backend::executor::{
-    ExecError, ExecutorContext, Expr, StatementResult, ToastRelationRef, create_query_desc,
-    executor_start,
+    ExecError, ExecutorContext, Expr, StatementResult, ToastRelationRef, compare_order_values,
+    create_query_desc, executor_start,
 };
 use crate::backend::storage::page::bufpage::MAX_HEAP_TUPLE_SIZE;
 use crate::include::access::amapi::IndexUniqueCheck;
@@ -749,12 +750,15 @@ pub(crate) fn write_updated_row(
         current_values,
         ctx,
     )?;
-    crate::backend::executor::enforce_inbound_foreign_keys_on_update(
+    apply_inbound_foreign_key_actions_on_update(
         relation_name,
         referenced_by_foreign_keys,
         current_old_values,
         current_values,
         ctx,
+        xid,
+        cid,
+        waiter,
     )?;
     let (replacement, toasted) =
         toast_tuple_for_write(desc, current_values, toast, toast_index, ctx, xid, cid)?;
@@ -967,6 +971,357 @@ fn collect_matching_rows_index(
         })
     })?;
     Ok(rows)
+}
+
+fn first_toast_index(
+    catalog: &dyn CatalogLookup,
+    toast: Option<ToastRelationRef>,
+) -> Option<BoundIndexRelation> {
+    let toast = toast?;
+    catalog.index_relations_for_heap(toast.relation_oid).into_iter().next()
+}
+
+fn build_equality_scan_keys(
+    key_values: &[Value],
+) -> Vec<crate::include::access::scankey::ScanKeyData> {
+    key_values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| crate::include::access::scankey::ScanKeyData {
+            attribute_number: index.saturating_add(1) as i16,
+            strategy: 3,
+            argument: value.to_owned_value(),
+        })
+        .collect()
+}
+
+fn row_matches_key(values: &[Value], key_indexes: &[usize], key_values: &[Value]) -> bool {
+    key_indexes.iter().zip(key_values).all(|(index, expected)| {
+        values.get(*index).is_some_and(|actual| {
+            compare_order_values(actual, expected, None, false) == std::cmp::Ordering::Equal
+        })
+    })
+}
+
+fn key_columns_changed(previous_values: &[Value], values: &[Value], indexes: &[usize]) -> bool {
+    indexes.iter().any(|index| {
+        let previous = previous_values.get(*index).unwrap_or(&Value::Null);
+        let current = values.get(*index).unwrap_or(&Value::Null);
+        compare_order_values(previous, current, None, false) != std::cmp::Ordering::Equal
+    })
+}
+
+fn relation_write_state_for_foreign_key(
+    constraint: &BoundReferencedByForeignKey,
+    ctx: &ExecutorContext,
+) -> Result<
+    (
+        BoundRelationConstraints,
+        Vec<BoundReferencedByForeignKey>,
+        Vec<BoundIndexRelation>,
+        Option<BoundIndexRelation>,
+    ),
+    ExecError,
+> {
+    let catalog = ctx.catalog.as_ref().ok_or_else(|| ExecError::DetailedError {
+        message: "foreign key action failed".into(),
+        detail: Some("executor context missing visible catalog".into()),
+        hint: None,
+        sqlstate: "XX000",
+    })?;
+    // :HACK: Recursive referential actions only need the child table's local
+    // row-shape checks plus its inbound FK graph. Rebinding outbound FKs from
+    // the catalog here is brittle today because some FK rows don't round-trip
+    // their referenced index binding cleanly through the visible-catalog path.
+    let constraints = BoundRelationConstraints {
+        not_nulls: constraint
+            .child_desc
+            .columns
+            .iter()
+            .enumerate()
+            .filter_map(|(column_index, column)| {
+                column.not_null_constraint_name.as_ref().map(|constraint_name| {
+                    crate::backend::parser::BoundNotNullConstraint {
+                        column_index,
+                        constraint_name: constraint_name.clone(),
+                    }
+                })
+            })
+            .collect(),
+        checks: Vec::new(),
+        foreign_keys: Vec::new(),
+    };
+    let referenced_by = bind_referenced_by_foreign_keys(
+        constraint.child_relation_oid,
+        &constraint.child_desc,
+        catalog,
+    )
+    .map_err(ExecError::Parse)?;
+    Ok((
+        constraints,
+        referenced_by,
+        catalog.index_relations_for_heap(constraint.child_relation_oid),
+        first_toast_index(catalog, constraint.child_toast),
+    ))
+}
+
+fn collect_referencing_rows(
+    constraint: &BoundReferencedByForeignKey,
+    key_values: &[Value],
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<(ItemPointerData, Vec<Value>)>, ExecError> {
+    if key_values.iter().any(|value| matches!(value, Value::Null)) {
+        return Ok(Vec::new());
+    }
+    if let Some(index) = &constraint.child_index {
+        return collect_matching_rows_index(
+            constraint.child_rel,
+            &constraint.child_desc,
+            constraint.child_toast,
+            index,
+            &build_equality_scan_keys(key_values),
+            None,
+            ctx,
+        );
+    }
+    let rows = collect_matching_rows_heap(
+        constraint.child_rel,
+        &constraint.child_desc,
+        constraint.child_toast,
+        None,
+        ctx,
+    )?;
+    Ok(rows
+        .into_iter()
+        .filter(|(_, values)| row_matches_key(values, &constraint.child_column_indexes, key_values))
+        .collect())
+}
+
+fn evaluate_default_value(
+    desc: &RelationDesc,
+    column_index: usize,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    let Some(default_sql) = desc.columns[column_index].default_expr.as_deref() else {
+        return Ok(Value::Null);
+    };
+    let catalog = ctx.catalog.as_ref().ok_or_else(|| ExecError::DetailedError {
+        message: "foreign key action failed".into(),
+        detail: Some("executor context missing visible catalog".into()),
+        hint: None,
+        sqlstate: "XX000",
+    })?;
+    let parsed = crate::backend::parser::parse_expr(default_sql).map_err(ExecError::Parse)?;
+    let (bound, _) = bind_scalar_expr_in_scope(&parsed, &[], catalog).map_err(ExecError::Parse)?;
+    let mut slot = TupleSlot::virtual_row(vec![Value::Null; desc.columns.len()]);
+    eval_expr(&bound, &mut slot, ctx)
+}
+
+fn apply_referential_action_to_rows(
+    constraint: &BoundReferencedByForeignKey,
+    action: ForeignKeyAction,
+    key_values: &[Value],
+    replacement_key_values: Option<&[Value]>,
+    ctx: &mut ExecutorContext,
+    xid: TransactionId,
+    cid: CommandId,
+    waiter: Option<(
+        &RwLock<TransactionManager>,
+        &TransactionWaiter,
+        &crate::backend::utils::misc::interrupts::InterruptState,
+    )>,
+) -> Result<(), ExecError> {
+    let rows = collect_referencing_rows(constraint, key_values, ctx)?;
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let (relation_constraints, referenced_by_foreign_keys, indexes, toast_index) =
+        relation_write_state_for_foreign_key(constraint, ctx)?;
+    for (tid, current_values) in rows {
+        ctx.check_for_interrupts()?;
+        match action {
+            ForeignKeyAction::Cascade | ForeignKeyAction::SetNull | ForeignKeyAction::SetDefault => {
+                let mut updated_values = current_values.clone();
+                for (position, column_index) in constraint.child_column_indexes.iter().enumerate() {
+                    updated_values[*column_index] = match action {
+                        ForeignKeyAction::Cascade => replacement_key_values
+                            .and_then(|values| values.get(position))
+                            .cloned()
+                            .unwrap_or(Value::Null)
+                            .to_owned_value(),
+                        ForeignKeyAction::SetNull => Value::Null,
+                        ForeignKeyAction::SetDefault => {
+                            evaluate_default_value(&constraint.child_desc, *column_index, ctx)?
+                        }
+                        ForeignKeyAction::NoAction | ForeignKeyAction::Restrict => unreachable!(),
+                    };
+                }
+                let _ = write_updated_row(
+                    &constraint.child_relation_name,
+                    constraint.child_rel,
+                    constraint.child_toast,
+                    toast_index.as_ref(),
+                    &constraint.child_desc,
+                    &relation_constraints,
+                    &referenced_by_foreign_keys,
+                    &indexes,
+                    tid,
+                    &current_values,
+                    &updated_values,
+                    ctx,
+                    xid,
+                    cid,
+                    waiter,
+                )?;
+            }
+            ForeignKeyAction::NoAction | ForeignKeyAction::Restrict => unreachable!(),
+        }
+    }
+    Ok(())
+}
+
+fn apply_inbound_foreign_key_actions_on_update(
+    relation_name: &str,
+    constraints: &[BoundReferencedByForeignKey],
+    previous_values: &[Value],
+    values: &[Value],
+    ctx: &mut ExecutorContext,
+    xid: TransactionId,
+    cid: CommandId,
+    waiter: Option<(
+        &RwLock<TransactionManager>,
+        &TransactionWaiter,
+        &crate::backend::utils::misc::interrupts::InterruptState,
+    )>,
+) -> Result<(), ExecError> {
+    for constraint in constraints {
+        if !constraint.enforced
+            || !key_columns_changed(previous_values, values, &constraint.referenced_column_indexes)
+        {
+            continue;
+        }
+        match constraint.on_update {
+            ForeignKeyAction::NoAction | ForeignKeyAction::Restrict => {
+                crate::backend::executor::enforce_inbound_foreign_keys_on_update(
+                    relation_name,
+                    std::slice::from_ref(constraint),
+                    previous_values,
+                    values,
+                    ctx,
+                )?;
+            }
+            ForeignKeyAction::Cascade => {
+                let old_key_values = constraint
+                    .referenced_column_indexes
+                    .iter()
+                    .map(|index| previous_values.get(*index).cloned().unwrap_or(Value::Null))
+                    .collect::<Vec<_>>();
+                let new_key_values = constraint
+                    .referenced_column_indexes
+                    .iter()
+                    .map(|index| values.get(*index).cloned().unwrap_or(Value::Null))
+                    .collect::<Vec<_>>();
+                apply_referential_action_to_rows(
+                    constraint,
+                    ForeignKeyAction::Cascade,
+                    &old_key_values,
+                    Some(&new_key_values),
+                    ctx,
+                    xid,
+                    cid,
+                    waiter,
+                )?;
+            }
+            ForeignKeyAction::SetNull | ForeignKeyAction::SetDefault => {
+                let old_key_values = constraint
+                    .referenced_column_indexes
+                    .iter()
+                    .map(|index| previous_values.get(*index).cloned().unwrap_or(Value::Null))
+                    .collect::<Vec<_>>();
+                apply_referential_action_to_rows(
+                    constraint,
+                    constraint.on_update,
+                    &old_key_values,
+                    None,
+                    ctx,
+                    xid,
+                    cid,
+                    waiter,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn apply_inbound_foreign_key_actions_on_delete(
+    relation_name: &str,
+    constraints: &[BoundReferencedByForeignKey],
+    values: &[Value],
+    ctx: &mut ExecutorContext,
+    xid: TransactionId,
+    waiter: Option<(
+        &RwLock<TransactionManager>,
+        &TransactionWaiter,
+        &crate::backend::utils::misc::interrupts::InterruptState,
+    )>,
+) -> Result<(), ExecError> {
+    let cid = ctx.next_command_id;
+    for constraint in constraints {
+        if !constraint.enforced {
+            continue;
+        }
+        match constraint.on_delete {
+            ForeignKeyAction::NoAction | ForeignKeyAction::Restrict => {
+                crate::backend::executor::enforce_inbound_foreign_keys_on_delete(
+                    relation_name,
+                    std::slice::from_ref(constraint),
+                    values,
+                    ctx,
+                )?;
+            }
+            ForeignKeyAction::Cascade => {
+                let key_values = constraint
+                    .referenced_column_indexes
+                    .iter()
+                    .map(|index| values.get(*index).cloned().unwrap_or(Value::Null))
+                    .collect::<Vec<_>>();
+                let rows = collect_referencing_rows(constraint, &key_values, ctx)?;
+                for (tid, child_values) in rows {
+                    let target = BoundDeleteTarget {
+                        relation_name: constraint.child_relation_name.clone(),
+                        rel: constraint.child_rel,
+                        relation_oid: constraint.child_relation_oid,
+                        relkind: 'r',
+                        toast: constraint.child_toast,
+                        desc: constraint.child_desc.clone(),
+                        referenced_by_foreign_keys: relation_write_state_for_foreign_key(constraint, ctx)?.1,
+                        row_source: BoundModifyRowSource::Heap,
+                        predicate: None,
+                    };
+                    let _ = apply_base_delete_row(&target, tid, child_values, ctx, xid, waiter)?;
+                }
+            }
+            ForeignKeyAction::SetNull | ForeignKeyAction::SetDefault => {
+                let key_values = constraint
+                    .referenced_column_indexes
+                    .iter()
+                    .map(|index| values.get(*index).cloned().unwrap_or(Value::Null))
+                    .collect::<Vec<_>>();
+                apply_referential_action_to_rows(
+                    constraint,
+                    constraint.on_delete,
+                    &key_values,
+                    None,
+                    ctx,
+                    xid,
+                    cid,
+                    waiter,
+                )?;
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn execute_analyze(
@@ -1364,12 +1719,15 @@ fn execute_merge_update_row(
         &updated_values,
         ctx,
     )?;
-    crate::backend::executor::enforce_inbound_foreign_keys_on_update(
+    apply_inbound_foreign_key_actions_on_update(
         &stmt.relation_name,
         &stmt.referenced_by_foreign_keys,
         original_values,
         &updated_values,
         ctx,
+        xid,
+        cid,
+        None,
     )?;
     let (replacement, toasted) = toast_tuple_for_write(
         &stmt.desc,
@@ -1426,11 +1784,13 @@ fn execute_merge_delete_row(
     ctx: &mut ExecutorContext,
     xid: TransactionId,
 ) -> Result<bool, ExecError> {
-    crate::backend::executor::enforce_inbound_foreign_keys_on_delete(
+    apply_inbound_foreign_key_actions_on_delete(
         &stmt.relation_name,
         &stmt.referenced_by_foreign_keys,
         original_values,
         ctx,
+        xid,
+        None,
     )?;
     let old_tuple = if stmt.toast.is_some() {
         Some(heap_fetch(&*ctx.pool, ctx.client_id, stmt.rel, target_tid)?)
@@ -2747,11 +3107,13 @@ pub fn execute_delete_with_waiter(
                             break;
                         }
                     }
-                    crate::backend::executor::enforce_inbound_foreign_keys_on_delete(
+                    apply_inbound_foreign_key_actions_on_delete(
                         &target.relation_name,
                         &target.referenced_by_foreign_keys,
                         &current_values,
                         ctx,
+                        xid,
+                        waiter,
                     )?;
                     let old_tuple = if target.toast.is_some() {
                         Some(heap_fetch(
@@ -2943,12 +3305,15 @@ pub(crate) fn apply_base_update_row(
             &current_values,
             ctx,
         )?;
-        crate::backend::executor::enforce_inbound_foreign_keys_on_update(
+        apply_inbound_foreign_key_actions_on_update(
             &target.relation_name,
             &target.referenced_by_foreign_keys,
             &current_old_values,
             &current_values,
             ctx,
+            xid,
+            cid,
+            waiter,
         )?;
         let (current_replacement, toasted) = toast_tuple_for_write(
             &target.desc,
@@ -3093,11 +3458,13 @@ pub(crate) fn apply_base_delete_row(
     let mut current_values = old_values;
     loop {
         ctx.check_for_interrupts()?;
-        crate::backend::executor::enforce_inbound_foreign_keys_on_delete(
+        apply_inbound_foreign_key_actions_on_delete(
             &target.relation_name,
             &target.referenced_by_foreign_keys,
             &current_values,
             ctx,
+            xid,
+            waiter,
         )?;
         let old_tuple = if target.toast.is_some() {
             Some(heap_fetch(
