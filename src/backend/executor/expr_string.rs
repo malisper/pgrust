@@ -175,6 +175,7 @@ fn value_output_text(value: &Value) -> Result<String, ExecError> {
             crate::include::nodes::primnodes::BuiltinScalarFunction::RowToJson,
             &[Value::Record(record.clone())],
             false,
+            &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
         )
         .expect("row_to_json is a json builtin")?
         .as_text()
