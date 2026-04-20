@@ -42,7 +42,7 @@ pub(super) fn lookup_heap_relation_for_ddl(
     }
 }
 
-pub(super) fn lookup_heap_relation_for_alter_table(
+pub(crate) fn lookup_heap_relation_for_alter_table(
     catalog: &dyn CatalogLookup,
     name: &str,
     if_exists: bool,

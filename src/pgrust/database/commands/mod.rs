@@ -1,3 +1,4 @@
+mod alter_table;
 mod alter_column_type;
 mod constraint;
 mod conversion;

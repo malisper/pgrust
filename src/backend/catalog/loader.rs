@@ -587,6 +587,7 @@ fn append_catalog_kind_rows(
                 .into_iter()
                 .map(pg_attribute_row_from_values)
                 .collect::<Result<Vec<_>, _>>()?;
+            dedupe_visible_attribute_rows(&mut rows.attributes);
         }
         BootstrapCatalogKind::PgType => {
             rows.types = values
@@ -708,6 +709,7 @@ fn append_catalog_kind_rows(
                 .into_iter()
                 .map(pg_constraint_row_from_values)
                 .collect::<Result<Vec<_>, _>>()?;
+            dedupe_visible_constraint_rows(&mut rows.constraints);
         }
         BootstrapCatalogKind::PgDepend => {
             rows.depends = values
@@ -2086,7 +2088,7 @@ pub(crate) fn load_visible_attribute_rows(
     client_id: crate::ClientId,
 ) -> Result<Vec<PgAttributeRow>, CatalogError> {
     let _ = base_dir;
-    load_visible_catalog_kind_in_pool(
+    let mut rows = load_visible_catalog_kind_in_pool(
         pool,
         txns,
         snapshot,
@@ -2095,7 +2097,9 @@ pub(crate) fn load_visible_attribute_rows(
     )?
     .into_iter()
     .map(pg_attribute_row_from_values)
-    .collect()
+    .collect::<Result<Vec<_>, _>>()?;
+    dedupe_visible_attribute_rows(&mut rows);
+    Ok(rows)
 }
 
 pub(crate) fn load_visible_attrdef_rows(
@@ -2146,7 +2150,7 @@ pub(crate) fn load_visible_constraint_rows(
     client_id: crate::ClientId,
 ) -> Result<Vec<PgConstraintRow>, CatalogError> {
     let _ = base_dir;
-    load_visible_catalog_kind_in_pool(
+    let mut rows = load_visible_catalog_kind_in_pool(
         pool,
         txns,
         snapshot,
@@ -2155,7 +2159,33 @@ pub(crate) fn load_visible_constraint_rows(
     )?
     .into_iter()
     .map(pg_constraint_row_from_values)
-    .collect()
+    .collect::<Result<Vec<_>, _>>()?;
+    dedupe_visible_constraint_rows(&mut rows);
+    Ok(rows)
+}
+
+fn dedupe_visible_attribute_rows(rows: &mut Vec<PgAttributeRow>) {
+    // :HACK: Our MVCC tuples currently preserve self-deleted catalog versions in
+    // visible scans within the same transaction. Collapse pg_attribute rows to
+    // the newest version for each (relation, attnum) so later DDL subcommands
+    // observe the latest descriptor shape.
+    let deduped = std::mem::take(rows)
+        .into_iter()
+        .fold(BTreeMap::<(u32, i16), PgAttributeRow>::new(), |mut acc, row| {
+            acc.insert((row.attrelid, row.attnum), row);
+            acc
+        });
+    *rows = deduped.into_values().collect();
+}
+
+fn dedupe_visible_constraint_rows(rows: &mut Vec<PgConstraintRow>) {
+    let deduped = std::mem::take(rows)
+        .into_iter()
+        .fold(BTreeMap::<u32, PgConstraintRow>::new(), |mut acc, row| {
+            acc.insert(row.oid, row);
+            acc
+        });
+    *rows = deduped.into_values().collect();
 }
 
 pub(crate) fn load_visible_depend_rows(

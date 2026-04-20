@@ -2925,6 +2925,7 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::alter_role_stmt => Ok(Statement::AlterRole(build_alter_role(inner)?)),
         Rule::create_database_stmt => Ok(Statement::CreateDatabase(build_create_database(inner)?)),
         Rule::create_index_stmt => Ok(Statement::CreateIndex(build_create_index(inner)?)),
+        Rule::alter_table_stmt => Ok(Statement::AlterTable(build_alter_table_stmt(inner)?)),
         Rule::alter_table_add_column_stmt => Ok(Statement::AlterTableAddColumn(
             build_alter_table_add_column(inner)?,
         )),
@@ -2999,6 +3000,186 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::rollback_stmt => Ok(Statement::Rollback),
         _ => Err(ParseError::UnexpectedToken {
             expected: "statement",
+            actual: inner.as_str().into(),
+        }),
+    }
+}
+
+fn build_alter_table_stmt(pair: Pair<'_, Rule>) -> Result<AlterTableStatement, ParseError> {
+    let mut if_exists = false;
+    let mut only = false;
+    let mut table_name = None;
+    let mut actions = Vec::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::alter_table_target => {
+                let (parsed_if_exists, parsed_only, parsed_table_name) =
+                    build_alter_table_target(part)?;
+                if_exists = parsed_if_exists;
+                only = parsed_only;
+                table_name = Some(parsed_table_name);
+            }
+            Rule::alter_table_action => actions.push(build_alter_table_action(part)?),
+            _ => {}
+        }
+    }
+    Ok(AlterTableStatement {
+        if_exists,
+        only,
+        table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
+        actions,
+    })
+}
+
+fn build_alter_table_action(pair: Pair<'_, Rule>) -> Result<AlterTableAction, ParseError> {
+    let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+    match inner.as_rule() {
+        Rule::alter_table_add_column_action => {
+            let column = inner
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::column_def)
+                .map(build_column_def)
+                .transpose()?
+                .ok_or(ParseError::UnexpectedEof)?;
+            Ok(AlterTableAction::AddColumn(column))
+        }
+        Rule::alter_table_add_constraint_action => {
+            let constraint = inner
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::named_table_constraint)
+                .map(build_table_constraint_inner)
+                .transpose()?
+                .ok_or(ParseError::UnexpectedEof)?;
+            Ok(AlterTableAction::AddConstraint(constraint))
+        }
+        Rule::alter_table_drop_column_action => {
+            let column_name = inner
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::identifier)
+                .map(build_identifier)
+                .ok_or(ParseError::UnexpectedEof)?;
+            Ok(AlterTableAction::DropColumn { column_name })
+        }
+        Rule::alter_table_drop_constraint_action => {
+            let constraint_name = inner
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::identifier)
+                .map(build_identifier)
+                .ok_or(ParseError::UnexpectedEof)?;
+            Ok(AlterTableAction::DropConstraint { constraint_name })
+        }
+        Rule::alter_table_alter_constraint_action => {
+            let mut constraint_name = None;
+            let mut deferrable = None;
+            let mut initially_deferred = None;
+            for part in inner.into_inner() {
+                match part.as_rule() {
+                    Rule::identifier if constraint_name.is_none() => {
+                        constraint_name = Some(build_identifier(part))
+                    }
+                    Rule::alter_table_constraint_action => {
+                        for inner in part.into_inner() {
+                            match inner.as_rule() {
+                                Rule::deferrable_constraint_attribute => deferrable = Some(true),
+                                Rule::not_deferrable_constraint_attribute => {
+                                    deferrable = Some(false)
+                                }
+                                Rule::initially_deferred_constraint_attribute => {
+                                    initially_deferred = Some(true)
+                                }
+                                Rule::initially_immediate_constraint_attribute => {
+                                    initially_deferred = Some(false)
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(AlterTableAction::AlterConstraint {
+                constraint_name: constraint_name.ok_or(ParseError::UnexpectedEof)?,
+                deferrable,
+                initially_deferred,
+            })
+        }
+        Rule::alter_table_rename_constraint_action => {
+            let mut parts = inner
+                .into_inner()
+                .filter(|part| part.as_rule() == Rule::identifier)
+                .map(build_identifier);
+            Ok(AlterTableAction::RenameConstraint {
+                constraint_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
+                new_constraint_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
+            })
+        }
+        Rule::alter_table_alter_column_type_action => {
+            let mut column_name = None;
+            let mut ty = None;
+            let mut using_expr = None;
+            for part in inner.into_inner() {
+                match part.as_rule() {
+                    Rule::identifier if column_name.is_none() => {
+                        column_name = Some(build_identifier(part))
+                    }
+                    Rule::alter_table_column_type_action => {
+                        for inner in part.into_inner() {
+                            match inner.as_rule() {
+                                Rule::type_name => ty = Some(build_type_name(inner)),
+                                Rule::alter_table_using_clause => {
+                                    let expr = inner
+                                        .into_inner()
+                                        .find(|item| item.as_rule() == Rule::expr)
+                                        .ok_or(ParseError::UnexpectedEof)?;
+                                    using_expr = Some(build_expr(expr)?);
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(AlterTableAction::AlterColumnType {
+                column_name: column_name.ok_or(ParseError::UnexpectedEof)?,
+                ty: ty.ok_or(ParseError::UnexpectedEof)?,
+                using_expr,
+            })
+        }
+        Rule::alter_table_set_action => {
+            let options = inner
+                .into_inner()
+                .filter(|part| part.as_rule() == Rule::reloption)
+                .map(build_reloption)
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(AlterTableAction::Set { options })
+        }
+        Rule::alter_table_set_not_null_action => {
+            let column_name = inner
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::identifier)
+                .map(build_identifier)
+                .ok_or(ParseError::UnexpectedEof)?;
+            Ok(AlterTableAction::SetNotNull { column_name })
+        }
+        Rule::alter_table_drop_not_null_action => {
+            let column_name = inner
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::identifier)
+                .map(build_identifier)
+                .ok_or(ParseError::UnexpectedEof)?;
+            Ok(AlterTableAction::DropNotNull { column_name })
+        }
+        Rule::alter_table_validate_constraint_action => {
+            let constraint_name = inner
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::identifier)
+                .map(build_identifier)
+                .ok_or(ParseError::UnexpectedEof)?;
+            Ok(AlterTableAction::ValidateConstraint { constraint_name })
+        }
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "ALTER TABLE action",
             actual: inner.as_str().into(),
         }),
     }

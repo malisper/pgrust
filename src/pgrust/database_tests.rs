@@ -4164,6 +4164,59 @@ fn alter_table_only_is_accepted_for_supported_operations() {
 }
 
 #[test]
+fn alter_table_multi_subcommands_apply_in_order() {
+    let base = temp_dir("alter_table_multi_subcommands");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4, note text)")
+        .unwrap();
+    db.execute(1, "insert into items values (1, 'hello'), (2, 'world')")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table items add column bucket int4 default 3, alter column note set not null, add constraint items_id_positive check (id > 0)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select id, note, bucket from items order by id"),
+        vec![
+            vec![
+                Value::Int32(1),
+                Value::Text("hello".into()),
+                Value::Int32(3)
+            ],
+            vec![
+                Value::Int32(2),
+                Value::Text("world".into()),
+                Value::Int32(3)
+            ],
+        ]
+    );
+}
+
+#[test]
+fn alter_table_multi_subcommands_roll_back_on_failure() {
+    let base = temp_dir("alter_table_multi_subcommands_rollback");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4, note text)").unwrap();
+
+    match db.execute(
+        1,
+        "alter table items add column bucket int4 default 3, drop column missing_col",
+    ) {
+        Err(ExecError::Parse(ParseError::UnknownColumn(name))) if name == "missing_col" => {}
+        other => panic!("expected multi-subcommand failure, got {other:?}"),
+    }
+
+    match db.execute(1, "select bucket from items") {
+        Err(ExecError::Parse(ParseError::UnknownColumn(name))) if name == "bucket" => {}
+        other => panic!("expected failed alter table to roll back bucket, got {other:?}"),
+    }
+}
+
+#[test]
 fn alter_table_add_column_serial_backfills_existing_rows_and_keeps_sequence_advancing() {
     let base = temp_dir("alter_table_add_column_serial");
     let db = Database::open(&base, 16).unwrap();

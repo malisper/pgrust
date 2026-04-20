@@ -135,6 +135,7 @@ impl From<ControlFileError> for DatabaseError {
 pub use crate::backend::storage::lmgr::TransactionWaiter;
 pub use crate::pgrust::session::{SelectGuard, Session};
 pub(crate) use ddl::reject_relation_with_referencing_foreign_keys;
+pub(crate) use ddl::lookup_heap_relation_for_alter_table;
 pub(crate) use foreign_keys::{
     alter_table_add_constraint_lock_requests, alter_table_validate_constraint_lock_requests,
     delete_foreign_key_lock_requests, insert_foreign_key_lock_requests,

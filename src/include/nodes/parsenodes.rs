@@ -236,6 +236,7 @@ pub enum Statement {
     AlterSequence(AlterSequenceStatement),
     AlterSequenceOwner(AlterRelationOwnerStatement),
     AlterSequenceRename(AlterTableRenameStatement),
+    AlterTable(AlterTableStatement),
     AlterTableAddColumn(AlterTableAddColumnStatement),
     AlterTableAddConstraint(AlterTableAddConstraintStatement),
     AlterTableDropColumn(AlterTableDropColumnStatement),
@@ -1091,6 +1092,52 @@ pub struct AlterTableSetStatement {
     pub only: bool,
     pub table_name: String,
     pub options: Vec<RelOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableStatement {
+    pub if_exists: bool,
+    pub only: bool,
+    pub table_name: String,
+    pub actions: Vec<AlterTableAction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlterTableAction {
+    AddColumn(ColumnDef),
+    AddConstraint(TableConstraint),
+    DropColumn {
+        column_name: String,
+    },
+    DropConstraint {
+        constraint_name: String,
+    },
+    AlterConstraint {
+        constraint_name: String,
+        deferrable: Option<bool>,
+        initially_deferred: Option<bool>,
+    },
+    RenameConstraint {
+        constraint_name: String,
+        new_constraint_name: String,
+    },
+    AlterColumnType {
+        column_name: String,
+        ty: RawTypeName,
+        using_expr: Option<SqlExpr>,
+    },
+    Set {
+        options: Vec<RelOption>,
+    },
+    SetNotNull {
+        column_name: String,
+    },
+    DropNotNull {
+        column_name: String,
+    },
+    ValidateConstraint {
+        constraint_name: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

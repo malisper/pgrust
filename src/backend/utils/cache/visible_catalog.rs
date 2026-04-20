@@ -379,8 +379,27 @@ fn bound_relation_from_relcache_entry(
         owner_oid: entry.owner_oid,
         relpersistence: entry.relpersistence,
         relkind: entry.relkind,
-        desc: entry.desc.clone(),
+        desc: dedupe_bound_relation_desc(entry.desc.clone()),
     }
+}
+
+fn dedupe_bound_relation_desc(
+    mut desc: crate::include::nodes::primnodes::RelationDesc,
+) -> crate::include::nodes::primnodes::RelationDesc {
+    // :HACK: Catalog MVCC currently leaks self-deleted relation versions within a
+    // transaction. Collapse duplicate physical column versions here so callers
+    // that bind against a base relation see a single latest column definition.
+    let mut seen = std::collections::BTreeSet::new();
+    let mut deduped = Vec::with_capacity(desc.columns.len());
+    for column in desc.columns.into_iter().rev() {
+        let key = column.name.to_ascii_lowercase();
+        if seen.insert(key) {
+            deduped.push(column);
+        }
+    }
+    deduped.reverse();
+    desc.columns = deduped;
+    desc
 }
 
 fn composite_type_rows_from_relcache(relcache: &RelCache) -> Vec<PgTypeRow> {
