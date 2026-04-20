@@ -1082,6 +1082,71 @@ mod tests {
     }
 
     #[test]
+    fn create_group_legacy_syntax_creates_memberships() {
+        let base = temp_dir("create_group_legacy");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session.execute(&db, "create role admin_member").unwrap();
+        session.execute(&db, "create role regular_member").unwrap();
+
+        session
+            .execute(
+                &db,
+                "create group app_group with admin admin_member user regular_member",
+            )
+            .unwrap();
+
+        assert!(!role_row(&db, "app_group").rolcanlogin);
+        let app_group_oid = role_oid(&db, "app_group");
+        let admin_member_oid = role_oid(&db, "admin_member");
+        let regular_member_oid = role_oid(&db, "regular_member");
+        let grants = db.shared_catalog.read().catcache().unwrap().auth_members_rows();
+        assert!(grants.iter().any(|row| {
+            row.roleid == app_group_oid && row.member == admin_member_oid && row.admin_option
+        }));
+        assert!(grants.iter().any(|row| {
+            row.roleid == app_group_oid && row.member == regular_member_oid && !row.admin_option
+        }));
+    }
+
+    #[test]
+    fn alter_group_legacy_syntax_manages_memberships() {
+        let base = temp_dir("alter_group_legacy");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session.execute(&db, "create group app_group").unwrap();
+        session.execute(&db, "create role app_member").unwrap();
+
+        session
+            .execute(&db, "alter group app_group add user app_member")
+            .unwrap();
+        let app_group_oid = role_oid(&db, "app_group");
+        let app_member_oid = role_oid(&db, "app_member");
+        assert!(
+            db.shared_catalog
+                .read()
+                .catcache()
+                .unwrap()
+                .auth_members_rows()
+                .into_iter()
+                .any(|row| row.roleid == app_group_oid && row.member == app_member_oid)
+        );
+
+        session
+            .execute(&db, "alter group app_group drop user app_member")
+            .unwrap();
+        assert!(
+            !db.shared_catalog
+                .read()
+                .catcache()
+                .unwrap()
+                .auth_members_rows()
+                .into_iter()
+                .any(|row| row.roleid == app_group_oid && row.member == app_member_oid)
+        );
+    }
+
+    #[test]
     fn create_role_membership_clauses_persist_memberships() {
         let base = temp_dir("membership_clauses");
         let db = Database::open(&base, 16).unwrap();

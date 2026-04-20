@@ -1654,6 +1654,38 @@ fn parse_create_user_with_statement() {
 }
 
 #[test]
+fn parse_create_group_statement() {
+    let stmt = parse_statement("create group regress_group").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateRole(CreateRoleStatement {
+            role_name: "regress_group".into(),
+            is_user: false,
+            options: vec![],
+        })
+    );
+}
+
+#[test]
+fn parse_create_group_membership_options() {
+    let stmt = parse_statement(
+        "create group regress_group with admin regress_admin user regress_member",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateRole(CreateRoleStatement {
+            role_name: "regress_group".into(),
+            is_user: false,
+            options: vec![
+                RoleOption::Admin(vec!["regress_admin".into()]),
+                RoleOption::Role(vec!["regress_member".into()]),
+            ],
+        })
+    );
+}
+
+#[test]
 fn parse_create_role_membership_options() {
     let stmt = parse_statement(
         "create role regress_inroles role regress_createdb, regress_login admin regress_role_super in role regress_createrole",
@@ -1688,6 +1720,58 @@ fn parse_multiline_create_role_membership_options() {
                 RoleOption::Role(vec!["regress_createdb".into(), "regress_login".into()]),
                 RoleOption::Admin(vec!["regress_role_super".into()]),
             ],
+        })
+    );
+}
+
+#[test]
+fn parse_alter_group_add_user_statement() {
+    let stmt = parse_statement("alter group regress_group add user regress_member").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::GrantRoleMembership(GrantRoleMembershipStatement {
+            role_names: vec!["regress_group".into()],
+            grantee_names: vec!["regress_member".into()],
+            admin_option: false,
+            inherit_option: None,
+            set_option: None,
+            granted_by: None,
+        })
+    );
+}
+
+#[test]
+fn parse_multiline_alter_group_add_user_statement() {
+    let stmt =
+        parse_statement("alter group regress_group add\n\tuser regress_member, regress_member2")
+            .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::GrantRoleMembership(GrantRoleMembershipStatement {
+            role_names: vec!["regress_group".into()],
+            grantee_names: vec!["regress_member".into(), "regress_member2".into()],
+            admin_option: false,
+            inherit_option: None,
+            set_option: None,
+            granted_by: None,
+        })
+    );
+}
+
+#[test]
+fn parse_alter_group_drop_user_statement() {
+    let stmt = parse_statement("alter group regress_group drop user regress_member").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::RevokeRoleMembership(RevokeRoleMembershipStatement {
+            role_names: vec!["regress_group".into()],
+            grantee_names: vec!["regress_member".into()],
+            revoke_membership: true,
+            admin_option: false,
+            inherit_option: false,
+            set_option: false,
+            cascade: false,
+            granted_by: None,
         })
     );
 }

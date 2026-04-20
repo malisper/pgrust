@@ -3311,6 +3311,7 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::reset_stmt => Ok(Statement::Reset(build_reset(inner)?)),
         Rule::create_role_stmt => Ok(Statement::CreateRole(build_create_role(inner)?)),
         Rule::alter_role_stmt => Ok(Statement::AlterRole(build_alter_role(inner)?)),
+        Rule::alter_group_stmt => build_alter_group(inner),
         Rule::create_database_stmt => Ok(Statement::CreateDatabase(build_create_database(inner)?)),
         Rule::create_index_stmt => Ok(Statement::CreateIndex(build_create_index(inner)?)),
         Rule::alter_table_add_column_stmt => Ok(Statement::AlterTableAddColumn(
@@ -3703,6 +3704,58 @@ fn build_alter_role(pair: Pair<'_, Rule>) -> Result<AlterRoleStatement, ParseErr
     })
 }
 
+fn build_alter_group(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
+    let mut is_add = None;
+    let mut role_name = None;
+    let mut grantee_names = Vec::new();
+
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier if role_name.is_none() => role_name = Some(build_identifier(part)),
+            Rule::alter_group_action => {
+                is_add = Some(part.as_str().trim_start().to_ascii_lowercase().starts_with("add"));
+                for inner in part.into_inner() {
+                    match inner.as_rule() {
+                        Rule::ident_list => {
+                            grantee_names.extend(inner.into_inner().map(build_identifier));
+                        }
+                        Rule::identifier => grantee_names.push(build_identifier(inner)),
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let role_name = role_name.ok_or(ParseError::UnexpectedEof)?;
+    let is_add = is_add.ok_or(ParseError::UnexpectedEof)?;
+    if grantee_names.is_empty() {
+        return Err(ParseError::UnexpectedEof);
+    }
+    if is_add {
+        Ok(Statement::GrantRoleMembership(GrantRoleMembershipStatement {
+            role_names: vec![role_name],
+            grantee_names,
+            admin_option: false,
+            inherit_option: None,
+            set_option: None,
+            granted_by: None,
+        }))
+    } else {
+        Ok(Statement::RevokeRoleMembership(RevokeRoleMembershipStatement {
+            role_names: vec![role_name],
+            grantee_names,
+            revoke_membership: true,
+            admin_option: false,
+            inherit_option: false,
+            set_option: false,
+            cascade: false,
+            granted_by: None,
+        }))
+    }
+}
+
 fn build_alter_role_rename(pair: Pair<'_, Rule>) -> Result<String, ParseError> {
     pair.into_inner()
         .find(|part| part.as_rule() == Rule::identifier)
@@ -3840,6 +3893,8 @@ fn build_role_membership_option(pair: Pair<'_, Rule>) -> Result<RoleOption, Pars
         Some("role")
     } else if strip_keyword_prefix(trimmed, "admin").is_some() {
         Some("admin")
+    } else if strip_keyword_prefix(trimmed, "user").is_some() {
+        Some("user")
     } else {
         None
     };
@@ -3858,7 +3913,7 @@ fn build_role_membership_option(pair: Pair<'_, Rule>) -> Result<RoleOption, Pars
             expected: "role membership option",
             actual: actual.clone(),
         })? {
-            "role" => RoleOption::Role(roles),
+            "role" | "user" => RoleOption::Role(roles),
             "admin" => RoleOption::Admin(roles),
             "in role" => RoleOption::InRole(roles),
             _ => unreachable!(),
