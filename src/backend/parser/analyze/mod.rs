@@ -27,10 +27,10 @@ use crate::backend::rewrite::pg_rewrite_query;
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, PgCastRow, PgClassRow, PgConstraintRow, PgInheritsRow, PgLanguageRow,
-    PgOperatorRow, PgProcRow, PgRangeRow, PgRewriteRow, PgStatisticRow, PgTypeRow, RECORD_TYPE_OID,
-    bootstrap_pg_cast_rows, bootstrap_pg_language_rows, bootstrap_pg_operator_rows,
-    bootstrap_pg_proc_rows, builtin_range_rows, builtin_type_rows,
+    BOOTSTRAP_SUPERUSER_OID, PgAuthIdRow, PgCastRow, PgClassRow, PgConstraintRow, PgInheritsRow,
+    PgLanguageRow, PgOperatorRow, PgProcRow, PgRangeRow, PgRewriteRow, PgStatisticRow, PgTypeRow,
+    RECORD_TYPE_OID, bootstrap_pg_cast_rows, bootstrap_pg_language_rows,
+    bootstrap_pg_operator_rows, bootstrap_pg_proc_rows, builtin_range_rows, builtin_type_rows,
     proc_oid_for_builtin_aggregate_function, range_type_ref_for_sql_type, relkind_is_analyzable,
 };
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
@@ -413,6 +413,10 @@ pub trait CatalogLookup {
     fn pg_stat_io_rows(&self) -> Vec<Vec<Value>> {
         Vec::new()
     }
+
+    fn authid_rows(&self) -> Vec<PgAuthIdRow> {
+        Vec::new()
+    }
 }
 
 impl CatalogLookup for Catalog {
@@ -579,6 +583,10 @@ impl CatalogLookup for Catalog {
 
     fn pg_stat_activity_rows(&self) -> Vec<Vec<Value>> {
         Vec::new()
+    }
+
+    fn authid_rows(&self) -> Vec<PgAuthIdRow> {
+        crate::backend::utils::cache::catcache::CatCache::from_catalog(self).authid_rows()
     }
 
     fn materialize_visible_catalog(&self) -> Option<VisibleCatalog> {
