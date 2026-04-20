@@ -90,7 +90,6 @@ pub(crate) fn create_view_sync_kinds() -> Vec<BootstrapCatalogKind> {
         BootstrapCatalogKind::PgType,
         BootstrapCatalogKind::PgAttribute,
         BootstrapCatalogKind::PgDepend,
-        BootstrapCatalogKind::PgRewrite,
     ]
 }
 
