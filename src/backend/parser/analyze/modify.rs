@@ -92,6 +92,7 @@ pub struct BoundDeleteTarget {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundDeleteStatement {
     pub targets: Vec<BoundDeleteTarget>,
+    pub returning: Vec<TargetEntry>,
     pub subplans: Vec<Plan>,
 }
 
@@ -948,6 +949,7 @@ pub(crate) fn rewrite_bound_delete_auto_view_target(
 
     Ok(BoundDeleteStatement {
         targets,
+        returning: stmt.returning,
         subplans: stmt.subplans,
     })
 }
@@ -1471,6 +1473,7 @@ pub(crate) fn bind_delete_with_outer_scopes(
             bind_expr_with_outer_and_ctes(expr, &scope, catalog, outer_scopes, None, &local_ctes)
         })
         .transpose()?;
+    let returning = bind_returning_targets(&stmt.returning, &scope, catalog, outer_scopes, &local_ctes)?;
 
     let targets = if stmt.only {
         vec![entry.relation_oid]
@@ -1494,6 +1497,7 @@ pub(crate) fn bind_delete_with_outer_scopes(
 
     Ok(BoundDeleteStatement {
         targets,
+        returning,
         subplans: Vec::new(),
     })
 }

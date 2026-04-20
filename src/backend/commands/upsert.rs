@@ -24,7 +24,7 @@ enum EvaluatedConflictAction {
 }
 
 enum ConflictActionResult {
-    Updated,
+    Updated(Vec<Value>),
     Skipped,
     Retry,
 }
@@ -221,7 +221,7 @@ fn run_conflict_update(
         None,
     )?;
     match write_result {
-        WriteUpdatedRowResult::Updated(_new_tid) => Ok(ConflictActionResult::Updated),
+        WriteUpdatedRowResult::Updated(_new_tid) => Ok(ConflictActionResult::Updated(new_values)),
         WriteUpdatedRowResult::TupleUpdated(_new_tid) => Ok(ConflictActionResult::Retry),
         WriteUpdatedRowResult::AlreadyModified => Ok(ConflictActionResult::Retry),
     }
@@ -393,7 +393,7 @@ pub(crate) fn execute_insert_on_conflict_rows(
     ctx: &mut ExecutorContext,
     xid: TransactionId,
     cid: CommandId,
-) -> Result<usize, ExecError> {
+) -> Result<Vec<Vec<Value>>, ExecError> {
     let desc = Rc::new(stmt.desc.clone());
     let attr_descs: Rc<[_]> = desc.attribute_descs().into();
     let arbiter_index_oids = on_conflict
@@ -415,7 +415,7 @@ pub(crate) fn execute_insert_on_conflict_rows(
                 && !arbiter_index_oids.contains(&index.relation_oid)
         })
         .collect::<Vec<_>>();
-    let mut affected_rows = 0usize;
+    let mut affected_rows = Vec::new();
 
     if let BoundOnConflictAction::Update {
         assignments,
@@ -456,8 +456,8 @@ pub(crate) fn execute_insert_on_conflict_rows(
                         xid,
                         cid,
                     )? {
-                        ConflictActionResult::Updated => {
-                            affected_rows += 1;
+                        ConflictActionResult::Updated(updated_values) => {
+                            affected_rows.push(updated_values);
                             break;
                         }
                         ConflictActionResult::Skipped => break,
@@ -503,7 +503,9 @@ pub(crate) fn execute_insert_on_conflict_rows(
             for index in &non_arbiter_indexes {
                 insert_index_entry_for_row(stmt.rel, &stmt.desc, index, values, heap_tid, ctx)?;
             }
-            affected_rows += 1;
+            let mut inserted_values = values.to_vec();
+            Value::materialize_all(&mut inserted_values);
+            affected_rows.push(inserted_values);
             break;
         }
     }

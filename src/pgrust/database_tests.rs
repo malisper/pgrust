@@ -1248,6 +1248,133 @@ fn insert_and_update_returning_target_lists() {
 }
 
 #[test]
+fn delete_returning_target_lists() {
+    let dir = temp_dir("delete_returning_target_lists");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create temp table delete_returning_tbl (id int, name text, note text)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into delete_returning_tbl values (1, 'alice', 'x'), (2, 'bob', 'y')",
+        )
+        .unwrap();
+
+    match session
+        .execute(
+            &db,
+            "delete from delete_returning_tbl where id = 1 returning delete_returning_tbl.*, id + 100 as deleted_id",
+        )
+        .unwrap()
+    {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(
+                column_names,
+                vec!["id", "name", "note", "deleted_id"]
+            );
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Int32(1),
+                    Value::Text("alice".into()),
+                    Value::Text("x".into()),
+                    Value::Int32(101),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+
+    match session
+        .execute(&db, "select * from delete_returning_tbl order by id")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Int32(2),
+                    Value::Text("bob".into()),
+                    Value::Text("y".into()),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+}
+
+#[test]
+fn insert_on_conflict_returning_rows() {
+    let dir = temp_dir("insert_on_conflict_returning_rows");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create temp table upsert_returning_tbl (id int4 primary key, name text, note text)",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "insert into upsert_returning_tbl values (1, 'alice', 'seed') returning id, name",
+        ),
+        vec![vec![Value::Int32(1), Value::Text("alice".into())]]
+    );
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "insert into upsert_returning_tbl values (1, 'bob', 'beta') on conflict do nothing returning id, name",
+        ),
+        Vec::<Vec<Value>>::new()
+    );
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "insert into upsert_returning_tbl values (1, 'carol', 'gamma') on conflict (id) do update set name = excluded.name, note = upsert_returning_tbl.note || excluded.note returning id, name, note",
+        ),
+        vec![vec![
+            Value::Int32(1),
+            Value::Text("carol".into()),
+            Value::Text("seedgamma".into()),
+        ]]
+    );
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "insert into upsert_returning_tbl values (1, 'dave', 'delta') on conflict (id) do update set name = excluded.name where false returning id, name",
+        ),
+        Vec::<Vec<Value>>::new()
+    );
+
+    assert_eq!(
+        query_rows(&db, 1, "select id, name, note from upsert_returning_tbl"),
+        vec![vec![
+            Value::Int32(1),
+            Value::Text("carol".into()),
+            Value::Text("seedgamma".into()),
+        ]]
+    );
+}
+
+#[test]
 fn copy_from_file_loads_tsvector_rows() {
     let dir = temp_dir("copy_from_file");
     let db = Database::open(&dir, 128).unwrap();
