@@ -1672,13 +1672,7 @@ fn lower_agg_accum(
         order_by: accum
             .order_by
             .into_iter()
-            .map(|item| crate::include::nodes::primnodes::OrderByEntry {
-                expr: {
-                    let expr = fix_upper_expr_for_input(ctx.root, item.expr, path, input_tlist);
-                    lower_expr(ctx, expr, LowerMode::Input { tlist: input_tlist })
-                },
-                ..item
-            })
+            .map(|item| lower_order_by_expr_for_input(ctx.root, item, path, input_tlist))
             .collect(),
         filter: accum.filter.map(|filter| {
             let filter = fix_upper_expr_for_input(ctx.root, filter, path, input_tlist);
