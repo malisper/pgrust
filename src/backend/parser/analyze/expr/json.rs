@@ -90,6 +90,72 @@ pub(super) fn bind_json_binary_expr(
     Ok(Expr::op_auto(op, vec![left, right]))
 }
 
+fn bind_jsonb_containment_expr(
+    op: crate::include::nodes::primnodes::OpExprKind,
+    op_name: &'static str,
+    left: &SqlExpr,
+    right: &SqlExpr,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Expr, ParseError> {
+    let raw_left_type =
+        infer_sql_expr_type_with_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes);
+    let raw_right_type =
+        infer_sql_expr_type_with_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes);
+    let jsonb_type = SqlType::new(SqlTypeKind::Jsonb);
+
+    let left_is_string_literal = matches!(
+        left,
+        SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _))
+    );
+    let right_is_string_literal = matches!(
+        right,
+        SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _))
+    );
+
+    let mut left_type = coerce_unknown_string_literal_type(left, raw_left_type, raw_right_type);
+    let mut right_type = coerce_unknown_string_literal_type(right, raw_right_type, raw_left_type);
+
+    if left_is_string_literal && raw_right_type.kind == SqlTypeKind::Jsonb {
+        left_type = jsonb_type;
+    }
+    if right_is_string_literal && raw_left_type.kind == SqlTypeKind::Jsonb {
+        right_type = jsonb_type;
+    }
+    if left_is_string_literal && right_is_string_literal {
+        left_type = jsonb_type;
+        right_type = jsonb_type;
+    }
+
+    if left_type.kind != SqlTypeKind::Jsonb || right_type.kind != SqlTypeKind::Jsonb {
+        return Err(ParseError::UndefinedOperator {
+            op: op_name.into(),
+            left_type: sql_type_name(left_type),
+            right_type: sql_type_name(right_type),
+        });
+    }
+
+    let (left_bound, right_bound) = bind_json_binary_operands(
+        left,
+        right,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    )?;
+    Ok(Expr::op_auto(
+        op,
+        vec![
+            coerce_bound_expr(left_bound, raw_left_type, jsonb_type),
+            coerce_bound_expr(right_bound, raw_right_type, jsonb_type),
+        ],
+    ))
+}
+
 pub(super) fn bind_jsonb_contains_expr(
     left: &SqlExpr,
     right: &SqlExpr,
@@ -111,8 +177,9 @@ pub(super) fn bind_jsonb_contains_expr(
     ) {
         result
     } else {
-        bind_json_binary_expr(
+        bind_jsonb_containment_expr(
             crate::include::nodes::primnodes::OpExprKind::JsonbContains,
+            "@>",
             left,
             right,
             scope,
@@ -145,8 +212,9 @@ pub(super) fn bind_jsonb_contained_expr(
     ) {
         result
     } else {
-        bind_json_binary_expr(
+        bind_jsonb_containment_expr(
             crate::include::nodes::primnodes::OpExprKind::JsonbContained,
+            "<@",
             left,
             right,
             scope,
