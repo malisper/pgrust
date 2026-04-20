@@ -137,6 +137,7 @@ If a change affects SQL behavior more broadly, run the regression harness afterw
 
 When finishing work in this repo:
 
+- When the user says `Finish`, mark the work as finished in the todo list, commit it, merge it, and then list the next related features to work on as a numbered list.
 - Do not push new code unless the user explicitly asks for a push.
 
 ## Profiling Output
