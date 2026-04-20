@@ -2768,6 +2768,7 @@ pub(super) fn estimate_sql_type_width(sql_type: SqlType) -> usize {
         | SqlTypeKind::TsVector
         | SqlTypeKind::TsQuery
         | SqlTypeKind::Void
+        | SqlTypeKind::FdwHandler
         | SqlTypeKind::RegConfig
         | SqlTypeKind::RegDictionary
         | SqlTypeKind::AnyArray

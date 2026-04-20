@@ -403,6 +403,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
             SqlTypeKind::Int8 => 1016,
             SqlTypeKind::Range => col.sql_type.type_oid as i32,
             SqlTypeKind::Void => unreachable!("void arrays are unsupported"),
+            SqlTypeKind::FdwHandler => unreachable!("fdw_handler arrays are unsupported"),
             SqlTypeKind::Oid => 1028,
             SqlTypeKind::RegProcedure => {
                 crate::include::catalog::REGPROCEDURE_ARRAY_TYPE_OID as i32
@@ -462,6 +463,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
     match col.sql_type.kind {
         SqlTypeKind::AnyArray => (2277, -1, -1),
         SqlTypeKind::Trigger => (TRIGGER_TYPE_OID as i32, -1, -1),
+        SqlTypeKind::FdwHandler => (crate::include::catalog::FDW_HANDLER_TYPE_OID as i32, 4, -1),
         SqlTypeKind::Record | SqlTypeKind::Composite => {
             (col.sql_type.type_oid as i32, -1, col.sql_type.typmod)
         }

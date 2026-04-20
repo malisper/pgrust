@@ -4,13 +4,13 @@ use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::{
     ANYARRAYOID, ANYOID, BIT_TYPE_OID, BOOL_TYPE_OID, BOOTSTRAP_SUPERUSER_OID, BOX_TYPE_OID,
     BPCHAR_TYPE_OID, BYTEA_TYPE_OID, CIRCLE_TYPE_OID, DATE_TYPE_OID, DATERANGE_TYPE_OID,
-    FLOAT8_TYPE_OID, INT2_TYPE_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID, INT8_TYPE_OID,
-    INT8RANGE_TYPE_OID, JSON_TYPE_OID, JSONB_TYPE_OID, JSONPATH_TYPE_OID, LINE_TYPE_OID,
-    LSEG_TYPE_OID, MONEY_TYPE_OID, NAME_TYPE_OID, NUMERIC_TYPE_OID, NUMRANGE_TYPE_OID,
-    OID_TYPE_OID, PATH_TYPE_OID, PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_INTERNAL_OID,
-    POINT_TYPE_OID, POLYGON_TYPE_OID, RECORD_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID,
-    TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID, TSQUERY_TYPE_OID, TSRANGE_TYPE_OID,
-    TSTZRANGE_TYPE_OID, VARBIT_TYPE_OID,
+    FDW_HANDLER_TYPE_OID, FLOAT8_TYPE_OID, INT2_TYPE_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID,
+    INT8_TYPE_OID, INT8RANGE_TYPE_OID, JSON_TYPE_OID, JSONB_TYPE_OID, JSONPATH_TYPE_OID,
+    LINE_TYPE_OID, LSEG_TYPE_OID, MONEY_TYPE_OID, NAME_TYPE_OID, NUMERIC_TYPE_OID,
+    NUMRANGE_TYPE_OID, OID_TYPE_OID, PATH_TYPE_OID, PG_CATALOG_NAMESPACE_OID,
+    PG_LANGUAGE_INTERNAL_OID, POINT_TYPE_OID, POLYGON_TYPE_OID, RECORD_TYPE_OID,
+    TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID,
+    TSQUERY_TYPE_OID, TSRANGE_TYPE_OID, TSTZRANGE_TYPE_OID, VARBIT_TYPE_OID,
 };
 use crate::include::nodes::primnodes::{AggFunc, BuiltinScalarFunction, BuiltinWindowFunction};
 use std::sync::OnceLock;
@@ -183,6 +183,18 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             &oid_argtypes(&[OID_TYPE_OID, OID_TYPE_OID]),
             "pg_rust_internal_binary_coercible",
             2,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            6403,
+            "pg_rust_test_fdw_handler",
+            FDW_HANDLER_TYPE_OID,
+            "",
+            "pg_rust_test_fdw_handler",
+            0,
             false,
             true,
             'f',
@@ -2582,6 +2594,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         (
             "pg_rust_internal_binary_coercible",
             BuiltinScalarFunction::PgRustInternalBinaryCoercible,
+        ),
+        (
+            "pg_rust_test_fdw_handler",
+            BuiltinScalarFunction::PgRustTestFdwHandler,
         ),
         (
             "pg_rust_test_enc_setup",
@@ -5920,6 +5936,20 @@ mod tests {
                     .expect("synthetic oid")
             ),
             Some(BuiltinScalarFunction::ArrayToJson)
+        );
+    }
+
+    #[test]
+    fn bootstrap_rows_include_pg_rust_test_fdw_handler() {
+        let row = bootstrap_pg_proc_rows()
+            .into_iter()
+            .find(|row| row.proname == "pg_rust_test_fdw_handler")
+            .expect("pg_rust_test_fdw_handler row");
+        assert_eq!(row.prorettype, FDW_HANDLER_TYPE_OID);
+        assert_eq!(row.proargtypes, "");
+        assert_eq!(
+            builtin_scalar_function_for_proc_oid(row.oid),
+            Some(BuiltinScalarFunction::PgRustTestFdwHandler)
         );
     }
 }

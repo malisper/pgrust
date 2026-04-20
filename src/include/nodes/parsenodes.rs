@@ -1604,6 +1604,7 @@ pub enum SqlTypeKind {
     Composite,
     Void,
     Trigger,
+    FdwHandler,
     Int2,
     Int2Vector,
     Int4,

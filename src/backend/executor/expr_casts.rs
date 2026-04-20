@@ -1257,6 +1257,7 @@ pub(crate) fn cast_value_with_config(
                     | SqlTypeKind::TsVector
                     | SqlTypeKind::TsQuery
                     | SqlTypeKind::Void
+                    | SqlTypeKind::FdwHandler
                     | SqlTypeKind::Tid
                     | SqlTypeKind::Interval
                     | SqlTypeKind::RegConfig
@@ -1367,6 +1368,7 @@ pub(crate) fn cast_value_with_config(
                     | SqlTypeKind::TsVector
                     | SqlTypeKind::TsQuery
                     | SqlTypeKind::Void
+                    | SqlTypeKind::FdwHandler
                     | SqlTypeKind::Tid
                     | SqlTypeKind::Interval
                     | SqlTypeKind::RegConfig
@@ -1445,6 +1447,7 @@ pub(crate) fn cast_value_with_config(
                     | SqlTypeKind::TsVector
                     | SqlTypeKind::TsQuery
                     | SqlTypeKind::Void
+                    | SqlTypeKind::FdwHandler
                     | SqlTypeKind::Tid
                     | SqlTypeKind::Interval
                     | SqlTypeKind::RegConfig
@@ -1862,6 +1865,7 @@ pub(crate) fn cast_value_with_config(
                     | SqlTypeKind::TsVector
                     | SqlTypeKind::TsQuery
                     | SqlTypeKind::Void
+                    | SqlTypeKind::FdwHandler
                     | SqlTypeKind::Tid
                     | SqlTypeKind::Interval
                     | SqlTypeKind::RegConfig
@@ -1956,6 +1960,7 @@ pub(crate) fn cast_value_with_config(
                     | SqlTypeKind::TsVector
                     | SqlTypeKind::TsQuery
                     | SqlTypeKind::Void
+                    | SqlTypeKind::FdwHandler
                     | SqlTypeKind::Tid
                     | SqlTypeKind::Interval
                     | SqlTypeKind::RegConfig
@@ -2081,6 +2086,11 @@ pub(super) fn cast_text_value_with_config(
         SqlTypeKind::AnyArray => Err(unsupported_anyarray_input()),
         SqlTypeKind::Record | SqlTypeKind::Composite => Err(unsupported_record_input()),
         SqlTypeKind::Trigger => Err(unsupported_trigger_input()),
+        SqlTypeKind::FdwHandler => Err(ExecError::TypeMismatch {
+            op: "::fdw_handler",
+            left: Value::Text(CompactString::new(text)),
+            right: Value::Null,
+        }),
         SqlTypeKind::Text
         | SqlTypeKind::Int2Vector
         | SqlTypeKind::OidVector
@@ -2203,6 +2213,11 @@ pub(super) fn cast_numeric_value(
         SqlTypeKind::AnyArray => Err(unsupported_anyarray_input()),
         SqlTypeKind::Record | SqlTypeKind::Composite => Err(unsupported_record_input()),
         SqlTypeKind::Trigger => Err(unsupported_trigger_input()),
+        SqlTypeKind::FdwHandler => Err(ExecError::TypeMismatch {
+            op: "::fdw_handler",
+            left: Value::Numeric(value),
+            right: Value::Null,
+        }),
         SqlTypeKind::Void => Err(ExecError::TypeMismatch {
             op: "::void",
             left: Value::Numeric(value),
