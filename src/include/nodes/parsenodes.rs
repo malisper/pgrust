@@ -256,8 +256,10 @@ pub enum Statement {
     CommentOnRule(CommentOnRuleStatement),
     CommentOnDomain(CommentOnDomainStatement),
     CommentOnConversion(CommentOnConversionStatement),
+    CommentOnForeignDataWrapper(CommentOnForeignDataWrapperStatement),
     CreateDomain(CreateDomainStatement),
     CreateConversion(CreateConversionStatement),
+    CreateForeignDataWrapper(CreateForeignDataWrapperStatement),
     CommentOnRole(CommentOnRoleStatement),
     GrantObject(GrantObjectStatement),
     RevokeObject(RevokeObjectStatement),
@@ -271,11 +273,15 @@ pub enum Statement {
     DropTrigger(DropTriggerStatement),
     DropIndex(DropIndexStatement),
     DropDomain(DropDomainStatement),
+    DropForeignDataWrapper(DropForeignDataWrapperStatement),
     DropView(DropViewStatement),
     DropRule(DropRuleStatement),
     DropSchema(DropSchemaStatement),
     CreateRole(CreateRoleStatement),
     AlterRole(AlterRoleStatement),
+    AlterForeignDataWrapper(AlterForeignDataWrapperStatement),
+    AlterForeignDataWrapperOwner(AlterForeignDataWrapperOwnerStatement),
+    AlterForeignDataWrapperRename(AlterForeignDataWrapperRenameStatement),
     DropRole(DropRoleStatement),
     SetRole(SetRoleStatement),
     ResetRole(ResetRoleStatement),
@@ -1242,12 +1248,26 @@ pub struct CommentOnConversionStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentOnForeignDataWrapperStatement {
+    pub fdw_name: String,
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateConversionStatement {
     pub conversion_name: String,
     pub for_encoding: String,
     pub to_encoding: String,
     pub function_name: String,
     pub is_default: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateForeignDataWrapperStatement {
+    pub fdw_name: String,
+    pub handler_name: Option<String>,
+    pub validator_name: Option<String>,
+    pub options: Vec<RelOption>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1393,6 +1413,20 @@ pub struct RelOption {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlterGenericOptionAction {
+    Add,
+    Set,
+    Drop,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterGenericOption {
+    pub action: AlterGenericOptionAction,
+    pub name: String,
+    pub value: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DropTableStatement {
     pub if_exists: bool,
     pub table_names: Vec<String>,
@@ -1428,6 +1462,13 @@ pub struct DropDomainStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropForeignDataWrapperStatement {
+    pub if_exists: bool,
+    pub fdw_name: String,
+    pub cascade: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DropTypeStatement {
     pub if_exists: bool,
     pub type_names: Vec<String>,
@@ -1451,6 +1492,26 @@ pub struct DropRuleStatement {
 pub struct DropSchemaStatement {
     pub if_exists: bool,
     pub schema_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterForeignDataWrapperStatement {
+    pub fdw_name: String,
+    pub handler_name: Option<Option<String>>,
+    pub validator_name: Option<Option<String>>,
+    pub options: Vec<AlterGenericOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterForeignDataWrapperOwnerStatement {
+    pub fdw_name: String,
+    pub new_owner: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterForeignDataWrapperRenameStatement {
+    pub fdw_name: String,
+    pub new_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

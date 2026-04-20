@@ -6,10 +6,11 @@ use crate::backend::utils::cache::catcache::{CatCache, sql_type_oid};
 use crate::include::catalog::{
     BootstrapCatalogKind, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow,
     PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow,
-    PgDatabaseRow, PgDependRow, PgDescriptionRow, PgIndexRow, PgInheritsRow, PgLanguageRow,
-    PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow, PgRewriteRow,
-    PgStatisticRow, PgTablespaceRow, PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow,
-    PgTsParserRow, PgTsTemplateRow, PgTypeRow, composite_array_type_row, composite_type_row,
+    PgDatabaseRow, PgDependRow, PgDescriptionRow, PgForeignDataWrapperRow, PgIndexRow,
+    PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow,
+    PgProcRow, PgRewriteRow, PgStatisticRow, PgTablespaceRow, PgTriggerRow, PgTsConfigMapRow,
+    PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
+    composite_array_type_row, composite_type_row,
 };
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -21,6 +22,7 @@ pub(crate) struct PhysicalCatalogRows {
     pub depends: Vec<PgDependRow>,
     pub inherits: Vec<PgInheritsRow>,
     pub descriptions: Vec<PgDescriptionRow>,
+    pub foreign_data_wrappers: Vec<PgForeignDataWrapperRow>,
     pub indexes: Vec<PgIndexRow>,
     pub rewrites: Vec<PgRewriteRow>,
     pub triggers: Vec<PgTriggerRow>,
@@ -146,6 +148,9 @@ pub(crate) fn extend_physical_catalog_rows(
     target.depends.extend(source.depends);
     target.inherits.extend(source.inherits);
     target.descriptions.extend(source.descriptions);
+    target
+        .foreign_data_wrappers
+        .extend(source.foreign_data_wrappers);
     target.indexes.extend(source.indexes);
     target.rewrites.extend(source.rewrites);
     target.triggers.extend(source.triggers);
@@ -182,6 +187,7 @@ pub(crate) fn physical_catalog_rows_from_catcache(catcache: &CatCache) -> Physic
         depends: catcache.depend_rows(),
         inherits: catcache.inherit_rows(),
         descriptions: Vec::new(),
+        foreign_data_wrappers: catcache.foreign_data_wrapper_rows(),
         indexes: catcache.index_rows(),
         rewrites: catcache.rewrite_rows(),
         triggers: catcache.trigger_rows(),

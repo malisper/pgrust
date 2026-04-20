@@ -1353,6 +1353,9 @@ impl Session {
                     search_path.as_deref(),
                 )
             }
+            Statement::CommentOnForeignDataWrapper(ref comment_stmt) => {
+                db.execute_comment_on_foreign_data_wrapper_stmt(client_id, comment_stmt)
+            }
             Statement::CopyFrom(ref copy_stmt) => self.execute_copy_from_file(db, copy_stmt),
             Statement::CreateDomain(ref create_stmt) => {
                 let search_path = self.configured_search_path();
@@ -1369,6 +1372,31 @@ impl Session {
                     create_stmt,
                     search_path.as_deref(),
                 )
+            }
+            Statement::CreateForeignDataWrapper(ref create_stmt) => {
+                let search_path = self.configured_search_path();
+                db.execute_create_foreign_data_wrapper_stmt_with_search_path(
+                    client_id,
+                    create_stmt,
+                    search_path.as_deref(),
+                )
+            }
+            Statement::AlterForeignDataWrapper(ref alter_stmt) => {
+                let search_path = self.configured_search_path();
+                db.execute_alter_foreign_data_wrapper_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    search_path.as_deref(),
+                )
+            }
+            Statement::AlterForeignDataWrapperOwner(ref alter_stmt) => {
+                db.execute_alter_foreign_data_wrapper_owner_stmt(client_id, alter_stmt)
+            }
+            Statement::AlterForeignDataWrapperRename(ref alter_stmt) => {
+                db.execute_alter_foreign_data_wrapper_rename_stmt(client_id, alter_stmt)
+            }
+            Statement::DropForeignDataWrapper(ref drop_stmt) => {
+                db.execute_drop_foreign_data_wrapper_stmt(client_id, drop_stmt)
             }
             Statement::CreateTrigger(ref create_stmt) => {
                 let search_path = self.configured_search_path();

@@ -201,6 +201,18 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'i',
         ),
         proc_row(
+            6404,
+            "postgresql_fdw_validator",
+            BOOL_TYPE_OID,
+            &oid_argtypes(&[TEXT_ARRAY_TYPE_OID, OID_TYPE_OID]),
+            "postgresql_fdw_validator",
+            2,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
             6401,
             "pg_rust_test_enc_setup",
             VOID_TYPE_OID,

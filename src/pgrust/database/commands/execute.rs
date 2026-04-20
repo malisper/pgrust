@@ -467,6 +467,27 @@ impl Database {
                     comment_stmt,
                     configured_search_path,
                 ),
+            Statement::CommentOnForeignDataWrapper(ref comment_stmt) => self
+                .execute_comment_on_foreign_data_wrapper_stmt(client_id, comment_stmt),
+            Statement::CreateForeignDataWrapper(ref create_stmt) => self
+                .execute_create_foreign_data_wrapper_stmt_with_search_path(
+                    client_id,
+                    create_stmt,
+                    configured_search_path,
+                ),
+            Statement::AlterForeignDataWrapper(ref alter_stmt) => self
+                .execute_alter_foreign_data_wrapper_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
+            Statement::AlterForeignDataWrapperOwner(ref alter_stmt) => self
+                .execute_alter_foreign_data_wrapper_owner_stmt(client_id, alter_stmt),
+            Statement::AlterForeignDataWrapperRename(ref alter_stmt) => self
+                .execute_alter_foreign_data_wrapper_rename_stmt(client_id, alter_stmt),
+            Statement::DropForeignDataWrapper(ref drop_stmt) => {
+                self.execute_drop_foreign_data_wrapper_stmt(client_id, drop_stmt)
+            }
             Statement::Select(_) | Statement::Values(_) | Statement::Explain(_) => {
                 let visible_catalog =
                     self.lazy_catalog_lookup(client_id, None, configured_search_path);
