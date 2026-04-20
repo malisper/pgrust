@@ -285,6 +285,7 @@ pub(crate) fn physical_catalog_rows_for_catalog_entry(
                     attstorage: column.storage.attstorage,
                     attcompression: column.storage.attcompression,
                     attstattarget: column.attstattarget,
+                    attoptions: column.attoptions.clone(),
                     attinhcount: column.attinhcount,
                     attislocal: column.attislocal,
                     sql_type: column.sql_type,
