@@ -1179,6 +1179,43 @@ fn parse_alter_table_if_exists_only_statement() {
     );
 }
 
+#[test]
+fn parse_alter_table_multi_statement() {
+    let stmt = parse_statement(
+        "alter table if exists only items add column note text, alter column note set not null, add constraint items_note_guard check (length(note) > 0)",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTable(AlterTableStatement {
+            if_exists: true,
+            only: true,
+            table_name: "items".into(),
+            actions: vec![
+                AlterTableAction::AddColumn(ColumnDef {
+                    name: "note".into(),
+                    ty: builtin_type(SqlType::new(SqlTypeKind::Text)),
+                    default_expr: None,
+                    constraints: vec![],
+                }),
+                AlterTableAction::SetNotNull {
+                    column_name: "note".into(),
+                },
+                AlterTableAction::AddConstraint(TableConstraint::Check {
+                    attributes: ConstraintAttributes {
+                        name: Some("items_note_guard".into()),
+                        not_valid: false,
+                        deferrable: None,
+                        initially_deferred: None,
+                        enforced: None,
+                    },
+                    expr_sql: "length(note) > 0".into(),
+                }),
+            ],
+        })
+    );
+}
+
 fn parse_alter_table_rename_statement() {
     let stmt = parse_statement("alter table items rename to items_new").unwrap();
     assert_eq!(

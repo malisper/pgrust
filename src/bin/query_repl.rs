@@ -473,6 +473,7 @@ fn run_statement(
         | Statement::CopyFrom(_)
         | Statement::CreateTrigger(_)
         | Statement::DropTrigger(_)
+        | Statement::AlterTable(_)
         | Statement::AlterTableSet(_)
         | Statement::AlterTableAddColumn(_)
         | Statement::AlterTableAddConstraint(_)

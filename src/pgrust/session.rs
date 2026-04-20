@@ -38,6 +38,7 @@ use crate::pgrust::database::{
     Database, SequenceMutationEffect, SessionStatsState, StatsFetchConsistency, TempMutationEffect,
     TrackFunctionsSetting, alter_table_add_constraint_lock_requests,
     alter_table_validate_constraint_lock_requests, delete_foreign_key_lock_requests,
+    lookup_heap_relation_for_alter_table,
     insert_foreign_key_lock_requests, prepared_insert_foreign_key_lock_requests,
     reject_relation_with_referencing_foreign_keys, relation_foreign_key_lock_requests,
     update_foreign_key_lock_requests, validate_deferred_foreign_key_constraints,
@@ -575,6 +576,24 @@ impl Session {
                     search_path.as_deref(),
                     self.maintenance_work_mem_kb()?,
                 )
+            }
+            Statement::AlterTable(ref alter_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_alter_table_stmt_with_search_path(
+                        self.client_id,
+                        alter_stmt,
+                        search_path.as_deref(),
+                    )
+                }
             }
             Statement::AlterTableOwner(ref alter_stmt) => {
                 if self.active_txn.is_some() {
@@ -1406,6 +1425,31 @@ impl Session {
                     cid,
                     search_path.as_deref(),
                     catalog_effects,
+                )
+            }
+            Statement::AlterTable(ref alter_stmt) => {
+                let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                let Some(relation) = lookup_heap_relation_for_alter_table(
+                    &catalog,
+                    &alter_stmt.table_name,
+                    alter_stmt.if_exists,
+                )?
+                else {
+                    return Ok(StatementResult::AffectedRows(0));
+                };
+                self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_alter_table_stmt_in_transaction_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    relation.rel,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                    &mut txn.temp_effects,
+                    &mut txn.sequence_effects,
                 )
             }
             Statement::AlterTableOwner(ref alter_stmt) => {
