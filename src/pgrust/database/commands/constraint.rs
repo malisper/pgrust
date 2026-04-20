@@ -517,7 +517,7 @@ impl Database {
                     .iter()
                     .map(|&index| constraint.referenced_desc.columns[index].name.clone())
                     .collect(),
-                match_type: ForeignKeyMatchType::Simple,
+                match_type: constraint.match_type,
                 on_delete: ForeignKeyAction::NoAction,
                 on_update: ForeignKeyAction::NoAction,
                 not_valid: false,
