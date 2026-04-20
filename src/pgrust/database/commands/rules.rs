@@ -507,7 +507,7 @@ pub(crate) fn execute_bound_update_with_rules(
             for event in materialize_update_row_events(
                 &crate::backend::parser::BoundUpdateStatement {
                     targets: vec![target.clone()],
-                    returning_all: false,
+                    returning: Vec::new(),
                     subplans: Vec::new(),
                 },
                 ctx,

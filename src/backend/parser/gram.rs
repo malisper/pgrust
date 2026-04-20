@@ -4381,7 +4381,7 @@ fn build_insert(pair: Pair<'_, Rule>) -> Result<InsertStatement, ParseError> {
     let mut columns = None;
     let mut source = None;
     let mut on_conflict = None;
-    let mut returning_all = false;
+    let mut returning = Vec::new();
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::cte_clause => {
@@ -4413,7 +4413,7 @@ fn build_insert(pair: Pair<'_, Rule>) -> Result<InsertStatement, ParseError> {
             Rule::insert_default_values_source => source = Some(InsertSource::DefaultValues),
             Rule::select_stmt => source = Some(InsertSource::Select(Box::new(build_select(part)?))),
             Rule::on_conflict_clause => on_conflict = Some(build_on_conflict_clause(part)?),
-            Rule::returning_clause => returning_all = true,
+            Rule::returning_clause => returning = build_returning_clause(part)?,
             _ => {}
         }
     }
@@ -4425,7 +4425,7 @@ fn build_insert(pair: Pair<'_, Rule>) -> Result<InsertStatement, ParseError> {
         columns,
         source: source.ok_or(ParseError::UnexpectedEof)?,
         on_conflict,
-        returning_all,
+        returning,
     })
 }
 
@@ -6001,7 +6001,7 @@ fn build_update(pair: Pair<'_, Rule>) -> Result<UpdateStatement, ParseError> {
     let mut only = false;
     let mut assignments = Vec::new();
     let mut where_clause = None;
-    let mut returning_all = false;
+    let mut returning = Vec::new();
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::cte_clause => {
@@ -6013,7 +6013,7 @@ fn build_update(pair: Pair<'_, Rule>) -> Result<UpdateStatement, ParseError> {
             Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
             Rule::assignment => assignments.push(build_assignment(part)?),
             Rule::expr => where_clause = Some(build_expr(part)?),
-            Rule::returning_clause => returning_all = true,
+            Rule::returning_clause => returning = build_returning_clause(part)?,
             _ => {}
         }
     }
@@ -6024,7 +6024,7 @@ fn build_update(pair: Pair<'_, Rule>) -> Result<UpdateStatement, ParseError> {
         only,
         assignments,
         where_clause,
-        returning_all,
+        returning,
     })
 }
 
@@ -6110,6 +6110,14 @@ fn build_select_list(pair: Pair<'_, Rule>) -> Result<Vec<SelectItem>, ParseError
     }
 
     Ok(items)
+}
+
+fn build_returning_clause(pair: Pair<'_, Rule>) -> Result<Vec<SelectItem>, ParseError> {
+    let select_list = pair
+        .into_inner()
+        .find(|part| part.as_rule() == Rule::select_list)
+        .ok_or(ParseError::UnexpectedEof)?;
+    build_select_list(select_list)
 }
 
 fn top_level_extract_expr(pair: Pair<'_, Rule>) -> bool {
