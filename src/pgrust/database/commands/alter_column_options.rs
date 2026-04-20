@@ -4,6 +4,41 @@ use crate::pgrust::database::ddl::{
     ensure_relation_owner, lookup_heap_relation_for_alter_table,
     validate_alter_table_alter_column_options,
 };
+use std::collections::BTreeMap;
+
+fn split_attoption(value: &str) -> Option<(String, String)> {
+    let (name, option_value) = value.split_once('=')?;
+    Some((name.to_string(), option_value.to_string()))
+}
+
+fn apply_attoptions_patch(
+    current: Option<&Vec<String>>,
+    action: &crate::backend::parser::AlterColumnOptionsAction,
+) -> Option<Vec<String>> {
+    let mut options = current
+        .into_iter()
+        .flatten()
+        .filter_map(|value| split_attoption(value))
+        .collect::<BTreeMap<_, _>>();
+    match action {
+        crate::backend::parser::AlterColumnOptionsAction::Set(new_options) => {
+            for option in new_options {
+                options.insert(option.name.to_ascii_lowercase(), option.value.clone());
+            }
+        }
+        crate::backend::parser::AlterColumnOptionsAction::Reset(names) => {
+            for name in names {
+                options.remove(&name.to_ascii_lowercase());
+            }
+        }
+    }
+    (!options.is_empty()).then(|| {
+        options
+            .into_iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect()
+    })
+}
 
 impl Database {
     pub(crate) fn execute_alter_table_alter_column_options_stmt_with_search_path(
@@ -71,12 +106,37 @@ impl Database {
             }));
         }
         ensure_relation_owner(self, client_id, &relation, &alter_stmt.table_name)?;
-        let _column_name =
+        let column_name =
             validate_alter_table_alter_column_options(&relation.desc, &alter_stmt.column_name)?;
+        let current_column = relation
+            .desc
+            .columns
+            .iter()
+            .find(|column| !column.dropped && column.name.eq_ignore_ascii_case(&column_name))
+            .expect("validated column exists");
+        let attoptions =
+            apply_attoptions_patch(current_column.attoptions.as_ref(), &alter_stmt.action);
 
-        // :HACK: PostgreSQL stores column-level SET/RESET options in pg_attribute.attoptions.
-        // pgrust does not model attoptions yet, so for now we validate and accept the syntax
-        // without persisting option values.
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+            interrupts: self.interrupt_state(client_id),
+        };
+        let effect = self
+            .catalog
+            .write()
+            .alter_table_set_column_options_mvcc(
+                relation.relation_oid,
+                &column_name,
+                attoptions,
+                &ctx,
+            )
+            .map_err(map_catalog_error)?;
+        _catalog_effects.push(effect);
         Ok(StatementResult::AffectedRows(0))
     }
 }

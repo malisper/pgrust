@@ -10,8 +10,7 @@ use crate::backend::catalog::persistence::{
 };
 use crate::backend::catalog::pg_constraint::derived_pg_constraint_rows;
 use crate::backend::catalog::pg_depend::{
-    derived_pg_depend_rows, foreign_key_constraint_depend_rows,
-    foreign_data_wrapper_depend_rows,
+    derived_pg_depend_rows, foreign_data_wrapper_depend_rows, foreign_key_constraint_depend_rows,
     index_backed_constraint_depend_rows, inheritance_depend_rows,
     primary_key_owned_not_null_depend_rows, proc_depend_rows, relation_constraint_depend_rows,
     relation_rule_depend_rows, sort_pg_depend_rows, trigger_depend_rows, view_rewrite_depend_rows,
@@ -38,7 +37,7 @@ use crate::include::catalog::{
     PG_AUTHID_RELATION_OID, PG_CLASS_RELATION_OID, PG_FOREIGN_DATA_WRAPPER_RELATION_OID,
     PG_NAMESPACE_RELATION_OID, PG_OPCLASS_RELATION_OID, PG_OPERATOR_RELATION_OID,
     PG_OPFAMILY_RELATION_OID, PG_PROC_RELATION_OID, PG_REWRITE_RELATION_OID, PG_TYPE_RELATION_OID,
-    PgAmopRow, PgAmprocRow, PgAttributeRow, PgAttrdefRow, PgClassRow, PgConstraintRow,
+    PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow, PgClassRow, PgConstraintRow,
     PgDatabaseRow, PgDependRow, PgDescriptionRow, PgForeignDataWrapperRow, PgInheritsRow,
     PgNamespaceRow, PgOpclassRow, PgOpfamilyRow, PgProcRow, PgRewriteRow, PgStatisticRow,
     PgTablespaceRow, relkind_has_storage,
@@ -2752,6 +2751,7 @@ impl CatalogStore {
                 column.storage.nullable = true;
                 column.dropped = true;
                 column.attstattarget = -1;
+                column.attoptions = None;
                 column.not_null_constraint_oid = None;
                 column.not_null_constraint_name = None;
                 column.not_null_constraint_validated = false;
@@ -2833,6 +2833,30 @@ impl CatalogStore {
                 }
                 let column_index = relation_column_index_visible(&entry.desc, column_name)?;
                 entry.desc.columns[column_index].attstattarget = statistics_target;
+                Ok(((), vec![BootstrapCatalogKind::PgAttribute]))
+            })?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        effect_record_oid(&mut effect.type_oids, new_entry.row_type_oid);
+        Ok(effect)
+    }
+
+    pub fn alter_table_set_column_options_mvcc(
+        &mut self,
+        relation_oid: u32,
+        column_name: &str,
+        attoptions: Option<Vec<String>>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let (_old_entry, new_entry, _, kinds) =
+            mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, _control| {
+                if entry.relkind != 'r' {
+                    return Err(CatalogError::UnknownTable(relation_oid.to_string()));
+                }
+                let column_index = relation_column_index_visible(&entry.desc, column_name)?;
+                entry.desc.columns[column_index].attoptions = attoptions;
                 Ok(((), vec![BootstrapCatalogKind::PgAttribute]))
             })?;
 
@@ -3889,6 +3913,7 @@ fn rows_for_new_relation_entry(
                     attstorage: column.storage.attstorage,
                     attcompression: column.storage.attcompression,
                     attstattarget: column.attstattarget,
+                    attoptions: column.attoptions.clone(),
                     attinhcount: column.attinhcount,
                     attislocal: column.attislocal,
                     sql_type: column.sql_type,

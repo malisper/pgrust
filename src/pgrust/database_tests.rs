@@ -4454,26 +4454,48 @@ fn alter_table_alter_column_set_default_rejects_mismatched_type() {
 }
 
 #[test]
-fn alter_table_alter_column_set_options_is_accepted() {
+fn alter_table_alter_column_set_options_persists_attoptions() {
     let base = temp_dir("alter_table_column_options");
     let db = Database::open(&base, 16).unwrap();
 
     db.execute(1, "create table attmp(i int4)").unwrap();
+    db.execute(
+        1,
+        "alter table attmp alter column i set (n_distinct = 1, n_distinct_inherited = 2)",
+    )
+    .unwrap();
     assert_eq!(
-        db.execute(
+        query_rows(
+            &db,
             1,
-            "alter table attmp alter column i set (n_distinct = 1, n_distinct_inherited = 2)",
-        )
-        .unwrap(),
-        StatementResult::AffectedRows(0)
+            "select attoptions from pg_attribute where attrelid = (select oid from pg_class where relname = 'attmp') and attname = 'i'",
+        ),
+        vec![vec![Value::PgArray(
+            crate::include::nodes::datum::ArrayValue::from_1d(vec![
+                Value::Text("n_distinct=1".into()),
+                Value::Text("n_distinct_inherited=2".into()),
+            ])
+            .with_element_type_oid(crate::include::catalog::TEXT_TYPE_OID),
+        )]]
     );
+
+    db.execute(
+        1,
+        "alter table attmp alter column i reset (n_distinct_inherited)",
+    )
+    .unwrap();
     assert_eq!(
-        db.execute(
+        query_rows(
+            &db,
             1,
-            "alter table attmp alter column i reset (n_distinct_inherited)",
-        )
-        .unwrap(),
-        StatementResult::AffectedRows(0)
+            "select attoptions from pg_attribute where attrelid = (select oid from pg_class where relname = 'attmp') and attname = 'i'",
+        ),
+        vec![vec![Value::PgArray(
+            crate::include::nodes::datum::ArrayValue::from_1d(vec![Value::Text(
+                "n_distinct=1".into(),
+            )])
+            .with_element_type_oid(crate::include::catalog::TEXT_TYPE_OID),
+        )]]
     );
 }
 
