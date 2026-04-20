@@ -6,6 +6,7 @@ use std::rc::Rc;
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(super) struct WindowBindingState {
     pub(super) clauses: Vec<WindowClause>,
+    named_specs: Vec<RawWindowClause>,
     next_winno: usize,
 }
 
@@ -70,6 +71,23 @@ fn current_window_scope() -> Option<WindowBindScope> {
 
 pub(super) fn take_window_clauses(state: &Rc<RefCell<WindowBindingState>>) -> Vec<WindowClause> {
     state.borrow().clauses.clone()
+}
+
+pub(super) fn register_named_window_specs(
+    state: &Rc<RefCell<WindowBindingState>>,
+    clauses: &[RawWindowClause],
+) -> Result<(), ParseError> {
+    let mut state = state.borrow_mut();
+    for clause in clauses {
+        if state.named_specs.iter().any(|existing| existing.name == clause.name) {
+            return Err(ParseError::WindowingError(format!(
+                "window \"{}\" is already defined",
+                clause.name
+            )));
+        }
+        state.named_specs.push(clause.clone());
+    }
+    Ok(())
 }
 
 pub(super) fn nested_window_error() -> ParseError {
@@ -231,6 +249,17 @@ pub(super) fn bind_window_spec(
     raw_spec: &RawWindowSpec,
     mut bind_expr: impl FnMut(&SqlExpr) -> Result<Expr, ParseError>,
 ) -> Result<WindowSpec, ParseError> {
+    if let Some(name) = raw_spec.name.as_ref() {
+        let state = current_window_state().ok_or_else(window_not_allowed_error)?;
+        let named = state
+            .borrow()
+            .named_specs
+            .iter()
+            .find(|clause| clause.name == *name)
+            .map(|clause| clause.spec.clone())
+            .ok_or_else(|| ParseError::WindowingError(format!("window \"{name}\" does not exist")))?;
+        return bind_window_spec(&named, bind_expr);
+    }
     let partition_by = raw_spec
         .partition_by
         .iter()

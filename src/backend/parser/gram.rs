@@ -3091,6 +3091,7 @@ fn build_table_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, ParseErro
         where_clause: None,
         group_by: Vec::new(),
         having: None,
+        window_clauses: Vec::new(),
         order_by: Vec::new(),
         limit: None,
         offset: None,
@@ -3625,6 +3626,7 @@ pub(crate) fn build_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, Pars
     let mut where_clause = None;
     let mut group_by = Vec::new();
     let mut having = None;
+    let mut window_clauses = Vec::new();
     let mut order_by = Vec::new();
     let mut limit = None;
     let mut offset = None;
@@ -3646,11 +3648,7 @@ pub(crate) fn build_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, Pars
                         Rule::expr => where_clause = Some(build_expr(inner)?),
                         Rule::group_by_clause => group_by = build_group_by_clause(inner)?,
                         Rule::having_clause => having = Some(build_having_clause(inner)?),
-                        Rule::window_clause_unsupported => {
-                            return Err(ParseError::FeatureNotSupported(
-                                "WINDOW clause aliases".into(),
-                            ));
-                        }
+                        Rule::window_clause => window_clauses = build_window_clause(inner)?,
                         Rule::order_by_clause => order_by = build_order_by_clause(inner)?,
                         Rule::limit_clause => limit = Some(build_limit_clause(inner)?),
                         Rule::offset_clause => offset = Some(build_offset_clause(inner)?),
@@ -3664,11 +3662,7 @@ pub(crate) fn build_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, Pars
             Rule::expr => where_clause = Some(build_expr(part)?),
             Rule::group_by_clause => group_by = build_group_by_clause(part)?,
             Rule::having_clause => having = Some(build_having_clause(part)?),
-            Rule::window_clause_unsupported => {
-                return Err(ParseError::FeatureNotSupported(
-                    "WINDOW clause aliases".into(),
-                ));
-            }
+            Rule::window_clause => window_clauses = build_window_clause(part)?,
             Rule::order_by_clause => order_by = build_order_by_clause(part)?,
             Rule::limit_clause => limit = Some(build_limit_clause(part)?),
             Rule::offset_clause => offset = Some(build_offset_clause(part)?),
@@ -3685,6 +3679,7 @@ pub(crate) fn build_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, Pars
         where_clause,
         group_by,
         having,
+        window_clauses,
         order_by,
         limit,
         offset,
@@ -3718,6 +3713,7 @@ fn build_set_operation_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, P
     let raw = pair.as_str().to_string();
     let mut with_recursive = false;
     let mut with = Vec::new();
+    let mut window_clauses = Vec::new();
     let mut order_by = Vec::new();
     let mut limit = None;
     let mut offset = None;
@@ -3745,11 +3741,7 @@ fn build_set_operation_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, P
                 };
                 operators.push(op);
             }
-            Rule::window_clause_unsupported => {
-                return Err(ParseError::FeatureNotSupported(
-                    "WINDOW clause aliases".into(),
-                ));
-            }
+            Rule::window_clause => window_clauses = build_window_clause(part)?,
             Rule::order_by_clause => order_by = build_order_by_clause(part)?,
             Rule::limit_clause => limit = Some(build_limit_clause(part)?),
             Rule::offset_clause => offset = Some(build_offset_clause(part)?),
@@ -3776,6 +3768,7 @@ fn build_set_operation_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, P
         where_clause: None,
         group_by: Vec::new(),
         having: None,
+        window_clauses,
         order_by,
         limit,
         offset,
@@ -3836,6 +3829,7 @@ fn select_statement_for_set_operation(
         where_clause: None,
         group_by: Vec::new(),
         having: None,
+        window_clauses: Vec::new(),
         order_by: Vec::new(),
         limit: None,
         offset: None,
@@ -3891,6 +3885,7 @@ fn wrap_values_as_select(stmt: ValuesStatement) -> SelectStatement {
         where_clause: None,
         group_by: Vec::new(),
         having: None,
+        window_clauses: Vec::new(),
         order_by: stmt.order_by,
         limit: stmt.limit,
         offset: stmt.offset,
@@ -8072,9 +8067,11 @@ fn build_agg_filter_clause(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> 
 }
 
 fn build_over_clause(pair: Pair<'_, Rule>) -> Result<RawWindowSpec, ParseError> {
+    let mut name = None;
     let mut spec = None;
     for part in pair.into_inner() {
         match part.as_rule() {
+            Rule::identifier => name = Some(build_identifier(part)),
             Rule::raw_window_spec => spec = Some(build_raw_window_spec(part)?),
             Rule::unsupported_window_frame => {
                 return Err(ParseError::FeatureNotSupported(
@@ -8084,10 +8081,50 @@ fn build_over_clause(pair: Pair<'_, Rule>) -> Result<RawWindowSpec, ParseError> 
             _ => {}
         }
     }
+    if let Some(name) = name {
+        return Ok(RawWindowSpec {
+            name: Some(name),
+            partition_by: Vec::new(),
+            order_by: Vec::new(),
+        });
+    }
     Ok(spec.unwrap_or(RawWindowSpec {
+        name: None,
         partition_by: Vec::new(),
         order_by: Vec::new(),
     }))
+}
+
+fn build_window_clause(pair: Pair<'_, Rule>) -> Result<Vec<RawWindowClause>, ParseError> {
+    pair.into_inner()
+        .filter(|part| part.as_rule() == Rule::window_definition)
+        .map(build_window_definition)
+        .collect()
+}
+
+fn build_window_definition(pair: Pair<'_, Rule>) -> Result<RawWindowClause, ParseError> {
+    let mut name = None;
+    let mut spec = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier => name = Some(build_identifier(part)),
+            Rule::raw_window_spec => spec = Some(build_raw_window_spec(part)?),
+            Rule::unsupported_window_frame => {
+                return Err(ParseError::FeatureNotSupported(
+                    "window frame clauses".into(),
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(RawWindowClause {
+        name: name.ok_or(ParseError::UnexpectedEof)?,
+        spec: spec.unwrap_or(RawWindowSpec {
+            name: None,
+            partition_by: Vec::new(),
+            order_by: Vec::new(),
+        }),
+    })
 }
 
 fn build_raw_window_spec(pair: Pair<'_, Rule>) -> Result<RawWindowSpec, ParseError> {
@@ -8113,6 +8150,7 @@ fn build_raw_window_spec(pair: Pair<'_, Rule>) -> Result<RawWindowSpec, ParseErr
         }
     }
     Ok(RawWindowSpec {
+        name: None,
         partition_by,
         order_by,
     })
