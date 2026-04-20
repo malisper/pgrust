@@ -1554,6 +1554,48 @@ fn parse_grant_all_on_schema_statement() {
 }
 
 #[test]
+fn parse_grant_select_on_table_statement() {
+    let stmt = parse_statement("grant select on uaccount to public").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::GrantObject(GrantObjectStatement {
+            privilege: GrantObjectPrivilege::SelectOnTable,
+            object_name: "uaccount".into(),
+            grantee_names: vec!["public".into()],
+            with_grant_option: false,
+        })
+    );
+}
+
+#[test]
+fn parse_grant_all_on_table_statement() {
+    let stmt = parse_statement("grant all on uaccount to public").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::GrantObject(GrantObjectStatement {
+            privilege: GrantObjectPrivilege::AllPrivilegesOnTable,
+            object_name: "uaccount".into(),
+            grantee_names: vec!["public".into()],
+            with_grant_option: false,
+        })
+    );
+}
+
+#[test]
+fn parse_grant_execute_on_function_statement() {
+    let stmt = parse_statement("grant execute on function f_leak(text) to public").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::GrantObject(GrantObjectStatement {
+            privilege: GrantObjectPrivilege::ExecuteOnFunction,
+            object_name: "f_leak(text)".into(),
+            grantee_names: vec!["public".into()],
+            with_grant_option: false,
+        })
+    );
+}
+
+#[test]
 fn parse_create_tablespace_statement() {
     let stmt = parse_statement("create tablespace regress_tblspace location ''").unwrap();
     assert_eq!(
@@ -3903,7 +3945,10 @@ fn parse_insert_update_delete() {
         matches!(parse_statement("drop index tenant_idx").unwrap(), Statement::DropIndex(DropIndexStatement { if_exists: false, index_names }) if index_names == vec!["tenant_idx"])
     );
     assert!(
-        matches!(parse_statement("drop schema if exists tenant_a, tenant_b").unwrap(), Statement::DropSchema(DropSchemaStatement { if_exists: true, schema_names }) if schema_names == vec!["tenant_a", "tenant_b"])
+        matches!(parse_statement("drop schema if exists tenant_a, tenant_b").unwrap(), Statement::DropSchema(DropSchemaStatement { if_exists: true, schema_names, cascade: false }) if schema_names == vec!["tenant_a", "tenant_b"])
+    );
+    assert!(
+        matches!(parse_statement("drop schema if exists tenant_a cascade").unwrap(), Statement::DropSchema(DropSchemaStatement { if_exists: true, schema_names, cascade: true }) if schema_names == vec!["tenant_a"])
     );
     assert!(
         matches!(parse_statement("create view item_names as select id, name from people").unwrap(), Statement::CreateView(CreateViewStatement { schema_name: None, view_name, query_sql, .. }) if view_name == "item_names" && query_sql == "select id, name from people")

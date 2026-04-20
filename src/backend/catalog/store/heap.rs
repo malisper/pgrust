@@ -940,6 +940,42 @@ impl CatalogStore {
         Ok((row.oid, effect))
     }
 
+    pub fn drop_proc_by_oid_mvcc(
+        &mut self,
+        proc_oid: u32,
+        ctx: &CatalogWriteContext,
+    ) -> Result<(PgProcRow, CatalogMutationEffect), CatalogError> {
+        let catcache = visible_catalog_caches_for_ctx(self, ctx)?.0;
+        let proc_row = catcache
+            .proc_by_oid(proc_oid)
+            .cloned()
+            .ok_or_else(|| CatalogError::UnknownTable(proc_oid.to_string()))?;
+        let mut referenced_type_oids = parse_proc_argtype_oids(&proc_row.proargtypes);
+        if let Some(all_arg_types) = &proc_row.proallargtypes {
+            referenced_type_oids.extend(all_arg_types.iter().copied());
+        }
+        let kinds = [BootstrapCatalogKind::PgProc, BootstrapCatalogKind::PgDepend];
+        delete_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                procs: vec![proc_row.clone()],
+                depends: proc_depend_rows(
+                    proc_row.oid,
+                    proc_row.pronamespace,
+                    proc_row.prorettype,
+                    &referenced_type_oids,
+                ),
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &kinds,
+        )?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        Ok((proc_row, effect))
+    }
+
     pub fn create_operator_class_mvcc(
         &mut self,
         mut opfamily_row: PgOpfamilyRow,
