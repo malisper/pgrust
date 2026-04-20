@@ -916,6 +916,7 @@ pub(super) fn validate_aggregate_arity(func: AggFunc, args: &[SqlExpr]) -> Resul
         .unwrap_or_else(|| match func {
             AggFunc::Count => args.len() <= 1,
             AggFunc::AnyValue
+            | AggFunc::BoolAnd
             | AggFunc::Sum
             | AggFunc::Avg
             | AggFunc::VarPop
@@ -2086,6 +2087,8 @@ fn supports_fixed_aggregate_return_type(func: AggFunc) -> bool {
     matches!(
         func,
         AggFunc::Count
+            | AggFunc::AnyValue
+            | AggFunc::BoolAnd
             | AggFunc::RegrCount
             | AggFunc::RegrSxx
             | AggFunc::RegrSyy
@@ -2125,6 +2128,7 @@ fn aggregate_func_for_proname(name: &str) -> Option<AggFunc> {
     match name.to_ascii_lowercase().as_str() {
         "count" => Some(AggFunc::Count),
         "any_value" => Some(AggFunc::AnyValue),
+        "bool_and" => Some(AggFunc::BoolAnd),
         "sum" => Some(AggFunc::Sum),
         "avg" => Some(AggFunc::Avg),
         "var_pop" => Some(AggFunc::VarPop),

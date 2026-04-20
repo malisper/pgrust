@@ -175,6 +175,7 @@ pub struct ToastRelationRef {
 pub enum AggFunc {
     Count,
     AnyValue,
+    BoolAnd,
     Sum,
     Avg,
     VarPop,
@@ -211,6 +212,7 @@ impl AggFunc {
         match self {
             AggFunc::Count => "count",
             AggFunc::AnyValue => "any_value",
+            AggFunc::BoolAnd => "bool_and",
             AggFunc::Sum => "sum",
             AggFunc::Avg => "avg",
             AggFunc::VarPop => "var_pop",
