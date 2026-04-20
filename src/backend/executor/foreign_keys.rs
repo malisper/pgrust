@@ -39,6 +39,9 @@ pub(crate) fn enforce_outbound_foreign_keys(
     ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
     for constraint in constraints {
+        if !constraint.enforced {
+            continue;
+        }
         if previous_values.is_some_and(|previous| {
             !key_columns_changed(previous, values, &constraint.column_indexes)
         }) {
@@ -85,6 +88,9 @@ pub(crate) fn enforce_inbound_foreign_keys_on_update(
     ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
     for constraint in constraints {
+        if !constraint.enforced {
+            continue;
+        }
         if !key_columns_changed(
             previous_values,
             values,
@@ -112,6 +118,9 @@ pub(crate) fn enforce_inbound_foreign_keys_on_delete(
     ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
     for constraint in constraints {
+        if !constraint.enforced {
+            continue;
+        }
         if maybe_defer_constraint(
             ctx,
             constraint.constraint_oid,
