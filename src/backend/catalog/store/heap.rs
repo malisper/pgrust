@@ -2896,6 +2896,30 @@ impl CatalogStore {
         Ok(effect)
     }
 
+    pub fn alter_relation_row_security_mvcc(
+        &mut self,
+        relation_oid: u32,
+        relrowsecurity: Option<bool>,
+        relforcerowsecurity: Option<bool>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let (_old_entry, _new_entry, _, kinds) =
+            mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, _control| {
+                if let Some(value) = relrowsecurity {
+                    entry.relrowsecurity = value;
+                }
+                if let Some(value) = relforcerowsecurity {
+                    entry.relforcerowsecurity = value;
+                }
+                Ok(((), vec![BootstrapCatalogKind::PgClass]))
+            })?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        Ok(effect)
+    }
+
     pub fn set_relation_analyze_stats_mvcc(
         &mut self,
         relation_oid: u32,
@@ -3288,6 +3312,8 @@ fn build_relation_entry(
         relhassubclass: false,
         relhastriggers: false,
         relispartition: false,
+        relrowsecurity: false,
+        relforcerowsecurity: false,
         relpages,
         reltuples,
         desc,
@@ -3383,6 +3409,8 @@ fn build_index_entry(
         relhassubclass: false,
         relhastriggers: false,
         relispartition: false,
+        relrowsecurity: false,
+        relforcerowsecurity: false,
         relpages: 0,
         reltuples: -1.0,
         desc: RelationDesc {
@@ -3792,6 +3820,8 @@ fn class_row_for_relation_name(relation_name: &str, entry: &CatalogEntry) -> PgC
         relhassubclass: entry.relhassubclass,
         relhastriggers: entry.relhastriggers,
         relispartition: entry.relispartition,
+        relrowsecurity: entry.relrowsecurity,
+        relforcerowsecurity: entry.relforcerowsecurity,
         relnatts: entry.desc.columns.len() as i16,
         relpages: entry.relpages,
         reltuples: entry.reltuples,
@@ -3972,6 +4002,8 @@ fn catalog_entry_from_visible_relation(
         relhassubclass: class_row.relhassubclass,
         relhastriggers: relation.relhastriggers,
         relispartition: class_row.relispartition,
+        relrowsecurity: class_row.relrowsecurity,
+        relforcerowsecurity: class_row.relforcerowsecurity,
         relpages: class_row.relpages,
         reltuples: class_row.reltuples,
         desc: relation.desc.clone(),

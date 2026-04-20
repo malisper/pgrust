@@ -1,7 +1,7 @@
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 
 statement = { SOI ~ stmt ~ EOI }
-stmt = _{ do_stmt | explain_stmt | table_stmt | select_stmt | values_stmt | copy_stmt | analyze_stmt | checkpoint_stmt | show_stmt | set_session_authorization_stmt | reset_session_authorization_stmt | set_role_stmt | reset_role_stmt | set_stmt | reset_stmt | create_role_stmt | alter_role_stmt | create_database_stmt | create_schema_stmt | create_index_stmt | alter_table_add_column_stmt | alter_table_add_constraint_stmt | alter_table_drop_constraint_stmt | alter_table_alter_constraint_stmt | alter_table_rename_constraint_stmt | alter_table_drop_column_stmt | alter_table_alter_column_type_stmt | alter_table_alter_column_default_stmt | alter_table_owner_stmt | alter_table_rename_column_stmt | alter_table_rename_stmt | alter_view_owner_stmt | alter_schema_owner_stmt | alter_table_set_stmt | alter_table_set_not_null_stmt | alter_table_drop_not_null_stmt | alter_table_validate_constraint_stmt | comment_on_role_stmt | comment_on_table_stmt | comment_on_rule_stmt | create_table_stmt | create_view_stmt | create_rule_stmt | drop_role_stmt | drop_database_stmt | drop_table_stmt | drop_index_stmt | drop_view_stmt | drop_rule_stmt | drop_schema_stmt | reassign_owned_stmt | truncate_table_stmt | vacuum_stmt | insert_stmt | merge_stmt | update_stmt | delete_stmt | begin_stmt | commit_stmt | rollback_stmt }
+stmt = _{ do_stmt | explain_stmt | table_stmt | select_stmt | values_stmt | copy_stmt | analyze_stmt | checkpoint_stmt | show_stmt | set_session_authorization_stmt | reset_session_authorization_stmt | set_role_stmt | reset_role_stmt | set_stmt | reset_stmt | create_role_stmt | alter_role_stmt | create_database_stmt | create_schema_stmt | create_index_stmt | alter_table_add_column_stmt | alter_table_add_constraint_stmt | alter_table_drop_constraint_stmt | alter_table_alter_constraint_stmt | alter_table_rename_constraint_stmt | alter_table_drop_column_stmt | alter_table_alter_column_type_stmt | alter_table_alter_column_default_stmt | alter_table_owner_stmt | alter_table_rename_column_stmt | alter_table_rename_stmt | alter_view_owner_stmt | alter_schema_owner_stmt | alter_table_set_stmt | alter_table_set_row_security_stmt | alter_table_set_not_null_stmt | alter_table_drop_not_null_stmt | alter_table_validate_constraint_stmt | comment_on_role_stmt | comment_on_table_stmt | comment_on_rule_stmt | create_table_stmt | create_view_stmt | create_rule_stmt | drop_role_stmt | drop_database_stmt | drop_table_stmt | drop_index_stmt | drop_view_stmt | drop_rule_stmt | drop_schema_stmt | reassign_owned_stmt | truncate_table_stmt | vacuum_stmt | insert_stmt | merge_stmt | update_stmt | delete_stmt | begin_stmt | commit_stmt | rollback_stmt }
 
 do_stmt = { kw_do ~ do_body ~ do_language_clause? | kw_do ~ do_language_clause ~ do_body }
 do_body = { quoted_string_literal }
@@ -135,6 +135,8 @@ alter_table_rename_stmt = { kw_alter ~ kw_table ~ alter_table_target ~ kw_rename
 alter_view_owner_stmt = { kw_alter ~ kw_view ~ identifier ~ kw_owner ~ kw_to ~ identifier }
 alter_schema_owner_stmt = { kw_alter ~ kw_schema ~ identifier ~ kw_owner ~ kw_to ~ identifier }
 alter_table_set_stmt = { kw_alter ~ kw_table ~ alter_table_target ~ kw_set ~ "(" ~ reloption ~ ("," ~ reloption)* ~ ")" }
+alter_table_set_row_security_stmt = { kw_alter ~ kw_table ~ alter_table_target ~ alter_table_row_security_action }
+alter_table_row_security_action = { (kw_enable ~ kw_row ~ kw_level ~ kw_security) | (kw_disable ~ kw_row ~ kw_level ~ kw_security) | (kw_force ~ kw_row ~ kw_level ~ kw_security) | (kw_no ~ kw_force ~ kw_row ~ kw_level ~ kw_security) }
 alter_table_set_not_null_stmt = { kw_alter ~ kw_table ~ alter_table_target ~ kw_alter ~ kw_column? ~ identifier ~ kw_set ~ kw_not ~ kw_null }
 alter_table_drop_not_null_stmt = { kw_alter ~ kw_table ~ alter_table_target ~ kw_alter ~ kw_column? ~ identifier ~ kw_drop ~ kw_not ~ kw_null }
 alter_table_validate_constraint_stmt = { kw_alter ~ kw_table ~ alter_table_target ~ kw_validate ~ kw_constraint ~ identifier }
@@ -568,6 +570,7 @@ kw_if = _{ kw_if_atom }
 kw_exists = _{ kw_exists_atom }
 kw_isolation = _{ kw_isolation_atom }
 kw_level = _{ kw_level_atom }
+kw_security = _{ kw_security_atom }
 kw_read = _{ kw_read_atom }
 kw_committed = _{ kw_committed_atom }
 kw_repeatable = _{ kw_repeatable_atom }
@@ -675,6 +678,9 @@ kw_connection = _{ kw_connection_atom }
 kw_password = _{ kw_password_atom }
 kw_encrypted = _{ kw_encrypted_atom }
 kw_sysid = _{ kw_sysid_atom }
+kw_enable = _{ kw_enable_atom }
+kw_disable = _{ kw_disable_atom }
+kw_force = _{ kw_force_atom }
 
 kw_int4 = { kw_int4_atom }
 kw_int2 = { kw_int2_atom }
@@ -851,6 +857,7 @@ kw_if_atom = @{ ^"if" ~ keyword_end }
 kw_exists_atom = @{ ^"exists" ~ keyword_end }
 kw_isolation_atom = @{ ^"isolation" ~ keyword_end }
 kw_level_atom = @{ ^"level" ~ keyword_end }
+kw_security_atom = @{ ^"security" ~ keyword_end }
 kw_read_atom = @{ ^"read" ~ keyword_end }
 kw_committed_atom = @{ ^"committed" ~ keyword_end }
 kw_repeatable_atom = @{ ^"repeatable" ~ keyword_end }
@@ -957,6 +964,9 @@ kw_connection_atom = @{ ^"connection" ~ keyword_end }
 kw_password_atom = @{ ^"password" ~ keyword_end }
 kw_encrypted_atom = @{ ^"encrypted" ~ keyword_end }
 kw_sysid_atom = @{ ^"sysid" ~ keyword_end }
+kw_enable_atom = @{ ^"enable" ~ keyword_end }
+kw_disable_atom = @{ ^"disable" ~ keyword_end }
+kw_force_atom = @{ ^"force" ~ keyword_end }
 
 kw_int2_atom = @{ ^"int2" ~ keyword_end }
 kw_int4_atom = @{ ^"int4" ~ keyword_end }

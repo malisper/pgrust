@@ -474,6 +474,7 @@ fn run_statement(
         | Statement::CreateTrigger(_)
         | Statement::DropTrigger(_)
         | Statement::AlterTableSet(_)
+        | Statement::AlterTableSetRowSecurity(_)
         | Statement::AlterTableAddColumn(_)
         | Statement::AlterTableAddConstraint(_)
         | Statement::AlterTableDropConstraint(_)

@@ -147,7 +147,8 @@ fn execute_statement_with_source(
         | Statement::AlterTableAlterColumnDefault(_)
         // :HACK: ALTER TABLE ... SET (...) is accepted narrowly for numeric.sql and ignored
         // until table reloptions are modeled for real.
-        | Statement::AlterTableSet(_) => Ok(StatementResult::AffectedRows(0)),
+        | Statement::AlterTableSet(_)
+        | Statement::AlterTableSetRowSecurity(_) => Ok(StatementResult::AffectedRows(0)),
         Statement::CopyFrom(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "COPY handled by session layer",
             actual: "COPY".into(),

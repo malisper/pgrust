@@ -233,6 +233,8 @@ impl CatCache {
                 relhassubclass: entry.relhassubclass,
                 relhastriggers: entry.relhastriggers,
                 relispartition: entry.relispartition,
+                relrowsecurity: entry.relrowsecurity,
+                relforcerowsecurity: entry.relforcerowsecurity,
                 relnatts: entry.desc.columns.len() as i16,
                 relpages: entry.relpages,
                 reltuples: entry.reltuples,

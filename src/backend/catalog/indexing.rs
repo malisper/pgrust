@@ -63,6 +63,8 @@ pub fn system_catalog_index_entry_for_db(
         relhassubclass: false,
         relhastriggers: false,
         relispartition: false,
+        relrowsecurity: false,
+        relforcerowsecurity: false,
         relpages: 0,
         reltuples: 0.0,
         desc: system_catalog_index_desc(descriptor),
