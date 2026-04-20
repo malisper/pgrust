@@ -14,6 +14,16 @@
 
 The current codebase was recently refactored to separate parser, logical plan, and executor-runtime responsibilities more cleanly. Prefer extending those boundaries instead of reintroducing cross-layer dependencies.
 
+## PostgreSQL Reference Repo
+
+A sibling PostgreSQL source checkout is available at `~/postgres`.
+
+Guidance:
+
+- Refer to the PostgreSQL repo as much as necessary when implementing SQL behavior, planner/executor semantics, catalog behavior, protocol details, or PostgreSQL-compatible errors.
+- Treat the PostgreSQL repo as the primary behavioral reference when pgrust behavior is unclear or when regression results need explanation.
+- Prefer checking the matching PostgreSQL area before introducing new semantics or compatibility shims in pgrust.
+
 ## Shared Node Layers
 
 The canonical shared types live under `src/include/nodes`:
