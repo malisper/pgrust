@@ -1014,6 +1014,9 @@ pub enum Expr {
     },
     Random,
     CurrentDate,
+    CurrentUser,
+    SessionUser,
+    CurrentRole,
     CurrentTime {
         precision: Option<i32>,
     },
@@ -1340,6 +1343,9 @@ pub fn expr_sql_type_hint(expr: &Expr) -> Option<SqlType> {
         | Expr::ArraySubscript { .. }
         | Expr::Random
         | Expr::CurrentDate
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
         | Expr::LocalTime { .. }

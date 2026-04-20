@@ -7807,6 +7807,8 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         Rule::kw_false => Ok(SqlExpr::Const(Value::Bool(false))),
         Rule::kw_current_date => Ok(SqlExpr::CurrentDate),
         Rule::kw_current_user => Ok(SqlExpr::CurrentUser),
+        Rule::kw_session_user => Ok(SqlExpr::SessionUser),
+        Rule::kw_current_role => Ok(SqlExpr::CurrentRole),
         Rule::kw_current_time => Ok(SqlExpr::CurrentTime {
             precision: pair
                 .into_inner()

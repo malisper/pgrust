@@ -182,6 +182,7 @@ fn analyze_executor_context(
         session_stats: db.session_stats_state(client_id),
         snapshot: db.txns.read().snapshot_for_command(xid, cid).unwrap(),
         client_id,
+        session_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         current_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         next_command_id: cid,
         timed: false,
@@ -12998,6 +12999,37 @@ fn regrole_cast_to_text_renders_role_name() {
         vec![vec![
             Value::Text("app_member".into()),
             Value::Text("postgres".into()),
+        ]]
+    );
+}
+
+#[test]
+fn session_user_and_current_role_are_sql_visible() {
+    let dir = temp_dir("session_user_current_role");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create role tenant login").unwrap();
+    db.execute(1, "create role manager").unwrap();
+    db.execute(1, "grant manager to tenant").unwrap();
+    db.execute(1, "set session authorization tenant").unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select session_user, current_user, current_role"),
+        vec![vec![
+            Value::Text("tenant".into()),
+            Value::Text("tenant".into()),
+            Value::Text("tenant".into()),
+        ]]
+    );
+
+    db.execute(1, "set role manager").unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select session_user, current_user, current_role"),
+        vec![vec![
+            Value::Text("tenant".into()),
+            Value::Text("manager".into()),
+            Value::Text("manager".into()),
         ]]
     );
 }

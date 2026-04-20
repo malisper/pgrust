@@ -987,6 +987,8 @@ pub(super) fn infer_sql_expr_type_with_ctes(
         | SqlExpr::GeometryBinaryOp { .. } => unreachable!("handled before match"),
         SqlExpr::CurrentDate => SqlType::new(SqlTypeKind::Date),
         SqlExpr::CurrentUser => SqlType::new(SqlTypeKind::Name),
+        SqlExpr::SessionUser => SqlType::new(SqlTypeKind::Name),
+        SqlExpr::CurrentRole => SqlType::new(SqlTypeKind::Name),
         SqlExpr::CurrentTime { precision } => precision
             .map(|precision| SqlType::with_time_precision(SqlTypeKind::TimeTz, precision))
             .unwrap_or_else(|| SqlType::new(SqlTypeKind::TimeTz)),
