@@ -1,4 +1,5 @@
 use super::*;
+use crate::backend::executor::expr_string::eval_like;
 use crate::backend::parser::CatalogLookup;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::nodes::datum::ArrayValue;
@@ -351,6 +352,10 @@ pub(super) fn compare_subquery_values(
                 right,
             }),
         },
+        SubqueryComparisonOp::Like => eval_like(&left, &right, None, false, false),
+        SubqueryComparisonOp::NotLike => eval_like(&left, &right, None, false, true),
+        SubqueryComparisonOp::ILike => eval_like(&left, &right, None, true, false),
+        SubqueryComparisonOp::NotILike => eval_like(&left, &right, None, true, true),
     }
 }
 

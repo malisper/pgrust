@@ -7061,6 +7061,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                         }
                     })
                 }
+                Rule::quantified_like_suffix => build_quantified_like_predicate(left, next),
                 Rule::like_suffix => build_like_predicate(left, next),
                 Rule::similar_suffix => build_similar_predicate(left, next),
                 Rule::comp_op => {
@@ -7855,6 +7856,60 @@ fn build_like_predicate(left: SqlExpr, pair: Pair<'_, Rule>) -> Result<SqlExpr, 
         case_insensitive,
         negated,
     })
+}
+
+fn build_quantified_like_predicate(
+    left: SqlExpr,
+    pair: Pair<'_, Rule>,
+) -> Result<SqlExpr, ParseError> {
+    enum QuantifiedLikeRhs {
+        Subquery(SelectStatement),
+        Expr(SqlExpr),
+    }
+
+    let mut negated = false;
+    let mut case_insensitive = false;
+    let lowered = pair.as_str().to_ascii_lowercase();
+    let is_all = if lowered.contains(" all ") {
+        Some(true)
+    } else if lowered.contains(" any ") {
+        Some(false)
+    } else {
+        None
+    };
+    let mut rhs = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::kw_not => negated = true,
+            Rule::kw_like => case_insensitive = false,
+            Rule::kw_ilike => case_insensitive = true,
+            Rule::select_stmt => rhs = Some(QuantifiedLikeRhs::Subquery(build_select(part)?)),
+            Rule::expr => rhs = Some(QuantifiedLikeRhs::Expr(build_expr(part)?)),
+            _ => {}
+        }
+    }
+
+    let op = match (case_insensitive, negated) {
+        (false, false) => SubqueryComparisonOp::Like,
+        (false, true) => SubqueryComparisonOp::NotLike,
+        (true, false) => SubqueryComparisonOp::ILike,
+        (true, true) => SubqueryComparisonOp::NotILike,
+    };
+    let is_all = is_all.ok_or(ParseError::UnexpectedEof)?;
+    match rhs.ok_or(ParseError::UnexpectedEof)? {
+        QuantifiedLikeRhs::Subquery(subquery) => Ok(SqlExpr::QuantifiedSubquery {
+            left: Box::new(left),
+            op,
+            is_all,
+            subquery: Box::new(subquery),
+        }),
+        QuantifiedLikeRhs::Expr(array) => Ok(SqlExpr::QuantifiedArray {
+            left: Box::new(left),
+            op,
+            is_all,
+            array: Box::new(array),
+        }),
+    }
 }
 
 fn build_similar_predicate(left: SqlExpr, pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
