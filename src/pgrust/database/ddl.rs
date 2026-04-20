@@ -42,6 +42,18 @@ pub(super) fn lookup_heap_relation_for_ddl(
     }
 }
 
+pub(super) fn lookup_heap_relation_for_alter_table(
+    catalog: &dyn CatalogLookup,
+    name: &str,
+    if_exists: bool,
+) -> Result<Option<BoundRelation>, ExecError> {
+    match lookup_heap_relation_for_ddl(catalog, name) {
+        Ok(relation) => Ok(Some(relation)),
+        Err(ExecError::Parse(ParseError::TableDoesNotExist(_))) if if_exists => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
 pub(super) fn lookup_rule_relation_for_ddl(
     catalog: &dyn CatalogLookup,
     name: &str,

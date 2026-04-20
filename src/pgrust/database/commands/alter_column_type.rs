@@ -4,7 +4,9 @@ use crate::backend::commands::tablecmds::{collect_matching_rows_heap, maintain_i
 use crate::backend::executor::value_io::tuple_from_values;
 use crate::backend::executor::{ExecutorContext, RelationDesc, TupleSlot, eval_expr};
 use crate::include::catalog::PG_CATALOG_NAMESPACE_OID;
-use crate::pgrust::database::ddl::validate_alter_table_alter_column_type;
+use crate::pgrust::database::ddl::{
+    lookup_heap_relation_for_alter_table, validate_alter_table_alter_column_type,
+};
 
 fn reject_unsupported_alter_column_type_indexes(
     indexes: &[crate::backend::parser::BoundIndexRelation],
@@ -79,7 +81,14 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let relation = lookup_heap_relation_for_ddl(&catalog, &alter_stmt.table_name)?;
+        let Some(relation) = lookup_heap_relation_for_alter_table(
+            &catalog,
+            &alter_stmt.table_name,
+            alter_stmt.if_exists,
+        )?
+        else {
+            return Ok(StatementResult::AffectedRows(0));
+        };
         self.table_locks.lock_table_interruptible(
             relation.rel,
             TableLockMode::AccessExclusive,
@@ -115,7 +124,14 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let relation = lookup_heap_relation_for_ddl(&catalog, &alter_stmt.table_name)?;
+        let Some(relation) = lookup_heap_relation_for_alter_table(
+            &catalog,
+            &alter_stmt.table_name,
+            alter_stmt.if_exists,
+        )?
+        else {
+            return Ok(StatementResult::AffectedRows(0));
+        };
         if relation.namespace_oid == PG_CATALOG_NAMESPACE_OID {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "user table for ALTER TABLE ALTER COLUMN TYPE",

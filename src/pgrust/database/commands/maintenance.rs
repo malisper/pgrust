@@ -6,7 +6,9 @@ use crate::backend::executor::{ExecutorContext, RelationDesc};
 use crate::include::catalog::relkind_is_analyzable;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::MaintenanceTarget;
-use crate::pgrust::database::ddl::lookup_analyzable_relation_for_ddl;
+use crate::pgrust::database::ddl::{
+    lookup_analyzable_relation_for_ddl, lookup_heap_relation_for_alter_table,
+};
 
 fn rewrite_heap_rows_for_added_serial_column(
     db: &Database,
@@ -200,7 +202,14 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let relation = lookup_heap_relation_for_ddl(&catalog, &alter_stmt.table_name)?;
+        let Some(relation) = lookup_heap_relation_for_alter_table(
+            &catalog,
+            &alter_stmt.table_name,
+            alter_stmt.if_exists,
+        )?
+        else {
+            return Ok(StatementResult::AffectedRows(0));
+        };
         self.table_locks.lock_table_interruptible(
             relation.rel,
             TableLockMode::AccessExclusive,
@@ -411,7 +420,14 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let relation = lookup_heap_relation_for_ddl(&catalog, &alter_stmt.table_name)?;
+        let Some(relation) = lookup_heap_relation_for_alter_table(
+            &catalog,
+            &alter_stmt.table_name,
+            alter_stmt.if_exists,
+        )?
+        else {
+            return Ok(StatementResult::AffectedRows(0));
+        };
         if relation.relpersistence == 't' {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "permanent table for ALTER TABLE ADD COLUMN",

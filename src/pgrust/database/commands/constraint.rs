@@ -10,6 +10,7 @@ use crate::include::catalog::{
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::TupleSlot;
+use crate::pgrust::database::ddl::lookup_heap_relation_for_alter_table;
 use crate::include::nodes::parsenodes::{ForeignKeyAction, ForeignKeyMatchType};
 use crate::pgrust::database::ddl::is_system_column_name;
 
@@ -390,7 +391,14 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let relation = lookup_heap_relation_for_ddl(&catalog, &alter_stmt.table_name)?;
+        let Some(relation) = lookup_heap_relation_for_alter_table(
+            &catalog,
+            &alter_stmt.table_name,
+            alter_stmt.if_exists,
+        )?
+        else {
+            return Ok(StatementResult::AffectedRows(0));
+        };
         self.table_locks.lock_table_interruptible(
             relation.rel,
             TableLockMode::AccessExclusive,
@@ -426,7 +434,14 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let relation = lookup_heap_relation_for_ddl(&catalog, &alter_stmt.table_name)?;
+        let Some(relation) = lookup_heap_relation_for_alter_table(
+            &catalog,
+            &alter_stmt.table_name,
+            alter_stmt.if_exists,
+        )?
+        else {
+            return Ok(StatementResult::AffectedRows(0));
+        };
         ensure_constraint_relation(self, client_id, &relation, &alter_stmt.table_name)?;
         let rows = catalog.constraint_rows_for_relation(relation.relation_oid);
         let row = find_constraint_row(&rows, &alter_stmt.constraint_name)
@@ -489,7 +504,14 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let relation = lookup_heap_relation_for_ddl(&catalog, &alter_stmt.table_name)?;
+        let Some(relation) = lookup_heap_relation_for_alter_table(
+            &catalog,
+            &alter_stmt.table_name,
+            alter_stmt.if_exists,
+        )?
+        else {
+            return Ok(StatementResult::AffectedRows(0));
+        };
         self.table_locks.lock_table_interruptible(
             relation.rel,
             TableLockMode::AccessExclusive,
@@ -525,7 +547,14 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let relation = lookup_heap_relation_for_ddl(&catalog, &alter_stmt.table_name)?;
+        let Some(relation) = lookup_heap_relation_for_alter_table(
+            &catalog,
+            &alter_stmt.table_name,
+            alter_stmt.if_exists,
+        )?
+        else {
+            return Ok(StatementResult::AffectedRows(0));
+        };
         ensure_constraint_relation(self, client_id, &relation, &alter_stmt.table_name)?;
         let rows = catalog.constraint_rows_for_relation(relation.relation_oid);
         find_constraint_row(&rows, &alter_stmt.constraint_name).ok_or_else(|| {
@@ -576,7 +605,14 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let relation = lookup_heap_relation_for_ddl(&catalog, &alter_stmt.table_name)?;
+        let Some(relation) = lookup_heap_relation_for_alter_table(
+            &catalog,
+            &alter_stmt.table_name,
+            alter_stmt.if_exists,
+        )?
+        else {
+            return Ok(StatementResult::AffectedRows(0));
+        };
         let lock_requests =
             alter_table_add_constraint_lock_requests(&relation, alter_stmt, &catalog)?;
         crate::backend::storage::lmgr::lock_table_requests_interruptible(
@@ -614,7 +650,14 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let relation = lookup_heap_relation_for_ddl(&catalog, &alter_stmt.table_name)?;
+        let Some(relation) = lookup_heap_relation_for_alter_table(
+            &catalog,
+            &alter_stmt.table_name,
+            alter_stmt.if_exists,
+        )?
+        else {
+            return Ok(StatementResult::AffectedRows(0));
+        };
         ensure_constraint_relation(self, client_id, &relation, &alter_stmt.table_name)?;
         let table_name = relation_basename(&alter_stmt.table_name).to_string();
         let existing_constraints = catalog.constraint_rows_for_relation(relation.relation_oid);
@@ -925,7 +968,14 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let relation = lookup_heap_relation_for_ddl(&catalog, &drop_stmt.table_name)?;
+        let Some(relation) = lookup_heap_relation_for_alter_table(
+            &catalog,
+            &drop_stmt.table_name,
+            drop_stmt.if_exists,
+        )?
+        else {
+            return Ok(StatementResult::AffectedRows(0));
+        };
         self.table_locks.lock_table_interruptible(
             relation.rel,
             TableLockMode::AccessExclusive,
@@ -960,7 +1010,14 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let relation = lookup_heap_relation_for_ddl(&catalog, &drop_stmt.table_name)?;
+        let Some(relation) = lookup_heap_relation_for_alter_table(
+            &catalog,
+            &drop_stmt.table_name,
+            drop_stmt.if_exists,
+        )?
+        else {
+            return Ok(StatementResult::AffectedRows(0));
+        };
         ensure_constraint_relation(self, client_id, &relation, &drop_stmt.table_name)?;
         let rows = catalog.constraint_rows_for_relation(relation.relation_oid);
         let row = find_constraint_row(&rows, &drop_stmt.constraint_name)
@@ -1146,7 +1203,14 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let relation = lookup_heap_relation_for_ddl(&catalog, &alter_stmt.table_name)?;
+        let Some(relation) = lookup_heap_relation_for_alter_table(
+            &catalog,
+            &alter_stmt.table_name,
+            alter_stmt.if_exists,
+        )?
+        else {
+            return Ok(StatementResult::AffectedRows(0));
+        };
         self.table_locks.lock_table_interruptible(
             relation.rel,
             TableLockMode::AccessExclusive,
@@ -1181,7 +1245,14 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let relation = lookup_heap_relation_for_ddl(&catalog, &alter_stmt.table_name)?;
+        let Some(relation) = lookup_heap_relation_for_alter_table(
+            &catalog,
+            &alter_stmt.table_name,
+            alter_stmt.if_exists,
+        )?
+        else {
+            return Ok(StatementResult::AffectedRows(0));
+        };
         ensure_constraint_relation(self, client_id, &relation, &alter_stmt.table_name)?;
         if is_system_column_name(&alter_stmt.column_name) {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
@@ -1259,7 +1330,14 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let relation = lookup_heap_relation_for_ddl(&catalog, &alter_stmt.table_name)?;
+        let Some(relation) = lookup_heap_relation_for_alter_table(
+            &catalog,
+            &alter_stmt.table_name,
+            alter_stmt.if_exists,
+        )?
+        else {
+            return Ok(StatementResult::AffectedRows(0));
+        };
         self.table_locks.lock_table_interruptible(
             relation.rel,
             TableLockMode::AccessExclusive,
@@ -1294,7 +1372,14 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let relation = lookup_heap_relation_for_ddl(&catalog, &alter_stmt.table_name)?;
+        let Some(relation) = lookup_heap_relation_for_alter_table(
+            &catalog,
+            &alter_stmt.table_name,
+            alter_stmt.if_exists,
+        )?
+        else {
+            return Ok(StatementResult::AffectedRows(0));
+        };
         ensure_constraint_relation(self, client_id, &relation, &alter_stmt.table_name)?;
         if is_system_column_name(&alter_stmt.column_name) {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
@@ -1358,7 +1443,14 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let relation = lookup_heap_relation_for_ddl(&catalog, &alter_stmt.table_name)?;
+        let Some(relation) = lookup_heap_relation_for_alter_table(
+            &catalog,
+            &alter_stmt.table_name,
+            alter_stmt.if_exists,
+        )?
+        else {
+            return Ok(StatementResult::AffectedRows(0));
+        };
         let lock_requests =
             alter_table_validate_constraint_lock_requests(&relation, alter_stmt, &catalog)?;
         crate::backend::storage::lmgr::lock_table_requests_interruptible(
@@ -1397,7 +1489,14 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let relation = lookup_heap_relation_for_ddl(&catalog, &alter_stmt.table_name)?;
+        let Some(relation) = lookup_heap_relation_for_alter_table(
+            &catalog,
+            &alter_stmt.table_name,
+            alter_stmt.if_exists,
+        )?
+        else {
+            return Ok(StatementResult::AffectedRows(0));
+        };
         ensure_constraint_relation(self, client_id, &relation, &alter_stmt.table_name)?;
         let rows = catalog.constraint_rows_for_relation(relation.relation_oid);
         let row = find_constraint_row(&rows, &alter_stmt.constraint_name)
