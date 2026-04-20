@@ -143,8 +143,6 @@ fn test_catalog_entry(rel: RelFileLocator, desc: RelationDesc) -> CatalogEntry {
         relhastriggers: false,
         relhassubclass: false,
         relispartition: false,
-        relrowsecurity: false,
-        relforcerowsecurity: false,
         relpages: 0,
         reltuples: 0.0,
         rel,
@@ -10537,6 +10535,42 @@ fn jsonb_contains_and_exists_helpers_follow_postgres_semantics() {
                     Value::Bool(true),
                     Value::Bool(true),
                     Value::Bool(true),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn jsonb_containment_operators_coerce_string_literals_to_jsonb() {
+    let base = temp_dir("jsonb_containment_literal_coercion");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select \
+            '{\"a\":\"b\", \"b\":1, \"c\":null}'::jsonb @> '{\"a\":\"b\"}', \
+            '{\"a\":\"b\", \"b\":1, \"c\":null}'::jsonb @> '{\"a\":\"b\", \"c\":null}', \
+            '{\"a\":\"b\"}'::jsonb <@ '{\"a\":\"b\", \"b\":1, \"c\":null}', \
+            '{\"a\":\"b\", \"c\":null}'::jsonb <@ '{\"a\":\"b\", \"b\":1, \"c\":null}', \
+            '{\"a\":\"b\", \"b\":1, \"c\":null}'::jsonb @> '{\"a\":\"b\", \"g\":null}', \
+            '{\"a\":\"b\", \"g\":null}'::jsonb <@ '{\"a\":\"b\", \"b\":1, \"c\":null}'",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Bool(true),
+                    Value::Bool(true),
+                    Value::Bool(true),
+                    Value::Bool(true),
+                    Value::Bool(false),
+                    Value::Bool(false),
                 ]]
             );
         }
