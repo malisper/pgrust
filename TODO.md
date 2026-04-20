@@ -188,8 +188,8 @@ Targeted reruns and notes:
 - indirect_toast.sql: 12/30
 - inet.sql: 6/116
 - infinite_recurse.sql: 1/3
-- inherit.sql: 280/884
-  - Emit the duplicate inherited-column merge notice PostgreSQL expects for `CREATE TABLE ... INHERITS (...)` with multiple parent definitions of the same column
+- inherit.sql: 361/884
+  - [done] Emit the duplicate inherited-column merge notice PostgreSQL expects for `CREATE TABLE ... INHERITS (...)` with multiple parent definitions of the same column
   - Preserve PostgreSQL inheritance traversal order for inherited scans and inherited `UPDATE`/`DELETE` target expansion instead of sorting `find_all_inheritors()` output by OID
   - [done] temp `ALTER TABLE ... ADD COLUMN` inheritance propagation, including propagated defaults and merged `attinhcount`/notice handling for multi-parent temp children
   - [done] temp `ALTER TABLE ... ADD COLUMN` inline `NOT NULL` / `CHECK` propagation, including inherited child-row validation and propagated child constraint enforcement

@@ -609,11 +609,16 @@ mod tests {
             CORE_BOOTSTRAP_RELATIONS[27].oid,
             PG_DESCRIPTION_RELATION_OID
         );
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[28].oid, PG_INDEX_RELATION_OID);
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[29].oid, PG_INHERITS_RELATION_OID);
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[30].oid, PG_REWRITE_RELATION_OID);
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[31].oid, PG_STATISTIC_RELATION_OID);
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[32].oid, PG_TRIGGER_RELATION_OID);
+        assert_eq!(
+            CORE_BOOTSTRAP_RELATIONS[28].oid,
+            PG_FOREIGN_DATA_WRAPPER_RELATION_OID
+        );
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[29].oid, PG_INDEX_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[30].oid, PG_INHERITS_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[31].oid, PG_REWRITE_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[32].oid, PG_STATISTIC_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[33].oid, PG_TRIGGER_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[34].oid, PG_POLICY_RELATION_OID);
     }
 
     #[test]
@@ -653,11 +658,13 @@ mod tests {
                 "pg_constraint",
                 "pg_depend",
                 "pg_description",
+                "pg_foreign_data_wrapper",
                 "pg_index",
                 "pg_inherits",
                 "pg_rewrite",
                 "pg_statistic",
                 "pg_trigger",
+                "pg_policy",
             ]
         );
     }
