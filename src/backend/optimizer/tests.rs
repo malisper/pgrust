@@ -568,6 +568,28 @@ fn planned_grouped_window_aggregate_uses_aggregate_output_slot() {
 }
 
 #[test]
+fn planned_grouped_named_window_uses_named_spec() {
+    let sql = "select x, y, sum(z) as gsum, sum(sum(z)) over win as wsum \
+        from (values (1, 1, 10), (2, 1, 20), (1, 2, 7)) as t(x, y, z) \
+        group by x, y window win as (partition by y order by x)";
+    let catalog = LiteralDefaultCatalog;
+    let stmt = parse_select(sql).expect("parse");
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog, &[], None, &[], &[]).expect("analyze");
+    let planned = super::planner(query, &catalog);
+
+    assert!(plan_contains(&planned.plan_tree, |plan| match plan {
+        Plan::WindowAgg { clause, .. } => {
+            clause.spec.partition_by.len() == 1
+                && is_special_user_var(&clause.spec.partition_by[0], OUTER_VAR, 1)
+                && clause.spec.order_by.len() == 1
+                && is_special_user_var(&clause.spec.order_by[0].expr, OUTER_VAR, 0)
+        }
+        _ => false,
+    }));
+}
+
+#[test]
 fn planned_distinct_window_specs_stack_windowagg_nodes() {
     let planned = planned_stmt_for_values_sql(
         "select row_number() over (order by x), rank() over (partition by x order by x) from (values (1), (2)) as t(x)",

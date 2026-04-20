@@ -843,6 +843,7 @@ fn materialize_view_rows(
         where_clause: None,
         group_by: Vec::new(),
         having: None,
+        window_clauses: Vec::new(),
         order_by: Vec::new(),
         limit: None,
         offset: None,

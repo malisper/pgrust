@@ -16,14 +16,14 @@ explain_option_name = { kw_analyze | kw_buffers | kw_costs | kw_timing | kw_verb
 explain_option_value = { kw_off | kw_true | kw_false | kw_text | kw_json | kw_yaml | kw_xml | kw_on_value }
 select_stmt = { set_operation_stmt | simple_select_stmt }
 simple_select_stmt = {
-    cte_clause? ~ simple_select_core ~ window_clause_unsupported? ~ order_by_clause? ~ limit_clause? ~ offset_clause? ~ locking_clause?
-  | cte_clause? ~ simple_select_core ~ window_clause_unsupported? ~ order_by_clause? ~ locking_clause ~ limit_clause? ~ offset_clause?
+    cte_clause? ~ simple_select_core ~ window_clause? ~ order_by_clause? ~ limit_clause? ~ offset_clause? ~ locking_clause?
+  | cte_clause? ~ simple_select_core ~ window_clause? ~ order_by_clause? ~ locking_clause ~ limit_clause? ~ offset_clause?
 }
 simple_select_core = { kw_select ~ select_distinct_clause? ~ (empty_select_list | select_list)? ~ (kw_from ~ from_item)? ~ (kw_where ~ expr)? ~ group_by_clause? ~ having_clause? }
 select_distinct_clause = { kw_distinct }
 set_operation_stmt = {
-    cte_clause? ~ set_operation_term ~ (set_operation_clause ~ set_operation_term)+ ~ window_clause_unsupported? ~ order_by_clause? ~ limit_clause? ~ offset_clause? ~ locking_clause?
-  | cte_clause? ~ set_operation_term ~ (set_operation_clause ~ set_operation_term)+ ~ window_clause_unsupported? ~ order_by_clause? ~ locking_clause ~ limit_clause? ~ offset_clause?
+    cte_clause? ~ set_operation_term ~ (set_operation_clause ~ set_operation_term)+ ~ window_clause? ~ order_by_clause? ~ limit_clause? ~ offset_clause? ~ locking_clause?
+  | cte_clause? ~ set_operation_term ~ (set_operation_clause ~ set_operation_term)+ ~ window_clause? ~ order_by_clause? ~ locking_clause ~ limit_clause? ~ offset_clause?
 }
 set_operation_term = { parenthesized_set_operation_term | simple_select_core }
 parenthesized_set_operation_term = { "(" ~ select_stmt ~ ")" }
@@ -218,7 +218,7 @@ rollback_stmt = { kw_rollback }
 select_list = { select_item ~ ("," ~ select_item)* }
 select_item = { star | qualified_star | expr ~ alias? }
 alias = { kw_as ~ identifier | bare_select_alias }
-bare_select_alias = { !kw_as ~ !kw_from ~ !kw_where ~ !kw_group ~ !kw_having ~ !kw_order ~ !kw_limit ~ !kw_offset ~ !kw_for ~ !kw_share ~ !kw_update ~ !kw_union ~ !kw_intersect ~ !kw_except ~ identifier }
+bare_select_alias = { !kw_as ~ !kw_from ~ !kw_where ~ !kw_group ~ !kw_having ~ !kw_window ~ !kw_order ~ !kw_limit ~ !kw_offset ~ !kw_for ~ !kw_share ~ !kw_update ~ !kw_union ~ !kw_intersect ~ !kw_except ~ identifier }
 values_row = { "(" ~ expr_list ~ ")" }
 expr_list = { expr ~ ("," ~ expr)* }
 ident_list = { identifier ~ ("," ~ identifier)* }
@@ -249,7 +249,7 @@ parenthesized_from_item = { "(" ~ from_list ~ ")" }
 relation_alias = { kw_as ~ identifier ~ alias_column_spec? | bare_relation_alias ~ alias_column_spec? }
 alias_column_spec = { "(" ~ (alias_column_def ~ ("," ~ alias_column_def)* | ident_list) ~ ")" }
 alias_column_def = { identifier ~ type_name }
-bare_relation_alias = { !kw_as ~ !kw_join ~ !kw_on ~ !kw_where ~ !kw_group ~ !kw_having ~ !kw_order ~ !kw_limit ~ !kw_offset ~ !kw_for ~ !kw_share ~ !kw_update ~ !kw_cross ~ !kw_inner ~ !kw_left ~ !kw_right ~ !kw_full ~ !kw_outer ~ !kw_natural ~ !kw_using ~ !kw_union ~ !kw_intersect ~ !kw_except ~ identifier }
+bare_relation_alias = { !kw_as ~ !kw_join ~ !kw_on ~ !kw_where ~ !kw_group ~ !kw_having ~ !kw_window ~ !kw_order ~ !kw_limit ~ !kw_offset ~ !kw_for ~ !kw_share ~ !kw_update ~ !kw_cross ~ !kw_inner ~ !kw_left ~ !kw_right ~ !kw_full ~ !kw_outer ~ !kw_natural ~ !kw_using ~ !kw_union ~ !kw_intersect ~ !kw_except ~ identifier }
 
 column_def = { !kw_constraint ~ identifier ~ type_name ~ column_modifier* }
 column_modifier = { column_default | nullable | named_column_constraint | not_null_column_constraint | check_column_constraint | primary_key_column_constraint | unique_column_constraint | references_column_constraint }
@@ -378,8 +378,9 @@ window_partition_by_clause = { kw_partition ~ kw_by ~ expr ~ ("," ~ expr)* }
 window_order_by_clause = { kw_order ~ kw_by ~ order_by_item ~ ("," ~ order_by_item)* }
 unsupported_window_frame = { (kw_rows | kw_range | kw_groups) ~ (!")" ~ ANY)* }
 raw_window_spec = { window_partition_by_clause? ~ window_order_by_clause? }
-over_clause = { kw_over ~ "(" ~ raw_window_spec? ~ unsupported_window_frame? ~ ")" }
-window_clause_unsupported = { kw_window ~ identifier ~ kw_as ~ "(" ~ (!")" ~ ANY)* ~ ")" ~ ("," ~ identifier ~ kw_as ~ "(" ~ (!")" ~ ANY)* ~ ")")* }
+over_clause = { kw_over ~ (identifier | "(" ~ raw_window_spec? ~ unsupported_window_frame? ~ ")") }
+window_clause = { kw_window ~ window_definition ~ ("," ~ window_definition)* }
+window_definition = { identifier ~ kw_as ~ "(" ~ raw_window_spec? ~ unsupported_window_frame? ~ ")" }
 agg_call = { agg_func ~ "(" ~ (agg_distinct ~ function_arg_list ~ agg_order_by_clause? | star | function_arg_list ~ agg_order_by_clause?) ~ ")" ~ agg_filter_clause? ~ over_clause? }
 func_call = { identifier ~ "(" ~ function_arg_list? ~ ")" ~ over_clause? }
 function_arg_list = { variadic_function_arg | function_arg ~ ("," ~ function_arg)* ~ ("," ~ variadic_function_arg)? }
