@@ -144,6 +144,7 @@ fn execute_statement_with_source(
         | Statement::SetRole(_)
         | Statement::ResetRole(_)
         | Statement::AlterTableAlterConstraint(_)
+        | Statement::AlterTableAlterColumnDefault(_)
         // :HACK: ALTER TABLE ... SET (...) is accepted narrowly for numeric.sql and ignored
         // until table reloptions are modeled for real.
         | Statement::AlterTableSet(_) => Ok(StatementResult::AffectedRows(0)),
@@ -372,7 +373,8 @@ pub fn execute_readonly_statement(
         | Statement::AlterTableRenameColumn(_)
         | Statement::AlterTableAddColumn(_)
         | Statement::AlterTableDropColumn(_)
-        | Statement::AlterTableAlterColumnType(_) => Ok(StatementResult::AffectedRows(0)),
+        | Statement::AlterTableAlterColumnType(_)
+        | Statement::AlterTableAlterColumnDefault(_) => Ok(StatementResult::AffectedRows(0)),
         Statement::AlterTableRename(_) => Ok(StatementResult::AffectedRows(0)),
         Statement::Merge(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
             "MERGE".into(),

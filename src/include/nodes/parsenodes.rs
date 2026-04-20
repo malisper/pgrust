@@ -243,6 +243,7 @@ pub enum Statement {
     AlterTableAlterConstraint(AlterTableAlterConstraintStatement),
     AlterTableRenameConstraint(AlterTableRenameConstraintStatement),
     AlterTableAlterColumnType(AlterTableAlterColumnTypeStatement),
+    AlterTableAlterColumnDefault(AlterTableAlterColumnDefaultStatement),
     AlterTableOwner(AlterRelationOwnerStatement),
     AlterTableRenameColumn(AlterTableRenameColumnStatement),
     AlterTableRename(AlterTableRenameStatement),
@@ -1159,6 +1160,16 @@ pub struct AlterTableAlterColumnTypeStatement {
     pub column_name: String,
     pub ty: RawTypeName,
     pub using_expr: Option<SqlExpr>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableAlterColumnDefaultStatement {
+    pub if_exists: bool,
+    pub only: bool,
+    pub table_name: String,
+    pub column_name: String,
+    pub default_expr: Option<SqlExpr>,
+    pub default_expr_sql: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

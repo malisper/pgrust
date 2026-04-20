@@ -1166,6 +1166,32 @@ fn parse_alter_table_constraint_statements() {
             column_name: "note".into(),
         })
     );
+
+    let stmt = parse_statement("alter table items alter column note set default 'hello'").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableAlterColumnDefault(AlterTableAlterColumnDefaultStatement {
+            if_exists: false,
+            only: false,
+            table_name: "items".into(),
+            column_name: "note".into(),
+            default_expr: Some(SqlExpr::Const(Value::Text("hello".into()))),
+            default_expr_sql: Some("'hello'".into()),
+        })
+    );
+
+    let stmt = parse_statement("alter table items alter note drop default").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableAlterColumnDefault(AlterTableAlterColumnDefaultStatement {
+            if_exists: false,
+            only: false,
+            table_name: "items".into(),
+            column_name: "note".into(),
+            default_expr: None,
+            default_expr_sql: None,
+        })
+    );
 }
 
 #[test]
