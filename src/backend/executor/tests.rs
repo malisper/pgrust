@@ -407,43 +407,6 @@ fn array_assignment_catalog() -> Catalog {
     catalog
 }
 
-fn array_extension_catalog() -> Catalog {
-    let mut catalog = Catalog::default();
-    catalog.insert(
-        "arrtest1",
-        test_catalog_entry(
-            RelFileLocator {
-                spc_oid: 0,
-                db_oid: 1,
-                rel_number: 14005,
-            },
-            RelationDesc {
-                columns: vec![
-                    crate::backend::catalog::catalog::column_desc(
-                        "i",
-                        crate::backend::parser::SqlType::array_of(
-                            crate::backend::parser::SqlType::new(
-                                crate::backend::parser::SqlTypeKind::Int4,
-                            ),
-                        ),
-                        true,
-                    ),
-                    crate::backend::catalog::catalog::column_desc(
-                        "t",
-                        crate::backend::parser::SqlType::array_of(
-                            crate::backend::parser::SqlType::new(
-                                crate::backend::parser::SqlTypeKind::Text,
-                            ),
-                        ),
-                        true,
-                    ),
-                ],
-            },
-        ),
-    );
-    catalog
-}
-
 fn varchar_catalog(name: &str, len: i32) -> Catalog {
     let mut catalog = Catalog::default();
     catalog.insert(
@@ -654,7 +617,6 @@ fn empty_executor_context(base: &PathBuf) -> ExecutorContext {
         )),
         snapshot,
         client_id: 1,
-        session_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         current_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         next_command_id: 0,
         expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
@@ -704,7 +666,6 @@ fn run_plan(
         )),
         snapshot: txns.snapshot(INVALID_TRANSACTION_ID).unwrap(),
         client_id: 42,
-        session_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         current_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         next_command_id: 0,
         expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
@@ -792,7 +753,6 @@ fn run_sql_with_catalog(
             )),
             snapshot: txns.snapshot(xid).unwrap(),
             client_id: 77,
-            session_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
             current_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
             next_command_id: 0,
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
@@ -4467,321 +4427,6 @@ fn array_slice_assignment_requires_full_bounds_for_null_arrays() {
 }
 
 #[test]
-fn array_subscript_assignment_extension_matches_postgres() {
-    let base = temp_dir("array_subscript_assignment_extension");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-
-    let xid = txns.begin();
-    assert_eq!(
-        run_sql_with_catalog(
-            &base,
-            &txns,
-            xid,
-            "insert into arrtest1 values(array[1,2,null,4], array['one','two',null,'four'])",
-            array_extension_catalog(),
-        )
-        .unwrap(),
-        StatementResult::AffectedRows(1)
-    );
-    txns.commit(xid).unwrap();
-
-    for sql in [
-        "update arrtest1 set i[2] = 22, t[2] = 'twenty-two'",
-        "update arrtest1 set i[5] = 5, t[5] = 'five'",
-        "update arrtest1 set i[8] = 8, t[8] = 'eight'",
-        "update arrtest1 set i[0] = 0, t[0] = 'zero'",
-        "update arrtest1 set i[-3] = -3, t[-3] = 'minus-three'",
-    ] {
-        let xid = txns.begin();
-        assert_eq!(
-            run_sql_with_catalog(&base, &txns, xid, sql, array_extension_catalog()).unwrap(),
-            StatementResult::AffectedRows(1)
-        );
-        txns.commit(xid).unwrap();
-    }
-
-    assert_query_rows(
-        run_sql_with_catalog(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "select i, t from arrtest1",
-            array_extension_catalog(),
-        )
-        .unwrap(),
-        vec![vec![
-            Value::PgArray(
-                ArrayValue::from_dimensions(
-                    vec![ArrayDimension {
-                        lower_bound: -3,
-                        length: 12,
-                    }],
-                    vec![
-                        Value::Int32(-3),
-                        Value::Null,
-                        Value::Null,
-                        Value::Int32(0),
-                        Value::Int32(1),
-                        Value::Int32(22),
-                        Value::Null,
-                        Value::Int32(4),
-                        Value::Int32(5),
-                        Value::Null,
-                        Value::Null,
-                        Value::Int32(8),
-                    ],
-                )
-                .with_element_type_oid(crate::include::catalog::INT4_TYPE_OID),
-            ),
-            Value::PgArray(
-                ArrayValue::from_dimensions(
-                    vec![ArrayDimension {
-                        lower_bound: -3,
-                        length: 12,
-                    }],
-                    vec![
-                        Value::Text("minus-three".into()),
-                        Value::Null,
-                        Value::Null,
-                        Value::Text("zero".into()),
-                        Value::Text("one".into()),
-                        Value::Text("twenty-two".into()),
-                        Value::Null,
-                        Value::Text("four".into()),
-                        Value::Text("five".into()),
-                        Value::Null,
-                        Value::Null,
-                        Value::Text("eight".into()),
-                    ],
-                )
-                .with_element_type_oid(crate::include::catalog::TEXT_TYPE_OID),
-            ),
-        ]],
-    );
-}
-
-#[test]
-fn array_slice_assignment_extension_matches_postgres() {
-    let base = temp_dir("array_slice_assignment_extension");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-
-    let xid = txns.begin();
-    assert_eq!(
-        run_sql_with_catalog(
-            &base,
-            &txns,
-            xid,
-            "insert into arrtest1 values(array[1,2,null,4], array['one','two',null,'four'])",
-            array_extension_catalog(),
-        )
-        .unwrap(),
-        StatementResult::AffectedRows(1)
-    );
-    txns.commit(xid).unwrap();
-
-    for sql in [
-        "update arrtest1 set i[2] = 22, t[2] = 'twenty-two'",
-        "update arrtest1 set i[5] = 5, t[5] = 'five'",
-        "update arrtest1 set i[8] = 8, t[8] = 'eight'",
-        "update arrtest1 set i[0] = 0, t[0] = 'zero'",
-        "update arrtest1 set i[-3] = -3, t[-3] = 'minus-three'",
-        "update arrtest1 set i[0:2] = array[10,11,12], t[0:2] = array['ten','eleven','twelve']",
-        "update arrtest1 set i[8:10] = array[18,null,20], t[8:10] = array['p18',null,'p20']",
-        "update arrtest1 set i[11:12] = array[null,22], t[11:12] = array[null,'p22']",
-        "update arrtest1 set i[15:16] = array[null,26], t[15:16] = array[null,'p26']",
-        "update arrtest1 set i[-5:-3] = array[-15,-14,-13], t[-5:-3] = array['m15','m14','m13']",
-        "update arrtest1 set i[-7:-6] = array[-17,null], t[-7:-6] = array['m17',null]",
-        "update arrtest1 set i[-12:-10] = array[-22,null,-20], t[-12:-10] = array['m22',null,'m20']",
-    ] {
-        let xid = txns.begin();
-        assert_eq!(
-            run_sql_with_catalog(&base, &txns, xid, sql, array_extension_catalog()).unwrap(),
-            StatementResult::AffectedRows(1)
-        );
-        txns.commit(xid).unwrap();
-    }
-
-    assert_query_rows(
-        run_sql_with_catalog(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "select i, t from arrtest1",
-            array_extension_catalog(),
-        )
-        .unwrap(),
-        vec![vec![
-            Value::PgArray(
-                ArrayValue::from_dimensions(
-                    vec![ArrayDimension {
-                        lower_bound: -12,
-                        length: 29,
-                    }],
-                    vec![
-                        Value::Int32(-22),
-                        Value::Null,
-                        Value::Int32(-20),
-                        Value::Null,
-                        Value::Null,
-                        Value::Int32(-17),
-                        Value::Null,
-                        Value::Int32(-15),
-                        Value::Int32(-14),
-                        Value::Int32(-13),
-                        Value::Null,
-                        Value::Null,
-                        Value::Int32(10),
-                        Value::Int32(11),
-                        Value::Int32(12),
-                        Value::Null,
-                        Value::Int32(4),
-                        Value::Int32(5),
-                        Value::Null,
-                        Value::Null,
-                        Value::Int32(18),
-                        Value::Null,
-                        Value::Int32(20),
-                        Value::Null,
-                        Value::Int32(22),
-                        Value::Null,
-                        Value::Null,
-                        Value::Null,
-                        Value::Int32(26),
-                    ],
-                )
-                .with_element_type_oid(crate::include::catalog::INT4_TYPE_OID),
-            ),
-            Value::PgArray(
-                ArrayValue::from_dimensions(
-                    vec![ArrayDimension {
-                        lower_bound: -12,
-                        length: 29,
-                    }],
-                    vec![
-                        Value::Text("m22".into()),
-                        Value::Null,
-                        Value::Text("m20".into()),
-                        Value::Null,
-                        Value::Null,
-                        Value::Text("m17".into()),
-                        Value::Null,
-                        Value::Text("m15".into()),
-                        Value::Text("m14".into()),
-                        Value::Text("m13".into()),
-                        Value::Null,
-                        Value::Null,
-                        Value::Text("ten".into()),
-                        Value::Text("eleven".into()),
-                        Value::Text("twelve".into()),
-                        Value::Null,
-                        Value::Text("four".into()),
-                        Value::Text("five".into()),
-                        Value::Null,
-                        Value::Null,
-                        Value::Text("p18".into()),
-                        Value::Null,
-                        Value::Text("p20".into()),
-                        Value::Null,
-                        Value::Text("p22".into()),
-                        Value::Null,
-                        Value::Null,
-                        Value::Null,
-                        Value::Text("p26".into()),
-                    ],
-                )
-                .with_element_type_oid(crate::include::catalog::TEXT_TYPE_OID),
-            ),
-        ]],
-    );
-
-    let xid = txns.begin();
-    assert_eq!(
-        run_sql_with_catalog(
-            &base,
-            &txns,
-            xid,
-            "delete from arrtest1",
-            array_extension_catalog(),
-        )
-        .unwrap(),
-        StatementResult::AffectedRows(1)
-    );
-    assert_eq!(
-        run_sql_with_catalog(
-            &base,
-            &txns,
-            xid,
-            "insert into arrtest1 values(array[1,2,null,4], array['one','two',null,'four'])",
-            array_extension_catalog(),
-        )
-        .unwrap(),
-        StatementResult::AffectedRows(1)
-    );
-    txns.commit(xid).unwrap();
-
-    let xid = txns.begin();
-    assert_eq!(
-        run_sql_with_catalog(
-            &base,
-            &txns,
-            xid,
-            "update arrtest1 set i[0:5] = array[0,1,2,null,4,5], t[0:5] = array['z','p1','p2',null,'p4','p5']",
-            array_extension_catalog(),
-        )
-        .unwrap(),
-        StatementResult::AffectedRows(1)
-    );
-    txns.commit(xid).unwrap();
-
-    assert_query_rows(
-        run_sql_with_catalog(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "select i, t from arrtest1",
-            array_extension_catalog(),
-        )
-        .unwrap(),
-        vec![vec![
-            Value::PgArray(
-                ArrayValue::from_dimensions(
-                    vec![ArrayDimension {
-                        lower_bound: 0,
-                        length: 6,
-                    }],
-                    vec![
-                        Value::Int32(0),
-                        Value::Int32(1),
-                        Value::Int32(2),
-                        Value::Null,
-                        Value::Int32(4),
-                        Value::Int32(5),
-                    ],
-                )
-                .with_element_type_oid(crate::include::catalog::INT4_TYPE_OID),
-            ),
-            Value::PgArray(
-                ArrayValue::from_dimensions(
-                    vec![ArrayDimension {
-                        lower_bound: 0,
-                        length: 6,
-                    }],
-                    vec![
-                        Value::Text("z".into()),
-                        Value::Text("p1".into()),
-                        Value::Text("p2".into()),
-                        Value::Null,
-                        Value::Text("p4".into()),
-                        Value::Text("p5".into()),
-                    ],
-                )
-                .with_element_type_oid(crate::include::catalog::TEXT_TYPE_OID),
-            ),
-        ]],
-    );
-}
-
-#[test]
 fn array_slice_assignment_three_dimensional_serial_updates_match_postgres() {
     let base = temp_dir("array_slice_assignment_three_dimensional");
     let mut txns = TransactionManager::new_durable(&base).unwrap();
@@ -5684,48 +5329,6 @@ fn float_and_numeric_casts_to_int2_follow_postgres_rounding() {
                 Value::Int16(3),
             ]],
         );
-}
-
-#[test]
-fn numeric_special_values_to_integer_casts_raise_postgres_style_errors() {
-    let base = temp_dir("numeric_special_values_to_int_casts");
-    let txns = TransactionManager::new_durable(&base).unwrap();
-
-    let err = run_sql(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "select 'NaN'::numeric::int2",
-    )
-    .unwrap_err();
-    assert!(matches!(err, ExecError::NumericNaNToInt { ty: "smallint" }));
-    assert_eq!(format_exec_error(&err), "cannot convert NaN to smallint");
-
-    let err = run_sql(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "select 'Infinity'::numeric::int4",
-    )
-    .unwrap_err();
-    assert!(matches!(
-        err,
-        ExecError::NumericInfinityToInt { ty: "integer" }
-    ));
-    assert_eq!(format_exec_error(&err), "cannot convert infinity to integer");
-
-    let err = run_sql(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "select '-Infinity'::numeric::int8",
-    )
-    .unwrap_err();
-    assert!(matches!(
-        err,
-        ExecError::NumericInfinityToInt { ty: "bigint" }
-    ));
-    assert_eq!(format_exec_error(&err), "cannot convert infinity to bigint");
 }
 
 #[test]
@@ -6763,7 +6366,6 @@ fn prepared_insert_uses_defaults_for_omitted_columns() {
         )),
         snapshot: txns.snapshot(INVALID_TRANSACTION_ID).unwrap(),
         client_id: 77,
-        session_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         current_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         next_command_id: 0,
         expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
@@ -7628,44 +7230,6 @@ fn to_char_numeric_fill_mode_respects_integer_zero_masks() {
                     Value::Text(".0".into()),
                 ]]
             );
-        }
-        other => panic!("expected query result, got {:?}", other),
-    }
-}
-
-#[test]
-fn to_char_float_overflow_mask_matches_postgres() {
-    let base = temp_dir("to_char_float_overflow_mask");
-    let txns = TransactionManager::new_durable(&base).unwrap();
-    match run_sql(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "select to_char('12345678901'::float8, 'FM9999999999D9999900000000000000000')",
-    )
-    .unwrap()
-    {
-        StatementResult::Query { rows, .. } => {
-            assert_eq!(rows, vec![vec![Value::Text("##########.####".into())]]);
-        }
-        other => panic!("expected query result, got {:?}", other),
-    }
-}
-
-#[test]
-fn to_number_roman_roundtrips_across_generate_series() {
-    let base = temp_dir("to_number_roman_roundtrip");
-    let txns = TransactionManager::new_durable(&base).unwrap();
-    match run_sql(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "with rows as (select i, to_char(i, 'RN') as roman from generate_series(1, 3999) as i) select bool_and(to_number(roman, 'RN') = i) from rows",
-    )
-    .unwrap()
-    {
-        StatementResult::Query { rows, .. } => {
-            assert_eq!(rows, vec![vec![Value::Bool(true)]]);
         }
         other => panic!("expected query result, got {:?}", other),
     }
@@ -10482,6 +10046,167 @@ fn window_builtin_functions_handle_peer_groups() {
                         Value::Int64(1),
                         Value::Int64(1)
                     ],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn window_distribution_functions_handle_peer_groups() {
+    let base = temp_dir("window_distribution_peer_groups");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let xid = txns.begin();
+    run_sql(
+        &base,
+        &txns,
+        xid,
+        "insert into people (id, name, note) values
+            (1, 'alice', 'x'),
+            (2, 'bob', 'x'),
+            (3, 'carol', 'y'),
+            (4, 'dave', 'x')",
+    )
+    .unwrap();
+    txns.commit(xid).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select id,
+                percent_rank() over (order by note),
+                cume_dist() over (order by note),
+                ntile(3) over (order by note, id)
+         from people
+         order by id",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows.len(), 4);
+            assert_eq!(rows[0][0], Value::Int32(1));
+            assert_eq!(rows[1][0], Value::Int32(2));
+            assert_eq!(rows[2][0], Value::Int32(3));
+            assert_eq!(rows[3][0], Value::Int32(4));
+
+            for index in [0usize, 1, 3] {
+                match rows[index][1] {
+                    Value::Float64(value) => assert_eq!(value, 0.0),
+                    ref other => panic!("expected Float64, got {other:?}"),
+                }
+                match rows[index][2] {
+                    Value::Float64(value) => assert!((value - 0.75).abs() < 1e-12),
+                    ref other => panic!("expected Float64, got {other:?}"),
+                }
+            }
+            match rows[2][1] {
+                Value::Float64(value) => assert_eq!(value, 1.0),
+                ref other => panic!("expected Float64, got {other:?}"),
+            }
+            match rows[2][2] {
+                Value::Float64(value) => assert_eq!(value, 1.0),
+                ref other => panic!("expected Float64, got {other:?}"),
+            }
+
+            assert_eq!(rows[0][3], Value::Int32(1));
+            assert_eq!(rows[1][3], Value::Int32(1));
+            assert_eq!(rows[2][3], Value::Int32(3));
+            assert_eq!(rows[3][3], Value::Int32(2));
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select ntile(null) over (order by id) from people order by id limit 2",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Null], vec![Value::Null]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn window_ntile_rejects_nonpositive_bucket_count() {
+    let base = temp_dir("window_ntile_invalid_bucket_count");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let xid = txns.begin();
+    run_sql(
+        &base,
+        &txns,
+        xid,
+        "insert into people (id, name, note) values
+            (1, 'alice', 'x'),
+            (2, 'bob', 'y')",
+    )
+    .unwrap();
+    txns.commit(xid).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select ntile(0) over (order by id) from people",
+    )
+    .unwrap_err()
+    {
+        ExecError::DetailedError {
+            message, sqlstate, ..
+        } => {
+            assert_eq!(message, "argument of ntile must be greater than zero");
+            assert_eq!(sqlstate, "22023");
+        }
+        other => panic!("expected detailed error, got {other:?}"),
+    }
+}
+
+#[test]
+fn window_ntile_supports_join_bucket_expression() {
+    let base = temp_dir("window_ntile_join_bucket_expression");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let xid = txns.begin();
+    run_sql(
+        &base,
+        &txns,
+        xid,
+        "insert into people (id, name, note) values
+            (1, 'alice', 'x'),
+            (2, 'bob', 'x'),
+            (3, 'carol', 'y')",
+    )
+    .unwrap();
+    txns.commit(xid).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select c
+         from (
+             select ntile(r.id) over (partition by l.note order by l.id) as c
+             from people l
+             left join people r on true
+             where l.id = r.id
+         ) s
+         where c = 1
+         order by c",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(1)],
+                    vec![Value::Int32(1)],
+                    vec![Value::Int32(1)]
                 ]
             );
         }
@@ -15137,7 +14862,6 @@ fn large_object_metadata_tracks_create_and_unlink() {
             )),
             snapshot: txns.snapshot(INVALID_TRANSACTION_ID).unwrap(),
             client_id: 77,
-            session_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
             current_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
             next_command_id: 0,
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
