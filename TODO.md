@@ -13,7 +13,7 @@ Counts from `/tmp/pgrust_regress_after_sequence_fix` on 2026-04-18 using the def
 Targeted reruns and notes:
 
 - numeric.sql: 945/1057
-- numeric.sql first mismatch is still unordered `VALUES`/cross-join row order; remaining substantive mismatches are numeric input/typmod parity, numeric-to-int cast errors for `NaN`/`Infinity`, `to_char` / `to_number` / Roman formatting, numeric `power()` / `exp()` underflow and edge cases, `generate_series(numeric, ...)` error text, numeric `gcd` / `lcm` scale and overflow behavior, and `\d` numeric typmod rendering
+- numeric.sql first mismatch is still unordered `VALUES`/cross-join row order; remaining substantive mismatches are numeric input/typmod parity, numeric-to-int cast errors for `NaN`/`Infinity`, `to_char` / `to_number` / Roman formatting, numeric `power()` / `exp()` underflow and edge cases, `generate_series(numeric, ...)` error text, numeric `variance`, numeric `gcd` / `lcm` scale and overflow behavior, and `\d` numeric typmod rendering
 
 - advisory_lock.sql: 8/38
 - aggregates.sql: 149/583
@@ -78,11 +78,9 @@ Targeted reruns and notes:
   - [done] preserve PostgreSQL's distinction between empty arrays and `NULL` results when slicing/subscripting array columns
   - [x] normalize SQL-visible errors for unsubscriptable and fixed-length array-like types such as `timestamp with time zone` and `point`
   - [x] fix scalar array assignment overflow/bounds handling that currently panics in `src/backend/commands/tablecmds.rs`
-  - [done] support `RETURNING` with subscripted array/fixed-length assignments used by `point_tbl`
+  - support `RETURNING` with subscripted array/fixed-length assignments used by `point_tbl`
   - [done] support `CREATE TEMP TABLE` column definitions with fixed-length array syntax like `integer ARRAY[4]`
   - [done] support deeper array constructors and nested `ARRAY[...]` expressions in `SELECT` targets and `INSERT` values
-  - [done] support omitted-bound slice reads and updates like `a[:3]`, `a[2:]`, and `a[:]`
-  - [done] support one-dimensional array extension behavior for scalar and slice assignments
   - [done] support `ARRAY(SELECT ...)` forms used later in `arrays.sql`
   - [done] support general `RETURNING` target lists for `INSERT` and `UPDATE`, not just `RETURNING *`
   - [done] support `DELETE ... RETURNING` target lists
@@ -392,8 +390,9 @@ Targeted reruns and notes:
 - vacuum.sql: 135/328
 - vacuum_parallel.sql: 11/14
 - varchar.sql: 12/22
-- window.sql: 48/388
+- window.sql: 53/388
   - [done] support named `WINDOW ... AS (...)` definitions together with `OVER w` references, including grouped queries such as `sum(sum(hundred)) OVER win`
+  - [done] implement `percent_rank`, `cume_dist`, and `ntile`, including `ntile(NULL)` and the PostgreSQL-visible `ntile(0)` error
 - with.sql: 37/312
 - without_overlaps.sql: 125/643
 - write_parallel.sql: 8/22
@@ -504,7 +503,7 @@ Targeted reruns and notes:
   - [done] Preserve PostgreSQL `power()` display scale for special finite results like `0 ^ 4.2` and `1 ^ 4.2`, which should render with 16 fractional digits instead of bare `0` / `1`
   - Align numeric `generate_series(...)` error text with PostgreSQL for `NaN` / infinity step values
   - Remove extra `CONTEXT` lines from builtin `log()` errors in this regression
-  - [done] Fix numeric `variance` aggregation on tiny values so the scaled regression case returns PostgreSQL's `12e-1000` instead of rounding away to zero
+  - Fix numeric `variance` aggregation on tiny values; PostgreSQL returns `12e-1000` in the scaled test where pgrust currently returns `0`
   - Preserve PostgreSQL scale and overflow behavior for numeric `gcd` / `lcm`, including the large `lcm(...)` overflow case
   - Render numeric typmods in `\d` output as `numeric(p,s)` instead of debug `SqlType { ... }` output
 - [x] Preserve numeric display scale in `generate_series(numeric, ...)` so rows like `0.0, 1.0, 2.0, 3.0, 4.0` do not degrade into integer-looking outputs after the first increment
