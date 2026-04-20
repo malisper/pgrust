@@ -82,7 +82,11 @@ Targeted reruns and notes:
 - bit.sql: 132/132
 - bitmapops.sql: 11/12
 - boolean.sql: 98/98
-- box.sql: 58/101
+- box.sql: 68/101
+  - route geometry `&&` through the geometry parser/binder path so box overlap lowers to `GeoOverlap` instead of failing as an undefined generic operator
+  - accept PostgreSQL box input forms with adjacent point pairs like `'(0,0)(0,100)'`, which currently suppresses the infinity-edge fixture rows later in the file
+  - allow `CREATE INDEX` on the temp/per-session relations exercised by `box.sql` instead of rejecting them as `temporary table`
+  - add SP-GiST planning/explain support for box indexes so the permanent-table half of the file uses index scans and distance ordering instead of seq-scan fallback
 - brin.sql: 81/125
 - brin_bloom.sql: 56/88
 - brin_multi.sql: 135/220
