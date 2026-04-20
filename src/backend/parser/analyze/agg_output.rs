@@ -123,9 +123,6 @@ fn expr_references_local_cte(expr: &Expr, local_ctes: &HashMap<usize, String>) -
         | Expr::CaseTest(_)
         | Expr::Random
         | Expr::CurrentDate
-        | Expr::CurrentUser
-        | Expr::SessionUser
-        | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
         | Expr::LocalTime { .. }
@@ -2529,9 +2526,9 @@ pub(super) fn bind_agg_output_expr_in_clause(
             actual: format!("unsupported field selection .{field}"),
         }),
         SqlExpr::CurrentDate => Ok(Expr::CurrentDate),
-        SqlExpr::CurrentUser => Ok(Expr::CurrentUser),
-        SqlExpr::SessionUser => Ok(Expr::SessionUser),
-        SqlExpr::CurrentRole => Ok(Expr::CurrentRole),
+        SqlExpr::CurrentUser => Ok(Expr::Const(Value::Text(
+            crate::include::catalog::BOOTSTRAP_SUPERUSER_NAME.into(),
+        ))),
         SqlExpr::CurrentTime { precision } => Ok(Expr::CurrentTime {
             precision: *precision,
         }),

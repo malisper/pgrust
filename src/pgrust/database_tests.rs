@@ -3,9 +3,6 @@ use crate::backend::commands::analyze::collect_analyze_stats;
 use crate::backend::executor::{ExecError, Value};
 use crate::backend::parser::{BoundRelation, CatalogLookup, ParseError, SqlType, SqlTypeKind};
 use crate::backend::utils::cache::lsyscache::LazyCatalogLookup;
-use crate::backend::utils::misc::notices::{
-    clear_notices as clear_backend_notices, take_notices as take_backend_notices,
-};
 use crate::include::catalog::{
     FLOAT8_TYPE_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID, PG_CLASS_RELATION_OID,
     PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID,
@@ -185,7 +182,6 @@ fn analyze_executor_context(
         session_stats: db.session_stats_state(client_id),
         snapshot: db.txns.read().snapshot_for_command(xid, cid).unwrap(),
         client_id,
-        session_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         current_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         next_command_id: cid,
         timed: false,
@@ -273,31 +269,6 @@ fn quantified_like_any_all_array_operators_work() {
             Value::Bool(true),
             Value::Bool(true),
             Value::Bool(true),
-        ]]
-    );
-}
-
-#[test]
-fn quantified_similar_any_all_array_operators_work() {
-    let db = Database::open_ephemeral(32).expect("open ephemeral database");
-
-    assert_eq!(
-        query_rows(
-            &db,
-            1,
-            "select \
-                'foo' similar to any (array['f..', 'b..']), \
-                'foo' similar to all (array['f..', 'fo.']), \
-                'foo' similar to all (array['f..', 'b..']), \
-                'foo' not similar to any (array['bar', 'baz']), \
-                'foo' not similar to all (array['foo', 'bar'])",
-        ),
-        vec![vec![
-            Value::Bool(true),
-            Value::Bool(true),
-            Value::Bool(false),
-            Value::Bool(true),
-            Value::Bool(false),
         ]]
     );
 }
@@ -1092,95 +1063,6 @@ fn explain_estimated_rows(db: &Database, client_id: u32, sql: &str) -> u64 {
     first[start..end]
         .parse()
         .expect("expected integer rows value")
-}
-
-#[test]
-fn point_subscript_assignments_return_rows() {
-    let dir = temp_dir("point_subscript_returning");
-    let db = Database::open(&dir, 128).unwrap();
-    let mut session = Session::new(1);
-
-    session
-        .execute(&db, "create temp table point_tbl (f1 point)")
-        .unwrap();
-    session
-        .execute(&db, "insert into point_tbl values (null), ('(10,10)'::point)")
-        .unwrap();
-
-    match session
-        .execute(
-            &db,
-            "update point_tbl set f1[0] = 10 where f1 is null returning *",
-        )
-        .unwrap()
-    {
-        StatementResult::Query {
-            column_names, rows, ..
-        } => {
-            assert_eq!(column_names, vec!["f1"]);
-            assert_eq!(rows, vec![vec![Value::Null]]);
-        }
-        other => panic!("expected query result, got {other:?}"),
-    }
-
-    match session
-        .execute(&db, "insert into point_tbl(f1[0]) values(0) returning *")
-        .unwrap()
-    {
-        StatementResult::Query { rows, .. } => {
-            assert_eq!(rows, vec![vec![Value::Null]]);
-        }
-        other => panic!("expected query result, got {other:?}"),
-    }
-
-    match session
-        .execute(
-            &db,
-            "update point_tbl set f1[0] = NULL where f1::text = '(10,10)'::point::text returning *",
-        )
-        .unwrap()
-    {
-        StatementResult::Query { rows, .. } => {
-            assert_eq!(
-                rows,
-                vec![vec![Value::Point(crate::include::nodes::datum::GeoPoint {
-                    x: 10.0,
-                    y: 10.0,
-                })]]
-            );
-        }
-        other => panic!("expected query result, got {other:?}"),
-    }
-
-    match session
-        .execute(
-            &db,
-            "update point_tbl set f1[0] = -10, f1[1] = -10 where f1::text = '(10,10)'::point::text returning *",
-        )
-        .unwrap()
-    {
-        StatementResult::Query { rows, .. } => {
-            assert_eq!(
-                rows,
-                vec![vec![Value::Point(crate::include::nodes::datum::GeoPoint {
-                    x: -10.0,
-                    y: -10.0,
-                })]]
-            );
-        }
-        other => panic!("expected query result, got {other:?}"),
-    }
-
-    match session.execute(
-        &db,
-        "update point_tbl set f1[3] = 10 where f1::text = '(-10,-10)'::point::text returning *",
-    ) {
-        Err(ExecError::DetailedError { message, sqlstate, .. }) => {
-            assert_eq!(message, "array subscript out of range");
-            assert_eq!(sqlstate, "2202E");
-        }
-        other => panic!("expected subscript error, got {other:?}"),
-    }
 }
 
 #[test]
@@ -2205,96 +2087,6 @@ fn dropping_inherited_child_removes_pg_inherits_rows() {
 }
 
 #[test]
-fn check_constraint_no_inherit_sets_pg_constraint_flag() {
-    let dir = temp_dir("check_no_inherit_flag");
-    let db = Database::open(&dir, 128).unwrap();
-
-    db.execute(1, "create table p1 (ff1 int)").unwrap();
-    db.execute(
-        1,
-        "alter table p1 add constraint p1chk check (ff1 > 0) no inherit",
-    )
-    .unwrap();
-    db.execute(1, "alter table p1 add constraint p2chk check (ff1 > 10)")
-        .unwrap();
-
-    assert_eq!(
-        query_rows(
-            &db,
-            1,
-            "select conname, connoinherit
-             from pg_constraint c
-             join pg_class r on r.oid = c.conrelid
-             where r.relname = 'p1'
-             order by conname",
-        ),
-        vec![
-            vec![Value::Text("p1chk".into()), Value::Bool(true)],
-            vec![Value::Text("p2chk".into()), Value::Bool(false)],
-        ]
-    );
-}
-
-#[test]
-fn inherited_child_skips_check_constraints_marked_no_inherit() {
-    let dir = temp_dir("inheritance_skips_no_inherit_checks");
-    let db = Database::open(&dir, 128).unwrap();
-
-    db.execute(1, "create table p1 (ff1 int)").unwrap();
-    db.execute(
-        1,
-        "alter table p1 add constraint p1chk check (ff1 > 0) no inherit",
-    )
-    .unwrap();
-    db.execute(1, "alter table p1 add constraint p2chk check (ff1 > 10)")
-        .unwrap();
-    db.execute(1, "create table c1 () inherits (p1)").unwrap();
-
-    assert_eq!(
-        query_rows(
-            &db,
-            1,
-            "select conname, connoinherit
-             from pg_constraint c
-             join pg_class r on r.oid = c.conrelid
-             where r.relname = 'c1'
-             order by conname",
-        ),
-        vec![vec![Value::Text("p2chk".into()), Value::Bool(false)]]
-    );
-}
-
-#[test]
-fn temp_table_check_constraint_no_inherit_sets_pg_constraint_flag() {
-    let dir = temp_dir("temp_check_no_inherit_flag");
-    let db = Database::open(&dir, 128).unwrap();
-    let mut session = Session::new(1);
-
-    session
-        .execute(&db, "create temp table p1 (ff1 int)")
-        .unwrap();
-    session
-        .execute(
-            &db,
-            "alter table p1 add constraint p1chk check (ff1 > 0) no inherit",
-        )
-        .unwrap();
-
-    assert_eq!(
-        session_query_rows(
-            &mut session,
-            &db,
-            "select conname, connoinherit
-             from pg_constraint c
-             join pg_class r on r.oid = c.conrelid
-             where r.relname = 'p1'
-             order by conname",
-        ),
-        vec![vec![Value::Text("p1chk".into()), Value::Bool(true)]]
-    );
-}
-
-#[test]
 fn explain_inherited_self_join_with_order_by_does_not_panic() {
     let dir = temp_dir("inheritance_explain_self_join");
     let db = Database::open(&dir, 128).unwrap();
@@ -2543,51 +2335,6 @@ fn create_view_selects_and_persists_rewrite_rule() {
             Value::Text("_RETURN".into()),
             Value::Text("select id, name from items".into()),
         ]]
-    );
-}
-
-#[test]
-fn view_return_rules_use_internal_dependency_and_user_rules_use_auto_dependency() {
-    let dir = temp_dir("view_rule_dependency_types");
-    let db = Database::open(&dir, 128).unwrap();
-
-    db.execute(1, "create table items(id int4)").unwrap();
-    db.execute(1, "create table item_log(id int4)").unwrap();
-    db.execute(1, "create view item_names as select id from items")
-        .unwrap();
-    db.execute(
-        1,
-        "create rule item_log_rule as on insert to items do also insert into item_log values (new.id)",
-    )
-    .unwrap();
-
-    assert_eq!(
-        query_rows(
-            &db,
-            1,
-            "select d.deptype \
-             from pg_depend d \
-             join pg_rewrite r on r.oid = d.objid \
-             where r.rulename = '_RETURN' \
-               and d.classid = 2618 \
-               and d.refclassid = 1259 \
-               and d.refobjid = (select oid from pg_class where relname = 'item_names')",
-        ),
-        vec![vec![Value::Text("i".into())]]
-    );
-    assert_eq!(
-        query_rows(
-            &db,
-            1,
-            "select d.deptype \
-             from pg_depend d \
-             join pg_rewrite r on r.oid = d.objid \
-             where r.rulename = 'item_log_rule' \
-               and d.classid = 2618 \
-               and d.refclassid = 1259 \
-               and d.refobjid = (select oid from pg_class where relname = 'items')",
-        ),
-        vec![vec![Value::Text("a".into())]]
     );
 }
 
@@ -3957,23 +3704,6 @@ fn create_comment_and_drop_rule_updates_catalogs() {
 }
 
 #[test]
-fn create_rule_on_select_is_rejected() {
-    let base = temp_dir("rule_on_select_rejected");
-    let db = Database::open(&base, 16).unwrap();
-
-    db.execute(1, "create table items (id int4)").unwrap();
-
-    match db.execute(
-        1,
-        "create rule item_select_rule as on select to items do instead delete from items where id = 1",
-    ) {
-        Err(ExecError::Parse(ParseError::FeatureNotSupported(feature)))
-            if feature == "CREATE RULE ... ON SELECT" => {}
-        other => panic!("expected ON SELECT rule rejection, got {other:?}"),
-    }
-}
-
-#[test]
 fn insert_rules_support_do_also_and_instead_nothing() {
     let base = temp_dir("rule_insert_do_also");
     let db = Database::open(&base, 16).unwrap();
@@ -4440,30 +4170,6 @@ fn alter_table_if_exists_ignores_missing_table() {
             .unwrap(),
         StatementResult::AffectedRows(0)
     );
-    assert_eq!(
-        db.execute(
-            1,
-            "alter table if exists missing alter column note set default 'hello'",
-        )
-        .unwrap(),
-        StatementResult::AffectedRows(0)
-    );
-    assert_eq!(
-        db.execute(
-            1,
-            "alter table if exists missing alter column note set (n_distinct = 1)",
-        )
-        .unwrap(),
-        StatementResult::AffectedRows(0)
-    );
-    assert_eq!(
-        db.execute(
-            1,
-            "alter table if exists missing alter column note set statistics 150",
-        )
-        .unwrap(),
-        StatementResult::AffectedRows(0)
-    );
 }
 
 #[test]
@@ -4482,132 +4188,6 @@ fn alter_table_only_is_accepted_for_supported_operations() {
         query_rows(&db, 1, "select id, summary, body from items"),
         Vec::<Vec<Value>>::new()
     );
-}
-
-#[test]
-fn alter_table_alter_column_set_default_applies_to_future_rows() {
-    let base = temp_dir("alter_table_set_default");
-    let db = Database::open(&base, 16).unwrap();
-
-    db.execute(1, "create table items (id int4, note text)")
-        .unwrap();
-    db.execute(1, "alter table items alter column note set default 'hello'")
-        .unwrap();
-    db.execute(1, "insert into items (id) values (1), (2)")
-        .unwrap();
-
-    assert_eq!(
-        query_rows(&db, 1, "select id, note from items order by id"),
-        vec![
-            vec![Value::Int32(1), Value::Text("hello".into())],
-            vec![Value::Int32(2), Value::Text("hello".into())],
-        ]
-    );
-}
-
-#[test]
-fn alter_table_alter_column_drop_default_removes_future_default() {
-    let base = temp_dir("alter_table_drop_default");
-    let db = Database::open(&base, 16).unwrap();
-
-    db.execute(1, "create table items (id int4, note text)")
-        .unwrap();
-    db.execute(1, "alter table items alter column note set default 'hello'")
-        .unwrap();
-    db.execute(1, "alter table items alter column note drop default")
-        .unwrap();
-    db.execute(1, "insert into items (id) values (1)").unwrap();
-
-    assert_eq!(
-        query_rows(&db, 1, "select id, note from items"),
-        vec![vec![Value::Int32(1), Value::Null]]
-    );
-}
-
-#[test]
-fn alter_table_alter_column_set_default_rejects_mismatched_type() {
-    let base = temp_dir("alter_table_set_default_type_error");
-    let db = Database::open(&base, 16).unwrap();
-
-    db.execute(1, "create table items (id int4, note text)")
-        .unwrap();
-
-    match db.execute(1, "alter table items alter column id set default 'oops'") {
-        Err(ExecError::DetailedError {
-            message, sqlstate, ..
-        }) if message
-            == "column \"id\" is of type integer but default expression is of type text"
-            && sqlstate == "42804" => {}
-        other => panic!("expected default type mismatch error, got {other:?}"),
-    }
-}
-
-#[test]
-fn alter_table_alter_column_set_options_is_accepted() {
-    let base = temp_dir("alter_table_column_options");
-    let db = Database::open(&base, 16).unwrap();
-
-    db.execute(1, "create table attmp(i int4)").unwrap();
-    assert_eq!(
-        db.execute(
-            1,
-            "alter table attmp alter column i set (n_distinct = 1, n_distinct_inherited = 2)",
-        )
-        .unwrap(),
-        StatementResult::AffectedRows(0)
-    );
-    assert_eq!(
-        db.execute(
-            1,
-            "alter table attmp alter column i reset (n_distinct_inherited)",
-        )
-        .unwrap(),
-        StatementResult::AffectedRows(0)
-    );
-}
-
-#[test]
-fn alter_table_alter_column_set_statistics_updates_pg_attribute() {
-    let base = temp_dir("alter_table_column_statistics");
-    let db = Database::open(&base, 16).unwrap();
-
-    db.execute(1, "create table attmp(i int4)").unwrap();
-    db.execute(1, "alter table attmp alter column i set statistics 150")
-        .unwrap();
-    assert_eq!(
-        query_rows(
-            &db,
-            1,
-            "select attstattarget from pg_attribute where attrelid = (select oid from pg_class where relname = 'attmp') and attname = 'i'",
-        ),
-        vec![vec![Value::Int16(150)]]
-    );
-
-    db.execute(1, "alter table attmp alter column i set statistics -1")
-        .unwrap();
-    assert_eq!(
-        query_rows(
-            &db,
-            1,
-            "select attstattarget from pg_attribute where attrelid = (select oid from pg_class where relname = 'attmp') and attname = 'i'",
-        ),
-        vec![vec![Value::Int16(-1)]]
-    );
-}
-
-#[test]
-fn alter_table_alter_column_set_statistics_rejects_values_below_minus_one() {
-    let base = temp_dir("alter_table_column_statistics_low");
-    let db = Database::open(&base, 16).unwrap();
-
-    db.execute(1, "create table attmp(i int4)").unwrap();
-
-    match db.execute(1, "alter table attmp alter column i set statistics -2") {
-        Err(ExecError::DetailedError {
-            message, sqlstate, ..
-        }) if message == "statistics target -2 is too low" && sqlstate == "22023" => {}
-        other => panic!("expected statistics target error, got {other:?}"),
-    }
 }
 
 #[test]
@@ -4758,95 +4338,6 @@ fn alter_table_add_column_supports_tid_xid_and_interval() {
         }
         other => panic!("expected query result, got {other:?}"),
     }
-}
-
-#[test]
-fn alter_table_add_column_propagates_to_temp_inherited_child() {
-    let base = temp_dir("alter_table_add_column_temp_inherits");
-    let db = Database::open(&base, 16).unwrap();
-    let mut session = Session::new(1);
-
-    session
-        .execute(&db, "create temp table parent1 (f1 int4)")
-        .unwrap();
-    session
-        .execute(&db, "create temp table child1 () inherits (parent1)")
-        .unwrap();
-    session.execute(&db, "insert into child1 values (1)").unwrap();
-    session
-        .execute(&db, "alter table parent1 add column a1 int4 default 3")
-        .unwrap();
-
-    match session
-        .execute(&db, "select f1, a1 from child1")
-        .expect("select propagated temp child column")
-    {
-        StatementResult::Query { columns, rows, .. } => {
-            assert_eq!(columns[1].sql_type, SqlType::new(SqlTypeKind::Int4));
-            assert_eq!(rows, vec![vec![Value::Int32(1), Value::Int32(3)]]);
-        }
-        other => panic!("expected query result, got {other:?}"),
-    }
-}
-
-#[test]
-fn alter_table_add_column_merges_temp_multi_parent_child_metadata() {
-    let base = temp_dir("alter_table_add_column_temp_multi_parent");
-    let db = Database::open(&base, 16).unwrap();
-    let mut session = Session::new(1);
-
-    session
-        .execute(&db, "create temp table pp1 (f1 int4)")
-        .unwrap();
-    session
-        .execute(&db, "create temp table cc1 (f2 text, f3 int4) inherits (pp1)")
-        .unwrap();
-    session
-        .execute(&db, "create temp table cc2 (f4 float8) inherits (pp1, cc1)")
-        .unwrap();
-
-    clear_backend_notices();
-    session
-        .execute(&db, "alter table pp1 add column a2 int4")
-        .unwrap();
-    assert_eq!(
-        take_backend_notices()
-            .into_iter()
-            .collect::<Vec<_>>(),
-        vec![r#"merging definition of column "a2" for child "cc2""#.to_string()]
-    );
-
-    assert_eq!(
-        session_query_rows(
-            &mut session,
-            &db,
-            "select c.relname, a.attname, a.attinhcount, a.attislocal
-             from pg_attribute a
-             join pg_class c on c.oid = a.attrelid
-             where attname = 'a2'
-             order by 1",
-        ),
-        vec![
-            vec![
-                Value::Text("cc1".into()),
-                Value::Text("a2".into()),
-                Value::Int16(1),
-                Value::Bool(false),
-            ],
-            vec![
-                Value::Text("cc2".into()),
-                Value::Text("a2".into()),
-                Value::Int16(2),
-                Value::Bool(false),
-            ],
-            vec![
-                Value::Text("pp1".into()),
-                Value::Text("a2".into()),
-                Value::Int16(0),
-                Value::Bool(true),
-            ],
-        ]
-    );
 }
 
 #[test]
@@ -6269,132 +5760,6 @@ fn create_table_foreign_keys_are_enforced_and_persisted() {
 }
 
 #[test]
-fn foreign_keys_support_match_full() {
-    let base = temp_dir("foreign_keys_match_full");
-    let db = Database::open(&base, 16).unwrap();
-
-    db.execute(
-        1,
-        "create table parents (id int4, code text, primary key (id, code))",
-    )
-    .unwrap();
-    db.execute(
-        1,
-        "create table children (
-            id int4 primary key,
-            parent_id int4,
-            parent_code text,
-            constraint children_parent_fk
-                foreign key (parent_id, parent_code) references parents(id, code) match full
-        )",
-    )
-    .unwrap();
-    db.execute(1, "insert into parents values (1, 'one')")
-        .unwrap();
-    db.execute(1, "insert into children values (1, 1, 'one')")
-        .unwrap();
-    db.execute(1, "insert into children values (2, null, null)")
-        .unwrap();
-
-    match db.execute(1, "insert into children values (3, 1, null)") {
-        Err(ExecError::ForeignKeyViolation {
-            constraint, detail, ..
-        }) => {
-            assert_eq!(constraint, "children_parent_fk");
-            assert!(
-                detail
-                    .as_deref()
-                    .is_some_and(|detail| detail.contains("MATCH FULL"))
-            );
-        }
-        other => panic!("expected MATCH FULL foreign-key violation, got {other:?}"),
-    }
-}
-
-#[test]
-fn foreign_keys_apply_referential_actions() {
-    let base = temp_dir("foreign_keys_referential_actions");
-    let db = Database::open(&base, 16).unwrap();
-
-    db.execute(1, "create table parents (id int4 primary key)")
-        .unwrap();
-    db.execute(1, "insert into parents values (0), (1)")
-        .unwrap();
-    db.execute(
-        1,
-        "create table cascade_children (
-            id int4 primary key,
-            parent_id int4 references parents(id) on update cascade on delete cascade
-        )",
-    )
-    .unwrap();
-    db.execute(
-        1,
-        "create table set_null_children (
-            id int4 primary key,
-            parent_id int4 references parents(id) on update set null on delete set null
-        )",
-    )
-    .unwrap();
-    db.execute(
-        1,
-        "create table set_default_update_children (
-            id int4 primary key,
-            parent_id int4 default 0 references parents(id) on update set default
-        )",
-    )
-    .unwrap();
-    db.execute(
-        1,
-        "create table set_default_delete_children (
-            id int4 primary key,
-            parent_id int4 default 0 references parents(id) on delete set default
-        )",
-    )
-    .unwrap();
-
-    db.execute(1, "insert into cascade_children values (1, 1)")
-        .unwrap();
-    db.execute(1, "insert into set_null_children values (1, 1)")
-        .unwrap();
-    db.execute(1, "insert into set_default_update_children values (1, 1)")
-        .unwrap();
-
-    db.execute(1, "update parents set id = 2 where id = 1")
-        .unwrap();
-    assert_eq!(
-        query_rows(&db, 1, "select parent_id from cascade_children"),
-        vec![vec![Value::Int32(2)]]
-    );
-    assert_eq!(
-        query_rows(&db, 1, "select parent_id from set_null_children"),
-        vec![vec![Value::Null]]
-    );
-    assert_eq!(
-        query_rows(&db, 1, "select parent_id from set_default_update_children"),
-        vec![vec![Value::Int32(0)]]
-    );
-
-    db.execute(1, "insert into set_default_delete_children values (1, 2)")
-        .unwrap();
-    db.execute(1, "delete from parents where id = 2").unwrap();
-
-    assert!(query_rows(&db, 1, "select * from cascade_children").is_empty());
-    assert_eq!(
-        query_rows(&db, 1, "select parent_id from set_null_children"),
-        vec![vec![Value::Null]]
-    );
-    assert_eq!(
-        query_rows(&db, 1, "select parent_id from set_default_update_children"),
-        vec![vec![Value::Int32(0)]]
-    );
-    assert_eq!(
-        query_rows(&db, 1, "select parent_id from set_default_delete_children"),
-        vec![vec![Value::Int32(0)]]
-    );
-}
-
-#[test]
 fn create_table_serial_creates_sequence_defaults_and_persists_state() {
     let base = temp_dir("create_table_serial_defaults");
     let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
@@ -6645,10 +6010,7 @@ fn unsupported_create_table_like_does_not_poison_catalog_after_sequence_drop() {
         Err(ExecError::Parse(ParseError::FeatureNotSupported(feature))) => {
             assert_eq!(feature, "CREATE TABLE ... LIKE")
         }
-        other => panic!(
-            "expected unsupported CREATE TABLE LIKE error, got {:?}",
-            other
-        ),
+        other => panic!("expected unsupported CREATE TABLE LIKE error, got {:?}", other),
     }
     db.execute(1, "drop sequence ctlseq1").unwrap();
 
@@ -7098,8 +6460,7 @@ fn foreign_keys_support_not_enforced_and_alter_enforced_state() {
     )
     .unwrap();
 
-    db.execute(1, "insert into children values (1, 42)")
-        .unwrap();
+    db.execute(1, "insert into children values (1, 42)").unwrap();
     assert_eq!(
         query_rows(
             &db,
@@ -7160,8 +6521,7 @@ fn foreign_keys_support_not_enforced_and_alter_enforced_state() {
         ]]
     );
 
-    db.execute(1, "insert into children values (2, 99)")
-        .unwrap();
+    db.execute(1, "insert into children values (2, 99)").unwrap();
 }
 
 #[test]
@@ -9249,9 +8609,7 @@ fn checkpoint_requires_pg_checkpoint_membership() {
     bootstrap
         .execute(&db, "create role outsider login")
         .unwrap();
-    bootstrap
-        .execute(&db, "grant pg_checkpoint to tenant")
-        .unwrap();
+    bootstrap.execute(&db, "grant pg_checkpoint to tenant").unwrap();
 
     let mut session = Session::new(2);
     session
@@ -10490,34 +9848,6 @@ fn create_table_errors_when_search_path_selects_no_creatable_schema() {
 }
 
 #[test]
-fn create_function_uses_search_path_for_unqualified_creation() {
-    let base = temp_dir("search_path_function_create");
-    let db = Database::open(&base, 16).unwrap();
-    let mut session = Session::new(1);
-
-    session.execute(&db, "create schema tenant_fn").unwrap();
-    session.execute(&db, "set search_path = tenant_fn").unwrap();
-    session
-        .execute(
-            &db,
-            "create function add_one(x int4) returns int4 language sql as $$ select x + 1 $$",
-        )
-        .unwrap();
-
-    let visible = db.backend_catcache(1, None).unwrap();
-    let proc = visible
-        .proc_rows_by_name("add_one")
-        .into_iter()
-        .find(|row| row.proname == "add_one")
-        .expect("function row");
-    let tenant_ns = visible
-        .namespace_by_name("tenant_fn")
-        .expect("tenant namespace")
-        .oid;
-    assert_eq!(proc.pronamespace, tenant_ns);
-}
-
-#[test]
 fn create_table_uses_pg_temp_search_path_for_unqualified_creation() {
     let base = temp_dir("search_path_pg_temp_create");
     let db = Database::open(&base, 16).unwrap();
@@ -10590,7 +9920,7 @@ fn create_index_supports_qualified_public_target_under_temp_shadowing() {
 }
 
 #[test]
-fn create_index_supports_temp_tables_when_temp_is_first_visible() {
+fn create_index_still_rejects_temp_tables_when_temp_is_first_visible() {
     let base = temp_dir("search_path_create_index_temp");
     let db = Database::open(&base, 16).unwrap();
     let mut session = Session::new(1);
@@ -10601,14 +9931,22 @@ fn create_index_supports_temp_tables_when_temp_is_first_visible() {
         .execute(&db, "create temp table items (id int4 not null)")
         .unwrap();
 
-    session
+    let err = session
         .execute(&db, "create index items_temp_idx on items (id)")
-        .unwrap();
-
-    let temp_table = db.temp_entry(1, "items").unwrap();
-    let temp_index = db.temp_entry(1, "items_temp_idx").unwrap();
-    let index_meta = temp_index.index.as_ref().unwrap();
-    assert_eq!(index_meta.indrelid, temp_table.relation_oid);
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::Parse(ParseError::UnexpectedToken { expected, actual })
+            if expected == "permanent table for CREATE INDEX" && actual == "temporary table"
+    ));
+    assert!(
+        db.catalog
+            .read()
+            .catalog_snapshot()
+            .unwrap()
+            .get("items_temp_idx")
+            .is_none()
+    );
 }
 
 #[test]
@@ -12974,67 +12312,6 @@ fn grant_all_on_schema_public_is_accepted() {
 }
 
 #[test]
-fn durable_bootstrap_preserves_public_schema_grants() {
-    let base = temp_dir("durable_public_schema_grant");
-    let db = Database::open(&base, 16).expect("open durable database");
-    let mut session = Session::new(1);
-
-    assert_eq!(
-        query_rows(
-            &db,
-            1,
-            "select count(*) from pg_namespace where nspname = 'public'",
-        ),
-        vec![vec![Value::Int64(1)]]
-    );
-
-    match session
-        .execute(&db, "grant all on schema public to public")
-        .unwrap()
-    {
-        StatementResult::AffectedRows(0) => {}
-        other => panic!("expected grant affected rows, got {other:?}"),
-    }
-}
-
-#[test]
-fn grant_select_on_table_is_accepted() {
-    let db = Database::open_ephemeral(32).expect("open ephemeral database");
-    let mut session = Session::new(1);
-
-    session
-        .execute(&db, "create table widgets (id int4)")
-        .unwrap();
-    match session
-        .execute(&db, "grant select on widgets to public")
-        .unwrap()
-    {
-        StatementResult::AffectedRows(0) => {}
-        other => panic!("expected grant affected rows, got {other:?}"),
-    }
-}
-
-#[test]
-fn grant_execute_on_function_is_accepted() {
-    let db = Database::open_ephemeral(32).expect("open ephemeral database");
-    let mut session = Session::new(1);
-
-    session
-        .execute(
-            &db,
-            "create function add_one(x int4) returns int4 language sql as $$ select x + 1 $$",
-        )
-        .unwrap();
-    match session
-        .execute(&db, "grant execute on function add_one(int4) to public")
-        .unwrap()
-    {
-        StatementResult::AffectedRows(0) => {}
-        other => panic!("expected grant affected rows, got {other:?}"),
-    }
-}
-
-#[test]
 fn create_tablespace_adds_pg_tablespace_row() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);
@@ -13139,85 +12416,6 @@ fn create_function_supports_void_returns_and_regprocedure_oid_lookup() {
     assert_eq!(
         query_rows(&db, 1, "select 'stats_test_func1()'::regprocedure::oid"),
         vec![vec![Value::Int64(proc.oid as i64)]]
-    );
-}
-
-#[test]
-fn role_name_literal_cast_supports_regrole() {
-    let dir = temp_dir("regrole_literal_cast");
-    let db = Database::open(&dir, 64).unwrap();
-
-    db.execute(1, "create role app_role").unwrap();
-
-    assert_eq!(
-        query_rows(&db, 1, "select 'app_role'::regrole::oid"),
-        vec![vec![Value::Int64(role_oid(&db, "app_role") as i64)]]
-    );
-}
-
-#[test]
-fn regrole_cast_to_text_renders_role_name() {
-    let dir = temp_dir("regrole_text_cast");
-    let db = Database::open(&dir, 64).unwrap();
-
-    db.execute(1, "create role app_role").unwrap();
-    db.execute(1, "create role app_member").unwrap();
-    db.execute(1, "grant app_role to app_member").unwrap();
-
-    assert_eq!(
-        query_rows(&db, 1, "select 'app_role'::regrole::text"),
-        vec![vec![Value::Text("app_role".into())]]
-    );
-    assert_eq!(
-        query_rows(
-            &db,
-            1,
-            "select oid::regrole::text from pg_authid where rolname = 'app_role'",
-        ),
-        vec![vec![Value::Text("app_role".into())]]
-    );
-    assert_eq!(
-        query_rows(
-            &db,
-            1,
-            "select member::regrole::text, grantor::regrole::text \
-             from pg_auth_members where roleid = 'app_role'::regrole",
-        ),
-        vec![vec![
-            Value::Text("app_member".into()),
-            Value::Text("postgres".into()),
-        ]]
-    );
-}
-
-#[test]
-fn session_user_and_current_role_are_sql_visible() {
-    let dir = temp_dir("session_user_current_role");
-    let db = Database::open(&dir, 64).unwrap();
-
-    db.execute(1, "create role tenant login").unwrap();
-    db.execute(1, "create role manager").unwrap();
-    db.execute(1, "grant manager to tenant").unwrap();
-    db.execute(1, "set session authorization tenant").unwrap();
-
-    assert_eq!(
-        query_rows(&db, 1, "select session_user, current_user, current_role"),
-        vec![vec![
-            Value::Text("tenant".into()),
-            Value::Text("tenant".into()),
-            Value::Text("tenant".into()),
-        ]]
-    );
-
-    db.execute(1, "set role manager").unwrap();
-
-    assert_eq!(
-        query_rows(&db, 1, "select session_user, current_user, current_role"),
-        vec![vec![
-            Value::Text("tenant".into()),
-            Value::Text("manager".into()),
-            Value::Text("manager".into()),
-        ]]
     );
 }
 

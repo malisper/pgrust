@@ -65,16 +65,6 @@ impl Database {
             .filter(|row| !self.other_session_temp_namespace_oid(client_id, row.oid))
     }
 
-    pub(crate) fn visible_namespace_oid_by_name(
-        &self,
-        client_id: ClientId,
-        txn_ctx: CatalogTxnContext,
-        schema_name: &str,
-    ) -> Option<u32> {
-        self.visible_namespace_by_name(client_id, txn_ctx, schema_name)
-            .map(|row| row.oid)
-    }
-
     fn resolve_create_relation_target(
         &self,
         client_id: ClientId,

@@ -1,18 +1,18 @@
 use super::super::*;
 use crate::backend::commands::tablecmds::collect_matching_rows_heap;
-use crate::backend::executor::{eval_expr, ExecutorContext};
+use crate::backend::executor::{ExecutorContext, eval_expr};
 use crate::backend::parser::{
     BoundCheckConstraint, BoundForeignKeyConstraint, ForeignKeyConstraintAction,
 };
 use crate::include::catalog::{
-    PgConstraintRow, CONSTRAINT_CHECK, CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY,
-    CONSTRAINT_UNIQUE, PG_CATALOG_NAMESPACE_OID,
+    CONSTRAINT_CHECK, CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY,
+    CONSTRAINT_UNIQUE, PG_CATALOG_NAMESPACE_OID, PgConstraintRow,
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::TupleSlot;
+use crate::pgrust::database::ddl::lookup_heap_relation_for_alter_table;
 use crate::include::nodes::parsenodes::{ForeignKeyAction, ForeignKeyMatchType};
 use crate::pgrust::database::ddl::is_system_column_name;
-use crate::pgrust::database::ddl::lookup_heap_relation_for_alter_table;
 
 fn relation_basename(name: &str) -> &str {
     name.rsplit('.').next().unwrap_or(name)
@@ -56,7 +56,6 @@ fn ddl_executor_context(
         session_stats: db.session_stats_state(client_id),
         snapshot,
         client_id,
-        session_user_oid: db.auth_state(client_id).session_user_oid(),
         current_user_oid: db.auth_state(client_id).current_user_oid(),
         next_command_id: cid,
         expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
@@ -238,7 +237,6 @@ fn validate_foreign_key_rows(
                     .ok_or_else(|| ExecError::Parse(ParseError::UnknownColumn(column_name.clone())))
             })
             .collect::<Result<Vec<_>, _>>()?,
-        match_type: action.match_type,
         referenced_relation_name: action.referenced_table.clone(),
         referenced_relation_oid: referenced_relation.relation_oid,
         referenced_rel: referenced_relation.rel,
@@ -367,6 +365,12 @@ fn ensure_constraint_relation(
         return Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "user table for ALTER TABLE constraint operations",
             actual: "system catalog".into(),
+        }));
+    }
+    if relation.relpersistence == 't' {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "permanent table for ALTER TABLE constraint operations",
+            actual: "temporary table".into(),
         }));
     }
     ensure_relation_owner(db, client_id, relation, table_name)
@@ -834,7 +838,6 @@ impl Database {
                         relation.relation_oid,
                         action.constraint_name,
                         !action.not_valid,
-                        action.no_inherit,
                         action.expr_sql,
                         &ctx,
                     )

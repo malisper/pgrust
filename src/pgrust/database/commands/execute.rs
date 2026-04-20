@@ -259,24 +259,6 @@ impl Database {
                     alter_stmt,
                     configured_search_path,
                 ),
-            Statement::AlterTableAlterColumnDefault(ref alter_stmt) => self
-                .execute_alter_table_alter_column_default_stmt_with_search_path(
-                    client_id,
-                    alter_stmt,
-                    configured_search_path,
-                ),
-            Statement::AlterTableAlterColumnOptions(ref alter_stmt) => self
-                .execute_alter_table_alter_column_options_stmt_with_search_path(
-                    client_id,
-                    alter_stmt,
-                    configured_search_path,
-                ),
-            Statement::AlterTableAlterColumnStatistics(ref alter_stmt) => self
-                .execute_alter_table_alter_column_statistics_stmt_with_search_path(
-                    client_id,
-                    alter_stmt,
-                    configured_search_path,
-                ),
             Statement::AlterTableAddConstraint(ref alter_stmt) => self
                 .execute_alter_table_add_constraint_stmt_with_search_path(
                     client_id,
@@ -438,7 +420,6 @@ impl Database {
                     session_stats: self.session_stats_state(client_id),
                     snapshot,
                     client_id,
-                    session_user_oid: self.auth_state(client_id).session_user_oid(),
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
                     next_command_id: 0,
                     expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
@@ -486,27 +467,6 @@ impl Database {
                     comment_stmt,
                     configured_search_path,
                 ),
-            Statement::CommentOnForeignDataWrapper(ref comment_stmt) => self
-                .execute_comment_on_foreign_data_wrapper_stmt(client_id, comment_stmt),
-            Statement::CreateForeignDataWrapper(ref create_stmt) => self
-                .execute_create_foreign_data_wrapper_stmt_with_search_path(
-                    client_id,
-                    create_stmt,
-                    configured_search_path,
-                ),
-            Statement::AlterForeignDataWrapper(ref alter_stmt) => self
-                .execute_alter_foreign_data_wrapper_stmt_with_search_path(
-                    client_id,
-                    alter_stmt,
-                    configured_search_path,
-                ),
-            Statement::AlterForeignDataWrapperOwner(ref alter_stmt) => self
-                .execute_alter_foreign_data_wrapper_owner_stmt(client_id, alter_stmt),
-            Statement::AlterForeignDataWrapperRename(ref alter_stmt) => self
-                .execute_alter_foreign_data_wrapper_rename_stmt(client_id, alter_stmt),
-            Statement::DropForeignDataWrapper(ref drop_stmt) => {
-                self.execute_drop_foreign_data_wrapper_stmt(client_id, drop_stmt)
-            }
             Statement::Select(_) | Statement::Values(_) | Statement::Explain(_) => {
                 let visible_catalog =
                     self.lazy_catalog_lookup(client_id, None, configured_search_path);
@@ -556,7 +516,6 @@ impl Database {
                     session_stats: self.session_stats_state(client_id),
                     snapshot,
                     client_id,
-                    session_user_oid: self.auth_state(client_id).session_user_oid(),
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
                     next_command_id: 0,
                     expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
@@ -611,7 +570,6 @@ impl Database {
                     session_stats: self.session_stats_state(client_id),
                     snapshot,
                     client_id,
-                    session_user_oid: self.auth_state(client_id).session_user_oid(),
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
                     next_command_id: 0,
                     expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
@@ -681,7 +639,6 @@ impl Database {
                     session_stats: self.session_stats_state(client_id),
                     snapshot,
                     client_id,
-                    session_user_oid: self.auth_state(client_id).session_user_oid(),
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
                     next_command_id: 0,
                     expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
@@ -756,7 +713,6 @@ impl Database {
                     session_stats: self.session_stats_state(client_id),
                     snapshot,
                     client_id,
-                    session_user_oid: self.auth_state(client_id).session_user_oid(),
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
                     next_command_id: 0,
                     expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
@@ -1028,7 +984,6 @@ impl Database {
                     session_stats: self.session_stats_state(client_id),
                     snapshot,
                     client_id,
-                    session_user_oid: self.auth_state(client_id).session_user_oid(),
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
                     next_command_id: 0,
                     expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
@@ -1088,7 +1043,6 @@ impl Database {
                     session_stats: self.session_stats_state(client_id),
                     snapshot,
                     client_id,
-                    session_user_oid: self.auth_state(client_id).session_user_oid(),
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
                     next_command_id: 0,
                     datetime_config: datetime_config.clone(),
@@ -1193,7 +1147,6 @@ impl Database {
             session_stats: self.session_stats_state(client_id),
             snapshot,
             client_id,
-            session_user_oid: self.auth_state(client_id).session_user_oid(),
             current_user_oid: self.auth_state(client_id).current_user_oid(),
             next_command_id: command_id,
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),

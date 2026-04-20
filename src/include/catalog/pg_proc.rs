@@ -9,8 +9,8 @@ use crate::include::catalog::{
     LINE_TYPE_OID, LSEG_TYPE_OID, MONEY_TYPE_OID, NAME_TYPE_OID, NUMERIC_TYPE_OID,
     NUMRANGE_TYPE_OID, OID_TYPE_OID, PATH_TYPE_OID, PG_CATALOG_NAMESPACE_OID,
     PG_LANGUAGE_INTERNAL_OID, POINT_TYPE_OID, POLYGON_TYPE_OID, RECORD_TYPE_OID,
-    TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID,
-    TSQUERY_TYPE_OID, TSRANGE_TYPE_OID, TSTZRANGE_TYPE_OID, VARBIT_TYPE_OID,
+    TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID, TSQUERY_TYPE_OID,
+    TSRANGE_TYPE_OID, TSTZRANGE_TYPE_OID, VARBIT_TYPE_OID,
 };
 use crate::include::nodes::primnodes::{AggFunc, BuiltinScalarFunction, BuiltinWindowFunction};
 use std::sync::OnceLock;
@@ -251,6 +251,42 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             "",
             "window_dense_rank",
             0,
+            false,
+            false,
+            'w',
+            'i',
+        ),
+        proc_row(
+            3103,
+            "percent_rank",
+            FLOAT8_TYPE_OID,
+            "",
+            "window_percent_rank",
+            0,
+            false,
+            false,
+            'w',
+            'i',
+        ),
+        proc_row(
+            3104,
+            "cume_dist",
+            FLOAT8_TYPE_OID,
+            "",
+            "window_cume_dist",
+            0,
+            false,
+            false,
+            'w',
+            'i',
+        ),
+        proc_row(
+            3105,
+            "ntile",
+            INT4_TYPE_OID,
+            &oid_argtypes(&[INT4_TYPE_OID]),
+            "window_ntile",
+            1,
             false,
             false,
             'w',
@@ -2523,6 +2559,9 @@ fn synthetic_window_proc_oids() -> &'static Vec<(BuiltinWindowFunction, u32)> {
             BuiltinWindowFunction::RowNumber,
             BuiltinWindowFunction::Rank,
             BuiltinWindowFunction::DenseRank,
+            BuiltinWindowFunction::PercentRank,
+            BuiltinWindowFunction::CumeDist,
+            BuiltinWindowFunction::Ntile,
         ]
         .into_iter()
         .enumerate()
@@ -2556,6 +2595,9 @@ fn window_func_for_proname(name: &str) -> Option<BuiltinWindowFunction> {
         "row_number" => Some(BuiltinWindowFunction::RowNumber),
         "rank" => Some(BuiltinWindowFunction::Rank),
         "dense_rank" => Some(BuiltinWindowFunction::DenseRank),
+        "percent_rank" => Some(BuiltinWindowFunction::PercentRank),
+        "cume_dist" => Some(BuiltinWindowFunction::CumeDist),
+        "ntile" => Some(BuiltinWindowFunction::Ntile),
         _ => None,
     }
 }

@@ -4,9 +4,9 @@ use crate::backend::parser::SqlTypeKind;
 use crate::backend::utils::cache::catcache::sql_type_oid;
 use crate::include::catalog::{
     DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, PG_ATTRDEF_RELATION_OID,
-    PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID, PG_FOREIGN_DATA_WRAPPER_RELATION_OID,
-    PG_NAMESPACE_RELATION_OID, PG_PROC_RELATION_OID, PG_REWRITE_RELATION_OID,
-    PG_TRIGGER_RELATION_OID, PG_TYPE_RELATION_OID, PgDependRow,
+    PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID, PG_NAMESPACE_RELATION_OID,
+    PG_PROC_RELATION_OID, PG_REWRITE_RELATION_OID, PG_TRIGGER_RELATION_OID, PG_TYPE_RELATION_OID,
+    PgDependRow,
 };
 use std::collections::BTreeSet;
 
@@ -303,38 +303,6 @@ pub fn trigger_depend_rows(trigger_oid: u32, relation_oid: u32, proc_oid: u32) -
             deptype: DEPENDENCY_NORMAL,
         },
     ];
-    sort_pg_depend_rows(&mut rows);
-    rows
-}
-
-pub fn foreign_data_wrapper_depend_rows(
-    fdw_oid: u32,
-    handler_oid: u32,
-    validator_oid: u32,
-) -> Vec<PgDependRow> {
-    let mut rows = Vec::new();
-    if handler_oid != 0 {
-        rows.push(PgDependRow {
-            classid: PG_FOREIGN_DATA_WRAPPER_RELATION_OID,
-            objid: fdw_oid,
-            objsubid: 0,
-            refclassid: PG_PROC_RELATION_OID,
-            refobjid: handler_oid,
-            refobjsubid: 0,
-            deptype: DEPENDENCY_NORMAL,
-        });
-    }
-    if validator_oid != 0 {
-        rows.push(PgDependRow {
-            classid: PG_FOREIGN_DATA_WRAPPER_RELATION_OID,
-            objid: fdw_oid,
-            objsubid: 0,
-            refclassid: PG_PROC_RELATION_OID,
-            refobjid: validator_oid,
-            refobjsubid: 0,
-            deptype: DEPENDENCY_NORMAL,
-        });
-    }
     sort_pg_depend_rows(&mut rows);
     rows
 }

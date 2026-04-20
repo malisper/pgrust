@@ -80,8 +80,6 @@ fn exec_error_sqlstate(e: &ExecError) -> &'static str {
         }
         ExecError::Parse(crate::backend::parser::ParseError::ActiveSqlTransaction(_)) => "25001",
         ExecError::IntegerOutOfRange { .. }
-        | ExecError::NumericNaNToInt { .. }
-        | ExecError::NumericInfinityToInt { .. }
         | ExecError::Int2OutOfRange
         | ExecError::Int4OutOfRange
         | ExecError::Int8OutOfRange

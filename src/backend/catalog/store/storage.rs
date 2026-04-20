@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 
 use crate::BufferPool;
 use crate::backend::access::transam::xact::{INVALID_TRANSACTION_ID, Snapshot, TransactionManager};
-use crate::backend::catalog::bootstrap::bootstrap_catalog_entry;
 use crate::backend::catalog::bootstrap::bootstrap_catalog_rel;
+use crate::backend::catalog::bootstrap::bootstrap_catalog_entry;
 use crate::backend::catalog::catalog::{Catalog, CatalogError};
 use crate::backend::catalog::indexing::{
     insert_bootstrap_system_indexes, system_catalog_index_entry_for_db,
@@ -240,7 +240,6 @@ impl CatalogStore {
                     rows.procs,
                     rows.casts,
                     rows.collations,
-                    rows.foreign_data_wrappers,
                     rows.databases,
                     rows.tablespaces,
                     rows.statistics,
@@ -302,7 +301,6 @@ impl CatalogStore {
             rows.procs,
             rows.casts,
             rows.collations,
-            rows.foreign_data_wrappers,
             rows.databases,
             rows.tablespaces,
             rows.statistics,
@@ -623,8 +621,7 @@ fn migrate_legacy_attrdef_defaults_if_needed(
         return Ok(false);
     }
 
-    smgr.open(rel)
-        .map_err(|e| CatalogError::Io(e.to_string()))?;
+    smgr.open(rel).map_err(|e| CatalogError::Io(e.to_string()))?;
     smgr.create(rel, ForkNumber::Main, false)
         .map_err(|e| CatalogError::Io(e.to_string()))?;
     for descriptor in system_catalog_indexes_for_heap(BootstrapCatalogKind::PgAttrdef) {

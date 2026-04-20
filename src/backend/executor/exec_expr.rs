@@ -371,20 +371,6 @@ fn sequence_catalog(
         })
 }
 
-fn role_catalog(
-    ctx: &ExecutorContext,
-) -> Result<&crate::backend::utils::cache::visible_catalog::VisibleCatalog, ExecError> {
-    ctx.catalog
-        .as_ref()
-        .ok_or_else(|| ExecError::DetailedError {
-            message: "role lookup requires a visible catalog".into(),
-            detail: None,
-            hint: None,
-            sqlstate: "XX000",
-        })
-}
-
->>>>>>> malisper/array-sql-gap-audit
 fn sequence_runtime(
     ctx: &ExecutorContext,
 ) -> Result<&crate::pgrust::database::SequenceRuntime, ExecError> {
@@ -1088,8 +1074,6 @@ pub fn eval_expr(
         }
         Expr::Random => Ok(Value::Float64(rand::random::<f64>())),
         Expr::CurrentDate => Ok(current_date_value_with_config(&ctx.datetime_config)),
-        Expr::CurrentUser | Expr::CurrentRole => auth_role_name(ctx, ctx.current_user_oid),
-        Expr::SessionUser => auth_role_name(ctx, ctx.session_user_oid),
         Expr::CurrentTime { precision } => Ok(current_time_value_with_config(
             &ctx.datetime_config,
             *precision,

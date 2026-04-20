@@ -20,7 +20,6 @@ pub struct BoundInsertStatement {
     pub target_columns: Vec<BoundAssignmentTarget>,
     pub source: BoundInsertSource,
     pub on_conflict: Option<BoundOnConflictClause>,
-    pub returning_all: bool,
     pub subplans: Vec<Plan>,
 }
 
@@ -69,7 +68,6 @@ pub struct BoundUpdateTarget {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundUpdateStatement {
     pub targets: Vec<BoundUpdateTarget>,
-    pub returning_all: bool,
     pub subplans: Vec<Plan>,
 }
 
@@ -974,7 +972,6 @@ pub(crate) fn bind_insert_with_outer_scopes(
                 )
             })
             .transpose()?,
-        returning_all: stmt.returning_all,
         subplans: Vec::new(),
     })
 }
@@ -1057,7 +1054,6 @@ pub(crate) fn bind_update_with_outer_scopes(
 
     Ok(BoundUpdateStatement {
         targets,
-        returning_all: stmt.returning_all,
         subplans: Vec::new(),
     })
 }

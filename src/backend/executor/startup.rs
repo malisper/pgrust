@@ -103,9 +103,6 @@ fn expr_uses_outer_columns(expr: &Expr) -> bool {
         Expr::Const(_)
         | Expr::Random
         | Expr::CurrentDate
-        | Expr::CurrentUser
-        | Expr::SessionUser
-        | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
         | Expr::LocalTime { .. }

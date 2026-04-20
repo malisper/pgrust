@@ -15,99 +15,99 @@ impl Database {
         let mut catalog_effects = Vec::new();
         let mut target_dir_to_cleanup: Option<PathBuf> = None;
         let result = (|| {
-            let auth = self.auth_state(client_id);
-            let auth_catalog = self
-                .auth_catalog(client_id, Some((xid, 0)))
+        let auth = self.auth_state(client_id);
+        let auth_catalog = self
+            .auth_catalog(client_id, Some((xid, 0)))
+            .map_err(map_catalog_error)?;
+        let current_role = auth_catalog
+            .role_by_oid(auth.current_user_oid())
+            .ok_or_else(|| ExecError::DetailedError {
+                message: "current role does not exist".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42704",
+            })?;
+        if !current_role.rolsuper && !current_role.rolcreatedb {
+            return Err(ExecError::DetailedError {
+                message: "permission denied to create database".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42501",
+            });
+        }
+
+        let template = {
+            let cache = self
+                .backend_catcache(client_id, Some((xid, 0)))
                 .map_err(map_catalog_error)?;
-            let current_role = auth_catalog
-                .role_by_oid(auth.current_user_oid())
-                .ok_or_else(|| ExecError::DetailedError {
-                    message: "current role does not exist".into(),
-                    detail: None,
-                    hint: None,
-                    sqlstate: "42704",
-                })?;
-            if !current_role.rolsuper && !current_role.rolcreatedb {
+            if cache
+                .database_rows()
+                .into_iter()
+                .any(|row| row.datname.eq_ignore_ascii_case(&stmt.database_name))
+            {
                 return Err(ExecError::DetailedError {
-                    message: "permission denied to create database".into(),
+                    message: format!("database \"{}\" already exists", stmt.database_name),
                     detail: None,
                     hint: None,
-                    sqlstate: "42501",
+                    sqlstate: "42P04",
                 });
             }
+            cache
+                .database_rows()
+                .into_iter()
+                .find(|row| row.datname.eq_ignore_ascii_case(TEMPLATE1_DATABASE_NAME))
+                .ok_or_else(|| ExecError::DetailedError {
+                    message: format!(
+                        "template database \"{}\" does not exist",
+                        TEMPLATE1_DATABASE_NAME
+                    ),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "3D000",
+                })?
+        };
+        flush_database_buffers_to_disk(self, template.oid)?;
 
-            let template = {
-                let cache = self
-                    .backend_catcache(client_id, Some((xid, 0)))
-                    .map_err(map_catalog_error)?;
-                if cache
-                    .database_rows()
-                    .into_iter()
-                    .any(|row| row.datname.eq_ignore_ascii_case(&stmt.database_name))
-                {
-                    return Err(ExecError::DetailedError {
-                        message: format!("database \"{}\" already exists", stmt.database_name),
-                        detail: None,
-                        hint: None,
-                        sqlstate: "42P04",
-                    });
-                }
-                cache
-                    .database_rows()
-                    .into_iter()
-                    .find(|row| row.datname.eq_ignore_ascii_case(TEMPLATE1_DATABASE_NAME))
-                    .ok_or_else(|| ExecError::DetailedError {
-                        message: format!(
-                            "template database \"{}\" does not exist",
-                            TEMPLATE1_DATABASE_NAME
-                        ),
-                        detail: None,
-                        hint: None,
-                        sqlstate: "3D000",
-                    })?
-            };
-            flush_database_buffers_to_disk(self, template.oid)?;
+        let mut row = template.clone();
+        row.oid = 0;
+        row.datname = stmt.database_name.to_ascii_lowercase();
+        row.datdba = auth.current_user_oid();
+        row.datistemplate = false;
+        row.datallowconn = true;
+        row.datacl = None;
 
-            let mut row = template.clone();
-            row.oid = 0;
-            row.datname = stmt.database_name.to_ascii_lowercase();
-            row.datdba = auth.current_user_oid();
-            row.datistemplate = false;
-            row.datallowconn = true;
-            row.datacl = None;
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid: 0,
+            client_id,
+            waiter: None,
+            interrupts: self.interrupt_state(client_id),
+        };
+        let (row, effect) = self
+            .shared_catalog
+            .write()
+            .create_database_row_mvcc(row, &ctx)
+            .map_err(map_catalog_error)?;
+        catalog_effects.push(effect);
 
-            let ctx = CatalogWriteContext {
-                pool: self.pool.clone(),
-                txns: self.txns.clone(),
-                xid,
-                cid: 0,
-                client_id,
-                waiter: None,
-                interrupts: self.interrupt_state(client_id),
-            };
-            let (row, effect) = self
-                .shared_catalog
-                .write()
-                .create_database_row_mvcc(row, &ctx)
-                .map_err(map_catalog_error)?;
-            catalog_effects.push(effect);
-
-            let template_dir = self
-                .cluster
-                .base_dir
-                .join("base")
-                .join(template.oid.to_string());
-            let target_dir = self.cluster.base_dir.join("base").join(row.oid.to_string());
-            target_dir_to_cleanup = Some(target_dir.clone());
-            copy_dir_all(&template_dir, &target_dir).map_err(|e| ExecError::DetailedError {
+        let template_dir = self
+            .cluster
+            .base_dir
+            .join("base")
+            .join(template.oid.to_string());
+        let target_dir = self.cluster.base_dir.join("base").join(row.oid.to_string());
+        target_dir_to_cleanup = Some(target_dir.clone());
+        copy_dir_all(&template_dir, &target_dir).map_err(|e| ExecError::DetailedError {
                 message: format!("could not initialize database directory: {e}"),
                 detail: None,
                 hint: None,
                 sqlstate: "58030",
             })?;
-            sync_cloned_local_catalogs(self, template.oid, row.oid)?;
+        sync_cloned_local_catalogs(self, template.oid, row.oid)?;
 
-            Ok(StatementResult::AffectedRows(0))
+        Ok(StatementResult::AffectedRows(0))
         })();
         if result.is_err()
             && let Some(target_dir) = &target_dir_to_cleanup
@@ -128,119 +128,119 @@ impl Database {
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let mut catalog_effects = Vec::new();
         let result = (|| {
-            let auth = self.auth_state(client_id);
-            let auth_catalog = self
-                .auth_catalog(client_id, Some((xid, 0)))
-                .map_err(map_catalog_error)?;
-            let current_role = auth_catalog
-                .role_by_oid(auth.current_user_oid())
-                .ok_or_else(|| ExecError::DetailedError {
-                    message: "current role does not exist".into(),
-                    detail: None,
-                    hint: None,
-                    sqlstate: "42704",
-                })?;
-            if !current_role.rolsuper && !current_role.rolcreatedb {
-                return Err(ExecError::DetailedError {
-                    message: "permission denied to drop database".into(),
-                    detail: None,
-                    hint: None,
-                    sqlstate: "42501",
-                });
-            }
+        let auth = self.auth_state(client_id);
+        let auth_catalog = self
+            .auth_catalog(client_id, Some((xid, 0)))
+            .map_err(map_catalog_error)?;
+        let current_role = auth_catalog
+            .role_by_oid(auth.current_user_oid())
+            .ok_or_else(|| ExecError::DetailedError {
+                message: "current role does not exist".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42704",
+            })?;
+        if !current_role.rolsuper && !current_role.rolcreatedb {
+            return Err(ExecError::DetailedError {
+                message: "permission denied to drop database".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42501",
+            });
+        }
 
-            let cache = self
-                .backend_catcache(client_id, Some((xid, 0)))
-                .map_err(map_catalog_error)?;
-            let Some(row) = cache
-                .database_rows()
-                .into_iter()
-                .find(|row| row.datname.eq_ignore_ascii_case(&stmt.database_name))
-            else {
-                return if stmt.if_exists {
-                    Ok(StatementResult::AffectedRows(0))
-                } else {
-                    Err(ExecError::DetailedError {
-                        message: format!("database \"{}\" does not exist", stmt.database_name),
-                        detail: None,
-                        hint: None,
-                        sqlstate: "3D000",
-                    })
-                };
+        let cache = self
+            .backend_catcache(client_id, Some((xid, 0)))
+            .map_err(map_catalog_error)?;
+        let Some(row) = cache
+            .database_rows()
+            .into_iter()
+            .find(|row| row.datname.eq_ignore_ascii_case(&stmt.database_name))
+        else {
+            return if stmt.if_exists {
+                Ok(StatementResult::AffectedRows(0))
+            } else {
+                Err(ExecError::DetailedError {
+                    message: format!("database \"{}\" does not exist", stmt.database_name),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "3D000",
+                })
             };
+        };
 
-            if row.datname.eq_ignore_ascii_case(TEMPLATE0_DATABASE_NAME)
-                || row.datname.eq_ignore_ascii_case(TEMPLATE1_DATABASE_NAME)
-            {
-                return Err(ExecError::DetailedError {
-                    message: format!("cannot drop database \"{}\"", row.datname),
-                    detail: None,
-                    hint: None,
-                    sqlstate: "55006",
-                });
-            }
-            if row.oid == self.database_oid {
-                return Err(ExecError::DetailedError {
-                    message: format!(
-                        "cannot drop the currently open database \"{}\"",
-                        row.datname
-                    ),
-                    detail: None,
-                    hint: None,
-                    sqlstate: "55006",
-                });
-            }
-            if self
-                .cluster
-                .active_connections
-                .read()
-                .get(&row.oid)
-                .copied()
-                .unwrap_or(0)
-                > 0
-            {
-                return Err(ExecError::DetailedError {
-                    message: format!(
-                        "database \"{}\" is being accessed by other users",
-                        row.datname
-                    ),
-                    detail: None,
-                    hint: None,
-                    sqlstate: "55006",
-                });
-            }
+        if row.datname.eq_ignore_ascii_case(TEMPLATE0_DATABASE_NAME)
+            || row.datname.eq_ignore_ascii_case(TEMPLATE1_DATABASE_NAME)
+        {
+            return Err(ExecError::DetailedError {
+                message: format!("cannot drop database \"{}\"", row.datname),
+                detail: None,
+                hint: None,
+                sqlstate: "55006",
+            });
+        }
+        if row.oid == self.database_oid {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "cannot drop the currently open database \"{}\"",
+                    row.datname
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "55006",
+            });
+        }
+        if self
+            .cluster
+            .active_connections
+            .read()
+            .get(&row.oid)
+            .copied()
+            .unwrap_or(0)
+            > 0
+        {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "database \"{}\" is being accessed by other users",
+                    row.datname
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "55006",
+            });
+        }
 
-            let ctx = CatalogWriteContext {
-                pool: self.pool.clone(),
-                txns: self.txns.clone(),
-                xid,
-                cid: 0,
-                client_id,
-                waiter: None,
-                interrupts: self.interrupt_state(client_id),
-            };
-            let (_, effect) = self
-                .shared_catalog
-                .write()
-                .drop_database_row_mvcc(&row.datname, &ctx)
-                .map_err(map_catalog_error)?;
-            catalog_effects.push(effect);
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid: 0,
+            client_id,
+            waiter: None,
+            interrupts: self.interrupt_state(client_id),
+        };
+        let (_, effect) = self
+            .shared_catalog
+            .write()
+            .drop_database_row_mvcc(&row.datname, &ctx)
+            .map_err(map_catalog_error)?;
+        catalog_effects.push(effect);
 
-            if let Some(state) = self.cluster.open_databases.read().get(&row.oid).cloned() {
-                invalidate_database_buffers(self, &state.catalog.read(), row.oid);
-            }
-            let db_dir = self.cluster.base_dir.join("base").join(row.oid.to_string());
-            if db_dir.exists() {
-                fs::remove_dir_all(&db_dir).map_err(|e| ExecError::DetailedError {
-                    message: format!("could not remove database directory: {e}"),
-                    detail: None,
-                    hint: None,
-                    sqlstate: "58030",
-                })?;
-            }
-            self.cluster.open_databases.write().remove(&row.oid);
+        if let Some(state) = self.cluster.open_databases.read().get(&row.oid).cloned() {
+            invalidate_database_buffers(self, &state.catalog.read(), row.oid);
+        }
+        let db_dir = self.cluster.base_dir.join("base").join(row.oid.to_string());
+        if db_dir.exists() {
+            fs::remove_dir_all(&db_dir).map_err(|e| ExecError::DetailedError {
+                message: format!("could not remove database directory: {e}"),
+                detail: None,
+                hint: None,
+                sqlstate: "58030",
+            })?;
+        }
+        self.cluster.open_databases.write().remove(&row.oid);
 
-            Ok(StatementResult::AffectedRows(0))
+        Ok(StatementResult::AffectedRows(0))
         })();
         let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
         guard.disarm();

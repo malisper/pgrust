@@ -11,8 +11,8 @@ use crate::include::nodes::plannodes::{ExecParamSource, Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
     AggAccum, Aggref, BoolExpr, Expr, ExprArraySubscript, FuncExpr, INNER_VAR, OUTER_VAR, OpExpr,
     OrderByEntry, Param, ParamKind, QueryColumn, ScalarArrayOpExpr, SubPlan, TargetEntry, Var,
-    WindowClause, WindowFuncKind, attrno_index, is_executor_special_varno, is_system_attr,
-    user_attrno,
+    WindowClause, WindowFuncExpr, WindowFuncKind, attrno_index, is_executor_special_varno,
+    is_system_attr, user_attrno,
 };
 
 #[derive(Clone, Debug)]
@@ -390,7 +390,16 @@ fn build_window_tlist(
                 match_exprs.push(flatten_join_alias_vars(root, input_expr.clone()));
             }
         } else if let Some(func) = clause.functions.get(index - input_target.exprs.len()) {
-            match_exprs.push(Expr::WindowFunc(Box::new(func.clone())));
+            let func_expr = Expr::WindowFunc(Box::new(func.clone()));
+            match_exprs.push(func_expr.clone());
+            match_exprs.push(fully_expand_output_expr_with_root(
+                root,
+                func_expr.clone(),
+                input,
+            ));
+            if let Some(root) = root {
+                match_exprs.push(flatten_join_alias_vars(root, func_expr));
+            }
         }
         entries.push(IndexedTlistEntry {
             index,
@@ -916,6 +925,22 @@ fn expr_contains_local_semantic_var(expr: &Expr) -> bool {
                     .as_ref()
                     .is_some_and(expr_contains_local_semantic_var)
         }
+        Expr::WindowFunc(window_func) => {
+            window_func
+                .args
+                .iter()
+                .any(expr_contains_local_semantic_var)
+                || match &window_func.kind {
+                    WindowFuncKind::Aggregate(aggref) => {
+                        aggref.args.iter().any(expr_contains_local_semantic_var)
+                            || aggref
+                                .aggfilter
+                                .as_ref()
+                                .is_some_and(expr_contains_local_semantic_var)
+                    }
+                    WindowFuncKind::Builtin(_) => false,
+                }
+        }
         Expr::Op(op) => op.args.iter().any(expr_contains_local_semantic_var),
         Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_contains_local_semantic_var),
         Expr::Case(case_expr) => {
@@ -1040,6 +1065,36 @@ fn rewrite_expr_for_append_rel(
                 .aggfilter
                 .map(|expr| rewrite_expr_for_append_rel(expr, info)),
             ..*aggref
+        })),
+        Expr::WindowFunc(window_func) => Expr::WindowFunc(Box::new(WindowFuncExpr {
+            kind: match window_func.kind {
+                WindowFuncKind::Aggregate(aggref) => WindowFuncKind::Aggregate(Aggref {
+                    args: aggref
+                        .args
+                        .into_iter()
+                        .map(|arg| rewrite_expr_for_append_rel(arg, info))
+                        .collect(),
+                    aggorder: aggref
+                        .aggorder
+                        .into_iter()
+                        .map(|item| OrderByEntry {
+                            expr: rewrite_expr_for_append_rel(item.expr, info),
+                            ..item
+                        })
+                        .collect(),
+                    aggfilter: aggref
+                        .aggfilter
+                        .map(|expr| rewrite_expr_for_append_rel(expr, info)),
+                    ..aggref
+                }),
+                WindowFuncKind::Builtin(kind) => WindowFuncKind::Builtin(kind),
+            },
+            args: window_func
+                .args
+                .into_iter()
+                .map(|arg| rewrite_expr_for_append_rel(arg, info))
+                .collect(),
+            ..*window_func
         })),
         Expr::Op(op) => Expr::Op(Box::new(OpExpr {
             args: op
@@ -1292,6 +1347,36 @@ fn inline_exec_params(expr: Expr, params: &[ExecParamSource], consumed: &mut Vec
                 .collect(),
             ..*func
         })),
+        Expr::WindowFunc(window_func) => Expr::WindowFunc(Box::new(WindowFuncExpr {
+            kind: match window_func.kind {
+                WindowFuncKind::Aggregate(aggref) => WindowFuncKind::Aggregate(Aggref {
+                    args: aggref
+                        .args
+                        .into_iter()
+                        .map(|arg| inline_exec_params(arg, params, consumed))
+                        .collect(),
+                    aggorder: aggref
+                        .aggorder
+                        .into_iter()
+                        .map(|item| OrderByEntry {
+                            expr: inline_exec_params(item.expr, params, consumed),
+                            ..item
+                        })
+                        .collect(),
+                    aggfilter: aggref
+                        .aggfilter
+                        .map(|expr| inline_exec_params(expr, params, consumed)),
+                    ..aggref
+                }),
+                WindowFuncKind::Builtin(kind) => WindowFuncKind::Builtin(kind),
+            },
+            args: window_func
+                .args
+                .into_iter()
+                .map(|arg| inline_exec_params(arg, params, consumed))
+                .collect(),
+            ..*window_func
+        })),
         Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(ScalarArrayOpExpr {
             left: Box::new(inline_exec_params(*saop.left, params, consumed)),
             right: Box::new(inline_exec_params(*saop.right, params, consumed)),
@@ -1349,6 +1434,34 @@ fn decrement_outer_var_levels(expr: Expr) -> Expr {
                 .map(decrement_outer_var_levels)
                 .collect(),
             ..*func
+        })),
+        Expr::WindowFunc(window_func) => Expr::WindowFunc(Box::new(WindowFuncExpr {
+            kind: match window_func.kind {
+                WindowFuncKind::Aggregate(aggref) => WindowFuncKind::Aggregate(Aggref {
+                    args: aggref
+                        .args
+                        .into_iter()
+                        .map(decrement_outer_var_levels)
+                        .collect(),
+                    aggorder: aggref
+                        .aggorder
+                        .into_iter()
+                        .map(|item| OrderByEntry {
+                            expr: decrement_outer_var_levels(item.expr),
+                            ..item
+                        })
+                        .collect(),
+                    aggfilter: aggref.aggfilter.map(decrement_outer_var_levels),
+                    ..aggref
+                }),
+                WindowFuncKind::Builtin(kind) => WindowFuncKind::Builtin(kind),
+            },
+            args: window_func
+                .args
+                .into_iter()
+                .map(decrement_outer_var_levels)
+                .collect(),
+            ..*window_func
         })),
         Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(ScalarArrayOpExpr {
             left: Box::new(decrement_outer_var_levels(*saop.left)),
@@ -2013,9 +2126,6 @@ fn validate_executable_expr(expr: &Expr, plan_node: &str, field: &str) {
         | Expr::CaseTest(_)
         | Expr::Random
         | Expr::CurrentDate
-        | Expr::CurrentUser
-        | Expr::SessionUser
-        | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
         | Expr::LocalTime { .. }
@@ -2329,9 +2439,6 @@ fn validate_planner_expr(expr: &Expr, path_node: &str, field: &str) {
         | Expr::CaseTest(_)
         | Expr::Random
         | Expr::CurrentDate
-        | Expr::CurrentUser
-        | Expr::SessionUser
-        | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
         | Expr::LocalTime { .. }
@@ -3529,6 +3636,24 @@ fn exprs_equivalent(root: Option<&PlannerInfo>, left: &Expr, right: &Expr) -> bo
     if left == right {
         return true;
     }
+    if let (Expr::WindowFunc(left_window), Expr::WindowFunc(right_window)) = (left, right) {
+        let same_kind = match (&left_window.kind, &right_window.kind) {
+            (WindowFuncKind::Builtin(left_kind), WindowFuncKind::Builtin(right_kind)) => {
+                left_kind == right_kind
+            }
+            (WindowFuncKind::Aggregate(left_agg), WindowFuncKind::Aggregate(right_agg)) => {
+                left_agg.aggno == right_agg.aggno && left_agg.aggfnoid == right_agg.aggfnoid
+            }
+            _ => false,
+        };
+        if same_kind
+            && left_window.winref == right_window.winref
+            && left_window.winno == right_window.winno
+            && left_window.result_type == right_window.result_type
+        {
+            return true;
+        }
+    }
     let Some(root) = root else {
         return false;
     };
@@ -3554,6 +3679,26 @@ fn rebuild_setrefs_expr(
                 .collect(),
             aggfilter: aggref.aggfilter.map(recurse),
             ..*aggref
+        })),
+        Expr::WindowFunc(window_func) => Expr::WindowFunc(Box::new(WindowFuncExpr {
+            kind: match window_func.kind {
+                WindowFuncKind::Aggregate(aggref) => WindowFuncKind::Aggregate(Aggref {
+                    args: aggref.args.into_iter().map(recurse).collect(),
+                    aggorder: aggref
+                        .aggorder
+                        .into_iter()
+                        .map(|item| OrderByEntry {
+                            expr: recurse(item.expr),
+                            ..item
+                        })
+                        .collect(),
+                    aggfilter: aggref.aggfilter.map(recurse),
+                    ..aggref
+                }),
+                WindowFuncKind::Builtin(kind) => WindowFuncKind::Builtin(kind),
+            },
+            args: window_func.args.into_iter().map(recurse).collect(),
+            ..*window_func
         })),
         Expr::Op(op) => Expr::Op(Box::new(OpExpr {
             args: op.args.into_iter().map(recurse).collect(),
@@ -3692,6 +3837,36 @@ fn fully_expand_output_expr(expr: Expr, path: &Path) -> Expr {
                 .aggfilter
                 .map(|expr| fully_expand_output_expr(expr, path)),
             ..*aggref
+        })),
+        Expr::WindowFunc(window_func) => Expr::WindowFunc(Box::new(WindowFuncExpr {
+            kind: match window_func.kind {
+                WindowFuncKind::Aggregate(aggref) => WindowFuncKind::Aggregate(Aggref {
+                    args: aggref
+                        .args
+                        .into_iter()
+                        .map(|arg| fully_expand_output_expr(arg, path))
+                        .collect(),
+                    aggorder: aggref
+                        .aggorder
+                        .into_iter()
+                        .map(|item| OrderByEntry {
+                            expr: fully_expand_output_expr(item.expr, path),
+                            ..item
+                        })
+                        .collect(),
+                    aggfilter: aggref
+                        .aggfilter
+                        .map(|expr| fully_expand_output_expr(expr, path)),
+                    ..aggref
+                }),
+                WindowFuncKind::Builtin(kind) => WindowFuncKind::Builtin(kind),
+            },
+            args: window_func
+                .args
+                .into_iter()
+                .map(|arg| fully_expand_output_expr(arg, path))
+                .collect(),
+            ..*window_func
         })),
         Expr::Op(op) => Expr::Op(Box::new(OpExpr {
             args: op
