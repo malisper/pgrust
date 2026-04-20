@@ -233,6 +233,7 @@ pub enum BuiltinScalarFunction {
     RandomNormal,
     GetDatabaseEncoding,
     PgRustInternalBinaryCoercible,
+    PgRustTestFdwHandler,
     PgRustTestEncSetup,
     PgRustTestEncConversion,
     PgTypeof,

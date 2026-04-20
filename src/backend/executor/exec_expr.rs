@@ -57,13 +57,14 @@ use super::expr_string::{
     eval_decode_function, eval_encode_function, eval_format_function, eval_get_bit_bytes,
     eval_get_byte, eval_initcap_function, eval_left_function, eval_length_function, eval_like,
     eval_lower_function, eval_lpad_function, eval_md5_function, eval_pg_rust_test_enc_conversion,
-    eval_pg_rust_test_enc_setup, eval_position_function, eval_quote_literal_function,
-    eval_repeat_function, eval_replace_function, eval_reverse_function, eval_right_function,
-    eval_rpad_function, eval_set_bit_bytes, eval_set_byte, eval_sha224_function,
-    eval_sha256_function, eval_sha384_function, eval_sha512_function, eval_split_part_function,
-    eval_strpos_function, eval_text_overlay, eval_text_substring, eval_to_bin_function,
-    eval_to_char_function, eval_to_hex_function, eval_to_number_function, eval_to_oct_function,
-    eval_translate_function, eval_trim_function, eval_unistr_function,
+    eval_pg_rust_test_enc_setup, eval_pg_rust_test_fdw_handler, eval_position_function,
+    eval_quote_literal_function, eval_repeat_function, eval_replace_function,
+    eval_reverse_function, eval_right_function, eval_rpad_function, eval_set_bit_bytes,
+    eval_set_byte, eval_sha224_function, eval_sha256_function, eval_sha384_function,
+    eval_sha512_function, eval_split_part_function, eval_strpos_function, eval_text_overlay,
+    eval_text_substring, eval_to_bin_function, eval_to_char_function, eval_to_hex_function,
+    eval_to_number_function, eval_to_oct_function, eval_translate_function,
+    eval_trim_function, eval_unistr_function,
 };
 use super::node_types::*;
 use super::pg_regex::{
@@ -1993,6 +1994,7 @@ fn eval_builtin_function(
         BuiltinScalarFunction::PgRustInternalBinaryCoercible => {
             eval_pg_rust_internal_binary_coercible(&values)
         }
+        BuiltinScalarFunction::PgRustTestFdwHandler => eval_pg_rust_test_fdw_handler(&values),
         BuiltinScalarFunction::PgRustTestEncSetup => eval_pg_rust_test_enc_setup(&values),
         BuiltinScalarFunction::PgRustTestEncConversion => eval_pg_rust_test_enc_conversion(&values),
         BuiltinScalarFunction::PgStatGetCheckpointerNumTimed

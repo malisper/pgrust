@@ -1798,6 +1798,20 @@ pub(super) fn eval_pg_rust_test_enc_setup(values: &[Value]) -> Result<Value, Exe
     Ok(Value::Null)
 }
 
+pub(super) fn eval_pg_rust_test_fdw_handler(values: &[Value]) -> Result<Value, ExecError> {
+    if values.iter().any(|value| matches!(value, Value::Null)) {
+        return Ok(Value::Null);
+    }
+    if !values.is_empty() {
+        return Err(ExecError::TypeMismatch {
+            op: "pg_rust_test_fdw_handler",
+            left: values.first().cloned().unwrap_or(Value::Null),
+            right: Value::Null,
+        });
+    }
+    Ok(Value::Null)
+}
+
 pub(super) fn eval_pg_rust_test_enc_conversion(values: &[Value]) -> Result<Value, ExecError> {
     let [string, src_encoding, dst_encoding, no_error] = values else {
         return Err(ExecError::TypeMismatch {

@@ -127,6 +127,7 @@ pub(super) fn sql_type_name(ty: SqlType) -> String {
             SqlTypeKind::Composite => "record",
             SqlTypeKind::Trigger => "trigger",
             SqlTypeKind::Void => "void",
+            SqlTypeKind::FdwHandler => "fdw_handler",
             SqlTypeKind::Int2 => "smallint",
             SqlTypeKind::Int2Vector => "int2vector",
             SqlTypeKind::Int4 => "integer",
@@ -264,6 +265,7 @@ pub(super) fn coerce_unknown_string_literal_type(
             SqlTypeKind::TsQuery => return SqlType::new(SqlTypeKind::TsQuery),
             SqlTypeKind::TsVector => return SqlType::new(SqlTypeKind::TsVector),
             SqlTypeKind::Void => return SqlType::new(SqlTypeKind::Void),
+            SqlTypeKind::FdwHandler => return SqlType::new(SqlTypeKind::FdwHandler),
             SqlTypeKind::RegProcedure => return SqlType::new(SqlTypeKind::RegProcedure),
             SqlTypeKind::RegConfig => return SqlType::new(SqlTypeKind::RegConfig),
             SqlTypeKind::RegDictionary => return SqlType::new(SqlTypeKind::RegDictionary),
@@ -278,6 +280,9 @@ pub(super) fn coerce_unknown_string_literal_type(
                     return SqlType::array_of(SqlType::new(SqlTypeKind::TsVector));
                 }
                 SqlTypeKind::Void => return SqlType::array_of(SqlType::new(SqlTypeKind::Void)),
+                SqlTypeKind::FdwHandler => {
+                    return SqlType::array_of(SqlType::new(SqlTypeKind::FdwHandler));
+                }
                 SqlTypeKind::RegProcedure => {
                     return SqlType::array_of(SqlType::new(SqlTypeKind::RegProcedure));
                 }
