@@ -6418,6 +6418,7 @@ fn build_alter_table_alter_constraint(
     let mut constraint_name = None;
     let mut deferrable = None;
     let mut initially_deferred = None;
+    let mut enforced = None;
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::alter_table_target => {
@@ -6442,6 +6443,8 @@ fn build_alter_table_alter_constraint(
                         Rule::initially_immediate_constraint_attribute => {
                             initially_deferred = Some(false)
                         }
+                        Rule::enforced_constraint_attribute => enforced = Some(true),
+                        Rule::not_enforced_constraint_attribute => enforced = Some(false),
                         _ => {}
                     }
                 }
@@ -6456,6 +6459,7 @@ fn build_alter_table_alter_constraint(
         constraint_name: constraint_name.ok_or(ParseError::UnexpectedEof)?,
         deferrable,
         initially_deferred,
+        enforced,
     })
 }
 
