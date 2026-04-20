@@ -329,4 +329,24 @@ mod tests {
         let err = session.execute(&db, "set role child").unwrap_err();
         assert!(format!("{err:?}").contains("permission denied to set role"));
     }
+
+    #[test]
+    fn sql_set_session_authorization_obeys_set_option_for_set_role() {
+        let base = temp_dir("set_role_sql_session_auth");
+        let db = Database::open(&base, 16).unwrap();
+        let mut superuser = Session::new(1);
+        superuser.execute(&db, "create role member").unwrap();
+        superuser.execute(&db, "create role child").unwrap();
+        superuser
+            .execute(&db, "grant child to member with set false")
+            .unwrap();
+
+        let mut session = Session::new(2);
+        session
+            .execute(&db, "set session authorization member")
+            .unwrap();
+
+        let err = session.execute(&db, "set role child").unwrap_err();
+        assert!(format!("{err:?}").contains("permission denied to set role"));
+    }
 }

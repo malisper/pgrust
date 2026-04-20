@@ -24,7 +24,7 @@ Targeted reruns and notes:
 - alter_table.sql: 476/1683
   - [done] expression indexes and `ALTER INDEX` operations used by `alter_table.sql`
   - partitioned tables, including `PARTITION OF`, `ATTACH PARTITION`, and `DETACH PARTITION`
-  - `SET ROLE` / `RESET ROLE`
+  - [done] `SET ROLE` / `RESET ROLE`
   - `ALTER VIEW` forms exercised by `alter_table.sql`
   - `ALTER TABLE` `NO INHERIT` / `INHERIT`
   - multi-action `ALTER TABLE` statements
@@ -382,7 +382,7 @@ Targeted reruns and notes:
   - [done] accept PostgreSQL-style mixed set-operation chains such as `SELECT 1 UNION SELECT 2 UNION ALL SELECT 2` instead of rejecting them in the parser
   - [done] support `SELECT DISTINCT` in set-operation inputs such as `EXCEPT ALL SELECT DISTINCT ...`
   - [done] match PostgreSQL's `FOR NO KEY UPDATE` set-operation error text instead of routing it through the generic unsupported-feature wrapper
-  - investigate why bootstrap fixture tables from `scripts/test_setup_pgrust.sql` like `float8_tbl`, `int8_tbl`, and `tenk1` are not consistently resolvable during regression runs
+  - [done] investigate why bootstrap fixture tables from `scripts/test_setup_pgrust.sql` like `float8_tbl`, `int8_tbl`, and `tenk1` are not consistently resolvable during regression runs; current false failures were stale `RESULTS_DIR` output reuse when bootstrap aborted before rewriting `output/test_setup_pgrust.out`
 - updatable_views.sql: 130/1139
   - [done] add PostgreSQL-style automatic `INSERT` / `UPDATE` / `DELETE` support for simple nested pass-through views, including filtered views, renamed columns, base defaults for hidden columns, and same-transaction `CREATE VIEW` visibility
 - update.sql: 72/300
@@ -410,7 +410,7 @@ Targeted reruns and notes:
 - record-expansion semantics for `jsonb_to_record` / `jsonb_populate_record`
 
 - partitioned tables, including `PARTITION OF`, `ATTACH PARTITION`, and `DETACH PARTITION`
-- `SET ROLE` / `RESET ROLE`
+- [done] `SET ROLE` / `RESET ROLE`
 - `ALTER VIEW` forms exercised by `alter_table.sql`
 - `ALTER TABLE` `NO INHERIT` / `INHERIT`
 - multi-action `ALTER TABLE` statements
@@ -508,13 +508,13 @@ Targeted reruns and notes:
 - [x] Preserve numeric display scale in `generate_series(numeric, ...)` so rows like `0.0, 1.0, 2.0, 3.0, 4.0` do not degrade into integer-looking outputs after the first increment
 - [x] Fix `width_bucket(float8, low, high, count)` boundary behavior for huge ranges; current float math can round into bucket `count + 1` or the wrong descending bucket near the upper edge
 - [x] Mixed set-operation chains: accept PostgreSQL-style left-associative chains such as `SELECT 1 UNION SELECT 2 UNION ALL SELECT 2` instead of rejecting them in the parser.
-- Shared regression fixture visibility: investigate why bootstrap tables from `scripts/test_setup_pgrust.sql` like `float8_tbl`, `int8_tbl`, and `tenk1` are not consistently resolvable during regression runs.
+- [done] Shared regression fixture visibility: investigate why bootstrap tables from `scripts/test_setup_pgrust.sql` like `float8_tbl`, `int8_tbl`, and `tenk1` are not consistently resolvable during regression runs; root cause was stale regression output reuse after bootstrap/startup failures, not missing bootstrap schemas.
 - privileges.sql parity:
   - [done] expose privilege-related system catalogs in SQL, including `pg_auth_members` and `pg_largeobject_metadata`
   - [done] implement `lo_create` / `lo_unlink` and surface `pg_largeobject_metadata` rows from runtime state
   - [done] add parser/analyzer support for role membership `GRANTED BY`
   - add parser/analyzer/executor support for `CASCADE` in role membership revokes
-  - implement `SET ROLE` and `RESET ROLE`
+  - [done] implement `SET ROLE` and `RESET ROLE`
   - [done] implement SQL-visible `session_user`, `current_user`, and `current_role` semantics used by the regression
   - add parser/executor support for `DROP OWNED`
   - add parser support for `DROP USER`, `CREATE GROUP`, and `ALTER GROUP`
