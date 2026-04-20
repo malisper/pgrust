@@ -79,9 +79,12 @@ ensure_clean_worktree() {
 }
 
 ensure_docker_auth() {
-    local username
-    username="$(docker info --format '{{.Username}}' 2>/dev/null || true)"
-    if [[ -z "$username" || "$username" == "<no value>" ]]; then
+    if ! docker info >/dev/null 2>&1; then
+        echo "docker daemon is not reachable; start Docker Desktop or fix the active docker context" >&2
+        exit 1
+    fi
+
+    if [[ ! -f "${HOME}/.docker/config.json" ]]; then
         echo "docker does not appear to be logged in to Docker Hub; run: docker login" >&2
         exit 1
     fi
