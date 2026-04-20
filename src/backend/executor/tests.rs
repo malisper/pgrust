@@ -4776,6 +4776,25 @@ fn float_math_domain_errors_are_explicit() {
 }
 
 #[test]
+fn box_text_input_accepts_adjacent_point_pairs() {
+    let base = temp_dir("box_text_adjacent_point_pairs");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select '(0,0)(0,100)'::box::text, '(Infinity,0)(0,-Infinity)'::box::text",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Text("(0,100),(0,0)".into()),
+            Value::Text("(Infinity,0),(0,-Infinity)".into()),
+        ]],
+    );
+}
+
+#[test]
 fn degree_trig_builtins_snap_landmarks() {
     let base = temp_dir("degree_trig_builtins");
     let txns = TransactionManager::new_durable(&base).unwrap();
