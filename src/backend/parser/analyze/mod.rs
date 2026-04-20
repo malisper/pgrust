@@ -1678,9 +1678,7 @@ impl<'a> RecursiveReferenceChecker<'a> {
             FromItem::Lateral(source) | FromItem::Alias { source, .. } => {
                 self.visit_from(source, context)
             }
-            FromItem::DerivedTable(select) => {
-                self.visit_select(select, RecursiveReferenceContext::Subquery)
-            }
+            FromItem::DerivedTable(select) => self.visit_select(select, context),
             FromItem::Join {
                 left,
                 right,
