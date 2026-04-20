@@ -264,7 +264,7 @@ fn parse_box_text(text: &str) -> Result<GeoBox, ExecError> {
             parser.idx = 0;
         }
         let first = parser.parse_point_pair()?;
-        parser.expect(',')?;
+        parser.consume(',');
         let second = parser.parse_point_pair()?;
         if outer {
             parser.expect(')')?;
