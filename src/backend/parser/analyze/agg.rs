@@ -494,6 +494,7 @@ pub(super) fn aggregate_sql_type(func: AggFunc, arg_type: Option<SqlType>) -> Sq
     use SqlTypeKind::*;
 
     match func {
+        AggFunc::BoolAnd => SqlType::new(Bool),
         AggFunc::Sum => match arg_type.map(|t| t.element_type().kind) {
             Some(Int2 | Int4) => SqlType::new(Int8),
             Some(Money) => SqlType::new(Money),
@@ -527,6 +528,7 @@ pub(super) fn aggregate_sql_type(func: AggFunc, arg_type: Option<SqlType>) -> Sq
         AggFunc::StringAgg => arg_type.unwrap_or(SqlType::new(Text)),
         AggFunc::Min | AggFunc::Max => arg_type.unwrap_or(SqlType::new(Text)),
         AggFunc::Count
+        | AggFunc::BoolAnd
         | AggFunc::JsonAgg
         | AggFunc::JsonbAgg
         | AggFunc::JsonObjectAgg

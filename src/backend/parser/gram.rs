@@ -7845,6 +7845,7 @@ fn build_agg_call(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                 let inner = part.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
                 func = Some(match inner.as_rule() {
                     Rule::kw_count => AggFunc::Count,
+                    Rule::kw_bool_and => AggFunc::BoolAnd,
                     Rule::kw_sum => AggFunc::Sum,
                     Rule::kw_avg => AggFunc::Avg,
                     Rule::kw_variance => AggFunc::Variance,

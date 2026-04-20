@@ -910,7 +910,8 @@ pub(super) fn validate_aggregate_arity(func: AggFunc, args: &[SqlExpr]) -> Resul
         .map(|count| args.len() == count)
         .unwrap_or_else(|| match func {
             AggFunc::Count => args.len() <= 1,
-            AggFunc::Sum
+            AggFunc::BoolAnd
+            | AggFunc::Sum
             | AggFunc::Avg
             | AggFunc::Variance
             | AggFunc::Stddev
@@ -2058,6 +2059,7 @@ fn supports_fixed_aggregate_return_type(func: AggFunc) -> bool {
     matches!(
         func,
         AggFunc::Count
+            | AggFunc::BoolAnd
             | AggFunc::JsonAgg
             | AggFunc::JsonbAgg
             | AggFunc::JsonObjectAgg
@@ -2084,6 +2086,7 @@ fn catalog_text_input_cast_exists(catalog: &dyn CatalogLookup, target_oid: u32) 
 fn aggregate_func_for_proname(name: &str) -> Option<AggFunc> {
     match name.to_ascii_lowercase().as_str() {
         "count" => Some(AggFunc::Count),
+        "bool_and" => Some(AggFunc::BoolAnd),
         "sum" => Some(AggFunc::Sum),
         "avg" => Some(AggFunc::Avg),
         "variance" => Some(AggFunc::Variance),

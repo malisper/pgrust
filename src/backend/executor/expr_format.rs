@@ -50,6 +50,72 @@ pub(crate) fn to_char_numeric(value: &NumericValue, format: &str) -> Result<Stri
     Ok(format_standard_numeric(&value, &spec))
 }
 
+pub(crate) fn to_char_float(value: f64, format: &str) -> Result<String, ExecError> {
+    let mut parser = FormatParser::new(format);
+    let spec = parser.parse()?;
+    if spec.roman {
+        let rounded = value.round();
+        let intvalue = if !rounded.is_nan()
+            && rounded >= i32::MIN as f64
+            && rounded <= i32::MAX as f64
+        {
+            rounded as i32
+        } else {
+            i32::MAX
+        };
+        return Ok(format_roman(intvalue as i128, spec.fill_mode, spec.roman_lower));
+    }
+    if spec.scientific {
+        let numeric = parse_numeric_text(&value.to_string())
+            .ok_or_else(|| ExecError::InvalidNumericInput(value.to_string()))?;
+        return format_scientific_numeric(&numeric, &spec);
+    }
+
+    let adjusted_value = if spec.scale_digits == 0 {
+        value
+    } else {
+        value * 10f64.powi(spec.scale_digits as i32)
+    };
+    let decimal_idx = spec
+        .tokens
+        .iter()
+        .position(|token| matches!(token, Token::Decimal));
+    let int_end = decimal_idx.unwrap_or(spec.tokens.len());
+    let int_slots = spec
+        .tokens
+        .iter()
+        .take(int_end)
+        .filter(|token| matches!(token, Token::Digit9 | Token::Digit0))
+        .count();
+    let post_slots = spec
+        .tokens
+        .iter()
+        .skip(int_end + usize::from(decimal_idx.is_some()))
+        .filter(|token| matches!(token, Token::Digit9 | Token::Digit0))
+        .count();
+
+    let abs_text = format!("{:.0}", adjusted_value.abs());
+    let pre_len = abs_text.len();
+    let max_digits = f64::DIGITS as usize;
+    let effective_post = if pre_len >= max_digits {
+        0
+    } else {
+        post_slots.min(max_digits.saturating_sub(pre_len))
+    };
+
+    let mut adjusted_spec = truncate_fractional_digit_tokens(&spec, effective_post);
+    adjusted_spec.scale_digits = 0;
+
+    if pre_len > int_slots {
+        return Ok(overflow_pattern(&adjusted_spec, adjusted_value.is_sign_negative()));
+    }
+
+    let rounded_text = format!("{adjusted_value:.effective_post$}");
+    let numeric = parse_numeric_text(&rounded_text)
+        .ok_or_else(|| ExecError::InvalidNumericInput(rounded_text.clone()))?;
+    Ok(format_standard_numeric(&numeric, &adjusted_spec))
+}
+
 pub(crate) fn to_number_numeric(input: &str, format: &str) -> Result<NumericValue, ExecError> {
     let mut parser = FormatParser::new(format);
     let spec = parser.parse()?;
@@ -174,7 +240,7 @@ pub(crate) fn to_number_numeric(input: &str, format: &str) -> Result<NumericValu
     parse_numeric_text(&rendered).ok_or_else(|| ExecError::InvalidNumericInput(input.to_string()))
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct FormatSpec {
     fill_mode: bool,
     ordinal_lower: bool,
@@ -730,6 +796,27 @@ fn overflow_pattern(spec: &FormatSpec, negative: bool) -> String {
         rendered = rendered.trim().to_string();
     }
     rendered
+}
+
+fn truncate_fractional_digit_tokens(spec: &FormatSpec, keep: usize) -> FormatSpec {
+    let decimal_idx = spec
+        .tokens
+        .iter()
+        .position(|token| matches!(token, Token::Decimal));
+    let mut clone = spec.clone();
+    let Some(dot_idx) = decimal_idx else {
+        return clone;
+    };
+    let mut kept = 0usize;
+    for idx in dot_idx + 1..clone.tokens.len() {
+        if matches!(clone.tokens[idx], Token::Digit9 | Token::Digit0) {
+            kept += 1;
+            if kept > keep {
+                clone.tokens[idx] = Token::Literal(String::new());
+            }
+        }
+    }
+    clone
 }
 
 fn special_value_fixed_text(value: &NumericValue) -> Option<(bool, &'static str)> {
@@ -1392,7 +1479,7 @@ fn ordinal_suffix(value: i128) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{to_char_int, to_char_numeric, to_number_numeric};
+    use super::{to_char_float, to_char_int, to_char_numeric, to_number_numeric};
     use crate::backend::executor::ExecError;
     use crate::include::nodes::datum::NumericValue;
 
@@ -1480,6 +1567,15 @@ mod tests {
             to_char_numeric(&NumericValue::from("1.2345e2345"), "9.999EEEE").unwrap(),
             " 1.235e+2345"
         );
+    }
+
+    #[test]
+    fn formats_float_overflow_masks_like_postgres() {
+        assert_eq!(
+            to_char_float(12345678901.0, "FM9999999999D9999900000000000000000").unwrap(),
+            "##########.####"
+        );
+        assert_eq!(to_char_float(1236.0, "rn").unwrap(), "       mccxxxvi");
     }
 
     #[test]
