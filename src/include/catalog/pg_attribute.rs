@@ -267,8 +267,6 @@ fn sql_type_oid(sql_type: SqlType) -> u32 {
         (SqlTypeKind::Text, true) => TEXT_ARRAY_TYPE_OID,
         (SqlTypeKind::Oid, false) => OID_TYPE_OID,
         (SqlTypeKind::Oid, true) => OID_ARRAY_TYPE_OID,
-        (SqlTypeKind::RegRole, false) => crate::include::catalog::REGROLE_TYPE_OID,
-        (SqlTypeKind::RegRole, true) => unreachable!("regrole arrays are unsupported"),
         (SqlTypeKind::RegProcedure, false) => crate::include::catalog::REGPROCEDURE_TYPE_OID,
         (SqlTypeKind::RegProcedure, true) => crate::include::catalog::REGPROCEDURE_ARRAY_TYPE_OID,
         (SqlTypeKind::Tid, false) => TID_TYPE_OID,

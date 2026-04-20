@@ -551,54 +551,9 @@ pub(super) fn eval_cardinality_function(values: &[Value]) -> Result<Value, ExecE
     }
 }
 
-pub(super) fn eval_array_append_function(values: &[Value]) -> Result<Value, ExecError> {
-    match values {
-        [Value::Null, _] => Ok(Value::Null),
-        [array, value] => array_append_like(array, value, false),
-        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "array_append(array, value)",
-            actual: format!("ArrayAppend({} args)", values.len()),
-        })),
-    }
-}
-
-pub(super) fn eval_array_prepend_function(values: &[Value]) -> Result<Value, ExecError> {
-    match values {
-        [_, Value::Null] => Ok(Value::Null),
-        [Value::Null, array] => array_append_like(array, &Value::Null, true),
-        [value, array] => array_append_like(array, value, true),
-        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "array_prepend(value, array)",
-            actual: format!("ArrayPrepend({} args)", values.len()),
-        })),
-    }
-}
-
-pub(super) fn eval_array_cat_function(values: &[Value]) -> Result<Value, ExecError> {
-    match values {
-        [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
-        [left, right] => array_cat_value(left, right),
-        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "array_cat(left, right)",
-            actual: format!("ArrayCat({} args)", values.len()),
-        })),
-    }
-}
-
-pub(super) fn eval_trim_array_function(values: &[Value]) -> Result<Value, ExecError> {
-    match values {
-        [Value::Null, _] => Ok(Value::Null),
-        [array, trim] => trim_array_value(array, trim),
-        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "trim_array(array, count)",
-            actual: format!("TrimArray({} args)", values.len()),
-        })),
-    }
-}
-
 pub(super) fn eval_array_position_function(values: &[Value]) -> Result<Value, ExecError> {
     match values {
-        [Value::Null, _] | [Value::Null, _, _] | [_, _, Value::Null] => Ok(Value::Null),
+        [Value::Null, _] | [Value::Null, _, _] => Ok(Value::Null),
         [array, needle] => array_position_value(array, needle, None, false),
         [array, needle, start] => {
             let start = array_subscript_index(Some(start))?;
@@ -632,7 +587,15 @@ fn array_position_value(
         return Ok(Value::Null);
     };
     if array.ndim() > 1 {
-        return Err(multidimensional_array_search_error());
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "one-dimensional array",
+            actual: if all {
+                "array_positions"
+            } else {
+                "array_position"
+            }
+            .into(),
+        }));
     }
     let lower_bound = array.lower_bound(0).unwrap_or(1);
     let start = start.unwrap_or(lower_bound);
@@ -669,195 +632,6 @@ fn array_position_value(
         )))
     } else {
         Ok(Value::Null)
-    }
-}
-
-fn array_append_like(array: &Value, value: &Value, prepend: bool) -> Result<Value, ExecError> {
-    let Some(array) = normalize_array_value(array) else {
-        return Ok(Value::Null);
-    };
-    if array.ndim() > 1 {
-        return Err(ExecError::DetailedError {
-            message: "argument must be empty or one-dimensional array".into(),
-            detail: None,
-            hint: None,
-            sqlstate: "22023",
-        });
-    }
-    let lower_bound = array.lower_bound(0).unwrap_or(1);
-    let mut items = array.elements.clone();
-    if prepend {
-        items.insert(0, value.to_owned_value());
-    } else {
-        items.push(value.to_owned_value());
-    }
-    let mut result = if items.is_empty() {
-        ArrayValue::empty()
-    } else {
-        ArrayValue::from_dimensions(
-            vec![ArrayDimension {
-                lower_bound,
-                length: items.len(),
-            }],
-            items,
-        )
-    };
-    if let Some(element_type_oid) = array.element_type_oid {
-        result = result.with_element_type_oid(element_type_oid);
-    }
-    Ok(Value::PgArray(result))
-}
-
-fn array_cat_value(left: &Value, right: &Value) -> Result<Value, ExecError> {
-    let Some(left_array) = normalize_array_value(left) else {
-        return Ok(Value::Null);
-    };
-    let Some(right_array) = normalize_array_value(right) else {
-        return Ok(Value::Null);
-    };
-    if left_array.is_empty() {
-        return Ok(Value::PgArray(right_array));
-    }
-    if right_array.is_empty() {
-        return Ok(Value::PgArray(left_array));
-    }
-
-    let (elements, lower_bounds, element_type_oid) = if left_array.ndim() == right_array.ndim() {
-        let mut elements = left_array.to_nested_values();
-        elements.extend(right_array.to_nested_values());
-        let lower_bounds = left_array
-            .dimensions
-            .iter()
-            .map(|dim| dim.lower_bound)
-            .collect::<Vec<_>>();
-        (
-            elements,
-            lower_bounds,
-            left_array.element_type_oid.or(right_array.element_type_oid),
-        )
-    } else if left_array.ndim() + 1 == right_array.ndim() {
-        let mut elements = vec![Value::PgArray(left_array.clone())];
-        elements.extend(right_array.to_nested_values());
-        let lower_bounds = right_array
-            .dimensions
-            .iter()
-            .map(|dim| dim.lower_bound)
-            .collect::<Vec<_>>();
-        (
-            elements,
-            lower_bounds,
-            left_array.element_type_oid.or(right_array.element_type_oid),
-        )
-    } else if left_array.ndim() == right_array.ndim() + 1 {
-        let mut elements = left_array.to_nested_values();
-        elements.push(Value::PgArray(right_array.clone()));
-        let lower_bounds = left_array
-            .dimensions
-            .iter()
-            .map(|dim| dim.lower_bound)
-            .collect::<Vec<_>>();
-        (
-            elements,
-            lower_bounds,
-            left_array.element_type_oid.or(right_array.element_type_oid),
-        )
-    } else {
-        return Err(incompatible_array_cat_error());
-    };
-
-    let mut result = ArrayValue::from_nested_values(elements, lower_bounds)
-        .map_err(|_| incompatible_array_cat_error())?;
-    if let Some(element_type_oid) = element_type_oid {
-        result = result.with_element_type_oid(element_type_oid);
-    }
-    Ok(Value::PgArray(result))
-}
-
-fn trim_array_value(array: &Value, trim: &Value) -> Result<Value, ExecError> {
-    let Some(array) = normalize_array_value(array) else {
-        return Ok(Value::Null);
-    };
-    let trim = array_subscript_index(Some(trim))?.unwrap_or(0);
-    let max_trim = array.axis_len(0).unwrap_or(0) as i32;
-    if trim < 0 || trim > max_trim {
-        return Err(ExecError::DetailedError {
-            message: format!("number of elements to trim must be between 0 and {max_trim}"),
-            detail: None,
-            hint: None,
-            sqlstate: "2202E",
-        });
-    }
-    if array.dimensions.is_empty() || trim == max_trim {
-        return Ok(Value::PgArray(ArrayValue::empty()));
-    }
-
-    let mut top_level = array.to_nested_values();
-    top_level.truncate(top_level.len().saturating_sub(trim as usize));
-    let mut lower_bounds = vec![1];
-    lower_bounds.extend(array.dimensions.iter().skip(1).map(|dim| dim.lower_bound));
-    let mut result =
-        ArrayValue::from_nested_values(top_level, lower_bounds).map_err(|message| {
-            ExecError::DetailedError {
-                message: message.into(),
-                detail: None,
-                hint: None,
-                sqlstate: "2202E",
-            }
-        })?;
-    if let Some(element_type_oid) = array.element_type_oid {
-        result = result.with_element_type_oid(element_type_oid);
-    }
-    Ok(Value::PgArray(result))
-}
-
-fn multidimensional_array_search_error() -> ExecError {
-    ExecError::DetailedError {
-        message: "searching for elements in multidimensional arrays is not supported".into(),
-        detail: None,
-        hint: None,
-        sqlstate: "0A000",
-    }
-}
-
-fn incompatible_array_cat_error() -> ExecError {
-    ExecError::DetailedError {
-        message: "cannot concatenate incompatible arrays".into(),
-        detail: None,
-        hint: None,
-        sqlstate: "2202E",
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::include::nodes::datum::RecordValue;
-
-    #[test]
-    fn array_position_supports_composite_elements() {
-        let array = Value::PgArray(ArrayValue::from_1d(vec![
-            Value::Record(RecordValue::anonymous(vec![
-                ("f1".into(), Value::Int32(0)),
-                ("f2".into(), Value::Int32(0)),
-            ])),
-            Value::Record(RecordValue::anonymous(vec![
-                ("f1".into(), Value::Int32(1)),
-                ("f2".into(), Value::Int32(1)),
-            ])),
-        ]));
-        let needle = Value::Record(RecordValue::anonymous(vec![
-            ("f1".into(), Value::Int32(1)),
-            ("f2".into(), Value::Int32(1)),
-        ]));
-
-        assert_eq!(
-            eval_array_position_function(&[array.clone(), needle.clone()]).unwrap(),
-            Value::Int32(2)
-        );
-        assert_eq!(
-            eval_array_positions_function(&[array, needle]).unwrap(),
-            Value::PgArray(ArrayValue::from_1d(vec![Value::Int32(2)]))
-        );
     }
 }
 

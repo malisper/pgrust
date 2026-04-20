@@ -199,7 +199,6 @@ pub fn parse_type_name(sql: &str) -> Result<RawTypeName, ParseError> {
                 SqlTypeKind::RegProcedure,
             )));
         }
-        "regrole" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegRole))),
         _ => {}
     }
     SqlParser::parse(Rule::type_name, &sql)
@@ -3011,6 +3010,11 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::alter_table_alter_column_options_stmt => Ok(Statement::AlterTableAlterColumnOptions(
             build_alter_table_alter_column_options(inner)?,
         )),
+        Rule::alter_table_alter_column_statistics_stmt => {
+            Ok(Statement::AlterTableAlterColumnStatistics(
+                build_alter_table_alter_column_statistics(inner)?,
+            ))
+        }
         Rule::alter_table_owner_stmt => Ok(Statement::AlterTableOwner(build_alter_relation_owner(
             inner,
         )?)),
@@ -6171,7 +6175,6 @@ fn sql_type_output_name(ty: SqlType) -> &'static str {
         SqlTypeKind::Int8Range => "int8range",
         SqlTypeKind::Name => "name",
         SqlTypeKind::Oid => "oid",
-        SqlTypeKind::RegRole => "regrole",
         SqlTypeKind::RegProcedure => "regprocedure",
         SqlTypeKind::Tid => "tid",
         SqlTypeKind::Xid => "xid",
@@ -6717,6 +6720,43 @@ fn build_alter_table_alter_column_options(
     })
 }
 
+fn build_alter_table_alter_column_statistics(
+    pair: Pair<'_, Rule>,
+) -> Result<AlterTableAlterColumnStatisticsStatement, ParseError> {
+    let mut if_exists = false;
+    let mut only = false;
+    let mut table_name = None;
+    let mut column_name = None;
+    let mut statistics_target = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::alter_table_target => {
+                let (parsed_if_exists, parsed_only, parsed_table_name) =
+                    build_alter_table_target(part)?;
+                if_exists = parsed_if_exists;
+                only = parsed_only;
+                table_name = Some(parsed_table_name);
+            }
+            Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
+            Rule::identifier if column_name.is_none() => column_name = Some(build_identifier(part)),
+            Rule::signed_integer => {
+                let value = parse_i32(part)?;
+                let value = i16::try_from(value)
+                    .map_err(|_| ParseError::InvalidInteger(value.to_string()))?;
+                statistics_target = Some(value);
+            }
+            _ => {}
+        }
+    }
+    Ok(AlterTableAlterColumnStatisticsStatement {
+        if_exists,
+        only,
+        table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
+        column_name: column_name.ok_or(ParseError::UnexpectedEof)?,
+        statistics_target: statistics_target.ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
 fn build_alter_table_set_not_null(
     pair: Pair<'_, Rule>,
 ) -> Result<AlterTableSetNotNullStatement, ParseError> {
@@ -7055,7 +7095,6 @@ fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
         Rule::kw_tsvector => RawTypeName::Builtin(SqlType::new(SqlTypeKind::TsVector)),
         Rule::kw_tsquery => RawTypeName::Builtin(SqlType::new(SqlTypeKind::TsQuery)),
         Rule::kw_regclass => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Oid)),
-        Rule::kw_regrole => RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegRole)),
         Rule::kw_regconfig => RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegConfig)),
         Rule::kw_regdictionary => RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegDictionary)),
         Rule::kw_bool | Rule::kw_boolean => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bool)),
@@ -7958,27 +7997,10 @@ fn build_agg_call(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                 let inner = part.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
                 func = Some(match inner.as_rule() {
                     Rule::kw_count => AggFunc::Count,
-                    Rule::kw_any_value => AggFunc::AnyValue,
                     Rule::kw_sum => AggFunc::Sum,
                     Rule::kw_avg => AggFunc::Avg,
-                    Rule::kw_var_pop => AggFunc::VarPop,
-                    Rule::kw_var_samp => AggFunc::VarSamp,
                     Rule::kw_variance => AggFunc::Variance,
-                    Rule::kw_stddev_pop => AggFunc::StddevPop,
-                    Rule::kw_stddev_samp => AggFunc::StddevSamp,
                     Rule::kw_stddev => AggFunc::Stddev,
-                    Rule::kw_regr_count => AggFunc::RegrCount,
-                    Rule::kw_regr_sxx => AggFunc::RegrSxx,
-                    Rule::kw_regr_syy => AggFunc::RegrSyy,
-                    Rule::kw_regr_sxy => AggFunc::RegrSxy,
-                    Rule::kw_regr_avgx => AggFunc::RegrAvgx,
-                    Rule::kw_regr_avgy => AggFunc::RegrAvgy,
-                    Rule::kw_regr_r2 => AggFunc::RegrR2,
-                    Rule::kw_regr_slope => AggFunc::RegrSlope,
-                    Rule::kw_regr_intercept => AggFunc::RegrIntercept,
-                    Rule::kw_covar_pop => AggFunc::CovarPop,
-                    Rule::kw_covar_samp => AggFunc::CovarSamp,
-                    Rule::kw_corr => AggFunc::Corr,
                     Rule::kw_min => AggFunc::Min,
                     Rule::kw_max => AggFunc::Max,
                     Rule::kw_string_agg => AggFunc::StringAgg,

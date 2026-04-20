@@ -405,22 +405,13 @@ fn is_oid_integer_comparison(left: SqlType, right: SqlType) -> bool {
         && !right.is_array
         && matches!(
             left.kind,
-            SqlTypeKind::Oid
-                | SqlTypeKind::RegRole
-                | SqlTypeKind::Int2
-                | SqlTypeKind::Int4
-                | SqlTypeKind::Int8
+            SqlTypeKind::Oid | SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8
         )
         && matches!(
             right.kind,
-            SqlTypeKind::Oid
-                | SqlTypeKind::RegRole
-                | SqlTypeKind::Int2
-                | SqlTypeKind::Int4
-                | SqlTypeKind::Int8
+            SqlTypeKind::Oid | SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8
         )
-        && (matches!(left.kind, SqlTypeKind::Oid | SqlTypeKind::RegRole)
-            || matches!(right.kind, SqlTypeKind::Oid | SqlTypeKind::RegRole))
+        && (matches!(left.kind, SqlTypeKind::Oid) || matches!(right.kind, SqlTypeKind::Oid))
 }
 
 pub(super) fn bind_shift_expr(
