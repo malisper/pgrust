@@ -13,7 +13,7 @@ Counts from `/tmp/pgrust_regress_after_sequence_fix` on 2026-04-18 using the def
 Targeted reruns and notes:
 
 - numeric.sql: 945/1057
-- numeric.sql first mismatch is still unordered `VALUES`/cross-join row order; remaining substantive mismatches are numeric input/typmod parity, numeric-to-int cast errors for `NaN`/`Infinity`, `to_char` / `to_number` / Roman formatting, numeric `power()` / `exp()` underflow and edge cases, `generate_series(numeric, ...)` error text, numeric `variance`, numeric `gcd` / `lcm` scale and overflow behavior, and `\d` numeric typmod rendering
+- numeric.sql first mismatch is still unordered `VALUES`/cross-join row order; remaining substantive mismatches are numeric input/typmod parity, numeric-to-int cast errors for `NaN`/`Infinity`, `to_char` / `to_number` / Roman formatting, numeric `power()` / `exp()` underflow and edge cases, `generate_series(numeric, ...)` error text, numeric `gcd` / `lcm` scale and overflow behavior, and `\d` numeric typmod rendering
 
 - advisory_lock.sql: 8/38
 - aggregates.sql: 149/583
@@ -495,7 +495,7 @@ Targeted reruns and notes:
   - Fix numeric `power()` / `exp()` edge semantics so extreme underflows collapse to exact zero, `0 ^ 0` returns `1`, and negative-base exponent edge cases match PostgreSQL
   - Align numeric `generate_series(...)` error text with PostgreSQL for `NaN` / infinity step values
   - Remove extra `CONTEXT` lines from builtin `log()` errors in this regression
-  - Fix numeric `variance` aggregation on tiny values; PostgreSQL returns `12e-1000` in the scaled test where pgrust currently returns `0`
+  - [done] Fix numeric `variance` aggregation on tiny values so the scaled regression case returns PostgreSQL's `12e-1000` instead of rounding away to zero
   - Preserve PostgreSQL scale and overflow behavior for numeric `gcd` / `lcm`, including the large `lcm(...)` overflow case
   - Render numeric typmods in `\d` output as `numeric(p,s)` instead of debug `SqlType { ... }` output
 - [x] Preserve numeric display scale in `generate_series(numeric, ...)` so rows like `0.0, 1.0, 2.0, 3.0, 4.0` do not degrade into integer-looking outputs after the first increment
