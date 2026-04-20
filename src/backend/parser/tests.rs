@@ -3299,6 +3299,27 @@ fn build_plan_dispatches_geometry_and_range_position_operators_independently() {
                 )
     ));
 
+    let overlap_plan = build_plan(
+        &parse_select("select '(0,0),(1,1)'::box && '(2,2),(3,3)'::box").unwrap(),
+        &catalog(),
+    )
+    .unwrap();
+    let Plan::Projection {
+        targets: overlap_targets,
+        ..
+    } = overlap_plan
+    else {
+        panic!("expected projection plan");
+    };
+    assert!(matches!(
+        &overlap_targets[0].expr,
+        Expr::Func(func)
+            if func.implementation
+                == crate::include::nodes::primnodes::ScalarFunctionImpl::Builtin(
+                    crate::include::nodes::primnodes::BuiltinScalarFunction::GeoOverlap
+                )
+    ));
+
     let range_plan = build_plan(
         &parse_select("select int4range(1, 4) &< int4range(2, 10)").unwrap(),
         &catalog(),
@@ -5579,6 +5600,12 @@ fn parse_array_and_unnest_expressions() {
 
     let stmt = parse_select("select ARRAY['a'] && ARRAY['b']").unwrap();
     assert!(matches!(stmt.targets[0].expr, SqlExpr::ArrayOverlap(_, _)));
+
+    let stmt = parse_select("select '(0,0),(1,1)'::box && '(2,2),(3,3)'::box").unwrap();
+    assert!(matches!(
+        stmt.targets[0].expr,
+        SqlExpr::BinaryOperator { ref op, .. } if op == "&&"
+    ));
 }
 
 #[test]
