@@ -187,7 +187,7 @@ table_with_clause = { kw_with ~ "(" ~ table_with_item ~ ("," ~ table_with_item)*
 table_with_item = { identifier ~ ("=" ~ (identifier | integer))? }
 without_oids_clause = { kw_without ~ kw_oids }
 table_storage_clause = { table_with_clause | without_oids_clause }
-drop_table_stmt = { kw_drop ~ kw_table ~ if_exists_clause? ~ ident_list }
+drop_table_stmt = { kw_drop ~ kw_table ~ if_exists_clause? ~ ident_list ~ drop_behavior? }
 drop_index_stmt = { kw_drop ~ kw_index ~ if_exists_clause? ~ ident_list }
 drop_view_stmt = { kw_drop ~ kw_view ~ if_exists_clause? ~ ident_list }
 drop_rule_stmt = { kw_drop ~ kw_rule ~ if_exists_clause? ~ identifier ~ kw_on ~ identifier }

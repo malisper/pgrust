@@ -1444,6 +1444,12 @@ pub fn execute_drop_table(
     catalog: &mut Catalog,
     ctx: &mut ExecutorContext,
 ) -> Result<StatementResult, ExecError> {
+    if stmt.cascade {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "DROP TABLE CASCADE handled by database/session layer",
+            actual: "DROP TABLE ... CASCADE".into(),
+        }));
+    }
     let mut dropped = 0;
     for table_name in stmt.table_names {
         match catalog.drop_table(&table_name) {
