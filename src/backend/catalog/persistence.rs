@@ -305,6 +305,7 @@ fn physical_catalog_rows_empty(rows: &PhysicalCatalogRows) -> bool {
         && rows.depends.is_empty()
         && rows.inherits.is_empty()
         && rows.descriptions.is_empty()
+        && rows.foreign_data_wrappers.is_empty()
         && rows.indexes.is_empty()
         && rows.rewrites.is_empty()
         && rows.triggers.is_empty()

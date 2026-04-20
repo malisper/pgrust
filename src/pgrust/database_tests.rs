@@ -114,18 +114,6 @@ fn scratch_temp_dir(label: &str) -> PathBuf {
     crate::pgrust::test_support::scratch_temp_dir("database", label)
 }
 
-fn role_oid(db: &Database, role_name: &str) -> u32 {
-    db.catalog
-        .read()
-        .catcache()
-        .unwrap()
-        .authid_rows()
-        .into_iter()
-        .find(|row| row.rolname.eq_ignore_ascii_case(role_name))
-        .map(|row| row.oid)
-        .unwrap()
-}
-
 struct AnalyzeRelkindOverrideCatalog<'a> {
     inner: LazyCatalogLookup<'a>,
     relkind_overrides: HashMap<u32, char>,
@@ -12417,6 +12405,56 @@ fn create_function_supports_void_returns_and_regprocedure_oid_lookup() {
         query_rows(&db, 1, "select 'stats_test_func1()'::regprocedure::oid"),
         vec![vec![Value::Int64(proc.oid as i64)]]
     );
+}
+
+#[test]
+fn foreign_data_wrapper_alter_requires_superuser() {
+    let dir = temp_dir("foreign_data_wrapper_alter_requires_superuser");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    db.execute(1, "create role fdw_owner login superuser").unwrap();
+    db.execute(
+        1,
+        "create foreign data wrapper foo validator postgresql_fdw_validator",
+    )
+    .unwrap();
+    db.execute(1, "alter foreign data wrapper foo owner to fdw_owner")
+        .unwrap();
+    db.execute(1, "alter role fdw_owner nosuperuser").unwrap();
+    session.execute(&db, "set session authorization fdw_owner").unwrap();
+
+    let err = session
+        .execute(&db, "alter foreign data wrapper foo options (add testing '1')")
+        .expect_err("non-superuser alter should fail");
+    assert!(matches!(
+        err,
+        ExecError::DetailedError { message, hint, .. }
+            if message == "permission denied to alter foreign-data wrapper"
+                && hint.as_deref() == Some("Must be superuser to alter a foreign-data wrapper.")
+    ));
+}
+
+#[test]
+fn foreign_data_wrapper_postgresql_validator_rejects_wrapper_options() {
+    let dir = temp_dir("foreign_data_wrapper_postgresql_validator_rejects_wrapper_options");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create foreign data wrapper foo validator postgresql_fdw_validator",
+    )
+    .unwrap();
+
+    let err = db
+        .execute(1, "alter foreign data wrapper foo options (nonexistent 'fdw')")
+        .expect_err("validator should reject wrapper options");
+    assert!(matches!(
+        err,
+        ExecError::DetailedError { message, hint, .. }
+            if message == "invalid option \"nonexistent\""
+                && hint.as_deref() == Some("There are no valid options in this context.")
+    ));
 }
 
 #[test]
