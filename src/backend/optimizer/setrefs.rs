@@ -2976,7 +2976,12 @@ fn lower_window_clause_for_input(
 ) -> WindowClause {
     let root = ctx.root;
     let lower_expr_for_input = |ctx: &mut SetRefsContext<'_>, expr: Expr| {
-        let fixed = fix_upper_expr_for_input(root, expr, input, input_tlist);
+        let lowered = lower_projection_expr_by_input_target(root, expr.clone(), input, input_tlist);
+        let fixed = if expr_contains_local_semantic_var(&lowered) {
+            fix_upper_expr_for_input(root, expr, input, input_tlist)
+        } else {
+            fix_upper_expr_for_input(root, lowered, input, input_tlist)
+        };
         lower_expr(ctx, fixed, LowerMode::Input { tlist: input_tlist })
     };
     WindowClause {
