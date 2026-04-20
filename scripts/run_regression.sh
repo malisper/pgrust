@@ -16,7 +16,8 @@
 #   --skip-server     Assume server is already running (don't start/stop it)
 #   --timeout SECS    Per-test timeout in seconds (default: 30)
 #   --test TESTNAME   Run only this test (without .sql extension)
-#   --results-dir DIR Directory for results (default: /tmp/pgrust_regress)
+#   --results-dir DIR Directory for results (default: unique temp dir)
+#   --data-dir DIR    Directory for the pgrust cluster (default: unique temp dir)
 #   --upstream-setup Use upstream test_setup.sql instead of the pgrust bootstrap (default: use pgrust bootstrap)
 
 set -euo pipefail
@@ -46,6 +47,7 @@ fi
 SQL_DIR="$PG_REGRESS/sql"
 EXPECTED_DIR="$PG_REGRESS/expected"
 PG_REGRESS_ABS="$(cd "$PG_REGRESS" && pwd)"
+WORKTREE_NAME="$(basename "$PGRUST_DIR")"
 
 setup_pg_regress_env() {
     if command -v pg_config >/dev/null 2>&1; then
@@ -118,10 +120,11 @@ SKIP_BUILD=false
 SKIP_SERVER=false
 TIMEOUT=30
 SINGLE_TEST=""
-RESULTS_DIR="/tmp/pgrust_regress"
-DATA_DIR="/tmp/pgrust_regress_data"
+RESULTS_DIR=""
+DATA_DIR=""
 SERVER_PID=""
 USE_PGRUST_SETUP=true
+REGRESS_USER="${PGRUST_REGRESS_USER:-${PGUSER:-$(id -un)}}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -131,11 +134,25 @@ while [[ $# -gt 0 ]]; do
         --timeout) TIMEOUT="$2"; shift 2 ;;
         --test) SINGLE_TEST="$2"; shift 2 ;;
         --results-dir) RESULTS_DIR="$2"; shift 2 ;;
+        --data-dir) DATA_DIR="$2"; shift 2 ;;
         --pgrust-setup) USE_PGRUST_SETUP=true; shift ;;
         --upstream-setup) USE_PGRUST_SETUP=false; shift ;;
         *) echo "Unknown flag: $1"; exit 1 ;;
     esac
 done
+
+make_temp_dir() {
+    local prefix="$1"
+    mktemp -d "${TMPDIR:-/tmp}/${prefix}.${WORKTREE_NAME}.XXXXXX"
+}
+
+if [[ -z "$RESULTS_DIR" ]]; then
+    RESULTS_DIR="$(make_temp_dir pgrust_regress_results)"
+fi
+
+if [[ -z "$DATA_DIR" ]]; then
+    DATA_DIR="$(make_temp_dir pgrust_regress_data)"
+fi
 
 cleanup() {
     if [[ -n "$SERVER_PID" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
@@ -154,7 +171,7 @@ wait_for_server_ready() {
     # startup on this branch, so keep the readiness window generous enough
     # for regression runs to avoid false negatives.
     for i in $(seq 1 120); do
-        if psql -X -h 127.0.0.1 -p "$PORT" -U postgres -c "SELECT 1" >/dev/null 2>&1; then
+        if psql -X -h 127.0.0.1 -p "$PORT" -U "$REGRESS_USER" postgres -c "SELECT 1" >/dev/null 2>&1; then
             echo "Server ready."
             return 0
         fi
@@ -164,7 +181,7 @@ wait_for_server_ready() {
         sleep 0.5
     done
 
-    psql -X -h 127.0.0.1 -p "$PORT" -U postgres -c "SELECT 1" >/dev/null 2>&1
+    psql -X -h 127.0.0.1 -p "$PORT" -U "$REGRESS_USER" postgres -c "SELECT 1" >/dev/null 2>&1
 }
 
 start_server() {
@@ -227,6 +244,9 @@ fi
 
 # Set up results directory
 mkdir -p "$RESULTS_DIR/output" "$RESULTS_DIR/diff"
+echo "Regression results dir: $RESULTS_DIR"
+echo "Regression data dir: $DATA_DIR"
+echo "Regression user: $REGRESS_USER"
 
 # Start pgrust server
 if [[ "$SKIP_SERVER" == false ]]; then
@@ -246,7 +266,7 @@ export PGTZ="America/Los_Angeles"
 export PGDATESTYLE="Postgres, MDY"
 setup_pg_regress_env
 export PGOPTIONS="${PGOPTIONS:+$PGOPTIONS }-c statement_timeout=5s"
-PG_ARGS=(-X -h 127.0.0.1 -p "$PORT" -U postgres -v "abs_srcdir=$PG_REGRESS_ABS")
+PG_ARGS=(-X -h 127.0.0.1 -p "$PORT" -U "$REGRESS_USER" postgres -v "abs_srcdir=$PG_REGRESS_ABS")
 
 run_bootstrap_setup() {
     local setup_sql=""

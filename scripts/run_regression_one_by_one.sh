@@ -6,7 +6,7 @@
 # Usage:
 #   scripts/run_regression_one_by_one.sh [--port PORT]
 #     [--skip-server] [--test TESTNAME]
-#     [--results-dir DIR] [--upstream-setup]
+#     [--results-dir DIR] [--data-dir DIR] [--upstream-setup]
 #
 # This variant differs from scripts/run_regression.sh by:
 #   1. Splitting each .sql file into one-statement fragments
@@ -60,11 +60,12 @@ setup_pg_regress_env() {
 PORT=5433
 SKIP_SERVER=false
 SINGLE_TEST=""
-RESULTS_DIR="/tmp/pgrust_regress_one_by_one"
 WORKTREE_NAME="$(basename "$PGRUST_DIR")"
-DATA_DIR="/tmp/pgrust_regress_one_by_one_data_${WORKTREE_NAME}"
+RESULTS_DIR=""
+DATA_DIR=""
 SERVER_PID=""
 USE_PGRUST_SETUP=true
+REGRESS_USER="${PGRUST_REGRESS_USER:-${PGUSER:-$(id -un)}}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -72,6 +73,7 @@ while [[ $# -gt 0 ]]; do
         --skip-server) SKIP_SERVER=true; shift ;;
         --test) SINGLE_TEST="$2"; shift 2 ;;
         --results-dir) RESULTS_DIR="$2"; shift 2 ;;
+        --data-dir) DATA_DIR="$2"; shift 2 ;;
         --pgrust-setup) USE_PGRUST_SETUP=true; shift ;;
         --upstream-setup) USE_PGRUST_SETUP=false; shift ;;
         -h|--help)
@@ -84,6 +86,19 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+make_temp_dir() {
+    local prefix="$1"
+    mktemp -d "${TMPDIR:-/tmp}/${prefix}.${WORKTREE_NAME}.XXXXXX"
+}
+
+if [[ -z "$RESULTS_DIR" ]]; then
+    RESULTS_DIR="$(make_temp_dir pgrust_regress_one_by_one_results)"
+fi
+
+if [[ -z "$DATA_DIR" ]]; then
+    DATA_DIR="$(make_temp_dir pgrust_regress_one_by_one_data)"
+fi
 
 cleanup() {
     if [[ -n "$SERVER_PID" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
@@ -149,7 +164,7 @@ wait_for_server_ready() {
 
     echo "Waiting for server to accept connections..."
     for i in $(seq 1 60); do
-        if psql -X -h 127.0.0.1 -p "$PORT" -U postgres -c "SELECT 1" >/dev/null 2>&1; then
+        if psql -X -h 127.0.0.1 -p "$PORT" -U "$REGRESS_USER" postgres -c "SELECT 1" >/dev/null 2>&1; then
             echo "Server ready."
             return 0
         fi
@@ -159,7 +174,7 @@ wait_for_server_ready() {
         sleep 0.5
     done
 
-    psql -X -h 127.0.0.1 -p "$PORT" -U postgres -c "SELECT 1" >/dev/null 2>&1
+    psql -X -h 127.0.0.1 -p "$PORT" -U "$REGRESS_USER" postgres -c "SELECT 1" >/dev/null 2>&1
 }
 
 start_server() {
@@ -212,6 +227,10 @@ mkdir -p \
     "$RESULTS_DIR/timings" \
     "$RESULTS_DIR/tmp"
 
+echo "Regression results dir: $RESULTS_DIR"
+echo "Regression data dir: $DATA_DIR"
+echo "Regression user: $REGRESS_USER"
+
 if [[ "$SKIP_SERVER" == false ]]; then
     rm -rf "$DATA_DIR"
     mkdir -p "$DATA_DIR"
@@ -228,7 +247,7 @@ export PGTZ="America/Los_Angeles"
 export PGDATESTYLE="Postgres, MDY"
 setup_pg_regress_env
 export PGOPTIONS="${PGOPTIONS:+$PGOPTIONS }-c statement_timeout=5s"
-PG_ARGS=(-X -h 127.0.0.1 -p "$PORT" -U postgres -v "abs_srcdir=$PG_REGRESS_ABS")
+PG_ARGS=(-X -h 127.0.0.1 -p "$PORT" -U "$REGRESS_USER" postgres -v "abs_srcdir=$PG_REGRESS_ABS")
 
 split_sql_statements() {
     local sql_path="$1"
