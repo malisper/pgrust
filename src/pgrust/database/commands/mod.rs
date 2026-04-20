@@ -11,6 +11,7 @@ mod index;
 mod maintenance;
 mod opclass;
 mod owner;
+mod policy;
 mod privilege;
 mod rename;
 mod row_security;

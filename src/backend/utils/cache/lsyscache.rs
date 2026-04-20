@@ -130,6 +130,17 @@ fn trigger_rows_for_relation(
         .unwrap_or_default()
 }
 
+fn policy_rows_for_relation(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    relation_oid: u32,
+) -> Vec<crate::include::catalog::PgPolicyRow> {
+    visible_catcache(db, client_id, txn_ctx)
+        .map(|catcache| catcache.policy_rows_for_relation(relation_oid))
+        .unwrap_or_default()
+}
+
 fn type_row_by_oid(
     db: &Database,
     client_id: ClientId,
@@ -775,6 +786,13 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
 
     fn trigger_rows_for_relation(&self, relation_oid: u32) -> Vec<PgTriggerRow> {
         trigger_rows_for_relation(self.db, self.client_id, self.txn_ctx, relation_oid)
+    }
+
+    fn policy_rows_for_relation(
+        &self,
+        relation_oid: u32,
+    ) -> Vec<crate::include::catalog::PgPolicyRow> {
+        policy_rows_for_relation(self.db, self.client_id, self.txn_ctx, relation_oid)
     }
 
     fn class_row_by_oid(&self, relation_oid: u32) -> Option<PgClassRow> {

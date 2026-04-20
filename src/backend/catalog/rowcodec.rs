@@ -9,9 +9,10 @@ use crate::include::catalog::{
     BootstrapCatalogKind, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow,
     PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow,
     PgDatabaseRow, PgDependRow, PgDescriptionRow, PgIndexRow, PgInheritsRow, PgLanguageRow,
-    PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow, PgRewriteRow,
-    PgStatisticRow, PgTablespaceRow, PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow,
-    PgTsParserRow, PgTsTemplateRow, PgTypeRow, bootstrap_composite_type_rows, builtin_type_rows,
+    PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgPolicyRow, PgProcRow,
+    PgRewriteRow, PgStatisticRow, PgTablespaceRow, PgTriggerRow, PgTsConfigMapRow,
+    PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
+    bootstrap_composite_type_rows, builtin_type_rows,
 };
 use crate::include::nodes::datum::{ArrayValue, Value};
 
@@ -178,6 +179,12 @@ pub(crate) fn catalog_row_values_for_kind(
             .cloned()
             .map(pg_trigger_row_values)
             .collect(),
+        BootstrapCatalogKind::PgPolicy => rows
+            .policies
+            .iter()
+            .cloned()
+            .map(pg_policy_row_values)
+            .collect(),
         BootstrapCatalogKind::PgStatistic => rows
             .statistics
             .iter()
@@ -294,6 +301,21 @@ pub(crate) fn pg_trigger_row_from_values(values: Vec<Value>) -> Result<PgTrigger
         tgqual: nullable_text(&values[16])?,
         tgoldtable: nullable_text(&values[17])?,
         tgnewtable: nullable_text(&values[18])?,
+    })
+}
+
+pub(crate) fn pg_policy_row_from_values(values: Vec<Value>) -> Result<PgPolicyRow, CatalogError> {
+    Ok(PgPolicyRow {
+        oid: expect_oid(&values[0])?,
+        polname: expect_text(&values[1])?,
+        polrelid: expect_oid(&values[2])?,
+        polcmd: crate::include::catalog::PolicyCommand::from_char(expect_char(&values[3], "polcmd")?)
+            .ok_or(CatalogError::Corrupt("expected recognized policy command"))?,
+        polpermissive: expect_bool(&values[4])?,
+        polroles: nullable_oid_array(&values[5])?
+            .ok_or(CatalogError::Corrupt("expected polroles array"))?,
+        polqual: nullable_text(&values[6])?,
+        polwithcheck: nullable_text(&values[7])?,
     })
 }
 
@@ -1206,6 +1228,19 @@ fn pg_trigger_row_values(row: PgTriggerRow) -> Vec<Value> {
         nullable_text_value(row.tgqual),
         nullable_text_value(row.tgoldtable),
         nullable_text_value(row.tgnewtable),
+    ]
+}
+
+fn pg_policy_row_values(row: PgPolicyRow) -> Vec<Value> {
+    vec![
+        Value::Int32(row.oid as i32),
+        Value::Text(row.polname.into()),
+        Value::Int32(row.polrelid as i32),
+        Value::InternalChar(row.polcmd.as_char() as u8),
+        Value::Bool(row.polpermissive),
+        Value::PgArray(oid_array_value(row.polroles)),
+        nullable_text_value(row.polqual),
+        nullable_text_value(row.polwithcheck),
     ]
 }
 

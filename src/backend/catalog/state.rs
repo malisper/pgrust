@@ -12,6 +12,7 @@ use crate::backend::catalog::pg_depend::{
     trigger_depend_rows,
 };
 use crate::backend::catalog::pg_inherits::sort_pg_inherits_rows;
+use crate::backend::catalog::pg_policy::sort_pg_policy_rows;
 use crate::backend::catalog::store::{DEFAULT_FIRST_REL_NUMBER, DEFAULT_FIRST_USER_OID};
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlType, SqlTypeKind};
@@ -19,10 +20,10 @@ use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::misc::interrupts::InterruptReason;
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_NOTNULL, PUBLIC_NAMESPACE_OID, PgAuthIdRow,
-    PgAuthMembersRow, PgConstraintRow, PgDatabaseRow, PgDependRow, PgInheritsRow, PgRewriteRow,
-    PgTablespaceRow, PgTriggerRow, bootstrap_pg_auth_members_rows, bootstrap_pg_authid_rows,
-    bootstrap_pg_database_rows, bootstrap_pg_tablespace_rows, builtin_range_name_for_sql_type,
-    builtin_type_rows, relkind_has_storage, sort_pg_rewrite_rows,
+    PgAuthMembersRow, PgConstraintRow, PgDatabaseRow, PgDependRow, PgInheritsRow, PgPolicyRow,
+    PgRewriteRow, PgTablespaceRow, PgTriggerRow, bootstrap_pg_auth_members_rows,
+    bootstrap_pg_authid_rows, bootstrap_pg_database_rows, bootstrap_pg_tablespace_rows,
+    builtin_range_name_for_sql_type, builtin_type_rows, relkind_has_storage, sort_pg_rewrite_rows,
 };
 
 const DEFAULT_SPC_OID: u32 = 0;
@@ -98,6 +99,7 @@ pub struct Catalog {
     pub(crate) inherits: Vec<PgInheritsRow>,
     pub(crate) rewrites: Vec<PgRewriteRow>,
     pub(crate) triggers: Vec<crate::include::catalog::PgTriggerRow>,
+    pub(crate) policies: Vec<PgPolicyRow>,
     pub(crate) authids: Vec<PgAuthIdRow>,
     pub(crate) auth_members: Vec<PgAuthMembersRow>,
     pub(crate) databases: Vec<PgDatabaseRow>,
@@ -115,6 +117,7 @@ impl Default for Catalog {
             inherits: Vec::new(),
             rewrites: Vec::new(),
             triggers: Vec::new(),
+            policies: Vec::new(),
             authids: bootstrap_pg_authid_rows(),
             auth_members: bootstrap_pg_auth_members_rows().into(),
             databases: bootstrap_pg_database_rows().into(),
@@ -279,6 +282,18 @@ impl Catalog {
             .partition_point(|row| row.tgrelid < relation_oid);
         let end = start + self.triggers[start..].partition_point(|row| row.tgrelid == relation_oid);
         &self.triggers[start..end]
+    }
+
+    pub fn policy_rows(&self) -> &[PgPolicyRow] {
+        &self.policies
+    }
+
+    pub fn policy_rows_for_relation(&self, relation_oid: u32) -> &[PgPolicyRow] {
+        let start = self
+            .policies
+            .partition_point(|row| row.polrelid < relation_oid);
+        let end = start + self.policies[start..].partition_point(|row| row.polrelid == relation_oid);
+        &self.policies[start..end]
     }
 
     pub fn next_oid(&self) -> u32 {
@@ -1756,6 +1771,28 @@ impl Catalog {
         let mut removed = Vec::new();
         self.rewrites.retain(|row| {
             if row.ev_class == relation_oid {
+                removed.push(row.clone());
+                false
+            } else {
+                true
+            }
+        });
+        removed
+    }
+
+    pub fn add_policy_row(&mut self, row: PgPolicyRow) {
+        if self.policies.iter().any(|existing| existing == &row) {
+            return;
+        }
+        self.next_oid = self.next_oid.max(row.oid.saturating_add(1));
+        self.policies.push(row);
+        sort_pg_policy_rows(&mut self.policies);
+    }
+
+    pub fn remove_policy_rows_for_relation(&mut self, relation_oid: u32) -> Vec<PgPolicyRow> {
+        let mut removed = Vec::new();
+        self.policies.retain(|row| {
+            if row.polrelid == relation_oid {
                 removed.push(row.clone());
                 false
             } else {

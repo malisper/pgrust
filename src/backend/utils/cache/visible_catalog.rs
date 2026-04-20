@@ -9,8 +9,8 @@ use crate::backend::utils::cache::system_views::{
 };
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, PgAuthIdRow, PgCastRow, PgClassRow, PgConstraintRow, PgIndexRow,
-    PgInheritsRow, PgLanguageRow, PgOperatorRow, PgProcRow, PgRangeRow, PgRewriteRow,
-    PgStatisticRow, PgTriggerRow, PgTypeRow, bootstrap_pg_cast_rows,
+    PgInheritsRow, PgLanguageRow, PgOperatorRow, PgPolicyRow, PgProcRow, PgRangeRow,
+    PgRewriteRow, PgStatisticRow, PgTriggerRow, PgTypeRow, bootstrap_pg_cast_rows,
     bootstrap_pg_language_rows, bootstrap_pg_operator_rows, bootstrap_pg_proc_rows,
     builtin_range_rows, builtin_type_rows,
 };
@@ -50,6 +50,13 @@ impl VisibleCatalog {
         self.catcache
             .as_ref()
             .map(|catcache| catcache.trigger_rows_for_relation(relation_oid))
+            .unwrap_or_default()
+    }
+
+    pub fn policy_rows_for_relation(&self, relation_oid: u32) -> Vec<PgPolicyRow> {
+        self.catcache
+            .as_ref()
+            .map(|catcache| catcache.policy_rows_for_relation(relation_oid))
             .unwrap_or_default()
     }
 
@@ -236,6 +243,10 @@ impl CatalogLookup for VisibleCatalog {
 
     fn trigger_rows_for_relation(&self, relation_oid: u32) -> Vec<PgTriggerRow> {
         VisibleCatalog::trigger_rows_for_relation(self, relation_oid)
+    }
+
+    fn policy_rows_for_relation(&self, relation_oid: u32) -> Vec<PgPolicyRow> {
+        VisibleCatalog::policy_rows_for_relation(self, relation_oid)
     }
 
     fn class_row_by_oid(&self, relation_oid: u32) -> Option<PgClassRow> {
@@ -446,6 +457,7 @@ mod tests {
             base.index_rows(),
             base.rewrite_rows(),
             base.trigger_rows(),
+            base.policy_rows(),
             base.am_rows(),
             base.amop_rows(),
             base.amproc_rows(),

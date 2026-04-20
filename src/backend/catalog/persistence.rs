@@ -343,7 +343,8 @@ fn catalog_row_identity_matches(
         BootstrapCatalogKind::PgClass
         | BootstrapCatalogKind::PgType
         | BootstrapCatalogKind::PgAttrdef
-        | BootstrapCatalogKind::PgTrigger => catalog_value_eq(left.first(), right.first()),
+        | BootstrapCatalogKind::PgTrigger
+        | BootstrapCatalogKind::PgPolicy => catalog_value_eq(left.first(), right.first()),
         BootstrapCatalogKind::PgAttribute => {
             catalog_value_eq(left.first(), right.first())
                 && catalog_value_eq(left.get(4), right.get(4))

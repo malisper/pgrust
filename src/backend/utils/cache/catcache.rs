@@ -22,6 +22,7 @@ use crate::backend::catalog::pg_language::sort_pg_language_rows;
 use crate::backend::catalog::pg_opclass::sort_pg_opclass_rows;
 use crate::backend::catalog::pg_operator::sort_pg_operator_rows;
 use crate::backend::catalog::pg_opfamily::sort_pg_opfamily_rows;
+use crate::backend::catalog::pg_policy::sort_pg_policy_rows;
 use crate::backend::catalog::pg_proc::sort_pg_proc_rows;
 use crate::backend::catalog::pg_tablespace::sort_pg_tablespace_rows;
 use crate::backend::catalog::pg_trigger::sort_pg_trigger_rows;
@@ -44,9 +45,10 @@ use crate::include::catalog::{
     PATH_TYPE_OID, POINT_TYPE_OID, POLYGON_TYPE_OID, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow,
     PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow,
     PgConstraintRow, PgDatabaseRow, PgDependRow, PgIndexRow, PgInheritsRow, PgLanguageRow,
-    PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow, PgRewriteRow,
-    PgStatisticRow, PgTablespaceRow, PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow,
-    PgTsParserRow, PgTsTemplateRow, PgTypeRow, REGCONFIG_ARRAY_TYPE_OID, REGCONFIG_TYPE_OID,
+    PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgPolicyRow, PgProcRow,
+    PgRewriteRow, PgStatisticRow, PgTablespaceRow, PgTriggerRow, PgTsConfigMapRow,
+    PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
+    REGCONFIG_ARRAY_TYPE_OID, REGCONFIG_TYPE_OID,
     REGDICTIONARY_ARRAY_TYPE_OID, REGDICTIONARY_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID,
     TID_ARRAY_TYPE_OID, TID_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID,
     TSQUERY_ARRAY_TYPE_OID, TSQUERY_TYPE_OID, TSVECTOR_ARRAY_TYPE_OID, TSVECTOR_TYPE_OID,
@@ -76,6 +78,7 @@ pub struct CatCache {
     index_rows: Vec<PgIndexRow>,
     rewrite_rows: Vec<PgRewriteRow>,
     trigger_rows: Vec<PgTriggerRow>,
+    policy_rows: Vec<PgPolicyRow>,
     am_rows: Vec<PgAmRow>,
     amop_rows: Vec<PgAmopRow>,
     amproc_rows: Vec<PgAmprocRow>,
@@ -359,11 +362,13 @@ impl CatCache {
             .rewrite_rows
             .extend(catalog.rewrite_rows().iter().cloned());
         cache.trigger_rows.extend(catalog.triggers.iter().cloned());
+        cache.policy_rows.extend(catalog.policy_rows().iter().cloned());
         sort_pg_constraint_rows(&mut cache.constraint_rows);
         sort_pg_depend_rows(&mut cache.depend_rows);
         sort_pg_inherits_rows(&mut cache.inherit_rows);
         sort_pg_rewrite_rows(&mut cache.rewrite_rows);
         sort_pg_trigger_rows(&mut cache.trigger_rows);
+        sort_pg_policy_rows(&mut cache.policy_rows);
         sort_pg_index_rows(&mut cache.index_rows);
 
         cache.normalize_composite_array_types();
@@ -382,6 +387,7 @@ impl CatCache {
             rows.indexes,
             rows.rewrites,
             rows.triggers,
+            rows.policies,
             rows.ams,
             rows.amops,
             rows.amprocs,
@@ -417,6 +423,7 @@ impl CatCache {
         index_rows: Vec<PgIndexRow>,
         rewrite_rows: Vec<PgRewriteRow>,
         trigger_rows: Vec<PgTriggerRow>,
+        policy_rows: Vec<PgPolicyRow>,
         am_rows: Vec<PgAmRow>,
         amop_rows: Vec<PgAmopRow>,
         amproc_rows: Vec<PgAmprocRow>,
@@ -482,6 +489,8 @@ impl CatCache {
         sort_pg_rewrite_rows(&mut cache.rewrite_rows);
         cache.trigger_rows = trigger_rows;
         sort_pg_trigger_rows(&mut cache.trigger_rows);
+        cache.policy_rows = policy_rows;
+        sort_pg_policy_rows(&mut cache.policy_rows);
         cache.am_rows = am_rows;
         sort_pg_am_rows(&mut cache.am_rows);
         cache.amop_rows = amop_rows;
@@ -605,6 +614,10 @@ impl CatCache {
         self.trigger_rows.clone()
     }
 
+    pub fn policy_rows(&self) -> Vec<PgPolicyRow> {
+        self.policy_rows.clone()
+    }
+
     pub fn trigger_rows_for_relation(&self, relation_oid: u32) -> Vec<PgTriggerRow> {
         self.trigger_rows
             .iter()
@@ -617,6 +630,14 @@ impl CatCache {
         self.rewrite_rows
             .iter()
             .filter(|row| row.ev_class == relation_oid)
+            .cloned()
+            .collect()
+    }
+
+    pub fn policy_rows_for_relation(&self, relation_oid: u32) -> Vec<PgPolicyRow> {
+        self.policy_rows
+            .iter()
+            .filter(|row| row.polrelid == relation_oid)
             .cloned()
             .collect()
     }
