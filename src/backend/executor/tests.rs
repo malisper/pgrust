@@ -405,6 +405,43 @@ fn array_assignment_catalog() -> Catalog {
     catalog
 }
 
+fn array_extension_catalog() -> Catalog {
+    let mut catalog = Catalog::default();
+    catalog.insert(
+        "arrtest1",
+        test_catalog_entry(
+            RelFileLocator {
+                spc_oid: 0,
+                db_oid: 1,
+                rel_number: 14005,
+            },
+            RelationDesc {
+                columns: vec![
+                    crate::backend::catalog::catalog::column_desc(
+                        "i",
+                        crate::backend::parser::SqlType::array_of(
+                            crate::backend::parser::SqlType::new(
+                                crate::backend::parser::SqlTypeKind::Int4,
+                            ),
+                        ),
+                        true,
+                    ),
+                    crate::backend::catalog::catalog::column_desc(
+                        "t",
+                        crate::backend::parser::SqlType::array_of(
+                            crate::backend::parser::SqlType::new(
+                                crate::backend::parser::SqlTypeKind::Text,
+                            ),
+                        ),
+                        true,
+                    ),
+                ],
+            },
+        ),
+    );
+    catalog
+}
+
 fn varchar_catalog(name: &str, len: i32) -> Catalog {
     let mut catalog = Catalog::default();
     catalog.insert(
@@ -4363,6 +4400,321 @@ fn array_slice_assignment_requires_full_bounds_for_null_arrays() {
                     == Some("When assigning to a slice of an empty array value, slice boundaries must be fully specified.".into())
                 && sqlstate == "2202E"
     ));
+}
+
+#[test]
+fn array_subscript_assignment_extension_matches_postgres() {
+    let base = temp_dir("array_subscript_assignment_extension");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+
+    let xid = txns.begin();
+    assert_eq!(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            xid,
+            "insert into arrtest1 values(array[1,2,null,4], array['one','two',null,'four'])",
+            array_extension_catalog(),
+        )
+        .unwrap(),
+        StatementResult::AffectedRows(1)
+    );
+    txns.commit(xid).unwrap();
+
+    for sql in [
+        "update arrtest1 set i[2] = 22, t[2] = 'twenty-two'",
+        "update arrtest1 set i[5] = 5, t[5] = 'five'",
+        "update arrtest1 set i[8] = 8, t[8] = 'eight'",
+        "update arrtest1 set i[0] = 0, t[0] = 'zero'",
+        "update arrtest1 set i[-3] = -3, t[-3] = 'minus-three'",
+    ] {
+        let xid = txns.begin();
+        assert_eq!(
+            run_sql_with_catalog(&base, &txns, xid, sql, array_extension_catalog()).unwrap(),
+            StatementResult::AffectedRows(1)
+        );
+        txns.commit(xid).unwrap();
+    }
+
+    assert_query_rows(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select i, t from arrtest1",
+            array_extension_catalog(),
+        )
+        .unwrap(),
+        vec![vec![
+            Value::PgArray(
+                ArrayValue::from_dimensions(
+                    vec![ArrayDimension {
+                        lower_bound: -3,
+                        length: 12,
+                    }],
+                    vec![
+                        Value::Int32(-3),
+                        Value::Null,
+                        Value::Null,
+                        Value::Int32(0),
+                        Value::Int32(1),
+                        Value::Int32(22),
+                        Value::Null,
+                        Value::Int32(4),
+                        Value::Int32(5),
+                        Value::Null,
+                        Value::Null,
+                        Value::Int32(8),
+                    ],
+                )
+                .with_element_type_oid(crate::include::catalog::INT4_TYPE_OID),
+            ),
+            Value::PgArray(
+                ArrayValue::from_dimensions(
+                    vec![ArrayDimension {
+                        lower_bound: -3,
+                        length: 12,
+                    }],
+                    vec![
+                        Value::Text("minus-three".into()),
+                        Value::Null,
+                        Value::Null,
+                        Value::Text("zero".into()),
+                        Value::Text("one".into()),
+                        Value::Text("twenty-two".into()),
+                        Value::Null,
+                        Value::Text("four".into()),
+                        Value::Text("five".into()),
+                        Value::Null,
+                        Value::Null,
+                        Value::Text("eight".into()),
+                    ],
+                )
+                .with_element_type_oid(crate::include::catalog::TEXT_TYPE_OID),
+            ),
+        ]],
+    );
+}
+
+#[test]
+fn array_slice_assignment_extension_matches_postgres() {
+    let base = temp_dir("array_slice_assignment_extension");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+
+    let xid = txns.begin();
+    assert_eq!(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            xid,
+            "insert into arrtest1 values(array[1,2,null,4], array['one','two',null,'four'])",
+            array_extension_catalog(),
+        )
+        .unwrap(),
+        StatementResult::AffectedRows(1)
+    );
+    txns.commit(xid).unwrap();
+
+    for sql in [
+        "update arrtest1 set i[2] = 22, t[2] = 'twenty-two'",
+        "update arrtest1 set i[5] = 5, t[5] = 'five'",
+        "update arrtest1 set i[8] = 8, t[8] = 'eight'",
+        "update arrtest1 set i[0] = 0, t[0] = 'zero'",
+        "update arrtest1 set i[-3] = -3, t[-3] = 'minus-three'",
+        "update arrtest1 set i[0:2] = array[10,11,12], t[0:2] = array['ten','eleven','twelve']",
+        "update arrtest1 set i[8:10] = array[18,null,20], t[8:10] = array['p18',null,'p20']",
+        "update arrtest1 set i[11:12] = array[null,22], t[11:12] = array[null,'p22']",
+        "update arrtest1 set i[15:16] = array[null,26], t[15:16] = array[null,'p26']",
+        "update arrtest1 set i[-5:-3] = array[-15,-14,-13], t[-5:-3] = array['m15','m14','m13']",
+        "update arrtest1 set i[-7:-6] = array[-17,null], t[-7:-6] = array['m17',null]",
+        "update arrtest1 set i[-12:-10] = array[-22,null,-20], t[-12:-10] = array['m22',null,'m20']",
+    ] {
+        let xid = txns.begin();
+        assert_eq!(
+            run_sql_with_catalog(&base, &txns, xid, sql, array_extension_catalog()).unwrap(),
+            StatementResult::AffectedRows(1)
+        );
+        txns.commit(xid).unwrap();
+    }
+
+    assert_query_rows(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select i, t from arrtest1",
+            array_extension_catalog(),
+        )
+        .unwrap(),
+        vec![vec![
+            Value::PgArray(
+                ArrayValue::from_dimensions(
+                    vec![ArrayDimension {
+                        lower_bound: -12,
+                        length: 29,
+                    }],
+                    vec![
+                        Value::Int32(-22),
+                        Value::Null,
+                        Value::Int32(-20),
+                        Value::Null,
+                        Value::Null,
+                        Value::Int32(-17),
+                        Value::Null,
+                        Value::Int32(-15),
+                        Value::Int32(-14),
+                        Value::Int32(-13),
+                        Value::Null,
+                        Value::Null,
+                        Value::Int32(10),
+                        Value::Int32(11),
+                        Value::Int32(12),
+                        Value::Null,
+                        Value::Int32(4),
+                        Value::Int32(5),
+                        Value::Null,
+                        Value::Null,
+                        Value::Int32(18),
+                        Value::Null,
+                        Value::Int32(20),
+                        Value::Null,
+                        Value::Int32(22),
+                        Value::Null,
+                        Value::Null,
+                        Value::Null,
+                        Value::Int32(26),
+                    ],
+                )
+                .with_element_type_oid(crate::include::catalog::INT4_TYPE_OID),
+            ),
+            Value::PgArray(
+                ArrayValue::from_dimensions(
+                    vec![ArrayDimension {
+                        lower_bound: -12,
+                        length: 29,
+                    }],
+                    vec![
+                        Value::Text("m22".into()),
+                        Value::Null,
+                        Value::Text("m20".into()),
+                        Value::Null,
+                        Value::Null,
+                        Value::Text("m17".into()),
+                        Value::Null,
+                        Value::Text("m15".into()),
+                        Value::Text("m14".into()),
+                        Value::Text("m13".into()),
+                        Value::Null,
+                        Value::Null,
+                        Value::Text("ten".into()),
+                        Value::Text("eleven".into()),
+                        Value::Text("twelve".into()),
+                        Value::Null,
+                        Value::Text("four".into()),
+                        Value::Text("five".into()),
+                        Value::Null,
+                        Value::Null,
+                        Value::Text("p18".into()),
+                        Value::Null,
+                        Value::Text("p20".into()),
+                        Value::Null,
+                        Value::Text("p22".into()),
+                        Value::Null,
+                        Value::Null,
+                        Value::Null,
+                        Value::Text("p26".into()),
+                    ],
+                )
+                .with_element_type_oid(crate::include::catalog::TEXT_TYPE_OID),
+            ),
+        ]],
+    );
+
+    let xid = txns.begin();
+    assert_eq!(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            xid,
+            "delete from arrtest1",
+            array_extension_catalog(),
+        )
+        .unwrap(),
+        StatementResult::AffectedRows(1)
+    );
+    assert_eq!(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            xid,
+            "insert into arrtest1 values(array[1,2,null,4], array['one','two',null,'four'])",
+            array_extension_catalog(),
+        )
+        .unwrap(),
+        StatementResult::AffectedRows(1)
+    );
+    txns.commit(xid).unwrap();
+
+    let xid = txns.begin();
+    assert_eq!(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            xid,
+            "update arrtest1 set i[0:5] = array[0,1,2,null,4,5], t[0:5] = array['z','p1','p2',null,'p4','p5']",
+            array_extension_catalog(),
+        )
+        .unwrap(),
+        StatementResult::AffectedRows(1)
+    );
+    txns.commit(xid).unwrap();
+
+    assert_query_rows(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select i, t from arrtest1",
+            array_extension_catalog(),
+        )
+        .unwrap(),
+        vec![vec![
+            Value::PgArray(
+                ArrayValue::from_dimensions(
+                    vec![ArrayDimension {
+                        lower_bound: 0,
+                        length: 6,
+                    }],
+                    vec![
+                        Value::Int32(0),
+                        Value::Int32(1),
+                        Value::Int32(2),
+                        Value::Null,
+                        Value::Int32(4),
+                        Value::Int32(5),
+                    ],
+                )
+                .with_element_type_oid(crate::include::catalog::INT4_TYPE_OID),
+            ),
+            Value::PgArray(
+                ArrayValue::from_dimensions(
+                    vec![ArrayDimension {
+                        lower_bound: 0,
+                        length: 6,
+                    }],
+                    vec![
+                        Value::Text("z".into()),
+                        Value::Text("p1".into()),
+                        Value::Text("p2".into()),
+                        Value::Null,
+                        Value::Text("p4".into()),
+                        Value::Text("p5".into()),
+                    ],
+                )
+                .with_element_type_oid(crate::include::catalog::TEXT_TYPE_OID),
+            ),
+        ]],
+    );
 }
 
 #[test]
