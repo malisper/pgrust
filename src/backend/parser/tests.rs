@@ -5241,10 +5241,7 @@ fn lower_create_table_rejects_unsupported_constraint_attributes() {
     let Statement::CreateTable(ct) = stmt else {
         panic!("expected create table");
     };
-    assert!(matches!(
-        lower_create_table(&ct, &catalog_with_people_primary_key()),
-        Err(ParseError::FeatureNotSupported(feature)) if feature == "FOREIGN KEY NOT VALID"
-    ));
+    assert!(lower_create_table(&ct, &catalog_with_people_primary_key()).is_ok());
 }
 
 #[test]

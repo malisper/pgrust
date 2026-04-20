@@ -171,7 +171,25 @@ fn check_visibility(
         return true;
     }
     if xmin == snapshot.current_xid {
-        return cid < snapshot.current_cid;
+        if cid >= snapshot.current_cid {
+            return false;
+        }
+        if xmax == INVALID_TRANSACTION_ID {
+            return true;
+        }
+        if xmax == snapshot.current_xid {
+            return false;
+        }
+        if xmax >= snapshot.xmax {
+            return true;
+        }
+        if snapshot.transaction_active_in_snapshot(xmax) {
+            return true;
+        }
+        return match txns.status(xmax) {
+            Some(TransactionStatus::Committed) => false,
+            Some(TransactionStatus::Aborted) | Some(TransactionStatus::InProgress) | None => true,
+        };
     }
     if xmin >= snapshot.xmax {
         return false;

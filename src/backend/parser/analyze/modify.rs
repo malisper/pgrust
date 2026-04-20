@@ -1,6 +1,9 @@
 use super::paths::choose_modify_row_source;
 use super::query::rewrite_local_vars_for_output_exprs;
 use super::*;
+use crate::backend::rewrite::{
+    ViewDmlEvent, ViewDmlRewriteError, resolve_auto_updatable_view_target,
+};
 use crate::include::nodes::primnodes::JoinType;
 use crate::include::nodes::primnodes::{SELF_ITEM_POINTER_ATTR_NO, TargetEntry, Var};
 
@@ -635,7 +638,10 @@ fn build_update_target(
                     &translation_indexes,
                     &relation_name,
                 )?,
-                subscripts: assignment.subscripts.clone(),
+                subscripts: rewrite_assignment_subscripts(
+                    &assignment.subscripts,
+                    &translation_exprs,
+                ),
                 expr: rewrite_local_vars_for_output_exprs(
                     assignment.expr.clone(),
                     1,
@@ -669,6 +675,279 @@ fn build_update_target(
         assignments,
         predicate,
     })
+}
+
+fn rewrite_assignment_subscripts(
+    subscripts: &[BoundArraySubscript],
+    output_exprs: &[Expr],
+) -> Vec<BoundArraySubscript> {
+    subscripts
+        .iter()
+        .map(|subscript| BoundArraySubscript {
+            is_slice: subscript.is_slice,
+            lower: subscript
+                .lower
+                .as_ref()
+                .map(|expr| rewrite_local_vars_for_output_exprs(expr.clone(), 1, output_exprs)),
+            upper: subscript
+                .upper
+                .as_ref()
+                .map(|expr| rewrite_local_vars_for_output_exprs(expr.clone(), 1, output_exprs)),
+        })
+        .collect()
+}
+
+fn map_auto_view_column_index(
+    view_desc: &RelationDesc,
+    updatable_column_map: &[Option<usize>],
+    column_index: usize,
+) -> Result<usize, ViewDmlRewriteError> {
+    updatable_column_map
+        .get(column_index)
+        .copied()
+        .flatten()
+        .ok_or_else(|| {
+            let column_name = view_desc
+                .columns
+                .get(column_index)
+                .map(|column| column.name.as_str())
+                .unwrap_or("<unknown>");
+            ViewDmlRewriteError::UnsupportedViewShape(format!(
+                "View column \"{}\" is not automatically updatable.",
+                column_name
+            ))
+        })
+}
+
+pub(crate) fn rewrite_bound_insert_auto_view_target(
+    stmt: BoundInsertStatement,
+    catalog: &dyn CatalogLookup,
+) -> Result<BoundInsertStatement, ViewDmlRewriteError> {
+    if stmt.relkind != 'v' {
+        return Ok(stmt);
+    }
+
+    let resolved = resolve_auto_updatable_view_target(
+        stmt.relation_oid,
+        &stmt.desc,
+        ViewDmlEvent::Insert,
+        catalog,
+        &[],
+    )?;
+    if stmt.on_conflict.is_some() {
+        return Err(ViewDmlRewriteError::DeferredFeature(
+            "INSERT ... ON CONFLICT on automatically updatable views is not supported yet."
+                .into(),
+        ));
+    }
+
+    let relation_name =
+        relation_display_name(catalog, resolved.base_relation.relation_oid, &stmt.relation_name);
+    let target_columns = stmt
+        .target_columns
+        .iter()
+        .map(|target| {
+            Ok(BoundAssignmentTarget {
+                column_index: map_auto_view_column_index(
+                    &stmt.desc,
+                    &resolved.updatable_column_map,
+                    target.column_index,
+                )?,
+                subscripts: rewrite_assignment_subscripts(
+                    &target.subscripts,
+                    &resolved.visible_output_exprs,
+                ),
+            })
+        })
+        .collect::<Result<Vec<_>, ViewDmlRewriteError>>()?;
+
+    Ok(BoundInsertStatement {
+        relation_name: relation_name.clone(),
+        rel: resolved.base_relation.rel,
+        relation_oid: resolved.base_relation.relation_oid,
+        relkind: resolved.base_relation.relkind,
+        toast: resolved.base_relation.toast,
+        toast_index: first_toast_index(catalog, resolved.base_relation.toast),
+        desc: resolved.base_relation.desc.clone(),
+        relation_constraints: bind_relation_constraints(
+            Some(&relation_name),
+            resolved.base_relation.relation_oid,
+            &resolved.base_relation.desc,
+            catalog,
+        )
+        .map_err(|err| ViewDmlRewriteError::UnsupportedViewShape(err.to_string()))?,
+        referenced_by_foreign_keys: bind_referenced_by_foreign_keys(
+            resolved.base_relation.relation_oid,
+            &resolved.base_relation.desc,
+            catalog,
+        )
+        .map_err(|err| ViewDmlRewriteError::UnsupportedViewShape(err.to_string()))?,
+        indexes: catalog.index_relations_for_heap(resolved.base_relation.relation_oid),
+        column_defaults: bind_insert_column_defaults(&resolved.base_relation.desc, catalog, &[])
+            .map_err(|err| ViewDmlRewriteError::UnsupportedViewShape(err.to_string()))?,
+        target_columns,
+        source: stmt.source,
+        on_conflict: None,
+        subplans: stmt.subplans,
+    })
+}
+
+pub(crate) fn rewrite_bound_update_auto_view_target(
+    stmt: BoundUpdateStatement,
+    catalog: &dyn CatalogLookup,
+) -> Result<BoundUpdateStatement, ViewDmlRewriteError> {
+    if !stmt.targets.iter().any(|target| target.relkind == 'v') {
+        return Ok(stmt);
+    }
+
+    let [target] = stmt.targets.as_slice() else {
+        return Err(ViewDmlRewriteError::UnsupportedViewShape(
+            "Views with multiple update targets are not automatically updatable.".into(),
+        ));
+    };
+    if target.relkind != 'v' {
+        return Ok(stmt);
+    }
+
+    let resolved = resolve_auto_updatable_view_target(
+        target.relation_oid,
+        &target.desc,
+        ViewDmlEvent::Update,
+        catalog,
+        &[],
+    )?;
+    let relation_name =
+        relation_display_name(catalog, resolved.base_relation.relation_oid, &target.relation_name);
+    let assignments = target
+        .assignments
+        .iter()
+        .map(|assignment| {
+            Ok(BoundAssignment {
+                column_index: map_auto_view_column_index(
+                    &target.desc,
+                    &resolved.updatable_column_map,
+                    assignment.column_index,
+                )?,
+                subscripts: rewrite_assignment_subscripts(
+                    &assignment.subscripts,
+                    &resolved.visible_output_exprs,
+                ),
+                expr: rewrite_local_vars_for_output_exprs(
+                    assignment.expr.clone(),
+                    1,
+                    &resolved.visible_output_exprs,
+                ),
+            })
+        })
+        .collect::<Result<Vec<_>, ViewDmlRewriteError>>()?;
+    let predicate = and_predicates(
+        target.predicate.as_ref().map(|expr| {
+            rewrite_local_vars_for_output_exprs(expr.clone(), 1, &resolved.visible_output_exprs)
+        }),
+        resolved.combined_predicate.clone(),
+    );
+
+    let targets = auto_view_base_children(&resolved, catalog)?
+        .into_iter()
+        .map(|child| {
+            build_update_target(
+                &relation_name,
+                &resolved.base_relation.desc,
+                &assignments,
+                predicate.as_ref(),
+                &child,
+                catalog,
+            )
+            .map_err(|err| ViewDmlRewriteError::UnsupportedViewShape(err.to_string()))
+        })
+        .collect::<Result<Vec<_>, ViewDmlRewriteError>>()?;
+
+    Ok(BoundUpdateStatement {
+        targets,
+        subplans: stmt.subplans,
+    })
+}
+
+pub(crate) fn rewrite_bound_delete_auto_view_target(
+    stmt: BoundDeleteStatement,
+    catalog: &dyn CatalogLookup,
+) -> Result<BoundDeleteStatement, ViewDmlRewriteError> {
+    if !stmt.targets.iter().any(|target| target.relkind == 'v') {
+        return Ok(stmt);
+    }
+
+    let [target] = stmt.targets.as_slice() else {
+        return Err(ViewDmlRewriteError::UnsupportedViewShape(
+            "Views with multiple delete targets are not automatically updatable.".into(),
+        ));
+    };
+    if target.relkind != 'v' {
+        return Ok(stmt);
+    }
+
+    let resolved = resolve_auto_updatable_view_target(
+        target.relation_oid,
+        &target.desc,
+        ViewDmlEvent::Delete,
+        catalog,
+        &[],
+    )?;
+    let relation_name =
+        relation_display_name(catalog, resolved.base_relation.relation_oid, &target.relation_name);
+    let predicate = and_predicates(
+        target.predicate.as_ref().map(|expr| {
+            rewrite_local_vars_for_output_exprs(expr.clone(), 1, &resolved.visible_output_exprs)
+        }),
+        resolved.combined_predicate.clone(),
+    );
+
+    let targets = auto_view_base_children(&resolved, catalog)?
+        .into_iter()
+        .map(|child| {
+            build_delete_target(
+                &relation_name,
+                &resolved.base_relation.desc,
+                predicate.as_ref(),
+                &child,
+                catalog,
+            )
+            .map_err(|err| ViewDmlRewriteError::UnsupportedViewShape(err.to_string()))
+        })
+        .collect::<Result<Vec<_>, ViewDmlRewriteError>>()?;
+
+    Ok(BoundDeleteStatement {
+        targets,
+        subplans: stmt.subplans,
+    })
+}
+
+fn auto_view_base_children(
+    resolved: &crate::backend::rewrite::ResolvedAutoViewTarget,
+    catalog: &dyn CatalogLookup,
+) -> Result<Vec<BoundRelation>, ViewDmlRewriteError> {
+    let relation_oids = if resolved.base_inh {
+        catalog.find_all_inheritors(resolved.base_relation.relation_oid)
+    } else {
+        vec![resolved.base_relation.relation_oid]
+    };
+    relation_oids
+        .into_iter()
+        .map(|relation_oid| {
+            catalog
+                .relation_by_oid(relation_oid)
+                .ok_or_else(|| ViewDmlRewriteError::UnsupportedViewShape(format!(
+                    "missing inherited child relation {relation_oid}"
+                )))
+        })
+        .collect()
+}
+
+fn and_predicates(left: Option<Expr>, right: Option<Expr>) -> Option<Expr> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(Expr::and(left, right)),
+        (Some(expr), None) | (None, Some(expr)) => Some(expr),
+        (None, None) => None,
+    }
 }
 
 fn build_delete_target(

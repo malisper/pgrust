@@ -58,7 +58,7 @@ fn validate_view_shape(
     Ok(())
 }
 
-pub(crate) fn rewrite_view_relation_query(
+pub(crate) fn load_view_return_query(
     relation_oid: u32,
     relation_desc: &RelationDesc,
     alias: Option<&str>,
@@ -86,4 +86,14 @@ pub(crate) fn rewrite_view_relation_query(
         analyze_select_query_with_outer(&select, catalog, &[], None, &[], &next_views)?;
     validate_view_shape(&query, relation_desc, &display_name)?;
     Ok(query)
+}
+
+pub(crate) fn rewrite_view_relation_query(
+    relation_oid: u32,
+    relation_desc: &RelationDesc,
+    alias: Option<&str>,
+    catalog: &dyn CatalogLookup,
+    expanded_views: &[u32],
+) -> Result<Query, ParseError> {
+    load_view_return_query(relation_oid, relation_desc, alias, catalog, expanded_views)
 }

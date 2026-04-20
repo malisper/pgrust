@@ -19,8 +19,11 @@ use crate::backend::executor::{
 use crate::backend::parser::{
     CatalogLookup, CommentOnRuleStatement, CreateRuleStatement, DropRuleStatement, FromItem,
     ParseError, RuleDoKind, RuleEvent, SelectItem, SelectStatement, Statement,
-    bind_rule_action_statement, bind_rule_qual, validate_rule_definition,
+    bind_rule_action_statement, bind_rule_qual, rewrite_bound_delete_auto_view_target,
+    rewrite_bound_insert_auto_view_target, rewrite_bound_update_auto_view_target,
+    validate_rule_definition,
 };
+use crate::backend::rewrite::{ViewDmlEvent, ViewDmlRewriteError};
 use crate::backend::rewrite::split_stored_rule_action_sql;
 use crate::backend::storage::lmgr::TableLockMode;
 use crate::include::catalog::PgRewriteRow;
@@ -28,6 +31,7 @@ use crate::include::nodes::primnodes::RelationDesc;
 use crate::pgrust::database::TransactionWaiter;
 use crate::pgrust::database::ddl::map_catalog_error;
 use crate::pgrust::database::ddl::{ensure_relation_owner, lookup_rule_relation_for_ddl};
+use crate::pgrust::database::foreign_keys::TableLockRequest;
 use crate::pgrust::database::{AutoCommitGuard, Database};
 
 impl Database {
@@ -376,6 +380,88 @@ struct PreparedRule {
     is_instead: bool,
     qual: Option<crate::backend::executor::Expr>,
     actions: Vec<crate::backend::parser::BoundRuleAction>,
+}
+
+pub(crate) struct PreparedBoundStatement<T> {
+    pub(crate) stmt: T,
+    pub(crate) extra_lock_requests: Vec<TableLockRequest>,
+}
+
+pub(crate) fn prepare_bound_insert_for_execution(
+    stmt: crate::backend::parser::BoundInsertStatement,
+    catalog: &dyn CatalogLookup,
+) -> Result<PreparedBoundStatement<crate::backend::parser::BoundInsertStatement>, ExecError> {
+    if stmt.relkind != 'v'
+        || relation_has_user_rules_for_event(stmt.relation_oid, RuleEvent::Insert, catalog)
+    {
+        return Ok(PreparedBoundStatement {
+            stmt,
+            extra_lock_requests: Vec::new(),
+        });
+    }
+
+    let view_name = stmt.relation_name.clone();
+    let view_rel = stmt.rel;
+    let stmt = rewrite_bound_insert_auto_view_target(stmt, catalog)
+        .map_err(|err| auto_view_prepare_error(&view_name, ViewDmlEvent::Insert, err))?;
+    Ok(PreparedBoundStatement {
+        stmt,
+        extra_lock_requests: vec![(view_rel, TableLockMode::RowExclusive)],
+    })
+}
+
+pub(crate) fn prepare_bound_update_for_execution(
+    stmt: crate::backend::parser::BoundUpdateStatement,
+    catalog: &dyn CatalogLookup,
+) -> Result<PreparedBoundStatement<crate::backend::parser::BoundUpdateStatement>, ExecError> {
+    let Some(view_target) = stmt.targets.iter().find(|target| target.relkind == 'v') else {
+        return Ok(PreparedBoundStatement {
+            stmt,
+            extra_lock_requests: Vec::new(),
+        });
+    };
+    if relation_has_user_rules_for_event(view_target.relation_oid, RuleEvent::Update, catalog) {
+        return Ok(PreparedBoundStatement {
+            stmt,
+            extra_lock_requests: Vec::new(),
+        });
+    }
+
+    let view_name = view_target.relation_name.clone();
+    let view_rel = view_target.rel;
+    let stmt = rewrite_bound_update_auto_view_target(stmt, catalog)
+        .map_err(|err| auto_view_prepare_error(&view_name, ViewDmlEvent::Update, err))?;
+    Ok(PreparedBoundStatement {
+        stmt,
+        extra_lock_requests: vec![(view_rel, TableLockMode::RowExclusive)],
+    })
+}
+
+pub(crate) fn prepare_bound_delete_for_execution(
+    stmt: crate::backend::parser::BoundDeleteStatement,
+    catalog: &dyn CatalogLookup,
+) -> Result<PreparedBoundStatement<crate::backend::parser::BoundDeleteStatement>, ExecError> {
+    let Some(view_target) = stmt.targets.iter().find(|target| target.relkind == 'v') else {
+        return Ok(PreparedBoundStatement {
+            stmt,
+            extra_lock_requests: Vec::new(),
+        });
+    };
+    if relation_has_user_rules_for_event(view_target.relation_oid, RuleEvent::Delete, catalog) {
+        return Ok(PreparedBoundStatement {
+            stmt,
+            extra_lock_requests: Vec::new(),
+        });
+    }
+
+    let view_name = view_target.relation_name.clone();
+    let view_rel = view_target.rel;
+    let stmt = rewrite_bound_delete_auto_view_target(stmt, catalog)
+        .map_err(|err| auto_view_prepare_error(&view_name, ViewDmlEvent::Delete, err))?;
+    Ok(PreparedBoundStatement {
+        stmt,
+        extra_lock_requests: vec![(view_rel, TableLockMode::RowExclusive)],
+    })
 }
 
 pub(crate) fn execute_bound_insert_with_rules(
@@ -876,5 +962,61 @@ fn row_passes_predicate(
         Value::Bool(value) => Ok(value),
         Value::Null => Ok(false),
         other => Err(ExecError::NonBoolQual(other)),
+    }
+}
+
+fn relation_has_user_rules_for_event(
+    relation_oid: u32,
+    event: RuleEvent,
+    catalog: &dyn CatalogLookup,
+) -> bool {
+    catalog
+        .rewrite_rows_for_relation(relation_oid)
+        .into_iter()
+        .any(|row| row.rulename != "_RETURN" && row.ev_type == rule_event_code(event))
+}
+
+fn auto_view_prepare_error(
+    relation_name: &str,
+    event: ViewDmlEvent,
+    err: ViewDmlRewriteError,
+) -> ExecError {
+    if let ViewDmlRewriteError::DeferredFeature(detail) = err {
+        return ExecError::Parse(ParseError::FeatureNotSupported(detail));
+    }
+
+    ExecError::DetailedError {
+        message: format!("cannot {} view \"{}\"", event_verb(event), relation_name),
+        detail: Some(err.detail()),
+        hint: Some(format!(
+            "To enable {} the view, provide an unconditional ON {} DO INSTEAD rule.",
+            event_gerund(event),
+            event_name(event),
+        )),
+        sqlstate: "55000",
+    }
+}
+
+fn event_name(event: ViewDmlEvent) -> &'static str {
+    match event {
+        ViewDmlEvent::Insert => "INSERT",
+        ViewDmlEvent::Update => "UPDATE",
+        ViewDmlEvent::Delete => "DELETE",
+    }
+}
+
+fn event_verb(event: ViewDmlEvent) -> &'static str {
+    match event {
+        ViewDmlEvent::Insert => "insert into",
+        ViewDmlEvent::Update => "update",
+        ViewDmlEvent::Delete => "delete from",
+    }
+}
+
+fn event_gerund(event: ViewDmlEvent) -> &'static str {
+    match event {
+        ViewDmlEvent::Insert => "inserting into",
+        ViewDmlEvent::Update => "updating",
+        ViewDmlEvent::Delete => "deleting from",
     }
 }
