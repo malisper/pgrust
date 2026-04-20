@@ -39,6 +39,8 @@ pub fn bootstrap_catalog_entry(kind: BootstrapCatalogKind) -> CatalogEntry {
         relhassubclass: false,
         relhastriggers: false,
         relispartition: false,
+        relrowsecurity: false,
+        relforcerowsecurity: false,
         relpages: 0,
         reltuples: 0.0,
         desc: bootstrap_relation_desc(kind),
@@ -72,12 +74,12 @@ mod tests {
             desc.columns
                 .iter()
                 .rev()
-                .nth(6)
+                .nth(8)
                 .map(|col| col.name.as_str()),
             Some("relkind")
         );
         assert_eq!(
-            desc.columns.iter().rev().nth(6).map(|col| col.sql_type),
+            desc.columns.iter().rev().nth(8).map(|col| col.sql_type),
             Some(SqlType::new(SqlTypeKind::InternalChar))
         );
     }

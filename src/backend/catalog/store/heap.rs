@@ -1477,6 +1477,111 @@ impl CatalogStore {
         Ok((old_trigger, effect))
     }
 
+    pub fn create_policy_mvcc(
+        &mut self,
+        mut row: crate::include::catalog::PgPolicyRow,
+        ctx: &CatalogWriteContext,
+    ) -> Result<(u32, CatalogMutationEffect), CatalogError> {
+        let catcache = visible_catalog_caches_for_ctx(self, ctx)?.0;
+        if catcache
+            .policy_rows_for_relation(row.polrelid)
+            .iter()
+            .any(|existing| existing.polname.eq_ignore_ascii_case(&row.polname))
+        {
+            return Err(CatalogError::UniqueViolation(
+                "pg_policy_polrelid_polname_index".into(),
+            ));
+        }
+        if catcache.class_by_oid(row.polrelid).is_none() {
+            return Err(CatalogError::UnknownTable(row.polrelid.to_string()));
+        }
+        let mut control = self.control_state()?;
+        if row.oid == 0 {
+            row.oid = control.next_oid;
+        }
+        control.next_oid = control.next_oid.max(row.oid.saturating_add(1));
+        self.persist_control_values(control.next_oid, control.next_rel_number)?;
+        insert_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                policies: vec![row.clone()],
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &[BootstrapCatalogKind::PgPolicy],
+        )?;
+        self.control = control;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &[BootstrapCatalogKind::PgPolicy]);
+        effect_record_oid(&mut effect.relation_oids, row.polrelid);
+        Ok((row.oid, effect))
+    }
+
+    pub fn replace_policy_mvcc(
+        &mut self,
+        old_row: &crate::include::catalog::PgPolicyRow,
+        mut row: crate::include::catalog::PgPolicyRow,
+        ctx: &CatalogWriteContext,
+    ) -> Result<(u32, CatalogMutationEffect), CatalogError> {
+        let catcache = visible_catalog_caches_for_ctx(self, ctx)?.0;
+        let old_visible = policy_row_visible(&catcache, old_row.polrelid, &old_row.polname)?;
+        if catcache.policy_rows_for_relation(row.polrelid).iter().any(|existing| {
+            existing.oid != old_visible.oid && existing.polname.eq_ignore_ascii_case(&row.polname)
+        }) {
+            return Err(CatalogError::UniqueViolation(
+                "pg_policy_polrelid_polname_index".into(),
+            ));
+        }
+        row.oid = old_visible.oid;
+        delete_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                policies: vec![old_visible.clone()],
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &[BootstrapCatalogKind::PgPolicy],
+        )?;
+        insert_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                policies: vec![row.clone()],
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &[BootstrapCatalogKind::PgPolicy],
+        )?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &[BootstrapCatalogKind::PgPolicy]);
+        effect_record_oid(&mut effect.relation_oids, row.polrelid);
+        Ok((row.oid, effect))
+    }
+
+    pub fn drop_policy_mvcc(
+        &mut self,
+        relation_oid: u32,
+        policy_name: &str,
+        ctx: &CatalogWriteContext,
+    ) -> Result<(crate::include::catalog::PgPolicyRow, CatalogMutationEffect), CatalogError> {
+        let catcache = visible_catalog_caches_for_ctx(self, ctx)?.0;
+        let old_policy = policy_row_visible(&catcache, relation_oid, policy_name)?;
+        delete_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                policies: vec![old_policy.clone()],
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &[BootstrapCatalogKind::PgPolicy],
+        )?;
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &[BootstrapCatalogKind::PgPolicy]);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        Ok((old_policy, effect))
+    }
+
     pub fn create_relation_inheritance_mvcc(
         &mut self,
         relation_oid: u32,
@@ -3046,6 +3151,30 @@ impl CatalogStore {
         Ok(effect)
     }
 
+    pub fn alter_relation_row_security_mvcc(
+        &mut self,
+        relation_oid: u32,
+        relrowsecurity: Option<bool>,
+        relforcerowsecurity: Option<bool>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let (_old_entry, _new_entry, _, kinds) =
+            mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, _control| {
+                if let Some(value) = relrowsecurity {
+                    entry.relrowsecurity = value;
+                }
+                if let Some(value) = relforcerowsecurity {
+                    entry.relforcerowsecurity = value;
+                }
+                Ok(((), vec![BootstrapCatalogKind::PgClass]))
+            })?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        Ok(effect)
+    }
+
     pub fn set_relation_analyze_stats_mvcc(
         &mut self,
         relation_oid: u32,
@@ -3438,6 +3567,8 @@ fn build_relation_entry(
         relhassubclass: false,
         relhastriggers: false,
         relispartition: false,
+        relrowsecurity: false,
+        relforcerowsecurity: false,
         relpages,
         reltuples,
         desc,
@@ -3533,6 +3664,8 @@ fn build_index_entry(
         relhassubclass: false,
         relhastriggers: false,
         relispartition: false,
+        relrowsecurity: false,
+        relforcerowsecurity: false,
         relpages: 0,
         reltuples: -1.0,
         desc: RelationDesc {
@@ -3791,6 +3924,18 @@ fn trigger_row_visible(
         .ok_or_else(|| CatalogError::UnknownTable(trigger_name.to_string()))
 }
 
+fn policy_row_visible(
+    catcache: &CatCache,
+    relation_oid: u32,
+    policy_name: &str,
+) -> Result<crate::include::catalog::PgPolicyRow, CatalogError> {
+    catcache
+        .policy_rows_for_relation(relation_oid)
+        .into_iter()
+        .find(|row| row.polname.eq_ignore_ascii_case(policy_name))
+        .ok_or_else(|| CatalogError::UnknownTable(policy_name.to_string()))
+}
+
 fn rewrite_row_visible(
     catcache: &CatCache,
     rewrite_oid: u32,
@@ -3942,6 +4087,8 @@ fn class_row_for_relation_name(relation_name: &str, entry: &CatalogEntry) -> PgC
         relhassubclass: entry.relhassubclass,
         relhastriggers: entry.relhastriggers,
         relispartition: entry.relispartition,
+        relrowsecurity: entry.relrowsecurity,
+        relforcerowsecurity: entry.relforcerowsecurity,
         relnatts: entry.desc.columns.len() as i16,
         relpages: entry.relpages,
         reltuples: entry.reltuples,
@@ -4122,6 +4269,8 @@ fn catalog_entry_from_visible_relation(
         relhassubclass: class_row.relhassubclass,
         relhastriggers: relation.relhastriggers,
         relispartition: class_row.relispartition,
+        relrowsecurity: class_row.relrowsecurity,
+        relforcerowsecurity: class_row.relforcerowsecurity,
         relpages: class_row.relpages,
         reltuples: class_row.reltuples,
         desc: relation.desc.clone(),

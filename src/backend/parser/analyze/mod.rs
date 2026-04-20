@@ -329,6 +329,13 @@ pub trait CatalogLookup {
         Vec::new()
     }
 
+    fn policy_rows_for_relation(
+        &self,
+        _relation_oid: u32,
+    ) -> Vec<crate::include::catalog::PgPolicyRow> {
+        Vec::new()
+    }
+
     fn constraint_rows_for_relation(&self, _relation_oid: u32) -> Vec<PgConstraintRow> {
         Vec::new()
     }
@@ -506,6 +513,14 @@ impl CatalogLookup for Catalog {
     ) -> Vec<crate::include::catalog::PgTriggerRow> {
         crate::backend::utils::cache::catcache::CatCache::from_catalog(self)
             .trigger_rows_for_relation(relation_oid)
+    }
+
+    fn policy_rows_for_relation(
+        &self,
+        relation_oid: u32,
+    ) -> Vec<crate::include::catalog::PgPolicyRow> {
+        crate::backend::utils::cache::catcache::CatCache::from_catalog(self)
+            .policy_rows_for_relation(relation_oid)
     }
 
     fn constraint_rows_for_relation(&self, relation_oid: u32) -> Vec<PgConstraintRow> {

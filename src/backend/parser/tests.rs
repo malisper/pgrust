@@ -119,6 +119,8 @@ fn test_catalog_entry(rel_number: u32, desc: RelationDesc) -> CatalogEntry {
         relhastriggers: false,
         relhassubclass: false,
         relispartition: false,
+        relrowsecurity: false,
+        relforcerowsecurity: false,
         relpages: 0,
         reltuples: 0.0,
         desc,
@@ -169,6 +171,8 @@ fn people_view_entry() -> CatalogEntry {
         relhastriggers: false,
         relhassubclass: false,
         relispartition: false,
+        relrowsecurity: false,
+        relforcerowsecurity: false,
         relpages: 0,
         reltuples: 0.0,
         desc: RelationDesc {
@@ -279,6 +283,8 @@ fn catalog_with_people_id_index() -> Catalog {
             relhastriggers: false,
             relhassubclass: false,
             relispartition: false,
+            relrowsecurity: false,
+            relforcerowsecurity: false,
             relpages: 0,
             reltuples: 0.0,
             desc: RelationDesc {
@@ -324,6 +330,8 @@ fn catalog_with_people_primary_key() -> Catalog {
             relhastriggers: false,
             relhassubclass: false,
             relispartition: false,
+            relrowsecurity: false,
+            relforcerowsecurity: false,
             relpages: 0,
             reltuples: 0.0,
             desc: RelationDesc {
@@ -402,6 +410,8 @@ fn catalog_with_people_partial_unique_index() -> Catalog {
             relhastriggers: false,
             relhassubclass: false,
             relispartition: false,
+            relrowsecurity: false,
+            relforcerowsecurity: false,
             relpages: 0,
             reltuples: 0.0,
             desc: RelationDesc {
@@ -456,6 +466,8 @@ fn catalog_with_text_parent_primary_key() -> Catalog {
             relhastriggers: false,
             relhassubclass: false,
             relispartition: false,
+            relrowsecurity: false,
+            relforcerowsecurity: false,
             relpages: 0,
             reltuples: 0.0,
             desc: RelationDesc {
@@ -499,6 +511,7 @@ fn visible_catalog_without_text_input_cast(
         base.index_rows(),
         base.rewrite_rows(),
         base.trigger_rows(),
+        base.policy_rows(),
         base.am_rows(),
         base.amop_rows(),
         base.amproc_rows(),
@@ -551,6 +564,7 @@ fn visible_catalog_without_operator(
         base.index_rows(),
         base.rewrite_rows(),
         base.trigger_rows(),
+        base.policy_rows(),
         base.am_rows(),
         base.amop_rows(),
         base.amproc_rows(),
@@ -1302,6 +1316,113 @@ fn parse_alter_table_set_statement() {
             table_name: "attmp".into(),
             column_name: "i".into(),
             statistics_target: 150,
+        })
+    );
+}
+
+#[test]
+fn parse_alter_table_row_security_statements() {
+    let cases = [
+        (
+            "alter table items enable row level security",
+            false,
+            false,
+            AlterTableRowSecurityAction::Enable,
+        ),
+        (
+            "alter table items disable row level security",
+            false,
+            false,
+            AlterTableRowSecurityAction::Disable,
+        ),
+        (
+            "alter table items force row level security",
+            false,
+            false,
+            AlterTableRowSecurityAction::Force,
+        ),
+        (
+            "alter table if exists only items no force row level security",
+            true,
+            true,
+            AlterTableRowSecurityAction::NoForce,
+        ),
+    ];
+
+    for (sql, if_exists, only, action) in cases {
+        let stmt = parse_statement(sql).unwrap();
+        assert_eq!(
+            stmt,
+            Statement::AlterTableSetRowSecurity(AlterTableSetRowSecurityStatement {
+                if_exists,
+                only,
+                table_name: "items".into(),
+                action,
+            })
+        );
+    }
+}
+
+#[test]
+fn parse_policy_statements() {
+    let stmt = parse_statement(
+        "create policy p1 on items as restrictive for select to app_role using (a > 0) with check (a > 1)",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreatePolicy(CreatePolicyStatement {
+            policy_name: "p1".into(),
+            table_name: "items".into(),
+            permissive: false,
+            command: crate::include::catalog::PolicyCommand::Select,
+            role_names: vec!["app_role".into()],
+            using_expr: Some(parse_expr("a > 0").unwrap()),
+            using_sql: Some("a > 0".into()),
+            with_check_expr: Some(parse_expr("a > 1").unwrap()),
+            with_check_sql: Some("a > 1".into()),
+        })
+    );
+
+    let stmt =
+        parse_statement("alter policy p1 on items rename to p2").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterPolicy(AlterPolicyStatement {
+            policy_name: "p1".into(),
+            table_name: "items".into(),
+            action: AlterPolicyAction::Rename {
+                new_name: "p2".into(),
+            },
+        })
+    );
+
+    let stmt = parse_statement("drop policy if exists p2 on items").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::DropPolicy(DropPolicyStatement {
+            if_exists: true,
+            policy_name: "p2".into(),
+            table_name: "items".into(),
+        })
+    );
+
+    let stmt = parse_statement(
+        "create policy p3 on items as permissive\n    using (a > 2);\n",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreatePolicy(CreatePolicyStatement {
+            policy_name: "p3".into(),
+            table_name: "items".into(),
+            permissive: true,
+            command: crate::include::catalog::PolicyCommand::All,
+            role_names: vec!["public".into()],
+            using_expr: Some(parse_expr("a > 2").unwrap()),
+            using_sql: Some("a > 2".into()),
+            with_check_expr: None,
+            with_check_sql: None,
         })
     );
 }

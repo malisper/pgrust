@@ -155,6 +155,8 @@ fn main() -> Result<(), ExecError> {
             relpersistence: 'p',
             relkind: 'r',
             relhastriggers: false,
+            relrowsecurity: false,
+            relforcerowsecurity: false,
             desc: desc(),
             index: None,
         },

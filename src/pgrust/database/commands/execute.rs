@@ -319,6 +319,18 @@ impl Database {
                     alter_stmt,
                     configured_search_path,
                 ),
+            Statement::AlterTableSetRowSecurity(ref alter_stmt) => self
+                .execute_alter_table_set_row_security_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
+            Statement::AlterPolicy(ref alter_stmt) => self
+                .execute_alter_policy_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
             Statement::Show(_)
             | Statement::Set(_)
             | Statement::Reset(_)
@@ -824,6 +836,12 @@ impl Database {
                     create_stmt,
                     configured_search_path,
                 ),
+            Statement::CreatePolicy(ref create_stmt) => self
+                .execute_create_policy_stmt_with_search_path(
+                    client_id,
+                    create_stmt,
+                    configured_search_path,
+                ),
             Statement::CreateType(ref create_stmt) => self
                 .execute_create_type_stmt_with_search_path(
                     client_id,
@@ -898,6 +916,12 @@ impl Database {
                 ),
             Statement::DropTrigger(ref drop_stmt) => self
                 .execute_drop_trigger_stmt_with_search_path(
+                    client_id,
+                    drop_stmt,
+                    configured_search_path,
+                ),
+            Statement::DropPolicy(ref drop_stmt) => self
+                .execute_drop_policy_stmt_with_search_path(
                     client_id,
                     drop_stmt,
                     configured_search_path,
