@@ -848,7 +848,7 @@ pub struct InsertStatement {
     pub columns: Option<Vec<AssignmentTarget>>,
     pub source: InsertSource,
     pub on_conflict: Option<OnConflictClause>,
-    pub returning_all: bool,
+    pub returning: Vec<SelectItem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2168,7 +2168,7 @@ pub struct UpdateStatement {
     pub only: bool,
     pub assignments: Vec<Assignment>,
     pub where_clause: Option<SqlExpr>,
-    pub returning_all: bool,
+    pub returning: Vec<SelectItem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
