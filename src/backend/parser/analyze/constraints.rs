@@ -77,6 +77,7 @@ pub struct BoundForeignKeyConstraint {
     pub relation_name: String,
     pub column_names: Vec<String>,
     pub column_indexes: Vec<usize>,
+    pub match_type: ForeignKeyMatchType,
     pub referenced_relation_name: String,
     pub referenced_relation_oid: u32,
     pub referenced_rel: crate::backend::storage::smgr::RelFileLocator,
@@ -876,8 +877,8 @@ fn validate_alter_foreign_key(
 fn validate_foreign_key(
     attributes: &ConstraintAttributes,
     match_type: ForeignKeyMatchType,
-    on_delete: ForeignKeyAction,
-    on_update: ForeignKeyAction,
+    _on_delete: ForeignKeyAction,
+    _on_update: ForeignKeyAction,
 ) -> Result<(), ParseError> {
     if attributes.deferrable.is_some() || attributes.initially_deferred.is_some() {
         if attributes.enforced == Some(false) {
@@ -886,28 +887,13 @@ fn validate_foreign_key(
             ));
         }
     }
-    if match_type != ForeignKeyMatchType::Simple {
+    if match_type == ForeignKeyMatchType::Partial {
         return Err(ParseError::FeatureNotSupported(format!(
             "FOREIGN KEY MATCH {}",
             foreign_key_match_keyword(match_type)
         )));
     }
-    validate_foreign_key_action("ON DELETE", on_delete)?;
-    validate_foreign_key_action("ON UPDATE", on_update)?;
     Ok(())
-}
-
-fn validate_foreign_key_action(clause: &str, action: ForeignKeyAction) -> Result<(), ParseError> {
-    if matches!(
-        action,
-        ForeignKeyAction::NoAction | ForeignKeyAction::Restrict
-    ) {
-        return Ok(());
-    }
-    Err(ParseError::FeatureNotSupported(format!(
-        "FOREIGN KEY {clause} {}",
-        foreign_key_action_keyword(action)
-    )))
 }
 
 fn resolve_pending_self_referenced_key(
@@ -1102,6 +1088,9 @@ fn bind_outbound_foreign_key_constraint(
         .index_relations_for_heap(referenced_relation.relation_oid)
         .into_iter()
         .find(|index| index.relation_oid == row.conindid)
+        .or_else(|| {
+            find_exact_index_for_attnums(catalog, referenced_relation.relation_oid, &referenced_attnums, true)
+        })
         .ok_or_else(|| ParseError::UnexpectedToken {
             expected: "referenced foreign-key index",
             actual: format!("missing referenced index {}", row.conindid),
@@ -1112,6 +1101,7 @@ fn bind_outbound_foreign_key_constraint(
         relation_name: relation_display_name(catalog, relation_oid, &relation_oid.to_string()),
         column_names: attnums_to_column_names(desc, &local_attnums)?,
         column_indexes: attnums_to_column_indexes(desc, &local_attnums)?,
+        match_type: foreign_key_match_from_code(row.confmatchtype)?,
         referenced_relation_name: relation_display_name(
             catalog,
             referenced_relation.relation_oid,
@@ -1384,16 +1374,6 @@ fn find_exact_index_for_attnums(
         })
 }
 
-fn foreign_key_action_keyword(action: ForeignKeyAction) -> &'static str {
-    match action {
-        ForeignKeyAction::NoAction => "NO ACTION",
-        ForeignKeyAction::Restrict => "RESTRICT",
-        ForeignKeyAction::Cascade => "CASCADE",
-        ForeignKeyAction::SetNull => "SET NULL",
-        ForeignKeyAction::SetDefault => "SET DEFAULT",
-    }
-}
-
 fn foreign_key_match_keyword(match_type: ForeignKeyMatchType) -> &'static str {
     match match_type {
         ForeignKeyMatchType::Simple => "SIMPLE",
@@ -1411,6 +1391,18 @@ fn foreign_key_action_from_code(code: char) -> Result<ForeignKeyAction, ParseErr
         'd' => Ok(ForeignKeyAction::SetDefault),
         other => Err(ParseError::UnexpectedToken {
             expected: "foreign-key action code",
+            actual: other.to_string(),
+        }),
+    }
+}
+
+fn foreign_key_match_from_code(code: char) -> Result<ForeignKeyMatchType, ParseError> {
+    match code {
+        's' | ' ' => Ok(ForeignKeyMatchType::Simple),
+        'f' => Ok(ForeignKeyMatchType::Full),
+        'p' => Ok(ForeignKeyMatchType::Partial),
+        other => Err(ParseError::UnexpectedToken {
+            expected: "foreign-key match code",
             actual: other.to_string(),
         }),
     }

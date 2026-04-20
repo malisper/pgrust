@@ -5286,10 +5286,9 @@ fn lower_create_table_rejects_unsupported_constraint_attributes() {
     let Statement::CreateTable(ct) = stmt else {
         panic!("expected create table");
     };
-    assert!(matches!(
-        lower_create_table(&ct, &catalog_with_people_primary_key()),
-        Err(ParseError::FeatureNotSupported(feature)) if feature == "FOREIGN KEY NOT VALID"
-    ));
+    let lowered = lower_create_table(&ct, &catalog_with_people_id_name_unique_index()).unwrap();
+    assert_eq!(lowered.foreign_key_actions.len(), 1);
+    assert!(lowered.foreign_key_actions[0].not_valid);
 }
 
 #[test]
@@ -5318,7 +5317,7 @@ fn lower_create_table_resolves_foreign_keys_against_primary_keys() {
     let Statement::CreateTable(ct) = stmt else {
         panic!("expected create table");
     };
-    let lowered = lower_create_table(&ct, &catalog_with_people_primary_key()).unwrap();
+    let lowered = lower_create_table(&ct, &catalog_with_people_id_name_unique_index()).unwrap();
     assert_eq!(lowered.foreign_key_actions.len(), 1);
     let foreign_key = &lowered.foreign_key_actions[0];
     assert_eq!(foreign_key.constraint_name, "pets_owner_id_fkey");
@@ -5329,6 +5328,23 @@ fn lower_create_table_resolves_foreign_keys_against_primary_keys() {
     assert_eq!(foreign_key.on_delete, ForeignKeyAction::NoAction);
     assert_eq!(foreign_key.on_update, ForeignKeyAction::NoAction);
     assert!(!foreign_key.self_referential);
+}
+
+#[test]
+fn lower_create_table_supports_match_full_and_foreign_key_actions() {
+    let stmt = parse_statement(
+        "create table pets (owner_id int4, owner_name text, foreign key (owner_id, owner_name) references people(id, name) match full on delete set null on update cascade)",
+    )
+    .unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+    let lowered = lower_create_table(&ct, &catalog_with_people_id_name_unique_index()).unwrap();
+    assert_eq!(lowered.foreign_key_actions.len(), 1);
+    let foreign_key = &lowered.foreign_key_actions[0];
+    assert_eq!(foreign_key.match_type, ForeignKeyMatchType::Full);
+    assert_eq!(foreign_key.on_delete, ForeignKeyAction::SetNull);
+    assert_eq!(foreign_key.on_update, ForeignKeyAction::Cascade);
 }
 
 #[test]

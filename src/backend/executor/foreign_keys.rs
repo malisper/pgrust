@@ -8,7 +8,9 @@ use crate::backend::access::heap::heapam::{
 };
 use crate::backend::access::index::indexam;
 use crate::backend::executor::exec_tuples::CompiledTupleDecoder;
-use crate::backend::parser::{BoundForeignKeyConstraint, BoundReferencedByForeignKey};
+use crate::backend::parser::{
+    BoundForeignKeyConstraint, BoundReferencedByForeignKey, ForeignKeyMatchType,
+};
 use crate::include::access::scankey::ScanKeyData;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::{SlotKind, ToastRelationRef, TupleSlot};
@@ -49,7 +51,26 @@ pub(crate) fn enforce_outbound_foreign_keys(
         }
         let key_values = extract_key_values(values, &constraint.column_indexes);
         if key_values.iter().any(|value| matches!(value, Value::Null)) {
-            continue;
+            match constraint.match_type {
+                ForeignKeyMatchType::Simple => continue,
+                ForeignKeyMatchType::Full => {
+                    if key_values.iter().all(|value| matches!(value, Value::Null)) {
+                        continue;
+                    }
+                    return Err(ExecError::ForeignKeyViolation {
+                        constraint: constraint.constraint_name.clone(),
+                        message: format!(
+                            "insert or update on table \"{relation_name}\" violates foreign key constraint \"{}\"",
+                            constraint.constraint_name
+                        ),
+                        detail: Some(
+                            "MATCH FULL does not allow mixing of null and nonnull key values."
+                                .into(),
+                        ),
+                    });
+                }
+                ForeignKeyMatchType::Partial => continue,
+            }
         }
         if maybe_defer_constraint(
             ctx,
