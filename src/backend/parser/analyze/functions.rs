@@ -571,6 +571,7 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::MakeDate => args.len() == 3,
             BuiltinScalarFunction::GetDatabaseEncoding => args.is_empty(),
             BuiltinScalarFunction::PgRustInternalBinaryCoercible => args.len() == 2,
+            BuiltinScalarFunction::PgRustTestFdwHandler => args.is_empty(),
             BuiltinScalarFunction::PgRustTestEncSetup => args.is_empty(),
             BuiltinScalarFunction::PgRustTestEncConversion => args.len() == 4,
             BuiltinScalarFunction::PgTypeof => args.len() == 1,
@@ -1237,6 +1238,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::PgRustInternalBinaryCoercible,
         ),
         (
+            "pg_rust_test_fdw_handler",
+            BuiltinScalarFunction::PgRustTestFdwHandler,
+        ),
+        (
             "pg_rust_test_enc_setup",
             BuiltinScalarFunction::PgRustTestEncSetup,
         ),
@@ -1848,6 +1853,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::SetVal
             | BuiltinScalarFunction::PgGetSerialSequence
             | BuiltinScalarFunction::GetDatabaseEncoding
+            | BuiltinScalarFunction::PgRustTestFdwHandler
             | BuiltinScalarFunction::PgStatGetCheckpointerNumTimed
             | BuiltinScalarFunction::PgStatGetCheckpointerNumRequested
             | BuiltinScalarFunction::PgStatGetCheckpointerNumPerformed

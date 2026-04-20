@@ -484,6 +484,12 @@ fn array_element_layout(
                 details: "trigger arrays are unsupported".into(),
             });
         }
+        SqlTypeKind::FdwHandler => {
+            return Err(ExecError::InvalidStorageValue {
+                column: column.into(),
+                details: "fdw_handler arrays are unsupported".into(),
+            });
+        }
         SqlTypeKind::Record | SqlTypeKind::Composite => (-1, AttributeAlign::Double),
         SqlTypeKind::Int2 => (2, AttributeAlign::Short),
         SqlTypeKind::Int4
@@ -751,6 +757,10 @@ fn decode_array_element_value(
         SqlTypeKind::Trigger => Err(ExecError::InvalidStorageValue {
             column: column.into(),
             details: "trigger arrays are unsupported".into(),
+        }),
+        SqlTypeKind::FdwHandler => Err(ExecError::InvalidStorageValue {
+            column: column.into(),
+            details: "fdw_handler arrays are unsupported".into(),
         }),
         SqlTypeKind::Record | SqlTypeKind::Composite => {
             decode_composite_datum(bytes).map(Value::Record)
