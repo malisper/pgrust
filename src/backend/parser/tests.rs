@@ -7836,7 +7836,7 @@ fn parse_insert_alias_and_begin_isolation_level() {
 }
 
 #[test]
-fn parse_insert_and_update_returning_targets() {
+fn parse_dml_returning_targets() {
     assert!(matches!(
         parse_statement("insert into people (id) values (1) returning *").unwrap(),
         Statement::Insert(InsertStatement {
@@ -7871,6 +7871,29 @@ fn parse_insert_and_update_returning_targets() {
                         func_variadic: false,
                         over: None,
                     },
+                },
+            ]
+    ));
+
+    assert!(matches!(
+        parse_statement("delete from people where id = 1 returning people.*, id + 1 as next_id")
+            .unwrap(),
+        Statement::Delete(DeleteStatement {
+            table_name,
+            returning,
+            ..
+        }) if table_name == "people"
+            && returning == vec![
+                SelectItem {
+                    output_name: "*".into(),
+                    expr: SqlExpr::Column("people.*".into()),
+                },
+                SelectItem {
+                    output_name: "next_id".into(),
+                    expr: SqlExpr::Add(
+                        Box::new(SqlExpr::Column("id".into())),
+                        Box::new(SqlExpr::IntegerLiteral("1".into())),
+                    ),
                 },
             ]
     ));

@@ -2188,6 +2188,7 @@ pub struct DeleteStatement {
     pub table_name: String,
     pub only: bool,
     pub where_clause: Option<SqlExpr>,
+    pub returning: Vec<SelectItem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
