@@ -120,6 +120,8 @@ fn test_catalog_entry(rel_number: u32, desc: RelationDesc) -> CatalogEntry {
         relhastriggers: false,
         relhassubclass: false,
         relispartition: false,
+        relrowsecurity: false,
+        relforcerowsecurity: false,
         relpages: 0,
         reltuples: 0.0,
         desc,
@@ -170,6 +172,8 @@ fn people_view_entry() -> CatalogEntry {
         relhastriggers: false,
         relhassubclass: false,
         relispartition: false,
+        relrowsecurity: false,
+        relforcerowsecurity: false,
         relpages: 0,
         reltuples: 0.0,
         desc: RelationDesc {
@@ -280,6 +284,8 @@ fn catalog_with_people_id_index() -> Catalog {
             relhastriggers: false,
             relhassubclass: false,
             relispartition: false,
+            relrowsecurity: false,
+            relforcerowsecurity: false,
             relpages: 0,
             reltuples: 0.0,
             desc: RelationDesc {
@@ -325,6 +331,8 @@ fn catalog_with_people_primary_key() -> Catalog {
             relhastriggers: false,
             relhassubclass: false,
             relispartition: false,
+            relrowsecurity: false,
+            relforcerowsecurity: false,
             relpages: 0,
             reltuples: 0.0,
             desc: RelationDesc {
@@ -403,6 +411,8 @@ fn catalog_with_people_partial_unique_index() -> Catalog {
             relhastriggers: false,
             relhassubclass: false,
             relispartition: false,
+            relrowsecurity: false,
+            relforcerowsecurity: false,
             relpages: 0,
             reltuples: 0.0,
             desc: RelationDesc {
@@ -457,6 +467,8 @@ fn catalog_with_text_parent_primary_key() -> Catalog {
             relhastriggers: false,
             relhassubclass: false,
             relispartition: false,
+            relrowsecurity: false,
+            relforcerowsecurity: false,
             relpages: 0,
             reltuples: 0.0,
             desc: RelationDesc {
@@ -1252,6 +1264,49 @@ fn parse_alter_table_set_statement() {
             }],
         })
     );
+}
+
+#[test]
+fn parse_alter_table_row_security_statements() {
+    let cases = [
+        (
+            "alter table items enable row level security",
+            false,
+            false,
+            AlterTableRowSecurityAction::Enable,
+        ),
+        (
+            "alter table items disable row level security",
+            false,
+            false,
+            AlterTableRowSecurityAction::Disable,
+        ),
+        (
+            "alter table items force row level security",
+            false,
+            false,
+            AlterTableRowSecurityAction::Force,
+        ),
+        (
+            "alter table if exists only items no force row level security",
+            true,
+            true,
+            AlterTableRowSecurityAction::NoForce,
+        ),
+    ];
+
+    for (sql, if_exists, only, action) in cases {
+        let stmt = parse_statement(sql).unwrap();
+        assert_eq!(
+            stmt,
+            Statement::AlterTableSetRowSecurity(AlterTableSetRowSecurityStatement {
+                if_exists,
+                only,
+                table_name: "items".into(),
+                action,
+            })
+        );
+    }
 }
 
 #[test]

@@ -254,9 +254,11 @@ pub(crate) fn pg_class_row_from_values(values: Vec<Value>) -> Result<PgClassRow,
         relhassubclass: expect_bool(&values[11])?,
         relhastriggers: expect_bool(&values[12])?,
         relispartition: expect_bool(&values[13])?,
-        relnatts: expect_int16(&values[14])?,
-        relpages: expect_int32(&values[15])?,
-        reltuples: expect_float64(&values[16])?,
+        relrowsecurity: expect_bool(&values[14])?,
+        relforcerowsecurity: expect_bool(&values[15])?,
+        relnatts: expect_int16(&values[16])?,
+        relpages: expect_int32(&values[17])?,
+        reltuples: expect_float64(&values[18])?,
     })
 }
 
@@ -815,6 +817,8 @@ fn pg_class_row_values(row: PgClassRow) -> Vec<Value> {
         Value::Bool(row.relhassubclass),
         Value::Bool(row.relhastriggers),
         Value::Bool(row.relispartition),
+        Value::Bool(row.relrowsecurity),
+        Value::Bool(row.relforcerowsecurity),
         Value::Int16(row.relnatts),
         Value::Int32(row.relpages),
         Value::Float64(row.reltuples),

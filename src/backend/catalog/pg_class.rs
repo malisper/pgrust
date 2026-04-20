@@ -16,6 +16,8 @@ pub fn relkind_for_plain_table() -> PgClassRow {
         relhassubclass: false,
         relhastriggers: false,
         relispartition: false,
+        relrowsecurity: false,
+        relforcerowsecurity: false,
         relnatts: 0,
         relpages: 0,
         reltuples: 0.0,

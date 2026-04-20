@@ -13,6 +13,7 @@ mod opclass;
 mod owner;
 mod privilege;
 mod rename;
+mod row_security;
 mod role;
 pub(crate) mod rules;
 mod schema;
