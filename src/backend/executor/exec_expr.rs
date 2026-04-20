@@ -384,28 +384,7 @@ fn role_catalog(
         })
 }
 
-fn auth_role_name(ctx: &ExecutorContext, oid: u32) -> Result<Value, ExecError> {
-    let Some(role_name) = role_catalog(ctx)?
-        .authid_rows()
-        .into_iter()
-        .find(|row| row.oid == oid)
-        .map(|row| row.rolname)
-    else {
-        return Err(ExecError::DetailedError {
-            message: format!("cache lookup failed for role {oid}").into(),
-            detail: None,
-            hint: None,
-            sqlstate: "XX000",
-        });
-    };
-    Ok(Value::Text(role_name.into()))
-}
-
-fn eval_regrole_to_text(value: &Value, ctx: &ExecutorContext) -> Result<Value, ExecError> {
-    let oid = oid_arg_to_u32(value, "regrole_to_text")?;
-    auth_role_name(ctx, oid)
-}
-
+>>>>>>> malisper/array-sql-gap-audit
 fn sequence_runtime(
     ctx: &ExecutorContext,
 ) -> Result<&crate::pgrust::database::SequenceRuntime, ExecError> {
@@ -1973,14 +1952,6 @@ fn eval_builtin_function(
         | BuiltinScalarFunction::TsLexize => eval_text_search_builtin_function(func, &values),
         BuiltinScalarFunction::Random => eval_random_function(&values),
         BuiltinScalarFunction::RandomNormal => eval_random_normal_function(&values),
-        BuiltinScalarFunction::RegRoleToText => match values.as_slice() {
-            [Value::Null] => Ok(Value::Null),
-            [value] => eval_regrole_to_text(value, ctx),
-            _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "valid regrole builtin call",
-                actual: format!("{func:?}"),
-            })),
-        },
         BuiltinScalarFunction::CashLarger => match values.as_slice() {
             [Value::Money(left), Value::Money(right)] => {
                 Ok(Value::Money(money_larger(*left, *right)))

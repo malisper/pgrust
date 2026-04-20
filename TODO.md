@@ -76,7 +76,7 @@ Targeted reruns and notes:
   - [done] preserve PostgreSQL's distinction between empty arrays and `NULL` results when slicing/subscripting array columns
   - [x] normalize SQL-visible errors for unsubscriptable and fixed-length array-like types such as `timestamp with time zone` and `point`
   - [x] fix scalar array assignment overflow/bounds handling that currently panics in `src/backend/commands/tablecmds.rs`
-  - support `RETURNING` with subscripted array/fixed-length assignments used by `point_tbl`
+  - [done] support `RETURNING` with subscripted array/fixed-length assignments used by `point_tbl`
   - [done] support `CREATE TEMP TABLE` column definitions with fixed-length array syntax like `integer ARRAY[4]`
   - [done] support deeper array constructors and nested `ARRAY[...]` expressions in `SELECT` targets and `INSERT` values
   - [done] support omitted-bound slice reads and updates like `a[:3]`, `a[2:]`, and `a[:]`
