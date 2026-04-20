@@ -43,7 +43,7 @@ Targeted reruns and notes:
   - `ALTER TABLE IF EXISTS ...` variants beyond current support
   - `CHECK ... NO INHERIT`
   - `CHECK ENFORCED` / `NOT ENFORCED`
-  - foreign keys with `MATCH FULL`
+  - [done] foreign keys with `MATCH FULL`
   - foreign keys with `NOT VALID`
   - foreign keys with `ENFORCED` / `NOT ENFORCED`
   - deferrable foreign keys
@@ -158,7 +158,7 @@ Targeted reruns and notes:
 - foreign_data.sql: 83/540
 - foreign_key.sql: 459/1252
   - upstream `foreign_key.sql` now starts with unsupported FK surface, so the first create-table failures cascade into most later `unknown table: fktable` mismatches
-  - foreign keys with `MATCH FULL`
+  - [done] foreign keys with `MATCH FULL`
   - foreign keys with `NOT VALID`
   - foreign keys with `ENFORCED` / `NOT ENFORCED`
   - foreign keys with `ON DELETE` / `ON UPDATE` actions beyond `NO ACTION` and `RESTRICT`
@@ -428,7 +428,7 @@ Targeted reruns and notes:
 - `ALTER TABLE IF EXISTS ...` variants beyond current support
 - `CHECK ... NO INHERIT`
 - `CHECK ENFORCED` / `NOT ENFORCED`
-- foreign keys with `MATCH FULL`
+- [done] foreign keys with `MATCH FULL`
 - deferrable foreign keys
 - `COMMENT ON COLUMN`
 - `COMMENT ON INDEX`

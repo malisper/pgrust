@@ -401,6 +401,7 @@ fn auth_role_name(ctx: &ExecutorContext, oid: u32) -> Result<Value, ExecError> {
     };
     Ok(Value::Text(role_name.into()))
 }
+
 fn sequence_runtime(
     ctx: &ExecutorContext,
 ) -> Result<&crate::pgrust::database::SequenceRuntime, ExecError> {
