@@ -1184,6 +1184,70 @@ fn point_subscript_assignments_return_rows() {
 }
 
 #[test]
+fn insert_and_update_returning_target_lists() {
+    let dir = temp_dir("returning_target_lists");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create temp table returning_tbl (id int, name text, note text)",
+        )
+        .unwrap();
+
+    match session
+        .execute(
+            &db,
+            "insert into returning_tbl values (1, 'alice', 'x') returning id + 1 as next_id, name || note as combined, *",
+        )
+        .unwrap()
+    {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(column_names, vec!["next_id", "combined", "id", "name", "note"]);
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Int32(2),
+                    Value::Text("alicex".into()),
+                    Value::Int32(1),
+                    Value::Text("alice".into()),
+                    Value::Text("x".into()),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+
+    match session
+        .execute(
+            &db,
+            "update returning_tbl set name = 'bob', note = name || '!' where id = 1 returning returning_tbl.*, note, id + 10 as bumped_id",
+        )
+        .unwrap()
+    {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(column_names, vec!["id", "name", "note", "note", "bumped_id"]);
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Int32(1),
+                    Value::Text("bob".into()),
+                    Value::Text("alice!".into()),
+                    Value::Text("alice!".into()),
+                    Value::Int32(11),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+}
+
+#[test]
 fn copy_from_file_loads_tsvector_rows() {
     let dir = temp_dir("copy_from_file");
     let db = Database::open(&dir, 128).unwrap();

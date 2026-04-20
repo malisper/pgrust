@@ -384,7 +384,23 @@ fn role_catalog(
         })
 }
 
->>>>>>> malisper/array-sql-gap-audit
+fn auth_role_name(ctx: &ExecutorContext, oid: u32) -> Result<Value, ExecError> {
+    let Some(role_name) = role_catalog(ctx)?
+        .authid_rows()
+        .into_iter()
+        .find(|row| row.oid == oid)
+        .map(|row| row.rolname)
+    else {
+        return Err(ExecError::DetailedError {
+            message: format!("cache lookup failed for role {oid}").into(),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        });
+    };
+    Ok(Value::Text(role_name.into()))
+}
+
 fn sequence_runtime(
     ctx: &ExecutorContext,
 ) -> Result<&crate::pgrust::database::SequenceRuntime, ExecError> {

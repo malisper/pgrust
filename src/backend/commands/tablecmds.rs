@@ -53,6 +53,7 @@ use crate::include::catalog::builtin_range_name_for_sql_type;
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue, array_value_from_value};
 use crate::include::nodes::execnodes::TupleSlot;
 use crate::include::nodes::execnodes::*;
+use crate::include::nodes::primnodes::{QueryColumn, TargetEntry};
 
 fn finalize_bound_insert(
     mut stmt: BoundInsertStatement,
@@ -121,6 +122,14 @@ fn finalize_bound_insert(
                     },
                 },
             });
+    stmt.returning = stmt
+        .returning
+        .into_iter()
+        .map(|target| TargetEntry {
+            expr: finalize_expr_subqueries(target.expr, catalog, &mut subplans),
+            ..target
+        })
+        .collect();
     stmt.subplans = subplans;
     stmt
 }
@@ -165,6 +174,14 @@ fn finalize_bound_update(
             predicate: target
                 .predicate
                 .map(|expr| finalize_expr_subqueries(expr, catalog, &mut subplans)),
+            ..target
+        })
+        .collect();
+    stmt.returning = stmt
+        .returning
+        .into_iter()
+        .map(|target| TargetEntry {
+            expr: finalize_expr_subqueries(target.expr, catalog, &mut subplans),
             ..target
         })
         .collect();
@@ -1528,7 +1545,7 @@ pub fn execute_insert(
     let result = (|| {
         let values = materialize_insert_rows(&stmt, catalog, ctx)?;
 
-        if stmt.returning_all && stmt.on_conflict.is_some() {
+        if !stmt.returning.is_empty() && stmt.on_conflict.is_some() {
             return Err(ExecError::Parse(ParseError::FeatureNotSupported(
                 "INSERT ... ON CONFLICT ... RETURNING is not supported yet".into(),
             )));
@@ -1564,10 +1581,17 @@ pub fn execute_insert(
             }
             returned_rows
         };
-        if stmt.returning_all {
-            Ok(build_returning_result(&stmt.desc, returned_rows))
-        } else {
+        if stmt.returning.is_empty() {
             Ok(StatementResult::AffectedRows(returned_rows.len()))
+        } else {
+            let projected_rows = returned_rows
+                .iter()
+                .map(|row| project_returning_row(&stmt.returning, row, ctx))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(build_returning_result(
+                returning_result_columns(&stmt.returning),
+                projected_rows,
+            ))
         }
     })();
     ctx.subplans = saved_subplans;
@@ -2769,24 +2793,33 @@ fn modified_attnums_for_update(assignments: &[BoundAssignment]) -> Vec<i16> {
         .collect()
 }
 
-fn build_returning_result(desc: &RelationDesc, rows: Vec<Vec<Value>>) -> StatementResult {
-    let visible = desc.visible_column_indexes();
-    let columns = visible
+fn returning_result_columns(targets: &[TargetEntry]) -> Vec<QueryColumn> {
+    targets
         .iter()
-        .map(|index| {
-            let column = &desc.columns[*index];
-            crate::include::nodes::primnodes::QueryColumn {
-                name: column.name.clone(),
-                sql_type: column.sql_type,
-                wire_type_oid: None,
-            }
+        .map(|target| QueryColumn {
+            name: target.name.clone(),
+            sql_type: target.sql_type,
+            wire_type_oid: None,
         })
-        .collect::<Vec<_>>();
+        .collect()
+}
+
+fn project_returning_row(
+    targets: &[TargetEntry],
+    row: &[Value],
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<Value>, ExecError> {
+    let mut slot = TupleSlot::virtual_row(row.to_vec());
+    let mut values = targets
+        .iter()
+        .map(|target| eval_expr(&target.expr, &mut slot, ctx).map(|value| value.to_owned_value()))
+        .collect::<Result<Vec<_>, _>>()?;
+    Value::materialize_all(&mut values);
+    Ok(values)
+}
+
+fn build_returning_result(columns: Vec<QueryColumn>, rows: Vec<Vec<Value>>) -> StatementResult {
     let column_names = columns.iter().map(|column| column.name.clone()).collect();
-    let rows = rows
-        .into_iter()
-        .map(|row| visible.iter().map(|index| row[*index].clone()).collect())
-        .collect();
     StatementResult::Query {
         columns,
         column_names,
@@ -3104,8 +3137,9 @@ pub fn execute_update_with_waiter(
                                     ctx,
                                 )?;
                             }
-                            if stmt.returning_all {
-                                returned_rows.push(triggered_values.clone());
+                            if !stmt.returning.is_empty() {
+                                returned_rows
+                                    .push(project_returning_row(&stmt.returning, &triggered_values, ctx)?);
                             }
                             affected_rows += 1;
                             break;
@@ -3161,22 +3195,13 @@ pub fn execute_update_with_waiter(
             }
         }
 
-        if stmt.returning_all {
-            let desc = stmt
-                .targets
-                .first()
-                .map(|target| &target.desc)
-                .ok_or_else(|| {
-                    ExecError::DetailedError {
-                        message: "UPDATE RETURNING requires at least one target relation".into(),
-                        detail: None,
-                        hint: None,
-                        sqlstate: "XX000",
-                    }
-                })?;
-            Ok(build_returning_result(desc, returned_rows))
-        } else {
+        if stmt.returning.is_empty() {
             Ok(StatementResult::AffectedRows(affected_rows))
+        } else {
+            Ok(build_returning_result(
+                returning_result_columns(&stmt.returning),
+                returned_rows,
+            ))
         }
     })();
     ctx.subplans = saved_subplans;
