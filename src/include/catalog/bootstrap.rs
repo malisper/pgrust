@@ -328,7 +328,7 @@ impl BootstrapCatalogKind {
     }
 }
 
-pub const CORE_BOOTSTRAP_KINDS: [BootstrapCatalogKind; 34] = [
+pub const CORE_BOOTSTRAP_KINDS: [BootstrapCatalogKind; 35] = [
     BootstrapCatalogKind::PgNamespace,
     BootstrapCatalogKind::PgType,
     BootstrapCatalogKind::PgProc,
@@ -366,7 +366,7 @@ pub const CORE_BOOTSTRAP_KINDS: [BootstrapCatalogKind; 34] = [
     BootstrapCatalogKind::PgPolicy,
 ];
 
-pub const fn bootstrap_catalog_kinds() -> [BootstrapCatalogKind; 34] {
+pub const fn bootstrap_catalog_kinds() -> [BootstrapCatalogKind; 35] {
     CORE_BOOTSTRAP_KINDS
 }
 
@@ -420,7 +420,7 @@ pub const fn bootstrap_namespace_oid() -> u32 {
     PG_CATALOG_NAMESPACE_OID
 }
 
-pub const CORE_BOOTSTRAP_RELATIONS: [BootstrapCatalogRelation; 34] = [
+pub const CORE_BOOTSTRAP_RELATIONS: [BootstrapCatalogRelation; 35] = [
     BootstrapCatalogRelation {
         oid: PG_NAMESPACE_RELATION_OID,
         name: "pg_namespace",
