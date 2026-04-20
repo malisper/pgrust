@@ -145,8 +145,9 @@ pub(super) fn resolve_function_call(
 }
 
 pub(super) fn resolve_scalar_function(name: &str) -> Option<BuiltinScalarFunction> {
+    let normalized = normalize_builtin_function_name(name);
     scalar_functions_by_name()
-        .get(&name.to_ascii_lowercase())
+        .get(normalized)
         .copied()
 }
 
@@ -154,9 +155,9 @@ pub(super) fn resolve_function_cast_type(
     catalog: &dyn CatalogLookup,
     name: &str,
 ) -> Option<SqlType> {
-    let normalized = name.to_ascii_lowercase();
+    let normalized = normalize_builtin_function_name(name);
     for row in catalog.type_rows() {
-        if row.typrelid != 0 || !row.typname.eq_ignore_ascii_case(&normalized) {
+        if row.typrelid != 0 || !row.typname.eq_ignore_ascii_case(normalized) {
             continue;
         }
         if row.oid != TEXT_TYPE_OID && !catalog_text_input_cast_exists(catalog, row.oid) {
@@ -190,12 +191,12 @@ pub(super) fn explicit_text_input_cast_exists(
 
 pub(super) fn resolve_json_table_function(name: &str) -> Option<JsonTableFunction> {
     json_table_functions_by_name()
-        .get(&name.to_ascii_lowercase())
+        .get(normalize_builtin_function_name(name))
         .copied()
 }
 
 pub(super) fn resolve_regex_table_function(name: &str) -> Option<RegexTableFunction> {
-    match name.to_ascii_lowercase().as_str() {
+    match normalize_builtin_function_name(name) {
         "regexp_matches" => Some(RegexTableFunction::Matches),
         "regexp_split_to_table" => Some(RegexTableFunction::SplitToTable),
         _ => None,
@@ -203,7 +204,7 @@ pub(super) fn resolve_regex_table_function(name: &str) -> Option<RegexTableFunct
 }
 
 pub(super) fn resolve_json_record_function(name: &str) -> Option<JsonRecordFunction> {
-    match name.to_ascii_lowercase().as_str() {
+    match normalize_builtin_function_name(name) {
         "json_populate_record" => Some(JsonRecordFunction::PopulateRecord),
         "json_populate_recordset" => Some(JsonRecordFunction::PopulateRecordSet),
         "json_to_record" => Some(JsonRecordFunction::ToRecord),
@@ -214,6 +215,10 @@ pub(super) fn resolve_json_record_function(name: &str) -> Option<JsonRecordFunct
         "jsonb_to_recordset" => Some(JsonRecordFunction::JsonbToRecordSet),
         _ => None,
     }
+}
+
+fn normalize_builtin_function_name(name: &str) -> &str {
+    name.strip_prefix("pg_catalog.").unwrap_or(name)
 }
 
 fn builtin_scalar_function_for_proc_row(row: &PgProcRow) -> Option<BuiltinScalarFunction> {
@@ -579,6 +584,7 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::NextVal | BuiltinScalarFunction::CurrVal => args.len() == 1,
             BuiltinScalarFunction::SetVal => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::PgGetSerialSequence => args.len() == 2,
+            BuiltinScalarFunction::PgGetUserById => args.len() == 1,
             BuiltinScalarFunction::LoCreate | BuiltinScalarFunction::LoUnlink => args.len() == 1,
             BuiltinScalarFunction::PgStatGetCheckpointerNumTimed
             | BuiltinScalarFunction::PgStatGetCheckpointerNumRequested
@@ -679,13 +685,10 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::QuoteLiteral
             | BuiltinScalarFunction::BitcastIntegerToFloat4
             | BuiltinScalarFunction::BitcastBigintToFloat8
+            | BuiltinScalarFunction::RegProcedureToText
             | BuiltinScalarFunction::RegRoleToText
             | BuiltinScalarFunction::BpcharToText
             | BuiltinScalarFunction::BitCount => args.len() == 1,
-            BuiltinScalarFunction::Float8Accum => args.len() == 2,
-            BuiltinScalarFunction::Float8Combine => args.len() == 2,
-            BuiltinScalarFunction::Float8RegrAccum => args.len() == 3,
-            BuiltinScalarFunction::Float8RegrCombine => args.len() == 2,
             BuiltinScalarFunction::Trunc | BuiltinScalarFunction::Round => {
                 matches!(args.len(), 1 | 2)
             }
@@ -1516,8 +1519,12 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("replace", BuiltinScalarFunction::Replace),
         ("split_part", BuiltinScalarFunction::SplitPart),
         ("translate", BuiltinScalarFunction::Translate),
+        ("regprocedure_to_text", BuiltinScalarFunction::RegProcedureToText),
+        ("regprocedureout", BuiltinScalarFunction::RegProcedureToText),
+        ("regprocout", BuiltinScalarFunction::RegProcedureToText),
         ("regrole_to_text", BuiltinScalarFunction::RegRoleToText),
         ("regroleout", BuiltinScalarFunction::RegRoleToText),
+        ("pg_get_userbyid", BuiltinScalarFunction::PgGetUserById),
         ("position", BuiltinScalarFunction::Position),
         ("strpos", BuiltinScalarFunction::Strpos),
         ("substring", BuiltinScalarFunction::Substring),
@@ -1868,6 +1875,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::CurrVal
             | BuiltinScalarFunction::SetVal
             | BuiltinScalarFunction::PgGetSerialSequence
+            | BuiltinScalarFunction::PgGetUserById
             | BuiltinScalarFunction::GetDatabaseEncoding
             | BuiltinScalarFunction::PgMyTempSchema
             | BuiltinScalarFunction::PgRustTestFdwHandler
@@ -2134,6 +2142,10 @@ mod tests {
             Some(BuiltinScalarFunction::Random)
         );
         assert_eq!(
+            resolve_scalar_function("pg_catalog.array_length"),
+            Some(BuiltinScalarFunction::ArrayLength)
+        );
+        assert_eq!(
             resolve_scalar_function("lower"),
             Some(BuiltinScalarFunction::Lower)
         );
@@ -2161,6 +2173,10 @@ mod tests {
             Some(JsonTableFunction::ArrayElements)
         );
         assert_eq!(
+            resolve_json_table_function("pg_catalog.json_array_elements"),
+            Some(JsonTableFunction::ArrayElements)
+        );
+        assert_eq!(
             resolve_json_table_function("jsonb_array_elements"),
             Some(JsonTableFunction::JsonbArrayElements)
         );
@@ -2169,6 +2185,15 @@ mod tests {
             Some(JsonTableFunction::Each)
         );
         assert_eq!(resolve_json_table_function("random"), None);
+    }
+
+    #[test]
+    fn resolve_function_cast_type_accepts_pg_catalog_prefix() {
+        let catalog = Catalog::bootstrap();
+        assert_eq!(
+            resolve_function_cast_type(&catalog, "pg_catalog.text"),
+            Some(SqlType::new(SqlTypeKind::Text))
+        );
     }
 
     #[test]

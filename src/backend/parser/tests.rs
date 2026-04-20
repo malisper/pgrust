@@ -134,8 +134,6 @@ fn test_catalog_entry(rel_number: u32, desc: RelationDesc) -> CatalogEntry {
         relhastriggers: false,
         relhassubclass: false,
         relispartition: false,
-        relrowsecurity: false,
-        relforcerowsecurity: false,
         relpages: 0,
         reltuples: 0.0,
         desc,
@@ -186,8 +184,6 @@ fn people_view_entry() -> CatalogEntry {
         relhastriggers: false,
         relhassubclass: false,
         relispartition: false,
-        relrowsecurity: false,
-        relforcerowsecurity: false,
         relpages: 0,
         reltuples: 0.0,
         desc: RelationDesc {
@@ -298,8 +294,6 @@ fn catalog_with_people_id_index() -> Catalog {
             relhastriggers: false,
             relhassubclass: false,
             relispartition: false,
-            relrowsecurity: false,
-            relforcerowsecurity: false,
             relpages: 0,
             reltuples: 0.0,
             desc: RelationDesc {
@@ -345,8 +339,6 @@ fn catalog_with_people_primary_key() -> Catalog {
             relhastriggers: false,
             relhassubclass: false,
             relispartition: false,
-            relrowsecurity: false,
-            relforcerowsecurity: false,
             relpages: 0,
             reltuples: 0.0,
             desc: RelationDesc {
@@ -425,8 +417,6 @@ fn catalog_with_people_partial_unique_index() -> Catalog {
             relhastriggers: false,
             relhassubclass: false,
             relispartition: false,
-            relrowsecurity: false,
-            relforcerowsecurity: false,
             relpages: 0,
             reltuples: 0.0,
             desc: RelationDesc {
@@ -577,8 +567,6 @@ fn catalog_with_text_parent_primary_key() -> Catalog {
             relhastriggers: false,
             relhassubclass: false,
             relispartition: false,
-            relrowsecurity: false,
-            relforcerowsecurity: false,
             relpages: 0,
             reltuples: 0.0,
             desc: RelationDesc {
@@ -622,7 +610,6 @@ fn visible_catalog_without_text_input_cast(
         base.index_rows(),
         base.rewrite_rows(),
         base.trigger_rows(),
-        base.policy_rows(),
         base.am_rows(),
         base.amop_rows(),
         base.amproc_rows(),
@@ -676,7 +663,6 @@ fn visible_catalog_without_operator(
         base.index_rows(),
         base.rewrite_rows(),
         base.trigger_rows(),
-        base.policy_rows(),
         base.am_rows(),
         base.amop_rows(),
         base.amproc_rows(),
@@ -1651,6 +1637,7 @@ fn parse_alter_table_if_exists_only_statement() {
     );
 }
 
+#[test]
 fn parse_alter_table_rename_statement() {
     let stmt = parse_statement("alter table items rename to items_new").unwrap();
     assert_eq!(
@@ -1997,6 +1984,14 @@ fn parse_set_session_authorization_statement() {
         Statement::SetSessionAuthorization(SetSessionAuthorizationStatement {
             role_name: "regress_tenant".into(),
         })
+    );
+}
+
+#[test]
+fn parse_regproc_type_name() {
+    assert_eq!(
+        parse_type_name("regproc").unwrap(),
+        RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegProcedure))
     );
 }
 
