@@ -215,8 +215,8 @@ fn parse_args() -> Result<Args, String> {
             }
             "--query-file" => {
                 let path = take_value(&raw, &mut i, "--query-file")?;
-                args.query = std::fs::read_to_string(&path)
-                    .map_err(|err| format!("read {path}: {err}"))?;
+                args.query =
+                    std::fs::read_to_string(&path).map_err(|err| format!("read {path}: {err}"))?;
             }
             "--count" => {
                 args.count = true;

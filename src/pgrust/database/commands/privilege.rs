@@ -1,7 +1,5 @@
 use super::super::*;
-use crate::backend::commands::rolecmds::{
-    membership_row, role_management_error,
-};
+use crate::backend::commands::rolecmds::{membership_row, role_management_error};
 use crate::backend::parser::{
     GrantObjectPrivilege, GrantObjectStatement, GrantRoleMembershipStatement,
     RevokeObjectStatement, RevokeRoleMembershipStatement, RoleGrantorSpec,
@@ -686,9 +684,9 @@ fn select_best_role_grantor(
 
         if member_oid == role_oid
             || catalog
-            .memberships()
-            .iter()
-            .any(|row| row.member == member_oid && row.roleid == role_oid && row.admin_option)
+                .memberships()
+                .iter()
+                .any(|row| row.member == member_oid && row.roleid == role_oid && row.admin_option)
         {
             match best {
                 Some((best_distance, best_oid))
@@ -1136,11 +1134,17 @@ mod tests {
             .execute(&db, "grant parent to user2 with admin option")
             .unwrap();
         session
-            .execute(&db, "grant parent to user3 with admin option granted by user2")
+            .execute(
+                &db,
+                "grant parent to user3 with admin option granted by user2",
+            )
             .unwrap();
 
         let err = session
-            .execute(&db, "grant parent to user2 with admin option granted by user3")
+            .execute(
+                &db,
+                "grant parent to user2 with admin option granted by user3",
+            )
             .unwrap_err();
         match err {
             ExecError::DetailedError { message, .. } => {
