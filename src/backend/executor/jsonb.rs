@@ -8,6 +8,8 @@ use crate::backend::executor::ExecError;
 use crate::backend::executor::exec_expr::format_array_text;
 use crate::backend::executor::render_bit_text;
 use crate::backend::executor::render_datetime_value_text;
+use crate::backend::executor::render_datetime_value_text_with_config;
+use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::include::nodes::datetime::{DateADT, TimeADT, TimeTzADT, TimestampADT, TimestampTzADT};
 use crate::include::nodes::execnodes::{NumericValue, Value};
@@ -695,7 +697,10 @@ pub(crate) fn encode_jsonb(value: &JsonbValue) -> Vec<u8> {
     out
 }
 
-pub(crate) fn jsonb_from_value(value: &Value) -> Result<JsonbValue, ExecError> {
+pub(crate) fn jsonb_from_value(
+    value: &Value,
+    datetime_config: &DateTimeConfig,
+) -> Result<JsonbValue, ExecError> {
     Ok(match value {
         Value::Null => JsonbValue::Null,
         Value::Int16(v) => JsonbValue::Numeric(NumericValue::from_i64(*v as i64)),
@@ -725,9 +730,10 @@ pub(crate) fn jsonb_from_value(value: &Value) -> Result<JsonbValue, ExecError> {
         | Value::Time(_)
         | Value::TimeTz(_)
         | Value::Timestamp(_)
-        | Value::TimestampTz(_) => {
-            JsonbValue::String(render_datetime_value_text(value).expect("datetime values render"))
-        }
+        | Value::TimestampTz(_) => JsonbValue::String(
+            render_datetime_value_text_with_config(value, datetime_config)
+                .expect("datetime values render"),
+        ),
         Value::Point(_)
         | Value::Lseg(_)
         | Value::Path(_)
@@ -748,20 +754,22 @@ pub(crate) fn jsonb_from_value(value: &Value) -> Result<JsonbValue, ExecError> {
         Value::Record(record) => JsonbValue::Object(
             record
                 .iter()
-                .map(|(field, value)| Ok((field.name.clone(), jsonb_from_value(value)?)))
+                .map(|(field, value)| {
+                    Ok((field.name.clone(), jsonb_from_value(value, datetime_config)?))
+                })
                 .collect::<Result<Vec<_>, ExecError>>()?,
         ),
         Value::Array(items) => JsonbValue::Array(
             items
                 .iter()
-                .map(jsonb_from_value)
+                .map(|value| jsonb_from_value(value, datetime_config))
                 .collect::<Result<Vec<_>, _>>()?,
         ),
         Value::PgArray(array) => JsonbValue::Array(
             array
                 .to_nested_values()
                 .iter()
-                .map(jsonb_from_value)
+                .map(|value| jsonb_from_value(value, datetime_config))
                 .collect::<Result<Vec<_>, _>>()?,
         ),
     })
@@ -968,7 +976,12 @@ pub(crate) fn jsonb_exists_all(value: &JsonbValue, keys: &[String]) -> bool {
 pub(crate) fn jsonb_object_from_pairs(pairs: &[(String, Value)]) -> Result<JsonbValue, ExecError> {
     let items = pairs
         .iter()
-        .map(|(k, v)| Ok((k.clone(), jsonb_from_value(v)?)))
+        .map(|(k, v)| {
+            Ok((
+                k.clone(),
+                jsonb_from_value(v, &DateTimeConfig::default())?,
+            ))
+        })
         .collect::<Result<Vec<_>, ExecError>>()?;
     Ok(JsonbValue::Object(canonicalize_object_pairs(items)))
 }
@@ -1025,7 +1038,12 @@ pub(crate) fn jsonb_builder_key(value: &Value) -> Result<String, ExecError> {
         Value::Record(record) => Ok(JsonbValue::Object(
             record
                 .iter()
-                .map(|(field, value)| Ok((field.name.clone(), jsonb_from_value(value)?)))
+                .map(|(field, value)| {
+                    Ok((
+                        field.name.clone(),
+                        jsonb_from_value(value, &DateTimeConfig::default())?,
+                    ))
+                })
                 .collect::<Result<Vec<_>, ExecError>>()?,
         )
         .to_serde()

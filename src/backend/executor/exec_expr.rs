@@ -837,6 +837,24 @@ fn eval_func_expr(
     }
 }
 
+fn current_temp_namespace_name(ctx: &ExecutorContext) -> Option<CompactString> {
+    // :HACK: `pg_my_temp_schema()` needs session temp namespace identity, but
+    // executor contexts do not thread that through directly yet. Derive the
+    // visible temp schema name from the qualified temp relcache entries until
+    // temp namespace metadata is carried explicitly alongside the session.
+    ctx.catalog
+        .as_ref()?
+        .relcache()
+        .entries()
+        .find_map(|(name, entry)| {
+            (entry.relpersistence == 't')
+                .then_some(name)
+                .and_then(|qualified| qualified.split_once('.'))
+                .and_then(|(schema, _)| schema.starts_with("pg_temp_").then_some(schema))
+                .map(Into::into)
+        })
+}
+
 fn eval_scalar_array_op_expr(
     saop: &ScalarArrayOpExpr,
     slot: &mut TupleSlot,
@@ -2227,7 +2245,7 @@ fn eval_builtin_function(
     if let Some(result) = eval_range_function(func, &values, result_type) {
         return result;
     }
-    if let Some(result) = eval_json_builtin_function(func, &values, func_variadic) {
+    if let Some(result) = eval_json_builtin_function(func, &values, func_variadic, &ctx.datetime_config) {
         return result;
     }
     if matches!(
@@ -2309,6 +2327,9 @@ fn eval_builtin_function(
         BuiltinScalarFunction::IsFinite => eval_isfinite_function(&values),
         BuiltinScalarFunction::MakeDate => eval_make_date_function(&values),
         BuiltinScalarFunction::GetDatabaseEncoding => Ok(Value::Text("UTF8".into())),
+        BuiltinScalarFunction::PgMyTempSchema => Ok(current_temp_namespace_name(ctx)
+            .map(Value::Text)
+            .unwrap_or(Value::Null)),
         BuiltinScalarFunction::PgRustInternalBinaryCoercible => {
             eval_pg_rust_internal_binary_coercible(&values)
         }
@@ -2731,8 +2752,8 @@ fn eval_jsonb_contains(left: Value, right: Value) -> Result<Value, ExecError> {
     if matches!(left, Value::Null) || matches!(right, Value::Null) {
         return Ok(Value::Null);
     }
-    let left_jsonb = jsonb_from_value(&left)?;
-    let right_jsonb = jsonb_from_value(&right)?;
+    let left_jsonb = jsonb_from_value(&left, &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default())?;
+    let right_jsonb = jsonb_from_value(&right, &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default())?;
     Ok(Value::Bool(jsonb_contains(&left_jsonb, &right_jsonb)))
 }
 
@@ -2740,8 +2761,8 @@ fn eval_jsonb_contained(left: Value, right: Value) -> Result<Value, ExecError> {
     if matches!(left, Value::Null) || matches!(right, Value::Null) {
         return Ok(Value::Null);
     }
-    let left_jsonb = jsonb_from_value(&left)?;
-    let right_jsonb = jsonb_from_value(&right)?;
+    let left_jsonb = jsonb_from_value(&left, &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default())?;
+    let right_jsonb = jsonb_from_value(&right, &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default())?;
     Ok(Value::Bool(jsonb_contains(&right_jsonb, &left_jsonb)))
 }
 
@@ -2754,7 +2775,8 @@ fn eval_jsonb_exists(left: Value, right: Value) -> Result<Value, ExecError> {
         left: left.clone(),
         right: right.clone(),
     })?;
-    let jsonb = jsonb_from_value(&left)?;
+    let jsonb =
+        jsonb_from_value(&left, &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default())?;
     Ok(Value::Bool(jsonb_exists(&jsonb, key)))
 }
 
@@ -2809,7 +2831,8 @@ fn eval_jsonb_exists_list(
             });
         }
     };
-    let jsonb = jsonb_from_value(&left)?;
+    let jsonb =
+        jsonb_from_value(&left, &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default())?;
     Ok(Value::Bool(pred(&jsonb, &keys)))
 }
 

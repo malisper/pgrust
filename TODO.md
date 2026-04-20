@@ -208,6 +208,7 @@ Targeted reruns and notes:
   - [done] stack depth limit handling for deeply nested jsonb input
   - [done] aggregate-local `ORDER BY` support for `jsonb_agg` / `jsonb_object_agg`
   - [done] jsonb containment and existence builtin semantics (`@>`, `<@`, `?`, `?|`, `?&`, helper funcs)
+  - [done] coerce unknown/text JSON literals to `jsonb` for `@>` / `<@` so operator semantics match `jsonb_contains` / `jsonb_contained`
   - [done] jsonb object/key construction semantics and SQL-visible errors (`jsonb_object_keys`, `jsonb_build_object`, `jsonb_object`, `jsonb_object_agg`)
   - jsonb subscripting semantics
   - record-expansion semantics for `jsonb_to_record` / `jsonb_populate_record`
