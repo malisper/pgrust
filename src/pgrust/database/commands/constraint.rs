@@ -237,6 +237,7 @@ fn validate_foreign_key_rows(
                     .ok_or_else(|| ExecError::Parse(ParseError::UnknownColumn(column_name.clone())))
             })
             .collect::<Result<Vec<_>, _>>()?,
+        match_type: action.match_type,
         referenced_relation_name: action.referenced_table.clone(),
         referenced_relation_oid: referenced_relation.relation_oid,
         referenced_rel: referenced_relation.rel,
