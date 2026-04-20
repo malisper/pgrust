@@ -6348,6 +6348,64 @@ fn alter_table_add_validate_and_drop_foreign_keys() {
 }
 
 #[test]
+fn foreign_keys_support_enforced_not_valid_on_create_and_alter_table_add() {
+    let base = temp_dir("foreign_keys_enforced_not_valid");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table parents (id int4 primary key)")
+        .unwrap();
+    db.execute(1, "insert into parents values (1)").unwrap();
+    db.execute(
+        1,
+        "create table children_create (id int4 primary key, parent_id int4 references parents not valid)",
+    )
+    .unwrap();
+    db.execute(1, "insert into children_create values (1, 1)")
+        .unwrap();
+    match db.execute(1, "insert into children_create values (2, 2)") {
+        Err(ExecError::ForeignKeyViolation { constraint, .. }) => {
+            assert_eq!(constraint, "children_create_parent_id_fkey");
+        }
+        other => panic!("expected create-table NOT VALID foreign-key violation, got {other:?}"),
+    }
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conenforced, convalidated from pg_constraint where conname = 'children_create_parent_id_fkey'",
+        ),
+        vec![vec![Value::Bool(true), Value::Bool(false)]]
+    );
+
+    db.execute(
+        1,
+        "create table children_add (id int4 primary key, parent_id int4)",
+    )
+    .unwrap();
+    db.execute(1, "insert into children_add values (1, 1), (2, 2)")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table children_add add constraint children_add_parent_fk foreign key (parent_id) references parents(id) not valid",
+    )
+    .unwrap();
+    match db.execute(1, "insert into children_add values (3, 3)") {
+        Err(ExecError::ForeignKeyViolation { constraint, .. }) => {
+            assert_eq!(constraint, "children_add_parent_fk");
+        }
+        other => panic!("expected alter-table-add NOT VALID foreign-key violation, got {other:?}"),
+    }
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conenforced, convalidated from pg_constraint where conname = 'children_add_parent_fk'",
+        ),
+        vec![vec![Value::Bool(true), Value::Bool(false)]]
+    );
+}
+
+#[test]
 fn alter_table_alter_constraint_updates_foreign_key_deferrability_flags() {
     let base = temp_dir("alter_table_alter_constraint_fk_deferrability");
     let db = Database::open(&base, 16).unwrap();
@@ -6464,6 +6522,54 @@ fn foreign_keys_support_not_enforced_and_alter_enforced_state() {
     );
 
     db.execute(1, "insert into children values (2, 99)").unwrap();
+}
+
+#[test]
+fn alter_constraint_enforced_validates_existing_unvalidated_foreign_key() {
+    let base = temp_dir("fk_alter_constraint_enforced_validates");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table parents (id int4 primary key)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table children (id int4 primary key, parent_id int4)",
+    )
+    .unwrap();
+    db.execute(1, "insert into parents values (1)").unwrap();
+    db.execute(1, "insert into children values (1, 1), (2, 2)")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table children add constraint children_parent_fk foreign key (parent_id) references parents(id) not valid",
+    )
+    .unwrap();
+
+    match db.execute(
+        1,
+        "alter table children alter constraint children_parent_fk enforced",
+    ) {
+        Err(ExecError::ForeignKeyViolation { constraint, .. }) => {
+            assert_eq!(constraint, "children_parent_fk");
+        }
+        other => panic!("expected ALTER CONSTRAINT ENFORCED validation failure, got {other:?}"),
+    }
+
+    db.execute(1, "update children set parent_id = 1 where id = 2")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table children alter constraint children_parent_fk enforced",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conenforced, convalidated from pg_constraint where conname = 'children_parent_fk'",
+        ),
+        vec![vec![Value::Bool(true), Value::Bool(true)]]
+    );
 }
 
 #[test]

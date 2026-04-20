@@ -861,11 +861,6 @@ fn validate_create_foreign_key(
     on_delete: ForeignKeyAction,
     on_update: ForeignKeyAction,
 ) -> Result<(), ParseError> {
-    if attributes.not_valid && attributes.enforced != Some(false) {
-        return Err(ParseError::FeatureNotSupported(
-            "FOREIGN KEY NOT VALID".into(),
-        ));
-    }
     validate_foreign_key(attributes, match_type, on_delete, on_update)
 }
 
