@@ -276,14 +276,14 @@ Targeted reruns and notes:
 - replica_identity.sql: 13/66
 - returning.sql: 21/150
 - roleattributes.sql: 32/80
-- rowsecurity.sql: 293/774
+- rowsecurity.sql: 392/774
 - rowsecurity.sql: support `DROP SCHEMA ... CASCADE`
 - rowsecurity.sql: support `GRANT SELECT ON <table> ...`
 - rowsecurity.sql: support `GRANT EXECUTE ON FUNCTION ...`
 - rowsecurity.sql: honor non-`public` visible schemas for unqualified `CREATE FUNCTION`
-- rowsecurity.sql: support `CREATE POLICY`
-- rowsecurity.sql: support `ALTER POLICY`
-- rowsecurity.sql: support `DROP POLICY`
+- [done] rowsecurity.sql: support `CREATE POLICY`
+- [done] rowsecurity.sql: support `ALTER POLICY`
+- [done] rowsecurity.sql: support `DROP POLICY`
 - rowsecurity.sql: support `ALTER TABLE ... ENABLE ROW LEVEL SECURITY`
 - rowsecurity.sql: expose `pg_policies`
 - rowsecurity.sql: improve `psql` describe handling for row-security metadata
