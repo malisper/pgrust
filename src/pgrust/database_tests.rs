@@ -3,6 +3,9 @@ use crate::backend::commands::analyze::collect_analyze_stats;
 use crate::backend::executor::{ExecError, Value};
 use crate::backend::parser::{BoundRelation, CatalogLookup, ParseError, SqlType, SqlTypeKind};
 use crate::backend::utils::cache::lsyscache::LazyCatalogLookup;
+use crate::backend::utils::misc::notices::{
+    clear_notices as clear_backend_notices, take_notices as take_backend_notices,
+};
 use crate::include::catalog::{
     FLOAT8_TYPE_OID, INT4RANGE_TYPE_OID, INT4_TYPE_OID, PG_CLASS_RELATION_OID,
     PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID,
@@ -4694,6 +4697,95 @@ fn alter_table_add_column_supports_tid_xid_and_interval() {
         }
         other => panic!("expected query result, got {other:?}"),
     }
+}
+
+#[test]
+fn alter_table_add_column_propagates_to_temp_inherited_child() {
+    let base = temp_dir("alter_table_add_column_temp_inherits");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create temp table parent1 (f1 int4)")
+        .unwrap();
+    session
+        .execute(&db, "create temp table child1 () inherits (parent1)")
+        .unwrap();
+    session.execute(&db, "insert into child1 values (1)").unwrap();
+    session
+        .execute(&db, "alter table parent1 add column a1 int4 default 3")
+        .unwrap();
+
+    match session
+        .execute(&db, "select f1, a1 from child1")
+        .expect("select propagated temp child column")
+    {
+        StatementResult::Query { columns, rows, .. } => {
+            assert_eq!(columns[1].sql_type, SqlType::new(SqlTypeKind::Int4));
+            assert_eq!(rows, vec![vec![Value::Int32(1), Value::Int32(3)]]);
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+}
+
+#[test]
+fn alter_table_add_column_merges_temp_multi_parent_child_metadata() {
+    let base = temp_dir("alter_table_add_column_temp_multi_parent");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create temp table pp1 (f1 int4)")
+        .unwrap();
+    session
+        .execute(&db, "create temp table cc1 (f2 text, f3 int4) inherits (pp1)")
+        .unwrap();
+    session
+        .execute(&db, "create temp table cc2 (f4 float8) inherits (pp1, cc1)")
+        .unwrap();
+
+    clear_backend_notices();
+    session
+        .execute(&db, "alter table pp1 add column a2 int4")
+        .unwrap();
+    assert_eq!(
+        take_backend_notices()
+            .into_iter()
+            .collect::<Vec<_>>(),
+        vec![r#"merging definition of column "a2" for child "cc2""#.to_string()]
+    );
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select c.relname, a.attname, a.attinhcount, a.attislocal
+             from pg_attribute a
+             join pg_class c on c.oid = a.attrelid
+             where attname = 'a2'
+             order by 1",
+        ),
+        vec![
+            vec![
+                Value::Text("cc1".into()),
+                Value::Text("a2".into()),
+                Value::Int16(1),
+                Value::Bool(false),
+            ],
+            vec![
+                Value::Text("cc2".into()),
+                Value::Text("a2".into()),
+                Value::Int16(2),
+                Value::Bool(false),
+            ],
+            vec![
+                Value::Text("pp1".into()),
+                Value::Text("a2".into()),
+                Value::Int16(0),
+                Value::Bool(true),
+            ],
+        ]
+    );
 }
 
 #[test]
