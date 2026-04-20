@@ -70,6 +70,8 @@ pub use modify::{
 };
 pub(crate) use modify::{
     bind_delete_with_outer_scopes, bind_insert_with_outer_scopes, bind_update_with_outer_scopes,
+    rewrite_bound_delete_auto_view_target, rewrite_bound_insert_auto_view_target,
+    rewrite_bound_update_auto_view_target,
 };
 pub use on_conflict::{BoundOnConflictAction, BoundOnConflictClause};
 pub use paths::BoundModifyRowSource;
@@ -79,6 +81,7 @@ use query::{
     AnalyzedFrom, analyze_values_query_with_outer, identity_target_list, normalize_target_list,
     query_from_from_projection,
 };
+pub(crate) use query::rewrite_local_vars_for_output_exprs;
 pub(crate) use rules::{
     BoundRuleAction, bind_rule_action_statement, bind_rule_qual, validate_rule_definition,
 };

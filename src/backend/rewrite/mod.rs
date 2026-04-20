@@ -1,7 +1,11 @@
 mod rules;
+mod view_dml;
 mod views;
 
 pub(crate) use rules::{format_stored_rule_definition, split_stored_rule_action_sql};
+pub(crate) use view_dml::{
+    ResolvedAutoViewTarget, ViewDmlEvent, ViewDmlRewriteError, resolve_auto_updatable_view_target,
+};
 
 use crate::backend::parser::{CatalogLookup, ParseError};
 use crate::include::nodes::parsenodes::{Query, RangeTblEntry, RangeTblEntryKind};
