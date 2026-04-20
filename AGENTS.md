@@ -1,4 +1,4 @@
-# AGENTS
+# pgrust — project guide for AI agents
 
 ## Overview
 
@@ -13,16 +13,6 @@
 - `src/pgrust`: server/session/database orchestration outside the PostgreSQL-style backend tree.
 
 The current codebase was recently refactored to separate parser, logical plan, and executor-runtime responsibilities more cleanly. Prefer extending those boundaries instead of reintroducing cross-layer dependencies.
-
-## PostgreSQL Reference Tree
-
-There is a full PostgreSQL source checkout alongside this repo at [../postgres](/Users/malisper/workspace/work/postgres-rewrite/postgres). Use it as the first reference when pgrust behavior should match upstream PostgreSQL semantics, output formatting, planner structure, catalog behavior, or regression expectations.
-
-Useful reference paths inside that tree include:
-
-- [../postgres/src/backend](/Users/malisper/workspace/work/postgres-rewrite/postgres/src/backend) for parser, planner, executor, catalog, and command behavior.
-- [../postgres/src/include](/Users/malisper/workspace/work/postgres-rewrite/postgres/src/include) for canonical node/type definitions and shared headers.
-- [../postgres/src/test/regress](/Users/malisper/workspace/work/postgres-rewrite/postgres/src/test/regress) for regression SQL and expected output files.
 
 ## Shared Node Layers
 
@@ -122,7 +112,6 @@ If a change is about SQL semantics, planning, or execution, it usually belongs u
 - Keep parser analysis, logical plan construction, and executor runtime concerns separate.
 - Keep tests close to the module they validate when practical. The executor facade still has a large test block; shrinking that is still a good follow-up.
 - Avoid adding new parser dependencies on executor implementation modules.
-- When the user says `Finish`, mark the work as finished in the todo list, commit it, merge it, and then list the next related features to work on as a numbered list.
 - When you introduce a narrow workaround, compatibility shim, or intentionally temporary shortcut, add a nearby `:HACK:` comment explaining what is being worked around and what the preferred long-term shape should be.
 
 ## Validation
@@ -141,3 +130,51 @@ When the user asks for a profile or profiling analysis:
 - Present the results in a clean, readable format.
 - Include the profile source or file path, a short summary of the main hotspots, and a compact list of the most important syscall or caller chains when relevant.
 - Prefer concise sections such as `Summary`, `Top Hotspots`, and `Key Call Paths` over dumping raw profiler output without interpretation.
+
+
+<!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:ca08a54f -->
+## Beads Issue Tracker
+
+This project uses **bd (beads)** for issue tracking. Run `bd prime` to see full workflow context and commands.
+
+### Quick Reference
+
+```bash
+bd ready              # Find available work
+bd show <id>          # View issue details
+bd update <id> --claim  # Claim work
+bd close <id>         # Complete work
+```
+
+### Rules
+
+- Use `bd` for ALL task tracking — do NOT use TodoWrite, TaskCreate, or markdown TODO lists
+- Run `bd prime` for detailed command reference and session close protocol
+- Use `bd remember` for persistent knowledge — do NOT use MEMORY.md files
+
+## Session Completion
+
+**When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.
+
+**MANDATORY WORKFLOW:**
+
+1. **File issues for remaining work** - Create issues for anything that needs follow-up
+2. **Run quality gates** (if code changed) - Tests, linters, builds
+3. **Update issue status** - Close finished work, update in-progress items
+4. **PUSH TO REMOTE** - This is MANDATORY:
+   ```bash
+   git pull --rebase
+   bd dolt push
+   git push
+   git status  # MUST show "up to date with origin"
+   ```
+5. **Clean up** - Clear stashes, prune remote branches
+6. **Verify** - All changes committed AND pushed
+7. **Hand off** - Provide context for next session
+
+**CRITICAL RULES:**
+- Work is NOT complete until `git push` succeeds
+- NEVER stop before pushing - that leaves work stranded locally
+- NEVER say "ready to push when you are" - YOU must push
+- If push fails, resolve and retry until it succeeds
+<!-- END BEADS INTEGRATION -->

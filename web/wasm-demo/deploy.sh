@@ -1,19 +1,23 @@
 #!/usr/bin/env bash
-# Deploy the pgrust wasm demo to https://pgrust.com (CloudFront + S3).
+# Deploy the pgrust wasm demo to an S3 + CloudFront static site.
 #
-# Requires AWS_PROFILE=mfa (or another profile with S3 + CloudFront access
-# on account 149051628381). Uses terraform output from pgrust/domains/ to
-# locate the CloudFront distribution for invalidation.
+# Required env vars:
+#   PGRUST_DEMO_BUCKET        S3 bucket name for the demo (e.g. "my-pgrust-demo")
+#   PGRUST_CLOUDFRONT_ID      CloudFront distribution id to invalidate
+# Optional env vars:
+#   AWS_PROFILE               aws cli profile to use (default: current shell default)
+#   PGRUST_DEMO_URL           public URL printed at end of deploy (cosmetic)
 
 set -euo pipefail
 cd "$(dirname "$0")"
 
-BUCKET="pgrust"
+: "${PGRUST_DEMO_BUCKET:?set PGRUST_DEMO_BUCKET to the target S3 bucket}"
+: "${PGRUST_CLOUDFRONT_ID:?set PGRUST_CLOUDFRONT_ID to the CloudFront distribution id}"
 
 ./build.sh
 
 # Pass 1: everything except .wasm — let S3 auto-detect Content-Type.
-AWS_PROFILE=mfa aws s3 sync . "s3://${BUCKET}/" \
+aws s3 sync . "s3://${PGRUST_DEMO_BUCKET}/" \
   --delete \
   --exclude "build.sh" \
   --exclude "deploy.sh" \
@@ -25,26 +29,15 @@ AWS_PROFILE=mfa aws s3 sync . "s3://${BUCKET}/" \
 # Pass 2: .wasm files with explicit Content-Type.
 # Browsers need `application/wasm` for streaming compile (WebAssembly.compileStreaming).
 # S3 MIME auto-detection is unreliable for .wasm.
-AWS_PROFILE=mfa aws s3 sync . "s3://${BUCKET}/" \
+aws s3 sync . "s3://${PGRUST_DEMO_BUCKET}/" \
   --exclude "*" \
   --include "*.wasm" \
   --content-type "application/wasm"
 
-# Invalidate CloudFront so edge caches pick up the new build.
-DIST_ID="${PGRUST_CLOUDFRONT_ID:-}"
-if [[ -z "$DIST_ID" ]]; then
-  DIST_ID="$(cd ../../domains && AWS_PROFILE=mfa terraform output -raw cloudfront_distribution_id 2>/dev/null || true)"
-fi
+aws cloudfront create-invalidation \
+  --distribution-id "$PGRUST_CLOUDFRONT_ID" \
+  --paths "/*" \
+  >/dev/null
+echo "Invalidated CloudFront distribution $PGRUST_CLOUDFRONT_ID"
 
-if [[ -n "$DIST_ID" ]]; then
-  AWS_PROFILE=mfa aws cloudfront create-invalidation \
-    --distribution-id "$DIST_ID" \
-    --paths "/*" \
-    >/dev/null
-  echo "Invalidated CloudFront distribution $DIST_ID"
-else
-  echo "Warning: could not determine CloudFront distribution id; skipping invalidation."
-  echo "Set PGRUST_CLOUDFRONT_ID or run from a tree where pgrust/domains/ terraform state is accessible."
-fi
-
-echo "Deployed to https://pgrust.com"
+echo "Deployed to ${PGRUST_DEMO_URL:-s3://$PGRUST_DEMO_BUCKET}"

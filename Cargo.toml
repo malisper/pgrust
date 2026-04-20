@@ -3,6 +3,9 @@ name = "pgrust"
 version = "0.1.0"
 edition = "2024"
 license = "AGPL-3.0-only"
+description = "Multi-threaded PostgreSQL, rewritten from scratch in Rust."
+repository = "https://github.com/malisper/pgrust"
+readme = "README.md"
 
 [lib]
 name = "pgrust"
