@@ -2396,21 +2396,39 @@ pub(super) fn cast_numeric_value(
             let v = parse_pg_float(&rendered, SqlTypeKind::Float8)?;
             Ok(Value::Float64(v))
         }
-        SqlTypeKind::Int2 => value
-            .round_to_scale(0)
-            .and_then(|rounded| rounded.render().parse::<i16>().ok())
-            .map(Value::Int16)
-            .ok_or(ExecError::Int2OutOfRange),
-        SqlTypeKind::Int4 => value
-            .round_to_scale(0)
-            .and_then(|rounded| rounded.render().parse::<i32>().ok())
-            .map(Value::Int32)
-            .ok_or(ExecError::Int4OutOfRange),
-        SqlTypeKind::Int8 => value
-            .round_to_scale(0)
-            .and_then(|rounded| rounded.render().parse::<i64>().ok())
-            .map(Value::Int64)
-            .ok_or(ExecError::Int8OutOfRange),
+        SqlTypeKind::Int2 => match value {
+            NumericValue::NaN => Err(ExecError::NumericNaNToInt { ty: "smallint" }),
+            NumericValue::PosInf | NumericValue::NegInf => {
+                Err(ExecError::NumericInfinityToInt { ty: "smallint" })
+            }
+            NumericValue::Finite { .. } => value
+                .round_to_scale(0)
+                .and_then(|rounded| rounded.render().parse::<i16>().ok())
+                .map(Value::Int16)
+                .ok_or(ExecError::Int2OutOfRange),
+        },
+        SqlTypeKind::Int4 => match value {
+            NumericValue::NaN => Err(ExecError::NumericNaNToInt { ty: "integer" }),
+            NumericValue::PosInf | NumericValue::NegInf => {
+                Err(ExecError::NumericInfinityToInt { ty: "integer" })
+            }
+            NumericValue::Finite { .. } => value
+                .round_to_scale(0)
+                .and_then(|rounded| rounded.render().parse::<i32>().ok())
+                .map(Value::Int32)
+                .ok_or(ExecError::Int4OutOfRange),
+        },
+        SqlTypeKind::Int8 => match value {
+            NumericValue::NaN => Err(ExecError::NumericNaNToInt { ty: "bigint" }),
+            NumericValue::PosInf | NumericValue::NegInf => {
+                Err(ExecError::NumericInfinityToInt { ty: "bigint" })
+            }
+            NumericValue::Finite { .. } => value
+                .round_to_scale(0)
+                .and_then(|rounded| rounded.render().parse::<i64>().ok())
+                .map(Value::Int64)
+                .ok_or(ExecError::Int8OutOfRange),
+        },
         SqlTypeKind::Oid | SqlTypeKind::RegProcedure | SqlTypeKind::Xid => value
             .round_to_scale(0)
             .and_then(|rounded| rounded.render().parse::<u32>().ok())

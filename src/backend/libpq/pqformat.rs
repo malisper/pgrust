@@ -120,6 +120,8 @@ pub(crate) fn format_exec_error(e: &ExecError) -> String {
         }
         ExecError::FloatOverflow => "value out of range: overflow".to_string(),
         ExecError::FloatUnderflow => "value out of range: underflow".to_string(),
+        ExecError::NumericNaNToInt { ty } => format!("cannot convert NaN to {ty}"),
+        ExecError::NumericInfinityToInt { ty } => format!("cannot convert infinity to {ty}"),
         ExecError::InvalidStorageValue { details, .. } => details.clone(),
         ExecError::Int2OutOfRange => "smallint out of range".to_string(),
         ExecError::Int4OutOfRange => "integer out of range".to_string(),
