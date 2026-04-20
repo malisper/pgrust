@@ -7594,6 +7594,30 @@ fn parse_like_and_trim_syntax() {
 }
 
 #[test]
+fn parse_quantified_like_syntax() {
+    let stmt = parse_select(
+        "select 'foo' like any (array['%a', '%o']), 'foo' not ilike all (array['F%', '%O'])",
+    )
+    .unwrap();
+    assert!(matches!(
+        &stmt.targets[0].expr,
+        SqlExpr::QuantifiedArray {
+            op: SubqueryComparisonOp::Like,
+            is_all: false,
+            ..
+        }
+    ));
+    assert!(matches!(
+        &stmt.targets[1].expr,
+        SqlExpr::QuantifiedArray {
+            op: SubqueryComparisonOp::NotILike,
+            is_all: true,
+            ..
+        }
+    ));
+}
+
+#[test]
 fn parse_trim_without_explicit_trim_chars() {
     let stmt = parse_select(
         "select trim(both from '  bunch  '), trim(leading from '  bunch  '), trim(trailing from '  bunch  ')",
