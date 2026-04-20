@@ -1012,6 +1012,8 @@ fn parse_alter_table_add_column_statement() {
     assert_eq!(
         stmt,
         Statement::AlterTableAddColumn(AlterTableAddColumnStatement {
+            if_exists: false,
+            only: false,
             table_name: "items".into(),
             column: ColumnDef {
                 name: "note".into(),
@@ -1031,6 +1033,8 @@ fn parse_alter_table_constraint_statements() {
     assert_eq!(
         stmt,
         Statement::AlterTableAddConstraint(AlterTableAddConstraintStatement {
+            if_exists: false,
+            only: false,
             table_name: "items".into(),
             constraint: TableConstraint::Check {
                 attributes: ConstraintAttributes {
@@ -1052,6 +1056,8 @@ fn parse_alter_table_constraint_statements() {
     assert_eq!(
         stmt,
         Statement::AlterTableAddConstraint(AlterTableAddConstraintStatement {
+            if_exists: false,
+            only: false,
             table_name: "items".into(),
             constraint: TableConstraint::NotNull {
                 attributes: ConstraintAttributes {
@@ -1070,6 +1076,8 @@ fn parse_alter_table_constraint_statements() {
     assert_eq!(
         stmt,
         Statement::AlterTableDropConstraint(AlterTableDropConstraintStatement {
+            if_exists: false,
+            only: false,
             table_name: "items".into(),
             constraint_name: "items_id_check".into(),
         })
@@ -1082,6 +1090,8 @@ fn parse_alter_table_constraint_statements() {
     assert_eq!(
         stmt,
         Statement::AlterTableAlterConstraint(AlterTableAlterConstraintStatement {
+            if_exists: false,
+            only: false,
             table_name: "items".into(),
             constraint_name: "items_id_check".into(),
             deferrable: Some(true),
@@ -1095,6 +1105,8 @@ fn parse_alter_table_constraint_statements() {
     assert_eq!(
         stmt,
         Statement::AlterTableRenameConstraint(AlterTableRenameConstraintStatement {
+            if_exists: false,
+            only: false,
             table_name: "items".into(),
             constraint_name: "items_id_check".into(),
             new_constraint_name: "items_id_guard".into(),
@@ -1105,6 +1117,8 @@ fn parse_alter_table_constraint_statements() {
     assert_eq!(
         stmt,
         Statement::AlterTableValidateConstraint(AlterTableValidateConstraintStatement {
+            if_exists: false,
+            only: false,
             table_name: "items".into(),
             constraint_name: "items_id_check".into(),
         })
@@ -1114,6 +1128,8 @@ fn parse_alter_table_constraint_statements() {
     assert_eq!(
         stmt,
         Statement::AlterTableSetNotNull(AlterTableSetNotNullStatement {
+            if_exists: false,
+            only: false,
             table_name: "items".into(),
             column_name: "note".into(),
         })
@@ -1123,6 +1139,8 @@ fn parse_alter_table_constraint_statements() {
     assert_eq!(
         stmt,
         Statement::AlterTableDropNotNull(AlterTableDropNotNullStatement {
+            if_exists: false,
+            only: false,
             table_name: "items".into(),
             column_name: "note".into(),
         })
@@ -1135,6 +1153,8 @@ fn parse_alter_table_set_statement() {
     assert_eq!(
         stmt,
         Statement::AlterTableSet(AlterTableSetStatement {
+            if_exists: false,
+            only: false,
             table_name: "num_variance".into(),
             options: vec![RelOption {
                 name: "parallel_workers".into(),
@@ -1144,11 +1164,28 @@ fn parse_alter_table_set_statement() {
     );
 }
 
+#[test]
+fn parse_alter_table_if_exists_only_statement() {
+    let stmt = parse_statement("alter table if exists only items rename column note to body").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableRenameColumn(AlterTableRenameColumnStatement {
+            if_exists: true,
+            only: true,
+            table_name: "items".into(),
+            column_name: "note".into(),
+            new_column_name: "body".into(),
+        })
+    );
+}
+
 fn parse_alter_table_rename_statement() {
     let stmt = parse_statement("alter table items rename to items_new").unwrap();
     assert_eq!(
         stmt,
         Statement::AlterTableRename(AlterTableRenameStatement {
+            if_exists: false,
+            only: false,
             table_name: "items".into(),
             new_table_name: "items_new".into(),
         })
@@ -1161,6 +1198,8 @@ fn parse_alter_table_rename_column_statement() {
     assert_eq!(
         stmt,
         Statement::AlterTableRenameColumn(AlterTableRenameColumnStatement {
+            if_exists: false,
+            only: false,
             table_name: "items".into(),
             column_name: "note".into(),
             new_column_name: "body".into(),
@@ -1174,6 +1213,8 @@ fn parse_alter_table_drop_column_statement() {
     assert_eq!(
         stmt,
         Statement::AlterTableDropColumn(AlterTableDropColumnStatement {
+            if_exists: false,
+            only: false,
             table_name: "items".into(),
             column_name: "note".into(),
         })
@@ -1224,6 +1265,8 @@ fn parse_alter_table_alter_column_type_statement() {
     assert_eq!(
         stmt,
         Statement::AlterTableAlterColumnType(AlterTableAlterColumnTypeStatement {
+            if_exists: false,
+            only: false,
             table_name: "items".into(),
             column_name: "note".into(),
             ty: builtin_type(SqlType::with_char_len(SqlTypeKind::Varchar, 10)),
@@ -1241,6 +1284,8 @@ fn parse_alter_table_owner_statement() {
     assert_eq!(
         stmt,
         Statement::AlterTableOwner(AlterRelationOwnerStatement {
+            if_exists: false,
+            only: false,
             relation_name: "items".into(),
             new_owner: "app_owner".into(),
         })
@@ -1253,6 +1298,8 @@ fn parse_alter_view_owner_statement() {
     assert_eq!(
         stmt,
         Statement::AlterViewOwner(AlterRelationOwnerStatement {
+            if_exists: false,
+            only: false,
             relation_name: "items_view".into(),
             new_owner: "app_owner".into(),
         })

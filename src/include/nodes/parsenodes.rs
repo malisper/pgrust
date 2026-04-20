@@ -1087,6 +1087,8 @@ impl From<String> for IndexColumnDef {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterTableSetStatement {
+    pub if_exists: bool,
+    pub only: bool,
     pub table_name: String,
     pub options: Vec<RelOption>,
 }
@@ -1099,30 +1101,40 @@ pub struct AlterSequenceStatement {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterTableAddColumnStatement {
+    pub if_exists: bool,
+    pub only: bool,
     pub table_name: String,
     pub column: ColumnDef,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterTableAddConstraintStatement {
+    pub if_exists: bool,
+    pub only: bool,
     pub table_name: String,
     pub constraint: TableConstraint,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterTableDropColumnStatement {
+    pub if_exists: bool,
+    pub only: bool,
     pub table_name: String,
     pub column_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterTableDropConstraintStatement {
+    pub if_exists: bool,
+    pub only: bool,
     pub table_name: String,
     pub constraint_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterTableAlterConstraintStatement {
+    pub if_exists: bool,
+    pub only: bool,
     pub table_name: String,
     pub constraint_name: String,
     pub deferrable: Option<bool>,
@@ -1131,6 +1143,8 @@ pub struct AlterTableAlterConstraintStatement {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterTableRenameConstraintStatement {
+    pub if_exists: bool,
+    pub only: bool,
     pub table_name: String,
     pub constraint_name: String,
     pub new_constraint_name: String,
@@ -1138,6 +1152,8 @@ pub struct AlterTableRenameConstraintStatement {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterTableAlterColumnTypeStatement {
+    pub if_exists: bool,
+    pub only: bool,
     pub table_name: String,
     pub column_name: String,
     pub ty: RawTypeName,
@@ -1146,6 +1162,8 @@ pub struct AlterTableAlterColumnTypeStatement {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterRelationOwnerStatement {
+    pub if_exists: bool,
+    pub only: bool,
     pub relation_name: String,
     pub new_owner: String,
 }
@@ -1158,6 +1176,8 @@ pub struct AlterSchemaOwnerStatement {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterTableRenameColumnStatement {
+    pub if_exists: bool,
+    pub only: bool,
     pub table_name: String,
     pub column_name: String,
     pub new_column_name: String,
@@ -1165,24 +1185,32 @@ pub struct AlterTableRenameColumnStatement {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterTableRenameStatement {
+    pub if_exists: bool,
+    pub only: bool,
     pub table_name: String,
     pub new_table_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterTableSetNotNullStatement {
+    pub if_exists: bool,
+    pub only: bool,
     pub table_name: String,
     pub column_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterTableDropNotNullStatement {
+    pub if_exists: bool,
+    pub only: bool,
     pub table_name: String,
     pub column_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterTableValidateConstraintStatement {
+    pub if_exists: bool,
+    pub only: bool,
     pub table_name: String,
     pub constraint_name: String,
 }
