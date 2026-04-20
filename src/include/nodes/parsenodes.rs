@@ -2192,6 +2192,8 @@ pub enum SqlExpr {
     },
     CurrentDate,
     CurrentUser,
+    SessionUser,
+    CurrentRole,
     CurrentTime {
         precision: Option<i32>,
     },

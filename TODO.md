@@ -505,7 +505,7 @@ Targeted reruns and notes:
   - [done] add parser/analyzer support for role membership `GRANTED BY`
   - add parser/analyzer/executor support for `CASCADE` in role membership revokes
   - implement `SET ROLE` and `RESET ROLE`
-  - implement SQL-visible `session_user`, `current_user`, and `current_role` semantics used by the regression
+  - [done] implement SQL-visible `session_user`, `current_user`, and `current_role` semantics used by the regression
   - add parser/executor support for `DROP OWNED`
   - add parser support for `DROP USER`, `CREATE GROUP`, and `ALTER GROUP`
   - make role membership grant/revoke execution honor explicit grantors and dependent membership chains

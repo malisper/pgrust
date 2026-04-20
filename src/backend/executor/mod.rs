@@ -166,6 +166,7 @@ pub struct ExecutorContext {
     pub session_stats: std::sync::Arc<parking_lot::RwLock<SessionStatsState>>,
     pub snapshot: Snapshot,
     pub client_id: ClientId,
+    pub session_user_oid: u32,
     pub current_user_oid: u32,
     pub next_command_id: CommandId,
     pub expr_bindings: ExprEvalBindings,

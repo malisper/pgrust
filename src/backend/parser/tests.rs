@@ -4614,6 +4614,13 @@ fn parse_current_user_and_legacy_null_predicates() {
 }
 
 #[test]
+fn parse_session_user_and_current_role() {
+    let stmt = parse_select("select session_user, current_role from people").unwrap();
+    assert!(matches!(stmt.targets[0].expr, SqlExpr::SessionUser));
+    assert!(matches!(stmt.targets[1].expr, SqlExpr::CurrentRole));
+}
+
+#[test]
 fn create_table_temp_name_validation() {
     let (name, persistence) =
         crate::backend::parser::normalize_create_table_name(&CreateTableStatement {

@@ -204,6 +204,7 @@ pub(crate) fn validate_deferred_foreign_key_constraints(
         session_stats: db.session_stats_state(client_id),
         snapshot,
         client_id,
+        session_user_oid: db.auth_state(client_id).session_user_oid(),
         current_user_oid: db.auth_state(client_id).current_user_oid(),
         next_command_id: cid,
         expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
