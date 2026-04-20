@@ -14,9 +14,3 @@ override.tf
 override.tf.json
 *_override.tf
 *_override.tf.json
-
-# Beads / Dolt files (added by bd init)
-.dolt/
-*.db
-.beads-credential-key
-/issues.jsonl
