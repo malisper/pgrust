@@ -202,12 +202,10 @@ fn merge_parent_column(
     parent: &crate::backend::parser::ColumnDef,
 ) -> Result<(), ParseError> {
     ensure_matching_column_type(&merged.column.name, &merged.column.ty, &parent.ty)?;
-    if merged.attinhcount == 1 {
-        push_notice(format!(
-            "merging multiple inherited definitions of column \"{}\"",
-            merged.column.name
-        ));
-    }
+    push_notice(format!(
+        "merging multiple inherited definitions of column \"{}\"",
+        merged.column.name
+    ));
     merged.attinhcount = merged.attinhcount.saturating_add(1);
     if !parent.nullable() {
         ensure_not_null_constraint(&mut merged.column);
