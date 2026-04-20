@@ -4611,16 +4611,12 @@ fn alter_table_add_column_rejects_unsupported_forms() {
         other => panic!("expected system-column rejection, got {other:?}"),
     }
 
-    match db.execute(1, "alter table items add column note text not null") {
-        Err(ExecError::Parse(ParseError::UnexpectedToken { expected, actual }))
-            if expected == "ADD COLUMN without NOT NULL" && actual == "NOT NULL" => {}
-        other => panic!("expected NOT NULL rejection, got {other:?}"),
-    }
+    db.execute(1, "alter table items add column note text not null")
+        .unwrap();
 
     match db.execute(1, "alter table items add column key_id int4 primary key") {
         Err(ExecError::Parse(ParseError::UnexpectedToken { expected, actual }))
-            if (expected == "ADD COLUMN without PRIMARY KEY" && actual == "PRIMARY KEY")
-                || (expected == "ADD COLUMN without NOT NULL" && actual == "NOT NULL") => {}
+            if expected == "ADD COLUMN without PRIMARY KEY" && actual == "PRIMARY KEY" => {}
         other => panic!("expected PRIMARY KEY rejection, got {other:?}"),
     }
 
@@ -4683,7 +4679,9 @@ fn alter_table_add_column_propagates_to_temp_inherited_child() {
     session
         .execute(&db, "create temp table child1 () inherits (parent1)")
         .unwrap();
-    session.execute(&db, "insert into child1 values (1)").unwrap();
+    session
+        .execute(&db, "insert into child1 values (1)")
+        .unwrap();
     session
         .execute(&db, "alter table parent1 add column a1 int4 default 3")
         .unwrap();
@@ -4710,7 +4708,10 @@ fn alter_table_add_column_merges_temp_multi_parent_child_metadata() {
         .execute(&db, "create temp table pp1 (f1 int4)")
         .unwrap();
     session
-        .execute(&db, "create temp table cc1 (f2 text, f3 int4) inherits (pp1)")
+        .execute(
+            &db,
+            "create temp table cc1 (f2 text, f3 int4) inherits (pp1)",
+        )
         .unwrap();
     session
         .execute(&db, "create temp table cc2 (f4 float8) inherits (pp1, cc1)")
@@ -4721,9 +4722,7 @@ fn alter_table_add_column_merges_temp_multi_parent_child_metadata() {
         .execute(&db, "alter table pp1 add column a2 int4")
         .unwrap();
     assert_eq!(
-        take_backend_notices()
-            .into_iter()
-            .collect::<Vec<_>>(),
+        take_backend_notices().into_iter().collect::<Vec<_>>(),
         vec![r#"merging definition of column "a2" for child "cc2""#.to_string()]
     );
 
@@ -4758,6 +4757,120 @@ fn alter_table_add_column_merges_temp_multi_parent_child_metadata() {
             ],
         ]
     );
+}
+
+#[test]
+fn alter_table_add_column_propagates_temp_not_null_constraints() {
+    let base = temp_dir("alter_table_add_column_temp_not_null");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create temp table parent1 (f1 int4)")
+        .unwrap();
+    session
+        .execute(&db, "create temp table child1 () inherits (parent1)")
+        .unwrap();
+    session
+        .execute(&db, "insert into child1 values (1)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table parent1 add column a1 int4 not null default 3",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select f1, a1 from child1 order by f1",),
+        vec![vec![Value::Int32(1), Value::Int32(3)]]
+    );
+    match session.execute(&db, "insert into child1 (f1, a1) values (2, null)") {
+        Err(ExecError::NotNullViolation {
+            relation,
+            column,
+            constraint,
+        }) if relation == "child1" && column == "a1" && constraint == "parent1_a1_not_null" => {}
+        other => panic!("expected propagated temp not-null violation, got {other:?}"),
+    }
+}
+
+#[test]
+fn alter_table_add_column_propagates_temp_check_constraints() {
+    let base = temp_dir("alter_table_add_column_temp_check");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create temp table parent1 (f1 int4)")
+        .unwrap();
+    session
+        .execute(&db, "create temp table child1 () inherits (parent1)")
+        .unwrap();
+    session
+        .execute(&db, "insert into child1 values (1)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table parent1 add column a1 int4 check (a1 > 0) default 3",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select c.relname, pgc.conname
+             from pg_constraint pgc
+             join pg_class c on c.oid = pgc.conrelid
+             where pgc.conname = 'parent1_a1_check'
+             order by 1",
+        ),
+        vec![
+            vec![
+                Value::Text("child1".into()),
+                Value::Text("parent1_a1_check".into()),
+            ],
+            vec![
+                Value::Text("parent1".into()),
+                Value::Text("parent1_a1_check".into()),
+            ],
+        ]
+    );
+    match session.execute(&db, "insert into child1 (f1, a1) values (2, -1)") {
+        Err(ExecError::CheckViolation {
+            relation,
+            constraint,
+        }) if relation == "child1" && constraint == "parent1_a1_check" => {}
+        other => panic!("expected propagated temp check violation, got {other:?}"),
+    }
+}
+
+#[test]
+fn alter_table_add_column_temp_not_null_validates_inherited_child_rows() {
+    let base = temp_dir("alter_table_add_column_temp_not_null_validate");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create temp table parent1 (f1 int4)")
+        .unwrap();
+    session
+        .execute(&db, "create temp table child1 () inherits (parent1)")
+        .unwrap();
+    session
+        .execute(&db, "insert into child1 values (1)")
+        .unwrap();
+
+    match session.execute(&db, "alter table parent1 add column a1 int4 not null") {
+        Err(ExecError::NotNullViolation {
+            relation,
+            column,
+            constraint,
+        }) if relation == "child1" && column == "a1" && constraint == "parent1_a1_not_null" => {}
+        other => panic!("expected inherited child validation failure, got {other:?}"),
+    }
 }
 
 #[test]
