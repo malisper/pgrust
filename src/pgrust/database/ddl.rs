@@ -589,7 +589,6 @@ pub(super) fn format_sql_type_name(sql_type: SqlType) -> &'static str {
         SqlTypeKind::Tid => "tid",
         SqlTypeKind::Xid => "xid",
         SqlTypeKind::Oid => "oid",
-        SqlTypeKind::RegRole => "regrole",
         SqlTypeKind::RegProcedure => "regprocedure",
         SqlTypeKind::OidVector => "oidvector",
         SqlTypeKind::Bit => "bit",
@@ -707,6 +706,59 @@ pub(super) fn validate_alter_table_alter_column_default(
         default_sequence_oid: default_expr_sql
             .and_then(crate::pgrust::database::default_sequence_oid_from_default_expr),
     })
+}
+
+pub(super) fn validate_alter_table_alter_column_options(
+    desc: &RelationDesc,
+    column_name: &str,
+) -> Result<String, ExecError> {
+    if is_system_column_name(column_name) {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "user column name for ALTER COLUMN SET/RESET options",
+            actual: column_name.to_string(),
+        }));
+    }
+    let column = desc
+        .columns
+        .iter()
+        .find(|column| !column.dropped && column.name.eq_ignore_ascii_case(column_name))
+        .ok_or_else(|| ExecError::Parse(ParseError::UnknownColumn(column_name.to_string())))?;
+    Ok(column.name.clone())
+}
+
+pub(super) fn validate_alter_table_alter_column_statistics(
+    desc: &RelationDesc,
+    column_name: &str,
+    statistics_target: i16,
+) -> Result<(String, i16), ExecError> {
+    if is_system_column_name(column_name) {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "user column name for ALTER COLUMN SET STATISTICS",
+            actual: column_name.to_string(),
+        }));
+    }
+    let column = desc
+        .columns
+        .iter()
+        .find(|column| !column.dropped && column.name.eq_ignore_ascii_case(column_name))
+        .ok_or_else(|| ExecError::Parse(ParseError::UnknownColumn(column_name.to_string())))?;
+
+    let statistics_target = if statistics_target == -1 {
+        -1
+    } else if statistics_target < 0 {
+        return Err(ExecError::DetailedError {
+            message: format!("statistics target {} is too low", statistics_target),
+            detail: None,
+            hint: None,
+            sqlstate: "22023",
+        });
+    } else if statistics_target > 10000 {
+        10000
+    } else {
+        statistics_target
+    };
+
+    Ok((column.name.clone(), statistics_target))
 }
 
 fn alter_column_type_error(
