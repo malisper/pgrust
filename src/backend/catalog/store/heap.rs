@@ -46,7 +46,7 @@ use crate::include::nodes::datum::Value;
 
 use super::{
     CatalogControl, CatalogMutationEffect, CatalogStore, CatalogStoreMode, CatalogWriteContext,
-    CreateTableResult,
+    CreateTableResult, RuleOwnerDependency,
 };
 
 const PG_DESCRIPTION_O_C_O_INDEX_OID: u32 = 2675;
@@ -1435,14 +1435,12 @@ impl CatalogStore {
         Ok(effect)
     }
 
-    pub fn create_view_mvcc(
+    pub fn create_view_relation_mvcc(
         &mut self,
         name: impl Into<String>,
         desc: RelationDesc,
         namespace_oid: u32,
         owner_oid: u32,
-        definition: String,
-        referenced_relation_oids: &[u32],
         ctx: &CatalogWriteContext,
     ) -> Result<(CatalogEntry, CatalogMutationEffect), CatalogError> {
         let name = name.into();
@@ -1466,31 +1464,9 @@ impl CatalogStore {
             owner_oid,
             &mut control,
         )?;
-        let rewrite_row = PgRewriteRow {
-            oid: control.next_oid,
-            rulename: "_RETURN".to_string(),
-            ev_class: entry.relation_oid,
-            ev_type: '1',
-            ev_enabled: 'O',
-            is_instead: true,
-            ev_qual: String::new(),
-            ev_action: definition,
-        };
-        control.next_oid = control.next_oid.saturating_add(1);
-        let mut referenced = referenced_relation_oids.to_vec();
-        referenced.sort_unstable();
-        referenced.dedup();
-
         let kinds = create_view_sync_kinds();
         self.persist_control_values(control.next_oid, control.next_rel_number)?;
-        let mut rows = rows_for_new_relation_entry(&catcache, &name, &entry)?;
-        rows.rewrites.push(rewrite_row);
-        rows.depends.extend(view_rewrite_depend_rows(
-            rows.rewrites[0].oid,
-            entry.relation_oid,
-            &referenced,
-        ));
-        sort_pg_depend_rows(&mut rows.depends);
+        let rows = rows_for_new_relation_entry(&catcache, &name, &entry)?;
         insert_catalog_rows_subset_mvcc(ctx, &rows, self.scope_db_oid(), &kinds)?;
         self.control = control;
 
@@ -1511,6 +1487,31 @@ impl CatalogStore {
         ev_qual: String,
         ev_action: String,
         referenced_relation_oids: &[u32],
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        self.create_rule_mvcc_with_owner_dependency(
+            relation_oid,
+            rule_name,
+            ev_type,
+            is_instead,
+            ev_qual,
+            ev_action,
+            referenced_relation_oids,
+            RuleOwnerDependency::Auto,
+            ctx,
+        )
+    }
+
+    pub fn create_rule_mvcc_with_owner_dependency(
+        &mut self,
+        relation_oid: u32,
+        rule_name: impl Into<String>,
+        ev_type: char,
+        is_instead: bool,
+        ev_qual: String,
+        ev_action: String,
+        referenced_relation_oids: &[u32],
+        owner_dependency: RuleOwnerDependency,
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let rule_name = rule_name.into();
@@ -1537,7 +1538,14 @@ impl CatalogStore {
         self.persist_control_values(control.next_oid, control.next_rel_number)?;
         let rows = PhysicalCatalogRows {
             rewrites: vec![rewrite_row.clone()],
-            depends: relation_rule_depend_rows(rewrite_row.oid, relation_oid, &referenced),
+            depends: match owner_dependency {
+                RuleOwnerDependency::Auto => {
+                    relation_rule_depend_rows(rewrite_row.oid, relation_oid, &referenced)
+                }
+                RuleOwnerDependency::Internal => {
+                    view_rewrite_depend_rows(rewrite_row.oid, relation_oid, &referenced)
+                }
+            },
             ..PhysicalCatalogRows::default()
         };
         let kinds = vec![
