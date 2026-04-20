@@ -246,6 +246,7 @@ pub enum Statement {
     AlterTableRenameConstraint(AlterTableRenameConstraintStatement),
     AlterTableAlterColumnType(AlterTableAlterColumnTypeStatement),
     AlterTableAlterColumnDefault(AlterTableAlterColumnDefaultStatement),
+    AlterTableAlterColumnStorage(AlterTableAlterColumnStorageStatement),
     AlterTableAlterColumnOptions(AlterTableAlterColumnOptionsStatement),
     AlterTableAlterColumnStatistics(AlterTableAlterColumnStatisticsStatement),
     AlterTableOwner(AlterRelationOwnerStatement),
@@ -1221,6 +1222,15 @@ pub struct AlterTableAlterColumnDefaultStatement {
     pub column_name: String,
     pub default_expr: Option<SqlExpr>,
     pub default_expr_sql: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableAlterColumnStorageStatement {
+    pub if_exists: bool,
+    pub only: bool,
+    pub table_name: String,
+    pub column_name: String,
+    pub storage: crate::include::access::htup::AttributeStorage,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

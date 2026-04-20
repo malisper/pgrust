@@ -1344,6 +1344,39 @@ impl Catalog {
         Ok((name, old_entry, new_entry))
     }
 
+    pub fn alter_table_set_column_storage(
+        &mut self,
+        relation_oid: u32,
+        column_name: &str,
+        storage: crate::include::access::htup::AttributeStorage,
+    ) -> Result<(String, CatalogEntry, CatalogEntry), CatalogError> {
+        let name = self
+            .tables
+            .iter()
+            .find(|(_, entry)| entry.relation_oid == relation_oid)
+            .map(|(name, _)| name.clone())
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        let old_entry = self
+            .tables
+            .get(&name)
+            .cloned()
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        if old_entry.relkind != 'r' {
+            return Err(CatalogError::UnknownTable(relation_oid.to_string()));
+        }
+        let column_index = relation_column_index(&old_entry.desc, column_name)?;
+
+        let mut new_entry = old_entry.clone();
+        new_entry.desc.columns[column_index].storage.attstorage = storage;
+
+        let entry = self
+            .tables
+            .get_mut(&name)
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        *entry = new_entry.clone();
+        Ok((name, old_entry, new_entry))
+    }
+
     pub fn alter_table_drop_column(
         &mut self,
         relation_oid: u32,

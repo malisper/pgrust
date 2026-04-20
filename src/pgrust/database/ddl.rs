@@ -12,6 +12,7 @@ use crate::backend::parser::{
 use crate::backend::utils::cache::syscache::{
     ensure_class_rows, ensure_depend_rows, ensure_namespace_rows, ensure_rewrite_rows,
 };
+use crate::include::access::htup::AttributeStorage;
 use crate::include::catalog::{
     CONSTRAINT_FOREIGN, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, PG_CATALOG_NAMESPACE_OID,
     PG_CLASS_RELATION_OID, PG_PROC_RELATION_OID, PG_REWRITE_RELATION_OID, PG_TYPE_RELATION_OID,
@@ -727,6 +728,41 @@ pub(super) fn validate_alter_table_alter_column_options(
     Ok(column.name.clone())
 }
 
+pub(super) fn validate_alter_table_alter_column_storage(
+    desc: &RelationDesc,
+    column_name: &str,
+    storage: AttributeStorage,
+) -> Result<(String, AttributeStorage), ExecError> {
+    if is_system_column_name(column_name) {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "user column name for ALTER COLUMN SET STORAGE",
+            actual: column_name.to_string(),
+        }));
+    }
+    let column = desc
+        .columns
+        .iter()
+        .find(|column| !column.dropped && column.name.eq_ignore_ascii_case(column_name))
+        .ok_or_else(|| ExecError::Parse(ParseError::UnknownColumn(column_name.to_string())))?;
+
+    let type_default = column_desc("attstorage_check", column.sql_type, column.storage.nullable)
+        .storage
+        .attstorage;
+    if storage != AttributeStorage::Plain && type_default == AttributeStorage::Plain {
+        return Err(ExecError::DetailedError {
+            message: format!(
+                "column data type {} can only have storage PLAIN",
+                format_sql_type_name(column.sql_type)
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
+    }
+
+    Ok((column.name.clone(), storage))
+}
+
 pub(super) fn validate_alter_table_alter_column_statistics(
     desc: &RelationDesc,
     column_name: &str,
@@ -888,6 +924,8 @@ pub(super) fn validate_alter_table_alter_column_type(
         target_sql_type,
         current_column.storage.nullable,
     );
+    new_column.storage.attstorage = current_column.storage.attstorage;
+    new_column.storage.attcompression = current_column.storage.attcompression;
     new_column.attstattarget = current_column.attstattarget;
     new_column.not_null_constraint_oid = current_column.not_null_constraint_oid;
     new_column.not_null_constraint_name = current_column.not_null_constraint_name.clone();

@@ -4567,6 +4567,32 @@ fn alter_table_alter_column_set_options_is_accepted() {
 }
 
 #[test]
+fn alter_table_alter_column_set_storage_updates_pg_attribute_and_write_behavior() {
+    let base = temp_dir("alter_table_column_storage");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table attmp(t text)").unwrap();
+    db.execute(1, "alter table attmp alter column t set storage plain")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select attstorage from pg_attribute where attrelid = (select oid from pg_class where relname = 'attmp') and attname = 't'",
+        ),
+        vec![vec![Value::Text("p".into())]]
+    );
+
+    let oversized = "x".repeat(crate::backend::storage::page::bufpage::MAX_HEAP_TUPLE_SIZE);
+    match db.execute(1, &format!("insert into attmp values ('{oversized}')")) {
+        Err(ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Tuple(
+            crate::include::access::htup::TupleError::Oversized { .. },
+        ))) => {}
+        other => panic!("expected oversized tuple error after SET STORAGE PLAIN, got {other:?}"),
+    }
+}
+
+#[test]
 fn alter_table_alter_column_set_statistics_updates_pg_attribute() {
     let base = temp_dir("alter_table_column_statistics");
     let db = Database::open(&base, 16).unwrap();
