@@ -480,6 +480,7 @@ fn run_statement(
         | Statement::AlterTableAlterConstraint(_)
         | Statement::AlterTableRenameConstraint(_)
         | Statement::AlterTableAlterColumnOptions(_)
+        | Statement::AlterTableAlterColumnStatistics(_)
         | Statement::AlterTableAlterColumnDefault(_)
         | Statement::AlterTableSetNotNull(_)
         | Statement::AlterTableDropNotNull(_)

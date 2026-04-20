@@ -602,46 +602,6 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 Some(BuiltinScalarFunction::StringToArray) => {
                     SqlType::array_of(SqlType::new(SqlTypeKind::Text))
                 }
-                Some(BuiltinScalarFunction::ArrayAppend | BuiltinScalarFunction::ArrayCat) => {
-                    function_arg_values(args).next().map_or(
-                        SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
-                        |arg| {
-                            infer_sql_expr_type_with_ctes(
-                                arg,
-                                scope,
-                                catalog,
-                                outer_scopes,
-                                grouped_outer,
-                                ctes,
-                            )
-                        },
-                    )
-                }
-                Some(BuiltinScalarFunction::ArrayPrepend) => function_arg_values(args)
-                    .nth(1)
-                    .map_or(SqlType::array_of(SqlType::new(SqlTypeKind::Text)), |arg| {
-                        infer_sql_expr_type_with_ctes(
-                            arg,
-                            scope,
-                            catalog,
-                            outer_scopes,
-                            grouped_outer,
-                            ctes,
-                        )
-                    }),
-                Some(BuiltinScalarFunction::TrimArray) => function_arg_values(args).next().map_or(
-                    SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
-                    |arg| {
-                        infer_sql_expr_type_with_ctes(
-                            arg,
-                            scope,
-                            catalog,
-                            outer_scopes,
-                            grouped_outer,
-                            ctes,
-                        )
-                    },
-                ),
                 Some(BuiltinScalarFunction::ArrayPositions) => {
                     SqlType::array_of(SqlType::new(SqlTypeKind::Int4))
                 }

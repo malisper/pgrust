@@ -245,6 +245,7 @@ pub enum Statement {
     AlterTableAlterColumnType(AlterTableAlterColumnTypeStatement),
     AlterTableAlterColumnDefault(AlterTableAlterColumnDefaultStatement),
     AlterTableAlterColumnOptions(AlterTableAlterColumnOptionsStatement),
+    AlterTableAlterColumnStatistics(AlterTableAlterColumnStatisticsStatement),
     AlterTableOwner(AlterRelationOwnerStatement),
     AlterTableRenameColumn(AlterTableRenameColumnStatement),
     AlterTableRename(AlterTableRenameStatement),
@@ -1189,6 +1190,15 @@ pub struct AlterTableAlterColumnOptionsStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableAlterColumnStatisticsStatement {
+    pub if_exists: bool,
+    pub only: bool,
+    pub table_name: String,
+    pub column_name: String,
+    pub statistics_target: i16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterRelationOwnerStatement {
     pub if_exists: bool,
     pub only: bool,
@@ -1672,7 +1682,6 @@ pub enum SqlTypeKind {
     Int8,
     Name,
     Oid,
-    RegRole,
     RegProcedure,
     Tid,
     Xid,

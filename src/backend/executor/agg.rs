@@ -24,37 +24,10 @@ pub(crate) enum NumericAccum {
     Numeric(NumericValue),
 }
 
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum NumericStatsMode {
-    PopulationVariance,
-    SampleVariance,
-    PopulationStddev,
-    SampleStddev,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum RegrStatsMode {
-    RegrCount,
-    RegrSxx,
-    RegrSyy,
-    RegrSxy,
-    RegrAvgx,
-    RegrAvgy,
-    RegrR2,
-    RegrSlope,
-    RegrIntercept,
-    CovarPop,
-    CovarSamp,
-    Corr,
-}
-
 #[derive(Debug, Clone)]
 pub(crate) enum AccumState {
     Count {
         count: i64,
-    },
-    AnyValue {
-        value: Option<Value>,
     },
     CountDistinct {
         seen: HashSet<Value>,
@@ -73,16 +46,7 @@ pub(crate) enum AccumState {
         sum: NumericValue,
         sum_sq: NumericValue,
         result_type: SqlType,
-        mode: NumericStatsMode,
-    },
-    RegrStats {
-        count: i64,
-        sum_x: f64,
-        sum_y: f64,
-        sum_x_sq: f64,
-        sum_y_sq: f64,
-        sum_xy: f64,
-        mode: RegrStatsMode,
+        stddev: bool,
     },
     JsonAgg {
         values: Vec<Value>,
@@ -118,7 +82,6 @@ impl AccumState {
                 seen: HashSet::new(),
             },
             (AggFunc::Count, false) => AccumState::Count { count: 0 },
-            (AggFunc::AnyValue, _) => AccumState::AnyValue { value: None },
             (AggFunc::Sum, _) => AccumState::Sum {
                 sum: None,
                 result_type: sql_type,
@@ -128,40 +91,19 @@ impl AccumState {
                 count: 0,
                 result_type: sql_type,
             },
-            (
-                AggFunc::VarPop | AggFunc::VarSamp | AggFunc::Variance | AggFunc::StddevPop
-                | AggFunc::StddevSamp
-                | AggFunc::Stddev,
-                _,
-            ) => AccumState::NumericStats {
+            (AggFunc::Variance, _) => AccumState::NumericStats {
                 count: 0,
                 sum: NumericValue::zero(),
                 sum_sq: NumericValue::zero(),
                 result_type: sql_type,
-                mode: numeric_stats_mode(func),
+                stddev: false,
             },
-            (
-                AggFunc::RegrCount
-                | AggFunc::RegrSxx
-                | AggFunc::RegrSyy
-                | AggFunc::RegrSxy
-                | AggFunc::RegrAvgx
-                | AggFunc::RegrAvgy
-                | AggFunc::RegrR2
-                | AggFunc::RegrSlope
-                | AggFunc::RegrIntercept
-                | AggFunc::CovarPop
-                | AggFunc::CovarSamp
-                | AggFunc::Corr,
-                _,
-            ) => AccumState::RegrStats {
+            (AggFunc::Stddev, _) => AccumState::NumericStats {
                 count: 0,
-                sum_x: 0.0,
-                sum_y: 0.0,
-                sum_x_sq: 0.0,
-                sum_y_sq: 0.0,
-                sum_xy: 0.0,
-                mode: regr_stats_mode(func),
+                sum: NumericValue::zero(),
+                sum_sq: NumericValue::zero(),
+                result_type: sql_type,
+                stddev: true,
             },
             (AggFunc::JsonAgg, _) => AccumState::JsonAgg {
                 values: Vec::new(),
@@ -221,15 +163,6 @@ impl AccumState {
                 }
                 Ok(())
             },
-            (AggFunc::AnyValue, _, _) => |state, values| {
-                if let AccumState::AnyValue { value: current } = state {
-                    let value = values.first().unwrap_or(&Value::Null);
-                    if current.is_none() && !matches!(value, Value::Null) {
-                        *current = Some(value.to_owned_value());
-                    }
-                }
-                Ok(())
-            },
             (AggFunc::Sum, _, _) => |state, values| {
                 if let AccumState::Sum { sum, result_type } = state {
                     let value = values.first().unwrap_or(&Value::Null);
@@ -252,16 +185,7 @@ impl AccumState {
                 }
                 Ok(())
             },
-            (
-                AggFunc::VarPop
-                | AggFunc::VarSamp
-                | AggFunc::Variance
-                | AggFunc::StddevPop
-                | AggFunc::StddevSamp
-                | AggFunc::Stddev,
-                _,
-                _,
-            ) => |state, values| {
+            (AggFunc::Variance | AggFunc::Stddev, _, _) => |state, values| {
                 if let AccumState::NumericStats {
                     count, sum, sum_sq, ..
                 } = state
@@ -271,46 +195,6 @@ impl AccumState {
                         *sum = sum.add(&numeric);
                         *sum_sq = sum_sq.add(&numeric.mul(&numeric));
                         *count += 1;
-                    }
-                }
-                Ok(())
-            },
-            (
-                AggFunc::RegrCount
-                | AggFunc::RegrSxx
-                | AggFunc::RegrSyy
-                | AggFunc::RegrSxy
-                | AggFunc::RegrAvgx
-                | AggFunc::RegrAvgy
-                | AggFunc::RegrR2
-                | AggFunc::RegrSlope
-                | AggFunc::RegrIntercept
-                | AggFunc::CovarPop
-                | AggFunc::CovarSamp
-                | AggFunc::Corr,
-                _,
-                _,
-            ) => |state, values| {
-                if let AccumState::RegrStats {
-                    count,
-                    sum_x,
-                    sum_y,
-                    sum_x_sq,
-                    sum_y_sq,
-                    sum_xy,
-                    ..
-                } = state
-                {
-                    let y = values.first().unwrap_or(&Value::Null);
-                    let x = values.get(1).unwrap_or(&Value::Null);
-                    if let (Some(y), Some(x)) = (aggregate_float8_value(y), aggregate_float8_value(x))
-                    {
-                        *count += 1;
-                        *sum_x += x;
-                        *sum_y += y;
-                        *sum_x_sq += x * x;
-                        *sum_y_sq += y * y;
-                        *sum_xy += x * y;
                     }
                 }
                 Ok(())
@@ -420,7 +304,6 @@ impl AccumState {
     pub(crate) fn finalize(&self) -> Value {
         match self {
             AccumState::Count { count } => Value::Int64(*count),
-            AccumState::AnyValue { value } => value.clone().unwrap_or(Value::Null),
             AccumState::CountDistinct { seen } => Value::Int64(seen.len() as i64),
             AccumState::Sum { sum, result_type } => match sum {
                 Some(NumericAccum::Int(v)) if matches!(result_type.kind, SqlTypeKind::Money) => {
@@ -474,23 +357,19 @@ impl AccumState {
                 sum,
                 sum_sq,
                 result_type,
-                mode,
+                stddev,
             } => {
-                if *count == 0 || (numeric_stats_is_sample(*mode) && *count < 2) {
+                if *count < 2 {
                     Value::Null
                 } else {
                     let n = NumericValue::from_i64(*count);
+                    let n_minus_one = NumericValue::from_i64(*count - 1);
                     let mean_square = sum.mul(sum).div(&n, 32).unwrap_or_else(NumericValue::zero);
-                    let divisor = if numeric_stats_is_sample(*mode) {
-                        NumericValue::from_i64(*count - 1)
-                    } else {
-                        n.clone()
-                    };
                     let variance = sum_sq
                         .sub(&mean_square)
-                        .div(&divisor, 32)
+                        .div(&n_minus_one, 32)
                         .unwrap_or_else(NumericValue::zero);
-                    let result = if numeric_stats_is_stddev(*mode) {
+                    let result = if *stddev {
                         numeric_sqrt(&variance, 20)
                     } else {
                         variance.round_to_scale(20).unwrap_or(variance)
@@ -503,15 +382,6 @@ impl AccumState {
                     }
                 }
             }
-            AccumState::RegrStats {
-                count,
-                sum_x,
-                sum_y,
-                sum_x_sq,
-                sum_y_sq,
-                sum_xy,
-                mode,
-            } => finalize_regr_stats(*count, *sum_x, *sum_y, *sum_x_sq, *sum_y_sq, *sum_xy, *mode),
             AccumState::JsonAgg { values, jsonb } => {
                 if *jsonb {
                     let mut items = Vec::with_capacity(values.len());
@@ -630,110 +500,6 @@ fn normalize_array_value(value: &Value) -> Option<ArrayValue> {
         Value::Array(items) => Some(ArrayValue::from_1d(items.clone())),
         _ => None,
     }
-}
-
-fn numeric_stats_mode(func: AggFunc) -> NumericStatsMode {
-    match func {
-        AggFunc::VarPop => NumericStatsMode::PopulationVariance,
-        AggFunc::VarSamp | AggFunc::Variance => NumericStatsMode::SampleVariance,
-        AggFunc::StddevPop => NumericStatsMode::PopulationStddev,
-        AggFunc::StddevSamp | AggFunc::Stddev => NumericStatsMode::SampleStddev,
-        _ => unreachable!("non-numeric aggregate in numeric_stats_mode"),
-    }
-}
-
-fn numeric_stats_is_sample(mode: NumericStatsMode) -> bool {
-    matches!(
-        mode,
-        NumericStatsMode::SampleVariance | NumericStatsMode::SampleStddev
-    )
-}
-
-fn numeric_stats_is_stddev(mode: NumericStatsMode) -> bool {
-    matches!(
-        mode,
-        NumericStatsMode::PopulationStddev | NumericStatsMode::SampleStddev
-    )
-}
-
-fn regr_stats_mode(func: AggFunc) -> RegrStatsMode {
-    match func {
-        AggFunc::RegrCount => RegrStatsMode::RegrCount,
-        AggFunc::RegrSxx => RegrStatsMode::RegrSxx,
-        AggFunc::RegrSyy => RegrStatsMode::RegrSyy,
-        AggFunc::RegrSxy => RegrStatsMode::RegrSxy,
-        AggFunc::RegrAvgx => RegrStatsMode::RegrAvgx,
-        AggFunc::RegrAvgy => RegrStatsMode::RegrAvgy,
-        AggFunc::RegrR2 => RegrStatsMode::RegrR2,
-        AggFunc::RegrSlope => RegrStatsMode::RegrSlope,
-        AggFunc::RegrIntercept => RegrStatsMode::RegrIntercept,
-        AggFunc::CovarPop => RegrStatsMode::CovarPop,
-        AggFunc::CovarSamp => RegrStatsMode::CovarSamp,
-        AggFunc::Corr => RegrStatsMode::Corr,
-        _ => unreachable!("non-bivariate aggregate in regr_stats_mode"),
-    }
-}
-
-fn finalize_regr_stats(
-    count: i64,
-    sum_x: f64,
-    sum_y: f64,
-    sum_x_sq: f64,
-    sum_y_sq: f64,
-    sum_xy: f64,
-    mode: RegrStatsMode,
-) -> Value {
-    let n = count as f64;
-    if n < 1.0 {
-        return Value::Null;
-    }
-    let sxx = sum_x_sq - (sum_x * sum_x) / n;
-    let syy = sum_y_sq - (sum_y * sum_y) / n;
-    let sxy = sum_xy - (sum_x * sum_y) / n;
-    let value = match mode {
-        RegrStatsMode::RegrCount => return Value::Int64(count),
-        RegrStatsMode::RegrSxx => sxx,
-        RegrStatsMode::RegrSyy => syy,
-        RegrStatsMode::RegrSxy => sxy,
-        RegrStatsMode::RegrAvgx => sum_x / n,
-        RegrStatsMode::RegrAvgy => sum_y / n,
-        RegrStatsMode::CovarPop => sxy / n,
-        RegrStatsMode::CovarSamp => {
-            if n < 2.0 {
-                return Value::Null;
-            }
-            sxy / (n - 1.0)
-        }
-        RegrStatsMode::Corr => {
-            if sxx == 0.0 || syy == 0.0 {
-                return Value::Null;
-            }
-            sxy / (sxx * syy).sqrt()
-        }
-        RegrStatsMode::RegrR2 => {
-            if sxx == 0.0 {
-                return Value::Null;
-            }
-            if syy == 0.0 {
-                1.0
-            } else {
-                (sxy * sxy) / (sxx * syy)
-            }
-        }
-        RegrStatsMode::RegrSlope => {
-            if sxx == 0.0 {
-                return Value::Null;
-            }
-            sxy / sxx
-        }
-        RegrStatsMode::RegrIntercept => {
-            if sxx == 0.0 {
-                return Value::Null;
-            }
-            (sum_y - sum_x * sxy / sxx) / n
-        }
-    };
-    Value::Float64(value)
 }
 
 fn render_json_array(values: &[Value]) -> String {
@@ -931,18 +697,6 @@ fn aggregate_numeric_value(value: &Value) -> Option<NumericValue> {
         Value::Int64(v) => Some(NumericValue::from_i64(*v)),
         Value::Float64(v) => parse_numeric_text(&v.to_string()),
         Value::Numeric(v) => Some(v.clone()),
-        _ => None,
-    }
-}
-
-fn aggregate_float8_value(value: &Value) -> Option<f64> {
-    match value {
-        Value::Null => None,
-        Value::Int16(v) => Some(f64::from(*v)),
-        Value::Int32(v) => Some(f64::from(*v)),
-        Value::Int64(v) => Some(*v as f64),
-        Value::Float64(v) => Some(*v),
-        Value::Numeric(v) => v.render().parse().ok(),
         _ => None,
     }
 }

@@ -8,11 +8,10 @@ use crate::backend::utils::cache::system_views::{
     build_pg_views_rows,
 };
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, PgAuthIdRow, PgCastRow, PgClassRow, PgConstraintRow, PgIndexRow,
-    PgInheritsRow, PgLanguageRow, PgOperatorRow, PgProcRow, PgRangeRow, PgRewriteRow,
-    PgStatisticRow, PgTriggerRow, PgTypeRow, bootstrap_pg_cast_rows,
-    bootstrap_pg_language_rows, bootstrap_pg_operator_rows, bootstrap_pg_proc_rows,
-    builtin_range_rows, builtin_type_rows,
+    BOOTSTRAP_SUPERUSER_OID, PgCastRow, PgClassRow, PgConstraintRow, PgIndexRow, PgInheritsRow,
+    PgLanguageRow, PgOperatorRow, PgProcRow, PgRangeRow, PgRewriteRow, PgStatisticRow,
+    PgTriggerRow, PgTypeRow, bootstrap_pg_cast_rows, bootstrap_pg_language_rows,
+    bootstrap_pg_operator_rows, bootstrap_pg_proc_rows, builtin_range_rows, builtin_type_rows,
 };
 use crate::pgrust::database::DatabaseStatsStore;
 
@@ -80,13 +79,6 @@ impl VisibleCatalog {
             'i' => Some("btree".to_string()),
             _ => None,
         }
-    }
-
-    pub fn authid_rows(&self) -> Vec<PgAuthIdRow> {
-        self.catcache
-            .as_ref()
-            .map(|catcache| catcache.authid_rows())
-            .unwrap_or_default()
     }
 }
 
@@ -358,10 +350,6 @@ impl CatalogLookup for VisibleCatalog {
 
     fn pg_stat_io_rows(&self) -> Vec<Vec<crate::backend::executor::Value>> {
         build_pg_stat_io_rows(&DatabaseStatsStore::with_default_io_rows())
-    }
-
-    fn authid_rows(&self) -> Vec<PgAuthIdRow> {
-        VisibleCatalog::authid_rows(self)
     }
 
     fn materialize_visible_catalog(&self) -> Option<VisibleCatalog> {

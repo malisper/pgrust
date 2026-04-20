@@ -1290,6 +1290,18 @@ fn parse_alter_table_set_statement() {
             action: AlterColumnOptionsAction::Reset(vec!["n_distinct_inherited".into()]),
         })
     );
+
+    let stmt = parse_statement("alter table attmp alter column i set statistics 150").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableAlterColumnStatistics(AlterTableAlterColumnStatisticsStatement {
+            if_exists: false,
+            only: false,
+            table_name: "attmp".into(),
+            column_name: "i".into(),
+            statistics_target: 150,
+        })
+    );
 }
 
 #[test]
@@ -5901,36 +5913,6 @@ fn parse_aggregate_select() {
         } if args.is_empty()
     ));
     assert_eq!(stmt.targets[0].output_name, "count");
-}
-
-#[test]
-fn parse_extended_aggregate_selects() {
-    let stmt = parse_select("select any_value(note), stddev_pop(id), regr_count(score, id) from people")
-        .unwrap();
-    assert!(matches!(
-        &stmt.targets[0].expr,
-        SqlExpr::AggCall {
-            func: AggFunc::AnyValue,
-            args,
-            ..
-        } if args.len() == 1
-    ));
-    assert!(matches!(
-        &stmt.targets[1].expr,
-        SqlExpr::AggCall {
-            func: AggFunc::StddevPop,
-            args,
-            ..
-        } if args.len() == 1
-    ));
-    assert!(matches!(
-        &stmt.targets[2].expr,
-        SqlExpr::AggCall {
-            func: AggFunc::RegrCount,
-            args,
-            ..
-        } if args.len() == 2
-    ));
 }
 
 #[test]
