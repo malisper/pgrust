@@ -197,6 +197,7 @@ Targeted reruns and notes:
 - init_privs.sql: 0/4
 - insert.sql: 54/390
 - insert_conflict.sql: 104/266
+  - [done] support `INSERT ... ON CONFLICT ... RETURNING`
 - int4.sql: 94/94
 - int8.sql: 145/174
 - interval.sql: 38/450
