@@ -59,6 +59,18 @@ fn lower_special_cast(expr: &Expr, from: SqlType, to: SqlType) -> Option<Expr> {
             vec![expr.clone()],
         ));
     }
+    if matches!(from.element_type().kind, SqlTypeKind::RegRole)
+        && matches!(to.element_type().kind, SqlTypeKind::Text)
+        && !from.is_array
+        && !to.is_array
+    {
+        return Some(Expr::builtin_func(
+            BuiltinScalarFunction::RegRoleToText,
+            Some(SqlType::new(SqlTypeKind::Text)),
+            false,
+            vec![expr.clone()],
+        ));
+    }
     None
 }
 
@@ -289,6 +301,7 @@ pub(super) fn coerce_unknown_string_literal_type(
                 SqlTypeKind::Void => return SqlType::array_of(SqlType::new(SqlTypeKind::Void)),
                 SqlTypeKind::FdwHandler => {
                     return SqlType::array_of(SqlType::new(SqlTypeKind::FdwHandler));
+                }
                 SqlTypeKind::RegRole => {
                     return SqlType::array_of(SqlType::new(SqlTypeKind::RegRole));
                 }
