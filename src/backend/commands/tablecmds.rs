@@ -211,6 +211,14 @@ fn finalize_bound_delete(
             ..target
         })
         .collect();
+    stmt.returning = stmt
+        .returning
+        .into_iter()
+        .map(|target| TargetEntry {
+            expr: finalize_expr_subqueries(target.expr, catalog, &mut subplans),
+            ..target
+        })
+        .collect();
     stmt.subplans = subplans;
     stmt
 }
@@ -3238,6 +3246,7 @@ pub fn execute_delete_with_waiter(
     let saved_subplans = std::mem::replace(&mut ctx.subplans, stmt.subplans.clone());
     let result = (|| {
         let mut affected_rows = 0;
+        let mut returned_rows = Vec::new();
         for target in &stmt.targets {
             let triggers = ctx
                 .catalog
@@ -3341,6 +3350,10 @@ pub fn execute_delete_with_waiter(
                             if let Some(triggers) = &triggers {
                                 triggers.after_row_delete(&current_values, ctx)?;
                             }
+                            if !stmt.returning.is_empty() {
+                                returned_rows
+                                    .push(project_returning_row(&stmt.returning, &current_values, ctx)?);
+                            }
                             affected_rows += 1;
                             break;
                         }
@@ -3377,7 +3390,14 @@ pub fn execute_delete_with_waiter(
             }
         }
 
-        Ok(StatementResult::AffectedRows(affected_rows))
+        if stmt.returning.is_empty() {
+            Ok(StatementResult::AffectedRows(affected_rows))
+        } else {
+            Ok(build_returning_result(
+                returning_result_columns(&stmt.returning),
+                returned_rows,
+            ))
+        }
     })();
     ctx.subplans = saved_subplans;
     result
