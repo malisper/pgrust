@@ -180,6 +180,143 @@ fn cast_text_to_xid(text: &str) -> Result<Value, ExecError> {
     Ok(Value::Int64(xid as i64))
 }
 
+const NUMERIC_MAX_INPUT_DIGITS_BEFORE_DECIMAL: i32 = 131072;
+
+fn parse_numeric_input_exponent(text: &str) -> Option<i32> {
+    let (negative, digits) = if let Some(rest) = text.strip_prefix('-') {
+        (true, rest)
+    } else if let Some(rest) = text.strip_prefix('+') {
+        (false, rest)
+    } else {
+        (false, text)
+    };
+    if digits.is_empty()
+        || digits.starts_with('_')
+        || digits.ends_with('_')
+        || digits.contains("__")
+    {
+        return None;
+    }
+    let normalized: String = digits.chars().filter(|&ch| ch != '_').collect();
+    if normalized.is_empty() || !normalized.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    let value = normalized.parse::<i32>().ok()?;
+    Some(if negative { -value } else { value })
+}
+
+fn normalize_numeric_input_digits(
+    digits: &str,
+    valid_digit: impl Fn(char) -> bool,
+) -> Option<String> {
+    if digits.is_empty()
+        || digits.starts_with('_')
+        || digits.ends_with('_')
+        || digits.contains("__")
+    {
+        return None;
+    }
+    let normalized: String = digits.chars().filter(|&ch| ch != '_').collect();
+    if normalized.is_empty() || !normalized.chars().all(valid_digit) {
+        return None;
+    }
+    Some(normalized)
+}
+
+fn numeric_input_would_overflow(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty()
+        || trimmed.eq_ignore_ascii_case("nan")
+        || matches!(
+            trimmed.to_ascii_lowercase().as_str(),
+            "inf" | "+inf" | "infinity" | "+infinity" | "-inf" | "-infinity"
+        )
+        || trimmed.chars().any(|ch| ch.is_ascii_whitespace())
+    {
+        return false;
+    }
+
+    let unsigned = trimmed
+        .strip_prefix(['+', '-'])
+        .unwrap_or(trimmed);
+
+    if let Some(rest) = unsigned
+        .strip_prefix("0x")
+        .or_else(|| unsigned.strip_prefix("0X"))
+    {
+        let rest = rest.strip_prefix('_').unwrap_or(rest);
+        let Some(digits) = normalize_numeric_input_digits(rest, |ch| ch.is_ascii_hexdigit()) else {
+            return false;
+        };
+        return digits.trim_start_matches('0').len() as i32 > NUMERIC_MAX_INPUT_DIGITS_BEFORE_DECIMAL;
+    }
+    if let Some(rest) = unsigned
+        .strip_prefix("0o")
+        .or_else(|| unsigned.strip_prefix("0O"))
+    {
+        let rest = rest.strip_prefix('_').unwrap_or(rest);
+        let Some(digits) = normalize_numeric_input_digits(rest, |ch| matches!(ch, '0'..='7')) else {
+            return false;
+        };
+        return digits.trim_start_matches('0').len() as i32 > NUMERIC_MAX_INPUT_DIGITS_BEFORE_DECIMAL;
+    }
+    if let Some(rest) = unsigned
+        .strip_prefix("0b")
+        .or_else(|| unsigned.strip_prefix("0B"))
+    {
+        let rest = rest.strip_prefix('_').unwrap_or(rest);
+        let Some(digits) = normalize_numeric_input_digits(rest, |ch| matches!(ch, '0' | '1')) else {
+            return false;
+        };
+        return digits.trim_start_matches('0').len() as i32 > NUMERIC_MAX_INPUT_DIGITS_BEFORE_DECIMAL;
+    }
+
+    let (mantissa, exponent) = match trimmed.find(['e', 'E']) {
+        Some(index) => {
+            let Some(exponent) = parse_numeric_input_exponent(&trimmed[index + 1..]) else {
+                return false;
+            };
+            (&trimmed[..index], exponent)
+        }
+        None => (trimmed, 0),
+    };
+    let unsigned_mantissa = mantissa.strip_prefix(['+', '-']).unwrap_or(mantissa);
+    let parts: Vec<&str> = unsigned_mantissa.split('.').collect();
+    if parts.len() > 2 {
+        return false;
+    }
+    let whole = parts[0];
+    let frac = parts.get(1).copied().unwrap_or("");
+    if whole.is_empty() && frac.is_empty() {
+        return false;
+    }
+    let Some(whole) = normalize_numeric_input_digits(whole, |ch| ch.is_ascii_digit())
+        .or_else(|| whole.is_empty().then(String::new))
+    else {
+        return false;
+    };
+    let Some(frac) = normalize_numeric_input_digits(frac, |ch| ch.is_ascii_digit())
+        .or_else(|| frac.is_empty().then(String::new))
+    else {
+        return false;
+    };
+    let digits = format!("{whole}{frac}");
+    let significant = digits.trim_start_matches('0');
+    if significant.is_empty() {
+        return false;
+    }
+    let leading_zero_count = (digits.len() - significant.len()) as i32;
+    let digits_before_decimal = whole.len() as i32 + exponent - leading_zero_count;
+    digits_before_decimal > NUMERIC_MAX_INPUT_DIGITS_BEFORE_DECIMAL
+}
+
+fn parse_numeric_input_value(text: &str) -> Result<crate::include::nodes::datum::NumericValue, ExecError> {
+    if numeric_input_would_overflow(text) {
+        return Err(ExecError::NumericFieldOverflow);
+    }
+    parse_numeric_text(text).ok_or_else(|| ExecError::InvalidNumericInput(text.to_string()))
+}
+
 fn canonicalize_tid_text(text: &str) -> Result<String, ExecError> {
     let trimmed = text.trim();
     let inner = trimmed
@@ -2169,8 +2306,7 @@ pub(super) fn cast_text_value_with_config(
             })
         }),
         SqlTypeKind::Numeric => Ok(Value::Numeric(coerce_numeric_value(
-            parse_numeric_text(text)
-                .ok_or_else(|| ExecError::InvalidNumericInput(text.to_string()))?,
+            parse_numeric_input_value(text)?,
             ty,
         )?)),
         SqlTypeKind::Bool => parse_pg_bool_text(text).map(Value::Bool),
