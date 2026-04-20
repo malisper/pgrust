@@ -6432,6 +6432,81 @@ fn foreign_keys_support_match_full() {
 }
 
 #[test]
+fn alter_table_add_foreign_key_supports_match_full() {
+    let base = temp_dir("alter_table_add_fk_match_full");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table parents (id int4, code text, primary key (id, code))",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table children (
+            id int4 primary key,
+            parent_id int4,
+            parent_code text
+        )",
+    )
+    .unwrap();
+    db.execute(1, "insert into parents values (1, 'one')")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into children values (1, 1, 'one'), (2, null, null), (3, 1, null)",
+    )
+    .unwrap();
+
+    match db.execute(
+        1,
+        "alter table children add constraint children_parent_fk foreign key (parent_id, parent_code) references parents(id, code) match full",
+    ) {
+        Err(ExecError::ForeignKeyViolation {
+            constraint, detail, ..
+        }) => {
+            assert_eq!(constraint, "children_parent_fk");
+            assert!(
+                detail
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("MATCH FULL"))
+            );
+        }
+        other => panic!("expected ALTER TABLE MATCH FULL validation failure, got {other:?}"),
+    }
+
+    db.execute(1, "update children set parent_id = null where id = 3")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table children add constraint children_parent_fk foreign key (parent_id, parent_code) references parents(id, code) match full",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select confmatchtype, convalidated from pg_constraint where conname = 'children_parent_fk'",
+        ),
+        vec![vec![Value::Text("f".into()), Value::Bool(true)]]
+    );
+
+    match db.execute(1, "insert into children values (4, 1, null)") {
+        Err(ExecError::ForeignKeyViolation {
+            constraint, detail, ..
+        }) => {
+            assert_eq!(constraint, "children_parent_fk");
+            assert!(
+                detail
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("MATCH FULL"))
+            );
+        }
+        other => panic!("expected post-add MATCH FULL foreign-key violation, got {other:?}"),
+    }
+}
+
+#[test]
 fn foreign_keys_apply_referential_actions() {
     let base = temp_dir("foreign_keys_referential_actions");
     let db = Database::open(&base, 16).unwrap();
@@ -7329,6 +7404,93 @@ fn alter_constraint_enforced_validates_existing_unvalidated_foreign_key() {
             "select conenforced, convalidated from pg_constraint where conname = 'children_parent_fk'",
         ),
         vec![vec![Value::Bool(true), Value::Bool(true)]]
+    );
+}
+
+#[test]
+fn alter_constraint_enforced_validates_match_full_existing_rows() {
+    let base = temp_dir("fk_alter_constraint_enforced_match_full");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table parents (id int4, code text, primary key (id, code))",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table children (
+            id int4 primary key,
+            parent_id int4,
+            parent_code text
+        )",
+    )
+    .unwrap();
+    db.execute(1, "insert into parents values (1, 'one')")
+        .unwrap();
+    db.execute(1, "insert into children values (1, 1, null)")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table children add constraint children_parent_fk foreign key (parent_id, parent_code) references parents(id, code) match full not valid not enforced",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select confmatchtype, conenforced, convalidated from pg_constraint where conname = 'children_parent_fk'",
+        ),
+        vec![vec![
+            Value::Text("f".into()),
+            Value::Bool(false),
+            Value::Bool(false),
+        ]]
+    );
+
+    match db.execute(
+        1,
+        "alter table children alter constraint children_parent_fk enforced",
+    ) {
+        Err(ExecError::ForeignKeyViolation {
+            constraint, detail, ..
+        }) => {
+            assert_eq!(constraint, "children_parent_fk");
+            assert!(
+                detail
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("MATCH FULL"))
+            );
+        }
+        other => panic!("expected ALTER CONSTRAINT ENFORCED MATCH FULL failure, got {other:?}"),
+    }
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conenforced, convalidated from pg_constraint where conname = 'children_parent_fk'",
+        ),
+        vec![vec![Value::Bool(false), Value::Bool(false)]]
+    );
+
+    db.execute(1, "update children set parent_id = null where id = 1")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table children alter constraint children_parent_fk enforced",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select confmatchtype, conenforced, convalidated from pg_constraint where conname = 'children_parent_fk'",
+        ),
+        vec![vec![
+            Value::Text("f".into()),
+            Value::Bool(true),
+            Value::Bool(true),
+        ]]
     );
 }
 
