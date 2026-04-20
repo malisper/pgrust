@@ -3,8 +3,9 @@ use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::{AggFunc, Expr, Plan, RelationDesc, Value};
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_PRIMARY, JSON_TYPE_OID, PUBLIC_NAMESPACE_OID, PgProcRow,
-    PgRewriteRow, PgTypeRow, RECORD_TYPE_OID, bootstrap_pg_proc_rows, sort_pg_rewrite_rows,
+    bootstrap_pg_proc_rows, sort_pg_rewrite_rows, PgProcRow, PgRewriteRow, PgTypeRow,
+    BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_PRIMARY, JSON_TYPE_OID, PUBLIC_NAMESPACE_OID,
+    RECORD_TYPE_OID,
 };
 use crate::include::nodes::parsenodes::{
     AliasColumnDef, AliasColumnSpec, ColumnConstraint, CompositeTypeAttributeDef,
@@ -13,7 +14,7 @@ use crate::include::nodes::parsenodes::{
     InsertSource, InsertStatement, JoinTreeNode, RangeTblEntryKind, RawTypeName, TableConstraint,
     TriggerEvent, TriggerEventSpec, TriggerLevel, TriggerTiming,
 };
-use crate::include::nodes::primnodes::{AttrNumber, JoinType, Var, is_system_attr};
+use crate::include::nodes::primnodes::{is_system_attr, AttrNumber, JoinType, Var};
 
 fn desc() -> RelationDesc {
     RelationDesc {
@@ -1040,6 +1041,7 @@ fn parse_alter_table_constraint_statements() {
                 attributes: ConstraintAttributes {
                     name: Some("items_id_check".into()),
                     not_valid: true,
+                    no_inherit: false,
                     deferrable: None,
                     initially_deferred: None,
                     enforced: None,
@@ -1063,6 +1065,7 @@ fn parse_alter_table_constraint_statements() {
                 attributes: ConstraintAttributes {
                     name: Some("items_note_required".into()),
                     not_valid: true,
+                    no_inherit: false,
                     deferrable: None,
                     initially_deferred: None,
                     enforced: None,
@@ -1166,6 +1169,49 @@ fn parse_alter_table_constraint_statements() {
 }
 
 #[test]
+fn parse_check_constraint_no_inherit() {
+    let stmt = parse_statement(
+        "alter table items add constraint items_id_check check (id > 0) no inherit",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableAddConstraint(AlterTableAddConstraintStatement {
+            if_exists: false,
+            only: false,
+            table_name: "items".into(),
+            constraint: TableConstraint::Check {
+                attributes: ConstraintAttributes {
+                    name: Some("items_id_check".into()),
+                    no_inherit: true,
+                    ..attrs()
+                },
+                expr_sql: "id > 0".into(),
+            },
+        })
+    );
+
+    let stmt = parse_statement(
+        "create table items (id int4 constraint id_positive check (id > 0) no inherit)",
+    )
+    .unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+    assert_eq!(
+        ct.columns().collect::<Vec<_>>()[0].constraints,
+        vec![ColumnConstraint::Check {
+            attributes: ConstraintAttributes {
+                name: Some("id_positive".into()),
+                no_inherit: true,
+                ..attrs()
+            },
+            expr_sql: "id > 0".into(),
+        }]
+    );
+}
+
+#[test]
 fn parse_alter_table_set_statement() {
     let stmt = parse_statement("alter table num_variance set (parallel_workers = 4)").unwrap();
     assert_eq!(
@@ -1184,7 +1230,8 @@ fn parse_alter_table_set_statement() {
 
 #[test]
 fn parse_alter_table_if_exists_only_statement() {
-    let stmt = parse_statement("alter table if exists only items rename column note to body").unwrap();
+    let stmt =
+        parse_statement("alter table if exists only items rename column note to body").unwrap();
     assert_eq!(
         stmt,
         Statement::AlterTableRenameColumn(AlterTableRenameColumnStatement {
@@ -3183,16 +3230,14 @@ fn build_plan_accepts_catalog_backed_bit_comparisons() {
 
 #[test]
 fn build_plan_accepts_catalog_backed_bytea_comparisons() {
-    assert!(
-        build_plan(
-            &parse_select(
-                r"select E'\\x01'::bytea = E'\\x01'::bytea, E'\\x01'::bytea < E'\\x02'::bytea"
-            )
-            .unwrap(),
-            &catalog(),
+    assert!(build_plan(
+        &parse_select(
+            r"select E'\\x01'::bytea = E'\\x01'::bytea, E'\\x01'::bytea < E'\\x02'::bytea"
         )
-        .is_ok()
-    );
+        .unwrap(),
+        &catalog(),
+    )
+    .is_ok());
 }
 
 #[test]
@@ -3252,14 +3297,12 @@ fn build_plan_coerces_unknown_string_literals_for_array_ops() {
 
 #[test]
 fn build_plan_accepts_catalog_backed_text_array_casts() {
-    assert!(
-        build_plan(
-            &parse_select("select cast('{1,2}' as int4[]), cast('{\"a\",\"b\"}' as varchar[])")
-                .unwrap(),
-            &catalog(),
-        )
-        .is_ok()
-    );
+    assert!(build_plan(
+        &parse_select("select cast('{1,2}' as int4[]), cast('{\"a\",\"b\"}' as varchar[])")
+            .unwrap(),
+        &catalog(),
+    )
+    .is_ok());
 }
 
 #[test]
@@ -5125,6 +5168,7 @@ fn parse_create_table_named_check_and_not_null_constraints() {
             attributes: ConstraintAttributes {
                 name: Some("id_positive".into()),
                 not_valid: true,
+                no_inherit: false,
                 deferrable: Some(true),
                 initially_deferred: Some(true),
                 enforced: Some(false),
@@ -5139,6 +5183,7 @@ fn parse_create_table_named_check_and_not_null_constraints() {
                 attributes: ConstraintAttributes {
                     name: Some("note_present".into()),
                     not_valid: true,
+                    no_inherit: false,
                     deferrable: None,
                     initially_deferred: None,
                     enforced: None,
@@ -5149,6 +5194,7 @@ fn parse_create_table_named_check_and_not_null_constraints() {
                 attributes: ConstraintAttributes {
                     name: Some("note_nonempty".into()),
                     not_valid: false,
+                    no_inherit: false,
                     deferrable: Some(false),
                     initially_deferred: Some(false),
                     enforced: Some(true),

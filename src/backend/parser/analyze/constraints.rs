@@ -31,6 +31,7 @@ pub struct CheckConstraintAction {
     pub constraint_name: String,
     pub expr_sql: String,
     pub not_valid: bool,
+    pub no_inherit: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,6 +140,7 @@ struct PendingCheckConstraint {
     generated_base: String,
     expr_sql: String,
     not_valid: bool,
+    no_inherit: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -228,12 +230,13 @@ pub fn normalize_create_table_constraints(
                     attributes,
                     expr_sql,
                 } => {
-                    validate_not_null_or_check_attributes(attributes, "CHECK")?;
+                    validate_check_attributes(attributes)?;
                     check_constraints.push(PendingCheckConstraint {
                         explicit_name: attributes.name.clone(),
                         generated_base: format!("{}_{}_check", stmt.table_name, column.name),
                         expr_sql: expr_sql.clone(),
                         not_valid: attributes.not_valid,
+                        no_inherit: attributes.no_inherit,
                     });
                 }
                 ColumnConstraint::PrimaryKey { attributes } => {
@@ -297,12 +300,13 @@ pub fn normalize_create_table_constraints(
                 attributes,
                 expr_sql,
             } => {
-                validate_not_null_or_check_attributes(attributes, "CHECK")?;
+                validate_check_attributes(attributes)?;
                 check_constraints.push(PendingCheckConstraint {
                     explicit_name: attributes.name.clone(),
                     generated_base: format!("{}_check", stmt.table_name),
                     expr_sql: expr_sql.clone(),
                     not_valid: attributes.not_valid,
+                    no_inherit: attributes.no_inherit,
                 });
             }
             TableConstraint::PrimaryKey {
@@ -433,6 +437,7 @@ pub fn normalize_create_table_constraints(
             }),
             expr_sql: constraint.expr_sql,
             not_valid: constraint.not_valid,
+            no_inherit: constraint.no_inherit,
         })
         .collect();
 
@@ -633,7 +638,7 @@ pub fn normalize_alter_table_add_constraint(
             attributes,
             expr_sql,
         } => {
-            validate_not_null_or_check_attributes(attributes, "CHECK")?;
+            validate_check_attributes(attributes)?;
             let constraint_name = assign_constraint_name(
                 attributes.name.clone(),
                 format!("{table_name}_check"),
@@ -644,6 +649,7 @@ pub fn normalize_alter_table_add_constraint(
                     constraint_name,
                     expr_sql: expr_sql.clone(),
                     not_valid: attributes.not_valid,
+                    no_inherit: attributes.no_inherit,
                 },
             ))
         }
@@ -826,6 +832,11 @@ fn validate_not_null_or_check_attributes(
     attributes: &ConstraintAttributes,
     constraint_kind: &'static str,
 ) -> Result<(), ParseError> {
+    if attributes.no_inherit {
+        return Err(ParseError::FeatureNotSupported(format!(
+            "{constraint_kind} NO INHERIT"
+        )));
+    }
     if attributes.deferrable.is_some() {
         return Err(ParseError::FeatureNotSupported(format!(
             "{constraint_kind} DEFERRABLE"
@@ -840,6 +851,21 @@ fn validate_not_null_or_check_attributes(
         return Err(ParseError::FeatureNotSupported(format!(
             "{constraint_kind} ENFORCED/NOT ENFORCED"
         )));
+    }
+    Ok(())
+}
+
+fn validate_check_attributes(attributes: &ConstraintAttributes) -> Result<(), ParseError> {
+    if attributes.deferrable.is_some() {
+        return Err(ParseError::FeatureNotSupported("CHECK DEFERRABLE".into()));
+    }
+    if attributes.initially_deferred.is_some() {
+        return Err(ParseError::FeatureNotSupported("CHECK INITIALLY".into()));
+    }
+    if attributes.enforced.is_some() {
+        return Err(ParseError::FeatureNotSupported(
+            "CHECK ENFORCED/NOT ENFORCED".into(),
+        ));
     }
     Ok(())
 }

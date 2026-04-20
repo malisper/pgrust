@@ -1839,6 +1839,7 @@ impl CatalogStore {
         relation_oid: u32,
         conname: impl Into<String>,
         convalidated: bool,
+        connoinherit: bool,
         conbin: impl Into<String>,
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
@@ -1883,7 +1884,7 @@ impl CatalogStore {
             conbin: Some(conbin),
             conislocal: true,
             coninhcount: 0,
-            connoinherit: false,
+            connoinherit,
             conperiod: false,
         };
         control.next_oid = control.next_oid.saturating_add(1);
