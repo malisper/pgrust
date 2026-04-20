@@ -1313,7 +1313,9 @@ pub struct CommentOnRoleStatement {
 pub enum GrantObjectPrivilege {
     CreateOnDatabase,
     AllPrivilegesOnTable,
+    SelectOnTable,
     AllPrivilegesOnSchema,
+    ExecuteOnFunction,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1450,6 +1452,7 @@ pub struct DropRuleStatement {
 pub struct DropSchemaStatement {
     pub if_exists: bool,
     pub schema_names: Vec<String>,
+    pub cascade: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
