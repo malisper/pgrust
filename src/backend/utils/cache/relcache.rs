@@ -570,6 +570,7 @@ mod tests {
             rows.procs,
             rows.casts,
             rows.collations,
+            rows.foreign_data_wrappers,
             rows.databases,
             rows.tablespaces,
             rows.statistics,

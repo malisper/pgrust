@@ -467,6 +467,7 @@ mod tests {
                 .collect(),
             base.cast_rows(),
             base.collation_rows(),
+            base.foreign_data_wrapper_rows(),
             base.database_rows(),
             base.tablespace_rows(),
             base.statistic_rows(),

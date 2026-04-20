@@ -19,12 +19,13 @@ use crate::backend::catalog::rowcodec::{
     pg_auth_members_row_from_values, pg_authid_row_from_values, pg_cast_row_from_values,
     pg_class_row_from_values, pg_collation_row_from_values, pg_constraint_row_from_values,
     pg_database_row_from_values, pg_depend_row_from_values, pg_description_row_from_values,
-    pg_index_row_from_values, pg_inherits_row_from_values, pg_language_row_from_values,
-    pg_opclass_row_from_values, pg_operator_row_from_values, pg_opfamily_row_from_values,
-    pg_proc_row_from_values, pg_rewrite_row_from_values, pg_statistic_row_from_values,
-    pg_tablespace_row_from_values, pg_trigger_row_from_values, pg_ts_config_map_row_from_values,
-    pg_ts_config_row_from_values, pg_ts_dict_row_from_values, pg_ts_parser_row_from_values,
-    pg_ts_template_row_from_values, pg_type_row_from_values,
+    pg_foreign_data_wrapper_row_from_values, pg_index_row_from_values,
+    pg_inherits_row_from_values, pg_language_row_from_values, pg_opclass_row_from_values,
+    pg_operator_row_from_values, pg_opfamily_row_from_values, pg_proc_row_from_values,
+    pg_rewrite_row_from_values, pg_statistic_row_from_values, pg_tablespace_row_from_values,
+    pg_trigger_row_from_values, pg_ts_config_map_row_from_values, pg_ts_config_row_from_values,
+    pg_ts_dict_row_from_values, pg_ts_parser_row_from_values, pg_ts_template_row_from_values,
+    pg_type_row_from_values,
 };
 use crate::backend::catalog::rows::PhysicalCatalogRows;
 use crate::backend::executor::RelationDesc;
@@ -721,6 +722,12 @@ fn append_catalog_kind_rows(
                 .map(pg_description_row_from_values)
                 .collect::<Result<Vec<_>, _>>()?;
         }
+        BootstrapCatalogKind::PgForeignDataWrapper => {
+            rows.foreign_data_wrappers = values
+                .into_iter()
+                .map(pg_foreign_data_wrapper_row_from_values)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
         BootstrapCatalogKind::PgIndex => {
             rows.indexes = values
                 .into_iter()
@@ -1341,6 +1348,7 @@ fn load_physical_catalog_rows_legacy(base_dir: &Path) -> Result<PhysicalCatalogR
         depends: depend_rows,
         inherits: inherit_rows,
         descriptions: description_rows,
+        foreign_data_wrappers: Vec::new(),
         indexes: index_rows,
         rewrites: rewrite_rows,
         triggers: Vec::new(),
@@ -1974,6 +1982,7 @@ fn load_physical_catalog_rows_visible_legacy(
         depends: depend_rows,
         inherits: inherit_rows,
         descriptions: description_rows,
+        foreign_data_wrappers: Vec::new(),
         indexes: index_rows,
         rewrites: rewrite_rows,
         triggers: Vec::new(),
