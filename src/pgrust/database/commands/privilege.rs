@@ -1,108 +1,15 @@
 use super::super::*;
-use crate::backend::commands::rolecmds::{membership_row, role_management_error};
+use crate::backend::commands::rolecmds::{
+    membership_row, role_management_error,
+};
 use crate::backend::parser::{
-    CatalogLookup, GrantObjectPrivilege, GrantObjectStatement, GrantRoleMembershipStatement,
-    ParseError, RevokeObjectStatement, RevokeRoleMembershipStatement, RoleGrantorSpec,
-    parse_type_name, resolve_raw_type_name,
+    GrantObjectPrivilege, GrantObjectStatement, GrantRoleMembershipStatement,
+    RevokeObjectStatement, RevokeRoleMembershipStatement, RoleGrantorSpec,
 };
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, CURRENT_DATABASE_NAME, CURRENT_DATABASE_OID, PgAuthIdRow,
 };
 use std::collections::{BTreeSet, VecDeque};
-
-fn parse_granted_function_signature(signature: &str) -> Result<(&str, Vec<&str>), ParseError> {
-    let Some(open_paren) = signature.rfind('(') else {
-        return Err(ParseError::UnexpectedToken {
-            expected: "function signature",
-            actual: signature.to_string(),
-        });
-    };
-    if !signature.ends_with(')') {
-        return Err(ParseError::UnexpectedToken {
-            expected: "function signature",
-            actual: signature.to_string(),
-        });
-    }
-    let proc_name = signature[..open_paren].trim();
-    if proc_name.is_empty() {
-        return Err(ParseError::UnexpectedToken {
-            expected: "function name",
-            actual: signature.to_string(),
-        });
-    }
-    let arg_sql = &signature[open_paren + 1..signature.len().saturating_sub(1)];
-    let args = if arg_sql.trim().is_empty() {
-        Vec::new()
-    } else {
-        arg_sql.split(',').map(str::trim).collect::<Vec<_>>()
-    };
-    Ok((proc_name, args))
-}
-
-fn parse_proc_argtype_oids(argtypes: &str) -> Option<Vec<u32>> {
-    if argtypes.trim().is_empty() {
-        return Some(Vec::new());
-    }
-    argtypes
-        .split_whitespace()
-        .map(|oid| oid.parse::<u32>().ok())
-        .collect()
-}
-
-fn ensure_function_signature_exists(
-    db: &Database,
-    client_id: ClientId,
-    txn_ctx: CatalogTxnContext,
-    configured_search_path: Option<&[String]>,
-    signature: &str,
-) -> Result<(), ExecError> {
-    let catalog = db.lazy_catalog_lookup(client_id, txn_ctx, configured_search_path);
-    let (proc_name, arg_names) = parse_granted_function_signature(signature).map_err(ExecError::Parse)?;
-    let (schema_name, base_name) = proc_name
-        .rsplit_once('.')
-        .map(|(schema, name)| (Some(schema.trim().to_ascii_lowercase()), name.trim()))
-        .unwrap_or((None, proc_name));
-    let desired_arg_oids = arg_names
-        .into_iter()
-        .map(|arg| {
-            let raw_type = parse_type_name(arg)?;
-            let sql_type = resolve_raw_type_name(&raw_type, &catalog)?;
-            catalog
-                .type_oid_for_sql_type(sql_type)
-                .ok_or_else(|| ParseError::UnsupportedType(arg.to_string()))
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(ExecError::Parse)?;
-    let schema_oid = match schema_name {
-        Some(ref schema_name) => Some(
-            db.visible_namespace_oid_by_name(client_id, txn_ctx, schema_name)
-                .ok_or_else(|| ExecError::DetailedError {
-                    message: format!("schema \"{schema_name}\" does not exist"),
-                    detail: None,
-                    hint: None,
-                    sqlstate: "3F000",
-                })?,
-        ),
-        None => None,
-    };
-    let normalized_name = base_name.trim_matches('"').to_ascii_lowercase();
-    let exists = catalog.proc_rows_by_name(&normalized_name).into_iter().any(|row| {
-        parse_proc_argtype_oids(&row.proargtypes) == Some(desired_arg_oids.clone())
-            && schema_oid
-                .map(|schema_oid| row.pronamespace == schema_oid)
-                .unwrap_or(true)
-    });
-    if exists {
-        Ok(())
-    } else {
-        Err(ExecError::DetailedError {
-            message: format!("function {signature} does not exist"),
-            detail: None,
-            hint: None,
-            sqlstate: "42883",
-        })
-    }
-}
 
 impl Database {
     pub(crate) fn execute_grant_object_stmt_with_search_path(
@@ -122,13 +29,6 @@ impl Database {
                 })?;
                 Ok(StatementResult::AffectedRows(0))
             }
-            GrantObjectPrivilege::SelectOnTable => {
-                let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-                catalog.lookup_relation(&stmt.object_name).ok_or_else(|| {
-                    ExecError::Parse(ParseError::TableDoesNotExist(stmt.object_name.clone()))
-                })?;
-                Ok(StatementResult::AffectedRows(0))
-            }
             GrantObjectPrivilege::AllPrivilegesOnSchema => {
                 self.backend_catcache(client_id, None)
                     .map_err(map_catalog_error)?
@@ -139,16 +39,6 @@ impl Database {
                         hint: None,
                         sqlstate: "3F000",
                     })?;
-                Ok(StatementResult::AffectedRows(0))
-            }
-            GrantObjectPrivilege::ExecuteOnFunction => {
-                ensure_function_signature_exists(
-                    self,
-                    client_id,
-                    None,
-                    configured_search_path,
-                    &stmt.object_name,
-                )?;
                 Ok(StatementResult::AffectedRows(0))
             }
         }
@@ -171,13 +61,6 @@ impl Database {
                 })?;
                 Ok(StatementResult::AffectedRows(0))
             }
-            GrantObjectPrivilege::SelectOnTable => {
-                let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-                catalog.lookup_relation(&stmt.object_name).ok_or_else(|| {
-                    ExecError::Parse(ParseError::TableDoesNotExist(stmt.object_name.clone()))
-                })?;
-                Ok(StatementResult::AffectedRows(0))
-            }
             GrantObjectPrivilege::AllPrivilegesOnSchema => {
                 self.backend_catcache(client_id, None)
                     .map_err(map_catalog_error)?
@@ -188,16 +71,6 @@ impl Database {
                         hint: None,
                         sqlstate: "3F000",
                     })?;
-                Ok(StatementResult::AffectedRows(0))
-            }
-            GrantObjectPrivilege::ExecuteOnFunction => {
-                ensure_function_signature_exists(
-                    self,
-                    client_id,
-                    None,
-                    configured_search_path,
-                    &stmt.object_name,
-                )?;
                 Ok(StatementResult::AffectedRows(0))
             }
         }
@@ -813,9 +686,9 @@ fn select_best_role_grantor(
 
         if member_oid == role_oid
             || catalog
-                .memberships()
-                .iter()
-                .any(|row| row.member == member_oid && row.roleid == role_oid && row.admin_option)
+            .memberships()
+            .iter()
+            .any(|row| row.member == member_oid && row.roleid == role_oid && row.admin_option)
         {
             match best {
                 Some((best_distance, best_oid))
@@ -1263,17 +1136,11 @@ mod tests {
             .execute(&db, "grant parent to user2 with admin option")
             .unwrap();
         session
-            .execute(
-                &db,
-                "grant parent to user3 with admin option granted by user2",
-            )
+            .execute(&db, "grant parent to user3 with admin option granted by user2")
             .unwrap();
 
         let err = session
-            .execute(
-                &db,
-                "grant parent to user2 with admin option granted by user3",
-            )
+            .execute(&db, "grant parent to user2 with admin option granted by user3")
             .unwrap_err();
         match err {
             ExecError::DetailedError { message, .. } => {

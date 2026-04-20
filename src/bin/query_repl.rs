@@ -479,9 +479,6 @@ fn run_statement(
         | Statement::AlterTableDropConstraint(_)
         | Statement::AlterTableAlterConstraint(_)
         | Statement::AlterTableRenameConstraint(_)
-        | Statement::AlterTableAlterColumnOptions(_)
-        | Statement::AlterTableAlterColumnStatistics(_)
-        | Statement::AlterTableAlterColumnDefault(_)
         | Statement::AlterTableSetNotNull(_)
         | Statement::AlterTableDropNotNull(_)
         | Statement::AlterTableValidateConstraint(_) => Ok(StatementResult::AffectedRows(0)),
@@ -499,12 +496,6 @@ fn run_statement(
         }
         Statement::CommentOnRole(_)
         | Statement::CommentOnConversion(_)
-        | Statement::CommentOnForeignDataWrapper(_)
-        | Statement::CreateForeignDataWrapper(_)
-        | Statement::AlterForeignDataWrapper(_)
-        | Statement::AlterForeignDataWrapperOwner(_)
-        | Statement::AlterForeignDataWrapperRename(_)
-        | Statement::DropForeignDataWrapper(_)
         | Statement::CreateRole(_)
         | Statement::CreateDatabase(_)
         | Statement::AlterRole(_)
@@ -661,7 +652,6 @@ fn run_statement(
                 session_stats: Arc::clone(&session_stats),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
-                session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 next_command_id: 0,
                 expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
@@ -695,7 +685,6 @@ fn run_statement(
                 session_stats: Arc::clone(&session_stats),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
-                session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 next_command_id: 0,
                 expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
@@ -729,7 +718,6 @@ fn run_statement(
                 session_stats: Arc::clone(&session_stats),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
-                session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 next_command_id: 0,
                 expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
@@ -763,7 +751,6 @@ fn run_statement(
                 session_stats: Arc::clone(&session_stats),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
-                session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 next_command_id: 0,
                 expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
@@ -879,7 +866,6 @@ fn run_statement(
                 session_stats: Arc::clone(&session_stats),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
-                session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 next_command_id: 0,
                 expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
@@ -913,7 +899,6 @@ fn run_statement(
                 session_stats: Arc::clone(&session_stats),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
-                session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 next_command_id: 0,
                 expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
@@ -950,7 +935,6 @@ fn run_statement(
                     session_stats: Arc::clone(&session_stats),
                     snapshot: txns.read().snapshot(xid)?,
                     client_id: 21,
-                    session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                     current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                     next_command_id: 0,
                     expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
@@ -998,7 +982,6 @@ fn run_statement(
                     session_stats: Arc::clone(&session_stats),
                     snapshot: txns.read().snapshot(xid)?,
                     client_id: 21,
-                    session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                     current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                     next_command_id: 0,
                     expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
@@ -1046,7 +1029,6 @@ fn run_statement(
                     session_stats: Arc::clone(&session_stats),
                     snapshot: txns.read().snapshot(xid)?,
                     client_id: 21,
-                    session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                     current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                     next_command_id: 0,
                     expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),

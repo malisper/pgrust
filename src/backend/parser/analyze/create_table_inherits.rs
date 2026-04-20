@@ -2,10 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::backend::utils::misc::notices::push_notice;
 
-use super::create_table::{lower_create_table, LoweredCreateTable};
+use super::create_table::{LoweredCreateTable, lower_create_table};
 use super::{
     BoundRelation, CatalogLookup, ColumnConstraint, ConstraintAttributes, CreateTableElement,
-    CreateTableStatement, ParseError, RawTypeName, TableConstraint, TablePersistence,
+    CreateTableStatement, ParseError, RawTypeName, TablePersistence,
 };
 
 #[derive(Debug, Clone)]
@@ -27,17 +27,10 @@ pub fn lower_create_table_with_catalog(
 
     let parents = resolve_parent_relations(stmt, catalog, persistence)?;
     let merged_columns = merge_inherited_columns(stmt, &parents)?;
-    let inherited_constraints = inherited_table_constraints(&parents, catalog);
     let mut synthetic = stmt.clone();
     synthetic.elements = merged_columns
         .iter()
         .map(|column| CreateTableElement::Column(column.column.clone()))
-        .chain(
-            inherited_constraints
-                .iter()
-                .cloned()
-                .map(CreateTableElement::Constraint),
-        )
         .chain(
             stmt.constraints()
                 .cloned()
@@ -61,43 +54,6 @@ pub fn lower_create_table_with_catalog(
         .map(|parent| parent.relation_oid)
         .collect();
     Ok(lowered)
-}
-
-fn inherited_table_constraints(
-    parents: &[BoundRelation],
-    catalog: &dyn CatalogLookup,
-) -> Vec<TableConstraint> {
-    let mut constraints = Vec::new();
-    let mut seen = BTreeSet::new();
-    for parent in parents {
-        for row in catalog
-            .constraint_rows_for_relation(parent.relation_oid)
-            .into_iter()
-            .filter(|row| {
-                row.contype == crate::include::catalog::CONSTRAINT_CHECK && !row.connoinherit
-            })
-        {
-            let Some(expr_sql) = row.conbin.clone() else {
-                continue;
-            };
-            let key = (
-                row.conname.to_ascii_lowercase(),
-                expr_sql.to_ascii_lowercase(),
-            );
-            if !seen.insert(key) {
-                continue;
-            }
-            constraints.push(TableConstraint::Check {
-                attributes: ConstraintAttributes {
-                    name: Some(row.conname),
-                    not_valid: !row.convalidated,
-                    ..ConstraintAttributes::default()
-                },
-                expr_sql,
-            });
-        }
-    }
-    constraints
 }
 
 fn resolve_parent_relations(

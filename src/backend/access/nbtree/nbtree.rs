@@ -4,13 +4,14 @@ use std::sync::Arc;
 use parking_lot::RwLockWriteGuard;
 
 use crate::backend::access::heap::heapam::{heap_scan_begin_visible, heap_scan_next_visible};
-use crate::backend::access::index::unique::{UniqueCandidateResult, classify_unique_candidate};
+use crate::backend::access::index::unique::{
+    UniqueCandidateResult, classify_unique_candidate,
+};
 use crate::backend::access::nbtree::nbtcompare::{compare_bt_keyspace, compare_bt_values};
 use crate::backend::access::nbtree::nbtpreprocesskeys::preprocess_scan_keys;
 use crate::backend::access::nbtree::nbtsplitloc::choose_split_index;
 use crate::backend::access::nbtree::nbtutils::BtSortTuple;
 use crate::backend::access::nbtree::nbtxlog::log_btree_record;
-use crate::backend::access::transam::xact::TransactionId;
 use crate::backend::access::transam::xlog::{
     INVALID_LSN, XLOG_BTREE_INSERT_LEAF, XLOG_BTREE_INSERT_META, XLOG_BTREE_INSERT_UPPER,
     XLOG_BTREE_NEWROOT, XLOG_BTREE_SPLIT_L, XLOG_BTREE_SPLIT_R, XLOG_FPI,
@@ -22,6 +23,7 @@ use crate::backend::storage::fsm::get_free_index_page;
 use crate::backend::storage::page::bufpage::page_header;
 use crate::backend::storage::smgr::{ForkNumber, RelFileLocator, StorageManager};
 use crate::backend::utils::misc::interrupts::check_for_interrupts;
+use crate::backend::access::transam::xact::TransactionId;
 use crate::include::access::amapi::{
     IndexAmRoutine, IndexBeginScanContext, IndexBuildContext, IndexBuildEmptyContext,
     IndexBuildResult, IndexInsertContext,
@@ -89,7 +91,9 @@ struct LockedUniqueInsertPath<'a> {
 enum LockedUniqueCheckResult {
     Clear,
     WaitFor(TransactionId),
-    Restart { split_block: Option<u32> },
+    Restart {
+        split_block: Option<u32>,
+    },
 }
 
 fn encode_index_value(
@@ -369,13 +373,7 @@ fn pin_btree_block<'a>(
 fn lock_btree_block_exclusive<'a>(
     ctx: &'a IndexInsertContext,
     block: u32,
-) -> Result<
-    (
-        PinnedBuffer<'a, SmgrStorageBackend>,
-        RwLockWriteGuard<'a, Page>,
-    ),
-    CatalogError,
-> {
+) -> Result<(PinnedBuffer<'a, SmgrStorageBackend>, RwLockWriteGuard<'a, Page>), CatalogError> {
     let pin = pin_btree_block(&ctx.pool, ctx.client_id, ctx.index_relation, block)?;
     let guard = ctx
         .pool
@@ -2121,10 +2119,8 @@ fn btinsert(ctx: &IndexInsertContext) -> Result<bool, CatalogError> {
     let payload = encode_key_payload(&ctx.index_desc, &key_values)?;
     let new_tuple = IndexTupleData::new_raw(ctx.heap_tid, false, false, false, payload);
 
-    let check_unique = matches!(
-        ctx.unique_check,
-        crate::include::access::amapi::IndexUniqueCheck::Yes
-    ) && (ctx.index_meta.indnullsnotdistinct || !keys_contain_null(&key_values));
+    let check_unique = matches!(ctx.unique_check, crate::include::access::amapi::IndexUniqueCheck::Yes)
+        && (ctx.index_meta.indnullsnotdistinct || !keys_contain_null(&key_values));
     if check_unique {
         // PostgreSQL checks uniqueness while holding the write lock on the
         // first leaf page the key could live on, and keeps that lock through

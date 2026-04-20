@@ -52,12 +52,8 @@ impl Database {
         configured_search_path: Option<&[String]>,
     ) -> Result<StatementResult, ExecError> {
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        if lookup_heap_relation_for_alter_table(
-            &catalog,
-            &alter_stmt.relation_name,
-            alter_stmt.if_exists,
-        )?
-        .is_none()
+        if lookup_heap_relation_for_alter_table(&catalog, &alter_stmt.relation_name, alter_stmt.if_exists)?
+            .is_none()
         {
             return Ok(StatementResult::AffectedRows(0));
         }
@@ -110,12 +106,8 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        if lookup_heap_relation_for_alter_table(
-            &catalog,
-            &alter_stmt.relation_name,
-            alter_stmt.if_exists,
-        )?
-        .is_none()
+        if lookup_heap_relation_for_alter_table(&catalog, &alter_stmt.relation_name, alter_stmt.if_exists)?
+            .is_none()
         {
             return Ok(StatementResult::AffectedRows(0));
         }

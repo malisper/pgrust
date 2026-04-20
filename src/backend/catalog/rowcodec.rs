@@ -8,11 +8,10 @@ use crate::include::access::htup::{AttributeAlign, AttributeCompression, Attribu
 use crate::include::catalog::{
     BootstrapCatalogKind, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow,
     PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow,
-    PgDatabaseRow, PgDependRow, PgDescriptionRow, PgForeignDataWrapperRow, PgIndexRow,
-    PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow,
-    PgProcRow, PgRewriteRow, PgStatisticRow, PgTablespaceRow, PgTriggerRow, PgTsConfigMapRow,
-    PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
-    bootstrap_composite_type_rows, builtin_type_rows,
+    PgDatabaseRow, PgDependRow, PgDescriptionRow, PgIndexRow, PgInheritsRow, PgLanguageRow,
+    PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow, PgRewriteRow,
+    PgStatisticRow, PgTablespaceRow, PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow,
+    PgTsParserRow, PgTsTemplateRow, PgTypeRow, bootstrap_composite_type_rows, builtin_type_rows,
 };
 use crate::include::nodes::datum::{ArrayValue, Value};
 
@@ -160,12 +159,6 @@ pub(crate) fn catalog_row_values_for_kind(
             .iter()
             .cloned()
             .map(pg_description_row_values)
-            .collect(),
-        BootstrapCatalogKind::PgForeignDataWrapper => rows
-            .foreign_data_wrappers
-            .iter()
-            .cloned()
-            .map(pg_foreign_data_wrapper_row_values)
             .collect(),
         BootstrapCatalogKind::PgIndex => rows
             .indexes
@@ -494,19 +487,6 @@ pub(crate) fn pg_collation_row_from_values(
         collprovider: expect_char(&values[4], "collprovider")?,
         collisdeterministic: expect_bool(&values[5])?,
         collencoding: expect_int32(&values[6])?,
-    })
-}
-
-pub(crate) fn pg_foreign_data_wrapper_row_from_values(
-    values: Vec<Value>,
-) -> Result<PgForeignDataWrapperRow, CatalogError> {
-    Ok(PgForeignDataWrapperRow {
-        oid: expect_oid(&values[0])?,
-        fdwname: expect_text(&values[1])?,
-        fdwowner: expect_oid(&values[2])?,
-        fdwhandler: expect_oid(&values[3])?,
-        fdwvalidator: expect_oid(&values[4])?,
-        fdwoptions: nullable_text_array(&values[5])?,
     })
 }
 
@@ -911,19 +891,6 @@ fn pg_collation_row_values(row: PgCollationRow) -> Vec<Value> {
         Value::Text(row.collprovider.to_string().into()),
         Value::Bool(row.collisdeterministic),
         Value::Int32(row.collencoding),
-    ]
-}
-
-fn pg_foreign_data_wrapper_row_values(row: PgForeignDataWrapperRow) -> Vec<Value> {
-    vec![
-        Value::Int32(row.oid as i32),
-        Value::Text(row.fdwname.into()),
-        Value::Int32(row.fdwowner as i32),
-        Value::Int32(row.fdwhandler as i32),
-        Value::Int32(row.fdwvalidator as i32),
-        row.fdwoptions
-            .map(|values| Value::PgArray(text_array_value(values)))
-            .unwrap_or(Value::Null),
     ]
 }
 
@@ -1536,11 +1503,6 @@ fn oid_array_value(values: Vec<u32>) -> ArrayValue {
 fn int16_array_value(values: Vec<i16>) -> ArrayValue {
     ArrayValue::from_1d(values.into_iter().map(Value::Int16).collect())
         .with_element_type_oid(crate::include::catalog::INT2_TYPE_OID)
-}
-
-fn text_array_value(values: Vec<String>) -> ArrayValue {
-    ArrayValue::from_1d(values.into_iter().map(|value| Value::Text(value.into())).collect())
-        .with_element_type_oid(crate::include::catalog::TEXT_TYPE_OID)
 }
 
 fn nullable_text_value(value: Option<String>) -> Value {

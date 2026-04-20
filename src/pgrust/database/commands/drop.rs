@@ -2,81 +2,6 @@ use super::super::*;
 use crate::include::nodes::parsenodes::{DropIndexStatement, DropSchemaStatement};
 
 impl Database {
-    fn drop_schema_owned_objects_in_transaction(
-        &self,
-        client_id: ClientId,
-        schema_oid: u32,
-        xid: TransactionId,
-        cid: CommandId,
-        catalog_effects: &mut Vec<CatalogMutationEffect>,
-    ) -> Result<(), ExecError> {
-        let catcache = self
-            .backend_catcache(client_id, Some((xid, cid)))
-            .map_err(map_catalog_error)?;
-        let interrupts = self.interrupt_state(client_id);
-        let relation_rows = catcache
-            .class_rows()
-            .into_iter()
-            .filter(|row| row.relnamespace == schema_oid)
-            .collect::<Vec<_>>();
-        let proc_rows = catcache
-            .proc_rows()
-            .into_iter()
-            .filter(|row| row.pronamespace == schema_oid)
-            .collect::<Vec<_>>();
-        let ctx = CatalogWriteContext {
-            pool: self.pool.clone(),
-            txns: self.txns.clone(),
-            xid,
-            cid,
-            client_id,
-            waiter: Some(self.txn_waiter.clone()),
-            interrupts,
-        };
-
-        for relation in relation_rows {
-            let drop_result = match relation.relkind {
-                'v' => self
-                    .catalog
-                    .write()
-                    .drop_view_by_oid_mvcc(relation.oid, &ctx)
-                    .map(|(_, effect)| effect),
-                'i' => self
-                    .catalog
-                    .write()
-                    .drop_relation_entry_by_oid_mvcc(relation.oid, &ctx)
-                    .map(|(_, effect)| effect),
-                _ => self
-                    .catalog
-                    .write()
-                    .drop_relation_by_oid_mvcc(relation.oid, &ctx)
-                    .map(|(_, effect)| effect),
-            };
-            let effect = drop_result.map_err(map_catalog_error)?;
-            if relation.relkind != 'v' {
-                self.apply_catalog_mutation_effect_immediate(&effect)?;
-            }
-            if relation.relkind == 'r' {
-                self.session_stats_state(client_id)
-                    .write()
-                    .note_relation_drop(relation.oid, &self.stats);
-            }
-            catalog_effects.push(effect);
-        }
-
-        for proc_row in proc_rows {
-            let effect = self
-                .catalog
-                .write()
-                .drop_proc_by_oid_mvcc(proc_row.oid, &ctx)
-                .map(|(_, effect)| effect)
-                .map_err(map_catalog_error)?;
-            catalog_effects.push(effect);
-        }
-
-        Ok(())
-    }
-
     pub(crate) fn execute_drop_domain_stmt_with_search_path(
         &self,
         _client_id: ClientId,
@@ -226,11 +151,7 @@ impl Database {
                 .class_rows()
                 .into_iter()
                 .any(|row| row.relnamespace == schema.oid);
-            let has_procs = catcache
-                .proc_rows()
-                .into_iter()
-                .any(|row| row.pronamespace == schema.oid);
-            if (has_relations || has_procs) && !drop_stmt.cascade {
+            if has_relations {
                 return Err(ExecError::DetailedError {
                     message: format!(
                         "cannot drop schema {schema_name} because other objects depend on it"
@@ -239,15 +160,6 @@ impl Database {
                     hint: None,
                     sqlstate: "2BP01",
                 });
-            }
-            if has_relations || has_procs {
-                self.drop_schema_owned_objects_in_transaction(
-                    client_id,
-                    schema.oid,
-                    xid,
-                    cid,
-                    catalog_effects,
-                )?;
             }
             let ctx = CatalogWriteContext {
                 pool: self.pool.clone(),
@@ -523,45 +435,6 @@ mod tests {
                 .unwrap()
                 .namespace_by_name("tenant_drop")
                 .is_none()
-        );
-    }
-
-    #[test]
-    fn drop_schema_cascade_removes_schema_relations_and_functions() {
-        let base = temp_dir("schema_cascade");
-        let db = Database::open(&base, 16).unwrap();
-        let mut session = Session::new(1);
-        session.execute(&db, "create schema tenant_drop").unwrap();
-        session
-            .execute(&db, "set search_path = tenant_drop")
-            .unwrap();
-        session
-            .execute(&db, "create table widgets (id int4)")
-            .unwrap();
-        session
-            .execute(
-                &db,
-                "create function tenant_fn() returns int4 language sql as $$ select 1 $$",
-            )
-            .unwrap();
-
-        session
-            .execute(&db, "drop schema tenant_drop cascade")
-            .unwrap();
-
-        let catcache = db.backend_catcache(1, None).unwrap();
-        assert!(catcache.namespace_by_name("tenant_drop").is_none());
-        assert!(
-            !catcache
-                .class_rows()
-                .into_iter()
-                .any(|row| row.relname == "widgets")
-        );
-        assert!(
-            !catcache
-                .proc_rows()
-                .into_iter()
-                .any(|row| row.proname == "tenant_fn")
         );
     }
 }

@@ -588,9 +588,6 @@ pub(super) fn shift_expr_rtindexes(expr: Expr, offset: usize) -> Expr {
                 .collect(),
         },
         expr @ (Expr::CurrentDate
-        | Expr::CurrentUser
-        | Expr::SessionUser
-        | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
         | Expr::LocalTime { .. }
@@ -898,9 +895,6 @@ pub(super) fn rewrite_local_vars_for_output_exprs(
                 .collect(),
         },
         expr @ (Expr::CurrentDate
-        | Expr::CurrentUser
-        | Expr::SessionUser
-        | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
         | Expr::LocalTime { .. }

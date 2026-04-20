@@ -41,7 +41,6 @@ fn merge_catcaches(shared: CatCache, local: CatCache) -> CatCache {
         local.proc_rows(),
         local.cast_rows(),
         local.collation_rows(),
-        local.foreign_data_wrapper_rows(),
         shared.database_rows(),
         shared.tablespace_rows(),
         local.statistic_rows(),

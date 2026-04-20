@@ -5,8 +5,12 @@ use super::{ExecError, ExecutorContext};
 use crate::include::catalog::builtin_aggregate_function_for_proc_oid;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::{MaterializedRow, SystemVarBinding, TupleSlot};
-use crate::include::nodes::primnodes::{BuiltinWindowFunction, WindowClause, WindowFuncKind};
+use crate::include::nodes::primnodes::{
+    BuiltinWindowFunction, WindowClause, WindowFuncExpr, WindowFuncKind,
+};
 use std::cmp::Ordering;
+
+const INVALID_PARAMETER_VALUE_SQLSTATE: &str = "22023";
 
 #[derive(Debug)]
 struct PreparedWindowRow {
@@ -112,25 +116,164 @@ fn advance_window_aggregate(
     Ok(())
 }
 
-fn evaluate_builtin_window(
+fn evaluate_rank_like_window(
     func: BuiltinWindowFunction,
     partition_rows: &[PreparedWindowRow],
 ) -> Vec<Value> {
     let mut values = Vec::with_capacity(partition_rows.len());
-    let mut peer_start = 0usize;
     let mut dense_rank = 1i64;
-    for index in 0..partition_rows.len() {
-        if index > 0 && !same_peer(&partition_rows[index - 1], &partition_rows[index]) {
-            peer_start = index;
-            dense_rank += 1;
+    let total_rows = partition_rows.len();
+    let mut peer_start = 0usize;
+    while peer_start < total_rows {
+        let mut peer_end = peer_start + 1;
+        while peer_end < total_rows
+            && same_peer(&partition_rows[peer_end - 1], &partition_rows[peer_end])
+        {
+            peer_end += 1;
         }
-        values.push(match func {
-            BuiltinWindowFunction::RowNumber => Value::Int64(index as i64 + 1),
-            BuiltinWindowFunction::Rank => Value::Int64(peer_start as i64 + 1),
-            BuiltinWindowFunction::DenseRank => Value::Int64(dense_rank),
-        });
+
+        match func {
+            BuiltinWindowFunction::RowNumber => {
+                for index in peer_start..peer_end {
+                    values.push(Value::Int64(index as i64 + 1));
+                }
+            }
+            BuiltinWindowFunction::Rank => {
+                values.extend(std::iter::repeat_n(
+                    Value::Int64(peer_start as i64 + 1),
+                    peer_end - peer_start,
+                ));
+            }
+            BuiltinWindowFunction::DenseRank => {
+                values.extend(std::iter::repeat_n(
+                    Value::Int64(dense_rank),
+                    peer_end - peer_start,
+                ));
+            }
+            BuiltinWindowFunction::PercentRank => {
+                let percent_rank = if total_rows <= 1 {
+                    0.0
+                } else {
+                    peer_start as f64 / (total_rows - 1) as f64
+                };
+                values.extend(std::iter::repeat_n(
+                    Value::Float64(percent_rank),
+                    peer_end - peer_start,
+                ));
+            }
+            BuiltinWindowFunction::CumeDist => {
+                let cume_dist = peer_end as f64 / total_rows as f64;
+                values.extend(std::iter::repeat_n(
+                    Value::Float64(cume_dist),
+                    peer_end - peer_start,
+                ));
+            }
+            BuiltinWindowFunction::Ntile => {
+                panic!("ntile() must be evaluated through evaluate_ntile_window")
+            }
+        }
+
+        peer_start = peer_end;
+        dense_rank += 1;
     }
     values
+}
+
+fn invalid_ntile_bucket_error() -> ExecError {
+    ExecError::DetailedError {
+        message: "argument of ntile must be greater than zero".into(),
+        detail: None,
+        hint: None,
+        sqlstate: INVALID_PARAMETER_VALUE_SQLSTATE,
+    }
+}
+
+fn evaluate_ntile_bucket_count(
+    ctx: &mut ExecutorContext,
+    func: &WindowFuncExpr,
+    partition_rows: &mut [PreparedWindowRow],
+) -> Result<Option<usize>, ExecError> {
+    let Some(first_row) = partition_rows.first_mut() else {
+        return Ok(Some(1));
+    };
+    let Some(bucket_arg) = func.args.first() else {
+        panic!("ntile() missing bucket-count argument");
+    };
+
+    set_active_system_bindings(ctx, &first_row.row.system_bindings);
+    set_outer_expr_bindings(
+        ctx,
+        first_row.row.slot.tts_values.clone(),
+        &first_row.row.system_bindings,
+    );
+    let bucket_count = eval_expr(bucket_arg, &mut first_row.row.slot, ctx)?.to_owned_value();
+    match bucket_count {
+        Value::Null => Ok(None),
+        Value::Int16(value) if value > 0 => Ok(Some(value as usize)),
+        Value::Int32(value) if value > 0 => Ok(Some(value as usize)),
+        Value::Int64(value) if value > 0 => usize::try_from(value)
+            .map(Some)
+            .map_err(|_| invalid_ntile_bucket_error()),
+        Value::Int16(_) | Value::Int32(_) | Value::Int64(_) => Err(invalid_ntile_bucket_error()),
+        other => Err(ExecError::TypeMismatch {
+            op: "ntile",
+            left: other,
+            right: Value::Int32(1),
+        }),
+    }
+}
+
+fn evaluate_ntile_window(
+    ctx: &mut ExecutorContext,
+    func: &WindowFuncExpr,
+    partition_rows: &mut [PreparedWindowRow],
+) -> Result<Vec<Value>, ExecError> {
+    let total_rows = partition_rows.len();
+    if total_rows == 0 {
+        return Ok(Vec::new());
+    }
+
+    let Some(bucket_count) = evaluate_ntile_bucket_count(ctx, func, partition_rows)? else {
+        return Ok(vec![Value::Null; total_rows]);
+    };
+
+    if total_rows < bucket_count {
+        return (1..=total_rows)
+            .map(|bucket| {
+                i32::try_from(bucket)
+                    .map(Value::Int32)
+                    .map_err(|_| invalid_ntile_bucket_error())
+            })
+            .collect();
+    }
+
+    let rows_per_bucket = total_rows / bucket_count;
+    let remainder = total_rows % bucket_count;
+    let mut values = Vec::with_capacity(total_rows);
+    for bucket_index in 0..bucket_count {
+        let bucket_size = rows_per_bucket + usize::from(bucket_index < remainder);
+        let bucket_value =
+            i32::try_from(bucket_index + 1).map_err(|_| invalid_ntile_bucket_error())?;
+        values.extend(std::iter::repeat_n(Value::Int32(bucket_value), bucket_size));
+        if values.len() == total_rows {
+            break;
+        }
+    }
+    Ok(values)
+}
+
+fn evaluate_builtin_window(
+    ctx: &mut ExecutorContext,
+    func: &WindowFuncExpr,
+    partition_rows: &mut [PreparedWindowRow],
+) -> Result<Vec<Value>, ExecError> {
+    match func.kind {
+        WindowFuncKind::Builtin(BuiltinWindowFunction::Ntile) => {
+            evaluate_ntile_window(ctx, func, partition_rows)
+        }
+        WindowFuncKind::Builtin(kind) => Ok(evaluate_rank_like_window(kind, partition_rows)),
+        WindowFuncKind::Aggregate(_) => panic!("aggregate window function routed to builtin path"),
+    }
 }
 
 fn evaluate_aggregate_window(
@@ -194,7 +337,7 @@ pub(crate) fn execute_window_clause(
         let mut function_values = Vec::with_capacity(clause.functions.len());
         for func in &clause.functions {
             function_values.push(match &func.kind {
-                WindowFuncKind::Builtin(kind) => evaluate_builtin_window(*kind, partition),
+                WindowFuncKind::Builtin(_) => evaluate_builtin_window(ctx, func, partition)?,
                 WindowFuncKind::Aggregate(aggref) => evaluate_aggregate_window(
                     ctx,
                     aggref,

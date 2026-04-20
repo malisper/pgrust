@@ -494,7 +494,6 @@ fn array_element_layout(
         SqlTypeKind::Int2 => (2, AttributeAlign::Short),
         SqlTypeKind::Int4
         | SqlTypeKind::Oid
-        | SqlTypeKind::RegRole
         | SqlTypeKind::RegProcedure
         | SqlTypeKind::Xid
         | SqlTypeKind::RegConfig
@@ -777,7 +776,6 @@ fn decode_array_element_value(
         }
         SqlTypeKind::Int4
         | SqlTypeKind::Oid
-        | SqlTypeKind::RegRole
         | SqlTypeKind::RegProcedure
         | SqlTypeKind::Xid
         | SqlTypeKind::RegConfig

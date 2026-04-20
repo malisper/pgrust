@@ -215,6 +215,9 @@ pub enum BuiltinWindowFunction {
     RowNumber,
     Rank,
     DenseRank,
+    PercentRank,
+    CumeDist,
+    Ntile,
 }
 
 impl BuiltinWindowFunction {
@@ -223,6 +226,9 @@ impl BuiltinWindowFunction {
             BuiltinWindowFunction::RowNumber => "row_number",
             BuiltinWindowFunction::Rank => "rank",
             BuiltinWindowFunction::DenseRank => "dense_rank",
+            BuiltinWindowFunction::PercentRank => "percent_rank",
+            BuiltinWindowFunction::CumeDist => "cume_dist",
+            BuiltinWindowFunction::Ntile => "ntile",
         }
     }
 }
@@ -371,7 +377,6 @@ pub enum BuiltinScalarFunction {
     SetBit,
     GetByte,
     SetByte,
-    RegRoleToText,
     BitCount,
     Encode,
     Decode,
@@ -976,9 +981,6 @@ pub enum Expr {
     },
     Random,
     CurrentDate,
-    CurrentUser,
-    SessionUser,
-    CurrentRole,
     CurrentTime {
         precision: Option<i32>,
     },
@@ -1305,9 +1307,6 @@ pub fn expr_sql_type_hint(expr: &Expr) -> Option<SqlType> {
         | Expr::ArraySubscript { .. }
         | Expr::Random
         | Expr::CurrentDate
-        | Expr::CurrentUser
-        | Expr::SessionUser
-        | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
         | Expr::LocalTime { .. }

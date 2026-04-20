@@ -57,9 +57,6 @@ pub(super) fn finalize_expr_subqueries(
         | Expr::Const(_)
         | Expr::Random
         | Expr::CurrentDate
-        | Expr::CurrentUser
-        | Expr::SessionUser
-        | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
         | Expr::LocalTime { .. }
@@ -420,9 +417,6 @@ fn rebase_expr_subplan_ids(expr: Expr, base: usize) -> Expr {
         | Expr::Const(_)
         | Expr::Random
         | Expr::CurrentDate
-        | Expr::CurrentUser
-        | Expr::SessionUser
-        | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
         | Expr::LocalTime { .. }

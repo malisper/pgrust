@@ -16,8 +16,6 @@ pub(super) fn expr_contains_agg(expr: &SqlExpr) -> bool {
         | SqlExpr::Random
         | SqlExpr::CurrentDate
         | SqlExpr::CurrentUser
-        | SqlExpr::SessionUser
-        | SqlExpr::CurrentRole
         | SqlExpr::CurrentTime { .. }
         | SqlExpr::CurrentTimestamp { .. }
         | SqlExpr::LocalTime { .. }
@@ -136,8 +134,6 @@ pub(super) fn expr_references_input_scope(expr: &SqlExpr) -> bool {
         | SqlExpr::Random
         | SqlExpr::CurrentDate
         | SqlExpr::CurrentUser
-        | SqlExpr::SessionUser
-        | SqlExpr::CurrentRole
         | SqlExpr::CurrentTime { .. }
         | SqlExpr::CurrentTimestamp { .. }
         | SqlExpr::LocalTime { .. }
@@ -335,8 +331,6 @@ pub(super) fn collect_aggs(
         | SqlExpr::Random
         | SqlExpr::CurrentDate
         | SqlExpr::CurrentUser
-        | SqlExpr::SessionUser
-        | SqlExpr::CurrentRole
         | SqlExpr::CurrentTime { .. }
         | SqlExpr::CurrentTimestamp { .. }
         | SqlExpr::LocalTime { .. }
