@@ -6135,22 +6135,52 @@ fn parse_window_calls_capture_over_clause() {
         SqlExpr::FuncCall {
             name,
             over: Some(RawWindowSpec {
+                name: window_name,
                 partition_by,
                 order_by,
             }),
             ..
-        } if name == "row_number" && partition_by.is_empty() && order_by.is_empty()
+        } if name == "row_number"
+            && window_name.is_none()
+            && partition_by.is_empty()
+            && order_by.is_empty()
     ));
     assert!(matches!(
         &stmt.targets[1].expr,
         SqlExpr::AggCall {
             func: AggFunc::Sum,
             over: Some(RawWindowSpec {
+                name: window_name,
                 partition_by,
                 order_by,
             }),
             ..
-        } if partition_by.len() == 1 && order_by.len() == 1
+        } if window_name.is_none() && partition_by.len() == 1 && order_by.len() == 1
+    ));
+}
+
+#[test]
+fn parse_named_window_clause_and_reference() {
+    let stmt = parse_select("select row_number() over w from people window w as (order by id)")
+        .unwrap();
+    assert_eq!(stmt.window_clauses.len(), 1);
+    assert_eq!(stmt.window_clauses[0].name, "w");
+    assert!(stmt.window_clauses[0].spec.partition_by.is_empty());
+    assert_eq!(stmt.window_clauses[0].spec.order_by.len(), 1);
+    assert!(matches!(
+        &stmt.targets[0].expr,
+        SqlExpr::FuncCall {
+            name,
+            over: Some(RawWindowSpec {
+                name: Some(window_name),
+                partition_by,
+                order_by,
+            }),
+            ..
+        } if name == "row_number"
+            && window_name == "w"
+            && partition_by.is_empty()
+            && order_by.is_empty()
     ));
 }
 
@@ -6283,6 +6313,24 @@ fn analyze_grouped_query_keeps_semantic_group_refs() {
 #[test]
 fn build_plan_with_window_function_uses_windowagg() {
     let stmt = parse_select("select row_number() over (order by id) from people").unwrap();
+    let plan = build_plan(&stmt, &catalog()).unwrap();
+    match plan {
+        Plan::Projection { input, .. } => match *input {
+            Plan::WindowAgg { input, clause, .. } => {
+                assert!(clause.spec.partition_by.is_empty());
+                assert_eq!(clause.spec.order_by.len(), 1);
+                assert!(matches!(*input, Plan::OrderBy { .. }));
+            }
+            other => panic!("expected window agg below projection, got {other:?}"),
+        },
+        other => panic!("expected projection, got {other:?}"),
+    }
+}
+
+#[test]
+fn build_plan_with_named_window_clause_uses_windowagg() {
+    let stmt = parse_select("select row_number() over w from people window w as (order by id)")
+        .unwrap();
     let plan = build_plan(&stmt, &catalog()).unwrap();
     match plan {
         Plan::Projection { input, .. } => match *input {
@@ -6529,8 +6577,18 @@ fn window_function_rejected_in_where_group_by_and_having() {
 }
 
 #[test]
-fn window_aliases_and_frames_are_rejected() {
-    assert!(parse_select("select row_number() over w from people window w as ()").is_err());
+fn named_window_errors_and_frames_are_rejected() {
+    let stmt = parse_select("select row_number() over missing from people").unwrap();
+    assert!(matches!(
+        build_plan(&stmt, &catalog()),
+        Err(ParseError::WindowingError(message)) if message == "window \"missing\" does not exist"
+    ));
+    let stmt =
+        parse_select("select row_number() over w from people window w as (), w as ()").unwrap();
+    assert!(matches!(
+        build_plan(&stmt, &catalog()),
+        Err(ParseError::WindowingError(message)) if message == "window \"w\" is already defined"
+    ));
     assert!(parse_select(
         "select row_number() over (order by id rows between unbounded preceding and current row) from people"
     )

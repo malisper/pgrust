@@ -1284,6 +1284,7 @@ fn cte_body_as_select(body: &CteBody) -> Result<SelectStatement, ParseError> {
             where_clause: None,
             group_by: Vec::new(),
             having: None,
+            window_clauses: Vec::new(),
             order_by: values.order_by.clone(),
             limit: values.limit,
             offset: values.offset,
@@ -1303,6 +1304,7 @@ fn cte_body_as_select(body: &CteBody) -> Result<SelectStatement, ParseError> {
             where_clause: None,
             group_by: Vec::new(),
             having: None,
+            window_clauses: Vec::new(),
             order_by: Vec::new(),
             limit: None,
             offset: None,
@@ -2480,6 +2482,7 @@ fn bind_select_query_with_outer(
     };
 
     let window_state = Rc::new(RefCell::new(WindowBindingState::default()));
+    register_named_window_specs(&window_state, &stmt.window_clauses)?;
 
     if needs_agg {
         let mut aggs: Vec<(

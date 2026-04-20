@@ -638,6 +638,7 @@ pub struct SelectStatement {
     pub where_clause: Option<SqlExpr>,
     pub group_by: Vec<SqlExpr>,
     pub having: Option<SqlExpr>,
+    pub window_clauses: Vec<RawWindowClause>,
     pub order_by: Vec<OrderByItem>,
     pub limit: Option<usize>,
     pub offset: Option<usize>,
@@ -822,8 +823,15 @@ pub struct OrderByItem {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawWindowSpec {
+    pub name: Option<String>,
     pub partition_by: Vec<SqlExpr>,
     pub order_by: Vec<OrderByItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawWindowClause {
+    pub name: String,
+    pub spec: RawWindowSpec,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

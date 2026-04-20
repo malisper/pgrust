@@ -324,6 +324,19 @@ fn collect_window_input_exprs(expr: &Expr, preserve_expr: bool, target: &mut Pat
         target.add_column_to_pathtarget(expr.clone(), 0);
         return;
     }
+    if let Expr::WindowFunc(window_func) = expr {
+        for arg in &window_func.args {
+            collect_window_input_exprs(arg, preserve_expr, target);
+        }
+        if let crate::include::nodes::primnodes::WindowFuncKind::Aggregate(aggref) =
+            &window_func.kind
+        {
+            if let Some(filter) = aggref.aggfilter.as_ref() {
+                collect_window_input_exprs(filter, preserve_expr, target);
+            }
+        }
+        return;
+    }
     let mut supporting = Vec::new();
     collect_supporting_inputs(expr, &mut supporting);
     target.add_new_columns_to_pathtarget(supporting);
