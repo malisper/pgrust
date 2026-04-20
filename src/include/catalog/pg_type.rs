@@ -7,13 +7,14 @@ use crate::include::catalog::{
     ANYARRAYOID, BIT_ARRAY_TYPE_OID, BIT_TYPE_OID, BOOL_ARRAY_TYPE_OID, BOOL_TYPE_OID,
     BOOTSTRAP_SUPERUSER_OID, BOX_TYPE_OID, BPCHAR_ARRAY_TYPE_OID, BPCHAR_TYPE_OID,
     BYTEA_ARRAY_TYPE_OID, BYTEA_TYPE_OID, CIRCLE_TYPE_OID, DATE_ARRAY_TYPE_OID, DATE_TYPE_OID,
-    DATERANGE_TYPE_OID, FLOAT4_ARRAY_TYPE_OID, FLOAT4_TYPE_OID, FLOAT8_ARRAY_TYPE_OID,
-    FLOAT8_TYPE_OID, INT2_ARRAY_TYPE_OID, INT2_TYPE_OID, INT2VECTOR_TYPE_OID, INT4_ARRAY_TYPE_OID,
-    INT4_TYPE_OID, INT4RANGE_TYPE_OID, INT8_ARRAY_TYPE_OID, INT8_TYPE_OID, INT8RANGE_TYPE_OID,
-    INTERNAL_CHAR_ARRAY_TYPE_OID, INTERNAL_CHAR_TYPE_OID, INTERVAL_ARRAY_TYPE_OID,
-    INTERVAL_TYPE_OID, JSON_ARRAY_TYPE_OID, JSON_TYPE_OID, JSONB_ARRAY_TYPE_OID, JSONB_TYPE_OID,
-    JSONPATH_ARRAY_TYPE_OID, JSONPATH_TYPE_OID, LINE_TYPE_OID, LSEG_TYPE_OID, MONEY_ARRAY_TYPE_OID,
-    MONEY_TYPE_OID, NAME_ARRAY_TYPE_OID, NAME_TYPE_OID, NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID,
+    DATERANGE_TYPE_OID, FDW_HANDLER_TYPE_OID, FLOAT4_ARRAY_TYPE_OID, FLOAT4_TYPE_OID,
+    FLOAT8_ARRAY_TYPE_OID, FLOAT8_TYPE_OID, INT2_ARRAY_TYPE_OID, INT2_TYPE_OID,
+    INT2VECTOR_TYPE_OID, INT4_ARRAY_TYPE_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID,
+    INT8_ARRAY_TYPE_OID, INT8_TYPE_OID, INT8RANGE_TYPE_OID, INTERNAL_CHAR_ARRAY_TYPE_OID,
+    INTERNAL_CHAR_TYPE_OID, INTERVAL_ARRAY_TYPE_OID, INTERVAL_TYPE_OID, JSON_ARRAY_TYPE_OID,
+    JSON_TYPE_OID, JSONB_ARRAY_TYPE_OID, JSONB_TYPE_OID, JSONPATH_ARRAY_TYPE_OID,
+    JSONPATH_TYPE_OID, LINE_TYPE_OID, LSEG_TYPE_OID, MONEY_ARRAY_TYPE_OID, MONEY_TYPE_OID,
+    NAME_ARRAY_TYPE_OID, NAME_TYPE_OID, NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID,
     NUMRANGE_TYPE_OID, OID_ARRAY_TYPE_OID, OID_TYPE_OID, OIDVECTOR_TYPE_OID, PATH_TYPE_OID,
     PG_ATTRIBUTE_RELATION_OID, PG_ATTRIBUTE_ROWTYPE_OID, PG_CATALOG_NAMESPACE_OID,
     PG_CLASS_RELATION_OID, PG_CLASS_ROWTYPE_OID, PG_DATABASE_RELATION_OID, PG_DATABASE_ROWTYPE_OID,
@@ -145,6 +146,13 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
             "trigger",
             TRIGGER_TYPE_OID,
             SqlType::new(SqlTypeKind::Trigger),
+        ),
+        fixed_builtin_type_row(
+            "fdw_handler",
+            FDW_HANDLER_TYPE_OID,
+            SqlType::new(SqlTypeKind::FdwHandler),
+            4,
+            AttributeAlign::Int,
         ),
         builtin_type_row("oid", OID_TYPE_OID, SqlType::new(SqlTypeKind::Oid)),
         builtin_type_row(
@@ -424,6 +432,28 @@ fn builtin_type_row(name: &str, oid: u32, sql_type: SqlType) -> PgTypeRow {
     }
 }
 
+fn fixed_builtin_type_row(
+    name: &str,
+    oid: u32,
+    sql_type: SqlType,
+    typlen: i16,
+    typalign: AttributeAlign,
+) -> PgTypeRow {
+    PgTypeRow {
+        oid,
+        typname: name.to_string(),
+        typnamespace: PG_CATALOG_NAMESPACE_OID,
+        typowner: BOOTSTRAP_SUPERUSER_OID,
+        typlen,
+        typalign,
+        typstorage: AttributeStorage::Plain,
+        typrelid: 0,
+        typelem: 0,
+        typarray: 0,
+        sql_type,
+    }
+}
+
 fn builtin_range_type_row(name: &str, oid: u32, subtype_oid: u32, discrete: bool) -> PgTypeRow {
     builtin_type_row(
         name,
@@ -610,6 +640,17 @@ mod tests {
         assert_eq!(row.typalign, AttributeAlign::Double);
         assert_eq!(row.typstorage, AttributeStorage::Extended);
         assert_eq!(row.sql_type, SqlType::record(RECORD_TYPE_OID));
+    }
+
+    #[test]
+    fn builtin_types_include_fdw_handler() {
+        let row = builtin_type_rows()
+            .into_iter()
+            .find(|row| row.oid == FDW_HANDLER_TYPE_OID)
+            .expect("fdw_handler row");
+        assert_eq!(row.typname, "fdw_handler");
+        assert_eq!(row.typlen, 4);
+        assert_eq!(row.sql_type, SqlType::new(SqlTypeKind::FdwHandler));
     }
 
     #[test]

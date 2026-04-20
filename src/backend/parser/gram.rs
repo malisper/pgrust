@@ -193,6 +193,7 @@ pub fn parse_type_name(sql: &str) -> Result<RawTypeName, ParseError> {
         "pg_node_tree" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::PgNodeTree))),
         "trigger" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Trigger))),
         "void" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Void))),
+        "fdw_handler" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::FdwHandler))),
         "regprocedure" => {
             return Ok(RawTypeName::Builtin(SqlType::new(
                 SqlTypeKind::RegProcedure,
@@ -6077,6 +6078,7 @@ fn sql_type_output_name(ty: SqlType) -> &'static str {
         SqlTypeKind::Composite => "record",
         SqlTypeKind::Trigger => "trigger",
         SqlTypeKind::Void => "void",
+        SqlTypeKind::FdwHandler => "fdw_handler",
         SqlTypeKind::Int2 => "int2",
         SqlTypeKind::Int2Vector => "int2vector",
         SqlTypeKind::Int4 => "int4",

@@ -561,6 +561,7 @@ fn format_sql_type_name(sql_type: SqlType) -> &'static str {
         SqlTypeKind::Record | SqlTypeKind::Composite => "record",
         SqlTypeKind::Trigger => "trigger",
         SqlTypeKind::Void => "void",
+        SqlTypeKind::FdwHandler => "fdw_handler",
         SqlTypeKind::Int2 => "smallint",
         SqlTypeKind::Int2Vector => "int2vector",
         SqlTypeKind::Int4 => "integer",

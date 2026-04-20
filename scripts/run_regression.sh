@@ -74,6 +74,16 @@ transform_conversion_fixture() {
     " "$input_path" > "$output_path"
 }
 
+transform_foreign_data_fixture() {
+    local input_path="$1"
+    local output_path="$2"
+
+    perl -0pe "
+        s/CREATE FUNCTION test_fdw_handler\\(\\)\\n\\s+RETURNS fdw_handler\\n\\s+AS :'regresslib', 'test_fdw_handler'\\n\\s+LANGUAGE C;\\n//s;
+        s/\\btest_fdw_handler\\b/pg_rust_test_fdw_handler/g;
+    " "$input_path" > "$output_path"
+}
+
 prepare_test_fixture() {
     local sql_file="$1"
     local expected_file="$2"
@@ -82,18 +92,25 @@ prepare_test_fixture() {
     PREPARED_SQL_FILE="$sql_file"
     PREPARED_EXPECTED_FILE="$expected_file"
 
-    if [[ "$test_name" != "conversion" ]]; then
-        return 0
-    fi
-
     local fixture_dir="$RESULTS_DIR/fixtures"
-    mkdir -p "$fixture_dir"
-
-    PREPARED_SQL_FILE="$fixture_dir/${test_name}.sql"
-    PREPARED_EXPECTED_FILE="$fixture_dir/${test_name}.out"
-
-    transform_conversion_fixture "$sql_file" "$PREPARED_SQL_FILE"
-    transform_conversion_fixture "$expected_file" "$PREPARED_EXPECTED_FILE"
+    case "$test_name" in
+        conversion)
+            mkdir -p "$fixture_dir"
+            PREPARED_SQL_FILE="$fixture_dir/${test_name}.sql"
+            PREPARED_EXPECTED_FILE="$fixture_dir/${test_name}.out"
+            transform_conversion_fixture "$sql_file" "$PREPARED_SQL_FILE"
+            transform_conversion_fixture "$expected_file" "$PREPARED_EXPECTED_FILE"
+            ;;
+        foreign_data)
+            mkdir -p "$fixture_dir"
+            PREPARED_SQL_FILE="$fixture_dir/${test_name}.sql"
+            PREPARED_EXPECTED_FILE="$fixture_dir/${test_name}.out"
+            transform_foreign_data_fixture "$sql_file" "$PREPARED_SQL_FILE"
+            transform_foreign_data_fixture "$expected_file" "$PREPARED_EXPECTED_FILE"
+            ;;
+        *)
+            ;;
+    esac
 }
 
 PORT=5433

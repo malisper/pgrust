@@ -80,6 +80,7 @@ pub const ANYOID: u32 = 2276;
 pub const ANYARRAYOID: u32 = 2277;
 pub const VOID_TYPE_OID: u32 = 2278;
 pub const TRIGGER_TYPE_OID: u32 = 2279;
+pub const FDW_HANDLER_TYPE_OID: u32 = 3115;
 pub const RECORD_TYPE_OID: u32 = 2249;
 pub const RECORD_ARRAY_TYPE_OID: u32 = 2287;
 pub const TEXT_ARRAY_TYPE_OID: u32 = 1009;
