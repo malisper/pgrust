@@ -532,6 +532,42 @@ fn planned_grouped_window_query_keeps_aggregate_below_windowagg() {
 }
 
 #[test]
+fn planned_grouped_window_aggregate_uses_aggregate_output_slot() {
+    let sql = "select x, y, sum(z) as gsum, sum(sum(z)) over (partition by y order by x) as wsum \
+        from (values (1, 1, 10), (2, 1, 20), (1, 2, 7)) as t(x, y, z) group by x, y";
+    let catalog = LiteralDefaultCatalog;
+    let stmt = parse_select(sql).expect("parse");
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog, &[], None, &[], &[]).expect("analyze");
+    let func = &query.window_clauses[0].functions[0];
+    assert!(matches!(
+        &func.kind,
+        crate::include::nodes::primnodes::WindowFuncKind::Aggregate(aggref)
+            if matches!(aggref.args.as_slice(), [Expr::Aggref(_)])
+    ));
+    assert!(matches!(func.args.as_slice(), [Expr::Aggref(_)]));
+
+    let planned = super::planner(query, &catalog);
+
+    assert!(plan_contains(&planned.plan_tree, |plan| match plan {
+        Plan::WindowAgg { clause, .. } => {
+            clause.spec.partition_by.len() == 1
+                && is_special_user_var(&clause.spec.partition_by[0], OUTER_VAR, 1)
+                && clause.spec.order_by.len() == 1
+                && is_special_user_var(&clause.spec.order_by[0].expr, OUTER_VAR, 0)
+                && clause.functions.len() == 1
+                && matches!(
+                    &clause.functions[0].kind,
+                    crate::include::nodes::primnodes::WindowFuncKind::Aggregate(aggref)
+                        if aggref.args.len() == 1
+                            && is_special_user_var(&aggref.args[0], OUTER_VAR, 2)
+                )
+        }
+        _ => false,
+    }));
+}
+
+#[test]
 fn planned_distinct_window_specs_stack_windowagg_nodes() {
     let planned = planned_stmt_for_values_sql(
         "select row_number() over (order by x), rank() over (partition by x order by x) from (values (1), (2)) as t(x)",
