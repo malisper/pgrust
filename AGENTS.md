@@ -133,6 +133,12 @@ For structural refactors, the default verification loop is:
 
 If a change affects SQL behavior more broadly, run the regression harness afterward.
 
+## Finish
+
+When finishing work in this repo:
+
+- Do not push new code unless the user explicitly asks for a push.
+
 ## Profiling Output
 
 When the user asks for a profile or profiling analysis:
