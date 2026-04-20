@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::{self, Write};
 use std::str::FromStr;
 
@@ -199,6 +200,7 @@ pub(crate) fn send_query_result(
     rows: &[Vec<Value>],
     tag: &str,
     float_format: FloatFormatOptions,
+    role_names: Option<&HashMap<u32, String>>,
 ) -> io::Result<()> {
     send_row_description(stream, columns)?;
     let mut row_buf = Vec::new();
@@ -210,6 +212,7 @@ pub(crate) fn send_query_result(
             &[],
             &mut row_buf,
             float_format.clone(),
+            role_names,
         )?;
     }
     send_command_complete(stream, tag)
@@ -404,6 +407,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
             SqlTypeKind::Range => col.sql_type.type_oid as i32,
             SqlTypeKind::Void => unreachable!("void arrays are unsupported"),
             SqlTypeKind::Oid => 1028,
+            SqlTypeKind::RegRole => unreachable!("regrole arrays are unsupported"),
             SqlTypeKind::RegProcedure => {
                 crate::include::catalog::REGPROCEDURE_ARRAY_TYPE_OID as i32
             }
@@ -470,6 +474,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
         SqlTypeKind::Int8 => (20, 8, -1),
         SqlTypeKind::Void => (crate::include::catalog::VOID_TYPE_OID as i32, 4, -1),
         SqlTypeKind::Oid => (26, 4, -1),
+        SqlTypeKind::RegRole => (crate::include::catalog::REGROLE_TYPE_OID as i32, 4, -1),
         SqlTypeKind::RegProcedure => (crate::include::catalog::REGPROCEDURE_TYPE_OID as i32, 4, -1),
         SqlTypeKind::Tid => (27, 6, -1),
         SqlTypeKind::Xid => (28, 4, -1),
@@ -526,6 +531,7 @@ pub(crate) fn send_typed_data_row(
     result_formats: &[i16],
     buf: &mut Vec<u8>,
     float_format: FloatFormatOptions,
+    role_names: Option<&HashMap<u32, String>>,
 ) -> io::Result<()> {
     buf.clear();
     buf.extend_from_slice(&(values.len() as i16).to_be_bytes());
@@ -573,9 +579,25 @@ pub(crate) fn send_typed_data_row(
             Value::Int64(v) => {
                 let start = buf.len();
                 buf.extend_from_slice(&0_i32.to_be_bytes());
-                let mut itoa_buf = itoa::Buffer::new();
-                let written = itoa_buf.format(*v);
-                buf.extend_from_slice(written.as_bytes());
+                if matches!(sql_type.map(|ty| ty.kind), Some(SqlTypeKind::RegRole)) {
+                    if let Ok(role_oid) = u32::try_from(*v) {
+                        if let Some(role_name) = role_names.and_then(|names| names.get(&role_oid)) {
+                            buf.extend_from_slice(role_name.as_bytes());
+                        } else {
+                            let mut itoa_buf = itoa::Buffer::new();
+                            let written = itoa_buf.format(*v);
+                            buf.extend_from_slice(written.as_bytes());
+                        }
+                    } else {
+                        let mut itoa_buf = itoa::Buffer::new();
+                        let written = itoa_buf.format(*v);
+                        buf.extend_from_slice(written.as_bytes());
+                    }
+                } else {
+                    let mut itoa_buf = itoa::Buffer::new();
+                    let written = itoa_buf.format(*v);
+                    buf.extend_from_slice(written.as_bytes());
+                }
                 let text_len = (buf.len() - start - 4) as i32;
                 buf[start..start + 4].copy_from_slice(&text_len.to_be_bytes());
             }
@@ -722,6 +744,7 @@ fn encode_binary_data_row_value(value: &Value, sql_type: SqlType) -> Result<Vec<
             if matches!(
                 sql_type.kind,
                 SqlTypeKind::Oid
+                    | SqlTypeKind::RegRole
                     | SqlTypeKind::Xid
                     | SqlTypeKind::RegConfig
                     | SqlTypeKind::RegDictionary
@@ -1502,10 +1525,12 @@ fn trim_fractional_zeros(text: &str) -> &str {
 mod tests {
     use super::{
         FloatFormatOptions, format_bytea_text, format_exec_error, format_exec_error_hint,
-        format_float4_text, format_float8_text, send_error_with_fields,
+        format_float4_text, format_float8_text, send_error_with_fields, send_typed_data_row,
     };
-    use crate::backend::executor::ExecError;
+    use crate::backend::executor::{ExecError, QueryColumn, Value};
+    use crate::backend::parser::{SqlType, SqlTypeKind};
     use crate::pgrust::session::ByteaOutputFormat;
+    use std::collections::HashMap;
 
     #[test]
     fn large_float8_values_render_in_scientific_notation() {
@@ -1687,5 +1712,30 @@ mod tests {
                 "Ensure that no rows proposed for insertion within the same command have duplicate constrained values."
             )
         );
+    }
+
+    #[test]
+    fn typed_data_row_renders_regrole_with_role_name() {
+        let mut out = Vec::new();
+        let mut row_buf = Vec::new();
+        let mut role_names = HashMap::new();
+        role_names.insert(42, "app_role".to_string());
+
+        send_typed_data_row(
+            &mut out,
+            &[Value::Int64(42)],
+            &[QueryColumn {
+                name: "member".into(),
+                sql_type: SqlType::new(SqlTypeKind::RegRole),
+                wire_type_oid: None,
+            }],
+            &[],
+            &mut row_buf,
+            FloatFormatOptions::default(),
+            Some(&role_names),
+        )
+        .unwrap();
+
+        assert!(out.windows("app_role".len()).any(|window| window == b"app_role"));
     }
 }
