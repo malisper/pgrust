@@ -494,8 +494,6 @@ pub(super) fn aggregate_sql_type(func: AggFunc, arg_type: Option<SqlType>) -> Sq
     use SqlTypeKind::*;
 
     match func {
-        AggFunc::AnyValue => arg_type.unwrap_or(SqlType::new(Text)),
-        AggFunc::BoolAnd => SqlType::new(Bool),
         AggFunc::Sum => match arg_type.map(|t| t.element_type().kind) {
             Some(Int2 | Int4) => SqlType::new(Int8),
             Some(Money) => SqlType::new(Money),
@@ -511,12 +509,7 @@ pub(super) fn aggregate_sql_type(func: AggFunc, arg_type: Option<SqlType>) -> Sq
             Some(kind) => SqlType::new(kind),
             None => SqlType::new(Numeric),
         },
-        AggFunc::VarPop
-        | AggFunc::VarSamp
-        | AggFunc::Variance
-        | AggFunc::StddevPop
-        | AggFunc::StddevSamp
-        | AggFunc::Stddev => match arg_type.map(|t| t.element_type().kind) {
+        AggFunc::Variance | AggFunc::Stddev => match arg_type.map(|t| t.element_type().kind) {
             Some(Int2 | Int4 | Int8 | Numeric) => SqlType::new(Numeric),
             Some(Float4 | Float8) => SqlType::new(Float8),
             Some(kind) => SqlType::new(kind),
@@ -534,20 +527,6 @@ pub(super) fn aggregate_sql_type(func: AggFunc, arg_type: Option<SqlType>) -> Sq
         AggFunc::StringAgg => arg_type.unwrap_or(SqlType::new(Text)),
         AggFunc::Min | AggFunc::Max => arg_type.unwrap_or(SqlType::new(Text)),
         AggFunc::Count
-        | AggFunc::AnyValue
-        | AggFunc::BoolAnd
-        | AggFunc::RegrCount
-        | AggFunc::RegrSxx
-        | AggFunc::RegrSyy
-        | AggFunc::RegrSxy
-        | AggFunc::RegrAvgx
-        | AggFunc::RegrAvgy
-        | AggFunc::RegrR2
-        | AggFunc::RegrSlope
-        | AggFunc::RegrIntercept
-        | AggFunc::CovarPop
-        | AggFunc::CovarSamp
-        | AggFunc::Corr
         | AggFunc::JsonAgg
         | AggFunc::JsonbAgg
         | AggFunc::JsonObjectAgg

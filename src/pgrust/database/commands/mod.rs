@@ -1,4 +1,6 @@
 mod alter_column_default;
+mod alter_column_options;
+mod alter_column_statistics;
 mod alter_column_type;
 mod constraint;
 mod conversion;

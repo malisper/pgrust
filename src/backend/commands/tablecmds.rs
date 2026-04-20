@@ -2123,7 +2123,6 @@ fn sql_type_display_name(ty: SqlType) -> String {
         SqlTypeKind::Int8 => "bigint",
         SqlTypeKind::Name => "name",
         SqlTypeKind::Oid => "oid",
-        SqlTypeKind::RegRole => "regrole",
         SqlTypeKind::RegProcedure => "regprocedure",
         SqlTypeKind::Tid => "tid",
         SqlTypeKind::Xid => "xid",
