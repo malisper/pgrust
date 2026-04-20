@@ -462,7 +462,13 @@ fn format_standard(value: i128, spec: &FormatSpec) -> String {
     for (idx, token) in spec.tokens.iter().enumerate() {
         if let Token::Sign(kind) = token {
             rendered[idx] = match kind {
-                SignKind::S if idx == 0 => " ".into(),
+                SignKind::S if idx == 0 => {
+                    if spec.fill_mode {
+                        sign_text(*kind, negative).into()
+                    } else {
+                        " ".into()
+                    }
+                }
                 SignKind::Pl if negative => " ".into(),
                 _ => sign_text(*kind, negative).into(),
             };
@@ -482,7 +488,9 @@ fn format_standard(value: i128, spec: &FormatSpec) -> String {
         }
     }
 
-    move_s_sign_to_number(spec, &mut rendered, negative);
+    if !(spec.fill_mode && matches!(spec.tokens.first(), Some(Token::Sign(SignKind::S)))) {
+        move_s_sign_to_number(spec, &mut rendered, negative);
+    }
     apply_implicit_sign(spec, &mut rendered, negative);
 
     let mut out = rendered.concat();
@@ -786,6 +794,43 @@ fn apply_implicit_sign(spec: &FormatSpec, rendered: &mut [String], negative: boo
     }
 }
 
+fn trim_fill_mode_fraction(spec: &FormatSpec, rendered: &mut [String], decimal_idx: usize) {
+    let mut trimming = false;
+    for idx in (decimal_idx + 1..spec.tokens.len()).rev() {
+        match spec.tokens[idx] {
+            Token::Digit9 => {
+                if rendered[idx].is_empty() || rendered[idx] == "0" {
+                    rendered[idx].clear();
+                    trimming = true;
+                } else {
+                    break;
+                }
+            }
+            Token::Digit0 => break,
+            Token::Literal(_) | Token::Group => {
+                if trimming {
+                    rendered[idx].clear();
+                }
+            }
+            Token::Decimal | Token::Sign(_) => break,
+        }
+    }
+}
+
+fn trim_fill_mode_integer(spec: &FormatSpec, rendered: &mut [String], int_end: usize) {
+    let Some(anchor_idx) = (0..int_end)
+        .find(|idx| token_has_visible_number_text(&spec.tokens[*idx], &rendered[*idx]))
+    else {
+        return;
+    };
+    for idx in 0..anchor_idx {
+        match spec.tokens[idx] {
+            Token::Digit9 | Token::Group | Token::Literal(_) => rendered[idx].clear(),
+            Token::Digit0 | Token::Decimal | Token::Sign(_) => {}
+        }
+    }
+}
+
 fn format_standard_numeric(value: &NumericValue, spec: &FormatSpec) -> String {
     if let Some((negative, text)) = special_value_fixed_text(value) {
         let decimal_idx = spec
@@ -1006,14 +1051,22 @@ fn format_standard_numeric(value: &NumericValue, spec: &FormatSpec) -> String {
     for (idx, token) in spec.tokens.iter().enumerate() {
         if let Token::Sign(kind) = token {
             rendered[idx] = match kind {
-                SignKind::S if idx == 0 => " ".into(),
+                SignKind::S if idx == 0 => {
+                    if spec.fill_mode {
+                        sign_text(*kind, negative).into()
+                    } else {
+                        " ".into()
+                    }
+                }
                 SignKind::Pl if negative => " ".into(),
                 _ => sign_text(*kind, negative).into(),
             };
         }
     }
 
-    move_s_sign_to_number(spec, &mut rendered, negative);
+    if !(spec.fill_mode && matches!(spec.tokens.first(), Some(Token::Sign(SignKind::S)))) {
+        move_s_sign_to_number(spec, &mut rendered, negative);
+    }
     apply_implicit_sign(spec, &mut rendered, negative);
     let mut out = rendered.concat();
     if negative
@@ -1025,25 +1078,37 @@ fn format_standard_numeric(value: &NumericValue, spec: &FormatSpec) -> String {
         out = format!("-{}", out.trim_start());
     }
     if spec.fill_mode {
-        out = out.trim().to_string();
-        if let Some(dot_idx) = out.find('.') {
-            let frac_pattern = spec.tokens.iter().skip(int_end + 1).collect::<Vec<_>>();
-            let mut frac_chars = out[dot_idx + 1..].chars().collect::<Vec<_>>();
-            while let Some(last) = frac_chars.last() {
-                let idx = frac_chars.len() - 1;
-                if matches!(frac_pattern.get(idx), Some(Token::Digit9)) && *last == '0' {
-                    frac_chars.pop();
-                } else {
-                    break;
-                }
+        if let Some(dot_idx) = decimal_idx {
+            trim_fill_mode_fraction(spec, &mut rendered, dot_idx);
+            let has_visible_integer = rendered
+                .iter()
+                .enumerate()
+                .take(int_end)
+                .any(|(idx, cell)| token_has_visible_number_text(&spec.tokens[idx], cell));
+            if !has_visible_integer
+                && matches!(spec.tokens.first(), Some(Token::Sign(_)))
+                && let Some(zero_idx) = (0..int_end)
+                    .rev()
+                    .find(|idx| matches!(spec.tokens[*idx], Token::Digit9 | Token::Digit0))
+            {
+                rendered[zero_idx] = "0".into();
             }
-            let mut rebuilt = out[..dot_idx + 1].to_string();
-            rebuilt.extend(frac_chars);
-            out = rebuilt;
-            if out.ends_with('.') && frac_pattern.is_empty() {
-                out.pop();
+            let has_fraction_tokens = spec
+                .tokens
+                .iter()
+                .skip(dot_idx + 1)
+                .any(|token| matches!(token, Token::Digit9 | Token::Digit0));
+            let has_visible_fraction = rendered
+                .iter()
+                .enumerate()
+                .skip(dot_idx + 1)
+                .any(|(idx, cell)| token_has_visible_number_text(&spec.tokens[idx], cell));
+            if !has_fraction_tokens && !has_visible_fraction {
+                rendered[dot_idx].clear();
             }
         }
+        trim_fill_mode_integer(spec, &mut rendered, int_end);
+        out = rendered.concat().trim().to_string();
         if out.starts_with('.') || out.starts_with("-.") || out.starts_with("+.") {
             let dot_idx = out.find('.').unwrap_or(0);
             if dot_idx + 1 == out.len() {
@@ -1475,6 +1540,20 @@ mod tests {
             .unwrap(),
             ".0"
         );
+        assert_eq!(
+            to_char_numeric(&NumericValue::from("0"), "FMS 9 9 9 . 9 9 9").unwrap(),
+            "+0 ."
+        );
+        assert_eq!(
+            to_char_numeric(&NumericValue::from("4.31"), "FMS 9 9 9 . 9 9 9")
+                .unwrap(),
+            "+4 . 3 1"
+        );
+        assert_eq!(
+            to_char_numeric(&NumericValue::from("-83028485"), "FMS 9 9 9 9 9 9 9 9 . 9 9")
+                .unwrap(),
+            "-8 3 0 2 8 4 8 5 ."
+        );
     }
 
     #[test]
@@ -1519,6 +1598,18 @@ mod tests {
                 .unwrap()
                 .trim_end(),
             "-  Infinity"
+        );
+        assert_eq!(
+            to_char_numeric(&NumericValue::PosInf, "MI99.99").unwrap(),
+            " ##.##"
+        );
+        assert_eq!(
+            to_char_numeric(&NumericValue::NegInf, "MI99.99").unwrap(),
+            "-##.##"
+        );
+        assert_eq!(
+            to_char_numeric(&NumericValue::NaN, "MI99.99").unwrap(),
+            " ##.##"
         );
     }
 
