@@ -1,6 +1,8 @@
 # Early Access Docker Handoff
 
 This path is manual-only and separate from the repo's existing `Dockerfile`.
+It is also separate from the normal Docker Hub publish flow in
+`scripts/deploy_docker_images.sh`, which only publishes the main runtime image.
 
 Use it when you want to hand an evaluator a prebuilt Docker image without giving
 them repo access or publishing to a registry.
