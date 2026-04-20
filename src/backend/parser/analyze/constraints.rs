@@ -118,6 +118,12 @@ pub struct NormalizedCreateTableConstraints {
     pub foreign_keys: Vec<ForeignKeyConstraintAction>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct NormalizedAddColumnConstraints {
+    pub not_null: Option<NotNullConstraintAction>,
+    pub checks: Vec<CheckConstraintAction>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NormalizedAlterTableConstraint {
     NotNull(NotNullConstraintAction),
@@ -757,6 +763,87 @@ pub fn normalize_alter_table_add_constraint(
     }
 }
 
+pub fn normalize_alter_table_add_column_constraints(
+    table_name: &str,
+    column: &crate::include::nodes::parsenodes::ColumnDef,
+    existing_constraints: &[PgConstraintRow],
+) -> Result<NormalizedAddColumnConstraints, ParseError> {
+    let column_lookup = BTreeMap::from([(column.name.to_ascii_lowercase(), 0usize)]);
+    let mut not_nulls = BTreeMap::<String, PendingNotNullConstraint>::new();
+    let mut checks = Vec::new();
+
+    for constraint in &column.constraints {
+        match constraint {
+            ColumnConstraint::NotNull { attributes } => {
+                validate_not_null_or_check_attributes(attributes, "NOT NULL")?;
+                merge_not_null_constraint(
+                    &mut not_nulls,
+                    &column_lookup,
+                    &column.name,
+                    attributes,
+                    false,
+                    table_name,
+                )?;
+            }
+            ColumnConstraint::Check {
+                attributes,
+                expr_sql,
+            } => {
+                validate_check_attributes(attributes)?;
+                checks.push(PendingCheckConstraint {
+                    explicit_name: attributes.name.clone(),
+                    generated_base: format!("{table_name}_{}_check", column.name),
+                    expr_sql: expr_sql.clone(),
+                    not_valid: attributes.not_valid,
+                    no_inherit: attributes.no_inherit,
+                });
+            }
+            ColumnConstraint::PrimaryKey { .. }
+            | ColumnConstraint::Unique { .. }
+            | ColumnConstraint::References { .. } => {}
+        }
+    }
+
+    let mut used_names = existing_constraint_names(existing_constraints);
+    reserve_explicit_constraint_names(
+        &mut used_names,
+        not_nulls
+            .values()
+            .filter_map(|constraint| constraint.explicit_name.as_deref()),
+    )?;
+    reserve_explicit_constraint_names(
+        &mut used_names,
+        checks
+            .iter()
+            .filter_map(|constraint| constraint.explicit_name.as_deref()),
+    )?;
+
+    let not_null = not_nulls
+        .into_values()
+        .next()
+        .map(|constraint| NotNullConstraintAction {
+            constraint_name: constraint.explicit_name.unwrap_or_else(|| {
+                choose_generated_constraint_name(&constraint.generated_base, &mut used_names)
+            }),
+            column: constraint.column,
+            not_valid: constraint.not_valid,
+            primary_key_owned: false,
+        });
+    let checks = checks
+        .into_iter()
+        .map(|constraint| CheckConstraintAction {
+            constraint_name: constraint.explicit_name.unwrap_or_else(|| {
+                choose_generated_constraint_name(&constraint.generated_base, &mut used_names)
+            }),
+            expr_sql: constraint.expr_sql,
+            not_valid: constraint.not_valid,
+            no_inherit: constraint.no_inherit,
+        })
+        .collect();
+
+    Ok(NormalizedAddColumnConstraints { not_null, checks })
+}
+
 pub fn generated_not_null_constraint_name(
     table_name: &str,
     column_name: &str,
@@ -1115,7 +1202,12 @@ fn bind_outbound_foreign_key_constraint(
         .into_iter()
         .find(|index| index.relation_oid == row.conindid)
         .or_else(|| {
-            find_exact_index_for_attnums(catalog, referenced_relation.relation_oid, &referenced_attnums, true)
+            find_exact_index_for_attnums(
+                catalog,
+                referenced_relation.relation_oid,
+                &referenced_attnums,
+                true,
+            )
         })
         .ok_or_else(|| ParseError::UnexpectedToken {
             expected: "referenced foreign-key index",

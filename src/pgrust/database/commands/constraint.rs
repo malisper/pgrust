@@ -1,12 +1,12 @@
 use super::super::*;
 use crate::backend::commands::tablecmds::collect_matching_rows_heap;
-use crate::backend::executor::{eval_expr, ExecutorContext};
+use crate::backend::executor::{ExecutorContext, eval_expr};
 use crate::backend::parser::{
     BoundCheckConstraint, BoundForeignKeyConstraint, ForeignKeyConstraintAction,
 };
 use crate::include::catalog::{
-    PgConstraintRow, CONSTRAINT_CHECK, CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY,
-    CONSTRAINT_UNIQUE, PG_CATALOG_NAMESPACE_OID,
+    CONSTRAINT_CHECK, CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY,
+    CONSTRAINT_UNIQUE, PG_CATALOG_NAMESPACE_OID, PgConstraintRow,
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::TupleSlot;
@@ -74,7 +74,7 @@ fn ddl_executor_context(
     })
 }
 
-fn validate_not_null_rows(
+pub(super) fn validate_not_null_rows(
     db: &Database,
     relation: &crate::backend::parser::BoundRelation,
     relation_name: &str,
@@ -102,7 +102,7 @@ fn validate_not_null_rows(
     Ok(())
 }
 
-fn validate_check_rows(
+pub(super) fn validate_check_rows(
     db: &Database,
     relation: &crate::backend::parser::BoundRelation,
     relation_name: &str,
