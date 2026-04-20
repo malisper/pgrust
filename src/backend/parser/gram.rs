@@ -5163,6 +5163,7 @@ fn build_constraint_attributes(pair: Pair<'_, Rule>) -> ConstraintAttributes {
             .expect("constraint attribute inner");
         match attr.as_rule() {
             Rule::not_valid_constraint_attribute => attributes.not_valid = true,
+            Rule::no_inherit_constraint_attribute => attributes.no_inherit = true,
             Rule::deferrable_constraint_attribute => attributes.deferrable = Some(true),
             Rule::not_deferrable_constraint_attribute => attributes.deferrable = Some(false),
             Rule::initially_deferred_constraint_attribute => {
@@ -6726,7 +6727,11 @@ fn build_alter_table_target(pair: Pair<'_, Rule>) -> Result<(bool, bool, String)
             _ => {}
         }
     }
-    Ok((if_exists, only, table_name.ok_or(ParseError::UnexpectedEof)?))
+    Ok((
+        if_exists,
+        only,
+        table_name.ok_or(ParseError::UnexpectedEof)?,
+    ))
 }
 
 fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {

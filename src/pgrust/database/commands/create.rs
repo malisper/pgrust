@@ -1,17 +1,18 @@
 use super::super::*;
 use crate::backend::parser::{
-    CreateFunctionReturnSpec, CreateFunctionStatement, FunctionArgMode, FunctionParallel,
-    FunctionVolatility, OwnedSequenceSpec, SequenceOptionsSpec, SqlTypeKind, resolve_raw_type_name,
+    resolve_raw_type_name, CreateFunctionReturnSpec, CreateFunctionStatement, FunctionArgMode,
+    FunctionParallel, FunctionVolatility, OwnedSequenceSpec, SequenceOptionsSpec, SqlTypeKind,
 };
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_PLPGSQL_OID,
-    PG_LANGUAGE_SQL_OID, PUBLIC_NAMESPACE_OID, PgProcRow, RECORD_TYPE_OID,
+    PgProcRow, BOOTSTRAP_SUPERUSER_OID, PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_PLPGSQL_OID,
+    PG_LANGUAGE_SQL_OID, PUBLIC_NAMESPACE_OID, RECORD_TYPE_OID,
 };
 use crate::include::nodes::parsenodes::{ForeignKeyAction, ForeignKeyMatchType};
 use crate::include::nodes::primnodes::{QueryColumn, ToastRelationRef};
 use crate::pgrust::database::{
-    SequenceData, SequenceRuntime, default_sequence_name_base, format_nextval_default_oid,
-    initial_sequence_state, resolve_sequence_options_spec, sequence_type_oid_for_serial_kind,
+    default_sequence_name_base, format_nextval_default_oid, initial_sequence_state,
+    resolve_sequence_options_spec, sequence_type_oid_for_serial_kind, SequenceData,
+    SequenceRuntime,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -247,6 +248,7 @@ impl Database {
                     relation.relation_oid,
                     action.constraint_name.clone(),
                     !action.not_valid,
+                    action.no_inherit,
                     action.expr_sql.clone(),
                     &constraint_ctx,
                 )
