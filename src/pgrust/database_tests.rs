@@ -299,6 +299,125 @@ fn quantified_similar_any_all_array_operators_work() {
 }
 
 #[test]
+fn array_builtin_helpers_work() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select \
+                array_append(array[42], 6), \
+                array_prepend(6, array[42]), \
+                array_cat(array[1,2], array[3,4]), \
+                array_cat(array[1,2], array[[3,4],[5,6]]), \
+                trim_array('[10:16]={1,2,3,4,5,6,7}'::int[], 2), \
+                trim_array(array[[1,10],[2,20],[3,30],[4,40]], 2)",
+        ),
+        vec![vec![
+            Value::PgArray(crate::include::nodes::datum::ArrayValue::from_1d(vec![
+                Value::Int32(42),
+                Value::Int32(6),
+            ])),
+            Value::PgArray(crate::include::nodes::datum::ArrayValue::from_1d(vec![
+                Value::Int32(6),
+                Value::Int32(42),
+            ])),
+            Value::PgArray(crate::include::nodes::datum::ArrayValue::from_1d(vec![
+                Value::Int32(1),
+                Value::Int32(2),
+                Value::Int32(3),
+                Value::Int32(4),
+            ])),
+            Value::PgArray(
+                crate::include::nodes::datum::ArrayValue::from_nested_values(
+                    vec![
+                        Value::PgArray(crate::include::nodes::datum::ArrayValue::from_1d(vec![
+                            Value::Int32(1),
+                            Value::Int32(2),
+                        ])),
+                        Value::PgArray(crate::include::nodes::datum::ArrayValue::from_1d(vec![
+                            Value::Int32(3),
+                            Value::Int32(4),
+                        ])),
+                        Value::PgArray(crate::include::nodes::datum::ArrayValue::from_1d(vec![
+                            Value::Int32(5),
+                            Value::Int32(6),
+                        ])),
+                    ],
+                    vec![1, 1],
+                )
+                .unwrap(),
+            ),
+            Value::PgArray(crate::include::nodes::datum::ArrayValue::from_1d(vec![
+                Value::Int32(1),
+                Value::Int32(2),
+                Value::Int32(3),
+                Value::Int32(4),
+                Value::Int32(5),
+            ])),
+            Value::PgArray(
+                crate::include::nodes::datum::ArrayValue::from_nested_values(
+                    vec![
+                        Value::PgArray(crate::include::nodes::datum::ArrayValue::from_1d(vec![
+                            Value::Int32(1),
+                            Value::Int32(10),
+                        ])),
+                        Value::PgArray(crate::include::nodes::datum::ArrayValue::from_1d(vec![
+                            Value::Int32(2),
+                            Value::Int32(20),
+                        ])),
+                    ],
+                    vec![1, 1],
+                )
+                .unwrap(),
+            ),
+        ]]
+    );
+}
+
+#[test]
+fn array_position_edge_cases_work() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+
+    assert_eq!(
+        query_rows(&db, 1, "select array_position('[2:4]={1,2,3}'::int[], 1)"),
+        vec![vec![Value::Int32(2)]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select array_positions('[2:4]={1,2,3}'::int[], 1)"),
+        vec![vec![Value::PgArray(
+            crate::include::nodes::datum::ArrayValue::from_1d(vec![Value::Int32(2)]),
+        )]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select array_position(array[1,2,3], 2, null)"),
+        vec![vec![Value::Null]]
+    );
+
+    let mut session = Session::new(1);
+    let err = session
+        .execute(&db, "select array_position(array[[1,2],[3,4]], 3)")
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError { message, sqlstate, .. }
+            if message == "searching for elements in multidimensional arrays is not supported"
+                && sqlstate == "0A000"
+    ));
+
+    let err = session
+        .execute(&db, "select trim_array(array[1,2,3], 10)")
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError { message, sqlstate, .. }
+            if message == "number of elements to trim must be between 0 and 3"
+                && sqlstate == "2202E"
+    ));
+}
+
+#[test]
 fn jsonb_input_respects_max_stack_depth_setting() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);
