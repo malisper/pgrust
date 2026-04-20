@@ -169,6 +169,9 @@ Targeted reruns and notes:
 - inet.sql: 6/116
 - infinite_recurse.sql: 1/3
 - inherit.sql: 280/884
+  - Emit the duplicate inherited-column merge notice PostgreSQL expects for `CREATE TABLE ... INHERITS (...)` with multiple parent definitions of the same column
+  - Preserve PostgreSQL inheritance traversal order for inherited scans and inherited `UPDATE`/`DELETE` target expansion instead of sorting `find_all_inheritors()` output by OID
+  - Large remaining failure buckets are unsupported inheritance-adjacent features: `CHECK ... NO INHERIT`, `DROP TABLE ... CASCADE`, partitioned-table DDL/attach, `ALTER TABLE ... NO INHERIT`, inherited constraint display via `pg_get_expr`, and some table `GRANT`/`REVOKE` parsing
 - init_privs.sql: 0/4
 - insert.sql: 54/390
 - insert_conflict.sql: 104/266
