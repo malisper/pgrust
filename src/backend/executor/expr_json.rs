@@ -13,6 +13,7 @@ use crate::backend::executor::jsonpath::{
 };
 use crate::backend::executor::render_bit_text;
 use crate::backend::executor::render_datetime_value_text;
+use crate::backend::executor::render_datetime_value_text_with_config;
 use crate::backend::executor::render_range_text;
 use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::backend::parser::CatalogLookup;
@@ -266,18 +267,24 @@ pub(crate) fn eval_json_builtin_function(
     func: BuiltinScalarFunction,
     values: &[Value],
     func_variadic: bool,
+    datetime_config: &crate::backend::utils::misc::guc_datetime::DateTimeConfig,
 ) -> Option<Result<Value, ExecError>> {
     let eval = || -> Result<Value, ExecError> {
         match func {
             BuiltinScalarFunction::ToJson => {
                 let value = values.first().cloned().unwrap_or(Value::Null);
                 Ok(Value::Json(CompactString::from_owned(value_to_json_text(
-                    &value, false,
+                    &value,
+                    false,
+                    datetime_config,
                 ))))
             }
             BuiltinScalarFunction::ToJsonb => {
                 let value = values.first().cloned().unwrap_or(Value::Null);
-                Ok(Value::Jsonb(encode_jsonb(&jsonb_from_value(&value)?)))
+                Ok(Value::Jsonb(encode_jsonb(&jsonb_from_value(
+                    &value,
+                    datetime_config,
+                )?)))
             }
             BuiltinScalarFunction::ArrayToJson => {
                 let value = values.first().cloned().unwrap_or(Value::Null);
@@ -289,7 +296,9 @@ pub(crate) fn eval_json_builtin_function(
                     })
                     .unwrap_or(false);
                 Ok(Value::Json(CompactString::from_owned(value_to_json_text(
-                    &value, pretty,
+                    &value,
+                    pretty,
+                    datetime_config,
                 ))))
             }
             BuiltinScalarFunction::RowToJson => {
@@ -302,7 +311,9 @@ pub(crate) fn eval_json_builtin_function(
                     })
                     .unwrap_or(false);
                 Ok(Value::Json(CompactString::from_owned(value_to_json_text(
-                    &value, pretty,
+                    &value,
+                    pretty,
+                    datetime_config,
                 ))))
             }
             BuiltinScalarFunction::JsonBuildArray => {
@@ -464,7 +475,7 @@ pub(crate) fn eval_json_builtin_function(
                 };
                 let mut items = Vec::with_capacity(args.len());
                 for value in &args {
-                    items.push(jsonb_from_value(value)?);
+                    items.push(jsonb_from_value(value, datetime_config)?);
                 }
                 Ok(Value::Jsonb(encode_jsonb(&JsonbValue::Array(items))))
             }
@@ -1278,7 +1289,11 @@ fn render_json_builder_array(values: &[Value]) -> String {
         if idx > 0 {
             out.push(',');
         }
-        out.push_str(&value_to_json_text(value, false));
+        out.push_str(&value_to_json_text(
+            value,
+            false,
+            &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+        ));
     }
     out.push(']');
     out
@@ -1430,7 +1445,11 @@ fn render_json_pairs(pairs: &[(String, Value)]) -> String {
         }
         out.push_str(&serde_json::to_string(key).unwrap());
         out.push(':');
-        out.push_str(&value_to_json_text(value, false));
+        out.push_str(&value_to_json_text(
+            value,
+            false,
+            &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+        ));
     }
     out.push('}');
     out
@@ -2647,7 +2666,10 @@ fn json_value_to_value(value: &SerdeJsonValue, as_text: bool) -> Value {
     }
 }
 
-fn value_to_json_serde(value: &Value) -> SerdeJsonValue {
+fn value_to_json_serde_with_config(
+    value: &Value,
+    datetime_config: &crate::backend::utils::misc::guc_datetime::DateTimeConfig,
+) -> SerdeJsonValue {
     match value {
         Value::Null => SerdeJsonValue::Null,
         Value::Int16(v) => SerdeJsonValue::from(*v),
@@ -2677,7 +2699,8 @@ fn value_to_json_serde(value: &Value) -> SerdeJsonValue {
         | Value::TimeTz(_)
         | Value::Timestamp(_)
         | Value::TimestampTz(_) => SerdeJsonValue::String(
-            render_datetime_value_text(value).expect("datetime values render"),
+            render_datetime_value_text_with_config(value, datetime_config)
+                .expect("datetime values render"),
         ),
         Value::Point(_)
         | Value::Lseg(_)
@@ -2696,27 +2719,46 @@ fn value_to_json_serde(value: &Value) -> SerdeJsonValue {
         Value::TsQuery(v) => {
             SerdeJsonValue::String(crate::backend::executor::render_tsquery_text(v))
         }
-        Value::Array(items) => {
-            SerdeJsonValue::Array(items.iter().map(value_to_json_serde).collect())
-        }
+        Value::Array(items) => SerdeJsonValue::Array(
+            items
+                .iter()
+                .map(|value| value_to_json_serde_with_config(value, datetime_config))
+                .collect(),
+        ),
         Value::Record(record) => SerdeJsonValue::Object(
             record
                 .iter()
-                .map(|(field, value)| (field.name.clone(), value_to_json_serde(value)))
+                .map(|(field, value)| {
+                    (
+                        field.name.clone(),
+                        value_to_json_serde_with_config(value, datetime_config),
+                    )
+                })
                 .collect(),
         ),
         Value::PgArray(array) => SerdeJsonValue::Array(
             array
                 .to_nested_values()
                 .iter()
-                .map(value_to_json_serde)
+                .map(|value| value_to_json_serde_with_config(value, datetime_config))
                 .collect(),
         ),
     }
 }
 
-fn value_to_json_text(value: &Value, pretty: bool) -> String {
-    let json = value_to_json_serde(value);
+fn value_to_json_serde(value: &Value) -> SerdeJsonValue {
+    value_to_json_serde_with_config(
+        value,
+        &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+    )
+}
+
+fn value_to_json_text(
+    value: &Value,
+    pretty: bool,
+    datetime_config: &crate::backend::utils::misc::guc_datetime::DateTimeConfig,
+) -> String {
+    let json = value_to_json_serde_with_config(value, datetime_config);
     if pretty {
         serde_json::to_string_pretty(&json).unwrap()
     } else {
