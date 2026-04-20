@@ -247,6 +247,33 @@ fn create_temp_table_accepts_fixed_length_array_column_syntax() {
 }
 
 #[test]
+fn quantified_like_any_all_array_operators_work() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select \
+                'foo' like any (array['%a', '%o']), \
+                'foo' like all (array['f%', '%o']), \
+                'foo' like all (array['f%', '%b']), \
+                'foo' not like any (array['%a', '%b']), \
+                'foo' ilike any (array['%A', '%O']), \
+                'foo' ilike all (array['F%', '%O'])",
+        ),
+        vec![vec![
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(false),
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(true),
+        ]]
+    );
+}
+
+#[test]
 fn jsonb_input_respects_max_stack_depth_setting() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);
