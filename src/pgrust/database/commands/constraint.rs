@@ -260,6 +260,7 @@ fn validate_foreign_key_rows(
         referenced_index,
         deferrable: false,
         initially_deferred: false,
+        enforced: true,
     };
     let mut ctx = ddl_executor_context(db, catalog, client_id, xid, cid, interrupts)?;
     let rows =
@@ -329,7 +330,7 @@ fn normalize_constraint_rename_target_name(name: &str) -> Result<String, ExecErr
 fn resolve_alter_constraint_deferrability(
     row: &PgConstraintRow,
     alter_stmt: &crate::backend::parser::AlterTableAlterConstraintStatement,
-) -> Result<(bool, bool), ExecError> {
+) -> Result<(bool, bool, bool), ExecError> {
     let deferrable = alter_stmt.deferrable.unwrap_or(row.condeferrable);
     let initially_deferred =
         if alter_stmt.deferrable == Some(false) && alter_stmt.initially_deferred.is_none() {
@@ -337,6 +338,7 @@ fn resolve_alter_constraint_deferrability(
         } else {
             alter_stmt.initially_deferred.unwrap_or(row.condeferred)
         };
+    let enforced = alter_stmt.enforced.unwrap_or(row.conenforced);
     if !deferrable && initially_deferred {
         return Err(ExecError::DetailedError {
             message: format!("constraint \"{}\" is not deferrable", row.conname),
@@ -345,7 +347,12 @@ fn resolve_alter_constraint_deferrability(
             sqlstate: "55000",
         });
     }
-    Ok((deferrable, initially_deferred))
+    if !enforced && (deferrable || initially_deferred) {
+        return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+            "FOREIGN KEY NOT ENFORCED with DEFERRABLE/INITIALLY".into(),
+        )));
+    }
+    Ok((deferrable, initially_deferred, enforced))
 }
 
 fn ensure_constraint_relation(
@@ -467,11 +474,77 @@ impl Database {
                 sqlstate: "42809",
             });
         }
-        let (deferrable, initially_deferred) =
+        let (deferrable, initially_deferred, enforced) =
             resolve_alter_constraint_deferrability(&row, alter_stmt)?;
-        if row.condeferrable == deferrable && row.condeferred == initially_deferred {
+        if row.condeferrable == deferrable
+            && row.condeferred == initially_deferred
+            && row.conenforced == enforced
+        {
             return Ok(StatementResult::AffectedRows(0));
         }
+        let validating_enable = alter_stmt.enforced == Some(true) && !row.convalidated;
+        if enforced && (!row.conenforced || validating_enable) {
+            let constraints = crate::backend::parser::bind_relation_constraints(
+                Some(relation_basename(&alter_stmt.table_name)),
+                relation.relation_oid,
+                &relation.desc,
+                &catalog,
+            )
+            .map_err(ExecError::Parse)?;
+            let constraint = constraints
+                .foreign_keys
+                .iter()
+                .find(|constraint| {
+                    constraint
+                        .constraint_name
+                        .eq_ignore_ascii_case(&alter_stmt.constraint_name)
+                })
+                .ok_or_else(|| {
+                    ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "bound foreign key constraint",
+                        actual: format!(
+                            "missing foreign key binding for {}",
+                            alter_stmt.constraint_name
+                        ),
+                    })
+                })?;
+            let validation_action = ForeignKeyConstraintAction {
+                constraint_name: constraint.constraint_name.clone(),
+                columns: constraint.column_names.clone(),
+                referenced_table: constraint.referenced_relation_name.clone(),
+                referenced_relation_oid: constraint.referenced_relation_oid,
+                referenced_index_oid: constraint.referenced_index.relation_oid,
+                self_referential: false,
+                referenced_columns: constraint
+                    .referenced_column_indexes
+                    .iter()
+                    .map(|&index| constraint.referenced_desc.columns[index].name.clone())
+                    .collect(),
+                match_type: ForeignKeyMatchType::Simple,
+                on_delete: ForeignKeyAction::NoAction,
+                on_update: ForeignKeyAction::NoAction,
+                not_valid: false,
+                enforced: true,
+            };
+            validate_foreign_key_rows(
+                self,
+                &relation,
+                relation_basename(&alter_stmt.table_name),
+                &validation_action,
+                &catalog,
+                client_id,
+                xid,
+                cid,
+                std::sync::Arc::clone(&interrupts),
+            )?;
+        }
+        let validated = if !enforced {
+            false
+        } else if !row.conenforced || validating_enable {
+            true
+        } else {
+            row.convalidated
+        };
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
             txns: self.txns.clone(),
@@ -484,11 +557,13 @@ impl Database {
         let effect = self
             .catalog
             .write()
-            .alter_foreign_key_constraint_deferrability_mvcc(
+            .alter_foreign_key_constraint_attributes_mvcc(
                 relation.relation_oid,
                 &alter_stmt.constraint_name,
                 deferrable,
                 initially_deferred,
+                enforced,
+                validated,
                 &ctx,
             )
             .map_err(map_catalog_error)?;
@@ -905,17 +980,19 @@ impl Database {
             }
             crate::backend::parser::NormalizedAlterTableConstraint::ForeignKey(action) => {
                 if !action.not_valid {
-                    validate_foreign_key_rows(
-                        self,
-                        &relation,
-                        &table_name,
-                        &action,
-                        &catalog,
-                        client_id,
-                        xid,
-                        cid,
-                        std::sync::Arc::clone(&interrupts),
-                    )?;
+                    if action.enforced {
+                        validate_foreign_key_rows(
+                            self,
+                            &relation,
+                            &table_name,
+                            &action,
+                            &catalog,
+                            client_id,
+                            xid,
+                            cid,
+                            std::sync::Arc::clone(&interrupts),
+                        )?;
+                    }
                 }
                 let referenced_relation = catalog
                     .lookup_relation_by_oid(action.referenced_relation_oid)
@@ -942,7 +1019,8 @@ impl Database {
                     .create_foreign_key_constraint_mvcc(
                         relation.relation_oid,
                         action.constraint_name,
-                        !action.not_valid,
+                        action.enforced,
+                        action.enforced && !action.not_valid,
                         &local_attnums,
                         action.referenced_relation_oid,
                         action.referenced_index_oid,

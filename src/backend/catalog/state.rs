@@ -723,6 +723,7 @@ impl Catalog {
         &mut self,
         relation_oid: u32,
         conname: impl Into<String>,
+        conenforced: bool,
         convalidated: bool,
         local_attnums: &[i16],
         referenced_relation_oid: u32,
@@ -773,7 +774,7 @@ impl Catalog {
             contype: crate::include::catalog::CONSTRAINT_FOREIGN,
             condeferrable: false,
             condeferred: false,
-            conenforced: true,
+            conenforced,
             convalidated,
             conrelid: relation_oid,
             contypid: 0,
@@ -963,12 +964,14 @@ impl Catalog {
         Ok((old_row, new_row))
     }
 
-    pub fn alter_foreign_key_constraint_deferrability(
+    pub fn alter_foreign_key_constraint_attributes(
         &mut self,
         relation_oid: u32,
         constraint_name: &str,
         deferrable: bool,
         initially_deferred: bool,
+        enforced: bool,
+        validated: bool,
     ) -> Result<(PgConstraintRow, PgConstraintRow), CatalogError> {
         let row = self
             .constraints
@@ -982,6 +985,8 @@ impl Catalog {
         let old_row = row.clone();
         row.condeferrable = deferrable;
         row.condeferred = initially_deferred;
+        row.conenforced = enforced;
+        row.convalidated = validated;
         let new_row = row.clone();
         Ok((old_row, new_row))
     }

@@ -1861,6 +1861,7 @@ impl CatalogStore {
         &mut self,
         relation_oid: u32,
         conname: impl Into<String>,
+        conenforced: bool,
         convalidated: bool,
         local_attnums: &[i16],
         referenced_relation_oid: u32,
@@ -1909,7 +1910,7 @@ impl CatalogStore {
             contype: crate::include::catalog::CONSTRAINT_FOREIGN,
             condeferrable: false,
             condeferred: false,
-            conenforced: true,
+            conenforced,
             convalidated,
             conrelid: relation_oid,
             contypid: 0,
@@ -2181,12 +2182,14 @@ impl CatalogStore {
         Ok(effect)
     }
 
-    pub fn alter_foreign_key_constraint_deferrability_mvcc(
+    pub fn alter_foreign_key_constraint_attributes_mvcc(
         &mut self,
         relation_oid: u32,
         constraint_name: &str,
         deferrable: bool,
         initially_deferred: bool,
+        enforced: bool,
+        validated: bool,
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let catcache = visible_catalog_caches_for_ctx(self, ctx)?.0;
@@ -2199,6 +2202,8 @@ impl CatalogStore {
         let mut new_row = old_row.clone();
         new_row.condeferrable = deferrable;
         new_row.condeferred = initially_deferred;
+        new_row.conenforced = enforced;
+        new_row.convalidated = validated;
 
         let kinds = vec![BootstrapCatalogKind::PgConstraint];
         delete_catalog_rows_subset_mvcc(
