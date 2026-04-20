@@ -859,6 +859,12 @@ pub(crate) fn resolve_raw_type_name(
 fn builtin_named_type_alias(name: &str) -> Option<SqlType> {
     if name.eq_ignore_ascii_case("float") {
         Some(SqlType::new(SqlTypeKind::Float8))
+    } else if name.eq_ignore_ascii_case("regnamespace") {
+        // :HACK: PostgreSQL's `regnamespace` is an OID-backed catalog type with
+        // namespace-aware I/O. pgrust only needs enough surface area for
+        // `pg_my_temp_schema()::regnamespace::text` in the json/jsonb regressions,
+        // so keep it text-compatible until the full reg* catalog type family lands.
+        Some(SqlType::new(SqlTypeKind::Text))
     } else {
         None
     }

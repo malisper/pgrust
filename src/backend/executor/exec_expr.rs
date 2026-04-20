@@ -806,6 +806,24 @@ fn eval_func_expr(
     }
 }
 
+fn current_temp_namespace_name(ctx: &ExecutorContext) -> Option<CompactString> {
+    // :HACK: `pg_my_temp_schema()` needs session temp namespace identity, but
+    // executor contexts do not thread that through directly yet. Derive the
+    // visible temp schema name from the qualified temp relcache entries until
+    // temp namespace metadata is carried explicitly alongside the session.
+    ctx.catalog
+        .as_ref()?
+        .relcache()
+        .entries()
+        .find_map(|(name, entry)| {
+            (entry.relpersistence == 't')
+                .then_some(name)
+                .and_then(|qualified| qualified.split_once('.'))
+                .and_then(|(schema, _)| schema.starts_with("pg_temp_").then_some(schema))
+                .map(Into::into)
+        })
+}
+
 fn eval_scalar_array_op_expr(
     saop: &ScalarArrayOpExpr,
     slot: &mut TupleSlot,
@@ -1991,6 +2009,9 @@ fn eval_builtin_function(
         BuiltinScalarFunction::IsFinite => eval_isfinite_function(&values),
         BuiltinScalarFunction::MakeDate => eval_make_date_function(&values),
         BuiltinScalarFunction::GetDatabaseEncoding => Ok(Value::Text("UTF8".into())),
+        BuiltinScalarFunction::PgMyTempSchema => Ok(current_temp_namespace_name(ctx)
+            .map(Value::Text)
+            .unwrap_or(Value::Null)),
         BuiltinScalarFunction::PgRustInternalBinaryCoercible => {
             eval_pg_rust_internal_binary_coercible(&values)
         }
