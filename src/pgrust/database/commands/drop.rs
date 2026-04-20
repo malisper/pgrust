@@ -1,5 +1,381 @@
 use super::super::*;
+use crate::backend::utils::cache::catcache::CatCache;
+use crate::backend::utils::misc::notices::push_notice;
+use crate::include::catalog::{
+    CONSTRAINT_FOREIGN, DEPENDENCY_NORMAL, PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID,
+    PG_REWRITE_RELATION_OID, PgConstraintRow, PgRewriteRow,
+};
 use crate::include::nodes::parsenodes::{DropIndexStatement, DropSchemaStatement};
+use std::collections::{BTreeMap, BTreeSet};
+
+#[derive(Debug, Clone)]
+struct DropForeignKeyConstraintPlan {
+    oid: u32,
+    relation_oid: u32,
+    constraint_name: String,
+}
+
+#[derive(Debug, Clone)]
+struct DropRulePlan {
+    rewrite_oid: u32,
+}
+
+#[derive(Debug, Clone)]
+enum DropTableDependency {
+    Relation {
+        relation_oid: u32,
+        relkind: char,
+        display_name: String,
+    },
+    ForeignKey {
+        relation_oid: u32,
+        constraint: DropForeignKeyConstraintPlan,
+        relation_display_name: String,
+    },
+    Rule {
+        relation_oid: u32,
+        relation_kind: char,
+        relation_display_name: String,
+        rule: DropRulePlan,
+        rule_name: String,
+    },
+}
+
+impl DropTableDependency {
+    fn blocker_detail(&self, referenced_kind: &'static str, referenced_name: &str) -> String {
+        match self {
+            Self::Relation {
+                relkind,
+                display_name,
+                ..
+            } => format!(
+                "{} {display_name} depends on {referenced_kind} {referenced_name}",
+                drop_table_relation_kind_name(*relkind)
+            ),
+            Self::ForeignKey {
+                constraint,
+                relation_display_name,
+                ..
+            } => format!(
+                "constraint {} on table {relation_display_name} depends on {referenced_kind} {referenced_name}",
+                constraint.constraint_name
+            ),
+            Self::Rule {
+                relation_kind,
+                relation_display_name,
+                rule_name,
+                ..
+            } => format!(
+                "rule {rule_name} on {} {relation_display_name} depends on {referenced_kind} {referenced_name}",
+                drop_table_relation_kind_name(*relation_kind)
+            ),
+        }
+    }
+
+    fn cascade_notice(&self) -> String {
+        match self {
+            Self::Relation {
+                relkind,
+                display_name,
+                ..
+            } => format!(
+                "drop cascades to {} {display_name}",
+                drop_table_relation_kind_name(*relkind)
+            ),
+            Self::ForeignKey {
+                constraint,
+                relation_display_name,
+                ..
+            } => format!(
+                "drop cascades to constraint {} on table {relation_display_name}",
+                constraint.constraint_name
+            ),
+            Self::Rule {
+                relation_kind,
+                relation_display_name,
+                rule_name,
+                ..
+            } => format!(
+                "drop cascades to rule {rule_name} on {} {relation_display_name}",
+                drop_table_relation_kind_name(*relation_kind)
+            ),
+        }
+    }
+
+    fn sort_key(&self) -> (u8, String) {
+        match self {
+            Self::Relation {
+                display_name,
+                relkind,
+                ..
+            } => (0, format!("{}:{display_name}", drop_table_relation_kind_name(*relkind))),
+            Self::ForeignKey {
+                relation_display_name,
+                constraint,
+                ..
+            } => (1, format!("{relation_display_name}:{}", constraint.constraint_name)),
+            Self::Rule {
+                relation_display_name,
+                rule_name,
+                ..
+            } => (2, format!("{relation_display_name}:{rule_name}")),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct DropTablePlan {
+    relation_drop_order: Vec<u32>,
+    relation_drop_oids: BTreeSet<u32>,
+    constraint_drop_oids: BTreeSet<u32>,
+    constraint_drops: Vec<DropForeignKeyConstraintPlan>,
+    rule_drop_oids: BTreeSet<u32>,
+    rule_drops: Vec<DropRulePlan>,
+    blocker_details: Vec<String>,
+    blocker_source: Option<(char, String)>,
+    notices: Vec<String>,
+}
+
+struct DropTableDependencyContext<'a> {
+    catcache: &'a CatCache,
+    constraints_by_oid: BTreeMap<u32, PgConstraintRow>,
+    rewrites_by_oid: BTreeMap<u32, PgRewriteRow>,
+}
+
+fn drop_table_relation_kind_name(relkind: char) -> &'static str {
+    match relkind {
+        'm' => "materialized view",
+        'p' => "table",
+        'S' => "sequence",
+        'v' => "view",
+        _ => "table",
+    }
+}
+
+fn drop_table_display_relation_name(catcache: &CatCache, relation_oid: u32) -> String {
+    let Some(class) = catcache.class_by_oid(relation_oid) else {
+        return relation_oid.to_string();
+    };
+    let schema_name = catcache
+        .namespace_by_oid(class.relnamespace)
+        .map(|row| row.nspname.clone())
+        .unwrap_or_else(|| "public".to_string());
+    match schema_name.as_str() {
+        "public" | "pg_catalog" => class.relname.clone(),
+        _ => format!("{schema_name}.{}", class.relname),
+    }
+}
+
+fn drop_table_direct_dependencies(
+    ctx: &DropTableDependencyContext<'_>,
+    relation_oid: u32,
+) -> Vec<DropTableDependency> {
+    let mut relation_oids = BTreeSet::new();
+    let mut constraint_oids = BTreeSet::new();
+    let mut rule_oids = BTreeSet::new();
+    let mut deps = Vec::new();
+
+    for row in ctx.catcache.depend_rows() {
+        if row.refclassid != PG_CLASS_RELATION_OID || row.refobjid != relation_oid || row.objsubid != 0
+        {
+            continue;
+        }
+        match row.classid {
+            PG_CLASS_RELATION_OID if row.deptype == DEPENDENCY_NORMAL => {
+                if !relation_oids.insert(row.objid) {
+                    continue;
+                }
+                let Some(class) = ctx.catcache.class_by_oid(row.objid) else {
+                    continue;
+                };
+                if !matches!(class.relkind, 'r' | 'p' | 'S' | 'v') {
+                    continue;
+                }
+                deps.push(DropTableDependency::Relation {
+                    relation_oid: row.objid,
+                    relkind: class.relkind,
+                    display_name: drop_table_display_relation_name(ctx.catcache, row.objid),
+                });
+            }
+            PG_CONSTRAINT_RELATION_OID if row.deptype == DEPENDENCY_NORMAL => {
+                let Some(constraint) = ctx.constraints_by_oid.get(&row.objid) else {
+                    continue;
+                };
+                if constraint.contype != CONSTRAINT_FOREIGN || !constraint_oids.insert(constraint.oid)
+                {
+                    continue;
+                }
+                deps.push(DropTableDependency::ForeignKey {
+                    relation_oid: constraint.conrelid,
+                    relation_display_name: drop_table_display_relation_name(
+                        ctx.catcache,
+                        constraint.conrelid,
+                    ),
+                    constraint: DropForeignKeyConstraintPlan {
+                        oid: constraint.oid,
+                        relation_oid: constraint.conrelid,
+                        constraint_name: constraint.conname.clone(),
+                    },
+                });
+            }
+            PG_REWRITE_RELATION_OID if row.deptype == DEPENDENCY_NORMAL => {
+                let Some(rewrite) = ctx.rewrites_by_oid.get(&row.objid) else {
+                    continue;
+                };
+                let Some(owner) = ctx.catcache.class_by_oid(rewrite.ev_class) else {
+                    continue;
+                };
+                if owner.relkind == 'v' {
+                    if !relation_oids.insert(owner.oid) {
+                        continue;
+                    }
+                    deps.push(DropTableDependency::Relation {
+                        relation_oid: owner.oid,
+                        relkind: owner.relkind,
+                        display_name: drop_table_display_relation_name(ctx.catcache, owner.oid),
+                    });
+                } else if rule_oids.insert(rewrite.oid) {
+                    deps.push(DropTableDependency::Rule {
+                        relation_oid: owner.oid,
+                        relation_kind: owner.relkind,
+                        relation_display_name: drop_table_display_relation_name(
+                            ctx.catcache,
+                            owner.oid,
+                        ),
+                        rule: DropRulePlan {
+                            rewrite_oid: rewrite.oid,
+                        },
+                        rule_name: rewrite.rulename.clone(),
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    deps.sort_by_key(DropTableDependency::sort_key);
+    deps
+}
+
+fn record_drop_table_blocker(
+    plan: &mut DropTablePlan,
+    source_relkind: char,
+    source_name: String,
+    detail: String,
+) {
+    if plan.blocker_source.is_none() {
+        plan.blocker_source = Some((source_relkind, source_name));
+    }
+    if !plan.blocker_details.contains(&detail) {
+        plan.blocker_details.push(detail);
+    }
+}
+
+fn plan_drop_table_relation(
+    ctx: &DropTableDependencyContext<'_>,
+    relation_oid: u32,
+    explicit_relation_oids: &BTreeSet<u32>,
+    cascade: bool,
+    plan: &mut DropTablePlan,
+) {
+    if !plan.relation_drop_oids.insert(relation_oid) {
+        return;
+    }
+
+    let Some(class) = ctx.catcache.class_by_oid(relation_oid) else {
+        return;
+    };
+    let source_relkind = class.relkind;
+    let source_name = drop_table_display_relation_name(ctx.catcache, relation_oid);
+    let referenced_kind = drop_table_relation_kind_name(source_relkind);
+
+    for dep in drop_table_direct_dependencies(ctx, relation_oid) {
+        match dep {
+            DropTableDependency::Relation {
+                relation_oid: dependent_oid,
+                ..
+            } => {
+                if explicit_relation_oids.contains(&dependent_oid)
+                    || plan.relation_drop_oids.contains(&dependent_oid)
+                {
+                    plan_drop_table_relation(
+                        ctx,
+                        dependent_oid,
+                        explicit_relation_oids,
+                        cascade,
+                        plan,
+                    );
+                    continue;
+                }
+                if cascade {
+                    plan.notices.push(dep.cascade_notice());
+                    plan_drop_table_relation(
+                        ctx,
+                        dependent_oid,
+                        explicit_relation_oids,
+                        cascade,
+                        plan,
+                    );
+                } else {
+                    record_drop_table_blocker(
+                        plan,
+                        source_relkind,
+                        source_name.clone(),
+                        dep.blocker_detail(referenced_kind, &source_name),
+                    );
+                }
+            }
+            DropTableDependency::ForeignKey {
+                relation_oid: dependent_relation_oid,
+                ref constraint,
+                ..
+            } => {
+                if explicit_relation_oids.contains(&dependent_relation_oid)
+                    || plan.relation_drop_oids.contains(&dependent_relation_oid)
+                    || !plan.constraint_drop_oids.insert(constraint.oid)
+                {
+                    continue;
+                }
+                if cascade {
+                    plan.notices.push(dep.cascade_notice());
+                    plan.constraint_drops.push(constraint.clone());
+                } else {
+                    record_drop_table_blocker(
+                        plan,
+                        source_relkind,
+                        source_name.clone(),
+                        dep.blocker_detail(referenced_kind, &source_name),
+                    );
+                }
+            }
+            DropTableDependency::Rule {
+                relation_oid: dependent_relation_oid,
+                ref rule,
+                ..
+            } => {
+                if explicit_relation_oids.contains(&dependent_relation_oid)
+                    || plan.relation_drop_oids.contains(&dependent_relation_oid)
+                    || !plan.rule_drop_oids.insert(rule.rewrite_oid)
+                {
+                    continue;
+                }
+                if cascade {
+                    plan.notices.push(dep.cascade_notice());
+                    plan.rule_drops.push(rule.clone());
+                } else {
+                    record_drop_table_blocker(
+                        plan,
+                        source_relkind,
+                        source_name.clone(),
+                        dep.blocker_detail(referenced_kind, &source_name),
+                    );
+                }
+            }
+        }
+    }
+
+    plan.relation_drop_order.push(relation_oid);
+}
 
 impl Database {
     fn drop_schema_owned_objects_in_transaction(
@@ -108,18 +484,201 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
         temp_effects: &mut Vec<TempMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
-        self.execute_drop_relation_stmt_in_transaction_with_search_path(
+        let interrupts = self.interrupt_state(client_id);
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let catcache = self
+            .backend_catcache(client_id, Some((xid, cid)))
+            .map_err(map_catalog_error)?;
+        let mut rels = Vec::new();
+        let mut dropped = 0usize;
+        let mut explicit_relation_oids = BTreeSet::new();
+
+        for relation_name in &drop_stmt.table_names {
+            let relation = match catalog.lookup_any_relation(relation_name) {
+                Some(relation) if relation.relkind == 'r' => relation,
+                Some(_) => {
+                    return Err(ExecError::Parse(ParseError::WrongObjectType {
+                        name: relation_name.clone(),
+                        expected: "table",
+                    }));
+                }
+                None if drop_stmt.if_exists => continue,
+                None => {
+                    return Err(ExecError::Parse(ParseError::TableDoesNotExist(
+                        relation_name.clone(),
+                    )));
+                }
+            };
+
+            ensure_relation_owner(self, client_id, &relation, relation_name)?;
+            explicit_relation_oids.insert(relation.relation_oid);
+            rels.push(relation.rel);
+            dropped += 1;
+        }
+
+        lock_tables_interruptible(
+            &self.table_locks,
             client_id,
-            &drop_stmt.table_names,
-            drop_stmt.if_exists,
-            xid,
-            cid,
-            configured_search_path,
-            catalog_effects,
-            Some(temp_effects),
-            'r',
-            "table",
-        )
+            &rels,
+            TableLockMode::AccessExclusive,
+            interrupts.as_ref(),
+        )?;
+
+        let result = (|| {
+            let dependency_ctx = DropTableDependencyContext {
+                catcache: &catcache,
+                constraints_by_oid: catcache
+                    .constraint_rows()
+                    .into_iter()
+                    .map(|row| (row.oid, row))
+                    .collect(),
+                rewrites_by_oid: catcache
+                    .rewrite_rows()
+                    .into_iter()
+                    .map(|row| (row.oid, row))
+                    .collect(),
+            };
+            let mut plan = DropTablePlan::default();
+            for &relation_oid in &explicit_relation_oids {
+                plan_drop_table_relation(
+                    &dependency_ctx,
+                    relation_oid,
+                    &explicit_relation_oids,
+                    drop_stmt.cascade,
+                    &mut plan,
+                );
+            }
+
+            if !drop_stmt.cascade && !plan.blocker_details.is_empty() {
+                let (_, source_name) = plan
+                    .blocker_source
+                    .unwrap_or(('r', "table".to_string()));
+                return Err(ExecError::DetailedError {
+                    message: format!(
+                        "cannot drop table {source_name} because other objects depend on it"
+                    ),
+                    detail: Some(plan.blocker_details.join("\n")),
+                    hint: Some("Use DROP ... CASCADE to drop the dependent objects too.".into()),
+                    sqlstate: "2BP01",
+                });
+            }
+
+            for notice in &plan.notices {
+                push_notice(notice.clone());
+            }
+
+            let mut next_cid = cid;
+
+            for rule in &plan.rule_drops {
+                let ctx = CatalogWriteContext {
+                    pool: self.pool.clone(),
+                    txns: self.txns.clone(),
+                    xid,
+                    cid: next_cid,
+                    client_id,
+                    waiter: None,
+                    interrupts: Arc::clone(&interrupts),
+                };
+                let effect = self
+                    .catalog
+                    .write()
+                    .drop_rule_mvcc(rule.rewrite_oid, &ctx)
+                    .map_err(map_catalog_error)?;
+                catalog_effects.push(effect);
+                next_cid = next_cid.saturating_add(1);
+            }
+
+            for constraint in &plan.constraint_drops {
+                let ctx = CatalogWriteContext {
+                    pool: self.pool.clone(),
+                    txns: self.txns.clone(),
+                    xid,
+                    cid: next_cid,
+                    client_id,
+                    waiter: None,
+                    interrupts: Arc::clone(&interrupts),
+                };
+                let (_removed, effect) = self
+                    .catalog
+                    .write()
+                    .drop_relation_constraint_mvcc(
+                        constraint.relation_oid,
+                        &constraint.constraint_name,
+                        &ctx,
+                    )
+                    .map_err(map_catalog_error)?;
+                catalog_effects.push(effect);
+                next_cid = next_cid.saturating_add(1);
+            }
+
+            for relation_oid in &plan.relation_drop_order {
+                let (relkind, relpersistence) = catcache
+                    .class_by_oid(*relation_oid)
+                    .map(|row| (row.relkind, row.relpersistence))
+                    .unwrap_or(('r', 'p'));
+                if relpersistence == 't' {
+                    let temp_name = self
+                        .temp_relation_name_for_oid(client_id, *relation_oid)
+                        .ok_or_else(|| {
+                            ExecError::Parse(ParseError::UnexpectedToken {
+                                expected: "tracked temporary relation",
+                                actual: relation_oid.to_string(),
+                            })
+                        })?;
+                    self.drop_temp_relation_in_transaction(
+                        client_id,
+                        &temp_name,
+                        xid,
+                        next_cid,
+                        catalog_effects,
+                        temp_effects,
+                    )?;
+                    next_cid = next_cid.saturating_add(1);
+                    continue;
+                }
+                let ctx = CatalogWriteContext {
+                    pool: self.pool.clone(),
+                    txns: self.txns.clone(),
+                    xid,
+                    cid: next_cid,
+                    client_id,
+                    waiter: Some(self.txn_waiter.clone()),
+                    interrupts: Arc::clone(&interrupts),
+                };
+                let effect = match relkind {
+                    'v' => self
+                        .catalog
+                        .write()
+                        .drop_view_by_oid_mvcc(*relation_oid, &ctx)
+                        .map(|(_, effect)| effect),
+                    _ => self
+                        .catalog
+                        .write()
+                        .drop_relation_by_oid_mvcc(*relation_oid, &ctx)
+                        .map(|(_, effect)| effect),
+                }
+                .map_err(map_catalog_error)?;
+
+                if relkind != 'v' {
+                    self.apply_catalog_mutation_effect_immediate(&effect)?;
+                }
+                if relkind == 'r' {
+                    self.session_stats_state(client_id)
+                        .write()
+                        .note_relation_drop(*relation_oid, &self.stats);
+                }
+                catalog_effects.push(effect);
+                next_cid = next_cid.saturating_add(1);
+            }
+
+            Ok(StatementResult::AffectedRows(dropped))
+        })();
+
+        for rel in rels {
+            self.table_locks.unlock_table(rel, client_id);
+        }
+
+        result
     }
 
     pub(crate) fn execute_drop_view_stmt_in_transaction_with_search_path(
@@ -455,6 +1014,9 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::utils::misc::notices::{
+        clear_notices as clear_backend_notices, take_notices as take_backend_notices,
+    };
     use crate::pgrust::session::Session;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -471,6 +1033,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&p);
         std::fs::create_dir_all(&p).unwrap();
         p
+    }
+
+    fn take_backend_notice_messages() -> Vec<String> {
+        take_backend_notices()
     }
 
     #[test]
@@ -498,6 +1064,183 @@ mod tests {
             db.backend_catcache(1, None)
                 .unwrap()
                 .class_by_name("widgets_id_idx")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn drop_table_restrict_reports_pg_style_foreign_key_dependency() {
+        let base = temp_dir("table_fk_restrict");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session
+            .execute(&db, "create table parents (id int4 primary key)")
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create table children (id int4 primary key, parent_id int4 references parents)",
+            )
+            .unwrap();
+
+        match session.execute(&db, "drop table parents") {
+            Err(ExecError::DetailedError {
+                message,
+                detail: Some(detail),
+                hint: Some(hint),
+                sqlstate,
+            }) => {
+                assert_eq!(
+                    message,
+                    "cannot drop table parents because other objects depend on it"
+                );
+                assert_eq!(
+                    detail,
+                    "constraint children_parent_id_fkey on table children depends on table parents"
+                );
+                assert_eq!(hint, "Use DROP ... CASCADE to drop the dependent objects too.");
+                assert_eq!(sqlstate, "2BP01");
+            }
+            other => panic!("expected detailed dependency error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn drop_table_cascade_removes_foreign_key_constraint_and_emits_notice() {
+        let base = temp_dir("table_fk_cascade");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session
+            .execute(&db, "create table parents (id int4 primary key)")
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create table children (id int4 primary key, parent_id int4 references parents)",
+            )
+            .unwrap();
+
+        clear_backend_notices();
+        session.execute(&db, "drop table parents cascade").unwrap();
+
+        assert_eq!(
+            take_backend_notice_messages(),
+            vec![String::from(
+                "drop cascades to constraint children_parent_id_fkey on table children",
+            )]
+        );
+        let child_oid = db
+            .lazy_catalog_lookup(1, None, None)
+            .lookup_any_relation("children")
+            .unwrap()
+            .relation_oid;
+        assert!(
+            !db.backend_catcache(1, None)
+                .unwrap()
+                .constraint_rows()
+                .into_iter()
+                .any(|row| row.conrelid == child_oid && row.contype == CONSTRAINT_FOREIGN)
+        );
+    }
+
+    #[test]
+    fn drop_table_cascade_drops_dependent_view_and_emits_notice() {
+        let base = temp_dir("table_view_cascade");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session
+            .execute(&db, "create table base_items (id int4)")
+            .unwrap();
+        session
+            .execute(&db, "create view base_view as select id from base_items")
+            .unwrap();
+
+        clear_backend_notices();
+        session.execute(&db, "drop table base_items cascade").unwrap();
+
+        assert_eq!(
+            take_backend_notice_messages(),
+            vec![String::from("drop cascades to view base_view")]
+        );
+        assert!(
+            db.backend_catcache(1, None)
+                .unwrap()
+                .class_by_name("base_view")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn drop_table_cascade_drops_inherited_children() {
+        let base = temp_dir("table_inherit_cascade");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session.execute(&db, "create table p1 (id int4)").unwrap();
+        session
+            .execute(&db, "create table c1 () inherits (p1)")
+            .unwrap();
+
+        clear_backend_notices();
+        session.execute(&db, "drop table p1 cascade").unwrap();
+
+        assert_eq!(
+            take_backend_notice_messages(),
+            vec![String::from("drop cascades to table c1")]
+        );
+        let catcache = db.backend_catcache(1, None).unwrap();
+        assert!(catcache.class_by_name("p1").is_none());
+        assert!(catcache.class_by_name("c1").is_none());
+    }
+
+    #[test]
+    fn drop_table_allows_explicitly_dropping_parent_and_child_together() {
+        let base = temp_dir("table_fk_explicit_multi_drop");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session
+            .execute(&db, "create table parents (id int4 primary key)")
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create table children (id int4 primary key, parent_id int4 references parents)",
+            )
+            .unwrap();
+
+        clear_backend_notices();
+        session.execute(&db, "drop table parents, children").unwrap();
+
+        assert!(take_backend_notice_messages().is_empty());
+        let catcache = db.backend_catcache(1, None).unwrap();
+        assert!(catcache.class_by_name("parents").is_none());
+        assert!(catcache.class_by_name("children").is_none());
+    }
+
+    #[test]
+    fn drop_table_cascade_cleans_temp_inherited_child_namespace_state() {
+        let base = temp_dir("table_temp_inherit_cascade");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session.execute(&db, "create table parents (id int4)").unwrap();
+        session
+            .execute(&db, "create temp table temp_child () inherits (parents)")
+            .unwrap();
+
+        assert!(db.temp_entry(1, "temp_child").is_some());
+
+        clear_backend_notices();
+        session.execute(&db, "drop table parents cascade").unwrap();
+
+        let notices = take_backend_notice_messages();
+        assert_eq!(notices.len(), 1);
+        assert!(notices[0].contains("temp_child"));
+        assert!(db.temp_entry(1, "temp_child").is_none());
+        let namespace = db.temp_relations.read().get(&1).cloned().unwrap();
+        assert!(namespace.tables.is_empty());
+        assert!(
+            db.backend_catcache(1, None)
+                .unwrap()
+                .class_by_name("parents")
                 .is_none()
         );
     }
