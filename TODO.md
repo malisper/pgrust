@@ -378,7 +378,7 @@ Targeted reruns and notes:
   - [done] accept PostgreSQL-style mixed set-operation chains such as `SELECT 1 UNION SELECT 2 UNION ALL SELECT 2` instead of rejecting them in the parser
   - [done] support `SELECT DISTINCT` in set-operation inputs such as `EXCEPT ALL SELECT DISTINCT ...`
   - [done] match PostgreSQL's `FOR NO KEY UPDATE` set-operation error text instead of routing it through the generic unsupported-feature wrapper
-  - investigate why bootstrap fixture tables from `scripts/test_setup_pgrust.sql` like `float8_tbl`, `int8_tbl`, and `tenk1` are not consistently resolvable during regression runs
+  - [done] investigate why bootstrap fixture tables from `scripts/test_setup_pgrust.sql` like `float8_tbl`, `int8_tbl`, and `tenk1` are not consistently resolvable during regression runs; current false failures were stale `RESULTS_DIR` output reuse when bootstrap aborted before rewriting `output/test_setup_pgrust.out`
 - updatable_views.sql: 130/1139
 - update.sql: 72/300
 - uuid.sql: 0/63
@@ -501,7 +501,7 @@ Targeted reruns and notes:
 - [x] Preserve numeric display scale in `generate_series(numeric, ...)` so rows like `0.0, 1.0, 2.0, 3.0, 4.0` do not degrade into integer-looking outputs after the first increment
 - [x] Fix `width_bucket(float8, low, high, count)` boundary behavior for huge ranges; current float math can round into bucket `count + 1` or the wrong descending bucket near the upper edge
 - [x] Mixed set-operation chains: accept PostgreSQL-style left-associative chains such as `SELECT 1 UNION SELECT 2 UNION ALL SELECT 2` instead of rejecting them in the parser.
-- Shared regression fixture visibility: investigate why bootstrap tables from `scripts/test_setup_pgrust.sql` like `float8_tbl`, `int8_tbl`, and `tenk1` are not consistently resolvable during regression runs.
+- [done] Shared regression fixture visibility: investigate why bootstrap tables from `scripts/test_setup_pgrust.sql` like `float8_tbl`, `int8_tbl`, and `tenk1` are not consistently resolvable during regression runs; root cause was stale regression output reuse after bootstrap/startup failures, not missing bootstrap schemas.
 - privileges.sql parity:
   - [done] expose privilege-related system catalogs in SQL, including `pg_auth_members` and `pg_largeobject_metadata`
   - [done] implement `lo_create` / `lo_unlink` and surface `pg_largeobject_metadata` rows from runtime state
