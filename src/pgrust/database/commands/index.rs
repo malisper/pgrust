@@ -357,6 +357,8 @@ impl Database {
                     relpersistence: index_entry.relpersistence,
                     relkind: index_entry.relkind,
                     relhastriggers: index_entry.relhastriggers,
+                    relrowsecurity: index_entry.relrowsecurity,
+                    relforcerowsecurity: index_entry.relforcerowsecurity,
                     desc: index_entry.desc.clone(),
                     index: Some(Self::relcache_index_meta_from_catalog(
                         index_entry.relation_oid,

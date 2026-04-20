@@ -8,7 +8,8 @@ use crate::include::catalog::{
     PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow,
     PgDatabaseRow, PgDependRow, PgDescriptionRow, PgForeignDataWrapperRow, PgIndexRow,
     PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow,
-    PgProcRow, PgRewriteRow, PgStatisticRow, PgTablespaceRow, PgTriggerRow, PgTsConfigMapRow,
+    PgPolicyRow, PgProcRow, PgRewriteRow, PgStatisticRow, PgTablespaceRow, PgTriggerRow,
+    PgTsConfigMapRow,
     PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
     composite_array_type_row, composite_type_row,
 };
@@ -26,6 +27,7 @@ pub(crate) struct PhysicalCatalogRows {
     pub indexes: Vec<PgIndexRow>,
     pub rewrites: Vec<PgRewriteRow>,
     pub triggers: Vec<PgTriggerRow>,
+    pub policies: Vec<PgPolicyRow>,
     pub ams: Vec<PgAmRow>,
     pub amops: Vec<PgAmopRow>,
     pub amprocs: Vec<PgAmprocRow>,
@@ -117,6 +119,7 @@ pub(crate) fn drop_relation_sync_kinds() -> Vec<BootstrapCatalogKind> {
         BootstrapCatalogKind::PgIndex,
         BootstrapCatalogKind::PgRewrite,
         BootstrapCatalogKind::PgTrigger,
+        BootstrapCatalogKind::PgPolicy,
     ]
 }
 
@@ -133,6 +136,7 @@ pub(crate) fn drop_relation_delete_kinds() -> Vec<BootstrapCatalogKind> {
         BootstrapCatalogKind::PgDescription,
         BootstrapCatalogKind::PgRewrite,
         BootstrapCatalogKind::PgTrigger,
+        BootstrapCatalogKind::PgPolicy,
     ]
 }
 
@@ -153,6 +157,7 @@ pub(crate) fn extend_physical_catalog_rows(
     target.indexes.extend(source.indexes);
     target.rewrites.extend(source.rewrites);
     target.triggers.extend(source.triggers);
+    target.policies.extend(source.policies);
     target.ams.extend(source.ams);
     target.amops.extend(source.amops);
     target.amprocs.extend(source.amprocs);
@@ -190,6 +195,7 @@ pub(crate) fn physical_catalog_rows_from_catcache(catcache: &CatCache) -> Physic
         indexes: catcache.index_rows(),
         rewrites: catcache.rewrite_rows(),
         triggers: catcache.trigger_rows(),
+        policies: catcache.policy_rows(),
         ams: catcache.am_rows(),
         amops: catcache.amop_rows(),
         amprocs: catcache.amproc_rows(),
@@ -241,6 +247,8 @@ pub(crate) fn physical_catalog_rows_for_catalog_entry(
         relhassubclass: entry.relhassubclass,
         relhastriggers: entry.relhastriggers,
         relispartition: entry.relispartition,
+        relrowsecurity: entry.relrowsecurity,
+        relforcerowsecurity: entry.relforcerowsecurity,
         relnatts: entry.desc.columns.len() as i16,
         relpages: entry.relpages,
         reltuples: entry.reltuples,
@@ -320,6 +328,8 @@ pub(crate) fn physical_catalog_rows_for_catalog_entry(
             .filter(|row| row.tgrelid == entry.relation_oid)
             .cloned(),
     );
+    rows.policies
+        .extend(catalog.policy_rows_for_relation(entry.relation_oid).iter().cloned());
     rows.inherits.extend(
         catalog
             .inherit_rows()
@@ -329,6 +339,7 @@ pub(crate) fn physical_catalog_rows_for_catalog_entry(
     );
     object_oids.extend(rows.rewrites.iter().map(|row| row.oid));
     object_oids.extend(rows.triggers.iter().map(|row| row.oid));
+    object_oids.extend(rows.policies.iter().map(|row| row.oid));
 
     if entry.relkind == 'r' {
         rows.constraints.extend(

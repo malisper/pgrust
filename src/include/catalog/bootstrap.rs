@@ -32,6 +32,7 @@ pub const PG_INHERITS_RELATION_OID: u32 = 2611;
 pub const PG_REWRITE_RELATION_OID: u32 = 2618;
 pub const PG_STATISTIC_RELATION_OID: u32 = 2619;
 pub const PG_TRIGGER_RELATION_OID: u32 = 2620;
+pub const PG_POLICY_RELATION_OID: u32 = 3256;
 pub const PG_LANGUAGE_RELATION_OID: u32 = 2612;
 pub const PG_NAMESPACE_RELATION_OID: u32 = 2615;
 pub const PG_OPCLASS_RELATION_OID: u32 = 2616;
@@ -183,6 +184,7 @@ pub enum BootstrapCatalogKind {
     PgRewrite,
     PgStatistic,
     PgTrigger,
+    PgPolicy,
     PgOpclass,
     PgOpfamily,
 }
@@ -228,6 +230,7 @@ impl BootstrapCatalogKind {
             Self::PgRewrite => PG_REWRITE_RELATION_OID,
             Self::PgStatistic => PG_STATISTIC_RELATION_OID,
             Self::PgTrigger => PG_TRIGGER_RELATION_OID,
+            Self::PgPolicy => PG_POLICY_RELATION_OID,
             Self::PgOpclass => PG_OPCLASS_RELATION_OID,
             Self::PgOpfamily => PG_OPFAMILY_RELATION_OID,
         }
@@ -267,6 +270,7 @@ impl BootstrapCatalogKind {
             Self::PgRewrite => "pg_rewrite",
             Self::PgStatistic => "pg_statistic",
             Self::PgTrigger => "pg_trigger",
+            Self::PgPolicy => "pg_policy",
             Self::PgOpclass => "pg_opclass",
             Self::PgOpfamily => "pg_opfamily",
         }
@@ -306,6 +310,7 @@ impl BootstrapCatalogKind {
             Self::PgRewrite => PG_REWRITE_ROWTYPE_OID,
             Self::PgStatistic => PG_STATISTIC_ROWTYPE_OID,
             Self::PgTrigger => PG_TRIGGER_ROWTYPE_OID,
+            Self::PgPolicy => 0,
             Self::PgOpclass => 0,
             Self::PgOpfamily => 0,
         }
@@ -358,6 +363,7 @@ pub const CORE_BOOTSTRAP_KINDS: [BootstrapCatalogKind; 34] = [
     BootstrapCatalogKind::PgRewrite,
     BootstrapCatalogKind::PgStatistic,
     BootstrapCatalogKind::PgTrigger,
+    BootstrapCatalogKind::PgPolicy,
 ];
 
 pub const fn bootstrap_catalog_kinds() -> [BootstrapCatalogKind; 34] {
@@ -366,7 +372,8 @@ pub const fn bootstrap_catalog_kinds() -> [BootstrapCatalogKind; 34] {
 
 use crate::include::catalog::{
     pg_description_desc, pg_foreign_data_wrapper_desc, pg_inherits_desc,
-    pg_largeobject_metadata_desc, pg_rewrite_desc, pg_statistic_desc, pg_trigger_desc,
+    pg_largeobject_metadata_desc, pg_policy_desc, pg_rewrite_desc, pg_statistic_desc,
+    pg_trigger_desc,
 };
 
 pub fn bootstrap_relation_desc(kind: BootstrapCatalogKind) -> RelationDesc {
@@ -403,6 +410,7 @@ pub fn bootstrap_relation_desc(kind: BootstrapCatalogKind) -> RelationDesc {
         BootstrapCatalogKind::PgRewrite => pg_rewrite_desc(),
         BootstrapCatalogKind::PgStatistic => pg_statistic_desc(),
         BootstrapCatalogKind::PgTrigger => pg_trigger_desc(),
+        BootstrapCatalogKind::PgPolicy => pg_policy_desc(),
         BootstrapCatalogKind::PgOpclass => pg_opclass_desc(),
         BootstrapCatalogKind::PgOpfamily => pg_opfamily_desc(),
     }
@@ -548,6 +556,10 @@ pub const CORE_BOOTSTRAP_RELATIONS: [BootstrapCatalogRelation; 34] = [
     BootstrapCatalogRelation {
         oid: PG_TRIGGER_RELATION_OID,
         name: "pg_trigger",
+    },
+    BootstrapCatalogRelation {
+        oid: PG_POLICY_RELATION_OID,
+        name: "pg_policy",
     },
 ];
 

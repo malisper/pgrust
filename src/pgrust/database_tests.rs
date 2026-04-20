@@ -13035,6 +13035,63 @@ fn grant_execute_on_function_is_accepted() {
 }
 
 #[test]
+fn create_alter_and_drop_policy_updates_pg_policy() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create role app_role nologin")
+        .unwrap();
+    session
+        .execute(&db, "create table items (a int4, owner text)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create policy p1 on items as restrictive for select to app_role using (a > 0)",
+        )
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select polname, polqual from pg_policy where polname = 'p1'",
+        ),
+        vec![vec![Value::Text("p1".into()), Value::Text("a > 0".into())]]
+    );
+
+    session
+        .execute(&db, "alter policy p1 on items rename to p2")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter policy p2 on items using (a > 1) with check (a > 2)",
+        )
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select polname, polqual, polwithcheck from pg_policy where polname = 'p2'",
+        ),
+        vec![vec![
+            Value::Text("p2".into()),
+            Value::Text("a > 1".into()),
+            Value::Text("a > 2".into()),
+        ]]
+    );
+
+    session.execute(&db, "drop policy p2 on items").unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from pg_policy where polname = 'p2'"),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
 fn create_tablespace_adds_pg_tablespace_row() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);
@@ -13344,6 +13401,59 @@ fn create_trigger_updates_pg_trigger_and_relhastriggers() {
         ),
         vec![vec![Value::Bool(false)]]
     );
+}
+
+#[test]
+fn alter_table_row_security_flags_update_pg_class() {
+    let dir = temp_dir("alter_table_row_security_flags");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table items (id int4)").unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relrowsecurity, relforcerowsecurity from pg_class where relname = 'items'",
+        ),
+        vec![vec![Value::Bool(false), Value::Bool(false)]]
+    );
+
+    db.execute(1, "alter table items enable row level security")
+        .unwrap();
+    db.execute(1, "alter table items force row level security")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relrowsecurity, relforcerowsecurity from pg_class where relname = 'items'",
+        ),
+        vec![vec![Value::Bool(true), Value::Bool(true)]]
+    );
+
+    db.execute(1, "alter table items no force row level security")
+        .unwrap();
+    db.execute(1, "alter table items disable row level security")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relrowsecurity, relforcerowsecurity from pg_class where relname = 'items'",
+        ),
+        vec![vec![Value::Bool(false), Value::Bool(false)]]
+    );
+}
+
+#[test]
+fn alter_table_row_security_if_exists_ignores_missing_table() {
+    let dir = temp_dir("alter_table_row_security_if_exists");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "alter table if exists missing enable row level security")
+        .unwrap();
+    db.execute(1, "alter table if exists missing no force row level security")
+        .unwrap();
 }
 
 #[test]

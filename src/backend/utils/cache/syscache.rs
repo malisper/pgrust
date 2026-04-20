@@ -8,7 +8,7 @@ use crate::backend::utils::time::snapmgr::{Snapshot, get_catalog_snapshot};
 use crate::include::catalog::{
     PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow, PgClassRow, PgCollationRow,
     PgConstraintRow, PgDependRow, PgIndexRow, PgInheritsRow, PgNamespaceRow, PgOpclassRow,
-    PgOpfamilyRow, PgProcRow, PgRewriteRow, PgStatisticRow, PgTypeRow,
+    PgOpfamilyRow, PgPolicyRow, PgProcRow, PgRewriteRow, PgStatisticRow, PgTypeRow,
 };
 use crate::pgrust::database::Database;
 
@@ -23,6 +23,7 @@ fn merge_catcaches(shared: CatCache, local: CatCache) -> CatCache {
         local.index_rows(),
         local.rewrite_rows(),
         local.trigger_rows(),
+        local.policy_rows(),
         local.am_rows(),
         local.amop_rows(),
         local.amproc_rows(),

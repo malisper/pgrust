@@ -22,6 +22,8 @@ pub struct PgClassRow {
     pub relhassubclass: bool,
     pub relhastriggers: bool,
     pub relispartition: bool,
+    pub relrowsecurity: bool,
+    pub relforcerowsecurity: bool,
     pub relnatts: i16,
     pub relpages: i32,
     pub reltuples: f64,
@@ -48,6 +50,8 @@ pub fn pg_class_desc() -> RelationDesc {
             column_desc("relhassubclass", SqlType::new(SqlTypeKind::Bool), false),
             column_desc("relhastriggers", SqlType::new(SqlTypeKind::Bool), false),
             column_desc("relispartition", SqlType::new(SqlTypeKind::Bool), false),
+            column_desc("relrowsecurity", SqlType::new(SqlTypeKind::Bool), false),
+            column_desc("relforcerowsecurity", SqlType::new(SqlTypeKind::Bool), false),
             column_desc("relnatts", SqlType::new(SqlTypeKind::Int2), false),
             column_desc("relpages", SqlType::new(SqlTypeKind::Int4), false),
             column_desc("reltuples", SqlType::new(SqlTypeKind::Float4), false),
@@ -96,6 +100,7 @@ pub fn bootstrap_pg_class_rows() -> [PgClassRow; 23] {
         bootstrap_pg_class_row(BootstrapCatalogKind::PgRewrite),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgStatistic),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgTrigger),
+        bootstrap_pg_class_row(BootstrapCatalogKind::PgPolicy),
     ]
 }
 
@@ -115,6 +120,8 @@ fn bootstrap_pg_class_row(kind: BootstrapCatalogKind) -> PgClassRow {
         relhassubclass: false,
         relhastriggers: false,
         relispartition: false,
+        relrowsecurity: false,
+        relforcerowsecurity: false,
         relnatts: bootstrap_relation_desc(kind).columns.len() as i16,
         relpages: 0,
         reltuples: 0.0,
