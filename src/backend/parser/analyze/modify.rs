@@ -23,7 +23,7 @@ pub struct BoundInsertStatement {
     pub target_columns: Vec<BoundAssignmentTarget>,
     pub source: BoundInsertSource,
     pub on_conflict: Option<BoundOnConflictClause>,
-    pub returning_all: bool,
+    pub returning: Vec<TargetEntry>,
     pub subplans: Vec<Plan>,
 }
 
@@ -72,7 +72,7 @@ pub struct BoundUpdateTarget {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundUpdateStatement {
     pub targets: Vec<BoundUpdateTarget>,
-    pub returning_all: bool,
+    pub returning: Vec<TargetEntry>,
     pub subplans: Vec<Plan>,
 }
 
@@ -330,6 +330,33 @@ fn merge_projection_targets(columns: &[QueryColumn], output_exprs: &[Expr]) -> V
             .with_input_resno(index + 1)
         })
         .collect()
+}
+
+fn bind_returning_targets(
+    targets: &[crate::include::nodes::parsenodes::SelectItem],
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    local_ctes: &[BoundCte],
+) -> Result<Vec<TargetEntry>, ParseError> {
+    if targets.is_empty() {
+        return Ok(Vec::new());
+    }
+    match bind_select_targets(
+        targets,
+        scope,
+        catalog,
+        outer_scopes,
+        None,
+        local_ctes,
+    )? {
+        BoundSelectTargets::Plain(targets) => Ok(targets),
+        BoundSelectTargets::WithProjectSet { .. } => {
+            Err(ParseError::FeatureNotSupported(
+                "set-returning functions are not allowed in RETURNING".into(),
+            ))
+        }
+    }
 }
 
 fn with_merge_target_ctid(from: AnalyzedFrom, target_desc: &RelationDesc) -> (AnalyzedFrom, usize) {
@@ -1115,8 +1142,15 @@ pub(crate) fn bind_insert_with_outer_scopes(
     let entry = lookup_modify_relation(catalog, &stmt.table_name)?;
     let column_defaults = bind_insert_column_defaults(&entry.desc, catalog, &local_ctes)?;
     let visible_target_name = stmt.table_alias.as_deref().unwrap_or(&stmt.table_name);
-    let target_scope = scope_for_relation(Some(&stmt.table_name), &entry.desc);
+    let target_scope = scope_for_relation(Some(visible_target_name), &entry.desc);
     let expr_scope = empty_scope();
+    let returning = bind_returning_targets(
+        &stmt.returning,
+        &target_scope,
+        catalog,
+        outer_scopes,
+        &local_ctes,
+    )?;
 
     let source = match &stmt.source {
         InsertSource::Values(rows) => {
@@ -1253,7 +1287,7 @@ pub(crate) fn bind_insert_with_outer_scopes(
                 )
             })
             .transpose()?,
-        returning_all: stmt.returning_all,
+        returning,
         subplans: Vec::new(),
     })
 }
@@ -1288,6 +1322,7 @@ pub(crate) fn bind_update_with_outer_scopes(
             bind_expr_with_outer_and_ctes(expr, &scope, catalog, outer_scopes, None, &local_ctes)
         })
         .transpose()?;
+    let returning = bind_returning_targets(&stmt.returning, &scope, catalog, outer_scopes, &local_ctes)?;
     let assignments = stmt
         .assignments
         .iter()
@@ -1336,7 +1371,7 @@ pub(crate) fn bind_update_with_outer_scopes(
 
     Ok(BoundUpdateStatement {
         targets,
-        returning_all: stmt.returning_all,
+        returning,
         subplans: Vec::new(),
     })
 }

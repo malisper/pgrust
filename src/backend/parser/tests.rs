@@ -4379,7 +4379,7 @@ fn parse_create_rule_single_action() {
                         SqlExpr::Column("new.id".into()),
                     ]]),
                     on_conflict: None,
-                    returning_all: false,
+                    returning: vec![],
                 }),
                 sql: "insert into pets values (new.id, new.id)".into(),
             }],
@@ -4560,7 +4560,7 @@ fn people_insert_with_on_conflict(
             assignments,
             where_clause,
         }),
-        returning_all: false,
+        returning: vec![],
     }
 }
 
@@ -7799,23 +7799,43 @@ fn parse_insert_alias_and_begin_isolation_level() {
 }
 
 #[test]
-fn parse_insert_and_update_returning_star() {
+fn parse_insert_and_update_returning_targets() {
     assert!(matches!(
         parse_statement("insert into people (id) values (1) returning *").unwrap(),
         Statement::Insert(InsertStatement {
             table_name,
-            returning_all,
+            returning,
             ..
-        }) if table_name == "people" && returning_all
+        }) if table_name == "people"
+            && returning == vec![SelectItem {
+                output_name: "*".into(),
+                expr: SqlExpr::Column("*".into()),
+            }]
     ));
 
     assert!(matches!(
-        parse_statement("update people set name = 'alice' returning *").unwrap(),
+        parse_statement("update people set name = 'alice' returning id, upper(name) as upper_name")
+            .unwrap(),
         Statement::Update(UpdateStatement {
             table_name,
-            returning_all,
+            returning,
             ..
-        }) if table_name == "people" && returning_all
+        }) if table_name == "people"
+            && returning == vec![
+                SelectItem {
+                    output_name: "id".into(),
+                    expr: SqlExpr::Column("id".into()),
+                },
+                SelectItem {
+                    output_name: "upper_name".into(),
+                    expr: SqlExpr::FuncCall {
+                        name: "upper".into(),
+                        args: vec![SqlFunctionArg::positional(SqlExpr::Column("name".into()))],
+                        func_variadic: false,
+                        over: None,
+                    },
+                },
+            ]
     ));
 }
 
