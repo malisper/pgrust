@@ -1514,6 +1514,7 @@ pub enum CreateTableElement {
 pub struct ConstraintAttributes {
     pub name: Option<String>,
     pub not_valid: bool,
+    pub no_inherit: bool,
     pub deferrable: Option<bool>,
     pub initially_deferred: Option<bool>,
     pub enforced: Option<bool>,
@@ -1524,6 +1525,7 @@ impl Default for ConstraintAttributes {
         Self {
             name: None,
             not_valid: false,
+            no_inherit: false,
             deferrable: None,
             initially_deferred: None,
             enforced: None,

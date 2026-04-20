@@ -339,6 +339,36 @@ impl Database {
 
         self.apply_catalog_mutation_effect_immediate(&ready_effect)?;
         catalog_effects.push(ready_effect);
+        if relation.relpersistence == 't' {
+            let mut temp_index_meta = index_meta.clone();
+            temp_index_meta.indisready = true;
+            temp_index_meta.indisvalid = true;
+            self.install_temp_entry(
+                client_id,
+                index_name,
+                crate::backend::utils::cache::relcache::RelCacheEntry {
+                    rel: index_entry.rel,
+                    relation_oid: index_entry.relation_oid,
+                    namespace_oid: index_entry.namespace_oid,
+                    owner_oid: index_entry.owner_oid,
+                    row_type_oid: index_entry.row_type_oid,
+                    array_type_oid: index_entry.array_type_oid,
+                    reltoastrelid: index_entry.reltoastrelid,
+                    relpersistence: index_entry.relpersistence,
+                    relkind: index_entry.relkind,
+                    relhastriggers: index_entry.relhastriggers,
+                    desc: index_entry.desc.clone(),
+                    index: Some(Self::relcache_index_meta_from_catalog(
+                        index_entry.relation_oid,
+                        &temp_index_meta,
+                        access_method_oid,
+                        access_method_handler,
+                    )),
+                },
+                self.temp_entry_on_commit(client_id, relation.relation_oid)
+                    .unwrap_or(OnCommitAction::PreserveRows),
+            )?;
+        }
         Ok(index_entry)
     }
 
@@ -564,12 +594,6 @@ impl Database {
                 ))
             })?;
 
-        if entry.relpersistence == 't' {
-            return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "permanent table for CREATE INDEX",
-                actual: "temporary table".into(),
-            }));
-        }
         if entry.relkind != 'r' {
             return Err(ExecError::Parse(ParseError::WrongObjectType {
                 name: create_stmt.table_name.clone(),
