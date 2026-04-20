@@ -7416,6 +7416,28 @@ fn numeric_power_special_values_follow_postgres() {
 }
 
 #[test]
+fn numeric_power_zero_exponents_with_fractional_scale_follow_postgres() {
+    let base = temp_dir("numeric_power_zero_exponents");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select 0.0::numeric ^ 0.0::numeric, (-12.34)::numeric ^ 0.0::numeric, 12.34::numeric ^ 0.0::numeric, 0.0::numeric ^ 12.34::numeric",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Numeric("1.0000000000000000".into()),
+            Value::Numeric("1.0000000000000000".into()),
+            Value::Numeric("1.0000000000000000".into()),
+            Value::Numeric("0.0000000000000000".into()),
+        ]],
+    );
+}
+
+#[test]
 fn numeric_log_special_values_follow_postgres() {
     let base = temp_dir("numeric_log_special_values");
     let txns = TransactionManager::new_durable(&base).unwrap();
