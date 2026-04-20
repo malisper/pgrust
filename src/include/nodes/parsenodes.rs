@@ -2001,6 +2001,10 @@ pub enum SubqueryComparisonOp {
     Gt,
     GtEq,
     Match,
+    Like,
+    NotLike,
+    ILike,
+    NotILike,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
