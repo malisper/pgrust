@@ -909,9 +909,14 @@ pub(super) fn validate_aggregate_arity(func: AggFunc, args: &[SqlExpr]) -> Resul
         .map(|count| args.len() == count)
         .unwrap_or_else(|| match func {
             AggFunc::Count => args.len() <= 1,
-            AggFunc::Sum
+            AggFunc::AnyValue
+            | AggFunc::Sum
             | AggFunc::Avg
+            | AggFunc::VarPop
+            | AggFunc::VarSamp
             | AggFunc::Variance
+            | AggFunc::StddevPop
+            | AggFunc::StddevSamp
             | AggFunc::Stddev
             | AggFunc::Min
             | AggFunc::Max
@@ -919,6 +924,18 @@ pub(super) fn validate_aggregate_arity(func: AggFunc, args: &[SqlExpr]) -> Resul
             | AggFunc::JsonAgg
             | AggFunc::JsonbAgg
             | AggFunc::RangeIntersectAgg => args.len() == 1,
+            AggFunc::RegrCount
+            | AggFunc::RegrSxx
+            | AggFunc::RegrSyy
+            | AggFunc::RegrSxy
+            | AggFunc::RegrAvgx
+            | AggFunc::RegrAvgy
+            | AggFunc::RegrR2
+            | AggFunc::RegrSlope
+            | AggFunc::RegrIntercept
+            | AggFunc::CovarPop
+            | AggFunc::CovarSamp
+            | AggFunc::Corr => args.len() == 2,
             AggFunc::StringAgg | AggFunc::JsonObjectAgg | AggFunc::JsonbObjectAgg => {
                 args.len() == 2
             }
@@ -2052,6 +2069,18 @@ fn supports_fixed_aggregate_return_type(func: AggFunc) -> bool {
     matches!(
         func,
         AggFunc::Count
+            | AggFunc::RegrCount
+            | AggFunc::RegrSxx
+            | AggFunc::RegrSyy
+            | AggFunc::RegrSxy
+            | AggFunc::RegrAvgx
+            | AggFunc::RegrAvgy
+            | AggFunc::RegrR2
+            | AggFunc::RegrSlope
+            | AggFunc::RegrIntercept
+            | AggFunc::CovarPop
+            | AggFunc::CovarSamp
+            | AggFunc::Corr
             | AggFunc::JsonAgg
             | AggFunc::JsonbAgg
             | AggFunc::JsonObjectAgg
@@ -2078,10 +2107,27 @@ fn catalog_text_input_cast_exists(catalog: &dyn CatalogLookup, target_oid: u32) 
 fn aggregate_func_for_proname(name: &str) -> Option<AggFunc> {
     match name.to_ascii_lowercase().as_str() {
         "count" => Some(AggFunc::Count),
+        "any_value" => Some(AggFunc::AnyValue),
         "sum" => Some(AggFunc::Sum),
         "avg" => Some(AggFunc::Avg),
+        "var_pop" => Some(AggFunc::VarPop),
+        "var_samp" => Some(AggFunc::VarSamp),
         "variance" => Some(AggFunc::Variance),
+        "stddev_pop" => Some(AggFunc::StddevPop),
+        "stddev_samp" => Some(AggFunc::StddevSamp),
         "stddev" => Some(AggFunc::Stddev),
+        "regr_count" => Some(AggFunc::RegrCount),
+        "regr_sxx" => Some(AggFunc::RegrSxx),
+        "regr_syy" => Some(AggFunc::RegrSyy),
+        "regr_sxy" => Some(AggFunc::RegrSxy),
+        "regr_avgx" => Some(AggFunc::RegrAvgx),
+        "regr_avgy" => Some(AggFunc::RegrAvgy),
+        "regr_r2" => Some(AggFunc::RegrR2),
+        "regr_slope" => Some(AggFunc::RegrSlope),
+        "regr_intercept" => Some(AggFunc::RegrIntercept),
+        "covar_pop" => Some(AggFunc::CovarPop),
+        "covar_samp" => Some(AggFunc::CovarSamp),
+        "corr" => Some(AggFunc::Corr),
         "min" => Some(AggFunc::Min),
         "max" => Some(AggFunc::Max),
         "string_agg" => Some(AggFunc::StringAgg),
