@@ -2890,6 +2890,43 @@ fn any_value_over_values_mixed_nulls_uses_concrete_values_type() {
 }
 
 #[test]
+fn float8_regression_helper_functions_update_transition_states() {
+    let base = temp_dir("float8_regression_helpers");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select \
+            float8_accum('{4,140,2900}'::float8[], 100), \
+            float8_regr_accum('{4,140,2900,1290,83075,15050}'::float8[], 200, 100), \
+            float8_combine('{3,60,200}'::float8[], '{2,180,200}'::float8[]), \
+            float8_regr_combine('{3,60,200,750,20000,2000}'::float8[], '{2,180,200,740,57800,-3400}'::float8[])",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            let float8_array = |values: &[f64]| {
+                Value::PgArray(
+                    ArrayValue::from_1d(values.iter().copied().map(Value::Float64).collect())
+                        .with_element_type_oid(crate::include::catalog::FLOAT8_TYPE_OID),
+                )
+            };
+            assert_eq!(
+                rows,
+                vec![vec![
+                    float8_array(&[5.0, 240.0, 6280.0]),
+                    float8_array(&[5.0, 240.0, 6280.0, 1490.0, 95080.0, 8680.0]),
+                    float8_array(&[5.0, 240.0, 6280.0]),
+                    float8_array(&[5.0, 240.0, 6280.0, 1490.0, 95080.0, 8680.0]),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn group_by_with_count() {
     let base = temp_dir("group_by_count");
     let mut txns = TransactionManager::new_durable(&base).unwrap();

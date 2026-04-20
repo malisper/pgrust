@@ -1,4 +1,5 @@
 use num_bigint::{BigInt, Sign};
+use num_traits::ToPrimitive;
 
 use crate::backend::utils::time::system_time::{SystemTime, UNIX_EPOCH};
 use rand::{Rng, RngCore};
@@ -83,7 +84,7 @@ use crate::backend::parser::{
     CatalogLookup, ParseError, SqlType, SqlTypeKind, SubqueryComparisonOp,
 };
 use crate::backend::utils::misc::checkpoint::checkpoint_stats_value;
-use crate::include::catalog::builtin_scalar_function_for_proc_oid;
+use crate::include::catalog::{FLOAT8_TYPE_OID, builtin_scalar_function_for_proc_oid};
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue, NumericValue};
 use crate::include::nodes::primnodes::{
     BoolExpr, BoolExprType, FuncExpr, INDEX_VAR, INNER_VAR, OUTER_VAR, OpExpr, OpExprKind,
@@ -1740,7 +1741,11 @@ fn eval_plpgsql_builtin_function(
         | BuiltinScalarFunction::Gamma
         | BuiltinScalarFunction::Lgamma
         | BuiltinScalarFunction::Float4Send
-        | BuiltinScalarFunction::Float8Send => Err(ExecError::Parse(ParseError::UnexpectedToken {
+        | BuiltinScalarFunction::Float8Send
+        | BuiltinScalarFunction::Float8Accum
+        | BuiltinScalarFunction::Float8Combine
+        | BuiltinScalarFunction::Float8RegrAccum
+        | BuiltinScalarFunction::Float8RegrCombine => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "plpgsql builtin function supported by the standalone evaluator",
             actual: format!("{func:?}"),
         })),
@@ -1917,6 +1922,287 @@ fn eval_text_search_builtin_function(
             expected: "text search builtin function",
             actual: format!("{func:?}"),
         })),
+    }
+}
+
+fn eval_float8_accum_function(values: &[Value]) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
+        [state, newval] => {
+            let state = expect_float8_transition_state("float8_accum", state, 3)?;
+            let newval = expect_float8_arg("float8_accum", newval)?;
+            let [count, sum, sum_sq] =
+                float8_accum_state(state[0], state[1], state[2], newval)?;
+            Ok(encode_float8_transition_state([count, sum, sum_sq]))
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "float8_accum(state, value)",
+            actual: format!("{} args", values.len()),
+        })),
+    }
+}
+
+fn eval_float8_combine_function(values: &[Value]) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
+        [left, right] => {
+            let left = expect_float8_transition_state("float8_combine", left, 3)?;
+            let right = expect_float8_transition_state("float8_combine", right, 3)?;
+            let [count, sum, sum_sq] =
+                float8_combine_state(left[0], left[1], left[2], right[0], right[1], right[2])?;
+            Ok(encode_float8_transition_state([count, sum, sum_sq]))
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "float8_combine(state1, state2)",
+            actual: format!("{} args", values.len()),
+        })),
+    }
+}
+
+fn eval_float8_regr_accum_function(values: &[Value]) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null, _, _] | [_, Value::Null, _] | [_, _, Value::Null] => Ok(Value::Null),
+        [state, y, x] => {
+            let state = expect_float8_transition_state("float8_regr_accum", state, 6)?;
+            let y = expect_float8_arg("float8_regr_accum", y)?;
+            let x = expect_float8_arg("float8_regr_accum", x)?;
+            let [count, sum_x, sum_sq_x, sum_y, sum_sq_y, sum_xy] =
+                float8_regr_accum_state(
+                    state[0], state[1], state[2], state[3], state[4], state[5], y, x,
+                )?;
+            Ok(encode_float8_transition_state([
+                count, sum_x, sum_sq_x, sum_y, sum_sq_y, sum_xy,
+            ]))
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "float8_regr_accum(state, y, x)",
+            actual: format!("{} args", values.len()),
+        })),
+    }
+}
+
+fn eval_float8_regr_combine_function(values: &[Value]) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
+        [left, right] => {
+            let left = expect_float8_transition_state("float8_regr_combine", left, 6)?;
+            let right = expect_float8_transition_state("float8_regr_combine", right, 6)?;
+            let [count, sum_x, sum_sq_x, sum_y, sum_sq_y, sum_xy] = float8_regr_combine_state(
+                [left[0], left[1], left[2], left[3], left[4], left[5]],
+                [right[0], right[1], right[2], right[3], right[4], right[5]],
+            )?;
+            Ok(encode_float8_transition_state([
+                count, sum_x, sum_sq_x, sum_y, sum_sq_y, sum_xy,
+            ]))
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "float8_regr_combine(state1, state2)",
+            actual: format!("{} args", values.len()),
+        })),
+    }
+}
+
+fn expect_float8_transition_state(
+    op: &'static str,
+    value: &Value,
+    expected_len: usize,
+) -> Result<Vec<f64>, ExecError> {
+    let array = value.as_array_value().ok_or_else(|| ExecError::TypeMismatch {
+        op,
+        left: value.clone(),
+        right: Value::PgArray(ArrayValue::empty().with_element_type_oid(FLOAT8_TYPE_OID)),
+    })?;
+    if array.dimensions.len() != 1 || array.dimensions[0].length != expected_len {
+        return Err(ExecError::DetailedError {
+            message: format!("{op} requires a float8[] transition state of length {expected_len}"),
+            detail: None,
+            hint: None,
+            sqlstate: "22023",
+        });
+    }
+    array
+        .elements
+        .iter()
+        .map(|element| expect_float8_arg(op, element))
+        .collect()
+}
+
+fn expect_float8_arg(op: &'static str, value: &Value) -> Result<f64, ExecError> {
+    match value {
+        Value::Int16(v) => Ok(f64::from(*v)),
+        Value::Int32(v) => Ok(f64::from(*v)),
+        Value::Int64(v) => Ok(*v as f64),
+        Value::Float64(v) => Ok(*v),
+        Value::Numeric(numeric) => match numeric {
+            NumericValue::PosInf => Ok(f64::INFINITY),
+            NumericValue::NegInf => Ok(f64::NEG_INFINITY),
+            NumericValue::NaN => Ok(f64::NAN),
+            NumericValue::Finite { coeff, scale, .. } => {
+                let coeff = coeff.to_f64().ok_or_else(|| ExecError::TypeMismatch {
+                    op,
+                    left: value.clone(),
+                    right: Value::Float64(0.0),
+                })?;
+                Ok(coeff / 10f64.powi(*scale as i32))
+            }
+        },
+        _ => Err(ExecError::TypeMismatch {
+            op,
+            left: value.clone(),
+            right: Value::Float64(0.0),
+        }),
+    }
+}
+
+fn encode_float8_transition_state<const N: usize>(values: [f64; N]) -> Value {
+    Value::PgArray(
+        ArrayValue::from_1d(values.into_iter().map(Value::Float64).collect())
+            .with_element_type_oid(FLOAT8_TYPE_OID),
+    )
+}
+
+fn float8_accum_state(
+    prev_count: f64,
+    prev_sum: f64,
+    mut prev_sum_sq: f64,
+    newval: f64,
+) -> Result<[f64; 3], ExecError> {
+    let count = prev_count + 1.0;
+    let sum = prev_sum + newval;
+    if prev_count > 0.0 {
+        let tmp = newval * count - sum;
+        prev_sum_sq += tmp * tmp / (count * prev_count);
+        if sum.is_infinite() || prev_sum_sq.is_infinite() {
+            if !prev_sum.is_infinite() && !newval.is_infinite() {
+                return Err(float8_overflow_error());
+            }
+            prev_sum_sq = f64::NAN;
+        }
+    } else if newval.is_nan() || newval.is_infinite() {
+        prev_sum_sq = f64::NAN;
+    }
+    Ok([count, sum, prev_sum_sq])
+}
+
+fn float8_combine_state(
+    count1: f64,
+    sum1: f64,
+    sum_sq1: f64,
+    count2: f64,
+    sum2: f64,
+    sum_sq2: f64,
+) -> Result<[f64; 3], ExecError> {
+    if count1 == 0.0 {
+        return Ok([count2, sum2, sum_sq2]);
+    }
+    if count2 == 0.0 {
+        return Ok([count1, sum1, sum_sq1]);
+    }
+    let count = count1 + count2;
+    let sum = sum1 + sum2;
+    let tmp = sum1 / count1 - sum2 / count2;
+    let sum_sq = sum_sq1 + sum_sq2 + count1 * count2 * tmp * tmp / count;
+    if sum_sq.is_infinite() && !sum_sq1.is_infinite() && !sum_sq2.is_infinite() {
+        return Err(float8_overflow_error());
+    }
+    Ok([count, sum, sum_sq])
+}
+
+fn float8_regr_accum_state(
+    prev_count: f64,
+    prev_sum_x: f64,
+    mut prev_sum_sq_x: f64,
+    prev_sum_y: f64,
+    mut prev_sum_sq_y: f64,
+    mut prev_sum_xy: f64,
+    new_y: f64,
+    new_x: f64,
+) -> Result<[f64; 6], ExecError> {
+    let count = prev_count + 1.0;
+    let sum_x = prev_sum_x + new_x;
+    let sum_y = prev_sum_y + new_y;
+    if prev_count > 0.0 {
+        let tmp_x = new_x * count - sum_x;
+        let tmp_y = new_y * count - sum_y;
+        let scale = 1.0 / (count * prev_count);
+        prev_sum_sq_x += tmp_x * tmp_x * scale;
+        prev_sum_sq_y += tmp_y * tmp_y * scale;
+        prev_sum_xy += tmp_x * tmp_y * scale;
+        if sum_x.is_infinite()
+            || prev_sum_sq_x.is_infinite()
+            || sum_y.is_infinite()
+            || prev_sum_sq_y.is_infinite()
+            || prev_sum_xy.is_infinite()
+        {
+            if ((sum_x.is_infinite() || prev_sum_sq_x.is_infinite())
+                && !prev_sum_x.is_infinite()
+                && !new_x.is_infinite())
+                || ((sum_y.is_infinite() || prev_sum_sq_y.is_infinite())
+                    && !prev_sum_y.is_infinite()
+                    && !new_y.is_infinite())
+                || (prev_sum_xy.is_infinite()
+                    && !prev_sum_x.is_infinite()
+                    && !new_x.is_infinite()
+                    && !prev_sum_y.is_infinite()
+                    && !new_y.is_infinite())
+            {
+                return Err(float8_overflow_error());
+            }
+            if prev_sum_sq_x.is_infinite() {
+                prev_sum_sq_x = f64::NAN;
+            }
+            if prev_sum_sq_y.is_infinite() {
+                prev_sum_sq_y = f64::NAN;
+            }
+            if prev_sum_xy.is_infinite() {
+                prev_sum_xy = f64::NAN;
+            }
+        }
+    } else {
+        if new_x.is_nan() || new_x.is_infinite() {
+            prev_sum_sq_x = f64::NAN;
+            prev_sum_xy = f64::NAN;
+        }
+        if new_y.is_nan() || new_y.is_infinite() {
+            prev_sum_sq_y = f64::NAN;
+            prev_sum_xy = f64::NAN;
+        }
+    }
+    Ok([count, sum_x, prev_sum_sq_x, sum_y, prev_sum_sq_y, prev_sum_xy])
+}
+
+fn float8_regr_combine_state(left: [f64; 6], right: [f64; 6]) -> Result<[f64; 6], ExecError> {
+    let [count1, sum_x1, sum_sq_x1, sum_y1, sum_sq_y1, sum_xy1] = left;
+    let [count2, sum_x2, sum_sq_x2, sum_y2, sum_sq_y2, sum_xy2] = right;
+    if count1 == 0.0 {
+        return Ok(right);
+    }
+    if count2 == 0.0 {
+        return Ok(left);
+    }
+    let count = count1 + count2;
+    let sum_x = sum_x1 + sum_x2;
+    let sum_y = sum_y1 + sum_y2;
+    let tmp_x = sum_x1 / count1 - sum_x2 / count2;
+    let tmp_y = sum_y1 / count1 - sum_y2 / count2;
+    let sum_sq_x = sum_sq_x1 + sum_sq_x2 + count1 * count2 * tmp_x * tmp_x / count;
+    let sum_sq_y = sum_sq_y1 + sum_sq_y2 + count1 * count2 * tmp_y * tmp_y / count;
+    let sum_xy = sum_xy1 + sum_xy2 + count1 * count2 * tmp_x * tmp_y / count;
+    if (sum_sq_x.is_infinite() && !sum_sq_x1.is_infinite() && !sum_sq_x2.is_infinite())
+        || (sum_sq_y.is_infinite() && !sum_sq_y1.is_infinite() && !sum_sq_y2.is_infinite())
+        || (sum_xy.is_infinite() && !sum_xy1.is_infinite() && !sum_xy2.is_infinite())
+    {
+        return Err(float8_overflow_error());
+    }
+    Ok([count, sum_x, sum_sq_x, sum_y, sum_sq_y, sum_xy])
+}
+
+fn float8_overflow_error() -> ExecError {
+    ExecError::DetailedError {
+        message: "value out of range: overflow".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "22003",
     }
 }
 
@@ -2260,6 +2546,10 @@ fn eval_builtin_function(
         }),
         BuiltinScalarFunction::Float4Send => eval_float_send_function("float4send", &values, true),
         BuiltinScalarFunction::Float8Send => eval_float_send_function("float8send", &values, false),
+        BuiltinScalarFunction::Float8Accum => eval_float8_accum_function(&values),
+        BuiltinScalarFunction::Float8Combine => eval_float8_combine_function(&values),
+        BuiltinScalarFunction::Float8RegrAccum => eval_float8_regr_accum_function(&values),
+        BuiltinScalarFunction::Float8RegrCombine => eval_float8_regr_combine_function(&values),
         BuiltinScalarFunction::Erf => eval_unary_float_function("erf", &values, eval_erf),
         BuiltinScalarFunction::Erfc => eval_unary_float_function("erfc", &values, eval_erfc),
         BuiltinScalarFunction::Gamma => eval_unary_float_function("gamma", &values, eval_gamma),
