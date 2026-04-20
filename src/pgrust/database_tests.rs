@@ -4129,6 +4129,41 @@ fn alter_table_add_column_reads_old_rows_with_null_or_default() {
 }
 
 #[test]
+fn alter_table_if_exists_ignores_missing_table() {
+    let base = temp_dir("alter_table_if_exists_missing");
+    let db = Database::open(&base, 16).unwrap();
+
+    assert_eq!(
+        db.execute(1, "alter table if exists missing add column note text")
+            .unwrap(),
+        StatementResult::AffectedRows(0)
+    );
+    assert_eq!(
+        db.execute(1, "alter table if exists missing rename to renamed_missing")
+            .unwrap(),
+        StatementResult::AffectedRows(0)
+    );
+}
+
+#[test]
+fn alter_table_only_is_accepted_for_supported_operations() {
+    let base = temp_dir("alter_table_only_supported");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4 not null, note text)")
+        .unwrap();
+    db.execute(1, "alter table only items add column body text")
+        .unwrap();
+    db.execute(1, "alter table only items rename column note to summary")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select id, summary, body from items"),
+        Vec::<Vec<Value>>::new()
+    );
+}
+
+#[test]
 fn alter_table_add_column_serial_backfills_existing_rows_and_keeps_sequence_advancing() {
     let base = temp_dir("alter_table_add_column_serial");
     let db = Database::open(&base, 16).unwrap();

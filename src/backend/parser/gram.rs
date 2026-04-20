@@ -1029,6 +1029,8 @@ fn build_alter_sequence_owner_statement(
         });
     }
     Ok(AlterRelationOwnerStatement {
+        if_exists: false,
+        only: false,
         relation_name,
         new_owner,
     })
@@ -1052,6 +1054,8 @@ fn build_alter_sequence_rename_statement(
         });
     }
     Ok(AlterTableRenameStatement {
+        if_exists: false,
+        only: false,
         table_name,
         new_table_name,
     })
@@ -5472,16 +5476,27 @@ fn build_create_index_item(pair: Pair<'_, Rule>) -> Result<IndexColumnDef, Parse
 }
 
 fn build_alter_table_set(pair: Pair<'_, Rule>) -> Result<AlterTableSetStatement, ParseError> {
+    let mut if_exists = false;
+    let mut only = false;
     let mut table_name = None;
     let mut options = Vec::new();
     for part in pair.into_inner() {
         match part.as_rule() {
+            Rule::alter_table_target => {
+                let (parsed_if_exists, parsed_only, parsed_table_name) =
+                    build_alter_table_target(part)?;
+                if_exists = parsed_if_exists;
+                only = parsed_only;
+                table_name = Some(parsed_table_name);
+            }
             Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
             Rule::reloption => options.push(build_reloption(part)?),
             _ => {}
         }
     }
     Ok(AlterTableSetStatement {
+        if_exists,
+        only,
         table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
         options,
     })
@@ -6283,16 +6298,27 @@ fn canonicalize_column_type_name(ty: RawTypeName) -> Result<RawTypeName, ParseEr
 fn build_alter_table_add_column(
     pair: Pair<'_, Rule>,
 ) -> Result<AlterTableAddColumnStatement, ParseError> {
+    let mut if_exists = false;
+    let mut only = false;
     let mut table_name = None;
     let mut column = None;
     for part in pair.into_inner() {
         match part.as_rule() {
+            Rule::alter_table_target => {
+                let (parsed_if_exists, parsed_only, parsed_table_name) =
+                    build_alter_table_target(part)?;
+                if_exists = parsed_if_exists;
+                only = parsed_only;
+                table_name = Some(parsed_table_name);
+            }
             Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
             Rule::column_def => column = Some(build_column_def(part)?),
             _ => {}
         }
     }
     Ok(AlterTableAddColumnStatement {
+        if_exists,
+        only,
         table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
         column: column.ok_or(ParseError::UnexpectedEof)?,
     })
@@ -6301,16 +6327,27 @@ fn build_alter_table_add_column(
 fn build_alter_table_add_constraint(
     pair: Pair<'_, Rule>,
 ) -> Result<AlterTableAddConstraintStatement, ParseError> {
+    let mut if_exists = false;
+    let mut only = false;
     let mut table_name = None;
     let mut constraint = None;
     for part in pair.into_inner() {
         match part.as_rule() {
+            Rule::alter_table_target => {
+                let (parsed_if_exists, parsed_only, parsed_table_name) =
+                    build_alter_table_target(part)?;
+                if_exists = parsed_if_exists;
+                only = parsed_only;
+                table_name = Some(parsed_table_name);
+            }
             Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
             Rule::named_table_constraint => constraint = Some(build_table_constraint_inner(part)?),
             _ => {}
         }
     }
     Ok(AlterTableAddConstraintStatement {
+        if_exists,
+        only,
         table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
         constraint: constraint.ok_or(ParseError::UnexpectedEof)?,
     })
@@ -6319,11 +6356,26 @@ fn build_alter_table_add_constraint(
 fn build_alter_table_drop_column(
     pair: Pair<'_, Rule>,
 ) -> Result<AlterTableDropColumnStatement, ParseError> {
-    let mut parts = pair
-        .into_inner()
-        .filter(|part| part.as_rule() == Rule::identifier)
-        .map(build_identifier);
+    let mut if_exists = false;
+    let mut only = false;
+    let mut parts = Vec::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::alter_table_target => {
+                let (parsed_if_exists, parsed_only, parsed_table_name) =
+                    build_alter_table_target(part)?;
+                if_exists = parsed_if_exists;
+                only = parsed_only;
+                parts.push(parsed_table_name);
+            }
+            Rule::identifier => parts.push(build_identifier(part)),
+            _ => {}
+        }
+    }
+    let mut parts = parts.into_iter();
     Ok(AlterTableDropColumnStatement {
+        if_exists,
+        only,
         table_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
         column_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
     })
@@ -6332,11 +6384,26 @@ fn build_alter_table_drop_column(
 fn build_alter_table_drop_constraint(
     pair: Pair<'_, Rule>,
 ) -> Result<AlterTableDropConstraintStatement, ParseError> {
-    let mut parts = pair
-        .into_inner()
-        .filter(|part| part.as_rule() == Rule::identifier)
-        .map(build_identifier);
+    let mut if_exists = false;
+    let mut only = false;
+    let mut parts = Vec::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::alter_table_target => {
+                let (parsed_if_exists, parsed_only, parsed_table_name) =
+                    build_alter_table_target(part)?;
+                if_exists = parsed_if_exists;
+                only = parsed_only;
+                parts.push(parsed_table_name);
+            }
+            Rule::identifier => parts.push(build_identifier(part)),
+            _ => {}
+        }
+    }
+    let mut parts = parts.into_iter();
     Ok(AlterTableDropConstraintStatement {
+        if_exists,
+        only,
         table_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
         constraint_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
     })
@@ -6345,12 +6412,21 @@ fn build_alter_table_drop_constraint(
 fn build_alter_table_alter_constraint(
     pair: Pair<'_, Rule>,
 ) -> Result<AlterTableAlterConstraintStatement, ParseError> {
+    let mut if_exists = false;
+    let mut only = false;
     let mut table_name = None;
     let mut constraint_name = None;
     let mut deferrable = None;
     let mut initially_deferred = None;
     for part in pair.into_inner() {
         match part.as_rule() {
+            Rule::alter_table_target => {
+                let (parsed_if_exists, parsed_only, parsed_table_name) =
+                    build_alter_table_target(part)?;
+                if_exists = parsed_if_exists;
+                only = parsed_only;
+                table_name = Some(parsed_table_name);
+            }
             Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
             Rule::identifier if constraint_name.is_none() => {
                 constraint_name = Some(build_identifier(part))
@@ -6374,6 +6450,8 @@ fn build_alter_table_alter_constraint(
         }
     }
     Ok(AlterTableAlterConstraintStatement {
+        if_exists,
+        only,
         table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
         constraint_name: constraint_name.ok_or(ParseError::UnexpectedEof)?,
         deferrable,
@@ -6384,11 +6462,26 @@ fn build_alter_table_alter_constraint(
 fn build_alter_table_rename_constraint(
     pair: Pair<'_, Rule>,
 ) -> Result<AlterTableRenameConstraintStatement, ParseError> {
-    let mut parts = pair
-        .into_inner()
-        .filter(|part| part.as_rule() == Rule::identifier)
-        .map(build_identifier);
+    let mut if_exists = false;
+    let mut only = false;
+    let mut parts = Vec::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::alter_table_target => {
+                let (parsed_if_exists, parsed_only, parsed_table_name) =
+                    build_alter_table_target(part)?;
+                if_exists = parsed_if_exists;
+                only = parsed_only;
+                parts.push(parsed_table_name);
+            }
+            Rule::identifier => parts.push(build_identifier(part)),
+            _ => {}
+        }
+    }
+    let mut parts = parts.into_iter();
     Ok(AlterTableRenameConstraintStatement {
+        if_exists,
+        only,
         table_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
         constraint_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
         new_constraint_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
@@ -6398,12 +6491,21 @@ fn build_alter_table_rename_constraint(
 fn build_alter_table_alter_column_type(
     pair: Pair<'_, Rule>,
 ) -> Result<AlterTableAlterColumnTypeStatement, ParseError> {
+    let mut if_exists = false;
+    let mut only = false;
     let mut table_name = None;
     let mut column_name = None;
     let mut ty = None;
     let mut using_expr = None;
     for part in pair.into_inner() {
         match part.as_rule() {
+            Rule::alter_table_target => {
+                let (parsed_if_exists, parsed_only, parsed_table_name) =
+                    build_alter_table_target(part)?;
+                if_exists = parsed_if_exists;
+                only = parsed_only;
+                table_name = Some(parsed_table_name);
+            }
             Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
             Rule::identifier if column_name.is_none() => column_name = Some(build_identifier(part)),
             Rule::alter_table_column_type_action => {
@@ -6425,6 +6527,8 @@ fn build_alter_table_alter_column_type(
         }
     }
     Ok(AlterTableAlterColumnTypeStatement {
+        if_exists,
+        only,
         table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
         column_name: column_name.ok_or(ParseError::UnexpectedEof)?,
         ty: ty.ok_or(ParseError::UnexpectedEof)?,
@@ -6435,11 +6539,26 @@ fn build_alter_table_alter_column_type(
 fn build_alter_table_set_not_null(
     pair: Pair<'_, Rule>,
 ) -> Result<AlterTableSetNotNullStatement, ParseError> {
-    let mut parts = pair
-        .into_inner()
-        .filter(|part| part.as_rule() == Rule::identifier)
-        .map(build_identifier);
+    let mut if_exists = false;
+    let mut only = false;
+    let mut parts = Vec::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::alter_table_target => {
+                let (parsed_if_exists, parsed_only, parsed_table_name) =
+                    build_alter_table_target(part)?;
+                if_exists = parsed_if_exists;
+                only = parsed_only;
+                parts.push(parsed_table_name);
+            }
+            Rule::identifier => parts.push(build_identifier(part)),
+            _ => {}
+        }
+    }
+    let mut parts = parts.into_iter();
     Ok(AlterTableSetNotNullStatement {
+        if_exists,
+        only,
         table_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
         column_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
     })
@@ -6448,11 +6567,26 @@ fn build_alter_table_set_not_null(
 fn build_alter_table_drop_not_null(
     pair: Pair<'_, Rule>,
 ) -> Result<AlterTableDropNotNullStatement, ParseError> {
-    let mut parts = pair
-        .into_inner()
-        .filter(|part| part.as_rule() == Rule::identifier)
-        .map(build_identifier);
+    let mut if_exists = false;
+    let mut only = false;
+    let mut parts = Vec::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::alter_table_target => {
+                let (parsed_if_exists, parsed_only, parsed_table_name) =
+                    build_alter_table_target(part)?;
+                if_exists = parsed_if_exists;
+                only = parsed_only;
+                parts.push(parsed_table_name);
+            }
+            Rule::identifier => parts.push(build_identifier(part)),
+            _ => {}
+        }
+    }
+    let mut parts = parts.into_iter();
     Ok(AlterTableDropNotNullStatement {
+        if_exists,
+        only,
         table_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
         column_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
     })
@@ -6461,11 +6595,26 @@ fn build_alter_table_drop_not_null(
 fn build_alter_table_validate_constraint(
     pair: Pair<'_, Rule>,
 ) -> Result<AlterTableValidateConstraintStatement, ParseError> {
-    let mut parts = pair
-        .into_inner()
-        .filter(|part| part.as_rule() == Rule::identifier)
-        .map(build_identifier);
+    let mut if_exists = false;
+    let mut only = false;
+    let mut parts = Vec::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::alter_table_target => {
+                let (parsed_if_exists, parsed_only, parsed_table_name) =
+                    build_alter_table_target(part)?;
+                if_exists = parsed_if_exists;
+                only = parsed_only;
+                parts.push(parsed_table_name);
+            }
+            Rule::identifier => parts.push(build_identifier(part)),
+            _ => {}
+        }
+    }
+    let mut parts = parts.into_iter();
     Ok(AlterTableValidateConstraintStatement {
+        if_exists,
+        only,
         table_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
         constraint_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
     })
@@ -6474,11 +6623,26 @@ fn build_alter_table_validate_constraint(
 fn build_alter_relation_owner(
     pair: Pair<'_, Rule>,
 ) -> Result<AlterRelationOwnerStatement, ParseError> {
-    let mut parts = pair
-        .into_inner()
-        .filter(|part| part.as_rule() == Rule::identifier)
-        .map(build_identifier);
+    let mut if_exists = false;
+    let mut only = false;
+    let mut parts = Vec::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::alter_table_target => {
+                let (parsed_if_exists, parsed_only, parsed_table_name) =
+                    build_alter_table_target(part)?;
+                if_exists = parsed_if_exists;
+                only = parsed_only;
+                parts.push(parsed_table_name);
+            }
+            Rule::identifier => parts.push(build_identifier(part)),
+            _ => {}
+        }
+    }
+    let mut parts = parts.into_iter();
     Ok(AlterRelationOwnerStatement {
+        if_exists,
+        only,
         relation_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
         new_owner: parts.next().ok_or(ParseError::UnexpectedEof)?,
     })
@@ -6496,11 +6660,26 @@ fn build_alter_schema_owner(pair: Pair<'_, Rule>) -> Result<AlterSchemaOwnerStat
 }
 
 fn build_alter_table_rename(pair: Pair<'_, Rule>) -> Result<AlterTableRenameStatement, ParseError> {
-    let mut parts = pair
-        .into_inner()
-        .filter(|part| part.as_rule() == Rule::identifier)
-        .map(build_identifier);
+    let mut if_exists = false;
+    let mut only = false;
+    let mut parts = Vec::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::alter_table_target => {
+                let (parsed_if_exists, parsed_only, parsed_table_name) =
+                    build_alter_table_target(part)?;
+                if_exists = parsed_if_exists;
+                only = parsed_only;
+                parts.push(parsed_table_name);
+            }
+            Rule::identifier => parts.push(build_identifier(part)),
+            _ => {}
+        }
+    }
+    let mut parts = parts.into_iter();
     Ok(AlterTableRenameStatement {
+        if_exists,
+        only,
         table_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
         new_table_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
     })
@@ -6509,15 +6688,45 @@ fn build_alter_table_rename(pair: Pair<'_, Rule>) -> Result<AlterTableRenameStat
 fn build_alter_table_rename_column(
     pair: Pair<'_, Rule>,
 ) -> Result<AlterTableRenameColumnStatement, ParseError> {
-    let mut parts = pair
-        .into_inner()
-        .filter(|part| part.as_rule() == Rule::identifier)
-        .map(build_identifier);
+    let mut if_exists = false;
+    let mut only = false;
+    let mut parts = Vec::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::alter_table_target => {
+                let (parsed_if_exists, parsed_only, parsed_table_name) =
+                    build_alter_table_target(part)?;
+                if_exists = parsed_if_exists;
+                only = parsed_only;
+                parts.push(parsed_table_name);
+            }
+            Rule::identifier => parts.push(build_identifier(part)),
+            _ => {}
+        }
+    }
+    let mut parts = parts.into_iter();
     Ok(AlterTableRenameColumnStatement {
+        if_exists,
+        only,
         table_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
         column_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
         new_column_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
     })
+}
+
+fn build_alter_table_target(pair: Pair<'_, Rule>) -> Result<(bool, bool, String), ParseError> {
+    let mut if_exists = false;
+    let mut only = false;
+    let mut table_name = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::if_exists_clause => if_exists = true,
+            Rule::only_clause => only = true,
+            Rule::identifier => table_name = Some(build_identifier(part)),
+            _ => {}
+        }
+    }
+    Ok((if_exists, only, table_name.ok_or(ParseError::UnexpectedEof)?))
 }
 
 fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
