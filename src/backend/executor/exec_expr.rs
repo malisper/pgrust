@@ -385,7 +385,6 @@ fn role_catalog(
         })
 }
 
->>>>>>> malisper/array-sql-gap-audit
 fn sequence_runtime(
     ctx: &ExecutorContext,
 ) -> Result<&crate::pgrust::database::SequenceRuntime, ExecError> {

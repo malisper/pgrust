@@ -498,6 +498,7 @@ Targeted reruns and notes:
   - Finish `to_char(numeric, ...)` parity in `expr_format.rs`, especially `FMS` formats, scientific-format hash width, and overflow/hash rendering for wide values and infinities
   - Finish `to_number(..., 'RN')` / Roman numeral parity, including the aggregate validation path that currently errors in the `bool_and(to_number(roman, 'RN') = i)` check
   - Fix numeric `power()` / `exp()` edge semantics so extreme underflows collapse to exact zero, `0 ^ 0` returns `1`, and negative-base exponent edge cases match PostgreSQL
+  - [done] Preserve PostgreSQL `power()` display scale for special finite results like `0 ^ 4.2` and `1 ^ 4.2`, which should render with 16 fractional digits instead of bare `0` / `1`
   - Align numeric `generate_series(...)` error text with PostgreSQL for `NaN` / infinity step values
   - Remove extra `CONTEXT` lines from builtin `log()` errors in this regression
   - [done] Fix numeric `variance` aggregation on tiny values so the scaled regression case returns PostgreSQL's `12e-1000` instead of rounding away to zero

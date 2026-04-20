@@ -7893,6 +7893,31 @@ fn numeric_power_zero_exponents_with_fractional_scale_follow_postgres() {
 }
 
 #[test]
+fn numeric_power_fractional_exponents_preserve_special_result_scale() {
+    let base = temp_dir("numeric_power_fractional_special_scale");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select 0::numeric ^ 4.2::numeric, \
+                0.0::numeric ^ 4.2::numeric, \
+                1::numeric ^ 4.2::numeric, \
+                1.0::numeric ^ 4.2::numeric",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Numeric("0.0000000000000000".into()),
+            Value::Numeric("0.0000000000000000".into()),
+            Value::Numeric("1.0000000000000000".into()),
+            Value::Numeric("1.0000000000000000".into()),
+        ]],
+    );
+}
+
+#[test]
 fn numeric_variance_preserves_tiny_values() {
     let base = temp_dir("numeric_variance_tiny_values");
     let txns = TransactionManager::new_durable(&base).unwrap();
