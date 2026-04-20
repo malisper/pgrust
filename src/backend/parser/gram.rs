@@ -3020,6 +3020,9 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
             inner,
         )?)),
         Rule::alter_table_set_stmt => Ok(Statement::AlterTableSet(build_alter_table_set(inner)?)),
+        Rule::alter_table_set_row_security_stmt => Ok(Statement::AlterTableSetRowSecurity(
+            build_alter_table_set_row_security(inner)?,
+        )),
         Rule::alter_table_set_not_null_stmt => Ok(Statement::AlterTableSetNotNull(
             build_alter_table_set_not_null(inner)?,
         )),
@@ -5558,6 +5561,56 @@ fn build_alter_table_set(pair: Pair<'_, Rule>) -> Result<AlterTableSetStatement,
         table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
         options,
     })
+}
+
+fn build_alter_table_set_row_security(
+    pair: Pair<'_, Rule>,
+) -> Result<AlterTableSetRowSecurityStatement, ParseError> {
+    let mut if_exists = false;
+    let mut only = false;
+    let mut table_name = None;
+    let mut action = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::alter_table_target => {
+                let (parsed_if_exists, parsed_only, parsed_table_name) =
+                    build_alter_table_target(part)?;
+                if_exists = parsed_if_exists;
+                only = parsed_only;
+                table_name = Some(parsed_table_name);
+            }
+            Rule::alter_table_row_security_action => {
+                action = Some(build_alter_table_row_security_action(part)?);
+            }
+            Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
+            _ => {}
+        }
+    }
+    Ok(AlterTableSetRowSecurityStatement {
+        if_exists,
+        only,
+        table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
+        action: action.ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
+fn build_alter_table_row_security_action(
+    pair: Pair<'_, Rule>,
+) -> Result<AlterTableRowSecurityAction, ParseError> {
+    let lowered = pair.as_str().to_ascii_lowercase();
+    if lowered.starts_with("enable ") {
+        return Ok(AlterTableRowSecurityAction::Enable);
+    }
+    if lowered.starts_with("disable ") {
+        return Ok(AlterTableRowSecurityAction::Disable);
+    }
+    if lowered.starts_with("no force ") {
+        return Ok(AlterTableRowSecurityAction::NoForce);
+    }
+    if lowered.starts_with("force ") {
+        return Ok(AlterTableRowSecurityAction::Force);
+    }
+    Err(ParseError::UnexpectedEof)
 }
 
 fn build_comment_on_table(pair: Pair<'_, Rule>) -> Result<CommentOnTableStatement, ParseError> {

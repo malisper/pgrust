@@ -12692,6 +12692,59 @@ fn create_trigger_updates_pg_trigger_and_relhastriggers() {
 }
 
 #[test]
+fn alter_table_row_security_flags_update_pg_class() {
+    let dir = temp_dir("alter_table_row_security_flags");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table items (id int4)").unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relrowsecurity, relforcerowsecurity from pg_class where relname = 'items'",
+        ),
+        vec![vec![Value::Bool(false), Value::Bool(false)]]
+    );
+
+    db.execute(1, "alter table items enable row level security")
+        .unwrap();
+    db.execute(1, "alter table items force row level security")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relrowsecurity, relforcerowsecurity from pg_class where relname = 'items'",
+        ),
+        vec![vec![Value::Bool(true), Value::Bool(true)]]
+    );
+
+    db.execute(1, "alter table items no force row level security")
+        .unwrap();
+    db.execute(1, "alter table items disable row level security")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relrowsecurity, relforcerowsecurity from pg_class where relname = 'items'",
+        ),
+        vec![vec![Value::Bool(false), Value::Bool(false)]]
+    );
+}
+
+#[test]
+fn alter_table_row_security_if_exists_ignores_missing_table() {
+    let dir = temp_dir("alter_table_row_security_if_exists");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "alter table if exists missing enable row level security")
+        .unwrap();
+    db.execute(1, "alter table if exists missing no force row level security")
+        .unwrap();
+}
+
+#[test]
 fn before_insert_trigger_can_mutate_new_and_skip_rows() {
     let dir = temp_dir("before_insert_trigger_mutate_skip");
     let db = Database::open(&dir, 64).unwrap();

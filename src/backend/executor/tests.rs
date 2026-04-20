@@ -143,6 +143,8 @@ fn test_catalog_entry(rel: RelFileLocator, desc: RelationDesc) -> CatalogEntry {
         relhastriggers: false,
         relhassubclass: false,
         relispartition: false,
+        relrowsecurity: false,
+        relforcerowsecurity: false,
         relpages: 0,
         reltuples: 0.0,
         rel,

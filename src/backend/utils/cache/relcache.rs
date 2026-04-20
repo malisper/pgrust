@@ -56,6 +56,8 @@ pub struct RelCacheEntry {
     pub relpersistence: char,
     pub relkind: char,
     pub relhastriggers: bool,
+    pub relrowsecurity: bool,
+    pub relforcerowsecurity: bool,
     pub desc: RelationDesc,
     pub index: Option<IndexRelCacheEntry>,
 }
@@ -201,6 +203,8 @@ impl RelCache {
                 relpersistence: class.relpersistence,
                 relkind: class.relkind,
                 relhastriggers: class.relhastriggers,
+                relrowsecurity: class.relrowsecurity,
+                relforcerowsecurity: class.relforcerowsecurity,
                 desc: RelationDesc { columns },
                 index: class.relkind.eq(&'i').then(|| {
                     let Some(index) = catcache
@@ -393,6 +397,8 @@ fn from_catalog_entry(entry: &CatalogEntry) -> RelCacheEntry {
         relpersistence: entry.relpersistence,
         relkind: entry.relkind,
         relhastriggers: entry.relhastriggers,
+        relrowsecurity: entry.relrowsecurity,
+        relforcerowsecurity: entry.relforcerowsecurity,
         desc: entry.desc.clone(),
         index: entry.index_meta.as_ref().map(|index| IndexRelCacheEntry {
             indexrelid: entry.relation_oid,

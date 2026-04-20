@@ -168,6 +168,8 @@ impl Database {
                 relpersistence: 't',
                 relkind: 'n',
                 relhastriggers: false,
+                relrowsecurity: false,
+                relforcerowsecurity: false,
                 desc: crate::backend::executor::RelationDesc {
                     columns: Vec::new(),
                 },
@@ -282,6 +284,8 @@ impl Database {
             relpersistence: created.entry.relpersistence,
             relkind: created.entry.relkind,
             relhastriggers: created.entry.relhastriggers,
+            relrowsecurity: created.entry.relrowsecurity,
+            relforcerowsecurity: created.entry.relforcerowsecurity,
             desc: created.entry.desc.clone(),
             index: None,
         };

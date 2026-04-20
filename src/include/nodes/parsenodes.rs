@@ -249,6 +249,7 @@ pub enum Statement {
     AlterViewOwner(AlterRelationOwnerStatement),
     AlterSchemaOwner(AlterSchemaOwnerStatement),
     AlterTableSet(AlterTableSetStatement),
+    AlterTableSetRowSecurity(AlterTableSetRowSecurityStatement),
     AlterTableSetNotNull(AlterTableSetNotNullStatement),
     AlterTableDropNotNull(AlterTableDropNotNullStatement),
     AlterTableValidateConstraint(AlterTableValidateConstraintStatement),
@@ -1091,6 +1092,22 @@ pub struct AlterTableSetStatement {
     pub only: bool,
     pub table_name: String,
     pub options: Vec<RelOption>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlterTableRowSecurityAction {
+    Enable,
+    Disable,
+    Force,
+    NoForce,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableSetRowSecurityStatement {
+    pub if_exists: bool,
+    pub only: bool,
+    pub table_name: String,
+    pub action: AlterTableRowSecurityAction,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
