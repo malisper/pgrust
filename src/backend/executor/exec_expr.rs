@@ -384,8 +384,7 @@ fn role_catalog(
         })
 }
 
-fn eval_regrole_to_text(value: &Value, ctx: &ExecutorContext) -> Result<Value, ExecError> {
-    let oid = oid_arg_to_u32(value, "regrole_to_text")?;
+fn auth_role_name(ctx: &ExecutorContext, oid: u32) -> Result<Value, ExecError> {
     let Some(role_name) = role_catalog(ctx)?
         .authid_rows()
         .into_iter()
@@ -400,6 +399,11 @@ fn eval_regrole_to_text(value: &Value, ctx: &ExecutorContext) -> Result<Value, E
         });
     };
     Ok(Value::Text(role_name.into()))
+}
+
+fn eval_regrole_to_text(value: &Value, ctx: &ExecutorContext) -> Result<Value, ExecError> {
+    let oid = oid_arg_to_u32(value, "regrole_to_text")?;
+    auth_role_name(ctx, oid)
 }
 
 fn sequence_runtime(
@@ -1105,6 +1109,8 @@ pub fn eval_expr(
         }
         Expr::Random => Ok(Value::Float64(rand::random::<f64>())),
         Expr::CurrentDate => Ok(current_date_value_with_config(&ctx.datetime_config)),
+        Expr::CurrentUser | Expr::CurrentRole => auth_role_name(ctx, ctx.current_user_oid),
+        Expr::SessionUser => auth_role_name(ctx, ctx.session_user_oid),
         Expr::CurrentTime { precision } => Ok(current_time_value_with_config(
             &ctx.datetime_config,
             *precision,

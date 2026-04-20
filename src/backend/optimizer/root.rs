@@ -372,6 +372,9 @@ fn expr_contains_window_func(expr: &Expr) -> bool {
         | Expr::Const(_)
         | Expr::Random
         | Expr::CurrentDate
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
         | Expr::LocalTime { .. }
@@ -533,6 +536,9 @@ fn collect_group_input_exprs(expr: &Expr, group_by: &[Expr], exprs: &mut Vec<Exp
         Expr::Const(_)
         | Expr::Random
         | Expr::CurrentDate
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
         | Expr::LocalTime { .. }
@@ -663,6 +669,9 @@ fn collect_supporting_inputs(expr: &Expr, exprs: &mut Vec<Expr>) {
         Expr::Const(_)
         | Expr::Random
         | Expr::CurrentDate
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
         | Expr::LocalTime { .. }
@@ -804,6 +813,9 @@ fn collect_query_outer_refs_expr(expr: &Expr, levelsup: usize, exprs: &mut Vec<E
         ),
         Expr::Var(_) | Expr::Param(_) | Expr::Const(_) | Expr::Random => {}
         Expr::CurrentDate
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
         | Expr::LocalTime { .. }

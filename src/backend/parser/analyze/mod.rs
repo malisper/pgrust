@@ -1723,6 +1723,8 @@ impl<'a> RecursiveReferenceChecker<'a> {
             | SqlExpr::Random
             | SqlExpr::CurrentDate
             | SqlExpr::CurrentUser
+            | SqlExpr::SessionUser
+            | SqlExpr::CurrentRole
             | SqlExpr::CurrentTime { .. }
             | SqlExpr::CurrentTimestamp { .. }
             | SqlExpr::LocalTime { .. }
@@ -2016,6 +2018,8 @@ fn sql_expr_references_table(expr: &SqlExpr, table_name: &str) -> bool {
         | SqlExpr::Random
         | SqlExpr::CurrentDate
         | SqlExpr::CurrentUser
+        | SqlExpr::SessionUser
+        | SqlExpr::CurrentRole
         | SqlExpr::CurrentTime { .. }
         | SqlExpr::CurrentTimestamp { .. }
         | SqlExpr::LocalTime { .. }
