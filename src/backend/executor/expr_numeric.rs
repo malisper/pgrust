@@ -751,13 +751,16 @@ fn eval_power_numeric(base: &NumericValue, exp: &NumericValue) -> Result<Numeric
     if let Some(exp_i64) = finite_integer(exp) {
         return numeric_pow_integer(base, exp_i64, finite_dscale(exp));
     }
+    let special_result_scale = choose_power_result_scale(base, finite_dscale(exp), 0.0);
     match base {
-        NumericValue::Finite { coeff, .. } if coeff.is_zero() => Ok(NumericValue::zero()),
+        NumericValue::Finite { coeff, .. } if coeff.is_zero() => {
+            Ok(NumericValue::zero().with_dscale(special_result_scale))
+        }
         NumericValue::Finite { coeff, .. } if coeff.is_negative() => Err(numeric_domain_error(
             "a negative number raised to a non-integer power yields a complex result",
         )),
         _ if base.cmp(&NumericValue::from_i64(1)) == Ordering::Equal => {
-            Ok(NumericValue::from_i64(1))
+            Ok(NumericValue::from_i64(1).with_dscale(special_result_scale))
         }
         _ => {
             let ln_dweight = estimate_ln_dweight(base);
