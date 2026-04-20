@@ -14,7 +14,7 @@ use crate::include::nodes::primnodes::{ColumnDesc, RelationDesc};
 use crate::pgrust::database::default_sequence_oid_from_default_expr;
 
 const RELCACHE_INIT_MAGIC: u32 = 0x5052_494E;
-const RELCACHE_INIT_VERSION: u32 = 2;
+const RELCACHE_INIT_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 enum RelCacheInitScopeFile {
@@ -48,6 +48,8 @@ struct RelCacheEntryFile {
     relpersistence: char,
     relkind: char,
     relhastriggers: bool,
+    relrowsecurity: bool,
+    relforcerowsecurity: bool,
     desc: RelationDescFile,
     index: Option<IndexRelCacheEntry>,
 }
@@ -193,6 +195,8 @@ fn relcache_entry_to_file(entry: &RelCacheEntry) -> RelCacheEntryFile {
         relpersistence: entry.relpersistence,
         relkind: entry.relkind,
         relhastriggers: entry.relhastriggers,
+        relrowsecurity: entry.relrowsecurity,
+        relforcerowsecurity: entry.relforcerowsecurity,
         desc: RelationDescFile {
             columns: entry.desc.columns.iter().map(column_desc_to_file).collect(),
         },
@@ -212,6 +216,8 @@ fn relcache_entry_from_file(entry: RelCacheEntryFile) -> RelCacheEntry {
         relpersistence: entry.relpersistence,
         relkind: entry.relkind,
         relhastriggers: entry.relhastriggers,
+        relrowsecurity: entry.relrowsecurity,
+        relforcerowsecurity: entry.relforcerowsecurity,
         desc: RelationDesc {
             columns: entry
                 .desc

@@ -352,6 +352,8 @@ pub(crate) fn catalog_from_physical_rows_scoped(
                 relhassubclass: row.relhassubclass,
                 relhastriggers: row.relhastriggers,
                 relispartition: row.relispartition,
+                relrowsecurity: row.relrowsecurity,
+                relforcerowsecurity: row.relforcerowsecurity,
                 relpages: row.relpages,
                 reltuples: row.reltuples,
                 desc: RelationDesc { columns },
