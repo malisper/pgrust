@@ -7,6 +7,15 @@ use crate::include::catalog::PG_CATALOG_NAMESPACE_OID;
 use crate::pgrust::database::ddl::{
     lookup_heap_relation_for_alter_table, validate_alter_table_alter_column_type,
 };
+use std::collections::BTreeSet;
+
+struct AlterColumnTypeTarget {
+    relation: crate::backend::parser::BoundRelation,
+    new_desc: RelationDesc,
+    rewrite_expr: crate::backend::executor::Expr,
+    column_index: usize,
+    indexes: Vec<crate::backend::parser::BoundIndexRelation>,
+}
 
 fn reject_unsupported_alter_column_type_indexes(
     indexes: &[crate::backend::parser::BoundIndexRelation],
@@ -70,6 +79,129 @@ fn rewrite_heap_rows_for_alter_column_type(
         maintain_indexes_for_row(relation.rel, new_desc, indexes, &values, new_tid, ctx)?;
     }
     Ok(())
+}
+
+fn relation_name_for_error(catalog: &dyn CatalogLookup, relation_oid: u32) -> String {
+    catalog
+        .class_row_by_oid(relation_oid)
+        .map(|row| row.relname)
+        .unwrap_or_else(|| relation_oid.to_string())
+}
+
+fn reject_inherited_type_change_conflicts(
+    catalog: &dyn CatalogLookup,
+    target_relation_oids: &BTreeSet<u32>,
+    relation: &crate::backend::parser::BoundRelation,
+    column_name: &str,
+    new_sql_type: crate::backend::parser::SqlType,
+) -> Result<(), ExecError> {
+    for parent in catalog.inheritance_parents(relation.relation_oid) {
+        if target_relation_oids.contains(&parent.inhparent) {
+            continue;
+        }
+        let Some(parent_relation) = catalog.lookup_relation_by_oid(parent.inhparent) else {
+            continue;
+        };
+        let Some(parent_column) = parent_relation
+            .desc
+            .columns
+            .iter()
+            .find(|column| !column.dropped && column.name.eq_ignore_ascii_case(column_name))
+        else {
+            continue;
+        };
+        if parent_column.sql_type != new_sql_type {
+            let relation_name = relation_name_for_error(catalog, relation.relation_oid);
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "cannot alter inherited column \"{column_name}\" of relation \"{relation_name}\""
+                ),
+                detail: Some(format!(
+                    "child table \"{relation_name}\" has conflicting inherited definition for column \"{column_name}\""
+                )),
+                hint: None,
+                sqlstate: "0A000",
+            });
+        }
+    }
+    Ok(())
+}
+
+fn collect_alter_column_type_targets(
+    db: &Database,
+    catalog: &dyn CatalogLookup,
+    client_id: ClientId,
+    xid: TransactionId,
+    cid: CommandId,
+    relation: &crate::backend::parser::BoundRelation,
+    alter_stmt: &crate::backend::parser::AlterTableAlterColumnTypeStatement,
+) -> Result<Vec<AlterColumnTypeTarget>, ExecError> {
+    let target_relation_oids = catalog
+        .find_all_inheritors(relation.relation_oid)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let mut targets = Vec::with_capacity(target_relation_oids.len());
+
+    for relation_oid in &target_relation_oids {
+        let target_relation = if *relation_oid == relation.relation_oid {
+            relation.clone()
+        } else {
+            catalog.lookup_relation_by_oid(*relation_oid).ok_or_else(|| {
+                ExecError::Parse(ParseError::UnknownTable(relation_oid.to_string()))
+            })?
+        };
+        if target_relation.namespace_oid == PG_CATALOG_NAMESPACE_OID {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "user table for ALTER TABLE ALTER COLUMN TYPE",
+                actual: "system catalog".into(),
+            }));
+        }
+        reject_relation_with_dependent_views(
+            db,
+            client_id,
+            Some((xid, cid)),
+            target_relation.relation_oid,
+            "ALTER TABLE ALTER COLUMN TYPE on relation without dependent views",
+        )?;
+        let plan = validate_alter_table_alter_column_type(
+            catalog,
+            &target_relation.desc,
+            &alter_stmt.column_name,
+            &alter_stmt.ty,
+            if *relation_oid == relation.relation_oid {
+                alter_stmt.using_expr.as_ref()
+            } else {
+                None
+            },
+        )?;
+        reject_inherited_type_change_conflicts(
+            catalog,
+            &target_relation_oids,
+            &target_relation,
+            &alter_stmt.column_name,
+            plan.new_column.sql_type,
+        )?;
+        reject_column_with_foreign_key_dependencies(
+            catalog,
+            target_relation.relation_oid,
+            &target_relation.desc.columns[plan.column_index].name,
+            (plan.column_index + 1) as i16,
+            "ALTER TABLE ALTER COLUMN TYPE on column without foreign key dependencies",
+        )?;
+        let indexes = catalog.index_relations_for_heap(target_relation.relation_oid);
+        reject_unsupported_alter_column_type_indexes(&indexes, plan.column_index)?;
+        let mut new_desc = target_relation.desc.clone();
+        new_desc.columns[plan.column_index] = plan.new_column;
+        targets.push(AlterColumnTypeTarget {
+            relation: target_relation,
+            new_desc,
+            rewrite_expr: plan.rewrite_expr,
+            column_index: plan.column_index,
+            indexes,
+        });
+    }
+
+    Ok(targets)
 }
 
 impl Database {
@@ -138,39 +270,11 @@ impl Database {
                 actual: "system catalog".into(),
             }));
         }
-        if relation.relpersistence == 't' {
-            return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "permanent table for ALTER TABLE ALTER COLUMN TYPE",
-                actual: "temporary table".into(),
-            }));
-        }
         ensure_relation_owner(self, client_id, &relation, &alter_stmt.table_name)?;
-        reject_relation_with_dependent_views(
-            self,
-            client_id,
-            Some((xid, cid)),
-            relation.relation_oid,
-            "ALTER TABLE ALTER COLUMN TYPE on relation without dependent views",
+        let targets = collect_alter_column_type_targets(
+            self, &catalog, client_id, xid, cid, &relation, alter_stmt,
         )?;
-        let plan = validate_alter_table_alter_column_type(
-            &catalog,
-            &relation.desc,
-            &alter_stmt.column_name,
-            &alter_stmt.ty,
-            alter_stmt.using_expr.as_ref(),
-        )?;
-        reject_column_with_foreign_key_dependencies(
-            &catalog,
-            relation.relation_oid,
-            &relation.desc.columns[plan.column_index].name,
-            (plan.column_index + 1) as i16,
-            "ALTER TABLE ALTER COLUMN TYPE on column without foreign key dependencies",
-        )?;
-        let indexes = catalog.index_relations_for_heap(relation.relation_oid);
-        reject_unsupported_alter_column_type_indexes(&indexes, plan.column_index)?;
 
-        let mut new_desc = relation.desc.clone();
-        new_desc.columns[plan.column_index] = plan.new_column.clone();
         let snapshot = self.txns.read().snapshot_for_command(xid, cid)?;
         let mut ctx = ExecutorContext {
             pool: std::sync::Arc::clone(&self.pool),
@@ -200,17 +304,19 @@ impl Database {
             recursive_worktables: std::collections::HashMap::new(),
             deferred_foreign_keys: None,
         };
-        rewrite_heap_rows_for_alter_column_type(
-            self,
-            &relation,
-            &new_desc,
-            &indexes,
-            plan.column_index,
-            &plan.rewrite_expr,
-            &mut ctx,
-            xid,
-            cid,
-        )?;
+        for target in &targets {
+            rewrite_heap_rows_for_alter_column_type(
+                self,
+                &target.relation,
+                &target.new_desc,
+                &target.indexes,
+                target.column_index,
+                &target.rewrite_expr,
+                &mut ctx,
+                xid,
+                cid,
+            )?;
+        }
         drop(ctx);
 
         let ctx = CatalogWriteContext {
@@ -222,17 +328,26 @@ impl Database {
             waiter: None,
             interrupts,
         };
-        let effect = self
-            .catalog
-            .write()
-            .alter_table_alter_column_type_mvcc(
-                relation.relation_oid,
-                &alter_stmt.column_name,
-                plan.new_column,
-                &ctx,
-            )
-            .map_err(map_catalog_error)?;
-        catalog_effects.push(effect);
+        for target in targets {
+            let effect = self
+                .catalog
+                .write()
+                .alter_table_alter_column_type_mvcc(
+                    target.relation.relation_oid,
+                    &alter_stmt.column_name,
+                    target.new_desc.columns[target.column_index].clone(),
+                    &ctx,
+                )
+                .map_err(map_catalog_error)?;
+            catalog_effects.push(effect);
+            if target.relation.relpersistence == 't' {
+                self.replace_temp_entry_desc(
+                    client_id,
+                    target.relation.relation_oid,
+                    target.new_desc,
+                )?;
+            }
+        }
         Ok(StatementResult::AffectedRows(0))
     }
 }
