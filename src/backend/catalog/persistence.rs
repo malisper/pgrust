@@ -24,7 +24,9 @@ use crate::backend::storage::smgr::ForkNumber;
 use crate::backend::storage::smgr::{MdStorageManager, RelFileLocator, StorageManager};
 use crate::backend::utils::misc::interrupts::InterruptState;
 use crate::include::access::itemptr::ItemPointerData;
-use crate::include::catalog::{BootstrapCatalogKind, bootstrap_catalog_kinds, bootstrap_relation_desc};
+use crate::include::catalog::{
+    BootstrapCatalogKind, bootstrap_catalog_kinds, bootstrap_relation_desc,
+};
 use crate::include::nodes::datum::Value;
 
 #[allow(dead_code)]

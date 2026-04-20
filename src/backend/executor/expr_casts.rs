@@ -236,9 +236,7 @@ fn numeric_input_would_overflow(text: &str) -> bool {
         return false;
     }
 
-    let unsigned = trimmed
-        .strip_prefix(['+', '-'])
-        .unwrap_or(trimmed);
+    let unsigned = trimmed.strip_prefix(['+', '-']).unwrap_or(trimmed);
 
     if let Some(rest) = unsigned
         .strip_prefix("0x")
@@ -248,27 +246,32 @@ fn numeric_input_would_overflow(text: &str) -> bool {
         let Some(digits) = normalize_numeric_input_digits(rest, |ch| ch.is_ascii_hexdigit()) else {
             return false;
         };
-        return digits.trim_start_matches('0').len() as i32 > NUMERIC_MAX_INPUT_DIGITS_BEFORE_DECIMAL;
+        return digits.trim_start_matches('0').len() as i32
+            > NUMERIC_MAX_INPUT_DIGITS_BEFORE_DECIMAL;
     }
     if let Some(rest) = unsigned
         .strip_prefix("0o")
         .or_else(|| unsigned.strip_prefix("0O"))
     {
         let rest = rest.strip_prefix('_').unwrap_or(rest);
-        let Some(digits) = normalize_numeric_input_digits(rest, |ch| matches!(ch, '0'..='7')) else {
+        let Some(digits) = normalize_numeric_input_digits(rest, |ch| matches!(ch, '0'..='7'))
+        else {
             return false;
         };
-        return digits.trim_start_matches('0').len() as i32 > NUMERIC_MAX_INPUT_DIGITS_BEFORE_DECIMAL;
+        return digits.trim_start_matches('0').len() as i32
+            > NUMERIC_MAX_INPUT_DIGITS_BEFORE_DECIMAL;
     }
     if let Some(rest) = unsigned
         .strip_prefix("0b")
         .or_else(|| unsigned.strip_prefix("0B"))
     {
         let rest = rest.strip_prefix('_').unwrap_or(rest);
-        let Some(digits) = normalize_numeric_input_digits(rest, |ch| matches!(ch, '0' | '1')) else {
+        let Some(digits) = normalize_numeric_input_digits(rest, |ch| matches!(ch, '0' | '1'))
+        else {
             return false;
         };
-        return digits.trim_start_matches('0').len() as i32 > NUMERIC_MAX_INPUT_DIGITS_BEFORE_DECIMAL;
+        return digits.trim_start_matches('0').len() as i32
+            > NUMERIC_MAX_INPUT_DIGITS_BEFORE_DECIMAL;
     }
 
     let (mantissa, exponent) = match trimmed.find(['e', 'E']) {
@@ -310,7 +313,9 @@ fn numeric_input_would_overflow(text: &str) -> bool {
     digits_before_decimal > NUMERIC_MAX_INPUT_DIGITS_BEFORE_DECIMAL
 }
 
-fn parse_numeric_input_value(text: &str) -> Result<crate::include::nodes::datum::NumericValue, ExecError> {
+fn parse_numeric_input_value(
+    text: &str,
+) -> Result<crate::include::nodes::datum::NumericValue, ExecError> {
     if numeric_input_would_overflow(text) {
         return Err(ExecError::NumericFieldOverflow);
     }
