@@ -1528,10 +1528,22 @@ pub fn execute_insert(
     let result = (|| {
         let values = materialize_insert_rows(&stmt, catalog, ctx)?;
 
-        let inserted = if let Some(on_conflict) = stmt.on_conflict.as_ref() {
-            execute_insert_on_conflict_rows(&stmt, on_conflict, &values, ctx, xid, cid)?
+        if stmt.returning_all && stmt.on_conflict.is_some() {
+            return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                "INSERT ... ON CONFLICT ... RETURNING is not supported yet".into(),
+            )));
+        }
+
+        let returned_rows = if let Some(on_conflict) = stmt.on_conflict.as_ref() {
+            let inserted = execute_insert_on_conflict_rows(&stmt, on_conflict, &values, ctx, xid, cid)?;
+            for _ in 0..inserted {
+                ctx.session_stats
+                    .write()
+                    .note_relation_insert(stmt.relation_oid);
+            }
+            return Ok(StatementResult::AffectedRows(inserted));
         } else {
-            let inserted = execute_insert_values(
+            let returned_rows = execute_insert_rows(
                 &stmt.relation_name,
                 stmt.relation_oid,
                 stmt.rel,
@@ -1545,14 +1557,18 @@ pub fn execute_insert(
                 xid,
                 cid,
             )?;
-            for _ in 0..inserted {
+            for _ in 0..returned_rows.len() {
                 ctx.session_stats
                     .write()
                     .note_relation_insert(stmt.relation_oid);
             }
-            inserted
+            returned_rows
         };
-        Ok(StatementResult::AffectedRows(inserted))
+        if stmt.returning_all {
+            Ok(build_returning_result(&stmt.desc, returned_rows))
+        } else {
+            Ok(StatementResult::AffectedRows(returned_rows.len()))
+        }
     })();
     ctx.subplans = saved_subplans;
     result
@@ -2071,7 +2087,12 @@ pub(crate) fn apply_assignment_target(
         })
         .collect::<Result<Vec<_>, ExecError>>()?;
     let current = values[target.column_index].clone();
-    values[target.column_index] = assign_array_value(current, &resolved, value)?;
+    let column_type = desc.columns[target.column_index].sql_type;
+    values[target.column_index] = if column_type.kind == SqlTypeKind::Point && !column_type.is_array {
+        assign_point_value(current, &resolved, value)?
+    } else {
+        assign_array_value(current, &resolved, value)?
+    };
     Ok(())
 }
 
@@ -2182,6 +2203,9 @@ fn assignment_target_sql_type(desc: &RelationDesc, target: &BoundAssignmentTarge
     if target.subscripts.is_empty() {
         return column_type;
     }
+    if column_type.kind == SqlTypeKind::Point && !column_type.is_array {
+        return SqlType::new(SqlTypeKind::Float8);
+    }
     if target.subscripts.iter().any(|subscript| subscript.is_slice) {
         return SqlType::array_of(column_type.element_type());
     }
@@ -2193,6 +2217,59 @@ struct ResolvedAssignmentSubscript {
     is_slice: bool,
     lower: Option<Value>,
     upper: Option<Value>,
+}
+
+fn assign_point_value(
+    current: Value,
+    subscripts: &[ResolvedAssignmentSubscript],
+    replacement: Value,
+) -> Result<Value, ExecError> {
+    if subscripts.len() != 1 {
+        return Err(array_assignment_error("wrong number of array subscripts"));
+    }
+    let subscript = &subscripts[0];
+    if subscript.is_slice {
+        return Err(ExecError::DetailedError {
+            message: "slices of fixed-length arrays not implemented".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
+    }
+    let Some(index) = assignment_subscript_index(subscript.lower.as_ref())? else {
+        return Err(assignment_null_subscript_error());
+    };
+    if !(0..=1).contains(&index) {
+        return Err(array_assignment_error("array subscript out of range"));
+    }
+    let Value::Point(mut point) = current else {
+        return if matches!(current, Value::Null) {
+            Ok(Value::Null)
+        } else {
+            Err(ExecError::TypeMismatch {
+                op: "array assignment",
+                left: current,
+                right: Value::Null,
+            })
+        };
+    };
+    let coordinate = match replacement {
+        Value::Null => return Ok(Value::Point(point)),
+        Value::Float64(value) => value,
+        other => {
+            return Err(ExecError::TypeMismatch {
+                op: "array assignment",
+                left: Value::Point(point),
+                right: other,
+            });
+        }
+    };
+    if index == 0 {
+        point.x = coordinate;
+    } else {
+        point.y = coordinate;
+    }
+    Ok(Value::Point(point))
 }
 
 fn assign_array_value(
@@ -2692,7 +2769,32 @@ fn modified_attnums_for_update(assignments: &[BoundAssignment]) -> Vec<i16> {
         .collect()
 }
 
-pub fn execute_insert_values(
+fn build_returning_result(desc: &RelationDesc, rows: Vec<Vec<Value>>) -> StatementResult {
+    let visible = desc.visible_column_indexes();
+    let columns = visible
+        .iter()
+        .map(|index| {
+            let column = &desc.columns[*index];
+            crate::include::nodes::primnodes::QueryColumn {
+                name: column.name.clone(),
+                sql_type: column.sql_type,
+                wire_type_oid: None,
+            }
+        })
+        .collect::<Vec<_>>();
+    let column_names = columns.iter().map(|column| column.name.clone()).collect();
+    let rows = rows
+        .into_iter()
+        .map(|row| visible.iter().map(|index| row[*index].clone()).collect())
+        .collect();
+    StatementResult::Query {
+        columns,
+        column_names,
+        rows,
+    }
+}
+
+fn execute_insert_rows(
     relation_name: &str,
     relation_oid: u32,
     rel: crate::backend::storage::smgr::RelFileLocator,
@@ -2705,7 +2807,7 @@ pub fn execute_insert_values(
     ctx: &mut ExecutorContext,
     xid: TransactionId,
     cid: CommandId,
-) -> Result<usize, ExecError> {
+) -> Result<Vec<Vec<Value>>, ExecError> {
     let triggers = ctx
         .catalog
         .as_ref()
@@ -2724,7 +2826,7 @@ pub fn execute_insert_values(
         triggers.before_statement(ctx)?;
     }
 
-    let mut inserted = 0usize;
+    let mut inserted_rows = Vec::new();
     for values in rows {
         let Some(values) = (match &triggers {
             Some(triggers) => triggers.before_row_insert(values.clone(), ctx)?,
@@ -2745,7 +2847,7 @@ pub fn execute_insert_values(
             cid,
         )?;
         maintain_indexes_for_row(rel, desc, indexes, &values, heap_tid, ctx)?;
-        inserted += 1;
+        inserted_rows.push(values.clone());
         if let Some(triggers) = &triggers {
             triggers.after_row_insert(&values, ctx)?;
         }
@@ -2755,7 +2857,40 @@ pub fn execute_insert_values(
         triggers.after_statement(ctx)?;
     }
 
-    Ok(inserted)
+    Ok(inserted_rows)
+}
+
+pub fn execute_insert_values(
+    relation_name: &str,
+    relation_oid: u32,
+    rel: crate::backend::storage::smgr::RelFileLocator,
+    toast: Option<ToastRelationRef>,
+    toast_index: Option<&BoundIndexRelation>,
+    desc: &RelationDesc,
+    relation_constraints: &BoundRelationConstraints,
+    indexes: &[BoundIndexRelation],
+    rows: &[Vec<Value>],
+    ctx: &mut ExecutorContext,
+    xid: TransactionId,
+    cid: CommandId,
+) -> Result<usize, ExecError> {
+    Ok(
+        execute_insert_rows(
+            relation_name,
+            relation_oid,
+            rel,
+            toast,
+            toast_index,
+            desc,
+            relation_constraints,
+            indexes,
+            rows,
+            ctx,
+            xid,
+            cid,
+        )?
+        .len(),
+    )
 }
 
 /// Execute a single-row insert from a prepared insert plan and parameter values.
@@ -2859,6 +2994,7 @@ pub fn execute_update_with_waiter(
     let saved_subplans = std::mem::replace(&mut ctx.subplans, stmt.subplans.clone());
     let result = (|| {
         let mut affected_rows = 0;
+        let mut returned_rows = Vec::new();
 
         for target in &stmt.targets {
             let modified_attnums = modified_attnums_for_update(&target.assignments);
@@ -2968,6 +3104,9 @@ pub fn execute_update_with_waiter(
                                     ctx,
                                 )?;
                             }
+                            if stmt.returning_all {
+                                returned_rows.push(triggered_values.clone());
+                            }
                             affected_rows += 1;
                             break;
                         }
@@ -3022,7 +3161,23 @@ pub fn execute_update_with_waiter(
             }
         }
 
-        Ok(StatementResult::AffectedRows(affected_rows))
+        if stmt.returning_all {
+            let desc = stmt
+                .targets
+                .first()
+                .map(|target| &target.desc)
+                .ok_or_else(|| {
+                    ExecError::DetailedError {
+                        message: "UPDATE RETURNING requires at least one target relation".into(),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "XX000",
+                    }
+                })?;
+            Ok(build_returning_result(desc, returned_rows))
+        } else {
+            Ok(StatementResult::AffectedRows(affected_rows))
+        }
     })();
     ctx.subplans = saved_subplans;
     result

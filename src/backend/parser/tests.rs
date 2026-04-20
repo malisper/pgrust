@@ -4255,6 +4255,7 @@ fn parse_create_rule_single_action() {
                         SqlExpr::Column("new.id".into()),
                     ]]),
                     on_conflict: None,
+                    returning_all: false,
                 }),
                 sql: "insert into pets values (new.id, new.id)".into(),
             }],
@@ -4435,6 +4436,7 @@ fn people_insert_with_on_conflict(
             assignments,
             where_clause,
         }),
+        returning_all: false,
     }
 }
 
@@ -7595,6 +7597,27 @@ fn parse_insert_alias_and_begin_isolation_level() {
     assert!(matches!(
         parse_statement("begin transaction isolation level repeatable read").unwrap(),
         Statement::Begin
+    ));
+}
+
+#[test]
+fn parse_insert_and_update_returning_star() {
+    assert!(matches!(
+        parse_statement("insert into people (id) values (1) returning *").unwrap(),
+        Statement::Insert(InsertStatement {
+            table_name,
+            returning_all,
+            ..
+        }) if table_name == "people" && returning_all
+    ));
+
+    assert!(matches!(
+        parse_statement("update people set name = 'alice' returning *").unwrap(),
+        Statement::Update(UpdateStatement {
+            table_name,
+            returning_all,
+            ..
+        }) if table_name == "people" && returning_all
     ));
 }
 

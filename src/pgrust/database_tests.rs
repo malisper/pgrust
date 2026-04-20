@@ -1095,6 +1095,95 @@ fn explain_estimated_rows(db: &Database, client_id: u32, sql: &str) -> u64 {
 }
 
 #[test]
+fn point_subscript_assignments_return_rows() {
+    let dir = temp_dir("point_subscript_returning");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create temp table point_tbl (f1 point)")
+        .unwrap();
+    session
+        .execute(&db, "insert into point_tbl values (null), ('(10,10)'::point)")
+        .unwrap();
+
+    match session
+        .execute(
+            &db,
+            "update point_tbl set f1[0] = 10 where f1 is null returning *",
+        )
+        .unwrap()
+    {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(column_names, vec!["f1"]);
+            assert_eq!(rows, vec![vec![Value::Null]]);
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+
+    match session
+        .execute(&db, "insert into point_tbl(f1[0]) values(0) returning *")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Null]]);
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+
+    match session
+        .execute(
+            &db,
+            "update point_tbl set f1[0] = NULL where f1::text = '(10,10)'::point::text returning *",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Point(crate::include::nodes::datum::GeoPoint {
+                    x: 10.0,
+                    y: 10.0,
+                })]]
+            );
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+
+    match session
+        .execute(
+            &db,
+            "update point_tbl set f1[0] = -10, f1[1] = -10 where f1::text = '(10,10)'::point::text returning *",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Point(crate::include::nodes::datum::GeoPoint {
+                    x: -10.0,
+                    y: -10.0,
+                })]]
+            );
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+
+    match session.execute(
+        &db,
+        "update point_tbl set f1[3] = 10 where f1::text = '(-10,-10)'::point::text returning *",
+    ) {
+        Err(ExecError::DetailedError { message, sqlstate, .. }) => {
+            assert_eq!(message, "array subscript out of range");
+            assert_eq!(sqlstate, "2202E");
+        }
+        other => panic!("expected subscript error, got {other:?}"),
+    }
+}
+
+#[test]
 fn copy_from_file_loads_tsvector_rows() {
     let dir = temp_dir("copy_from_file");
     let db = Database::open(&dir, 128).unwrap();
