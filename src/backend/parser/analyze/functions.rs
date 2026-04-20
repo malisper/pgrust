@@ -681,6 +681,10 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::RegRoleToText
             | BuiltinScalarFunction::BpcharToText
             | BuiltinScalarFunction::BitCount => args.len() == 1,
+            BuiltinScalarFunction::Float8Accum => args.len() == 2,
+            BuiltinScalarFunction::Float8Combine => args.len() == 2,
+            BuiltinScalarFunction::Float8RegrAccum => args.len() == 3,
+            BuiltinScalarFunction::Float8RegrCombine => args.len() == 2,
             BuiltinScalarFunction::Trunc | BuiltinScalarFunction::Round => {
                 matches!(args.len(), 1 | 2)
             }
@@ -1620,6 +1624,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("atan2d", BuiltinScalarFunction::Atan2d),
         ("float4send", BuiltinScalarFunction::Float4Send),
         ("float8send", BuiltinScalarFunction::Float8Send),
+        ("float8_accum", BuiltinScalarFunction::Float8Accum),
+        ("float8_combine", BuiltinScalarFunction::Float8Combine),
+        ("float8_regr_accum", BuiltinScalarFunction::Float8RegrAccum),
+        ("float8_regr_combine", BuiltinScalarFunction::Float8RegrCombine),
         ("erf", BuiltinScalarFunction::Erf),
         ("erfc", BuiltinScalarFunction::Erfc),
         ("gamma", BuiltinScalarFunction::Gamma),

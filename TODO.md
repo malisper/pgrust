@@ -18,6 +18,7 @@ Targeted reruns and notes:
 - advisory_lock.sql: 8/38
 - aggregates.sql: 149/583
   - [done] `VALUES` mixed-`NULL` type reconciliation now skips bare `NULL` when selecting a common column type, which unblocks `any_value` cases like `VALUES (NULL), (1), (2)`
+  - [done] direct regression helper functions `float8_accum`, `float8_regr_accum`, `float8_combine`, and `float8_regr_combine`
 - alter_generic.sql: 65/333
 - alter_operator.sql: 7/65
 - alter_table.sql: 476/1683
