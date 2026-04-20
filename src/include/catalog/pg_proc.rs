@@ -189,6 +189,18 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'i',
         ),
         proc_row(
+            6404,
+            "pg_my_temp_schema",
+            TEXT_TYPE_OID,
+            "",
+            "pg_my_temp_schema",
+            0,
+            false,
+            true,
+            'f',
+            's',
+        ),
+        proc_row(
             6403,
             "pg_rust_test_fdw_handler",
             FDW_HANDLER_TYPE_OID,
@@ -2591,6 +2603,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "getdatabaseencoding",
             BuiltinScalarFunction::GetDatabaseEncoding,
         ),
+        ("pg_my_temp_schema", BuiltinScalarFunction::PgMyTempSchema),
         (
             "pg_rust_internal_binary_coercible",
             BuiltinScalarFunction::PgRustInternalBinaryCoercible,

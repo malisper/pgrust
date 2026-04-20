@@ -8752,6 +8752,54 @@ fn set_local_time_zone_updates_timestamptz_json_output() {
 }
 
 #[test]
+fn pg_my_temp_schema_filters_temp_pg_stats_rows() {
+    let base = temp_dir("pg_my_temp_schema_pg_stats");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create temp table rows as
+             select x, 'txt' || x as y
+             from generate_series(1, 3) as x",
+        )
+        .unwrap();
+    session.execute(&db, "analyze rows").unwrap();
+
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select pg_my_temp_schema()::regnamespace::text"),
+        vec![vec![Value::Text("pg_temp_1".into())]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select attname, to_jsonb(histogram_bounds)
+             from pg_stats
+             where tablename = 'rows'
+               and schemaname = pg_my_temp_schema()::regnamespace::text
+             order by 1",
+        ),
+        vec![
+            vec![
+                Value::Text("x".into()),
+                Value::Jsonb(crate::backend::executor::jsonb::parse_jsonb_text("[1,2,3]").unwrap()),
+            ],
+            vec![
+                Value::Text("y".into()),
+                Value::Jsonb(
+                    crate::backend::executor::jsonb::parse_jsonb_text(
+                        "[\"txt1\",\"txt2\",\"txt3\"]"
+                    )
+                    .unwrap()
+                ),
+            ],
+        ]
+    );
+}
+
+#[test]
 fn relation_stats_views_track_commit_flush_and_rollback() {
     let base = temp_dir("relation_stats_views");
     let db = Database::open(&base, 16).unwrap();
