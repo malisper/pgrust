@@ -644,7 +644,7 @@ fn rte_output_exprs(rtindex: usize, columns: &[QueryColumn]) -> Vec<Expr> {
         .collect()
 }
 
-pub(super) fn rewrite_local_vars_for_output_exprs(
+pub(crate) fn rewrite_local_vars_for_output_exprs(
     expr: Expr,
     source_varno: usize,
     output_exprs: &[Expr],

@@ -38,9 +38,10 @@ use crate::pgrust::database::{
     Database, SequenceMutationEffect, SessionStatsState, StatsFetchConsistency, TempMutationEffect,
     TrackFunctionsSetting, alter_table_add_constraint_lock_requests,
     alter_table_validate_constraint_lock_requests, delete_foreign_key_lock_requests,
-    insert_foreign_key_lock_requests, prepared_insert_foreign_key_lock_requests,
-    reject_relation_with_referencing_foreign_keys, relation_foreign_key_lock_requests,
-    update_foreign_key_lock_requests, validate_deferred_foreign_key_constraints,
+    insert_foreign_key_lock_requests, merge_table_lock_requests,
+    prepared_insert_foreign_key_lock_requests, reject_relation_with_referencing_foreign_keys,
+    relation_foreign_key_lock_requests, update_foreign_key_lock_requests,
+    validate_deferred_foreign_key_constraints,
 };
 use crate::pl::plpgsql::execute_do;
 use crate::{ClientId, RelFileLocator};
@@ -433,6 +434,15 @@ impl Session {
         );
         txn.prior_cmd_catalog_invalidations
             .extend(mem::take(&mut txn.current_cmd_catalog_invalidations));
+    }
+
+    fn advance_catalog_command_id_after_statement(&mut self, base_cid: u32, effect_start: usize) {
+        let Some(txn) = self.active_txn.as_mut() else {
+            return;
+        };
+        let consumed_catalog_cids = txn.catalog_effects.len().saturating_sub(effect_start).max(1);
+        let next_cid = base_cid.saturating_add(consumed_catalog_cids as u32);
+        txn.next_command_id = txn.next_command_id.max(next_cid);
     }
 
     pub fn execute(&mut self, db: &Database, sql: &str) -> Result<StatementResult, ExecError> {
@@ -2236,7 +2246,14 @@ impl Session {
             Statement::Insert(ref insert_stmt) => {
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);
                 let bound = bind_insert(insert_stmt, &catalog)?;
-                let lock_requests = insert_foreign_key_lock_requests(&bound);
+                let prepared =
+                    crate::pgrust::database::commands::rules::prepare_bound_insert_for_execution(
+                        bound, &catalog,
+                    )?;
+                let lock_requests = merge_table_lock_requests(
+                    &insert_foreign_key_lock_requests(&prepared.stmt),
+                    &prepared.extra_lock_requests,
+                );
                 self.lock_table_requests_if_needed(db, &lock_requests)?;
                 let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
                 let deferred_foreign_keys = self
@@ -2253,13 +2270,24 @@ impl Session {
                     Some(deferred_foreign_keys),
                 );
                 crate::pgrust::database::commands::rules::execute_bound_insert_with_rules(
-                    bound, &catalog, &mut ctx, xid, cid,
+                    prepared.stmt,
+                    &catalog,
+                    &mut ctx,
+                    xid,
+                    cid,
                 )
             }
             Statement::Update(ref update_stmt) => {
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);
                 let bound = bind_update(update_stmt, &catalog)?;
-                let lock_requests = update_foreign_key_lock_requests(&bound);
+                let prepared =
+                    crate::pgrust::database::commands::rules::prepare_bound_update_for_execution(
+                        bound, &catalog,
+                    )?;
+                let lock_requests = merge_table_lock_requests(
+                    &update_foreign_key_lock_requests(&prepared.stmt),
+                    &prepared.extra_lock_requests,
+                );
                 self.lock_table_requests_if_needed(db, &lock_requests)?;
                 let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
                 let interrupts = self.interrupts();
@@ -2278,7 +2306,7 @@ impl Session {
                 );
                 ctx.interrupts = Arc::clone(&interrupts);
                 crate::pgrust::database::commands::rules::execute_bound_update_with_rules(
-                    bound,
+                    prepared.stmt,
                     &catalog,
                     &mut ctx,
                     xid,
@@ -2289,7 +2317,14 @@ impl Session {
             Statement::Delete(ref delete_stmt) => {
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);
                 let bound = bind_delete(delete_stmt, &catalog)?;
-                let lock_requests = delete_foreign_key_lock_requests(&bound);
+                let prepared =
+                    crate::pgrust::database::commands::rules::prepare_bound_delete_for_execution(
+                        bound, &catalog,
+                    )?;
+                let lock_requests = merge_table_lock_requests(
+                    &delete_foreign_key_lock_requests(&prepared.stmt),
+                    &prepared.extra_lock_requests,
+                );
                 self.lock_table_requests_if_needed(db, &lock_requests)?;
                 let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
                 let interrupts = self.interrupts();
@@ -2308,7 +2343,7 @@ impl Session {
                 );
                 ctx.interrupts = Arc::clone(&interrupts);
                 crate::pgrust::database::commands::rules::execute_bound_delete_with_rules(
-                    bound,
+                    prepared.stmt,
                     &catalog,
                     &mut ctx,
                     xid,
@@ -2617,6 +2652,7 @@ impl Session {
         };
 
         if result.is_ok() {
+            self.advance_catalog_command_id_after_statement(cid, effect_start);
             self.process_catalog_command_end(db, effect_start);
         }
 

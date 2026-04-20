@@ -383,6 +383,7 @@ Targeted reruns and notes:
   - [done] match PostgreSQL's `FOR NO KEY UPDATE` set-operation error text instead of routing it through the generic unsupported-feature wrapper
   - investigate why bootstrap fixture tables from `scripts/test_setup_pgrust.sql` like `float8_tbl`, `int8_tbl`, and `tenk1` are not consistently resolvable during regression runs
 - updatable_views.sql: 130/1139
+  - [done] add PostgreSQL-style automatic `INSERT` / `UPDATE` / `DELETE` support for simple nested pass-through views, including filtered views, renamed columns, base defaults for hidden columns, and same-transaction `CREATE VIEW` visibility
 - update.sql: 72/300
 - uuid.sql: 0/63
 - vacuum.sql: 135/328

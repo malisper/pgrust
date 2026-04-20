@@ -4089,6 +4089,358 @@ fn view_dml_routes_through_instead_rules() {
     );
 }
 
+fn assert_view_dml_error(
+    err: ExecError,
+    expected_message: &str,
+    expected_detail: &str,
+    expected_hint_event: &str,
+) {
+    match err {
+        ExecError::DetailedError {
+            sqlstate,
+            message,
+            detail: Some(detail),
+            hint: Some(hint),
+        } => {
+            assert_eq!(sqlstate, "55000");
+            assert_eq!(message, expected_message);
+            assert!(
+                detail.contains(expected_detail),
+                "expected detail `{expected_detail}`, got `{detail}`"
+            );
+            assert!(
+                hint.contains(expected_hint_event),
+                "expected hint event `{expected_hint_event}`, got `{hint}`"
+            );
+        }
+        other => panic!("expected view DML detailed error, got {other:?}"),
+    }
+}
+
+#[test]
+fn simple_view_auto_dml_routes_to_base_table() {
+    let base = temp_dir("auto_simple_view_dml");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table base_items (id int4 not null, name text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create view item_view as select id, name from base_items",
+    )
+    .unwrap();
+
+    db.execute(1, "insert into item_view values (1, 'alpha')")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select id, name from base_items"),
+        vec![vec![Value::Int32(1), Value::Text("alpha".into())]]
+    );
+
+    db.execute(1, "update item_view set name = 'beta' where id = 1")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select id, name from base_items"),
+        vec![vec![Value::Int32(1), Value::Text("beta".into())]]
+    );
+
+    db.execute(1, "delete from item_view where id = 1").unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select id, name from base_items"),
+        Vec::<Vec<Value>>::new()
+    );
+}
+
+#[test]
+fn nested_simple_views_auto_dml_route_to_base_table() {
+    let base = temp_dir("auto_nested_view_dml");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table base_items (id int4 not null, name text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create view first_view as select id, name from base_items",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create view second_view as select id, name from first_view",
+    )
+    .unwrap();
+
+    db.execute(1, "insert into second_view values (1, 'alpha')")
+        .unwrap();
+    db.execute(1, "update second_view set name = 'beta' where id = 1")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select id, name from base_items"),
+        vec![vec![Value::Int32(1), Value::Text("beta".into())]]
+    );
+
+    db.execute(1, "delete from second_view where id = 1").unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select id, name from base_items"),
+        Vec::<Vec<Value>>::new()
+    );
+}
+
+#[test]
+fn filtered_views_auto_update_delete_visible_rows_and_insert_can_hide_rows() {
+    let base = temp_dir("auto_filtered_view_dml");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table base_items (id int4 not null, name text, active bool default false not null)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into base_items values (1, 'alpha', true), (2, 'beta', false)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create view active_items as select id, name from base_items where active",
+    )
+    .unwrap();
+
+    db.execute(1, "update active_items set name = 'seen'").unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select id, name, active from base_items order by id"),
+        vec![
+            vec![
+                Value::Int32(1),
+                Value::Text("seen".into()),
+                Value::Bool(true),
+            ],
+            vec![
+                Value::Int32(2),
+                Value::Text("beta".into()),
+                Value::Bool(false),
+            ],
+        ]
+    );
+
+    db.execute(1, "delete from active_items where id = 1").unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select id, name, active from base_items order by id"),
+        vec![vec![
+            Value::Int32(2),
+            Value::Text("beta".into()),
+            Value::Bool(false),
+        ]]
+    );
+
+    db.execute(1, "insert into active_items values (3, 'hidden')")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select id, name, active from base_items order by id"),
+        vec![
+            vec![
+                Value::Int32(2),
+                Value::Text("beta".into()),
+                Value::Bool(false),
+            ],
+            vec![
+                Value::Int32(3),
+                Value::Text("hidden".into()),
+                Value::Bool(false),
+            ],
+        ]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select id, name from active_items order by id"),
+        Vec::<Vec<Value>>::new()
+    );
+}
+
+#[test]
+fn auto_view_insert_maps_renamed_columns_and_hidden_defaults() {
+    let base = temp_dir("auto_view_renamed_columns");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table people (id int4 not null, given_name text, tenant text default 'main' not null)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create view public_people as select id as person_id, given_name as display_name from people",
+    )
+    .unwrap();
+
+    db.execute(1, "insert into public_people values (1, 'Ada')")
+        .unwrap();
+    db.execute(
+        1,
+        "update public_people set display_name = 'Grace' where person_id = 1",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select id, given_name, tenant from people order by id",
+        ),
+        vec![vec![
+            Value::Int32(1),
+            Value::Text("Grace".into()),
+            Value::Text("main".into()),
+        ]]
+    );
+}
+
+#[test]
+fn non_simple_views_reject_auto_dml() {
+    let base = temp_dir("auto_view_rejects_non_simple");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4 not null, name text)")
+        .unwrap();
+    db.execute(1, "create table notes (id int4 not null, note text)")
+        .unwrap();
+    db.execute(1, "insert into items values (1, 'alpha')").unwrap();
+    db.execute(1, "insert into notes values (1, 'memo')").unwrap();
+
+    db.execute(
+        1,
+        "create view join_view as select items.id, notes.note from items join notes on notes.id = items.id",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create view aggregate_view as select count(*) as total from items",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create view computed_view as select id, id + 1 as next_id from items",
+    )
+    .unwrap();
+
+    assert_view_dml_error(
+        db.execute(1, "update join_view set note = 'x' where id = 1")
+            .unwrap_err(),
+        "cannot update view \"join_view\"",
+        "single table or view",
+        "ON UPDATE DO INSTEAD rule",
+    );
+    assert_view_dml_error(
+        db.execute(1, "insert into aggregate_view values (1)").unwrap_err(),
+        "cannot insert into view \"aggregate_view\"",
+        "aggregate functions",
+        "ON INSERT DO INSTEAD rule",
+    );
+    assert_view_dml_error(
+        db.execute(1, "update computed_view set next_id = 5 where id = 1")
+            .unwrap_err(),
+        "cannot update view \"computed_view\"",
+        "simple base table columns",
+        "ON UPDATE DO INSTEAD rule",
+    );
+}
+
+#[test]
+fn insert_on_conflict_is_rejected_for_auto_updatable_views() {
+    let base = temp_dir("auto_view_on_conflict");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4 primary key)").unwrap();
+    db.execute(1, "create view item_view as select id from items")
+        .unwrap();
+
+    match db.execute(1, "insert into item_view values (1) on conflict do nothing") {
+        Err(ExecError::Parse(ParseError::FeatureNotSupported(feature))) => {
+            assert!(feature.contains("automatically updatable views"));
+        }
+        other => panic!("expected ON CONFLICT feature rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn nested_views_with_user_rules_are_not_auto_updatable() {
+    let base = temp_dir("auto_view_nested_rule_reject");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table base_items (id int4 not null, name text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create view inner_view as select id, name from base_items",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create rule inner_view_upd as on update to inner_view do instead update base_items set name = new.name where id = old.id",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create view outer_view as select id, name from inner_view",
+    )
+    .unwrap();
+
+    assert_view_dml_error(
+        db.execute(1, "update outer_view set name = 'beta' where id = 1")
+            .unwrap_err(),
+        "cannot update view \"outer_view\"",
+        "nested view \"inner_view\"",
+        "ON UPDATE DO INSTEAD rule",
+    );
+}
+
+#[test]
+fn view_dml_is_visible_within_transaction_after_create_view() {
+    let base = temp_dir("auto_view_txn_visibility");
+    let db = Database::open(&base, 32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table base_items (id int4 not null, name text)")
+        .unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(
+            &db,
+            "create view item_view as select id, name from base_items",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into item_view values (1, 'alpha')")
+        .unwrap();
+    session
+        .execute(&db, "update item_view set name = 'beta' where id = 1")
+        .unwrap();
+    match session
+        .execute(&db, "select name from item_view where id = 1")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Text("beta".into())]]);
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+    session
+        .execute(&db, "delete from item_view where id = 1")
+        .unwrap();
+    match session
+        .execute(&db, "select count(*) from base_items")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(0)]]);
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+    session.execute(&db, "commit").unwrap();
+}
+
 #[test]
 fn cascading_insert_rules_execute_recursively() {
     let base = temp_dir("rule_cascade_insert");
@@ -12488,6 +12840,53 @@ fn read_your_own_writes_within_transaction() {
         }
         other => panic!("expected query result, got {:?}", other),
     }
+}
+
+#[test]
+fn read_your_own_updates_within_transaction() {
+    let base = temp_dir("read_own_updates");
+    let db = Database::open(&base, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table rowtable (id int4 not null, val int4 not null)",
+        )
+        .unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "insert into rowtable (id, val) values (1, 42)")
+        .unwrap();
+    session
+        .execute(&db, "update rowtable set val = 7 where id = 1")
+        .unwrap();
+
+    match session
+        .execute(&db, "select val from rowtable where id = 1")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int32(7)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    session
+        .execute(&db, "delete from rowtable where id = 1")
+        .unwrap();
+    match session
+        .execute(&db, "select count(*) from rowtable")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(0)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    session.execute(&db, "commit").unwrap();
 }
 
 /// Each thread runs one explicit transaction that inserts a batch of rows.

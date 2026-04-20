@@ -596,7 +596,11 @@ impl Database {
             Statement::Insert(ref insert_stmt) => {
                 let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
                 let bound = bind_insert(insert_stmt, &catalog)?;
-                let lock_requests = insert_foreign_key_lock_requests(&bound);
+                let prepared = super::rules::prepare_bound_insert_for_execution(bound, &catalog)?;
+                let lock_requests = merge_table_lock_requests(
+                    &insert_foreign_key_lock_requests(&prepared.stmt),
+                    &prepared.extra_lock_requests,
+                );
                 crate::backend::storage::lmgr::lock_table_requests_interruptible(
                     &self.table_locks,
                     client_id,
@@ -640,7 +644,11 @@ impl Database {
                     deferred_foreign_keys: Some(deferred_foreign_keys.clone()),
                 };
                 let result = super::rules::execute_bound_insert_with_rules(
-                    bound, &catalog, &mut ctx, xid, 0,
+                    prepared.stmt,
+                    &catalog,
+                    &mut ctx,
+                    xid,
+                    0,
                 );
                 drop(ctx);
                 let validation_catalog =
@@ -666,7 +674,11 @@ impl Database {
             Statement::Update(ref update_stmt) => {
                 let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
                 let bound = bind_update(update_stmt, &catalog)?;
-                let lock_requests = update_foreign_key_lock_requests(&bound);
+                let prepared = super::rules::prepare_bound_update_for_execution(bound, &catalog)?;
+                let lock_requests = merge_table_lock_requests(
+                    &update_foreign_key_lock_requests(&prepared.stmt),
+                    &prepared.extra_lock_requests,
+                );
                 crate::backend::storage::lmgr::lock_table_requests_interruptible(
                     &self.table_locks,
                     client_id,
@@ -710,7 +722,7 @@ impl Database {
                     deferred_foreign_keys: Some(deferred_foreign_keys.clone()),
                 };
                 let result = super::rules::execute_bound_update_with_rules(
-                    bound,
+                    prepared.stmt,
                     &catalog,
                     &mut ctx,
                     xid,
@@ -741,7 +753,11 @@ impl Database {
             Statement::Delete(ref delete_stmt) => {
                 let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
                 let bound = bind_delete(delete_stmt, &catalog)?;
-                let lock_requests = delete_foreign_key_lock_requests(&bound);
+                let prepared = super::rules::prepare_bound_delete_for_execution(bound, &catalog)?;
+                let lock_requests = merge_table_lock_requests(
+                    &delete_foreign_key_lock_requests(&prepared.stmt),
+                    &prepared.extra_lock_requests,
+                );
                 crate::backend::storage::lmgr::lock_table_requests_interruptible(
                     &self.table_locks,
                     client_id,
@@ -785,7 +801,7 @@ impl Database {
                     deferred_foreign_keys: Some(deferred_foreign_keys.clone()),
                 };
                 let result = super::rules::execute_bound_delete_with_rules(
-                    bound,
+                    prepared.stmt,
                     &catalog,
                     &mut ctx,
                     xid,
