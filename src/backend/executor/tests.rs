@@ -2868,6 +2868,28 @@ fn aggregate_filter_clause_counts_matching_rows() {
 }
 
 #[test]
+fn any_value_over_values_mixed_nulls_uses_concrete_values_type() {
+    let base = temp_dir("any_value_values_mixed_nulls");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select any_value(v) from (values (null), (1), (2)) as t(v)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(column_names, vec!["any_value".to_string()]);
+            assert_eq!(rows, vec![vec![Value::Int32(1)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn group_by_with_count() {
     let base = temp_dir("group_by_count");
     let mut txns = TransactionManager::new_durable(&base).unwrap();
