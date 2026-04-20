@@ -1947,6 +1947,32 @@ fn parse_set_local_statement() {
 }
 
 #[test]
+fn parse_set_local_time_zone_statement() {
+    let stmt = parse_statement("set local time zone 10.5").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::Set(SetStatement {
+            name: "timezone".into(),
+            value: "10.5".into(),
+            is_local: true,
+        })
+    );
+}
+
+#[test]
+fn parse_set_time_zone_negative_offset_statement() {
+    let stmt = parse_statement("set time zone -8").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::Set(SetStatement {
+            name: "timezone".into(),
+            value: "-8".into(),
+            is_local: false,
+        })
+    );
+}
+
+#[test]
 fn parse_set_statement_with_escape_string() {
     let stmt = parse_statement(r#"set application_name to E'line\nbreak'"#).unwrap();
     assert_eq!(
@@ -2638,6 +2664,23 @@ fn parse_typed_string_literal_expression() {
 }
 
 #[test]
+fn parse_timestamptz_typed_string_literal_with_text_cast() {
+    let stmt =
+        parse_select("select timestamptz '2024-01-02 03:04:05+00'::text").unwrap();
+    match &stmt.targets[0].expr {
+        SqlExpr::Cast(inner, ty) => {
+            assert_eq!(*ty, SqlType::new(SqlTypeKind::Text));
+            assert!(matches!(
+                inner.as_ref(),
+                SqlExpr::Cast(_, inner_ty)
+                    if *inner_ty == SqlType::new(SqlTypeKind::TimestampTz)
+            ));
+        }
+        other => panic!("expected outer text cast, got {other:?}"),
+    }
+}
+
+#[test]
 fn parse_select_star_with_extra_target() {
     let stmt = parse_select("select *, 'asphalt' from people").unwrap();
     assert_eq!(stmt.targets.len(), 2);
@@ -3140,6 +3183,19 @@ fn build_plan_coerces_unknown_string_literals_for_array_ops() {
                 && matches!(saop.right.as_ref(), Expr::Cast(inner, ty)
                 if *ty == SqlType::array_of(SqlType::new(SqlTypeKind::Int4))
                     && matches!(inner.as_ref(), Expr::Const(Value::Text(_)) | Expr::Const(Value::TextRef(_, _))))
+    ));
+}
+
+#[test]
+fn analyze_timestamptz_typed_string_literal_keeps_timestamp_tz_type() {
+    let stmt = parse_select("select timestamptz '2024-01-02 03:04:05+00'").unwrap();
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, &[], &[]).unwrap();
+    assert!(matches!(
+        &query.target_list[0].expr,
+        Expr::Cast(inner, ty)
+            if *ty == SqlType::new(SqlTypeKind::TimestampTz)
+                && matches!(inner.as_ref(), Expr::Const(Value::Text(_)) | Expr::Const(Value::TextRef(_, _)))
     ));
 }
 

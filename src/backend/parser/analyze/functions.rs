@@ -2283,6 +2283,14 @@ mod tests {
         ));
         assert!(explicit_text_input_cast_exists(
             &Catalog::default(),
+            SqlType::new(SqlTypeKind::TimeTz)
+        ));
+        assert!(explicit_text_input_cast_exists(
+            &Catalog::default(),
+            SqlType::new(SqlTypeKind::TimestampTz)
+        ));
+        assert!(explicit_text_input_cast_exists(
+            &Catalog::default(),
             SqlType::new(SqlTypeKind::Name)
         ));
         assert!(explicit_text_input_cast_exists(
