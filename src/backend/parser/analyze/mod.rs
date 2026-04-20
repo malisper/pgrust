@@ -156,7 +156,15 @@ fn resolve_aggregate_call(
 ) -> Option<ResolvedFunctionCall> {
     if matches!(
         func,
-        AggFunc::Sum | AggFunc::Avg | AggFunc::Variance | AggFunc::Stddev
+        AggFunc::AnyValue
+            | AggFunc::Sum
+            | AggFunc::Avg
+            | AggFunc::VarPop
+            | AggFunc::VarSamp
+            | AggFunc::Variance
+            | AggFunc::StddevPop
+            | AggFunc::StddevSamp
+            | AggFunc::Stddev
     ) {
         return None;
     }

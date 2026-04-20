@@ -5862,6 +5862,36 @@ fn parse_aggregate_select() {
 }
 
 #[test]
+fn parse_extended_aggregate_selects() {
+    let stmt = parse_select("select any_value(note), stddev_pop(id), regr_count(score, id) from people")
+        .unwrap();
+    assert!(matches!(
+        &stmt.targets[0].expr,
+        SqlExpr::AggCall {
+            func: AggFunc::AnyValue,
+            args,
+            ..
+        } if args.len() == 1
+    ));
+    assert!(matches!(
+        &stmt.targets[1].expr,
+        SqlExpr::AggCall {
+            func: AggFunc::StddevPop,
+            args,
+            ..
+        } if args.len() == 1
+    ));
+    assert!(matches!(
+        &stmt.targets[2].expr,
+        SqlExpr::AggCall {
+            func: AggFunc::RegrCount,
+            args,
+            ..
+        } if args.len() == 2
+    ));
+}
+
+#[test]
 fn parse_string_agg_select() {
     let stmt = parse_select("select string_agg(note, ',') from people").unwrap();
     assert!(matches!(
