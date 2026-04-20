@@ -817,6 +817,7 @@ pub(crate) fn rewrite_bound_insert_auto_view_target(
         target_columns,
         source: stmt.source,
         on_conflict: None,
+        returning_all: stmt.returning_all,
         subplans: stmt.subplans,
     })
 }
@@ -893,6 +894,7 @@ pub(crate) fn rewrite_bound_update_auto_view_target(
 
     Ok(BoundUpdateStatement {
         targets,
+        returning_all: stmt.returning_all,
         subplans: stmt.subplans,
     })
 }
