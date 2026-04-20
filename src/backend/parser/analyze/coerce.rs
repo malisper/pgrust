@@ -289,6 +289,7 @@ pub(super) fn coerce_unknown_string_literal_type(
                 SqlTypeKind::Void => return SqlType::array_of(SqlType::new(SqlTypeKind::Void)),
                 SqlTypeKind::FdwHandler => {
                     return SqlType::array_of(SqlType::new(SqlTypeKind::FdwHandler));
+                }
                 SqlTypeKind::RegRole => {
                     return SqlType::array_of(SqlType::new(SqlTypeKind::RegRole));
                 }

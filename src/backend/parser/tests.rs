@@ -7155,6 +7155,22 @@ fn build_plan_values_alias_exposes_column_aliases() {
 }
 
 #[test]
+fn build_plan_values_mixed_nulls_infer_concrete_column_type() {
+    let stmt = parse_select("select t.x from (values (null), (1), (2)) as t(x)").unwrap();
+    let plan = build_plan(&stmt, &catalog()).unwrap();
+    match plan {
+        Plan::Projection { input, .. } => match input.as_ref() {
+            Plan::Values { output_columns, .. } => {
+                assert_eq!(output_columns.len(), 1);
+                assert_eq!(output_columns[0].sql_type, SqlType::new(SqlTypeKind::Int4));
+            }
+            other => panic!("expected values input, got {:?}", other),
+        },
+        other => panic!("expected projection, got {:?}", other),
+    }
+}
+
+#[test]
 fn build_plan_join_alias_hides_inner_relation_names() {
     let mut catalog = catalog();
     catalog.insert("pets", pets_entry());
