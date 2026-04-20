@@ -1909,7 +1909,7 @@ fn eval_builtin_function(
     if let Some(result) = eval_range_function(func, &values, result_type) {
         return result;
     }
-    if let Some(result) = eval_json_builtin_function(func, &values, func_variadic) {
+    if let Some(result) = eval_json_builtin_function(func, &values, func_variadic, &ctx.datetime_config) {
         return result;
     }
     if matches!(
@@ -2409,8 +2409,8 @@ fn eval_jsonb_contains(left: Value, right: Value) -> Result<Value, ExecError> {
     if matches!(left, Value::Null) || matches!(right, Value::Null) {
         return Ok(Value::Null);
     }
-    let left_jsonb = jsonb_from_value(&left)?;
-    let right_jsonb = jsonb_from_value(&right)?;
+    let left_jsonb = jsonb_from_value(&left, &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default())?;
+    let right_jsonb = jsonb_from_value(&right, &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default())?;
     Ok(Value::Bool(jsonb_contains(&left_jsonb, &right_jsonb)))
 }
 
@@ -2418,8 +2418,8 @@ fn eval_jsonb_contained(left: Value, right: Value) -> Result<Value, ExecError> {
     if matches!(left, Value::Null) || matches!(right, Value::Null) {
         return Ok(Value::Null);
     }
-    let left_jsonb = jsonb_from_value(&left)?;
-    let right_jsonb = jsonb_from_value(&right)?;
+    let left_jsonb = jsonb_from_value(&left, &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default())?;
+    let right_jsonb = jsonb_from_value(&right, &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default())?;
     Ok(Value::Bool(jsonb_contains(&right_jsonb, &left_jsonb)))
 }
 
@@ -2432,7 +2432,8 @@ fn eval_jsonb_exists(left: Value, right: Value) -> Result<Value, ExecError> {
         left: left.clone(),
         right: right.clone(),
     })?;
-    let jsonb = jsonb_from_value(&left)?;
+    let jsonb =
+        jsonb_from_value(&left, &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default())?;
     Ok(Value::Bool(jsonb_exists(&jsonb, key)))
 }
 
@@ -2487,7 +2488,8 @@ fn eval_jsonb_exists_list(
             });
         }
     };
-    let jsonb = jsonb_from_value(&left)?;
+    let jsonb =
+        jsonb_from_value(&left, &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default())?;
     Ok(Value::Bool(pred(&jsonb, &keys)))
 }
 
