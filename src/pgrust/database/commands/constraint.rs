@@ -1,12 +1,12 @@
 use super::super::*;
 use crate::backend::commands::tablecmds::collect_matching_rows_heap;
-use crate::backend::executor::{ExecutorContext, eval_expr};
+use crate::backend::executor::{eval_expr, ExecutorContext};
 use crate::backend::parser::{
     BoundCheckConstraint, BoundForeignKeyConstraint, ForeignKeyConstraintAction,
 };
 use crate::include::catalog::{
-    CONSTRAINT_CHECK, CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY,
-    CONSTRAINT_UNIQUE, PG_CATALOG_NAMESPACE_OID, PgConstraintRow,
+    PgConstraintRow, CONSTRAINT_CHECK, CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY,
+    CONSTRAINT_UNIQUE, PG_CATALOG_NAMESPACE_OID,
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::TupleSlot;
@@ -366,12 +366,6 @@ fn ensure_constraint_relation(
         return Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "user table for ALTER TABLE constraint operations",
             actual: "system catalog".into(),
-        }));
-    }
-    if relation.relpersistence == 't' {
-        return Err(ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "permanent table for ALTER TABLE constraint operations",
-            actual: "temporary table".into(),
         }));
     }
     ensure_relation_owner(db, client_id, relation, table_name)
@@ -839,6 +833,7 @@ impl Database {
                         relation.relation_oid,
                         action.constraint_name,
                         !action.not_valid,
+                        action.no_inherit,
                         action.expr_sql,
                         &ctx,
                     )
