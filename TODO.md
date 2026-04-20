@@ -372,7 +372,8 @@ Targeted reruns and notes:
 - vacuum.sql: 135/328
 - vacuum_parallel.sql: 11/14
 - varchar.sql: 12/22
-- window.sql: 0/388
+- window.sql: 48/388
+  - [done] support named `WINDOW ... AS (...)` definitions together with `OVER w` references, including grouped queries such as `sum(sum(hundred)) OVER win`
 - with.sql: 37/312
 - without_overlaps.sql: 125/643
 - write_parallel.sql: 8/22
