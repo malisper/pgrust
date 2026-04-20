@@ -497,20 +497,24 @@ impl AccumState {
                     Value::Null
                 } else {
                     let n = NumericValue::from_i64(*count);
-                    let mean_square = sum.mul(sum).div(&n, 32).unwrap_or_else(NumericValue::zero);
-                    let divisor = if numeric_stats_is_sample(*mode) {
-                        NumericValue::from_i64(*count - 1)
+                    let numerator = n.mul(sum_sq).sub(&sum.mul(sum));
+                    let denominator = if numeric_stats_is_sample(*mode) {
+                        n.mul(&NumericValue::from_i64(*count - 1))
                     } else {
-                        n.clone()
+                        n.mul(&n)
                     };
-                    let variance = sum_sq
-                        .sub(&mean_square)
-                        .div(&divisor, 32)
-                        .unwrap_or_else(NumericValue::zero);
-                    let result = if numeric_stats_is_stddev(*mode) {
-                        numeric_sqrt(&variance, 20)
+                    let variance = if numerator.cmp(&NumericValue::zero()) != Ordering::Greater {
+                        NumericValue::zero()
                     } else {
-                        variance.round_to_scale(20).unwrap_or(variance)
+                        let rscale = numeric_div_display_scale(&numerator, &denominator);
+                        numerator
+                            .div(&denominator, rscale)
+                            .unwrap_or_else(NumericValue::zero)
+                    };
+                    let result = if numeric_stats_is_stddev(*mode) {
+                        numeric_sqrt(&variance, variance.dscale())
+                    } else {
+                        variance
                     };
                     match result_type.kind {
                         SqlTypeKind::Float4 | SqlTypeKind::Float8 => {
@@ -1039,7 +1043,7 @@ fn floor_div_i32(value: i32, divisor: i32) -> i32 {
 fn numeric_div_display_scale(lhs: &NumericValue, rhs: &NumericValue) -> u32 {
     const NUMERIC_MIN_SIG_DIGITS: i32 = 16;
     const NUMERIC_MIN_DISPLAY_SCALE: i32 = 0;
-    const NUMERIC_MAX_DISPLAY_SCALE: i32 = 16383;
+    const NUMERIC_MAX_DISPLAY_SCALE: i32 = 1000;
     const DEC_DIGITS: i32 = 4;
 
     fn normalized_weight_and_first_group(value: &NumericValue) -> (i32, i32, i32) {

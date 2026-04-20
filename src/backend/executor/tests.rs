@@ -7476,6 +7476,47 @@ fn numeric_power_zero_exponents_with_fractional_scale_follow_postgres() {
 }
 
 #[test]
+fn numeric_variance_preserves_tiny_values() {
+    let base = temp_dir("numeric_variance_tiny_values");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select trim_scale(variance(a) * 1e1000) \
+             from (values \
+                (0::numeric), \
+                (3e-500), \
+                (-3e-500), \
+                (4e-500 - 1e-16383), \
+                (-4e-500 + 1e-16383)) as t(a)",
+        )
+        .unwrap(),
+        vec![vec![Value::Numeric("12".into())]],
+    );
+}
+
+#[test]
+fn numeric_variance_handles_large_offset_inputs() {
+    let base = temp_dir("numeric_variance_large_offsets");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select variance(a) \
+             from (select 9e131071 + x as a from generate_series(1, 5) as x) as t",
+        )
+        .unwrap(),
+        vec![vec![Value::Numeric("2.5000000000000000".into())]],
+    );
+}
+
+#[test]
 fn numeric_log_special_values_follow_postgres() {
     let base = temp_dir("numeric_log_special_values");
     let txns = TransactionManager::new_durable(&base).unwrap();
