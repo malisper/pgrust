@@ -21,6 +21,71 @@ impl Database {
             .and_then(|ns| ns.tables.get(&normalized).map(|entry| entry.entry.clone()))
     }
 
+    pub(super) fn temp_entry_on_commit(
+        &self,
+        client_id: ClientId,
+        relation_oid: u32,
+    ) -> Option<OnCommitAction> {
+        self.temp_relations
+            .read()
+            .get(&self.temp_backend_id(client_id))
+            .and_then(|ns| {
+                ns.tables
+                    .values()
+                    .find(|entry| entry.entry.relation_oid == relation_oid)
+                    .map(|entry| entry.on_commit)
+            })
+    }
+
+    pub(super) fn install_temp_entry(
+        &self,
+        client_id: ClientId,
+        table_name: &str,
+        entry: RelCacheEntry,
+        on_commit: OnCommitAction,
+    ) -> Result<(), ExecError> {
+        let temp_backend_id = self.temp_backend_id(client_id);
+        let normalized = normalize_temp_lookup_name(table_name);
+        let mut namespaces = self.temp_relations.write();
+        let namespace = namespaces.get_mut(&temp_backend_id).ok_or_else(|| {
+            ExecError::Parse(ParseError::TableDoesNotExist(normalized.clone()))
+        })?;
+        namespace.tables.insert(
+            normalized,
+            TempCatalogEntry {
+                entry,
+                on_commit,
+            },
+        );
+        namespace.generation = namespace.generation.saturating_add(1);
+        drop(namespaces);
+        self.invalidate_backend_cache_state(client_id);
+        Ok(())
+    }
+
+    pub(super) fn replace_temp_entry_desc(
+        &self,
+        client_id: ClientId,
+        relation_oid: u32,
+        desc: crate::backend::executor::RelationDesc,
+    ) -> Result<(), ExecError> {
+        let temp_backend_id = self.temp_backend_id(client_id);
+        let mut namespaces = self.temp_relations.write();
+        let namespace = namespaces
+            .get_mut(&temp_backend_id)
+            .ok_or_else(|| ExecError::Parse(ParseError::TableDoesNotExist(relation_oid.to_string())))?;
+        let entry = namespace
+            .tables
+            .values_mut()
+            .find(|entry| entry.entry.relation_oid == relation_oid)
+            .ok_or_else(|| ExecError::Parse(ParseError::TableDoesNotExist(relation_oid.to_string())))?;
+        entry.entry.desc = desc;
+        namespace.generation = namespace.generation.saturating_add(1);
+        drop(namespaces);
+        self.invalidate_backend_cache_state(client_id);
+        Ok(())
+    }
+
     fn cleanup_stale_temp_relations_in_transaction(
         &self,
         client_id: ClientId,

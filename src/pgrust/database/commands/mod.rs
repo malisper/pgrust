@@ -1,3 +1,6 @@
+mod alter_column_default;
+mod alter_column_options;
+mod alter_column_statistics;
 mod alter_column_type;
 mod constraint;
 mod conversion;
@@ -6,6 +9,7 @@ mod database_cmds;
 mod drop;
 mod drop_column;
 mod execute;
+mod foreign_data_wrapper;
 mod index;
 mod maintenance;
 mod opclass;

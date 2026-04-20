@@ -16,6 +16,7 @@ use crate::backend::catalog::pg_collation::sort_pg_collation_rows;
 use crate::backend::catalog::pg_constraint::sort_pg_constraint_rows;
 use crate::backend::catalog::pg_database::sort_pg_database_rows;
 use crate::backend::catalog::pg_depend::sort_pg_depend_rows;
+use crate::backend::catalog::pg_foreign_data_wrapper::sort_pg_foreign_data_wrapper_rows;
 use crate::backend::catalog::pg_index::sort_pg_index_rows;
 use crate::backend::catalog::pg_inherits::sort_pg_inherits_rows;
 use crate::backend::catalog::pg_language::sort_pg_language_rows;
@@ -51,16 +52,16 @@ use crate::include::catalog::{
     TID_ARRAY_TYPE_OID, TID_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID,
     TSQUERY_ARRAY_TYPE_OID, TSQUERY_TYPE_OID, TSVECTOR_ARRAY_TYPE_OID, TSVECTOR_TYPE_OID,
     VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID,
-    XID_ARRAY_TYPE_OID, XID_TYPE_OID, bootstrap_composite_type_rows, bootstrap_pg_am_rows,
-    bootstrap_pg_amop_rows, bootstrap_pg_amproc_rows, bootstrap_pg_auth_members_rows,
-    bootstrap_pg_authid_rows, bootstrap_pg_cast_rows, bootstrap_pg_collation_rows,
-    bootstrap_pg_constraint_rows, bootstrap_pg_database_rows, bootstrap_pg_language_rows,
-    bootstrap_pg_namespace_rows, bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows,
-    bootstrap_pg_opfamily_rows, bootstrap_pg_proc_rows, bootstrap_pg_tablespace_rows,
-    bootstrap_pg_ts_config_map_rows, bootstrap_pg_ts_config_rows, bootstrap_pg_ts_dict_rows,
-    bootstrap_pg_ts_parser_rows, bootstrap_pg_ts_template_rows, builtin_type_rows,
-    composite_array_type_row, composite_type_row, range_type_ref_for_sql_type,
-    sort_pg_rewrite_rows,
+    XID_ARRAY_TYPE_OID, XID_TYPE_OID, PgForeignDataWrapperRow, bootstrap_composite_type_rows,
+    bootstrap_pg_am_rows, bootstrap_pg_amop_rows, bootstrap_pg_amproc_rows,
+    bootstrap_pg_auth_members_rows, bootstrap_pg_authid_rows, bootstrap_pg_cast_rows,
+    bootstrap_pg_collation_rows, bootstrap_pg_constraint_rows, bootstrap_pg_database_rows,
+    bootstrap_pg_foreign_data_wrapper_rows, bootstrap_pg_language_rows, bootstrap_pg_namespace_rows,
+    bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows, bootstrap_pg_opfamily_rows,
+    bootstrap_pg_proc_rows, bootstrap_pg_tablespace_rows, bootstrap_pg_ts_config_map_rows,
+    bootstrap_pg_ts_config_rows, bootstrap_pg_ts_dict_rows, bootstrap_pg_ts_parser_rows,
+    bootstrap_pg_ts_template_rows, builtin_type_rows, composite_array_type_row,
+    composite_type_row, range_type_ref_for_sql_type, sort_pg_rewrite_rows,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -72,6 +73,7 @@ pub struct CatCache {
     attributes_by_relid: BTreeMap<u32, Vec<PgAttributeRow>>,
     attrdefs_by_key: BTreeMap<(u32, i16), PgAttrdefRow>,
     depend_rows: Vec<PgDependRow>,
+    foreign_data_wrapper_rows: Vec<PgForeignDataWrapperRow>,
     inherit_rows: Vec<PgInheritsRow>,
     index_rows: Vec<PgIndexRow>,
     rewrite_rows: Vec<PgRewriteRow>,
@@ -190,6 +192,10 @@ impl CatCache {
         sort_pg_cast_rows(&mut cache.cast_rows);
         cache.collation_rows.extend(bootstrap_pg_collation_rows());
         sort_pg_collation_rows(&mut cache.collation_rows);
+        cache
+            .foreign_data_wrapper_rows
+            .extend(bootstrap_pg_foreign_data_wrapper_rows());
+        sort_pg_foreign_data_wrapper_rows(&mut cache.foreign_data_wrapper_rows);
         cache
             .database_rows
             .extend(catalog.database_rows().iter().cloned());
@@ -398,6 +404,7 @@ impl CatCache {
             rows.procs,
             rows.casts,
             rows.collations,
+            rows.foreign_data_wrappers,
             rows.databases,
             rows.tablespaces,
             rows.statistics,
@@ -433,6 +440,7 @@ impl CatCache {
         proc_rows: Vec<PgProcRow>,
         cast_rows: Vec<PgCastRow>,
         collation_rows: Vec<PgCollationRow>,
+        foreign_data_wrapper_rows: Vec<PgForeignDataWrapperRow>,
         database_rows: Vec<PgDatabaseRow>,
         tablespace_rows: Vec<PgTablespaceRow>,
         statistic_rows: Vec<PgStatisticRow>,
@@ -516,6 +524,8 @@ impl CatCache {
         sort_pg_cast_rows(&mut cache.cast_rows);
         cache.collation_rows = collation_rows;
         sort_pg_collation_rows(&mut cache.collation_rows);
+        cache.foreign_data_wrapper_rows = foreign_data_wrapper_rows;
+        sort_pg_foreign_data_wrapper_rows(&mut cache.foreign_data_wrapper_rows);
         cache.database_rows = database_rows;
         sort_pg_database_rows(&mut cache.database_rows);
         cache.tablespace_rows = tablespace_rows;
@@ -735,6 +745,10 @@ impl CatCache {
         self.collation_rows.clone()
     }
 
+    pub fn foreign_data_wrapper_rows(&self) -> Vec<PgForeignDataWrapperRow> {
+        self.foreign_data_wrapper_rows.clone()
+    }
+
     pub fn database_rows(&self) -> Vec<PgDatabaseRow> {
         self.database_rows.clone()
     }
@@ -841,6 +855,8 @@ pub fn sql_type_oid(sql_type: SqlType) -> u32 {
         (SqlTypeKind::Xid, true) => XID_ARRAY_TYPE_OID,
         (SqlTypeKind::Oid, false) => OID_TYPE_OID,
         (SqlTypeKind::Oid, true) => OID_ARRAY_TYPE_OID,
+        (SqlTypeKind::RegRole, false) => crate::include::catalog::REGROLE_TYPE_OID,
+        (SqlTypeKind::RegRole, true) => unreachable!("regrole arrays are unsupported"),
         (SqlTypeKind::RegProcedure, false) => crate::include::catalog::REGPROCEDURE_TYPE_OID,
         (SqlTypeKind::RegProcedure, true) => crate::include::catalog::REGPROCEDURE_ARRAY_TYPE_OID,
         (SqlTypeKind::OidVector, false) => crate::include::catalog::OIDVECTOR_TYPE_OID,

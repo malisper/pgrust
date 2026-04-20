@@ -12,8 +12,7 @@ use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::cache::catcache::{CatCache, normalize_catalog_name};
 use crate::include::catalog::{
     CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY, PG_CATALOG_NAMESPACE_OID, PG_CONSTRAINT_RELATION_OID,
-    bootstrap_catalog_kinds, relam_for_relkind,
-    system_catalog_index_by_oid,
+    bootstrap_catalog_kinds, relam_for_relkind, system_catalog_index_by_oid,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -535,8 +534,9 @@ mod tests {
             )
             .unwrap();
 
-        let mut rows =
-            crate::backend::catalog::rows::physical_catalog_rows_from_catcache(&store.catcache().unwrap());
+        let mut rows = crate::backend::catalog::rows::physical_catalog_rows_from_catcache(
+            &store.catcache().unwrap(),
+        );
         rows.attributes
             .iter_mut()
             .find(|row| row.attrelid == entry.relation_oid && row.attname == "id")
@@ -570,6 +570,7 @@ mod tests {
             rows.procs,
             rows.casts,
             rows.collations,
+            rows.foreign_data_wrappers,
             rows.databases,
             rows.tablespaces,
             rows.statistics,

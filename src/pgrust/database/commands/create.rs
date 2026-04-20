@@ -1,17 +1,18 @@
 use super::super::*;
 use crate::backend::parser::{
-    CreateFunctionReturnSpec, CreateFunctionStatement, FunctionArgMode, FunctionParallel,
-    FunctionVolatility, OwnedSequenceSpec, SequenceOptionsSpec, SqlTypeKind, resolve_raw_type_name,
+    resolve_raw_type_name, CreateFunctionReturnSpec, CreateFunctionStatement, FunctionArgMode,
+    FunctionParallel, FunctionVolatility, OwnedSequenceSpec, SequenceOptionsSpec, SqlTypeKind,
 };
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_PLPGSQL_OID,
-    PG_LANGUAGE_SQL_OID, PUBLIC_NAMESPACE_OID, PgProcRow, RECORD_TYPE_OID,
+    PG_LANGUAGE_SQL_OID, PgProcRow, RECORD_TYPE_OID,
 };
 use crate::include::nodes::parsenodes::{ForeignKeyAction, ForeignKeyMatchType};
 use crate::include::nodes::primnodes::{QueryColumn, ToastRelationRef};
 use crate::pgrust::database::{
-    SequenceData, SequenceRuntime, default_sequence_name_base, format_nextval_default_oid,
-    initial_sequence_state, resolve_sequence_options_spec, sequence_type_oid_for_serial_kind,
+    default_sequence_name_base, format_nextval_default_oid, initial_sequence_state,
+    resolve_sequence_options_spec, sequence_type_oid_for_serial_kind, SequenceData,
+    SequenceRuntime,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -31,35 +32,39 @@ fn relation_exists_in_namespace(
 }
 
 fn normalize_create_function_name_for_search_path(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
     stmt: &CreateFunctionStatement,
     configured_search_path: Option<&[String]>,
 ) -> Result<(String, u32), ParseError> {
     let normalized = stmt.function_name.to_ascii_lowercase();
     match stmt.schema_name.as_deref().map(str::to_ascii_lowercase) {
-        Some(schema) if schema == "public" => Ok((normalized, PUBLIC_NAMESPACE_OID)),
         Some(schema) if schema == "pg_catalog" => Ok((normalized, PG_CATALOG_NAMESPACE_OID)),
         Some(schema) if schema == "pg_temp" => Err(ParseError::UnexpectedToken {
             expected: "permanent function",
             actual: "temporary function".into(),
         }),
-        Some(schema) => Err(ParseError::UnsupportedQualifiedName(format!(
-            "{schema}.{}",
-            stmt.function_name
-        ))),
+        Some(schema) => db
+            .visible_namespace_oid_by_name(client_id, txn_ctx, &schema)
+            .map(|namespace_oid| (normalized.clone(), namespace_oid))
+            .ok_or_else(|| ParseError::UnexpectedToken {
+                expected: "existing schema",
+                actual: format!("schema \"{schema}\" does not exist"),
+            }),
         None => {
-            let search_path = configured_search_path
-                .map(|path| {
-                    path.iter()
-                        .map(|s| s.trim().to_ascii_lowercase())
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_else(|| vec!["public".into()]);
+            let search_path = db.effective_search_path(client_id, configured_search_path);
             for schema in search_path {
                 match schema.as_str() {
                     "" | "$user" | "pg_temp" => continue,
                     "pg_catalog" => continue,
-                    "public" => return Ok((normalized, PUBLIC_NAMESPACE_OID)),
-                    _ => continue,
+                    _ => {
+                        if let Some(namespace_oid) =
+                            db.visible_namespace_oid_by_name(client_id, txn_ctx, &schema)
+                        {
+                            return Ok((normalized.clone(), namespace_oid));
+                        }
+                    }
                 }
             }
             Err(ParseError::NoSchemaSelectedForCreate)
@@ -247,6 +252,7 @@ impl Database {
                     relation.relation_oid,
                     action.constraint_name.clone(),
                     !action.not_valid,
+                    action.no_inherit,
                     action.expr_sql.clone(),
                     &constraint_ctx,
                 )
@@ -502,8 +508,13 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let (function_name, namespace_oid) =
-            normalize_create_function_name_for_search_path(create_stmt, configured_search_path)?;
+        let (function_name, namespace_oid) = normalize_create_function_name_for_search_path(
+            self,
+            client_id,
+            Some((xid, cid)),
+            create_stmt,
+            configured_search_path,
+        )?;
 
         let language_row = catalog
             .language_row_by_name(&create_stmt.language)
@@ -1052,20 +1063,44 @@ impl Database {
             waiter: None,
             interrupts,
         };
-        let (_entry, effect) = self
+        let (entry, create_effect) = self
             .catalog
             .write()
-            .create_view_mvcc(
+            .create_view_relation_mvcc(
                 view_name.clone(),
                 desc,
                 namespace_oid,
                 self.auth_state(client_id).current_user_oid(),
-                create_stmt.query_sql.clone(),
-                &referenced_relation_oids.into_iter().collect::<Vec<_>>(),
                 &ctx,
             )
             .map_err(map_catalog_error)?;
-        catalog_effects.push(effect);
+        catalog_effects.push(create_effect);
+
+        let rule_ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid: cid.saturating_add(1),
+            client_id,
+            waiter: None,
+            interrupts: Arc::clone(&ctx.interrupts),
+        };
+        let rule_effect = self
+            .catalog
+            .write()
+            .create_rule_mvcc_with_owner_dependency(
+                entry.relation_oid,
+                "_RETURN",
+                '1',
+                true,
+                String::new(),
+                create_stmt.query_sql.clone(),
+                &referenced_relation_oids.into_iter().collect::<Vec<_>>(),
+                crate::backend::catalog::store::RuleOwnerDependency::Internal,
+                &rule_ctx,
+            )
+            .map_err(map_catalog_error)?;
+        catalog_effects.push(rule_effect);
         Ok(StatementResult::AffectedRows(0))
     }
 
@@ -1106,6 +1141,7 @@ impl Database {
             session_stats: self.session_stats_state(client_id),
             snapshot,
             client_id,
+            session_user_oid: self.auth_state(client_id).session_user_oid(),
             current_user_oid: self.auth_state(client_id).current_user_oid(),
             next_command_id: cid,
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
@@ -1248,6 +1284,7 @@ impl Database {
             session_stats: self.session_stats_state(client_id),
             snapshot,
             client_id,
+            session_user_oid: self.auth_state(client_id).session_user_oid(),
             current_user_oid: self.auth_state(client_id).current_user_oid(),
             next_command_id: cid,
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),

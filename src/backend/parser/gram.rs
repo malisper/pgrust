@@ -384,6 +384,15 @@ fn build_grant_statement(sql: &str) -> Result<Statement, ParseError> {
     if lowered.starts_with("grant all on schema ") {
         return Ok(Statement::GrantObject(build_grant_schema_all(sql)?));
     }
+    if lowered.starts_with("grant execute on function ") {
+        return Ok(Statement::GrantObject(build_grant_function_execute(sql)?));
+    }
+    if lowered.starts_with("grant select on ") {
+        return Ok(Statement::GrantObject(build_grant_table_select(sql)?));
+    }
+    if lowered.starts_with("grant all on ") {
+        return Ok(Statement::GrantObject(build_grant_table_all(sql)?));
+    }
     if lowered.starts_with("grant all privileges on ") {
         return Ok(Statement::GrantObject(build_grant_table_all_privileges(
             sql,
@@ -441,6 +450,38 @@ fn build_grant_table_all_privileges(sql: &str) -> Result<GrantObjectStatement, P
     })
 }
 
+fn build_grant_table_all(sql: &str) -> Result<GrantObjectStatement, ParseError> {
+    let prefix = "grant all on ";
+    let rest = sql
+        .get(prefix.len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let (object_name, rest) = split_once_keyword(rest, "to")?;
+    let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
+    Ok(GrantObjectStatement {
+        privilege: GrantObjectPrivilege::AllPrivilegesOnTable,
+        object_name: normalize_simple_identifier(object_name)?,
+        grantee_names,
+        with_grant_option,
+    })
+}
+
+fn build_grant_table_select(sql: &str) -> Result<GrantObjectStatement, ParseError> {
+    let prefix = "grant select on ";
+    let rest = sql
+        .get(prefix.len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let (object_name, rest) = split_once_keyword(rest, "to")?;
+    let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
+    Ok(GrantObjectStatement {
+        privilege: GrantObjectPrivilege::SelectOnTable,
+        object_name: normalize_simple_identifier(object_name)?,
+        grantee_names,
+        with_grant_option,
+    })
+}
+
 fn build_grant_schema_all(sql: &str) -> Result<GrantObjectStatement, ParseError> {
     let prefix = "grant all on schema ";
     let rest = sql
@@ -452,6 +493,22 @@ fn build_grant_schema_all(sql: &str) -> Result<GrantObjectStatement, ParseError>
     Ok(GrantObjectStatement {
         privilege: GrantObjectPrivilege::AllPrivilegesOnSchema,
         object_name: normalize_simple_identifier(object_name)?,
+        grantee_names,
+        with_grant_option,
+    })
+}
+
+fn build_grant_function_execute(sql: &str) -> Result<GrantObjectStatement, ParseError> {
+    let prefix = "grant execute on function ";
+    let rest = sql
+        .get(prefix.len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let (object_name, rest) = split_once_keyword(rest, "to")?;
+    let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
+    Ok(GrantObjectStatement {
+        privilege: GrantObjectPrivilege::ExecuteOnFunction,
+        object_name: object_name.trim().to_ascii_lowercase(),
         grantee_names,
         with_grant_option,
     })
@@ -2947,6 +3004,17 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::alter_table_alter_column_type_stmt => Ok(Statement::AlterTableAlterColumnType(
             build_alter_table_alter_column_type(inner)?,
         )),
+        Rule::alter_table_alter_column_default_stmt => Ok(Statement::AlterTableAlterColumnDefault(
+            build_alter_table_alter_column_default(inner)?,
+        )),
+        Rule::alter_table_alter_column_options_stmt => Ok(Statement::AlterTableAlterColumnOptions(
+            build_alter_table_alter_column_options(inner)?,
+        )),
+        Rule::alter_table_alter_column_statistics_stmt => {
+            Ok(Statement::AlterTableAlterColumnStatistics(
+                build_alter_table_alter_column_statistics(inner)?,
+            ))
+        }
         Rule::alter_table_owner_stmt => Ok(Statement::AlterTableOwner(build_alter_relation_owner(
             inner,
         )?)),
@@ -4308,6 +4376,7 @@ fn build_insert(pair: Pair<'_, Rule>) -> Result<InsertStatement, ParseError> {
     let mut columns = None;
     let mut source = None;
     let mut on_conflict = None;
+    let mut returning_all = false;
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::cte_clause => {
@@ -4339,6 +4408,7 @@ fn build_insert(pair: Pair<'_, Rule>) -> Result<InsertStatement, ParseError> {
             Rule::insert_default_values_source => source = Some(InsertSource::DefaultValues),
             Rule::select_stmt => source = Some(InsertSource::Select(Box::new(build_select(part)?))),
             Rule::on_conflict_clause => on_conflict = Some(build_on_conflict_clause(part)?),
+            Rule::returning_clause => returning_all = true,
             _ => {}
         }
     }
@@ -4350,6 +4420,7 @@ fn build_insert(pair: Pair<'_, Rule>) -> Result<InsertStatement, ParseError> {
         columns,
         source: source.ok_or(ParseError::UnexpectedEof)?,
         on_conflict,
+        returning_all,
     })
 }
 
@@ -5159,6 +5230,7 @@ fn build_constraint_attributes(pair: Pair<'_, Rule>) -> ConstraintAttributes {
             .expect("constraint attribute inner");
         match attr.as_rule() {
             Rule::not_valid_constraint_attribute => attributes.not_valid = true,
+            Rule::no_inherit_constraint_attribute => attributes.no_inherit = true,
             Rule::deferrable_constraint_attribute => attributes.deferrable = Some(true),
             Rule::not_deferrable_constraint_attribute => attributes.deferrable = Some(false),
             Rule::initially_deferred_constraint_attribute => {
@@ -5790,11 +5862,13 @@ fn build_drop_rule(pair: Pair<'_, Rule>) -> Result<DropRuleStatement, ParseError
 fn build_drop_schema(pair: Pair<'_, Rule>) -> Result<DropSchemaStatement, ParseError> {
     let mut if_exists = false;
     let mut schema_names = Vec::new();
+    let mut cascade = false;
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::if_exists_clause => if_exists = true,
             Rule::ident_list => schema_names.extend(part.into_inner().map(build_identifier)),
             Rule::identifier => schema_names.push(build_identifier(part)),
+            Rule::drop_behavior => cascade = part.as_str().eq_ignore_ascii_case("cascade"),
             _ => {}
         }
     }
@@ -5804,6 +5878,7 @@ fn build_drop_schema(pair: Pair<'_, Rule>) -> Result<DropSchemaStatement, ParseE
     Ok(DropSchemaStatement {
         if_exists,
         schema_names,
+        cascade,
     })
 }
 
@@ -5921,6 +5996,7 @@ fn build_update(pair: Pair<'_, Rule>) -> Result<UpdateStatement, ParseError> {
     let mut only = false;
     let mut assignments = Vec::new();
     let mut where_clause = None;
+    let mut returning_all = false;
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::cte_clause => {
@@ -5932,6 +6008,7 @@ fn build_update(pair: Pair<'_, Rule>) -> Result<UpdateStatement, ParseError> {
             Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
             Rule::assignment => assignments.push(build_assignment(part)?),
             Rule::expr => where_clause = Some(build_expr(part)?),
+            Rule::returning_clause => returning_all = true,
             _ => {}
         }
     }
@@ -5942,6 +6019,7 @@ fn build_update(pair: Pair<'_, Rule>) -> Result<UpdateStatement, ParseError> {
         only,
         assignments,
         where_clause,
+        returning_all,
     })
 }
 
@@ -6098,6 +6176,7 @@ fn sql_type_output_name(ty: SqlType) -> &'static str {
         SqlTypeKind::Int8Range => "int8range",
         SqlTypeKind::Name => "name",
         SqlTypeKind::Oid => "oid",
+        SqlTypeKind::RegRole => "regrole",
         SqlTypeKind::RegProcedure => "regprocedure",
         SqlTypeKind::Tid => "tid",
         SqlTypeKind::Xid => "xid",
@@ -6534,6 +6613,149 @@ fn build_alter_table_alter_column_type(
         column_name: column_name.ok_or(ParseError::UnexpectedEof)?,
         ty: ty.ok_or(ParseError::UnexpectedEof)?,
         using_expr,
+    })
+}
+
+fn build_alter_table_alter_column_default(
+    pair: Pair<'_, Rule>,
+) -> Result<AlterTableAlterColumnDefaultStatement, ParseError> {
+    let mut if_exists = false;
+    let mut only = false;
+    let mut table_name = None;
+    let mut column_name = None;
+    let mut default_expr = None;
+    let mut default_expr_sql = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::alter_table_target => {
+                let (parsed_if_exists, parsed_only, parsed_table_name) =
+                    build_alter_table_target(part)?;
+                if_exists = parsed_if_exists;
+                only = parsed_only;
+                table_name = Some(parsed_table_name);
+            }
+            Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
+            Rule::identifier if column_name.is_none() => column_name = Some(build_identifier(part)),
+            Rule::alter_table_column_default_action => {
+                for inner in part.into_inner() {
+                    match inner.as_rule() {
+                        Rule::alter_table_set_default_action => {
+                            let expr = inner
+                                .into_inner()
+                                .find(|item| item.as_rule() == Rule::expr)
+                                .ok_or(ParseError::UnexpectedEof)?;
+                            default_expr_sql = Some(expr.as_str().trim().to_string());
+                            default_expr = Some(build_expr(expr)?);
+                        }
+                        Rule::alter_table_drop_default_action => {
+                            default_expr = None;
+                            default_expr_sql = None;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(AlterTableAlterColumnDefaultStatement {
+        if_exists,
+        only,
+        table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
+        column_name: column_name.ok_or(ParseError::UnexpectedEof)?,
+        default_expr,
+        default_expr_sql,
+    })
+}
+
+fn build_alter_table_alter_column_options(
+    pair: Pair<'_, Rule>,
+) -> Result<AlterTableAlterColumnOptionsStatement, ParseError> {
+    let mut if_exists = false;
+    let mut only = false;
+    let mut table_name = None;
+    let mut column_name = None;
+    let mut action = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::alter_table_target => {
+                let (parsed_if_exists, parsed_only, parsed_table_name) =
+                    build_alter_table_target(part)?;
+                if_exists = parsed_if_exists;
+                only = parsed_only;
+                table_name = Some(parsed_table_name);
+            }
+            Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
+            Rule::identifier if column_name.is_none() => column_name = Some(build_identifier(part)),
+            Rule::alter_table_column_options_action => {
+                for inner in part.into_inner() {
+                    match inner.as_rule() {
+                        Rule::alter_table_set_options_action => {
+                            let options = inner
+                                .into_inner()
+                                .filter(|item| item.as_rule() == Rule::reloption)
+                                .map(build_reloption)
+                                .collect::<Result<Vec<_>, _>>()?;
+                            action = Some(AlterColumnOptionsAction::Set(options));
+                        }
+                        Rule::alter_table_reset_options_action => {
+                            let options = inner
+                                .into_inner()
+                                .find(|item| item.as_rule() == Rule::ident_list)
+                                .map(|list| list.into_inner().map(build_identifier).collect())
+                                .ok_or(ParseError::UnexpectedEof)?;
+                            action = Some(AlterColumnOptionsAction::Reset(options));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(AlterTableAlterColumnOptionsStatement {
+        if_exists,
+        only,
+        table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
+        column_name: column_name.ok_or(ParseError::UnexpectedEof)?,
+        action: action.ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
+fn build_alter_table_alter_column_statistics(
+    pair: Pair<'_, Rule>,
+) -> Result<AlterTableAlterColumnStatisticsStatement, ParseError> {
+    let mut if_exists = false;
+    let mut only = false;
+    let mut table_name = None;
+    let mut column_name = None;
+    let mut statistics_target = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::alter_table_target => {
+                let (parsed_if_exists, parsed_only, parsed_table_name) =
+                    build_alter_table_target(part)?;
+                if_exists = parsed_if_exists;
+                only = parsed_only;
+                table_name = Some(parsed_table_name);
+            }
+            Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
+            Rule::identifier if column_name.is_none() => column_name = Some(build_identifier(part)),
+            Rule::signed_integer => {
+                let value = parse_i32(part)?;
+                let value = i16::try_from(value)
+                    .map_err(|_| ParseError::InvalidInteger(value.to_string()))?;
+                statistics_target = Some(value);
+            }
+            _ => {}
+        }
+    }
+    Ok(AlterTableAlterColumnStatisticsStatement {
+        if_exists,
+        only,
+        table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
+        column_name: column_name.ok_or(ParseError::UnexpectedEof)?,
+        statistics_target: statistics_target.ok_or(ParseError::UnexpectedEof)?,
     })
 }
 
@@ -7276,6 +7498,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                     })
                 }
                 Rule::quantified_like_suffix => build_quantified_like_predicate(left, next),
+                Rule::quantified_similar_suffix => build_quantified_similar_predicate(left, next),
                 Rule::like_suffix => build_like_predicate(left, next),
                 Rule::similar_suffix => build_similar_predicate(left, next),
                 Rule::comp_op => {
@@ -7680,6 +7903,8 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         Rule::kw_false => Ok(SqlExpr::Const(Value::Bool(false))),
         Rule::kw_current_date => Ok(SqlExpr::CurrentDate),
         Rule::kw_current_user => Ok(SqlExpr::CurrentUser),
+        Rule::kw_session_user => Ok(SqlExpr::SessionUser),
+        Rule::kw_current_role => Ok(SqlExpr::CurrentRole),
         Rule::kw_current_time => Ok(SqlExpr::CurrentTime {
             precision: pair
                 .into_inner()
@@ -8161,6 +8386,56 @@ fn build_quantified_like_predicate(
             subquery: Box::new(subquery),
         }),
         QuantifiedLikeRhs::Expr(array) => Ok(SqlExpr::QuantifiedArray {
+            left: Box::new(left),
+            op,
+            is_all,
+            array: Box::new(array),
+        }),
+    }
+}
+
+fn build_quantified_similar_predicate(
+    left: SqlExpr,
+    pair: Pair<'_, Rule>,
+) -> Result<SqlExpr, ParseError> {
+    enum QuantifiedSimilarRhs {
+        Subquery(SelectStatement),
+        Expr(SqlExpr),
+    }
+
+    let mut negated = false;
+    let lowered = pair.as_str().to_ascii_lowercase();
+    let is_all = if lowered.contains(" all ") {
+        Some(true)
+    } else if lowered.contains(" any ") {
+        Some(false)
+    } else {
+        None
+    };
+    let mut rhs = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::kw_not => negated = true,
+            Rule::select_stmt => rhs = Some(QuantifiedSimilarRhs::Subquery(build_select(part)?)),
+            Rule::expr => rhs = Some(QuantifiedSimilarRhs::Expr(build_expr(part)?)),
+            _ => {}
+        }
+    }
+
+    let op = if negated {
+        SubqueryComparisonOp::NotSimilar
+    } else {
+        SubqueryComparisonOp::Similar
+    };
+    let is_all = is_all.ok_or(ParseError::UnexpectedEof)?;
+    match rhs.ok_or(ParseError::UnexpectedEof)? {
+        QuantifiedSimilarRhs::Subquery(subquery) => Ok(SqlExpr::QuantifiedSubquery {
+            left: Box::new(left),
+            op,
+            is_all,
+            subquery: Box::new(subquery),
+        }),
+        QuantifiedSimilarRhs::Expr(array) => Ok(SqlExpr::QuantifiedArray {
             left: Box::new(left),
             op,
             is_all,

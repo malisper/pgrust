@@ -144,6 +144,9 @@ fn execute_statement_with_source(
         | Statement::SetRole(_)
         | Statement::ResetRole(_)
         | Statement::AlterTableAlterConstraint(_)
+        | Statement::AlterTableAlterColumnOptions(_)
+        | Statement::AlterTableAlterColumnStatistics(_)
+        | Statement::AlterTableAlterColumnDefault(_)
         // :HACK: ALTER TABLE ... SET (...) is accepted narrowly for numeric.sql and ignored
         // until table reloptions are modeled for real.
         | Statement::AlterTableSet(_) => Ok(StatementResult::AffectedRows(0)),
@@ -220,6 +223,17 @@ fn execute_statement_with_source(
             expected: "COMMENT ON CONVERSION handled by database/session layer",
             actual: "COMMENT ON CONVERSION".into(),
         })),
+        Statement::CommentOnForeignDataWrapper(_)
+        | Statement::CreateForeignDataWrapper(_)
+        | Statement::AlterForeignDataWrapper(_)
+        | Statement::AlterForeignDataWrapperOwner(_)
+        | Statement::AlterForeignDataWrapperRename(_)
+        | Statement::DropForeignDataWrapper(_) => {
+            Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "FOREIGN DATA WRAPPER handled by database/session layer",
+                actual: "FOREIGN DATA WRAPPER".into(),
+            }))
+        }
         Statement::CommentOnRole(_)
         | Statement::CreateRole(_)
         | Statement::AlterRole(_)
@@ -372,7 +386,8 @@ pub fn execute_readonly_statement(
         | Statement::AlterTableRenameColumn(_)
         | Statement::AlterTableAddColumn(_)
         | Statement::AlterTableDropColumn(_)
-        | Statement::AlterTableAlterColumnType(_) => Ok(StatementResult::AffectedRows(0)),
+        | Statement::AlterTableAlterColumnType(_)
+        | Statement::AlterTableAlterColumnDefault(_) => Ok(StatementResult::AffectedRows(0)),
         Statement::AlterTableRename(_) => Ok(StatementResult::AffectedRows(0)),
         Statement::Merge(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
             "MERGE".into(),

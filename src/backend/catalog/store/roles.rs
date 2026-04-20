@@ -1,4 +1,7 @@
 use crate::backend::catalog::catalog::CatalogError;
+use crate::backend::catalog::persistence::{
+    delete_catalog_rows_subset_mvcc, insert_catalog_rows_subset_mvcc,
+};
 use crate::backend::catalog::role_memberships::{
     NewRoleMembership, grant_membership as grant_role_membership_row,
     revoke_role_membership as delete_role_membership_row,
@@ -9,14 +12,11 @@ use crate::backend::catalog::roles::{
     drop_roles as drop_role_rows, rename_role as rename_role_row,
 };
 use crate::backend::catalog::rows::PhysicalCatalogRows;
-use crate::backend::catalog::persistence::{
-    delete_catalog_rows_subset_mvcc, insert_catalog_rows_subset_mvcc,
-};
 use crate::include::catalog::{BootstrapCatalogKind, PgAuthIdRow, PgAuthMembersRow};
 
-use super::{CatalogMutationEffect, CatalogStore, CatalogWriteContext};
 #[cfg(test)]
 use super::CatalogStoreMode;
+use super::{CatalogMutationEffect, CatalogStore, CatalogWriteContext};
 
 fn role_catalog_effect(kinds: &[BootstrapCatalogKind]) -> CatalogMutationEffect {
     CatalogMutationEffect {

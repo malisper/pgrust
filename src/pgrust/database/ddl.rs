@@ -556,6 +556,13 @@ pub(super) struct AlterColumnTypePlan {
     pub new_column: ColumnDesc,
 }
 
+#[derive(Debug, Clone)]
+pub(super) struct AlterColumnDefaultPlan {
+    pub column_name: String,
+    pub default_expr_sql: Option<String>,
+    pub default_sequence_oid: Option<u32>,
+}
+
 fn is_text_like_type(ty: SqlType) -> bool {
     !ty.is_array
         && matches!(
@@ -564,7 +571,7 @@ fn is_text_like_type(ty: SqlType) -> bool {
         )
 }
 
-fn format_sql_type_name(sql_type: SqlType) -> &'static str {
+pub(super) fn format_sql_type_name(sql_type: SqlType) -> &'static str {
     if sql_type.is_range() {
         return builtin_range_name_for_sql_type(sql_type).unwrap_or("range");
     }
@@ -582,6 +589,7 @@ fn format_sql_type_name(sql_type: SqlType) -> &'static str {
         SqlTypeKind::Tid => "tid",
         SqlTypeKind::Xid => "xid",
         SqlTypeKind::Oid => "oid",
+        SqlTypeKind::RegRole => "regrole",
         SqlTypeKind::RegProcedure => "regprocedure",
         SqlTypeKind::OidVector => "oidvector",
         SqlTypeKind::Bit => "bit",
@@ -627,7 +635,7 @@ fn format_sql_type_name(sql_type: SqlType) -> &'static str {
     }
 }
 
-fn automatic_alter_type_cast_allowed(
+pub(super) fn automatic_alter_type_cast_allowed(
     catalog: &dyn CatalogLookup,
     from: SqlType,
     to: SqlType,
@@ -650,6 +658,108 @@ fn automatic_alter_type_cast_allowed(
     catalog
         .cast_by_source_target(source_oid, target_oid)
         .is_some_and(|row| row.castcontext != 'e')
+}
+
+pub(super) fn validate_alter_table_alter_column_default(
+    catalog: &dyn CatalogLookup,
+    desc: &RelationDesc,
+    column_name: &str,
+    default_expr: Option<&SqlExpr>,
+    default_expr_sql: Option<&str>,
+) -> Result<AlterColumnDefaultPlan, ExecError> {
+    if is_system_column_name(column_name) {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "user column name for ALTER COLUMN DEFAULT",
+            actual: column_name.to_string(),
+        }));
+    }
+    let column_index = desc
+        .columns
+        .iter()
+        .enumerate()
+        .find_map(|(index, column)| {
+            (!column.dropped && column.name.eq_ignore_ascii_case(column_name)).then_some(index)
+        })
+        .ok_or_else(|| ExecError::Parse(ParseError::UnknownColumn(column_name.to_string())))?;
+    let current_column = &desc.columns[column_index];
+
+    if let Some(expr) = default_expr {
+        let (_bound, default_type) =
+            bind_scalar_expr_in_scope(expr, &[], catalog).map_err(ExecError::Parse)?;
+        if !automatic_alter_type_cast_allowed(catalog, default_type, current_column.sql_type) {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "column \"{}\" is of type {} but default expression is of type {}",
+                    current_column.name,
+                    format_sql_type_name(current_column.sql_type),
+                    format_sql_type_name(default_type),
+                ),
+                detail: None,
+                hint: Some("You will need to rewrite or cast the expression.".into()),
+                sqlstate: "42804",
+            });
+        }
+    }
+
+    Ok(AlterColumnDefaultPlan {
+        column_name: current_column.name.clone(),
+        default_expr_sql: default_expr_sql.map(str::to_string),
+        default_sequence_oid: default_expr_sql
+            .and_then(crate::pgrust::database::default_sequence_oid_from_default_expr),
+    })
+}
+
+pub(super) fn validate_alter_table_alter_column_options(
+    desc: &RelationDesc,
+    column_name: &str,
+) -> Result<String, ExecError> {
+    if is_system_column_name(column_name) {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "user column name for ALTER COLUMN SET/RESET options",
+            actual: column_name.to_string(),
+        }));
+    }
+    let column = desc
+        .columns
+        .iter()
+        .find(|column| !column.dropped && column.name.eq_ignore_ascii_case(column_name))
+        .ok_or_else(|| ExecError::Parse(ParseError::UnknownColumn(column_name.to_string())))?;
+    Ok(column.name.clone())
+}
+
+pub(super) fn validate_alter_table_alter_column_statistics(
+    desc: &RelationDesc,
+    column_name: &str,
+    statistics_target: i16,
+) -> Result<(String, i16), ExecError> {
+    if is_system_column_name(column_name) {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "user column name for ALTER COLUMN SET STATISTICS",
+            actual: column_name.to_string(),
+        }));
+    }
+    let column = desc
+        .columns
+        .iter()
+        .find(|column| !column.dropped && column.name.eq_ignore_ascii_case(column_name))
+        .ok_or_else(|| ExecError::Parse(ParseError::UnknownColumn(column_name.to_string())))?;
+
+    let statistics_target = if statistics_target == -1 {
+        -1
+    } else if statistics_target < 0 {
+        return Err(ExecError::DetailedError {
+            message: format!("statistics target {} is too low", statistics_target),
+            detail: None,
+            hint: None,
+            sqlstate: "22023",
+        });
+    } else if statistics_target > 10000 {
+        10000
+    } else {
+        statistics_target
+    };
+
+    Ok((column.name.clone(), statistics_target))
 }
 
 fn alter_column_type_error(

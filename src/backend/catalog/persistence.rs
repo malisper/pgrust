@@ -24,7 +24,9 @@ use crate::backend::storage::smgr::ForkNumber;
 use crate::backend::storage::smgr::{MdStorageManager, RelFileLocator, StorageManager};
 use crate::backend::utils::misc::interrupts::InterruptState;
 use crate::include::access::itemptr::ItemPointerData;
-use crate::include::catalog::{BootstrapCatalogKind, bootstrap_catalog_kinds, bootstrap_relation_desc};
+use crate::include::catalog::{
+    BootstrapCatalogKind, bootstrap_catalog_kinds, bootstrap_relation_desc,
+};
 use crate::include::nodes::datum::Value;
 
 #[allow(dead_code)]
@@ -305,6 +307,7 @@ fn physical_catalog_rows_empty(rows: &PhysicalCatalogRows) -> bool {
         && rows.depends.is_empty()
         && rows.inherits.is_empty()
         && rows.descriptions.is_empty()
+        && rows.foreign_data_wrappers.is_empty()
         && rows.indexes.is_empty()
         && rows.rewrites.is_empty()
         && rows.triggers.is_empty()

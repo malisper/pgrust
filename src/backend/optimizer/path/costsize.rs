@@ -2007,6 +2007,9 @@ fn expr_uses_immediate_outer_columns(expr: &Expr) -> bool {
         Expr::Const(_)
         | Expr::Random
         | Expr::CurrentDate
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
         | Expr::LocalTime { .. }
@@ -2743,6 +2746,7 @@ pub(super) fn estimate_sql_type_width(sql_type: SqlType) -> usize {
         SqlTypeKind::Int2 => 2,
         SqlTypeKind::Int4
         | SqlTypeKind::Oid
+        | SqlTypeKind::RegRole
         | SqlTypeKind::RegProcedure
         | SqlTypeKind::Xid
         | SqlTypeKind::Date
