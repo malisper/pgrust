@@ -17,7 +17,6 @@ mod ranges;
 mod rules;
 mod scope;
 mod system_views;
-mod views;
 mod window;
 
 use crate::RelFileLocator;
@@ -88,7 +87,6 @@ use scope::*;
 use std::cell::RefCell;
 use std::rc::Rc;
 use system_views::*;
-pub(crate) use views::analyze_view_rule_sql;
 use window::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

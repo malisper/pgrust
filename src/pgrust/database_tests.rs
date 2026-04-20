@@ -2364,6 +2364,51 @@ fn create_view_selects_and_persists_rewrite_rule() {
 }
 
 #[test]
+fn view_return_rules_use_internal_dependency_and_user_rules_use_auto_dependency() {
+    let dir = temp_dir("view_rule_dependency_types");
+    let db = Database::open(&dir, 128).unwrap();
+
+    db.execute(1, "create table items(id int4)").unwrap();
+    db.execute(1, "create table item_log(id int4)").unwrap();
+    db.execute(1, "create view item_names as select id from items")
+        .unwrap();
+    db.execute(
+        1,
+        "create rule item_log_rule as on insert to items do also insert into item_log values (new.id)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select d.deptype \
+             from pg_depend d \
+             join pg_rewrite r on r.oid = d.objid \
+             where r.rulename = '_RETURN' \
+               and d.classid = 2618 \
+               and d.refclassid = 1259 \
+               and d.refobjid = (select oid from pg_class where relname = 'item_names')",
+        ),
+        vec![vec![Value::Text("i".into())]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select d.deptype \
+             from pg_depend d \
+             join pg_rewrite r on r.oid = d.objid \
+             where r.rulename = 'item_log_rule' \
+               and d.classid = 2618 \
+               and d.refclassid = 1259 \
+               and d.refobjid = (select oid from pg_class where relname = 'items')",
+        ),
+        vec![vec![Value::Text("a".into())]]
+    );
+}
+
+#[test]
 fn nested_views_and_pg_views_work() {
     let dir = temp_dir("nested_views");
     let db = Database::open(&dir, 128).unwrap();
@@ -3726,6 +3771,23 @@ fn create_comment_and_drop_rule_updates_catalogs() {
         ),
         vec![vec![Value::Int64(0)]]
     );
+}
+
+#[test]
+fn create_rule_on_select_is_rejected() {
+    let base = temp_dir("rule_on_select_rejected");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4)").unwrap();
+
+    match db.execute(
+        1,
+        "create rule item_select_rule as on select to items do instead delete from items where id = 1",
+    ) {
+        Err(ExecError::Parse(ParseError::FeatureNotSupported(feature)))
+            if feature == "CREATE RULE ... ON SELECT" => {}
+        other => panic!("expected ON SELECT rule rejection, got {other:?}"),
+    }
 }
 
 #[test]
