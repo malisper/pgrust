@@ -13,7 +13,7 @@ Counts from `/tmp/pgrust_regress_after_sequence_fix` on 2026-04-18 using the def
 Targeted reruns and notes:
 
 - numeric.sql: 945/1057
-- numeric.sql first mismatch is unordered cross-join row order; substantive mismatches are `width_bucket(float8, ...)`, numeric display scale/rendering, and PostgreSQL-specific error text/detail for numeric overflow and numeric-to-int casts
+- numeric.sql first mismatch is still unordered `VALUES`/cross-join row order; remaining substantive mismatches are numeric input/typmod parity, numeric-to-int cast errors for `NaN`/`Infinity`, `to_char` / `to_number` / Roman formatting, numeric `power()` / `exp()` underflow and edge cases, `generate_series(numeric, ...)` error text, numeric `variance`, numeric `gcd` / `lcm` scale and overflow behavior, and `\d` numeric typmod rendering
 
 - advisory_lock.sql: 8/38
 - aggregates.sql: 149/583
@@ -82,7 +82,11 @@ Targeted reruns and notes:
 - bit.sql: 132/132
 - bitmapops.sql: 11/12
 - boolean.sql: 98/98
-- box.sql: 58/101
+- box.sql: 68/101
+  - route geometry `&&` through the geometry parser/binder path so box overlap lowers to `GeoOverlap` instead of failing as an undefined generic operator
+  - accept PostgreSQL box input forms with adjacent point pairs like `'(0,0)(0,100)'`, which currently suppresses the infinity-edge fixture rows later in the file
+  - allow `CREATE INDEX` on the temp/per-session relations exercised by `box.sql` instead of rejecting them as `temporary table`
+  - add SP-GiST planning/explain support for box indexes so the permanent-table half of the file uses index scans and distance ordering instead of seq-scan fallback
 - brin.sql: 81/125
 - brin_bloom.sql: 56/88
 - brin_multi.sql: 135/220
@@ -451,16 +455,21 @@ Targeted reruns and notes:
   - [done] Add support for SQL-visible object lookup/types used by the file’s function-stat queries: `void`, `regprocedure`, and the corresponding cast/lookup path for `'func()'::regprocedure::oid`.
   - Extend SELECT/binder support enough for the early stats queries, including querying the new stats relations and handling `ORDER BY ... COLLATE "C"` on projected text columns.
 - numeric.sql:
-  Retest source: `/tmp/pgrust_numeric_regress_55433/diff/numeric.diff`
-- Preserve PostgreSQL-compatible row order for the unordered `WITH v AS (VALUES ...) FROM v1, v2` cross-join cases in `numeric.sql`, or otherwise make the planner/executor match upstream join/input ordering closely enough for regression parity
+  Retest source: `/tmp/pgrust_regress_numeric_20260420/diff/numeric.diff`
+  - Preserve PostgreSQL-compatible row order for the `VALUES`/cross-join cases in `numeric.sql`; the first mismatch is still output ordering rather than wrong row contents
+  - Finish numeric input validation parity in `expr_casts.rs`, including `pg_input_is_valid('1e400000', 'numeric')`, `pg_input_error_info(...)` detail/sqlstate fields, and spaced base-prefix literals that PostgreSQL accepts
+  - Restore PostgreSQL `DETAIL` text for numeric typmod overflow and infinity rejection paths in inserts and `pg_input_error_info(...)`
+  - Add dedicated numeric-to-integer cast errors for `NaN` and `Infinity` instead of collapsing them into generic `smallint` / `integer` / `bigint out of range`
+  - Finish `to_char(numeric, ...)` parity in `expr_format.rs`, especially `FMS` formats, scientific-format hash width, and overflow/hash rendering for wide values and infinities
+  - Finish `to_number(..., 'RN')` / Roman numeral parity, including the aggregate validation path that currently errors in the `bool_and(to_number(roman, 'RN') = i)` check
+  - Fix numeric `power()` / `exp()` edge semantics so extreme underflows collapse to exact zero, `0 ^ 0` returns `1`, and negative-base exponent edge cases match PostgreSQL
+  - Align numeric `generate_series(...)` error text with PostgreSQL for `NaN` / infinity step values
+  - Remove extra `CONTEXT` lines from builtin `log()` errors in this regression
+  - Fix numeric `variance` aggregation on tiny values; PostgreSQL returns `12e-1000` in the scaled test where pgrust currently returns `0`
+  - Preserve PostgreSQL scale and overflow behavior for numeric `gcd` / `lcm`, including the large `lcm(...)` overflow case
+  - Render numeric typmods in `\d` output as `numeric(p,s)` instead of debug `SqlType { ... }` output
 - [x] Preserve numeric display scale in `generate_series(numeric, ...)` so rows like `0.0, 1.0, 2.0, 3.0, 4.0` do not degrade into integer-looking outputs after the first increment
-- [x] Remaining `to_number(...)` / Roman numeral formatting and validation parity in `expr_format.rs`, including `V`-scaled output, `RN` aggregate validation, and PostgreSQL-style `DETAIL` / caret output for invalid Roman formats
 - [x] Fix `width_bucket(float8, low, high, count)` boundary behavior for huge ranges; current float math can round into bucket `count + 1` or the wrong descending bucket near the upper edge
-- [x] Make `to_char(numeric, ...)` formatting match PostgreSQL more closely when the input numeric carries excess display scale
-- [x] Add PostgreSQL-style `DETAIL` output for numeric typmod overflow, including fractional-only numerics and infinite values rejected by typmod constraints
-- [x] Add dedicated numeric-to-integer cast errors for `NaN` and `Infinity` instead of collapsing them into generic `smallint/integer/bigint out of range`
-- [x] Audit the remaining `numeric.sql` formatting mismatches after the display-scale fix; many later hunks appear to be the same root cause repeated across `to_char` cases
-- [x] Fix numeric `exp()` underflow and `NULLIF`/`COALESCE` typing so extreme-negative `exp()` cases round to zero with PostgreSQL-style scale instead of producing tiny nonzero values or `text and integer` errors
 - [x] Mixed set-operation chains: accept PostgreSQL-style left-associative chains such as `SELECT 1 UNION SELECT 2 UNION ALL SELECT 2` instead of rejecting them in the parser.
 - Shared regression fixture visibility: investigate why bootstrap tables from `scripts/test_setup_pgrust.sql` like `float8_tbl`, `int8_tbl`, and `tenk1` are not consistently resolvable during regression runs.
 - privileges.sql parity:
