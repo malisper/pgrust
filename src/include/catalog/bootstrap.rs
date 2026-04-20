@@ -75,6 +75,7 @@ pub const OID_TYPE_OID: u32 = 26;
 pub const TID_TYPE_OID: u32 = 27;
 pub const XID_TYPE_OID: u32 = 28;
 pub const OIDVECTOR_TYPE_OID: u32 = 30;
+pub const REGROLE_TYPE_OID: u32 = 4096;
 pub const REGPROCEDURE_TYPE_OID: u32 = 2202;
 pub const REGPROCEDURE_ARRAY_TYPE_OID: u32 = 2207;
 pub const ANYOID: u32 = 2276;

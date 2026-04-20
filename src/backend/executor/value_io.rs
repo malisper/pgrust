@@ -175,6 +175,7 @@ fn sql_type_kind_tag(kind: SqlTypeKind) -> u8 {
         SqlTypeKind::Int8 => 6,
         SqlTypeKind::Name => 7,
         SqlTypeKind::Oid => 8,
+        SqlTypeKind::RegRole => 55,
         SqlTypeKind::RegProcedure => 52,
         SqlTypeKind::Tid => 9,
         SqlTypeKind::Xid => 10,

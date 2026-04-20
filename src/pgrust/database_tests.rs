@@ -12885,6 +12885,30 @@ fn grant_all_on_schema_public_is_accepted() {
 }
 
 #[test]
+fn durable_bootstrap_preserves_public_schema_grants() {
+    let base = temp_dir("durable_public_schema_grant");
+    let db = Database::open(&base, 16).expect("open durable database");
+    let mut session = Session::new(1);
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_namespace where nspname = 'public'",
+        ),
+        vec![vec![Value::Int64(1)]]
+    );
+
+    match session
+        .execute(&db, "grant all on schema public to public")
+        .unwrap()
+    {
+        StatementResult::AffectedRows(0) => {}
+        other => panic!("expected grant affected rows, got {other:?}"),
+    }
+}
+
+#[test]
 fn grant_select_on_table_is_accepted() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);
