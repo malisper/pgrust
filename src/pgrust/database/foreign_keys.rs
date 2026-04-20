@@ -171,6 +171,20 @@ pub(crate) fn alter_table_validate_constraint_lock_requests(
     Ok(requests.into_iter().collect())
 }
 
+pub(crate) fn merge_table_lock_requests(
+    primary: &[TableLockRequest],
+    extra: &[TableLockRequest],
+) -> Vec<TableLockRequest> {
+    let mut requests = BTreeMap::new();
+    for &(rel, mode) in primary {
+        add_lock_request(&mut requests, rel, mode);
+    }
+    for &(rel, mode) in extra {
+        add_lock_request(&mut requests, rel, mode);
+    }
+    requests.into_iter().collect()
+}
+
 pub(crate) fn table_lock_relations(requests: &[TableLockRequest]) -> Vec<RelFileLocator> {
     requests.iter().map(|(rel, _)| *rel).collect()
 }
