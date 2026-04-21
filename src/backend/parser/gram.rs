@@ -262,6 +262,7 @@ pub fn parse_type_name(sql: &str) -> Result<RawTypeName, ParseError> {
         "void" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Void))),
         "fdw_handler" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::FdwHandler))),
         "regrole" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegRole))),
+        "regproc" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegProcedure))),
         "regprocedure" => {
             return Ok(RawTypeName::Builtin(SqlType::new(
                 SqlTypeKind::RegProcedure,
@@ -508,10 +509,7 @@ fn build_alter_foreign_data_wrapper_statement(sql: &str) -> Result<Option<Statem
             });
         }
         return Ok(Some(Statement::AlterForeignDataWrapperOwner(
-            AlterForeignDataWrapperOwnerStatement {
-                fdw_name,
-                new_owner,
-            },
+            AlterForeignDataWrapperOwnerStatement { fdw_name, new_owner },
         )));
     }
     if keyword_at_start(rest, "rename to") {
@@ -629,7 +627,10 @@ fn build_drop_foreign_data_wrapper_statement(
     let cascade = tokens
         .get(index + 1)
         .is_some_and(|token| token.eq_ignore_ascii_case("cascade"));
-    if tokens.len() > index + 1 && !cascade && !tokens[index + 1].eq_ignore_ascii_case("restrict") {
+    if tokens.len() > index + 1
+        && !cascade
+        && !tokens[index + 1].eq_ignore_ascii_case("restrict")
+    {
         return Err(ParseError::UnexpectedToken {
             expected: "CASCADE, RESTRICT, or end of statement",
             actual: tokens[index + 1].into(),
@@ -666,7 +667,7 @@ fn build_comment_on_foreign_data_wrapper_statement(
         Some(value[1..value.len() - 1].replace("''", "'"))
     } else {
         return Err(ParseError::UnexpectedToken {
-            expected: "quoted string literal or NULL",
+            expected: "quoted string or NULL",
             actual: value.into(),
         });
     };
@@ -678,10 +679,7 @@ fn build_comment_on_foreign_data_wrapper_statement(
 
 fn parse_create_generic_options(input: &str) -> Result<Vec<RelOption>, ParseError> {
     let rest = consume_keyword(input.trim_start(), "options").trim_start();
-    let Some(inner) = rest
-        .strip_prefix('(')
-        .and_then(|value| value.strip_suffix(')'))
-    else {
+    let Some(inner) = rest.strip_prefix('(').and_then(|value| value.strip_suffix(')')) else {
         return Err(ParseError::UnexpectedToken {
             expected: "OPTIONS (name 'value' [, ...])",
             actual: input.into(),
@@ -692,10 +690,7 @@ fn parse_create_generic_options(input: &str) -> Result<Vec<RelOption>, ParseErro
 
 fn parse_alter_generic_options(input: &str) -> Result<Vec<AlterGenericOption>, ParseError> {
     let rest = consume_keyword(input.trim_start(), "options").trim_start();
-    let Some(inner) = rest
-        .strip_prefix('(')
-        .and_then(|value| value.strip_suffix(')'))
-    else {
+    let Some(inner) = rest.strip_prefix('(').and_then(|value| value.strip_suffix(')')) else {
         return Err(ParseError::UnexpectedToken {
             expected: "OPTIONS (ADD|SET|DROP ...)",
             actual: input.into(),
@@ -775,21 +770,22 @@ fn split_comma_separated_sql(input: &str) -> Result<Vec<&str>, ParseError> {
     let bytes = input.as_bytes();
     let mut index = 0usize;
     while index < bytes.len() {
-        match bytes[index] {
-            b'\'' => {
-                let literal_len = scan_string_literal_token_len(&input[index..])
-                    .ok_or(ParseError::UnexpectedEof)?;
-                index += literal_len;
-            }
-            b',' => {
-                parts.push(&input[start..index]);
-                index += 1;
-                start = index;
-            }
-            _ => index += 1,
+        if bytes[index] == b'\'' {
+            let literal_len =
+                scan_string_literal_token_len(&input[index..]).ok_or(ParseError::UnexpectedEof)?;
+            index += literal_len;
+            continue;
         }
+        if bytes[index] == b',' {
+            parts.push(input[start..index].trim());
+            start = index + 1;
+        }
+        index += 1;
     }
-    parts.push(&input[start..]);
+    let trailing = input[start..].trim();
+    if !trailing.is_empty() {
+        parts.push(trailing);
+    }
     Ok(parts)
 }
 

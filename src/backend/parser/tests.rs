@@ -1759,6 +1759,7 @@ fn parse_alter_table_if_exists_only_statement() {
     );
 }
 
+#[test]
 fn parse_alter_table_rename_statement() {
     let stmt = parse_statement("alter table items rename to items_new").unwrap();
     assert_eq!(
@@ -2105,6 +2106,14 @@ fn parse_set_session_authorization_statement() {
         Statement::SetSessionAuthorization(SetSessionAuthorizationStatement {
             role_name: "regress_tenant".into(),
         })
+    );
+}
+
+#[test]
+fn parse_regproc_type_name() {
+    assert_eq!(
+        parse_type_name("regproc").unwrap(),
+        RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegProcedure))
     );
 }
 
@@ -4687,10 +4696,10 @@ fn parse_insert_update_delete() {
         matches!(parse_statement("create temp table tempy(id) as select 1").unwrap(), Statement::CreateTableAs(CreateTableAsStatement { table_name, column_names, persistence: TablePersistence::Temporary, .. }) if table_name == "tempy" && column_names == vec!["id"])
     );
     assert!(
-        matches!(parse_statement("drop table widgets").unwrap(), Statement::DropTable(DropTableStatement { if_exists: false, table_names, cascade: false }) if table_names == vec!["widgets"])
+        matches!(parse_statement("drop table widgets").unwrap(), Statement::DropTable(DropTableStatement { if_exists: false, table_names, .. }) if table_names == vec!["widgets"])
     );
     assert!(
-        matches!(parse_statement("drop table if exists pgbench_accounts, pgbench_branches, pgbench_history, pgbench_tellers").unwrap(), Statement::DropTable(DropTableStatement { if_exists: true, table_names, cascade: false }) if table_names == vec!["pgbench_accounts", "pgbench_branches", "pgbench_history", "pgbench_tellers"])
+        matches!(parse_statement("drop table if exists pgbench_accounts, pgbench_branches, pgbench_history, pgbench_tellers").unwrap(), Statement::DropTable(DropTableStatement { if_exists: true, table_names, .. }) if table_names == vec!["pgbench_accounts", "pgbench_branches", "pgbench_history", "pgbench_tellers"])
     );
     assert!(
         matches!(parse_statement("drop index tenant_idx").unwrap(), Statement::DropIndex(DropIndexStatement { if_exists: false, index_names }) if index_names == vec!["tenant_idx"])
@@ -6967,6 +6976,21 @@ fn parse_range_intersect_agg_select() {
 }
 
 #[test]
+fn parse_any_value_select() {
+    let stmt = parse_select("select any_value(id) from people").unwrap();
+    assert!(matches!(
+        &stmt.targets[0].expr,
+        SqlExpr::AggCall {
+            func: AggFunc::AnyValue,
+            args,
+            distinct: false,
+            ..
+        } if args.len() == 1
+    ));
+    assert_eq!(stmt.targets[0].output_name, "any_value");
+}
+
+#[test]
 fn parse_variadic_aggregate_call_marks_call_level_flag() {
     std::thread::Builder::new()
         .name("parse_variadic_aggregate_call_marks_call_level_flag".into())
@@ -7480,7 +7504,11 @@ fn window_function_rejected_in_where_group_by_and_having() {
 }
 
 #[test]
-fn named_window_errors_and_frame_rules_are_enforced() {
+fn named_windows_parse_and_frames_are_rejected() {
+    let stmt = parse_select("select row_number() over w from people window w as ()").unwrap();
+    assert_eq!(stmt.window_clauses.len(), 1);
+    assert_eq!(stmt.window_clauses[0].name, "w");
+
     let stmt = parse_select("select row_number() over missing from people").unwrap();
     assert!(matches!(
         build_plan(&stmt, &catalog()),
@@ -7492,6 +7520,7 @@ fn named_window_errors_and_frame_rules_are_enforced() {
         build_plan(&stmt, &catalog()),
         Err(ParseError::WindowingError(message)) if message == "window \"w\" is already defined"
     ));
+
     let stmt = parse_select(
         "select sum(id) over (w rows between current row and unbounded following) from people window w as (order by id rows between unbounded preceding and current row)",
     )

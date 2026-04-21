@@ -258,6 +258,53 @@ fn oid_arg_to_u32(value: &Value, op: &'static str) -> Result<u32, ExecError> {
     }
 }
 
+fn regproc_type_name(sql_type: SqlType) -> &'static str {
+    match sql_type.element_type().kind {
+        SqlTypeKind::Bool => "boolean",
+        SqlTypeKind::Bytea => "bytea",
+        SqlTypeKind::Float8 => "double precision",
+        SqlTypeKind::Int2 => "smallint",
+        SqlTypeKind::Int4 => "integer",
+        SqlTypeKind::Int8 => "bigint",
+        SqlTypeKind::Name => "name",
+        SqlTypeKind::Oid => "oid",
+        SqlTypeKind::RegProcedure => "regprocedure",
+        SqlTypeKind::RegRole => "regrole",
+        SqlTypeKind::Text => "text",
+        SqlTypeKind::FdwHandler => "fdw_handler",
+        _ => "text",
+    }
+}
+
+fn eval_regprocedure_to_text(value: &Value, ctx: &ExecutorContext) -> Result<Value, ExecError> {
+    let oid = oid_arg_to_u32(value, "regprocedure_to_text")?;
+    let Some(proc_row) = role_catalog(ctx)?.proc_row_by_oid(oid) else {
+        return Ok(Value::Null);
+    };
+    let arg_types = proc_row
+        .proargtypes
+        .split_whitespace()
+        .filter_map(|oid| oid.parse::<u32>().ok())
+        .filter_map(sql_type_from_builtin_oid)
+        .map(|sql_type| {
+            let mut name = regproc_type_name(sql_type).to_string();
+            if sql_type.is_array {
+                name.push_str("[]");
+            }
+            name
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    Ok(Value::Text(
+        format!("{}({arg_types})", proc_row.proname).into(),
+    ))
+}
+
+fn eval_pg_get_userbyid(value: &Value, ctx: &ExecutorContext) -> Result<Value, ExecError> {
+    let oid = oid_arg_to_u32(value, "pg_get_userbyid")?;
+    auth_role_name(ctx, oid)
+}
+
 fn eval_pg_rust_internal_binary_coercible(values: &[Value]) -> Result<Value, ExecError> {
     match values {
         [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
@@ -2389,6 +2436,14 @@ fn eval_builtin_function(
                 left: values.first().cloned().unwrap_or(Value::Null),
                 right: Value::Null,
             }),
+        },
+        BuiltinScalarFunction::RegProcedureToText => match values.as_slice() {
+            [value] => eval_regprocedure_to_text(value, ctx),
+            _ => Err(malformed_expr_error("regprocedure_to_text")),
+        },
+        BuiltinScalarFunction::PgGetUserById => match values.as_slice() {
+            [value] => eval_pg_get_userbyid(value, ctx),
+            _ => Err(malformed_expr_error("pg_get_userbyid")),
         },
         BuiltinScalarFunction::Now
         | BuiltinScalarFunction::TransactionTimestamp

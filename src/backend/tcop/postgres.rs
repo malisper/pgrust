@@ -904,6 +904,8 @@ fn execute_query_statement(
                 use crate::backend::executor::exec_next;
                 let mut columns = guard.columns.clone();
                 let catalog = state.session.catalog_lookup(db);
+                let role_names = role_name_map(&catalog);
+                let proc_names = proc_name_map(&catalog);
                 annotate_query_columns_with_wire_type_oids(&mut columns, &catalog);
                 let mut row_buf = Vec::new();
                 let mut row_count = 0usize;
@@ -933,6 +935,8 @@ fn execute_query_statement(
                                                 .datetime_config()
                                                 .clone(),
                                         },
+                                        Some(&role_names),
+                                        Some(&proc_names),
                                     )?;
                                     row_count += 1;
                                 }
@@ -979,6 +983,8 @@ fn execute_query_statement(
             mut columns, rows, ..
         }) => {
             let catalog = state.session.catalog_lookup(db);
+            let role_names = role_name_map(&catalog);
+            let proc_names = proc_name_map(&catalog);
             annotate_query_columns_with_wire_type_oids(&mut columns, &catalog);
             send_queued_notices(stream)?;
             send_query_result(
@@ -991,6 +997,8 @@ fn execute_query_statement(
                     bytea_output: state.session.bytea_output(),
                     datetime_config: state.session.datetime_config().clone(),
                 },
+                Some(&role_names),
+                Some(&proc_names),
             )?;
             Ok(QueryStatementFlow::Continue)
         }
@@ -1133,6 +1141,37 @@ fn split_simple_query_statements(sql: &str) -> Vec<&str> {
     statements
 }
 
+fn role_name_map(catalog: &dyn CatalogLookup) -> HashMap<u32, String> {
+    catalog
+        .materialize_visible_catalog()
+        .map(|visible| {
+            visible
+                .authid_rows()
+                .into_iter()
+                .map(|row| (row.oid, row.rolname))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn proc_name_map(catalog: &dyn CatalogLookup) -> HashMap<u32, String> {
+    catalog
+        .materialize_visible_catalog()
+        .map(|visible| {
+            visible
+                .proc_rows()
+                .into_iter()
+                .map(|row| (row.oid, row.proname))
+                .collect()
+        })
+        .unwrap_or_else(|| {
+            crate::include::catalog::bootstrap_pg_proc_rows()
+                .into_iter()
+                .map(|row| (row.oid, row.proname))
+                .collect()
+        })
+}
+
 fn try_handle_psql_describe_query(
     stream: &mut impl Write,
     db: &Database,
@@ -1142,6 +1181,9 @@ fn try_handle_psql_describe_query(
     let Some((columns, rows)) = execute_psql_describe_query(db, &state.session, sql) else {
         return Ok(false);
     };
+    let catalog = state.session.catalog_lookup(db);
+    let role_names = role_name_map(&catalog);
+    let proc_names = proc_name_map(&catalog);
     send_query_result(
         stream,
         &columns,
@@ -1152,6 +1194,8 @@ fn try_handle_psql_describe_query(
             bytea_output: state.session.bytea_output(),
             datetime_config: state.session.datetime_config().clone(),
         },
+        Some(&role_names),
+        Some(&proc_names),
     )?;
     Ok(true)
 }
@@ -2768,6 +2812,8 @@ fn execute_portal(
             rows, mut columns, ..
         }) => {
             annotate_query_columns_with_wire_type_oids(&mut columns, &catalog);
+            let role_names = role_name_map(&catalog);
+            let proc_names = proc_name_map(&catalog);
             send_queued_notices(stream)?;
             if let Err(e) = validate_binary_result_formats(&rows, &columns, &portal.result_formats)
             {
@@ -2794,6 +2840,8 @@ fn execute_portal(
                         bytea_output: session.bytea_output(),
                         datetime_config: session.datetime_config().clone(),
                     },
+                    Some(&role_names),
+                    Some(&proc_names),
                 )?;
             }
             send_command_complete(stream, &format!("SELECT {}", rows.len()))?;

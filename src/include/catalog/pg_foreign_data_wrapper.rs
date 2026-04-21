@@ -9,6 +9,7 @@ pub struct PgForeignDataWrapperRow {
     pub fdwowner: u32,
     pub fdwhandler: u32,
     pub fdwvalidator: u32,
+    pub fdwacl: Option<Vec<String>>,
     pub fdwoptions: Option<Vec<String>>,
 }
 
@@ -20,6 +21,11 @@ pub fn pg_foreign_data_wrapper_desc() -> RelationDesc {
             column_desc("fdwowner", SqlType::new(SqlTypeKind::Oid), false),
             column_desc("fdwhandler", SqlType::new(SqlTypeKind::Oid), false),
             column_desc("fdwvalidator", SqlType::new(SqlTypeKind::Oid), false),
+            column_desc(
+                "fdwacl",
+                SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
+                true,
+            ),
             column_desc(
                 "fdwoptions",
                 SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
