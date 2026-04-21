@@ -391,10 +391,11 @@ Targeted reruns and notes:
 - vacuum.sql: 135/328
 - vacuum_parallel.sql: 11/14
 - varchar.sql: 12/22
-- window.sql: 58/388
+- window.sql: 69/388
   - [done] support named `WINDOW ... AS (...)` definitions together with `OVER w` references, including grouped queries such as `sum(sum(hundred)) OVER win`
   - [done] implement `percent_rank`, `cume_dist`, and `ntile`, including `ntile(NULL)` and the PostgreSQL-visible `ntile(0)` error
   - [done] implement `first_value`, `last_value`, and `nth_value`, including the PostgreSQL-visible `nth_value(..., 0)` error
+  - [done] implement `lag` and `lead`, including offset/default argument semantics, common-type coercion for the 3-argument form, and PostgreSQL null/out-of-partition behavior
 - with.sql: 37/312
 - without_overlaps.sql: 125/643
 - write_parallel.sql: 8/22
