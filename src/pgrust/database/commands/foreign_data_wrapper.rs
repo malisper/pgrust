@@ -233,6 +233,7 @@ impl Database {
             fdwowner: self.auth_state(client_id).current_user_oid(),
             fdwhandler,
             fdwvalidator,
+            fdwacl: None,
             fdwoptions: options,
         };
         let (_, effect) = self
@@ -365,6 +366,7 @@ impl Database {
             fdwowner: existing.fdwowner,
             fdwhandler,
             fdwvalidator,
+            fdwacl: existing.fdwacl.clone(),
             fdwoptions: options,
         };
 

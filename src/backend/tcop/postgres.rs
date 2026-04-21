@@ -1143,18 +1143,33 @@ fn split_simple_query_statements(sql: &str) -> Vec<&str> {
 
 fn role_name_map(catalog: &dyn CatalogLookup) -> HashMap<u32, String> {
     catalog
-        .authid_rows()
-        .into_iter()
-        .map(|row| (row.oid, row.rolname))
-        .collect()
+        .materialize_visible_catalog()
+        .map(|visible| {
+            visible
+                .authid_rows()
+                .into_iter()
+                .map(|row| (row.oid, row.rolname))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn proc_name_map(catalog: &dyn CatalogLookup) -> HashMap<u32, String> {
-    let _ = catalog;
-    crate::include::catalog::bootstrap_pg_proc_rows()
-        .into_iter()
-        .map(|row| (row.oid, row.proname))
-        .collect()
+    catalog
+        .materialize_visible_catalog()
+        .map(|visible| {
+            visible
+                .proc_rows()
+                .into_iter()
+                .map(|row| (row.oid, row.proname))
+                .collect()
+        })
+        .unwrap_or_else(|| {
+            crate::include::catalog::bootstrap_pg_proc_rows()
+                .into_iter()
+                .map(|row| (row.oid, row.proname))
+                .collect()
+        })
 }
 
 fn try_handle_psql_describe_query(

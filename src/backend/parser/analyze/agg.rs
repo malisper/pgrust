@@ -521,6 +521,7 @@ pub(super) fn aggregate_sql_type(func: AggFunc, arg_type: Option<SqlType>) -> Sq
             Some(kind) => SqlType::new(kind),
             None => SqlType::new(Numeric),
         },
+        AggFunc::AnyValue => arg_type.unwrap_or(SqlType::new(Text)),
         AggFunc::ArrayAgg => arg_type
             .map(|ty| {
                 if ty.is_array {

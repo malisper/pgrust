@@ -566,7 +566,8 @@ pub(crate) fn pg_foreign_data_wrapper_row_from_values(
         fdwowner: expect_oid(&values[2])?,
         fdwhandler: expect_oid(&values[3])?,
         fdwvalidator: expect_oid(&values[4])?,
-        fdwoptions: nullable_text_array(&values[5])?,
+        fdwacl: nullable_text_array(&values[5])?,
+        fdwoptions: nullable_text_array(&values[6])?,
     })
 }
 
@@ -983,6 +984,9 @@ fn pg_foreign_data_wrapper_row_values(row: PgForeignDataWrapperRow) -> Vec<Value
         Value::Int32(row.fdwowner as i32),
         Value::Int32(row.fdwhandler as i32),
         Value::Int32(row.fdwvalidator as i32),
+        row.fdwacl
+            .map(|values| Value::PgArray(text_array_value(values)))
+            .unwrap_or(Value::Null),
         row.fdwoptions
             .map(|values| Value::PgArray(text_array_value(values)))
             .unwrap_or(Value::Null),

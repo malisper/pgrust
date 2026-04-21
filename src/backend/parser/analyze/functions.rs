@@ -699,6 +699,11 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::BoolNe
             | BuiltinScalarFunction::Div
             | BuiltinScalarFunction::Mod => args.len() == 2,
+            BuiltinScalarFunction::Float8Accum | BuiltinScalarFunction::Float8Combine => {
+                args.len() == 2
+            }
+            BuiltinScalarFunction::Float8RegrAccum => args.len() == 3,
+            BuiltinScalarFunction::Float8RegrCombine => args.len() == 2,
             BuiltinScalarFunction::WidthBucket => matches!(args.len(), 2 | 4),
             BuiltinScalarFunction::GetBit => args.len() == 2,
             BuiltinScalarFunction::SetBit => args.len() == 3,
@@ -919,7 +924,8 @@ pub(super) fn validate_aggregate_arity(func: AggFunc, args: &[SqlExpr]) -> Resul
         .map(|count| args.len() == count)
         .unwrap_or_else(|| match func {
             AggFunc::Count => args.len() <= 1,
-            AggFunc::Sum
+            AggFunc::AnyValue
+            | AggFunc::Sum
             | AggFunc::Avg
             | AggFunc::Variance
             | AggFunc::Stddev
@@ -1610,10 +1616,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("float8_accum", BuiltinScalarFunction::Float8Accum),
         ("float8_combine", BuiltinScalarFunction::Float8Combine),
         ("float8_regr_accum", BuiltinScalarFunction::Float8RegrAccum),
-        (
-            "float8_regr_combine",
-            BuiltinScalarFunction::Float8RegrCombine,
-        ),
+        ("float8_regr_combine", BuiltinScalarFunction::Float8RegrCombine),
         ("erf", BuiltinScalarFunction::Erf),
         ("erfc", BuiltinScalarFunction::Erfc),
         ("gamma", BuiltinScalarFunction::Gamma),
@@ -2109,6 +2112,7 @@ fn catalog_text_input_cast_exists(catalog: &dyn CatalogLookup, target_oid: u32) 
 fn aggregate_func_for_proname(name: &str) -> Option<AggFunc> {
     match name.to_ascii_lowercase().as_str() {
         "count" => Some(AggFunc::Count),
+        "any_value" => Some(AggFunc::AnyValue),
         "sum" => Some(AggFunc::Sum),
         "avg" => Some(AggFunc::Avg),
         "variance" => Some(AggFunc::Variance),
@@ -2161,6 +2165,10 @@ mod tests {
             resolve_scalar_function("jsonb_exists_any"),
             Some(BuiltinScalarFunction::JsonbExistsAny)
         );
+        assert_eq!(
+            resolve_scalar_function("float8_accum"),
+            Some(BuiltinScalarFunction::Float8Accum)
+        );
         assert_eq!(resolve_scalar_function("count"), None);
         assert_eq!(resolve_scalar_function("json_array_elements"), None);
         assert_eq!(resolve_scalar_function("int4"), None);
@@ -2189,7 +2197,7 @@ mod tests {
 
     #[test]
     fn resolve_function_cast_type_accepts_pg_catalog_prefix() {
-        let catalog = Catalog::bootstrap();
+        let catalog = Catalog::default();
         assert_eq!(
             resolve_function_cast_type(&catalog, "pg_catalog.text"),
             Some(SqlType::new(SqlTypeKind::Text))
@@ -2400,6 +2408,7 @@ mod tests {
     fn validate_aggregate_arity_uses_pg_proc_for_exact_rows() {
         assert!(validate_aggregate_arity(AggFunc::Sum, &[SqlExpr::Default]).is_ok());
         assert!(validate_aggregate_arity(AggFunc::Sum, &[]).is_err());
+        assert!(validate_aggregate_arity(AggFunc::AnyValue, &[SqlExpr::Default]).is_ok());
         assert!(
             validate_aggregate_arity(
                 AggFunc::JsonObjectAgg,

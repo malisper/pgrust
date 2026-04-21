@@ -134,6 +134,8 @@ fn test_catalog_entry(rel_number: u32, desc: RelationDesc) -> CatalogEntry {
         relhastriggers: false,
         relhassubclass: false,
         relispartition: false,
+        relrowsecurity: false,
+        relforcerowsecurity: false,
         relpages: 0,
         reltuples: 0.0,
         desc,
@@ -184,6 +186,8 @@ fn people_view_entry() -> CatalogEntry {
         relhastriggers: false,
         relhassubclass: false,
         relispartition: false,
+        relrowsecurity: false,
+        relforcerowsecurity: false,
         relpages: 0,
         reltuples: 0.0,
         desc: RelationDesc {
@@ -294,6 +298,8 @@ fn catalog_with_people_id_index() -> Catalog {
             relhastriggers: false,
             relhassubclass: false,
             relispartition: false,
+            relrowsecurity: false,
+            relforcerowsecurity: false,
             relpages: 0,
             reltuples: 0.0,
             desc: RelationDesc {
@@ -339,6 +345,8 @@ fn catalog_with_people_primary_key() -> Catalog {
             relhastriggers: false,
             relhassubclass: false,
             relispartition: false,
+            relrowsecurity: false,
+            relforcerowsecurity: false,
             relpages: 0,
             reltuples: 0.0,
             desc: RelationDesc {
@@ -417,6 +425,8 @@ fn catalog_with_people_partial_unique_index() -> Catalog {
             relhastriggers: false,
             relhassubclass: false,
             relispartition: false,
+            relrowsecurity: false,
+            relforcerowsecurity: false,
             relpages: 0,
             reltuples: 0.0,
             desc: RelationDesc {
@@ -567,6 +577,8 @@ fn catalog_with_text_parent_primary_key() -> Catalog {
             relhastriggers: false,
             relhassubclass: false,
             relispartition: false,
+            relrowsecurity: false,
+            relforcerowsecurity: false,
             relpages: 0,
             reltuples: 0.0,
             desc: RelationDesc {
@@ -610,6 +622,7 @@ fn visible_catalog_without_text_input_cast(
         base.index_rows(),
         base.rewrite_rows(),
         base.trigger_rows(),
+        base.policy_rows(),
         base.am_rows(),
         base.amop_rows(),
         base.amproc_rows(),
@@ -663,6 +676,7 @@ fn visible_catalog_without_operator(
         base.index_rows(),
         base.rewrite_rows(),
         base.trigger_rows(),
+        base.policy_rows(),
         base.am_rows(),
         base.amop_rows(),
         base.amproc_rows(),
@@ -4574,10 +4588,10 @@ fn parse_insert_update_delete() {
         matches!(parse_statement("create temp table tempy(id) as select 1").unwrap(), Statement::CreateTableAs(CreateTableAsStatement { table_name, column_names, persistence: TablePersistence::Temporary, .. }) if table_name == "tempy" && column_names == vec!["id"])
     );
     assert!(
-        matches!(parse_statement("drop table widgets").unwrap(), Statement::DropTable(DropTableStatement { if_exists: false, table_names, cascade: false }) if table_names == vec!["widgets"])
+        matches!(parse_statement("drop table widgets").unwrap(), Statement::DropTable(DropTableStatement { if_exists: false, table_names, .. }) if table_names == vec!["widgets"])
     );
     assert!(
-        matches!(parse_statement("drop table if exists pgbench_accounts, pgbench_branches, pgbench_history, pgbench_tellers").unwrap(), Statement::DropTable(DropTableStatement { if_exists: true, table_names, cascade: false }) if table_names == vec!["pgbench_accounts", "pgbench_branches", "pgbench_history", "pgbench_tellers"])
+        matches!(parse_statement("drop table if exists pgbench_accounts, pgbench_branches, pgbench_history, pgbench_tellers").unwrap(), Statement::DropTable(DropTableStatement { if_exists: true, table_names, .. }) if table_names == vec!["pgbench_accounts", "pgbench_branches", "pgbench_history", "pgbench_tellers"])
     );
     assert!(
         matches!(parse_statement("drop index tenant_idx").unwrap(), Statement::DropIndex(DropIndexStatement { if_exists: false, index_names }) if index_names == vec!["tenant_idx"])
@@ -6713,6 +6727,21 @@ fn parse_range_intersect_agg_select() {
 }
 
 #[test]
+fn parse_any_value_select() {
+    let stmt = parse_select("select any_value(id) from people").unwrap();
+    assert!(matches!(
+        &stmt.targets[0].expr,
+        SqlExpr::AggCall {
+            func: AggFunc::AnyValue,
+            args,
+            distinct: false,
+            ..
+        } if args.len() == 1
+    ));
+    assert_eq!(stmt.targets[0].output_name, "any_value");
+}
+
+#[test]
 fn parse_variadic_aggregate_call_marks_call_level_flag() {
     std::thread::Builder::new()
         .name("parse_variadic_aggregate_call_marks_call_level_flag".into())
@@ -7226,7 +7255,11 @@ fn window_function_rejected_in_where_group_by_and_having() {
 }
 
 #[test]
-fn named_window_errors_and_frame_rules_are_enforced() {
+fn named_windows_parse_and_frames_are_rejected() {
+    let stmt = parse_select("select row_number() over w from people window w as ()").unwrap();
+    assert_eq!(stmt.window_clauses.len(), 1);
+    assert_eq!(stmt.window_clauses[0].name, "w");
+
     let stmt = parse_select("select row_number() over missing from people").unwrap();
     assert!(matches!(
         build_plan(&stmt, &catalog()),
@@ -7238,6 +7271,7 @@ fn named_window_errors_and_frame_rules_are_enforced() {
         build_plan(&stmt, &catalog()),
         Err(ParseError::WindowingError(message)) if message == "window \"w\" is already defined"
     ));
+
     let stmt = parse_select(
         "select sum(id) over (w rows between current row and unbounded following) from people window w as (order by id rows between unbounded preceding and current row)",
     )
