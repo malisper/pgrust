@@ -101,6 +101,9 @@ pub(crate) fn classify_unique_candidate(
     ctx: &IndexInsertContext,
     tid: ItemPointerData,
 ) -> Result<UniqueCandidateResult, CatalogError> {
+    if tid == ctx.heap_tid {
+        return Ok(UniqueCandidateResult::NoConflict);
+    }
     let tuple = heap_fetch(&ctx.pool, ctx.client_id, ctx.heap_relation, tid)
         .map_err(|err| CatalogError::Io(format!("heap unique probe failed: {err:?}")))?;
     let txns = ctx.txns.read();
