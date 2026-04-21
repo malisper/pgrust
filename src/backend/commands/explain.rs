@@ -235,7 +235,9 @@ fn direct_plan_subplans(plan: &Plan) -> Vec<&SubPlan> {
             }
         }
         Plan::WindowAgg { clause, .. } => collect_direct_window_clause_subplans(clause, &mut found),
-        Plan::FunctionScan { call, .. } => collect_direct_set_returning_call_subplans(call, &mut found),
+        Plan::FunctionScan { call, .. } => {
+            collect_direct_set_returning_call_subplans(call, &mut found)
+        }
         Plan::Values { rows, .. } => {
             for row in rows {
                 for expr in row {
@@ -403,10 +405,7 @@ fn collect_direct_agg_accum_subplans<'a>(accum: &'a AggAccum, out: &mut Vec<&'a 
     }
 }
 
-fn collect_direct_window_clause_subplans<'a>(
-    clause: &'a WindowClause,
-    out: &mut Vec<&'a SubPlan>,
-) {
+fn collect_direct_window_clause_subplans<'a>(clause: &'a WindowClause, out: &mut Vec<&'a SubPlan>) {
     for expr in &clause.spec.partition_by {
         collect_direct_expr_subplans(expr, out);
     }

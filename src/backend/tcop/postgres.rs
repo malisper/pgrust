@@ -4149,7 +4149,10 @@ mod tests {
             &output,
             "privileges for membership of role user3 in role user1"
         ));
-        assert!(!output_contains_message(&output, "role \"user2\" does not exist"));
+        assert!(!output_contains_message(
+            &output,
+            "role \"user2\" does not exist"
+        ));
         assert!(
             !db.backend_catcache(2, None)
                 .unwrap()
@@ -5348,7 +5351,8 @@ mod tests {
     #[test]
     fn simple_query_reports_position_for_subscripted_assignment_error() {
         let db = Database::open(temp_dir("subscripted_assignment_error_position"), 16).unwrap();
-        db.execute(1, "create table arrtest (b int4[][][])").unwrap();
+        db.execute(1, "create table arrtest (b int4[][][])")
+            .unwrap();
         let mut state = ConnectionState {
             session: Session::new(2),
             prepared: HashMap::new(),

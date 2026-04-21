@@ -278,10 +278,7 @@ impl AccumState {
                 Ok(())
             },
             (
-                AggFunc::VarPop
-                | AggFunc::VarSamp
-                | AggFunc::StddevPop
-                | AggFunc::StddevSamp,
+                AggFunc::VarPop | AggFunc::VarSamp | AggFunc::StddevPop | AggFunc::StddevSamp,
                 _,
                 _,
             ) => |state, values| {
@@ -430,14 +427,20 @@ impl AccumState {
             AccumState::Count { count } => Value::Int64(*count),
             AccumState::CountDistinct { seen } => Value::Int64(seen.len() as i64),
             AccumState::AnyValue { value } => value.clone().unwrap_or(Value::Null),
-            AccumState::BoolAnd { seen_nonnull, value } => {
+            AccumState::BoolAnd {
+                seen_nonnull,
+                value,
+            } => {
                 if *seen_nonnull {
                     Value::Bool(*value)
                 } else {
                     Value::Null
                 }
             }
-            AccumState::BoolOr { seen_nonnull, value } => {
+            AccumState::BoolOr {
+                seen_nonnull,
+                value,
+            } => {
                 if *seen_nonnull {
                     Value::Bool(*value)
                 } else {

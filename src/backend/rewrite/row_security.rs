@@ -2,8 +2,8 @@ use super::rewrite_policy_expr;
 use crate::backend::catalog::role_memberships::has_effective_membership;
 use crate::backend::catalog::roles::{has_bypassrls_privilege, policy_applies_to_role};
 use crate::backend::parser::{
-    bind_expr_with_outer_and_ctes, parse_select, scope_for_relation, shift_scope_rtindexes,
-    BoundScope, CatalogLookup, ParseError,
+    BoundScope, CatalogLookup, ParseError, bind_expr_with_outer_and_ctes, parse_select,
+    scope_for_relation, shift_scope_rtindexes,
 };
 use crate::include::catalog::{PgClassRow, PgPolicyRow, PolicyCommand};
 use crate::include::nodes::datum::Value;
