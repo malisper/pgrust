@@ -3494,6 +3494,10 @@ fn explain_verbose_update_where_false_is_accepted() {
 
     assert_eq!(lines.first().map(String::as_str), Some("Update on public.some_tab"));
     assert!(
+        lines.iter().any(|line| line == "        Output: (some_tab.a + 1), NULL::oid, NULL::tid"),
+        "expected EXPLAIN VERBOSE UPDATE to render assignment output, got {lines:?}"
+    );
+    assert!(
         lines.iter().any(|line| line == "        One-Time Filter: false"),
         "expected EXPLAIN VERBOSE UPDATE to show false one-time filter, got {lines:?}"
     );

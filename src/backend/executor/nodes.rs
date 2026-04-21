@@ -841,7 +841,18 @@ impl PlanNode for IndexScanState {
 }
 
 pub(crate) fn render_explain_expr(expr: &Expr, column_names: &[String]) -> String {
-    format!("({})", render_explain_expr_inner(expr, column_names))
+    render_explain_expr_with_qualifier(expr, None, column_names)
+}
+
+pub(crate) fn render_explain_expr_with_qualifier(
+    expr: &Expr,
+    qualifier: Option<&str>,
+    column_names: &[String],
+) -> String {
+    format!(
+        "({})",
+        render_explain_expr_inner_with_qualifier(expr, qualifier, column_names)
+    )
 }
 
 pub(crate) fn render_explain_join_expr(
@@ -860,13 +871,59 @@ fn render_explain_var_name(var: &Var, column_names: &[String]) -> Option<String>
 }
 
 fn render_explain_expr_inner(expr: &Expr, column_names: &[String]) -> String {
+    render_explain_expr_inner_with_qualifier(expr, None, column_names)
+}
+
+fn render_explain_expr_inner_with_qualifier(
+    expr: &Expr,
+    qualifier: Option<&str>,
+    column_names: &[String],
+) -> String {
     match expr {
-        Expr::Var(var) => {
-            render_explain_var_name(var, column_names).unwrap_or_else(|| format!("{expr:?}"))
-        }
+        Expr::Var(var) => render_explain_var_name(var, column_names)
+            .map(|name| match qualifier {
+                Some(qualifier) => format!("{qualifier}.{name}"),
+                None => name,
+            })
+            .unwrap_or_else(|| format!("{expr:?}")),
         Expr::Const(value) => render_explain_const(value),
-        Expr::Cast(inner, ty) => render_explain_cast(inner, *ty, column_names),
+        Expr::Cast(inner, ty) => render_explain_cast(inner, *ty, qualifier, column_names),
         Expr::Op(op) => match op.op {
+            crate::include::nodes::primnodes::OpExprKind::Add
+            | crate::include::nodes::primnodes::OpExprKind::Sub
+            | crate::include::nodes::primnodes::OpExprKind::Mul
+            | crate::include::nodes::primnodes::OpExprKind::Div
+            | crate::include::nodes::primnodes::OpExprKind::Mod
+            | crate::include::nodes::primnodes::OpExprKind::BitAnd
+            | crate::include::nodes::primnodes::OpExprKind::BitOr
+            | crate::include::nodes::primnodes::OpExprKind::BitXor
+            | crate::include::nodes::primnodes::OpExprKind::Shl
+            | crate::include::nodes::primnodes::OpExprKind::Shr
+            | crate::include::nodes::primnodes::OpExprKind::Concat => {
+                let [left, right] = op.args.as_slice() else {
+                    return format!("{expr:?}");
+                };
+                let op_text = match op.op {
+                    crate::include::nodes::primnodes::OpExprKind::Add => "+",
+                    crate::include::nodes::primnodes::OpExprKind::Sub => "-",
+                    crate::include::nodes::primnodes::OpExprKind::Mul => "*",
+                    crate::include::nodes::primnodes::OpExprKind::Div => "/",
+                    crate::include::nodes::primnodes::OpExprKind::Mod => "%",
+                    crate::include::nodes::primnodes::OpExprKind::BitAnd => "&",
+                    crate::include::nodes::primnodes::OpExprKind::BitOr => "|",
+                    crate::include::nodes::primnodes::OpExprKind::BitXor => "#",
+                    crate::include::nodes::primnodes::OpExprKind::Shl => "<<",
+                    crate::include::nodes::primnodes::OpExprKind::Shr => ">>",
+                    crate::include::nodes::primnodes::OpExprKind::Concat => "||",
+                    _ => unreachable!(),
+                };
+                format!(
+                    "{} {} {}",
+                    render_explain_infix_operand(left, qualifier, column_names),
+                    op_text,
+                    render_explain_infix_operand(right, qualifier, column_names)
+                )
+            }
             crate::include::nodes::primnodes::OpExprKind::Eq
             | crate::include::nodes::primnodes::OpExprKind::NotEq
             | crate::include::nodes::primnodes::OpExprKind::Lt
@@ -889,9 +946,9 @@ fn render_explain_expr_inner(expr: &Expr, column_names: &[String]) -> String {
                 };
                 format!(
                     "{} {} {}",
-                    render_explain_expr_inner(left, column_names),
+                    render_explain_infix_operand(left, qualifier, column_names),
                     op_text,
-                    render_explain_expr_inner(right, column_names)
+                    render_explain_infix_operand(right, qualifier, column_names)
                 )
             }
             _ => format!("{expr:?}"),
@@ -901,7 +958,7 @@ fn render_explain_expr_inner(expr: &Expr, column_names: &[String]) -> String {
                 let rendered = bool_expr
                     .args
                     .iter()
-                    .map(|arg| render_explain_expr_inner(arg, column_names))
+                    .map(|arg| render_explain_expr_inner_with_qualifier(arg, qualifier, column_names))
                     .collect::<Vec<_>>();
                 format!("({})", rendered.join(" AND "))
             }
@@ -909,7 +966,7 @@ fn render_explain_expr_inner(expr: &Expr, column_names: &[String]) -> String {
                 let rendered = bool_expr
                     .args
                     .iter()
-                    .map(|arg| render_explain_expr_inner(arg, column_names))
+                    .map(|arg| render_explain_expr_inner_with_qualifier(arg, qualifier, column_names))
                     .collect::<Vec<_>>();
                 format!("({})", rendered.join(" OR "))
             }
@@ -917,21 +974,27 @@ fn render_explain_expr_inner(expr: &Expr, column_names: &[String]) -> String {
                 let Some(inner) = bool_expr.args.first() else {
                     return format!("{expr:?}");
                 };
-                format!("NOT {}", render_explain_expr_inner(inner, column_names))
+                format!(
+                    "NOT {}",
+                    render_explain_expr_inner_with_qualifier(inner, qualifier, column_names)
+                )
             }
         },
         Expr::Coalesce(left, right) => format!(
             "COALESCE({}, {})",
-            render_explain_expr_inner(left, column_names),
-            render_explain_expr_inner(right, column_names)
+            render_explain_expr_inner_with_qualifier(left, qualifier, column_names),
+            render_explain_expr_inner_with_qualifier(right, qualifier, column_names)
         ),
         Expr::IsNull(inner) => {
-            format!("{} IS NULL", render_explain_expr_inner(inner, column_names))
+            format!(
+                "{} IS NULL",
+                render_explain_expr_inner_with_qualifier(inner, qualifier, column_names)
+            )
         }
         Expr::IsNotNull(inner) => {
             format!(
                 "{} IS NOT NULL",
-                render_explain_expr_inner(inner, column_names)
+                render_explain_expr_inner_with_qualifier(inner, qualifier, column_names)
             )
         }
         Expr::Similar {
@@ -940,9 +1003,24 @@ fn render_explain_expr_inner(expr: &Expr, column_names: &[String]) -> String {
             escape,
             negated,
         } => render_similar_explain_expr(expr, pattern, escape.as_deref(), *negated, |expr| {
-            render_explain_expr_inner(expr, column_names)
+            render_explain_expr_inner_with_qualifier(expr, qualifier, column_names)
         }),
         other => format!("{other:?}"),
+    }
+}
+
+fn render_explain_infix_operand(
+    expr: &Expr,
+    qualifier: Option<&str>,
+    column_names: &[String],
+) -> String {
+    match expr {
+        Expr::Const(value) => render_explain_literal(value),
+        Expr::Cast(inner, _) => match inner.as_ref() {
+            Expr::Const(value) => render_explain_literal(value),
+            _ => render_explain_expr_inner_with_qualifier(expr, qualifier, column_names),
+        },
+        _ => render_explain_expr_inner_with_qualifier(expr, qualifier, column_names),
     }
 }
 
@@ -1114,7 +1192,12 @@ fn render_explain_const(value: &Value) -> String {
     }
 }
 
-fn render_explain_cast(expr: &Expr, ty: SqlType, column_names: &[String]) -> String {
+fn render_explain_cast(
+    expr: &Expr,
+    ty: SqlType,
+    qualifier: Option<&str>,
+    column_names: &[String],
+) -> String {
     if let Expr::Const(value) = expr {
         return format!(
             "{}::{}",
@@ -1122,7 +1205,7 @@ fn render_explain_cast(expr: &Expr, ty: SqlType, column_names: &[String]) -> Str
             render_explain_sql_type_name(ty)
         );
     }
-    let inner = render_explain_expr_inner(expr, column_names);
+    let inner = render_explain_expr_inner_with_qualifier(expr, qualifier, column_names);
     format!("({inner})::{}", render_explain_sql_type_name(ty))
 }
 
