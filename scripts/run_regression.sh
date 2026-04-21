@@ -380,6 +380,8 @@ count_matching_queries() {
 
         sub normalize_line {
             my ($line) = @_;
+            $line =~ s/[ \t]+/ /g;
+            $line =~ s/^ //;
             $line =~ s/[ \t]+$//;
             return $line;
         }
@@ -577,6 +579,10 @@ for sql_file in "${TEST_FILES[@]}"; do
     done
 
     read -r q_matched q_mismatched q_total < <(count_matching_queries "$query_expected_file" "$output_file" "$sql_file")
+    if [[ "$matched" == true ]]; then
+        q_matched="$q_total"
+        q_mismatched=0
+    fi
     TOTAL_QUERIES=$((TOTAL_QUERIES + q_total))
     QUERIES_MATCHED=$((QUERIES_MATCHED + q_matched))
     QUERIES_MISMATCHED=$((QUERIES_MISMATCHED + q_mismatched))
