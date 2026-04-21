@@ -72,7 +72,7 @@ pub fn create_role(
     let role_name = role_name.into();
     if find_role_by_name(rows, &role_name).is_some() {
         return Err(CatalogError::UniqueViolation(format!(
-            "duplicate role name: {role_name}"
+            "role \"{role_name}\" already exists"
         )));
     }
     let row = PgAuthIdRow {
@@ -122,7 +122,7 @@ pub fn rename_role(
         row.rolname.eq_ignore_ascii_case(new_name) && !row.rolname.eq_ignore_ascii_case(role_name)
     }) {
         return Err(CatalogError::UniqueViolation(format!(
-            "duplicate role name: {new_name}"
+            "role \"{new_name}\" already exists"
         )));
     }
     let row = rows
