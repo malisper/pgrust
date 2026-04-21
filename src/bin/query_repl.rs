@@ -805,7 +805,8 @@ fn run_statement(
             };
             execute_readonly_statement(Statement::Analyze(stmt), &relcache, &mut ctx)
         }
-        Statement::CommentOnDomain(_)
+        Statement::CommentOnConstraint(_)
+        | Statement::CommentOnDomain(_)
         | Statement::CreateConversion(_)
         | Statement::CommentOnRule(_)
         | Statement::CreateFunction(_)

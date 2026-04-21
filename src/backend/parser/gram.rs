@@ -83,6 +83,9 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_publication_statement(&sql)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_constraint_comment_statement(&sql)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_create_type_statement(&sql)? {
         return Ok(stmt);
     }
@@ -226,6 +229,22 @@ fn try_parse_publication_statement(sql: &str) -> Result<Option<Statement>, Parse
             .map(|stmt| Some(Statement::CommentOnPublication(stmt)));
     }
     Ok(None)
+}
+
+fn try_parse_constraint_comment_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if !lowered.starts_with("comment on constraint ") {
+        return Ok(None);
+    }
+    if lowered["comment on constraint ".len()..]
+        .trim_start()
+        .starts_with("on domain ")
+    {
+        return Ok(None);
+    }
+    build_comment_on_constraint_statement(trimmed)
+        .map(|stmt| Some(Statement::CommentOnConstraint(stmt)))
 }
 
 fn build_create_publication_statement(sql: &str) -> Result<CreatePublicationStatement, ParseError> {
@@ -411,6 +430,61 @@ fn build_comment_on_publication_statement(
     }
     Ok(CommentOnPublicationStatement {
         publication_name,
+        comment,
+    })
+}
+
+fn build_comment_on_constraint_statement(
+    sql: &str,
+) -> Result<CommentOnConstraintStatement, ParseError> {
+    let rest = sql
+        .get("comment on constraint".len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let (constraint_name, mut rest) = parse_unqualified_identifier(rest, "constraint name")?;
+    rest = rest.trim_start();
+    if !keyword_at_start(rest, "on") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "ON table_name",
+            actual: rest.into(),
+        });
+    }
+    rest = consume_keyword(rest, "on").trim_start();
+    let (parts, mut rest) = parse_qualified_identifier_parts(rest)?;
+    let table_name = match parts.as_slice() {
+        [name] => name.clone(),
+        [schema, name] => format!("{schema}.{name}"),
+        _ => return Err(ParseError::UnsupportedQualifiedName(parts.join("."))),
+    };
+    rest = rest.trim_start();
+    if !keyword_at_start(rest, "is") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "IS string literal or NULL",
+            actual: rest.into(),
+        });
+    }
+    rest = consume_keyword(rest, "is").trim_start();
+    let (comment, rest) = if keyword_at_start(rest, "null") {
+        (None, consume_keyword(rest, "null"))
+    } else {
+        let token_len = scan_string_literal_token_len(rest).ok_or(ParseError::UnexpectedToken {
+            expected: "comment string literal or NULL",
+            actual: rest.into(),
+        })?;
+        (
+            Some(decode_string_literal(&rest[..token_len])?),
+            &rest[token_len..],
+        )
+    };
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of COMMENT ON CONSTRAINT",
+            actual: rest.trim().into(),
+        });
+    }
+    Ok(CommentOnConstraintStatement {
+        constraint_name,
+        table_name,
         comment,
     })
 }
