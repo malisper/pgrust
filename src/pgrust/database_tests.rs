@@ -11481,9 +11481,28 @@ fn set_local_time_zone_updates_timestamptz_json_output() {
         ),
         vec![vec![Value::Jsonb(
             crate::backend::executor::jsonb::parse_jsonb_text(
-                "\"2014-05-29 02:52:35.614298+10:30\"",
+                "\"2014-05-29T02:52:35.614298+10:30\"",
             )
             .unwrap()
+        )]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select to_jsonb(timestamp '2014-05-28 12:22:35.614298')",
+        ),
+        vec![vec![Value::Jsonb(
+            crate::backend::executor::jsonb::parse_jsonb_text(
+                "\"2014-05-28T12:22:35.614298\"",
+            )
+            .unwrap()
+        )]]
+    );
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select to_jsonb(date '2014-05-28')"),
+        vec![vec![Value::Jsonb(
+            crate::backend::executor::jsonb::parse_jsonb_text("\"2014-05-28\"").unwrap()
         )]]
     );
 
