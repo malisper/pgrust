@@ -379,7 +379,6 @@ pub enum BuiltinScalarFunction {
     Replace,
     SplitPart,
     Translate,
-    RegRoleToText,
     BpcharToText,
     Position,
     Substring,
@@ -388,6 +387,7 @@ pub enum BuiltinScalarFunction {
     ToOct,
     ToHex,
     Reverse,
+    RegRoleToText,
     GetBit,
     SetBit,
     GetByte,
@@ -1331,6 +1331,9 @@ pub fn expr_sql_type_hint(expr: &Expr) -> Option<SqlType> {
         | Expr::Similar { .. }
         | Expr::ArraySubscript { .. }
         | Expr::Random
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
         | Expr::CurrentDate
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
