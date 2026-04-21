@@ -227,20 +227,13 @@ fn parse_point_text(text: &str) -> Result<GeoPoint, ExecError> {
 }
 
 fn parse_lseg_text(text: &str) -> Result<GeoLseg, ExecError> {
-    let mut parser = GeometryParser::new(text, "lseg");
-    let mut wrapped = false;
-    parser.skip_ws();
-    if parser.consume('[') {
-        wrapped = true;
+    let (_closed, points) = parse_path_like(text, "lseg")?;
+    if points.len() != 2 {
+        return Err(invalid_geometry_input("lseg", text));
     }
-    let first = parser.parse_point_pair()?;
-    parser.expect(',')?;
-    let second = parser.parse_point_pair()?;
-    if wrapped {
-        parser.expect(']')?;
-    }
-    parser.finish()?;
-    Ok(GeoLseg { p: [first, second] })
+    Ok(GeoLseg {
+        p: [points[0].clone(), points[1].clone()],
+    })
 }
 
 fn parse_box_text(text: &str) -> Result<GeoBox, ExecError> {
@@ -2997,5 +2990,19 @@ impl<'a> GeometryParser<'a> {
             self.expect(')')?;
         }
         Ok(GeoPoint { x, y })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_lseg_text;
+
+    #[test]
+    fn parse_lseg_accepts_flat_text_input() {
+        let lseg = parse_lseg_text("(4.1,4.1,3.1,3.1)").unwrap();
+        assert_eq!(lseg.p[0].x, 4.1);
+        assert_eq!(lseg.p[0].y, 4.1);
+        assert_eq!(lseg.p[1].x, 3.1);
+        assert_eq!(lseg.p[1].y, 3.1);
     }
 }
