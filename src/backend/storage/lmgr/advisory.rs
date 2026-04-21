@@ -152,7 +152,7 @@ impl AdvisoryLockManager {
         if key_state
             .granted
             .iter()
-            .any(|entry| entry.owner != owner && entry.mode.conflicts_with(mode))
+            .any(|entry| conflicts_between_owners(entry.owner, owner) && entry.mode.conflicts_with(mode))
         {
             return false;
         }
@@ -175,7 +175,7 @@ impl AdvisoryLockManager {
             let has_conflict = key_state
                 .granted
                 .iter()
-                .any(|entry| entry.owner != owner && entry.mode.conflicts_with(mode));
+                .any(|entry| conflicts_between_owners(entry.owner, owner) && entry.mode.conflicts_with(mode));
             if !has_conflict {
                 if waiting {
                     remove_waiter(key_state, waiter_id);
@@ -325,6 +325,10 @@ fn remove_waiter(key_state: &mut AdvisoryKeyState, waiter_id: u64) {
     }
 }
 
+fn conflicts_between_owners(left: AdvisoryLockOwner, right: AdvisoryLockOwner) -> bool {
+    left.client_id != right.client_id
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -353,5 +357,20 @@ mod tests {
         ));
         locks.unlock_all_session(1);
         assert!(locks.snapshot().is_empty());
+    }
+
+    #[test]
+    fn same_backend_different_scopes_do_not_conflict() {
+        let locks = AdvisoryLockManager::new();
+        assert!(locks.try_lock(
+            AdvisoryLockKey::BigInt(7),
+            AdvisoryLockMode::Exclusive,
+            AdvisoryLockOwner::transaction(1, 42),
+        ));
+        assert!(locks.try_lock(
+            AdvisoryLockKey::BigInt(7),
+            AdvisoryLockMode::Exclusive,
+            AdvisoryLockOwner::session(1),
+        ));
     }
 }

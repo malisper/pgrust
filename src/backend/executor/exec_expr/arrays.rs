@@ -201,8 +201,7 @@ fn apply_array_subscripts_to_value(
                     upper: clamped_upper,
                 });
                 result_dimensions.push(ArrayDimension {
-                    // PostgreSQL rebases array slice results to 1-based bounds
-                    // even when the source array uses custom lower bounds.
+                    // PostgreSQL rebases all slice results to 1-based bounds.
                     lower_bound: 1,
                     length,
                 });
