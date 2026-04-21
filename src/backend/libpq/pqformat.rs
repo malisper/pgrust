@@ -5,10 +5,11 @@ use std::str::FromStr;
 use crate::backend::access::heap::heapam::HeapError;
 use crate::backend::executor::exec_expr::format_array_text;
 use crate::backend::executor::{
-    ExecError, QueryColumn, Value, geometry_input_error_message,
+    ArrayValue, ExecError, QueryColumn, Value, geometry_input_error_message,
     render_datetime_value_text_with_config, render_geometry_text, render_internal_char_text,
     render_range_text,
 };
+use crate::backend::executor::value_io::builtin_type_oid_for_sql_type;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::include::access::htup::TupleError;
@@ -790,7 +791,19 @@ pub(crate) fn send_typed_data_row(
                 buf.extend_from_slice(rendered.as_bytes());
             }
             Value::Array(items) => {
-                let rendered = format_array_text(items);
+                let rendered = if let Some(sql_type) = sql_type.filter(|ty| ty.is_array) {
+                    let array = builtin_type_oid_for_sql_type(sql_type.element_type()).map(
+                        |element_type_oid| {
+                            ArrayValue::from_1d(items.clone()).with_element_type_oid(element_type_oid)
+                        },
+                    );
+                    array
+                        .as_ref()
+                        .map(crate::backend::executor::value_io::format_array_value_text)
+                        .unwrap_or_else(|| format_array_text(items))
+                } else {
+                    format_array_text(items)
+                };
                 buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
                 buf.extend_from_slice(rendered.as_bytes());
             }
@@ -1886,5 +1899,35 @@ mod tests {
         .unwrap();
 
         assert!(out.windows(1).any(|window| window == b"-"));
+    }
+
+    #[test]
+    fn typed_data_row_renders_interval_arrays_with_interval_text() {
+        let mut out = Vec::new();
+        let mut row_buf = Vec::new();
+
+        send_typed_data_row(
+            &mut out,
+            &[Value::Array(vec![
+                Value::Text("00:00:00".into()),
+                Value::Text("01:42:20".into()),
+            ])],
+            &[QueryColumn {
+                name: "intervals".into(),
+                sql_type: SqlType::array_of(SqlType::new(SqlTypeKind::Interval)),
+                wire_type_oid: None,
+            }],
+            &[],
+            &mut row_buf,
+            FloatFormatOptions::default(),
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            out.windows("{\"@ 0\",\"@ 1 hour 42 mins 20 secs\"}".len())
+                .any(|window| window == b"{\"@ 0\",\"@ 1 hour 42 mins 20 secs\"}")
+        );
     }
 }

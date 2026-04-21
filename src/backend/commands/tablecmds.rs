@@ -2412,9 +2412,11 @@ fn assign_array_value(
         if items.is_empty() {
             lower_bound = start;
         }
-        extend_assignment_items(&mut lower_bound, &mut items, start, end);
-        let start_idx = (start - lower_bound) as usize;
-        let end_idx = (end - lower_bound) as usize;
+        extend_assignment_items(&mut lower_bound, &mut items, start, end)?;
+        let start_idx = usize::try_from(i64::from(start) - i64::from(lower_bound))
+            .map_err(|_| array_assignment_limit_error())?;
+        let end_idx = usize::try_from(i64::from(end) - i64::from(lower_bound))
+            .map_err(|_| array_assignment_limit_error())?;
         let span = end_idx - start_idx + 1;
         if replacement_items.len() != span {
             return Err(ExecError::TypeMismatch {
@@ -2441,8 +2443,9 @@ fn assign_array_value(
         if items.is_empty() {
             lower_bound = index;
         }
-        extend_assignment_items(&mut lower_bound, &mut items, index, index);
-        let index = (index - lower_bound) as usize;
+        extend_assignment_items(&mut lower_bound, &mut items, index, index)?;
+        let index = usize::try_from(i64::from(index) - i64::from(lower_bound))
+            .map_err(|_| array_assignment_limit_error())?;
         items[index] = if subscripts.len() == 1 {
             replacement
         } else {
@@ -2494,7 +2497,7 @@ fn assign_array_slice_value(
             } else {
                 subscript.lower.as_ref()
             },
-            dim.lower_bound + dim.length as i32 - 1,
+            checked_array_upper_bound(dim.lower_bound, dim.length)?,
             subscript.is_slice,
         )?;
         if lower > upper {
@@ -2505,15 +2508,27 @@ fn assign_array_slice_value(
 
         if ndim == 1 {
             if lower < dimensions[0].lower_bound {
-                let extension = (dimensions[0].lower_bound - lower) as usize;
+                let extension = usize::try_from(i64::from(dimensions[0].lower_bound) - i64::from(lower))
+                    .map_err(|_| array_assignment_limit_error())?;
                 dimensions[0].lower_bound = lower;
-                dimensions[0].length += extension;
+                dimensions[0].length = dimensions[0]
+                    .length
+                    .checked_add(extension)
+                    .ok_or_else(array_assignment_limit_error)?;
+                dimensions[0].length = checked_array_item_count(dimensions[0].length)?;
             }
-            let current_upper = dimensions[0].lower_bound + dimensions[0].length as i32 - 1;
+            let current_upper =
+                checked_array_upper_bound(dimensions[0].lower_bound, dimensions[0].length)?;
             if upper > current_upper {
-                dimensions[0].length += (upper - current_upper) as usize;
+                let extension = usize::try_from(i64::from(upper) - i64::from(current_upper))
+                    .map_err(|_| array_assignment_limit_error())?;
+                dimensions[0].length = dimensions[0]
+                    .length
+                    .checked_add(extension)
+                    .ok_or_else(array_assignment_limit_error)?;
+                dimensions[0].length = checked_array_item_count(dimensions[0].length)?;
             }
-        } else if lower < dim.lower_bound || upper >= dim.lower_bound + dim.length as i32 {
+        } else if lower < dim.lower_bound || upper > checked_array_upper_bound(dim.lower_bound, dim.length)? {
             return Err(array_assignment_error("array subscript out of range"));
         }
 
@@ -2523,18 +2538,19 @@ fn assign_array_slice_value(
 
     for dim in dimensions.iter().skip(subscripts.len()) {
         lower_bounds.push(dim.lower_bound);
-        upper_bounds.push(dim.lower_bound + dim.length as i32 - 1);
+        upper_bounds.push(checked_array_upper_bound(dim.lower_bound, dim.length)?);
     }
 
     let span_lengths = lower_bounds
         .iter()
         .zip(upper_bounds.iter())
-        .map(|(lower, upper)| (*upper - *lower + 1) as usize)
-        .collect::<Vec<_>>();
+        .map(|(lower, upper)| checked_array_span_length(*lower, *upper))
+        .collect::<Result<Vec<_>, _>>()?;
     let target_items = span_lengths
         .iter()
         .try_fold(1usize, |count, span| count.checked_mul(*span))
-        .ok_or_else(|| array_assignment_limit_error())?;
+        .ok_or_else(|| array_assignment_limit_error())
+        .and_then(checked_array_item_count)?;
     if source_array.elements.len() < target_items {
         return Err(array_assignment_error("source array too small"));
     }
@@ -2546,10 +2562,16 @@ fn assign_array_slice_value(
         let mut elements = vec![Value::Null; dimensions[0].length];
         let original_lower = current_array.lower_bound(0).unwrap_or(1);
         for (idx, value) in current_array.elements.iter().enumerate() {
-            let target_idx = (original_lower + idx as i32 - dimensions[0].lower_bound) as usize;
+            let target_idx = usize::try_from(
+                i64::from(original_lower)
+                    + i64::try_from(idx).map_err(|_| array_assignment_limit_error())?
+                    - i64::from(dimensions[0].lower_bound),
+            )
+            .map_err(|_| array_assignment_limit_error())?;
             elements[target_idx] = value.clone();
         }
-        let start_idx = (lower_bounds[0] - dimensions[0].lower_bound) as usize;
+        let start_idx = usize::try_from(i64::from(lower_bounds[0]) - i64::from(dimensions[0].lower_bound))
+            .map_err(|_| array_assignment_limit_error())?;
         for (offset, value) in source_array
             .elements
             .into_iter()
@@ -2624,14 +2646,15 @@ fn assign_array_slice_into_empty(
         }
         dimensions.push(ArrayDimension {
             lower_bound: lower,
-            length: (upper - lower + 1) as usize,
+            length: checked_array_span_length(lower, upper)?,
         });
     }
 
     let target_items = dimensions
         .iter()
         .try_fold(1usize, |count, dim| count.checked_mul(dim.length))
-        .ok_or_else(|| array_assignment_limit_error())?;
+        .ok_or_else(|| array_assignment_limit_error())
+        .and_then(checked_array_item_count)?;
     if source_array.elements.len() < target_items {
         return Err(array_assignment_error("source array too small"));
     }
@@ -2685,6 +2708,39 @@ fn assignment_null_subscript_error() -> ExecError {
         column: "<array>".into(),
         details: "array subscript in assignment must not be null".into(),
     }
+}
+
+const MAX_ASSIGNMENT_ARRAY_ITEMS: usize = i32::MAX as usize;
+
+fn checked_array_item_count(count: usize) -> Result<usize, ExecError> {
+    if count > MAX_ASSIGNMENT_ARRAY_ITEMS {
+        Err(array_assignment_limit_error())
+    } else {
+        Ok(count)
+    }
+}
+
+fn checked_array_upper_bound(lower_bound: i32, length: usize) -> Result<i32, ExecError> {
+    let length = i64::try_from(checked_array_item_count(length)?)
+        .map_err(|_| array_assignment_limit_error())?;
+    i32::try_from(
+        i64::from(lower_bound)
+            .checked_add(length)
+            .and_then(|bound| bound.checked_sub(1))
+            .ok_or_else(array_assignment_limit_error)?,
+    )
+    .map_err(|_| array_assignment_limit_error())
+}
+
+fn checked_array_span_length(lower: i32, upper: i32) -> Result<usize, ExecError> {
+    let span = usize::try_from(
+        i64::from(upper)
+            .checked_sub(i64::from(lower))
+            .and_then(|span| span.checked_add(1))
+            .ok_or_else(array_assignment_limit_error)?,
+    )
+    .map_err(|_| array_assignment_limit_error())?;
+    checked_array_item_count(span)
 }
 
 fn array_assignment_error(message: &str) -> ExecError {
@@ -2787,19 +2843,39 @@ fn assignment_replacement_items(replacement: Value) -> Result<Vec<Value>, ExecEr
     }
 }
 
-fn extend_assignment_items(lower_bound: &mut i32, items: &mut Vec<Value>, start: i32, end: i32) {
+fn extend_assignment_items(
+    lower_bound: &mut i32,
+    items: &mut Vec<Value>,
+    start: i32,
+    end: i32,
+) -> Result<(), ExecError> {
     if items.is_empty() {
         *lower_bound = start;
     }
     if start < *lower_bound {
-        let prepend = (*lower_bound - start) as usize;
+        let prepend = i64::from(*lower_bound)
+            .checked_sub(i64::from(start))
+            .and_then(|delta| usize::try_from(delta).ok())
+            .ok_or_else(array_assignment_limit_error)?;
         items.splice(0..0, std::iter::repeat_n(Value::Null, prepend));
         *lower_bound = start;
     }
-    let upper_bound = *lower_bound + items.len() as i32 - 1;
-    if end > upper_bound {
-        items.resize(items.len() + (end - upper_bound) as usize, Value::Null);
+    let upper_bound = i64::from(*lower_bound)
+        .checked_add(i64::try_from(items.len()).map_err(|_| array_assignment_limit_error())?)
+        .and_then(|bound| bound.checked_sub(1))
+        .ok_or_else(array_assignment_limit_error)?;
+    if i64::from(end) > upper_bound {
+        let append = i64::from(end)
+            .checked_sub(upper_bound)
+            .and_then(|delta| usize::try_from(delta).ok())
+            .ok_or_else(array_assignment_limit_error)?;
+        let new_len = items
+            .len()
+            .checked_add(append)
+            .ok_or_else(array_assignment_limit_error)?;
+        items.resize(checked_array_item_count(new_len)?, Value::Null);
     }
+    Ok(())
 }
 
 fn build_assignment_array_value(lower_bound: i32, items: Vec<Value>) -> Result<Value, ExecError> {

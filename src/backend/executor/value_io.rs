@@ -29,8 +29,8 @@ mod array;
 
 pub use array::format_array_value_text;
 pub(crate) use array::{
-    decode_anyarray_bytes, decode_array_bytes, encode_anyarray_bytes, encode_array_bytes,
-    format_array_text,
+    builtin_type_oid_for_sql_type, decode_anyarray_bytes, decode_array_bytes,
+    encode_anyarray_bytes, encode_array_bytes, format_array_text,
 };
 
 const INTERNAL_VALUE_TAG_NULL: u8 = 0;
@@ -2224,6 +2224,20 @@ mod tests {
         assert_eq!(
             u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
             crate::include::catalog::INT4_TYPE_OID
+        );
+    }
+
+    #[test]
+    fn interval_arrays_render_postgres_interval_style() {
+        let array = ArrayValue::from_1d(vec![
+            Value::Text("00:00:00".into()),
+            Value::Text("01:42:20".into()),
+        ])
+        .with_element_type_oid(crate::include::catalog::INTERVAL_TYPE_OID);
+
+        assert_eq!(
+            format_array_value_text(&array),
+            "{\"@ 0\",\"@ 1 hour 42 mins 20 secs\"}"
         );
     }
 
