@@ -7907,6 +7907,7 @@ fn select_item_name(expr: &SqlExpr, index: usize) -> String {
     let _ = index;
     match expr {
         SqlExpr::Column(name) => name.rsplit('.').next().unwrap_or(name).to_string(),
+        SqlExpr::ArrayLiteral(_) => "array".to_string(),
         SqlExpr::ArraySubscript { array, .. } => select_item_name(array, index),
         SqlExpr::FieldSelect { field, .. } => field.clone(),
         SqlExpr::Cast(inner, ty) => match inner.as_ref() {
