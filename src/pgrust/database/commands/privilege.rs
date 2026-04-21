@@ -1361,6 +1361,88 @@ mod tests {
     }
 
     #[test]
+    fn revoke_admin_option_requires_cascade_for_dependent_grants() {
+        let base = temp_dir("revoke_role_admin_dependents");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session.execute(&db, "create role parent").unwrap();
+        session.execute(&db, "create role grantor").unwrap();
+        session.execute(&db, "create role grantee").unwrap();
+        session.execute(&db, "create role child").unwrap();
+        session
+            .execute(&db, "grant parent to grantor with admin option")
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "grant parent to grantee with admin option granted by grantor",
+            )
+            .unwrap();
+        session
+            .execute(&db, "grant parent to child granted by grantee")
+            .unwrap();
+
+        let err = session
+            .execute(
+                &db,
+                "revoke admin option for parent from grantee granted by grantor",
+            )
+            .unwrap_err();
+        match err {
+            ExecError::DetailedError { message, hint, .. } => {
+                assert_eq!(message, "dependent privileges exist");
+                assert_eq!(hint.as_deref(), Some("Use CASCADE to revoke them too."));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn revoke_admin_option_cascade_removes_dependent_grants() {
+        let base = temp_dir("revoke_role_admin_cascade");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session.execute(&db, "create role parent").unwrap();
+        session.execute(&db, "create role grantor").unwrap();
+        session.execute(&db, "create role grantee").unwrap();
+        session.execute(&db, "create role child").unwrap();
+        session
+            .execute(&db, "grant parent to grantor with admin option")
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "grant parent to grantee with admin option granted by grantor",
+            )
+            .unwrap();
+        session
+            .execute(&db, "grant parent to child granted by grantee")
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "revoke admin option for parent from grantee granted by grantor cascade",
+            )
+            .unwrap();
+
+        let parent_oid = role_oid(&db, "parent");
+        let grantor_oid = role_oid(&db, "grantor");
+        let grantee_oid = role_oid(&db, "grantee");
+        let child_oid = role_oid(&db, "child");
+        let rows = db.catalog.read().catcache().unwrap().auth_members_rows();
+        let membership = rows
+            .iter()
+            .find(|row| {
+                row.roleid == parent_oid && row.member == grantee_oid && row.grantor == grantor_oid
+            })
+            .unwrap();
+        assert!(!membership.admin_option);
+        assert!(!rows.iter().any(|row| {
+            row.roleid == parent_oid && row.member == child_oid && row.grantor == grantee_oid
+        }));
+    }
+
+    #[test]
     fn revoke_set_option_clears_set_flag() {
         let base = temp_dir("revoke_role_set_option");
         let db = Database::open(&base, 16).unwrap();

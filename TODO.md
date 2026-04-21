@@ -518,7 +518,7 @@ Targeted reruns and notes:
   - [done] expose privilege-related system catalogs in SQL, including `pg_auth_members` and `pg_largeobject_metadata`
   - [done] implement `lo_create` / `lo_unlink` and surface `pg_largeobject_metadata` rows from runtime state
   - [done] add parser/analyzer support for role membership `GRANTED BY`
-  - add parser/analyzer/executor support for `CASCADE` in role membership revokes
+  - [done] add parser/analyzer/executor support for `CASCADE` in role membership revokes
   - [done] implement `SET ROLE` and `RESET ROLE`
   - [done] implement SQL-visible `session_user`, `current_user`, and `current_role` semantics used by the regression
   - [done] add parser/executor support for `DROP OWNED`
