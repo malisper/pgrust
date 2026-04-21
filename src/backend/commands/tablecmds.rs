@@ -563,7 +563,7 @@ fn render_update_returning_targets(target_name: &str, returning: &[TargetEntry])
         .join(", ")
 }
 
-fn render_update_projection_output(_target_name: &str, target: &BoundUpdateTarget) -> String {
+fn render_update_projection_output(target_name: &str, target: &BoundUpdateTarget) -> String {
     let column_names = target
         .desc
         .columns
@@ -574,7 +574,11 @@ fn render_update_projection_output(_target_name: &str, target: &BoundUpdateTarge
         .assignments
         .iter()
         .map(|assignment| {
-            crate::backend::executor::render_explain_expr(&assignment.expr, &column_names)
+            crate::backend::executor::render_explain_expr_with_qualifier(
+                &assignment.expr,
+                Some(target_name),
+                &column_names,
+            )
         })
         .collect::<Vec<_>>();
     let mut outputs = assignment_outputs;
