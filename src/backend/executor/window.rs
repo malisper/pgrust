@@ -85,6 +85,30 @@ fn same_peer(left: &PreparedWindowRow, right: &PreparedWindowRow) -> bool {
             .all(|(left, right)| compare_order_values(left, right, None, false) == Ordering::Equal)
 }
 
+fn evaluate_window_expr_on_row(
+    ctx: &mut ExecutorContext,
+    row: &mut PreparedWindowRow,
+    expr: &crate::include::nodes::primnodes::Expr,
+) -> Result<Value, ExecError> {
+    set_active_system_bindings(ctx, &row.row.system_bindings);
+    set_outer_expr_bindings(
+        ctx,
+        row.row.slot.tts_values.clone(),
+        &row.row.system_bindings,
+    );
+    eval_expr(expr, &mut row.row.slot, ctx).map(|value| value.to_owned_value())
+}
+
+fn peer_group_end_for_index(partition_rows: &[PreparedWindowRow], index: usize) -> usize {
+    let mut peer_end = index + 1;
+    while peer_end < partition_rows.len()
+        && same_peer(&partition_rows[peer_end - 1], &partition_rows[peer_end])
+    {
+        peer_end += 1;
+    }
+    peer_end
+}
+
 fn advance_window_aggregate(
     ctx: &mut ExecutorContext,
     state: &mut AccumState,
@@ -171,6 +195,11 @@ fn evaluate_rank_like_window(
             BuiltinWindowFunction::Ntile => {
                 panic!("ntile() must be evaluated through evaluate_ntile_window")
             }
+            BuiltinWindowFunction::FirstValue
+            | BuiltinWindowFunction::LastValue
+            | BuiltinWindowFunction::NthValue => {
+                panic!("value window functions must be evaluated through evaluate_value_window")
+            }
         }
 
         peer_start = peer_end;
@@ -182,6 +211,15 @@ fn evaluate_rank_like_window(
 fn invalid_ntile_bucket_error() -> ExecError {
     ExecError::DetailedError {
         message: "argument of ntile must be greater than zero".into(),
+        detail: None,
+        hint: None,
+        sqlstate: INVALID_PARAMETER_VALUE_SQLSTATE,
+    }
+}
+
+fn invalid_nth_value_argument_error() -> ExecError {
+    ExecError::DetailedError {
+        message: "argument of nth_value must be greater than zero".into(),
         detail: None,
         hint: None,
         sqlstate: INVALID_PARAMETER_VALUE_SQLSTATE,
@@ -262,17 +300,88 @@ fn evaluate_ntile_window(
     Ok(values)
 }
 
+fn evaluate_nth_value_offset(
+    ctx: &mut ExecutorContext,
+    func: &WindowFuncExpr,
+    current_row: &mut PreparedWindowRow,
+) -> Result<Option<usize>, ExecError> {
+    let Some(offset_expr) = func.args.get(1) else {
+        panic!("nth_value() missing offset argument");
+    };
+    match evaluate_window_expr_on_row(ctx, current_row, offset_expr)? {
+        Value::Null => Ok(None),
+        Value::Int16(value) if value > 0 => Ok(Some(value as usize)),
+        Value::Int32(value) if value > 0 => Ok(Some(value as usize)),
+        Value::Int64(value) if value > 0 => usize::try_from(value)
+            .map(Some)
+            .map_err(|_| invalid_nth_value_argument_error()),
+        Value::Int16(_) | Value::Int32(_) | Value::Int64(_) => {
+            Err(invalid_nth_value_argument_error())
+        }
+        other => Err(ExecError::TypeMismatch {
+            op: "nth_value",
+            left: other,
+            right: Value::Int32(1),
+        }),
+    }
+}
+
+fn evaluate_value_window(
+    ctx: &mut ExecutorContext,
+    func: &WindowFuncExpr,
+    partition_rows: &mut [PreparedWindowRow],
+) -> Result<Vec<Value>, ExecError> {
+    let Some(value_expr) = func.args.first() else {
+        panic!("value window function missing value argument");
+    };
+    let builtin = match &func.kind {
+        WindowFuncKind::Builtin(kind) => *kind,
+        WindowFuncKind::Aggregate(_) => panic!("aggregate window function routed to value path"),
+    };
+    let mut values = Vec::with_capacity(partition_rows.len());
+    for row_index in 0..partition_rows.len() {
+        let frame_end = peer_group_end_for_index(partition_rows, row_index);
+        let frame_row_index = match builtin {
+            BuiltinWindowFunction::FirstValue => Some(0),
+            BuiltinWindowFunction::LastValue => Some(frame_end - 1),
+            BuiltinWindowFunction::NthValue => {
+                let Some(offset) =
+                    evaluate_nth_value_offset(ctx, func, &mut partition_rows[row_index])?
+                else {
+                    values.push(Value::Null);
+                    continue;
+                };
+                (offset <= frame_end).then_some(offset - 1)
+            }
+            _ => panic!("non-value window function routed to value path"),
+        };
+
+        let value = match frame_row_index {
+            Some(index) => {
+                evaluate_window_expr_on_row(ctx, &mut partition_rows[index], value_expr)?
+            }
+            None => Value::Null,
+        };
+        values.push(value);
+    }
+    Ok(values)
+}
+
 fn evaluate_builtin_window(
     ctx: &mut ExecutorContext,
     func: &WindowFuncExpr,
     partition_rows: &mut [PreparedWindowRow],
 ) -> Result<Vec<Value>, ExecError> {
-    match func.kind {
-        WindowFuncKind::Builtin(BuiltinWindowFunction::Ntile) => {
-            evaluate_ntile_window(ctx, func, partition_rows)
-        }
-        WindowFuncKind::Builtin(kind) => Ok(evaluate_rank_like_window(kind, partition_rows)),
+    let builtin = match &func.kind {
+        WindowFuncKind::Builtin(kind) => *kind,
         WindowFuncKind::Aggregate(_) => panic!("aggregate window function routed to builtin path"),
+    };
+    match builtin {
+        BuiltinWindowFunction::Ntile => evaluate_ntile_window(ctx, func, partition_rows),
+        BuiltinWindowFunction::FirstValue
+        | BuiltinWindowFunction::LastValue
+        | BuiltinWindowFunction::NthValue => evaluate_value_window(ctx, func, partition_rows),
+        _ => Ok(evaluate_rank_like_window(builtin, partition_rows)),
     }
 }
 
