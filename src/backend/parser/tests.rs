@@ -4638,6 +4638,24 @@ fn build_plan_accepts_catalog_backed_text_array_casts() {
 }
 
 #[test]
+fn analyze_interval_array_text_cast_keeps_outer_text_cast() {
+    let stmt =
+        parse_select("select '{0 second,1 hour 42 minutes 20 seconds}'::interval[]::text")
+            .unwrap();
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, &[], &[]).unwrap();
+    assert!(matches!(
+        &query.target_list[0].expr,
+        Expr::Cast(inner, ty)
+            if *ty == SqlType::new(SqlTypeKind::Text)
+                && matches!(
+                    inner.as_ref(),
+                    Expr::Cast(_, inner_ty) if *inner_ty == SqlType::array_of(SqlType::new(SqlTypeKind::Interval))
+                )
+    ));
+}
+
+#[test]
 fn build_plan_rejects_missing_visible_catalog_text_input_cast() {
     let visible = visible_catalog_without_text_input_cast(crate::include::catalog::JSONB_TYPE_OID);
     let err = build_plan(

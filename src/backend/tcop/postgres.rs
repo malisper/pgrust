@@ -5206,6 +5206,61 @@ mod tests {
         assert_eq!(first_error_response_position(&output), Some(22));
     }
 
+    #[test]
+    fn simple_query_renders_interval_array_literals_with_interval_text() {
+        let db = Database::open(temp_dir("interval_array_literal_output"), 16).unwrap();
+        let mut state = ConnectionState {
+            session: Session::new(2),
+            prepared: HashMap::new(),
+            portals: HashMap::new(),
+            copy_in: None,
+        };
+        let mut output = Vec::new();
+
+        handle_query(
+            &mut output,
+            &db,
+            &mut state,
+            "select '{0 second,1 hour 42 minutes 20 seconds}'::interval[];",
+        )
+        .unwrap();
+
+        assert!(
+            output
+                .windows("{\"@ 0\",\"@ 1 hour 42 mins 20 secs\"}".len())
+                .any(|window| window == b"{\"@ 0\",\"@ 1 hour 42 mins 20 secs\"}")
+        );
+    }
+
+    #[test]
+    fn simple_query_reports_program_limit_for_overflowed_array_assignment() {
+        let db = Database::open(temp_dir("array_assignment_overflow_query"), 16).unwrap();
+        db.execute(1, "create table arr_pk_tbl (pk int4 primary key, f1 int[])")
+            .unwrap();
+        db.execute(
+            1,
+            "insert into arr_pk_tbl values (10, '[-2147483648:-2147483647]={1,2}')",
+        )
+        .unwrap();
+        let mut state = ConnectionState {
+            session: Session::new(2),
+            prepared: HashMap::new(),
+            portals: HashMap::new(),
+            copy_in: None,
+        };
+        let mut output = Vec::new();
+
+        handle_query(
+            &mut output,
+            &db,
+            &mut state,
+            "update arr_pk_tbl set f1[2147483647] = 42 where pk = 10;",
+        )
+        .unwrap();
+
+        assert!(output.windows("SERROR\0C54000\0".len()).any(|window| window == b"SERROR\0C54000\0"));
+    }
+
     fn split_simple_query_statements_keeps_rule_action_lists_together() {
         let sql = "create rule r as on update to widgets do also (\n    update other set id = new.id where id = old.id;\n    delete from audit where id = old.id\n);\nselect 1;\n";
 

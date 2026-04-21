@@ -394,7 +394,7 @@ fn canonicalize_tid_text(text: &str) -> Result<String, ExecError> {
     Ok(format!("({block_number},{offset_number})"))
 }
 
-fn canonicalize_interval_text(text: &str) -> Result<String, ExecError> {
+pub(crate) fn canonicalize_interval_text(text: &str) -> Result<String, ExecError> {
     fn invalid(text: &str) -> ExecError {
         ExecError::DetailedError {
             message: format!("invalid input syntax for type interval: \"{text}\""),
@@ -683,8 +683,13 @@ pub(crate) fn parse_text_array_literal_with_options(
     explicit: bool,
 ) -> Result<Value, ExecError> {
     let (bounds, input) = parse_array_bounds_prefix(raw)?;
+    let element_type_oid = array_element_type_oid(element_type);
     if input == "{}" {
-        return Ok(Value::PgArray(ArrayValue::empty()));
+        let mut array = ArrayValue::empty();
+        if let Some(element_type_oid) = element_type_oid {
+            array = array.with_element_type_oid(element_type_oid);
+        }
+        return Ok(Value::PgArray(array));
     }
     if !input.starts_with('{') || !input.ends_with('}') {
         return Err(invalid_array_literal(
@@ -711,7 +716,7 @@ pub(crate) fn parse_text_array_literal_with_options(
             });
         }
     };
-    let array =
+    let mut array =
         ArrayValue::from_nested_values(nested, bounds.lower_bounds.clone()).map_err(|_| {
             invalid_array_literal(
                 raw,
@@ -731,6 +736,9 @@ pub(crate) fn parse_text_array_literal_with_options(
             raw,
             Some("Specified array dimensions do not match array contents.".into()),
         ));
+    }
+    if let Some(element_type_oid) = element_type_oid {
+        array = array.with_element_type_oid(element_type_oid);
     }
     Ok(Value::PgArray(array))
 }
@@ -2453,8 +2461,24 @@ pub(crate) fn cast_value_with_config(
         | Value::Box(_)
         | Value::Polygon(_)
         | Value::Circle(_) => unreachable!("geometry casts handled before scalar match"),
-        Value::Array(items) => Ok(Value::Array(items)),
-        Value::PgArray(array) => Ok(Value::PgArray(array)),
+        Value::Array(items) => match ty.kind {
+            SqlTypeKind::Text
+            | SqlTypeKind::Name
+            | SqlTypeKind::Char
+            | SqlTypeKind::Varchar => Ok(Value::Text(CompactString::from_owned(
+                crate::backend::executor::value_io::format_array_text(&items),
+            ))),
+            _ => Ok(Value::Array(items)),
+        },
+        Value::PgArray(array) => match ty.kind {
+            SqlTypeKind::Text
+            | SqlTypeKind::Name
+            | SqlTypeKind::Char
+            | SqlTypeKind::Varchar => Ok(Value::Text(CompactString::from_owned(
+                crate::backend::executor::value_io::format_array_value_text(&array),
+            ))),
+            _ => Ok(Value::PgArray(array)),
+        },
         Value::Record(record) => Ok(Value::Record(record)),
     }
 }
@@ -2467,6 +2491,24 @@ fn parse_int2vector_array_text(text: &str) -> Result<Value, ExecError> {
     Ok(Value::PgArray(
         ArrayValue::from_1d(items).with_element_type_oid(INT2_TYPE_OID),
     ))
+}
+
+fn array_element_type_oid(element_type: SqlType) -> Option<u32> {
+    if let Some(multirange_type) = multirange_type_ref_for_sql_type(element_type) {
+        return Some(multirange_type.type_oid());
+    }
+    if let Some(range_type) = range_type_ref_for_sql_type(element_type) {
+        return Some(range_type.type_oid());
+    }
+    if element_type.type_oid != 0 {
+        return Some(element_type.type_oid);
+    }
+    builtin_type_rows().into_iter().find_map(|row| {
+        (!row.sql_type.is_array
+            && row.sql_type.kind == element_type.kind
+            && !matches!(row.sql_type.kind, SqlTypeKind::AnyArray))
+        .then_some(row.oid)
+    })
 }
 
 pub(super) fn cast_text_value(text: &str, ty: SqlType, explicit: bool) -> Result<Value, ExecError> {
@@ -3079,6 +3121,7 @@ mod tests {
         parse_text_array_literal, soft_input_error_info,
     };
     use crate::backend::executor::{ExecError, Value};
+    use crate::include::nodes::datum::ArrayValue;
     use crate::backend::parser::{SqlType, SqlTypeKind};
 
     #[test]
@@ -3190,6 +3233,24 @@ mod tests {
             )
             .unwrap(),
             Value::Array(vec![Value::Text("a".into()), Value::Text("b".into())])
+        );
+    }
+
+    #[test]
+    fn cast_value_preserves_interval_array_element_oid() {
+        assert_eq!(
+            cast_value(
+                Value::Text("{0 second,1 hour 42 minutes 20 seconds}".into()),
+                SqlType::array_of(SqlType::new(SqlTypeKind::Interval))
+            )
+            .unwrap(),
+            Value::PgArray(
+                ArrayValue::from_1d(vec![
+                    Value::Text("@ 0 secs".into()),
+                    Value::Text("@ 1 hour 42 mins 20 secs".into()),
+                ])
+                .with_element_type_oid(crate::include::catalog::INTERVAL_TYPE_OID),
+            )
         );
     }
 
