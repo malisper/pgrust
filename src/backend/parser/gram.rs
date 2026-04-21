@@ -2279,9 +2279,7 @@ fn build_alter_sequence_rename_statement(
     })
 }
 
-fn build_alter_index_rename_statement(
-    sql: &str,
-) -> Result<AlterTableRenameStatement, ParseError> {
+fn build_alter_index_rename_statement(sql: &str) -> Result<AlterTableRenameStatement, ParseError> {
     let mut rest = consume_keyword(sql.trim_start(), "alter").trim_start();
     rest = consume_keyword(rest, "index").trim_start();
     let mut if_exists = false;
@@ -4586,9 +4584,9 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::alter_table_validate_constraint_stmt => Ok(Statement::AlterTableValidateConstraint(
             build_alter_table_validate_constraint(inner)?,
         )),
-        Rule::alter_table_inherit_stmt => {
-            Ok(Statement::AlterTableInherit(build_alter_table_inherit(inner)?))
-        }
+        Rule::alter_table_inherit_stmt => Ok(Statement::AlterTableInherit(
+            build_alter_table_inherit(inner)?,
+        )),
         Rule::alter_table_no_inherit_stmt => Ok(Statement::AlterTableNoInherit(
             build_alter_table_no_inherit(inner)?,
         )),
@@ -8038,6 +8036,7 @@ fn sql_type_output_name(ty: SqlType) -> &'static str {
         SqlTypeKind::Int8Range => "int8range",
         SqlTypeKind::Name => "name",
         SqlTypeKind::Oid => "oid",
+        SqlTypeKind::RegClass => "regclass",
         SqlTypeKind::RegType => "regtype",
         SqlTypeKind::RegRole => "regrole",
         SqlTypeKind::RegProcedure => "regprocedure",
@@ -8832,7 +8831,9 @@ fn build_alter_table_no_inherit(
     })
 }
 
-fn build_alter_table_inherit(pair: Pair<'_, Rule>) -> Result<AlterTableInheritStatement, ParseError> {
+fn build_alter_table_inherit(
+    pair: Pair<'_, Rule>,
+) -> Result<AlterTableInheritStatement, ParseError> {
     let mut if_exists = false;
     let mut only = false;
     let mut parts = Vec::new();
@@ -9113,7 +9114,7 @@ fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
         Rule::kw_xml => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Xml)),
         Rule::kw_tsvector => RawTypeName::Builtin(SqlType::new(SqlTypeKind::TsVector)),
         Rule::kw_tsquery => RawTypeName::Builtin(SqlType::new(SqlTypeKind::TsQuery)),
-        Rule::kw_regclass => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Oid)),
+        Rule::kw_regclass => RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegClass)),
         Rule::kw_regconfig => RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegConfig)),
         Rule::kw_regdictionary => RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegDictionary)),
         Rule::kw_bool | Rule::kw_boolean => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bool)),

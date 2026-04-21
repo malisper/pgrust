@@ -170,6 +170,7 @@ fn value_output_text(value: &Value) -> Result<String, ExecError> {
             &[Value::Record(record.clone())],
             false,
             &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+            None,
         )
         .expect("row_to_json is a json builtin")?
         .as_text()

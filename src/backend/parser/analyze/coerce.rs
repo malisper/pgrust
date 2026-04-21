@@ -170,6 +170,7 @@ pub(super) fn sql_type_name(ty: SqlType) -> String {
             SqlTypeKind::Int8 => "bigint",
             SqlTypeKind::Name => "name",
             SqlTypeKind::Oid => "oid",
+            SqlTypeKind::RegClass => "regclass",
             SqlTypeKind::RegType => "regtype",
             SqlTypeKind::RegRole => "regrole",
             SqlTypeKind::RegProcedure => "regprocedure",
@@ -235,6 +236,7 @@ pub(super) fn is_numeric_family(ty: SqlType) -> bool {
                 | SqlTypeKind::Int4
                 | SqlTypeKind::Int8
                 | SqlTypeKind::Oid
+                | SqlTypeKind::RegClass
                 | SqlTypeKind::RegType
                 | SqlTypeKind::RegRole
                 | SqlTypeKind::Float4
@@ -251,6 +253,7 @@ pub(super) fn is_integer_family(ty: SqlType) -> bool {
                 | SqlTypeKind::Int4
                 | SqlTypeKind::Int8
                 | SqlTypeKind::Oid
+                | SqlTypeKind::RegClass
                 | SqlTypeKind::RegType
                 | SqlTypeKind::RegRole
         )
@@ -314,6 +317,7 @@ pub(super) fn coerce_unknown_string_literal_type(
             SqlTypeKind::TsVector => return SqlType::new(SqlTypeKind::TsVector),
             SqlTypeKind::Void => return SqlType::new(SqlTypeKind::Void),
             SqlTypeKind::FdwHandler => return SqlType::new(SqlTypeKind::FdwHandler),
+            SqlTypeKind::RegClass => return SqlType::new(SqlTypeKind::RegClass),
             SqlTypeKind::RegType => return SqlType::new(SqlTypeKind::RegType),
             SqlTypeKind::RegRole => return SqlType::new(SqlTypeKind::RegRole),
             SqlTypeKind::RegProcedure => return SqlType::new(SqlTypeKind::RegProcedure),
@@ -332,6 +336,9 @@ pub(super) fn coerce_unknown_string_literal_type(
                 SqlTypeKind::Void => return SqlType::array_of(SqlType::new(SqlTypeKind::Void)),
                 SqlTypeKind::FdwHandler => {
                     return SqlType::array_of(SqlType::new(SqlTypeKind::FdwHandler));
+                }
+                SqlTypeKind::RegClass => {
+                    return SqlType::array_of(SqlType::new(SqlTypeKind::RegClass));
                 }
                 SqlTypeKind::RegType => {
                     return SqlType::array_of(SqlType::new(SqlTypeKind::RegType));

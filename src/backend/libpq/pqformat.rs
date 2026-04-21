@@ -54,10 +54,10 @@ pub(crate) fn format_exec_error(e: &ExecError) -> String {
             format!("duplicate key value violates unique constraint \"{constraint}\"")
         }
         ExecError::NotNullViolation {
-            relation,
-            column,
-            ..
-        } => format!("null value in column \"{column}\" of relation \"{relation}\" violates not-null constraint"),
+            relation, column, ..
+        } => format!(
+            "null value in column \"{column}\" of relation \"{relation}\" violates not-null constraint"
+        ),
         ExecError::CheckViolation {
             relation,
             constraint,
@@ -429,6 +429,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
             SqlTypeKind::Void => unreachable!("void arrays are unsupported"),
             SqlTypeKind::FdwHandler => unreachable!("fdw_handler arrays are unsupported"),
             SqlTypeKind::Oid => 1028,
+            SqlTypeKind::RegClass => crate::include::catalog::REGCLASS_ARRAY_TYPE_OID as i32,
             SqlTypeKind::RegType => unreachable!("regtype arrays are unsupported"),
             SqlTypeKind::RegRole => unreachable!("regrole arrays are unsupported"),
             SqlTypeKind::RegProcedure => {
@@ -527,6 +528,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
         SqlTypeKind::Int8 => (20, 8, -1),
         SqlTypeKind::Void => (crate::include::catalog::VOID_TYPE_OID as i32, 4, -1),
         SqlTypeKind::Oid => (26, 4, -1),
+        SqlTypeKind::RegClass => (crate::include::catalog::REGCLASS_TYPE_OID as i32, 4, -1),
         SqlTypeKind::RegType => (crate::include::catalog::REGTYPE_TYPE_OID as i32, 4, -1),
         SqlTypeKind::RegRole => (crate::include::catalog::REGROLE_TYPE_OID as i32, 4, -1),
         SqlTypeKind::RegProcedure => (crate::include::catalog::REGPROCEDURE_TYPE_OID as i32, 4, -1),
@@ -829,6 +831,7 @@ fn encode_binary_data_row_value(value: &Value, sql_type: SqlType) -> Result<Vec<
             if matches!(
                 sql_type.kind,
                 SqlTypeKind::Oid
+                    | SqlTypeKind::RegClass
                     | SqlTypeKind::RegType
                     | SqlTypeKind::RegRole
                     | SqlTypeKind::RegProcedure
