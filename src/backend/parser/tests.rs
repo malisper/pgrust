@@ -6829,6 +6829,21 @@ fn parse_create_table_foreign_key_constraints() {
         ParseError::FeatureNotSupportedMessage(message)
             if message == "multiple ENFORCED/NOT ENFORCED clauses not allowed"
     ));
+
+    let err = parse_statement(
+        "create table fktable (
+            tid int,
+            id int,
+            foo int,
+            foreign key (tid, foo) references pktable on update set null (foo)
+        )",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ParseError::FeatureNotSupportedMessage(message)
+            if message == "a column list with SET NULL is only supported for ON DELETE actions"
+    ));
 }
 
 #[test]
