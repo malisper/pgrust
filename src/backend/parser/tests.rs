@@ -4559,8 +4559,10 @@ fn build_plan_accepts_same_type_array_comparisons() {
 #[test]
 fn build_plan_coerces_unknown_string_literals_for_array_ops() {
     let plan = build_plan(
-        &parse_select("select ARRAY[1, 2] = '{1,2}', ARRAY[1, 2] && '{2,3}', 2 = any ('{1,2,3}')")
-            .unwrap(),
+        &parse_select(
+            "select ARRAY[1, 2] = '{1,2}', ARRAY[1, 2] && '{2,3}', ARRAY[1, 2] @> '{2}', 2 = any ('{1,2,3}')",
+        )
+        .unwrap(),
         &catalog(),
     )
     .unwrap();
@@ -4591,6 +4593,17 @@ fn build_plan_coerces_unknown_string_literals_for_array_ops() {
     ));
     assert!(matches!(
         &targets[2].expr,
+        Expr::Op(op)
+            if op.op == crate::include::nodes::primnodes::OpExprKind::ArrayContains
+                && matches!(op.args.as_slice(), [left, right]
+                    if matches!(left, Expr::ArrayLiteral { array_type, .. }
+                if *array_type == SqlType::array_of(SqlType::new(SqlTypeKind::Int4)))
+                && matches!(right, Expr::Cast(inner, ty)
+                    if *ty == SqlType::array_of(SqlType::new(SqlTypeKind::Int4))
+                        && matches!(inner.as_ref(), Expr::Const(Value::Text(_)) | Expr::Const(Value::TextRef(_, _)))))
+    ));
+    assert!(matches!(
+        &targets[3].expr,
         Expr::ScalarArrayOp(saop)
             if saop.use_or
                 && matches!(saop.right.as_ref(), Expr::Cast(inner, ty)
@@ -4680,6 +4693,29 @@ fn build_plan_resolves_lower_for_range_type() {
 
 #[test]
 fn build_plan_dispatches_jsonb_and_range_contains_independently() {
+    let array_plan = build_plan(
+        &parse_select("select ARRAY[1, 2] @> ARRAY[2], ARRAY[2] <@ ARRAY[1, 2]").unwrap(),
+        &catalog(),
+    )
+    .unwrap();
+    let Plan::Projection {
+        targets: array_targets,
+        ..
+    } = array_plan
+    else {
+        panic!("expected projection plan");
+    };
+    assert!(matches!(
+        &array_targets[0].expr,
+        Expr::Op(op)
+            if op.op == crate::include::nodes::primnodes::OpExprKind::ArrayContains
+    ));
+    assert!(matches!(
+        &array_targets[1].expr,
+        Expr::Op(op)
+            if op.op == crate::include::nodes::primnodes::OpExprKind::ArrayContained
+    ));
+
     let json_plan = build_plan(
         &parse_select("select '{\"a\":1}'::jsonb @> '{\"a\":1}'::jsonb").unwrap(),
         &catalog(),
@@ -7472,6 +7508,10 @@ fn parse_array_and_unnest_expressions() {
 
     let stmt = parse_select("select ARRAY['a'] && ARRAY['b']").unwrap();
     assert!(matches!(stmt.targets[0].expr, SqlExpr::ArrayOverlap(_, _)));
+
+    let stmt = parse_select("select ARRAY['a'] @> ARRAY['b'], ARRAY['a'] <@ ARRAY['b']").unwrap();
+    assert!(matches!(stmt.targets[0].expr, SqlExpr::ArrayContains(_, _)));
+    assert!(matches!(stmt.targets[1].expr, SqlExpr::ArrayContained(_, _)));
 
     let stmt = parse_select("select '(0,0),(1,1)'::box && '(2,2),(3,3)'::box").unwrap();
     assert!(matches!(

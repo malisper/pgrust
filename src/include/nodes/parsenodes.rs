@@ -2623,6 +2623,8 @@ pub enum SqlExpr {
     ArrayLiteral(Vec<SqlExpr>),
     Row(Vec<SqlExpr>),
     ArrayOverlap(Box<SqlExpr>, Box<SqlExpr>),
+    ArrayContains(Box<SqlExpr>, Box<SqlExpr>),
+    ArrayContained(Box<SqlExpr>, Box<SqlExpr>),
     JsonbContains(Box<SqlExpr>, Box<SqlExpr>),
     JsonbContained(Box<SqlExpr>, Box<SqlExpr>),
     JsonbExists(Box<SqlExpr>, Box<SqlExpr>),

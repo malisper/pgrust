@@ -2100,6 +2100,32 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 )?,
             ],
         )),
+        SqlExpr::ArrayContains(l, r) => Ok(bind_grouped_array_membership_expr(
+            OpExprKind::ArrayContains,
+            l,
+            r,
+            group_by_exprs,
+            group_key_exprs,
+            input_scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            agg_list,
+            n_keys,
+        )?),
+        SqlExpr::ArrayContained(l, r) => Ok(bind_grouped_array_membership_expr(
+            OpExprKind::ArrayContained,
+            l,
+            r,
+            group_by_exprs,
+            group_key_exprs,
+            input_scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            agg_list,
+            n_keys,
+        )?),
         SqlExpr::JsonbContains(l, r) => Ok(Expr::op_auto(
             OpExprKind::JsonbContains,
             vec![
@@ -2572,6 +2598,79 @@ pub(super) fn bind_agg_output_expr_in_clause(
             precision: *precision,
         }),
     }
+}
+
+fn bind_grouped_array_membership_expr(
+    op: OpExprKind,
+    left: &SqlExpr,
+    right: &SqlExpr,
+    group_by_exprs: &[SqlExpr],
+    group_key_exprs: &[Expr],
+    input_scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    agg_list: &[(
+        AggFunc,
+        Vec<SqlFunctionArg>,
+        Vec<OrderByItem>,
+        bool,
+        bool,
+        Option<SqlExpr>,
+    )],
+    n_keys: usize,
+) -> Result<Expr, ParseError> {
+    let raw_left_type =
+        grouped_infer_sql_expr_type(left, input_scope, catalog, outer_scopes, grouped_outer);
+    let raw_right_type =
+        grouped_infer_sql_expr_type(right, input_scope, catalog, outer_scopes, grouped_outer);
+    let left_expr = bind_agg_output_expr(
+        left,
+        group_by_exprs,
+        group_key_exprs,
+        input_scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        agg_list,
+        n_keys,
+    )?;
+    let right_expr = bind_agg_output_expr(
+        right,
+        group_by_exprs,
+        group_key_exprs,
+        input_scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        agg_list,
+        n_keys,
+    )?;
+    let right_expr = if matches!(
+        right,
+        SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _))
+    ) {
+        if let Expr::ArrayLiteral { array_type, .. } = &left_expr {
+            coerce_bound_expr(right_expr, raw_right_type, *array_type)
+        } else {
+            right_expr
+        }
+    } else {
+        right_expr
+    };
+    let left_expr = if matches!(
+        left,
+        SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _))
+    ) {
+        if let Expr::ArrayLiteral { array_type, .. } = &right_expr {
+            coerce_bound_expr(left_expr, raw_left_type, *array_type)
+        } else {
+            left_expr
+        }
+    } else {
+        left_expr
+    };
+    Ok(Expr::op_auto(op, vec![left_expr, right_expr]))
 }
 
 fn build_ungrouped_column_error(
