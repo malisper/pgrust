@@ -53,6 +53,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::include::catalog::GLOBAL_TABLESPACE_OID;
 
+pub(crate) const TABLESPACE_VERSION_DIRECTORY: &str = "PG_18_202406281";
+
 // ---------------------------------------------------------------------------
 // Public constants
 // ---------------------------------------------------------------------------
@@ -312,6 +314,12 @@ pub(crate) fn segment_path(
 ) -> PathBuf {
     let db_dir = if rel.db_oid == 0 && rel.spc_oid == GLOBAL_TABLESPACE_OID {
         base_dir.join("global")
+    } else if rel.spc_oid != 0 {
+        base_dir
+            .join("pg_tblspc")
+            .join(rel.spc_oid.to_string())
+            .join(TABLESPACE_VERSION_DIRECTORY)
+            .join(rel.db_oid.to_string())
     } else {
         base_dir.join("base").join(rel.db_oid.to_string())
     };
