@@ -4303,6 +4303,49 @@ fn array_append_prepend_and_cat_match_postgres() {
 }
 
 #[test]
+fn interval_array_literals_preserve_interval_array_values() {
+    let base = temp_dir("interval_array_literals");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select '{0 second,1 hour 42 minutes 20 seconds}'::interval[]",
+        )
+        .unwrap(),
+        vec![vec![Value::PgArray(
+            ArrayValue::from_1d(vec![
+                Value::Text("@ 0 secs".into()),
+                Value::Text("@ 1 hour 42 mins 20 secs".into()),
+            ])
+            .with_element_type_oid(crate::include::catalog::INTERVAL_TYPE_OID),
+        )]],
+    );
+}
+
+#[test]
+fn interval_array_text_casts_render_postgres_interval_style() {
+    let base = temp_dir("interval_array_text_casts");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select '{0 second,1 hour 42 minutes 20 seconds}'::interval[]::text, ('{0 second,1 hour 42 minutes 20 seconds}'::interval[])[1]::text",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Text("{\"@ 0\",\"@ 1 hour 42 mins 20 secs\"}".into()),
+            Value::Text("@ 0 secs".into()),
+        ]],
+    );
+}
+
+#[test]
 fn array_position_reports_multidimensional_search_error() {
     let base = temp_dir("array_position_multidimensional_error");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -4826,6 +4869,76 @@ fn array_slice_assignment_requires_full_bounds_for_null_arrays() {
                 && detail
                     == Some("When assigning to a slice of an empty array value, slice boundaries must be fully specified.".into())
                 && sqlstate == "2202E"
+    ));
+}
+
+#[test]
+fn array_assignment_overflow_reports_program_limit() {
+    let base = temp_dir("array_assignment_overflow_limit");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+
+    let xid = txns.begin();
+    assert_eq!(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            xid,
+            "insert into t values ('[-2147483648:-2147483647]={1,2}', null)",
+            array_subscript_catalog(),
+        )
+        .unwrap(),
+        StatementResult::AffectedRows(1)
+    );
+    txns.commit(xid).unwrap();
+
+    let update_xid = txns.begin();
+    let err = run_sql_with_catalog(
+        &base,
+        &txns,
+        update_xid,
+        "update t set a[2147483647] = 42",
+        array_subscript_catalog(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError { message, sqlstate, .. }
+            if message == "array size exceeds the maximum allowed" && sqlstate == "54000"
+    ));
+}
+
+#[test]
+fn array_slice_assignment_overflow_reports_program_limit() {
+    let base = temp_dir("array_slice_assignment_overflow_limit");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+
+    let xid = txns.begin();
+    assert_eq!(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            xid,
+            "insert into t values ('[-2147483648:-2147483647]={1,2}', null)",
+            array_subscript_catalog(),
+        )
+        .unwrap(),
+        StatementResult::AffectedRows(1)
+    );
+    txns.commit(xid).unwrap();
+
+    let update_xid = txns.begin();
+    let err = run_sql_with_catalog(
+        &base,
+        &txns,
+        update_xid,
+        "update t set a[2147483646:2147483647] = array[4,2]",
+        array_subscript_catalog(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError { message, sqlstate, .. }
+            if message == "array size exceeds the maximum allowed" && sqlstate == "54000"
     ));
 }
 
@@ -8157,6 +8270,35 @@ fn array_overlap_false_and_null_cases() {
     let base = temp_dir("array_overlap_false_null");
     let txns = TransactionManager::new_durable(&base).unwrap();
     match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select ARRAY['a']::varchar[] && ARRAY['b']::varchar[], ARRAY['a', null]::varchar[] && ARRAY['b', null]::varchar[], ARRAY['a']::varchar[] && (null)::varchar[]").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Bool(false), Value::Bool(false), Value::Null]]); } other => panic!("expected query result, got {:?}", other), }
+}
+
+#[test]
+fn array_contains_and_contained_match_postgres_cases() {
+    let base = temp_dir("array_contains_contained");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select ARRAY[1,2,3] @> ARRAY[2], ARRAY[1,2,3] @> ARRAY[4], ARRAY[1,2,3] @> ARRAY[]::int4[], ARRAY[1,null]::int4[] @> ARRAY[null]::int4[], ARRAY[2] <@ ARRAY[1,2,3], ARRAY[]::int4[] <@ ARRAY[null]::int4[]",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Bool(true),
+                    Value::Bool(false),
+                    Value::Bool(true),
+                    Value::Bool(false),
+                    Value::Bool(true),
+                    Value::Bool(true),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
 }
 
 #[test]
