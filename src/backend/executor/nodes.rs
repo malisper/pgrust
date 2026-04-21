@@ -12,6 +12,7 @@ use crate::backend::executor::srf::{
 };
 use crate::backend::executor::value_io::{decode_value_with_toast, missing_column_value};
 use crate::backend::executor::window::execute_window_clause;
+use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::utils::time::instant::Instant;
 use crate::include::catalog::PG_LARGEOBJECT_METADATA_RELATION_OID;
 use crate::include::catalog::builtin_aggregate_function_for_proc_oid;
@@ -864,6 +865,7 @@ fn render_explain_expr_inner(expr: &Expr, column_names: &[String]) -> String {
             render_explain_var_name(var, column_names).unwrap_or_else(|| format!("{expr:?}"))
         }
         Expr::Const(value) => render_explain_const(value),
+        Expr::Cast(inner, ty) => render_explain_cast(inner, *ty, column_names),
         Expr::Op(op) => match op.op {
             crate::include::nodes::primnodes::OpExprKind::Eq
             | crate::include::nodes::primnodes::OpExprKind::NotEq
@@ -965,6 +967,7 @@ fn render_explain_join_expr_inner(
             render_explain_var_name(var, &combined_names).unwrap_or_else(|| format!("{expr:?}"))
         }
         Expr::Const(value) => render_explain_const(value),
+        Expr::Cast(inner, ty) => render_explain_join_cast(inner, *ty, outer_names, inner_names),
         Expr::Op(op) => match op.op {
             crate::include::nodes::primnodes::OpExprKind::Eq
             | crate::include::nodes::primnodes::OpExprKind::NotEq
@@ -1108,6 +1111,77 @@ fn render_explain_const(value: &Value) -> String {
         Value::Bool(v) => format!("{}::boolean", if *v { "true" } else { "false" }),
         Value::Null => "NULL".to_string(),
         other => format!("{other:?}"),
+    }
+}
+
+fn render_explain_cast(expr: &Expr, ty: SqlType, column_names: &[String]) -> String {
+    if let Expr::Const(value) = expr {
+        return format!(
+            "{}::{}",
+            render_explain_literal(value),
+            render_explain_sql_type_name(ty)
+        );
+    }
+    let inner = render_explain_expr_inner(expr, column_names);
+    format!("({inner})::{}", render_explain_sql_type_name(ty))
+}
+
+fn render_explain_join_cast(
+    expr: &Expr,
+    ty: SqlType,
+    outer_names: &[String],
+    inner_names: &[String],
+) -> String {
+    if let Expr::Const(value) = expr {
+        return format!(
+            "{}::{}",
+            render_explain_literal(value),
+            render_explain_sql_type_name(ty)
+        );
+    }
+    let inner = render_explain_join_expr_inner(expr, outer_names, inner_names);
+    format!("({inner})::{}", render_explain_sql_type_name(ty))
+}
+
+fn render_explain_literal(value: &Value) -> String {
+    match value {
+        Value::Text(_) | Value::TextRef(_, _) => {
+            format!("'{}'", value.as_text().unwrap().replace('\'', "''"))
+        }
+        Value::Int16(v) => v.to_string(),
+        Value::Int32(v) => v.to_string(),
+        Value::Int64(v) => v.to_string(),
+        Value::Bool(v) => {
+            if *v {
+                "true".to_string()
+            } else {
+                "false".to_string()
+            }
+        }
+        Value::Null => "NULL".to_string(),
+        other => format!("{other:?}"),
+    }
+}
+
+fn render_explain_sql_type_name(ty: SqlType) -> &'static str {
+    if ty.is_array {
+        return "array";
+    }
+    match ty.kind {
+        SqlTypeKind::Bool => "boolean",
+        SqlTypeKind::Int2 => "smallint",
+        SqlTypeKind::Int4 => "integer",
+        SqlTypeKind::Int8 => "bigint",
+        SqlTypeKind::Float4 => "real",
+        SqlTypeKind::Float8 => "double precision",
+        SqlTypeKind::Numeric => "numeric",
+        SqlTypeKind::Text => "text",
+        SqlTypeKind::Name => "name",
+        SqlTypeKind::Oid => "oid",
+        SqlTypeKind::Date => "date",
+        SqlTypeKind::Json => "json",
+        SqlTypeKind::Jsonb => "jsonb",
+        _ => "text",
     }
 }
 
@@ -1816,6 +1890,9 @@ impl PlanNode for ProjectionState {
     fn node_label(&self) -> String {
         "Projection".into()
     }
+    fn explain_passthrough(&self) -> Option<&dyn PlanNode> {
+        projection_is_explain_passthrough(self).then_some(self.input.as_ref())
+    }
     fn explain_children(
         &self,
         indent: usize,
@@ -1825,6 +1902,16 @@ impl PlanNode for ProjectionState {
     ) {
         format_explain_lines_with_costs(&*self.input, indent + 1, analyze, show_costs, lines);
     }
+}
+
+fn projection_is_explain_passthrough(state: &ProjectionState) -> bool {
+    let input_names = state.input.column_names();
+    state.targets.len() == input_names.len()
+        && state.targets.iter().enumerate().all(|(index, target)| {
+            !target.resjunk
+                && target.input_resno == Some(index + 1)
+                && target.name == input_names[index]
+        })
 }
 
 impl PlanNode for AggregateState {
