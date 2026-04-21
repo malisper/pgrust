@@ -1,7 +1,6 @@
 use crate::include::catalog::PolicyCommand;
 use crate::include::executor::execdesc::CommandType;
 use crate::include::nodes::datum::Value;
-use crate::include::nodes::primnodes::AggFunc;
 use crate::include::nodes::primnodes::{
     AggAccum, Expr, JoinType, ProjectSetTarget, QueryColumn, RelationDesc, SetReturningCall,
     SortGroupClause, TargetEntry, ToastRelationRef, WindowClause,
@@ -795,8 +794,27 @@ impl SqlFunctionArg {
     }
 }
 
-pub fn function_arg_values(args: &[SqlFunctionArg]) -> impl Iterator<Item = &SqlExpr> {
-    args.iter().map(|arg| &arg.value)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SqlCallArgs {
+    Star,
+    Args(Vec<SqlFunctionArg>),
+}
+
+impl SqlCallArgs {
+    pub fn args(&self) -> &[SqlFunctionArg] {
+        match self {
+            Self::Star => &[],
+            Self::Args(args) => args,
+        }
+    }
+
+    pub fn is_star(&self) -> bool {
+        matches!(self, Self::Star)
+    }
+}
+
+pub fn function_arg_values(args: &SqlCallArgs) -> impl Iterator<Item = &SqlExpr> {
+    args.args().iter().map(|arg| &arg.value)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2331,15 +2349,6 @@ pub enum SqlExpr {
     JsonbExistsAll(Box<SqlExpr>, Box<SqlExpr>),
     JsonbPathExists(Box<SqlExpr>, Box<SqlExpr>),
     JsonbPathMatch(Box<SqlExpr>, Box<SqlExpr>),
-    AggCall {
-        func: AggFunc,
-        args: Vec<SqlFunctionArg>,
-        order_by: Vec<OrderByItem>,
-        distinct: bool,
-        func_variadic: bool,
-        filter: Option<Box<SqlExpr>>,
-        over: Option<RawWindowSpec>,
-    },
     ScalarSubquery(Box<SelectStatement>),
     ArraySubquery(Box<SelectStatement>),
     Exists(Box<SelectStatement>),
@@ -2371,8 +2380,11 @@ pub enum SqlExpr {
     JsonPathText(Box<SqlExpr>, Box<SqlExpr>),
     FuncCall {
         name: String,
-        args: Vec<SqlFunctionArg>,
+        args: SqlCallArgs,
+        order_by: Vec<OrderByItem>,
+        distinct: bool,
         func_variadic: bool,
+        filter: Option<Box<SqlExpr>>,
         over: Option<RawWindowSpec>,
     },
     FieldSelect {

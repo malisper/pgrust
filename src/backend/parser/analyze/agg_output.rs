@@ -783,8 +783,8 @@ pub(super) fn bind_agg_output_expr_in_clause(
             expected: "implemented row expression",
             actual: "ROW(...)".into(),
         }),
-        SqlExpr::AggCall {
-            func,
+        SqlExpr::FuncCall {
+            name,
             args,
             order_by,
             distinct,
@@ -792,14 +792,147 @@ pub(super) fn bind_agg_output_expr_in_clause(
             filter,
             over,
         } => {
-            if let Some(raw_over) = over {
-                return bind_grouped_window_agg_call(
-                    *func,
-                    args,
-                    order_by,
+            if let Some(func) = resolve_builtin_aggregate(name) {
+                if let Some(raw_over) = over {
+                    return bind_grouped_window_agg_call(
+                        func,
+                        args.args(),
+                        order_by,
+                        *distinct,
+                        *func_variadic,
+                        filter.as_deref(),
+                        raw_over,
+                        group_by_exprs,
+                        group_key_exprs,
+                        input_scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        agg_list,
+                        n_keys,
+                    );
+                }
+                let entry = (
+                    func,
+                    args.args().to_vec(),
+                    order_by.clone(),
                     *distinct,
                     *func_variadic,
-                    filter.as_deref(),
+                    filter.as_deref().cloned(),
+                );
+                for (i, agg) in agg_list.iter().enumerate() {
+                    if *agg == entry {
+                        let arg_values: Vec<SqlExpr> =
+                            args.args().iter().map(|arg| arg.value.clone()).collect();
+                        let arg_types = arg_values
+                            .iter()
+                            .map(|e| {
+                                grouped_infer_sql_expr_type(
+                                    e,
+                                    input_scope,
+                                    catalog,
+                                    outer_scopes,
+                                    grouped_outer,
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        let resolved =
+                            resolve_aggregate_call(catalog, func, &arg_types, *func_variadic);
+                        let aggfnoid = resolved
+                            .as_ref()
+                            .map(|call| call.proc_oid)
+                            .or_else(|| proc_oid_for_builtin_aggregate_function(func))
+                            .unwrap_or(0);
+                        let agg_variadic = resolved
+                            .as_ref()
+                            .map(|call| call.func_variadic)
+                            .unwrap_or(*func_variadic);
+                        let bound_args = arg_values
+                            .iter()
+                            .map(|arg| {
+                                bind_grouped_plain_expr(
+                                    arg,
+                                    input_scope,
+                                    catalog,
+                                    outer_scopes,
+                                    grouped_outer,
+                                )
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                        for arg in &bound_args {
+                            reject_nested_local_ctes_in_agg_expr(arg)?;
+                        }
+                        let coerced_args = if let Some(resolved) = &resolved {
+                            bound_args
+                                .into_iter()
+                                .zip(arg_types.iter().copied())
+                                .zip(resolved.declared_arg_types.iter().copied())
+                                .map(|((arg, actual_type), declared_type)| {
+                                    coerce_bound_expr(arg, actual_type, declared_type)
+                                })
+                                .collect()
+                        } else {
+                            bound_args
+                        };
+                        let bound_filter = filter
+                            .as_deref()
+                            .map(|expr| {
+                                bind_grouped_plain_expr(
+                                    expr,
+                                    input_scope,
+                                    catalog,
+                                    outer_scopes,
+                                    grouped_outer,
+                                )
+                            })
+                            .transpose()?;
+                        if let Some(filter) = &bound_filter {
+                            reject_nested_local_ctes_in_agg_expr(filter)?;
+                        }
+                        let bound_order_by = order_by
+                            .iter()
+                            .map(|item| {
+                                Ok(OrderByEntry {
+                                    expr: bind_grouped_plain_expr(
+                                        &item.expr,
+                                        input_scope,
+                                        catalog,
+                                        outer_scopes,
+                                        grouped_outer,
+                                    )?,
+                                    ressortgroupref: 0,
+                                    descending: item.descending,
+                                    nulls_first: item.nulls_first,
+                                })
+                            })
+                            .collect::<Result<Vec<_>, ParseError>>()?;
+                        for item in &bound_order_by {
+                            reject_nested_local_ctes_in_agg_expr(&item.expr)?;
+                        }
+                        return Ok(Expr::aggref(
+                            aggfnoid,
+                            aggregate_sql_type(func, arg_types.first().copied()),
+                            agg_variadic,
+                            *distinct,
+                            coerced_args,
+                            bound_order_by,
+                            bound_filter,
+                            i,
+                        ));
+                    }
+                }
+            }
+            if !order_by.is_empty() || *distinct || filter.is_some() || args.is_star() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "supported grouped scalar function",
+                    actual: name.clone(),
+                });
+            }
+            if let Some(raw_over) = over {
+                bind_grouped_window_func_call(
+                    name,
+                    args.args(),
+                    *func_variadic,
                     raw_over,
                     group_by_exprs,
                     group_key_exprs,
@@ -809,121 +942,21 @@ pub(super) fn bind_agg_output_expr_in_clause(
                     grouped_outer,
                     agg_list,
                     n_keys,
-                );
+                )
+            } else {
+                bind_grouped_func_call(
+                    name,
+                    args.args(),
+                    group_by_exprs,
+                    group_key_exprs,
+                    input_scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    agg_list,
+                    n_keys,
+                )
             }
-            let entry = (
-                *func,
-                args.clone(),
-                order_by.clone(),
-                *distinct,
-                *func_variadic,
-                filter.as_deref().cloned(),
-            );
-            for (i, agg) in agg_list.iter().enumerate() {
-                if *agg == entry {
-                    let arg_values: Vec<SqlExpr> =
-                        args.iter().map(|arg| arg.value.clone()).collect();
-                    let arg_types = arg_values
-                        .iter()
-                        .map(|e| {
-                            grouped_infer_sql_expr_type(
-                                e,
-                                input_scope,
-                                catalog,
-                                outer_scopes,
-                                grouped_outer,
-                            )
-                        })
-                        .collect::<Vec<_>>();
-                    let resolved =
-                        resolve_aggregate_call(catalog, *func, &arg_types, *func_variadic);
-                    let aggfnoid = resolved
-                        .as_ref()
-                        .map(|call| call.proc_oid)
-                        .or_else(|| proc_oid_for_builtin_aggregate_function(*func))
-                        .unwrap_or(0);
-                    let agg_variadic = resolved
-                        .as_ref()
-                        .map(|call| call.func_variadic)
-                        .unwrap_or(*func_variadic);
-                    let bound_args = arg_values
-                        .iter()
-                        .map(|arg| {
-                            bind_grouped_plain_expr(
-                                arg,
-                                input_scope,
-                                catalog,
-                                outer_scopes,
-                                grouped_outer,
-                            )
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    for arg in &bound_args {
-                        reject_nested_local_ctes_in_agg_expr(arg)?;
-                    }
-                    let coerced_args = if let Some(resolved) = &resolved {
-                        bound_args
-                            .into_iter()
-                            .zip(arg_types.iter().copied())
-                            .zip(resolved.declared_arg_types.iter().copied())
-                            .map(|((arg, actual_type), declared_type)| {
-                                coerce_bound_expr(arg, actual_type, declared_type)
-                            })
-                            .collect()
-                    } else {
-                        bound_args
-                    };
-                    let bound_filter = filter
-                        .as_deref()
-                        .map(|expr| {
-                            bind_grouped_plain_expr(
-                                expr,
-                                input_scope,
-                                catalog,
-                                outer_scopes,
-                                grouped_outer,
-                            )
-                        })
-                        .transpose()?;
-                    if let Some(filter) = &bound_filter {
-                        reject_nested_local_ctes_in_agg_expr(filter)?;
-                    }
-                    let bound_order_by = order_by
-                        .iter()
-                        .map(|item| {
-                            Ok(OrderByEntry {
-                                expr: bind_grouped_plain_expr(
-                                    &item.expr,
-                                    input_scope,
-                                    catalog,
-                                    outer_scopes,
-                                    grouped_outer,
-                                )?,
-                                ressortgroupref: 0,
-                                descending: item.descending,
-                                nulls_first: item.nulls_first,
-                            })
-                        })
-                        .collect::<Result<Vec<_>, ParseError>>()?;
-                    for item in &bound_order_by {
-                        reject_nested_local_ctes_in_agg_expr(&item.expr)?;
-                    }
-                    return Ok(Expr::aggref(
-                        aggfnoid,
-                        aggregate_sql_type(*func, arg_types.first().copied()),
-                        agg_variadic,
-                        *distinct,
-                        coerced_args,
-                        bound_order_by,
-                        bound_filter,
-                        i,
-                    ));
-                }
-            }
-            Err(ParseError::UnexpectedToken {
-                expected: "known aggregate",
-                actual: format!("{}(...)", func.name()),
-            })
         }
         SqlExpr::Column(name) => {
             let col_index =
@@ -2408,42 +2441,6 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 .collect::<Result<_, ParseError>>()?,
         }),
         SqlExpr::Random => Ok(Expr::Random),
-        SqlExpr::FuncCall {
-            name,
-            args,
-            func_variadic,
-            over,
-        } => {
-            if let Some(raw_over) = over {
-                bind_grouped_window_func_call(
-                    name,
-                    args,
-                    *func_variadic,
-                    raw_over,
-                    group_by_exprs,
-                    group_key_exprs,
-                    input_scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    agg_list,
-                    n_keys,
-                )
-            } else {
-                bind_grouped_func_call(
-                    name,
-                    args,
-                    group_by_exprs,
-                    group_key_exprs,
-                    input_scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    agg_list,
-                    n_keys,
-                )
-            }
-        }
         SqlExpr::Subscript { expr, index } => {
             let expr_type =
                 infer_sql_expr_type(expr, input_scope, catalog, outer_scopes, grouped_outer);

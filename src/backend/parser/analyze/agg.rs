@@ -2,7 +2,6 @@ use super::*;
 
 pub(super) fn expr_contains_agg(expr: &SqlExpr) -> bool {
     match expr {
-        SqlExpr::AggCall { over, .. } => over.is_none(),
         SqlExpr::Column(_)
         | SqlExpr::Default
         | SqlExpr::Const(_)
@@ -22,7 +21,19 @@ pub(super) fn expr_contains_agg(expr: &SqlExpr) -> bool {
         | SqlExpr::CurrentTimestamp { .. }
         | SqlExpr::LocalTime { .. }
         | SqlExpr::LocalTimestamp { .. } => false,
-        SqlExpr::FuncCall { args, .. } => args.iter().any(|arg| expr_contains_agg(&arg.value)),
+        SqlExpr::FuncCall {
+            name,
+            args,
+            order_by,
+            filter,
+            over,
+            ..
+        } => {
+            resolve_builtin_aggregate(name).is_some() && over.is_none()
+                || args.args().iter().any(|arg| expr_contains_agg(&arg.value))
+                || order_by.iter().any(|item| expr_contains_agg(&item.expr))
+                || filter.as_deref().is_some_and(expr_contains_agg)
+        }
         SqlExpr::ArrayLiteral(elements) | SqlExpr::Row(elements) => {
             elements.iter().any(expr_contains_agg)
         }
@@ -145,22 +156,20 @@ pub(super) fn expr_references_input_scope(expr: &SqlExpr) -> bool {
         SqlExpr::BinaryOperator { left, right, .. } => {
             expr_references_input_scope(left) || expr_references_input_scope(right)
         }
-        SqlExpr::AggCall {
+        SqlExpr::FuncCall {
             args,
             order_by,
             filter,
             ..
         } => {
-            args.iter()
+            args.args()
+                .iter()
                 .any(|arg| expr_references_input_scope(&arg.value))
                 || order_by
                     .iter()
                     .any(|item| expr_references_input_scope(&item.expr))
                 || filter.as_deref().is_some_and(expr_references_input_scope)
         }
-        SqlExpr::FuncCall { args, .. } => args
-            .iter()
-            .any(|arg| expr_references_input_scope(&arg.value)),
         SqlExpr::PrefixOperator { expr, .. } | SqlExpr::FieldSelect { expr, .. } => {
             expr_references_input_scope(expr)
         }
@@ -289,39 +298,6 @@ pub(super) fn collect_aggs(
     )>,
 ) {
     match expr {
-        SqlExpr::AggCall {
-            func,
-            args,
-            order_by,
-            distinct,
-            func_variadic,
-            filter,
-            over,
-        } => {
-            if over.is_some() {
-                for arg in args {
-                    collect_aggs(&arg.value, aggs);
-                }
-                for item in order_by {
-                    collect_aggs(&item.expr, aggs);
-                }
-                if let Some(filter) = filter.as_deref() {
-                    collect_aggs(filter, aggs);
-                }
-                return;
-            }
-            let entry = (
-                *func,
-                args.clone(),
-                order_by.clone(),
-                *distinct,
-                *func_variadic,
-                filter.as_deref().cloned(),
-            );
-            if !aggs.contains(&entry) {
-                aggs.push(entry);
-            }
-        }
         SqlExpr::Column(_)
         | SqlExpr::Default
         | SqlExpr::Const(_)
@@ -348,9 +324,38 @@ pub(super) fn collect_aggs(
         SqlExpr::PrefixOperator { expr, .. } | SqlExpr::FieldSelect { expr, .. } => {
             collect_aggs(expr, aggs);
         }
-        SqlExpr::FuncCall { args, .. } => {
-            for arg in args {
+        SqlExpr::FuncCall {
+            name,
+            args,
+            order_by,
+            distinct,
+            func_variadic,
+            filter,
+            over,
+        } => {
+            if let Some(func) = resolve_builtin_aggregate(name) {
+                if over.is_none() {
+                    let entry = (
+                        func,
+                        args.args().to_vec(),
+                        order_by.clone(),
+                        *distinct,
+                        *func_variadic,
+                        filter.as_deref().cloned(),
+                    );
+                    if !aggs.contains(&entry) {
+                        aggs.push(entry);
+                    }
+                }
+            }
+            for arg in args.args() {
                 collect_aggs(&arg.value, aggs);
+            }
+            for item in order_by {
+                collect_aggs(&item.expr, aggs);
+            }
+            if let Some(filter) = filter.as_deref() {
+                collect_aggs(filter, aggs);
             }
         }
         SqlExpr::ArrayLiteral(elements) | SqlExpr::Row(elements) => {
@@ -471,7 +476,7 @@ pub(super) fn collect_aggs(
 pub(super) fn sql_expr_name(expr: &SqlExpr) -> String {
     match expr {
         SqlExpr::Column(name) => name.clone(),
-        SqlExpr::AggCall { func, .. } => func.name().to_string(),
+        SqlExpr::FuncCall { name, .. } => name.clone(),
         SqlExpr::ScalarSubquery(_)
         | SqlExpr::ArraySubquery(_)
         | SqlExpr::Exists(_)

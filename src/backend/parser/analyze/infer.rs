@@ -319,19 +319,6 @@ pub(super) fn infer_sql_expr_type_with_ctes(
             }
         }
         SqlExpr::JsonGetText(_, _) | SqlExpr::JsonPathText(_, _) => SqlType::new(SqlTypeKind::Text),
-        SqlExpr::AggCall { func, args, .. } => aggregate_sql_type(
-            *func,
-            function_arg_values(args).next().map(|expr| {
-                infer_sql_expr_type_with_ctes(
-                    expr,
-                    scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    ctes,
-                )
-            }),
-        ),
         SqlExpr::ArrayLiteral(elements) => infer_array_literal_type_with_ctes(
             elements,
             scope,
@@ -389,8 +376,27 @@ pub(super) fn infer_sql_expr_type_with_ctes(
             func_variadic,
             ..
         } => {
+            if let Some(func) = resolve_builtin_aggregate(name) {
+                return aggregate_sql_type(
+                    func,
+                    function_arg_values(args).next().map(|expr| {
+                        infer_sql_expr_type_with_ctes(
+                            expr,
+                            scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer,
+                            ctes,
+                        )
+                    }),
+                );
+            }
             if name.eq_ignore_ascii_case("coalesce") {
-                let values = args.iter().map(|arg| arg.value.clone()).collect::<Vec<_>>();
+                let values = args
+                    .args()
+                    .iter()
+                    .map(|arg| arg.value.clone())
+                    .collect::<Vec<_>>();
                 return infer_common_scalar_expr_type_with_ctes(
                     &values,
                     scope,
@@ -403,7 +409,11 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 .unwrap_or(SqlType::new(SqlTypeKind::Text));
             }
             if name.eq_ignore_ascii_case("nullif") {
-                let values = args.iter().map(|arg| arg.value.clone()).collect::<Vec<_>>();
+                let values = args
+                    .args()
+                    .iter()
+                    .map(|arg| arg.value.clone())
+                    .collect::<Vec<_>>();
                 return infer_common_scalar_expr_type_with_ctes(
                     &values,
                     scope,
@@ -416,6 +426,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 .unwrap_or(SqlType::new(SqlTypeKind::Text));
             }
             let actual_types = args
+                .args()
                 .iter()
                 .map(|arg| {
                     infer_sql_expr_type_with_ctes(
@@ -514,7 +525,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 }
                 Some(BuiltinScalarFunction::TimeOfDay) => SqlType::new(SqlTypeKind::Text),
                 Some(BuiltinScalarFunction::DatePart) => SqlType::new(SqlTypeKind::Float8),
-                Some(BuiltinScalarFunction::DateTrunc) => match args.get(1).map(|arg| {
+                Some(BuiltinScalarFunction::DateTrunc) => match args.args().get(1).map(|arg| {
                     infer_sql_expr_type_with_ctes(
                         &arg.value,
                         scope,
@@ -756,6 +767,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                     | BuiltinScalarFunction::Exp
                     | BuiltinScalarFunction::Ln,
                 ) => args
+                    .args()
                     .first()
                     .map_or(SqlType::new(SqlTypeKind::Float8), |arg| {
                         let ty = infer_sql_expr_type_with_ctes(
@@ -775,7 +787,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                         }
                     }),
                 Some(BuiltinScalarFunction::Power) => {
-                    let left = args.first().map(|arg| {
+                    let left = args.args().first().map(|arg| {
                         infer_sql_expr_type_with_ctes(
                             &arg.value,
                             scope,
@@ -785,7 +797,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                             ctes,
                         )
                     });
-                    let right = args.get(1).map(|arg| {
+                    let right = args.args().get(1).map(|arg| {
                         infer_sql_expr_type_with_ctes(
                             &arg.value,
                             scope,
@@ -816,7 +828,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                     }
                 }
                 Some(BuiltinScalarFunction::Log | BuiltinScalarFunction::Log10) => {
-                    if args.len() == 2 {
+                    if args.args().len() == 2 {
                         function_arg_values(args).next().map_or(
                             SqlType::new(SqlTypeKind::Float8),
                             |arg| {

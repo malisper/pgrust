@@ -1,6 +1,6 @@
 use super::*;
 use crate::backend::catalog::catalog::column_desc;
-use crate::backend::executor::{AggFunc, Expr, Plan, RelationDesc, Value};
+use crate::backend::executor::{Expr, Plan, RelationDesc, Value};
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_PRIMARY, JSON_TYPE_OID, PUBLIC_NAMESPACE_OID, PgProcRow,
@@ -2828,7 +2828,7 @@ fn parse_position_in_syntax_as_builtin_call() {
     assert!(matches!(
         stmt.targets[0].expr,
         SqlExpr::FuncCall { ref name, ref args, .. }
-            if name == "position" && args.len() == 2
+            if name == "position" && args.args().len() == 2
     ));
 }
 
@@ -2839,8 +2839,8 @@ fn parse_extract_in_syntax_as_date_part_call() {
         stmt.targets[0].expr,
         SqlExpr::FuncCall { ref name, ref args, .. }
             if name == "date_part"
-                && args.len() == 2
-                && matches!(args[0].value, SqlExpr::Const(Value::Text(ref field)) if &field[..] == "week")
+                && args.args().len() == 2
+                && matches!(args.args()[0].value, SqlExpr::Const(Value::Text(ref field)) if &field[..] == "week")
     ));
 }
 
@@ -2858,7 +2858,7 @@ fn parse_variadic_function_call_marks_call_level_flag() {
                     ref args,
                     func_variadic: true,
                     ..
-                } if name == "json_build_array" && args.len() == 1
+                } if name == "json_build_array" && args.args().len() == 1
             ));
         })
         .unwrap()
@@ -2883,7 +2883,7 @@ fn parse_variadic_function_call_with_fixed_prefix_and_cast() {
                     ref args,
                     func_variadic: true,
                     ..
-                } if name == "json_extract_path" && args.len() == 2
+                } if name == "json_extract_path" && args.args().len() == 2
             ));
         })
         .unwrap()
@@ -2917,7 +2917,7 @@ fn parse_multiline_position_convert_from_expression() {
             assert!(matches!(
                 stmt.targets[0].expr,
                 SqlExpr::FuncCall { ref name, ref args, .. }
-                    if name == "position" && args.len() == 2
+                    if name == "position" && args.args().len() == 2
             ));
         })
         .unwrap()
@@ -3233,14 +3233,14 @@ fn parse_bit_substring_and_overlay_syntax() {
     match &stmt.targets[0].expr {
         SqlExpr::FuncCall { name, args, .. } => {
             assert_eq!(name, "substring");
-            assert_eq!(args.len(), 3);
+            assert_eq!(args.args().len(), 3);
         }
         other => panic!("expected substring call, got {other:?}"),
     }
     match &stmt.targets[1].expr {
         SqlExpr::FuncCall { name, args, .. } => {
             assert_eq!(name, "overlay");
-            assert_eq!(args.len(), 3);
+            assert_eq!(args.args().len(), 3);
         }
         other => panic!("expected overlay call, got {other:?}"),
     }
@@ -3253,9 +3253,9 @@ fn parse_substring_for_syntax() {
     match &stmt.targets[0].expr {
         SqlExpr::FuncCall { name, args, .. } => {
             assert_eq!(name, "substring");
-            assert_eq!(args.len(), 3);
+            assert_eq!(args.args().len(), 3);
             assert!(matches!(
-                &args[1].value,
+                &args.args()[1].value,
                 SqlExpr::IntegerLiteral(value) if value == "1"
             ));
         }
@@ -3264,9 +3264,9 @@ fn parse_substring_for_syntax() {
     match &stmt.targets[1].expr {
         SqlExpr::FuncCall { name, args, .. } => {
             assert_eq!(name, "substring");
-            assert_eq!(args.len(), 3);
+            assert_eq!(args.args().len(), 3);
             assert!(matches!(
-                &args[1].value,
+                &args.args()[1].value,
                 SqlExpr::IntegerLiteral(value) if value == "1"
             ));
         }
@@ -3438,15 +3438,15 @@ fn parse_prefix_float_operator_sugar() {
     let stmt = parse_select("select @x, |/x, ||/x from metrics").unwrap();
     assert!(matches!(
         &stmt.targets[0].expr,
-        SqlExpr::FuncCall { name, args, .. } if name == "abs" && args.len() == 1
+        SqlExpr::FuncCall { name, args, .. } if name == "abs" && args.args().len() == 1
     ));
     assert!(matches!(
         &stmt.targets[1].expr,
-        SqlExpr::FuncCall { name, args, .. } if name == "sqrt" && args.len() == 1
+        SqlExpr::FuncCall { name, args, .. } if name == "sqrt" && args.args().len() == 1
     ));
     assert!(matches!(
         &stmt.targets[2].expr,
-        SqlExpr::FuncCall { name, args, .. } if name == "cbrt" && args.len() == 1
+        SqlExpr::FuncCall { name, args, .. } if name == "cbrt" && args.args().len() == 1
     ));
 }
 
@@ -3455,7 +3455,7 @@ fn parse_power_operator_and_in_list() {
     let stmt = parse_select("select x ^ '2.0', x in (0, 1, 2) from metrics").unwrap();
     assert!(matches!(
         &stmt.targets[0].expr,
-        SqlExpr::FuncCall { name, args, .. } if name == "power" && args.len() == 2
+        SqlExpr::FuncCall { name, args, .. } if name == "power" && args.args().len() == 2
     ));
     assert!(matches!(
         &stmt.targets[1].expr,
@@ -6216,6 +6216,105 @@ fn parse_create_drop_and_comment_on_conversion_statements() {
     assert_eq!(comment.comment.as_deref(), Some("hello"));
 }
 
+#[test]
+fn parse_foreign_data_wrapper_statements() {
+    let Statement::CreateForeignDataWrapper(create) = parse_statement(
+        "create foreign data wrapper foo handler pg_rust_test_fdw_handler validator postgresql_fdw_validator options (testing '1', another '2')",
+    )
+    .unwrap() else {
+        panic!("expected create foreign data wrapper");
+    };
+    assert_eq!(create.fdw_name, "foo");
+    assert_eq!(
+        create.handler_name.as_deref(),
+        Some("pg_rust_test_fdw_handler")
+    );
+    assert_eq!(
+        create.validator_name.as_deref(),
+        Some("postgresql_fdw_validator")
+    );
+    assert_eq!(
+        create.options,
+        vec![
+            RelOption {
+                name: "testing".into(),
+                value: "1".into(),
+            },
+            RelOption {
+                name: "another".into(),
+                value: "2".into(),
+            },
+        ]
+    );
+
+    let Statement::AlterForeignDataWrapper(alter) = parse_statement(
+        "alter foreign data wrapper foo no validator options (drop a, set b '2', add c '3')",
+    )
+    .unwrap() else {
+        panic!("expected alter foreign data wrapper");
+    };
+    assert_eq!(alter.fdw_name, "foo");
+    assert_eq!(alter.validator_name, Some(None));
+    assert_eq!(alter.options.len(), 3);
+
+    let Statement::AlterForeignDataWrapperOwner(owner) =
+        parse_statement("alter foreign data wrapper foo owner to regress_test_role").unwrap()
+    else {
+        panic!("expected alter foreign data wrapper owner");
+    };
+    assert_eq!(owner.fdw_name, "foo");
+    assert_eq!(owner.new_owner, "regress_test_role");
+
+    let Statement::AlterForeignDataWrapperRename(rename) =
+        parse_statement("alter foreign data wrapper foo rename to bar").unwrap()
+    else {
+        panic!("expected alter foreign data wrapper rename");
+    };
+    assert_eq!(rename.fdw_name, "foo");
+    assert_eq!(rename.new_name, "bar");
+
+    let Statement::DropForeignDataWrapper(drop_stmt) =
+        parse_statement("drop foreign data wrapper if exists foo cascade").unwrap()
+    else {
+        panic!("expected drop foreign data wrapper");
+    };
+    assert!(drop_stmt.if_exists);
+    assert!(drop_stmt.cascade);
+    assert_eq!(drop_stmt.fdw_name, "foo");
+
+    let Statement::CommentOnForeignDataWrapper(comment) =
+        parse_statement("comment on foreign data wrapper foo is 'hello'").unwrap()
+    else {
+        panic!("expected comment on foreign data wrapper");
+    };
+    assert_eq!(comment.fdw_name, "foo");
+    assert_eq!(comment.comment.as_deref(), Some("hello"));
+}
+
+#[test]
+fn parse_foreign_data_wrapper_rejects_duplicate_clauses() {
+    let err = parse_statement(
+        "create foreign data wrapper foo handler pg_rust_test_fdw_handler handler invalid_fdw_handler",
+    )
+    .expect_err("duplicate handler should fail");
+    assert!(matches!(
+        err,
+        ParseError::FeatureNotSupportedMessage(message)
+            if message == "conflicting or redundant options"
+    ));
+
+    let err = parse_statement(
+        "alter foreign data wrapper foo validator postgresql_fdw_validator no validator",
+    )
+    .expect_err("duplicate validator should fail");
+    assert!(matches!(
+        err,
+        ParseError::FeatureNotSupportedMessage(message)
+            if message == "conflicting or redundant options"
+    ));
+}
+
+#[test]
 fn parse_create_and_drop_type_statements() {
     let Statement::CreateType(CreateTypeStatement::Composite(CreateCompositeTypeStatement {
         schema_name,
@@ -6540,12 +6639,12 @@ fn parse_aggregate_select() {
     assert_eq!(stmt.targets.len(), 1);
     assert!(matches!(
         &stmt.targets[0].expr,
-        SqlExpr::AggCall {
-            func: AggFunc::Count,
+        SqlExpr::FuncCall {
+            name,
             args,
             distinct: false,
             ..
-        } if args.is_empty()
+        } if name == "count" && args.is_star()
     ));
     assert_eq!(stmt.targets[0].output_name, "count");
 }
@@ -6555,12 +6654,12 @@ fn parse_string_agg_select() {
     let stmt = parse_select("select string_agg(note, ',') from people").unwrap();
     assert!(matches!(
         &stmt.targets[0].expr,
-        SqlExpr::AggCall {
-            func: AggFunc::StringAgg,
+        SqlExpr::FuncCall {
+            name,
             args,
             distinct: false,
             ..
-        } if args.len() == 2
+        } if name == "string_agg" && args.args().len() == 2
     ));
     assert_eq!(stmt.targets[0].output_name, "string_agg");
 }
@@ -6570,12 +6669,13 @@ fn parse_jsonb_agg_with_local_order_by() {
     let stmt = parse_select("select jsonb_agg(id order by note desc, id) from people").unwrap();
     assert!(matches!(
         &stmt.targets[0].expr,
-        SqlExpr::AggCall {
-            func: AggFunc::JsonbAgg,
+        SqlExpr::FuncCall {
+            name,
             args,
             order_by,
             ..
-        } if args.len() == 1
+        } if name == "jsonb_agg"
+            && args.args().len() == 1
             && order_by.len() == 2
             && order_by[0].descending
             && matches!(order_by[0].expr, SqlExpr::Column(ref name) if name == "note")
@@ -6588,13 +6688,14 @@ fn parse_aggregate_filter_clause() {
     let stmt = parse_select("select count(*) filter (where note is not null) from people").unwrap();
     assert!(matches!(
         &stmt.targets[0].expr,
-        SqlExpr::AggCall {
-            func: AggFunc::Count,
+        SqlExpr::FuncCall {
+            name,
             args,
             distinct: false,
             filter: Some(filter),
             ..
-        } if args.is_empty()
+        } if name == "count"
+            && args.is_star()
             && matches!(
                 filter.as_ref(),
                 SqlExpr::IsNotNull(inner) if matches!(inner.as_ref(), SqlExpr::Column(name) if name == "note")
@@ -6607,12 +6708,12 @@ fn parse_range_intersect_agg_select() {
     let stmt = parse_select("select range_intersect_agg(id::int4range) from people").unwrap();
     assert!(matches!(
         &stmt.targets[0].expr,
-        SqlExpr::AggCall {
-            func: AggFunc::RangeIntersectAgg,
+        SqlExpr::FuncCall {
+            name,
             args,
             distinct: false,
             ..
-        } if args.len() == 1
+        } if name == "range_intersect_agg" && args.args().len() == 1
     ));
     assert_eq!(stmt.targets[0].output_name, "range_intersect_agg");
 }
@@ -6626,12 +6727,12 @@ fn parse_variadic_aggregate_call_marks_call_level_flag() {
             let stmt = parse_select("select count(VARIADIC ARRAY[1, 2]) from people").unwrap();
             assert!(matches!(
                 &stmt.targets[0].expr,
-                SqlExpr::AggCall {
-                    func: AggFunc::Count,
+                SqlExpr::FuncCall {
+                    name,
                     args,
                     func_variadic: true,
                     ..
-                } if args.len() == 1
+                } if name == "count" && args.args().len() == 1
             ));
         })
         .unwrap()
@@ -6671,15 +6772,40 @@ fn parse_window_calls_capture_over_clause() {
     ));
     assert!(matches!(
         &stmt.targets[1].expr,
-        SqlExpr::AggCall {
-            func: AggFunc::Sum,
+        SqlExpr::FuncCall {
+            name,
             over: Some(RawWindowSpec {
                 name: window_name,
                 partition_by,
                 order_by,
             }),
             ..
-        } if window_name.is_none() && partition_by.len() == 1 && order_by.len() == 1
+        } if name == "sum" && window_name.is_none() && partition_by.len() == 1 && order_by.len() == 1
+    ));
+}
+
+#[test]
+fn parse_named_window_clause_and_reference() {
+    let stmt =
+        parse_select("select row_number() over w from people window w as (order by id)").unwrap();
+    assert_eq!(stmt.window_clauses.len(), 1);
+    assert_eq!(stmt.window_clauses[0].name, "w");
+    assert!(stmt.window_clauses[0].spec.partition_by.is_empty());
+    assert_eq!(stmt.window_clauses[0].spec.order_by.len(), 1);
+    assert!(matches!(
+        &stmt.targets[0].expr,
+        SqlExpr::FuncCall {
+            name,
+            over: Some(RawWindowSpec {
+                name: Some(window_name),
+                partition_by,
+                order_by,
+            }),
+            ..
+        } if name == "row_number"
+            && window_name == "w"
+            && partition_by.is_empty()
+            && order_by.is_empty()
     ));
 }
 
@@ -6825,6 +6951,25 @@ fn build_plan_with_window_function_uses_windowagg() {
     }
 }
 
+#[test]
+fn build_plan_with_named_window_clause_uses_windowagg() {
+    let stmt =
+        parse_select("select row_number() over w from people window w as (order by id)").unwrap();
+    let plan = build_plan(&stmt, &catalog()).unwrap();
+    match plan {
+        Plan::Projection { input, .. } => match *input {
+            Plan::WindowAgg { input, clause, .. } => {
+                assert!(clause.spec.partition_by.is_empty());
+                assert_eq!(clause.spec.order_by.len(), 1);
+                assert!(matches!(*input, Plan::OrderBy { .. }));
+            }
+            other => panic!("expected window agg below projection, got {other:?}"),
+        },
+        other => panic!("expected projection, got {other:?}"),
+    }
+}
+
+#[test]
 fn ungrouped_column_rejected_at_plan_time() {
     let stmt = parse_select("select name, count(*) from people").unwrap();
     assert!(matches!(
@@ -7071,12 +7216,12 @@ fn parse_column_alias() {
     assert_eq!(stmt.targets[0].output_name, "total");
     assert!(matches!(
         &stmt.targets[0].expr,
-        SqlExpr::AggCall {
-            func: AggFunc::Count,
+        SqlExpr::FuncCall {
+            name,
             args,
             distinct: false,
             ..
-        } if args.is_empty()
+        } if name == "count" && args.is_star()
     ));
 }
 
@@ -7094,12 +7239,12 @@ fn parse_count_distinct() {
     assert_eq!(stmt.targets.len(), 1);
     assert!(matches!(
         &stmt.targets[0].expr,
-        SqlExpr::AggCall {
-            func: AggFunc::Count,
+        SqlExpr::FuncCall {
+            name,
             args,
             distinct: true,
             ..
-        } if args.len() == 1
+        } if name == "count" && args.args().len() == 1
     ));
 }
 
@@ -7129,10 +7274,10 @@ fn parse_named_function_args_in_select() {
         panic!("expected function call");
     };
     assert_eq!(name, "jsonb_path_exists");
-    assert_eq!(args.len(), 3);
-    assert_eq!(args[0].name.as_deref(), Some("target"));
-    assert_eq!(args[1].name.as_deref(), Some("path"));
-    assert_eq!(args[2].name.as_deref(), Some("silent"));
+    assert_eq!(args.args().len(), 3);
+    assert_eq!(args.args()[0].name.as_deref(), Some("target"));
+    assert_eq!(args.args()[1].name.as_deref(), Some("path"));
+    assert_eq!(args.args()[2].name.as_deref(), Some("silent"));
 }
 
 #[test]
@@ -8033,12 +8178,12 @@ fn parse_json_builder_and_object_agg_functions() {
     assert!(matches!(stmt.targets[2].expr, SqlExpr::FuncCall { .. }));
     assert!(matches!(
         &stmt.targets[3].expr,
-        SqlExpr::AggCall {
-            func: AggFunc::JsonObjectAgg,
+        SqlExpr::FuncCall {
+            name,
             args,
             distinct: false,
             ..
-        } if args.len() == 2
+        } if name == "json_object_agg" && args.args().len() == 2
     ));
 }
 
@@ -8525,15 +8670,15 @@ fn parse_trim_without_explicit_trim_chars() {
     .unwrap();
     assert!(matches!(
         &stmt.targets[0].expr,
-        SqlExpr::FuncCall { name, args, .. } if name == "btrim" && args.len() == 1
+        SqlExpr::FuncCall { name, args, .. } if name == "btrim" && args.args().len() == 1
     ));
     assert!(matches!(
         &stmt.targets[1].expr,
-        SqlExpr::FuncCall { name, args, .. } if name == "ltrim" && args.len() == 1
+        SqlExpr::FuncCall { name, args, .. } if name == "ltrim" && args.args().len() == 1
     ));
     assert!(matches!(
         &stmt.targets[2].expr,
-        SqlExpr::FuncCall { name, args, .. } if name == "rtrim" && args.len() == 1
+        SqlExpr::FuncCall { name, args, .. } if name == "rtrim" && args.args().len() == 1
     ));
 }
 
