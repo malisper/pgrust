@@ -2,6 +2,7 @@ use num_bigint::{BigInt, Sign};
 use num_traits::ToPrimitive;
 
 use crate::backend::utils::time::system_time::{SystemTime, UNIX_EPOCH};
+use crate::include::nodes::primnodes::expr_sql_type_hint;
 use rand::{Rng, RngCore};
 
 use super::expr_bit::{
@@ -10,7 +11,10 @@ use super::expr_bit::{
     substring as eval_bit_substring,
 };
 use super::expr_bool::{eval_booleq, eval_boolne};
-use super::expr_casts::{cast_value, cast_value_with_config, soft_input_error_info_with_config};
+use super::expr_casts::{
+    cast_value, cast_value_with_config, cast_value_with_source_type_and_config,
+    soft_input_error_info_with_config,
+};
 pub(crate) use super::expr_compile::{
     CompiledPredicate, compile_predicate, compile_predicate_with_decoder,
 };
@@ -1298,7 +1302,12 @@ pub fn eval_expr(
             let value = eval_expr(expr, slot, ctx)?;
             eval_record_field(value, field)
         }
-        Expr::Cast(inner, ty) => cast_value_with_config(eval_expr(inner, slot, ctx)?, *ty, &ctx.datetime_config),
+        Expr::Cast(inner, ty) => cast_value_with_source_type_and_config(
+            eval_expr(inner, slot, ctx)?,
+            expr_sql_type_hint(inner),
+            *ty,
+            &ctx.datetime_config,
+        ),
         Expr::Coalesce(left, right) => {
             let left = eval_expr(left, slot, ctx)?;
             if !matches!(left, Value::Null) {
@@ -1637,7 +1646,12 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
             eval_plpgsql_expr(&case_expr.defresult, slot)
         }
         Expr::CaseTest(_) => Err(malformed_expr_error("CASE test in PL/pgSQL")),
-        Expr::Cast(inner, ty) => cast_value(eval_plpgsql_expr(inner, slot)?, *ty),
+        Expr::Cast(inner, ty) => cast_value_with_source_type_and_config(
+            eval_plpgsql_expr(inner, slot)?,
+            expr_sql_type_hint(inner),
+            *ty,
+            &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+        ),
         Expr::Coalesce(left, right) => {
             let left = eval_plpgsql_expr(left, slot)?;
             if !matches!(left, Value::Null) {

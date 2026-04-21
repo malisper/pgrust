@@ -14,6 +14,7 @@ use super::expr_money::{
 use super::expr_multirange::{multirange_from_range, parse_multirange_text};
 use super::expr_range::{parse_range_text, render_range_text};
 use super::node_types::*;
+use crate::backend::libpq::pqformat::{FloatFormatOptions, format_float4_text, format_float8_text};
 use crate::backend::executor::jsonb::{
     parse_json_text_input, parse_jsonb_text, parse_jsonb_text_with_limit, render_jsonb_bytes,
 };
@@ -1346,11 +1347,20 @@ pub(crate) fn soft_input_error_info_with_config(
 }
 
 pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> {
-    cast_value_with_config(value, ty, &DateTimeConfig::default())
+    cast_value_with_source_type_and_config(value, None, ty, &DateTimeConfig::default())
 }
 
 pub(crate) fn cast_value_with_config(
     value: Value,
+    ty: SqlType,
+    config: &DateTimeConfig,
+) -> Result<Value, ExecError> {
+    cast_value_with_source_type_and_config(value, None, ty, config)
+}
+
+pub(crate) fn cast_value_with_source_type_and_config(
+    value: Value,
+    source_type: Option<SqlType>,
     ty: SqlType,
     config: &DateTimeConfig,
 ) -> Result<Value, ExecError> {
@@ -2291,7 +2301,7 @@ pub(crate) fn cast_value_with_config(
                 kind: SqlTypeKind::Numeric,
                 ..
             } => Ok(Value::Numeric(coerce_numeric_value(
-                parse_numeric_text(&v.to_string())
+                parse_numeric_text(&float_to_numeric_text(v, source_type))
                     .ok_or_else(|| ExecError::InvalidNumericInput(v.to_string()))?,
                 ty,
             )?)),
@@ -3060,6 +3070,18 @@ fn narrow_float4_runtime(value: f64) -> Result<f64, ExecError> {
     Ok(narrowed as f64)
 }
 
+fn float_to_numeric_text(value: f64, source_type: Option<SqlType>) -> String {
+    let options = FloatFormatOptions {
+        extra_float_digits: 0,
+        ..FloatFormatOptions::default()
+    };
+    match source_type.map(|ty| ty.kind) {
+        Some(SqlTypeKind::Float4) => format_float4_text(value, options),
+        Some(SqlTypeKind::Float8) => format_float8_text(value, options),
+        _ => value.to_string(),
+    }
+}
+
 fn float_sql_type_name(kind: SqlTypeKind) -> &'static str {
     match kind {
         SqlTypeKind::Float4 => "real",
@@ -3075,11 +3097,13 @@ fn has_nonzero_digit(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        cast_float_to_int, cast_value, parse_input_type_name, parse_pg_float,
-        parse_text_array_literal, soft_input_error_info,
+        cast_float_to_int, cast_value, cast_value_with_source_type_and_config,
+        parse_input_type_name, parse_pg_float, parse_text_array_literal, soft_input_error_info,
     };
+    use crate::backend::executor::exec_expr::parse_numeric_text;
     use crate::backend::executor::{ExecError, Value};
     use crate::backend::parser::{SqlType, SqlTypeKind};
+    use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 
     #[test]
     fn float4_text_input_rounds_at_float4_width() {
@@ -3111,6 +3135,33 @@ mod tests {
             cast_float_to_int(9_223_372_036_854_775_808.0, int8),
             Err(ExecError::Int8OutOfRange)
         ));
+    }
+
+    #[test]
+    fn float_to_numeric_cast_uses_pg_precision_by_source_type() {
+        let float4_numeric = cast_value_with_source_type_and_config(
+            Value::Float64(1.23456789_f64),
+            Some(SqlType::new(SqlTypeKind::Float4)),
+            SqlType::new(SqlTypeKind::Numeric),
+            &DateTimeConfig::default(),
+        )
+        .unwrap();
+        let float8_numeric = cast_value_with_source_type_and_config(
+            Value::Float64(1.2345678901234567_f64),
+            Some(SqlType::new(SqlTypeKind::Float8)),
+            SqlType::new(SqlTypeKind::Numeric),
+            &DateTimeConfig::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            float4_numeric,
+            Value::Numeric(parse_numeric_text("1.23457").unwrap())
+        );
+        assert_eq!(
+            float8_numeric,
+            Value::Numeric(parse_numeric_text("1.23456789012346").unwrap())
+        );
     }
 
     #[test]

@@ -55,6 +55,13 @@ pub(crate) enum AccumState {
         count: i64,
         result_type: SqlType,
     },
+    FloatStats {
+        count: f64,
+        sum: f64,
+        sum_sq: f64,
+        stddev: bool,
+        sample: bool,
+    },
     NumericStats {
         count: i64,
         sum: NumericValue,
@@ -130,38 +137,86 @@ impl AccumState {
                 count: 0,
                 result_type: sql_type,
             },
-            (AggFunc::VarPop, _) => AccumState::NumericStats {
-                count: 0,
-                sum: NumericValue::zero(),
-                sum_sq: NumericValue::zero(),
-                result_type: sql_type,
-                stddev: false,
-                sample: false,
-            },
-            (AggFunc::VarSamp, _) => AccumState::NumericStats {
-                count: 0,
-                sum: NumericValue::zero(),
-                sum_sq: NumericValue::zero(),
-                result_type: sql_type,
-                stddev: false,
-                sample: true,
-            },
-            (AggFunc::StddevPop, _) => AccumState::NumericStats {
-                count: 0,
-                sum: NumericValue::zero(),
-                sum_sq: NumericValue::zero(),
-                result_type: sql_type,
-                stddev: true,
-                sample: false,
-            },
-            (AggFunc::StddevSamp, _) => AccumState::NumericStats {
-                count: 0,
-                sum: NumericValue::zero(),
-                sum_sq: NumericValue::zero(),
-                result_type: sql_type,
-                stddev: true,
-                sample: true,
-            },
+            (AggFunc::VarPop, _) => {
+                if matches!(sql_type.kind, SqlTypeKind::Float4 | SqlTypeKind::Float8) {
+                    AccumState::FloatStats {
+                        count: 0.0,
+                        sum: 0.0,
+                        sum_sq: 0.0,
+                        stddev: false,
+                        sample: false,
+                    }
+                } else {
+                    AccumState::NumericStats {
+                        count: 0,
+                        sum: NumericValue::zero(),
+                        sum_sq: NumericValue::zero(),
+                        result_type: sql_type,
+                        stddev: false,
+                        sample: false,
+                    }
+                }
+            }
+            (AggFunc::VarSamp, _) => {
+                if matches!(sql_type.kind, SqlTypeKind::Float4 | SqlTypeKind::Float8) {
+                    AccumState::FloatStats {
+                        count: 0.0,
+                        sum: 0.0,
+                        sum_sq: 0.0,
+                        stddev: false,
+                        sample: true,
+                    }
+                } else {
+                    AccumState::NumericStats {
+                        count: 0,
+                        sum: NumericValue::zero(),
+                        sum_sq: NumericValue::zero(),
+                        result_type: sql_type,
+                        stddev: false,
+                        sample: true,
+                    }
+                }
+            }
+            (AggFunc::StddevPop, _) => {
+                if matches!(sql_type.kind, SqlTypeKind::Float4 | SqlTypeKind::Float8) {
+                    AccumState::FloatStats {
+                        count: 0.0,
+                        sum: 0.0,
+                        sum_sq: 0.0,
+                        stddev: true,
+                        sample: false,
+                    }
+                } else {
+                    AccumState::NumericStats {
+                        count: 0,
+                        sum: NumericValue::zero(),
+                        sum_sq: NumericValue::zero(),
+                        result_type: sql_type,
+                        stddev: true,
+                        sample: false,
+                    }
+                }
+            }
+            (AggFunc::StddevSamp, _) => {
+                if matches!(sql_type.kind, SqlTypeKind::Float4 | SqlTypeKind::Float8) {
+                    AccumState::FloatStats {
+                        count: 0.0,
+                        sum: 0.0,
+                        sum_sq: 0.0,
+                        stddev: true,
+                        sample: true,
+                    }
+                } else {
+                    AccumState::NumericStats {
+                        count: 0,
+                        sum: NumericValue::zero(),
+                        sum_sq: NumericValue::zero(),
+                        result_type: sql_type,
+                        stddev: true,
+                        sample: true,
+                    }
+                }
+            }
             (
                 AggFunc::RegrCount
                 | AggFunc::RegrSxx
@@ -318,16 +373,38 @@ impl AccumState {
                 _,
                 _,
             ) => |state, values| {
-                if let AccumState::NumericStats {
-                    count, sum, sum_sq, ..
-                } = state
-                {
-                    let value = values.first().unwrap_or(&Value::Null);
-                    if let Some(numeric) = aggregate_numeric_value(value) {
-                        *sum = sum.add(&numeric);
-                        *sum_sq = sum_sq.add(&numeric.mul(&numeric));
-                        *count += 1;
+                let value = values.first().unwrap_or(&Value::Null);
+                match state {
+                    AccumState::FloatStats { count, sum, sum_sq, .. } => {
+                        if let Some(value) = aggregate_float_value(value) {
+                            let next_count = *count + 1.0;
+                            let next_sum = *sum + value;
+                            if *count > 0.0 {
+                                let tmp = value * next_count - next_sum;
+                                *sum_sq += tmp * tmp / (next_count * *count);
+                                if next_sum.is_infinite() || sum_sq.is_infinite() {
+                                    if !sum.is_infinite() && !value.is_infinite() {
+                                        return Err(float8_overflow_error());
+                                    }
+                                    *sum_sq = f64::NAN;
+                                }
+                            } else if value.is_nan() || value.is_infinite() {
+                                *sum_sq = f64::NAN;
+                            }
+                            *count = next_count;
+                            *sum = next_sum;
+                        }
                     }
+                    AccumState::NumericStats {
+                        count, sum, sum_sq, ..
+                    } => {
+                        if let Some(numeric) = aggregate_numeric_value(value) {
+                            *sum = sum.add(&numeric);
+                            *sum_sq = sum_sq.add(&numeric.mul(&numeric));
+                            *count += 1;
+                        }
+                    }
+                    _ => {}
                 }
                 Ok(())
             },
@@ -570,6 +647,25 @@ impl AccumState {
                     }
                 }
             }
+            AccumState::FloatStats {
+                count,
+                sum: _,
+                sum_sq,
+                stddev,
+                sample,
+            } => {
+                if *count == 0.0 || (*sample && *count <= 1.0) {
+                    Value::Null
+                } else {
+                    let variance = if *sample {
+                        *sum_sq / (*count - 1.0)
+                    } else {
+                        *sum_sq / *count
+                    };
+                    let result = if *stddev { variance.sqrt() } else { variance };
+                    Value::Float64(result)
+                }
+            }
             AccumState::NumericStats {
                 count,
                 sum,
@@ -582,7 +678,11 @@ impl AccumState {
                     Value::Null
                 } else {
                     let n = NumericValue::from_i64(*count);
-                    let numerator = n.mul(sum_sq).sub(&sum.mul(sum));
+                    let mul_rscale = sum.dscale().saturating_mul(2);
+                    let numerator = n
+                        .mul(sum_sq)
+                        .with_dscale(mul_rscale)
+                        .sub(&sum.mul(sum).with_dscale(mul_rscale));
                     let denominator = if *sample {
                         n.mul(&NumericValue::from_i64(*count - 1))
                     } else {
@@ -597,7 +697,7 @@ impl AccumState {
                             .unwrap_or_else(NumericValue::zero)
                     };
                     let result = if *stddev {
-                        numeric_sqrt(&variance, variance.dscale())
+                        numeric_sqrt(&variance, numeric_visible_scale(&variance))
                     } else {
                         variance
                     };
@@ -1056,6 +1156,26 @@ fn aggregate_numeric_value(value: &Value) -> Option<NumericValue> {
     }
 }
 
+fn aggregate_float_value(value: &Value) -> Option<f64> {
+    match value {
+        Value::Null => None,
+        Value::Int16(v) => Some(f64::from(*v)),
+        Value::Int32(v) => Some(f64::from(*v)),
+        Value::Int64(v) => Some(*v as f64),
+        Value::Float64(v) => Some(*v),
+        _ => None,
+    }
+}
+
+fn float8_overflow_error() -> ExecError {
+    ExecError::DetailedError {
+        message: "value out of range: overflow".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "22003",
+    }
+}
+
 fn numeric_sqrt(value: &NumericValue, scale: u32) -> NumericValue {
     match value {
         NumericValue::Finite { coeff, .. } if coeff.is_zero() => NumericValue::zero(),
@@ -1089,6 +1209,14 @@ fn numeric_sqrt(value: &NumericValue, scale: u32) -> NumericValue {
         NumericValue::PosInf => NumericValue::PosInf,
         NumericValue::NegInf | NumericValue::NaN => NumericValue::NaN,
     }
+}
+
+fn numeric_visible_scale(value: &NumericValue) -> u32 {
+    value
+        .render()
+        .split_once('.')
+        .map(|(_, frac)| frac.len() as u32)
+        .unwrap_or(0)
 }
 
 fn accumulate_integral(
