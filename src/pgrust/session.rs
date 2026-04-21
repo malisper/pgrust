@@ -548,6 +548,24 @@ impl Session {
                     )
                 }
             }
+            Statement::DropFunction(ref drop_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_drop_function_stmt_with_search_path(
+                        self.client_id,
+                        drop_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
             Statement::CreateDatabase(ref create_stmt) => {
                 if self.active_txn.is_some() {
                     let result = self.execute_in_transaction(db, stmt);
@@ -2873,6 +2891,18 @@ impl Session {
                     client_id,
                     drop_stmt,
                     search_path.as_deref(),
+                )
+            }
+            Statement::DropFunction(ref drop_stmt) => {
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_drop_function_stmt_in_transaction_with_search_path(
+                    client_id,
+                    drop_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
                 )
             }
             Statement::CreateView(ref create_stmt) => {
