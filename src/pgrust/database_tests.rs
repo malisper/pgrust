@@ -14,6 +14,7 @@ use crate::include::nodes::parsenodes::MaintenanceTarget;
 use crate::include::nodes::primnodes::QueryColumn;
 use crate::pl::plpgsql::{clear_notices, take_notices};
 use std::collections::HashMap;
+use std::fs;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
@@ -15757,8 +15758,12 @@ fn create_alter_and_drop_policy_updates_pg_policy() {
 
 #[test]
 fn create_tablespace_adds_pg_tablespace_row() {
-    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let dir = temp_dir("create_tablespace_adds_pg_tablespace_row");
+    let db = Database::open(&dir, 32).expect("open database");
     let mut session = Session::new(1);
+    session
+        .execute(&db, "set allow_in_place_tablespaces = true")
+        .unwrap();
 
     match session
         .execute(&db, "create tablespace regress_tblspace location ''")
@@ -15772,10 +15777,73 @@ fn create_tablespace_adds_pg_tablespace_row() {
         query_rows(
             &db,
             1,
-            "select spcname from pg_tablespace where spcname = 'regress_tblspace'",
+            "select oid, spcname from pg_tablespace where spcname = 'regress_tblspace'",
         ),
-        vec![vec![Value::Text("regress_tblspace".into())]]
+        vec![vec![
+            Value::Int64(16384),
+            Value::Text("regress_tblspace".into()),
+        ]]
     );
+    let tablespace_oid = match &query_rows(
+        &db,
+        1,
+        "select oid from pg_tablespace where spcname = 'regress_tblspace'",
+    )[0][0]
+    {
+        Value::Int64(oid) => *oid as u32,
+        other => panic!("expected oid row, got {other:?}"),
+    };
+    assert!(dir
+        .join("pg_tblspc")
+        .join(tablespace_oid.to_string())
+        .join("PG_18_202406281")
+        .is_dir());
+}
+
+#[test]
+fn create_tablespace_rejects_empty_location_without_guc() {
+    let dir = temp_dir("create_tablespace_rejects_empty_location_without_guc");
+    let db = Database::open(&dir, 32).expect("open database");
+    let mut session = Session::new(1);
+
+    let err = session
+        .execute(&db, "create tablespace regress_tblspace location ''")
+        .unwrap_err();
+    match err {
+        ExecError::DetailedError { message, .. } => {
+            assert_eq!(message, "tablespace location must be an absolute path");
+        }
+        other => panic!("expected detailed error, got {other:?}"),
+    }
+}
+
+#[test]
+fn create_tablespace_absolute_location_creates_symlinked_version_dir() {
+    let dir = temp_dir("create_tablespace_absolute_location");
+    let tablespace_dir = dir.join("external_tablespace");
+    fs::create_dir_all(&tablespace_dir).unwrap();
+
+    let db = Database::open(&dir, 32).expect("open database");
+    let mut session = Session::new(1);
+    let sql = format!(
+        "create tablespace regress_tblspace location '{}'",
+        tablespace_dir.display()
+    );
+
+    session.execute(&db, &sql).unwrap();
+
+    let tablespace_oid = match &query_rows(
+        &db,
+        1,
+        "select oid from pg_tablespace where spcname = 'regress_tblspace'",
+    )[0][0]
+    {
+        Value::Int64(oid) => *oid as u32,
+        other => panic!("expected oid row, got {other:?}"),
+    };
+    let link_path = dir.join("pg_tblspc").join(tablespace_oid.to_string());
+    assert!(link_path.exists());
+    assert!(tablespace_dir.join("PG_18_202406281").is_dir());
 }
 
 #[test]

@@ -171,6 +171,12 @@ impl MdStorageManager {
     fn db_dir(&self, rel: RelFileLocator) -> PathBuf {
         if rel.db_oid == 0 && rel.spc_oid == GLOBAL_TABLESPACE_OID {
             self.base_dir.join("global")
+        } else if rel.spc_oid != 0 {
+            self.base_dir
+                .join("pg_tblspc")
+                .join(rel.spc_oid.to_string())
+                .join(TABLESPACE_VERSION_DIRECTORY)
+                .join(rel.db_oid.to_string())
         } else {
             self.base_dir.join("base").join(rel.db_oid.to_string())
         }
