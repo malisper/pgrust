@@ -977,9 +977,8 @@ fn seed_trigger_state(
                 .collect(),
         )
     };
-    state.values[bindings.tg_argv_slot] = Value::PgArray(
-        tg_argv.with_element_type_oid(TEXT_TYPE_OID),
-    );
+    state.values[bindings.tg_argv_slot] =
+        Value::PgArray(tg_argv.with_element_type_oid(TEXT_TYPE_OID));
     state.values[bindings.tg_table_name_slot] = Value::Text(call.table_name.clone().into());
     state.values[bindings.tg_table_schema_slot] = Value::Text(call.table_schema.clone().into());
 }

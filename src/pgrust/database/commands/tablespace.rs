@@ -189,7 +189,10 @@ fn ensure_fresh_directory(path: &Path) -> Result<(), ExecError> {
                 });
             }
             return Err(ExecError::DetailedError {
-                message: format!("directory \"{}\" already in use as a tablespace", path.display()),
+                message: format!(
+                    "directory \"{}\" already in use as a tablespace",
+                    path.display()
+                ),
                 detail: None,
                 hint: None,
                 sqlstate: "55006",
@@ -206,7 +209,10 @@ fn create_symlink_if_missing(target: &Path, link: &Path) -> Result<(), ExecError
     match fs::symlink_metadata(link) {
         Ok(_) => {
             return Err(ExecError::DetailedError {
-                message: format!("directory \"{}\" already in use as a tablespace", link.display()),
+                message: format!(
+                    "directory \"{}\" already in use as a tablespace",
+                    link.display()
+                ),
                 detail: None,
                 hint: None,
                 sqlstate: "55006",

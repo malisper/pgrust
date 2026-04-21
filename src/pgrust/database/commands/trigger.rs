@@ -233,7 +233,12 @@ fn resolve_trigger_function(
 ) -> Result<crate::include::catalog::PgProcRow, ExecError> {
     let proname = stmt.function_name.to_ascii_lowercase();
     let namespace_candidates = if let Some(schema_name) = stmt.function_schema_name.as_deref() {
-        vec![resolve_function_schema_oid(db, client_id, txn_ctx, schema_name)?]
+        vec![resolve_function_schema_oid(
+            db,
+            client_id,
+            txn_ctx,
+            schema_name,
+        )?]
     } else {
         function_search_path_namespace_oids(db, client_id, txn_ctx, configured_search_path)
     };

@@ -7,7 +7,7 @@ use crate::backend::utils::misc::notices::{
     clear_notices as clear_backend_notices, take_notices as take_backend_notices,
 };
 use crate::include::catalog::{
-    FLOAT8_TYPE_OID, INT4RANGE_TYPE_OID, INT4_TYPE_OID, PG_CLASS_RELATION_OID,
+    FLOAT8_TYPE_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID, PG_CLASS_RELATION_OID,
     PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID,
 };
 use crate::include::nodes::parsenodes::MaintenanceTarget;
@@ -15,8 +15,8 @@ use crate::include::nodes::primnodes::QueryColumn;
 use crate::pl::plpgsql::{clear_notices, take_notices};
 use std::collections::HashMap;
 use std::fs;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 
 use std::time::{Duration, Instant};
@@ -2710,9 +2710,11 @@ fn analyze_populates_pg_stats_view_and_anyarray_columns() {
          order by 1",
     );
     assert!(!histogram_dims.is_empty());
-    assert!(histogram_dims
-        .iter()
-        .all(|row| row.as_slice() == [Value::Int32(1)]));
+    assert!(
+        histogram_dims
+            .iter()
+            .all(|row| row.as_slice() == [Value::Int32(1)])
+    );
 }
 
 #[test]
@@ -3447,19 +3449,20 @@ fn explain_update_accepts_inherited_update_statement() {
         })
         .collect::<Vec<_>>();
 
-    assert_eq!(lines.first().map(String::as_str), Some("Update on some_tab"));
+    assert_eq!(
+        lines.first().map(String::as_str),
+        Some("Update on some_tab")
+    );
     assert!(
-        lines
-            .iter()
-            .any(|line| {
-                line.contains("Index Scan using") && line.contains("on some_tab_child some_tab_1")
-            }),
+        lines.iter().any(|line| {
+            line.contains("Index Scan using") && line.contains("on some_tab_child some_tab_1")
+        }),
         "expected EXPLAIN UPDATE to show inherited child index scan, got {lines:?}"
     );
     assert!(
-        lines
-            .iter()
-            .any(|line| line.contains("f1 =") && line.contains("12::integer") && line.contains("13::integer")),
+        lines.iter().any(|line| line.contains("f1 =")
+            && line.contains("12::integer")
+            && line.contains("13::integer")),
         "expected EXPLAIN UPDATE to show index quals, got {lines:?}"
     );
 }
@@ -3469,7 +3472,8 @@ fn explain_verbose_update_where_false_is_accepted() {
     let dir = temp_dir("inheritance_explain_update_false");
     let db = Database::open(&dir, 128).unwrap();
 
-    db.execute(1, "create table some_tab (a int, b int)").unwrap();
+    db.execute(1, "create table some_tab (a int, b int)")
+        .unwrap();
     db.execute(1, "create table some_tab_child () inherits (some_tab)")
         .unwrap();
     db.execute(1, "insert into some_tab_child values (1, 2)")
@@ -3492,9 +3496,14 @@ fn explain_verbose_update_where_false_is_accepted() {
         })
         .collect::<Vec<_>>();
 
-    assert_eq!(lines.first().map(String::as_str), Some("Update on public.some_tab"));
+    assert_eq!(
+        lines.first().map(String::as_str),
+        Some("Update on public.some_tab")
+    );
     assert!(
-        lines.iter().any(|line| line == "        One-Time Filter: false"),
+        lines
+            .iter()
+            .any(|line| line == "        One-Time Filter: false"),
         "expected EXPLAIN VERBOSE UPDATE to show false one-time filter, got {lines:?}"
     );
 }
@@ -4259,14 +4268,16 @@ fn committed_catalog_invalidation_evicts_other_sessions_without_global_reset() {
     let mut writer = Session::new(1);
     let mut reader = Session::new(2);
 
-    assert!(db
-        .lazy_catalog_lookup(1, None, None)
-        .lookup_any_relation("fanout_test")
-        .is_none());
-    assert!(db
-        .lazy_catalog_lookup(2, None, None)
-        .lookup_any_relation("fanout_test")
-        .is_none());
+    assert!(
+        db.lazy_catalog_lookup(1, None, None)
+            .lookup_any_relation("fanout_test")
+            .is_none()
+    );
+    assert!(
+        db.lazy_catalog_lookup(2, None, None)
+            .lookup_any_relation("fanout_test")
+            .is_none()
+    );
     {
         let states = db.backend_cache_states.read();
         let writer_state = states.get(&1).unwrap();
@@ -6655,9 +6666,13 @@ fn alter_index_rename_supports_if_exists_and_rename() {
     let db = Database::open(&base, 16).unwrap();
 
     db.execute(1, "create table items (id int4)").unwrap();
-    db.execute(1, "create index items_idx on items (id)").unwrap();
-    db.execute(1, "alter index if exists missing_idx rename to items_idx_new")
+    db.execute(1, "create index items_idx on items (id)")
         .unwrap();
+    db.execute(
+        1,
+        "alter index if exists missing_idx rename to items_idx_new",
+    )
+    .unwrap();
     db.execute(1, "alter index items_idx rename to items_idx_new")
         .unwrap();
 
@@ -6677,8 +6692,11 @@ fn alter_index_rename_if_exists_missing_pushes_notice() {
     let db = Database::open(&base, 16).unwrap();
 
     clear_backend_notices();
-    db.execute(1, "alter index if exists missing_idx rename to items_idx_new")
-        .unwrap();
+    db.execute(
+        1,
+        "alter index if exists missing_idx rename to items_idx_new",
+    )
+    .unwrap();
 
     assert_eq!(
         take_backend_notices().into_iter().collect::<Vec<_>>(),
@@ -6695,7 +6713,10 @@ fn alter_index_rename_if_exists_missing_in_transaction_pushes_notice() {
     clear_backend_notices();
     session.execute(&db, "begin").unwrap();
     session
-        .execute(&db, "alter index if exists missing_idx rename to items_idx_new")
+        .execute(
+            &db,
+            "alter index if exists missing_idx rename to items_idx_new",
+        )
         .unwrap();
     session.execute(&db, "commit").unwrap();
 
@@ -6710,7 +6731,8 @@ fn alter_table_inherit_validates_shape_and_constraints() {
     let base = temp_dir("alter_table_inherit_validate");
     let db = Database::open(&base, 16).unwrap();
 
-    db.execute(1, "create table parent_items (test2 int4)").unwrap();
+    db.execute(1, "create table parent_items (test2 int4)")
+        .unwrap();
     db.execute(1, "create table child_items ()").unwrap();
 
     match db.execute(1, "alter table child_items inherit parent_items") {
@@ -6720,15 +6742,18 @@ fn alter_table_inherit_validates_shape_and_constraints() {
     }
 
     db.execute(1, "drop table child_items").unwrap();
-    db.execute(1, "create table child_items (test2 bool)").unwrap();
+    db.execute(1, "create table child_items (test2 bool)")
+        .unwrap();
     match db.execute(1, "alter table child_items inherit parent_items") {
         Err(ExecError::DetailedError { message, .. })
-            if message == "child table \"child_items\" has different type for column \"test2\"" => {}
+            if message == "child table \"child_items\" has different type for column \"test2\"" => {
+        }
         other => panic!("expected type-mismatch inherit error, got {other:?}"),
     }
 
     db.execute(1, "drop table child_items").unwrap();
-    db.execute(1, "create table child_items (test2 int4)").unwrap();
+    db.execute(1, "create table child_items (test2 int4)")
+        .unwrap();
     db.execute(
         1,
         "alter table parent_items add constraint parent_items_check check (test2 > 0)",
@@ -6748,11 +6773,15 @@ fn alter_table_inherit_supports_attach_duplicate_and_cycle_errors() {
 
     db.execute(1, "create table atacc1 (test int4)").unwrap();
     db.execute(1, "create table atacc2 (test2 int4)").unwrap();
-    db.execute(1, "create table atacc3 (test3 int4, test2 int4) inherits (atacc1)")
-        .unwrap();
+    db.execute(
+        1,
+        "create table atacc3 (test3 int4, test2 int4) inherits (atacc1)",
+    )
+    .unwrap();
     db.execute(1, "alter table atacc2 add constraint foo check (test2 > 0)")
         .unwrap();
-    db.execute(1, "insert into atacc3 (test2) values (4)").unwrap();
+    db.execute(1, "insert into atacc3 (test2) values (4)")
+        .unwrap();
     db.execute(1, "update atacc3 set test2 = 4 where test2 is null")
         .unwrap();
     db.execute(1, "alter table atacc3 add constraint foo check (test2 > 0)")
@@ -6814,7 +6843,11 @@ fn explain_inherited_append_uses_relation_names_and_sql_casts() {
         .collect::<Vec<_>>();
 
     assert!(rendered.iter().any(|line| line.contains("Append")));
-    assert!(rendered.iter().any(|line| line.contains("Seq Scan on nv_parent")));
+    assert!(
+        rendered
+            .iter()
+            .any(|line| line.contains("Seq Scan on nv_parent"))
+    );
     assert!(
         rendered
             .iter()
@@ -9446,9 +9479,11 @@ fn foreign_keys_support_match_full() {
             constraint, detail, ..
         }) => {
             assert_eq!(constraint, "children_parent_fk");
-            assert!(detail
-                .as_deref()
-                .is_some_and(|detail| detail.contains("MATCH FULL")));
+            assert!(
+                detail
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("MATCH FULL"))
+            );
         }
         other => panic!("expected MATCH FULL foreign-key violation, got {other:?}"),
     }
@@ -9519,9 +9554,11 @@ fn alter_table_add_foreign_key_supports_match_full() {
             constraint, detail, ..
         }) => {
             assert_eq!(constraint, "children_parent_fk");
-            assert!(detail
-                .as_deref()
-                .is_some_and(|detail| detail.contains("MATCH FULL")));
+            assert!(
+                detail
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("MATCH FULL"))
+            );
         }
         other => panic!("expected post-add MATCH FULL foreign-key violation, got {other:?}"),
     }
@@ -10722,9 +10759,11 @@ fn alter_constraint_enforced_validates_match_full_existing_rows() {
             constraint, detail, ..
         }) => {
             assert_eq!(constraint, "children_parent_fk");
-            assert!(detail
-                .as_deref()
-                .is_some_and(|detail| detail.contains("MATCH FULL")));
+            assert!(
+                detail
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("MATCH FULL"))
+            );
         }
         other => panic!("expected ALTER CONSTRAINT ENFORCED MATCH FULL failure, got {other:?}"),
     }
@@ -12587,10 +12626,8 @@ fn set_local_time_zone_updates_timestamptz_json_output() {
             "select to_jsonb(timestamp '2014-05-28 12:22:35.614298')",
         ),
         vec![vec![Value::Jsonb(
-            crate::backend::executor::jsonb::parse_jsonb_text(
-                "\"2014-05-28T12:22:35.614298\"",
-            )
-            .unwrap()
+            crate::backend::executor::jsonb::parse_jsonb_text("\"2014-05-28T12:22:35.614298\"",)
+                .unwrap()
         )]]
     );
     assert_eq!(
@@ -13002,7 +13039,7 @@ fn checkpoint_updates_checkpointer_stats() {
 #[test]
 fn checkpoint_flushes_dirty_pages_and_clog_to_disk() {
     use crate::backend::access::transam::xact::{
-        TransactionManager, TransactionStatus, INVALID_TRANSACTION_ID,
+        INVALID_TRANSACTION_ID, TransactionManager, TransactionStatus,
     };
     use crate::backend::storage::smgr::ForkNumber;
 
@@ -14279,13 +14316,14 @@ fn create_table_uses_pg_temp_search_path_for_unqualified_creation() {
         .unwrap();
 
     assert!(db.temp_entry(1, "tempy").is_some());
-    assert!(db
-        .catalog
-        .read()
-        .catalog_snapshot()
-        .unwrap()
-        .get("tempy")
-        .is_none());
+    assert!(
+        db.catalog
+            .read()
+            .catalog_snapshot()
+            .unwrap()
+            .get("tempy")
+            .is_none()
+    );
 }
 
 #[test]
@@ -16928,11 +16966,12 @@ fn create_tablespace_adds_pg_tablespace_row() {
         Value::Int64(oid) => *oid as u32,
         other => panic!("expected oid row, got {other:?}"),
     };
-    assert!(dir
-        .join("pg_tblspc")
-        .join(tablespace_oid.to_string())
-        .join("PG_18_202406281")
-        .is_dir());
+    assert!(
+        dir.join("pg_tblspc")
+            .join(tablespace_oid.to_string())
+            .join("PG_18_202406281")
+            .is_dir()
+    );
 }
 
 #[test]
@@ -17688,17 +17727,18 @@ fn create_type_exposes_catalog_rows_and_function_row_expansion() {
             vec![Value::Text("label".into())],
         ]
     );
-    assert!(db
-        .backend_catcache(1, None)
-        .unwrap()
-        .depend_rows()
-        .iter()
-        .any(|row| {
-            row.classid == PG_PROC_RELATION_OID
-                && row.objid == widget_proc.oid
-                && row.refclassid == PG_TYPE_RELATION_OID
-                && row.refobjid == widget_type.oid
-        }));
+    assert!(
+        db.backend_catcache(1, None)
+            .unwrap()
+            .depend_rows()
+            .iter()
+            .any(|row| {
+                row.classid == PG_PROC_RELATION_OID
+                    && row.objid == widget_proc.oid
+                    && row.refclassid == PG_TYPE_RELATION_OID
+                    && row.refobjid == widget_type.oid
+            })
+    );
     assert_eq!(
         query_rows(&db, 1, "select * from widget_rows(5)"),
         vec![vec![Value::Int32(5), Value::Text("widget".into())]]
@@ -17902,9 +17942,11 @@ fn create_type_nested_dependencies_and_named_composite_arrays_work() {
         }) => {
             assert_eq!(sqlstate, "2BP01");
             assert!(message.contains("cannot drop type complex"));
-            assert!(detail
-                .unwrap_or_default()
-                .contains("type holder depends on type complex"));
+            assert!(
+                detail
+                    .unwrap_or_default()
+                    .contains("type holder depends on type complex")
+            );
         }
         other => panic!("expected dependent-type drop restriction, got {other:?}"),
     }
@@ -17997,9 +18039,11 @@ fn drop_type_enforces_restrict_and_if_exists() {
         }) => {
             assert_eq!(sqlstate, "2BP01");
             assert!(message.contains("cannot drop type widget"));
-            assert!(detail
-                .unwrap_or_default()
-                .contains("function widget_rows depends on type widget"));
+            assert!(
+                detail
+                    .unwrap_or_default()
+                    .contains("function widget_rows depends on type widget")
+            );
         }
         other => panic!("expected dependent-function drop restriction, got {other:?}"),
     }
@@ -18036,9 +18080,11 @@ fn drop_enum_type_enforces_restrict_and_if_exists() {
         }) => {
             assert_eq!(sqlstate, "2BP01");
             assert!(message.contains("cannot drop type mood"));
-            assert!(detail
-                .unwrap_or_default()
-                .contains("table feelings depends on type mood"));
+            assert!(
+                detail
+                    .unwrap_or_default()
+                    .contains("table feelings depends on type mood")
+            );
         }
         other => panic!("expected dependent enum drop restriction, got {other:?}"),
     }
@@ -18078,9 +18124,11 @@ fn drop_range_type_enforces_restrict_and_if_exists() {
         }) => {
             assert_eq!(sqlstate, "2BP01");
             assert!(message.contains("cannot drop type float8range"));
-            assert!(detail
-                .unwrap_or_default()
-                .contains("table measurements depends on type float8range"));
+            assert!(
+                detail
+                    .unwrap_or_default()
+                    .contains("table measurements depends on type float8range")
+            );
         }
         other => panic!("expected dependent range drop restriction, got {other:?}"),
     }

@@ -2581,10 +2581,7 @@ impl Session {
                 let relation = catalog
                     .lookup_relation(&comment_stmt.table_name)
                     .ok_or_else(|| ExecError::DetailedError {
-                        message: format!(
-                            "relation \"{}\" does not exist",
-                            comment_stmt.table_name
-                        ),
+                        message: format!("relation \"{}\" does not exist", comment_stmt.table_name),
                         detail: None,
                         hint: None,
                         sqlstate: "42P01",

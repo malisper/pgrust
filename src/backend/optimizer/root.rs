@@ -3,8 +3,8 @@ use crate::include::executor::execdesc::CommandType;
 use crate::include::nodes::parsenodes::{JoinTreeNode, Query, RangeTblEntry, RangeTblEntryKind};
 use crate::include::nodes::pathnodes::{PathTarget, PlannerInfo, RelOptInfo};
 use crate::include::nodes::primnodes::{
-    AggAccum, AggFunc, Aggref, Expr, ProjectSetTarget, SetReturningCall, SortGroupClause,
-    SubLink, SubLinkType, TargetEntry, Var, is_system_attr,
+    AggAccum, AggFunc, Aggref, Expr, ProjectSetTarget, SetReturningCall, SortGroupClause, SubLink,
+    SubLinkType, TargetEntry, Var, is_system_attr,
 };
 
 use super::joininfo::build_special_join_info;
@@ -150,7 +150,8 @@ fn build_minmax_sublink(query: &Query, accum: &AggAccum) -> Option<Expr> {
         return None;
     }
 
-    let target = TargetEntry::new("?column?", arg.clone(), accum.sql_type, 1).with_sort_group_ref(1);
+    let target =
+        TargetEntry::new("?column?", arg.clone(), accum.sql_type, 1).with_sort_group_ref(1);
     let sort_clause = vec![SortGroupClause {
         expr: arg.clone(),
         tle_sort_group_ref: 1,
@@ -242,12 +243,12 @@ fn raise_outer_varlevels_for_minmax_rewrite(expr: Expr) -> Expr {
             Box::new(raise_outer_varlevels_for_minmax_rewrite(*left)),
             Box::new(raise_outer_varlevels_for_minmax_rewrite(*right)),
         ),
-        Expr::IsNull(inner) => Expr::IsNull(Box::new(raise_outer_varlevels_for_minmax_rewrite(
-            *inner,
-        ))),
-        Expr::IsNotNull(inner) => Expr::IsNotNull(Box::new(
-            raise_outer_varlevels_for_minmax_rewrite(*inner),
-        )),
+        Expr::IsNull(inner) => {
+            Expr::IsNull(Box::new(raise_outer_varlevels_for_minmax_rewrite(*inner)))
+        }
+        Expr::IsNotNull(inner) => {
+            Expr::IsNotNull(Box::new(raise_outer_varlevels_for_minmax_rewrite(*inner)))
+        }
         Expr::IsDistinctFrom(left, right) => Expr::IsDistinctFrom(
             Box::new(raise_outer_varlevels_for_minmax_rewrite(*left)),
             Box::new(raise_outer_varlevels_for_minmax_rewrite(*right)),
@@ -273,12 +274,10 @@ fn expr_contains_sublink_for_minmax_rewrite(expr: &Expr) -> bool {
                     .as_ref()
                     .is_some_and(expr_contains_sublink_for_minmax_rewrite)
         }
-        Expr::WindowFunc(window_func) => {
-            window_func
-                .args
-                .iter()
-                .any(expr_contains_sublink_for_minmax_rewrite)
-        }
+        Expr::WindowFunc(window_func) => window_func
+            .args
+            .iter()
+            .any(expr_contains_sublink_for_minmax_rewrite),
         Expr::Op(op) => op.args.iter().any(expr_contains_sublink_for_minmax_rewrite),
         Expr::Bool(bool_expr) => bool_expr
             .args
@@ -303,9 +302,9 @@ fn expr_contains_sublink_for_minmax_rewrite(expr: &Expr) -> bool {
             expr_contains_sublink_for_minmax_rewrite(&saop.left)
                 || expr_contains_sublink_for_minmax_rewrite(&saop.right)
         }
-        Expr::Cast(inner, _)
-        | Expr::IsNull(inner)
-        | Expr::IsNotNull(inner) => expr_contains_sublink_for_minmax_rewrite(inner),
+        Expr::Cast(inner, _) | Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
+            expr_contains_sublink_for_minmax_rewrite(inner)
+        }
         Expr::Like {
             expr,
             pattern,
@@ -333,9 +332,9 @@ fn expr_contains_sublink_for_minmax_rewrite(expr: &Expr) -> bool {
         Expr::ArrayLiteral { elements, .. } => elements
             .iter()
             .any(expr_contains_sublink_for_minmax_rewrite),
-        Expr::Row { fields, .. } => fields.iter().any(|(_, expr)| {
-            expr_contains_sublink_for_minmax_rewrite(expr)
-        }),
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .any(|(_, expr)| expr_contains_sublink_for_minmax_rewrite(expr)),
         Expr::FieldSelect { expr, .. } => expr_contains_sublink_for_minmax_rewrite(expr),
         Expr::ArraySubscript { array, subscripts } => {
             expr_contains_sublink_for_minmax_rewrite(array)
@@ -443,10 +442,7 @@ fn rewrite_minmax_aggrefs(expr: Expr, rewritten_aggs: &[Expr]) -> Expr {
                     result: rewrite_minmax_aggrefs(arm.result, rewritten_aggs),
                 })
                 .collect(),
-            defresult: Box::new(rewrite_minmax_aggrefs(
-                *case_expr.defresult,
-                rewritten_aggs,
-            )),
+            defresult: Box::new(rewrite_minmax_aggrefs(*case_expr.defresult, rewritten_aggs)),
             ..*case_expr
         })),
         Expr::Func(func) => Expr::Func(Box::new(crate::include::nodes::primnodes::FuncExpr {
@@ -463,17 +459,19 @@ fn rewrite_minmax_aggrefs(expr: Expr, rewritten_aggs: &[Expr]) -> Expr {
                 .map(|expr| Box::new(rewrite_minmax_aggrefs(*expr, rewritten_aggs))),
             ..*sublink
         })),
-        Expr::SubPlan(subplan) => Expr::SubPlan(Box::new(crate::include::nodes::primnodes::SubPlan {
-            testexpr: subplan
-                .testexpr
-                .map(|expr| Box::new(rewrite_minmax_aggrefs(*expr, rewritten_aggs))),
-            args: subplan
-                .args
-                .into_iter()
-                .map(|arg| rewrite_minmax_aggrefs(arg, rewritten_aggs))
-                .collect(),
-            ..*subplan
-        })),
+        Expr::SubPlan(subplan) => {
+            Expr::SubPlan(Box::new(crate::include::nodes::primnodes::SubPlan {
+                testexpr: subplan
+                    .testexpr
+                    .map(|expr| Box::new(rewrite_minmax_aggrefs(*expr, rewritten_aggs))),
+                args: subplan
+                    .args
+                    .into_iter()
+                    .map(|arg| rewrite_minmax_aggrefs(arg, rewritten_aggs))
+                    .collect(),
+                ..*subplan
+            }))
+        }
         Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(
             crate::include::nodes::primnodes::ScalarArrayOpExpr {
                 left: Box::new(rewrite_minmax_aggrefs(*saop.left, rewritten_aggs)),
@@ -521,14 +519,12 @@ fn rewrite_minmax_aggrefs(expr: Expr, rewritten_aggs: &[Expr]) -> Expr {
             escape: escape.map(|expr| Box::new(rewrite_minmax_aggrefs(*expr, rewritten_aggs))),
             negated,
         },
-        Expr::IsNull(inner) => Expr::IsNull(Box::new(rewrite_minmax_aggrefs(
-            *inner,
-            rewritten_aggs,
-        ))),
-        Expr::IsNotNull(inner) => Expr::IsNotNull(Box::new(rewrite_minmax_aggrefs(
-            *inner,
-            rewritten_aggs,
-        ))),
+        Expr::IsNull(inner) => {
+            Expr::IsNull(Box::new(rewrite_minmax_aggrefs(*inner, rewritten_aggs)))
+        }
+        Expr::IsNotNull(inner) => {
+            Expr::IsNotNull(Box::new(rewrite_minmax_aggrefs(*inner, rewritten_aggs)))
+        }
         Expr::IsDistinctFrom(left, right) => Expr::IsDistinctFrom(
             Box::new(rewrite_minmax_aggrefs(*left, rewritten_aggs)),
             Box::new(rewrite_minmax_aggrefs(*right, rewritten_aggs)),
@@ -571,15 +567,17 @@ fn rewrite_minmax_aggrefs(expr: Expr, rewritten_aggs: &[Expr]) -> Expr {
             array: Box::new(rewrite_minmax_aggrefs(*array, rewritten_aggs)),
             subscripts: subscripts
                 .into_iter()
-                .map(|subscript| crate::include::nodes::primnodes::ExprArraySubscript {
-                    is_slice: subscript.is_slice,
-                    lower: subscript
-                        .lower
-                        .map(|expr| rewrite_minmax_aggrefs(expr, rewritten_aggs)),
-                    upper: subscript
-                        .upper
-                        .map(|expr| rewrite_minmax_aggrefs(expr, rewritten_aggs)),
-                })
+                .map(
+                    |subscript| crate::include::nodes::primnodes::ExprArraySubscript {
+                        is_slice: subscript.is_slice,
+                        lower: subscript
+                            .lower
+                            .map(|expr| rewrite_minmax_aggrefs(expr, rewritten_aggs)),
+                        upper: subscript
+                            .upper
+                            .map(|expr| rewrite_minmax_aggrefs(expr, rewritten_aggs)),
+                    },
+                )
                 .collect(),
         },
         other => other,
@@ -590,7 +588,10 @@ fn expr_contains_local_var_outside_subquery(expr: &Expr) -> bool {
     match expr {
         Expr::Var(var) => var.varlevelsup == 0,
         Expr::Aggref(aggref) => {
-            aggref.args.iter().any(expr_contains_local_var_outside_subquery)
+            aggref
+                .args
+                .iter()
+                .any(expr_contains_local_var_outside_subquery)
                 || aggref
                     .aggfilter
                     .as_ref()
@@ -625,7 +626,10 @@ fn expr_contains_local_var_outside_subquery(expr: &Expr) -> bool {
                 })
                 || expr_contains_local_var_outside_subquery(&case_expr.defresult)
         }
-        Expr::Func(func) => func.args.iter().any(expr_contains_local_var_outside_subquery),
+        Expr::Func(func) => func
+            .args
+            .iter()
+            .any(expr_contains_local_var_outside_subquery),
         Expr::SubLink(sublink) => sublink
             .testexpr
             .as_deref()
@@ -674,9 +678,9 @@ fn expr_contains_local_var_outside_subquery(expr: &Expr) -> bool {
             expr_contains_local_var_outside_subquery(left)
                 || expr_contains_local_var_outside_subquery(right)
         }
-        Expr::ArrayLiteral { elements, .. } => {
-            elements.iter().any(expr_contains_local_var_outside_subquery)
-        }
+        Expr::ArrayLiteral { elements, .. } => elements
+            .iter()
+            .any(expr_contains_local_var_outside_subquery),
         Expr::Row { fields, .. } => fields
             .iter()
             .any(|(_, expr)| expr_contains_local_var_outside_subquery(expr)),

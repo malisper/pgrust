@@ -792,9 +792,9 @@ impl Database {
 
 fn map_role_catalog_error(err: crate::backend::catalog::CatalogError) -> ExecError {
     match err {
-        crate::backend::catalog::CatalogError::UniqueViolation(message) => {
-            ExecError::Parse(role_management_error(rewrite_role_catalog_message(&message)))
-        }
+        crate::backend::catalog::CatalogError::UniqueViolation(message) => ExecError::Parse(
+            role_management_error(rewrite_role_catalog_message(&message)),
+        ),
         crate::backend::catalog::CatalogError::UnknownTable(name) => ExecError::Parse(
             role_management_error(format!("role \"{name}\" does not exist")),
         ),
@@ -1087,8 +1087,8 @@ fn shared_role_dependency_details_for_roles(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::catalog::role_memberships::memberships_for_member;
     use crate::backend::catalog::CatalogError;
+    use crate::backend::catalog::role_memberships::memberships_for_member;
     use crate::backend::executor::StatementResult;
     use crate::backend::executor::Value;
     use crate::include::catalog::PgAuthIdRow;
@@ -1918,7 +1918,10 @@ mod tests {
                     message,
                     "role \"user2\" cannot be dropped because some objects depend on it"
                 );
-                assert_eq!(detail.as_deref(), Some("privileges for membership of role user3 in role user1"));
+                assert_eq!(
+                    detail.as_deref(),
+                    Some("privileges for membership of role user3 in role user1")
+                );
                 assert_eq!(sqlstate, "2BP01");
             }
             other => panic!("unexpected error: {other:?}"),
@@ -1940,7 +1943,10 @@ mod tests {
                     message,
                     "role \"user2\" cannot be dropped because some objects depend on it"
                 );
-                assert_eq!(detail.as_deref(), Some("privileges for membership of role user3 in role user1"));
+                assert_eq!(
+                    detail.as_deref(),
+                    Some("privileges for membership of role user3 in role user1")
+                );
                 assert_eq!(sqlstate, "2BP01");
             }
             other => panic!("unexpected error: {other:?}"),

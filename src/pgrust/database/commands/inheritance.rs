@@ -5,9 +5,7 @@ use super::super::*;
 use crate::backend::parser::BoundRelation;
 use crate::backend::storage::lmgr::{TableLockMode, lock_table_requests_interruptible};
 use crate::include::catalog::CONSTRAINT_CHECK;
-use crate::include::nodes::parsenodes::{
-    AlterTableInheritStatement, AlterTableNoInheritStatement,
-};
+use crate::include::nodes::parsenodes::{AlterTableInheritStatement, AlterTableNoInheritStatement};
 use crate::pgrust::database::ddl::{
     ensure_relation_owner, lookup_heap_relation_for_alter_table, lookup_heap_relation_for_ddl,
 };
@@ -122,7 +120,9 @@ fn validate_inherit_constraints(
     let child_constraints = inherited_check_constraints(catalog, relation.relation_oid);
     for parent_constraint in inherited_check_constraints(catalog, parent.relation_oid) {
         let matched = child_constraints.iter().any(|child_constraint| {
-            child_constraint.conname.eq_ignore_ascii_case(&parent_constraint.conname)
+            child_constraint
+                .conname
+                .eq_ignore_ascii_case(&parent_constraint.conname)
                 && child_constraint.conbin == parent_constraint.conbin
         });
         if !matched {

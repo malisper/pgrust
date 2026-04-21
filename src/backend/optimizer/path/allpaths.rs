@@ -421,7 +421,9 @@ fn build_cte_scan_path(
     let query = super::super::root::prepare_query_for_planning(query);
     let (subroot, cte_path) = if let Some(recursive_union) = query.recursive_union.clone() {
         (
-            PlannerInfo::new(super::super::root::prepare_query_for_planning(query.clone())),
+            PlannerInfo::new(super::super::root::prepare_query_for_planning(
+                query.clone(),
+            )),
             build_recursive_union_path(*recursive_union, catalog),
         )
     } else {
@@ -457,7 +459,9 @@ fn build_subquery_scan_path(
     let query = super::super::root::prepare_query_for_planning(query);
     let (subroot, input) = if let Some(recursive_union) = query.recursive_union.clone() {
         (
-            PlannerInfo::new(super::super::root::prepare_query_for_planning(query.clone())),
+            PlannerInfo::new(super::super::root::prepare_query_for_planning(
+                query.clone(),
+            )),
             build_recursive_union_path(*recursive_union, catalog),
         )
     } else {
