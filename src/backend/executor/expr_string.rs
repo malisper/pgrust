@@ -132,7 +132,7 @@ fn value_output_text(value: &Value) -> Result<String, ExecError> {
                 "f".into()
             }
         }
-        Value::Text(_) | Value::TextRef(_, _) | Value::JsonPath(_) => {
+        Value::Text(_) | Value::TextRef(_, _) | Value::JsonPath(_) | Value::Xml(_) => {
             value.as_text().unwrap().into()
         }
         Value::Json(v) => v.as_str().into(),

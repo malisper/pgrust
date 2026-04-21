@@ -13,6 +13,7 @@ use std::cmp::Ordering;
 use std::collections::HashSet;
 
 use super::expr_range::{range_intersection_agg_transition, render_range_text};
+use super::expr_xml::concat_xml_texts;
 use super::jsonb::{JsonbValue, encode_jsonb, jsonb_from_value, render_jsonb_bytes};
 
 pub(crate) type AggTransitionFn = fn(&mut AccumState, &[Value]) -> Result<(), ExecError>;
@@ -63,6 +64,9 @@ pub(crate) enum AccumState {
         bytes: Vec<u8>,
         first_delim_len: Option<usize>,
         bytea: bool,
+    },
+    XmlAgg {
+        values: Vec<CompactString>,
     },
     Min {
         min: Option<Value>,
@@ -127,6 +131,7 @@ impl AccumState {
                 first_delim_len: None,
                 bytea: matches!(sql_type.kind, SqlTypeKind::Bytea),
             },
+            (AggFunc::XmlAgg, _) => AccumState::XmlAgg { values: Vec::new() },
             (AggFunc::Min, _) => AccumState::Min { min: None },
             (AggFunc::Max, _) => AccumState::Max { max: None },
             (AggFunc::RangeIntersectAgg, _) => AccumState::RangeIntersect { current: None },
@@ -247,6 +252,20 @@ impl AccumState {
                     }
                     bytes.extend_from_slice(&delimiter_bytes);
                     bytes.extend_from_slice(&string_agg_input_bytes(value, *bytea));
+                }
+                Ok(())
+            },
+            (AggFunc::XmlAgg, _, _) => |state, values| {
+                if let AccumState::XmlAgg { values: out } = state {
+                    match values.first().unwrap_or(&Value::Null) {
+                        Value::Null => {}
+                        Value::Xml(text) => out.push(text.clone()),
+                        other => {
+                            if let Some(text) = other.as_text() {
+                                out.push(CompactString::new(text));
+                            }
+                        }
+                    }
                 }
                 Ok(())
             },
@@ -448,6 +467,15 @@ impl AccumState {
                     ))
                 }
             }
+            AccumState::XmlAgg { values } => {
+                if values.is_empty() {
+                    Value::Null
+                } else {
+                    Value::Xml(CompactString::from_owned(concat_xml_texts(
+                        values.iter().map(|value| value.as_str()),
+                    )))
+                }
+            }
             AccumState::Min { min } => min.clone().unwrap_or(Value::Null),
             AccumState::Max { max } => max.clone().unwrap_or(Value::Null),
             AccumState::RangeIntersect { current } => current.clone().unwrap_or(Value::Null),
@@ -567,6 +595,7 @@ fn json_object_agg_key(key: &Value) -> String {
             }
         }
         Value::JsonPath(v) => v.to_string(),
+        Value::Xml(v) => v.to_string(),
         Value::Date(_)
         | Value::Time(_)
         | Value::TimeTz(_)
@@ -609,6 +638,7 @@ fn value_to_json_text(value: &Value) -> String {
         Value::JsonPath(v) => serde_json::to_string(v.as_str()).unwrap(),
         Value::Json(v) => v.to_string(),
         Value::Jsonb(v) => render_jsonb_bytes(v).unwrap_or_else(|_| "null".into()),
+        Value::Xml(v) => serde_json::to_string(v.as_str()).unwrap(),
         Value::Text(_) | Value::TextRef(_, _) => {
             serde_json::to_string(value.as_text().unwrap()).unwrap()
         }
@@ -844,4 +874,35 @@ pub(crate) struct AggGroup {
 pub(crate) struct OrderedAggInput {
     pub(crate) sort_keys: Vec<Value>,
     pub(crate) arg_values: Vec<Value>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::parser::{SqlType, SqlTypeKind};
+
+    #[test]
+    fn xmlagg_finalizes_with_xmlconcat_semantics() {
+        let mut state = AccumState::new(AggFunc::XmlAgg, false, SqlType::new(SqlTypeKind::Xml));
+        let transition = AccumState::transition_fn(AggFunc::XmlAgg, 1, false);
+        transition(
+            &mut state,
+            &[Value::Xml(CompactString::from(
+                "<?xml version=\"1.1\"?><foo/>",
+            ))],
+        )
+        .unwrap();
+        transition(
+            &mut state,
+            &[Value::Xml(CompactString::from(
+                "<?xml version=\"1.1\" standalone=\"no\"?><bar/>",
+            ))],
+        )
+        .unwrap();
+
+        assert_eq!(
+            state.finalize(),
+            Value::Xml(CompactString::from("<?xml version=\"1.1\"?><foo/><bar/>"))
+        );
+    }
 }

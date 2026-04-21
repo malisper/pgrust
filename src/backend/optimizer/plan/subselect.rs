@@ -262,6 +262,19 @@ pub(super) fn finalize_expr_subqueries(
                 })
                 .collect(),
         },
+        Expr::Xml(xml) => Expr::Xml(Box::new(crate::include::nodes::primnodes::XmlExpr {
+            named_args: xml
+                .named_args
+                .into_iter()
+                .map(|arg| finalize_expr_subqueries(arg, catalog, subplans))
+                .collect(),
+            args: xml
+                .args
+                .into_iter()
+                .map(|arg| finalize_expr_subqueries(arg, catalog, subplans))
+                .collect(),
+            ..*xml
+        })),
     }
 }
 
@@ -618,6 +631,19 @@ fn rebase_expr_subplan_ids(expr: Expr, base: usize) -> Expr {
                 })
                 .collect(),
         },
+        Expr::Xml(xml) => Expr::Xml(Box::new(crate::include::nodes::primnodes::XmlExpr {
+            named_args: xml
+                .named_args
+                .into_iter()
+                .map(|arg| rebase_expr_subplan_ids(arg, base))
+                .collect(),
+            args: xml
+                .args
+                .into_iter()
+                .map(|arg| rebase_expr_subplan_ids(arg, base))
+                .collect(),
+            ..*xml
+        })),
     }
 }
 

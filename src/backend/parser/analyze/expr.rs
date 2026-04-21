@@ -40,6 +40,7 @@ use super::ranges::{
     bind_maybe_range_arithmetic, bind_maybe_range_comparison, bind_maybe_range_contains,
     bind_maybe_range_over_position, bind_maybe_range_shift,
 };
+use std::collections::BTreeSet;
 
 #[allow(dead_code)]
 pub(crate) fn bind_expr(expr: &SqlExpr, scope: &BoundScope) -> Result<Expr, ParseError> {
@@ -120,6 +121,25 @@ pub(super) fn raise_expr_varlevels(expr: Expr, levels: usize) -> Expr {
                 ..*saop
             },
         )),
+        Expr::Xml(xml) => Expr::Xml(Box::new(crate::include::nodes::primnodes::XmlExpr {
+            op: xml.op,
+            name: xml.name,
+            named_args: xml
+                .named_args
+                .into_iter()
+                .map(|arg| raise_expr_varlevels(arg, levels))
+                .collect(),
+            arg_names: xml.arg_names,
+            args: xml
+                .args
+                .into_iter()
+                .map(|arg| raise_expr_varlevels(arg, levels))
+                .collect(),
+            xml_option: xml.xml_option,
+            indent: xml.indent,
+            target_type: xml.target_type,
+            standalone: xml.standalone,
+        })),
         Expr::Cast(inner, ty) => Expr::Cast(Box::new(raise_expr_varlevels(*inner, levels)), ty),
         Expr::IsNull(inner) => Expr::IsNull(Box::new(raise_expr_varlevels(*inner, levels))),
         Expr::IsNotNull(inner) => Expr::IsNotNull(Box::new(raise_expr_varlevels(*inner, levels))),
@@ -469,6 +489,9 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
     ctes: &[BoundCte],
 ) -> Result<Expr, ParseError> {
     Ok(match expr {
+        SqlExpr::Xml(xml) => {
+            return bind_xml_expr(xml, scope, catalog, outer_scopes, grouped_outer, ctes);
+        }
         SqlExpr::Column(name) => {
             if let Some(relation_name) = name.strip_suffix(".*") {
                 let fields =
@@ -1960,6 +1983,53 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     ctes,
                 );
             }
+            if name.eq_ignore_ascii_case("xmlconcat") {
+                if args.iter().any(|arg| arg.name.is_some()) {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "positional xmlconcat arguments",
+                        actual: "named argument".into(),
+                    });
+                }
+                let xml_type = SqlType::new(SqlTypeKind::Xml);
+                let bound_args = args
+                    .iter()
+                    .map(|arg| {
+                        let source = infer_sql_expr_type_with_ctes(
+                            &arg.value,
+                            scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer,
+                            ctes,
+                        );
+                        Ok(coerce_bound_expr(
+                            bind_expr_with_outer_and_ctes(
+                                &arg.value,
+                                scope,
+                                catalog,
+                                outer_scopes,
+                                grouped_outer,
+                                ctes,
+                            )?,
+                            source,
+                            xml_type,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, ParseError>>()?;
+                return Ok(Expr::Xml(Box::new(
+                    crate::include::nodes::primnodes::XmlExpr {
+                        op: crate::include::nodes::primnodes::XmlExprOp::Concat,
+                        name: None,
+                        named_args: Vec::new(),
+                        arg_names: Vec::new(),
+                        args: bound_args,
+                        xml_option: None,
+                        indent: None,
+                        target_type: None,
+                        standalone: None,
+                    },
+                )));
+            }
             let legacy_func =
                 resolve_scalar_function(name).ok_or_else(|| ParseError::UnexpectedToken {
                     expected: "supported builtin function",
@@ -2550,6 +2620,192 @@ fn regprocedure_literal_text(expr: &SqlExpr) -> Option<&str> {
         SqlExpr::Const(Value::TextRef(_, _)) => None,
         _ => None,
     }
+}
+
+fn bind_xml_expr(
+    xml: &crate::include::nodes::parsenodes::RawXmlExpr,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Expr, ParseError> {
+    let text_type = SqlType::new(SqlTypeKind::Text);
+    let xml_type = SqlType::new(SqlTypeKind::Xml);
+    let bind_child = |expr: &SqlExpr| {
+        bind_expr_with_outer_and_ctes(expr, scope, catalog, outer_scopes, grouped_outer, ctes)
+    };
+    let bind_as = |expr: &SqlExpr, target: SqlType| -> Result<Expr, ParseError> {
+        let source =
+            infer_sql_expr_type_with_ctes(expr, scope, catalog, outer_scopes, grouped_outer, ctes);
+        Ok(coerce_bound_expr(bind_child(expr)?, source, target))
+    };
+
+    let mut name = xml.name.clone();
+    let mut named_args = Vec::new();
+    let mut arg_names = xml.arg_names.clone();
+    let mut args = Vec::new();
+    let mut target_type = None;
+
+    match xml.op {
+        crate::include::nodes::parsenodes::RawXmlExprOp::Parse => {
+            args = xml
+                .args
+                .iter()
+                .map(|arg| bind_as(arg, text_type))
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        crate::include::nodes::parsenodes::RawXmlExprOp::Serialize => {
+            args = xml
+                .args
+                .iter()
+                .map(|arg| bind_as(arg, xml_type))
+                .collect::<Result<Vec<_>, _>>()?;
+            let resolved = resolve_raw_type_name(
+                &xml.target_type.clone().ok_or(ParseError::UnexpectedEof)?,
+                catalog,
+            )?;
+            if resolved.is_array
+                || !matches!(
+                    resolved.kind,
+                    SqlTypeKind::Text | SqlTypeKind::Varchar | SqlTypeKind::Char
+                )
+            {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "text, character, or character varying",
+                    actual: sql_type_name(resolved),
+                });
+            }
+            target_type = Some(resolved);
+        }
+        crate::include::nodes::parsenodes::RawXmlExprOp::Root => {
+            if let Some(first) = xml.args.first() {
+                args.push(bind_as(first, xml_type)?);
+            }
+            if let Some(version) = xml.args.get(1) {
+                args.push(bind_as(version, text_type)?);
+            }
+        }
+        crate::include::nodes::parsenodes::RawXmlExprOp::Pi => {
+            args = xml
+                .args
+                .iter()
+                .map(|arg| bind_as(arg, text_type))
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        crate::include::nodes::parsenodes::RawXmlExprOp::IsDocument => {
+            args = xml
+                .args
+                .iter()
+                .map(|arg| bind_as(arg, xml_type))
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        crate::include::nodes::parsenodes::RawXmlExprOp::Element => {
+            let mut seen_names = BTreeSet::new();
+            for (raw_expr, raw_name) in xml.named_args.iter().zip(xml.arg_names.iter()) {
+                let inferred_name = if raw_name.is_empty() {
+                    match raw_expr {
+                        SqlExpr::Column(column)
+                            if !column.contains('.') && !column.ends_with(".*") =>
+                        {
+                            column.clone()
+                        }
+                        _ => {
+                            return Err(ParseError::UnexpectedToken {
+                                expected: "attribute alias for non-column XMLATTRIBUTES expression",
+                                actual: "XMLATTRIBUTES expression".into(),
+                            });
+                        }
+                    }
+                } else {
+                    raw_name.clone()
+                };
+                if !seen_names.insert(inferred_name.clone()) {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "distinct XML attribute names",
+                        actual: inferred_name,
+                    });
+                }
+                named_args.push(bind_child(raw_expr)?);
+                arg_names.push(inferred_name);
+            }
+            args = xml
+                .args
+                .iter()
+                .map(bind_child)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        crate::include::nodes::parsenodes::RawXmlExprOp::Forest => {
+            arg_names.clear();
+            for (raw_expr, raw_name) in xml.args.iter().zip(xml.arg_names.iter()) {
+                let inferred_name = if raw_name.is_empty() {
+                    match raw_expr {
+                        SqlExpr::Column(column)
+                            if !column.contains('.') && !column.ends_with(".*") =>
+                        {
+                            column.clone()
+                        }
+                        _ => {
+                            return Err(ParseError::UnexpectedToken {
+                                expected: "element alias for non-column XMLFOREST expression",
+                                actual: "XMLFOREST expression".into(),
+                            });
+                        }
+                    }
+                } else {
+                    raw_name.clone()
+                };
+                arg_names.push(inferred_name);
+                args.push(bind_child(raw_expr)?);
+            }
+        }
+        crate::include::nodes::parsenodes::RawXmlExprOp::Concat => {
+            args = xml
+                .args
+                .iter()
+                .map(|arg| bind_as(arg, xml_type))
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+    }
+
+    Ok(Expr::Xml(Box::new(
+        crate::include::nodes::primnodes::XmlExpr {
+            op: match xml.op {
+                crate::include::nodes::parsenodes::RawXmlExprOp::Concat => {
+                    crate::include::nodes::primnodes::XmlExprOp::Concat
+                }
+                crate::include::nodes::parsenodes::RawXmlExprOp::Element => {
+                    crate::include::nodes::primnodes::XmlExprOp::Element
+                }
+                crate::include::nodes::parsenodes::RawXmlExprOp::Forest => {
+                    crate::include::nodes::primnodes::XmlExprOp::Forest
+                }
+                crate::include::nodes::parsenodes::RawXmlExprOp::Parse => {
+                    crate::include::nodes::primnodes::XmlExprOp::Parse
+                }
+                crate::include::nodes::parsenodes::RawXmlExprOp::Pi => {
+                    crate::include::nodes::primnodes::XmlExprOp::Pi
+                }
+                crate::include::nodes::parsenodes::RawXmlExprOp::Root => {
+                    crate::include::nodes::primnodes::XmlExprOp::Root
+                }
+                crate::include::nodes::parsenodes::RawXmlExprOp::Serialize => {
+                    crate::include::nodes::primnodes::XmlExprOp::Serialize
+                }
+                crate::include::nodes::parsenodes::RawXmlExprOp::IsDocument => {
+                    crate::include::nodes::primnodes::XmlExprOp::IsDocument
+                }
+            },
+            name: name.take(),
+            named_args,
+            arg_names,
+            args,
+            xml_option: xml.xml_option,
+            indent: xml.indent,
+            target_type,
+            standalone: xml.standalone,
+        },
+    )))
 }
 
 fn resolve_regprocedure_signature(

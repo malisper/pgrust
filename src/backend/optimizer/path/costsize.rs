@@ -2004,6 +2004,7 @@ fn expr_uses_immediate_outer_columns(expr: &Expr) -> bool {
                             .is_some_and(expr_uses_immediate_outer_columns)
                 })
         }
+        Expr::Xml(xml) => xml.child_exprs().any(expr_uses_immediate_outer_columns),
         Expr::Const(_)
         | Expr::Random
         | Expr::CurrentDate
@@ -2769,6 +2770,7 @@ pub(super) fn estimate_sql_type_width(sql_type: SqlType) -> usize {
         | SqlTypeKind::Json
         | SqlTypeKind::Jsonb
         | SqlTypeKind::JsonPath
+        | SqlTypeKind::Xml
         | SqlTypeKind::TsVector
         | SqlTypeKind::TsQuery
         | SqlTypeKind::Void

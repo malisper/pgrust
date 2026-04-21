@@ -431,6 +431,7 @@ fn expr_contains_window_func(expr: &Expr) -> bool {
                             .is_some_and(expr_contains_window_func)
                 })
         }
+        Expr::Xml(xml) => xml.child_exprs().any(expr_contains_window_func),
     }
 }
 
@@ -544,6 +545,11 @@ fn collect_group_input_exprs(expr: &Expr, group_by: &[Expr], exprs: &mut Vec<Exp
                 if let Some(upper) = &subscript.upper {
                     collect_group_input_exprs(upper, group_by, exprs);
                 }
+            }
+        }
+        Expr::Xml(xml) => {
+            for child in xml.child_exprs() {
+                collect_group_input_exprs(child, group_by, exprs);
             }
         }
         Expr::Const(_)
@@ -677,6 +683,11 @@ fn collect_supporting_inputs(expr: &Expr, exprs: &mut Vec<Expr>) {
                 if let Some(upper) = &subscript.upper {
                     collect_supporting_inputs(upper, exprs);
                 }
+            }
+        }
+        Expr::Xml(xml) => {
+            for child in xml.child_exprs() {
+                collect_supporting_inputs(child, exprs);
             }
         }
         Expr::Const(_)
@@ -941,6 +952,11 @@ fn collect_query_outer_refs_expr(expr: &Expr, levelsup: usize, exprs: &mut Vec<E
                 if let Some(upper) = &subscript.upper {
                     collect_query_outer_refs_expr(upper, levelsup, exprs);
                 }
+            }
+        }
+        Expr::Xml(xml) => {
+            for child in xml.child_exprs() {
+                collect_query_outer_refs_expr(child, levelsup, exprs);
             }
         }
     }

@@ -133,6 +133,7 @@ pub(super) fn expr_contains_window(expr: &SqlExpr) -> bool {
         SqlExpr::FuncCall { args, over, .. } => {
             over.is_some() || args.iter().any(|arg| expr_contains_window(&arg.value))
         }
+        SqlExpr::Xml(xml) => xml.child_exprs().any(expr_contains_window),
         SqlExpr::Column(_)
         | SqlExpr::Default
         | SqlExpr::Const(_)

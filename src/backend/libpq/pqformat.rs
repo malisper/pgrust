@@ -343,6 +343,7 @@ fn validate_binary_output_type(sql_type: SqlType) -> Result<(), ExecError> {
                 | SqlTypeKind::PgNodeTree
                 | SqlTypeKind::Json
                 | SqlTypeKind::JsonPath
+                | SqlTypeKind::Xml
                 | SqlTypeKind::InternalChar
                 | SqlTypeKind::Float4
                 | SqlTypeKind::Float8
@@ -423,6 +424,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
             SqlTypeKind::Json => 199,
             SqlTypeKind::Jsonb => 3807,
             SqlTypeKind::JsonPath => 4073,
+            SqlTypeKind::Xml => 143,
             SqlTypeKind::Date => 1182,
             SqlTypeKind::Time => 1183,
             SqlTypeKind::TimeTz => 1270,
@@ -489,6 +491,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
         SqlTypeKind::Json => (114, -1, -1),
         SqlTypeKind::Jsonb => (3802, -1, -1),
         SqlTypeKind::JsonPath => (4072, -1, -1),
+        SqlTypeKind::Xml => (142, -1, -1),
         SqlTypeKind::Date => (1082, 4, -1),
         SqlTypeKind::Time => (1083, 8, col.sql_type.typmod),
         SqlTypeKind::TimeTz => (1266, 12, col.sql_type.typmod),
@@ -636,6 +639,10 @@ pub(crate) fn send_typed_data_row(
                 buf.extend_from_slice(&(v.len() as i32).to_be_bytes());
                 buf.extend_from_slice(v.as_bytes());
             }
+            Value::Xml(v) => {
+                buf.extend_from_slice(&(v.len() as i32).to_be_bytes());
+                buf.extend_from_slice(v.as_bytes());
+            }
             Value::Jsonb(v) => {
                 let text = crate::backend::executor::jsonb::render_jsonb_bytes(v).unwrap();
                 buf.extend_from_slice(&(text.len() as i32).to_be_bytes());
@@ -748,6 +755,7 @@ fn encode_binary_data_row_value(value: &Value, sql_type: SqlType) -> Result<Vec<
                     | SqlTypeKind::PgNodeTree
                     | SqlTypeKind::Json
                     | SqlTypeKind::JsonPath
+                    | SqlTypeKind::Xml
             ) =>
         {
             Ok(text.as_bytes().to_vec())
@@ -762,9 +770,13 @@ fn encode_binary_data_row_value(value: &Value, sql_type: SqlType) -> Result<Vec<
                     | SqlTypeKind::PgNodeTree
                     | SqlTypeKind::Json
                     | SqlTypeKind::JsonPath
+                    | SqlTypeKind::Xml
             ) =>
         {
             Ok(value.as_text().unwrap_or_default().as_bytes().to_vec())
+        }
+        Value::Xml(text) if matches!(sql_type.kind, SqlTypeKind::Xml) => {
+            Ok(text.as_bytes().to_vec())
         }
         Value::InternalChar(byte) => Ok(vec![*byte]),
         Value::Float64(v) if matches!(sql_type.kind, SqlTypeKind::Float4) => {

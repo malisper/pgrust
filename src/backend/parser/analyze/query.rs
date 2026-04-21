@@ -428,6 +428,19 @@ pub(super) fn shift_expr_rtindexes(expr: Expr, offset: usize) -> Expr {
                 .collect(),
             ..*func
         })),
+        Expr::Xml(xml) => Expr::Xml(Box::new(crate::include::nodes::primnodes::XmlExpr {
+            named_args: xml
+                .named_args
+                .into_iter()
+                .map(|arg| shift_expr_rtindexes(arg, offset))
+                .collect(),
+            args: xml
+                .args
+                .into_iter()
+                .map(|arg| shift_expr_rtindexes(arg, offset))
+                .collect(),
+            ..*xml
+        })),
         Expr::Aggref(aggref) => Expr::Aggref(Box::new(Aggref {
             args: aggref
                 .args
@@ -673,6 +686,19 @@ pub(crate) fn rewrite_local_vars_for_output_exprs(
                 .map(|arg| rewrite_local_vars_for_output_exprs(arg, source_varno, output_exprs))
                 .collect(),
             ..*func
+        })),
+        Expr::Xml(xml) => Expr::Xml(Box::new(crate::include::nodes::primnodes::XmlExpr {
+            named_args: xml
+                .named_args
+                .into_iter()
+                .map(|arg| rewrite_local_vars_for_output_exprs(arg, source_varno, output_exprs))
+                .collect(),
+            args: xml
+                .args
+                .into_iter()
+                .map(|arg| rewrite_local_vars_for_output_exprs(arg, source_varno, output_exprs))
+                .collect(),
+            ..*xml
         })),
         Expr::Aggref(aggref) => Expr::Aggref(Box::new(Aggref {
             args: aggref

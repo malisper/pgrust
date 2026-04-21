@@ -1953,6 +1953,12 @@ impl<'a> RecursiveReferenceChecker<'a> {
                 }
                 Ok(())
             }
+            SqlExpr::Xml(xml) => {
+                for child in xml.child_exprs() {
+                    self.visit_expr(child, context)?;
+                }
+                Ok(())
+            }
         }
     }
 
@@ -2089,6 +2095,9 @@ fn sql_expr_references_table(expr: &SqlExpr, table_name: &str) -> bool {
         | SqlExpr::IsNotNull(inner)
         | SqlExpr::Not(inner)
         | SqlExpr::FieldSelect { expr: inner, .. } => sql_expr_references_table(inner, table_name),
+        SqlExpr::Xml(xml) => xml
+            .child_exprs()
+            .any(|child| sql_expr_references_table(child, table_name)),
         SqlExpr::Add(left, right)
         | SqlExpr::Sub(left, right)
         | SqlExpr::BitAnd(left, right)

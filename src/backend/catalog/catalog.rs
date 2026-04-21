@@ -32,7 +32,9 @@ pub fn column_desc(name: impl Into<String>, sql_type: SqlType, nullable: bool) -
         ScalarType::Float32 => (4, AttributeAlign::Int),
         ScalarType::Float64 => (8, AttributeAlign::Double),
         ScalarType::Numeric => (-1, AttributeAlign::Int),
-        ScalarType::Json | ScalarType::Jsonb | ScalarType::JsonPath => (-1, AttributeAlign::Int),
+        ScalarType::Json | ScalarType::Jsonb | ScalarType::JsonPath | ScalarType::Xml => {
+            (-1, AttributeAlign::Int)
+        }
         ScalarType::TsVector | ScalarType::TsQuery => (-1, AttributeAlign::Int),
         ScalarType::Text => (-1, AttributeAlign::Int),
         ScalarType::Record => (-1, AttributeAlign::Double),
@@ -110,6 +112,7 @@ fn default_attribute_storage(sql_type: SqlType, attlen: i16) -> AttributeStorage
         | SqlTypeKind::Json
         | SqlTypeKind::Jsonb
         | SqlTypeKind::JsonPath
+        | SqlTypeKind::Xml
         | SqlTypeKind::Tid
         | SqlTypeKind::Interval
         | SqlTypeKind::TsVector
@@ -212,6 +215,7 @@ pub(crate) fn scalar_type_for_sql_type(sql_type: SqlType) -> ScalarType {
         SqlTypeKind::Json => ScalarType::Json,
         SqlTypeKind::Jsonb => ScalarType::Jsonb,
         SqlTypeKind::JsonPath => ScalarType::JsonPath,
+        SqlTypeKind::Xml => ScalarType::Xml,
         SqlTypeKind::Date => ScalarType::Date,
         SqlTypeKind::Time => ScalarType::Time,
         SqlTypeKind::TimeTz => ScalarType::TimeTz,

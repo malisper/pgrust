@@ -558,6 +558,10 @@ pub(super) fn validate_scalar_function_arity(
                 args.len() == 2
             }
             BuiltinScalarFunction::CashWords => args.len() == 1,
+            BuiltinScalarFunction::XmlComment
+            | BuiltinScalarFunction::XmlIsWellFormed
+            | BuiltinScalarFunction::XmlIsWellFormedDocument
+            | BuiltinScalarFunction::XmlIsWellFormedContent => args.len() == 1,
             BuiltinScalarFunction::Random | BuiltinScalarFunction::RandomNormal => {
                 matches!(args.len(), 0 | 2)
             }
@@ -925,6 +929,7 @@ pub(super) fn validate_aggregate_arity(func: AggFunc, args: &[SqlExpr]) -> Resul
             | AggFunc::ArrayAgg
             | AggFunc::JsonAgg
             | AggFunc::JsonbAgg
+            | AggFunc::XmlAgg
             | AggFunc::RangeIntersectAgg => args.len() == 1,
             AggFunc::StringAgg | AggFunc::JsonObjectAgg | AggFunc::JsonbObjectAgg => {
                 args.len() == 2
@@ -1645,6 +1650,16 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "bitcast_bigint_to_float8",
             BuiltinScalarFunction::BitcastBigintToFloat8,
         ),
+        ("xmlcomment", BuiltinScalarFunction::XmlComment),
+        ("xml_is_well_formed", BuiltinScalarFunction::XmlIsWellFormed),
+        (
+            "xml_is_well_formed_document",
+            BuiltinScalarFunction::XmlIsWellFormedDocument,
+        ),
+        (
+            "xml_is_well_formed_content",
+            BuiltinScalarFunction::XmlIsWellFormedContent,
+        ),
         ("pg_input_is_valid", BuiltinScalarFunction::PgInputIsValid),
         ("range_constructor", BuiltinScalarFunction::RangeConstructor),
         ("range_isempty", BuiltinScalarFunction::RangeIsEmpty),
@@ -1843,6 +1858,24 @@ fn scalar_fixed_return_types() -> &'static Vec<(BuiltinScalarFunction, SqlType)>
                 SqlType::new(SqlTypeKind::Text),
             ));
         }
+        if by_func
+            .iter()
+            .all(|(candidate, _)| *candidate != BuiltinScalarFunction::XmlComment)
+        {
+            by_func.push((
+                BuiltinScalarFunction::XmlComment,
+                SqlType::new(SqlTypeKind::Xml),
+            ));
+        }
+        for func in [
+            BuiltinScalarFunction::XmlIsWellFormed,
+            BuiltinScalarFunction::XmlIsWellFormedDocument,
+            BuiltinScalarFunction::XmlIsWellFormedContent,
+        ] {
+            if by_func.iter().all(|(candidate, _)| *candidate != func) {
+                by_func.push((func, SqlType::new(SqlTypeKind::Bool)));
+            }
+        }
         by_func
     })
 }
@@ -1970,6 +2003,10 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::BoolNe
             | BuiltinScalarFunction::BitcastIntegerToFloat4
             | BuiltinScalarFunction::BitcastBigintToFloat8
+            | BuiltinScalarFunction::XmlComment
+            | BuiltinScalarFunction::XmlIsWellFormed
+            | BuiltinScalarFunction::XmlIsWellFormedDocument
+            | BuiltinScalarFunction::XmlIsWellFormedContent
             | BuiltinScalarFunction::PgInputIsValid
             | BuiltinScalarFunction::PgInputErrorMessage
             | BuiltinScalarFunction::PgInputErrorDetail
@@ -2067,6 +2104,12 @@ fn aggregate_fixed_return_types() -> &'static Vec<(AggFunc, SqlType)> {
                 by_func.push((func, sql_type));
             }
         }
+        if by_func
+            .iter()
+            .all(|(candidate, _)| *candidate != AggFunc::XmlAgg)
+        {
+            by_func.push((AggFunc::XmlAgg, SqlType::new(SqlTypeKind::Xml)));
+        }
         by_func
     })
 }
@@ -2079,6 +2122,7 @@ fn supports_fixed_aggregate_return_type(func: AggFunc) -> bool {
             | AggFunc::JsonbAgg
             | AggFunc::JsonObjectAgg
             | AggFunc::JsonbObjectAgg
+            | AggFunc::XmlAgg
     )
 }
 
@@ -2113,6 +2157,7 @@ fn aggregate_func_for_proname(name: &str) -> Option<AggFunc> {
         "jsonb_agg" => Some(AggFunc::JsonbAgg),
         "json_object_agg" => Some(AggFunc::JsonObjectAgg),
         "jsonb_object_agg" => Some(AggFunc::JsonbObjectAgg),
+        "xmlagg" => Some(AggFunc::XmlAgg),
         "range_intersect_agg" => Some(AggFunc::RangeIntersectAgg),
         _ => None,
     }

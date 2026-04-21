@@ -57,6 +57,7 @@ const INTERNAL_VALUE_TAG_NUMERIC: u8 = 21;
 const INTERNAL_VALUE_TAG_JSON: u8 = 22;
 const INTERNAL_VALUE_TAG_JSONB: u8 = 23;
 const INTERNAL_VALUE_TAG_JSONPATH: u8 = 24;
+const INTERNAL_VALUE_TAG_XML: u8 = 32;
 const INTERNAL_VALUE_TAG_TSVECTOR: u8 = 25;
 const INTERNAL_VALUE_TAG_TSQUERY: u8 = 26;
 const INTERNAL_VALUE_TAG_TEXT: u8 = 27;
@@ -109,6 +110,7 @@ pub(crate) fn format_record_text(record: &crate::include::nodes::datum::RecordVa
                             Value::TsQuery(v) => crate::backend::executor::render_tsquery_text(v),
                             Value::Json(v) => v.to_string(),
                             Value::JsonPath(v) => v.to_string(),
+                            Value::Xml(v) => v.to_string(),
                             Value::Null => String::new(),
                             _ => format!("{other:?}"),
                         })
@@ -197,6 +199,7 @@ fn sql_type_kind_tag(kind: SqlTypeKind) -> u8 {
         SqlTypeKind::Json => 25,
         SqlTypeKind::Jsonb => 26,
         SqlTypeKind::JsonPath => 27,
+        SqlTypeKind::Xml => 56,
         SqlTypeKind::Date => 28,
         SqlTypeKind::Time => 29,
         SqlTypeKind::TimeTz => 30,
@@ -275,6 +278,7 @@ fn sql_type_kind_from_tag(tag: u8) -> Result<SqlTypeKind, ExecError> {
         25 => SqlTypeKind::Json,
         26 => SqlTypeKind::Jsonb,
         27 => SqlTypeKind::JsonPath,
+        56 => SqlTypeKind::Xml,
         28 => SqlTypeKind::Date,
         29 => SqlTypeKind::Time,
         30 => SqlTypeKind::TimeTz,
@@ -681,6 +685,10 @@ fn encode_internal_value(value: &Value) -> Result<Vec<u8>, ExecError> {
             out.push(INTERNAL_VALUE_TAG_JSONPATH);
             encode_internal_text(v.as_bytes(), &mut out);
         }
+        Value::Xml(v) => {
+            out.push(INTERNAL_VALUE_TAG_XML);
+            encode_internal_text(v.as_bytes(), &mut out);
+        }
         Value::TsVector(v) => {
             out.push(INTERNAL_VALUE_TAG_TSVECTOR);
             encode_internal_text(
@@ -991,6 +999,13 @@ fn decode_internal_value(bytes: &[u8]) -> Result<Value, ExecError> {
             })
             .unwrap_or_default(),
         )),
+        INTERNAL_VALUE_TAG_XML => Value::Xml(CompactString::new(
+            std::str::from_utf8({
+                let mut offset = 0usize;
+                decode_internal_text(rest, &mut offset)?
+            })
+            .unwrap_or_default(),
+        )),
         INTERNAL_VALUE_TAG_TSVECTOR => {
             Value::TsVector(crate::backend::executor::decode_tsvector_bytes({
                 let mut offset = 0usize;
@@ -1162,6 +1177,7 @@ pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<TupleVa
         (ScalarType::JsonPath, Value::JsonPath(text)) => {
             Ok(TupleValue::Bytes(text.as_bytes().to_vec()))
         }
+        (ScalarType::Xml, Value::Xml(text)) => Ok(TupleValue::Bytes(text.as_bytes().to_vec())),
         (ScalarType::TsVector, Value::TsVector(vector)) => Ok(TupleValue::Bytes(
             crate::backend::executor::encode_tsvector_bytes(&vector),
         )),
@@ -1317,6 +1333,7 @@ pub(crate) fn coerce_assignment_value(value: &Value, target: SqlType) -> Result<
         Value::Numeric(numeric) => cast_numeric_value(numeric.clone(), target, false),
         Value::JsonPath(text) => cast_text_value(text.as_str(), target, false),
         Value::Json(text) => cast_text_value(text.as_str(), target, false),
+        Value::Xml(text) => cast_text_value(text.as_str(), target, false),
         Value::Jsonb(bytes) => cast_text_value(&render_jsonb_bytes(bytes)?, target, false),
         Value::Bytea(bytes) => cast_value(Value::Bytea(bytes.clone()), target),
         Value::TsVector(vector) => cast_text_value(
@@ -1703,6 +1720,17 @@ pub(crate) fn decode_value_with_toast(
             }
             let text = unsafe { std::str::from_utf8_unchecked(bytes) };
             Ok(Value::JsonPath(canonicalize_jsonpath_text(text)?))
+        }
+        ScalarType::Xml => {
+            if column.storage.attlen != -1 && column.storage.attlen != -2 {
+                return Err(ExecError::UnsupportedStorageType {
+                    column: column.name.clone(),
+                    ty: column.ty.clone(),
+                    attlen: column.storage.attlen,
+                });
+            }
+            let text = unsafe { std::str::from_utf8_unchecked(bytes) };
+            Ok(Value::Xml(CompactString::new(text)))
         }
         ScalarType::TsVector => {
             if column.storage.attlen != -1 && column.storage.attlen != -2 {

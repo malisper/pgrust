@@ -41,6 +41,7 @@ fn exec_error_sqlstate(e: &ExecError) -> &'static str {
     match e {
         ExecError::Regex(err) => err.sqlstate,
         ExecError::JsonInput { sqlstate, .. } => sqlstate,
+        ExecError::XmlInput { sqlstate, .. } => sqlstate,
         ExecError::DetailedError { sqlstate, .. } => sqlstate,
         ExecError::Parse(crate::backend::parser::ParseError::InvalidInteger(_))
         | ExecError::Parse(crate::backend::parser::ParseError::InvalidNumeric(_))
@@ -107,6 +108,7 @@ fn exec_error_detail(e: &ExecError) -> Option<&str> {
     match e {
         ExecError::Regex(err) => err.detail.as_deref(),
         ExecError::JsonInput { detail, .. } => detail.as_deref(),
+        ExecError::XmlInput { detail, .. } => detail.as_deref(),
         ExecError::DetailedError { detail, .. } => detail.as_deref(),
         ExecError::ForeignKeyViolation { detail, .. } => detail.as_deref(),
         ExecError::ArrayInput { detail, .. } => detail.as_deref(),
@@ -125,6 +127,7 @@ fn exec_error_hint(e: &ExecError) -> Option<&str> {
 fn exec_error_context(e: &ExecError) -> Option<&str> {
     match e {
         ExecError::JsonInput { context, .. } => context.as_deref(),
+        ExecError::XmlInput { context, .. } => context.as_deref(),
         ExecError::Regex(err) => err.context.as_deref(),
         _ => None,
     }
@@ -186,6 +189,7 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             }
         }
         ExecError::JsonInput { raw_input, .. } => raw_input.as_str(),
+        ExecError::XmlInput { raw_input, .. } => raw_input.as_str(),
         _ => return None,
     };
     sql.find(value).map(|index| index + 1).or_else(|| {

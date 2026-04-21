@@ -67,6 +67,7 @@ use super::expr_string::{
     eval_to_number_function, eval_to_oct_function, eval_translate_function, eval_trim_function,
     eval_unistr_function,
 };
+use super::expr_xml::{eval_xml_comment_function, eval_xml_expr, eval_xml_is_well_formed_function};
 use super::node_types::*;
 use super::pg_regex::{
     eval_regex_match_operator, eval_regexp_count, eval_regexp_instr, eval_regexp_like,
@@ -988,6 +989,7 @@ pub fn eval_expr(
             hint: None,
             sqlstate: "XX000",
         }),
+        Expr::Xml(xml) => eval_xml_expr(xml, slot, ctx),
         Expr::ScalarArrayOp(saop) => eval_scalar_array_op_expr(saop, slot, ctx),
         Expr::SubLink(_) => Err(ExecError::DetailedError {
             message: "unplanned subquery reached executor".into(),
@@ -1718,6 +1720,22 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::Lcm => eval_lcm_function(&values),
         BuiltinScalarFunction::BoolEq => eval_booleq(&values),
         BuiltinScalarFunction::BoolNe => eval_boolne(&values),
+        BuiltinScalarFunction::XmlComment => eval_xml_comment_function(&values, None),
+        BuiltinScalarFunction::XmlIsWellFormed => eval_xml_is_well_formed_function(
+            &values,
+            crate::backend::utils::misc::guc_xml::XmlOptionSetting::Content,
+            None,
+        ),
+        BuiltinScalarFunction::XmlIsWellFormedDocument => eval_xml_is_well_formed_function(
+            &values,
+            crate::backend::utils::misc::guc_xml::XmlOptionSetting::Document,
+            None,
+        ),
+        BuiltinScalarFunction::XmlIsWellFormedContent => eval_xml_is_well_formed_function(
+            &values,
+            crate::backend::utils::misc::guc_xml::XmlOptionSetting::Content,
+            None,
+        ),
         BuiltinScalarFunction::TsMatch => match values.as_slice() {
             [Value::TsVector(vector), Value::TsQuery(query)] => Ok(Value::Bool(
                 crate::backend::executor::eval_tsvector_matches_tsquery(vector, query),
@@ -2641,6 +2659,20 @@ fn eval_builtin_function(
         BuiltinScalarFunction::Lgamma => eval_unary_float_function("lgamma", &values, eval_lgamma),
         BuiltinScalarFunction::BoolEq => eval_booleq(&values),
         BuiltinScalarFunction::BoolNe => eval_boolne(&values),
+        BuiltinScalarFunction::XmlComment => eval_xml_comment_function(&values, Some(ctx)),
+        BuiltinScalarFunction::XmlIsWellFormed => {
+            eval_xml_is_well_formed_function(&values, ctx.datetime_config.xml.option, Some(ctx))
+        }
+        BuiltinScalarFunction::XmlIsWellFormedDocument => eval_xml_is_well_formed_function(
+            &values,
+            crate::backend::utils::misc::guc_xml::XmlOptionSetting::Document,
+            Some(ctx),
+        ),
+        BuiltinScalarFunction::XmlIsWellFormedContent => eval_xml_is_well_formed_function(
+            &values,
+            crate::backend::utils::misc::guc_xml::XmlOptionSetting::Content,
+            Some(ctx),
+        ),
         BuiltinScalarFunction::TsMatch => match values.as_slice() {
             [Value::TsVector(vector), Value::TsQuery(query)] => Ok(Value::Bool(
                 crate::backend::executor::eval_tsvector_matches_tsquery(vector, query),

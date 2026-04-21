@@ -29,6 +29,7 @@ use crate::include::catalog::{
     TSQUERY_ARRAY_TYPE_OID, TSQUERY_TYPE_OID, TSRANGE_TYPE_OID, TSTZRANGE_TYPE_OID,
     TSVECTOR_ARRAY_TYPE_OID, TSVECTOR_TYPE_OID, VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID,
     VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID, VOID_TYPE_OID, XID_ARRAY_TYPE_OID, XID_TYPE_OID,
+    XML_ARRAY_TYPE_OID, XML_TYPE_OID,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -317,6 +318,12 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
             "jsonpath",
             JSONPATH_TYPE_OID,
             SqlType::new(SqlTypeKind::JsonPath),
+        ),
+        builtin_type_row("xml", XML_TYPE_OID, SqlType::new(SqlTypeKind::Xml)),
+        builtin_type_row(
+            "_xml",
+            XML_ARRAY_TYPE_OID,
+            SqlType::array_of(SqlType::new(SqlTypeKind::Xml)),
         ),
         builtin_type_row(
             "tsvector",

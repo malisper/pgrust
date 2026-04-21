@@ -78,6 +78,7 @@ fn render_value(value: &Value) -> String {
         Value::Json(v) => v.to_string(),
         Value::Jsonb(v) => format!("{:?}", v),
         Value::JsonPath(v) => v.to_string(),
+        Value::Xml(v) => v.to_string(),
         Value::Range(_) => pgrust::backend::executor::render_range_text(value).unwrap_or_default(),
         Value::Point(_)
         | Value::Lseg(_)

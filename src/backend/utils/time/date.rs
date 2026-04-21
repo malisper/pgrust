@@ -462,6 +462,7 @@ mod tests {
             date_order: DateOrder::Mdy,
             time_zone: "UTC".into(),
             max_stack_depth_kb: 100,
+            ..DateTimeConfig::default()
         };
         assert_eq!(format_date_text(value, &iso), "1999-01-08");
 
@@ -470,6 +471,7 @@ mod tests {
             date_order: DateOrder::Dmy,
             time_zone: "UTC".into(),
             max_stack_depth_kb: 100,
+            ..DateTimeConfig::default()
         };
         assert_eq!(format_date_text(value, &sql), "08-01-1999");
 
@@ -478,6 +480,7 @@ mod tests {
             date_order: DateOrder::Mdy,
             time_zone: "UTC".into(),
             max_stack_depth_kb: 100,
+            ..DateTimeConfig::default()
         };
         assert_eq!(format_date_text(value, &german), "08.01.1999");
     }
@@ -490,6 +493,7 @@ mod tests {
             date_order: DateOrder::Mdy,
             time_zone: "UTC".into(),
             max_stack_depth_kb: 100,
+            ..DateTimeConfig::default()
         };
         assert_eq!(format_date_text(value, &config), "0099-01-08 BC");
     }
@@ -501,6 +505,7 @@ mod tests {
             date_order: DateOrder::Ymd,
             time_zone: "UTC".into(),
             max_stack_depth_kb: 100,
+            ..DateTimeConfig::default()
         };
 
         for input in [
@@ -524,6 +529,7 @@ mod tests {
             date_order: DateOrder::Ymd,
             time_zone: "UTC".into(),
             max_stack_depth_kb: 100,
+            ..DateTimeConfig::default()
         };
 
         assert_eq!(
@@ -545,18 +551,21 @@ mod tests {
             date_order: DateOrder::Ymd,
             time_zone: "UTC".into(),
             max_stack_depth_kb: 100,
+            ..DateTimeConfig::default()
         };
         let dmy = DateTimeConfig {
             date_style_format: DateStyleFormat::Iso,
             date_order: DateOrder::Dmy,
             time_zone: "UTC".into(),
             max_stack_depth_kb: 100,
+            ..DateTimeConfig::default()
         };
         let mdy = DateTimeConfig {
             date_style_format: DateStyleFormat::Iso,
             date_order: DateOrder::Mdy,
             time_zone: "UTC".into(),
             max_stack_depth_kb: 100,
+            ..DateTimeConfig::default()
         };
 
         assert_eq!(
@@ -626,18 +635,21 @@ mod tests {
             date_order: DateOrder::Ymd,
             time_zone: "UTC".into(),
             max_stack_depth_kb: 100,
+            ..DateTimeConfig::default()
         };
         let dmy = DateTimeConfig {
             date_style_format: DateStyleFormat::Iso,
             date_order: DateOrder::Dmy,
             time_zone: "UTC".into(),
             max_stack_depth_kb: 100,
+            ..DateTimeConfig::default()
         };
         let mdy = DateTimeConfig {
             date_style_format: DateStyleFormat::Iso,
             date_order: DateOrder::Mdy,
             time_zone: "UTC".into(),
             max_stack_depth_kb: 100,
+            ..DateTimeConfig::default()
         };
 
         let out_of_range = Err(DateParseError::FieldOutOfRange {
@@ -748,18 +760,21 @@ mod tests {
             date_order: DateOrder::Ymd,
             time_zone: "UTC".into(),
             max_stack_depth_kb: 100,
+            ..DateTimeConfig::default()
         };
         let dmy = DateTimeConfig {
             date_style_format: DateStyleFormat::Iso,
             date_order: DateOrder::Dmy,
             time_zone: "UTC".into(),
             max_stack_depth_kb: 100,
+            ..DateTimeConfig::default()
         };
         let mdy = DateTimeConfig {
             date_style_format: DateStyleFormat::Iso,
             date_order: DateOrder::Mdy,
             time_zone: "UTC".into(),
             max_stack_depth_kb: 100,
+            ..DateTimeConfig::default()
         };
 
         let out_of_range = Err(DateParseError::FieldOutOfRange {

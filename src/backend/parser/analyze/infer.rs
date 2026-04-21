@@ -96,6 +96,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
         SqlExpr::Const(Value::Json(_)) => SqlType::new(SqlTypeKind::Json),
         SqlExpr::Const(Value::Jsonb(_)) => SqlType::new(SqlTypeKind::Jsonb),
         SqlExpr::Const(Value::JsonPath(_)) => SqlType::new(SqlTypeKind::JsonPath),
+        SqlExpr::Const(Value::Xml(_)) => SqlType::new(SqlTypeKind::Xml),
         SqlExpr::Const(Value::Point(_)) => SqlType::new(SqlTypeKind::Point),
         SqlExpr::Const(Value::Lseg(_)) => SqlType::new(SqlTypeKind::Lseg),
         SqlExpr::Const(Value::Path(_)) => SqlType::new(SqlTypeKind::Path),
@@ -414,6 +415,9 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                     "NULLIF arguments with a common type",
                 )
                 .unwrap_or(SqlType::new(SqlTypeKind::Text));
+            }
+            if name.eq_ignore_ascii_case("xmlconcat") {
+                return SqlType::new(SqlTypeKind::Xml);
             }
             let actual_types = args
                 .iter()
@@ -983,6 +987,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
         SqlExpr::LocalTimestamp { precision } => precision
             .map(|precision| SqlType::with_time_precision(SqlTypeKind::Timestamp, precision))
             .unwrap_or_else(|| SqlType::new(SqlTypeKind::Timestamp)),
+        SqlExpr::Xml(_) => SqlType::new(SqlTypeKind::Xml),
     }
 }
 

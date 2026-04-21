@@ -2120,6 +2120,9 @@ fn validate_executable_expr(expr: &Expr, plan_node: &str, field: &str) {
                 }
             }
         }
+        Expr::Xml(xml) => xml
+            .child_exprs()
+            .for_each(|child| validate_executable_expr(child, plan_node, field)),
         Expr::Var(_)
         | Expr::Param(_)
         | Expr::Const(_)
@@ -2129,6 +2132,9 @@ fn validate_executable_expr(expr: &Expr, plan_node: &str, field: &str) {
         | Expr::SessionUser
         | Expr::CurrentRole
         | Expr::CurrentDate
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
         | Expr::LocalTime { .. }
@@ -2436,6 +2442,9 @@ fn validate_planner_expr(expr: &Expr, path_node: &str, field: &str) {
                 }
             }
         }
+        Expr::Xml(xml) => xml
+            .child_exprs()
+            .for_each(|child| validate_planner_expr(child, path_node, field)),
         Expr::Var(_)
         | Expr::Const(_)
         | Expr::Aggref(_)
@@ -2445,6 +2454,9 @@ fn validate_planner_expr(expr: &Expr, path_node: &str, field: &str) {
         | Expr::SessionUser
         | Expr::CurrentRole
         | Expr::CurrentDate
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
         | Expr::LocalTime { .. }

@@ -525,6 +525,36 @@ fn rewrite_semantic_expr(
                 ..*saop
             },
         )),
+        Expr::Xml(xml_expr) => {
+            let crate::include::nodes::primnodes::XmlExpr {
+                op,
+                name,
+                named_args,
+                arg_names,
+                args,
+                xml_option,
+                indent,
+                target_type,
+                standalone,
+            } = *xml_expr;
+            Expr::Xml(Box::new(crate::include::nodes::primnodes::XmlExpr {
+                op,
+                name,
+                named_args: named_args
+                    .into_iter()
+                    .map(|arg| rewrite_semantic_expr(arg, catalog, expanded_views))
+                    .collect::<Result<Vec<_>, _>>()?,
+                arg_names,
+                args: args
+                    .into_iter()
+                    .map(|arg| rewrite_semantic_expr(arg, catalog, expanded_views))
+                    .collect::<Result<Vec<_>, _>>()?,
+                xml_option,
+                indent,
+                target_type,
+                standalone,
+            }))
+        }
         Expr::Cast(inner, ty) => Expr::Cast(
             Box::new(rewrite_semantic_expr(*inner, catalog, expanded_views)?),
             ty,
