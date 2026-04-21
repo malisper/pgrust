@@ -188,6 +188,7 @@ fn main() -> Result<(), ExecError> {
         session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         next_command_id: 0,
+        default_toast_compression: pgrust::include::access::htup::AttributeCompression::Pglz,
         expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
         case_test_values: Vec::new(),
         system_bindings: Vec::new(),

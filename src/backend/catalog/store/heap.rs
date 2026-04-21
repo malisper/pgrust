@@ -3180,6 +3180,30 @@ impl CatalogStore {
         Ok(effect)
     }
 
+    pub fn alter_table_set_column_compression_mvcc(
+        &mut self,
+        relation_oid: u32,
+        column_name: &str,
+        compression: crate::include::access::htup::AttributeCompression,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let (_old_entry, new_entry, _, kinds) =
+            mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, _control| {
+                if entry.relkind != 'r' {
+                    return Err(CatalogError::UnknownTable(relation_oid.to_string()));
+                }
+                let column_index = relation_column_index_visible(&entry.desc, column_name)?;
+                entry.desc.columns[column_index].storage.attcompression = compression;
+                Ok(((), vec![BootstrapCatalogKind::PgAttribute]))
+            })?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        effect_record_oid(&mut effect.type_oids, new_entry.row_type_oid);
+        Ok(effect)
+    }
+
     pub fn alter_table_alter_column_type_mvcc(
         &mut self,
         relation_oid: u32,

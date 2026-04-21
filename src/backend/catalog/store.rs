@@ -244,6 +244,7 @@ mod tests {
             session_user_oid: BOOTSTRAP_SUPERUSER_OID,
             current_user_oid: BOOTSTRAP_SUPERUSER_OID,
             next_command_id: 0,
+            default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
             case_test_values: Vec::new(),
             system_bindings: Vec::new(),

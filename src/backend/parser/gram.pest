@@ -1,7 +1,7 @@
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 
 statement = { SOI ~ stmt ~ EOI }
-stmt = _{ do_stmt | explain_stmt | table_stmt | select_stmt | values_stmt | copy_stmt | analyze_stmt | checkpoint_stmt | show_stmt | set_session_authorization_stmt | reset_session_authorization_stmt | set_role_stmt | reset_role_stmt | set_stmt | reset_stmt | create_role_stmt | alter_role_stmt | alter_group_stmt | create_database_stmt | create_schema_stmt | create_policy_stmt | create_index_stmt | alter_table_add_column_stmt | alter_table_add_constraint_stmt | alter_table_drop_constraint_stmt | alter_table_alter_constraint_stmt | alter_table_rename_constraint_stmt | alter_table_drop_column_stmt | alter_table_alter_column_type_stmt | alter_table_alter_column_default_stmt | alter_table_alter_column_storage_stmt | alter_table_alter_column_options_stmt | alter_table_alter_column_statistics_stmt | alter_table_owner_stmt | alter_table_rename_column_stmt | alter_table_rename_stmt | alter_view_owner_stmt | alter_schema_owner_stmt | alter_table_set_stmt | alter_table_set_row_security_stmt | alter_policy_stmt | alter_table_set_not_null_stmt | alter_table_drop_not_null_stmt | alter_table_validate_constraint_stmt | alter_table_no_inherit_stmt | comment_on_role_stmt | comment_on_table_stmt | comment_on_rule_stmt | create_table_stmt | create_view_stmt | create_rule_stmt | drop_role_stmt | drop_database_stmt | drop_table_stmt | drop_index_stmt | drop_view_stmt | drop_rule_stmt | drop_policy_stmt | drop_schema_stmt | drop_owned_stmt | reassign_owned_stmt | truncate_table_stmt | vacuum_stmt | insert_stmt | merge_stmt | update_stmt | delete_stmt | begin_stmt | commit_stmt | rollback_stmt }
+stmt = _{ do_stmt | explain_stmt | table_stmt | select_stmt | values_stmt | copy_stmt | analyze_stmt | checkpoint_stmt | show_stmt | set_session_authorization_stmt | reset_session_authorization_stmt | set_role_stmt | reset_role_stmt | set_stmt | reset_stmt | create_role_stmt | alter_role_stmt | alter_group_stmt | create_database_stmt | create_schema_stmt | create_policy_stmt | create_index_stmt | alter_table_add_column_stmt | alter_table_add_constraint_stmt | alter_table_drop_constraint_stmt | alter_table_alter_constraint_stmt | alter_table_rename_constraint_stmt | alter_table_drop_column_stmt | alter_table_alter_column_type_stmt | alter_table_alter_column_default_stmt | alter_table_alter_column_compression_stmt | alter_table_alter_column_storage_stmt | alter_table_alter_column_options_stmt | alter_table_alter_column_statistics_stmt | alter_table_owner_stmt | alter_table_rename_column_stmt | alter_table_rename_stmt | alter_view_owner_stmt | alter_schema_owner_stmt | alter_table_set_stmt | alter_table_set_row_security_stmt | alter_policy_stmt | alter_table_set_not_null_stmt | alter_table_drop_not_null_stmt | alter_table_validate_constraint_stmt | alter_table_no_inherit_stmt | comment_on_role_stmt | comment_on_table_stmt | comment_on_rule_stmt | create_table_stmt | create_view_stmt | create_rule_stmt | drop_role_stmt | drop_database_stmt | drop_table_stmt | drop_index_stmt | drop_view_stmt | drop_rule_stmt | drop_policy_stmt | drop_schema_stmt | drop_owned_stmt | reassign_owned_stmt | truncate_table_stmt | vacuum_stmt | insert_stmt | merge_stmt | update_stmt | delete_stmt | begin_stmt | commit_stmt | rollback_stmt }
 
 do_stmt = { kw_do ~ do_body ~ do_language_clause? | kw_do ~ do_language_clause ~ do_body }
 do_body = { quoted_string_literal }
@@ -131,6 +131,7 @@ alter_table_constraint_attribute = _{ deferrable_constraint_attribute | not_defe
 alter_table_rename_constraint_stmt = { kw_alter ~ kw_table ~ alter_table_target ~ kw_rename ~ kw_constraint ~ identifier ~ kw_to ~ identifier }
 alter_table_alter_column_type_stmt = { kw_alter ~ kw_table ~ alter_table_target ~ kw_alter ~ kw_column? ~ identifier ~ alter_table_column_type_action }
 alter_table_alter_column_default_stmt = { kw_alter ~ kw_table ~ alter_table_target ~ kw_alter ~ kw_column? ~ identifier ~ alter_table_column_default_action }
+alter_table_alter_column_compression_stmt = { kw_alter ~ kw_table ~ alter_table_target ~ kw_alter ~ kw_column? ~ identifier ~ kw_set ~ kw_compression ~ (kw_default | identifier) }
 alter_table_alter_column_storage_stmt = { kw_alter ~ kw_table ~ alter_table_target ~ kw_alter ~ kw_column? ~ identifier ~ kw_set ~ kw_storage ~ identifier }
 alter_table_alter_column_options_stmt = { kw_alter ~ kw_table ~ alter_table_target ~ kw_alter ~ kw_column? ~ identifier ~ alter_table_column_options_action }
 alter_table_alter_column_statistics_stmt = { kw_alter ~ kw_table ~ alter_table_target ~ kw_alter ~ kw_column? ~ identifier ~ kw_set ~ kw_statistics ~ signed_integer }
@@ -631,6 +632,7 @@ kw_admin = _{ kw_admin_atom }
 kw_similar = { kw_similar_atom }
 kw_using = _{ kw_using_atom }
 kw_default = { kw_default_atom }
+kw_compression = _{ kw_compression_atom }
 kw_statistics = _{ kw_statistics_atom }
 kw_also = _{ kw_also_atom }
 kw_instead = _{ kw_instead_atom }
@@ -1042,6 +1044,7 @@ kw_localtime_atom = @{ ^"localtime" ~ keyword_end }
 kw_localtimestamp_atom = @{ ^"localtimestamp" ~ keyword_end }
 kw_begin_atom = @{ ^"begin" ~ keyword_end }
 kw_start_atom = @{ ^"start" ~ keyword_end }
+kw_compression_atom = @{ ^"compression" ~ keyword_end }
 kw_storage_atom = @{ ^"storage" ~ keyword_end }
 kw_transaction_atom = @{ ^"transaction" ~ keyword_end }
 kw_commit_atom = @{ ^"commit" ~ keyword_end }

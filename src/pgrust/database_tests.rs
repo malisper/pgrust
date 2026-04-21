@@ -189,6 +189,7 @@ fn analyze_executor_context(
         session_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         current_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         next_command_id: cid,
+        default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
         timed: false,
         allow_side_effects: false,
         expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
