@@ -11,12 +11,13 @@ use super::expr_json::{canonicalize_jsonpath_text, validate_json_text};
 use super::expr_money::{
     money_format_text, money_from_float, money_numeric_text, money_parse_text,
 };
+use super::expr_multirange::{multirange_from_range, parse_multirange_text};
 use super::expr_range::{parse_range_text, render_range_text};
 use super::node_types::*;
 use crate::backend::executor::jsonb::{
     parse_json_text_input, parse_jsonb_text, parse_jsonb_text_with_limit, render_jsonb_bytes,
 };
-use crate::backend::parser::{SqlType, SqlTypeKind, parse_type_name};
+use crate::backend::parser::{RawTypeName, SqlType, SqlTypeKind, parse_type_name};
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::time::date::{
     DateParseError, parse_date_text, parse_time_text, parse_timetz_text,
@@ -24,7 +25,8 @@ use crate::backend::utils::time::date::{
 use crate::backend::utils::time::datetime::DateTimeParseError;
 use crate::backend::utils::time::timestamp::{parse_timestamp_text, parse_timestamptz_text};
 use crate::include::catalog::{
-    TEXT_TYPE_OID, bootstrap_pg_cast_rows, builtin_type_rows, range_type_ref_for_sql_type,
+    TEXT_TYPE_OID, bootstrap_pg_cast_rows, builtin_type_rows, multirange_type_ref_for_sql_type,
+    range_type_ref_for_sql_type,
 };
 use crate::pgrust::compact_string::CompactString;
 use num_integer::Integer;
@@ -983,14 +985,31 @@ fn parse_input_type_name(type_name: &str) -> Result<Option<SqlType>, ExecError> 
         Ok(ty) => ty,
         Err(_) => return Ok(None),
     };
-    let Some(parsed) = parsed.as_builtin() else {
-        return Ok(None);
+    let resolved = match parsed {
+        RawTypeName::Builtin(ty) => Some(ty),
+        RawTypeName::Named { name, array_bounds } => {
+            let base = builtin_type_rows()
+                .into_iter()
+                .find(|row| row.typrelid == 0 && row.typname.eq_ignore_ascii_case(&name))
+                .map(|row| row.sql_type.with_identity(row.oid, row.typrelid));
+            base.map(|ty| {
+                if array_bounds == 0 {
+                    ty
+                } else {
+                    SqlType::array_of(ty)
+                }
+            })
+        }
+        RawTypeName::Serial(_) | RawTypeName::Record => None,
     };
-    Ok(input_type_name_supported(parsed).then_some(parsed))
+    Ok(resolved.filter(|ty| input_type_name_supported(*ty)))
 }
 
 fn input_type_name_supported(parsed: SqlType) -> bool {
     if !parsed.is_array && matches!(parsed.kind, SqlTypeKind::Text) {
+        return true;
+    }
+    if !parsed.is_array && (parsed.is_range() || parsed.is_multirange()) {
         return true;
     }
     let Some(type_oid) = builtin_type_oid(parsed) else {
@@ -1000,8 +1019,29 @@ fn input_type_name_supported(parsed: SqlType) -> bool {
 }
 
 fn builtin_type_oid(sql_type: SqlType) -> Option<u32> {
+    if let Some(row) = builtin_type_rows()
+        .into_iter()
+        .find(|row| row.sql_type == sql_type)
+    {
+        return Some(row.oid);
+    }
     if let Some(range_type) = range_type_ref_for_sql_type(sql_type) {
+        if sql_type.is_array {
+            return builtin_type_rows()
+                .into_iter()
+                .find(|row| row.typelem == range_type.type_oid())
+                .map(|row| row.oid);
+        }
         return Some(range_type.type_oid());
+    }
+    if let Some(multirange_type) = multirange_type_ref_for_sql_type(sql_type) {
+        if sql_type.is_array {
+            return builtin_type_rows()
+                .into_iter()
+                .find(|row| row.typelem == multirange_type.type_oid())
+                .map(|row| row.oid);
+        }
+        return Some(multirange_type.type_oid());
     }
     builtin_type_rows().into_iter().find_map(|row| {
         (row.sql_type.is_array == sql_type.is_array && row.sql_type.kind == sql_type.kind)
@@ -1365,6 +1405,7 @@ pub(crate) fn cast_value_with_config(
         Value::Null => Ok(Value::Null),
         Value::Int16(v) => match ty {
             ty if ty.is_range() => cast_text_value(&v.to_string(), ty, true),
+            ty if ty.is_multirange() => cast_text_value(&v.to_string(), ty, true),
             SqlType {
                 kind: SqlTypeKind::Int2,
                 ..
@@ -1453,6 +1494,17 @@ pub(crate) fn cast_value_with_config(
                 right: Value::Bytea(Vec::new()),
             }),
             SqlType {
+                kind:
+                    SqlTypeKind::AnyElement
+                    | SqlTypeKind::AnyRange
+                    | SqlTypeKind::AnyMultirange
+                    | SqlTypeKind::AnyCompatible
+                    | SqlTypeKind::AnyCompatibleArray
+                    | SqlTypeKind::AnyCompatibleRange
+                    | SqlTypeKind::AnyCompatibleMultirange,
+                ..
+            } => Ok(Value::Text(CompactString::from_owned(v.to_string()))),
+            SqlType {
                 kind: SqlTypeKind::AnyArray,
                 ..
             } => Err(unsupported_anyarray_input()),
@@ -1475,9 +1527,14 @@ pub(crate) fn cast_value_with_config(
                     | SqlTypeKind::TimestampTzRange,
                 ..
             } => unreachable!("range handled above"),
+            SqlType {
+                kind: SqlTypeKind::Multirange,
+                ..
+            } => unreachable!("multirange handled above"),
         },
         Value::Int32(v) => match ty {
             ty if ty.is_range() => cast_text_value(&v.to_string(), ty, true),
+            ty if ty.is_multirange() => cast_text_value(&v.to_string(), ty, true),
             SqlType {
                 kind: SqlTypeKind::Int2,
                 ..
@@ -1568,6 +1625,17 @@ pub(crate) fn cast_value_with_config(
                 right: Value::Bytea(Vec::new()),
             }),
             SqlType {
+                kind:
+                    SqlTypeKind::AnyElement
+                    | SqlTypeKind::AnyRange
+                    | SqlTypeKind::AnyMultirange
+                    | SqlTypeKind::AnyCompatible
+                    | SqlTypeKind::AnyCompatibleArray
+                    | SqlTypeKind::AnyCompatibleRange
+                    | SqlTypeKind::AnyCompatibleMultirange,
+                ..
+            } => Ok(Value::Text(CompactString::from_owned(v.to_string()))),
+            SqlType {
                 kind: SqlTypeKind::AnyArray,
                 ..
             } => Err(unsupported_anyarray_input()),
@@ -1590,9 +1658,16 @@ pub(crate) fn cast_value_with_config(
                     | SqlTypeKind::TimestampTzRange,
                 ..
             } => unreachable!("range handled above"),
+            SqlType {
+                kind: SqlTypeKind::Multirange,
+                ..
+            } => unreachable!("multirange handled above"),
         },
         Value::Bool(v) => match ty {
             ty if ty.is_range() => cast_text_value(if v { "true" } else { "false" }, ty, true),
+            ty if ty.is_multirange() => {
+                cast_text_value(if v { "true" } else { "false" }, ty, true)
+            }
             SqlType {
                 kind: SqlTypeKind::Bool,
                 ..
@@ -1655,6 +1730,17 @@ pub(crate) fn cast_value_with_config(
                 right: Value::Int32(0),
             }),
             SqlType {
+                kind:
+                    SqlTypeKind::AnyElement
+                    | SqlTypeKind::AnyRange
+                    | SqlTypeKind::AnyMultirange
+                    | SqlTypeKind::AnyCompatible
+                    | SqlTypeKind::AnyCompatibleArray
+                    | SqlTypeKind::AnyCompatibleRange
+                    | SqlTypeKind::AnyCompatibleMultirange,
+                ..
+            } => Ok(Value::Text(CompactString::new(if v { "true" } else { "false" }))),
+            SqlType {
                 kind: SqlTypeKind::AnyArray,
                 ..
             } => Err(unsupported_anyarray_input()),
@@ -1677,6 +1763,10 @@ pub(crate) fn cast_value_with_config(
                     | SqlTypeKind::TimestampTzRange,
                 ..
             } => unreachable!("range handled above"),
+            SqlType {
+                kind: SqlTypeKind::Multirange,
+                ..
+            } => unreachable!("multirange handled above"),
         },
         Value::Date(v) => match ty.kind {
             SqlTypeKind::Date => Ok(Value::Date(v)),
@@ -1820,6 +1910,23 @@ pub(crate) fn cast_value_with_config(
                         config,
                     )
                 }
+            } else if ty.is_multirange() {
+                let singleton = multirange_from_range(&range)?;
+                if multirange_type_ref_for_sql_type(ty).is_some_and(|target_type| {
+                    target_type.type_oid() == singleton.multirange_type.type_oid()
+                }) {
+                    Ok(Value::Multirange(singleton))
+                } else {
+                    cast_text_value_with_config(
+                        &crate::backend::executor::render_multirange_text(&Value::Multirange(
+                            singleton,
+                        ))
+                        .unwrap_or_default(),
+                        ty,
+                        true,
+                        config,
+                    )
+                }
             } else {
                 match ty.kind {
                     SqlTypeKind::Text
@@ -1837,6 +1944,34 @@ pub(crate) fn cast_value_with_config(
                     _ => Err(ExecError::TypeMismatch {
                         op: "::range",
                         left: Value::Range(range),
+                        right: Value::Null,
+                    }),
+                }
+            }
+        }
+        Value::Multirange(multirange) => {
+            if ty.is_multirange() {
+                Ok(Value::Multirange(multirange))
+            } else {
+                match ty.kind {
+                    SqlTypeKind::Text
+                    | SqlTypeKind::Name
+                    | SqlTypeKind::Char
+                    | SqlTypeKind::Varchar
+                    | SqlTypeKind::Json
+                    | SqlTypeKind::Jsonb
+                    | SqlTypeKind::JsonPath => cast_text_value_with_config(
+                        &crate::backend::executor::render_multirange_text(&Value::Multirange(
+                            multirange.clone(),
+                        ))
+                        .unwrap_or_default(),
+                        ty,
+                        true,
+                        config,
+                    ),
+                    _ => Err(ExecError::TypeMismatch {
+                        op: "::multirange",
+                        left: Value::Multirange(multirange),
                         right: Value::Null,
                     }),
                 }
@@ -1970,6 +2105,7 @@ pub(crate) fn cast_value_with_config(
         },
         Value::Int64(v) => match ty {
             ty if ty.is_range() => cast_text_value(&v.to_string(), ty, true),
+            ty if ty.is_multirange() => cast_text_value(&v.to_string(), ty, true),
             SqlType {
                 kind: SqlTypeKind::Int2,
                 ..
@@ -2070,6 +2206,17 @@ pub(crate) fn cast_value_with_config(
                 right: Value::Bytea(Vec::new()),
             }),
             SqlType {
+                kind:
+                    SqlTypeKind::AnyElement
+                    | SqlTypeKind::AnyRange
+                    | SqlTypeKind::AnyMultirange
+                    | SqlTypeKind::AnyCompatible
+                    | SqlTypeKind::AnyCompatibleArray
+                    | SqlTypeKind::AnyCompatibleRange
+                    | SqlTypeKind::AnyCompatibleMultirange,
+                ..
+            } => Ok(Value::Text(CompactString::from_owned(v.to_string()))),
+            SqlType {
                 kind: SqlTypeKind::AnyArray,
                 ..
             } => Err(unsupported_anyarray_input()),
@@ -2092,9 +2239,14 @@ pub(crate) fn cast_value_with_config(
                     | SqlTypeKind::TimestampTzRange,
                 ..
             } => unreachable!("range handled above"),
+            SqlType {
+                kind: SqlTypeKind::Multirange,
+                ..
+            } => unreachable!("multirange handled above"),
         },
         Value::Float64(v) => match ty {
             ty if ty.is_range() => cast_text_value(&v.to_string(), ty, true),
+            ty if ty.is_multirange() => cast_text_value(&v.to_string(), ty, true),
             SqlType {
                 kind: SqlTypeKind::Float4 | SqlTypeKind::Float8,
                 ..
@@ -2189,6 +2341,17 @@ pub(crate) fn cast_value_with_config(
                 right: Value::Bytea(Vec::new()),
             }),
             SqlType {
+                kind:
+                    SqlTypeKind::AnyElement
+                    | SqlTypeKind::AnyRange
+                    | SqlTypeKind::AnyMultirange
+                    | SqlTypeKind::AnyCompatible
+                    | SqlTypeKind::AnyCompatibleArray
+                    | SqlTypeKind::AnyCompatibleRange
+                    | SqlTypeKind::AnyCompatibleMultirange,
+                ..
+            } => Ok(Value::Text(CompactString::from_owned(v.to_string()))),
+            SqlType {
                 kind: SqlTypeKind::AnyArray,
                 ..
             } => Err(unsupported_anyarray_input()),
@@ -2211,6 +2374,10 @@ pub(crate) fn cast_value_with_config(
                     | SqlTypeKind::TimestampTzRange,
                 ..
             } => unreachable!("range handled above"),
+            SqlType {
+                kind: SqlTypeKind::Multirange,
+                ..
+            } => unreachable!("multirange handled above"),
         },
         Value::Numeric(numeric) => cast_numeric_value(numeric, ty, true),
         Value::Money(v) => match ty.kind {
@@ -2271,8 +2438,17 @@ pub(super) fn cast_text_value_with_config(
     if ty.is_range() {
         return parse_range_text(text, ty);
     }
+    if ty.is_multirange() {
+        return parse_multirange_text(text, ty);
+    }
     match ty.kind {
-        SqlTypeKind::AnyArray => Err(unsupported_anyarray_input()),
+        SqlTypeKind::AnyArray | SqlTypeKind::AnyCompatibleArray => Err(unsupported_anyarray_input()),
+        SqlTypeKind::AnyElement
+        | SqlTypeKind::AnyRange
+        | SqlTypeKind::AnyMultirange
+        | SqlTypeKind::AnyCompatible
+        | SqlTypeKind::AnyCompatibleRange
+        | SqlTypeKind::AnyCompatibleMultirange => Ok(Value::Text(CompactString::new(text))),
         SqlTypeKind::Record | SqlTypeKind::Composite => Err(unsupported_record_input()),
         SqlTypeKind::Trigger => Err(unsupported_trigger_input()),
         SqlTypeKind::FdwHandler => Err(ExecError::TypeMismatch {
@@ -2387,6 +2563,7 @@ pub(super) fn cast_text_value_with_config(
         | SqlTypeKind::DateRange
         | SqlTypeKind::TimestampRange
         | SqlTypeKind::TimestampTzRange => unreachable!("range handled above"),
+        SqlTypeKind::Multirange => unreachable!("multirange handled above"),
     }
 }
 
@@ -2398,8 +2575,19 @@ pub(super) fn cast_numeric_value(
     if ty.is_range() {
         return cast_text_value(&value.render(), ty, explicit);
     }
+    if ty.is_multirange() {
+        return cast_text_value(&value.render(), ty, explicit);
+    }
     match ty.kind {
-        SqlTypeKind::AnyArray => Err(unsupported_anyarray_input()),
+        SqlTypeKind::AnyArray | SqlTypeKind::AnyCompatibleArray => Err(unsupported_anyarray_input()),
+        SqlTypeKind::AnyElement
+        | SqlTypeKind::AnyRange
+        | SqlTypeKind::AnyMultirange
+        | SqlTypeKind::AnyCompatible
+        | SqlTypeKind::AnyCompatibleRange
+        | SqlTypeKind::AnyCompatibleMultirange => {
+            Ok(Value::Text(CompactString::from_owned(value.render())))
+        }
         SqlTypeKind::Record | SqlTypeKind::Composite => Err(unsupported_record_input()),
         SqlTypeKind::Trigger => Err(unsupported_trigger_input()),
         SqlTypeKind::FdwHandler => Err(ExecError::TypeMismatch {
@@ -2521,6 +2709,7 @@ pub(super) fn cast_numeric_value(
         | SqlTypeKind::DateRange
         | SqlTypeKind::TimestampRange
         | SqlTypeKind::TimestampTzRange => unreachable!("range handled above"),
+        SqlTypeKind::Multirange => unreachable!("multirange handled above"),
     }
 }
 

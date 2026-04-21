@@ -426,6 +426,10 @@ impl CompiledTupleDecoder {
                                 values.push(Value::Null);
                                 continue;
                             }
+                            ScalarType::Multirange(_) => {
+                                values.push(Value::Null);
+                                continue;
+                            }
                         });
                     }
                     -1 => {

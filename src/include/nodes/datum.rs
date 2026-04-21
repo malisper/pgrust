@@ -426,6 +426,22 @@ impl RangeTypeRef {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MultirangeTypeRef {
+    pub sql_type: SqlType,
+    pub range_type: RangeTypeRef,
+}
+
+impl MultirangeTypeRef {
+    pub const fn type_oid(self) -> u32 {
+        self.sql_type.type_oid
+    }
+
+    pub const fn range_type_oid(self) -> u32 {
+        self.range_type.type_oid()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RangeBound {
     pub value: Box<Value>,
@@ -438,6 +454,12 @@ pub struct RangeValue {
     pub empty: bool,
     pub lower: Option<RangeBound>,
     pub upper: Option<RangeBound>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MultirangeValue {
+    pub multirange_type: MultirangeTypeRef,
+    pub ranges: Vec<RangeValue>,
 }
 
 impl BitString {
@@ -492,6 +514,7 @@ pub enum Value {
     Polygon(GeoPolygon),
     Circle(GeoCircle),
     Range(RangeValue),
+    Multirange(MultirangeValue),
     Float64(f64),
     Numeric(NumericValue),
     Json(CompactString),
@@ -856,6 +879,7 @@ impl Value {
             Value::Polygon(v) => Value::Polygon(v.clone()),
             Value::Circle(v) => Value::Circle(v.clone()),
             Value::Range(v) => Value::Range(v.clone()),
+            Value::Multirange(v) => Value::Multirange(v.clone()),
             Value::Float64(v) => Value::Float64(*v),
             Value::Numeric(v) => Value::Numeric(v.clone()),
             Value::Json(s) => Value::Json(s.clone()),
@@ -910,6 +934,15 @@ impl Value {
                 if let Some(upper) = &mut range.upper {
                     upper.value = Box::new(upper.value.to_owned_value());
                 }
+            } else if let Value::Multirange(multirange) = v {
+                for range in &mut multirange.ranges {
+                    if let Some(lower) = &mut range.lower {
+                        lower.value = Box::new(lower.value.to_owned_value());
+                    }
+                    if let Some(upper) = &mut range.upper {
+                        upper.value = Box::new(upper.value.to_owned_value());
+                    }
+                }
             }
         }
     }
@@ -939,6 +972,7 @@ impl Value {
             Value::Polygon(_) => Some(SqlType::new(SqlTypeKind::Polygon)),
             Value::Circle(_) => Some(SqlType::new(SqlTypeKind::Circle)),
             Value::Range(range) => Some(range.range_type.sql_type),
+            Value::Multirange(multirange) => Some(multirange.multirange_type.sql_type),
             Value::Float64(_) => Some(SqlType::new(SqlTypeKind::Float8)),
             Value::Numeric(_) => Some(SqlType::new(SqlTypeKind::Numeric)),
             Value::Json(_) => Some(SqlType::new(SqlTypeKind::Json)),
@@ -1034,6 +1068,7 @@ impl PartialEq for Value {
                     && a.radius.to_bits() == b.radius.to_bits()
             }
             (Value::Range(a), Value::Range(b)) => a == b,
+            (Value::Multirange(a), Value::Multirange(b)) => a == b,
             (Value::Float64(a), Value::Float64(b)) => a.to_bits() == b.to_bits(),
             (Value::Numeric(a), Value::Numeric(b)) => a == b,
             (Value::Json(a), Value::Json(b)) => a == b,
@@ -1161,6 +1196,10 @@ impl std::hash::Hash for Value {
                 23u8.hash(state);
                 v.hash(state);
             }
+            Value::Multirange(v) => {
+                24u8.hash(state);
+                v.hash(state);
+            }
             Value::Float64(v) => {
                 3u8.hash(state);
                 v.to_bits().hash(state);
@@ -1209,7 +1248,7 @@ impl std::hash::Hash for Value {
                 v.hash(state);
             }
             Value::Record(v) => {
-                23u8.hash(state);
+                25u8.hash(state);
                 v.hash(state);
             }
             Value::Array(_) | Value::PgArray(_) => unreachable!("array values hashed above"),

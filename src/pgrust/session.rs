@@ -3184,6 +3184,7 @@ impl Session {
                                 | ScalarType::Timestamp
                                 | ScalarType::TimestampTz
                                 | ScalarType::Range(_)
+                                | ScalarType::Multirange(_)
                                 | ScalarType::Point
                                 | ScalarType::Lseg
                                 | ScalarType::Path

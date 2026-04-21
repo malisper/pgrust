@@ -1,4 +1,5 @@
 use super::*;
+use crate::include::catalog::multirange_type_ref_for_sql_type;
 
 pub(super) fn expr_contains_agg(expr: &SqlExpr) -> bool {
     match expr {
@@ -532,6 +533,19 @@ pub(super) fn aggregate_sql_type(func: AggFunc, arg_type: Option<SqlType>) -> Sq
             .unwrap_or(SqlType::array_of(SqlType::new(Text))),
         AggFunc::StringAgg => arg_type.unwrap_or(SqlType::new(Text)),
         AggFunc::Min | AggFunc::Max => arg_type.unwrap_or(SqlType::new(Text)),
+        AggFunc::RangeAgg => arg_type
+            .and_then(|ty| {
+                if ty.is_multirange() {
+                    Some(ty)
+                } else {
+                    multirange_type_ref_for_sql_type(SqlType::multirange(
+                        ty.range_multitype_oid,
+                        ty.type_oid,
+                    ))
+                    .map(|multirange_type| multirange_type.sql_type)
+                }
+            })
+            .unwrap_or(SqlType::new(Text)),
         AggFunc::Count
         | AggFunc::JsonAgg
         | AggFunc::JsonbAgg

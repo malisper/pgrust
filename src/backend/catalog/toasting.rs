@@ -39,8 +39,18 @@ fn type_maximum_size(column: &crate::backend::executor::ColumnDesc) -> Option<us
     if sql_type.is_range() {
         return None;
     }
+    if sql_type.is_multirange() {
+        return None;
+    }
     match sql_type.kind {
-        crate::backend::parser::SqlTypeKind::AnyArray => None,
+        crate::backend::parser::SqlTypeKind::AnyArray
+        | crate::backend::parser::SqlTypeKind::AnyElement
+        | crate::backend::parser::SqlTypeKind::AnyRange
+        | crate::backend::parser::SqlTypeKind::AnyMultirange
+        | crate::backend::parser::SqlTypeKind::AnyCompatible
+        | crate::backend::parser::SqlTypeKind::AnyCompatibleArray
+        | crate::backend::parser::SqlTypeKind::AnyCompatibleRange
+        | crate::backend::parser::SqlTypeKind::AnyCompatibleMultirange => None,
         crate::backend::parser::SqlTypeKind::Record
         | crate::backend::parser::SqlTypeKind::Composite => None,
         crate::backend::parser::SqlTypeKind::Void => Some(column.storage.attlen as usize),
@@ -101,6 +111,9 @@ fn type_maximum_size(column: &crate::backend::executor::ColumnDesc) -> Option<us
         | crate::backend::parser::SqlTypeKind::TimestampRange
         | crate::backend::parser::SqlTypeKind::TimestampTzRange => {
             unreachable!("range handled above")
+        }
+        crate::backend::parser::SqlTypeKind::Multirange => {
+            unreachable!("multirange handled above")
         }
         crate::backend::parser::SqlTypeKind::RegConfig
         | crate::backend::parser::SqlTypeKind::RegDictionary => {

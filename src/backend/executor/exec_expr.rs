@@ -35,6 +35,7 @@ use super::expr_math::{
     eval_lcm_function, eval_lgamma, eval_unary_float_function, sind, snap_degree, tand,
 };
 use super::expr_money::{cash_words_text, money_larger, money_smaller};
+use super::expr_multirange::eval_multirange_function;
 use super::expr_numeric::{
     eval_ceil_function, eval_div_function, eval_exp_function, eval_factorial_function,
     eval_floor_function, eval_ln_function, eval_log_function, eval_log10_function,
@@ -1539,7 +1540,13 @@ fn eval_plpgsql_builtin_function(
     if let Some(result) = eval_geometry_function(func, &values) {
         return result;
     }
-    if let Some(result) = eval_range_function(func, &values, result_type) {
+    if (result_type.is_some_and(SqlType::is_multirange)
+        || values.iter().any(|value| matches!(value, Value::Multirange(_))))
+        && let Some(result) = eval_multirange_function(func, &values, result_type, func_variadic)
+    {
+        return result;
+    }
+    if let Some(result) = eval_range_function(func, &values, result_type, func_variadic) {
         return result;
     }
     match func {
@@ -2317,7 +2324,13 @@ fn eval_builtin_function(
     if let Some(result) = eval_geometry_function(func, &values) {
         return result;
     }
-    if let Some(result) = eval_range_function(func, &values, result_type) {
+    if (result_type.is_some_and(SqlType::is_multirange)
+        || values.iter().any(|value| matches!(value, Value::Multirange(_))))
+        && let Some(result) = eval_multirange_function(func, &values, result_type, func_variadic)
+    {
+        return result;
+    }
+    if let Some(result) = eval_range_function(func, &values, result_type, func_variadic) {
         return result;
     }
     if let Some(result) =

@@ -1,4 +1,5 @@
 use super::functions::{resolve_function_call, resolve_scalar_function};
+use super::multiranges::infer_multirange_special_expr_type_with_ctes;
 use super::ranges::infer_range_special_expr_type_with_ctes;
 use super::*;
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
@@ -35,6 +36,17 @@ pub(super) fn infer_sql_expr_type_with_ctes(
     }
 
     if let Some(sql_type) = infer_range_special_expr_type_with_ctes(
+        expr,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    ) {
+        return sql_type;
+    }
+
+    if let Some(sql_type) = infer_multirange_special_expr_type_with_ctes(
         expr,
         scope,
         catalog,
@@ -86,6 +98,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
         SqlExpr::Const(Value::Timestamp(_)) => SqlType::new(SqlTypeKind::Timestamp),
         SqlExpr::Const(Value::TimestampTz(_)) => SqlType::new(SqlTypeKind::TimestampTz),
         SqlExpr::Const(Value::Range(range)) => range.range_type.sql_type,
+        SqlExpr::Const(Value::Multirange(multirange)) => multirange.multirange_type.sql_type,
         SqlExpr::Const(Value::Bit(v)) => SqlType::with_bit_len(SqlTypeKind::VarBit, v.bit_len),
         SqlExpr::Const(Value::Bytea(_)) => SqlType::new(SqlTypeKind::Bytea),
         SqlExpr::Const(Value::Bool(_)) => SqlType::new(SqlTypeKind::Bool),

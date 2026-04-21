@@ -36,6 +36,11 @@ use self::subquery::{
 pub(crate) use self::targets::{
     BoundSelectTargets, bind_select_targets, select_targets_contain_set_returning_call,
 };
+use super::multiranges::{
+    bind_maybe_multirange_arithmetic, bind_maybe_multirange_comparison,
+    bind_maybe_multirange_contains, bind_maybe_multirange_over_position,
+    bind_maybe_multirange_shift,
+};
 use super::ranges::{
     bind_maybe_range_arithmetic, bind_maybe_range_comparison, bind_maybe_range_contains,
     bind_maybe_range_over_position, bind_maybe_range_shift,
@@ -607,7 +612,18 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             }
         },
         SqlExpr::Add(left, right) => {
-            if let Some(result) = bind_maybe_range_arithmetic(
+            if let Some(result) = bind_maybe_multirange_arithmetic(
+                "+",
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ) {
+                result?
+            } else if let Some(result) = bind_maybe_range_arithmetic(
                 "+",
                 left,
                 right,
@@ -645,6 +661,17 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
         }
         SqlExpr::Sub(left, right) => {
             if let Some(result) = bind_maybe_jsonb_delete(
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ) {
+                result?
+            } else if let Some(result) = bind_maybe_multirange_arithmetic(
+                "-",
                 left,
                 right,
                 scope,
@@ -739,7 +766,18 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             }
         }
         SqlExpr::Shl(left, right) => {
-            if let Some(result) = bind_maybe_range_shift(
+            if let Some(result) = bind_maybe_multirange_shift(
+                "<<",
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ) {
+                result?
+            } else if let Some(result) = bind_maybe_range_shift(
                 "<<",
                 left,
                 right,
@@ -776,7 +814,18 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             }
         }
         SqlExpr::Shr(left, right) => {
-            if let Some(result) = bind_maybe_range_shift(
+            if let Some(result) = bind_maybe_multirange_shift(
+                ">>",
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ) {
+                result?
+            } else if let Some(result) = bind_maybe_range_shift(
                 ">>",
                 left,
                 right,
@@ -813,7 +862,18 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             }
         }
         SqlExpr::Mul(left, right) => {
-            if let Some(result) = bind_maybe_range_arithmetic(
+            if let Some(result) = bind_maybe_multirange_arithmetic(
+                "*",
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ) {
+                result?
+            } else if let Some(result) = bind_maybe_range_arithmetic(
                 "*",
                 left,
                 right,
@@ -1008,7 +1068,18 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             coerce_bound_expr(bound_inner, source_type, target_type)
         }
         SqlExpr::Eq(left, right) => {
-            if let Some(result) = bind_maybe_range_comparison(
+            if let Some(result) = bind_maybe_multirange_comparison(
+                "=",
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ) {
+                result?
+            } else if let Some(result) = bind_maybe_range_comparison(
                 "=",
                 left,
                 right,
@@ -1045,7 +1116,18 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             }
         }
         SqlExpr::NotEq(left, right) => {
-            if let Some(result) = bind_maybe_range_comparison(
+            if let Some(result) = bind_maybe_multirange_comparison(
+                "<>",
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ) {
+                result?
+            } else if let Some(result) = bind_maybe_range_comparison(
                 "<>",
                 left,
                 right,
@@ -1082,7 +1164,18 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             }
         }
         SqlExpr::Lt(left, right) => {
-            if let Some(result) = bind_maybe_range_comparison(
+            if let Some(result) = bind_maybe_multirange_comparison(
+                "<",
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ) {
+                result?
+            } else if let Some(result) = bind_maybe_range_comparison(
                 "<",
                 left,
                 right,
@@ -1119,7 +1212,18 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             }
         }
         SqlExpr::LtEq(left, right) => {
-            if let Some(result) = bind_maybe_range_comparison(
+            if let Some(result) = bind_maybe_multirange_comparison(
+                "<=",
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ) {
+                result?
+            } else if let Some(result) = bind_maybe_range_comparison(
                 "<=",
                 left,
                 right,
@@ -1156,7 +1260,18 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             }
         }
         SqlExpr::Gt(left, right) => {
-            if let Some(result) = bind_maybe_range_comparison(
+            if let Some(result) = bind_maybe_multirange_comparison(
+                ">",
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ) {
+                result?
+            } else if let Some(result) = bind_maybe_range_comparison(
                 ">",
                 left,
                 right,
@@ -1193,7 +1308,18 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             }
         }
         SqlExpr::GtEq(left, right) => {
-            if let Some(result) = bind_maybe_range_comparison(
+            if let Some(result) = bind_maybe_multirange_comparison(
+                ">=",
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ) {
+                result?
+            } else if let Some(result) = bind_maybe_range_comparison(
                 ">=",
                 left,
                 right,
@@ -1727,7 +1853,18 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             ctes,
         )?,
         SqlExpr::JsonbContains(left, right) => {
-            if let Some(result) = bind_maybe_range_contains(
+            if let Some(result) = bind_maybe_multirange_contains(
+                "@>",
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ) {
+                result?
+            } else if let Some(result) = bind_maybe_range_contains(
                 "@>",
                 left,
                 right,
@@ -1751,7 +1888,18 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             }
         }
         SqlExpr::JsonbContained(left, right) => {
-            if let Some(result) = bind_maybe_range_contains(
+            if let Some(result) = bind_maybe_multirange_contains(
+                "<@",
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ) {
+                result?
+            } else if let Some(result) = bind_maybe_range_contains(
                 "<@",
                 left,
                 right,
@@ -1858,7 +2006,8 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             if name.eq_ignore_ascii_case("nullif") {
                 return bind_nullif_call(args, scope, catalog, outer_scopes, grouped_outer, ctes);
             }
-            if let Some(target_type) = resolve_function_cast_type(catalog, name)
+            if !*func_variadic
+                && let Some(target_type) = resolve_function_cast_type(catalog, name)
                 && args.len() == 1
                 && args.iter().all(|arg| arg.name.is_none())
             {
@@ -2033,7 +2182,18 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 } else {
                     "&>"
                 };
-                if let Some(result) = bind_maybe_range_over_position(
+                if let Some(result) = bind_maybe_multirange_over_position(
+                    range_op,
+                    left,
+                    right,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                ) {
+                    result?
+                } else if let Some(result) = bind_maybe_range_over_position(
                     range_op,
                     left,
                     right,

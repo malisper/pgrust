@@ -10,6 +10,7 @@ mod functions;
 mod geometry;
 mod infer;
 mod modify;
+mod multiranges;
 mod on_conflict;
 mod paths;
 mod query;
@@ -33,7 +34,9 @@ use crate::include::catalog::{
     bootstrap_pg_aggregate_rows, bootstrap_pg_cast_rows, bootstrap_pg_collation_rows,
     bootstrap_pg_language_rows, bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows,
     bootstrap_pg_proc_rows, builtin_range_rows, builtin_type_rows,
-    proc_oid_for_builtin_aggregate_function, range_type_ref_for_sql_type, relkind_is_analyzable,
+    multirange_type_ref_for_sql_type, proc_oid_for_builtin_aggregate_function,
+    range_type_ref_for_sql_type, relkind_is_analyzable, synthetic_range_proc_row_by_oid,
+    synthetic_range_proc_rows_by_name,
 };
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{
@@ -220,16 +223,23 @@ pub trait CatalogLookup {
 
     fn proc_rows_by_name(&self, name: &str) -> Vec<PgProcRow> {
         let normalized = normalize_catalog_lookup_name(name);
-        bootstrap_pg_proc_rows()
+        let mut rows = bootstrap_pg_proc_rows()
             .into_iter()
             .filter(|row| row.proname.eq_ignore_ascii_case(normalized))
-            .collect()
+            .collect::<Vec<_>>();
+        rows.extend(synthetic_range_proc_rows_by_name(
+            name,
+            &self.type_rows(),
+            &self.range_rows(),
+        ));
+        rows
     }
 
     fn proc_row_by_oid(&self, oid: u32) -> Option<PgProcRow> {
         bootstrap_pg_proc_rows()
             .into_iter()
             .find(|row| row.oid == oid)
+            .or_else(|| synthetic_range_proc_row_by_oid(oid, &self.type_rows(), &self.range_rows()))
     }
 
     fn opclass_rows(&self) -> Vec<PgOpclassRow> {
@@ -298,6 +308,16 @@ pub trait CatalogLookup {
                     .map(|row| row.oid);
             }
             return Some(range_type.type_oid());
+        }
+        if let Some(multirange_type) = multirange_type_ref_for_sql_type(sql_type) {
+            if sql_type.is_array {
+                return self
+                    .type_rows()
+                    .into_iter()
+                    .find(|row| row.typelem == multirange_type.type_oid())
+                    .map(|row| row.oid);
+            }
+            return Some(multirange_type.type_oid());
         }
         if !sql_type.is_array && sql_type.type_oid != 0 {
             return Some(sql_type.type_oid);
@@ -485,15 +505,24 @@ impl CatalogLookup for Catalog {
     }
 
     fn proc_rows_by_name(&self, name: &str) -> Vec<PgProcRow> {
-        CatCache::from_catalog(self)
+        let mut rows = CatCache::from_catalog(self)
             .proc_rows_by_name(name)
             .into_iter()
             .cloned()
-            .collect()
+            .collect::<Vec<_>>();
+        rows.extend(synthetic_range_proc_rows_by_name(
+            name,
+            &self.type_rows(),
+            &self.range_rows(),
+        ));
+        rows
     }
 
     fn proc_row_by_oid(&self, oid: u32) -> Option<PgProcRow> {
-        CatCache::from_catalog(self).proc_by_oid(oid).cloned()
+        CatCache::from_catalog(self)
+            .proc_by_oid(oid)
+            .cloned()
+            .or_else(|| synthetic_range_proc_row_by_oid(oid, &self.type_rows(), &self.range_rows()))
     }
 
     fn opclass_rows(&self) -> Vec<PgOpclassRow> {

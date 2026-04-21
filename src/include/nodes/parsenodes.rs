@@ -565,6 +565,7 @@ pub struct CreateRangeTypeStatement {
     pub subtype: RawTypeName,
     pub subtype_diff: Option<String>,
     pub collation: Option<String>,
+    pub multirange_type_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1856,6 +1857,13 @@ impl TableConstraint {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SqlTypeKind {
     AnyArray,
+    AnyElement,
+    AnyRange,
+    AnyMultirange,
+    AnyCompatible,
+    AnyCompatibleArray,
+    AnyCompatibleRange,
+    AnyCompatibleMultirange,
     Record,
     Composite,
     Void,
@@ -1886,6 +1894,7 @@ pub enum SqlTypeKind {
     DateRange,
     TimestampRange,
     TimestampTzRange,
+    Multirange,
     Json,
     Jsonb,
     JsonPath,
@@ -1958,6 +1967,7 @@ pub struct SqlType {
     pub range_subtype_oid: u32,
     pub range_multitype_oid: u32,
     pub range_discrete: bool,
+    pub multirange_range_oid: u32,
 }
 
 impl SqlType {
@@ -1974,6 +1984,7 @@ impl SqlType {
             range_subtype_oid: 0,
             range_multitype_oid: 0,
             range_discrete: false,
+            multirange_range_oid: 0,
         }
     }
 
@@ -1987,6 +1998,7 @@ impl SqlType {
             range_subtype_oid: 0,
             range_multitype_oid: 0,
             range_discrete: false,
+            multirange_range_oid: 0,
         }
     }
 
@@ -2000,6 +2012,7 @@ impl SqlType {
             range_subtype_oid: 0,
             range_multitype_oid: 0,
             range_discrete: false,
+            multirange_range_oid: 0,
         }
     }
 
@@ -2013,6 +2026,7 @@ impl SqlType {
             range_subtype_oid: 0,
             range_multitype_oid: 0,
             range_discrete: false,
+            multirange_range_oid: 0,
         }
     }
 
@@ -2026,6 +2040,7 @@ impl SqlType {
             range_subtype_oid: 0,
             range_multitype_oid: 0,
             range_discrete: false,
+            multirange_range_oid: 0,
         }
     }
 
@@ -2039,6 +2054,21 @@ impl SqlType {
             range_subtype_oid: subtype_oid,
             range_multitype_oid: 0,
             range_discrete: false,
+            multirange_range_oid: 0,
+        }
+    }
+
+    pub const fn multirange(type_oid: u32, range_oid: u32) -> Self {
+        Self {
+            kind: SqlTypeKind::Multirange,
+            typmod: Self::NO_TYPEMOD,
+            is_array: false,
+            type_oid,
+            typrelid: 0,
+            range_subtype_oid: 0,
+            range_multitype_oid: 0,
+            range_discrete: false,
+            multirange_range_oid: range_oid,
         }
     }
 
@@ -2057,6 +2087,11 @@ impl SqlType {
         self.range_subtype_oid = subtype_oid;
         self.range_multitype_oid = multitype_oid;
         self.range_discrete = discrete;
+        self
+    }
+
+    pub const fn with_multirange_range_oid(mut self, range_oid: u32) -> Self {
+        self.multirange_range_oid = range_oid;
         self
     }
 
@@ -2088,6 +2123,7 @@ impl SqlType {
             range_subtype_oid: self.range_subtype_oid,
             range_multitype_oid: self.range_multitype_oid,
             range_discrete: self.range_discrete,
+            multirange_range_oid: self.multirange_range_oid,
         }
     }
 
@@ -2103,6 +2139,10 @@ impl SqlType {
                     | SqlTypeKind::TimestampRange
                     | SqlTypeKind::TimestampTzRange
             )
+    }
+
+    pub const fn is_multirange(self) -> bool {
+        !self.is_array && matches!(self.kind, SqlTypeKind::Multirange)
     }
 
     pub const fn char_len(self) -> Option<i32> {

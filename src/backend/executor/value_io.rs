@@ -10,6 +10,7 @@ use super::expr_geometry::{
     decode_path_bytes, decode_polygon_bytes, encode_path_bytes, encode_polygon_bytes,
     render_geometry_text,
 };
+use super::expr_multirange::render_multirange;
 use super::expr_range::{decode_range_bytes, encode_range_bytes, render_range_text};
 use super::node_types::*;
 use crate::backend::catalog::catalog::column_desc;
@@ -64,6 +65,7 @@ const INTERNAL_VALUE_TAG_INTERNAL_CHAR: u8 = 28;
 const INTERNAL_VALUE_TAG_BOOL: u8 = 29;
 const INTERNAL_VALUE_TAG_ARRAY: u8 = 30;
 const INTERNAL_VALUE_TAG_RECORD: u8 = 31;
+const INTERNAL_VALUE_TAG_MULTIRANGE: u8 = 32;
 const COMPOSITE_DATUM_VERSION: u8 = 1;
 
 pub(crate) fn format_record_text(record: &crate::include::nodes::datum::RecordValue) -> String {
@@ -164,6 +166,13 @@ fn decode_internal_text<'a>(bytes: &'a [u8], offset: &mut usize) -> Result<&'a [
 fn sql_type_kind_tag(kind: SqlTypeKind) -> u8 {
     match kind {
         SqlTypeKind::AnyArray => 0,
+        SqlTypeKind::AnyElement => 55,
+        SqlTypeKind::AnyRange => 56,
+        SqlTypeKind::AnyMultirange => 57,
+        SqlTypeKind::AnyCompatible => 58,
+        SqlTypeKind::AnyCompatibleArray => 59,
+        SqlTypeKind::AnyCompatibleRange => 60,
+        SqlTypeKind::AnyCompatibleMultirange => 61,
         SqlTypeKind::Record => 1,
         SqlTypeKind::Composite => 2,
         SqlTypeKind::Trigger => 54,
@@ -194,6 +203,7 @@ fn sql_type_kind_tag(kind: SqlTypeKind) -> u8 {
         SqlTypeKind::DateRange => 22,
         SqlTypeKind::TimestampRange => 23,
         SqlTypeKind::TimestampTzRange => 24,
+        SqlTypeKind::Multirange => 62,
         SqlTypeKind::Json => 25,
         SqlTypeKind::Jsonb => 26,
         SqlTypeKind::JsonPath => 27,
@@ -224,25 +234,46 @@ fn sql_type_kind_tag(kind: SqlTypeKind) -> u8 {
 }
 
 fn canonical_sql_type_identity(sql_type: SqlType) -> SqlType {
-    let Some(range_type) = range_type_ref_for_sql_type(sql_type) else {
-        return sql_type;
-    };
-    let mut canonical = range_type.sql_type.with_typmod(sql_type.typmod);
-    canonical.is_array = sql_type.is_array;
-    canonical.type_oid = if sql_type.is_array {
-        sql_type.type_oid
-    } else if sql_type.type_oid != 0 {
-        sql_type.type_oid
-    } else {
-        canonical.type_oid
-    };
-    canonical.typrelid = sql_type.typrelid;
-    canonical
+    if let Some(range_type) = range_type_ref_for_sql_type(sql_type) {
+        let mut canonical = range_type.sql_type.with_typmod(sql_type.typmod);
+        canonical.is_array = sql_type.is_array;
+        canonical.type_oid = if sql_type.is_array {
+            sql_type.type_oid
+        } else if sql_type.type_oid != 0 {
+            sql_type.type_oid
+        } else {
+            canonical.type_oid
+        };
+        canonical.typrelid = sql_type.typrelid;
+        return canonical;
+    }
+    if let Some(multirange_type) = crate::include::catalog::multirange_type_ref_for_sql_type(sql_type)
+    {
+        let mut canonical = multirange_type.sql_type.with_typmod(sql_type.typmod);
+        canonical.is_array = sql_type.is_array;
+        canonical.type_oid = if sql_type.is_array {
+            sql_type.type_oid
+        } else if sql_type.type_oid != 0 {
+            sql_type.type_oid
+        } else {
+            canonical.type_oid
+        };
+        canonical.typrelid = sql_type.typrelid;
+        return canonical;
+    }
+    sql_type
 }
 
 fn sql_type_kind_from_tag(tag: u8) -> Result<SqlTypeKind, ExecError> {
     Ok(match tag {
         0 => SqlTypeKind::AnyArray,
+        55 => SqlTypeKind::AnyElement,
+        56 => SqlTypeKind::AnyRange,
+        57 => SqlTypeKind::AnyMultirange,
+        58 => SqlTypeKind::AnyCompatible,
+        59 => SqlTypeKind::AnyCompatibleArray,
+        60 => SqlTypeKind::AnyCompatibleRange,
+        61 => SqlTypeKind::AnyCompatibleMultirange,
         1 => SqlTypeKind::Record,
         2 => SqlTypeKind::Composite,
         54 => SqlTypeKind::Trigger,
@@ -272,6 +303,7 @@ fn sql_type_kind_from_tag(tag: u8) -> Result<SqlTypeKind, ExecError> {
         22 => SqlTypeKind::DateRange,
         23 => SqlTypeKind::TimestampRange,
         24 => SqlTypeKind::TimestampTzRange,
+        62 => SqlTypeKind::Multirange,
         25 => SqlTypeKind::Json,
         26 => SqlTypeKind::Jsonb,
         27 => SqlTypeKind::JsonPath,
@@ -317,10 +349,11 @@ fn encode_sql_type_identity(sql_type: SqlType, out: &mut Vec<u8>) {
     out.extend_from_slice(&sql_type.range_subtype_oid.to_le_bytes());
     out.extend_from_slice(&sql_type.range_multitype_oid.to_le_bytes());
     out.push(u8::from(sql_type.range_discrete));
+    out.extend_from_slice(&sql_type.multirange_range_oid.to_le_bytes());
 }
 
 fn decode_sql_type_identity(bytes: &[u8], offset: &mut usize) -> Result<SqlType, ExecError> {
-    if *offset + 23 > bytes.len() {
+    if *offset + 27 > bytes.len() {
         return Err(ExecError::InvalidStorageValue {
             column: "<record>".into(),
             details: "truncated composite field type".into(),
@@ -342,6 +375,9 @@ fn decode_sql_type_identity(bytes: &[u8], offset: &mut usize) -> Result<SqlType,
     *offset += 4;
     let range_discrete = bytes[*offset] != 0;
     *offset += 1;
+    let multirange_range_oid =
+        u32::from_le_bytes(bytes[*offset..*offset + 4].try_into().unwrap());
+    *offset += 4;
     Ok(SqlType {
         kind,
         typmod,
@@ -351,6 +387,7 @@ fn decode_sql_type_identity(bytes: &[u8], offset: &mut usize) -> Result<SqlType,
         range_subtype_oid,
         range_multitype_oid,
         range_discrete,
+        multirange_range_oid,
     })
 }
 
@@ -661,6 +698,11 @@ fn encode_internal_value(value: &Value) -> Result<Vec<u8>, ExecError> {
                 &mut out,
             );
         }
+        Value::Multirange(v) => {
+            out.push(INTERNAL_VALUE_TAG_MULTIRANGE);
+            encode_sql_type_identity(v.multirange_type.sql_type, &mut out);
+            encode_internal_text(render_multirange(&v).as_bytes(), &mut out);
+        }
         Value::Float64(v) => {
             out.push(INTERNAL_VALUE_TAG_FLOAT64);
             out.extend_from_slice(&v.to_le_bytes());
@@ -956,6 +998,13 @@ fn decode_internal_value(bytes: &[u8]) -> Result<Value, ExecError> {
                 std::str::from_utf8(decode_internal_text(rest, &mut offset)?).unwrap_or_default();
             crate::backend::executor::expr_range::parse_range_text(text, sql_type)?
         }
+        INTERNAL_VALUE_TAG_MULTIRANGE => {
+            let mut offset = 0usize;
+            let sql_type = decode_sql_type_identity(rest, &mut offset)?;
+            let text =
+                std::str::from_utf8(decode_internal_text(rest, &mut offset)?).unwrap_or_default();
+            crate::backend::executor::parse_multirange_text(text, sql_type)?
+        }
         INTERNAL_VALUE_TAG_FLOAT64 => {
             Value::Float64(f64::from_le_bytes(rest.try_into().map_err(|_| {
                 ExecError::InvalidStorageValue {
@@ -1101,6 +1150,11 @@ pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<TupleVa
         }
         (ScalarType::Range(_), Value::Range(range)) => {
             Ok(TupleValue::Bytes(encode_range_bytes(&range)?))
+        }
+        (ScalarType::Multirange(_), Value::Multirange(multirange)) => {
+            Ok(TupleValue::Bytes(crate::backend::executor::encode_multirange_bytes(
+                &multirange,
+            )?))
         }
         (ScalarType::BitString, Value::Bit(v)) => {
             let mut bytes = Vec::with_capacity(4 + v.bytes.len());
@@ -1333,6 +1387,7 @@ pub(crate) fn coerce_assignment_value(value: &Value, target: SqlType) -> Result<
         Value::TextRef(_, _) => cast_text_value(value.as_text().unwrap(), target, false),
         Value::InternalChar(byte) => cast_value(Value::InternalChar(*byte), target),
         Value::Range(range) => Ok(Value::Range(range.clone())),
+        Value::Multirange(multirange) => Ok(Value::Multirange(multirange.clone())),
         Value::Point(_)
         | Value::Lseg(_)
         | Value::Path(_)
@@ -1800,6 +1855,18 @@ pub(crate) fn decode_value_with_toast(
             } else {
                 decode_array_bytes(column.sql_type.element_type(), bytes)
             }
+        }
+        ScalarType::Multirange(multirange_type) => {
+            if column.storage.attlen != -1 && column.storage.attlen != -2 {
+                return Err(ExecError::UnsupportedStorageType {
+                    column: column.name.clone(),
+                    ty: column.ty.clone(),
+                    attlen: column.storage.attlen,
+                });
+            }
+            Ok(Value::Multirange(
+                crate::backend::executor::decode_multirange_bytes(multirange_type, bytes)?,
+            ))
         }
         ScalarType::Range(range_type) => {
             if column.storage.attlen != -1 && column.storage.attlen != -2 {
