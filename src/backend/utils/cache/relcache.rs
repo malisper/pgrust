@@ -151,6 +151,9 @@ impl RelCache {
                         desc.not_null_constraint_oid = Some(constraint.oid);
                         desc.not_null_constraint_name = Some(constraint.conname.clone());
                         desc.not_null_constraint_validated = constraint.convalidated;
+                        desc.not_null_constraint_is_local = constraint.conislocal;
+                        desc.not_null_constraint_inhcount = constraint.coninhcount;
+                        desc.not_null_constraint_no_inherit = constraint.connoinherit;
                         desc.not_null_primary_key_owned =
                             pk_owned_not_null.contains(&constraint.oid);
                     }

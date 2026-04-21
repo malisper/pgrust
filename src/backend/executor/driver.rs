@@ -188,7 +188,8 @@ fn execute_statement_with_source(
         | Statement::AlterTableRenameConstraint(_)
         | Statement::AlterTableSetNotNull(_)
         | Statement::AlterTableDropNotNull(_)
-        | Statement::AlterTableValidateConstraint(_) => {
+        | Statement::AlterTableValidateConstraint(_)
+        | Statement::AlterTableNoInherit(_) => {
             Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "ALTER TABLE constraint operations handled by database/session layer",
                 actual: "ALTER TABLE constraint operation".into(),

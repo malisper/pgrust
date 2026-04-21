@@ -3423,6 +3423,9 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::alter_table_validate_constraint_stmt => Ok(Statement::AlterTableValidateConstraint(
             build_alter_table_validate_constraint(inner)?,
         )),
+        Rule::alter_table_no_inherit_stmt => Ok(Statement::AlterTableNoInherit(
+            build_alter_table_no_inherit(inner)?,
+        )),
         Rule::comment_on_role_stmt => Ok(Statement::CommentOnRole(build_comment_on_role(inner)?)),
         Rule::comment_on_table_stmt => {
             Ok(Statement::CommentOnTable(build_comment_on_table(inner)?))
@@ -7412,6 +7415,34 @@ fn build_alter_table_validate_constraint(
         only,
         table_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
         constraint_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
+fn build_alter_table_no_inherit(
+    pair: Pair<'_, Rule>,
+) -> Result<AlterTableNoInheritStatement, ParseError> {
+    let mut if_exists = false;
+    let mut only = false;
+    let mut parts = Vec::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::alter_table_target => {
+                let (parsed_if_exists, parsed_only, parsed_table_name) =
+                    build_alter_table_target(part)?;
+                if_exists = parsed_if_exists;
+                only = parsed_only;
+                parts.push(parsed_table_name);
+            }
+            Rule::identifier => parts.push(build_identifier(part)),
+            _ => {}
+        }
+    }
+    let mut parts = parts.into_iter();
+    Ok(AlterTableNoInheritStatement {
+        if_exists,
+        only,
+        table_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
+        parent_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
     })
 }
 

@@ -260,6 +260,7 @@ pub enum Statement {
     AlterTableSetNotNull(AlterTableSetNotNullStatement),
     AlterTableDropNotNull(AlterTableDropNotNullStatement),
     AlterTableValidateConstraint(AlterTableValidateConstraintStatement),
+    AlterTableNoInherit(AlterTableNoInheritStatement),
     CommentOnTable(CommentOnTableStatement),
     CommentOnRule(CommentOnRuleStatement),
     CommentOnDomain(CommentOnDomainStatement),
@@ -1331,6 +1332,14 @@ pub struct AlterTableValidateConstraintStatement {
     pub only: bool,
     pub table_name: String,
     pub constraint_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableNoInheritStatement {
+    pub if_exists: bool,
+    pub only: bool,
+    pub table_name: String,
+    pub parent_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
