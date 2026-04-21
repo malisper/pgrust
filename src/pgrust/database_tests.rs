@@ -5806,6 +5806,23 @@ fn comment_on_missing_table_uses_table_does_not_exist_error() {
 }
 
 #[test]
+fn regtype_literal_cast_resolves_type_name() {
+    let base = temp_dir("regtype_literal_cast");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table attmp_array (id int4)").unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select typname from pg_type where oid = 'attmp_array[]'::regtype"
+        ),
+        vec![vec![Value::Text("_attmp_array".into())]]
+    );
+}
+
+#[test]
 fn alter_table_add_column_reads_old_rows_with_null_or_default() {
     let base = temp_dir("alter_table_add_column_reads_old_rows");
     let db = Database::open(&base, 16).unwrap();

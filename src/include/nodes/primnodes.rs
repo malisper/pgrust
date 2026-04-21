@@ -306,6 +306,7 @@ pub enum BuiltinScalarFunction {
     PgStatGetXactFunctionCalls,
     PgStatGetXactFunctionTotalTime,
     PgStatGetXactFunctionSelfTime,
+    RegTypeToText,
     RegRoleToText,
     CashLarger,
     CashSmaller,

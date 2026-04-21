@@ -431,6 +431,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
             SqlTypeKind::Void => unreachable!("void arrays are unsupported"),
             SqlTypeKind::FdwHandler => unreachable!("fdw_handler arrays are unsupported"),
             SqlTypeKind::Oid => 1028,
+            SqlTypeKind::RegType => unreachable!("regtype arrays are unsupported"),
             SqlTypeKind::RegRole => unreachable!("regrole arrays are unsupported"),
             SqlTypeKind::RegProcedure => {
                 crate::include::catalog::REGPROCEDURE_ARRAY_TYPE_OID as i32
@@ -528,6 +529,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
         SqlTypeKind::Int8 => (20, 8, -1),
         SqlTypeKind::Void => (crate::include::catalog::VOID_TYPE_OID as i32, 4, -1),
         SqlTypeKind::Oid => (26, 4, -1),
+        SqlTypeKind::RegType => (crate::include::catalog::REGTYPE_TYPE_OID as i32, 4, -1),
         SqlTypeKind::RegRole => (crate::include::catalog::REGROLE_TYPE_OID as i32, 4, -1),
         SqlTypeKind::RegProcedure => (crate::include::catalog::REGPROCEDURE_TYPE_OID as i32, 4, -1),
         SqlTypeKind::Tid => (27, 6, -1),
@@ -829,6 +831,7 @@ fn encode_binary_data_row_value(value: &Value, sql_type: SqlType) -> Result<Vec<
             if matches!(
                 sql_type.kind,
                 SqlTypeKind::Oid
+                    | SqlTypeKind::RegType
                     | SqlTypeKind::RegRole
                     | SqlTypeKind::RegProcedure
                     | SqlTypeKind::Xid
