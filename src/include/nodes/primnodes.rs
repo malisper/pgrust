@@ -731,6 +731,7 @@ pub struct Aggref {
 pub struct WindowSpec {
     pub partition_by: Vec<Expr>,
     pub order_by: Vec<OrderByEntry>,
+    pub frame: WindowFrame,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -752,6 +753,32 @@ pub struct WindowFuncExpr {
 pub struct WindowClause {
     pub spec: WindowSpec,
     pub functions: Vec<WindowFuncExpr>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WindowFrameBound {
+    UnboundedPreceding,
+    OffsetPreceding(Expr),
+    CurrentRow,
+    OffsetFollowing(Expr),
+    UnboundedFollowing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowFrame {
+    pub mode: crate::include::nodes::parsenodes::WindowFrameMode,
+    pub start_bound: WindowFrameBound,
+    pub end_bound: WindowFrameBound,
+}
+
+impl WindowFrame {
+    pub fn default_range() -> Self {
+        Self {
+            mode: crate::include::nodes::parsenodes::WindowFrameMode::Range,
+            start_bound: WindowFrameBound::UnboundedPreceding,
+            end_bound: WindowFrameBound::CurrentRow,
+        }
+    }
 }
 
 pub type AttrNumber = i32;

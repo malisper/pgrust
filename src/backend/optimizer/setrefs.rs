@@ -3114,6 +3114,35 @@ fn lower_window_clause_for_input(
                     ..item
                 })
                 .collect(),
+            frame: crate::include::nodes::primnodes::WindowFrame {
+                mode: clause.spec.frame.mode,
+                start_bound: match clause.spec.frame.start_bound {
+                    crate::include::nodes::primnodes::WindowFrameBound::OffsetPreceding(expr) => {
+                        crate::include::nodes::primnodes::WindowFrameBound::OffsetPreceding(
+                            lower_expr_for_input(ctx, expr),
+                        )
+                    }
+                    crate::include::nodes::primnodes::WindowFrameBound::OffsetFollowing(expr) => {
+                        crate::include::nodes::primnodes::WindowFrameBound::OffsetFollowing(
+                            lower_expr_for_input(ctx, expr),
+                        )
+                    }
+                    other => other,
+                },
+                end_bound: match clause.spec.frame.end_bound {
+                    crate::include::nodes::primnodes::WindowFrameBound::OffsetPreceding(expr) => {
+                        crate::include::nodes::primnodes::WindowFrameBound::OffsetPreceding(
+                            lower_expr_for_input(ctx, expr),
+                        )
+                    }
+                    crate::include::nodes::primnodes::WindowFrameBound::OffsetFollowing(expr) => {
+                        crate::include::nodes::primnodes::WindowFrameBound::OffsetFollowing(
+                            lower_expr_for_input(ctx, expr),
+                        )
+                    }
+                    other => other,
+                },
+            },
         },
         functions: clause
             .functions

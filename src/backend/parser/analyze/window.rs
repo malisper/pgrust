@@ -1,5 +1,8 @@
 use super::*;
-use crate::include::nodes::primnodes::{WindowClause, WindowFuncExpr, WindowFuncKind, WindowSpec};
+use crate::include::nodes::parsenodes::{RawWindowFrame, RawWindowFrameBound, WindowFrameMode};
+use crate::include::nodes::primnodes::{
+    WindowClause, WindowFrame, WindowFrameBound, WindowFuncExpr, WindowFuncKind, WindowSpec,
+};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -79,7 +82,11 @@ pub(super) fn register_named_window_specs(
 ) -> Result<(), ParseError> {
     let mut state = state.borrow_mut();
     for clause in clauses {
-        if state.named_specs.iter().any(|existing| existing.name == clause.name) {
+        if state
+            .named_specs
+            .iter()
+            .any(|existing| existing.name == clause.name)
+        {
             return Err(ParseError::WindowingError(format!(
                 "window \"{}\" is already defined",
                 clause.name
@@ -249,7 +256,11 @@ pub(super) fn bind_window_spec(
     raw_spec: &RawWindowSpec,
     mut bind_expr: impl FnMut(&SqlExpr) -> Result<Expr, ParseError>,
 ) -> Result<WindowSpec, ParseError> {
-    if let Some(name) = raw_spec.name.as_ref() {
+    let is_bare_named_ref = raw_spec.name.is_some()
+        && raw_spec.partition_by.is_empty()
+        && raw_spec.order_by.is_empty()
+        && raw_spec.frame.is_none();
+    let inherited = if let Some(name) = raw_spec.name.as_ref() {
         let state = current_window_state().ok_or_else(window_not_allowed_error)?;
         let named = state
             .borrow()
@@ -257,11 +268,33 @@ pub(super) fn bind_window_spec(
             .iter()
             .find(|clause| clause.name == *name)
             .map(|clause| clause.spec.clone())
-            .ok_or_else(|| ParseError::WindowingError(format!("window \"{name}\" does not exist")))?;
-        return bind_window_spec(&named, bind_expr);
+            .ok_or_else(|| {
+                ParseError::WindowingError(format!("window \"{name}\" does not exist"))
+            })?;
+        Some(named)
+    } else {
+        None
+    };
+
+    if is_bare_named_ref {
+        return bind_window_spec(
+            inherited.as_ref().expect("resolved named window"),
+            bind_expr,
+        );
     }
-    let partition_by = raw_spec
-        .partition_by
+
+    if inherited.is_some() && !raw_spec.partition_by.is_empty() {
+        return Err(ParseError::WindowingError(format!(
+            "cannot override PARTITION BY clause of window \"{}\"",
+            raw_spec.name.as_deref().unwrap_or_default()
+        )));
+    }
+
+    let partition_source = inherited
+        .as_ref()
+        .map(|spec| spec.partition_by.as_slice())
+        .unwrap_or(raw_spec.partition_by.as_slice());
+    let partition_by = partition_source
         .iter()
         .map(|expr| {
             if expr_contains_window(expr) {
@@ -270,8 +303,28 @@ pub(super) fn bind_window_spec(
             bind_expr(expr)
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let order_by = raw_spec
-        .order_by
+
+    if inherited.is_some()
+        && !raw_spec.order_by.is_empty()
+        && inherited
+            .as_ref()
+            .is_some_and(|spec| !spec.order_by.is_empty())
+    {
+        return Err(ParseError::WindowingError(format!(
+            "cannot override ORDER BY clause of window \"{}\"",
+            raw_spec.name.as_deref().unwrap_or_default()
+        )));
+    }
+
+    let order_source = if raw_spec.order_by.is_empty() {
+        inherited
+            .as_ref()
+            .map(|spec| spec.order_by.as_slice())
+            .unwrap_or(&[])
+    } else {
+        raw_spec.order_by.as_slice()
+    };
+    let order_by = order_source
         .iter()
         .map(|item| {
             if expr_contains_window(&item.expr) {
@@ -285,10 +338,121 @@ pub(super) fn bind_window_spec(
             })
         })
         .collect::<Result<Vec<_>, ParseError>>()?;
+
+    if inherited
+        .as_ref()
+        .and_then(|spec| spec.frame.as_ref())
+        .is_some()
+    {
+        return Err(ParseError::WindowingError(format!(
+            "cannot copy window \"{}\" because it has a frame clause",
+            raw_spec.name.as_deref().unwrap_or_default()
+        )));
+    }
+
+    let frame = bind_window_frame(raw_spec.frame.as_deref(), &order_by, &mut bind_expr)?;
     Ok(WindowSpec {
         partition_by,
         order_by,
+        frame,
     })
+}
+
+fn bind_window_frame_bound(
+    raw_bound: &RawWindowFrameBound,
+    bind_expr: &mut impl FnMut(&SqlExpr) -> Result<Expr, ParseError>,
+) -> Result<WindowFrameBound, ParseError> {
+    Ok(match raw_bound {
+        RawWindowFrameBound::UnboundedPreceding => WindowFrameBound::UnboundedPreceding,
+        RawWindowFrameBound::CurrentRow => WindowFrameBound::CurrentRow,
+        RawWindowFrameBound::UnboundedFollowing => WindowFrameBound::UnboundedFollowing,
+        RawWindowFrameBound::OffsetPreceding(expr) => {
+            if expr_contains_window(expr) {
+                return Err(nested_window_error());
+            }
+            WindowFrameBound::OffsetPreceding(with_windows_disallowed(|| bind_expr(expr))?)
+        }
+        RawWindowFrameBound::OffsetFollowing(expr) => {
+            if expr_contains_window(expr) {
+                return Err(nested_window_error());
+            }
+            WindowFrameBound::OffsetFollowing(with_windows_disallowed(|| bind_expr(expr))?)
+        }
+    })
+}
+
+fn bind_window_frame(
+    raw_frame: Option<&RawWindowFrame>,
+    order_by: &[OrderByEntry],
+    bind_expr: &mut impl FnMut(&SqlExpr) -> Result<Expr, ParseError>,
+) -> Result<WindowFrame, ParseError> {
+    let Some(raw_frame) = raw_frame else {
+        return Ok(WindowFrame {
+            mode: WindowFrameMode::Range,
+            start_bound: WindowFrameBound::UnboundedPreceding,
+            end_bound: WindowFrameBound::CurrentRow,
+        });
+    };
+
+    if raw_frame.mode == WindowFrameMode::Groups && order_by.is_empty() {
+        return Err(ParseError::WindowingError(
+            "GROUPS mode requires an ORDER BY clause".into(),
+        ));
+    }
+    if raw_frame.mode == WindowFrameMode::Range
+        && (matches!(
+            raw_frame.start_bound,
+            RawWindowFrameBound::OffsetPreceding(_) | RawWindowFrameBound::OffsetFollowing(_)
+        ) || matches!(
+            raw_frame.end_bound,
+            RawWindowFrameBound::OffsetPreceding(_) | RawWindowFrameBound::OffsetFollowing(_)
+        ))
+        && order_by.len() != 1
+    {
+        return Err(ParseError::WindowingError(
+            "RANGE with offset PRECEDING/FOLLOWING requires exactly one ORDER BY column".into(),
+        ));
+    }
+
+    let frame = WindowFrame {
+        mode: raw_frame.mode,
+        start_bound: bind_window_frame_bound(&raw_frame.start_bound, bind_expr)?,
+        end_bound: bind_window_frame_bound(&raw_frame.end_bound, bind_expr)?,
+    };
+    validate_window_frame(&frame)?;
+    Ok(frame)
+}
+
+fn validate_window_frame(frame: &WindowFrame) -> Result<(), ParseError> {
+    if matches!(frame.start_bound, WindowFrameBound::UnboundedFollowing) {
+        return Err(ParseError::WindowingError(
+            "frame start cannot be UNBOUNDED FOLLOWING".into(),
+        ));
+    }
+    if matches!(frame.end_bound, WindowFrameBound::UnboundedPreceding) {
+        return Err(ParseError::WindowingError(
+            "frame end cannot be UNBOUNDED PRECEDING".into(),
+        ));
+    }
+    if matches!(
+        (&frame.start_bound, &frame.end_bound),
+        (
+            WindowFrameBound::CurrentRow,
+            WindowFrameBound::OffsetPreceding(_)
+        ) | (
+            WindowFrameBound::OffsetFollowing(_),
+            WindowFrameBound::CurrentRow
+        ) | (
+            WindowFrameBound::OffsetFollowing(_),
+            WindowFrameBound::OffsetPreceding(_)
+        ) | (WindowFrameBound::UnboundedFollowing, _)
+            | (_, WindowFrameBound::UnboundedPreceding)
+    ) {
+        return Err(ParseError::WindowingError(
+            "frame starting from following row cannot have preceding rows".into(),
+        ));
+    }
+    Ok(())
 }
 
 pub(super) fn register_window_expr(

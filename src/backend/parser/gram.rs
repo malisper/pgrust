@@ -167,10 +167,12 @@ fn try_parse_policy_statement(sql: &str) -> Result<Option<Statement>, ParseError
     let trimmed = sql.trim().trim_end_matches(';').trim();
     let lowered = trimmed.to_ascii_lowercase();
     if lowered.starts_with("create policy ") {
-        return build_create_policy_statement(trimmed).map(|stmt| Some(Statement::CreatePolicy(stmt)));
+        return build_create_policy_statement(trimmed)
+            .map(|stmt| Some(Statement::CreatePolicy(stmt)));
     }
     if lowered.starts_with("alter policy ") {
-        return build_alter_policy_statement(trimmed).map(|stmt| Some(Statement::AlterPolicy(stmt)));
+        return build_alter_policy_statement(trimmed)
+            .map(|stmt| Some(Statement::AlterPolicy(stmt)));
     }
     if lowered.starts_with("drop policy ") {
         return build_drop_policy_statement(trimmed).map(|stmt| Some(Statement::DropPolicy(stmt)));
@@ -3411,9 +3413,9 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::alter_table_set_row_security_stmt => Ok(Statement::AlterTableSetRowSecurity(
             build_alter_table_set_row_security(inner)?,
         )),
-        Rule::alter_policy_stmt => Ok(Statement::AlterPolicy(
-            build_alter_policy_statement(inner.as_str())?,
-        )),
+        Rule::alter_policy_stmt => Ok(Statement::AlterPolicy(build_alter_policy_statement(
+            inner.as_str(),
+        )?)),
         Rule::alter_table_set_not_null_stmt => Ok(Statement::AlterTableSetNotNull(
             build_alter_table_set_not_null(inner)?,
         )),
@@ -3429,9 +3431,9 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         }
         Rule::comment_on_rule_stmt => Ok(Statement::CommentOnRule(build_comment_on_rule(inner)?)),
         Rule::create_schema_stmt => Ok(Statement::CreateSchema(build_create_schema(inner)?)),
-        Rule::create_policy_stmt => Ok(Statement::CreatePolicy(
-            build_create_policy_statement(inner.as_str())?,
-        )),
+        Rule::create_policy_stmt => Ok(Statement::CreatePolicy(build_create_policy_statement(
+            inner.as_str(),
+        )?)),
         Rule::create_table_stmt => build_create_table(inner),
         Rule::create_view_stmt => Ok(Statement::CreateView(build_create_view(inner)?)),
         Rule::create_rule_stmt => Ok(Statement::CreateRule(build_create_rule(inner)?)),
@@ -3441,9 +3443,9 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::drop_index_stmt => Ok(Statement::DropIndex(build_drop_index(inner)?)),
         Rule::drop_view_stmt => Ok(Statement::DropView(build_drop_view(inner)?)),
         Rule::drop_rule_stmt => Ok(Statement::DropRule(build_drop_rule(inner)?)),
-        Rule::drop_policy_stmt => Ok(Statement::DropPolicy(
-            build_drop_policy_statement(inner.as_str())?,
-        )),
+        Rule::drop_policy_stmt => Ok(Statement::DropPolicy(build_drop_policy_statement(
+            inner.as_str(),
+        )?)),
         Rule::drop_schema_stmt => Ok(Statement::DropSchema(build_drop_schema(inner)?)),
         Rule::reassign_owned_stmt => Ok(Statement::ReassignOwned(build_reassign_owned(inner)?)),
         Rule::truncate_table_stmt => Ok(Statement::TruncateTable(build_truncate_table(inner)?)),
@@ -3756,7 +3758,12 @@ fn build_alter_group(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         match part.as_rule() {
             Rule::identifier if role_name.is_none() => role_name = Some(build_identifier(part)),
             Rule::alter_group_action => {
-                is_add = Some(part.as_str().trim_start().to_ascii_lowercase().starts_with("add"));
+                is_add = Some(
+                    part.as_str()
+                        .trim_start()
+                        .to_ascii_lowercase()
+                        .starts_with("add"),
+                );
                 for inner in part.into_inner() {
                     match inner.as_rule() {
                         Rule::ident_list => {
@@ -3777,25 +3784,29 @@ fn build_alter_group(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         return Err(ParseError::UnexpectedEof);
     }
     if is_add {
-        Ok(Statement::GrantRoleMembership(GrantRoleMembershipStatement {
-            role_names: vec![role_name],
-            grantee_names,
-            admin_option: false,
-            inherit_option: None,
-            set_option: None,
-            granted_by: None,
-        }))
+        Ok(Statement::GrantRoleMembership(
+            GrantRoleMembershipStatement {
+                role_names: vec![role_name],
+                grantee_names,
+                admin_option: false,
+                inherit_option: None,
+                set_option: None,
+                granted_by: None,
+            },
+        ))
     } else {
-        Ok(Statement::RevokeRoleMembership(RevokeRoleMembershipStatement {
-            role_names: vec![role_name],
-            grantee_names,
-            revoke_membership: true,
-            admin_option: false,
-            inherit_option: false,
-            set_option: false,
-            cascade: false,
-            granted_by: None,
-        }))
+        Ok(Statement::RevokeRoleMembership(
+            RevokeRoleMembershipStatement {
+                role_names: vec![role_name],
+                grantee_names,
+                revoke_membership: true,
+                admin_option: false,
+                inherit_option: false,
+                set_option: false,
+                cascade: false,
+                granted_by: None,
+            },
+        ))
     }
 }
 
@@ -8638,6 +8649,88 @@ fn build_agg_filter_clause(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> 
     build_expr(expr)
 }
 
+fn build_window_frame_bound(pair: Pair<'_, Rule>) -> Result<RawWindowFrameBound, ParseError> {
+    let pair_text = pair.as_str().to_string();
+    let mut expr = None;
+    let mut saw_unbounded = false;
+    let mut saw_current = false;
+    let mut saw_preceding = false;
+    let mut saw_following = false;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::expr => expr = Some(build_expr(part)?),
+            Rule::kw_unbounded => saw_unbounded = true,
+            Rule::kw_current => saw_current = true,
+            Rule::kw_preceding => saw_preceding = true,
+            Rule::kw_following => saw_following = true,
+            _ => {}
+        }
+    }
+    match (
+        saw_unbounded,
+        saw_current,
+        saw_preceding,
+        saw_following,
+        expr,
+    ) {
+        (true, false, true, false, None) => Ok(RawWindowFrameBound::UnboundedPreceding),
+        (true, false, false, true, None) => Ok(RawWindowFrameBound::UnboundedFollowing),
+        (false, true, false, false, None) => Ok(RawWindowFrameBound::CurrentRow),
+        (false, false, true, false, Some(expr)) => {
+            Ok(RawWindowFrameBound::OffsetPreceding(Box::new(expr)))
+        }
+        (false, false, false, true, Some(expr)) => {
+            Ok(RawWindowFrameBound::OffsetFollowing(Box::new(expr)))
+        }
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "window frame bound",
+            actual: pair_text,
+        }),
+    }
+}
+
+fn build_window_frame_clause(pair: Pair<'_, Rule>) -> Result<RawWindowFrame, ParseError> {
+    let pair_text = pair.as_str().to_string();
+    let mut mode = None;
+    let mut bounds = Vec::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::kw_rows => mode = Some(WindowFrameMode::Rows),
+            Rule::kw_range => mode = Some(WindowFrameMode::Range),
+            Rule::kw_groups => mode = Some(WindowFrameMode::Groups),
+            Rule::window_frame_bound => bounds.push(build_window_frame_bound(part)?),
+            Rule::window_frame_between => {
+                for inner in part.into_inner() {
+                    if inner.as_rule() == Rule::window_frame_bound {
+                        bounds.push(build_window_frame_bound(inner)?);
+                    }
+                }
+            }
+            Rule::window_frame_exclusion => {
+                return Err(ParseError::FeatureNotSupported(
+                    "window frame exclusion".into(),
+                ));
+            }
+            _ => {}
+        }
+    }
+    let (start_bound, end_bound) = match bounds.as_slice() {
+        [start] => (start.clone(), RawWindowFrameBound::CurrentRow),
+        [start, end] => (start.clone(), end.clone()),
+        _ => {
+            return Err(ParseError::UnexpectedToken {
+                expected: "window frame clause",
+                actual: pair_text,
+            });
+        }
+    };
+    Ok(RawWindowFrame {
+        mode: mode.ok_or(ParseError::UnexpectedEof)?,
+        start_bound,
+        end_bound,
+    })
+}
+
 fn build_over_clause(pair: Pair<'_, Rule>) -> Result<RawWindowSpec, ParseError> {
     let mut name = None;
     let mut spec = None;
@@ -8645,11 +8738,6 @@ fn build_over_clause(pair: Pair<'_, Rule>) -> Result<RawWindowSpec, ParseError> 
         match part.as_rule() {
             Rule::identifier => name = Some(build_identifier(part)),
             Rule::raw_window_spec => spec = Some(build_raw_window_spec(part)?),
-            Rule::unsupported_window_frame => {
-                return Err(ParseError::FeatureNotSupported(
-                    "window frame clauses".into(),
-                ));
-            }
             _ => {}
         }
     }
@@ -8658,12 +8746,14 @@ fn build_over_clause(pair: Pair<'_, Rule>) -> Result<RawWindowSpec, ParseError> 
             name: Some(name),
             partition_by: Vec::new(),
             order_by: Vec::new(),
+            frame: None,
         });
     }
     Ok(spec.unwrap_or(RawWindowSpec {
         name: None,
         partition_by: Vec::new(),
         order_by: Vec::new(),
+        frame: None,
     }))
 }
 
@@ -8681,11 +8771,6 @@ fn build_window_definition(pair: Pair<'_, Rule>) -> Result<RawWindowClause, Pars
         match part.as_rule() {
             Rule::identifier => name = Some(build_identifier(part)),
             Rule::raw_window_spec => spec = Some(build_raw_window_spec(part)?),
-            Rule::unsupported_window_frame => {
-                return Err(ParseError::FeatureNotSupported(
-                    "window frame clauses".into(),
-                ));
-            }
             _ => {}
         }
     }
@@ -8695,15 +8780,19 @@ fn build_window_definition(pair: Pair<'_, Rule>) -> Result<RawWindowClause, Pars
             name: None,
             partition_by: Vec::new(),
             order_by: Vec::new(),
+            frame: None,
         }),
     })
 }
 
 fn build_raw_window_spec(pair: Pair<'_, Rule>) -> Result<RawWindowSpec, ParseError> {
+    let mut name = None;
     let mut partition_by = Vec::new();
     let mut order_by = Vec::new();
+    let mut frame = None;
     for part in pair.into_inner() {
         match part.as_rule() {
+            Rule::identifier => name = Some(build_identifier(part)),
             Rule::window_partition_by_clause => {
                 partition_by = part
                     .into_inner()
@@ -8718,13 +8807,15 @@ fn build_raw_window_spec(pair: Pair<'_, Rule>) -> Result<RawWindowSpec, ParseErr
                     .map(build_order_by_item)
                     .collect::<Result<Vec<_>, _>>()?;
             }
+            Rule::window_frame_clause => frame = Some(Box::new(build_window_frame_clause(part)?)),
             _ => {}
         }
     }
     Ok(RawWindowSpec {
-        name: None,
+        name,
         partition_by,
         order_by,
+        frame,
     })
 }
 

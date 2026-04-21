@@ -9755,11 +9755,25 @@ fn legacy_executor_rejects_drop_table_cascade() {
     let base = temp_dir("legacy_drop_table_cascade_rejected");
     let txns = TransactionManager::new_durable(&base).unwrap();
 
-    run_sql(&base, &txns, INVALID_TRANSACTION_ID, "create table items (id int4)").unwrap();
+    run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "create table items (id int4)",
+    )
+    .unwrap();
 
-    match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "drop table items cascade") {
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "drop table items cascade",
+    ) {
         Err(ExecError::Parse(ParseError::UnexpectedToken { expected, actual })) => {
-            assert_eq!(expected, "DROP TABLE CASCADE handled by database/session layer");
+            assert_eq!(
+                expected,
+                "DROP TABLE CASCADE handled by database/session layer"
+            );
             assert_eq!(actual, "DROP TABLE ... CASCADE");
         }
         other => panic!("expected DROP TABLE CASCADE rejection, got {other:?}"),
@@ -10347,6 +10361,148 @@ fn window_value_functions_follow_default_frame_semantics() {
                         Value::Int32(4),
                         Value::Int32(2),
                         Value::Null,
+                    ],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn window_rows_range_and_groups_frames_are_respected() {
+    let base = temp_dir("window_explicit_frames");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let xid = txns.begin();
+    run_sql(
+        &base,
+        &txns,
+        xid,
+        "insert into people (id, name, note) values
+            (1, 'alice', 'x'),
+            (2, 'bob', 'x'),
+            (3, 'carol', 'x'),
+            (4, 'dave', 'y')",
+    )
+    .unwrap();
+    txns.commit(xid).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select id,
+                sum(id) over (order by note, id rows between 1 preceding and 1 following),
+                sum(id) over (order by note range between current row and unbounded following),
+                sum(id) over (order by note groups between current row and 1 following),
+                first_value(id) over (order by note groups between 1 preceding and current row),
+                last_value(id) over (order by note range between current row and unbounded following)
+         from people
+         order by id",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![
+                        Value::Int32(1),
+                        Value::Int64(3),
+                        Value::Int64(10),
+                        Value::Int64(10),
+                        Value::Int32(1),
+                        Value::Int32(4),
+                    ],
+                    vec![
+                        Value::Int32(2),
+                        Value::Int64(6),
+                        Value::Int64(9),
+                        Value::Int64(10),
+                        Value::Int32(1),
+                        Value::Int32(4),
+                    ],
+                    vec![
+                        Value::Int32(3),
+                        Value::Int64(9),
+                        Value::Int64(7),
+                        Value::Int64(10),
+                        Value::Int32(1),
+                        Value::Int32(4),
+                    ],
+                    vec![
+                        Value::Int32(4),
+                        Value::Int64(7),
+                        Value::Int64(4),
+                        Value::Int64(4),
+                        Value::Int32(1),
+                        Value::Int32(4),
+                    ],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn window_range_offset_frame_supports_numeric_order_keys() {
+    let base = temp_dir("window_range_offset_frame");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let xid = txns.begin();
+    run_sql(
+        &base,
+        &txns,
+        xid,
+        "insert into people (id, name, note) values
+            (1, 'alice', 'x'),
+            (3, 'bob', 'x'),
+            (4, 'carol', 'x'),
+            (8, 'dave', 'x')",
+    )
+    .unwrap();
+    txns.commit(xid).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select id,
+                sum(id) over (order by id range between 2 preceding and 2 following),
+                first_value(id) over (order by id range between 2 preceding and 2 following),
+                last_value(id) over (order by id range between 2 preceding and 2 following)
+         from people
+         order by id",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![
+                        Value::Int32(1),
+                        Value::Int64(4),
+                        Value::Int32(1),
+                        Value::Int32(3)
+                    ],
+                    vec![
+                        Value::Int32(3),
+                        Value::Int64(8),
+                        Value::Int32(1),
+                        Value::Int32(4)
+                    ],
+                    vec![
+                        Value::Int32(4),
+                        Value::Int64(7),
+                        Value::Int32(3),
+                        Value::Int32(4)
+                    ],
+                    vec![
+                        Value::Int32(8),
+                        Value::Int64(8),
+                        Value::Int32(8),
+                        Value::Int32(8)
                     ],
                 ]
             );
