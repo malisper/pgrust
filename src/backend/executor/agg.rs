@@ -173,10 +173,10 @@ impl AccumState {
                 Ok(())
             },
             (AggFunc::AnyValue, _, _) => |state, values| {
-                if let AccumState::AnyValue { value } = state {
-                    let input = values.first().unwrap_or(&Value::Null);
-                    if value.is_none() && !matches!(input, Value::Null) {
-                        *value = Some(input.to_owned_value());
+                if let AccumState::AnyValue { value: current } = state {
+                    let value = values.first().unwrap_or(&Value::Null);
+                    if current.is_none() && !matches!(value, Value::Null) {
+                        *current = Some(value.to_owned_value());
                     }
                 }
                 Ok(())

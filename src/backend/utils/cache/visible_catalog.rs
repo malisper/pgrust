@@ -96,6 +96,13 @@ impl VisibleCatalog {
             .map(|catcache| catcache.authid_rows())
             .unwrap_or_default()
     }
+
+    pub fn proc_rows(&self) -> Vec<PgProcRow> {
+        self.catcache
+            .as_ref()
+            .map(|catcache| catcache.proc_rows())
+            .unwrap_or_else(crate::include::catalog::bootstrap_pg_proc_rows)
+    }
 }
 
 impl CatalogLookup for VisibleCatalog {

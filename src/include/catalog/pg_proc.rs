@@ -214,6 +214,30 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'i',
         ),
         proc_row(
+            6406,
+            "postgresql_fdw_validator",
+            BOOL_TYPE_OID,
+            &oid_argtypes(&[TEXT_ARRAY_TYPE_OID, OID_TYPE_OID]),
+            "postgresql_fdw_validator",
+            2,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            6405,
+            "pg_get_userbyid",
+            TEXT_TYPE_OID,
+            &oid_argtypes(&[OID_TYPE_OID]),
+            "pg_get_userbyid",
+            1,
+            false,
+            true,
+            'f',
+            's',
+        ),
+        proc_row(
             6401,
             "pg_rust_test_enc_setup",
             VOID_TYPE_OID,
@@ -3114,8 +3138,12 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("replace", BuiltinScalarFunction::Replace),
         ("split_part", BuiltinScalarFunction::SplitPart),
         ("translate", BuiltinScalarFunction::Translate),
+        ("regprocedure_to_text", BuiltinScalarFunction::RegProcedureToText),
+        ("regprocedureout", BuiltinScalarFunction::RegProcedureToText),
+        ("regprocout", BuiltinScalarFunction::RegProcedureToText),
         ("regrole_to_text", BuiltinScalarFunction::RegRoleToText),
         ("regroleout", BuiltinScalarFunction::RegRoleToText),
+        ("pg_get_userbyid", BuiltinScalarFunction::PgGetUserById),
         ("ascii", BuiltinScalarFunction::Ascii),
         ("chr", BuiltinScalarFunction::Chr),
         ("quote_literal", BuiltinScalarFunction::QuoteLiteral),
@@ -3186,10 +3214,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("float8_accum", BuiltinScalarFunction::Float8Accum),
         ("float8_combine", BuiltinScalarFunction::Float8Combine),
         ("float8_regr_accum", BuiltinScalarFunction::Float8RegrAccum),
-        (
-            "float8_regr_combine",
-            BuiltinScalarFunction::Float8RegrCombine,
-        ),
+        ("float8_regr_combine", BuiltinScalarFunction::Float8RegrCombine),
         ("erf", BuiltinScalarFunction::Erf),
         ("erfc", BuiltinScalarFunction::Erfc),
         ("gamma", BuiltinScalarFunction::Gamma),
@@ -6195,6 +6220,48 @@ mod tests {
         assert_eq!(
             builtin_scalar_function_for_proc_oid(row.oid),
             Some(BuiltinScalarFunction::PgRustTestFdwHandler)
+        );
+    }
+
+    #[test]
+    fn bootstrap_rows_have_unique_oids() {
+        use std::collections::HashSet;
+
+        let mut seen = HashSet::new();
+        for row in bootstrap_pg_proc_rows() {
+            assert!(
+                seen.insert(row.oid),
+                "duplicate pg_proc oid {} for {}",
+                row.oid,
+                row.proname
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_scalar_helpers_have_proc_oid_mappings() {
+        for func in [
+            BuiltinScalarFunction::RegProcedureToText,
+            BuiltinScalarFunction::RegRoleToText,
+            BuiltinScalarFunction::PgGetUserById,
+            BuiltinScalarFunction::Float8Accum,
+            BuiltinScalarFunction::Float8Combine,
+            BuiltinScalarFunction::Float8RegrAccum,
+            BuiltinScalarFunction::Float8RegrCombine,
+        ] {
+            let oid = proc_oid_for_builtin_scalar_function(func)
+                .unwrap_or_else(|| panic!("missing pg_proc oid mapping for {:?}", func));
+            assert_eq!(builtin_scalar_function_for_proc_oid(oid), Some(func));
+        }
+    }
+
+    #[test]
+    fn any_value_aggregate_has_proc_oid_mapping() {
+        let oid =
+            proc_oid_for_builtin_aggregate_function(AggFunc::AnyValue).expect("any_value oid");
+        assert_eq!(
+            builtin_aggregate_function_for_proc_oid(oid),
+            Some(AggFunc::AnyValue)
         );
     }
 }
