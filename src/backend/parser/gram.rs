@@ -5368,6 +5368,7 @@ fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
         buffers,
         costs,
         timing,
+        verbose: false,
         statement: Box::new(statement.ok_or(ParseError::UnexpectedEof)?),
     })
 }

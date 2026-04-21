@@ -3,9 +3,12 @@ use pest::iterators::Pair;
 use pest_derive::Parser;
 
 use crate::backend::executor::Value;
-use crate::backend::parser::{ParseError, SqlExpr, parse_expr, parse_type_name};
+use crate::backend::parser::{ParseError, SqlExpr, SqlType, parse_expr, parse_type_name};
+use crate::include::catalog::RECORD_TYPE_OID;
 
-use super::ast::{AssignTarget, Block, RaiseLevel, ReturnQueryKind, Stmt, VarDecl};
+use super::ast::{
+    AliasDecl, AssignTarget, Block, Decl, RaiseLevel, ReturnQueryKind, Stmt, VarDecl,
+};
 
 #[derive(Parser)]
 #[grammar = "pl/plpgsql/gram.pest"]
@@ -56,11 +59,23 @@ fn build_block(pair: Pair<'_, Rule>) -> Result<Block, ParseError> {
     })
 }
 
-fn build_declare_section(pair: Pair<'_, Rule>) -> Result<Vec<VarDecl>, ParseError> {
+fn build_declare_section(pair: Pair<'_, Rule>) -> Result<Vec<Decl>, ParseError> {
     pair.into_inner()
-        .filter(|part| part.as_rule() == Rule::var_decl)
-        .map(build_var_decl)
+        .filter(|part| part.as_rule() == Rule::decl_stmt)
+        .map(build_decl_stmt)
         .collect()
+}
+
+fn build_decl_stmt(pair: Pair<'_, Rule>) -> Result<Decl, ParseError> {
+    let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+    match inner.as_rule() {
+        Rule::var_decl => Ok(Decl::Var(build_var_decl(inner)?)),
+        Rule::alias_decl => Ok(Decl::Alias(build_alias_decl(inner)?)),
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "plpgsql declaration",
+            actual: inner.as_str().into(),
+        }),
+    }
 }
 
 fn build_var_decl(pair: Pair<'_, Rule>) -> Result<VarDecl, ParseError> {
@@ -84,9 +99,7 @@ fn build_var_decl(pair: Pair<'_, Rule>) -> Result<VarDecl, ParseError> {
                             }
                         )));
                     }
-                    crate::backend::parser::RawTypeName::Record => {
-                        return Err(ParseError::UnsupportedType("record".into()));
-                    }
+                    crate::backend::parser::RawTypeName::Record => SqlType::record(RECORD_TYPE_OID),
                     crate::backend::parser::RawTypeName::Named { name, .. } => {
                         return Err(ParseError::UnsupportedType(name));
                     }
@@ -108,6 +121,32 @@ fn build_var_decl(pair: Pair<'_, Rule>) -> Result<VarDecl, ParseError> {
     })
 }
 
+fn build_alias_decl(pair: Pair<'_, Rule>) -> Result<AliasDecl, ParseError> {
+    let mut name = None;
+    let mut param_index = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::ident => name = Some(build_ident(part)),
+            Rule::positional_param => {
+                let raw = part.as_str();
+                param_index = Some(
+                    raw[1..]
+                        .parse::<usize>()
+                        .map_err(|_| ParseError::UnexpectedToken {
+                            expected: "valid positional parameter reference",
+                            actual: raw.into(),
+                        })?,
+                );
+            }
+            _ => {}
+        }
+    }
+    Ok(AliasDecl {
+        name: name.ok_or(ParseError::UnexpectedEof)?,
+        param_index: param_index.ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
 fn build_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
     let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
     match inner.as_rule() {
@@ -126,6 +165,8 @@ fn build_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
         Rule::return_stmt => build_return_stmt(inner),
         Rule::return_next_stmt => build_return_next_stmt(inner),
         Rule::return_query_stmt => build_return_query_stmt(inner),
+        Rule::perform_stmt => build_perform_stmt(inner),
+        Rule::exec_sql_stmt => build_exec_sql_stmt(inner),
         _ => Err(ParseError::UnexpectedToken {
             expected: "plpgsql statement",
             actual: inner.as_str().into(),
@@ -334,6 +375,26 @@ fn build_return_query_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
     Ok(Stmt::ReturnQuery { sql, kind })
 }
 
+fn build_perform_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
+    let sql = pair
+        .into_inner()
+        .find(|part| part.as_rule() == Rule::exec_sql_text)
+        .map(|part| part.as_str().trim().to_string())
+        .filter(|text| !text.is_empty())
+        .ok_or(ParseError::UnexpectedEof)?;
+    Ok(Stmt::Perform { sql })
+}
+
+fn build_exec_sql_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
+    let sql = pair
+        .into_inner()
+        .find(|part| part.as_rule() == Rule::exec_sql_text)
+        .map(|part| part.as_str().trim().to_string())
+        .filter(|text| !text.is_empty())
+        .ok_or(ParseError::UnexpectedEof)?;
+    Ok(Stmt::ExecSql { sql })
+}
+
 fn build_ident(pair: Pair<'_, Rule>) -> String {
     let raw = pair.as_str();
     if raw.starts_with('"') && raw.ends_with('"') {
@@ -371,8 +432,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(block.declarations.len(), 1);
-        assert_eq!(block.declarations[0].name, "total");
-        assert_eq!(block.declarations[0].ty.kind, SqlTypeKind::Int4);
+        let Decl::Var(total_decl) = &block.declarations[0] else {
+            panic!("expected variable declaration");
+        };
+        assert_eq!(total_decl.name, "total");
+        assert_eq!(total_decl.ty.kind, SqlTypeKind::Int4);
         assert_eq!(block.statements.len(), 3);
     }
 
@@ -423,6 +487,29 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(block.statements[0], Stmt::Block(_)));
+    }
+
+    #[test]
+    fn parse_alias_and_exec_sql_statements() {
+        let block = parse_block(
+            "
+            declare
+                myname alias for $1;
+                rec record;
+            begin
+                select into rec * from slots where slotname = myname;
+                update slots set backlink = 'x' where slotname = myname;
+                perform 1 + 1;
+            end
+            ",
+        )
+        .unwrap();
+        assert_eq!(block.declarations.len(), 2);
+        assert!(matches!(block.declarations[0], Decl::Alias(_)));
+        assert!(matches!(block.declarations[1], Decl::Var(_)));
+        assert!(matches!(block.statements[0], Stmt::ExecSql { .. }));
+        assert!(matches!(block.statements[1], Stmt::ExecSql { .. }));
+        assert!(matches!(block.statements[2], Stmt::Perform { .. }));
     }
 
     #[test]

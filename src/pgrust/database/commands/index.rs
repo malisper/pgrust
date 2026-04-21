@@ -397,6 +397,7 @@ impl Database {
                     actual: "snapshot creation failed".into(),
                 })
             })?;
+        let current_xid = snapshot.current_xid;
         let index_meta = index_entry.index_meta.clone().ok_or_else(|| {
             ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "index metadata",
@@ -428,11 +429,15 @@ impl Database {
                 txn_waiter: Some(self.txn_waiter.clone()),
                 sequences: Some(self.sequences.clone()),
                 large_objects: Some(self.large_objects.clone()),
+                advisory_locks: std::sync::Arc::clone(&self.advisory_locks),
                 datetime_config: DateTimeConfig::default(),
                 stats: std::sync::Arc::clone(&self.stats),
                 session_stats: self.session_stats_state(client_id),
+                current_database_name: self.current_database_name(),
                 session_user_oid: self.auth_state(client_id).session_user_oid(),
                 current_user_oid: self.auth_state(client_id).current_user_oid(),
+                current_xid,
+                statement_lock_scope_id: None,
                 visible_catalog: visible_catalog.clone(),
             }),
         };
