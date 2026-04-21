@@ -7981,6 +7981,35 @@ fn array_overlap_false_and_null_cases() {
 }
 
 #[test]
+fn array_contains_and_contained_match_postgres_cases() {
+    let base = temp_dir("array_contains_contained");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select ARRAY[1,2,3] @> ARRAY[2], ARRAY[1,2,3] @> ARRAY[4], ARRAY[1,2,3] @> ARRAY[]::int4[], ARRAY[1,null]::int4[] @> ARRAY[null]::int4[], ARRAY[2] <@ ARRAY[1,2,3], ARRAY[]::int4[] <@ ARRAY[null]::int4[]",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Bool(true),
+                    Value::Bool(false),
+                    Value::Bool(true),
+                    Value::Bool(false),
+                    Value::Bool(true),
+                    Value::Bool(true),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn array_slice_omitted_upper_and_mixed_slice_shape_work() {
     let base = temp_dir("array_slice_shape");
     let txns = TransactionManager::new_durable(&base).unwrap();

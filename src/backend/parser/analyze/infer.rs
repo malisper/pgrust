@@ -287,6 +287,8 @@ pub(super) fn infer_sql_expr_type_with_ctes(
         | SqlExpr::IsDistinctFrom(_, _)
         | SqlExpr::IsNotDistinctFrom(_, _)
         | SqlExpr::ArrayOverlap(_, _)
+        | SqlExpr::ArrayContains(_, _)
+        | SqlExpr::ArrayContained(_, _)
         | SqlExpr::JsonbContains(_, _)
         | SqlExpr::JsonbContained(_, _)
         | SqlExpr::JsonbExists(_, _)

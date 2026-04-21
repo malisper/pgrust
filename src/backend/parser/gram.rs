@@ -9513,7 +9513,13 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                             left: Box::new(left),
                             right: Box::new(right),
                         },
+                        "@>" if expr_is_array_syntax(&left) && expr_is_array_syntax(&right) => {
+                            SqlExpr::ArrayContains(Box::new(left), Box::new(right))
+                        }
                         "@>" => SqlExpr::JsonbContains(Box::new(left), Box::new(right)),
+                        "<@" if expr_is_array_syntax(&left) && expr_is_array_syntax(&right) => {
+                            SqlExpr::ArrayContained(Box::new(left), Box::new(right))
+                        }
                         "<@" => SqlExpr::JsonbContained(Box::new(left), Box::new(right)),
                         "@?" => SqlExpr::JsonbPathExists(Box::new(left), Box::new(right)),
                         "@@" if expr_is_jsonb_syntax(&left) && expr_is_jsonpath_syntax(&right) => {
