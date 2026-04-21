@@ -72,6 +72,7 @@ pub(crate) fn compare_order_values(
             }
         }
         (Value::Int32(a), Value::Int32(b)) => a.cmp(b),
+        (Value::Int64(a), Value::Int64(b)) => a.cmp(b),
         (Value::Date(a), Value::Date(b)) => a.cmp(b),
         (Value::Time(a), Value::Time(b)) => a.cmp(b),
         (Value::TimeTz(a), Value::TimeTz(b)) => a
@@ -1367,4 +1368,24 @@ fn exact_numeric_binary(
         right: right.clone(),
     })?;
     Ok(Value::Numeric(result))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cmp::Ordering;
+
+    use crate::include::nodes::datum::Value;
+
+    #[test]
+    fn compare_order_values_orders_int64_values_directly() {
+        assert_eq!(
+            super::compare_order_values(
+                &Value::Int64(1234),
+                &Value::Int64(4_294_966_256),
+                None,
+                false
+            ),
+            Ordering::Less
+        );
+    }
 }
