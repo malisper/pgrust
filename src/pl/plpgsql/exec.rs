@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use crate::backend::executor::{
-    ArrayValue, ExecError, ExecutorContext, Expr, RelationDesc, StatementResult, TupleSlot, Value,
-    cast_value, eval_expr, eval_plpgsql_expr, execute_planned_stmt,
+    ArrayDimension, ArrayValue, ExecError, ExecutorContext, Expr, RelationDesc, StatementResult,
+    TupleSlot, Value, cast_value, eval_expr, eval_plpgsql_expr, execute_planned_stmt,
 };
 use crate::backend::parser::{
     CatalogLookup, ParseError, SqlType, SqlTypeKind, TriggerLevel, TriggerTiming,
@@ -962,15 +962,23 @@ fn seed_trigger_state(
     );
     state.values[bindings.tg_relid_slot] = Value::Int32(call.relation_oid as i32);
     state.values[bindings.tg_nargs_slot] = Value::Int32(call.trigger_args.len() as i32);
-    state.values[bindings.tg_argv_slot] = Value::PgArray(
-        ArrayValue::from_1d(
+    let tg_argv = if call.trigger_args.is_empty() {
+        ArrayValue::empty()
+    } else {
+        ArrayValue::from_dimensions(
+            vec![ArrayDimension {
+                lower_bound: 0,
+                length: call.trigger_args.len(),
+            }],
             call.trigger_args
                 .iter()
                 .cloned()
                 .map(|arg| Value::Text(arg.into()))
                 .collect(),
         )
-        .with_element_type_oid(TEXT_TYPE_OID),
+    };
+    state.values[bindings.tg_argv_slot] = Value::PgArray(
+        tg_argv.with_element_type_oid(TEXT_TYPE_OID),
     );
     state.values[bindings.tg_table_name_slot] = Value::Text(call.table_name.clone().into());
     state.values[bindings.tg_table_schema_slot] = Value::Text(call.table_schema.clone().into());
@@ -1014,4 +1022,107 @@ fn current_trigger_return(
         TriggerReturnedRow::New => TriggerFunctionResult::ReturnNew(values),
         TriggerReturnedRow::Old => TriggerFunctionResult::ReturnOld(values),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::parser::{TriggerLevel, TriggerTiming};
+    use crate::pl::plpgsql::compile::{CompiledTriggerBindings, CompiledTriggerRelation};
+
+    #[test]
+    fn seed_trigger_state_uses_zero_based_tg_argv() {
+        let bindings = CompiledTriggerBindings {
+            new_row: CompiledTriggerRelation { slots: vec![] },
+            old_row: CompiledTriggerRelation { slots: vec![] },
+            tg_name_slot: 0,
+            tg_op_slot: 1,
+            tg_when_slot: 2,
+            tg_level_slot: 3,
+            tg_relid_slot: 4,
+            tg_nargs_slot: 5,
+            tg_argv_slot: 6,
+            tg_table_name_slot: 7,
+            tg_table_schema_slot: 8,
+        };
+        let call = TriggerCallContext {
+            relation_desc: RelationDesc { columns: vec![] },
+            relation_oid: 42,
+            table_name: "main_table".into(),
+            table_schema: "public".into(),
+            trigger_name: "before_ins_stmt".into(),
+            trigger_args: vec!["before_ins_stmt".into()],
+            timing: TriggerTiming::Before,
+            level: TriggerLevel::Statement,
+            op: TriggerOperation::Insert,
+            new_row: None,
+            old_row: None,
+        };
+        let mut state = FunctionState {
+            values: vec![Value::Null; 9],
+            rows: Vec::new(),
+            scalar_return: None,
+            trigger_return: None,
+        };
+
+        seed_trigger_state(&bindings, &call, &mut state);
+
+        assert_eq!(state.values[bindings.tg_nargs_slot], Value::Int32(1));
+        assert_eq!(
+            state.values[bindings.tg_argv_slot],
+            Value::PgArray(
+                ArrayValue::from_dimensions(
+                    vec![ArrayDimension {
+                        lower_bound: 0,
+                        length: 1,
+                    }],
+                    vec![Value::Text("before_ins_stmt".into())],
+                )
+                .with_element_type_oid(TEXT_TYPE_OID),
+            )
+        );
+    }
+
+    #[test]
+    fn seed_trigger_state_uses_empty_array_for_no_trigger_args() {
+        let bindings = CompiledTriggerBindings {
+            new_row: CompiledTriggerRelation { slots: vec![] },
+            old_row: CompiledTriggerRelation { slots: vec![] },
+            tg_name_slot: 0,
+            tg_op_slot: 1,
+            tg_when_slot: 2,
+            tg_level_slot: 3,
+            tg_relid_slot: 4,
+            tg_nargs_slot: 5,
+            tg_argv_slot: 6,
+            tg_table_name_slot: 7,
+            tg_table_schema_slot: 8,
+        };
+        let call = TriggerCallContext {
+            relation_desc: RelationDesc { columns: vec![] },
+            relation_oid: 42,
+            table_name: "main_table".into(),
+            table_schema: "public".into(),
+            trigger_name: "after_ins_stmt".into(),
+            trigger_args: vec![],
+            timing: TriggerTiming::After,
+            level: TriggerLevel::Statement,
+            op: TriggerOperation::Insert,
+            new_row: None,
+            old_row: None,
+        };
+        let mut state = FunctionState {
+            values: vec![Value::Null; 9],
+            rows: Vec::new(),
+            scalar_return: None,
+            trigger_return: None,
+        };
+
+        seed_trigger_state(&bindings, &call, &mut state);
+
+        assert_eq!(
+            state.values[bindings.tg_argv_slot],
+            Value::PgArray(ArrayValue::empty().with_element_type_oid(TEXT_TYPE_OID))
+        );
+    }
 }
