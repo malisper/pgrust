@@ -119,6 +119,7 @@ Targeted reruns and notes:
 - copyencoding.sql: 9/17
 - copyselect.sql: 14/21
 - create_aggregate.sql: 6/59
+  - [done] PostgreSQL-shaped `pg_aggregate` catalog foundation: bootstrap rows, keyed aggregate lookup, and physical `pg_aggregate_fnoid_index`
 - create_am.sql: 27/142
 - create_cast.sql: 1/24
 - create_function_c.sql: 0/5

@@ -40,6 +40,7 @@ fn merge_catcaches(shared: CatCache, local: CatCache) -> CatCache {
         local.opclass_rows(),
         local.opfamily_rows(),
         local.proc_rows(),
+        local.aggregate_rows(),
         local.cast_rows(),
         local.collation_rows(),
         local.foreign_data_wrapper_rows(),

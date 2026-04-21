@@ -6,12 +6,12 @@ use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::utils::cache::catcache::format_indkey;
 use crate::include::access::htup::{AttributeAlign, AttributeCompression, AttributeStorage};
 use crate::include::catalog::{
-    BootstrapCatalogKind, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow,
-    PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow,
-    PgDatabaseRow, PgDependRow, PgDescriptionRow, PgForeignDataWrapperRow, PgIndexRow,
-    PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow,
-    PgPolicyRow, PgProcRow, PgRewriteRow, PgStatisticRow, PgTablespaceRow, PgTriggerRow,
-    PgTsConfigMapRow,
+    BootstrapCatalogKind, PgAggregateRow, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow,
+    PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow,
+    PgConstraintRow, PgDatabaseRow, PgDependRow, PgDescriptionRow, PgForeignDataWrapperRow,
+    PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow,
+    PgOpfamilyRow, PgPolicyRow, PgProcRow, PgRewriteRow, PgStatisticRow, PgTablespaceRow,
+    PgTriggerRow, PgTsConfigMapRow,
     PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
     bootstrap_composite_type_rows, builtin_type_rows,
 };
@@ -46,6 +46,12 @@ pub(crate) fn catalog_row_values_for_kind(
         BootstrapCatalogKind::PgProc => {
             rows.procs.iter().cloned().map(pg_proc_row_values).collect()
         }
+        BootstrapCatalogKind::PgAggregate => rows
+            .aggregates
+            .iter()
+            .cloned()
+            .map(pg_aggregate_row_values)
+            .collect(),
         BootstrapCatalogKind::PgLanguage => rows
             .languages
             .iter()
@@ -504,6 +510,35 @@ pub(crate) fn pg_proc_row_from_values(values: Vec<Value>) -> Result<PgProcRow, C
         proargmodes: nullable_char_array(&values[21])?,
         proargnames: nullable_text_array(&values[22])?,
         prosrc: expect_text(&values[23])?,
+    })
+}
+
+pub(crate) fn pg_aggregate_row_from_values(
+    values: Vec<Value>,
+) -> Result<PgAggregateRow, CatalogError> {
+    Ok(PgAggregateRow {
+        aggfnoid: expect_oid(&values[0])?,
+        aggkind: expect_char(&values[1], "aggkind")?,
+        aggnumdirectargs: expect_int16(&values[2])?,
+        aggtransfn: expect_oid(&values[3])?,
+        aggfinalfn: expect_oid(&values[4])?,
+        aggcombinefn: expect_oid(&values[5])?,
+        aggserialfn: expect_oid(&values[6])?,
+        aggdeserialfn: expect_oid(&values[7])?,
+        aggmtransfn: expect_oid(&values[8])?,
+        aggminvtransfn: expect_oid(&values[9])?,
+        aggmfinalfn: expect_oid(&values[10])?,
+        aggfinalextra: expect_bool(&values[11])?,
+        aggmfinalextra: expect_bool(&values[12])?,
+        aggfinalmodify: expect_char(&values[13], "aggfinalmodify")?,
+        aggmfinalmodify: expect_char(&values[14], "aggmfinalmodify")?,
+        aggsortop: expect_oid(&values[15])?,
+        aggtranstype: expect_oid(&values[16])?,
+        aggtransspace: expect_int32(&values[17])?,
+        aggmtranstype: expect_oid(&values[18])?,
+        aggmtransspace: expect_int32(&values[19])?,
+        agginitval: nullable_text(&values[20])?,
+        aggminitval: nullable_text(&values[21])?,
     })
 }
 
@@ -1074,6 +1109,33 @@ fn pg_proc_row_values(row: PgProcRow) -> Vec<Value> {
             .with_element_type_oid(crate::include::catalog::TEXT_TYPE_OID)
         })),
         Value::Text(row.prosrc.into()),
+    ]
+}
+
+fn pg_aggregate_row_values(row: PgAggregateRow) -> Vec<Value> {
+    vec![
+        Value::Int32(row.aggfnoid as i32),
+        Value::InternalChar(row.aggkind as u8),
+        Value::Int16(row.aggnumdirectargs),
+        Value::Int32(row.aggtransfn as i32),
+        Value::Int32(row.aggfinalfn as i32),
+        Value::Int32(row.aggcombinefn as i32),
+        Value::Int32(row.aggserialfn as i32),
+        Value::Int32(row.aggdeserialfn as i32),
+        Value::Int32(row.aggmtransfn as i32),
+        Value::Int32(row.aggminvtransfn as i32),
+        Value::Int32(row.aggmfinalfn as i32),
+        Value::Bool(row.aggfinalextra),
+        Value::Bool(row.aggmfinalextra),
+        Value::InternalChar(row.aggfinalmodify as u8),
+        Value::InternalChar(row.aggmfinalmodify as u8),
+        Value::Int32(row.aggsortop as i32),
+        Value::Int32(row.aggtranstype as i32),
+        Value::Int32(row.aggtransspace),
+        Value::Int32(row.aggmtranstype as i32),
+        Value::Int32(row.aggmtransspace),
+        nullable_text_value(row.agginitval),
+        nullable_text_value(row.aggminitval),
     ]
 }
 
