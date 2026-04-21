@@ -155,6 +155,10 @@ pub struct RestrictInfo {
     pub clause: Expr,
     pub required_relids: Vec<usize>,
     pub is_pushed_down: bool,
+    pub can_join: bool,
+    pub left_relids: Vec<usize>,
+    pub right_relids: Vec<usize>,
+    pub hashjoin_operator: Option<u32>,
 }
 
 impl RestrictInfo {
@@ -163,6 +167,10 @@ impl RestrictInfo {
             required_relids,
             clause,
             is_pushed_down: true,
+            can_join: false,
+            left_relids: Vec::new(),
+            right_relids: Vec::new(),
+            hashjoin_operator: None,
         }
     }
 }
@@ -335,15 +343,18 @@ impl Eq for PlannerSubroot {}
 pub enum Path {
     Result {
         plan_info: PlanEstimate,
+        pathtarget: PathTarget,
     },
     Append {
         plan_info: PlanEstimate,
+        pathtarget: PathTarget,
         source_id: usize,
         desc: RelationDesc,
         children: Vec<Path>,
     },
     SeqScan {
         plan_info: PlanEstimate,
+        pathtarget: PathTarget,
         source_id: usize,
         rel: RelFileLocator,
         relation_name: String,
@@ -354,6 +365,7 @@ pub enum Path {
     },
     IndexScan {
         plan_info: PlanEstimate,
+        pathtarget: PathTarget,
         source_id: usize,
         rel: RelFileLocator,
         relation_oid: u32,
@@ -370,11 +382,14 @@ pub enum Path {
     },
     Filter {
         plan_info: PlanEstimate,
+        pathtarget: PathTarget,
         input: Box<Path>,
         predicate: Expr,
     },
     NestedLoopJoin {
         plan_info: PlanEstimate,
+        pathtarget: PathTarget,
+        output_columns: Vec<QueryColumn>,
         left: Box<Path>,
         right: Box<Path>,
         kind: JoinType,
@@ -382,6 +397,8 @@ pub enum Path {
     },
     HashJoin {
         plan_info: PlanEstimate,
+        pathtarget: PathTarget,
+        output_columns: Vec<QueryColumn>,
         left: Box<Path>,
         right: Box<Path>,
         kind: JoinType,
@@ -392,23 +409,27 @@ pub enum Path {
     },
     Projection {
         plan_info: PlanEstimate,
+        pathtarget: PathTarget,
         slot_id: usize,
         input: Box<Path>,
         targets: Vec<TargetEntry>,
     },
     OrderBy {
         plan_info: PlanEstimate,
+        pathtarget: PathTarget,
         input: Box<Path>,
         items: Vec<OrderByEntry>,
     },
     Limit {
         plan_info: PlanEstimate,
+        pathtarget: PathTarget,
         input: Box<Path>,
         limit: Option<usize>,
         offset: usize,
     },
     Aggregate {
         plan_info: PlanEstimate,
+        pathtarget: PathTarget,
         slot_id: usize,
         input: Box<Path>,
         group_by: Vec<Expr>,
@@ -418,6 +439,7 @@ pub enum Path {
     },
     WindowAgg {
         plan_info: PlanEstimate,
+        pathtarget: PathTarget,
         slot_id: usize,
         input: Box<Path>,
         clause: WindowClause,
@@ -425,17 +447,20 @@ pub enum Path {
     },
     Values {
         plan_info: PlanEstimate,
+        pathtarget: PathTarget,
         slot_id: usize,
         rows: Vec<Vec<Expr>>,
         output_columns: Vec<QueryColumn>,
     },
     FunctionScan {
         plan_info: PlanEstimate,
+        pathtarget: PathTarget,
         slot_id: usize,
         call: SetReturningCall,
     },
     SubqueryScan {
         plan_info: PlanEstimate,
+        pathtarget: PathTarget,
         rtindex: usize,
         subroot: PlannerSubroot,
         query: Box<Query>,
@@ -445,6 +470,7 @@ pub enum Path {
     },
     CteScan {
         plan_info: PlanEstimate,
+        pathtarget: PathTarget,
         slot_id: usize,
         cte_id: usize,
         subroot: PlannerSubroot,
@@ -454,12 +480,14 @@ pub enum Path {
     },
     WorkTableScan {
         plan_info: PlanEstimate,
+        pathtarget: PathTarget,
         slot_id: usize,
         worktable_id: usize,
         output_columns: Vec<QueryColumn>,
     },
     RecursiveUnion {
         plan_info: PlanEstimate,
+        pathtarget: PathTarget,
         slot_id: usize,
         worktable_id: usize,
         distinct: bool,
@@ -474,6 +502,7 @@ pub enum Path {
     },
     SetOp {
         plan_info: PlanEstimate,
+        pathtarget: PathTarget,
         slot_id: usize,
         op: SetOperator,
         output_columns: Vec<QueryColumn>,
@@ -482,6 +511,7 @@ pub enum Path {
     },
     ProjectSet {
         plan_info: PlanEstimate,
+        pathtarget: PathTarget,
         slot_id: usize,
         input: Box<Path>,
         targets: Vec<ProjectSetTarget>,

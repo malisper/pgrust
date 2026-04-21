@@ -1,8 +1,13 @@
+mod indexed_pathtarget;
 mod tlist;
 
 use crate::backend::parser::CatalogLookup;
 use crate::include::nodes::pathnodes::{Path, PathKey, PathTarget, PlannerInfo, RelOptInfo};
 use crate::include::nodes::primnodes::{AggAccum, Expr, QueryColumn, RelationDesc, TargetEntry};
+
+pub(super) use indexed_pathtarget::{
+    IndexedPathTarget, simple_var_key, strip_binary_coercible_casts,
+};
 
 pub(super) fn build_aggregate_output_columns(
     group_by: &[Expr],
@@ -63,6 +68,10 @@ pub(super) fn lower_pathkeys_for_rel(
     pathkeys: &[PathKey],
 ) -> Vec<PathKey> {
     tlist::lower_pathkeys_for_rel(root, rel, pathkeys)
+}
+
+pub(super) fn pathkeys_are_fully_identified(pathkeys: &[PathKey]) -> bool {
+    tlist::pathkeys_are_fully_identified(pathkeys)
 }
 
 pub(super) fn required_query_pathkeys_for_path(root: &PlannerInfo, path: &Path) -> Vec<PathKey> {

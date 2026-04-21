@@ -10,6 +10,7 @@ use super::super::optimize_path;
 use super::super::pathnodes::{
     expr_sql_type, layout_candidate_for_expr, lower_agg_output_expr, lower_expr_to_path_output,
 };
+use super::indexed_pathtarget::IndexedPathTarget;
 
 pub(super) fn pathkeys_to_order_items(pathkeys: &[PathKey]) -> Vec<OrderByEntry> {
     pathkeys
@@ -94,6 +95,7 @@ pub(super) fn project_to_slot_layout_internal(
     optimize_path(
         Path::Projection {
             plan_info: PlanEstimate::default(),
+            pathtarget: PathTarget::from_target_list(&rewritten_targets),
             slot_id,
             input: Box::new(input),
             targets: rewritten_targets,
@@ -159,6 +161,7 @@ pub(super) fn annotate_targets_for_input(
     targets: &[TargetEntry],
 ) -> Vec<TargetEntry> {
     let input_target = path.semantic_output_target();
+    let indexed_input = IndexedPathTarget::new(&input_target);
     let projects_project_set_output = matches!(path, Path::ProjectSet { .. })
         || matches!(path, Path::OrderBy { input, .. } if matches!(input.as_ref(), Path::ProjectSet { .. }));
     targets
@@ -175,10 +178,8 @@ pub(super) fn annotate_targets_for_input(
             {
                 Some(target.resno)
             } else {
-                input_target
-                    .exprs
-                    .iter()
-                    .position(|candidate| *candidate == target.expr)
+                indexed_input
+                    .match_index(&target.expr, target.ressortgroupref)
                     .map(|index| index + 1)
             };
             TargetEntry {
@@ -214,12 +215,15 @@ pub(super) fn lower_pathkeys_for_path(
             .cloned()
             .map(|key| {
                 let layout = path.semantic_output_vars();
+                let output_target = path.output_target();
+                let indexed_output = IndexedPathTarget::new(&output_target);
                 let expr = lower_expr_to_path_output(
                     Some(root),
                     path,
                     key.expr.clone(),
                     key.ressortgroupref,
                 )
+                .or_else(|| indexed_output.matched_expr(&key.expr, key.ressortgroupref))
                 .or_else(|| layout_candidate_for_expr(Some(root), &key.expr, &layout))
                 .unwrap_or_else(|| key.expr.clone());
                 PathKey {
@@ -244,7 +248,7 @@ pub(super) fn lower_pathkeys_for_rel(
         .unwrap_or_else(|| pathkeys.to_vec())
 }
 
-fn pathkeys_are_fully_identified(pathkeys: &[PathKey]) -> bool {
+pub(super) fn pathkeys_are_fully_identified(pathkeys: &[PathKey]) -> bool {
     pathkeys.iter().all(|key| key.ressortgroupref != 0)
 }
 
