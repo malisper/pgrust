@@ -157,7 +157,7 @@ Targeted reruns and notes:
 - float4.sql: 79/100
 - float8.sql: 145/184
 - foreign_data.sql: 83/540
-- foreign_key.sql: 467/1252
+- foreign_key.sql: 471/1252
   - upstream `foreign_key.sql` now starts with unsupported FK surface, so the first create-table failures cascade into most later `unknown table: fktable` mismatches
   - [done] foreign keys with `MATCH FULL`
   - foreign keys with `NOT VALID`

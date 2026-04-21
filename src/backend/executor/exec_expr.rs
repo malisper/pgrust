@@ -402,6 +402,63 @@ fn auth_role_name(ctx: &ExecutorContext, oid: u32) -> Result<Value, ExecError> {
     Ok(Value::Text(role_name.into()))
 }
 
+fn quote_identifier_if_needed(identifier: &str) -> String {
+    if !identifier.is_empty()
+        && identifier.chars().enumerate().all(|(idx, ch)| {
+            if idx == 0 {
+                ch == '_' || ch.is_ascii_lowercase()
+            } else {
+                ch == '_' || ch.is_ascii_lowercase() || ch.is_ascii_digit()
+            }
+        })
+    {
+        return identifier.into();
+    }
+    let escaped = identifier.replace('"', "\"\"");
+    format!("\"{escaped}\"")
+}
+
+fn eval_regrole_to_text_function(
+    values: &[Value],
+    ctx: Option<&ExecutorContext>,
+) -> Result<Value, ExecError> {
+    let Some(value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    if matches!(value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let oid = match value {
+        Value::Int32(oid) if *oid >= 0 => *oid as u32,
+        Value::Int64(oid) if *oid >= 0 && *oid <= i64::from(u32::MAX) => *oid as u32,
+        _ => {
+            return Err(ExecError::TypeMismatch {
+                op: "::text",
+                left: value.clone(),
+                right: Value::Text("".into()),
+            });
+        }
+    };
+    if oid == 0 {
+        return Ok(Value::Text("-".into()));
+    }
+    if let Some(role_name) = ctx
+        .and_then(|ctx| ctx.catalog.as_ref())
+        .and_then(|catalog| {
+            catalog
+                .authid_rows()
+                .into_iter()
+                .find(|row| row.oid == oid)
+                .map(|row| row.rolname)
+        })
+    {
+        return Ok(Value::Text(
+            quote_identifier_if_needed(&role_name).into(),
+        ));
+    }
+    Ok(Value::Text(oid.to_string().into()))
+}
+
 fn sequence_runtime(
     ctx: &ExecutorContext,
 ) -> Result<&crate::pgrust::database::SequenceRuntime, ExecError> {
@@ -1427,6 +1484,14 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
             let value = eval_plpgsql_expr(array, slot)?;
             eval_array_subscript_plpgsql(value, subscripts, slot)
         }
+        Expr::CurrentUser | Expr::CurrentRole | Expr::SessionUser => {
+            Err(ExecError::DetailedError {
+                message: "role identity expressions are not supported in PL/pgSQL expression evaluation".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "0A000",
+            })
+        }
         Expr::CurrentDate => Ok(current_date_value()),
         Expr::CurrentTime { precision } => Ok(current_time_value(*precision, true)),
         Expr::CurrentTimestamp { precision } => Ok(current_timestamp_value(*precision, true)),
@@ -1535,6 +1600,7 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::Translate => eval_translate_function(&values),
         BuiltinScalarFunction::Ascii => eval_ascii_function(&values),
         BuiltinScalarFunction::Chr => eval_chr_function(&values),
+        BuiltinScalarFunction::RegRoleToText => eval_regrole_to_text_function(&values, None),
         BuiltinScalarFunction::QuoteLiteral => eval_quote_literal_function(&values),
         BuiltinScalarFunction::BpcharToText => eval_bpchar_to_text_function(&values),
         BuiltinScalarFunction::Strpos => eval_strpos_function(&values),
@@ -2641,6 +2707,7 @@ fn eval_builtin_function(
         BuiltinScalarFunction::RTrim => eval_trim_function("rtrim", &values),
         BuiltinScalarFunction::Md5 => eval_md5_function(&values),
         BuiltinScalarFunction::Reverse => eval_reverse_function(&values),
+        BuiltinScalarFunction::RegRoleToText => eval_regrole_to_text_function(&values, Some(ctx)),
         BuiltinScalarFunction::BpcharToText => eval_bpchar_to_text_function(&values),
         BuiltinScalarFunction::QuoteLiteral => eval_quote_literal_function(&values),
         BuiltinScalarFunction::Replace => eval_replace_function(&values),
