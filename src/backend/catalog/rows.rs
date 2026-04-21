@@ -7,9 +7,10 @@ use crate::include::catalog::{
     BootstrapCatalogKind, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow,
     PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow,
     PgDatabaseRow, PgDependRow, PgDescriptionRow, PgIndexRow, PgInheritsRow, PgLanguageRow,
-    PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow, PgRewriteRow,
-    PgStatisticRow, PgTablespaceRow, PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow,
-    PgTsParserRow, PgTsTemplateRow, PgTypeRow, composite_array_type_row, composite_type_row,
+    PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow,
+    PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgStatisticRow,
+    PgTablespaceRow, PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow,
+    PgTsTemplateRow, PgTypeRow, composite_array_type_row, composite_type_row,
 };
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -24,6 +25,9 @@ pub(crate) struct PhysicalCatalogRows {
     pub indexes: Vec<PgIndexRow>,
     pub rewrites: Vec<PgRewriteRow>,
     pub triggers: Vec<PgTriggerRow>,
+    pub publications: Vec<PgPublicationRow>,
+    pub publication_rels: Vec<PgPublicationRelRow>,
+    pub publication_namespaces: Vec<PgPublicationNamespaceRow>,
     pub ams: Vec<PgAmRow>,
     pub amops: Vec<PgAmopRow>,
     pub amprocs: Vec<PgAmprocRow>,
@@ -116,6 +120,9 @@ pub(crate) fn drop_relation_sync_kinds() -> Vec<BootstrapCatalogKind> {
         BootstrapCatalogKind::PgIndex,
         BootstrapCatalogKind::PgRewrite,
         BootstrapCatalogKind::PgTrigger,
+        BootstrapCatalogKind::PgPublication,
+        BootstrapCatalogKind::PgPublicationRel,
+        BootstrapCatalogKind::PgPublicationNamespace,
     ]
 }
 
@@ -132,6 +139,8 @@ pub(crate) fn drop_relation_delete_kinds() -> Vec<BootstrapCatalogKind> {
         BootstrapCatalogKind::PgDescription,
         BootstrapCatalogKind::PgRewrite,
         BootstrapCatalogKind::PgTrigger,
+        BootstrapCatalogKind::PgPublicationRel,
+        BootstrapCatalogKind::PgPublicationNamespace,
     ]
 }
 
@@ -149,6 +158,11 @@ pub(crate) fn extend_physical_catalog_rows(
     target.indexes.extend(source.indexes);
     target.rewrites.extend(source.rewrites);
     target.triggers.extend(source.triggers);
+    target.publications.extend(source.publications);
+    target.publication_rels.extend(source.publication_rels);
+    target
+        .publication_namespaces
+        .extend(source.publication_namespaces);
     target.ams.extend(source.ams);
     target.amops.extend(source.amops);
     target.amprocs.extend(source.amprocs);
@@ -185,6 +199,9 @@ pub(crate) fn physical_catalog_rows_from_catcache(catcache: &CatCache) -> Physic
         indexes: catcache.index_rows(),
         rewrites: catcache.rewrite_rows(),
         triggers: catcache.trigger_rows(),
+        publications: catcache.publication_rows(),
+        publication_rels: catcache.publication_rel_rows(),
+        publication_namespaces: catcache.publication_namespace_rows(),
         ams: catcache.am_rows(),
         amops: catcache.amop_rows(),
         amprocs: catcache.amproc_rows(),

@@ -551,6 +551,14 @@ impl Session {
                     search_path.as_deref(),
                 )
             }
+            Statement::CreatePublication(ref create_stmt) => {
+                let search_path = self.configured_search_path();
+                db.execute_create_publication_stmt_with_search_path(
+                    self.client_id,
+                    create_stmt,
+                    search_path.as_deref(),
+                )
+            }
             Statement::CreateTrigger(ref create_stmt) => {
                 let search_path = self.configured_search_path();
                 db.execute_create_trigger_stmt_with_search_path(
@@ -562,6 +570,14 @@ impl Session {
             Statement::DropTrigger(ref drop_stmt) => {
                 let search_path = self.configured_search_path();
                 db.execute_drop_trigger_stmt_with_search_path(
+                    self.client_id,
+                    drop_stmt,
+                    search_path.as_deref(),
+                )
+            }
+            Statement::DropPublication(ref drop_stmt) => {
+                let search_path = self.configured_search_path();
+                db.execute_drop_publication_stmt_with_search_path(
                     self.client_id,
                     drop_stmt,
                     search_path.as_deref(),
@@ -642,6 +658,24 @@ impl Session {
                 } else {
                     let search_path = self.configured_search_path();
                     db.execute_alter_schema_owner_stmt_with_search_path(
+                        self.client_id,
+                        alter_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
+            Statement::AlterPublication(ref alter_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_alter_publication_stmt_with_search_path(
                         self.client_id,
                         alter_stmt,
                         search_path.as_deref(),
@@ -1090,6 +1124,24 @@ impl Session {
                     )
                 }
             }
+            Statement::CommentOnPublication(ref comment_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_comment_on_publication_stmt_with_search_path(
+                        self.client_id,
+                        comment_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
             Statement::Merge(ref merge_stmt) => {
                 let _ = merge_stmt;
                 let search_path = self.configured_search_path();
@@ -1353,6 +1405,18 @@ impl Session {
                     search_path.as_deref(),
                 )
             }
+            Statement::CommentOnPublication(ref comment_stmt) => {
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_comment_on_publication_stmt_in_transaction_with_search_path(
+                    client_id,
+                    comment_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
             Statement::CopyFrom(ref copy_stmt) => self.execute_copy_from_file(db, copy_stmt),
             Statement::CreateDomain(ref create_stmt) => {
                 let search_path = self.configured_search_path();
@@ -1368,6 +1432,18 @@ impl Session {
                     client_id,
                     create_stmt,
                     search_path.as_deref(),
+                )
+            }
+            Statement::CreatePublication(ref create_stmt) => {
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_create_publication_stmt_in_transaction_with_search_path(
+                    client_id,
+                    create_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
                 )
             }
             Statement::CreateTrigger(ref create_stmt) => {
@@ -1840,6 +1916,18 @@ impl Session {
                     search_path.as_deref(),
                 )
             }
+            Statement::DropPublication(ref drop_stmt) => {
+                let search_path = self.configured_search_path();
+                let catalog_effects = &mut self.active_txn.as_mut().unwrap().catalog_effects;
+                db.execute_drop_publication_stmt_in_transaction_with_search_path(
+                    client_id,
+                    drop_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    catalog_effects,
+                )
+            }
             Statement::DropTrigger(ref drop_stmt) => {
                 let search_path = self.configured_search_path();
                 let catalog_effects = &mut self.active_txn.as_mut().unwrap().catalog_effects;
@@ -1881,6 +1969,18 @@ impl Session {
                     alter_stmt,
                     xid,
                     cid,
+                    &mut txn.catalog_effects,
+                )
+            }
+            Statement::AlterPublication(ref alter_stmt) => {
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_alter_publication_stmt_in_transaction_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
                     &mut txn.catalog_effects,
                 )
             }

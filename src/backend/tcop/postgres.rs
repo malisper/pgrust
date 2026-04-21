@@ -103,6 +103,14 @@ fn exec_error_sqlstate(e: &ExecError) -> &'static str {
 
 fn exec_error_detail(e: &ExecError) -> Option<&str> {
     match e {
+        ExecError::Parse(
+            crate::backend::parser::ParseError::InvalidPublicationParameterValue {
+                parameter,
+                ..
+            },
+        ) if parameter == "publish_generated_columns" => {
+            Some("Valid values are \"none\" and \"stored\".")
+        }
         ExecError::Regex(err) => err.detail.as_deref(),
         ExecError::JsonInput { detail, .. } => detail.as_deref(),
         ExecError::DetailedError { detail, .. } => detail.as_deref(),
@@ -165,6 +173,19 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         ExecError::Parse(crate::backend::parser::ParseError::UndefinedOperator { op, .. }) => {
             return sql.find(op).map(|index| index + 1);
         }
+        ExecError::Parse(
+            crate::backend::parser::ParseError::InvalidPublicationTableName(name),
+        )
+        | ExecError::Parse(
+            crate::backend::parser::ParseError::InvalidPublicationSchemaName(name),
+        ) => {
+            return find_case_insensitive_token_position(sql, name);
+        }
+        ExecError::Parse(
+            crate::backend::parser::ParseError::ConflictingOrRedundantOptions { option },
+        ) => {
+            return find_second_option_occurrence(sql, option);
+        }
         ExecError::InvalidIntegerInput { value, .. } => value.as_str(),
         ExecError::ArrayInput { value, .. } => value.as_str(),
         ExecError::IntegerOutOfRange { value, .. } => value.as_str(),
@@ -208,6 +229,45 @@ fn extract_syntax_error_token(message: &str) -> Option<&str> {
     let start = message.strip_prefix(prefix)?;
     let end = start.rfind('"')?;
     Some(&start[..end])
+}
+
+fn find_second_option_occurrence(sql: &str, option: &str) -> Option<usize> {
+    let lower = sql.to_ascii_lowercase();
+    let mut search_from = 0usize;
+    let mut seen = 0usize;
+    while let Some(relative) = lower[search_from..].find(option) {
+        let index = search_from + relative;
+        seen += 1;
+        if seen == 2 {
+            return Some(index + 1);
+        }
+        search_from = index.saturating_add(option.len());
+    }
+    None
+}
+
+fn find_case_insensitive_token_position(sql: &str, token: &str) -> Option<usize> {
+    if let Some(index) = sql.find(token) {
+        return Some(index + 1);
+    }
+    if token.contains('.') {
+        let quoted = token
+            .split('.')
+            .map(|part| format!("\"{part}\""))
+            .collect::<Vec<_>>()
+            .join(".");
+        if let Some(index) = sql.find(&quoted) {
+            return Some(index + 1);
+        }
+        let quoted_lower = quoted.to_ascii_lowercase();
+        if let Some(index) = sql.to_ascii_lowercase().find(&quoted_lower) {
+            return Some(index + 1);
+        }
+    }
+    let token_lower = token.to_ascii_lowercase();
+    sql.to_ascii_lowercase()
+        .find(&token_lower)
+        .map(|index| index + 1)
 }
 
 struct ExecErrorResponse {
@@ -669,7 +729,7 @@ where
         return Ok(());
     }
     send_auth_ok(&mut writer)?;
-    send_parameter_status(&mut writer, "server_version", "16.0")?;
+    send_parameter_status(&mut writer, "server_version", "18.3")?;
     send_parameter_status(&mut writer, "server_encoding", "UTF8")?;
     send_parameter_status(&mut writer, "client_encoding", "UTF8")?;
     send_parameter_status(
@@ -1241,19 +1301,6 @@ fn execute_psql_describe_query(
             Vec::new(),
         ));
     }
-    if lower.contains("from pg_catalog.pg_publication p")
-        && lower.contains("pg_relation_is_publishable")
-        && lower.contains("union")
-    {
-        return Some((
-            vec![
-                QueryColumn::text("pubname"),
-                QueryColumn::text("?column?"),
-                QueryColumn::text("?column?"),
-            ],
-            Vec::new(),
-        ));
-    }
     if lower.contains("from pg_catalog.pg_class c, pg_catalog.pg_inherits i")
         && lower.contains("::pg_catalog.regclass")
     {
@@ -1333,9 +1380,15 @@ fn psql_describe_tableinfo_query(
     let txn_ctx = session.catalog_txn_ctx();
     let entry = db.describe_relation_by_oid(session.client_id, txn_ctx, oid)?;
     let relhasindex = db.has_index_on_relation(session.client_id, txn_ctx, oid);
-    let amname = db
-        .access_method_name_for_relation(session.client_id, txn_ctx, oid)
-        .unwrap_or_default();
+    let amname = db.access_method_name_for_relation(session.client_id, txn_ctx, oid);
+    let visible_amname = match entry.relkind {
+        // :HACK: psql's verbose \d+ footer only renders a table access method
+        // when pg_class.relam points at a non-default AM. pgrust stores the
+        // default heap AM directly, so suppress that footer here until the
+        // catalog can distinguish explicit from implicit table AM selection.
+        'r' | 'p' | 'm' if amname.as_deref() == Some("heap") => None,
+        _ => amname,
+    };
     Some((
         vec![
             QueryColumn {
@@ -1417,7 +1470,9 @@ fn psql_describe_tableinfo_query(
             Value::Text("".into()),
             Value::InternalChar(entry.relpersistence as u8),
             Value::InternalChar(b'd'),
-            Value::Text(amname.into()),
+            visible_amname
+                .map(|name| Value::Text(name.into()))
+                .unwrap_or(Value::Null),
         ]],
     ))
 }
@@ -1523,7 +1578,11 @@ fn psql_describe_columns_query(
                     column
                         .default_expr
                         .as_ref()
-                        .map(|expr| Value::Text(format_psql_default(column.sql_type, expr).into()))
+                        .map(|expr| {
+                            Value::Text(
+                                format_psql_default(db, session, column.sql_type, expr).into(),
+                            )
+                        })
                         .unwrap_or(Value::Null),
                 );
             }
@@ -2412,7 +2471,15 @@ fn format_psql_type(sql_type: SqlType) -> String {
     }
 }
 
-fn format_psql_default(sql_type: SqlType, expr_sql: &str) -> String {
+fn format_psql_default(
+    db: &Database,
+    session: &Session,
+    sql_type: SqlType,
+    expr_sql: &str,
+) -> String {
+    if let Some(rendered) = format_regclass_nextval_default(db, session, sql_type, expr_sql) {
+        return rendered;
+    }
     if let Ok(expr) = parse_expr(expr_sql) {
         if let crate::backend::parser::SqlExpr::Const(Value::Bit(bits)) = expr {
             return format!("'{}'::\"bit\"", bits.render());
@@ -2422,6 +2489,44 @@ fn format_psql_default(sql_type: SqlType, expr_sql: &str) -> String {
         SqlTypeKind::VarBit => format!("{expr_sql}::bit varying"),
         SqlTypeKind::Bit => format!("{expr_sql}::\"bit\""),
         _ => expr_sql.to_string(),
+    }
+}
+
+fn format_regclass_nextval_default(
+    db: &Database,
+    session: &Session,
+    sql_type: SqlType,
+    expr_sql: &str,
+) -> Option<String> {
+    if !matches!(
+        sql_type.kind,
+        SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8
+    ) {
+        return None;
+    }
+    let oid = parse_nextval_relation_oid(expr_sql)?;
+    let relation_name = db.relation_display_name(
+        session.client_id,
+        session.catalog_txn_ctx(),
+        session.configured_search_path().as_deref(),
+        oid,
+    )?;
+    Some(format!(
+        "nextval({}::regclass)",
+        quote_sql_string(&relation_name)
+    ))
+}
+
+fn parse_nextval_relation_oid(expr_sql: &str) -> Option<u32> {
+    let expr_sql = expr_sql.trim();
+    let rest = expr_sql.strip_prefix("nextval(")?;
+    let close = rest.find(')')?;
+    let oid = rest[..close].trim().parse().ok()?;
+    let trailing = rest[close + 1..].trim();
+    if trailing.is_empty() || trailing.starts_with("::") {
+        Some(oid)
+    } else {
+        None
     }
 }
 
@@ -3725,6 +3830,40 @@ mod tests {
         None
     }
 
+    fn parameter_status_value(output: &[u8], key: &str) -> Option<String> {
+        let mut offset = 0;
+        while offset + 5 <= output.len() {
+            let tag = output[offset];
+            let len = i32::from_be_bytes(output[offset + 1..offset + 5].try_into().ok()?) as usize;
+            if len < 4 || offset + 1 + len > output.len() {
+                return None;
+            }
+            let body = &output[offset + 5..offset + 1 + len];
+            offset += 1 + len;
+
+            if tag != b'S' {
+                continue;
+            }
+
+            let key_end = body.iter().position(|byte| *byte == 0)?;
+            let value_start = key_end + 1;
+            let value_end = body[value_start..]
+                .iter()
+                .position(|byte| *byte == 0)
+                .map(|pos| value_start + pos)?;
+            if &body[..key_end] == key.as_bytes() {
+                return Some(String::from_utf8_lossy(&body[value_start..value_end]).into_owned());
+            }
+        }
+        None
+    }
+
+    fn output_contains_message(output: &[u8], message: &str) -> bool {
+        output
+            .windows(message.len() + 1)
+            .any(|window| window == format!("{message}\0").as_bytes())
+    }
+
     #[test]
     fn simple_query_role_creation_is_visible_to_next_query() {
         let db = Database::open(temp_dir("role_visibility"), 16).unwrap();
@@ -3793,6 +3932,129 @@ mod tests {
             .map(|row| row.oid)
             .unwrap();
         assert_eq!(state.session.current_user_oid(), tenant_oid);
+    }
+
+    #[test]
+    fn simple_query_session_authorization_sees_created_schema_for_qualified_create_table() {
+        let db = Database::open(temp_dir("pub_session_auth_schema"), 16).unwrap();
+        let mut state = ConnectionState {
+            session: Session::new(2),
+            prepared: HashMap::new(),
+            portals: HashMap::new(),
+            copy_in: None,
+        };
+        let mut output = Vec::new();
+
+        handle_query(
+            &mut output,
+            &db,
+            &mut state,
+            "create role regress_publication_user login superuser;\
+             set session authorization regress_publication_user;\
+             create schema pub_test;\
+             create table pub_test.testpub_nopk (foo int4, bar int4);",
+        )
+        .unwrap();
+
+        assert!(!output_contains_message(
+            &output,
+            "schema \"pub_test\" does not exist"
+        ));
+        assert!(
+            state
+                .session
+                .catalog_lookup(&db)
+                .lookup_any_relation("pub_test.testpub_nopk")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn simple_query_publication_footer_query_runs_after_session_authorization_setup() {
+        let db = Database::open(temp_dir("pub_session_auth_footer"), 16).unwrap();
+        let mut state = ConnectionState {
+            session: Session::new(2),
+            prepared: HashMap::new(),
+            portals: HashMap::new(),
+            copy_in: None,
+        };
+        let mut output = Vec::new();
+
+        handle_query(
+            &mut output,
+            &db,
+            &mut state,
+            "create role regress_publication_user login superuser;\
+             set session authorization regress_publication_user;\
+             create schema pub_test;\
+             create table testpub_tbl1 (id int4);\
+             create publication pub for table testpub_tbl1;\
+             alter publication pub add tables in schema pub_test;",
+        )
+        .unwrap();
+
+        let publication_oid = db
+            .backend_catcache(2, None)
+            .unwrap()
+            .publication_row_by_name("pub")
+            .map(|row| row.oid)
+            .unwrap();
+        output.clear();
+        handle_query(
+            &mut output,
+            &db,
+            &mut state,
+            &format!(
+                "SELECT n.nspname, c.relname, \
+                     pg_get_expr(pr.prqual, c.oid), \
+                     (CASE WHEN pr.prattrs IS NOT NULL THEN \
+                         pg_catalog.array_to_string( \
+                           ARRAY(SELECT attname \
+                                   FROM pg_catalog.generate_series(0, pg_catalog.array_upper(pr.prattrs::pg_catalog.int2[], 1)) s, \
+                                        pg_catalog.pg_attribute \
+                                  WHERE attrelid = c.oid AND attnum = prattrs[s]), ', ') \
+                      ELSE NULL END) \
+                 FROM pg_catalog.pg_class c, \
+                      pg_catalog.pg_namespace n, \
+                      pg_catalog.pg_publication_rel pr \
+                 WHERE c.relnamespace = n.oid \
+                   AND c.oid = pr.prrelid \
+                   AND pr.prpubid = '{}' \
+                 ORDER BY 1,2",
+                publication_oid
+            ),
+        )
+        .unwrap();
+
+        assert!(!output_contains_message(
+            &output,
+            "unknown table: pg_catalog.pg_class"
+        ));
+    }
+
+    #[test]
+    fn simple_query_explicit_pg_catalog_pg_class_lookup_runs_via_native_sql() {
+        let db = Database::open(temp_dir("explicit_pg_class_lookup"), 16).unwrap();
+        let mut state = ConnectionState {
+            session: Session::new(2),
+            prepared: HashMap::new(),
+            portals: HashMap::new(),
+            copy_in: None,
+        };
+        let mut output = Vec::new();
+
+        handle_query(
+            &mut output,
+            &db,
+            &mut state,
+            "select relname from pg_catalog.pg_class where relname = 'pg_class'",
+        )
+        .unwrap();
+
+        assert!(!output_contains_message(
+            &output,
+            "unknown table: pg_catalog.pg_class"
+        ));
     }
 
     #[test]
@@ -3866,6 +4128,21 @@ mod tests {
             }
             other => panic!("expected query result, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn startup_reports_server_version_18_3() {
+        let cluster = Cluster::open(temp_dir("startup_server_version"), 16).unwrap();
+        let mut input = startup_packet("postgres", "postgres");
+        input.extend(terminate_message());
+
+        let mut output = Vec::new();
+        handle_connection_with_io(Cursor::new(input), &mut output, &cluster, 41).unwrap();
+
+        assert_eq!(
+            parameter_status_value(&output, "server_version").as_deref(),
+            Some("18.3")
+        );
     }
 
     #[test]
@@ -4225,6 +4502,57 @@ mod tests {
     }
 
     #[test]
+    fn psql_describe_columns_query_formats_pg18_serial_defaults_like_postgres() {
+        let db = Database::open(temp_dir("describe_columns_serial_verbose"), 16).unwrap();
+        let mut session = Session::new(1);
+        session
+            .execute(
+                &db,
+                "create table widgets (id serial primary key, note text)",
+            )
+            .unwrap();
+        session
+            .execute(&db, "create publication pub for table widgets")
+            .unwrap();
+        let entry = session
+            .catalog_lookup(&db)
+            .lookup_any_relation("widgets")
+            .unwrap();
+
+        let sql = format!(
+            "SELECT a.attname, \
+                 pg_catalog.format_type(a.atttypid, a.atttypmod), \
+                 (SELECT pg_catalog.pg_get_expr(d.adbin, d.adrelid, true) \
+                    FROM pg_catalog.pg_attrdef d \
+                   WHERE d.adrelid = a.attrelid AND d.adnum = a.attnum AND a.atthasdef), \
+                 a.attnotnull, \
+                 (SELECT c.collname FROM pg_catalog.pg_collation c, pg_catalog.pg_type t \
+                   WHERE c.oid = a.attcollation AND t.oid = a.atttypid AND a.attcollation <> t.typcollation) AS attcollation, \
+                 a.attidentity, \
+                 a.attgenerated, \
+                 a.attstorage, \
+                 a.attcompression AS attcompression, \
+                 CASE WHEN a.attstattarget=-1 THEN NULL ELSE a.attstattarget END AS attstattarget, \
+                 pg_catalog.col_description(a.attrelid, a.attnum) \
+             FROM pg_catalog.pg_attribute a \
+             WHERE a.attrelid = '{}' AND a.attnum > 0 AND NOT a.attisdropped \
+             ORDER BY a.attnum",
+            entry.relation_oid
+        );
+        let (columns, rows) = execute_psql_describe_query(&db, &session, &sql).unwrap();
+        assert_eq!(columns.len(), 11);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0][2],
+            Value::Text("nextval('widgets_id_seq'::regclass)".into())
+        );
+        assert_eq!(rows[0][3], Value::Bool(true));
+        assert_eq!(rows[0][7], Value::InternalChar(b'p'));
+        assert_eq!(rows[0][8], Value::InternalChar(0));
+        assert_eq!(rows[0][9], Value::Null);
+    }
+
+    #[test]
     fn psql_describe_indexes_query_returns_primary_and_unique_rows() {
         let db = Database::open(temp_dir("describe_indexes_footer"), 16).unwrap();
         let session = Session::new(1);
@@ -4368,6 +4696,220 @@ mod tests {
     }
 
     #[test]
+    fn psql_publication_list_query_runs_via_native_sql() {
+        let db = Database::open(temp_dir("describe_publication_list"), 16).unwrap();
+        let mut session = Session::new(1);
+        session
+            .execute(&db, "create table widgets (id int4)")
+            .unwrap();
+        session
+            .execute(&db, "create publication pub for table widgets")
+            .unwrap();
+
+        let sql = "SELECT pubname AS \"Name\", \
+             pg_catalog.pg_get_userbyid(pubowner) AS \"Owner\", \
+             puballtables AS \"All tables\", \
+             pubinsert AS \"Inserts\", \
+             pubupdate AS \"Updates\", \
+             pubdelete AS \"Deletes\", \
+             pubtruncate AS \"Truncates\", \
+             (CASE pubgencols \
+                WHEN 'n' THEN 'none' \
+                WHEN 's' THEN 'stored' \
+              END) AS \"Generated columns\", \
+             pubviaroot AS \"Via root\" \
+             FROM pg_catalog.pg_publication \
+             ORDER BY 1";
+        let rows = match session.execute(&db, sql).unwrap() {
+            StatementResult::Query { rows, .. } => rows,
+            other => panic!("expected query result, got {other:?}"),
+        };
+        assert_eq!(
+            rows,
+            vec![vec![
+                Value::Text("pub".into()),
+                Value::Text("postgres".into()),
+                Value::Bool(false),
+                Value::Bool(true),
+                Value::Bool(true),
+                Value::Bool(true),
+                Value::Bool(true),
+                Value::Text("none".into()),
+                Value::Bool(false),
+            ]]
+        );
+    }
+
+    #[test]
+    fn psql_publication_footer_query_reports_relation_publications() {
+        let db = Database::open(temp_dir("describe_publication_footer"), 16).unwrap();
+        let mut session = Session::new(1);
+        session
+            .execute(&db, "create table widgets (id int4)")
+            .unwrap();
+        session
+            .execute(&db, "create publication pub for table widgets")
+            .unwrap();
+        let entry = session
+            .catalog_lookup(&db)
+            .lookup_any_relation("widgets")
+            .unwrap();
+
+        let sql = format!(
+            "SELECT pubname \
+                 , NULL \
+                 , NULL \
+             FROM pg_catalog.pg_publication p \
+                  JOIN pg_catalog.pg_publication_namespace pn ON p.oid = pn.pnpubid \
+                  JOIN pg_catalog.pg_class pc ON pc.relnamespace = pn.pnnspid \
+             WHERE pc.oid ='{}' and pg_catalog.pg_relation_is_publishable('{}') \
+             UNION \
+             SELECT pubname \
+                 , pg_get_expr(pr.prqual, c.oid) \
+                 , (CASE WHEN pr.prattrs IS NOT NULL THEN \
+                     (SELECT string_agg(attname, ', ') \
+                        FROM pg_catalog.generate_series(0, pg_catalog.array_upper(pr.prattrs::pg_catalog.int2[], 1)) s, \
+                             pg_catalog.pg_attribute \
+                       WHERE attrelid = pr.prrelid AND attnum = prattrs[s]) \
+                    ELSE NULL END) \
+             FROM pg_catalog.pg_publication p \
+                  JOIN pg_catalog.pg_publication_rel pr ON p.oid = pr.prpubid \
+                  JOIN pg_catalog.pg_class c ON c.oid = pr.prrelid \
+             WHERE pr.prrelid = '{}' \
+             UNION \
+             SELECT pubname \
+                 , NULL \
+                 , NULL \
+             FROM pg_catalog.pg_publication p \
+             WHERE p.puballtables AND pg_catalog.pg_relation_is_publishable('{}') \
+             ORDER BY 1",
+            entry.relation_oid, entry.relation_oid, entry.relation_oid, entry.relation_oid
+        );
+        let rows = match session.execute(&db, &sql).unwrap() {
+            StatementResult::Query { rows, .. } => rows,
+            other => panic!("expected query result, got {other:?}"),
+        };
+        assert_eq!(
+            rows,
+            vec![vec![Value::Text("pub".into()), Value::Null, Value::Null,]]
+        );
+    }
+
+    #[test]
+    fn psql_publication_detail_query_runs_via_native_sql() {
+        let db = Database::open(temp_dir("describe_publication_detail"), 16).unwrap();
+        let mut session = Session::new(1);
+        session.execute(&db, "create publication pub").unwrap();
+
+        let sql = "SELECT oid, pubname, \
+             pg_catalog.pg_get_userbyid(pubowner) AS owner, \
+             puballtables, pubinsert, pubupdate, pubdelete, pubtruncate, \
+             (CASE pubgencols WHEN 'n' THEN 'none' WHEN 's' THEN 'stored' END) AS \"Generated columns\", \
+             pubviaroot \
+             FROM pg_catalog.pg_publication \
+             WHERE pubname OPERATOR(pg_catalog.~) '^(pub)$' COLLATE pg_catalog.default \
+             ORDER BY 2";
+        let rows = match session.execute(&db, sql).unwrap() {
+            StatementResult::Query { rows, .. } => rows,
+            other => panic!("expected query result, got {other:?}"),
+        };
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][1], Value::Text("pub".into()));
+        assert_eq!(rows[0][2], Value::Text("postgres".into()));
+        assert_eq!(rows[0][3], Value::Bool(false));
+        assert_eq!(rows[0][8], Value::Text("none".into()));
+        assert_eq!(rows[0][9], Value::Bool(false));
+    }
+
+    #[test]
+    fn psql_publication_detail_footer_queries_run_via_native_sql() {
+        let db = Database::open(temp_dir("describe_publication_detail_footers"), 16).unwrap();
+        let mut session = Session::new(1);
+        session.execute(&db, "create schema pub_test").unwrap();
+        session
+            .execute(&db, "create table widgets (id int4)")
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create publication pub for table widgets, tables in schema pub_test",
+            )
+            .unwrap();
+        let publication_oid = db
+            .backend_catcache(1, None)
+            .unwrap()
+            .publication_row_by_name("pub")
+            .map(|row| row.oid)
+            .unwrap();
+
+        let tables_sql = format!(
+            "SELECT n.nspname, c.relname, \
+                 pg_get_expr(pr.prqual, c.oid), \
+                 (CASE WHEN pr.prattrs IS NOT NULL THEN \
+                     pg_catalog.array_to_string( \
+                       ARRAY(SELECT attname \
+                               FROM pg_catalog.generate_series(0, pg_catalog.array_upper(pr.prattrs::pg_catalog.int2[], 1)) s, \
+                                    pg_catalog.pg_attribute \
+                              WHERE attrelid = c.oid AND attnum = prattrs[s]), ', ') \
+                  ELSE NULL END) \
+             FROM pg_catalog.pg_class c, \
+                  pg_catalog.pg_namespace n, \
+                  pg_catalog.pg_publication_rel pr \
+             WHERE c.relnamespace = n.oid \
+               AND c.oid = pr.prrelid \
+               AND pr.prpubid = '{}' \
+             ORDER BY 1,2",
+            publication_oid
+        );
+        let table_rows = match session.execute(&db, &tables_sql).unwrap() {
+            StatementResult::Query { rows, .. } => rows,
+            other => panic!("expected query result, got {other:?}"),
+        };
+        assert_eq!(
+            table_rows,
+            vec![vec![
+                Value::Text("public".into()),
+                Value::Text("widgets".into()),
+                Value::Null,
+                Value::Null,
+            ]]
+        );
+
+        let schemas_sql = format!(
+            "SELECT n.nspname \
+             FROM pg_catalog.pg_namespace n \
+                  JOIN pg_catalog.pg_publication_namespace pn ON n.oid = pn.pnnspid \
+             WHERE pn.pnpubid = '{}' \
+             ORDER BY 1",
+            publication_oid
+        );
+        let schema_rows = match session.execute(&db, &schemas_sql).unwrap() {
+            StatementResult::Query { rows, .. } => rows,
+            other => panic!("expected query result, got {other:?}"),
+        };
+        assert_eq!(schema_rows, vec![vec![Value::Text("pub_test".into())]]);
+    }
+
+    #[test]
+    fn publication_obj_description_query_reads_pg_description() {
+        let db = Database::open(temp_dir("describe_publication_comment"), 16).unwrap();
+        let mut session = Session::new(1);
+        session.execute(&db, "create publication pub").unwrap();
+        session
+            .execute(&db, "comment on publication pub is 'hello world'")
+            .unwrap();
+
+        let sql = "SELECT obj_description(p.oid, 'pg_publication') \
+             FROM pg_catalog.pg_publication p \
+             WHERE p.pubname = 'pub'";
+        let rows = match session.execute(&db, sql).unwrap() {
+            StatementResult::Query { rows, .. } => rows,
+            other => panic!("expected query result, got {other:?}"),
+        };
+        assert_eq!(rows, vec![vec![Value::Text("hello world".into())]]);
+    }
+
+    #[test]
     fn psql_col_description_query_returns_null_without_column_comments() {
         let db = Database::open(temp_dir("describe_column_comment"), 16).unwrap();
         let session = Session::new(1);
@@ -4425,6 +4967,27 @@ mod tests {
     }
 
     #[test]
+    fn psql_describe_tableinfo_query_hides_default_heap_access_method() {
+        let db = Database::open(temp_dir("describe_tableinfo_heap_am"), 16).unwrap();
+        let session = Session::new(1);
+        db.execute(1, "create table widgets (id int4 not null)")
+            .unwrap();
+        let table = session
+            .catalog_lookup(&db)
+            .lookup_any_relation("widgets")
+            .unwrap();
+
+        let sql = format!(
+            "select c.relchecks, c.relkind, c.relhasindex \
+                 from pg_catalog.pg_class c \
+                 where c.oid = '{}'",
+            table.relation_oid
+        );
+        let (_, rows) = execute_psql_describe_query(&db, &session, &sql).unwrap();
+        assert_eq!(rows[0][14], Value::Null);
+    }
+
+    #[test]
     fn extract_quoted_error_value_handles_date_input_messages() {
         assert_eq!(
             extract_quoted_error_value("invalid input syntax for type date: \"garbage\""),
@@ -4437,6 +5000,52 @@ mod tests {
         assert_eq!(
             extract_quoted_error_value("date out of range: \"5874898-01-01\""),
             Some("5874898-01-01")
+        );
+    }
+
+    #[test]
+    fn exec_error_detail_reports_publication_generated_columns_valid_values() {
+        let err = ExecError::Parse(
+            crate::backend::parser::ParseError::InvalidPublicationParameterValue {
+                parameter: "publish_generated_columns".into(),
+                value: "foo".into(),
+            },
+        );
+
+        assert_eq!(
+            exec_error_detail(&err),
+            Some("Valid values are \"none\" and \"stored\".")
+        );
+    }
+
+    #[test]
+    fn exec_error_position_points_at_second_conflicting_publication_option() {
+        let sql = "create publication pub with (publish_via_partition_root = true, publish_via_partition_root = false)";
+        let err = ExecError::Parse(
+            crate::backend::parser::ParseError::ConflictingOrRedundantOptions {
+                option: "publish_via_partition_root".into(),
+            },
+        );
+
+        assert_eq!(
+            exec_error_position(sql, &err),
+            sql.to_ascii_lowercase()
+                .match_indices("publish_via_partition_root")
+                .nth(1)
+                .map(|(index, _)| index + 1)
+        );
+    }
+
+    #[test]
+    fn exec_error_position_finds_quoted_publication_schema_name_case_insensitively() {
+        let sql = "create publication pub for tables in schema \"Foo\".\"Bar\"";
+        let err = ExecError::Parse(
+            crate::backend::parser::ParseError::InvalidPublicationSchemaName("Foo.Bar".into()),
+        );
+
+        assert_eq!(
+            exec_error_position(sql, &err),
+            sql.find("\"Foo\".\"Bar\"").map(|index| index + 1)
         );
     }
 

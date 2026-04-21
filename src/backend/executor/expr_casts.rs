@@ -24,7 +24,8 @@ use crate::backend::utils::time::date::{
 use crate::backend::utils::time::datetime::DateTimeParseError;
 use crate::backend::utils::time::timestamp::{parse_timestamp_text, parse_timestamptz_text};
 use crate::include::catalog::{
-    TEXT_TYPE_OID, bootstrap_pg_cast_rows, builtin_type_rows, range_type_ref_for_sql_type,
+    INT2_TYPE_OID, TEXT_TYPE_OID, bootstrap_pg_cast_rows, builtin_type_rows,
+    range_type_ref_for_sql_type,
 };
 use crate::pgrust::compact_string::CompactString;
 use num_integer::Integer;
@@ -1175,7 +1176,15 @@ pub(crate) fn cast_value_with_config(
                 )))
             }
             other => match other.as_text() {
-                Some(text) => parse_text_array_literal(text, ty.element_type()),
+                Some(text) => {
+                    if matches!(ty.element_type().kind, SqlTypeKind::Int2)
+                        && !text.trim_start().starts_with('{')
+                    {
+                        parse_int2vector_array_text(text)
+                    } else {
+                        parse_text_array_literal(text, ty.element_type())
+                    }
+                }
                 None => Err(ExecError::TypeMismatch {
                     op: "::array",
                     left: other,
@@ -2062,6 +2071,16 @@ pub(crate) fn cast_value_with_config(
         Value::PgArray(array) => Ok(Value::PgArray(array)),
         Value::Record(record) => Ok(Value::Record(record)),
     }
+}
+
+fn parse_int2vector_array_text(text: &str) -> Result<Value, ExecError> {
+    let mut items = Vec::new();
+    for item in text.split_ascii_whitespace() {
+        items.push(cast_text_to_int2(item)?);
+    }
+    Ok(Value::PgArray(
+        ArrayValue::from_1d(items).with_element_type_oid(INT2_TYPE_OID),
+    ))
 }
 
 pub(super) fn cast_text_value(text: &str, ty: SqlType, explicit: bool) -> Result<Value, ExecError> {

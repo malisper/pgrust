@@ -577,6 +577,10 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::NextVal | BuiltinScalarFunction::CurrVal => args.len() == 1,
             BuiltinScalarFunction::SetVal => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::PgGetSerialSequence => args.len() == 2,
+            BuiltinScalarFunction::PgGetUserById => args.len() == 1,
+            BuiltinScalarFunction::ObjDescription => args.len() == 2,
+            BuiltinScalarFunction::PgGetExpr => matches!(args.len(), 2 | 3),
+            BuiltinScalarFunction::PgRelationIsPublishable => args.len() == 1,
             BuiltinScalarFunction::LoCreate | BuiltinScalarFunction::LoUnlink => args.len() == 1,
             BuiltinScalarFunction::PgStatGetCheckpointerNumTimed
             | BuiltinScalarFunction::PgStatGetCheckpointerNumRequested
@@ -616,13 +620,16 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::ToJson | BuiltinScalarFunction::ToJsonb => args.len() == 1,
             BuiltinScalarFunction::ArrayLength
             | BuiltinScalarFunction::ArrayLower
+            | BuiltinScalarFunction::ArrayUpper
             | BuiltinScalarFunction::Cardinality
             | BuiltinScalarFunction::ArrayNdims
             | BuiltinScalarFunction::ArrayDims => {
                 args.len()
                     == if matches!(
                         func,
-                        BuiltinScalarFunction::ArrayLength | BuiltinScalarFunction::ArrayLower
+                        BuiltinScalarFunction::ArrayLength
+                            | BuiltinScalarFunction::ArrayLower
+                            | BuiltinScalarFunction::ArrayUpper
                     ) {
                         2
                     } else {
@@ -1251,6 +1258,14 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "pg_get_serial_sequence",
             BuiltinScalarFunction::PgGetSerialSequence,
         ),
+        ("pg_get_userbyid", BuiltinScalarFunction::PgGetUserById),
+        ("obj_description", BuiltinScalarFunction::ObjDescription),
+        ("pg_get_expr", BuiltinScalarFunction::PgGetExpr),
+        ("pg_get_expr_ext", BuiltinScalarFunction::PgGetExpr),
+        (
+            "pg_relation_is_publishable",
+            BuiltinScalarFunction::PgRelationIsPublishable,
+        ),
         ("lo_create", BuiltinScalarFunction::LoCreate),
         ("lo_unlink", BuiltinScalarFunction::LoUnlink),
         ("pg_typeof", BuiltinScalarFunction::PgTypeof),
@@ -1486,6 +1501,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("array_ndims", BuiltinScalarFunction::ArrayNdims),
         ("array_dims", BuiltinScalarFunction::ArrayDims),
         ("array_lower", BuiltinScalarFunction::ArrayLower),
+        ("array_upper", BuiltinScalarFunction::ArrayUpper),
         ("array_fill", BuiltinScalarFunction::ArrayFill),
         ("string_to_array", BuiltinScalarFunction::StringToArray),
         ("array_to_string", BuiltinScalarFunction::ArrayToString),
@@ -1803,6 +1819,42 @@ fn scalar_fixed_return_types() -> &'static Vec<(BuiltinScalarFunction, SqlType)>
                 SqlType::new(SqlTypeKind::Int4),
             ));
         }
+        if by_func
+            .iter()
+            .all(|(candidate, _)| *candidate != BuiltinScalarFunction::ArrayUpper)
+        {
+            by_func.push((
+                BuiltinScalarFunction::ArrayUpper,
+                SqlType::new(SqlTypeKind::Int4),
+            ));
+        }
+        for func in [
+            BuiltinScalarFunction::PgGetSerialSequence,
+            BuiltinScalarFunction::ObjDescription,
+            BuiltinScalarFunction::PgGetExpr,
+        ] {
+            if by_func.iter().all(|(candidate, _)| *candidate != func) {
+                by_func.push((func, SqlType::new(SqlTypeKind::Text)));
+            }
+        }
+        if by_func
+            .iter()
+            .all(|(candidate, _)| *candidate != BuiltinScalarFunction::PgGetUserById)
+        {
+            by_func.push((
+                BuiltinScalarFunction::PgGetUserById,
+                SqlType::new(SqlTypeKind::Name),
+            ));
+        }
+        if by_func
+            .iter()
+            .all(|(candidate, _)| *candidate != BuiltinScalarFunction::PgRelationIsPublishable)
+        {
+            by_func.push((
+                BuiltinScalarFunction::PgRelationIsPublishable,
+                SqlType::new(SqlTypeKind::Bool),
+            ));
+        }
         for func in [
             BuiltinScalarFunction::Now,
             BuiltinScalarFunction::TransactionTimestamp,
@@ -1847,6 +1899,10 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::CurrVal
             | BuiltinScalarFunction::SetVal
             | BuiltinScalarFunction::PgGetSerialSequence
+            | BuiltinScalarFunction::PgGetUserById
+            | BuiltinScalarFunction::ObjDescription
+            | BuiltinScalarFunction::PgGetExpr
+            | BuiltinScalarFunction::PgRelationIsPublishable
             | BuiltinScalarFunction::GetDatabaseEncoding
             | BuiltinScalarFunction::PgStatGetCheckpointerNumTimed
             | BuiltinScalarFunction::PgStatGetCheckpointerNumRequested
@@ -1894,6 +1950,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::ArrayNdims
             | BuiltinScalarFunction::ArrayDims
             | BuiltinScalarFunction::ArrayLower
+            | BuiltinScalarFunction::ArrayUpper
             | BuiltinScalarFunction::Lower
             | BuiltinScalarFunction::Unistr
             | BuiltinScalarFunction::Ascii

@@ -73,29 +73,30 @@ impl Database {
         catalog_effects.push(effect);
         current_cid = current_cid.saturating_add(1);
 
-        let grant_membership = |db: &Database,
-                                current_cid: &mut CommandId,
-                                membership: crate::backend::catalog::role_memberships::NewRoleMembership,
-                                catalog_effects: &mut Vec<CatalogMutationEffect>|
-         -> Result<(), ExecError> {
-            let ctx = CatalogWriteContext {
-                pool: db.pool.clone(),
-                txns: db.txns.clone(),
-                xid,
-                cid: *current_cid,
-                client_id,
-                waiter: None,
-                interrupts: interrupts.clone(),
+        let grant_membership =
+            |db: &Database,
+             current_cid: &mut CommandId,
+             membership: crate::backend::catalog::role_memberships::NewRoleMembership,
+             catalog_effects: &mut Vec<CatalogMutationEffect>|
+             -> Result<(), ExecError> {
+                let ctx = CatalogWriteContext {
+                    pool: db.pool.clone(),
+                    txns: db.txns.clone(),
+                    xid,
+                    cid: *current_cid,
+                    client_id,
+                    waiter: None,
+                    interrupts: interrupts.clone(),
+                };
+                let (_, effect) = db
+                    .shared_catalog
+                    .write()
+                    .grant_role_membership_mvcc(&membership, &ctx)
+                    .map_err(map_role_catalog_error)?;
+                catalog_effects.push(effect);
+                *current_cid = current_cid.saturating_add(1);
+                Ok(())
             };
-            let (_, effect) = db
-                .shared_catalog
-                .write()
-                .grant_role_membership_mvcc(&membership, &ctx)
-                .map_err(map_role_catalog_error)?;
-            catalog_effects.push(effect);
-            *current_cid = current_cid.saturating_add(1);
-            Ok(())
-        };
 
         let current_user_oid = auth.current_user_oid();
         if !auth_catalog
@@ -234,14 +235,7 @@ impl Database {
                 .shared_catalog
                 .write()
                 .grant_role_membership_mvcc(
-                    &membership_row(
-                        created.oid,
-                        member.oid,
-                        current_user_oid,
-                        true,
-                        false,
-                        true,
-                    ),
+                    &membership_row(created.oid, member.oid, current_user_oid, true, false, true),
                     &ctx,
                 )
                 .map_err(|err| {
@@ -267,8 +261,13 @@ impl Database {
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let mut catalog_effects = Vec::new();
-        let result =
-            self.execute_alter_role_stmt_in_transaction(client_id, stmt, xid, 0, &mut catalog_effects);
+        let result = self.execute_alter_role_stmt_in_transaction(
+            client_id,
+            stmt,
+            xid,
+            0,
+            &mut catalog_effects,
+        );
         let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
         guard.disarm();
         result
@@ -415,8 +414,13 @@ impl Database {
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let mut catalog_effects = Vec::new();
-        let result =
-            self.execute_drop_role_stmt_in_transaction(client_id, stmt, xid, 0, &mut catalog_effects);
+        let result = self.execute_drop_role_stmt_in_transaction(
+            client_id,
+            stmt,
+            xid,
+            0,
+            &mut catalog_effects,
+        );
         let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
         guard.disarm();
         result
@@ -455,12 +459,16 @@ impl Database {
             if !auth.can_drop_role(existing.oid, &auth_catalog) {
                 return Err(drop_role_permission_error(&existing));
             }
-            let owned_objects =
-                owned_objects_for_roles(self, client_id, Some((xid, current_cid)), &[existing.oid])?;
+            let owned_objects = owned_objects_for_roles(
+                self,
+                client_id,
+                Some((xid, current_cid)),
+                &[existing.oid],
+            )?;
             if !owned_objects.is_empty() {
                 let detail = owned_objects
                     .iter()
-                    .filter(|object| object.relkind != 'i')
+                    .filter(|object| object.kind != OwnedObjectKind::Index)
                     .map(OwnedObject::drop_detail)
                     .collect::<Vec<_>>()
                     .join("\n");
@@ -573,11 +581,38 @@ impl Database {
                 waiter: None,
                 interrupts: Arc::clone(&interrupts),
             };
-            let effect = self
-                .catalog
-                .write()
-                .alter_relation_owner_mvcc(object.relation_oid, new_role.oid, &ctx)
-                .map_err(map_role_catalog_error)?;
+            let effect = match object.kind {
+                OwnedObjectKind::Publication => {
+                    let catcache = self
+                        .txn_backend_catcache(client_id, xid, cid.saturating_add(offset as u32))
+                        .map_err(map_role_catalog_error)?;
+                    let publication = catcache
+                        .publication_rows()
+                        .into_iter()
+                        .find(|row| row.oid == object.oid)
+                        .ok_or_else(|| {
+                            ExecError::Parse(role_management_error(format!(
+                                "publication \"{}\" does not exist",
+                                object.name
+                            )))
+                        })?;
+                    self.catalog
+                        .write()
+                        .replace_publication_row_mvcc(
+                            crate::include::catalog::PgPublicationRow {
+                                pubowner: new_role.oid,
+                                ..publication
+                            },
+                            &ctx,
+                        )
+                        .map_err(map_role_catalog_error)?
+                }
+                OwnedObjectKind::Index | OwnedObjectKind::Table | OwnedObjectKind::View => self
+                    .catalog
+                    .write()
+                    .alter_relation_owner_mvcc(object.oid, new_role.oid, &ctx)
+                    .map_err(map_role_catalog_error)?,
+            };
             catalog_effects.push(effect);
         }
 
@@ -740,17 +775,26 @@ fn drop_role_permission_error(existing: &crate::include::catalog::PgAuthIdRow) -
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct OwnedObject {
-    relation_oid: u32,
-    relkind: char,
+    oid: u32,
+    kind: OwnedObjectKind,
     name: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum OwnedObjectKind {
+    Index,
+    Publication,
+    Table,
+    View,
 }
 
 impl OwnedObject {
     fn kind_name(&self) -> &'static str {
-        match self.relkind {
-            'v' => "view",
-            'i' => "index",
-            _ => "table",
+        match self.kind {
+            OwnedObjectKind::Index => "index",
+            OwnedObjectKind::Publication => "publication",
+            OwnedObjectKind::Table => "table",
+            OwnedObjectKind::View => "view",
         }
     }
 
@@ -783,19 +827,30 @@ fn owned_objects_for_roles(
         .filter(|row| row.relpersistence != 't')
         .filter(|row| matches!(row.relkind, 'r' | 'v' | 'i'))
         .map(|row| OwnedObject {
-            relation_oid: row.oid,
-            relkind: row.relkind,
+            oid: row.oid,
+            kind: match row.relkind {
+                'i' => OwnedObjectKind::Index,
+                'v' => OwnedObjectKind::View,
+                _ => OwnedObjectKind::Table,
+            },
             name: match namespaces.get(&row.relnamespace).map(String::as_str) {
                 Some("public") | Some("pg_catalog") | None => row.relname,
                 Some(schema) => format!("{schema}.{}", row.relname),
             },
         })
         .collect::<Vec<_>>();
-    objects.sort_by(|left, right| {
-        left.name
-            .cmp(&right.name)
-            .then(left.relkind.cmp(&right.relkind))
-    });
+    objects.extend(
+        catcache
+            .publication_rows()
+            .into_iter()
+            .filter(|row| role_oids.contains(&row.pubowner))
+            .map(|row| OwnedObject {
+                oid: row.oid,
+                kind: OwnedObjectKind::Publication,
+                name: row.pubname,
+            }),
+    );
+    objects.sort_by(|left, right| left.name.cmp(&right.name).then(left.kind.cmp(&right.kind)));
     Ok(objects)
 }
 
@@ -1235,9 +1290,7 @@ mod tests {
             superuser
                 .execute(
                     &db,
-                    &format!(
-                        "grant {role_name} to limited_admin with inherit true, set true"
-                    ),
+                    &format!("grant {role_name} to limited_admin with inherit true, set true"),
                 )
                 .unwrap();
         }
@@ -1346,10 +1399,16 @@ mod tests {
         assert!(format!("{err:?}").contains("permission denied to reassign objects"));
 
         superuser
-            .execute(&db, "grant tenant2 to limited_admin with inherit true, set true")
+            .execute(
+                &db,
+                "grant tenant2 to limited_admin with inherit true, set true",
+            )
             .unwrap();
         superuser
-            .execute(&db, "grant target2 to limited_admin with inherit true, set true")
+            .execute(
+                &db,
+                "grant target2 to limited_admin with inherit true, set true",
+            )
             .unwrap();
 
         superuser

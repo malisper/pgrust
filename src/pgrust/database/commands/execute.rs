@@ -395,6 +395,12 @@ impl Database {
                     alter_stmt,
                     configured_search_path,
                 ),
+            Statement::AlterPublication(ref alter_stmt) => self
+                .execute_alter_publication_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
             Statement::CreateSequence(ref create_stmt) => self
                 .execute_create_sequence_stmt_with_search_path(
                     client_id,
@@ -463,6 +469,12 @@ impl Database {
                 ),
             Statement::CommentOnConversion(ref comment_stmt) => self
                 .execute_comment_on_conversion_stmt_with_search_path(
+                    client_id,
+                    comment_stmt,
+                    configured_search_path,
+                ),
+            Statement::CommentOnPublication(ref comment_stmt) => self
+                .execute_comment_on_publication_stmt_with_search_path(
                     client_id,
                     comment_stmt,
                     configured_search_path,
@@ -774,6 +786,12 @@ impl Database {
                     create_stmt,
                     configured_search_path,
                 ),
+            Statement::CreatePublication(ref create_stmt) => self
+                .execute_create_publication_stmt_with_search_path(
+                    client_id,
+                    create_stmt,
+                    configured_search_path,
+                ),
             Statement::CreateTrigger(ref create_stmt) => self
                 .execute_create_trigger_stmt_with_search_path(
                     client_id,
@@ -848,6 +866,12 @@ impl Database {
             ),
             Statement::DropConversion(ref drop_stmt) => self
                 .execute_drop_conversion_stmt_with_search_path(
+                    client_id,
+                    drop_stmt,
+                    configured_search_path,
+                ),
+            Statement::DropPublication(ref drop_stmt) => self
+                .execute_drop_publication_stmt_with_search_path(
                     client_id,
                     drop_stmt,
                     configured_search_path,

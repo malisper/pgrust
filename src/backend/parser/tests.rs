@@ -10,8 +10,9 @@ use crate::include::nodes::parsenodes::{
     AliasColumnDef, AliasColumnSpec, ColumnConstraint, CompositeTypeAttributeDef,
     CreateCompositeTypeStatement, CreateTriggerStatement, CreateTypeStatement,
     DropTriggerStatement, DropTypeStatement, ForeignKeyAction, ForeignKeyMatchType, IndexColumnDef,
-    InsertSource, InsertStatement, JoinTreeNode, RangeTblEntryKind, RawTypeName, TableConstraint,
-    TriggerEvent, TriggerEventSpec, TriggerLevel, TriggerTiming,
+    InsertSource, InsertStatement, JoinTreeNode, PublicationObjectSpec, PublicationOption,
+    PublicationSchemaName, RangeTblEntryKind, RawTypeName, SetSessionAuthorizationStatement,
+    TableConstraint, TriggerEvent, TriggerEventSpec, TriggerLevel, TriggerTiming,
 };
 use crate::include::nodes::primnodes::{AttrNumber, JoinType, Var, is_system_attr};
 
@@ -31,6 +32,283 @@ fn builtin_type(ty: SqlType) -> RawTypeName {
 
 fn attrs() -> ConstraintAttributes {
     ConstraintAttributes::default()
+}
+
+#[test]
+fn parse_create_publication_mixed_targets_and_options() {
+    let stmt = parse_statement(
+        "create publication pub for tables in schema pub_test, table pub_test.widgets with (publish = 'insert, update', publish_via_partition_root = true)",
+    )
+    .unwrap();
+    match stmt {
+        Statement::CreatePublication(stmt) => {
+            assert_eq!(stmt.publication_name, "pub");
+            assert!(!stmt.target.for_all_tables);
+            assert_eq!(stmt.target.objects.len(), 2);
+            assert!(matches!(
+                &stmt.target.objects[0],
+                PublicationObjectSpec::Schema(schema)
+                    if schema.schema_name == PublicationSchemaName::Name("pub_test".into())
+            ));
+            assert!(matches!(
+                &stmt.target.objects[1],
+                PublicationObjectSpec::Table(table)
+                    if table.relation_name == "pub_test.widgets"
+            ));
+            assert!(stmt.options.options.iter().any(|option| matches!(
+                option,
+                PublicationOption::Publish(actions)
+                    if actions.insert && actions.update && !actions.delete && !actions.truncate
+            )));
+            assert!(
+                stmt.options.options.iter().any(|option| matches!(
+                    option,
+                    PublicationOption::PublishViaPartitionRoot(true)
+                ))
+            );
+        }
+        other => panic!("expected create publication, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_publication_current_schema_depends_on_target_mode() {
+    let table_stmt = parse_statement("create publication pub for table current_schema").unwrap();
+    match table_stmt {
+        Statement::CreatePublication(stmt) => {
+            assert!(matches!(
+                &stmt.target.objects[0],
+                PublicationObjectSpec::Table(table) if table.relation_name == "current_schema"
+            ));
+        }
+        other => panic!("expected create publication, got {other:?}"),
+    }
+
+    let schema_stmt =
+        parse_statement("create publication pub for tables in schema current_schema").unwrap();
+    match schema_stmt {
+        Statement::CreatePublication(stmt) => {
+            assert!(matches!(
+                &stmt.target.objects[0],
+                PublicationObjectSpec::Schema(schema)
+                    if schema.schema_name == PublicationSchemaName::CurrentSchema
+            ));
+        }
+        other => panic!("expected create publication, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_alter_publication_actions() {
+    assert!(matches!(
+        parse_statement("alter publication pub rename to pub2").unwrap(),
+        Statement::AlterPublication(AlterPublicationStatement {
+            publication_name,
+            action: AlterPublicationAction::Rename { new_name },
+        }) if publication_name == "pub" && new_name == "pub2"
+    ));
+    assert!(matches!(
+        parse_statement("alter publication pub owner to app_owner").unwrap(),
+        Statement::AlterPublication(AlterPublicationStatement {
+            publication_name,
+            action: AlterPublicationAction::OwnerTo { new_owner },
+        }) if publication_name == "pub" && new_owner == "app_owner"
+    ));
+    assert!(matches!(
+        parse_statement("alter publication pub set (publish_generated_columns = stored)").unwrap(),
+        Statement::AlterPublication(AlterPublicationStatement {
+            action: AlterPublicationAction::SetOptions(_),
+            ..
+        })
+    ));
+    assert!(matches!(
+        parse_statement("alter publication pub add tables in schema pub_test, table pub_test.t")
+            .unwrap(),
+        Statement::AlterPublication(AlterPublicationStatement {
+            action: AlterPublicationAction::AddObjects(target),
+            ..
+        }) if target.objects.len() == 2
+    ));
+}
+
+#[test]
+fn parse_drop_and_comment_on_publication() {
+    assert!(matches!(
+        parse_statement("drop publication if exists pub1, pub2 cascade").unwrap(),
+        Statement::DropPublication(DropPublicationStatement {
+            if_exists: true,
+            publication_names,
+            cascade: true,
+        }) if publication_names == vec!["pub1", "pub2"]
+    ));
+    assert!(matches!(
+        parse_statement("comment on publication pub is 'hello'").unwrap(),
+        Statement::CommentOnPublication(CommentOnPublicationStatement {
+            publication_name,
+            comment: Some(comment),
+        }) if publication_name == "pub" && comment == "hello"
+    ));
+}
+
+#[test]
+fn parse_set_session_authorization_string_literal() {
+    assert!(matches!(
+        parse_statement("set session authorization 'tenant'").unwrap(),
+        Statement::SetSessionAuthorization(SetSessionAuthorizationStatement { role_name })
+            if role_name == "tenant"
+    ));
+}
+
+#[test]
+fn publication_parser_rejects_milestone_one_unsupported_features() {
+    assert!(matches!(
+        parse_statement("create publication pub for table only widgets"),
+        Err(ParseError::FeatureNotSupported(feature)) if feature == "publication ONLY"
+    ));
+    assert!(matches!(
+        parse_statement("create publication pub for table widgets(id)"),
+        Err(ParseError::FeatureNotSupported(feature)) if feature == "publication column lists"
+    ));
+    assert!(matches!(
+        parse_statement("create publication pub for table widgets where (id > 0)"),
+        Err(ParseError::FeatureNotSupported(feature)) if feature == "publication row filters"
+    ));
+}
+
+#[test]
+fn publication_parser_reports_postgres_like_option_errors() {
+    assert!(matches!(
+        parse_statement("create publication pub with (foo)"),
+        Err(ParseError::UnrecognizedPublicationParameter(name)) if name == "foo"
+    ));
+    assert!(matches!(
+        parse_statement("create publication pub with (publish = 'cluster, vacuum')"),
+        Err(ParseError::UnrecognizedPublicationOptionValue { option, value })
+            if option == "publish" && value == "cluster"
+    ));
+    assert!(matches!(
+        parse_statement("create publication pub with (publish_generated_columns = foo)"),
+        Err(ParseError::InvalidPublicationParameterValue { parameter, value })
+            if parameter == "publish_generated_columns" && value == "foo"
+    ));
+    assert!(matches!(
+        parse_statement("create publication pub with (publish_generated_columns)"),
+        Err(ParseError::InvalidPublicationParameterValue { parameter, value })
+            if parameter == "publish_generated_columns" && value.is_empty()
+    ));
+    assert!(matches!(
+        parse_statement("create publication pub with (publish_via_partition_root = true, publish_via_partition_root = false)"),
+        Err(ParseError::ConflictingOrRedundantOptions { option })
+            if option == "publish_via_partition_root"
+    ));
+}
+
+#[test]
+fn publication_parser_reports_invalid_mixed_object_names() {
+    assert!(matches!(
+        parse_statement(
+            "create publication pub for table pub_test.widgets, current_schema"
+        ),
+        Err(ParseError::InvalidPublicationTableName(name)) if name == "current_schema"
+    ));
+    assert!(matches!(
+        parse_statement("create publication pub for tables in schema foo, test.foo"),
+        Err(ParseError::InvalidPublicationSchemaName(name)) if name == "test.foo"
+    ));
+}
+
+#[test]
+fn parse_publication_describe_queries() {
+    parse_statement(
+        "SELECT pubname AS \"Name\", \
+         pg_catalog.pg_get_userbyid(pubowner) AS \"Owner\", \
+         puballtables AS \"All tables\", \
+         pubinsert AS \"Inserts\", \
+         pubupdate AS \"Updates\", \
+         pubdelete AS \"Deletes\", \
+         pubtruncate AS \"Truncates\", \
+         (CASE pubgencols WHEN 'n' THEN 'none' WHEN 's' THEN 'stored' END) AS \"Generated columns\", \
+         pubviaroot AS \"Via root\" \
+         FROM pg_catalog.pg_publication \
+         ORDER BY 1",
+    )
+    .unwrap();
+
+    parse_statement(
+        "SELECT oid, pubname, \
+         pg_catalog.pg_get_userbyid(pubowner) AS owner, \
+         puballtables, pubinsert, pubupdate, pubdelete, pubtruncate, \
+         (CASE pubgencols WHEN 'n' THEN 'none' WHEN 's' THEN 'stored' END) AS \"Generated columns\", \
+         pubviaroot \
+         FROM pg_catalog.pg_publication \
+         WHERE pubname OPERATOR(pg_catalog.~) '^(pub)$' COLLATE pg_catalog.default \
+         ORDER BY 2",
+    )
+    .unwrap();
+
+    parse_statement(
+        "SELECT pubname, NULL, NULL \
+         FROM pg_catalog.pg_publication p \
+              JOIN pg_catalog.pg_publication_namespace pn ON p.oid = pn.pnpubid \
+              JOIN pg_catalog.pg_class pc ON pc.relnamespace = pn.pnnspid \
+         WHERE pc.oid = '1' AND pg_catalog.pg_relation_is_publishable('1') \
+         UNION \
+         SELECT pubname, pg_get_expr(pr.prqual, c.oid), \
+                (CASE WHEN pr.prattrs IS NOT NULL THEN \
+                    (SELECT string_agg(attname, ', ') \
+                       FROM pg_catalog.generate_series(0, pg_catalog.array_upper(pr.prattrs::pg_catalog.int2[], 1)) s, \
+                            pg_catalog.pg_attribute \
+                      WHERE attrelid = pr.prrelid AND attnum = prattrs[s]) \
+                 ELSE NULL END) \
+         FROM pg_catalog.pg_publication p \
+              JOIN pg_catalog.pg_publication_rel pr ON p.oid = pr.prpubid \
+              JOIN pg_catalog.pg_class c ON c.oid = pr.prrelid \
+         WHERE pr.prrelid = '1' \
+         UNION \
+         SELECT pubname, NULL, NULL \
+         FROM pg_catalog.pg_publication p \
+         WHERE p.puballtables AND pg_catalog.pg_relation_is_publishable('1') \
+         ORDER BY 1",
+    )
+    .unwrap();
+}
+
+#[test]
+fn publication_describe_tokens_inside_literals_remain_literals() {
+    let stmt = parse_statement(
+        "select 'OPERATOR(pg_catalog.~)' as op, $$COLLATE pg_catalog.default$$ as coll",
+    )
+    .unwrap();
+    match stmt {
+        Statement::Select(stmt) => {
+            assert_eq!(stmt.targets[0].output_name, "op");
+            assert_eq!(
+                stmt.targets[0].expr,
+                SqlExpr::Const(Value::Text("OPERATOR(pg_catalog.~)".into()))
+            );
+            assert_eq!(stmt.targets[1].output_name, "coll");
+            assert_eq!(
+                stmt.targets[1].expr,
+                SqlExpr::Const(Value::Text("COLLATE pg_catalog.default".into()))
+            );
+        }
+        other => panic!("expected select statement, got {other:?}"),
+    }
+}
+
+#[test]
+fn publication_describe_tokens_inside_quoted_identifiers_remain_identifiers() {
+    let stmt = parse_statement(
+        "select 1 as \"OPERATOR(pg_catalog.~)\", 2 as \"COLLATE pg_catalog.default\"",
+    )
+    .unwrap();
+    match stmt {
+        Statement::Select(stmt) => {
+            assert_eq!(stmt.targets[0].output_name, "OPERATOR(pg_catalog.~)");
+            assert_eq!(stmt.targets[1].output_name, "COLLATE pg_catalog.default");
+        }
+        other => panic!("expected select statement, got {other:?}"),
+    }
 }
 
 fn is_outer_user_var(expr: &Expr, index: usize) -> bool {
@@ -499,6 +777,9 @@ fn visible_catalog_without_text_input_cast(
         base.index_rows(),
         base.rewrite_rows(),
         base.trigger_rows(),
+        base.publication_rows(),
+        base.publication_rel_rows(),
+        base.publication_namespace_rows(),
         base.am_rows(),
         base.amop_rows(),
         base.amproc_rows(),
@@ -550,6 +831,9 @@ fn visible_catalog_without_operator(
         base.index_rows(),
         base.rewrite_rows(),
         base.trigger_rows(),
+        base.publication_rows(),
+        base.publication_rel_rows(),
+        base.publication_namespace_rows(),
         base.am_rows(),
         base.amop_rows(),
         base.amproc_rows(),

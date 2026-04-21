@@ -46,10 +46,11 @@ offset_clause = { kw_offset ~ integer }
 locking_clause = { kw_for ~ ((kw_no ~ kw_key ~ kw_update) | (kw_key ~ kw_share) | kw_update | kw_share) }
 set_stmt = { kw_set ~ set_scope? ~ identifier ~ (("=" | kw_to) ~ set_value_list) }
 reset_stmt = { kw_reset ~ (kw_all | identifier) }
-set_session_authorization_stmt = { kw_set ~ kw_session ~ kw_authorization ~ identifier }
+set_session_authorization_stmt = { kw_set ~ kw_session ~ kw_authorization ~ session_authorization_target }
 reset_session_authorization_stmt = { kw_reset ~ kw_session ~ kw_authorization }
 set_role_stmt = { kw_set ~ kw_role ~ (kw_none | identifier) }
 reset_role_stmt = { kw_reset ~ kw_role }
+session_authorization_target = { identifier | quoted_string_literal }
 set_scope = { kw_session | kw_local }
 set_value_list = { set_value_atom ~ ("," ~ set_value_atom)* }
 set_value_atom = { signed_set_value | kw_default | kw_true | kw_false | kw_on_value | kw_off | quoted_string_literal | identifier | numeric_literal | integer }
