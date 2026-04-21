@@ -380,6 +380,7 @@ pub enum BuiltinScalarFunction {
     ToOct,
     ToHex,
     Reverse,
+    RegRoleToText,
     GetBit,
     SetBit,
     GetByte,
@@ -991,6 +992,9 @@ pub enum Expr {
         subscripts: Vec<ExprArraySubscript>,
     },
     Random,
+    CurrentUser,
+    SessionUser,
+    CurrentRole,
     CurrentDate,
     CurrentTime {
         precision: Option<i32>,
@@ -1317,6 +1321,9 @@ pub fn expr_sql_type_hint(expr: &Expr) -> Option<SqlType> {
         | Expr::Similar { .. }
         | Expr::ArraySubscript { .. }
         | Expr::Random
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
         | Expr::CurrentDate
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }

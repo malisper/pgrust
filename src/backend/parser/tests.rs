@@ -645,7 +645,7 @@ fn visible_catalog_without_text_input_cast(
                 !(row.castsource == crate::include::catalog::TEXT_TYPE_OID
                     && row.casttarget == target_oid
                     && row.castmethod == 'i')
-        })
+            })
             .collect(),
         base.collation_rows(),
         base.foreign_data_wrapper_rows(),
@@ -1555,8 +1555,7 @@ fn parse_policy_statements() {
         })
     );
 
-    let stmt =
-        parse_statement("alter policy p1 on items rename to p2").unwrap();
+    let stmt = parse_statement("alter policy p1 on items rename to p2").unwrap();
     assert_eq!(
         stmt,
         Statement::AlterPolicy(AlterPolicyStatement {
@@ -1578,10 +1577,8 @@ fn parse_policy_statements() {
         })
     );
 
-    let stmt = parse_statement(
-        "create policy p3 on items as permissive\n    using (a > 2);\n",
-    )
-    .unwrap();
+    let stmt =
+        parse_statement("create policy p3 on items as permissive\n    using (a > 2);\n").unwrap();
     assert_eq!(
         stmt,
         Statement::CreatePolicy(CreatePolicyStatement {
@@ -1802,10 +1799,9 @@ fn parse_create_group_statement() {
 
 #[test]
 fn parse_create_group_membership_options() {
-    let stmt = parse_statement(
-        "create group regress_group with admin regress_admin user regress_member",
-    )
-    .unwrap();
+    let stmt =
+        parse_statement("create group regress_group with admin regress_admin user regress_member")
+            .unwrap();
     assert_eq!(
         stmt,
         Statement::CreateRole(CreateRoleStatement {
@@ -2224,6 +2220,30 @@ fn parse_plain_revoke_role_membership_granted_by_cascade_statement() {
             set_option: false,
             cascade: true,
             granted_by: Some(RoleGrantorSpec::RoleName("regress_admin".into())),
+        })
+    );
+}
+
+#[test]
+fn parse_drop_owned_statement() {
+    let stmt = parse_statement("drop owned by regress_tenant, regress_tenant2").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::DropOwned(DropOwnedStatement {
+            role_names: vec!["regress_tenant".into(), "regress_tenant2".into()],
+            cascade: false,
+        })
+    );
+}
+
+#[test]
+fn parse_drop_owned_cascade_statement() {
+    let stmt = parse_statement("drop owned by regress_tenant cascade").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::DropOwned(DropOwnedStatement {
+            role_names: vec!["regress_tenant".into()],
+            cascade: true,
         })
     );
 }
@@ -3281,8 +3301,7 @@ fn parse_typed_string_literal_expression() {
 
 #[test]
 fn parse_timestamptz_typed_string_literal_with_text_cast() {
-    let stmt =
-        parse_select("select timestamptz '2024-01-02 03:04:05+00'::text").unwrap();
+    let stmt = parse_select("select timestamptz '2024-01-02 03:04:05+00'::text").unwrap();
     match &stmt.targets[0].expr {
         SqlExpr::Cast(inner, ty) => {
             assert_eq!(*ty, SqlType::new(SqlTypeKind::Text));
@@ -6156,8 +6175,14 @@ fn parse_foreign_data_wrapper_statements() {
         panic!("expected create foreign data wrapper");
     };
     assert_eq!(create.fdw_name, "foo");
-    assert_eq!(create.handler_name.as_deref(), Some("pg_rust_test_fdw_handler"));
-    assert_eq!(create.validator_name.as_deref(), Some("postgresql_fdw_validator"));
+    assert_eq!(
+        create.handler_name.as_deref(),
+        Some("pg_rust_test_fdw_handler")
+    );
+    assert_eq!(
+        create.validator_name.as_deref(),
+        Some("postgresql_fdw_validator")
+    );
     assert_eq!(
         create.options,
         vec![
@@ -6709,8 +6734,8 @@ fn parse_window_calls_capture_over_clause() {
 
 #[test]
 fn parse_named_window_clause_and_reference() {
-    let stmt = parse_select("select row_number() over w from people window w as (order by id)")
-        .unwrap();
+    let stmt =
+        parse_select("select row_number() over w from people window w as (order by id)").unwrap();
     assert_eq!(stmt.window_clauses.len(), 1);
     assert_eq!(stmt.window_clauses[0].name, "w");
     assert!(stmt.window_clauses[0].spec.partition_by.is_empty());
@@ -6877,8 +6902,8 @@ fn build_plan_with_window_function_uses_windowagg() {
 
 #[test]
 fn build_plan_with_named_window_clause_uses_windowagg() {
-    let stmt = parse_select("select row_number() over w from people window w as (order by id)")
-        .unwrap();
+    let stmt =
+        parse_select("select row_number() over w from people window w as (order by id)").unwrap();
     let plan = build_plan(&stmt, &catalog()).unwrap();
     match plan {
         Plan::Projection { input, .. } => match *input {

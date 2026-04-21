@@ -167,10 +167,12 @@ fn try_parse_policy_statement(sql: &str) -> Result<Option<Statement>, ParseError
     let trimmed = sql.trim().trim_end_matches(';').trim();
     let lowered = trimmed.to_ascii_lowercase();
     if lowered.starts_with("create policy ") {
-        return build_create_policy_statement(trimmed).map(|stmt| Some(Statement::CreatePolicy(stmt)));
+        return build_create_policy_statement(trimmed)
+            .map(|stmt| Some(Statement::CreatePolicy(stmt)));
     }
     if lowered.starts_with("alter policy ") {
-        return build_alter_policy_statement(trimmed).map(|stmt| Some(Statement::AlterPolicy(stmt)));
+        return build_alter_policy_statement(trimmed)
+            .map(|stmt| Some(Statement::AlterPolicy(stmt)));
     }
     if lowered.starts_with("drop policy ") {
         return build_drop_policy_statement(trimmed).map(|stmt| Some(Statement::DropPolicy(stmt)));
@@ -3411,9 +3413,9 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::alter_table_set_row_security_stmt => Ok(Statement::AlterTableSetRowSecurity(
             build_alter_table_set_row_security(inner)?,
         )),
-        Rule::alter_policy_stmt => Ok(Statement::AlterPolicy(
-            build_alter_policy_statement(inner.as_str())?,
-        )),
+        Rule::alter_policy_stmt => Ok(Statement::AlterPolicy(build_alter_policy_statement(
+            inner.as_str(),
+        )?)),
         Rule::alter_table_set_not_null_stmt => Ok(Statement::AlterTableSetNotNull(
             build_alter_table_set_not_null(inner)?,
         )),
@@ -3429,9 +3431,9 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         }
         Rule::comment_on_rule_stmt => Ok(Statement::CommentOnRule(build_comment_on_rule(inner)?)),
         Rule::create_schema_stmt => Ok(Statement::CreateSchema(build_create_schema(inner)?)),
-        Rule::create_policy_stmt => Ok(Statement::CreatePolicy(
-            build_create_policy_statement(inner.as_str())?,
-        )),
+        Rule::create_policy_stmt => Ok(Statement::CreatePolicy(build_create_policy_statement(
+            inner.as_str(),
+        )?)),
         Rule::create_table_stmt => build_create_table(inner),
         Rule::create_view_stmt => Ok(Statement::CreateView(build_create_view(inner)?)),
         Rule::create_rule_stmt => Ok(Statement::CreateRule(build_create_rule(inner)?)),
@@ -3441,10 +3443,11 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::drop_index_stmt => Ok(Statement::DropIndex(build_drop_index(inner)?)),
         Rule::drop_view_stmt => Ok(Statement::DropView(build_drop_view(inner)?)),
         Rule::drop_rule_stmt => Ok(Statement::DropRule(build_drop_rule(inner)?)),
-        Rule::drop_policy_stmt => Ok(Statement::DropPolicy(
-            build_drop_policy_statement(inner.as_str())?,
-        )),
+        Rule::drop_policy_stmt => Ok(Statement::DropPolicy(build_drop_policy_statement(
+            inner.as_str(),
+        )?)),
         Rule::drop_schema_stmt => Ok(Statement::DropSchema(build_drop_schema(inner)?)),
+        Rule::drop_owned_stmt => Ok(Statement::DropOwned(build_drop_owned(inner)?)),
         Rule::reassign_owned_stmt => Ok(Statement::ReassignOwned(build_reassign_owned(inner)?)),
         Rule::truncate_table_stmt => Ok(Statement::TruncateTable(build_truncate_table(inner)?)),
         Rule::vacuum_stmt => Ok(Statement::Vacuum(build_vacuum(inner)?)),
@@ -3756,7 +3759,12 @@ fn build_alter_group(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         match part.as_rule() {
             Rule::identifier if role_name.is_none() => role_name = Some(build_identifier(part)),
             Rule::alter_group_action => {
-                is_add = Some(part.as_str().trim_start().to_ascii_lowercase().starts_with("add"));
+                is_add = Some(
+                    part.as_str()
+                        .trim_start()
+                        .to_ascii_lowercase()
+                        .starts_with("add"),
+                );
                 for inner in part.into_inner() {
                     match inner.as_rule() {
                         Rule::ident_list => {
@@ -3777,25 +3785,29 @@ fn build_alter_group(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         return Err(ParseError::UnexpectedEof);
     }
     if is_add {
-        Ok(Statement::GrantRoleMembership(GrantRoleMembershipStatement {
-            role_names: vec![role_name],
-            grantee_names,
-            admin_option: false,
-            inherit_option: None,
-            set_option: None,
-            granted_by: None,
-        }))
+        Ok(Statement::GrantRoleMembership(
+            GrantRoleMembershipStatement {
+                role_names: vec![role_name],
+                grantee_names,
+                admin_option: false,
+                inherit_option: None,
+                set_option: None,
+                granted_by: None,
+            },
+        ))
     } else {
-        Ok(Statement::RevokeRoleMembership(RevokeRoleMembershipStatement {
-            role_names: vec![role_name],
-            grantee_names,
-            revoke_membership: true,
-            admin_option: false,
-            inherit_option: false,
-            set_option: false,
-            cascade: false,
-            granted_by: None,
-        }))
+        Ok(Statement::RevokeRoleMembership(
+            RevokeRoleMembershipStatement {
+                role_names: vec![role_name],
+                grantee_names,
+                revoke_membership: true,
+                admin_option: false,
+                inherit_option: false,
+                set_option: false,
+                cascade: false,
+                granted_by: None,
+            },
+        ))
     }
 }
 
@@ -6416,6 +6428,26 @@ fn build_reassign_owned(pair: Pair<'_, Rule>) -> Result<ReassignOwnedStatement, 
     Ok(ReassignOwnedStatement {
         old_roles,
         new_role: new_role.ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
+fn build_drop_owned(pair: Pair<'_, Rule>) -> Result<DropOwnedStatement, ParseError> {
+    let mut role_names = Vec::new();
+    let mut cascade = false;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::ident_list => role_names.extend(part.into_inner().map(build_identifier)),
+            Rule::identifier => role_names.push(build_identifier(part)),
+            Rule::drop_behavior => cascade = part.as_str().eq_ignore_ascii_case("cascade"),
+            _ => {}
+        }
+    }
+    if role_names.is_empty() {
+        return Err(ParseError::UnexpectedEof);
+    }
+    Ok(DropOwnedStatement {
+        role_names,
+        cascade,
     })
 }
 
