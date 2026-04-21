@@ -28,7 +28,7 @@ Targeted reruns and notes:
   - `ALTER VIEW` forms exercised by `alter_table.sql`
   - `ALTER TABLE` `NO INHERIT` / `INHERIT`
   - multi-action `ALTER TABLE` statements
-  - `ALTER TABLE ... ADD FOREIGN KEY (...) REFERENCES ...` without `ADD CONSTRAINT name`
+  - [done] `ALTER TABLE ... ADD FOREIGN KEY (...) REFERENCES ...` without `ADD CONSTRAINT name`
   - `ALTER TABLE ... ALTER CONSTRAINT` support beyond deferrability-only changes, including `ENFORCED` / `NOT ENFORCED`
   - `ALTER TABLE ... ALTER COLUMN ... SET/DROP DEFAULT`
   - `ALTER TABLE ... ALTER COLUMN ... SET STORAGE`
@@ -155,13 +155,13 @@ Targeted reruns and notes:
 - float4.sql: 79/100
 - float8.sql: 145/184
 - foreign_data.sql: 83/540
-- foreign_key.sql: 459/1252
+- foreign_key.sql: 467/1252
   - upstream `foreign_key.sql` now starts with unsupported FK surface, so the first create-table failures cascade into most later `unknown table: fktable` mismatches
   - [done] foreign keys with `MATCH FULL`
   - foreign keys with `NOT VALID`
   - foreign keys with `ENFORCED` / `NOT ENFORCED`
   - foreign keys with `ON DELETE` / `ON UPDATE` actions beyond `NO ACTION` and `RESTRICT`
-  - `ALTER TABLE ... ADD FOREIGN KEY (...) REFERENCES ...` without `ADD CONSTRAINT name`
+  - [done] `ALTER TABLE ... ADD FOREIGN KEY (...) REFERENCES ...` without `ADD CONSTRAINT name`
   - `ALTER TABLE ... ALTER CONSTRAINT ... ENFORCED|NOT ENFORCED`
   - `COMMENT ON CONSTRAINT`
   - [done] `DROP TABLE ... CASCADE` for ordinary, inherited, and temporary tables
