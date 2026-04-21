@@ -17608,6 +17608,20 @@ fn session_user_and_current_role_are_sql_visible() {
     db.execute(1, "grant manager to tenant").unwrap();
     db.execute(1, "set session authorization tenant").unwrap();
 
+    match db
+        .execute(
+            1,
+            "select session_user, current_role, current_user, current_setting('role') as role",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { column_names, .. } => assert_eq!(
+            column_names,
+            vec!["session_user", "current_role", "current_user", "role"]
+        ),
+        other => panic!("expected query result, got {other:?}"),
+    }
+
     assert_eq!(
         query_rows(&db, 1, "select session_user, current_user, current_role"),
         vec![vec![
@@ -17615,6 +17629,10 @@ fn session_user_and_current_role_are_sql_visible() {
             Value::Text("tenant".into()),
             Value::Text("tenant".into()),
         ]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select current_setting('role')"),
+        vec![vec![Value::Text("none".into())]]
     );
 
     db.execute(1, "set role manager").unwrap();
@@ -17626,6 +17644,16 @@ fn session_user_and_current_role_are_sql_visible() {
             Value::Text("manager".into()),
             Value::Text("manager".into()),
         ]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select current_setting('role')"),
+        vec![vec![Value::Text("manager".into())]]
+    );
+
+    db.execute(1, "reset role").unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select current_setting('role')"),
+        vec![vec![Value::Text("none".into())]]
     );
 }
 

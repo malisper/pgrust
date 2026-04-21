@@ -3276,6 +3276,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "pg_rust_test_enc_conversion",
             BuiltinScalarFunction::PgRustTestEncConversion,
         ),
+        ("current_setting", BuiltinScalarFunction::CurrentSetting),
         ("nextval", BuiltinScalarFunction::NextVal),
         ("currval", BuiltinScalarFunction::CurrVal),
         ("setval", BuiltinScalarFunction::SetVal),
@@ -6929,6 +6930,7 @@ mod tests {
     fn builtin_scalar_helpers_have_proc_oid_mappings() {
         for func in [
             BuiltinScalarFunction::CurrentDatabase,
+            BuiltinScalarFunction::CurrentSetting,
             BuiltinScalarFunction::RegProcedureToText,
             BuiltinScalarFunction::RegRoleToText,
             BuiltinScalarFunction::PgGetUserById,

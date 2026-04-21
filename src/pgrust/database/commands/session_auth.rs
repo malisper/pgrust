@@ -370,4 +370,57 @@ mod tests {
         let err = session.execute(&db, "set role child").unwrap_err();
         assert!(format!("{err:?}").contains("permission denied to set role"));
     }
+
+    #[test]
+    fn rollback_restores_session_authorization_and_role_state() {
+        let base = temp_dir("rollback_session_authorization");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session.execute(&db, "create role tenant login").unwrap();
+        session.execute(&db, "create role manager").unwrap();
+        session.execute(&db, "create role auditor login").unwrap();
+        session.execute(&db, "grant manager to tenant").unwrap();
+        session
+            .execute(&db, "set session authorization tenant")
+            .unwrap();
+        session.execute(&db, "set role manager").unwrap();
+        session.execute(&db, "begin").unwrap();
+        session
+            .execute(&db, "set session authorization auditor")
+            .unwrap();
+
+        assert!(matches!(
+            session
+                .execute(
+                    &db,
+                    "select session_user, current_user, current_role, current_setting('role')",
+                )
+                .unwrap(),
+            StatementResult::Query { rows, .. }
+                if rows == vec![vec![
+                    crate::backend::executor::Value::Text("auditor".into()),
+                    crate::backend::executor::Value::Text("auditor".into()),
+                    crate::backend::executor::Value::Text("auditor".into()),
+                    crate::backend::executor::Value::Text("none".into()),
+                ]]
+        ));
+
+        session.execute(&db, "rollback").unwrap();
+
+        assert!(matches!(
+            session
+                .execute(
+                    &db,
+                    "select session_user, current_user, current_role, current_setting('role')",
+                )
+                .unwrap(),
+            StatementResult::Query { rows, .. }
+                if rows == vec![vec![
+                    crate::backend::executor::Value::Text("tenant".into()),
+                    crate::backend::executor::Value::Text("manager".into()),
+                    crate::backend::executor::Value::Text("manager".into()),
+                    crate::backend::executor::Value::Text("manager".into()),
+                ]]
+        ));
+    }
 }

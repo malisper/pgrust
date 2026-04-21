@@ -28,7 +28,6 @@ use super::expr_json::{
     eval_json_builtin_function, eval_json_get, eval_json_path, eval_json_record_builtin_function,
     eval_jsonpath_operator,
 };
-use super::expr_locks::eval_advisory_lock_builtin_function;
 use super::expr_math::{
     cosd, cotd, eval_abs_function, eval_acosd, eval_acosh, eval_asind, eval_atanh,
     eval_binary_float_function, eval_bitcast_bigint_to_float8, eval_bitcast_integer_to_float4,
@@ -79,6 +78,7 @@ use super::pg_regex::{
 pub(crate) use super::value_io::{format_array_text, format_array_value_text};
 use super::{ExecError, ExecutorContext, exec_next, executor_start};
 use crate::backend::catalog::indexing::probe_system_catalog_rows_visible_in_db;
+use crate::backend::utils::misc::guc::normalize_guc_name;
 use crate::backend::catalog::rowcodec::pg_description_row_from_values;
 use crate::backend::executor::jsonb::{
     JsonbValue, jsonb_contains, jsonb_exists, jsonb_exists_all, jsonb_exists_any, jsonb_from_value,
@@ -296,14 +296,6 @@ fn regproc_type_name(sql_type: SqlType) -> &'static str {
     }
 }
 
-fn eval_regtype_to_text(value: &Value, ctx: &ExecutorContext) -> Result<Value, ExecError> {
-    let oid = oid_arg_to_u32(value, "regtype_to_text")?;
-    let Some(type_row) = role_catalog(ctx)?.type_by_oid(oid) else {
-        return Ok(Value::Null);
-    };
-    Ok(Value::Text(type_row.typname.into()))
-}
-
 fn eval_regprocedure_to_text(value: &Value, ctx: &ExecutorContext) -> Result<Value, ExecError> {
     let oid = oid_arg_to_u32(value, "regprocedure_to_text")?;
     let Some(proc_row) = role_catalog(ctx)?.proc_row_by_oid(oid) else {
@@ -427,6 +419,49 @@ fn auth_role_name(ctx: &ExecutorContext, role_oid: u32) -> Result<Value, ExecErr
     Ok(Value::Text(role.rolname.into()))
 }
 
+fn eval_current_setting(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
+    let (name, missing_ok) = match values {
+        [Value::Text(name)] => (normalize_guc_name(name), false),
+        [Value::Text(name), Value::Bool(missing_ok)] => (normalize_guc_name(name), *missing_ok),
+        [Value::Null] | [Value::Null, _] => return Ok(Value::Null),
+        [left] => {
+            return Err(ExecError::TypeMismatch {
+                op: "current_setting",
+                left: left.clone(),
+                right: Value::Text("".into()),
+            });
+        }
+        [left, right] => {
+            return Err(ExecError::TypeMismatch {
+                op: "current_setting",
+                left: left.clone(),
+                right: right.clone(),
+            });
+        }
+        _ => {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "current_setting(name [, missing_ok])",
+                actual: format!("CurrentSetting({} args)", values.len()),
+            }));
+        }
+    };
+
+    if name == "role" {
+        if let Some(role_oid) = ctx.active_role_oid {
+            return auth_role_name(ctx, role_oid);
+        }
+        return Ok(Value::Text("none".into()));
+    }
+
+    if missing_ok {
+        return Ok(Value::Null);
+    }
+
+    Err(ExecError::Parse(ParseError::UnknownConfigurationParameter(
+        name,
+    )))
+}
+
 fn quote_identifier_if_needed(identifier: &str) -> String {
     if !identifier.is_empty()
         && identifier.chars().enumerate().all(|(idx, ch)| {
@@ -492,17 +527,6 @@ fn ensure_builtin_side_effects_allowed(
             | BuiltinScalarFunction::SetVal
             | BuiltinScalarFunction::LoCreate
             | BuiltinScalarFunction::LoUnlink
-            | BuiltinScalarFunction::PgAdvisoryLock
-            | BuiltinScalarFunction::PgAdvisoryXactLock
-            | BuiltinScalarFunction::PgAdvisoryLockShared
-            | BuiltinScalarFunction::PgAdvisoryXactLockShared
-            | BuiltinScalarFunction::PgTryAdvisoryLock
-            | BuiltinScalarFunction::PgTryAdvisoryXactLock
-            | BuiltinScalarFunction::PgTryAdvisoryLockShared
-            | BuiltinScalarFunction::PgTryAdvisoryXactLockShared
-            | BuiltinScalarFunction::PgAdvisoryUnlock
-            | BuiltinScalarFunction::PgAdvisoryUnlockShared
-            | BuiltinScalarFunction::PgAdvisoryUnlockAll
     ) && !ctx.allow_side_effects
     {
         return Err(ExecError::DetailedError {
@@ -513,27 +537,6 @@ fn ensure_builtin_side_effects_allowed(
                     BuiltinScalarFunction::SetVal => "setval",
                     BuiltinScalarFunction::LoCreate => "lo_create",
                     BuiltinScalarFunction::LoUnlink => "lo_unlink",
-                    BuiltinScalarFunction::PgAdvisoryLock => "pg_advisory_lock",
-                    BuiltinScalarFunction::PgAdvisoryXactLock => "pg_advisory_xact_lock",
-                    BuiltinScalarFunction::PgAdvisoryLockShared => "pg_advisory_lock_shared",
-                    BuiltinScalarFunction::PgAdvisoryXactLockShared => {
-                        "pg_advisory_xact_lock_shared"
-                    }
-                    BuiltinScalarFunction::PgTryAdvisoryLock => "pg_try_advisory_lock",
-                    BuiltinScalarFunction::PgTryAdvisoryXactLock => {
-                        "pg_try_advisory_xact_lock"
-                    }
-                    BuiltinScalarFunction::PgTryAdvisoryLockShared => {
-                        "pg_try_advisory_lock_shared"
-                    }
-                    BuiltinScalarFunction::PgTryAdvisoryXactLockShared => {
-                        "pg_try_advisory_xact_lock_shared"
-                    }
-                    BuiltinScalarFunction::PgAdvisoryUnlock => "pg_advisory_unlock",
-                    BuiltinScalarFunction::PgAdvisoryUnlockShared => {
-                        "pg_advisory_unlock_shared"
-                    }
-                    BuiltinScalarFunction::PgAdvisoryUnlockAll => "pg_advisory_unlock_all",
                     _ => unreachable!(),
                 }
             ),
@@ -1839,6 +1842,12 @@ fn eval_plpgsql_builtin_function(
                 right: Value::Null,
             }),
         },
+        BuiltinScalarFunction::CurrentSetting => Err(ExecError::DetailedError {
+            message: "current_setting is not supported in PL/pgSQL expression evaluation".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        }),
         BuiltinScalarFunction::Lower => eval_lower_function(&values),
         BuiltinScalarFunction::Unistr => eval_unistr_function(&values),
         BuiltinScalarFunction::Initcap => eval_initcap_function(&values),
@@ -1858,11 +1867,6 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::Translate => eval_translate_function(&values),
         BuiltinScalarFunction::Ascii => eval_ascii_function(&values),
         BuiltinScalarFunction::Chr => eval_chr_function(&values),
-        BuiltinScalarFunction::RegTypeToText => match values.as_slice() {
-            [Value::Int32(v)] => Ok(Value::Text(v.to_string().into())),
-            [Value::Int64(v)] => Ok(Value::Text(v.to_string().into())),
-            _ => Err(malformed_expr_error("regtype_to_text")),
-        },
         BuiltinScalarFunction::RegRoleToText => eval_regrole_to_text_function(&values, None),
         BuiltinScalarFunction::QuoteLiteral => eval_quote_literal_function(&values),
         BuiltinScalarFunction::BpcharToText => eval_bpchar_to_text_function(&values),
@@ -2053,7 +2057,6 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::BitcastIntegerToFloat4 => eval_bitcast_integer_to_float4(&values),
         BuiltinScalarFunction::BitcastBigintToFloat8 => eval_bitcast_bigint_to_float8(&values),
         BuiltinScalarFunction::Random
-        | BuiltinScalarFunction::CurrentDatabase
         | BuiltinScalarFunction::GetDatabaseEncoding
         | BuiltinScalarFunction::PgGetUserById
         | BuiltinScalarFunction::ObjDescription
@@ -2632,9 +2635,6 @@ fn eval_builtin_function(
     ) {
         return eval_large_object_builtin_function(func, &values, ctx);
     }
-    if let Some(result) = eval_advisory_lock_builtin_function(func, &values, ctx) {
-        return result;
-    }
     match func {
         BuiltinScalarFunction::ToTsVector
         | BuiltinScalarFunction::ToTsQuery
@@ -2672,15 +2672,14 @@ fn eval_builtin_function(
                 right: Value::Null,
             }),
         },
-        BuiltinScalarFunction::RegTypeToText => match values.as_slice() {
-            [value] => eval_regtype_to_text(value, ctx),
-            _ => Err(malformed_expr_error("regtype_to_text")),
-        },
         BuiltinScalarFunction::RegProcedureToText => match values.as_slice() {
             [value] => eval_regprocedure_to_text(value, ctx),
             _ => Err(malformed_expr_error("regprocedure_to_text")),
         },
-        BuiltinScalarFunction::PgGetUserById => eval_pg_get_userbyid(&values, ctx),
+        BuiltinScalarFunction::PgGetUserById => match values.as_slice() {
+            [..] => eval_pg_get_userbyid(&values, ctx),
+            _ => Err(malformed_expr_error("pg_get_userbyid")),
+        },
         BuiltinScalarFunction::Now
         | BuiltinScalarFunction::TransactionTimestamp
         | BuiltinScalarFunction::StatementTimestamp
@@ -2703,26 +2702,10 @@ fn eval_builtin_function(
         | BuiltinScalarFunction::PgGetSerialSequence => {
             unreachable!("sequence builtins handled earlier");
         }
-        BuiltinScalarFunction::PgAdvisoryLock
-        | BuiltinScalarFunction::PgAdvisoryXactLock
-        | BuiltinScalarFunction::PgAdvisoryLockShared
-        | BuiltinScalarFunction::PgAdvisoryXactLockShared
-        | BuiltinScalarFunction::PgTryAdvisoryLock
-        | BuiltinScalarFunction::PgTryAdvisoryXactLock
-        | BuiltinScalarFunction::PgTryAdvisoryLockShared
-        | BuiltinScalarFunction::PgTryAdvisoryXactLockShared
-        | BuiltinScalarFunction::PgAdvisoryUnlock
-        | BuiltinScalarFunction::PgAdvisoryUnlockShared
-        | BuiltinScalarFunction::PgAdvisoryUnlockAll => {
-            unreachable!("advisory lock builtins handled earlier");
-        }
         BuiltinScalarFunction::DatePart => eval_date_part_function(&values),
         BuiltinScalarFunction::DateTrunc => eval_date_trunc_function(&values, &ctx.datetime_config),
         BuiltinScalarFunction::IsFinite => eval_isfinite_function(&values),
         BuiltinScalarFunction::MakeDate => eval_make_date_function(&values),
-        BuiltinScalarFunction::CurrentDatabase => {
-            Ok(Value::Text(ctx.current_database_name.clone().into()))
-        }
         BuiltinScalarFunction::GetDatabaseEncoding => Ok(Value::Text("UTF8".into())),
         BuiltinScalarFunction::PgMyTempSchema => Ok(current_temp_namespace_name(ctx)
             .map(Value::Text)
@@ -2733,6 +2716,7 @@ fn eval_builtin_function(
         BuiltinScalarFunction::PgRustTestFdwHandler => eval_pg_rust_test_fdw_handler(&values),
         BuiltinScalarFunction::PgRustTestEncSetup => eval_pg_rust_test_enc_setup(&values),
         BuiltinScalarFunction::PgRustTestEncConversion => eval_pg_rust_test_enc_conversion(&values),
+        BuiltinScalarFunction::CurrentSetting => eval_current_setting(&values, ctx),
         BuiltinScalarFunction::PgStatGetCheckpointerNumTimed
         | BuiltinScalarFunction::PgStatGetCheckpointerNumRequested
         | BuiltinScalarFunction::PgStatGetCheckpointerNumPerformed

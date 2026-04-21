@@ -22,7 +22,6 @@ use crate::backend::parser::{
     plan_merge,
 };
 use crate::backend::rewrite::relation_has_row_security;
-use crate::backend::storage::lmgr::AdvisoryLockManager;
 use crate::backend::storage::lmgr::{TableLockManager, TableLockMode, unlock_relations};
 use crate::backend::utils::cache::inval::CatalogInvalidation;
 use crate::backend::utils::cache::lsyscache::LazyCatalogLookup;
@@ -59,18 +58,12 @@ pub struct SelectGuard<'a> {
     pub column_names: Vec<String>,
     pub(crate) rels: Vec<RelFileLocator>,
     pub(crate) table_locks: &'a TableLockManager,
-    pub(crate) advisory_locks: &'a AdvisoryLockManager,
     pub(crate) client_id: ClientId,
-    pub(crate) statement_lock_scope_id: Option<u64>,
     pub(crate) interrupt_guard: Option<StatementInterruptGuard>,
 }
 
 impl Drop for SelectGuard<'_> {
     fn drop(&mut self) {
-        if let Some(scope_id) = self.statement_lock_scope_id {
-            self.advisory_locks
-                .unlock_all_statement(self.client_id, scope_id);
-        }
         unlock_relations(self.table_locks, self.client_id, &self.rels);
     }
 }
@@ -78,6 +71,7 @@ impl Drop for SelectGuard<'_> {
 struct ActiveTransaction {
     xid: TransactionId,
     failed: bool,
+    auth_at_start: AuthState,
     held_table_locks: BTreeMap<RelFileLocator, TableLockMode>,
     next_command_id: u32,
     catalog_effects: Vec<CatalogMutationEffect>,
@@ -185,13 +179,6 @@ impl Session {
         )
     }
 
-    pub fn allow_in_place_tablespaces(&self) -> bool {
-        self.gucs
-            .get("allow_in_place_tablespaces")
-            .and_then(|value| parse_bool_guc(value))
-            .unwrap_or(false)
-    }
-
     pub fn maintenance_work_mem_kb(&self) -> Result<usize, ExecError> {
         let Some(raw) = self.gucs.get("maintenance_work_mem") else {
             return Ok(Self::DEFAULT_MAINTENANCE_WORK_MEM_KB);
@@ -241,6 +228,10 @@ impl Session {
 
     pub fn current_user_oid(&self) -> u32 {
         self.auth.current_user_oid()
+    }
+
+    pub fn active_role_oid(&self) -> Option<u32> {
+        self.auth.active_role_oid()
     }
 
     pub(crate) fn auth_state(&self) -> &AuthState {
@@ -313,14 +304,12 @@ impl Session {
         catalog: &crate::backend::utils::cache::lsyscache::LazyCatalogLookup<'_>,
         deferred_foreign_keys: Option<DeferredForeignKeyTracker>,
     ) -> ExecutorContext {
-        use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
         ExecutorContext {
             pool: Arc::clone(&db.pool),
             txns: db.txns.clone(),
             txn_waiter: Some(db.txn_waiter.clone()),
             sequences: Some(db.sequences.clone()),
             large_objects: Some(db.large_objects.clone()),
-            advisory_locks: Arc::clone(&db.advisory_locks),
             checkpoint_stats: db.checkpoint_stats_snapshot(),
             datetime_config: self.datetime_config.clone(),
             interrupts: self.interrupts(),
@@ -328,15 +317,9 @@ impl Session {
             session_stats: Arc::clone(&self.stats_state),
             snapshot,
             client_id: self.client_id,
-            current_database_name: db.current_database_name(),
             session_user_oid: self.session_user_oid(),
             current_user_oid: self.current_user_oid(),
-            current_xid: self
-                .active_txn
-                .as_ref()
-                .map(|txn| txn.xid)
-                .unwrap_or(INVALID_TRANSACTION_ID),
-            statement_lock_scope_id: None,
+            active_role_oid: self.active_role_oid(),
             next_command_id: cid,
             default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
             timed: false,
@@ -432,8 +415,6 @@ impl Session {
                 Err(e)
             }
         };
-        db.advisory_locks
-            .unlock_all_transaction(self.client_id, txn.xid);
         for rel in held_locks {
             db.table_locks.unlock_table(rel, self.client_id);
         }
@@ -450,9 +431,12 @@ impl Session {
         db.finalize_aborted_catalog_effects(&txn.catalog_effects);
         db.finalize_aborted_temp_effects(self.client_id, &txn.temp_effects);
         db.finalize_aborted_sequence_effects(&txn.sequence_effects);
-        db.advisory_locks
-            .unlock_all_transaction(self.client_id, txn.xid);
         db.txn_waiter.notify();
+        if self.auth != txn.auth_at_start {
+            self.auth = txn.auth_at_start.clone();
+            db.install_auth_state(self.client_id, self.auth.clone());
+            db.plan_cache.invalidate_all();
+        }
         self.stats_state.write().rollback_top_level_xact();
     }
 
@@ -598,7 +582,6 @@ impl Session {
                 }
             }
             Statement::CreateTablespace(ref create_stmt) => {
-                let allow_in_place_tablespaces = self.allow_in_place_tablespaces();
                 if self.active_txn.is_some() {
                     let result = self.execute_in_transaction(db, stmt);
                     if result.is_err() {
@@ -608,11 +591,7 @@ impl Session {
                     }
                     result
                 } else {
-                    db.execute_create_tablespace_stmt(
-                        self.client_id,
-                        create_stmt,
-                        allow_in_place_tablespaces,
-                    )
+                    db.execute_create_tablespace_stmt(self.client_id, create_stmt)
                 }
             }
             Statement::CreateDomain(ref create_stmt) => {
@@ -710,24 +689,6 @@ impl Session {
                 } else {
                     let search_path = self.configured_search_path();
                     db.execute_alter_table_rename_stmt_with_search_path(
-                        self.client_id,
-                        rename_stmt,
-                        search_path.as_deref(),
-                    )
-                }
-            }
-            Statement::AlterIndexRename(ref rename_stmt) => {
-                if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
-                    if result.is_err() {
-                        if let Some(ref mut txn) = self.active_txn {
-                            txn.failed = true;
-                        }
-                    }
-                    result
-                } else {
-                    let search_path = self.configured_search_path();
-                    db.execute_alter_index_rename_stmt_with_search_path(
                         self.client_id,
                         rename_stmt,
                         search_path.as_deref(),
@@ -1070,24 +1031,6 @@ impl Session {
                 } else {
                     let search_path = self.configured_search_path();
                     db.execute_alter_table_validate_constraint_stmt_with_search_path(
-                        self.client_id,
-                        alter_stmt,
-                        search_path.as_deref(),
-                    )
-                }
-            }
-            Statement::AlterTableInherit(ref alter_stmt) => {
-                if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
-                    if result.is_err() {
-                        if let Some(ref mut txn) = self.active_txn {
-                            txn.failed = true;
-                        }
-                    }
-                    result
-                } else {
-                    let search_path = self.configured_search_path();
-                    db.execute_alter_table_inherit_stmt_with_search_path(
                         self.client_id,
                         alter_stmt,
                         search_path.as_deref(),
@@ -1444,6 +1387,7 @@ impl Session {
                 self.active_txn = Some(ActiveTransaction {
                     xid,
                     failed: false,
+                    auth_at_start: self.auth.clone(),
                     held_table_locks: BTreeMap::new(),
                     next_command_id: 0,
                     catalog_effects: Vec::new(),
@@ -1563,8 +1507,6 @@ impl Session {
             db.finalize_aborted_temp_effects(self.client_id, &txn.temp_effects);
             db.finalize_aborted_sequence_effects(&txn.sequence_effects);
             db.txn_waiter.notify();
-            db.advisory_locks
-                .unlock_all_transaction(self.client_id, txn.xid);
             for rel in txn.held_table_locks.keys().copied() {
                 db.table_locks.unlock_table(rel, self.client_id);
             }
@@ -1575,7 +1517,6 @@ impl Session {
         // still associated with this backend on disconnect, mirroring PostgreSQL
         // backend-exit lock cleanup even if the session missed normal unwind.
         db.table_locks.unlock_all_for_client(self.client_id);
-        db.advisory_locks.unlock_all_session(self.client_id);
     }
 
     fn lock_table_if_needed(
@@ -1854,22 +1795,6 @@ impl Session {
                     search_path.as_deref(),
                     &mut txn.catalog_effects,
                     &mut txn.temp_effects,
-                )
-            }
-            Statement::AlterIndexRename(ref rename_stmt) => {
-                let catalog = self.catalog_lookup_for_command(db, xid, cid);
-                if let Some(relation) = catalog.lookup_any_relation(&rename_stmt.table_name) {
-                    self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
-                }
-                let search_path = self.configured_search_path();
-                let txn = self.active_txn.as_mut().unwrap();
-                db.execute_alter_index_rename_stmt_in_transaction_with_search_path(
-                    client_id,
-                    rename_stmt,
-                    xid,
-                    cid,
-                    search_path.as_deref(),
-                    &mut txn.catalog_effects,
                 )
             }
             Statement::AlterViewOwner(ref alter_stmt) => {
@@ -2334,38 +2259,6 @@ impl Session {
                 let search_path = self.configured_search_path();
                 let txn = self.active_txn.as_mut().unwrap();
                 db.execute_alter_table_no_inherit_stmt_in_transaction_with_search_path(
-                    client_id,
-                    alter_stmt,
-                    xid,
-                    cid,
-                    search_path.as_deref(),
-                    &mut txn.catalog_effects,
-                )
-            }
-            Statement::AlterTableInherit(ref alter_stmt) => {
-                let catalog = self.catalog_lookup_for_command(db, xid, cid);
-                let mut requests: BTreeMap<RelFileLocator, TableLockMode> = BTreeMap::new();
-                if let Some(relation) = catalog.lookup_any_relation(&alter_stmt.table_name) {
-                    requests
-                        .entry(relation.rel)
-                        .and_modify(|existing| {
-                            *existing = existing.strongest(TableLockMode::AccessExclusive)
-                        })
-                        .or_insert(TableLockMode::AccessExclusive);
-                }
-                if let Some(parent) = catalog.lookup_any_relation(&alter_stmt.parent_name) {
-                    requests
-                        .entry(parent.rel)
-                        .and_modify(|existing| {
-                            *existing = existing.strongest(TableLockMode::AccessShare)
-                        })
-                        .or_insert(TableLockMode::AccessShare);
-                }
-                let requests = requests.into_iter().collect::<Vec<_>>();
-                self.lock_table_requests_if_needed(db, &requests)?;
-                let search_path = self.configured_search_path();
-                let txn = self.active_txn.as_mut().unwrap();
-                db.execute_alter_table_inherit_stmt_in_transaction_with_search_path(
                     client_id,
                     alter_stmt,
                     xid,
@@ -2848,12 +2741,10 @@ impl Session {
                 )
             }
             Statement::CreateTablespace(ref create_stmt) => {
-                let allow_in_place_tablespaces = self.allow_in_place_tablespaces();
                 let txn = self.active_txn.as_mut().unwrap();
                 db.execute_create_tablespace_stmt_in_transaction(
                     client_id,
                     create_stmt,
-                    allow_in_place_tablespaces,
                     xid,
                     cid,
                     &mut txn.catalog_effects,
@@ -3481,6 +3372,7 @@ impl Session {
             self.active_txn = Some(ActiveTransaction {
                 xid,
                 failed: false,
+                auth_at_start: self.auth.clone(),
                 held_table_locks: BTreeMap::new(),
                 next_command_id: 0,
                 catalog_effects: Vec::new(),
