@@ -25,7 +25,8 @@ use crate::backend::parser::comments::sql_is_effectively_empty_after_comments;
 use crate::backend::parser::{SqlType, SqlTypeKind, parse_expr};
 use crate::backend::utils::misc::guc_datetime::{DateTimeConfig, format_datestyle};
 use crate::backend::utils::misc::notices::{
-    clear_notices as clear_backend_notices, take_notices as take_backend_notices,
+    BackendNoticeLevel, clear_notices as clear_backend_notices,
+    take_notice_entries as take_backend_notice_entries,
 };
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::include::access::htup::TupleError;
@@ -3063,8 +3064,12 @@ fn send_plpgsql_notices(stream: &mut impl Write, notices: &[PlpgsqlNotice]) -> i
 }
 
 fn send_queued_notices(stream: &mut impl Write) -> io::Result<()> {
-    for notice in take_backend_notices() {
-        send_notice(stream, &notice, None, None)?;
+    for notice in take_backend_notice_entries() {
+        let (severity, sqlstate) = match notice.level {
+            BackendNoticeLevel::Notice => ("NOTICE", "00000"),
+            BackendNoticeLevel::Warning => ("WARNING", "01000"),
+        };
+        send_notice_with_severity(stream, severity, sqlstate, &notice.message, None, None)?;
     }
     send_plpgsql_notices(stream, &take_notices())
 }

@@ -339,6 +339,7 @@ impl PlanNode for ResultState {
         } else {
             self.emitted = true;
             self.slot.kind = SlotKind::Virtual;
+            self.slot.virtual_tid = None;
             self.slot.tts_values.clear();
             self.slot.tts_nvalid = 0;
             ctx.system_bindings.clear();
@@ -393,6 +394,7 @@ impl PlanNode for AppendState {
                 let mut values = slot.values()?.to_vec();
                 Value::materialize_all(&mut values);
                 self.slot.kind = SlotKind::Virtual;
+                self.slot.virtual_tid = None;
                 self.slot.tts_nvalid = values.len();
                 self.slot.tts_values = values;
                 self.slot.decode_offset = 0;
@@ -475,6 +477,7 @@ impl PlanNode for SeqScanState {
                 };
                 self.scan_index += 1;
                 self.slot.kind = SlotKind::Virtual;
+                self.slot.virtual_tid = None;
                 self.slot.tts_values = values;
                 self.slot.tts_nvalid = self.slot.tts_values.len();
                 self.slot.decode_offset = 0;
@@ -520,6 +523,7 @@ impl PlanNode for SeqScanState {
                     sqlstate: "42P01",
                 })?;
             self.slot.kind = SlotKind::Virtual;
+            self.slot.virtual_tid = None;
             self.slot.tts_values = values;
             self.slot.tts_nvalid = self.slot.tts_values.len();
             self.slot.decode_offset = 0;
@@ -1246,6 +1250,7 @@ impl PlanNode for NestedLoopJoinState {
                                 self.slot.tts_values = combined_values;
                                 self.slot.tts_nvalid = self.left_width + self.right_width;
                                 self.slot.kind = SlotKind::Virtual;
+                                self.slot.virtual_tid = None;
                                 self.slot.decode_offset = 0;
                                 self.current_bindings = right_rows[ri].system_bindings.clone();
                                 set_active_system_bindings(ctx, &self.current_bindings);
@@ -1274,6 +1279,7 @@ impl PlanNode for NestedLoopJoinState {
                 self.slot.tts_values = combined_values;
                 self.slot.tts_nvalid = nvalid;
                 self.slot.kind = SlotKind::Virtual;
+                self.slot.virtual_tid = None;
                 self.slot.decode_offset = 0;
                 self.current_bindings =
                     merge_system_bindings(&left.system_bindings, &right.system_bindings);
@@ -1298,6 +1304,7 @@ impl PlanNode for NestedLoopJoinState {
                 self.slot.tts_values = combined_values;
                 self.slot.tts_nvalid = self.left_width + self.right_width;
                 self.slot.kind = SlotKind::Virtual;
+                self.slot.virtual_tid = None;
                 self.slot.decode_offset = 0;
                 self.current_bindings = left.system_bindings.clone();
                 set_active_system_bindings(ctx, &self.current_bindings);
@@ -1441,6 +1448,7 @@ fn exec_lateral_join<'a>(
             state.slot.tts_values = combined_values;
             state.slot.tts_nvalid = nvalid;
             state.slot.kind = SlotKind::Virtual;
+            state.slot.virtual_tid = None;
             state.slot.decode_offset = 0;
             state.current_bindings = merge_system_bindings(&left.system_bindings, &right_bindings);
             set_active_system_bindings(ctx, &state.current_bindings);
@@ -1471,6 +1479,7 @@ fn exec_lateral_join<'a>(
                 state.slot.tts_values = combined_values;
                 state.slot.tts_nvalid = state.left_width + state.right_width;
                 state.slot.kind = SlotKind::Virtual;
+                state.slot.virtual_tid = None;
                 state.slot.decode_offset = 0;
                 state.current_bindings = right.system_bindings.clone();
                 set_active_system_bindings(ctx, &state.current_bindings);
@@ -1488,6 +1497,7 @@ fn exec_lateral_join<'a>(
             state.slot.tts_values = combined_values;
             state.slot.tts_nvalid = state.left_width + state.right_width;
             state.slot.kind = SlotKind::Virtual;
+            state.slot.virtual_tid = None;
             state.slot.decode_offset = 0;
             state.current_bindings = left.system_bindings.clone();
             set_active_system_bindings(ctx, &state.current_bindings);
@@ -1552,6 +1562,7 @@ fn exec_cross_join<'a>(
             state.slot.tts_values = combined_values;
             state.slot.tts_nvalid = nvalid;
             state.slot.kind = SlotKind::Virtual;
+            state.slot.virtual_tid = None;
             state.slot.decode_offset = 0;
             state.current_bindings =
                 merge_system_bindings(&left.system_bindings, &right.system_bindings);
@@ -1789,6 +1800,7 @@ impl PlanNode for ProjectionState {
         self.slot.tts_values = values;
         self.slot.tts_nvalid = nvalid;
         self.slot.kind = SlotKind::Virtual;
+        self.slot.virtual_tid = None;
         self.slot.decode_offset = 0;
         self.current_bindings = self.input.current_system_bindings().to_vec();
         set_active_system_bindings(ctx, &self.current_bindings);
@@ -2790,6 +2802,7 @@ impl PlanNode for ProjectSetState {
             }
 
             self.slot.kind = SlotKind::Virtual;
+            self.slot.virtual_tid = None;
             self.slot.tts_values = values;
             self.slot.tts_nvalid = self.slot.tts_values.len();
             self.slot.decode_offset = 0;

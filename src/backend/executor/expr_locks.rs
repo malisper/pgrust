@@ -3,6 +3,7 @@ use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
 use crate::backend::storage::lmgr::{
     AdvisoryLockError, AdvisoryLockKey, AdvisoryLockMode, AdvisoryLockOwner,
 };
+use crate::backend::utils::misc::notices::push_warning;
 use crate::include::nodes::primnodes::BuiltinScalarFunction;
 
 pub(crate) fn eval_advisory_lock_builtin_function(
@@ -53,11 +54,18 @@ fn eval_advisory_lock_builtin_function_inner(
             Ok(Value::Bool(ctx.advisory_locks.try_lock(key, mode, owner)))
         }
         BuiltinScalarFunction::PgAdvisoryUnlock | BuiltinScalarFunction::PgAdvisoryUnlockShared => {
-            Ok(Value::Bool(ctx.advisory_locks.unlock(
+            let released = ctx.advisory_locks.unlock(
                 key,
                 mode,
                 AdvisoryLockOwner::session(ctx.client_id),
-            )))
+            );
+            if !released {
+                push_warning(format!(
+                    "you don't own a lock of type {}",
+                    mode.pg_mode_name()
+                ));
+            }
+            Ok(Value::Bool(released))
         }
         BuiltinScalarFunction::PgAdvisoryUnlockAll => unreachable!("handled above"),
         _ => unreachable!("non-advisory builtin reached advisory evaluator"),

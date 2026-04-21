@@ -515,7 +515,7 @@ mod tests {
             .expect("copy should return an error");
         let fields = error_fields(&error.1);
         assert!(fields.iter().any(|(code, value)| {
-            *code == b'M' && value.contains("unknown table: missing_copy_target")
+            *code == b'M' && value.contains("relation \"missing_copy_target\" does not exist")
         }));
         assert!(matches!(copy_finish.last(), Some((b'Z', _))));
 

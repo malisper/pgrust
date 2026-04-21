@@ -41,6 +41,7 @@ pub struct TupleSlot {
     pub(crate) decoder: Option<Rc<crate::backend::executor::exec_tuples::CompiledTupleDecoder>>,
     pub(crate) toast: Option<ToastFetchContext>,
     pub(crate) table_oid: Option<u32>,
+    pub(crate) virtual_tid: Option<ItemPointerData>,
 }
 
 #[derive(Clone)]
@@ -178,6 +179,7 @@ impl Clone for TupleSlot {
             decoder: None,
             toast: self.toast.clone(),
             table_oid: self.table_oid,
+            virtual_tid: self.tid(),
         }
     }
 }
@@ -229,7 +231,7 @@ pub trait PlanNode: std::fmt::Debug {
         let mut values = slot.values()?.iter().cloned().collect::<Vec<_>>();
         Value::materialize_all(&mut values);
         Ok(MaterializedRow::new(
-            TupleSlot::virtual_row(values),
+            TupleSlot::virtual_row_with_tid(values, slot.tid(), slot.table_oid),
             bindings,
         ))
     }
@@ -640,10 +642,19 @@ impl TupleSlot {
             decoder: None,
             toast: None,
             table_oid: None,
+            virtual_tid: Some(tid),
         }
     }
 
     pub fn virtual_row(values: Vec<Value>) -> Self {
+        Self::virtual_row_with_tid(values, None, None)
+    }
+
+    pub fn virtual_row_with_tid(
+        values: Vec<Value>,
+        tid: Option<ItemPointerData>,
+        table_oid: Option<u32>,
+    ) -> Self {
         let nvalid = values.len();
         Self {
             kind: SlotKind::Virtual,
@@ -652,7 +663,8 @@ impl TupleSlot {
             decode_offset: 0,
             decoder: None,
             toast: None,
-            table_oid: None,
+            table_oid,
+            virtual_tid: tid,
         }
     }
 
@@ -665,6 +677,7 @@ impl TupleSlot {
             decoder: None,
             toast: None,
             table_oid: None,
+            virtual_tid: None,
         }
     }
 
@@ -710,6 +723,7 @@ impl TupleSlot {
     /// Convert to a self-contained Virtual slot, decoding all columns and
     /// materializing TextRef → owned Text. Releases the buffer pin.
     pub fn materialize(mut self) -> Result<Self, ExecError> {
+        let tid = self.tid();
         self.values()?;
         Value::materialize_all(&mut self.tts_values);
         Ok(Self {
@@ -720,13 +734,15 @@ impl TupleSlot {
             decoder: None,
             toast: self.toast,
             table_oid: self.table_oid,
+            virtual_tid: tid,
         })
     }
 
     pub fn tid(&self) -> Option<ItemPointerData> {
         match &self.kind {
             SlotKind::HeapTuple { tid, .. } | SlotKind::BufferHeapTuple { tid, .. } => Some(*tid),
-            _ => None,
+            SlotKind::Virtual => self.virtual_tid,
+            SlotKind::Empty => None,
         }
     }
 }
