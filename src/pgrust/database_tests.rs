@@ -7,15 +7,15 @@ use crate::backend::utils::misc::notices::{
     clear_notices as clear_backend_notices, take_notices as take_backend_notices,
 };
 use crate::include::catalog::{
-    FLOAT8_TYPE_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID, PG_CLASS_RELATION_OID,
+    FLOAT8_TYPE_OID, INT4RANGE_TYPE_OID, INT4_TYPE_OID, PG_CLASS_RELATION_OID,
     PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID,
 };
 use crate::include::nodes::parsenodes::MaintenanceTarget;
 use crate::include::nodes::primnodes::QueryColumn;
 use crate::pl::plpgsql::{clear_notices, take_notices};
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::thread;
 
 use std::time::{Duration, Instant};
@@ -2154,11 +2154,9 @@ fn analyze_populates_pg_stats_view_and_anyarray_columns() {
          order by 1",
     );
     assert!(!histogram_dims.is_empty());
-    assert!(
-        histogram_dims
-            .iter()
-            .all(|row| row.as_slice() == [Value::Int32(1)])
-    );
+    assert!(histogram_dims
+        .iter()
+        .all(|row| row.as_slice() == [Value::Int32(1)]));
 }
 
 #[test]
@@ -2906,6 +2904,35 @@ fn inherited_scan_tableoid_tracks_physical_child_relation() {
 }
 
 #[test]
+fn base_table_scan_exposes_ctid_system_column() {
+    let dir = temp_dir("scan_ctid");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table ctid_tbl(a int4)")
+        .unwrap();
+    session
+        .execute(&db, "insert into ctid_tbl values (10), (20)")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select ctid, a from ctid_tbl order by a"),
+        vec![
+            vec![Value::Text("(0,1)".into()), Value::Int32(10)],
+            vec![Value::Text("(0,2)".into()), Value::Int32(20)],
+        ]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select t.ctid, t.a from ctid_tbl t order by t.a"),
+        vec![
+            vec![Value::Text("(0,1)".into()), Value::Int32(10)],
+            vec![Value::Text("(0,2)".into()), Value::Int32(20)],
+        ]
+    );
+}
+
+#[test]
 fn inherited_update_delete_follow_postgres_targeting_rules() {
     let dir = temp_dir("inheritance_guardrails");
     let db = Database::open(&dir, 128).unwrap();
@@ -3139,6 +3166,154 @@ fn nested_views_and_pg_views_work() {
                 Value::Text("second_view".into()),
                 Value::Text("postgres".into()),
                 Value::Text("select id from first_view".into()),
+            ],
+        ]
+    );
+}
+
+#[test]
+fn information_schema_view_metadata_tracks_updatable_views() {
+    let dir = temp_dir("info_schema_updatable_views");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table base_tbl(a int primary key, b text)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create view ro_view1 as select distinct a, b from base_tbl",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create view rw_view14 as select ctid, a, b from base_tbl",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create view rw_view15 as select a, upper(b) from base_tbl",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create view rw_view16 as select a, b, a as aa from base_tbl",
+        )
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select table_name, is_insertable_into
+             from information_schema.tables
+             where table_name like 'r%view%'
+             order by table_name",
+        ),
+        vec![
+            vec![Value::Text("ro_view1".into()), Value::Text("NO".into())],
+            vec![Value::Text("rw_view14".into()), Value::Text("YES".into())],
+            vec![Value::Text("rw_view15".into()), Value::Text("YES".into())],
+            vec![Value::Text("rw_view16".into()), Value::Text("YES".into())],
+        ]
+    );
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select table_name, is_updatable, is_insertable_into
+             from information_schema.views
+             where table_name like 'r%view%'
+             order by table_name",
+        ),
+        vec![
+            vec![
+                Value::Text("ro_view1".into()),
+                Value::Text("NO".into()),
+                Value::Text("NO".into()),
+            ],
+            vec![
+                Value::Text("rw_view14".into()),
+                Value::Text("YES".into()),
+                Value::Text("YES".into()),
+            ],
+            vec![
+                Value::Text("rw_view15".into()),
+                Value::Text("YES".into()),
+                Value::Text("YES".into()),
+            ],
+            vec![
+                Value::Text("rw_view16".into()),
+                Value::Text("YES".into()),
+                Value::Text("YES".into()),
+            ],
+        ]
+    );
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select table_name, column_name, is_updatable
+             from information_schema.columns
+             where table_name like 'r%view%'
+             order by table_name, ordinal_position",
+        ),
+        vec![
+            vec![
+                Value::Text("ro_view1".into()),
+                Value::Text("a".into()),
+                Value::Text("NO".into()),
+            ],
+            vec![
+                Value::Text("ro_view1".into()),
+                Value::Text("b".into()),
+                Value::Text("NO".into()),
+            ],
+            vec![
+                Value::Text("rw_view14".into()),
+                Value::Text("ctid".into()),
+                Value::Text("NO".into()),
+            ],
+            vec![
+                Value::Text("rw_view14".into()),
+                Value::Text("a".into()),
+                Value::Text("YES".into()),
+            ],
+            vec![
+                Value::Text("rw_view14".into()),
+                Value::Text("b".into()),
+                Value::Text("YES".into()),
+            ],
+            vec![
+                Value::Text("rw_view15".into()),
+                Value::Text("a".into()),
+                Value::Text("YES".into()),
+            ],
+            vec![
+                Value::Text("rw_view15".into()),
+                Value::Text("upper".into()),
+                Value::Text("NO".into()),
+            ],
+            vec![
+                Value::Text("rw_view16".into()),
+                Value::Text("a".into()),
+                Value::Text("YES".into()),
+            ],
+            vec![
+                Value::Text("rw_view16".into()),
+                Value::Text("b".into()),
+                Value::Text("YES".into()),
+            ],
+            vec![
+                Value::Text("rw_view16".into()),
+                Value::Text("aa".into()),
+                Value::Text("YES".into()),
             ],
         ]
     );
@@ -3439,16 +3614,14 @@ fn committed_catalog_invalidation_evicts_other_sessions_without_global_reset() {
     let mut writer = Session::new(1);
     let mut reader = Session::new(2);
 
-    assert!(
-        db.lazy_catalog_lookup(1, None, None)
-            .lookup_any_relation("fanout_test")
-            .is_none()
-    );
-    assert!(
-        db.lazy_catalog_lookup(2, None, None)
-            .lookup_any_relation("fanout_test")
-            .is_none()
-    );
+    assert!(db
+        .lazy_catalog_lookup(1, None, None)
+        .lookup_any_relation("fanout_test")
+        .is_none());
+    assert!(db
+        .lazy_catalog_lookup(2, None, None)
+        .lookup_any_relation("fanout_test")
+        .is_none());
     {
         let states = db.backend_cache_states.read();
         let writer_state = states.get(&1).unwrap();
@@ -5394,7 +5567,10 @@ fn auto_view_errors_preserve_postgres_distinct_with_and_hint_text() {
     )
     .unwrap();
 
-    match db.execute(1, "delete from distinct_view where id = 1").unwrap_err() {
+    match db
+        .execute(1, "delete from distinct_view where id = 1")
+        .unwrap_err()
+    {
         ExecError::DetailedError {
             message,
             detail: Some(detail),
@@ -5414,7 +5590,10 @@ fn auto_view_errors_preserve_postgres_distinct_with_and_hint_text() {
         other => panic!("expected distinct view DML error, got {other:?}"),
     }
 
-    match db.execute(1, "update with_view set name = 'beta' where id = 1").unwrap_err() {
+    match db
+        .execute(1, "update with_view set name = 'beta' where id = 1")
+        .unwrap_err()
+    {
         ExecError::DetailedError {
             message,
             detail: Some(detail),
@@ -5422,7 +5601,10 @@ fn auto_view_errors_preserve_postgres_distinct_with_and_hint_text() {
             ..
         } => {
             assert_eq!(message, "cannot update view \"with_view\"");
-            assert_eq!(detail, "Views containing WITH are not automatically updatable.");
+            assert_eq!(
+                detail,
+                "Views containing WITH are not automatically updatable."
+            );
             assert_eq!(
                 hint,
                 "To enable updating the view, provide an INSTEAD OF UPDATE trigger or an unconditional ON UPDATE DO INSTEAD rule."
@@ -8429,11 +8611,9 @@ fn foreign_keys_support_match_full() {
             constraint, detail, ..
         }) => {
             assert_eq!(constraint, "children_parent_fk");
-            assert!(
-                detail
-                    .as_deref()
-                    .is_some_and(|detail| detail.contains("MATCH FULL"))
-            );
+            assert!(detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("MATCH FULL")));
         }
         other => panic!("expected MATCH FULL foreign-key violation, got {other:?}"),
     }
@@ -8504,11 +8684,9 @@ fn alter_table_add_foreign_key_supports_match_full() {
             constraint, detail, ..
         }) => {
             assert_eq!(constraint, "children_parent_fk");
-            assert!(
-                detail
-                    .as_deref()
-                    .is_some_and(|detail| detail.contains("MATCH FULL"))
-            );
+            assert!(detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("MATCH FULL")));
         }
         other => panic!("expected post-add MATCH FULL foreign-key violation, got {other:?}"),
     }
@@ -9709,11 +9887,9 @@ fn alter_constraint_enforced_validates_match_full_existing_rows() {
             constraint, detail, ..
         }) => {
             assert_eq!(constraint, "children_parent_fk");
-            assert!(
-                detail
-                    .as_deref()
-                    .is_some_and(|detail| detail.contains("MATCH FULL"))
-            );
+            assert!(detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("MATCH FULL")));
         }
         other => panic!("expected ALTER CONSTRAINT ENFORCED MATCH FULL failure, got {other:?}"),
     }
@@ -11972,7 +12148,7 @@ fn checkpoint_updates_checkpointer_stats() {
 #[test]
 fn checkpoint_flushes_dirty_pages_and_clog_to_disk() {
     use crate::backend::access::transam::xact::{
-        INVALID_TRANSACTION_ID, TransactionManager, TransactionStatus,
+        TransactionManager, TransactionStatus, INVALID_TRANSACTION_ID,
     };
     use crate::backend::storage::smgr::ForkNumber;
 
@@ -13210,14 +13386,13 @@ fn create_table_uses_pg_temp_search_path_for_unqualified_creation() {
         .unwrap();
 
     assert!(db.temp_entry(1, "tempy").is_some());
-    assert!(
-        db.catalog
-            .read()
-            .catalog_snapshot()
-            .unwrap()
-            .get("tempy")
-            .is_none()
-    );
+    assert!(db
+        .catalog
+        .read()
+        .catalog_snapshot()
+        .unwrap()
+        .get("tempy")
+        .is_none());
 }
 
 #[test]
@@ -16505,18 +16680,17 @@ fn create_type_exposes_catalog_rows_and_function_row_expansion() {
             vec![Value::Text("label".into())],
         ]
     );
-    assert!(
-        db.backend_catcache(1, None)
-            .unwrap()
-            .depend_rows()
-            .iter()
-            .any(|row| {
-                row.classid == PG_PROC_RELATION_OID
-                    && row.objid == widget_proc.oid
-                    && row.refclassid == PG_TYPE_RELATION_OID
-                    && row.refobjid == widget_type.oid
-            })
-    );
+    assert!(db
+        .backend_catcache(1, None)
+        .unwrap()
+        .depend_rows()
+        .iter()
+        .any(|row| {
+            row.classid == PG_PROC_RELATION_OID
+                && row.objid == widget_proc.oid
+                && row.refclassid == PG_TYPE_RELATION_OID
+                && row.refobjid == widget_type.oid
+        }));
     assert_eq!(
         query_rows(&db, 1, "select * from widget_rows(5)"),
         vec![vec![Value::Int32(5), Value::Text("widget".into())]]
@@ -16720,11 +16894,9 @@ fn create_type_nested_dependencies_and_named_composite_arrays_work() {
         }) => {
             assert_eq!(sqlstate, "2BP01");
             assert!(message.contains("cannot drop type complex"));
-            assert!(
-                detail
-                    .unwrap_or_default()
-                    .contains("type holder depends on type complex")
-            );
+            assert!(detail
+                .unwrap_or_default()
+                .contains("type holder depends on type complex"));
         }
         other => panic!("expected dependent-type drop restriction, got {other:?}"),
     }
@@ -16817,11 +16989,9 @@ fn drop_type_enforces_restrict_and_if_exists() {
         }) => {
             assert_eq!(sqlstate, "2BP01");
             assert!(message.contains("cannot drop type widget"));
-            assert!(
-                detail
-                    .unwrap_or_default()
-                    .contains("function widget_rows depends on type widget")
-            );
+            assert!(detail
+                .unwrap_or_default()
+                .contains("function widget_rows depends on type widget"));
         }
         other => panic!("expected dependent-function drop restriction, got {other:?}"),
     }
@@ -16858,11 +17028,9 @@ fn drop_enum_type_enforces_restrict_and_if_exists() {
         }) => {
             assert_eq!(sqlstate, "2BP01");
             assert!(message.contains("cannot drop type mood"));
-            assert!(
-                detail
-                    .unwrap_or_default()
-                    .contains("table feelings depends on type mood")
-            );
+            assert!(detail
+                .unwrap_or_default()
+                .contains("table feelings depends on type mood"));
         }
         other => panic!("expected dependent enum drop restriction, got {other:?}"),
     }
@@ -16902,11 +17070,9 @@ fn drop_range_type_enforces_restrict_and_if_exists() {
         }) => {
             assert_eq!(sqlstate, "2BP01");
             assert!(message.contains("cannot drop type float8range"));
-            assert!(
-                detail
-                    .unwrap_or_default()
-                    .contains("table measurements depends on type float8range")
-            );
+            assert!(detail
+                .unwrap_or_default()
+                .contains("table measurements depends on type float8range"));
         }
         other => panic!("expected dependent range drop restriction, got {other:?}"),
     }
