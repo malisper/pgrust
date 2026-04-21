@@ -2204,6 +2204,27 @@ fn parse_revoke_role_membership_granted_by_statement() {
 }
 
 #[test]
+fn parse_revoke_role_membership_admin_option_granted_by_cascade_statement() {
+    let stmt = parse_statement(
+        "revoke admin option for regress_tenant2 from regress_createrole granted by regress_admin cascade",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::RevokeRoleMembership(RevokeRoleMembershipStatement {
+            role_names: vec!["regress_tenant2".into()],
+            grantee_names: vec!["regress_createrole".into()],
+            revoke_membership: false,
+            admin_option: true,
+            inherit_option: false,
+            set_option: false,
+            cascade: true,
+            granted_by: Some(RoleGrantorSpec::RoleName("regress_admin".into())),
+        })
+    );
+}
+
+#[test]
 fn parse_plain_revoke_role_membership_granted_by_cascade_statement() {
     let stmt = parse_statement(
         "revoke regress_tenant2 from regress_createrole granted by regress_admin cascade",
