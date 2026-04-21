@@ -294,6 +294,14 @@ fn regproc_type_name(sql_type: SqlType) -> &'static str {
     }
 }
 
+fn eval_regtype_to_text(value: &Value, ctx: &ExecutorContext) -> Result<Value, ExecError> {
+    let oid = oid_arg_to_u32(value, "regtype_to_text")?;
+    let Some(type_row) = role_catalog(ctx)?.type_by_oid(oid) else {
+        return Ok(Value::Null);
+    };
+    Ok(Value::Text(type_row.typname.into()))
+}
+
 fn eval_regprocedure_to_text(value: &Value, ctx: &ExecutorContext) -> Result<Value, ExecError> {
     let oid = oid_arg_to_u32(value, "regprocedure_to_text")?;
     let Some(proc_row) = role_catalog(ctx)?.proc_row_by_oid(oid) else {
@@ -1816,6 +1824,11 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::Translate => eval_translate_function(&values),
         BuiltinScalarFunction::Ascii => eval_ascii_function(&values),
         BuiltinScalarFunction::Chr => eval_chr_function(&values),
+        BuiltinScalarFunction::RegTypeToText => match values.as_slice() {
+            [Value::Int32(v)] => Ok(Value::Text(v.to_string().into())),
+            [Value::Int64(v)] => Ok(Value::Text(v.to_string().into())),
+            _ => Err(malformed_expr_error("regtype_to_text")),
+        },
         BuiltinScalarFunction::RegRoleToText => eval_regrole_to_text_function(&values, None),
         BuiltinScalarFunction::QuoteLiteral => eval_quote_literal_function(&values),
         BuiltinScalarFunction::BpcharToText => eval_bpchar_to_text_function(&values),
@@ -2621,14 +2634,15 @@ fn eval_builtin_function(
                 right: Value::Null,
             }),
         },
+        BuiltinScalarFunction::RegTypeToText => match values.as_slice() {
+            [value] => eval_regtype_to_text(value, ctx),
+            _ => Err(malformed_expr_error("regtype_to_text")),
+        },
         BuiltinScalarFunction::RegProcedureToText => match values.as_slice() {
             [value] => eval_regprocedure_to_text(value, ctx),
             _ => Err(malformed_expr_error("regprocedure_to_text")),
         },
-        BuiltinScalarFunction::PgGetUserById => match values.as_slice() {
-            [..] => eval_pg_get_userbyid(&values, ctx),
-            _ => Err(malformed_expr_error("pg_get_userbyid")),
-        },
+        BuiltinScalarFunction::PgGetUserById => eval_pg_get_userbyid(&values, ctx),
         BuiltinScalarFunction::Now
         | BuiltinScalarFunction::TransactionTimestamp
         | BuiltinScalarFunction::StatementTimestamp
