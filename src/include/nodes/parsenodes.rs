@@ -291,6 +291,7 @@ pub enum Statement {
     AlterSequence(AlterSequenceStatement),
     AlterSequenceOwner(AlterRelationOwnerStatement),
     AlterSequenceRename(AlterTableRenameStatement),
+    AlterIndexRename(AlterTableRenameStatement),
     AlterTableAddColumn(AlterTableAddColumnStatement),
     AlterTableAddConstraint(AlterTableAddConstraintStatement),
     AlterTableDropColumn(AlterTableDropColumnStatement),
@@ -314,6 +315,7 @@ pub enum Statement {
     AlterTableSetNotNull(AlterTableSetNotNullStatement),
     AlterTableDropNotNull(AlterTableDropNotNullStatement),
     AlterTableValidateConstraint(AlterTableValidateConstraintStatement),
+    AlterTableInherit(AlterTableInheritStatement),
     AlterTableNoInherit(AlterTableNoInheritStatement),
     AlterPublication(AlterPublicationStatement),
     CommentOnTable(CommentOnTableStatement),
@@ -1494,6 +1496,14 @@ pub struct AlterTableValidateConstraintStatement {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterTableNoInheritStatement {
+    pub if_exists: bool,
+    pub only: bool,
+    pub table_name: String,
+    pub parent_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableInheritStatement {
     pub if_exists: bool,
     pub only: bool,
     pub table_name: String,
