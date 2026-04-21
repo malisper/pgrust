@@ -6332,6 +6332,7 @@ fn alter_table_add_column_propagates_temp_not_null_constraints() {
             relation,
             column,
             constraint,
+            ..
         }) if relation == "child1" && column == "a1" && constraint == "parent1_a1_not_null" => {}
         other => panic!("expected propagated temp not-null violation, got {other:?}"),
     }
@@ -6410,6 +6411,7 @@ fn alter_table_add_column_temp_not_null_validates_inherited_child_rows() {
             relation,
             column,
             constraint,
+            ..
         }) if relation == "child1" && column == "a1" && constraint == "parent1_a1_not_null" => {}
         other => panic!("expected inherited child validation failure, got {other:?}"),
     }
@@ -8027,6 +8029,7 @@ fn create_table_primary_key_and_unique_constraints_are_enforced_and_persisted() 
             relation,
             column,
             constraint,
+            ..
         }) if relation == "items" && column == "id" && constraint == "items_id_not_null" => {}
         other => panic!("expected primary-key NOT NULL rejection, got {other:?}"),
     }
@@ -8148,6 +8151,7 @@ fn create_table_table_level_primary_key_and_unique_constraints_work() {
             relation,
             column,
             constraint,
+            ..
         }) if relation == "memberships"
             && column == "tag"
             && constraint == "memberships_tag_not_null" => {}
@@ -8183,6 +8187,7 @@ fn create_table_check_and_named_not_null_constraints_are_enforced_and_persisted(
             relation,
             column,
             constraint,
+            ..
         }) if relation == "items" && column == "note" && constraint == "items_note_required" => {}
         other => panic!("expected named not-null violation, got {other:?}"),
     }
@@ -8240,6 +8245,7 @@ fn create_table_check_and_named_not_null_constraints_are_enforced_and_persisted(
             relation,
             column,
             constraint,
+            ..
         }) if relation == "items" && column == "note" && constraint == "items_note_required" => {}
         other => panic!("expected reopened named not-null violation, got {other:?}"),
     }
@@ -8876,6 +8882,7 @@ fn update_and_copy_from_enforce_check_and_not_null_constraints() {
             relation,
             column,
             constraint,
+            ..
         }) if relation == "items" && column == "note" && constraint == "items_note_required" => {}
         other => panic!("expected update not-null violation, got {other:?}"),
     }
@@ -8893,6 +8900,7 @@ fn update_and_copy_from_enforce_check_and_not_null_constraints() {
             relation,
             column,
             constraint,
+            ..
         }) if relation == "items" && column == "note" && constraint == "items_note_required" => {}
         other => panic!("expected copy not-null violation, got {other:?}"),
     }
@@ -8938,6 +8946,7 @@ fn prepared_insert_enforces_check_and_not_null_constraints() {
             relation,
             column,
             constraint,
+            ..
         }) if relation == "items" && column == "note" && constraint == "items_note_required" => {}
         other => panic!("expected prepared-insert not-null violation, got {other:?}"),
     }
@@ -9028,6 +9037,7 @@ fn alter_table_add_constraints_support_not_valid_and_validate() {
             relation,
             column,
             constraint,
+            ..
         }) if relation == "items" && column == "note" && constraint == "items_note_required" => {}
         other => panic!("expected ALTER TABLE NOT NULL violation, got {other:?}"),
     }
@@ -9068,6 +9078,7 @@ fn alter_table_add_constraints_support_not_valid_and_validate() {
             relation,
             column,
             constraint,
+            ..
         }) if relation == "items" && column == "note" && constraint == "items_note_required" => {}
         other => panic!("expected NOT NULL validate failure, got {other:?}"),
     }
@@ -10083,6 +10094,7 @@ fn alter_table_set_and_drop_not_null_updates_enforcement_and_catalog() {
             relation,
             column,
             constraint,
+            ..
         }) if relation == "items" && column == "note" && constraint == "items_note_not_null" => {}
         other => panic!("expected SET NOT NULL validation failure, got {other:?}"),
     }
@@ -10113,6 +10125,7 @@ fn alter_table_set_and_drop_not_null_updates_enforcement_and_catalog() {
             relation,
             column,
             constraint,
+            ..
         }) if relation == "items" && column == "note" && constraint == "items_note_not_null" => {}
         other => panic!("expected enforced SET NOT NULL violation, got {other:?}"),
     }
@@ -10345,6 +10358,7 @@ fn alter_table_rename_not_null_constraint_updates_column_enforcement() {
             relation,
             column,
             constraint,
+            ..
         }) if relation == "items" && column == "note" && constraint == "items_note_required" => {}
         other => panic!("expected renamed NOT NULL constraint violation, got {other:?}"),
     }
@@ -10413,6 +10427,7 @@ fn alter_table_drop_primary_key_removes_only_pk_owned_not_null_constraints() {
             relation,
             column,
             constraint,
+            ..
         }) if relation == "items" && column == "id" && constraint == "items_id_not_null" => {}
         other => panic!("expected user-owned NOT NULL to remain, got {other:?}"),
     }

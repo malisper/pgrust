@@ -56,10 +56,8 @@ pub(crate) fn format_exec_error(e: &ExecError) -> String {
         ExecError::NotNullViolation {
             relation,
             column,
-            constraint,
-        } => format!(
-            "null value in column \"{column}\" of relation \"{relation}\" violates not-null constraint \"{constraint}\""
-        ),
+            ..
+        } => format!("null value in column \"{column}\" of relation \"{relation}\" violates not-null constraint"),
         ExecError::CheckViolation {
             relation,
             constraint,
