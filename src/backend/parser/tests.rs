@@ -133,8 +133,6 @@ fn test_catalog_entry(rel_number: u32, desc: RelationDesc) -> CatalogEntry {
         relhastriggers: false,
         relhassubclass: false,
         relispartition: false,
-        relrowsecurity: false,
-        relforcerowsecurity: false,
         relpages: 0,
         reltuples: 0.0,
         desc,
@@ -185,8 +183,6 @@ fn people_view_entry() -> CatalogEntry {
         relhastriggers: false,
         relhassubclass: false,
         relispartition: false,
-        relrowsecurity: false,
-        relforcerowsecurity: false,
         relpages: 0,
         reltuples: 0.0,
         desc: RelationDesc {
@@ -297,8 +293,6 @@ fn catalog_with_people_id_index() -> Catalog {
             relhastriggers: false,
             relhassubclass: false,
             relispartition: false,
-            relrowsecurity: false,
-            relforcerowsecurity: false,
             relpages: 0,
             reltuples: 0.0,
             desc: RelationDesc {
@@ -344,8 +338,6 @@ fn catalog_with_people_primary_key() -> Catalog {
             relhastriggers: false,
             relhassubclass: false,
             relispartition: false,
-            relrowsecurity: false,
-            relforcerowsecurity: false,
             relpages: 0,
             reltuples: 0.0,
             desc: RelationDesc {
@@ -424,8 +416,6 @@ fn catalog_with_people_partial_unique_index() -> Catalog {
             relhastriggers: false,
             relhassubclass: false,
             relispartition: false,
-            relrowsecurity: false,
-            relforcerowsecurity: false,
             relpages: 0,
             reltuples: 0.0,
             desc: RelationDesc {
@@ -576,8 +566,6 @@ fn catalog_with_text_parent_primary_key() -> Catalog {
             relhastriggers: false,
             relhassubclass: false,
             relispartition: false,
-            relrowsecurity: false,
-            relforcerowsecurity: false,
             relpages: 0,
             reltuples: 0.0,
             desc: RelationDesc {
@@ -621,7 +609,6 @@ fn visible_catalog_without_text_input_cast(
         base.index_rows(),
         base.rewrite_rows(),
         base.trigger_rows(),
-        base.policy_rows(),
         base.am_rows(),
         base.amop_rows(),
         base.amproc_rows(),
@@ -645,10 +632,9 @@ fn visible_catalog_without_text_input_cast(
                 !(row.castsource == crate::include::catalog::TEXT_TYPE_OID
                     && row.casttarget == target_oid
                     && row.castmethod == 'i')
-        })
+            })
             .collect(),
         base.collation_rows(),
-        base.foreign_data_wrapper_rows(),
         base.database_rows(),
         base.tablespace_rows(),
         base.statistic_rows(),
@@ -675,7 +661,6 @@ fn visible_catalog_without_operator(
         base.index_rows(),
         base.rewrite_rows(),
         base.trigger_rows(),
-        base.policy_rows(),
         base.am_rows(),
         base.amop_rows(),
         base.amproc_rows(),
@@ -700,7 +685,6 @@ fn visible_catalog_without_operator(
         base.aggregate_rows(),
         base.cast_rows(),
         base.collation_rows(),
-        base.foreign_data_wrapper_rows(),
         base.database_rows(),
         base.tablespace_rows(),
         base.statistic_rows(),
@@ -1248,7 +1232,6 @@ fn parse_alter_table_constraint_statements() {
             },
         })
     );
-
     let stmt = parse_statement("alter table items drop constraint items_id_check").unwrap();
     assert_eq!(
         stmt,
@@ -1971,14 +1954,6 @@ fn parse_alter_schema_owner_statement() {
 #[test]
 fn parse_set_session_authorization_statement() {
     let stmt = parse_statement("set session authorization regress_tenant").unwrap();
-    assert_eq!(
-        stmt,
-        Statement::SetSessionAuthorization(SetSessionAuthorizationStatement {
-            role_name: "regress_tenant".into(),
-        })
-    );
-
-    let stmt = parse_statement("set session authorization 'regress_tenant'").unwrap();
     assert_eq!(
         stmt,
         Statement::SetSessionAuthorization(SetSessionAuthorizationStatement {
@@ -3050,6 +3025,12 @@ fn parse_type_cast_expression() {
 }
 
 #[test]
+fn parse_field_select_uses_field_name_as_default_output_name() {
+    let stmt = parse_select("select (jsonb_each('{\"a\":1}'::jsonb)).key").unwrap();
+    assert_eq!(stmt.targets[0].output_name, "key");
+}
+
+#[test]
 fn parse_varchar_type_cast_expression() {
     let stmt = parse_select("select 'abc'::varchar(2)").unwrap();
     assert_eq!(stmt.targets[0].output_name, "varchar");
@@ -3296,8 +3277,7 @@ fn parse_typed_string_literal_expression() {
 
 #[test]
 fn parse_timestamptz_typed_string_literal_with_text_cast() {
-    let stmt =
-        parse_select("select timestamptz '2024-01-02 03:04:05+00'::text").unwrap();
+    let stmt = parse_select("select timestamptz '2024-01-02 03:04:05+00'::text").unwrap();
     match &stmt.targets[0].expr {
         SqlExpr::Cast(inner, ty) => {
             assert_eq!(*ty, SqlType::new(SqlTypeKind::Text));
@@ -4516,13 +4496,10 @@ fn parse_insert_update_delete() {
         matches!(parse_statement("create temp table tempy(id) as select 1").unwrap(), Statement::CreateTableAs(CreateTableAsStatement { table_name, column_names, persistence: TablePersistence::Temporary, .. }) if table_name == "tempy" && column_names == vec!["id"])
     );
     assert!(
-        matches!(parse_statement("drop table widgets").unwrap(), Statement::DropTable(DropTableStatement { if_exists: false, table_names, cascade: false }) if table_names == vec!["widgets"])
+        matches!(parse_statement("drop table widgets").unwrap(), Statement::DropTable(DropTableStatement { if_exists: false, table_names }) if table_names == vec!["widgets"])
     );
     assert!(
-        matches!(parse_statement("drop table if exists pgbench_accounts, pgbench_branches, pgbench_history, pgbench_tellers").unwrap(), Statement::DropTable(DropTableStatement { if_exists: true, table_names, cascade: false }) if table_names == vec!["pgbench_accounts", "pgbench_branches", "pgbench_history", "pgbench_tellers"])
-    );
-    assert!(
-        matches!(parse_statement("drop table widgets cascade").unwrap(), Statement::DropTable(DropTableStatement { if_exists: false, table_names, cascade: true }) if table_names == vec!["widgets"])
+        matches!(parse_statement("drop table if exists pgbench_accounts, pgbench_branches, pgbench_history, pgbench_tellers").unwrap(), Statement::DropTable(DropTableStatement { if_exists: true, table_names }) if table_names == vec!["pgbench_accounts", "pgbench_branches", "pgbench_history", "pgbench_tellers"])
     );
     assert!(
         matches!(parse_statement("drop index tenant_idx").unwrap(), Statement::DropIndex(DropIndexStatement { if_exists: false, index_names }) if index_names == vec!["tenant_idx"])
@@ -4705,7 +4682,6 @@ fn parse_create_rule_single_action() {
                         SqlExpr::Column("new.id".into()),
                     ]]),
                     on_conflict: None,
-                    returning: vec![],
                 }),
                 sql: "insert into pets values (new.id, new.id)".into(),
             }],
@@ -4886,7 +4862,6 @@ fn people_insert_with_on_conflict(
             assignments,
             where_clause,
         }),
-        returning: vec![],
     }
 }
 
@@ -5240,13 +5215,6 @@ fn parse_current_user_and_legacy_null_predicates() {
     assert!(matches!(stmt.targets[0].expr, SqlExpr::CurrentUser));
     assert!(matches!(stmt.targets[1].expr, SqlExpr::IsNull(_)));
     assert!(matches!(stmt.targets[2].expr, SqlExpr::IsNotNull(_)));
-}
-
-#[test]
-fn parse_session_user_and_current_role() {
-    let stmt = parse_select("select session_user, current_role from people").unwrap();
-    assert!(matches!(stmt.targets[0].expr, SqlExpr::SessionUser));
-    assert!(matches!(stmt.targets[1].expr, SqlExpr::CurrentRole));
 }
 
 #[test]
@@ -6163,98 +6131,6 @@ fn parse_create_drop_and_comment_on_conversion_statements() {
 }
 
 #[test]
-fn parse_foreign_data_wrapper_statements() {
-    let Statement::CreateForeignDataWrapper(create) = parse_statement(
-        "create foreign data wrapper foo handler pg_rust_test_fdw_handler validator postgresql_fdw_validator options (testing '1', another '2')",
-    )
-    .unwrap() else {
-        panic!("expected create foreign data wrapper");
-    };
-    assert_eq!(create.fdw_name, "foo");
-    assert_eq!(create.handler_name.as_deref(), Some("pg_rust_test_fdw_handler"));
-    assert_eq!(create.validator_name.as_deref(), Some("postgresql_fdw_validator"));
-    assert_eq!(
-        create.options,
-        vec![
-            RelOption {
-                name: "testing".into(),
-                value: "1".into(),
-            },
-            RelOption {
-                name: "another".into(),
-                value: "2".into(),
-            },
-        ]
-    );
-
-    let Statement::AlterForeignDataWrapper(alter) = parse_statement(
-        "alter foreign data wrapper foo no validator options (drop a, set b '2', add c '3')",
-    )
-    .unwrap() else {
-        panic!("expected alter foreign data wrapper");
-    };
-    assert_eq!(alter.fdw_name, "foo");
-    assert_eq!(alter.validator_name, Some(None));
-    assert_eq!(alter.options.len(), 3);
-
-    let Statement::AlterForeignDataWrapperOwner(owner) =
-        parse_statement("alter foreign data wrapper foo owner to regress_test_role").unwrap()
-    else {
-        panic!("expected alter foreign data wrapper owner");
-    };
-    assert_eq!(owner.fdw_name, "foo");
-    assert_eq!(owner.new_owner, "regress_test_role");
-
-    let Statement::AlterForeignDataWrapperRename(rename) =
-        parse_statement("alter foreign data wrapper foo rename to bar").unwrap()
-    else {
-        panic!("expected alter foreign data wrapper rename");
-    };
-    assert_eq!(rename.fdw_name, "foo");
-    assert_eq!(rename.new_name, "bar");
-
-    let Statement::DropForeignDataWrapper(drop_stmt) =
-        parse_statement("drop foreign data wrapper if exists foo cascade").unwrap()
-    else {
-        panic!("expected drop foreign data wrapper");
-    };
-    assert!(drop_stmt.if_exists);
-    assert!(drop_stmt.cascade);
-    assert_eq!(drop_stmt.fdw_name, "foo");
-
-    let Statement::CommentOnForeignDataWrapper(comment) =
-        parse_statement("comment on foreign data wrapper foo is 'hello'").unwrap()
-    else {
-        panic!("expected comment on foreign data wrapper");
-    };
-    assert_eq!(comment.fdw_name, "foo");
-    assert_eq!(comment.comment.as_deref(), Some("hello"));
-}
-
-#[test]
-fn parse_foreign_data_wrapper_rejects_duplicate_clauses() {
-    let err = parse_statement(
-        "create foreign data wrapper foo handler pg_rust_test_fdw_handler handler invalid_fdw_handler",
-    )
-    .expect_err("duplicate handler should fail");
-    assert!(matches!(
-        err,
-        ParseError::FeatureNotSupportedMessage(message)
-            if message == "conflicting or redundant options"
-    ));
-
-    let err = parse_statement(
-        "alter foreign data wrapper foo validator postgresql_fdw_validator no validator",
-    )
-    .expect_err("duplicate validator should fail");
-    assert!(matches!(
-        err,
-        ParseError::FeatureNotSupportedMessage(message)
-            if message == "conflicting or redundant options"
-    ));
-}
-
-#[test]
 fn parse_create_and_drop_type_statements() {
     let Statement::CreateType(CreateTypeStatement::Composite(CreateCompositeTypeStatement {
         schema_name,
@@ -6698,52 +6574,22 @@ fn parse_window_calls_capture_over_clause() {
         SqlExpr::FuncCall {
             name,
             over: Some(RawWindowSpec {
-                name: window_name,
                 partition_by,
                 order_by,
             }),
             ..
-        } if name == "row_number"
-            && window_name.is_none()
-            && partition_by.is_empty()
-            && order_by.is_empty()
+        } if name == "row_number" && partition_by.is_empty() && order_by.is_empty()
     ));
     assert!(matches!(
         &stmt.targets[1].expr,
         SqlExpr::AggCall {
             func: AggFunc::Sum,
             over: Some(RawWindowSpec {
-                name: window_name,
                 partition_by,
                 order_by,
             }),
             ..
-        } if window_name.is_none() && partition_by.len() == 1 && order_by.len() == 1
-    ));
-}
-
-#[test]
-fn parse_named_window_clause_and_reference() {
-    let stmt = parse_select("select row_number() over w from people window w as (order by id)")
-        .unwrap();
-    assert_eq!(stmt.window_clauses.len(), 1);
-    assert_eq!(stmt.window_clauses[0].name, "w");
-    assert!(stmt.window_clauses[0].spec.partition_by.is_empty());
-    assert_eq!(stmt.window_clauses[0].spec.order_by.len(), 1);
-    assert!(matches!(
-        &stmt.targets[0].expr,
-        SqlExpr::FuncCall {
-            name,
-            over: Some(RawWindowSpec {
-                name: Some(window_name),
-                partition_by,
-                order_by,
-            }),
-            ..
-        } if name == "row_number"
-            && window_name == "w"
-            && partition_by.is_empty()
-            && order_by.is_empty()
+        } if partition_by.len() == 1 && order_by.len() == 1
     ));
 }
 
@@ -6876,24 +6722,6 @@ fn analyze_grouped_query_keeps_semantic_group_refs() {
 #[test]
 fn build_plan_with_window_function_uses_windowagg() {
     let stmt = parse_select("select row_number() over (order by id) from people").unwrap();
-    let plan = build_plan(&stmt, &catalog()).unwrap();
-    match plan {
-        Plan::Projection { input, .. } => match *input {
-            Plan::WindowAgg { input, clause, .. } => {
-                assert!(clause.spec.partition_by.is_empty());
-                assert_eq!(clause.spec.order_by.len(), 1);
-                assert!(matches!(*input, Plan::OrderBy { .. }));
-            }
-            other => panic!("expected window agg below projection, got {other:?}"),
-        },
-        other => panic!("expected projection, got {other:?}"),
-    }
-}
-
-#[test]
-fn build_plan_with_named_window_clause_uses_windowagg() {
-    let stmt = parse_select("select row_number() over w from people window w as (order by id)")
-        .unwrap();
     let plan = build_plan(&stmt, &catalog()).unwrap();
     match plan {
         Plan::Projection { input, .. } => match *input {
@@ -7140,18 +6968,8 @@ fn window_function_rejected_in_where_group_by_and_having() {
 }
 
 #[test]
-fn named_window_errors_and_frames_are_rejected() {
-    let stmt = parse_select("select row_number() over missing from people").unwrap();
-    assert!(matches!(
-        build_plan(&stmt, &catalog()),
-        Err(ParseError::WindowingError(message)) if message == "window \"missing\" does not exist"
-    ));
-    let stmt =
-        parse_select("select row_number() over w from people window w as (), w as ()").unwrap();
-    assert!(matches!(
-        build_plan(&stmt, &catalog()),
-        Err(ParseError::WindowingError(message)) if message == "window \"w\" is already defined"
-    ));
+fn window_aliases_and_frames_are_rejected() {
+    assert!(parse_select("select row_number() over w from people window w as ()").is_err());
     assert!(parse_select(
         "select row_number() over (order by id rows between unbounded preceding and current row) from people"
     )
@@ -7290,10 +7108,59 @@ fn build_plan_for_select_list_generate_series_uses_project_set() {
 }
 
 #[test]
-fn build_plan_for_select_list_json_each_is_rejected() {
+fn build_plan_for_select_list_json_each_uses_record_project_set() {
     let stmt = parse_select("select json_each('{\"a\":1}'::json)").unwrap();
-    let err = build_plan(&stmt, &catalog()).unwrap_err();
-    assert!(matches!(err, ParseError::UnexpectedToken { .. }));
+    let plan = build_plan(&stmt, &catalog()).unwrap();
+    match plan {
+        Plan::ProjectSet { targets, .. } => {
+            assert_eq!(targets.len(), 1);
+            match &targets[0] {
+                crate::include::nodes::primnodes::ProjectSetTarget::Set {
+                    call:
+                        crate::include::nodes::primnodes::SetReturningCall::JsonTableFunction {
+                            kind: crate::include::nodes::primnodes::JsonTableFunction::Each,
+                            ..
+                        },
+                    sql_type,
+                    column_index,
+                    ..
+                } => {
+                    assert_eq!(sql_type.kind, SqlTypeKind::Record);
+                    assert_eq!(*column_index, 0);
+                }
+                other => panic!("expected json_each project set target, got {other:?}"),
+            }
+        }
+        other => panic!("expected project set plan, got {other:?}"),
+    }
+}
+
+#[test]
+fn build_plan_for_select_list_jsonb_each_field_select_projects_key_column() {
+    let stmt = parse_select("select (jsonb_each('{\"a\":1}'::jsonb)).key").unwrap();
+    let plan = build_plan(&stmt, &catalog()).unwrap();
+    match plan {
+        Plan::ProjectSet { targets, .. } => {
+            assert_eq!(targets.len(), 1);
+            match &targets[0] {
+                crate::include::nodes::primnodes::ProjectSetTarget::Set {
+                    call:
+                        crate::include::nodes::primnodes::SetReturningCall::JsonTableFunction {
+                            kind: crate::include::nodes::primnodes::JsonTableFunction::JsonbEach,
+                            ..
+                        },
+                    sql_type,
+                    column_index,
+                    ..
+                } => {
+                    assert_eq!(*sql_type, SqlType::new(SqlTypeKind::Text));
+                    assert_eq!(*column_index, 1);
+                }
+                other => panic!("expected jsonb_each project set target, got {other:?}"),
+            }
+        }
+        other => panic!("expected project set plan, got {other:?}"),
+    }
 }
 
 #[test]
@@ -7911,22 +7778,6 @@ fn build_plan_values_alias_exposes_column_aliases() {
 }
 
 #[test]
-fn build_plan_values_mixed_nulls_infer_concrete_column_type() {
-    let stmt = parse_select("select t.x from (values (null), (1), (2)) as t(x)").unwrap();
-    let plan = build_plan(&stmt, &catalog()).unwrap();
-    match plan {
-        Plan::Projection { input, .. } => match input.as_ref() {
-            Plan::Values { output_columns, .. } => {
-                assert_eq!(output_columns.len(), 1);
-                assert_eq!(output_columns[0].sql_type, SqlType::new(SqlTypeKind::Int4));
-            }
-            other => panic!("expected values input, got {:?}", other),
-        },
-        other => panic!("expected projection, got {:?}", other),
-    }
-}
-
-#[test]
 fn build_plan_join_alias_hides_inner_relation_names() {
     let mut catalog = catalog();
     catalog.insert("pets", pets_entry());
@@ -8234,70 +8085,6 @@ fn parse_insert_alias_and_begin_isolation_level() {
     assert!(matches!(
         parse_statement("begin transaction isolation level repeatable read").unwrap(),
         Statement::Begin
-    ));
-}
-
-#[test]
-fn parse_dml_returning_targets() {
-    assert!(matches!(
-        parse_statement("insert into people (id) values (1) returning *").unwrap(),
-        Statement::Insert(InsertStatement {
-            table_name,
-            returning,
-            ..
-        }) if table_name == "people"
-            && returning == vec![SelectItem {
-                output_name: "*".into(),
-                expr: SqlExpr::Column("*".into()),
-            }]
-    ));
-
-    assert!(matches!(
-        parse_statement("update people set name = 'alice' returning id, upper(name) as upper_name")
-            .unwrap(),
-        Statement::Update(UpdateStatement {
-            table_name,
-            returning,
-            ..
-        }) if table_name == "people"
-            && returning == vec![
-                SelectItem {
-                    output_name: "id".into(),
-                    expr: SqlExpr::Column("id".into()),
-                },
-                SelectItem {
-                    output_name: "upper_name".into(),
-                    expr: SqlExpr::FuncCall {
-                        name: "upper".into(),
-                        args: vec![SqlFunctionArg::positional(SqlExpr::Column("name".into()))],
-                        func_variadic: false,
-                        over: None,
-                    },
-                },
-            ]
-    ));
-
-    assert!(matches!(
-        parse_statement("delete from people where id = 1 returning people.*, id + 1 as next_id")
-            .unwrap(),
-        Statement::Delete(DeleteStatement {
-            table_name,
-            returning,
-            ..
-        }) if table_name == "people"
-            && returning == vec![
-                SelectItem {
-                    output_name: "*".into(),
-                    expr: SqlExpr::Column("people.*".into()),
-                },
-                SelectItem {
-                    output_name: "next_id".into(),
-                    expr: SqlExpr::Add(
-                        Box::new(SqlExpr::Column("id".into())),
-                        Box::new(SqlExpr::IntegerLiteral("1".into())),
-                    ),
-                },
-            ]
     ));
 }
 

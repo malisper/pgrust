@@ -2,6 +2,7 @@ use super::exec_expr::eval_expr;
 use super::expr_casts::cast_value_with_config;
 use super::node_types::*;
 use super::{ExecError, ExecutorContext};
+use crate::backend::executor::expr_datetime::render_json_datetime_value_text_with_config;
 use crate::backend::executor::jsonb::{
     JsonbValue, decode_jsonb, encode_jsonb, jsonb_builder_key, jsonb_from_value, jsonb_get,
     jsonb_object_from_pairs, jsonb_path, jsonb_to_text_value, jsonb_to_value,
@@ -13,7 +14,6 @@ use crate::backend::executor::jsonpath::{
 };
 use crate::backend::executor::render_bit_text;
 use crate::backend::executor::render_datetime_value_text;
-use crate::backend::executor::render_datetime_value_text_with_config;
 use crate::backend::executor::render_range_text;
 use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::backend::parser::CatalogLookup;
@@ -96,6 +96,33 @@ impl ParsedJsonValue {
                 JsonbValue::Object(_) => "object",
             },
         }
+    }
+}
+
+fn json_array_length_error(value: ParsedJsonValue) -> ExecError {
+    let message = match value {
+        ParsedJsonValue::Json(SerdeJsonValue::Object(_))
+        | ParsedJsonValue::Jsonb(JsonbValue::Object(_)) => "cannot get array length of a non-array",
+        ParsedJsonValue::Json(SerdeJsonValue::Array(_))
+        | ParsedJsonValue::Jsonb(JsonbValue::Array(_)) => {
+            unreachable!("array length errors should only be raised for non-arrays")
+        }
+        ParsedJsonValue::Json(_) | ParsedJsonValue::Jsonb(_) => "cannot get array length of a scalar",
+    };
+    ExecError::DetailedError {
+        message: message.into(),
+        detail: None,
+        hint: None,
+        sqlstate: "22023",
+    }
+}
+
+fn jsonb_non_object_error(func_name: &'static str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("cannot call {func_name} on a non-object"),
+        detail: None,
+        hint: None,
+        sqlstate: "22023",
     }
 }
 
@@ -385,16 +412,7 @@ pub(crate) fn eval_json_builtin_function(
                     ParsedJsonValue::Jsonb(JsonbValue::Array(items)) => {
                         Ok(Value::Int32(items.len() as i32))
                     }
-                    ParsedJsonValue::Json(other) => Err(ExecError::TypeMismatch {
-                        op: "jsonb_array_length",
-                        left: json_value_to_value(&other, false),
-                        right: Value::Null,
-                    }),
-                    ParsedJsonValue::Jsonb(other) => Err(ExecError::TypeMismatch {
-                        op: "jsonb_array_length",
-                        left: jsonb_to_value(&other),
-                        right: Value::Null,
-                    }),
+                    other => Err(json_array_length_error(other)),
                 }
             }
             BuiltinScalarFunction::JsonExtractPath => {
@@ -2699,7 +2717,7 @@ fn value_to_json_serde_with_config(
         | Value::TimeTz(_)
         | Value::Timestamp(_)
         | Value::TimestampTz(_) => SerdeJsonValue::String(
-            render_datetime_value_text_with_config(value, datetime_config)
+            render_json_datetime_value_text_with_config(value, datetime_config)
                 .expect("datetime values render"),
         ),
         Value::Point(_)
@@ -2758,11 +2776,110 @@ fn value_to_json_text(
     pretty: bool,
     datetime_config: &crate::backend::utils::misc::guc_datetime::DateTimeConfig,
 ) -> String {
-    let json = value_to_json_serde_with_config(value, datetime_config);
     if pretty {
+        let json = value_to_json_serde_with_config(value, datetime_config);
         serde_json::to_string_pretty(&json).unwrap()
     } else {
-        serde_json::to_string(&json).unwrap()
+        render_json_value_text_with_config(value, datetime_config)
+    }
+}
+
+fn render_json_value_text_with_config(
+    value: &Value,
+    datetime_config: &crate::backend::utils::misc::guc_datetime::DateTimeConfig,
+) -> String {
+    match value {
+        Value::Null => "null".into(),
+        Value::Int16(v) => v.to_string(),
+        Value::Int32(v) => v.to_string(),
+        Value::Int64(v) => v.to_string(),
+        Value::Money(v) => crate::backend::executor::money_format_text(*v),
+        Value::Float64(v) => v.to_string(),
+        Value::Numeric(v) => v.render(),
+        Value::Bool(v) => {
+            if *v {
+                "true".into()
+            } else {
+                "false".into()
+            }
+        }
+        Value::Bit(v) => serde_json::to_string(&render_bit_text(v)).unwrap(),
+        Value::JsonPath(v) => serde_json::to_string(v.as_str()).unwrap(),
+        Value::Json(v) => v.to_string(),
+        Value::Jsonb(v) => render_jsonb_bytes(v).unwrap_or_else(|_| "null".into()),
+        Value::Text(_) | Value::TextRef(_, _) => {
+            serde_json::to_string(value.as_text().unwrap()).unwrap()
+        }
+        Value::Bytea(v) => {
+            serde_json::to_string(&format_bytea_text(v, ByteaOutputFormat::Hex)).unwrap()
+        }
+        Value::InternalChar(v) => {
+            serde_json::to_string(&crate::backend::executor::render_internal_char_text(*v)).unwrap()
+        }
+        Value::Date(_)
+        | Value::Time(_)
+        | Value::TimeTz(_)
+        | Value::Timestamp(_)
+        | Value::TimestampTz(_) => serde_json::to_string(
+            &render_json_datetime_value_text_with_config(value, datetime_config)
+                .expect("datetime values render"),
+        )
+        .unwrap(),
+        Value::Point(_)
+        | Value::Lseg(_)
+        | Value::Path(_)
+        | Value::Line(_)
+        | Value::Box(_)
+        | Value::Polygon(_)
+        | Value::Circle(_) => serde_json::to_string(
+            &crate::backend::executor::render_geometry_text(value, Default::default())
+                .unwrap_or_default(),
+        )
+        .unwrap(),
+        Value::Range(_) => {
+            serde_json::to_string(&render_range_text(value).unwrap_or_default()).unwrap()
+        }
+        Value::TsVector(v) => {
+            serde_json::to_string(&crate::backend::executor::render_tsvector_text(v)).unwrap()
+        }
+        Value::TsQuery(v) => {
+            serde_json::to_string(&crate::backend::executor::render_tsquery_text(v)).unwrap()
+        }
+        Value::Array(items) => {
+            let mut out = String::from("[");
+            for (idx, item) in items.iter().enumerate() {
+                if idx > 0 {
+                    out.push(',');
+                }
+                out.push_str(&render_json_value_text_with_config(item, datetime_config));
+            }
+            out.push(']');
+            out
+        }
+        Value::Record(record) => {
+            let mut out = String::from("{");
+            for (idx, (field, item)) in record.iter().enumerate() {
+                if idx > 0 {
+                    out.push(',');
+                }
+                out.push_str(&serde_json::to_string(&field.name).unwrap());
+                out.push(':');
+                out.push_str(&render_json_value_text_with_config(item, datetime_config));
+            }
+            out.push('}');
+            out
+        }
+        Value::PgArray(array) => {
+            let mut out = String::from("[");
+            for (idx, item) in array.to_nested_values().iter().enumerate() {
+                if idx > 0 {
+                    out.push(',');
+                }
+                out.push_str(&render_json_value_text_with_config(item, datetime_config));
+            }
+            out.push(']');
+            out
+        }
     }
 }
 
@@ -2857,11 +2974,8 @@ pub(crate) fn eval_json_table_function(
             let items = match json {
                 JsonbValue::Object(items) => items,
                 other => {
-                    return Err(ExecError::TypeMismatch {
-                        op: "jsonb_each",
-                        left: jsonb_to_value(&other),
-                        right: Value::Null,
-                    });
+                    let _ = other;
+                    return Err(jsonb_non_object_error("jsonb_each"));
                 }
             };
             for (key, value) in items {
@@ -2893,11 +3007,8 @@ pub(crate) fn eval_json_table_function(
             let items = match json {
                 JsonbValue::Object(items) => items,
                 other => {
-                    return Err(ExecError::TypeMismatch {
-                        op: "jsonb_each_text",
-                        left: jsonb_to_value(&other),
-                        right: Value::Null,
-                    });
+                    let _ = other;
+                    return Err(jsonb_non_object_error("jsonb_each_text"));
                 }
             };
             for (key, value) in items {
