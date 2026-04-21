@@ -35,6 +35,7 @@ fn json_datetime_config(config: &DateTimeConfig) -> DateTimeConfig {
         date_order: DateOrder::Ymd,
         time_zone: config.time_zone.clone(),
         max_stack_depth_kb: config.max_stack_depth_kb,
+        xml: config.xml,
     }
 }
 

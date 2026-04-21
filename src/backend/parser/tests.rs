@@ -13,7 +13,7 @@ use crate::include::nodes::parsenodes::{
     DropTriggerStatement, DropTypeStatement, ForeignKeyAction, ForeignKeyMatchType, IndexColumnDef,
     InsertSource, InsertStatement, JoinTreeNode, PublicationObjectSpec, PublicationOption,
     PublicationSchemaName, RangeTblEntryKind, RawTypeName, SetSessionAuthorizationStatement,
-    TableConstraint, TriggerEvent, TriggerEventSpec, TriggerLevel, TriggerTiming,
+    SqlCallArgs, TableConstraint, TriggerEvent, TriggerEventSpec, TriggerLevel, TriggerTiming,
 };
 use crate::include::nodes::primnodes::{AttrNumber, JoinType, Var, is_system_attr};
 
@@ -829,6 +829,7 @@ fn catalog_with_people_expression_unique_index() -> Catalog {
             reltoastrelid: 0,
             relpersistence: 'p',
             relkind: 'i',
+            am_oid: crate::include::catalog::BTREE_AM_OID,
             relhastriggers: false,
             relhassubclass: false,
             relispartition: false,
@@ -877,6 +878,7 @@ fn catalog_with_people_name_c_collation_index() -> Catalog {
             reltoastrelid: 0,
             relpersistence: 'p',
             relkind: 'i',
+            am_oid: crate::include::catalog::BTREE_AM_OID,
             relhastriggers: false,
             relhassubclass: false,
             relispartition: false,
@@ -1111,7 +1113,9 @@ fn visible_catalog_with_extra_opclasses(
         base.index_rows(),
         base.rewrite_rows(),
         base.trigger_rows(),
-        base.policy_rows(),
+        base.publication_rows(),
+        base.publication_rel_rows(),
+        base.publication_namespace_rows(),
         base.am_rows(),
         base.amop_rows(),
         base.amproc_rows(),
@@ -1440,7 +1444,10 @@ fn parse_xmlagg_aggregate() {
     let Statement::Select(select) = stmt else {
         panic!("expected select");
     };
-    assert!(matches!(select.targets[0].expr, SqlExpr::AggCall { .. }));
+    assert!(matches!(
+        select.targets[0].expr,
+        SqlExpr::FuncCall { ref name, .. } if name == "xmlagg"
+    ));
 }
 
 #[test]
@@ -9280,8 +9287,13 @@ fn parse_dml_returning_targets() {
                     output_name: "upper_name".into(),
                     expr: SqlExpr::FuncCall {
                         name: "upper".into(),
-                        args: vec![SqlFunctionArg::positional(SqlExpr::Column("name".into()))],
+                        args: SqlCallArgs::Args(vec![SqlFunctionArg::positional(
+                            SqlExpr::Column("name".into()),
+                        )]),
+                        order_by: vec![],
+                        distinct: false,
                         func_variadic: false,
+                        filter: None,
                         over: None,
                     },
                 },
@@ -9305,8 +9317,13 @@ fn parse_dml_returning_targets() {
                     output_name: "upper_name".into(),
                     expr: SqlExpr::FuncCall {
                         name: "upper".into(),
-                        args: vec![SqlFunctionArg::positional(SqlExpr::Column("name".into()))],
+                        args: SqlCallArgs::Args(vec![SqlFunctionArg::positional(
+                            SqlExpr::Column("name".into()),
+                        )]),
+                        order_by: vec![],
+                        distinct: false,
                         func_variadic: false,
+                        filter: None,
                         over: None,
                     },
                 },
