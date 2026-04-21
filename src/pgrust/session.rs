@@ -2421,10 +2421,14 @@ impl Session {
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);
                 let relation = catalog
                     .lookup_relation(&comment_stmt.table_name)
-                    .ok_or_else(|| {
-                        ExecError::Parse(ParseError::TableDoesNotExist(
-                            comment_stmt.table_name.clone(),
-                        ))
+                    .ok_or_else(|| ExecError::DetailedError {
+                        message: format!(
+                            "relation \"{}\" does not exist",
+                            comment_stmt.table_name
+                        ),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42P01",
                     })?;
                 self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
                 let search_path = self.configured_search_path();
