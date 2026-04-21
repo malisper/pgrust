@@ -1436,6 +1436,44 @@ fn parse_check_constraint_no_inherit() {
 }
 
 #[test]
+fn parse_not_null_constraint_no_inherit() {
+    let stmt = parse_statement(
+        "alter table items add constraint items_note_required not null note no inherit",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableAddConstraint(AlterTableAddConstraintStatement {
+            if_exists: false,
+            only: false,
+            table_name: "items".into(),
+            constraint: TableConstraint::NotNull {
+                attributes: ConstraintAttributes {
+                    name: Some("items_note_required".into()),
+                    no_inherit: true,
+                    ..attrs()
+                },
+                column: "note".into(),
+            },
+        })
+    );
+
+    let stmt = parse_statement("create table items (id int4 not null no inherit)").unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+    assert_eq!(
+        ct.columns().collect::<Vec<_>>()[0].constraints,
+        vec![ColumnConstraint::NotNull {
+            attributes: ConstraintAttributes {
+                no_inherit: true,
+                ..attrs()
+            },
+        }]
+    );
+}
+
+#[test]
 fn parse_alter_table_set_statement() {
     let stmt = parse_statement("alter table num_variance set (parallel_workers = 4)").unwrap();
     assert_eq!(

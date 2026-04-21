@@ -222,8 +222,25 @@ fn merge_local_column(
     local: &crate::backend::parser::ColumnDef,
 ) -> Result<(), ParseError> {
     ensure_matching_column_type(&merged.column.name, &merged.column.ty, &local.ty)?;
+    if merged.attinhcount > 0 {
+        push_notice(format!(
+            "merging column \"{}\" with inherited definition",
+            merged.column.name
+        ));
+    }
     merged.attislocal = true;
-    if !local.nullable() {
+    if let Some(attributes) = local_not_null_constraint_attributes(local) {
+        if merged.column.nullable() {
+            merged.column.constraints.push(ColumnConstraint::NotNull {
+                attributes: attributes.clone(),
+            });
+        } else if attributes.no_inherit {
+            return Err(ParseError::InvalidTableDefinition(format!(
+                "cannot define not-null constraint with NO INHERIT on column \"{}\"",
+                merged.column.name
+            )));
+        }
+    } else if !local.nullable() {
         ensure_not_null_constraint(&mut merged.column);
     }
     if local.primary_key() {
@@ -243,12 +260,24 @@ fn inherited_constraints_for_parent(
     column: &crate::include::nodes::primnodes::ColumnDesc,
 ) -> Vec<ColumnConstraint> {
     let mut constraints = Vec::new();
-    if !column.storage.nullable {
+    if !column.storage.nullable && !column.not_null_constraint_no_inherit {
         constraints.push(ColumnConstraint::NotNull {
             attributes: ConstraintAttributes::default(),
         });
     }
     constraints
+}
+
+fn local_not_null_constraint_attributes(
+    column: &crate::backend::parser::ColumnDef,
+) -> Option<&ConstraintAttributes> {
+    column
+        .constraints
+        .iter()
+        .find_map(|constraint| match constraint {
+            ColumnConstraint::NotNull { attributes } => Some(attributes),
+            _ => None,
+        })
 }
 
 fn ensure_not_null_constraint(column: &mut crate::backend::parser::ColumnDef) {

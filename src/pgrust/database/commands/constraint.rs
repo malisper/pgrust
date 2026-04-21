@@ -785,6 +785,7 @@ impl Database {
                         &action.column,
                         action.constraint_name,
                         !action.not_valid,
+                        action.no_inherit,
                         false,
                         &ctx,
                     )
@@ -891,6 +892,7 @@ impl Database {
                                     column_name,
                                     not_null_name.clone(),
                                     true,
+                                    false,
                                     true,
                                     &set_ctx,
                                 )
@@ -1351,6 +1353,19 @@ impl Database {
                 ExecError::Parse(ParseError::UnknownColumn(alter_stmt.column_name.clone()))
             })?;
         if !relation.desc.columns[column_index].storage.nullable {
+            if relation.desc.columns[column_index].not_null_constraint_no_inherit {
+                let constraint_name = relation.desc.columns[column_index]
+                    .not_null_constraint_name
+                    .as_deref()
+                    .unwrap_or(&alter_stmt.column_name);
+                return Err(ExecError::Parse(ParseError::InvalidTableDefinition(
+                    format!(
+                        "cannot change NO INHERIT status of NOT NULL constraint \"{}\" on relation \"{}\"",
+                        constraint_name,
+                        relation_basename(&alter_stmt.table_name),
+                    ),
+                )));
+            }
             return Ok(StatementResult::AffectedRows(0));
         }
         let used_names = catalog
@@ -1391,6 +1406,7 @@ impl Database {
                 &relation.desc.columns[column_index].name,
                 constraint_name,
                 true,
+                false,
                 false,
                 &ctx,
             )

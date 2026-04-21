@@ -2586,6 +2586,120 @@ fn alter_table_no_inherit_recomputes_multi_parent_column_and_not_null_metadata()
 }
 
 #[test]
+fn create_table_not_null_no_inherit_sets_pg_constraint_flag() {
+    let dir = temp_dir("create_table_not_null_no_inherit");
+    let db = Database::open(&dir, 128).unwrap();
+
+    db.execute(1, "create table p1 (ff1 int not null no inherit)")
+        .unwrap();
+    db.execute(1, "create table c1 () inherits (p1)").unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conname, connoinherit
+             from pg_constraint c
+             join pg_class r on r.oid = c.conrelid
+             where r.relname = 'p1' and c.contype = 'n'
+             order by conname",
+        ),
+        vec![vec![
+            Value::Text("p1_ff1_not_null".into()),
+            Value::Bool(true)
+        ]]
+    );
+    assert_eq!(
+        int_value(
+            &query_rows(
+                &db,
+                1,
+                "select count(*)
+                 from pg_constraint c
+                 join pg_class r on r.oid = c.conrelid
+                 where r.relname = 'c1' and c.contype = 'n'",
+            )[0][0],
+        ),
+        0
+    );
+    db.execute(1, "insert into c1 values (null)").unwrap();
+}
+
+#[test]
+fn alter_table_add_not_null_no_inherit_sets_pg_constraint_flag() {
+    let dir = temp_dir("alter_table_add_not_null_no_inherit");
+    let db = Database::open(&dir, 128).unwrap();
+
+    db.execute(1, "create table p1 (ff1 int)").unwrap();
+    db.execute(
+        1,
+        "alter table p1 add constraint p1nn not null ff1 no inherit",
+    )
+    .unwrap();
+    db.execute(1, "create table c1 () inherits (p1)").unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conname, connoinherit
+             from pg_constraint c
+             join pg_class r on r.oid = c.conrelid
+             where r.relname = 'p1' and c.contype = 'n'
+             order by conname",
+        ),
+        vec![vec![Value::Text("p1nn".into()), Value::Bool(true)]]
+    );
+    assert_eq!(
+        int_value(
+            &query_rows(
+                &db,
+                1,
+                "select count(*)
+                 from pg_constraint c
+                 join pg_class r on r.oid = c.conrelid
+                 where r.relname = 'c1' and c.contype = 'n'",
+            )[0][0],
+        ),
+        0
+    );
+    db.execute(1, "insert into c1 values (null)").unwrap();
+}
+
+#[test]
+fn create_table_rejects_not_null_no_inherit_on_inherited_not_null_column() {
+    let dir = temp_dir("inherit_not_null_no_inherit_conflict");
+    let db = Database::open(&dir, 128).unwrap();
+
+    db.execute(1, "create table p1 (a int not null)").unwrap();
+    clear_backend_notices();
+    match db.execute(
+        1,
+        "create table c1 (a int not null no inherit) inherits (p1)",
+    ) {
+        Err(ExecError::Parse(ParseError::InvalidTableDefinition(message)))
+            if message == "cannot define not-null constraint with NO INHERIT on column \"a\"" => {}
+        other => panic!("expected inherited NO INHERIT conflict, got {other:?}"),
+    }
+}
+
+#[test]
+fn alter_table_set_not_null_rejects_existing_no_inherit_constraint() {
+    let dir = temp_dir("set_not_null_existing_no_inherit");
+    let db = Database::open(&dir, 128).unwrap();
+
+    db.execute(1, "create table p1 (a int not null no inherit)")
+        .unwrap();
+    match db.execute(1, "alter table p1 alter column a set not null") {
+        Err(ExecError::Parse(ParseError::InvalidTableDefinition(message)))
+            if message
+                == "cannot change NO INHERIT status of NOT NULL constraint \"p1_a_not_null\" on relation \"p1\"" =>
+            {}
+        other => panic!("expected existing NO INHERIT SET NOT NULL failure, got {other:?}"),
+    }
+}
+
+#[test]
 fn check_constraint_no_inherit_sets_pg_constraint_flag() {
     let dir = temp_dir("check_no_inherit_flag");
     let db = Database::open(&dir, 128).unwrap();

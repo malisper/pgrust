@@ -2482,6 +2482,7 @@ impl CatalogStore {
         column_name: &str,
         constraint_name: impl Into<String>,
         validated: bool,
+        no_inherit: bool,
         primary_key_owned: bool,
         ctx: &CatalogWriteContext,
     ) -> Result<(u32, CatalogMutationEffect), CatalogError> {
@@ -2503,6 +2504,7 @@ impl CatalogStore {
                     .expect("not-null constraint oid");
                 column.not_null_constraint_name = Some(constraint_name);
                 column.not_null_constraint_validated = validated;
+                column.not_null_constraint_no_inherit = no_inherit;
                 column.not_null_primary_key_owned = primary_key_owned;
                 Ok((
                     constraint_oid,
@@ -2538,6 +2540,7 @@ impl CatalogStore {
                 column.not_null_constraint_oid = None;
                 column.not_null_constraint_name = None;
                 column.not_null_constraint_validated = false;
+                column.not_null_constraint_no_inherit = false;
                 column.not_null_primary_key_owned = false;
                 Ok((
                     (),
