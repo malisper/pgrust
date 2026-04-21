@@ -155,8 +155,8 @@ impl Database {
         relation_name: &str,
         columns: &[crate::backend::parser::IndexColumnDef],
     ) -> String {
-        let first_column = columns
-            .first()
+        let column_part = columns
+            .iter()
             .map(|column| {
                 if column.expr_sql.is_some() {
                     "expr"
@@ -164,8 +164,14 @@ impl Database {
                     column.name.as_str()
                 }
             })
-            .unwrap_or("idx");
-        format!("{relation_name}_{first_column}_idx")
+            .collect::<Vec<_>>()
+            .join("_");
+        let column_part = if column_part.is_empty() {
+            "idx".to_string()
+        } else {
+            column_part
+        };
+        format!("{relation_name}_{column_part}_idx")
     }
 
     pub(super) fn resolve_simple_index_build_options(

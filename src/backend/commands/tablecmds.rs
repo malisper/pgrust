@@ -612,14 +612,25 @@ fn explain_update_index_cond(target: &BoundUpdateTarget) -> Option<String> {
             Some(format!(
                 "({column_name} {} {})",
                 explain_strategy_operator(key.strategy),
-                crate::backend::executor::render_explain_expr(
-                    &Expr::Const(key.argument.clone()),
-                    &[],
-                )
+                render_explain_index_value(&key.argument)
             ))
         })
         .collect::<Vec<_>>();
     (!rendered.is_empty()).then(|| format!("({})", rendered.join(" AND ")))
+}
+
+fn render_explain_index_value(value: &Value) -> String {
+    match value {
+        Value::Null => "NULL".into(),
+        Value::Bool(value) => value.to_string(),
+        Value::Int16(value) => value.to_string(),
+        Value::Int32(value) => value.to_string(),
+        Value::Int64(value) => value.to_string(),
+        Value::Float64(value) => value.to_string(),
+        Value::Text(text) => format!("'{text}'"),
+        Value::TextRef(_, _) => format!("'{}'", value.as_text().unwrap_or_default()),
+        _ => crate::backend::executor::render_explain_expr(&Expr::Const(value.clone()), &[]),
+    }
 }
 
 fn explain_strategy_operator(strategy: u16) -> &'static str {
