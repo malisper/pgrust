@@ -2,7 +2,10 @@ use super::query::{AnalyzedFrom, JoinAliasInfo, shift_expr_rtindexes};
 use super::*;
 use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::record::lookup_anonymous_record_descriptor;
-use crate::include::nodes::primnodes::{JoinType, JsonRecordFunction, Var, user_attrno};
+use crate::include::nodes::primnodes::{
+    AttrNumber, JoinType, JsonRecordFunction, SELF_ITEM_POINTER_ATTR_NO, TABLE_OID_ATTR_NO, Var,
+    user_attrno,
+};
 
 #[derive(Debug, Clone)]
 pub(crate) struct BoundScope {
@@ -68,6 +71,7 @@ pub(super) enum ResolvedColumn {
 pub(super) struct ResolvedSystemColumn {
     pub(super) varno: usize,
     pub(super) varlevelsup: usize,
+    pub(super) varattno: AttrNumber,
     pub(super) sql_type: SqlType,
 }
 
@@ -321,11 +325,13 @@ fn resolve_system_column_in_scope(
         Some((relation, column_name)) => (Some(relation), column_name),
         None => (None, name),
     };
-    if !column_name.eq_ignore_ascii_case("tableoid") {
+    let (varattno, system_type) = if column_name.eq_ignore_ascii_case("tableoid") {
+        (TABLE_OID_ATTR_NO, SqlType::new(SqlTypeKind::Oid))
+    } else if column_name.eq_ignore_ascii_case("ctid") {
+        (SELF_ITEM_POINTER_ATTR_NO, SqlType::new(SqlTypeKind::Tid))
+    } else {
         return Ok(None);
-    }
-
-    let system_type = SqlType::new(SqlTypeKind::Oid);
+    };
     if let Some(relation) = relation {
         let mut matches = scope.relations.iter().filter(|entry| {
             entry
@@ -340,6 +346,7 @@ fn resolve_system_column_in_scope(
             return Ok(first.system_varno.map(|varno| ResolvedSystemColumn {
                 varno,
                 varlevelsup,
+                varattno,
                 sql_type: system_type,
             }));
         }
@@ -370,6 +377,7 @@ fn resolve_system_column_in_scope(
         .map(|varno| ResolvedSystemColumn {
             varno,
             varlevelsup,
+            varattno,
             sql_type: system_type,
         });
     let Some(first) = matches.next() else {
