@@ -36,6 +36,9 @@ pub const PG_NAMESPACE_RELATION_OID: u32 = 2615;
 pub const PG_OPCLASS_RELATION_OID: u32 = 2616;
 pub const PG_OPERATOR_RELATION_OID: u32 = 2617;
 pub const PG_OPFAMILY_RELATION_OID: u32 = 2753;
+pub const PG_PUBLICATION_RELATION_OID: u32 = 6104;
+pub const PG_PUBLICATION_REL_RELATION_OID: u32 = 6106;
+pub const PG_PUBLICATION_NAMESPACE_RELATION_OID: u32 = 6237;
 pub const PG_TS_TEMPLATE_RELATION_OID: u32 = 3764;
 
 pub const PG_NAMESPACE_ROWTYPE_OID: u32 = 0;
@@ -50,6 +53,9 @@ pub const PG_INHERITS_ROWTYPE_OID: u32 = 0;
 pub const PG_REWRITE_ROWTYPE_OID: u32 = 0;
 pub const PG_STATISTIC_ROWTYPE_OID: u32 = 0;
 pub const PG_TRIGGER_ROWTYPE_OID: u32 = 0;
+pub const PG_PUBLICATION_ROWTYPE_OID: u32 = 0;
+pub const PG_PUBLICATION_REL_ROWTYPE_OID: u32 = 0;
+pub const PG_PUBLICATION_NAMESPACE_ROWTYPE_OID: u32 = 0;
 
 pub const BOOL_TYPE_OID: u32 = 16;
 pub const BYTEA_TYPE_OID: u32 = 17;
@@ -179,6 +185,9 @@ pub enum BootstrapCatalogKind {
     PgRewrite,
     PgStatistic,
     PgTrigger,
+    PgPublication,
+    PgPublicationRel,
+    PgPublicationNamespace,
     PgOpclass,
     PgOpfamily,
 }
@@ -223,6 +232,9 @@ impl BootstrapCatalogKind {
             Self::PgRewrite => PG_REWRITE_RELATION_OID,
             Self::PgStatistic => PG_STATISTIC_RELATION_OID,
             Self::PgTrigger => PG_TRIGGER_RELATION_OID,
+            Self::PgPublication => PG_PUBLICATION_RELATION_OID,
+            Self::PgPublicationRel => PG_PUBLICATION_REL_RELATION_OID,
+            Self::PgPublicationNamespace => PG_PUBLICATION_NAMESPACE_RELATION_OID,
             Self::PgOpclass => PG_OPCLASS_RELATION_OID,
             Self::PgOpfamily => PG_OPFAMILY_RELATION_OID,
         }
@@ -261,6 +273,9 @@ impl BootstrapCatalogKind {
             Self::PgRewrite => "pg_rewrite",
             Self::PgStatistic => "pg_statistic",
             Self::PgTrigger => "pg_trigger",
+            Self::PgPublication => "pg_publication",
+            Self::PgPublicationRel => "pg_publication_rel",
+            Self::PgPublicationNamespace => "pg_publication_namespace",
             Self::PgOpclass => "pg_opclass",
             Self::PgOpfamily => "pg_opfamily",
         }
@@ -299,6 +314,9 @@ impl BootstrapCatalogKind {
             Self::PgRewrite => PG_REWRITE_ROWTYPE_OID,
             Self::PgStatistic => PG_STATISTIC_ROWTYPE_OID,
             Self::PgTrigger => PG_TRIGGER_ROWTYPE_OID,
+            Self::PgPublication => PG_PUBLICATION_ROWTYPE_OID,
+            Self::PgPublicationRel => PG_PUBLICATION_REL_ROWTYPE_OID,
+            Self::PgPublicationNamespace => PG_PUBLICATION_NAMESPACE_ROWTYPE_OID,
             Self::PgOpclass => 0,
             Self::PgOpfamily => 0,
         }
@@ -316,7 +334,7 @@ impl BootstrapCatalogKind {
     }
 }
 
-pub const CORE_BOOTSTRAP_KINDS: [BootstrapCatalogKind; 33] = [
+pub const CORE_BOOTSTRAP_KINDS: [BootstrapCatalogKind; 36] = [
     BootstrapCatalogKind::PgNamespace,
     BootstrapCatalogKind::PgType,
     BootstrapCatalogKind::PgProc,
@@ -350,15 +368,19 @@ pub const CORE_BOOTSTRAP_KINDS: [BootstrapCatalogKind; 33] = [
     BootstrapCatalogKind::PgRewrite,
     BootstrapCatalogKind::PgStatistic,
     BootstrapCatalogKind::PgTrigger,
+    BootstrapCatalogKind::PgPublication,
+    BootstrapCatalogKind::PgPublicationRel,
+    BootstrapCatalogKind::PgPublicationNamespace,
 ];
 
-pub const fn bootstrap_catalog_kinds() -> [BootstrapCatalogKind; 33] {
+pub const fn bootstrap_catalog_kinds() -> [BootstrapCatalogKind; 36] {
     CORE_BOOTSTRAP_KINDS
 }
 
 use crate::include::catalog::{
-    pg_description_desc, pg_inherits_desc, pg_largeobject_metadata_desc, pg_rewrite_desc,
-    pg_statistic_desc, pg_trigger_desc,
+    pg_description_desc, pg_inherits_desc, pg_largeobject_metadata_desc, pg_publication_desc,
+    pg_publication_namespace_desc, pg_publication_rel_desc, pg_rewrite_desc, pg_statistic_desc,
+    pg_trigger_desc,
 };
 
 pub fn bootstrap_relation_desc(kind: BootstrapCatalogKind) -> RelationDesc {
@@ -394,6 +416,9 @@ pub fn bootstrap_relation_desc(kind: BootstrapCatalogKind) -> RelationDesc {
         BootstrapCatalogKind::PgRewrite => pg_rewrite_desc(),
         BootstrapCatalogKind::PgStatistic => pg_statistic_desc(),
         BootstrapCatalogKind::PgTrigger => pg_trigger_desc(),
+        BootstrapCatalogKind::PgPublication => pg_publication_desc(),
+        BootstrapCatalogKind::PgPublicationRel => pg_publication_rel_desc(),
+        BootstrapCatalogKind::PgPublicationNamespace => pg_publication_namespace_desc(),
         BootstrapCatalogKind::PgOpclass => pg_opclass_desc(),
         BootstrapCatalogKind::PgOpfamily => pg_opfamily_desc(),
     }
@@ -403,7 +428,7 @@ pub const fn bootstrap_namespace_oid() -> u32 {
     PG_CATALOG_NAMESPACE_OID
 }
 
-pub const CORE_BOOTSTRAP_RELATIONS: [BootstrapCatalogRelation; 33] = [
+pub const CORE_BOOTSTRAP_RELATIONS: [BootstrapCatalogRelation; 36] = [
     BootstrapCatalogRelation {
         oid: PG_NAMESPACE_RELATION_OID,
         name: "pg_namespace",
@@ -536,6 +561,18 @@ pub const CORE_BOOTSTRAP_RELATIONS: [BootstrapCatalogRelation; 33] = [
         oid: PG_TRIGGER_RELATION_OID,
         name: "pg_trigger",
     },
+    BootstrapCatalogRelation {
+        oid: PG_PUBLICATION_RELATION_OID,
+        name: "pg_publication",
+    },
+    BootstrapCatalogRelation {
+        oid: PG_PUBLICATION_REL_RELATION_OID,
+        name: "pg_publication_rel",
+    },
+    BootstrapCatalogRelation {
+        oid: PG_PUBLICATION_NAMESPACE_RELATION_OID,
+        name: "pg_publication_namespace",
+    },
 ];
 
 #[cfg(test)]
@@ -589,6 +626,18 @@ mod tests {
         assert_eq!(CORE_BOOTSTRAP_RELATIONS[30].oid, PG_REWRITE_RELATION_OID);
         assert_eq!(CORE_BOOTSTRAP_RELATIONS[31].oid, PG_STATISTIC_RELATION_OID);
         assert_eq!(CORE_BOOTSTRAP_RELATIONS[32].oid, PG_TRIGGER_RELATION_OID);
+        assert_eq!(
+            CORE_BOOTSTRAP_RELATIONS[33].oid,
+            PG_PUBLICATION_RELATION_OID
+        );
+        assert_eq!(
+            CORE_BOOTSTRAP_RELATIONS[34].oid,
+            PG_PUBLICATION_REL_RELATION_OID
+        );
+        assert_eq!(
+            CORE_BOOTSTRAP_RELATIONS[35].oid,
+            PG_PUBLICATION_NAMESPACE_RELATION_OID
+        );
     }
 
     #[test]
@@ -633,6 +682,9 @@ mod tests {
                 "pg_rewrite",
                 "pg_statistic",
                 "pg_trigger",
+                "pg_publication",
+                "pg_publication_rel",
+                "pg_publication_namespace",
             ]
         );
     }

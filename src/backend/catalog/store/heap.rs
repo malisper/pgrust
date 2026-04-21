@@ -12,9 +12,9 @@ use crate::backend::catalog::pg_constraint::derived_pg_constraint_rows;
 use crate::backend::catalog::pg_depend::{
     derived_pg_depend_rows, foreign_key_constraint_depend_rows,
     index_backed_constraint_depend_rows, inheritance_depend_rows,
-    primary_key_owned_not_null_depend_rows, proc_depend_rows, relation_constraint_depend_rows,
-    relation_rule_depend_rows, sort_pg_depend_rows, trigger_depend_rows,
-    view_rewrite_depend_rows,
+    primary_key_owned_not_null_depend_rows, proc_depend_rows, publication_namespace_depend_rows,
+    publication_rel_depend_rows, relation_constraint_depend_rows, relation_rule_depend_rows,
+    sort_pg_depend_rows, trigger_depend_rows, view_rewrite_depend_rows,
 };
 use crate::backend::catalog::rowcodec::{
     pg_description_row_from_values, pg_statistic_row_from_values,
@@ -37,10 +37,12 @@ use crate::include::catalog::{
     BootstrapCatalogKind, PG_AM_RELATION_OID, PG_AMOP_RELATION_OID, PG_AMPROC_RELATION_OID,
     PG_AUTHID_RELATION_OID, PG_CLASS_RELATION_OID, PG_NAMESPACE_RELATION_OID,
     PG_OPCLASS_RELATION_OID, PG_OPERATOR_RELATION_OID, PG_OPFAMILY_RELATION_OID,
-    PG_PROC_RELATION_OID, PG_REWRITE_RELATION_OID, PG_TYPE_RELATION_OID, PgAmopRow, PgAmprocRow,
-    PgAttributeRow, PgAttrdefRow, PgClassRow, PgConstraintRow, PgDatabaseRow, PgDependRow,
-    PgDescriptionRow, PgInheritsRow, PgNamespaceRow, PgOpclassRow, PgOpfamilyRow, PgProcRow,
-    PgRewriteRow, PgStatisticRow, PgTablespaceRow, relkind_has_storage,
+    PG_PROC_RELATION_OID, PG_PUBLICATION_NAMESPACE_RELATION_OID, PG_PUBLICATION_REL_RELATION_OID,
+    PG_PUBLICATION_RELATION_OID, PG_REWRITE_RELATION_OID, PG_TYPE_RELATION_OID,
+    PUBLISH_GENCOLS_NONE, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow, PgClassRow,
+    PgConstraintRow, PgDatabaseRow, PgDependRow, PgDescriptionRow, PgInheritsRow, PgNamespaceRow,
+    PgOpclassRow, PgOpfamilyRow, PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow,
+    PgPublicationRow, PgRewriteRow, PgStatisticRow, PgTablespaceRow, relkind_has_storage,
 };
 use crate::include::nodes::datum::Value;
 
@@ -1170,19 +1172,18 @@ impl CatalogStore {
         ctx: &CatalogWriteContext,
     ) -> Result<(u32, CatalogMutationEffect), CatalogError> {
         let catcache = visible_catalog_caches_for_ctx(self, ctx)?.0;
-        let old_visible =
-            trigger_row_visible(&catcache, old_row.tgrelid, &old_row.tgname)?;
+        let old_visible = trigger_row_visible(&catcache, old_row.tgrelid, &old_row.tgname)?;
         let new_relation_triggers = catcache.trigger_rows_for_relation(row.tgrelid);
         if new_relation_triggers.iter().any(|existing| {
-            existing.oid != old_visible.oid
-                && existing.tgname.eq_ignore_ascii_case(&row.tgname)
+            existing.oid != old_visible.oid && existing.tgname.eq_ignore_ascii_case(&row.tgname)
         }) {
             return Err(CatalogError::UniqueViolation(
                 "pg_trigger_tgrelid_tgname_index".into(),
             ));
         }
         row.oid = old_visible.oid;
-        let old_depends = trigger_depend_rows(old_visible.oid, old_visible.tgrelid, old_visible.tgfoid);
+        let old_depends =
+            trigger_depend_rows(old_visible.oid, old_visible.tgrelid, old_visible.tgfoid);
         let new_depends = trigger_depend_rows(row.oid, row.tgrelid, row.tgfoid);
 
         let old_class = catcache
@@ -1317,6 +1318,281 @@ impl CatalogStore {
         Ok((old_trigger, effect))
     }
 
+    pub fn create_publication_mvcc(
+        &mut self,
+        mut publication: PgPublicationRow,
+        mut publication_rels: Vec<PgPublicationRelRow>,
+        mut publication_namespaces: Vec<PgPublicationNamespaceRow>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<(u32, CatalogMutationEffect), CatalogError> {
+        let catcache = visible_catalog_caches_for_ctx(self, ctx)?.0;
+        if catcache
+            .publication_row_by_name(&publication.pubname)
+            .is_some()
+        {
+            return Err(CatalogError::UniqueViolation(
+                "pg_publication_pubname_index".into(),
+            ));
+        }
+
+        let mut control = self.control_state()?;
+        if publication.oid == 0 {
+            publication.oid = control.next_oid;
+        }
+        control.next_oid = control.next_oid.max(publication.oid.saturating_add(1));
+        for row in &mut publication_rels {
+            row.prpubid = publication.oid;
+            if row.oid == 0 {
+                row.oid = control.next_oid;
+            }
+            control.next_oid = control.next_oid.max(row.oid.saturating_add(1));
+        }
+        for row in &mut publication_namespaces {
+            row.pnpubid = publication.oid;
+            if row.oid == 0 {
+                row.oid = control.next_oid;
+            }
+            control.next_oid = control.next_oid.max(row.oid.saturating_add(1));
+        }
+        self.persist_control_values(control.next_oid, control.next_rel_number)?;
+
+        let mut rows = PhysicalCatalogRows {
+            publications: vec![publication.clone()],
+            publication_rels: publication_rels.clone(),
+            publication_namespaces: publication_namespaces.clone(),
+            ..PhysicalCatalogRows::default()
+        };
+        for row in &publication_rels {
+            rows.depends.extend(publication_rel_depend_rows(
+                row.oid,
+                publication.oid,
+                row.prrelid,
+            ));
+        }
+        for row in &publication_namespaces {
+            rows.depends.extend(publication_namespace_depend_rows(
+                row.oid,
+                publication.oid,
+                row.pnnspid,
+            ));
+        }
+        sort_pg_depend_rows(&mut rows.depends);
+
+        let mut kinds = vec![BootstrapCatalogKind::PgPublication];
+        if !rows.publication_rels.is_empty() {
+            kinds.push(BootstrapCatalogKind::PgPublicationRel);
+        }
+        if !rows.publication_namespaces.is_empty() {
+            kinds.push(BootstrapCatalogKind::PgPublicationNamespace);
+        }
+        if !rows.depends.is_empty() {
+            kinds.push(BootstrapCatalogKind::PgDepend);
+        }
+        insert_catalog_rows_subset_mvcc(ctx, &rows, self.scope_db_oid(), &kinds)?;
+        self.control = control;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        Ok((publication.oid, effect))
+    }
+
+    pub fn replace_publication_row_mvcc(
+        &mut self,
+        publication: PgPublicationRow,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let catcache = visible_catalog_caches_for_ctx(self, ctx)?.0;
+        let existing = catcache
+            .publication_row_by_oid(publication.oid)
+            .cloned()
+            .ok_or_else(|| CatalogError::UnknownTable(publication.oid.to_string()))?;
+        if existing.pubname != publication.pubname
+            && catcache
+                .publication_row_by_name(&publication.pubname)
+                .is_some()
+        {
+            return Err(CatalogError::UniqueViolation(
+                "pg_publication_pubname_index".into(),
+            ));
+        }
+
+        let kinds = [BootstrapCatalogKind::PgPublication];
+        delete_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                publications: vec![existing],
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &kinds,
+        )?;
+        insert_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                publications: vec![publication],
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &kinds,
+        )?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        Ok(effect)
+    }
+
+    pub fn replace_publication_memberships_mvcc(
+        &mut self,
+        publication_oid: u32,
+        mut publication_rels: Vec<PgPublicationRelRow>,
+        mut publication_namespaces: Vec<PgPublicationNamespaceRow>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let catcache = visible_catalog_caches_for_ctx(self, ctx)?.0;
+        if catcache.publication_row_by_oid(publication_oid).is_none() {
+            return Err(CatalogError::UnknownTable(publication_oid.to_string()));
+        }
+
+        let old_publication_rels = catcache.publication_rel_rows_for_publication(publication_oid);
+        let old_publication_namespaces =
+            catcache.publication_namespace_rows_for_publication(publication_oid);
+        let old_rel_row_oids = old_publication_rels
+            .iter()
+            .map(|row| row.oid)
+            .collect::<BTreeSet<_>>();
+        let old_namespace_row_oids = old_publication_namespaces
+            .iter()
+            .map(|row| row.oid)
+            .collect::<BTreeSet<_>>();
+        let old_depends = catcache
+            .depend_rows()
+            .into_iter()
+            .filter(|row| {
+                (row.classid == PG_PUBLICATION_REL_RELATION_OID
+                    && old_rel_row_oids.contains(&row.objid))
+                    || (row.classid == PG_PUBLICATION_NAMESPACE_RELATION_OID
+                        && old_namespace_row_oids.contains(&row.objid))
+            })
+            .collect::<Vec<_>>();
+
+        let delete_rows = PhysicalCatalogRows {
+            publication_rels: old_publication_rels,
+            publication_namespaces: old_publication_namespaces,
+            depends: old_depends,
+            ..PhysicalCatalogRows::default()
+        };
+        let mut delete_kinds = Vec::new();
+        if !delete_rows.publication_rels.is_empty() {
+            delete_kinds.push(BootstrapCatalogKind::PgPublicationRel);
+        }
+        if !delete_rows.publication_namespaces.is_empty() {
+            delete_kinds.push(BootstrapCatalogKind::PgPublicationNamespace);
+        }
+        if !delete_rows.depends.is_empty() {
+            delete_kinds.push(BootstrapCatalogKind::PgDepend);
+        }
+        if !delete_kinds.is_empty() {
+            delete_catalog_rows_subset_mvcc(ctx, &delete_rows, self.scope_db_oid(), &delete_kinds)?;
+        }
+
+        let mut control = self.control_state()?;
+        for row in &mut publication_rels {
+            row.prpubid = publication_oid;
+            if row.oid == 0 {
+                row.oid = control.next_oid;
+            }
+            control.next_oid = control.next_oid.max(row.oid.saturating_add(1));
+        }
+        for row in &mut publication_namespaces {
+            row.pnpubid = publication_oid;
+            if row.oid == 0 {
+                row.oid = control.next_oid;
+            }
+            control.next_oid = control.next_oid.max(row.oid.saturating_add(1));
+        }
+        self.persist_control_values(control.next_oid, control.next_rel_number)?;
+
+        let mut insert_rows = PhysicalCatalogRows {
+            publication_rels: publication_rels.clone(),
+            publication_namespaces: publication_namespaces.clone(),
+            ..PhysicalCatalogRows::default()
+        };
+        for row in &publication_rels {
+            insert_rows.depends.extend(publication_rel_depend_rows(
+                row.oid,
+                publication_oid,
+                row.prrelid,
+            ));
+        }
+        for row in &publication_namespaces {
+            insert_rows
+                .depends
+                .extend(publication_namespace_depend_rows(
+                    row.oid,
+                    publication_oid,
+                    row.pnnspid,
+                ));
+        }
+        sort_pg_depend_rows(&mut insert_rows.depends);
+
+        let mut insert_kinds = Vec::new();
+        if !insert_rows.publication_rels.is_empty() {
+            insert_kinds.push(BootstrapCatalogKind::PgPublicationRel);
+        }
+        if !insert_rows.publication_namespaces.is_empty() {
+            insert_kinds.push(BootstrapCatalogKind::PgPublicationNamespace);
+        }
+        if !insert_rows.depends.is_empty() {
+            insert_kinds.push(BootstrapCatalogKind::PgDepend);
+        }
+        if !insert_kinds.is_empty() {
+            insert_catalog_rows_subset_mvcc(ctx, &insert_rows, self.scope_db_oid(), &insert_kinds)?;
+        }
+        self.control = control;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &delete_kinds);
+        effect_record_catalog_kinds(&mut effect, &insert_kinds);
+        Ok(effect)
+    }
+
+    pub fn drop_publication_mvcc(
+        &mut self,
+        publication_oid: u32,
+        ctx: &CatalogWriteContext,
+    ) -> Result<(PgPublicationRow, CatalogMutationEffect), CatalogError> {
+        let catcache = visible_catalog_caches_for_ctx(self, ctx)?.0;
+        let publication = catcache
+            .publication_row_by_oid(publication_oid)
+            .cloned()
+            .ok_or_else(|| CatalogError::UnknownTable(publication_oid.to_string()))?;
+
+        let membership_effect = self.replace_publication_memberships_mvcc(
+            publication_oid,
+            Vec::new(),
+            Vec::new(),
+            ctx,
+        )?;
+        let comment_effect = self.comment_publication_mvcc(publication_oid, None, ctx)?;
+
+        let kinds = [BootstrapCatalogKind::PgPublication];
+        delete_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                publications: vec![publication.clone()],
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &kinds,
+        )?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &membership_effect.touched_catalogs);
+        effect_record_catalog_kinds(&mut effect, &comment_effect.touched_catalogs);
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        Ok((publication, effect))
+    }
+
     pub fn create_relation_inheritance_mvcc(
         &mut self,
         relation_oid: u32,
@@ -1386,7 +1662,10 @@ impl CatalogStore {
             });
         }
 
-        let mut kinds = vec![BootstrapCatalogKind::PgDepend, BootstrapCatalogKind::PgInherits];
+        let mut kinds = vec![
+            BootstrapCatalogKind::PgDepend,
+            BootstrapCatalogKind::PgInherits,
+        ];
         if !rows_to_delete.classes.is_empty() {
             kinds.push(BootstrapCatalogKind::PgClass);
         }
@@ -1410,6 +1689,13 @@ impl CatalogStore {
         owner_oid: u32,
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
+        let (catcache, _) = visible_catalog_caches_for_ctx(self, ctx)?;
+        let publication_namespaces =
+            catcache.publication_namespace_rows_for_namespace(namespace_oid);
+        let publication_namespace_oids = publication_namespaces
+            .iter()
+            .map(|row| row.oid)
+            .collect::<BTreeSet<_>>();
         if !namespace_name.starts_with("pg_temp_") && !namespace_name.starts_with("pg_toast_temp_")
         {
             self.invalidate_relcache_init_for_kinds(&[BootstrapCatalogKind::PgNamespace]);
@@ -1420,17 +1706,23 @@ impl CatalogStore {
                 nspname: namespace_name.to_string(),
                 nspowner: owner_oid,
             }],
+            publication_namespaces,
+            depends: catcache
+                .depend_rows()
+                .into_iter()
+                .filter(|row| publication_namespace_oids.contains(&row.objid))
+                .collect(),
             ..PhysicalCatalogRows::default()
         };
-        delete_catalog_rows_subset_mvcc(
-            ctx,
-            &rows,
-            self.scope_db_oid(),
-            &[BootstrapCatalogKind::PgNamespace],
-        )?;
+        let mut kinds = vec![BootstrapCatalogKind::PgNamespace];
+        if !rows.publication_namespaces.is_empty() {
+            kinds.push(BootstrapCatalogKind::PgPublicationNamespace);
+            kinds.push(BootstrapCatalogKind::PgDepend);
+        }
+        delete_catalog_rows_subset_mvcc(ctx, &rows, self.scope_db_oid(), &kinds)?;
 
         let mut effect = CatalogMutationEffect::default();
-        effect_record_catalog_kinds(&mut effect, &[BootstrapCatalogKind::PgNamespace]);
+        effect_record_catalog_kinds(&mut effect, &kinds);
         effect_record_oid(&mut effect.namespace_oids, namespace_oid);
         Ok(effect)
     }
@@ -1447,9 +1739,11 @@ impl CatalogStore {
     ) -> Result<(CatalogEntry, CatalogMutationEffect), CatalogError> {
         let name = name.into();
         let catcache = visible_catalog_caches_for_ctx(self, ctx)?.0;
-        if catcache.class_rows().iter().any(|row| {
-            row.relnamespace == namespace_oid && row.relname.eq_ignore_ascii_case(&name)
-        }) {
+        if catcache
+            .class_rows()
+            .iter()
+            .any(|row| row.relnamespace == namespace_oid && row.relname.eq_ignore_ascii_case(&name))
+        {
             return Err(CatalogError::TableAlreadyExists(
                 normalize_catalog_name(&name).to_ascii_lowercase(),
             ));
@@ -1563,9 +1857,11 @@ impl CatalogStore {
     ) -> Result<(CatalogEntry, CatalogMutationEffect), CatalogError> {
         let name = name.into();
         let catcache = visible_catalog_caches_for_ctx(self, ctx)?.0;
-        if catcache.class_rows().iter().any(|row| {
-            row.relnamespace == namespace_oid && row.relname.eq_ignore_ascii_case(&name)
-        }) {
+        if catcache
+            .class_rows()
+            .iter()
+            .any(|row| row.relnamespace == namespace_oid && row.relname.eq_ignore_ascii_case(&name))
+        {
             return Err(CatalogError::TableAlreadyExists(
                 normalize_catalog_name(&name).to_ascii_lowercase(),
             ));
@@ -1753,7 +2049,8 @@ impl CatalogStore {
         };
         control.next_oid = control.next_oid.saturating_add(1);
 
-        let mut depends = index_backed_constraint_depend_rows(constraint.oid, relation_oid, index_oid);
+        let mut depends =
+            index_backed_constraint_depend_rows(constraint.oid, relation_oid, index_oid);
         if contype == crate::include::catalog::CONSTRAINT_PRIMARY {
             for &not_null_constraint_oid in primary_key_owned_not_null_oids {
                 depends.extend(primary_key_owned_not_null_depend_rows(
@@ -2329,9 +2626,9 @@ impl CatalogStore {
             ctx,
             &PhysicalCatalogRows {
                 constraints: vec![removed.clone()],
-                    depends: removed_depends,
-                    ..PhysicalCatalogRows::default()
-                },
+                depends: removed_depends,
+                ..PhysicalCatalogRows::default()
+            },
             self.scope_db_oid(),
             &kinds,
         )?;
@@ -2728,7 +3025,9 @@ impl CatalogStore {
                 && row.relnamespace == relation.namespace_oid
                 && row.relname.eq_ignore_ascii_case(new_name)
         }) {
-            return Err(CatalogError::TableAlreadyExists(new_name.to_ascii_lowercase()));
+            return Err(CatalogError::TableAlreadyExists(
+                new_name.to_ascii_lowercase(),
+            ));
         }
         let entry = catalog_entry_from_visible_relation(&catcache, relation)?;
         let old_rows = rows_for_existing_relation(&catcache, &entry)?;
@@ -2941,6 +3240,15 @@ impl CatalogStore {
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
         self.comment_shared_object_mvcc(rewrite_oid, PG_REWRITE_RELATION_OID, comment, ctx)
+    }
+
+    pub fn comment_publication_mvcc(
+        &mut self,
+        publication_oid: u32,
+        comment: Option<&str>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        self.comment_shared_object_mvcc(publication_oid, PG_PUBLICATION_RELATION_OID, comment, ctx)
     }
 
     pub fn drop_rule_mvcc(
@@ -3361,7 +3669,9 @@ fn build_toast_catalog_changes(
     toast_namespace_oid: u32,
     control: &mut CatalogControl,
 ) -> Result<Option<ToastCatalogChanges>, CatalogError> {
-    if parent.relkind != 'r' || parent.reltoastrelid != 0 || !relation_needs_toast_table(&parent.desc)
+    if parent.relkind != 'r'
+        || parent.reltoastrelid != 0
+        || !relation_needs_toast_table(&parent.desc)
     {
         return Ok(None);
     }
@@ -3385,7 +3695,10 @@ fn build_toast_catalog_changes(
     )?;
     new_parent.reltoastrelid = toast_entry.relation_oid;
 
-    let index_name = format!("{toast_namespace_name}.{}", toast_index_name(parent.relation_oid));
+    let index_name = format!(
+        "{toast_namespace_name}.{}",
+        toast_index_name(parent.relation_oid)
+    );
     let mut index_entry = build_index_entry(
         catcache,
         index_name.clone(),
@@ -3467,7 +3780,10 @@ fn mutate_visible_relation_entry_mvcc<T, F>(
     mutator: F,
 ) -> Result<(CatalogEntry, CatalogEntry, T, Vec<BootstrapCatalogKind>), CatalogError>
 where
-    F: FnOnce(&mut CatalogEntry, &mut CatalogControl) -> Result<(T, Vec<BootstrapCatalogKind>), CatalogError>,
+    F: FnOnce(
+        &mut CatalogEntry,
+        &mut CatalogControl,
+    ) -> Result<(T, Vec<BootstrapCatalogKind>), CatalogError>,
 {
     let (catcache, relcache) = visible_catalog_caches_for_ctx(store, ctx)?;
     let relation = relcache
@@ -3491,7 +3807,10 @@ where
     Ok((old_entry, new_entry, extra, kinds))
 }
 
-fn relation_column_index_visible(desc: &RelationDesc, column_name: &str) -> Result<usize, CatalogError> {
+fn relation_column_index_visible(
+    desc: &RelationDesc,
+    column_name: &str,
+) -> Result<usize, CatalogError> {
     desc.columns
         .iter()
         .enumerate()
@@ -3525,10 +3844,13 @@ fn relation_constraint_exists_visible(
     constraint_name: &str,
     contype: Option<char>,
 ) -> bool {
-    catcache.constraint_rows_for_relation(relation_oid).into_iter().any(|row| {
-        contype.is_none_or(|expected| row.contype == expected)
-            && row.conname.eq_ignore_ascii_case(constraint_name)
-    })
+    catcache
+        .constraint_rows_for_relation(relation_oid)
+        .into_iter()
+        .any(|row| {
+            contype.is_none_or(|expected| row.contype == expected)
+                && row.conname.eq_ignore_ascii_case(constraint_name)
+        })
 }
 
 fn relation_constraint_row_visible(
@@ -3569,7 +3891,10 @@ fn trigger_row_visible(
         .ok_or_else(|| CatalogError::UnknownTable(trigger_name.to_string()))
 }
 
-fn rewrite_row_visible(catcache: &CatCache, rewrite_oid: u32) -> Result<PgRewriteRow, CatalogError> {
+fn rewrite_row_visible(
+    catcache: &CatCache,
+    rewrite_oid: u32,
+) -> Result<PgRewriteRow, CatalogError> {
     catcache
         .rewrite_rows()
         .into_iter()
@@ -3644,30 +3969,31 @@ fn rows_for_new_relation_entry(
     rows.types
         .extend(type_rows_for_relation_name(relation_name, entry));
 
-    rows.attributes.extend(
-        entry
-            .desc
-            .columns
-            .iter()
-            .enumerate()
-            .map(|(idx, column)| PgAttributeRow {
-                attrelid: entry.relation_oid,
-                attname: column.name.clone(),
-                atttypid: resolved_sql_type_oid(catcache, entry, column.sql_type),
-                attlen: column.storage.attlen,
-                attnum: idx.saturating_add(1) as i16,
-                attnotnull: !column.storage.nullable,
-                attisdropped: column.dropped,
-                atttypmod: column.sql_type.typmod,
-                attalign: column.storage.attalign,
-                attstorage: column.storage.attstorage,
-                attcompression: column.storage.attcompression,
-                attstattarget: column.attstattarget,
-                attinhcount: column.attinhcount,
-                attislocal: column.attislocal,
-                sql_type: column.sql_type,
-            }),
-    );
+    rows.attributes
+        .extend(
+            entry
+                .desc
+                .columns
+                .iter()
+                .enumerate()
+                .map(|(idx, column)| PgAttributeRow {
+                    attrelid: entry.relation_oid,
+                    attname: column.name.clone(),
+                    atttypid: resolved_sql_type_oid(catcache, entry, column.sql_type),
+                    attlen: column.storage.attlen,
+                    attnum: idx.saturating_add(1) as i16,
+                    attnotnull: !column.storage.nullable,
+                    attisdropped: column.dropped,
+                    atttypmod: column.sql_type.typmod,
+                    attalign: column.storage.attalign,
+                    attstorage: column.storage.attstorage,
+                    attcompression: column.storage.attcompression,
+                    attstattarget: column.attstattarget,
+                    attinhcount: column.attinhcount,
+                    attislocal: column.attislocal,
+                    sql_type: column.sql_type,
+                }),
+        );
     rows.attrdefs.extend(
         entry
             .desc
@@ -3722,7 +4048,10 @@ fn class_row_for_relation_name(relation_name: &str, entry: &CatalogEntry) -> PgC
     }
 }
 
-fn type_rows_for_relation_name(relation_name: &str, entry: &CatalogEntry) -> Vec<crate::include::catalog::PgTypeRow> {
+fn type_rows_for_relation_name(
+    relation_name: &str,
+    entry: &CatalogEntry,
+) -> Vec<crate::include::catalog::PgTypeRow> {
     let relname = relation_object_name(relation_name);
     let mut rows = Vec::new();
     if entry.row_type_oid != 0 {
@@ -3830,7 +4159,10 @@ fn rows_for_existing_relation(
     object_oids.extend(attrdefs.iter().map(|row| row.oid));
     object_oids.extend(rewrites.iter().map(|row| row.oid));
     object_oids.extend(triggers.iter().map(|row| row.oid));
-    let constraint_oids = constraints.iter().map(|row| row.oid).collect::<BTreeSet<_>>();
+    let constraint_oids = constraints
+        .iter()
+        .map(|row| row.oid)
+        .collect::<BTreeSet<_>>();
 
     let mut rows = PhysicalCatalogRows {
         classes: vec![class_row],
@@ -3910,7 +4242,11 @@ fn catalog_entry_from_visible_relation(
     })
 }
 
-fn resolved_sql_type_oid(catcache: &CatCache, entry: &CatalogEntry, sql_type: crate::backend::parser::SqlType) -> u32 {
+fn resolved_sql_type_oid(
+    catcache: &CatCache,
+    entry: &CatalogEntry,
+    sql_type: crate::backend::parser::SqlType,
+) -> u32 {
     if sql_type.is_array
         && matches!(
             sql_type.kind,
@@ -3935,8 +4271,15 @@ fn drop_relation_entries_visible(
     catcache: &CatCache,
     relcache: &RelCache,
     relation_oid: u32,
-) -> Result<(PhysicalCatalogRows, PhysicalCatalogRows, Vec<CatalogEntry>, Vec<u32>), CatalogError>
-{
+) -> Result<
+    (
+        PhysicalCatalogRows,
+        PhysicalCatalogRows,
+        Vec<CatalogEntry>,
+        Vec<u32>,
+    ),
+    CatalogError,
+> {
     let oids = drop_relation_oids_by_oid_visible(relcache, &catcache.depend_rows(), relation_oid)?;
     let dropped = oids
         .iter()
@@ -3966,7 +4309,14 @@ fn drop_relation_entries_visible(
 
     let mut rows_to_delete = PhysicalCatalogRows::default();
     for entry in &dropped {
-        extend_physical_catalog_rows(&mut rows_to_delete, rows_for_existing_relation(catcache, entry)?);
+        extend_physical_catalog_rows(
+            &mut rows_to_delete,
+            rows_for_existing_relation(catcache, entry)?,
+        );
+        extend_physical_catalog_rows(
+            &mut rows_to_delete,
+            publication_rows_for_relation(catcache, entry.relation_oid),
+        );
     }
 
     let mut rows_to_insert = PhysicalCatalogRows::default();
@@ -3994,6 +4344,28 @@ fn drop_relation_entries_visible(
         dropped,
         affected_parent_oids.into_iter().collect(),
     ))
+}
+
+fn publication_rows_for_relation(catcache: &CatCache, relation_oid: u32) -> PhysicalCatalogRows {
+    let publication_rels = catcache.publication_rel_rows_for_relation(relation_oid);
+    if publication_rels.is_empty() {
+        return PhysicalCatalogRows::default();
+    }
+    let publication_rel_oids = publication_rels
+        .iter()
+        .map(|row| row.oid)
+        .collect::<BTreeSet<_>>();
+    let mut rows = PhysicalCatalogRows {
+        publication_rels,
+        depends: catcache
+            .depend_rows()
+            .into_iter()
+            .filter(|row| publication_rel_oids.contains(&row.objid))
+            .collect(),
+        ..PhysicalCatalogRows::default()
+    };
+    sort_pg_depend_rows(&mut rows.depends);
+    rows
 }
 
 fn drop_relation_oids_by_oid_visible(

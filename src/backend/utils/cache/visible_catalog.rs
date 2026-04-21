@@ -80,6 +80,16 @@ impl VisibleCatalog {
             _ => None,
         }
     }
+
+    pub fn role_name_by_oid(&self, role_oid: u32) -> Option<String> {
+        self.catcache.as_ref().and_then(|catcache| {
+            catcache
+                .authid_rows()
+                .into_iter()
+                .find(|row| row.oid == role_oid)
+                .map(|row| row.rolname)
+        })
+    }
 }
 
 impl CatalogLookup for VisibleCatalog {
@@ -434,6 +444,9 @@ mod tests {
             base.index_rows(),
             base.rewrite_rows(),
             base.trigger_rows(),
+            base.publication_rows(),
+            base.publication_rel_rows(),
+            base.publication_namespace_rows(),
             base.am_rows(),
             base.amop_rows(),
             base.amproc_rows(),

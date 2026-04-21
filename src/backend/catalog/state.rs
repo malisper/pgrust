@@ -19,7 +19,8 @@ use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::misc::interrupts::InterruptReason;
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_NOTNULL, PUBLIC_NAMESPACE_OID, PgAuthIdRow,
-    PgAuthMembersRow, PgConstraintRow, PgDatabaseRow, PgDependRow, PgInheritsRow, PgRewriteRow,
+    PgAuthMembersRow, PgConstraintRow, PgDatabaseRow, PgDependRow, PgInheritsRow,
+    PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow,
     PgTablespaceRow, PgTriggerRow, bootstrap_pg_auth_members_rows, bootstrap_pg_authid_rows,
     bootstrap_pg_database_rows, bootstrap_pg_tablespace_rows, builtin_range_name_for_sql_type,
     builtin_type_rows, relkind_has_storage, sort_pg_rewrite_rows,
@@ -96,6 +97,9 @@ pub struct Catalog {
     pub(crate) inherits: Vec<PgInheritsRow>,
     pub(crate) rewrites: Vec<PgRewriteRow>,
     pub(crate) triggers: Vec<crate::include::catalog::PgTriggerRow>,
+    pub(crate) publications: Vec<PgPublicationRow>,
+    pub(crate) publication_rels: Vec<PgPublicationRelRow>,
+    pub(crate) publication_namespaces: Vec<PgPublicationNamespaceRow>,
     pub(crate) authids: Vec<PgAuthIdRow>,
     pub(crate) auth_members: Vec<PgAuthMembersRow>,
     pub(crate) databases: Vec<PgDatabaseRow>,
@@ -113,6 +117,9 @@ impl Default for Catalog {
             inherits: Vec::new(),
             rewrites: Vec::new(),
             triggers: Vec::new(),
+            publications: Vec::new(),
+            publication_rels: Vec::new(),
+            publication_namespaces: Vec::new(),
             authids: bootstrap_pg_authid_rows(),
             auth_members: bootstrap_pg_auth_members_rows().into(),
             databases: bootstrap_pg_database_rows().into(),
@@ -277,6 +284,18 @@ impl Catalog {
             .partition_point(|row| row.tgrelid < relation_oid);
         let end = start + self.triggers[start..].partition_point(|row| row.tgrelid == relation_oid);
         &self.triggers[start..end]
+    }
+
+    pub fn publication_rows(&self) -> &[PgPublicationRow] {
+        &self.publications
+    }
+
+    pub fn publication_rel_rows(&self) -> &[PgPublicationRelRow] {
+        &self.publication_rels
+    }
+
+    pub fn publication_namespace_rows(&self) -> &[PgPublicationNamespaceRow] {
+        &self.publication_namespaces
     }
 
     pub fn next_oid(&self) -> u32 {

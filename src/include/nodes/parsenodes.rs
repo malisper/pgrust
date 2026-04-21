@@ -54,6 +54,20 @@ pub enum ParseError {
     SubqueryMustReturnOneColumn,
     UnknownConfigurationParameter(String),
     UnrecognizedParameter(String),
+    UnrecognizedPublicationParameter(String),
+    UnrecognizedPublicationOptionValue {
+        option: String,
+        value: String,
+    },
+    InvalidPublicationParameterValue {
+        parameter: String,
+        value: String,
+    },
+    InvalidPublicationTableName(String),
+    InvalidPublicationSchemaName(String),
+    ConflictingOrRedundantOptions {
+        option: String,
+    },
     CantChangeRuntimeParam(String),
     TablesDeclaredWithOidsNotSupported,
     OuterLevelAggregateNestedCte(String),
@@ -141,6 +155,30 @@ impl fmt::Display for ParseError {
             }
             ParseError::UnrecognizedParameter(name) => {
                 write!(f, "unrecognized parameter \"{name}\"")
+            }
+            ParseError::UnrecognizedPublicationParameter(name) => {
+                write!(f, "unrecognized publication parameter: \"{name}\"")
+            }
+            ParseError::UnrecognizedPublicationOptionValue { option, value } => {
+                write!(
+                    f,
+                    "unrecognized value for publication option \"{option}\": \"{value}\""
+                )
+            }
+            ParseError::InvalidPublicationParameterValue { parameter, value } => {
+                write!(
+                    f,
+                    "invalid value for publication parameter \"{parameter}\": \"{value}\""
+                )
+            }
+            ParseError::InvalidPublicationTableName(_) => {
+                write!(f, "invalid table name")
+            }
+            ParseError::InvalidPublicationSchemaName(_) => {
+                write!(f, "invalid schema name")
+            }
+            ParseError::ConflictingOrRedundantOptions { .. } => {
+                write!(f, "conflicting or redundant options")
             }
             ParseError::CantChangeRuntimeParam(name) => {
                 write!(f, "parameter \"{name}\" cannot be changed now")
@@ -252,12 +290,15 @@ pub enum Statement {
     AlterTableSetNotNull(AlterTableSetNotNullStatement),
     AlterTableDropNotNull(AlterTableDropNotNullStatement),
     AlterTableValidateConstraint(AlterTableValidateConstraintStatement),
+    AlterPublication(AlterPublicationStatement),
     CommentOnTable(CommentOnTableStatement),
     CommentOnRule(CommentOnRuleStatement),
     CommentOnDomain(CommentOnDomainStatement),
     CommentOnConversion(CommentOnConversionStatement),
+    CommentOnPublication(CommentOnPublicationStatement),
     CreateDomain(CreateDomainStatement),
     CreateConversion(CreateConversionStatement),
+    CreatePublication(CreatePublicationStatement),
     CommentOnRole(CommentOnRoleStatement),
     GrantObject(GrantObjectStatement),
     RevokeObject(RevokeObjectStatement),
@@ -267,6 +308,7 @@ pub enum Statement {
     DropSequence(DropSequenceStatement),
     DropConversion(DropConversionStatement),
     DropDatabase(DropDatabaseStatement),
+    DropPublication(DropPublicationStatement),
     DropTable(DropTableStatement),
     DropTrigger(DropTriggerStatement),
     DropIndex(DropIndexStatement),
@@ -1209,6 +1251,100 @@ pub struct CommentOnDomainStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommentOnConversionStatement {
     pub conversion_name: String,
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicationPublishActions {
+    pub insert: bool,
+    pub update: bool,
+    pub delete: bool,
+    pub truncate: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublishGeneratedColumns {
+    None,
+    Stored,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PublicationOption {
+    Publish(PublicationPublishActions),
+    PublishViaPartitionRoot(bool),
+    PublishGeneratedColumns(PublishGeneratedColumns),
+    Raw { name: String, value: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PublicationOptions {
+    pub options: Vec<PublicationOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PublicationSchemaName {
+    Name(String),
+    CurrentSchema,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicationTableSpec {
+    pub relation_name: String,
+    pub only: bool,
+    pub column_names: Vec<String>,
+    pub where_clause: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicationSchemaSpec {
+    pub schema_name: PublicationSchemaName,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PublicationObjectSpec {
+    Table(PublicationTableSpec),
+    Schema(PublicationSchemaSpec),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PublicationTargetSpec {
+    pub for_all_tables: bool,
+    pub objects: Vec<PublicationObjectSpec>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreatePublicationStatement {
+    pub publication_name: String,
+    pub target: PublicationTargetSpec,
+    pub options: PublicationOptions,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterPublicationStatement {
+    pub publication_name: String,
+    pub action: AlterPublicationAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlterPublicationAction {
+    SetOptions(PublicationOptions),
+    AddObjects(PublicationTargetSpec),
+    DropObjects(PublicationTargetSpec),
+    SetObjects(PublicationTargetSpec),
+    Rename { new_name: String },
+    OwnerTo { new_owner: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropPublicationStatement {
+    pub if_exists: bool,
+    pub publication_names: Vec<String>,
+    pub cascade: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentOnPublicationStatement {
+    pub publication_name: String,
     pub comment: Option<String>,
 }
 

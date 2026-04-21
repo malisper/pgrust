@@ -217,7 +217,9 @@ mod tests {
             pool,
             txns,
             txn_waiter: None,
-            sequences: Some(Arc::new(crate::pgrust::database::SequenceRuntime::new_ephemeral())),
+            sequences: Some(Arc::new(
+                crate::pgrust::database::SequenceRuntime::new_ephemeral(),
+            )),
             large_objects: Some(Arc::new(
                 crate::pgrust::database::LargeObjectRuntime::new_ephemeral(),
             )),
@@ -405,7 +407,10 @@ mod tests {
         let init_path =
             super::relcache_init::relcache_init_path_for_scope(&base, CatalogScope::Shared);
         store.relcache().unwrap();
-        assert!(init_path.exists(), "shared relcache init file should be written");
+        assert!(
+            init_path.exists(),
+            "shared relcache init file should be written"
+        );
 
         let (pool, txns, ctx) = durable_write_context(&base);
         let (_, effect) = store
@@ -1405,8 +1410,18 @@ mod tests {
         assert!(reopened_catalog.get("people").is_none());
         assert!(reopened_catalog.get("people_name_idx").is_none());
         let catcache = reopened.catcache().unwrap();
-        assert!(!catcache.class_rows().iter().any(|row| row.oid == table.relation_oid));
-        assert!(!catcache.class_rows().iter().any(|row| row.oid == index.relation_oid));
+        assert!(
+            !catcache
+                .class_rows()
+                .iter()
+                .any(|row| row.oid == table.relation_oid)
+        );
+        assert!(
+            !catcache
+                .class_rows()
+                .iter()
+                .any(|row| row.oid == index.relation_oid)
+        );
         assert!(
             !catcache
                 .index_rows()
@@ -1710,11 +1725,7 @@ mod tests {
         let after_rename = count_leaf_btree_items(&base, class_index_rel);
         assert!(after_rename > before);
 
-        vacuum_relation_via_command(
-            &base,
-            "pg_catalog.pg_class",
-            Some(Arc::clone(&txns)),
-        );
+        vacuum_relation_via_command(&base, "pg_catalog.pg_class", Some(Arc::clone(&txns)));
 
         let after_vacuum = count_leaf_btree_items(&base, class_index_rel);
         assert_eq!(after_vacuum, before);

@@ -5403,6 +5403,50 @@ fn pg_input_is_valid_reports_int2_and_int2vector_results() {
 }
 
 #[test]
+fn publication_describe_builtins_run_via_normal_sql() {
+    let base = temp_dir("publication_describe_builtins");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            &format!(
+                "select pg_get_userbyid({}::oid), \
+                        pg_get_expr(null::pg_node_tree, 1::oid), \
+                        array_upper(array[1, 2]::int4[], 1)",
+                crate::include::catalog::BOOTSTRAP_SUPERUSER_OID
+            ),
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Text("postgres".into()),
+            Value::Null,
+            Value::Int32(2),
+        ]],
+    );
+}
+
+#[test]
+fn int2vector_casts_to_int2_array() {
+    assert_eq!(
+        crate::backend::executor::expr_casts::cast_value(
+            Value::Text("1 2".into()),
+            SqlType::array_of(SqlType::new(crate::backend::parser::SqlTypeKind::Int2)),
+        )
+        .unwrap(),
+        Value::PgArray(
+            crate::include::nodes::datum::ArrayValue::from_1d(vec![
+                Value::Int16(1),
+                Value::Int16(2),
+            ])
+            .with_element_type_oid(crate::include::catalog::INT2_TYPE_OID)
+        ),
+    );
+}
+
+#[test]
 fn pg_input_is_valid_reports_float_results() {
     let base = temp_dir("pg_input_is_valid_float");
     let txns = TransactionManager::new_durable(&base).unwrap();

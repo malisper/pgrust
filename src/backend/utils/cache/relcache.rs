@@ -12,8 +12,7 @@ use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::cache::catcache::{CatCache, normalize_catalog_name};
 use crate::include::catalog::{
     CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY, PG_CATALOG_NAMESPACE_OID, PG_CONSTRAINT_RELATION_OID,
-    bootstrap_catalog_kinds, relam_for_relkind,
-    system_catalog_index_by_oid,
+    bootstrap_catalog_kinds, relam_for_relkind, system_catalog_index_by_oid,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,11 +69,20 @@ pub struct RelCache {
 impl RelCache {
     pub fn from_catalog(catalog: &Catalog) -> Self {
         let mut cache = Self::default();
+        let catcache = CatCache::from_catalog(catalog);
         for (name, entry) in catalog.entries() {
+            let relcache_entry = from_catalog_entry(entry);
             cache.by_name.insert(
                 normalize_catalog_name(name).to_ascii_lowercase(),
-                from_catalog_entry(entry),
+                relcache_entry.clone(),
             );
+            if let Some(namespace) = catcache.namespace_by_oid(entry.namespace_oid) {
+                let relname = name.rsplit('.').next().unwrap_or(name).to_ascii_lowercase();
+                cache.by_name.insert(
+                    format!("{}.{}", namespace.nspname.to_ascii_lowercase(), relname),
+                    relcache_entry.clone(),
+                );
+            }
             cache
                 .by_oid
                 .insert(entry.relation_oid, from_catalog_entry(entry));
@@ -299,6 +307,10 @@ impl RelCache {
     pub fn get_by_name(&self, name: &str) -> Option<&RelCacheEntry> {
         self.by_name
             .get(&normalize_catalog_name(name).to_ascii_lowercase())
+    }
+
+    pub fn get_by_name_exact(&self, name: &str) -> Option<&RelCacheEntry> {
+        self.by_name.get(&name.to_ascii_lowercase())
     }
 
     pub fn get_by_oid(&self, oid: u32) -> Option<&RelCacheEntry> {
@@ -535,8 +547,9 @@ mod tests {
             )
             .unwrap();
 
-        let mut rows =
-            crate::backend::catalog::rows::physical_catalog_rows_from_catcache(&store.catcache().unwrap());
+        let mut rows = crate::backend::catalog::rows::physical_catalog_rows_from_catcache(
+            &store.catcache().unwrap(),
+        );
         rows.attributes
             .iter_mut()
             .find(|row| row.attrelid == entry.relation_oid && row.attname == "id")
@@ -552,6 +565,9 @@ mod tests {
             rows.indexes,
             rows.rewrites,
             rows.triggers,
+            rows.publications,
+            rows.publication_rels,
+            rows.publication_namespaces,
             rows.ams,
             rows.amops,
             rows.amprocs,
@@ -579,5 +595,20 @@ mod tests {
         let cache = RelCache::from_catcache_in_db(&broken, 1).unwrap();
         assert!(cache.get_by_name("people").is_none());
         assert!(cache.get_by_name("pg_namespace").is_some());
+    }
+
+    #[test]
+    fn relcache_preserves_exact_pg_catalog_qualified_names() {
+        let cache = RelCache::from_catalog(&Catalog::default());
+        assert_eq!(
+            cache
+                .get_by_name_exact("pg_catalog.pg_class")
+                .map(|entry| entry.relation_oid),
+            Some(crate::include::catalog::PG_CLASS_RELATION_OID)
+        );
+        assert_eq!(
+            cache.get_by_name("pg_catalog.pg_class").map(|entry| entry.relation_oid),
+            Some(crate::include::catalog::PG_CLASS_RELATION_OID)
+        );
     }
 }

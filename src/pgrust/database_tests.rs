@@ -5948,7 +5948,10 @@ fn unsupported_create_table_like_does_not_poison_catalog_after_sequence_drop() {
         Err(ExecError::Parse(ParseError::FeatureNotSupported(feature))) => {
             assert_eq!(feature, "CREATE TABLE ... LIKE")
         }
-        other => panic!("expected unsupported CREATE TABLE LIKE error, got {:?}", other),
+        other => panic!(
+            "expected unsupported CREATE TABLE LIKE error, got {:?}",
+            other
+        ),
     }
     db.execute(1, "drop sequence ctlseq1").unwrap();
 
@@ -8364,7 +8367,9 @@ fn checkpoint_requires_pg_checkpoint_membership() {
     bootstrap
         .execute(&db, "create role outsider login")
         .unwrap();
-    bootstrap.execute(&db, "grant pg_checkpoint to tenant").unwrap();
+    bootstrap
+        .execute(&db, "grant pg_checkpoint to tenant")
+        .unwrap();
 
     let mut session = Session::new(2);
     session

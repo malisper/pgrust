@@ -11,6 +11,7 @@ mod maintenance;
 mod opclass;
 mod owner;
 mod privilege;
+mod publication;
 mod rename;
 mod role;
 pub(crate) mod rules;
