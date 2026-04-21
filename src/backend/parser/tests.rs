@@ -1538,6 +1538,20 @@ fn parse_comment_on_table_null_statement() {
 }
 
 #[test]
+fn parse_comment_on_constraint_statement() {
+    let stmt =
+        parse_statement("comment on constraint items_pkey on public.items is 'hello'").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CommentOnConstraint(CommentOnConstraintStatement {
+            constraint_name: "items_pkey".into(),
+            table_name: "public.items".into(),
+            comment: Some("hello".into()),
+        })
+    );
+}
+
+#[test]
 fn parse_comment_on_rule_statement() {
     let stmt = parse_statement("comment on rule r1 on public.items is 'hello'").unwrap();
     assert_eq!(
