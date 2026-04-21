@@ -12202,6 +12202,25 @@ fn trim_without_explicit_trim_chars_and_text_substring_work() {
         .unwrap(),
         vec![vec![Value::Text("123".into()), Value::Text("".into())]],
     );
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select substr('WS.001.1a'::char(20), 1, 2), \
+                    substring('WS.001.1a'::char(20) from 1 for 2), \
+                    substring('WS.001.1a'::varchar(20) from 4), \
+                    substring('abcdef'::char(6) similar 'a#\"(b_d)#\"%' escape '#')",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Text("WS".into()),
+            Value::Text("WS".into()),
+            Value::Text("001.1a".into()),
+            Value::Text("bcd".into()),
+        ]],
+    );
 }
 
 #[test]

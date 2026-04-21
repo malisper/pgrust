@@ -782,7 +782,7 @@ pub(super) fn bind_scalar_function_call(
                 }
                 return Ok(build_func(func_variadic, coerced));
             }
-            if value_type.kind != SqlTypeKind::Text {
+            if !is_text_like_type(value_type) {
                 return Err(ParseError::UnexpectedToken {
                     expected: "substring(text, int4[, int4]) or substring(text, text[, text])",
                     actual: format!(
@@ -893,7 +893,7 @@ pub(super) fn bind_scalar_function_call(
                 grouped_outer,
                 ctes,
             );
-            if value_type.kind != SqlTypeKind::Text || pattern_type.kind != SqlTypeKind::Text {
+            if !is_text_like_type(value_type) || !is_text_like_type(pattern_type) {
                 return Err(ParseError::UnexpectedToken {
                     expected: "substring(text similar text escape text)",
                     actual: format!(
@@ -924,7 +924,7 @@ pub(super) fn bind_scalar_function_call(
                     grouped_outer,
                     ctes,
                 );
-                if escape_type.kind != SqlTypeKind::Text {
+                if !is_text_like_type(escape_type) {
                     return Err(ParseError::UnexpectedToken {
                         expected: "text escape argument",
                         actual: sql_type_name(escape_type),
