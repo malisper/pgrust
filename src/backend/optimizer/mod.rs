@@ -23,8 +23,8 @@ use crate::include::nodes::parsenodes::{JoinTreeNode, Query, RangeTblEntryKind};
 use crate::include::nodes::pathnodes::{Path, PlannerInfo, RestrictInfo, SpecialJoinInfo};
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{
-    AggAccum, Expr, JoinType, ProjectSetTarget, RelationDesc, SetReturningCall, SubLink, SubPlan,
-    ToastRelationRef, Var,
+    AggAccum, Expr, JoinType, OpExprKind, ProjectSetTarget, RelationDesc, SetReturningCall,
+    SubLink, SubPlan, ToastRelationRef, Var,
 };
 
 const DEFAULT_EQ_SEL: f64 = 0.005;
@@ -51,9 +51,15 @@ struct RelationStats {
 }
 
 #[derive(Debug, Clone)]
+enum IndexStrategyLookup {
+    Operator { oid: u32, kind: OpExprKind },
+    Proc(u32),
+}
+
+#[derive(Debug, Clone)]
 struct IndexableQual {
     column: usize,
-    strategy: u16,
+    lookup: IndexStrategyLookup,
     argument: Value,
     expr: Expr,
 }
@@ -62,6 +68,7 @@ struct IndexableQual {
 struct IndexPathSpec {
     index: BoundIndexRelation,
     keys: Vec<crate::include::access::scankey::ScanKeyData>,
+    order_by_keys: Vec<crate::include::access::scankey::ScanKeyData>,
     residual: Option<Expr>,
     used_quals: Vec<Expr>,
     direction: crate::include::access::relscan::ScanDirection,

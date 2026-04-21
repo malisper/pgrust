@@ -2,7 +2,6 @@ use std::cmp::Ordering;
 
 use crate::RelFileLocator;
 use crate::backend::parser::CatalogLookup;
-use crate::include::catalog::BTREE_AM_OID;
 use crate::include::nodes::parsenodes::{JoinTreeNode, RangeTblEntryKind};
 use crate::include::nodes::pathnodes::{
     Path, PathKey, PathTarget, PlannerInfo, PlannerSubroot, RelOptInfo, RelOptKind, RestrictInfo,
@@ -206,26 +205,24 @@ fn collect_relation_access_paths(
             index.index_meta.indisvalid
                 && index.index_meta.indisready
                 && !index.index_meta.indkey.is_empty()
-                && index.index_meta.am_oid == BTREE_AM_OID
         })
     {
-        let Some(spec) = build_index_path_spec(filter.as_ref(), None, index) else {
-            continue;
-        };
-        paths.push(
-            estimate_index_candidate(
-                rtindex,
-                heap_rel,
-                relation_oid,
-                toast,
-                desc.clone(),
-                &stats,
-                spec,
-                None,
-                catalog,
-            )
-            .plan,
-        );
+        if let Some(spec) = build_index_path_spec(filter.as_ref(), None, index) {
+            paths.push(
+                estimate_index_candidate(
+                    rtindex,
+                    heap_rel,
+                    relation_oid,
+                    toast,
+                    desc.clone(),
+                    &stats,
+                    spec,
+                    None,
+                    catalog,
+                )
+                .plan,
+            );
+        }
         if let Some(order_items) = query_order_items.as_ref()
             && let Some(spec) = build_index_path_spec(filter.as_ref(), Some(order_items), index)
         {

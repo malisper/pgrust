@@ -3158,6 +3158,26 @@ fn read_relation_fork_block(
     page
 }
 
+fn read_buffered_relation_block(
+    db: &Database,
+    client_id: u32,
+    rel: crate::RelFileLocator,
+    block: u32,
+) -> [u8; crate::backend::storage::smgr::BLCKSZ] {
+    let pinned = db
+        .pool
+        .pin_existing_block(
+            client_id,
+            rel,
+            crate::backend::storage::smgr::ForkNumber::Main,
+            block,
+        )
+        .unwrap();
+    let page = db.pool.read_page(pinned.buffer_id()).unwrap();
+    drop(pinned);
+    page
+}
+
 fn relation_fork_nblocks(
     db: &Database,
     rel: crate::RelFileLocator,
@@ -3166,6 +3186,33 @@ fn relation_fork_nblocks(
     db.pool
         .with_storage_mut(|storage| storage.smgr.nblocks(rel, fork))
         .unwrap()
+}
+
+fn relation_has_dirty_buffered_page(
+    db: &Database,
+    client_id: u32,
+    rel: crate::RelFileLocator,
+) -> bool {
+    let nblocks = relation_fork_nblocks(db, rel, crate::backend::storage::smgr::ForkNumber::Main);
+    (0..nblocks).any(|block| {
+        read_relation_block(db, rel, block)
+            != read_buffered_relation_block(db, client_id, rel, block)
+    })
+}
+
+fn gist_leaf_tuple_count(db: &Database, client_id: u32, rel: crate::RelFileLocator) -> usize {
+    let nblocks = relation_fork_nblocks(db, rel, crate::backend::storage::smgr::ForkNumber::Main);
+    let mut count = 0usize;
+    for block in 0..nblocks {
+        let page = read_buffered_relation_block(db, client_id, rel, block);
+        let opaque = crate::include::access::gist::gist_page_get_opaque(&page).unwrap();
+        if opaque.is_leaf() && !opaque.is_deleted() {
+            count += crate::include::access::gist::gist_page_items(&page)
+                .unwrap()
+                .len();
+        }
+    }
+    count
 }
 
 fn assert_explain_uses_index(db: &Database, client_id: u32, sql: &str, index_name: &str) {
@@ -6299,6 +6346,494 @@ fn create_index_builds_ready_valid_btree_and_explain_uses_it() {
             );
         }
         other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn create_gist_box_index_explain_and_query_use_it() {
+    let base = temp_dir("gist_box_index_scan_explain");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table boxes (id int4 not null, b box)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into boxes values \
+         (1, '(0,0),(1,1)'::box), \
+         (2, '(5,5),(8,8)'::box), \
+         (3, '(10,10),(12,12)'::box)",
+    )
+    .unwrap();
+    db.execute(1, "create index boxes_b_gist on boxes using gist (b)")
+        .unwrap();
+
+    assert_explain_uses_index(
+        &db,
+        1,
+        "select id from boxes where b && '(6,6),(7,7)'::box",
+        "boxes_b_gist",
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select id from boxes where b && '(6,6),(7,7)'::box order by id",
+        ),
+        vec![vec![Value::Int32(2)]]
+    );
+
+    db.execute(1, "insert into boxes values (4, '(6,6),(9,9)'::box)")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select id from boxes where b && '(6,6),(7,7)'::box order by id",
+        ),
+        vec![vec![Value::Int32(2)], vec![Value::Int32(4)]]
+    );
+}
+
+#[test]
+fn create_gist_box_index_supports_knn_order_by() {
+    let base = temp_dir("gist_box_knn_order");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table boxes (id int4 not null, b box)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into boxes values \
+         (1, '(0,0),(1,1)'::box), \
+         (2, '(5,5),(6,6)'::box), \
+         (3, '(10,10),(12,12)'::box), \
+         (4, '(7,7),(8,8)'::box)",
+    )
+    .unwrap();
+
+    let sql = "select id from boxes \
+               order by b <-> '(5.2,5.2),(5.2,5.2)'::box \
+               limit 3";
+    let expected = query_rows(&db, 1, sql);
+    assert_eq!(
+        expected,
+        vec![
+            vec![Value::Int32(2)],
+            vec![Value::Int32(4)],
+            vec![Value::Int32(1)],
+        ]
+    );
+
+    db.execute(1, "create index boxes_b_gist on boxes using gist (b)")
+        .unwrap();
+
+    assert_explain_uses_index(&db, 1, sql, "boxes_b_gist");
+    assert_eq!(query_rows(&db, 1, sql), expected);
+}
+
+#[test]
+fn create_gist_range_index_explain_and_query_use_it() {
+    let base = temp_dir("gist_range_index_scan_explain");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table spans (id int4 not null, span int4range)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into spans values \
+         (1, '[1,5)'::int4range), \
+         (2, '[5,9)'::int4range), \
+         (3, '[20,30)'::int4range)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create index spans_range_gist on spans using gist (span)",
+    )
+    .unwrap();
+
+    assert_explain_uses_index(
+        &db,
+        1,
+        "select id from spans where span @> 7",
+        "spans_range_gist",
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select id from spans where span @> 7 order by id"),
+        vec![vec![Value::Int32(2)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select id from spans where span && '[4,6)'::int4range order by id",
+        ),
+        vec![vec![Value::Int32(1)], vec![Value::Int32(2)]]
+    );
+}
+
+#[test]
+fn create_gist_range_index_with_explicit_opclass_uses_matching_type() {
+    let base = temp_dir("gist_range_explicit_opclass");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table spans (span tsrange)").unwrap();
+    db.execute(
+        1,
+        "create index spans_ts_gist on spans using gist (span range_ops)",
+    )
+    .unwrap();
+
+    let rows = query_rows(
+        &db,
+        1,
+        "select indclass \
+         from pg_index \
+         where indexrelid = (select oid from pg_class where relname = 'spans_ts_gist')",
+    );
+    assert_eq!(
+        rows,
+        vec![vec![Value::Text(
+            crate::include::catalog::TSRANGE_GIST_OPCLASS_OID
+                .to_string()
+                .into()
+        )]]
+    );
+}
+
+#[test]
+fn create_gist_expression_index_builds_and_tracks_expression_metadata() {
+    let base = temp_dir("gist_expression_index_build");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table spans (id int4 not null, span int4range)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into spans values \
+         (1, '[1,5)'::int4range), \
+         (2, '[5,9)'::int4range), \
+         (3, '[20,30)'::int4range)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create index spans_expr_gist on spans using gist ((range_merge(span, span)))",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select indkey, indexprs \
+             from pg_index \
+             where indexrelid = (select oid from pg_class where relname = 'spans_expr_gist')",
+        ),
+        vec![vec![
+            Value::Text("0".into()),
+            Value::Text("[\"range_merge(span, span)\"]".into()),
+        ]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select id from spans \
+             where range_merge(span, span) @> 7 \
+             order by id",
+        ),
+        vec![vec![Value::Int32(2)]]
+    );
+
+    db.execute(1, "insert into spans values (4, '[6,10)'::int4range)")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select id from spans \
+             where range_merge(span, span) @> 7 \
+             order by id",
+        ),
+        vec![vec![Value::Int32(2)], vec![Value::Int32(4)]]
+    );
+}
+
+#[test]
+fn gist_split_recovery_preserves_exact_and_knn_scans_after_reopen() {
+    let base = temp_dir("gist_split_recovery");
+    let exact_sql = "select id from boxes \
+                     where b && '(250.1,250.1),(250.9,250.9)'::box \
+                     order by id";
+    let knn_sql = "select id from boxes \
+                   order by b <-> '(250.2,250.2),(250.2,250.2)'::box \
+                   limit 3";
+
+    let (expected_exact, expected_knn) = {
+        let db = Database::open(&base, 128).unwrap();
+
+        db.execute(1, "create table boxes (id int4 not null, b box)")
+            .unwrap();
+        db.execute(1, "create index boxes_b_gist on boxes using gist (b)")
+            .unwrap();
+
+        for i in 0..600 {
+            db.execute(
+                1,
+                &format!(
+                    "insert into boxes values ({id}, '({low},{low}),({high},{high})'::box)",
+                    id = i,
+                    low = i,
+                    high = i + 1
+                ),
+            )
+            .unwrap();
+        }
+
+        let index_rel = relation_locator_for(&db, 1, "boxes_b_gist");
+        assert!(
+            relation_fork_nblocks(
+                &db,
+                index_rel,
+                crate::backend::storage::smgr::ForkNumber::Main
+            ) > 1
+        );
+        let root_page = read_buffered_relation_block(&db, 1, index_rel, 0);
+        let root_opaque = crate::include::access::gist::gist_page_get_opaque(&root_page).unwrap();
+        assert!(
+            !root_opaque.is_leaf(),
+            "expected internal GiST root after splits"
+        );
+        assert!(
+            relation_has_dirty_buffered_page(&db, 1, index_rel),
+            "expected at least one uncheckpointed GiST page before reopen"
+        );
+
+        assert_explain_uses_index(&db, 1, exact_sql, "boxes_b_gist");
+        assert_explain_uses_index(&db, 1, knn_sql, "boxes_b_gist");
+
+        (query_rows(&db, 1, exact_sql), query_rows(&db, 1, knn_sql))
+    };
+
+    let reopened = Database::open(&base, 128).unwrap();
+    let index_rel = relation_locator_for(&reopened, 1, "boxes_b_gist");
+    let root_page = read_relation_block(&reopened, index_rel, 0);
+    let root_opaque = crate::include::access::gist::gist_page_get_opaque(&root_page).unwrap();
+    assert!(
+        !root_opaque.is_leaf(),
+        "expected internal GiST root after recovery"
+    );
+
+    assert_explain_uses_index(&reopened, 1, exact_sql, "boxes_b_gist");
+    assert_explain_uses_index(&reopened, 1, knn_sql, "boxes_b_gist");
+    assert_eq!(query_rows(&reopened, 1, exact_sql), expected_exact);
+    assert_eq!(query_rows(&reopened, 1, knn_sql), expected_knn);
+}
+
+#[test]
+fn gist_vacuum_removes_dead_entries_and_replays_after_reopen() {
+    let base = temp_dir("gist_vacuum_recovery");
+    let exact_sql = "select id from boxes where b && '(6,6),(7,7)'::box order by id";
+    let knn_sql = "select id from boxes \
+                   order by b <-> '(5.2,5.2),(5.2,5.2)'::box \
+                   limit 3";
+
+    let (expected_exact, expected_knn, tuples_after_vacuum) = {
+        let db = Database::open(&base, 64).unwrap();
+        let mut session = Session::new(1);
+
+        session
+            .execute(&db, "create table boxes (id int4 not null, b box)")
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "insert into boxes values \
+                 (1, '(0,0),(1,1)'::box), \
+                 (2, '(5,5),(6,6)'::box), \
+                 (3, '(10,10),(12,12)'::box), \
+                 (4, '(7,7),(8,8)'::box)",
+            )
+            .unwrap();
+        session
+            .execute(&db, "create index boxes_b_gist on boxes using gist (b)")
+            .unwrap();
+
+        let index_rel = relation_locator_for(&db, 1, "boxes_b_gist");
+        let tuples_before_delete = gist_leaf_tuple_count(&db, 1, index_rel);
+        assert_eq!(tuples_before_delete, 4);
+
+        session
+            .execute(&db, "delete from boxes where id = 2")
+            .unwrap();
+        assert_eq!(
+            gist_leaf_tuple_count(&db, 1, index_rel),
+            tuples_before_delete
+        );
+
+        session.execute(&db, "vacuum boxes").unwrap();
+
+        let tuples_after_vacuum = gist_leaf_tuple_count(&db, 1, index_rel);
+        assert_eq!(tuples_after_vacuum, 3);
+        assert!(
+            relation_has_dirty_buffered_page(&db, 1, index_rel),
+            "expected GiST vacuum to leave uncheckpointed page images for recovery"
+        );
+
+        assert_explain_uses_index(&db, 1, exact_sql, "boxes_b_gist");
+        assert_explain_uses_index(&db, 1, knn_sql, "boxes_b_gist");
+        let expected_exact = query_rows(&db, 1, exact_sql);
+        let expected_knn = query_rows(&db, 1, knn_sql);
+        assert_eq!(expected_exact, vec![vec![Value::Int32(4)]]);
+        assert_eq!(
+            expected_knn,
+            vec![
+                vec![Value::Int32(4)],
+                vec![Value::Int32(1)],
+                vec![Value::Int32(3)],
+            ]
+        );
+
+        (expected_exact, expected_knn, tuples_after_vacuum)
+    };
+
+    let reopened = Database::open(&base, 64).unwrap();
+    let index_rel = relation_locator_for(&reopened, 1, "boxes_b_gist");
+    assert_eq!(
+        gist_leaf_tuple_count(&reopened, 1, index_rel),
+        tuples_after_vacuum
+    );
+    assert_explain_uses_index(&reopened, 1, exact_sql, "boxes_b_gist");
+    assert_explain_uses_index(&reopened, 1, knn_sql, "boxes_b_gist");
+    assert_eq!(query_rows(&reopened, 1, exact_sql), expected_exact);
+    assert_eq!(query_rows(&reopened, 1, knn_sql), expected_knn);
+}
+
+#[test]
+fn gist_concurrent_split_scans_do_not_miss_committed_rows() {
+    let base = temp_dir("gist_concurrent_splits");
+    let db = Database::open(&base, 128).unwrap();
+    let sql = "select id from boxes where b && '(0,0),(400,400)'::box order by id";
+
+    db.execute(1, "create table boxes (id int4 not null, b box)")
+        .unwrap();
+    db.execute(1, "create index boxes_b_gist on boxes using gist (b)")
+        .unwrap();
+
+    for i in 0..200 {
+        db.execute(
+            1,
+            &format!(
+                "insert into boxes values ({id}, '({low},{low}),({high},{high})'::box)",
+                id = 10_000 + i,
+                low = 1_000 + i,
+                high = 1_001 + i
+            ),
+        )
+        .unwrap();
+    }
+
+    let committed = Arc::new(std::sync::Mutex::new(Vec::<i32>::new()));
+    for i in 0..120 {
+        db.execute(
+            1,
+            &format!(
+                "insert into boxes values ({id}, '({low},{low}),({high},{high})'::box)",
+                id = i,
+                low = i,
+                high = i + 1
+            ),
+        )
+        .unwrap();
+        committed.lock().unwrap().push(i);
+    }
+
+    assert_explain_uses_index(&db, 1, sql, "boxes_b_gist");
+
+    let barrier = Arc::new(std::sync::Barrier::new(4));
+    let mut handles = Vec::new();
+
+    for writer in 0..2 {
+        let db = db.clone();
+        let committed = Arc::clone(&committed);
+        let barrier = Arc::clone(&barrier);
+        handles.push(thread::spawn(move || {
+            barrier.wait();
+            for i in 0..120 {
+                let id = 1_000 + writer * 1_000 + i;
+                let low = 120 + writer * 120 + i;
+                db.execute(
+                    (writer + 2) as ClientId,
+                    &format!(
+                        "insert into boxes values ({id}, '({low},{low}),({high},{high})'::box)",
+                        high = low + 1
+                    ),
+                )
+                .unwrap();
+                committed.lock().unwrap().push(id);
+            }
+        }));
+    }
+
+    for reader in 0..2 {
+        let db = db.clone();
+        let committed = Arc::clone(&committed);
+        let barrier = Arc::clone(&barrier);
+        handles.push(thread::spawn(move || {
+            barrier.wait();
+            for iteration in 0..120 {
+                let expected = {
+                    let snapshot = committed.lock().unwrap().clone();
+                    snapshot
+                        .into_iter()
+                        .collect::<std::collections::BTreeSet<_>>()
+                };
+                let rows = query_rows(&db, (reader + 100) as ClientId, sql);
+                let actual = rows
+                    .iter()
+                    .map(|row| int_value(&row[0]) as i32)
+                    .collect::<std::collections::BTreeSet<_>>();
+                for id in expected {
+                    assert!(
+                        actual.contains(&id),
+                        "reader {reader} iteration {iteration}: missing committed id {id}"
+                    );
+                }
+            }
+        }));
+    }
+
+    join_all_with_timeout(handles, CONTENTION_TEST_TIMEOUT);
+
+    let final_expected = committed
+        .lock()
+        .unwrap()
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    let final_actual = query_rows(&db, 1, sql)
+        .iter()
+        .map(|row| int_value(&row[0]) as i32)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(final_actual, final_expected);
+}
+
+#[test]
+fn create_unique_gist_index_is_rejected() {
+    let base = temp_dir("gist_unique_guard");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table spans (span int4range)")
+        .unwrap();
+
+    match db.execute(
+        1,
+        "create unique index spans_unique_gist on spans using gist (span)",
+    ) {
+        Err(ExecError::Parse(ParseError::FeatureNotSupported(message)))
+            if message == "access method \"gist\" does not support unique indexes" => {}
+        other => panic!("expected unique GiST rejection, got {other:?}"),
     }
 }
 

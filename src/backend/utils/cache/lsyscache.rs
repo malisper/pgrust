@@ -335,9 +335,22 @@ pub fn default_opclass_for_am_and_type(
     am_oid: u32,
     input_type_oid: u32,
 ) -> Option<PgOpclassRow> {
-    opclass_rows_for_am(db, client_id, txn_ctx, am_oid)
-        .into_iter()
+    let rows = opclass_rows_for_am(db, client_id, txn_ctx, am_oid);
+    rows.iter()
         .find(|row| row.opcmethod == am_oid && row.opcdefault && row.opcintype == input_type_oid)
+        .cloned()
+        .or_else(|| {
+            (am_oid == crate::include::catalog::GIST_AM_OID
+                && crate::include::catalog::builtin_range_rows()
+                    .iter()
+                    .any(|row| row.rngtypid == input_type_oid))
+            .then(|| {
+                rows.iter()
+                    .find(|row| row.oid == crate::include::catalog::RANGE_GIST_OPCLASS_OID)
+                    .cloned()
+            })
+            .flatten()
+        })
 }
 
 pub fn opfamily_row_by_oid(

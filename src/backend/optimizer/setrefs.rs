@@ -2744,8 +2744,10 @@ fn set_index_scan_references(
     am_oid: u32,
     toast: Option<crate::include::nodes::primnodes::ToastRelationRef>,
     desc: crate::include::nodes::primnodes::RelationDesc,
+    index_desc: crate::include::nodes::primnodes::RelationDesc,
     index_meta: crate::backend::utils::cache::relcache::IndexRelCacheEntry,
     keys: Vec<crate::include::access::scankey::ScanKeyData>,
+    order_by_keys: Vec<crate::include::access::scankey::ScanKeyData>,
     direction: crate::include::access::relscan::ScanDirection,
 ) -> Plan {
     Plan::IndexScan {
@@ -2757,8 +2759,10 @@ fn set_index_scan_references(
         am_oid,
         toast,
         desc,
+        index_desc,
         index_meta,
         keys,
+        order_by_keys,
         direction,
     }
 }
@@ -3375,8 +3379,10 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             am_oid,
             toast,
             desc,
+            index_desc,
             index_meta,
             keys,
+            order_by_keys,
             direction,
             pathkeys: _,
         } => set_index_scan_references(
@@ -3388,8 +3394,10 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             am_oid,
             toast,
             desc,
+            index_desc,
             index_meta,
             keys,
+            order_by_keys,
             direction,
         ),
         Path::Filter {

@@ -99,8 +99,10 @@ pub enum Plan {
         am_oid: u32,
         toast: Option<ToastRelationRef>,
         desc: RelationDesc,
+        index_desc: RelationDesc,
         index_meta: IndexRelCacheEntry,
         keys: Vec<ScanKeyData>,
+        order_by_keys: Vec<ScanKeyData>,
         direction: ScanDirection,
     },
     Hash {

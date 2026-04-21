@@ -240,7 +240,7 @@ pub(crate) fn physical_catalog_rows_for_catalog_entry(
         relnamespace: entry.namespace_oid,
         reltype: entry.row_type_oid,
         relowner: entry.owner_oid,
-        relam: crate::include::catalog::relam_for_relkind(entry.relkind),
+        relam: entry.am_oid,
         reltablespace: 0,
         relfilenode: entry.rel.rel_number,
         reltoastrelid: entry.reltoastrelid,

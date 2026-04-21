@@ -2,12 +2,13 @@ use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::{
-    BIT_TYPE_OID, BOOL_TYPE_OID, BOOTSTRAP_SUPERUSER_OID, BPCHAR_TYPE_OID, BTREE_AM_OID,
-    BTREE_BIT_FAMILY_OID, BTREE_BOOL_FAMILY_OID, BTREE_BYTEA_FAMILY_OID, BTREE_CHAR_FAMILY_OID,
-    BTREE_DATETIME_FAMILY_OID, BTREE_FLOAT_FAMILY_OID, BTREE_INTEGER_FAMILY_OID,
-    BTREE_NUMERIC_FAMILY_OID, BTREE_OID_FAMILY_OID, BTREE_OIDVECTOR_FAMILY_OID,
-    BTREE_TEXT_FAMILY_OID, BTREE_VARBIT_FAMILY_OID, BYTEA_TYPE_OID, FLOAT4_TYPE_OID,
-    FLOAT8_TYPE_OID, INT2_TYPE_OID, INT4_TYPE_OID, INT8_TYPE_OID, INTERNAL_CHAR_TYPE_OID,
+    BIT_TYPE_OID, BOOL_TYPE_OID, BOOTSTRAP_SUPERUSER_OID, BOX_TYPE_OID, BPCHAR_TYPE_OID,
+    BTREE_AM_OID, BTREE_BIT_FAMILY_OID, BTREE_BOOL_FAMILY_OID, BTREE_BYTEA_FAMILY_OID,
+    BTREE_CHAR_FAMILY_OID, BTREE_DATETIME_FAMILY_OID, BTREE_FLOAT_FAMILY_OID,
+    BTREE_INTEGER_FAMILY_OID, BTREE_NUMERIC_FAMILY_OID, BTREE_OID_FAMILY_OID,
+    BTREE_OIDVECTOR_FAMILY_OID, BTREE_TEXT_FAMILY_OID, BTREE_VARBIT_FAMILY_OID, BYTEA_TYPE_OID,
+    FLOAT4_TYPE_OID, FLOAT8_TYPE_OID, GIST_AM_OID, GIST_BOX_FAMILY_OID, GIST_RANGE_FAMILY_OID,
+    INT2_TYPE_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID, INT8_TYPE_OID, INTERNAL_CHAR_TYPE_OID,
     NAME_TYPE_OID, NUMERIC_TYPE_OID, OID_TYPE_OID, OIDVECTOR_TYPE_OID, PG_CATALOG_NAMESPACE_OID,
     TEXT_TYPE_OID, TIMESTAMP_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_TYPE_OID,
 };
@@ -30,6 +31,14 @@ pub const TIMESTAMP_BTREE_OPCLASS_OID: u32 = 3129;
 pub const BYTEA_BTREE_OPCLASS_OID: u32 = 10003;
 pub const BIT_BTREE_OPCLASS_OID: u32 = 10004;
 pub const VARBIT_BTREE_OPCLASS_OID: u32 = 10005;
+pub const BOX_GIST_OPCLASS_OID: u32 = 76010;
+pub const RANGE_GIST_OPCLASS_OID: u32 = 76011;
+pub const INT4RANGE_GIST_OPCLASS_OID: u32 = RANGE_GIST_OPCLASS_OID;
+pub const INT8RANGE_GIST_OPCLASS_OID: u32 = RANGE_GIST_OPCLASS_OID;
+pub const NUMRANGE_GIST_OPCLASS_OID: u32 = RANGE_GIST_OPCLASS_OID;
+pub const DATERANGE_GIST_OPCLASS_OID: u32 = RANGE_GIST_OPCLASS_OID;
+pub const TSRANGE_GIST_OPCLASS_OID: u32 = RANGE_GIST_OPCLASS_OID;
+pub const TSTZRANGE_GIST_OPCLASS_OID: u32 = RANGE_GIST_OPCLASS_OID;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PgOpclassRow {
@@ -175,6 +184,21 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             BTREE_VARBIT_FAMILY_OID,
             VARBIT_TYPE_OID,
         ),
+        gist_row(
+            BOX_GIST_OPCLASS_OID,
+            "box_ops",
+            GIST_BOX_FAMILY_OID,
+            BOX_TYPE_OID,
+        ),
+        // :HACK: PostgreSQL models this as a single anyrange opclass. pgrust does
+        // not have an anyrange pseudo-type yet, so keep one catalog row and use
+        // the concrete type only as a placeholder for lookup.
+        gist_row(
+            RANGE_GIST_OPCLASS_OID,
+            "range_ops",
+            GIST_RANGE_FAMILY_OID,
+            INT4RANGE_TYPE_OID,
+        ),
     ]
 }
 
@@ -182,6 +206,20 @@ fn row(oid: u32, opcname: &str, family: u32, input_type: u32) -> PgOpclassRow {
     PgOpclassRow {
         oid,
         opcmethod: BTREE_AM_OID,
+        opcname: opcname.into(),
+        opcnamespace: PG_CATALOG_NAMESPACE_OID,
+        opcowner: BOOTSTRAP_SUPERUSER_OID,
+        opcfamily: family,
+        opcintype: input_type,
+        opcdefault: true,
+        opckeytype: 0,
+    }
+}
+
+fn gist_row(oid: u32, opcname: &str, family: u32, input_type: u32) -> PgOpclassRow {
+    PgOpclassRow {
+        oid,
+        opcmethod: GIST_AM_OID,
         opcname: opcname.into(),
         opcnamespace: PG_CATALOG_NAMESPACE_OID,
         opcowner: BOOTSTRAP_SUPERUSER_OID,

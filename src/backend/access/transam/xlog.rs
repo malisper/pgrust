@@ -59,6 +59,7 @@ pub const RM_HEAP_ID: u8 = 0;
 pub const RM_XACT_ID: u8 = 1;
 pub const RM_BTREE_ID: u8 = 2;
 pub const RM_XLOG_ID: u8 = 3;
+pub const RM_GIST_ID: u8 = 4;
 
 pub const REGBUF_STANDARD: u8 = 1 << 0;
 pub const REGBUF_WILL_INIT: u8 = 1 << 1;
@@ -76,6 +77,12 @@ pub const XLOG_BTREE_MARK_PAGE_HALFDEAD: u8 = 0x18;
 pub const XLOG_BTREE_UNLINK_PAGE: u8 = 0x19;
 pub const XLOG_BTREE_UNLINK_PAGE_META: u8 = 0x1a;
 pub const XLOG_BTREE_REUSE_PAGE: u8 = 0x1b;
+pub const XLOG_GIST_PAGE_INIT: u8 = 0x10;
+pub const XLOG_GIST_INSERT: u8 = 0x11;
+pub const XLOG_GIST_SPLIT: u8 = 0x12;
+pub const XLOG_GIST_PAGE_UPDATE: u8 = 0x13;
+pub const XLOG_GIST_SPLIT_COMPLETE: u8 = 0x14;
+pub const XLOG_GIST_VACUUM: u8 = 0x15;
 
 fn align_up(value: u64, align: u64) -> u64 {
     debug_assert!(align.is_power_of_two());
@@ -255,6 +262,12 @@ pub enum WalRecord {
         xid: u32,
         tag: BufferTag,
         page: Box<[u8; PAGE_SIZE]>,
+    },
+    GistPageImage {
+        xid: u32,
+        tag: BufferTag,
+        page: Box<[u8; PAGE_SIZE]>,
+        info: u8,
     },
     HeapInsert {
         xid: u32,
@@ -788,6 +801,29 @@ impl WalReader {
                     xid: decoded.xid,
                     tag: block.tag,
                     page,
+                }
+            }
+            (RM_GIST_ID, XLOG_FPI)
+            | (RM_GIST_ID, XLOG_GIST_PAGE_INIT)
+            | (RM_GIST_ID, XLOG_GIST_INSERT)
+            | (RM_GIST_ID, XLOG_GIST_SPLIT)
+            | (RM_GIST_ID, XLOG_GIST_PAGE_UPDATE)
+            | (RM_GIST_ID, XLOG_GIST_SPLIT_COMPLETE)
+            | (RM_GIST_ID, XLOG_GIST_VACUUM) => {
+                let block = decoded
+                    .blocks
+                    .first()
+                    .ok_or_else(|| WalError::Corrupt("gist record missing block ref".into()))?;
+                let page = block
+                    .image
+                    .as_ref()
+                    .ok_or_else(|| WalError::Corrupt("gist record missing page image".into()))?
+                    .clone();
+                WalRecord::GistPageImage {
+                    xid: decoded.xid,
+                    tag: block.tag,
+                    page,
+                    info: decoded.info,
                 }
             }
             (RM_HEAP_ID, XLOG_HEAP_INSERT) => {
@@ -1491,6 +1527,36 @@ mod tests {
             record.blocks[0].image.as_ref().unwrap()[PAGE_SIZE - 1],
             0xbb
         );
+    }
+
+    #[test]
+    fn gist_page_image_records_roundtrip_through_legacy_reader() {
+        let dir = test_dir("gist_page_image_roundtrip");
+        let wal = WalWriter::new(&dir).unwrap();
+        let mut page = [0u8; PAGE_SIZE];
+        page[32] = 0x5a;
+
+        xlog_begin_insert();
+        xlog_register_buffer(0, test_tag(3), REGBUF_STANDARD | REGBUF_FORCE_IMAGE);
+        xlog_register_buffer_image(0, &page);
+        xlog_insert(&wal, 77, RM_GIST_ID, XLOG_GIST_PAGE_UPDATE).unwrap();
+        wal.flush().unwrap();
+
+        let mut reader = WalReader::open(&dir).unwrap();
+        match reader.next_record().unwrap().unwrap().1 {
+            WalRecord::GistPageImage {
+                xid,
+                tag,
+                page: read_page,
+                info,
+            } => {
+                assert_eq!(xid, 77);
+                assert_eq!(tag, test_tag(3));
+                assert_eq!(info, XLOG_GIST_PAGE_UPDATE);
+                assert_eq!(read_page[32], 0x5a);
+            }
+            other => panic!("expected gist page image, got {other:?}"),
+        }
     }
 
     #[test]

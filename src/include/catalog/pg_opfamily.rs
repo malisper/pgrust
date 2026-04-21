@@ -1,7 +1,9 @@
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlType, SqlTypeKind};
-use crate::include::catalog::{BOOTSTRAP_SUPERUSER_OID, BTREE_AM_OID, PG_CATALOG_NAMESPACE_OID};
+use crate::include::catalog::{
+    BOOTSTRAP_SUPERUSER_OID, BTREE_AM_OID, GIST_AM_OID, PG_CATALOG_NAMESPACE_OID,
+};
 
 pub const BTREE_INTEGER_FAMILY_OID: u32 = 1976;
 pub const BTREE_CHAR_FAMILY_OID: u32 = 429;
@@ -15,6 +17,11 @@ pub const BTREE_BYTEA_FAMILY_OID: u32 = 428;
 pub const BTREE_DATETIME_FAMILY_OID: u32 = 434;
 pub const BTREE_FLOAT_FAMILY_OID: u32 = 1970;
 pub const BTREE_VARBIT_FAMILY_OID: u32 = 2002;
+pub const GIST_POINT_FAMILY_OID: u32 = 1029;
+pub const GIST_BOX_FAMILY_OID: u32 = 2593;
+pub const GIST_POLY_FAMILY_OID: u32 = 2594;
+pub const GIST_CIRCLE_FAMILY_OID: u32 = 2595;
+pub const GIST_RANGE_FAMILY_OID: u32 = 3919;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PgOpfamilyRow {
@@ -120,6 +127,41 @@ pub fn bootstrap_pg_opfamily_rows() -> Vec<PgOpfamilyRow> {
             oid: BTREE_VARBIT_FAMILY_OID,
             opfmethod: BTREE_AM_OID,
             opfname: "varbit_ops".into(),
+            opfnamespace: PG_CATALOG_NAMESPACE_OID,
+            opfowner: BOOTSTRAP_SUPERUSER_OID,
+        },
+        PgOpfamilyRow {
+            oid: GIST_POINT_FAMILY_OID,
+            opfmethod: GIST_AM_OID,
+            opfname: "point_ops".into(),
+            opfnamespace: PG_CATALOG_NAMESPACE_OID,
+            opfowner: BOOTSTRAP_SUPERUSER_OID,
+        },
+        PgOpfamilyRow {
+            oid: GIST_BOX_FAMILY_OID,
+            opfmethod: GIST_AM_OID,
+            opfname: "box_ops".into(),
+            opfnamespace: PG_CATALOG_NAMESPACE_OID,
+            opfowner: BOOTSTRAP_SUPERUSER_OID,
+        },
+        PgOpfamilyRow {
+            oid: GIST_POLY_FAMILY_OID,
+            opfmethod: GIST_AM_OID,
+            opfname: "poly_ops".into(),
+            opfnamespace: PG_CATALOG_NAMESPACE_OID,
+            opfowner: BOOTSTRAP_SUPERUSER_OID,
+        },
+        PgOpfamilyRow {
+            oid: GIST_CIRCLE_FAMILY_OID,
+            opfmethod: GIST_AM_OID,
+            opfname: "circle_ops".into(),
+            opfnamespace: PG_CATALOG_NAMESPACE_OID,
+            opfowner: BOOTSTRAP_SUPERUSER_OID,
+        },
+        PgOpfamilyRow {
+            oid: GIST_RANGE_FAMILY_OID,
+            opfmethod: GIST_AM_OID,
+            opfname: "range_ops".into(),
             opfnamespace: PG_CATALOG_NAMESPACE_OID,
             opfowner: BOOTSTRAP_SUPERUSER_OID,
         },

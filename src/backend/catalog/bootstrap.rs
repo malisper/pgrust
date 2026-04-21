@@ -36,6 +36,7 @@ pub fn bootstrap_catalog_entry(kind: BootstrapCatalogKind) -> CatalogEntry {
         reltoastrelid: 0,
         relpersistence: 'p',
         relkind: 'r',
+        am_oid: crate::include::catalog::relam_for_relkind('r'),
         relhassubclass: false,
         relhastriggers: false,
         relispartition: false,

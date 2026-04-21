@@ -3793,6 +3793,7 @@ fn build_relation_entry(
         reltoastrelid: 0,
         relpersistence,
         relkind,
+        am_oid: crate::include::catalog::relam_for_relkind(relkind),
         relhassubclass: false,
         relhastriggers: false,
         relispartition: false,
@@ -3890,6 +3891,7 @@ fn build_index_entry(
         reltoastrelid: 0,
         relpersistence: table.relpersistence,
         relkind: 'i',
+        am_oid: resolved_options.am_oid,
         relhassubclass: false,
         relhastriggers: false,
         relispartition: false,
@@ -4214,7 +4216,6 @@ fn policy_row_visible(
         .find(|row| row.polname.eq_ignore_ascii_case(policy_name))
         .ok_or_else(|| CatalogError::UnknownTable(policy_name.to_string()))
 }
-
 fn rewrite_row_visible(
     catcache: &CatCache,
     rewrite_oid: u32,
@@ -4357,7 +4358,7 @@ fn class_row_for_relation_name(relation_name: &str, entry: &CatalogEntry) -> PgC
         relnamespace: entry.namespace_oid,
         reltype: entry.row_type_oid,
         relowner: entry.owner_oid,
-        relam: crate::include::catalog::relam_for_relkind(entry.relkind),
+        relam: entry.am_oid,
         reltablespace: 0,
         relfilenode: entry.rel.rel_number,
         reltoastrelid: entry.reltoastrelid,
@@ -4545,6 +4546,7 @@ fn catalog_entry_from_visible_relation(
         reltoastrelid: relation.reltoastrelid,
         relpersistence: relation.relpersistence,
         relkind: relation.relkind,
+        am_oid: class_row.relam,
         relhassubclass: class_row.relhassubclass,
         relhastriggers: relation.relhastriggers,
         relispartition: class_row.relispartition,
