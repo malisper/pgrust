@@ -6,6 +6,17 @@ use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::include::catalog::range_type_ref_for_sql_type;
 use crate::include::nodes::primnodes::expr_sql_type_hint;
 
+fn array_subscript_element_type(array_type: SqlType) -> SqlType {
+    if array_type.is_array {
+        return array_type.element_type();
+    }
+    match array_type.kind {
+        SqlTypeKind::Int2Vector => SqlType::new(SqlTypeKind::Int2),
+        SqlTypeKind::OidVector => SqlType::new(SqlTypeKind::Oid),
+        _ => array_type.element_type(),
+    }
+}
+
 pub(super) fn infer_sql_expr_type(
     expr: &SqlExpr,
     scope: &BoundScope,
@@ -135,10 +146,11 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 grouped_outer,
                 ctes,
             );
+            let element_type = array_subscript_element_type(array_type);
             if subscripts.iter().any(|subscript| subscript.upper.is_some()) {
-                SqlType::array_of(array_type.element_type())
+                SqlType::array_of(element_type)
             } else {
-                array_type.element_type()
+                element_type
             }
         }
         SqlExpr::IntegerLiteral(value) => infer_integer_literal_type(value),

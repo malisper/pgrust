@@ -22,7 +22,8 @@ use crate::backend::catalog::rowcodec::{
     pg_description_row_from_values, pg_foreign_data_wrapper_row_from_values,
     pg_index_row_from_values, pg_inherits_row_from_values, pg_language_row_from_values,
     pg_opclass_row_from_values, pg_operator_row_from_values, pg_opfamily_row_from_values,
-    pg_policy_row_from_values, pg_proc_row_from_values, pg_rewrite_row_from_values,
+    pg_proc_row_from_values, pg_publication_namespace_row_from_values,
+    pg_publication_rel_row_from_values, pg_publication_row_from_values, pg_rewrite_row_from_values,
     pg_statistic_row_from_values, pg_tablespace_row_from_values, pg_trigger_row_from_values,
     pg_ts_config_map_row_from_values, pg_ts_config_row_from_values, pg_ts_dict_row_from_values,
     pg_ts_parser_row_from_values, pg_ts_template_row_from_values, pg_type_row_from_values,
@@ -120,7 +121,9 @@ pub(crate) fn catalog_from_physical_rows_scoped(
     let inherit_rows = rows.inherits;
     let rewrite_rows = rows.rewrites;
     let trigger_rows = rows.triggers;
-    let policy_rows = rows.policies;
+    let publication_rows = rows.publications;
+    let publication_rel_rows = rows.publication_rels;
+    let publication_namespace_rows = rows.publication_namespaces;
     let index_rows = rows.indexes;
     let _description_rows = rows.descriptions;
     let _am_rows = rows.ams;
@@ -257,6 +260,27 @@ pub(crate) fn catalog_from_physical_rows_scoped(
                 .fold(DEFAULT_FIRST_USER_OID, |next_oid, row| {
                     next_oid.max(row.oid.saturating_add(1))
                 }),
+        )
+        .max(
+            publication_rows
+                .iter()
+                .fold(DEFAULT_FIRST_USER_OID, |next_oid, row| {
+                    next_oid.max(row.oid.saturating_add(1))
+                }),
+        )
+        .max(
+            publication_rel_rows
+                .iter()
+                .fold(DEFAULT_FIRST_USER_OID, |next_oid, row| {
+                    next_oid.max(row.oid.saturating_add(1))
+                }),
+        )
+        .max(
+            publication_namespace_rows
+                .iter()
+                .fold(DEFAULT_FIRST_USER_OID, |next_oid, row| {
+                    next_oid.max(row.oid.saturating_add(1))
+                }),
         );
     let mut catalog = Catalog {
         tables: BTreeMap::new(),
@@ -265,7 +289,9 @@ pub(crate) fn catalog_from_physical_rows_scoped(
         inherits: inherit_rows,
         rewrites: Vec::new(),
         triggers: Vec::new(),
-        policies: Vec::new(),
+        publications: publication_rows,
+        publication_rels: publication_rel_rows,
+        publication_namespaces: publication_namespace_rows,
         authids: authid_rows,
         auth_members: auth_members_rows,
         databases: database_rows,
@@ -776,10 +802,22 @@ fn append_catalog_kind_rows(
                 .map(pg_trigger_row_from_values)
                 .collect::<Result<Vec<_>, _>>()?;
         }
-        BootstrapCatalogKind::PgPolicy => {
-            rows.policies = values
+        BootstrapCatalogKind::PgPublication => {
+            rows.publications = values
                 .into_iter()
-                .map(pg_policy_row_from_values)
+                .map(pg_publication_row_from_values)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        BootstrapCatalogKind::PgPublicationRel => {
+            rows.publication_rels = values
+                .into_iter()
+                .map(pg_publication_rel_row_from_values)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        BootstrapCatalogKind::PgPublicationNamespace => {
+            rows.publication_namespaces = values
+                .into_iter()
+                .map(pg_publication_namespace_row_from_values)
                 .collect::<Result<Vec<_>, _>>()?;
         }
         BootstrapCatalogKind::PgStatistic => {
@@ -1409,7 +1447,9 @@ fn load_physical_catalog_rows_legacy(base_dir: &Path) -> Result<PhysicalCatalogR
         indexes: index_rows,
         rewrites: rewrite_rows,
         triggers: Vec::new(),
-        policies: policy_rows,
+        publications: Vec::new(),
+        publication_rels: Vec::new(),
+        publication_namespaces: Vec::new(),
         ams: am_rows,
         amops: amop_rows,
         amprocs: amproc_rows,
@@ -2074,7 +2114,9 @@ fn load_physical_catalog_rows_visible_legacy(
         indexes: index_rows,
         rewrites: rewrite_rows,
         triggers: Vec::new(),
-        policies: policy_rows,
+        publications: Vec::new(),
+        publication_rels: Vec::new(),
+        publication_namespaces: Vec::new(),
         ams: am_rows,
         amops: amop_rows,
         amprocs: amproc_rows,

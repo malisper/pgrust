@@ -4,9 +4,10 @@ use crate::backend::parser::SqlTypeKind;
 use crate::backend::utils::cache::catcache::sql_type_oid;
 use crate::include::catalog::{
     DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, PG_ATTRDEF_RELATION_OID,
-    PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID, PG_FOREIGN_DATA_WRAPPER_RELATION_OID,
-    PG_NAMESPACE_RELATION_OID, PG_PROC_RELATION_OID, PG_REWRITE_RELATION_OID,
-    PG_TRIGGER_RELATION_OID, PG_TYPE_RELATION_OID, PgDependRow,
+    PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID, PG_NAMESPACE_RELATION_OID,
+    PG_PROC_RELATION_OID, PG_PUBLICATION_NAMESPACE_RELATION_OID, PG_PUBLICATION_REL_RELATION_OID,
+    PG_PUBLICATION_RELATION_OID, PG_REWRITE_RELATION_OID, PG_TRIGGER_RELATION_OID,
+    PG_TYPE_RELATION_OID, PgDependRow,
 };
 use std::collections::BTreeSet;
 
@@ -278,6 +279,64 @@ pub fn proc_depend_rows(
                 deptype: DEPENDENCY_NORMAL,
             }),
     );
+    sort_pg_depend_rows(&mut rows);
+    rows
+}
+
+pub fn publication_rel_depend_rows(
+    publication_rel_oid: u32,
+    publication_oid: u32,
+    relation_oid: u32,
+) -> Vec<PgDependRow> {
+    let mut rows = vec![
+        PgDependRow {
+            classid: PG_PUBLICATION_REL_RELATION_OID,
+            objid: publication_rel_oid,
+            objsubid: 0,
+            refclassid: PG_PUBLICATION_RELATION_OID,
+            refobjid: publication_oid,
+            refobjsubid: 0,
+            deptype: DEPENDENCY_AUTO,
+        },
+        PgDependRow {
+            classid: PG_PUBLICATION_REL_RELATION_OID,
+            objid: publication_rel_oid,
+            objsubid: 0,
+            refclassid: PG_CLASS_RELATION_OID,
+            refobjid: relation_oid,
+            refobjsubid: 0,
+            deptype: DEPENDENCY_AUTO,
+        },
+    ];
+    sort_pg_depend_rows(&mut rows);
+    rows
+}
+
+pub fn publication_namespace_depend_rows(
+    publication_namespace_oid: u32,
+    publication_oid: u32,
+    namespace_oid: u32,
+) -> Vec<PgDependRow> {
+    let mut rows = vec![
+        PgDependRow {
+            classid: PG_PUBLICATION_NAMESPACE_RELATION_OID,
+            objid: publication_namespace_oid,
+            objsubid: 0,
+            refclassid: PG_PUBLICATION_RELATION_OID,
+            refobjid: publication_oid,
+            refobjsubid: 0,
+            deptype: DEPENDENCY_AUTO,
+        },
+        PgDependRow {
+            classid: PG_PUBLICATION_NAMESPACE_RELATION_OID,
+            objid: publication_namespace_oid,
+            objsubid: 0,
+            refclassid: PG_NAMESPACE_RELATION_OID,
+            refobjid: namespace_oid,
+            refobjsubid: 0,
+            deptype: DEPENDENCY_AUTO,
+        },
+    ];
     sort_pg_depend_rows(&mut rows);
     rows
 }

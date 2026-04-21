@@ -1,6 +1,7 @@
 use pest::Parser as _;
 use pest::iterators::Pair;
 use pest_derive::Parser;
+use std::collections::BTreeSet;
 
 use super::comments::{
     find_comment_blocked_string_continuation, normalize_position_syntax_preserving_layout,
@@ -57,6 +58,7 @@ fn parse_statement_with_options_inner(
         });
     }
     let sql = normalize_string_continuation_preserving_layout(&sql);
+    let sql = normalize_psql_describe_syntax_preserving_layout(&sql);
     let sql = strip_sql_comments_preserving_layout(&sql);
     validate_unicode_string_literals(&sql, options)?;
     let sql = normalize_position_syntax_preserving_layout(&sql);
@@ -76,6 +78,9 @@ fn parse_statement_with_options_inner(
         return Ok(stmt);
     }
     if let Some(stmt) = try_parse_trigger_statement(&sql)? {
+        return Ok(stmt);
+    }
+    if let Some(stmt) = try_parse_publication_statement(&sql)? {
         return Ok(stmt);
     }
     if let Some(stmt) = try_parse_create_type_statement(&sql)? {
@@ -199,6 +204,577 @@ fn try_parse_trigger_statement(sql: &str) -> Result<Option<Statement>, ParseErro
             .map(|stmt| Some(Statement::CreateTrigger(stmt)));
     }
     Ok(None)
+}
+
+fn try_parse_publication_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if lowered.starts_with("create publication ") {
+        return build_create_publication_statement(trimmed)
+            .map(|stmt| Some(Statement::CreatePublication(stmt)));
+    }
+    if lowered.starts_with("alter publication ") {
+        return build_alter_publication_statement(trimmed)
+            .map(|stmt| Some(Statement::AlterPublication(stmt)));
+    }
+    if lowered.starts_with("drop publication ") {
+        return build_drop_publication_statement(trimmed)
+            .map(|stmt| Some(Statement::DropPublication(stmt)));
+    }
+    if lowered.starts_with("comment on publication ") {
+        return build_comment_on_publication_statement(trimmed)
+            .map(|stmt| Some(Statement::CommentOnPublication(stmt)));
+    }
+    Ok(None)
+}
+
+fn build_create_publication_statement(sql: &str) -> Result<CreatePublicationStatement, ParseError> {
+    let rest = sql
+        .get("create publication".len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let (publication_name, mut rest) = parse_unqualified_identifier(rest, "publication name")?;
+    let mut target = PublicationTargetSpec::default();
+    let mut options = PublicationOptions::default();
+
+    if keyword_at_start(rest, "for") {
+        rest = consume_keyword(rest.trim_start(), "for");
+        let (parsed_target, next) = parse_create_publication_target(rest)?;
+        target = parsed_target;
+        rest = next;
+    }
+    if keyword_at_start(rest, "with") {
+        rest = consume_keyword(rest.trim_start(), "with");
+        let (parsed_options, next) = parse_publication_options_clause(rest)?;
+        options = parsed_options;
+        rest = next;
+    }
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of CREATE PUBLICATION",
+            actual: rest.trim().into(),
+        });
+    }
+    reject_unsupported_publication_features(&target)?;
+    Ok(CreatePublicationStatement {
+        publication_name,
+        target,
+        options,
+    })
+}
+
+fn build_alter_publication_statement(sql: &str) -> Result<AlterPublicationStatement, ParseError> {
+    let rest = sql
+        .get("alter publication".len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let (publication_name, rest) = parse_unqualified_identifier(rest, "publication name")?;
+    let rest = rest.trim_start();
+
+    let (action, rest) = if keyword_at_start(rest, "rename") {
+        let mut rest = consume_keyword(rest, "rename").trim_start();
+        if !keyword_at_start(rest, "to") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "RENAME TO new_name",
+                actual: rest.into(),
+            });
+        }
+        rest = consume_keyword(rest, "to").trim_start();
+        let (new_name, rest) = parse_unqualified_identifier(rest, "publication name")?;
+        (AlterPublicationAction::Rename { new_name }, rest)
+    } else if keyword_at_start(rest, "owner") {
+        let mut rest = consume_keyword(rest, "owner").trim_start();
+        if !keyword_at_start(rest, "to") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "OWNER TO new_owner",
+                actual: rest.into(),
+            });
+        }
+        rest = consume_keyword(rest, "to").trim_start();
+        let (new_owner, rest) = parse_unqualified_identifier(rest, "role name")?;
+        (AlterPublicationAction::OwnerTo { new_owner }, rest)
+    } else if keyword_at_start(rest, "set") {
+        let rest = consume_keyword(rest, "set").trim_start();
+        if rest.starts_with('(') {
+            let (options, rest) = parse_publication_options_clause(rest)?;
+            (AlterPublicationAction::SetOptions(options), rest)
+        } else {
+            let (target, rest) = parse_publication_target_spec(rest)?;
+            reject_unsupported_publication_features(&target)?;
+            (AlterPublicationAction::SetObjects(target), rest)
+        }
+    } else if keyword_at_start(rest, "add") {
+        let rest = consume_keyword(rest, "add").trim_start();
+        let (target, rest) = parse_publication_target_spec(rest)?;
+        reject_unsupported_publication_features(&target)?;
+        (AlterPublicationAction::AddObjects(target), rest)
+    } else if keyword_at_start(rest, "drop") {
+        let rest = consume_keyword(rest, "drop").trim_start();
+        let (target, rest) = parse_publication_target_spec(rest)?;
+        reject_unsupported_publication_features(&target)?;
+        (AlterPublicationAction::DropObjects(target), rest)
+    } else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "ALTER PUBLICATION action",
+            actual: rest.into(),
+        });
+    };
+
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of ALTER PUBLICATION",
+            actual: rest.trim().into(),
+        });
+    }
+
+    Ok(AlterPublicationStatement {
+        publication_name,
+        action,
+    })
+}
+
+fn build_drop_publication_statement(sql: &str) -> Result<DropPublicationStatement, ParseError> {
+    let mut rest = sql
+        .get("drop publication".len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let mut if_exists = false;
+    if let Some(next) = consume_keywords(rest, &["if", "exists"]) {
+        if_exists = true;
+        rest = next;
+    }
+    let mut cascade = false;
+    if let Some(idx) = find_next_top_level_keyword(rest, &["cascade", "restrict"]) {
+        let suffix = rest[idx..].trim_start();
+        cascade = keyword_at_start(suffix, "cascade");
+        rest = rest[..idx].trim_end();
+    }
+    let publication_names = split_top_level_items(rest, ',')?
+        .into_iter()
+        .map(|item| {
+            let (name, trailing) = parse_unqualified_identifier(&item, "publication name")?;
+            if !trailing.trim().is_empty() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "publication name",
+                    actual: item,
+                });
+            }
+            Ok(name)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if publication_names.is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "publication name",
+            actual: sql.into(),
+        });
+    }
+    Ok(DropPublicationStatement {
+        if_exists,
+        publication_names,
+        cascade,
+    })
+}
+
+fn build_comment_on_publication_statement(
+    sql: &str,
+) -> Result<CommentOnPublicationStatement, ParseError> {
+    let rest = sql
+        .get("comment on publication".len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let (publication_name, mut rest) = parse_unqualified_identifier(rest, "publication name")?;
+    rest = rest.trim_start();
+    if !keyword_at_start(rest, "is") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "IS string literal or NULL",
+            actual: rest.into(),
+        });
+    }
+    rest = consume_keyword(rest, "is").trim_start();
+    let (comment, rest) = if keyword_at_start(rest, "null") {
+        (None, consume_keyword(rest, "null"))
+    } else {
+        let token_len = scan_string_literal_token_len(rest).ok_or(ParseError::UnexpectedToken {
+            expected: "comment string literal or NULL",
+            actual: rest.into(),
+        })?;
+        (
+            Some(decode_string_literal(&rest[..token_len])?),
+            &rest[token_len..],
+        )
+    };
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of COMMENT ON PUBLICATION",
+            actual: rest.trim().into(),
+        });
+    }
+    Ok(CommentOnPublicationStatement {
+        publication_name,
+        comment,
+    })
+}
+
+fn parse_create_publication_target(
+    input: &str,
+) -> Result<(PublicationTargetSpec, &str), ParseError> {
+    if let Some(rest) = consume_keywords(input, &["all", "tables"]) {
+        return Ok((
+            PublicationTargetSpec {
+                for_all_tables: true,
+                objects: Vec::new(),
+            },
+            rest,
+        ));
+    }
+    parse_publication_target_spec(input)
+}
+
+fn parse_publication_target_spec(input: &str) -> Result<(PublicationTargetSpec, &str), ParseError> {
+    enum PublicationObjectMode {
+        Table,
+        Schema,
+    }
+
+    let mut rest = input.trim_start();
+    let mut mode = if let Some(next) = consume_keywords(rest, &["table"]) {
+        rest = next;
+        PublicationObjectMode::Table
+    } else if let Some(next) = consume_keywords(rest, &["tables", "in", "schema"]) {
+        rest = next;
+        PublicationObjectMode::Schema
+    } else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "TABLE ... or TABLES IN SCHEMA ...",
+            actual: rest.into(),
+        });
+    };
+
+    let mut objects = Vec::new();
+    loop {
+        let (object, next) = match mode {
+            PublicationObjectMode::Table => {
+                let (table, next) = parse_publication_table_object(rest)?;
+                (PublicationObjectSpec::Table(table), next)
+            }
+            PublicationObjectMode::Schema => {
+                let (schema, next) = parse_publication_schema_object(rest)?;
+                (PublicationObjectSpec::Schema(schema), next)
+            }
+        };
+        objects.push(object);
+        rest = next.trim_start();
+        let Some(after_comma) = rest.strip_prefix(',') else {
+            break;
+        };
+        rest = after_comma.trim_start();
+        if let Some(next) = consume_keywords(rest, &["table"]) {
+            rest = next;
+            mode = PublicationObjectMode::Table;
+            continue;
+        }
+        if let Some(next) = consume_keywords(rest, &["tables", "in", "schema"]) {
+            rest = next;
+            mode = PublicationObjectMode::Schema;
+            continue;
+        }
+    }
+
+    Ok((
+        PublicationTargetSpec {
+            for_all_tables: false,
+            objects,
+        },
+        rest,
+    ))
+}
+
+fn parse_publication_table_object(input: &str) -> Result<(PublicationTableSpec, &str), ParseError> {
+    let mut rest = input.trim_start();
+    let mut only = false;
+    if keyword_at_start(rest, "only") {
+        only = true;
+        rest = consume_keyword(rest, "only").trim_start();
+    }
+    if keyword_at_start(rest, "current_schema") {
+        return Err(ParseError::InvalidPublicationTableName(
+            "current_schema".into(),
+        ));
+    }
+    let (parts, mut rest) = parse_qualified_identifier_parts(rest)?;
+    let relation_name = match parts.as_slice() {
+        [name] => name.clone(),
+        [schema, name] => format!("{schema}.{name}"),
+        _ => return Err(ParseError::UnsupportedQualifiedName(parts.join("."))),
+    };
+
+    let mut column_names = Vec::new();
+    let mut where_clause = None;
+    if rest.trim_start().starts_with('(') {
+        let (segment, next) = take_parenthesized_segment(rest)?;
+        column_names = parse_publication_identifier_list(&segment)?;
+        rest = next;
+    }
+    if keyword_at_start(rest, "where") {
+        let after_where = consume_keyword(rest.trim_start(), "where").trim_start();
+        let (segment, next) = take_parenthesized_segment(after_where)?;
+        where_clause = Some(segment.trim().to_string());
+        rest = next;
+    }
+
+    Ok((
+        PublicationTableSpec {
+            relation_name,
+            only,
+            column_names,
+            where_clause,
+        },
+        rest,
+    ))
+}
+
+fn parse_publication_schema_object(
+    input: &str,
+) -> Result<(PublicationSchemaSpec, &str), ParseError> {
+    let rest = input.trim_start();
+    let (schema_name, rest) = if keyword_at_start(rest, "current_schema") {
+        (
+            PublicationSchemaName::CurrentSchema,
+            consume_keyword(rest, "current_schema"),
+        )
+    } else {
+        let (parts, rest) = parse_qualified_identifier_parts(rest)?;
+        match parts.as_slice() {
+            [name] => (PublicationSchemaName::Name(name.clone()), rest),
+            _ => {
+                return Err(ParseError::InvalidPublicationSchemaName(parts.join(".")));
+            }
+        }
+    };
+    let trailing = rest.trim_start();
+    if trailing.starts_with('(') {
+        let _ = take_parenthesized_segment(trailing)?;
+        return Err(ParseError::FeatureNotSupported(
+            "publication column lists".into(),
+        ));
+    }
+    if keyword_at_start(trailing, "where") {
+        let after_where = consume_keyword(trailing, "where").trim_start();
+        let _ = take_parenthesized_segment(after_where)?;
+        return Err(ParseError::FeatureNotSupported(
+            "publication row filters".into(),
+        ));
+    }
+    Ok((PublicationSchemaSpec { schema_name }, rest))
+}
+
+fn parse_publication_options_clause(input: &str) -> Result<(PublicationOptions, &str), ParseError> {
+    let (segment, rest) = take_parenthesized_segment(input)?;
+    let mut options = Vec::new();
+    let mut seen = BTreeSet::new();
+    for item in split_top_level_items(&segment, ',')? {
+        if item.trim().is_empty() {
+            continue;
+        }
+        let (name, trailing) = parse_sql_identifier(&item)?;
+        let normalized_name = name.to_ascii_lowercase();
+        if !seen.insert(normalized_name.clone()) {
+            return Err(ParseError::ConflictingOrRedundantOptions {
+                option: normalized_name,
+            });
+        }
+        let trailing = trailing.trim_start();
+        let value = trailing
+            .strip_prefix('=')
+            .map(str::trim_start)
+            .unwrap_or_default();
+        let option = match normalized_name.as_str() {
+            "publish" => {
+                let (actions, trailing) = parse_publication_publish_actions(value)?;
+                if !trailing.trim().is_empty() {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "publish action list",
+                        actual: trailing.trim().into(),
+                    });
+                }
+                PublicationOption::Publish(actions)
+            }
+            "publish_via_partition_root" => {
+                let (value, trailing) = parse_publication_bool_value(value)?;
+                if !trailing.trim().is_empty() {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "boolean publication option value",
+                        actual: trailing.trim().into(),
+                    });
+                }
+                PublicationOption::PublishViaPartitionRoot(value)
+            }
+            "publish_generated_columns" => {
+                let (value, trailing) = parse_publication_generated_columns_value(value)?;
+                if !trailing.trim().is_empty() {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "publish_generated_columns value",
+                        actual: trailing.trim().into(),
+                    });
+                }
+                PublicationOption::PublishGeneratedColumns(value)
+            }
+            _ => return Err(ParseError::UnrecognizedPublicationParameter(name)),
+        };
+        options.push(option);
+    }
+    Ok((PublicationOptions { options }, rest))
+}
+
+fn parse_publication_publish_actions(
+    input: &str,
+) -> Result<(PublicationPublishActions, &str), ParseError> {
+    let (text, rest) = parse_publication_option_text_value(input)?;
+    let mut actions = PublicationPublishActions {
+        insert: false,
+        update: false,
+        delete: false,
+        truncate: false,
+    };
+    for item in text
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+    {
+        match item.to_ascii_lowercase().as_str() {
+            "insert" => actions.insert = true,
+            "update" => actions.update = true,
+            "delete" => actions.delete = true,
+            "truncate" => actions.truncate = true,
+            other => {
+                return Err(ParseError::UnrecognizedPublicationOptionValue {
+                    option: "publish".into(),
+                    value: other.into(),
+                });
+            }
+        }
+    }
+    Ok((actions, rest))
+}
+
+fn parse_publication_generated_columns_value(
+    input: &str,
+) -> Result<(PublishGeneratedColumns, &str), ParseError> {
+    let (value, rest) = parse_publication_option_text_value(input)?;
+    let value = match value.to_ascii_lowercase().as_str() {
+        "none" => PublishGeneratedColumns::None,
+        "stored" => PublishGeneratedColumns::Stored,
+        _ => {
+            return Err(ParseError::InvalidPublicationParameterValue {
+                parameter: "publish_generated_columns".into(),
+                value,
+            });
+        }
+    };
+    Ok((value, rest))
+}
+
+fn parse_publication_option_text_value(input: &str) -> Result<(String, &str), ParseError> {
+    let input = input.trim_start();
+    if input.is_empty() {
+        return Ok((String::new(), input));
+    }
+    if let Some(token_len) = scan_string_literal_token_len(input) {
+        return Ok((
+            decode_string_literal(&input[..token_len])?,
+            &input[token_len..],
+        ));
+    }
+    let (value, rest) = parse_sql_identifier(input)?;
+    Ok((value, rest))
+}
+
+fn parse_publication_bool_value(input: &str) -> Result<(bool, &str), ParseError> {
+    let input = input.trim_start();
+    if let Some(token_len) = scan_string_literal_token_len(input) {
+        let value = decode_string_literal(&input[..token_len])?;
+        let parsed = match value.to_ascii_lowercase().as_str() {
+            "true" | "on" | "yes" | "1" => true,
+            "false" | "off" | "no" | "0" => false,
+            _ => {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "boolean option value",
+                    actual: value,
+                });
+            }
+        };
+        return Ok((parsed, &input[token_len..]));
+    }
+    if let Some(rest) = input.strip_prefix('1') {
+        if rest
+            .chars()
+            .next()
+            .is_none_or(|ch| !(ch.is_ascii_alphanumeric() || ch == '_'))
+        {
+            return Ok((true, rest));
+        }
+    }
+    if let Some(rest) = input.strip_prefix('0') {
+        if rest
+            .chars()
+            .next()
+            .is_none_or(|ch| !(ch.is_ascii_alphanumeric() || ch == '_'))
+        {
+            return Ok((false, rest));
+        }
+    }
+    let (value, rest) = parse_sql_identifier(input)?;
+    let parsed = match value.as_str() {
+        "true" | "on" | "yes" => true,
+        "false" | "off" | "no" => false,
+        _ => {
+            return Err(ParseError::UnexpectedToken {
+                expected: "boolean option value",
+                actual: value,
+            });
+        }
+    };
+    Ok((parsed, rest))
+}
+
+fn parse_publication_identifier_list(input: &str) -> Result<Vec<String>, ParseError> {
+    split_top_level_items(input, ',')?
+        .into_iter()
+        .map(|item| {
+            let (name, rest) = parse_unqualified_identifier(&item, "identifier")?;
+            if !rest.trim().is_empty() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "identifier",
+                    actual: item,
+                });
+            }
+            Ok(name)
+        })
+        .collect()
+}
+
+fn reject_unsupported_publication_features(
+    target: &PublicationTargetSpec,
+) -> Result<(), ParseError> {
+    for object in &target.objects {
+        let PublicationObjectSpec::Table(table) = object else {
+            continue;
+        };
+        if table.only {
+            return Err(ParseError::FeatureNotSupported("publication ONLY".into()));
+        }
+        if !table.column_names.is_empty() {
+            return Err(ParseError::FeatureNotSupported(
+                "publication column lists".into(),
+            ));
+        }
+        if table.where_clause.is_some() {
+            return Err(ParseError::FeatureNotSupported(
+                "publication row filters".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn build_create_tablespace_statement(sql: &str) -> Result<CreateTablespaceStatement, ParseError> {
@@ -1242,6 +1818,20 @@ fn parse_schema_qualified_name(
         [name] => Ok(((None, name.clone()), rest)),
         [schema, name] => Ok(((Some(schema.clone()), name.clone()), rest)),
         _ => Err(ParseError::UnsupportedQualifiedName(parts.join("."))),
+    }
+}
+
+fn parse_unqualified_identifier<'a>(
+    input: &'a str,
+    expected: &'static str,
+) -> Result<(String, &'a str), ParseError> {
+    let (parts, rest) = parse_qualified_identifier_parts(input)?;
+    match parts.as_slice() {
+        [name] => Ok((name.clone(), rest)),
+        _ => Err(ParseError::UnexpectedToken {
+            expected,
+            actual: parts.join("."),
+        }),
     }
 }
 
@@ -3282,6 +3872,17 @@ fn keyword_at_start(input: &str, keyword: &str) -> bool {
     keyword_at_boundary(input.trim_start(), 0, keyword)
 }
 
+fn consume_keywords<'a>(input: &'a str, keywords: &[&str]) -> Option<&'a str> {
+    let mut rest = input.trim_start();
+    for keyword in keywords {
+        if !keyword_at_start(rest, keyword) {
+            return None;
+        }
+        rest = consume_keyword(rest, keyword).trim_start();
+    }
+    Some(rest)
+}
+
 fn keyword_at_boundary(input: &str, start: usize, keyword: &str) -> bool {
     let end = start.saturating_add(keyword.len());
     input
@@ -4084,20 +4685,21 @@ fn build_set_session_authorization(
         .into_inner()
         .find_map(|part| match part.as_rule() {
             Rule::identifier => Some(Ok(build_identifier(part))),
-            Rule::set_session_authorization_target => {
-                let inner = part.into_inner().next().ok_or(ParseError::UnexpectedEof);
-                Some(inner.and_then(|inner| match inner.as_rule() {
-                    Rule::identifier => Ok(build_identifier(inner)),
+            Rule::quoted_string_literal => Some(decode_string_literal_pair(part)),
+            Rule::session_authorization_target => {
+                let target = part.into_inner().next()?;
+                Some(match target.as_rule() {
+                    Rule::identifier => Ok(build_identifier(target)),
                     Rule::quoted_string_literal
                     | Rule::string_literal
-                    | Rule::unicode_string_literal
                     | Rule::escape_string_literal
-                    | Rule::dollar_string_literal => decode_string_literal_pair(inner),
+                    | Rule::unicode_string_literal
+                    | Rule::dollar_string_literal => decode_string_literal_pair(target),
                     _ => Err(ParseError::UnexpectedToken {
-                        expected: "role name",
-                        actual: inner.as_str().into(),
+                        expected: "session authorization role name",
+                        actual: format!("{:?}", target.as_rule()),
                     }),
-                }))
+                })
             }
             _ => None,
         })
@@ -9988,6 +10590,285 @@ fn decode_unicode_quoted_identifier(raw: &str) -> Result<String, ParseError> {
         })?
         .replace("\"\"", "\"");
     decode_unicode_escapes(&text, escape_char)
+}
+
+// :HACK: psql describe queries still rely on explicit OPERATOR(pg_catalog....)
+// and COLLATE pg_catalog.default syntax that the grammar does not parse
+// natively yet. Keep the shim narrow, but make it lexical-state-aware so it
+// never rewrites inside strings, identifiers, or comments.
+fn normalize_psql_describe_syntax_preserving_layout(sql: &str) -> String {
+    let bytes = sql.as_bytes();
+    let mut out = bytes.to_vec();
+    let mut i = 0usize;
+    let mut block_depth = 0usize;
+    let mut dollar_tag: Option<Vec<u8>> = None;
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum State {
+        Normal,
+        LineComment,
+        BlockComment,
+        DollarString,
+    }
+
+    let mut state = State::Normal;
+
+    while i < bytes.len() {
+        match state {
+            State::Normal => {
+                if starts_line_comment(bytes, i) {
+                    i += 2;
+                    state = State::LineComment;
+                } else if starts_block_comment(bytes, i) {
+                    i += 2;
+                    block_depth = 1;
+                    state = State::BlockComment;
+                } else if starts_escape_string_token(bytes, i) {
+                    i = parse_delimited_token_end(bytes, i + 1, b'\'');
+                } else if starts_unicode_string_token(bytes, i) {
+                    i = parse_delimited_token_end(bytes, i + 2, b'\'');
+                } else if starts_unicode_identifier_token(bytes, i) {
+                    i = parse_delimited_token_end(bytes, i + 2, b'"');
+                } else if bytes[i] == b'\'' {
+                    i = parse_delimited_token_end(bytes, i, b'\'');
+                } else if bytes[i] == b'"' {
+                    i = parse_delimited_token_end(bytes, i, b'"');
+                } else if let Some((tag, len)) = parse_dollar_tag(bytes, i) {
+                    i += len;
+                    dollar_tag = Some(tag);
+                    state = State::DollarString;
+                } else if let Some(end) =
+                    rewrite_pg_operator_invocation_preserving_layout(bytes, &mut out, i)
+                {
+                    i = end;
+                } else if let Some(end) =
+                    strip_default_collation_clause_preserving_layout(bytes, &mut out, i)
+                {
+                    i = end;
+                } else {
+                    i += sql[i..].chars().next().expect("valid utf-8").len_utf8();
+                }
+            }
+            State::LineComment => {
+                if matches!(bytes[i], b'\n' | b'\r') {
+                    i += 1;
+                    state = State::Normal;
+                } else {
+                    i += 1;
+                }
+            }
+            State::BlockComment => {
+                if starts_block_comment(bytes, i) {
+                    block_depth += 1;
+                    i += 2;
+                } else if ends_block_comment(bytes, i) {
+                    block_depth -= 1;
+                    i += 2;
+                    if block_depth == 0 {
+                        state = State::Normal;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            State::DollarString => {
+                if let Some(tag) = dollar_tag.as_ref() {
+                    if matches_dollar_end(bytes, i, tag) {
+                        i += tag.len() + 2;
+                        dollar_tag = None;
+                        state = State::Normal;
+                    } else {
+                        i += sql[i..].chars().next().expect("valid utf-8").len_utf8();
+                    }
+                } else {
+                    state = State::Normal;
+                }
+            }
+        }
+    }
+
+    String::from_utf8(out).expect("SQL normalization preserves UTF-8")
+}
+
+fn rewrite_pg_operator_invocation_preserving_layout(
+    bytes: &[u8],
+    out: &mut [u8],
+    start: usize,
+) -> Option<usize> {
+    let prefix = b"operator(pg_catalog.";
+    if !matches_ascii_insensitive(bytes, start, prefix)
+        || !has_identifier_boundary_before(bytes, start)
+    {
+        return None;
+    }
+    let operator_start = start + prefix.len();
+    let mut close = operator_start;
+    while close < bytes.len() && bytes[close] != b')' {
+        close += 1;
+    }
+    if close >= bytes.len() {
+        return None;
+    }
+    let operator = std::str::from_utf8(&bytes[operator_start..close]).ok()?;
+    if !is_simple_operator_token(operator) {
+        return None;
+    }
+    out[start..=close].fill(b' ');
+    out[start..start + operator.len()].copy_from_slice(operator.as_bytes());
+    Some(close + 1)
+}
+
+fn strip_default_collation_clause_preserving_layout(
+    bytes: &[u8],
+    out: &mut [u8],
+    start: usize,
+) -> Option<usize> {
+    let pattern = b"collate pg_catalog.default";
+    let end = start + pattern.len();
+    if !matches_ascii_insensitive(bytes, start, pattern)
+        || !has_identifier_boundary_before(bytes, start)
+        || !has_identifier_boundary_after(bytes, end)
+    {
+        return None;
+    }
+    out[start..end].fill(b' ');
+    Some(end)
+}
+
+fn matches_ascii_insensitive(bytes: &[u8], start: usize, pattern: &[u8]) -> bool {
+    start + pattern.len() <= bytes.len()
+        && bytes[start..start + pattern.len()].eq_ignore_ascii_case(pattern)
+}
+
+fn has_identifier_boundary_before(bytes: &[u8], start: usize) -> bool {
+    start == 0 || !is_identifier_continuation(bytes[start - 1] as char)
+}
+
+fn has_identifier_boundary_after(bytes: &[u8], end: usize) -> bool {
+    end >= bytes.len() || !is_identifier_continuation(bytes[end] as char)
+}
+
+fn starts_escape_string_token(bytes: &[u8], i: usize) -> bool {
+    i + 1 < bytes.len() && matches!(bytes[i], b'e' | b'E') && bytes[i + 1] == b'\''
+}
+
+fn starts_unicode_identifier_token(bytes: &[u8], i: usize) -> bool {
+    i + 2 < bytes.len()
+        && matches!(bytes[i], b'u' | b'U')
+        && bytes[i + 1] == b'&'
+        && bytes[i + 2] == b'"'
+}
+
+fn starts_line_comment(bytes: &[u8], i: usize) -> bool {
+    i + 1 < bytes.len() && bytes[i] == b'-' && bytes[i + 1] == b'-'
+}
+
+fn starts_block_comment(bytes: &[u8], i: usize) -> bool {
+    i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*'
+}
+
+fn ends_block_comment(bytes: &[u8], i: usize) -> bool {
+    i + 1 < bytes.len() && bytes[i] == b'*' && bytes[i + 1] == b'/'
+}
+
+fn parse_dollar_tag(bytes: &[u8], start: usize) -> Option<(Vec<u8>, usize)> {
+    if bytes.get(start) != Some(&b'$') {
+        return None;
+    }
+    let mut end = start + 1;
+    while end < bytes.len() && bytes[end] != b'$' {
+        let byte = bytes[end];
+        if !(byte.is_ascii_alphanumeric() || byte == b'_') {
+            return None;
+        }
+        end += 1;
+    }
+    if end >= bytes.len() || bytes[end] != b'$' {
+        return None;
+    }
+    Some((bytes[start + 1..end].to_vec(), end - start + 1))
+}
+
+fn matches_dollar_end(bytes: &[u8], start: usize, tag: &[u8]) -> bool {
+    if bytes.get(start) != Some(&b'$') {
+        return false;
+    }
+    let end = start + tag.len() + 1;
+    end < bytes.len() && &bytes[start + 1..end] == tag && bytes[end] == b'$'
+}
+
+fn is_simple_operator_token(token: &str) -> bool {
+    !token.is_empty()
+        && token.bytes().all(|byte| {
+            matches!(
+                byte,
+                b'!' | b'#'
+                    | b'%'
+                    | b'&'
+                    | b'*'
+                    | b'+'
+                    | b'-'
+                    | b'/'
+                    | b'<'
+                    | b'='
+                    | b'>'
+                    | b'?'
+                    | b'@'
+                    | b'^'
+                    | b'|'
+                    | b'~'
+            )
+        })
+}
+
+#[cfg(test)]
+mod sql_normalization_tests {
+    use super::normalize_psql_describe_syntax_preserving_layout;
+
+    #[test]
+    fn psql_describe_normalization_rewrites_exact_operator_and_collation_clause() {
+        let sql = "SELECT oid \
+             FROM pg_catalog.pg_publication \
+             WHERE pubname OPERATOR(pg_catalog.~) '^(pub)$' COLLATE pg_catalog.default \
+             ORDER BY 1";
+        let normalized = normalize_psql_describe_syntax_preserving_layout(sql);
+        assert_eq!(normalized.len(), sql.len());
+        assert!(
+            !normalized
+                .to_ascii_lowercase()
+                .contains("operator(pg_catalog.~)")
+        );
+        assert!(
+            !normalized
+                .to_ascii_lowercase()
+                .contains("collate pg_catalog.default")
+        );
+        assert!(normalized.contains("pubname ~"));
+    }
+
+    #[test]
+    fn psql_describe_normalization_skips_single_and_escape_strings() {
+        let sql = "SELECT 'OPERATOR(pg_catalog.~)', E'COLLATE pg_catalog.default'";
+        assert_eq!(normalize_psql_describe_syntax_preserving_layout(sql), sql);
+    }
+
+    #[test]
+    fn psql_describe_normalization_skips_unicode_and_dollar_strings() {
+        let sql = "SELECT U&'OPERATOR(pg_catalog.~)' UESCAPE '!', $$COLLATE pg_catalog.default$$";
+        assert_eq!(normalize_psql_describe_syntax_preserving_layout(sql), sql);
+    }
+
+    #[test]
+    fn psql_describe_normalization_skips_quoted_identifiers() {
+        let sql = "SELECT 1 AS \"OPERATOR(pg_catalog.~)\", 2 AS U&\"COLLATE pg_catalog.default\"";
+        assert_eq!(normalize_psql_describe_syntax_preserving_layout(sql), sql);
+    }
+
+    #[test]
+    fn psql_describe_normalization_skips_comments() {
+        let sql = "SELECT 1 -- OPERATOR(pg_catalog.~) COLLATE pg_catalog.default\nFROM pg_catalog.pg_class";
+        assert_eq!(normalize_psql_describe_syntax_preserving_layout(sql), sql);
+    }
 }
 
 fn decode_unicode_string_literal(raw: &str) -> Result<String, ParseError> {

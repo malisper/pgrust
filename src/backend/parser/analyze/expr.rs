@@ -47,6 +47,14 @@ use super::ranges::{
     bind_maybe_range_over_position, bind_maybe_range_shift,
 };
 
+fn supports_array_subscripts(array_type: SqlType) -> bool {
+    array_type.is_array
+        || matches!(
+            array_type.kind,
+            SqlTypeKind::Int2Vector | SqlTypeKind::OidVector
+        )
+}
+
 #[allow(dead_code)]
 pub(crate) fn bind_expr(expr: &SqlExpr, scope: &BoundScope) -> Result<Expr, ParseError> {
     bind_expr_with_outer(expr, scope, &Catalog::default(), &[], None)
@@ -1598,7 +1606,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     actual: "point".into(),
                 });
             }
-            if !array_type.is_array {
+            if !supports_array_subscripts(array_type) {
                 return Err(ParseError::UnexpectedToken {
                     expected: "array expression",
                     actual: sql_type_name(array_type).into(),

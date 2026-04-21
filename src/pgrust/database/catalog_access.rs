@@ -60,7 +60,7 @@ impl Database {
     ) -> Option<crate::include::catalog::PgNamespaceRow> {
         self.backend_catcache(client_id, txn_ctx)
             .ok()?
-            .namespace_by_name(schema_name)
+            .namespace_by_name_exact(schema_name)
             .cloned()
             .filter(|row| !self.other_session_temp_namespace_oid(client_id, row.oid))
     }

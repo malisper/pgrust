@@ -538,6 +538,29 @@ pub(super) fn eval_array_length_function(values: &[Value]) -> Result<Value, Exec
     }
 }
 
+pub(super) fn eval_array_upper_function(values: &[Value]) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
+        [array, dim] => {
+            let Some(array) = normalize_array_value(array) else {
+                return Ok(Value::Null);
+            };
+            let dim = array_subscript_index(Some(dim))?.unwrap_or(0);
+            if dim < 1 {
+                return Ok(Value::Null);
+            }
+            Ok(array
+                .upper_bound((dim - 1) as usize)
+                .map(Value::Int32)
+                .unwrap_or(Value::Null))
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "array_upper(array, dimension)",
+            actual: format!("ArrayUpper({} args)", values.len()),
+        })),
+    }
+}
+
 pub(super) fn eval_cardinality_function(values: &[Value]) -> Result<Value, ExecError> {
     match values {
         [Value::Null] => Ok(Value::Null),
