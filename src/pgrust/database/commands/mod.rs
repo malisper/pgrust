@@ -7,6 +7,7 @@ mod alter_column_type;
 mod constraint;
 mod conversion;
 mod create;
+mod create_statistics;
 mod database_cmds;
 mod drop;
 mod drop_column;
