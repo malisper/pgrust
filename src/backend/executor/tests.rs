@@ -2940,6 +2940,28 @@ fn sum_avg_min_max_aggregates() {
 }
 
 #[test]
+fn any_value_over_values_skips_null_type_bias() {
+    let base = temp_dir("any_value_values_null");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select any_value(v) from (values (null), (1), (2)) as v(v)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(column_names, vec!["any_value"]);
+            assert_eq!(rows, vec![vec![Value::Int32(1)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn string_agg_skips_null_values() {
     let base = temp_dir("string_agg_text");
     let mut txns = TransactionManager::new_durable(&base).unwrap();
