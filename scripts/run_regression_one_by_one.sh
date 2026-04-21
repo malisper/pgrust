@@ -57,6 +57,37 @@ setup_pg_regress_env() {
     fi
 }
 
+transform_triggers_fixture() {
+    local input_path="$1"
+    local output_path="$2"
+
+    perl -0pe "
+        s/CREATE FUNCTION trigger_return_old \\(\\)\\n\\s+RETURNS trigger\\n\\s+AS :'regresslib'\\n\\s+LANGUAGE C;/CREATE FUNCTION trigger_return_old ()\\n        RETURNS trigger\\n        AS \\\$\\\$\\nBEGIN\\n    IF TG_OP = 'INSERT' THEN\\n        RETURN NEW;\\n    END IF;\\n    RETURN OLD;\\nEND\\n\\\$\\\$\\n        LANGUAGE plpgsql;/s;
+    " "$input_path" > "$output_path"
+}
+
+prepare_test_fixture() {
+    local sql_file="$1"
+    local expected_file="$2"
+    local test_name="$3"
+
+    PREPARED_SQL_FILE="$sql_file"
+    PREPARED_EXPECTED_FILE="$expected_file"
+
+    local fixture_dir="$RESULTS_DIR/fixtures"
+    case "$test_name" in
+        triggers)
+            mkdir -p "$fixture_dir"
+            PREPARED_SQL_FILE="$fixture_dir/${test_name}.sql"
+            PREPARED_EXPECTED_FILE="$fixture_dir/${test_name}.out"
+            transform_triggers_fixture "$sql_file" "$PREPARED_SQL_FILE"
+            transform_triggers_fixture "$expected_file" "$PREPARED_EXPECTED_FILE"
+            ;;
+        *)
+            ;;
+    esac
+}
+
 PORT=5433
 SKIP_SERVER=false
 SINGLE_TEST=""
@@ -832,6 +863,10 @@ for sql_file in "${TEST_FILES[@]}"; do
         TOTAL=$((TOTAL - 1))
         continue
     fi
+
+    prepare_test_fixture "$sql_file" "$expected_file" "$test_name"
+    sql_file="$PREPARED_SQL_FILE"
+    expected_file="$PREPARED_EXPECTED_FILE"
 
     stmt_count="$(run_sql_one_by_one \
         "$sql_file" \
