@@ -277,6 +277,7 @@ pub enum Statement {
     CreateView(CreateViewStatement),
     CreateRule(CreateRuleStatement),
     CreatePolicy(CreatePolicyStatement),
+    CreateForeignDataWrapper(CreateForeignDataWrapperStatement),
     CreateIndex(CreateIndexStatement),
     CreateOperatorClass(CreateOperatorClassStatement),
     AlterSequence(AlterSequenceStatement),
@@ -305,11 +306,13 @@ pub enum Statement {
     AlterTableSetNotNull(AlterTableSetNotNullStatement),
     AlterTableDropNotNull(AlterTableDropNotNullStatement),
     AlterTableValidateConstraint(AlterTableValidateConstraintStatement),
+    AlterTableNoInherit(AlterTableNoInheritStatement),
     AlterPublication(AlterPublicationStatement),
     CommentOnTable(CommentOnTableStatement),
     CommentOnRule(CommentOnRuleStatement),
     CommentOnDomain(CommentOnDomainStatement),
     CommentOnConversion(CommentOnConversionStatement),
+    CommentOnForeignDataWrapper(CommentOnForeignDataWrapperStatement),
     CommentOnPublication(CommentOnPublicationStatement),
     CreateDomain(CreateDomainStatement),
     CreateConversion(CreateConversionStatement),
@@ -1560,6 +1563,12 @@ pub struct DropPublicationStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommentOnPublicationStatement {
     pub publication_name: String,
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentOnForeignDataWrapperStatement {
+    pub fdw_name: String,
     pub comment: Option<String>,
 }
 

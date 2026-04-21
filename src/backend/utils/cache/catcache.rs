@@ -47,13 +47,14 @@ use crate::include::catalog::{
     INTERVAL_TYPE_OID, JSON_ARRAY_TYPE_OID, JSON_TYPE_OID, JSONB_ARRAY_TYPE_OID, JSONB_TYPE_OID,
     JSONPATH_ARRAY_TYPE_OID, JSONPATH_TYPE_OID, LINE_TYPE_OID, LSEG_TYPE_OID, MONEY_ARRAY_TYPE_OID,
     MONEY_TYPE_OID, NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID, OID_ARRAY_TYPE_OID, OID_TYPE_OID,
-    PATH_TYPE_OID, POINT_TYPE_OID, POLYGON_TYPE_OID, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow,
-    PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow,
-    PgConstraintRow, PgDatabaseRow, PgDependRow, PgIndexRow, PgInheritsRow, PgLanguageRow,
-    PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow,
-    PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgStatisticRow,
-    PgTablespaceRow, PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow,
-    PgTsTemplateRow, PgTypeRow, REGCONFIG_ARRAY_TYPE_OID, REGCONFIG_TYPE_OID,
+    PATH_TYPE_OID, POINT_TYPE_OID, POLYGON_TYPE_OID, PgAggregateRow, PgAmRow, PgAmopRow,
+    PgAmprocRow, PgAttrdefRow, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow,
+    PgClassRow, PgCollationRow, PgConstraintRow, PgDatabaseRow, PgDependRow,
+    PgForeignDataWrapperRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow,
+    PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgPolicyRow, PgProcRow,
+    PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow,
+    PgStatisticRow, PgTablespaceRow, PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow,
+    PgTsParserRow, PgTsTemplateRow, PgTypeRow, REGCONFIG_ARRAY_TYPE_OID, REGCONFIG_TYPE_OID,
     REGDICTIONARY_ARRAY_TYPE_OID, REGDICTIONARY_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID,
     TID_ARRAY_TYPE_OID, TID_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID,
     TSQUERY_ARRAY_TYPE_OID, TSQUERY_TYPE_OID, TSVECTOR_ARRAY_TYPE_OID, TSVECTOR_TYPE_OID,
@@ -85,6 +86,7 @@ pub struct CatCache {
     index_rows: Vec<PgIndexRow>,
     rewrite_rows: Vec<PgRewriteRow>,
     trigger_rows: Vec<PgTriggerRow>,
+    policy_rows: Vec<PgPolicyRow>,
     publication_rows: Vec<PgPublicationRow>,
     publication_rel_rows: Vec<PgPublicationRelRow>,
     publication_namespace_rows: Vec<PgPublicationNamespaceRow>,
@@ -736,6 +738,10 @@ impl CatCache {
             .filter(|row| row.pnnspid == namespace_oid)
             .cloned()
             .collect()
+    }
+
+    pub fn policy_rows(&self) -> Vec<PgPolicyRow> {
+        self.policy_rows.clone()
     }
 
     pub fn trigger_rows_for_relation(&self, relation_oid: u32) -> Vec<PgTriggerRow> {

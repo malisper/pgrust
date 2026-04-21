@@ -579,10 +579,10 @@ impl Database {
         let mut owned_objects =
             owned_objects_for_roles(self, client_id, Some((xid, cid)), &role_oid_list)?;
         owned_objects.sort_by(|left, right| {
-            owned_object_drop_priority(left.relkind)
-                .cmp(&owned_object_drop_priority(right.relkind))
+            owned_object_drop_priority(left.kind)
+                .cmp(&owned_object_drop_priority(right.kind))
                 .then(left.name.cmp(&right.name))
-                .then(left.relkind.cmp(&right.relkind))
+                .then(left.kind.cmp(&right.kind))
         });
 
         let interrupts = self.interrupt_state(client_id);
@@ -597,31 +597,36 @@ impl Database {
                 waiter: Some(self.txn_waiter.clone()),
                 interrupts: interrupts.clone(),
             };
-            let effect = match object.relkind {
-                'v' => self
+            let effect = match object.kind {
+                OwnedObjectKind::View => self
                     .catalog
                     .write()
-                    .drop_view_by_oid_mvcc(object.relation_oid, &ctx)
+                    .drop_view_by_oid_mvcc(object.oid, &ctx)
                     .map(|(_, effect)| effect),
-                'i' => self
+                OwnedObjectKind::Index => self
                     .catalog
                     .write()
-                    .drop_relation_entry_by_oid_mvcc(object.relation_oid, &ctx)
+                    .drop_relation_entry_by_oid_mvcc(object.oid, &ctx)
+                    .map(|(_, effect)| effect),
+                OwnedObjectKind::Publication => self
+                    .catalog
+                    .write()
+                    .drop_publication_mvcc(object.oid, &ctx)
                     .map(|(_, effect)| effect),
                 _ => self
                     .catalog
                     .write()
-                    .drop_relation_by_oid_mvcc(object.relation_oid, &ctx)
+                    .drop_relation_by_oid_mvcc(object.oid, &ctx)
                     .map(|(_, effect)| effect),
             }
             .map_err(map_role_catalog_error)?;
-            if object.relkind != 'v' {
+            if !matches!(object.kind, OwnedObjectKind::View) {
                 self.apply_catalog_mutation_effect_immediate(&effect)?;
             }
-            if object.relkind == 'r' {
+            if matches!(object.kind, OwnedObjectKind::Table) {
                 self.session_stats_state(client_id)
                     .write()
-                    .note_relation_drop(object.relation_oid, &self.stats);
+                    .note_relation_drop(object.oid, &self.stats);
             }
             catalog_effects.push(effect);
             current_cid = current_cid.saturating_add(1);
@@ -1008,11 +1013,12 @@ fn owned_objects_for_roles(
     Ok(objects)
 }
 
-fn owned_object_drop_priority(relkind: char) -> u8 {
-    match relkind {
-        'v' => 0,
-        'i' => 1,
-        _ => 2,
+fn owned_object_drop_priority(kind: OwnedObjectKind) -> u8 {
+    match kind {
+        OwnedObjectKind::View => 0,
+        OwnedObjectKind::Index => 1,
+        OwnedObjectKind::Publication => 2,
+        OwnedObjectKind::Table => 3,
     }
 }
 

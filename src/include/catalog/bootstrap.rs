@@ -216,6 +216,7 @@ pub enum BootstrapCatalogKind {
     PgRewrite,
     PgStatistic,
     PgTrigger,
+    PgPolicy,
     PgPublication,
     PgPublicationRel,
     PgPublicationNamespace,
@@ -266,6 +267,7 @@ impl BootstrapCatalogKind {
             Self::PgRewrite => PG_REWRITE_RELATION_OID,
             Self::PgStatistic => PG_STATISTIC_RELATION_OID,
             Self::PgTrigger => PG_TRIGGER_RELATION_OID,
+            Self::PgPolicy => PG_POLICY_RELATION_OID,
             Self::PgPublication => PG_PUBLICATION_RELATION_OID,
             Self::PgPublicationRel => PG_PUBLICATION_REL_RELATION_OID,
             Self::PgPublicationNamespace => PG_PUBLICATION_NAMESPACE_RELATION_OID,
@@ -309,6 +311,7 @@ impl BootstrapCatalogKind {
             Self::PgRewrite => "pg_rewrite",
             Self::PgStatistic => "pg_statistic",
             Self::PgTrigger => "pg_trigger",
+            Self::PgPolicy => "pg_policy",
             Self::PgPublication => "pg_publication",
             Self::PgPublicationRel => "pg_publication_rel",
             Self::PgPublicationNamespace => "pg_publication_namespace",
@@ -352,6 +355,7 @@ impl BootstrapCatalogKind {
             Self::PgRewrite => PG_REWRITE_ROWTYPE_OID,
             Self::PgStatistic => PG_STATISTIC_ROWTYPE_OID,
             Self::PgTrigger => PG_TRIGGER_ROWTYPE_OID,
+            Self::PgPolicy => 0,
             Self::PgPublication => PG_PUBLICATION_ROWTYPE_OID,
             Self::PgPublicationRel => PG_PUBLICATION_REL_ROWTYPE_OID,
             Self::PgPublicationNamespace => PG_PUBLICATION_NAMESPACE_ROWTYPE_OID,
@@ -372,7 +376,7 @@ impl BootstrapCatalogKind {
     }
 }
 
-pub const CORE_BOOTSTRAP_KINDS: [BootstrapCatalogKind; 36] = [
+pub const CORE_BOOTSTRAP_KINDS: [BootstrapCatalogKind; 38] = [
     BootstrapCatalogKind::PgNamespace,
     BootstrapCatalogKind::PgType,
     BootstrapCatalogKind::PgProc,
@@ -407,17 +411,19 @@ pub const CORE_BOOTSTRAP_KINDS: [BootstrapCatalogKind; 36] = [
     BootstrapCatalogKind::PgRewrite,
     BootstrapCatalogKind::PgStatistic,
     BootstrapCatalogKind::PgTrigger,
+    BootstrapCatalogKind::PgPolicy,
     BootstrapCatalogKind::PgPublication,
     BootstrapCatalogKind::PgPublicationRel,
     BootstrapCatalogKind::PgPublicationNamespace,
 ];
 
-pub const fn bootstrap_catalog_kinds() -> [BootstrapCatalogKind; 36] {
+pub const fn bootstrap_catalog_kinds() -> [BootstrapCatalogKind; 38] {
     CORE_BOOTSTRAP_KINDS
 }
 
 use crate::include::catalog::{
-    pg_description_desc, pg_inherits_desc, pg_largeobject_metadata_desc, pg_publication_desc,
+    pg_aggregate_desc, pg_description_desc, pg_foreign_data_wrapper_desc, pg_inherits_desc,
+    pg_largeobject_metadata_desc, pg_policy_desc, pg_publication_desc,
     pg_publication_namespace_desc, pg_publication_rel_desc, pg_rewrite_desc, pg_statistic_desc,
     pg_trigger_desc,
 };
@@ -457,6 +463,7 @@ pub fn bootstrap_relation_desc(kind: BootstrapCatalogKind) -> RelationDesc {
         BootstrapCatalogKind::PgRewrite => pg_rewrite_desc(),
         BootstrapCatalogKind::PgStatistic => pg_statistic_desc(),
         BootstrapCatalogKind::PgTrigger => pg_trigger_desc(),
+        BootstrapCatalogKind::PgPolicy => pg_policy_desc(),
         BootstrapCatalogKind::PgPublication => pg_publication_desc(),
         BootstrapCatalogKind::PgPublicationRel => pg_publication_rel_desc(),
         BootstrapCatalogKind::PgPublicationNamespace => pg_publication_namespace_desc(),
@@ -469,7 +476,7 @@ pub const fn bootstrap_namespace_oid() -> u32 {
     PG_CATALOG_NAMESPACE_OID
 }
 
-pub const CORE_BOOTSTRAP_RELATIONS: [BootstrapCatalogRelation; 36] = [
+pub const CORE_BOOTSTRAP_RELATIONS: [BootstrapCatalogRelation; 37] = [
     BootstrapCatalogRelation {
         oid: PG_NAMESPACE_RELATION_OID,
         name: "pg_namespace",

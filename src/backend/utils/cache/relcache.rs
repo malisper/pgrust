@@ -11,8 +11,9 @@ use crate::backend::parser::SqlType;
 use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::cache::catcache::{CatCache, normalize_catalog_name, sql_type_oid};
 use crate::include::catalog::{
-    CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY, PG_CATALOG_NAMESPACE_OID, PG_CONSTRAINT_RELATION_OID,
-    bootstrap_catalog_kinds, relam_for_relkind, system_catalog_index_by_oid,
+    ANYOID, CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY, PG_CATALOG_NAMESPACE_OID,
+    PG_CONSTRAINT_RELATION_OID, bootstrap_catalog_kinds, relam_for_relkind,
+    system_catalog_index_by_oid,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -335,8 +336,9 @@ impl RelCache {
     pub fn from_catalog(catalog: &Catalog) -> Self {
         let mut cache = Self::default();
         let catcache = CatCache::from_catalog(catalog);
+        let support_lookup = IndexSupportLookup::from_catcache(&catcache);
         for (name, entry) in catalog.entries() {
-            let relcache_entry = from_catalog_entry(entry);
+            let relcache_entry = from_catalog_entry(entry, &support_lookup);
             cache.by_name.insert(
                 normalize_catalog_name(name).to_ascii_lowercase(),
                 relcache_entry.clone(),
@@ -350,7 +352,7 @@ impl RelCache {
             }
             cache
                 .by_oid
-                .insert(entry.relation_oid, from_catalog_entry(entry));
+                .insert(entry.relation_oid, relcache_entry);
         }
         cache
     }

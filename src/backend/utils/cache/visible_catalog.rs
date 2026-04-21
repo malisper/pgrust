@@ -91,6 +91,27 @@ impl VisibleCatalog {
         }
     }
 
+    pub fn authid_rows(&self) -> Vec<PgAuthIdRow> {
+        self.catcache
+            .as_ref()
+            .map(|catcache| catcache.authid_rows())
+            .unwrap_or_default()
+    }
+
+    pub fn proc_rows(&self) -> Vec<PgProcRow> {
+        self.catcache
+            .as_ref()
+            .map(|catcache| catcache.proc_rows())
+            .unwrap_or_else(crate::include::catalog::bootstrap_pg_proc_rows)
+    }
+
+    pub fn auth_members_rows(&self) -> Vec<PgAuthMembersRow> {
+        self.catcache
+            .as_ref()
+            .map(|catcache| catcache.auth_members_rows())
+            .unwrap_or_default()
+    }
+
     pub fn role_name_by_oid(&self, role_oid: u32) -> Option<String> {
         self.catcache.as_ref().and_then(|catcache| {
             catcache

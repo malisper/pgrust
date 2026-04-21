@@ -22,7 +22,7 @@ use crate::backend::catalog::rowcodec::{
     pg_description_row_from_values, pg_foreign_data_wrapper_row_from_values,
     pg_index_row_from_values, pg_inherits_row_from_values, pg_language_row_from_values,
     pg_opclass_row_from_values, pg_operator_row_from_values, pg_opfamily_row_from_values,
-    pg_proc_row_from_values, pg_publication_namespace_row_from_values,
+    pg_policy_row_from_values, pg_proc_row_from_values, pg_publication_namespace_row_from_values,
     pg_publication_rel_row_from_values, pg_publication_row_from_values, pg_rewrite_row_from_values,
     pg_statistic_row_from_values, pg_tablespace_row_from_values, pg_trigger_row_from_values,
     pg_ts_config_map_row_from_values, pg_ts_config_row_from_values, pg_ts_dict_row_from_values,
@@ -121,6 +121,7 @@ pub(crate) fn catalog_from_physical_rows_scoped(
     let inherit_rows = rows.inherits;
     let rewrite_rows = rows.rewrites;
     let trigger_rows = rows.triggers;
+    let policy_rows = rows.policies;
     let publication_rows = rows.publications;
     let publication_rel_rows = rows.publication_rels;
     let publication_namespace_rows = rows.publication_namespaces;
@@ -289,6 +290,7 @@ pub(crate) fn catalog_from_physical_rows_scoped(
         inherits: inherit_rows,
         rewrites: Vec::new(),
         triggers: Vec::new(),
+        policies: policy_rows.clone(),
         publications: publication_rows,
         publication_rels: publication_rel_rows,
         publication_namespaces: publication_namespace_rows,
@@ -453,7 +455,7 @@ pub(crate) fn catalog_from_physical_rows_scoped(
     crate::include::catalog::sort_pg_rewrite_rows(&mut catalog.rewrites);
     catalog.triggers = trigger_rows;
     crate::include::catalog::sort_pg_trigger_rows(&mut catalog.triggers);
-    catalog.policies = policy_rows;
+    catalog.policies = policy_rows.clone();
     crate::include::catalog::sort_pg_policy_rows(&mut catalog.policies);
     Ok(catalog)
 }
@@ -800,6 +802,12 @@ fn append_catalog_kind_rows(
             rows.triggers = values
                 .into_iter()
                 .map(pg_trigger_row_from_values)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        BootstrapCatalogKind::PgPolicy => {
+            rows.policies = values
+                .into_iter()
+                .map(pg_policy_row_from_values)
                 .collect::<Result<Vec<_>, _>>()?;
         }
         BootstrapCatalogKind::PgPublication => {
@@ -1447,6 +1455,7 @@ fn load_physical_catalog_rows_legacy(base_dir: &Path) -> Result<PhysicalCatalogR
         indexes: index_rows,
         rewrites: rewrite_rows,
         triggers: Vec::new(),
+        policies: policy_rows,
         publications: Vec::new(),
         publication_rels: Vec::new(),
         publication_namespaces: Vec::new(),
@@ -2114,6 +2123,7 @@ fn load_physical_catalog_rows_visible_legacy(
         indexes: index_rows,
         rewrites: rewrite_rows,
         triggers: Vec::new(),
+        policies: policy_rows,
         publications: Vec::new(),
         publication_rels: Vec::new(),
         publication_namespaces: Vec::new(),

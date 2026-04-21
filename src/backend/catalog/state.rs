@@ -20,7 +20,7 @@ use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::misc::interrupts::InterruptReason;
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_NOTNULL, PUBLIC_NAMESPACE_OID, PgAuthIdRow,
-    PgAuthMembersRow, PgConstraintRow, PgDatabaseRow, PgDependRow, PgInheritsRow,
+    PgAuthMembersRow, PgConstraintRow, PgDatabaseRow, PgDependRow, PgInheritsRow, PgPolicyRow,
     PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow,
     PgTablespaceRow, PgTriggerRow, bootstrap_pg_auth_members_rows, bootstrap_pg_authid_rows,
     bootstrap_pg_database_rows, bootstrap_pg_tablespace_rows, builtin_range_name_for_sql_type,
@@ -101,6 +101,7 @@ pub struct Catalog {
     pub(crate) inherits: Vec<PgInheritsRow>,
     pub(crate) rewrites: Vec<PgRewriteRow>,
     pub(crate) triggers: Vec<crate::include::catalog::PgTriggerRow>,
+    pub(crate) policies: Vec<PgPolicyRow>,
     pub(crate) publications: Vec<PgPublicationRow>,
     pub(crate) publication_rels: Vec<PgPublicationRelRow>,
     pub(crate) publication_namespaces: Vec<PgPublicationNamespaceRow>,
@@ -121,6 +122,7 @@ impl Default for Catalog {
             inherits: Vec::new(),
             rewrites: Vec::new(),
             triggers: Vec::new(),
+            policies: Vec::new(),
             publications: Vec::new(),
             publication_rels: Vec::new(),
             publication_namespaces: Vec::new(),
@@ -288,6 +290,18 @@ impl Catalog {
             .partition_point(|row| row.tgrelid < relation_oid);
         let end = start + self.triggers[start..].partition_point(|row| row.tgrelid == relation_oid);
         &self.triggers[start..end]
+    }
+
+    pub fn policy_rows(&self) -> &[PgPolicyRow] {
+        &self.policies
+    }
+
+    pub fn policy_rows_for_relation(&self, relation_oid: u32) -> &[PgPolicyRow] {
+        let start = self
+            .policies
+            .partition_point(|row| row.polrelid < relation_oid);
+        let end = start + self.policies[start..].partition_point(|row| row.polrelid == relation_oid);
+        &self.policies[start..end]
     }
 
     pub fn publication_rows(&self) -> &[PgPublicationRow] {

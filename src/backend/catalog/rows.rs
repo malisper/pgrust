@@ -4,13 +4,14 @@ use crate::backend::catalog::catalog::{Catalog, CatalogEntry};
 use crate::backend::parser::SqlType;
 use crate::backend::utils::cache::catcache::{CatCache, sql_type_oid};
 use crate::include::catalog::{
-    BootstrapCatalogKind, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow,
-    PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow,
-    PgDatabaseRow, PgDependRow, PgDescriptionRow, PgIndexRow, PgInheritsRow, PgLanguageRow,
-    PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow,
-    PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgStatisticRow,
-    PgTablespaceRow, PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow,
-    PgTsTemplateRow, PgTypeRow, composite_array_type_row, composite_type_row,
+    BootstrapCatalogKind, PgAggregateRow, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow,
+    PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow,
+    PgConstraintRow, PgDatabaseRow, PgDependRow, PgDescriptionRow, PgForeignDataWrapperRow,
+    PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow,
+    PgOpfamilyRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow,
+    PgPublicationRow, PgRewriteRow, PgStatisticRow, PgTablespaceRow, PgTriggerRow,
+    PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
+    composite_array_type_row, composite_type_row,
 };
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -26,6 +27,7 @@ pub(crate) struct PhysicalCatalogRows {
     pub indexes: Vec<PgIndexRow>,
     pub rewrites: Vec<PgRewriteRow>,
     pub triggers: Vec<PgTriggerRow>,
+    pub policies: Vec<PgPolicyRow>,
     pub publications: Vec<PgPublicationRow>,
     pub publication_rels: Vec<PgPublicationRelRow>,
     pub publication_namespaces: Vec<PgPublicationNamespaceRow>,
@@ -96,6 +98,7 @@ pub(crate) fn create_view_sync_kinds() -> Vec<BootstrapCatalogKind> {
         BootstrapCatalogKind::PgType,
         BootstrapCatalogKind::PgAttribute,
         BootstrapCatalogKind::PgDepend,
+        BootstrapCatalogKind::PgRewrite,
     ]
 }
 
@@ -205,6 +208,7 @@ pub(crate) fn physical_catalog_rows_from_catcache(catcache: &CatCache) -> Physic
         indexes: catcache.index_rows(),
         rewrites: catcache.rewrite_rows(),
         triggers: catcache.trigger_rows(),
+        policies: catcache.policy_rows(),
         publications: catcache.publication_rows(),
         publication_rels: catcache.publication_rel_rows(),
         publication_namespaces: catcache.publication_namespace_rows(),

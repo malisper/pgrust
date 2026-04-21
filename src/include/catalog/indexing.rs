@@ -158,7 +158,7 @@ const OID_INT2_BOOL_OPCLASS_3: [u32; 3] = [
     BOOL_BTREE_OPCLASS_OID,
 ];
 
-pub const SYSTEM_CATALOG_INDEXES: [CatalogIndexDescriptor; 71] = [
+pub const SYSTEM_CATALOG_INDEXES: [CatalogIndexDescriptor; 72] = [
     CatalogIndexDescriptor {
         relation_oid: 2684,
         relation_name: "pg_namespace_nspname_index",
