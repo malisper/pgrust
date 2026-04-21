@@ -5961,6 +5961,58 @@ fn alter_table_inherit_supports_attach_duplicate_and_cycle_errors() {
 }
 
 #[test]
+fn explain_inherited_append_uses_relation_names_and_sql_casts() {
+    let base = temp_dir("explain_inherited_append_format");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table nv_parent (d date)").unwrap();
+    db.execute(1, "create table nv_child_2009 () inherits (nv_parent)")
+        .unwrap();
+    db.execute(1, "create table nv_child_2010 () inherits (nv_parent)")
+        .unwrap();
+    db.execute(1, "create table nv_child_2011 () inherits (nv_parent)")
+        .unwrap();
+
+    let rows = query_rows(
+        &db,
+        1,
+        "explain select * from nv_parent where d >= '2009-08-01'::date and d <= '2009-08-31'::date",
+    );
+    let rendered = rows
+        .into_iter()
+        .map(|row| match &row[0] {
+            Value::Text(text) => text.clone(),
+            other => panic!("expected explain text row, got {other:?}"),
+        })
+        .collect::<Vec<_>>();
+
+    assert!(rendered.iter().any(|line| line.contains("Append")));
+    assert!(rendered.iter().any(|line| line.contains("Seq Scan on nv_parent")));
+    assert!(
+        rendered
+            .iter()
+            .any(|line| line.contains("Seq Scan on nv_child_2009"))
+    );
+    assert!(
+        rendered
+            .iter()
+            .any(|line| line.contains("'2009-08-01'::date"))
+    );
+    assert!(
+        rendered.iter().all(|line| !line.contains("Projection")),
+        "expected inherited append explain to elide passthrough projections, got {rendered:?}"
+    );
+    assert!(
+        rendered.iter().all(|line| !line.contains("Cast(Const(")),
+        "expected sql-style cast rendering, got {rendered:?}"
+    );
+    assert!(
+        rendered.iter().all(|line| !line.contains("rel ")),
+        "expected relation names instead of relcache numbers, got {rendered:?}"
+    );
+}
+
+#[test]
 fn alter_table_add_column_reads_old_rows_with_null_or_default() {
     let base = temp_dir("alter_table_add_column_reads_old_rows");
     let db = Database::open(&base, 16).unwrap();

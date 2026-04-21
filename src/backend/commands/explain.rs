@@ -17,6 +17,10 @@ pub(crate) fn format_explain_lines_with_costs(
     show_costs: bool,
     lines: &mut Vec<String>,
 ) {
+    if let Some(child) = state.explain_passthrough() {
+        format_explain_lines_with_costs(child, indent, analyze, show_costs, lines);
+        return;
+    }
     let prefix = "  ".repeat(indent);
     let label = state.node_label();
     let plan_info = state.plan_info();

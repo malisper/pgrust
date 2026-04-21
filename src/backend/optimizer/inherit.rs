@@ -43,7 +43,10 @@ pub(super) fn expand_inherited_rtentries(root: &mut PlannerInfo, catalog: &dyn C
             let translated_vars =
                 translate_parent_vars_to_child(&parent_rte.desc, child_rtindex, &child.desc);
             let child_rte = RangeTblEntry {
-                alias: None,
+                alias: catalog
+                    .class_row_by_oid(child.relation_oid)
+                    .map(|row| row.relname)
+                    .or_else(|| Some(child.relation_oid.to_string())),
                 desc: child.desc.clone(),
                 inh: false,
                 security_quals: Vec::new(),

@@ -241,6 +241,9 @@ pub trait PlanNode: std::fmt::Debug {
     fn node_stats_mut(&mut self) -> &mut NodeExecStats;
     fn plan_info(&self) -> PlanEstimate;
     fn node_label(&self) -> String;
+    fn explain_passthrough(&self) -> Option<&dyn PlanNode> {
+        None
+    }
     fn explain_details(
         &self,
         _indent: usize,
