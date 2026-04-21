@@ -701,6 +701,7 @@ impl Database {
                         &action.column,
                         action.constraint_name.clone(),
                         !action.not_valid,
+                        action.no_inherit,
                         false,
                         &set_ctx,
                     )
@@ -715,6 +716,7 @@ impl Database {
                 column.not_null_constraint_oid = Some(constraint_oid);
                 column.not_null_constraint_name = Some(action.constraint_name.clone());
                 column.not_null_constraint_validated = !action.not_valid;
+                column.not_null_constraint_no_inherit = action.no_inherit;
                 column.not_null_primary_key_owned = false;
                 target_relation.desc = target_desc.clone();
             }

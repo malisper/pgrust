@@ -102,6 +102,7 @@ pub fn lower_create_table(
                 if let Some(not_null) = not_null {
                     desc.not_null_constraint_name = Some(not_null.constraint_name.clone());
                     desc.not_null_constraint_validated = !not_null.not_valid;
+                    desc.not_null_constraint_no_inherit = not_null.no_inherit;
                     desc.not_null_primary_key_owned = not_null.primary_key_owned;
                 }
                 desc.default_expr = column.default_expr.clone();
@@ -193,6 +194,7 @@ mod tests {
                         attributes: ConstraintAttributes {
                             name: Some("items_note_nn".into()),
                             not_valid: true,
+                            no_inherit: true,
                             ..ConstraintAttributes::default()
                         },
                     }],
@@ -222,6 +224,48 @@ mod tests {
             Some("items_note_nn")
         );
         assert!(!lowered.relation_desc.columns[1].not_null_constraint_validated);
+        assert!(lowered.relation_desc.columns[1].not_null_constraint_no_inherit);
+        assert!(lowered.not_null_actions[1].no_inherit);
+    }
+
+    #[test]
+    fn lower_create_table_rejects_conflicting_not_null_no_inherit() {
+        let stmt = CreateTableStatement {
+            schema_name: None,
+            table_name: "items".into(),
+            persistence: TablePersistence::Permanent,
+            on_commit: OnCommitAction::PreserveRows,
+            elements: vec![
+                CreateTableElement::Column(ColumnDef {
+                    name: "id".into(),
+                    ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
+                    default_expr: None,
+                    constraints: vec![crate::backend::parser::ColumnConstraint::PrimaryKey {
+                        attributes: ConstraintAttributes::default(),
+                    }],
+                }),
+                CreateTableElement::Constraint(crate::backend::parser::TableConstraint::NotNull {
+                    attributes: ConstraintAttributes {
+                        no_inherit: true,
+                        ..ConstraintAttributes::default()
+                    },
+                    column: "id".into(),
+                }),
+            ],
+            inherits: Vec::new(),
+            if_not_exists: false,
+        };
+
+        assert_eq!(
+            lower_create_table(
+                &stmt,
+                &crate::backend::parser::analyze::LiteralDefaultCatalog
+            ),
+            Err(ParseError::InvalidTableDefinition(
+                "conflicting NO INHERIT declaration for not-null constraint on column \"id\""
+                    .into(),
+            ))
+        );
     }
 
     #[test]
