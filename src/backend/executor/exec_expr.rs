@@ -2396,7 +2396,7 @@ fn expect_float8_transition_state(
         .collect()
 }
 
-fn expect_float8_arg(op: &'static str, value: &Value) -> Result<f64, ExecError> {
+pub(crate) fn expect_float8_arg(op: &'static str, value: &Value) -> Result<f64, ExecError> {
     match value {
         Value::Int16(v) => Ok(f64::from(*v)),
         Value::Int32(v) => Ok(f64::from(*v)),
@@ -2477,7 +2477,7 @@ fn float8_combine_state(
     Ok([count, sum, sum_sq])
 }
 
-fn float8_regr_accum_state(
+pub(crate) fn float8_regr_accum_state(
     prev_count: f64,
     prev_sum_x: f64,
     mut prev_sum_sq_x: f64,
