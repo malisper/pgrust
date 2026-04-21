@@ -200,17 +200,10 @@ fn apply_array_subscripts_to_value(
                     lower: clamped_lower,
                     upper: clamped_upper,
                 });
-                let result_lower_bound = if subscript.is_slice {
-                    if subscript.lower_provided {
-                        clamped_lower
-                    } else {
-                        dim.lower_bound
-                    }
-                } else {
-                    clamped_lower
-                };
                 result_dimensions.push(ArrayDimension {
-                    lower_bound: result_lower_bound,
+                    // PostgreSQL rebases array slice results to 1-based bounds
+                    // even when the source array uses custom lower bounds.
+                    lower_bound: 1,
                     length,
                 });
             } else {
@@ -224,7 +217,10 @@ fn apply_array_subscripts_to_value(
                 lower: dim.lower_bound,
                 upper: dim.lower_bound + dim.length as i32 - 1,
             });
-            result_dimensions.push(dim.clone());
+            result_dimensions.push(ArrayDimension {
+                lower_bound: 1,
+                length: dim.length,
+            });
         }
     }
 

@@ -9927,7 +9927,7 @@ fn array_subscript_partial_slices_on_zero_based_arrays_match_postgres() {
         .unwrap(),
         vec![vec![Value::PgArray(ArrayValue::from_dimensions(
             vec![ArrayDimension {
-                lower_bound: 0,
+                lower_bound: 1,
                 length: 4,
             }],
             vec![
@@ -9949,7 +9949,7 @@ fn array_subscript_partial_slices_on_zero_based_arrays_match_postgres() {
         .unwrap(),
         vec![vec![Value::PgArray(ArrayValue::from_dimensions(
             vec![ArrayDimension {
-                lower_bound: 2,
+                lower_bound: 1,
                 length: 3,
             }],
             vec![Value::Int32(3), Value::Int32(4), Value::Int32(5)],
@@ -9966,7 +9966,7 @@ fn array_subscript_partial_slices_on_zero_based_arrays_match_postgres() {
         .unwrap(),
         vec![vec![Value::PgArray(ArrayValue::from_dimensions(
             vec![ArrayDimension {
-                lower_bound: 0,
+                lower_bound: 1,
                 length: 5,
             }],
             vec![
