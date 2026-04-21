@@ -1068,7 +1068,7 @@ pub(super) fn eval_like(
             let escape = match escape {
                 Some(Value::Null) => return Ok(Value::Null),
                 Some(Value::Bytea(bytes)) => Some(bytes.as_slice()),
-                None => None,
+                None => Some(br"\\".as_slice()),
                 Some(other) => {
                     return Err(ExecError::TypeMismatch {
                         op: "like",
@@ -1115,6 +1115,7 @@ pub(super) fn eval_like(
                 }
                 None => None,
             };
+            let escape = escape.or(Some('\\'));
             like_match_text(text, pattern_text, escape, case_insensitive)
         }
     };

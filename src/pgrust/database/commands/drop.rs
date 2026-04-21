@@ -1,6 +1,6 @@
 use super::super::*;
 use crate::backend::utils::cache::catcache::CatCache;
-use crate::backend::utils::misc::notices::push_notice;
+use crate::backend::utils::misc::notices::{push_notice, push_notice_with_detail};
 use crate::include::catalog::{
     CONSTRAINT_FOREIGN, DEPENDENCY_NORMAL, PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID,
     PG_REWRITE_RELATION_OID, PgConstraintRow, PgRewriteRow,
@@ -102,29 +102,32 @@ impl DropTableDependency {
         }
     }
 
-    fn sort_key(&self) -> (u8, String) {
+    fn sort_key(&self) -> (u8, u32, String) {
         match self {
             Self::Relation {
+                relation_oid,
                 display_name,
-                relkind,
                 ..
-            } => (
-                0,
-                format!("{}:{display_name}", drop_table_relation_kind_name(*relkind)),
-            ),
+            } => (0, *relation_oid, display_name.clone()),
             Self::ForeignKey {
-                relation_display_name,
                 constraint,
+                relation_display_name,
                 ..
             } => (
                 1,
+                constraint.oid,
                 format!("{relation_display_name}:{}", constraint.constraint_name),
             ),
             Self::Rule {
+                rule,
                 relation_display_name,
                 rule_name,
                 ..
-            } => (2, format!("{relation_display_name}:{rule_name}")),
+            } => (
+                2,
+                rule.rewrite_oid,
+                format!("{relation_display_name}:{rule_name}"),
+            ),
         }
     }
 }
@@ -570,8 +573,13 @@ impl Database {
                 });
             }
 
-            for notice in &plan.notices {
-                push_notice(notice.clone());
+            match plan.notices.as_slice() {
+                [] => {}
+                [notice] => push_notice(notice.clone()),
+                notices => push_notice_with_detail(
+                    format!("drop cascades to {} other objects", notices.len()),
+                    notices.join("\n"),
+                ),
             }
 
             let mut next_cid = cid;
@@ -1044,6 +1052,16 @@ mod tests {
 
     fn take_backend_notice_messages() -> Vec<String> {
         take_backend_notices()
+            .into_iter()
+            .map(|notice| notice.message)
+            .collect()
+    }
+
+    fn take_backend_notices_with_detail() -> Vec<(String, Option<String>)> {
+        take_backend_notices()
+            .into_iter()
+            .map(|notice| (notice.message, notice.detail))
+            .collect()
     }
 
     #[test]
@@ -1202,6 +1220,185 @@ mod tests {
         let catcache = db.backend_catcache(1, None).unwrap();
         assert!(catcache.class_by_name("p1").is_none());
         assert!(catcache.class_by_name("c1").is_none());
+    }
+
+    #[test]
+    fn drop_table_cascade_groups_many_view_notices_and_drops_views() {
+        let base = temp_dir("table_many_view_cascade");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session
+            .execute(
+                &db,
+                "create table base_tbl (a int primary key, b text default 'Unspecified')",
+            )
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create view ro_view1 as select distinct a, b from base_tbl",
+            )
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create view ro_view2 as select a, b from base_tbl group by a, b",
+            )
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create view ro_view3 as select 1 from base_tbl having max(a) > 0",
+            )
+            .unwrap();
+        session
+            .execute(&db, "create view ro_view4 as select count(*) from base_tbl")
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create view ro_view5 as select a, rank() over() from base_tbl",
+            )
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create view ro_view6 as select a, b from base_tbl union select -a, b from base_tbl",
+            )
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create view ro_view7 as with t as (select a, b from base_tbl) select * from t",
+            )
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create view ro_view8 as select a, b from base_tbl order by a offset 1",
+            )
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create view ro_view9 as select a, b from base_tbl order by a limit 1",
+            )
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create view ro_view11 as select b1.a, b2.b from base_tbl b1, base_tbl b2",
+            )
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create view ro_view13 as select a, b from (select * from base_tbl) as t",
+            )
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create view rw_view14 as select ctid, a, b from base_tbl",
+            )
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create view rw_view15 as select a, upper(b) from base_tbl",
+            )
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create view rw_view16 as select a, b, a as aa from base_tbl",
+            )
+            .unwrap();
+        session
+            .execute(&db, "create view ro_view17 as select * from ro_view1")
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create view ro_view20 as select a, b, generate_series(1, a) g from base_tbl",
+            )
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create rule rw_view16_ins_rule as on insert to rw_view16 where new.a > 0 do instead insert into base_tbl values (new.a, new.b)",
+            )
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create rule rw_view16_upd_rule as on update to rw_view16 where old.a > 0 do instead update base_tbl set b = new.b where a = old.a",
+            )
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create rule rw_view16_del_rule as on delete to rw_view16 where old.a > 0 do instead delete from base_tbl where a = old.a",
+            )
+            .unwrap();
+
+        clear_backend_notices();
+        session.execute(&db, "drop table base_tbl cascade").unwrap();
+
+        assert_eq!(
+            take_backend_notices_with_detail(),
+            vec![(
+                "drop cascades to 16 other objects".into(),
+                Some(
+                    [
+                        "drop cascades to view ro_view1",
+                        "drop cascades to view ro_view17",
+                        "drop cascades to view ro_view2",
+                        "drop cascades to view ro_view3",
+                        "drop cascades to view ro_view4",
+                        "drop cascades to view ro_view5",
+                        "drop cascades to view ro_view6",
+                        "drop cascades to view ro_view7",
+                        "drop cascades to view ro_view8",
+                        "drop cascades to view ro_view9",
+                        "drop cascades to view ro_view11",
+                        "drop cascades to view ro_view13",
+                        "drop cascades to view rw_view14",
+                        "drop cascades to view rw_view15",
+                        "drop cascades to view rw_view16",
+                        "drop cascades to view ro_view20",
+                    ]
+                    .join("\n"),
+                ),
+            )]
+        );
+
+        let catcache = db.backend_catcache(1, None).unwrap();
+        for name in [
+            "base_tbl",
+            "ro_view1",
+            "ro_view17",
+            "ro_view2",
+            "ro_view3",
+            "ro_view4",
+            "ro_view5",
+            "ro_view6",
+            "ro_view7",
+            "ro_view8",
+            "ro_view9",
+            "ro_view11",
+            "ro_view13",
+            "rw_view14",
+            "rw_view15",
+            "rw_view16",
+            "ro_view20",
+        ] {
+            assert!(
+                catcache.class_by_name(name).is_none(),
+                "{name} should be dropped"
+            );
+        }
     }
 
     #[test]
