@@ -302,6 +302,7 @@ fn plan_query_path(
     query: crate::include::nodes::parsenodes::Query,
     catalog: &dyn CatalogLookup,
 ) -> (PlannerInfo, Path) {
+    let query = super::super::root::prepare_query_for_planning(query);
     let mut root = PlannerInfo::new(query);
     let scanjoin_rel = query_planner(&mut root, catalog);
     let final_rel = grouping_planner(&mut root, scanjoin_rel, catalog);
@@ -417,9 +418,10 @@ fn build_cte_scan_path(
     desc: &RelationDesc,
     catalog: &dyn CatalogLookup,
 ) -> Path {
+    let query = super::super::root::prepare_query_for_planning(query);
     let (subroot, cte_path) = if let Some(recursive_union) = query.recursive_union.clone() {
         (
-            PlannerInfo::new(query.clone()),
+            PlannerInfo::new(super::super::root::prepare_query_for_planning(query.clone())),
             build_recursive_union_path(*recursive_union, catalog),
         )
     } else {
@@ -452,9 +454,10 @@ fn build_subquery_scan_path(
     desc: &RelationDesc,
     catalog: &dyn CatalogLookup,
 ) -> Path {
+    let query = super::super::root::prepare_query_for_planning(query);
     let (subroot, input) = if let Some(recursive_union) = query.recursive_union.clone() {
         (
-            PlannerInfo::new(query.clone()),
+            PlannerInfo::new(super::super::root::prepare_query_for_planning(query.clone())),
             build_recursive_union_path(*recursive_union, catalog),
         )
     } else {
