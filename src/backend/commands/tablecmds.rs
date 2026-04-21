@@ -828,7 +828,7 @@ pub(crate) fn write_updated_row(
     }
 }
 
-fn reinitialize_index_relation(
+pub(crate) fn reinitialize_index_relation(
     index: &BoundIndexRelation,
     ctx: &mut ExecutorContext,
     xid: TransactionId,
