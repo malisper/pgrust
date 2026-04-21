@@ -498,12 +498,17 @@ Targeted reruns and notes:
   - Extend SELECT/binder support enough for the early stats queries, including querying the new stats relations and handling `ORDER BY ... COLLATE "C"` on projected text columns.
 - numeric.sql:
   Retest source: `/tmp/pgrust_regress_numeric_20260420/diff/numeric.diff`
+  - 2026-04-20 rerun on current merged `perf-optimization` head is blocked at build time before `numeric.sql` starts
+  - unblock parser/analyzer drift from recent merged work first:
+    - restore parser support in `src/backend/parser/gram.rs` for newer parse-tree fields/helpers (`try_parse_policy_statement`, `window_clauses`, `returning`, `cascade`, `RawWindowSpec.name`, and the missing `window_clause_unsupported` rule)
+    - finish analyzer exhaustiveness updates for `RegRole`, `SessionUser`, and `CurrentRole` in `src/backend/parser/analyze/coerce.rs`, `src/backend/parser/analyze/expr/targets.rs`, and related parser/type-name paths
+  - rerun `numeric.sql` after the branch builds again; until then the items below reflect the last runnable diff rather than a fresh regression pass
   - Preserve PostgreSQL-compatible row order for the `VALUES`/cross-join cases in `numeric.sql`; the first mismatch is still output ordering rather than wrong row contents
   - [done] Finish numeric input validation parity in `expr_casts.rs`, including `pg_input_is_valid('1e400000', 'numeric')`, `pg_input_error_info(...)` detail/sqlstate fields, and spaced base-prefix literals that PostgreSQL accepts
   - [done] Restore PostgreSQL `DETAIL` text for numeric typmod overflow and infinity rejection paths in inserts and `pg_input_error_info(...)`
   - Add dedicated numeric-to-integer cast errors for `NaN` and `Infinity` instead of collapsing them into generic `smallint` / `integer` / `bigint out of range`
   - [done] Match PostgreSQL `FM` / `FMS` numeric trimming, sign anchoring, and literal-space rendering in `expr_format.rs`
-  - Finish remaining `to_char(numeric, ...)` parity in `expr_format.rs`, especially scientific-format hash width and overflow/hash rendering for wide values and infinities
+  - Reverify remaining `to_char(numeric, ...)` parity in `expr_format.rs` once `numeric.sql` reruns cleanly; FM/FMS, scientific/hash-width, and wide-value/infinity overflow cases now have direct unit coverage, so this may be stale from the last runnable diff
   - Finish `to_number(..., 'RN')` / Roman numeral parity, including the aggregate validation path that currently errors in the `bool_and(to_number(roman, 'RN') = i)` check
   - Fix numeric `power()` / `exp()` edge semantics so extreme underflows collapse to exact zero, `0 ^ 0` returns `1`, and negative-base exponent edge cases match PostgreSQL
   - Align numeric `generate_series(...)` error text with PostgreSQL for `NaN` / infinity step values
