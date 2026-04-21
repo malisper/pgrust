@@ -218,6 +218,9 @@ pub enum BuiltinWindowFunction {
     PercentRank,
     CumeDist,
     Ntile,
+    FirstValue,
+    LastValue,
+    NthValue,
 }
 
 impl BuiltinWindowFunction {
@@ -229,6 +232,9 @@ impl BuiltinWindowFunction {
             BuiltinWindowFunction::PercentRank => "percent_rank",
             BuiltinWindowFunction::CumeDist => "cume_dist",
             BuiltinWindowFunction::Ntile => "ntile",
+            BuiltinWindowFunction::FirstValue => "first_value",
+            BuiltinWindowFunction::LastValue => "last_value",
+            BuiltinWindowFunction::NthValue => "nth_value",
         }
     }
 }
