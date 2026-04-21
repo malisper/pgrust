@@ -37,8 +37,8 @@ use crate::include::catalog::{
     TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_ARRAY_TYPE_OID, TIMESTAMPTZ_TYPE_OID,
     TIMETZ_ARRAY_TYPE_OID, TIMETZ_TYPE_OID, TSQUERY_ARRAY_TYPE_OID, TSQUERY_TYPE_OID,
     TSVECTOR_ARRAY_TYPE_OID, TSVECTOR_TYPE_OID, VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID,
-    VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID, XID_ARRAY_TYPE_OID, XID_TYPE_OID, builtin_type_rows,
-    range_type_ref_for_sql_type,
+    VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID, XID_ARRAY_TYPE_OID, XID_TYPE_OID, XML_ARRAY_TYPE_OID,
+    XML_TYPE_OID, builtin_type_rows, range_type_ref_for_sql_type,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -239,7 +239,8 @@ fn sql_type_oid(sql_type: SqlType) -> u32 {
         }
         return range_type.type_oid();
     }
-    if let Some(multirange_type) = crate::include::catalog::multirange_type_ref_for_sql_type(sql_type)
+    if let Some(multirange_type) =
+        crate::include::catalog::multirange_type_ref_for_sql_type(sql_type)
     {
         if sql_type.is_array {
             if sql_type.type_oid != 0 && matches!(sql_type.kind, SqlTypeKind::Multirange) {
@@ -279,9 +280,7 @@ fn sql_type_oid(sql_type: SqlType) -> u32 {
         (SqlTypeKind::AnyCompatibleArray, true) => {
             unreachable!("anycompatiblearray arrays are unsupported")
         }
-        (SqlTypeKind::AnyCompatibleRange, false) => {
-            crate::include::catalog::ANYCOMPATIBLERANGEOID
-        }
+        (SqlTypeKind::AnyCompatibleRange, false) => crate::include::catalog::ANYCOMPATIBLERANGEOID,
         (SqlTypeKind::AnyCompatibleRange, true) => {
             unreachable!("anycompatiblerange arrays are unsupported")
         }
@@ -365,6 +364,8 @@ fn sql_type_oid(sql_type: SqlType) -> u32 {
         (SqlTypeKind::Jsonb, true) => JSONB_ARRAY_TYPE_OID,
         (SqlTypeKind::JsonPath, false) => JSONPATH_TYPE_OID,
         (SqlTypeKind::JsonPath, true) => JSONPATH_ARRAY_TYPE_OID,
+        (SqlTypeKind::Xml, false) => XML_TYPE_OID,
+        (SqlTypeKind::Xml, true) => XML_ARRAY_TYPE_OID,
         (SqlTypeKind::Point, false) => POINT_TYPE_OID,
         (SqlTypeKind::Point, true) => unreachable!("geometry arrays are unsupported"),
         (SqlTypeKind::Lseg, false) => LSEG_TYPE_OID,

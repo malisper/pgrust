@@ -41,6 +41,7 @@ encoding_rs = "0.8"
 md-5 = "0.10"
 rust-stemmers = "1"
 lz4_flex = { version = "0.11", optional = true }
+quick-xml = "0.38"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 mimalloc = "0.1.48"

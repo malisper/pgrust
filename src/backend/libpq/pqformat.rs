@@ -348,6 +348,7 @@ fn validate_binary_output_type(sql_type: SqlType) -> Result<(), ExecError> {
                 | SqlTypeKind::PgNodeTree
                 | SqlTypeKind::Json
                 | SqlTypeKind::JsonPath
+                | SqlTypeKind::Xml
                 | SqlTypeKind::InternalChar
                 | SqlTypeKind::Float4
                 | SqlTypeKind::Float8
@@ -446,6 +447,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
             SqlTypeKind::Json => 199,
             SqlTypeKind::Jsonb => 3807,
             SqlTypeKind::JsonPath => 4073,
+            SqlTypeKind::Xml => 143,
             SqlTypeKind::Date => 1182,
             SqlTypeKind::Time => 1183,
             SqlTypeKind::TimeTz => 1270,
@@ -501,15 +503,21 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
         SqlTypeKind::AnyRange => (crate::include::catalog::ANYRANGEOID as i32, -1, -1),
         SqlTypeKind::AnyMultirange => (crate::include::catalog::ANYMULTIRANGEOID as i32, -1, -1),
         SqlTypeKind::AnyCompatible => (crate::include::catalog::ANYCOMPATIBLEOID as i32, 4, -1),
-        SqlTypeKind::AnyCompatibleArray => {
-            (crate::include::catalog::ANYCOMPATIBLEARRAYOID as i32, -1, -1)
-        }
-        SqlTypeKind::AnyCompatibleRange => {
-            (crate::include::catalog::ANYCOMPATIBLERANGEOID as i32, -1, -1)
-        }
-        SqlTypeKind::AnyCompatibleMultirange => {
-            (crate::include::catalog::ANYCOMPATIBLEMULTIRANGEOID as i32, -1, -1)
-        }
+        SqlTypeKind::AnyCompatibleArray => (
+            crate::include::catalog::ANYCOMPATIBLEARRAYOID as i32,
+            -1,
+            -1,
+        ),
+        SqlTypeKind::AnyCompatibleRange => (
+            crate::include::catalog::ANYCOMPATIBLERANGEOID as i32,
+            -1,
+            -1,
+        ),
+        SqlTypeKind::AnyCompatibleMultirange => (
+            crate::include::catalog::ANYCOMPATIBLEMULTIRANGEOID as i32,
+            -1,
+            -1,
+        ),
         SqlTypeKind::Trigger => (TRIGGER_TYPE_OID as i32, -1, -1),
         SqlTypeKind::FdwHandler => (crate::include::catalog::FDW_HANDLER_TYPE_OID as i32, 4, -1),
         SqlTypeKind::Record | SqlTypeKind::Composite => {
@@ -534,6 +542,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
         SqlTypeKind::Json => (114, -1, -1),
         SqlTypeKind::Jsonb => (3802, -1, -1),
         SqlTypeKind::JsonPath => (4072, -1, -1),
+        SqlTypeKind::Xml => (142, -1, -1),
         SqlTypeKind::Date => (1082, 4, -1),
         SqlTypeKind::Time => (1083, 8, col.sql_type.typmod),
         SqlTypeKind::TimeTz => (1266, 12, col.sql_type.typmod),
@@ -694,8 +703,8 @@ pub(crate) fn send_typed_data_row(
                 buf.extend_from_slice(rendered.as_bytes());
             }
             Value::Multirange(_) => {
-                let rendered = crate::backend::executor::render_multirange_text(val)
-                    .unwrap_or_default();
+                let rendered =
+                    crate::backend::executor::render_multirange_text(val).unwrap_or_default();
                 buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
                 buf.extend_from_slice(rendered.as_bytes());
             }
@@ -721,6 +730,10 @@ pub(crate) fn send_typed_data_row(
                 buf.extend_from_slice(text.as_bytes());
             }
             Value::Json(v) => {
+                buf.extend_from_slice(&(v.len() as i32).to_be_bytes());
+                buf.extend_from_slice(v.as_bytes());
+            }
+            Value::Xml(v) => {
                 buf.extend_from_slice(&(v.len() as i32).to_be_bytes());
                 buf.extend_from_slice(v.as_bytes());
             }
@@ -838,6 +851,7 @@ fn encode_binary_data_row_value(value: &Value, sql_type: SqlType) -> Result<Vec<
                     | SqlTypeKind::PgNodeTree
                     | SqlTypeKind::Json
                     | SqlTypeKind::JsonPath
+                    | SqlTypeKind::Xml
             ) =>
         {
             Ok(text.as_bytes().to_vec())
@@ -852,9 +866,13 @@ fn encode_binary_data_row_value(value: &Value, sql_type: SqlType) -> Result<Vec<
                     | SqlTypeKind::PgNodeTree
                     | SqlTypeKind::Json
                     | SqlTypeKind::JsonPath
+                    | SqlTypeKind::Xml
             ) =>
         {
             Ok(value.as_text().unwrap_or_default().as_bytes().to_vec())
+        }
+        Value::Xml(text) if matches!(sql_type.kind, SqlTypeKind::Xml) => {
+            Ok(text.as_bytes().to_vec())
         }
         Value::InternalChar(byte) => Ok(vec![*byte]),
         Value::Float64(v) if matches!(sql_type.kind, SqlTypeKind::Float4) => {
@@ -1810,7 +1828,10 @@ mod tests {
         )
         .unwrap();
 
-        assert!(out.windows("app_role".len()).any(|window| window == b"app_role"));
+        assert!(
+            out.windows("app_role".len())
+                .any(|window| window == b"app_role")
+        );
     }
 
     #[test]
@@ -1836,9 +1857,10 @@ mod tests {
         )
         .unwrap();
 
-        assert!(out
-            .windows("pg_rust_test_fdw_handler".len())
-            .any(|window| window == b"pg_rust_test_fdw_handler"));
+        assert!(
+            out.windows("pg_rust_test_fdw_handler".len())
+                .any(|window| window == b"pg_rust_test_fdw_handler")
+        );
     }
 
     #[test]

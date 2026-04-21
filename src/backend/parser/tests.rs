@@ -1403,6 +1403,56 @@ fn parse_set_statement() {
 }
 
 #[test]
+fn parse_set_xml_option_statement() {
+    let stmt = parse_statement("set xml option document").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::Set(SetStatement {
+            name: "xmloption".into(),
+            value: "DOCUMENT".into(),
+            is_local: false,
+        })
+    );
+}
+
+#[test]
+fn parse_xmlelement_expression() {
+    let stmt =
+        parse_statement("select xmlelement(name employee, xmlattributes(1 as id), 'ok')").unwrap();
+    let Statement::Select(select) = stmt else {
+        panic!("expected select");
+    };
+    assert!(matches!(select.targets[0].expr, SqlExpr::Xml(_)));
+}
+
+#[test]
+fn parse_xmlserialize_expression() {
+    let stmt = parse_statement("select xmlserialize(document '<a/>' as text no indent)").unwrap();
+    let Statement::Select(select) = stmt else {
+        panic!("expected select");
+    };
+    assert!(matches!(select.targets[0].expr, SqlExpr::Xml(_)));
+}
+
+#[test]
+fn parse_xmlagg_aggregate() {
+    let stmt = parse_statement("select xmlagg(x) from t").unwrap();
+    let Statement::Select(select) = stmt else {
+        panic!("expected select");
+    };
+    assert!(matches!(select.targets[0].expr, SqlExpr::AggCall { .. }));
+}
+
+#[test]
+fn parse_is_document_expression() {
+    let stmt = parse_statement("select xml '<a/>' is document").unwrap();
+    let Statement::Select(select) = stmt else {
+        panic!("expected select");
+    };
+    assert!(matches!(select.targets[0].expr, SqlExpr::Xml(_)));
+}
+
+#[test]
 fn parse_transaction_alias_statements() {
     assert_eq!(
         parse_statement("begin transaction").unwrap(),
@@ -1869,10 +1919,9 @@ fn parse_alter_table_constraint_statements() {
         })
     );
 
-    let err = parse_statement(
-        "alter table items alter constraint items_id_check enforced not enforced",
-    )
-    .unwrap_err();
+    let err =
+        parse_statement("alter table items alter constraint items_id_check enforced not enforced")
+            .unwrap_err();
     assert!(matches!(
         err,
         ParseError::FeatureNotSupportedMessage(message)

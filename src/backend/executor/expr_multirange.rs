@@ -4,10 +4,12 @@ use super::ExecError;
 use super::expr_range::{
     empty_range, normalize_range, parse_range_text, range_adjacent, range_contains_element,
     range_contains_range, range_difference_segments, range_intersection, range_merge,
-    range_overlap, range_over_left_bounds, range_over_right_bounds, range_strict_left,
+    range_over_left_bounds, range_over_right_bounds, range_overlap, range_strict_left,
     range_strict_right, render_range_value,
 };
-use super::node_types::{BuiltinScalarFunction, MultirangeTypeRef, MultirangeValue, RangeValue, Value};
+use super::node_types::{
+    BuiltinScalarFunction, MultirangeTypeRef, MultirangeValue, RangeValue, Value,
+};
 use crate::backend::parser::SqlType;
 use crate::include::catalog::multirange_type_ref_for_sql_type;
 
@@ -22,10 +24,7 @@ pub(crate) fn parse_multirange_text(text: &str, ty: SqlType) -> Result<Value, Ex
     let mut idx = 0usize;
     skip_ascii_whitespace(text, &mut idx);
     if !matches!(char_at(text, idx), Some('{')) {
-        return Err(malformed_multirange_literal(
-            text,
-            "Missing left brace.",
-        ));
+        return Err(malformed_multirange_literal(text, "Missing left brace."));
     };
     idx += 1;
     enum ParseState {
@@ -49,7 +48,8 @@ pub(crate) fn parse_multirange_text(text: &str, ty: SqlType) -> Result<Value, Ex
                     let end = scan_range_item_end(text, idx).ok_or_else(|| {
                         malformed_multirange_literal(text, "Unexpected end of input.")
                     })?;
-                    let parsed = parse_range_text(&text[idx..end], multirange_type.range_type.sql_type)?;
+                    let parsed =
+                        parse_range_text(&text[idx..end], multirange_type.range_type.sql_type)?;
                     let Value::Range(range) = parsed else {
                         unreachable!("range parser must return a range value");
                     };
@@ -66,10 +66,7 @@ pub(crate) fn parse_multirange_text(text: &str, ty: SqlType) -> Result<Value, Ex
                     saw_range = true;
                     state = ParseState::AfterRange;
                 } else {
-                    return Err(malformed_multirange_literal(
-                        text,
-                        "Expected range start.",
-                    ));
+                    return Err(malformed_multirange_literal(text, "Expected range start."));
                 }
             }
             ParseState::AfterRange => {
@@ -95,7 +92,10 @@ pub(crate) fn parse_multirange_text(text: &str, ty: SqlType) -> Result<Value, Ex
             "Junk after closing right brace.",
         ));
     }
-    Ok(Value::Multirange(normalize_multirange(multirange_type, ranges)?))
+    Ok(Value::Multirange(normalize_multirange(
+        multirange_type,
+        ranges,
+    )?))
 }
 
 pub fn render_multirange_text(value: &Value) -> Option<String> {
@@ -194,13 +194,16 @@ pub(crate) fn decode_multirange_bytes(
 
 pub(crate) fn multirange_from_range(range: &RangeValue) -> Result<MultirangeValue, ExecError> {
     let Some(multirange_type) = multirange_type_ref_for_sql_type(
-        SqlType::multirange(range.range_type.multirange_type_oid, range.range_type.type_oid())
-            .with_range_metadata(
-                range.range_type.subtype_oid(),
-                range.range_type.multirange_type_oid,
-                range.range_type.is_discrete(),
-            )
-            .with_multirange_range_oid(range.range_type.type_oid()),
+        SqlType::multirange(
+            range.range_type.multirange_type_oid,
+            range.range_type.type_oid(),
+        )
+        .with_range_metadata(
+            range.range_type.subtype_oid(),
+            range.range_type.multirange_type_oid,
+            range.range_type.is_discrete(),
+        )
+        .with_multirange_range_oid(range.range_type.type_oid()),
     ) else {
         return Err(ExecError::TypeMismatch {
             op: "multirange",
@@ -230,11 +233,7 @@ pub(crate) fn normalize_multirange(
         if range.empty {
             continue;
         }
-        let range = normalize_range(
-            range.range_type,
-            range.lower.clone(),
-            range.upper.clone(),
-        )?;
+        let range = normalize_range(range.range_type, range.lower.clone(), range.upper.clone())?;
         normalized.push(range);
     }
     normalized.sort_by(super::compare_range_values);
@@ -337,20 +336,14 @@ pub(crate) fn eval_multirange_function(
             ))
         }),
         RangeLowerInf => unary_multirange_bool(values, "lower_inf", |multirange| {
-            Ok(Value::Bool(
-                multirange
-                    .ranges
-                    .first()
-                    .is_some_and(|range| !range.empty && range.lower.is_none()),
-            ))
+            Ok(Value::Bool(multirange.ranges.first().is_some_and(
+                |range| !range.empty && range.lower.is_none(),
+            )))
         }),
         RangeUpperInf => unary_multirange_bool(values, "upper_inf", |multirange| {
-            Ok(Value::Bool(
-                multirange
-                    .ranges
-                    .last()
-                    .is_some_and(|range| !range.empty && range.upper.is_none()),
-            ))
+            Ok(Value::Bool(multirange.ranges.last().is_some_and(|range| {
+                !range.empty && range.upper.is_none()
+            })))
         }),
         RangeContains => eval_multirange_contains(values),
         RangeContainedBy => eval_multirange_contained_by(values),
@@ -376,7 +369,10 @@ fn eval_multirange_constructor(
 ) -> Result<Value, ExecError> {
     let multirange_type = infer_constructor_multirange_type(values, result_type, func_variadic)?;
     let ranges = collect_constructor_ranges(values, multirange_type, func_variadic)?;
-    Ok(Value::Multirange(normalize_multirange(multirange_type, ranges)?))
+    Ok(Value::Multirange(normalize_multirange(
+        multirange_type,
+        ranges,
+    )?))
 }
 
 fn infer_constructor_multirange_type(
@@ -389,7 +385,9 @@ fn infer_constructor_multirange_type(
     }
     for value in values {
         match value {
-            Value::Range(range) => return multirange_from_range(range).map(|value| value.multirange_type),
+            Value::Range(range) => {
+                return multirange_from_range(range).map(|value| value.multirange_type);
+            }
             Value::Multirange(multirange) => return Ok(multirange.multirange_type),
             Value::Array(items) if func_variadic => {
                 if let Some(range) = items.iter().find_map(range_from_value) {
@@ -554,15 +552,29 @@ fn eval_multirange_contains(values: &[Value]) -> Result<Value, ExecError> {
     match values {
         [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
         [Value::Multirange(multirange), Value::Range(range)] => {
-            ensure_same_range_kind("@>", &multirange.multirange_type.range_type.sql_type, &range.range_type.sql_type, Value::Multirange(multirange.clone()), Value::Range(range.clone()))?;
+            ensure_same_range_kind(
+                "@>",
+                &multirange.multirange_type.range_type.sql_type,
+                &range.range_type.sql_type,
+                Value::Multirange(multirange.clone()),
+                Value::Range(range.clone()),
+            )?;
             Ok(Value::Bool(multirange_contains_range(multirange, range)))
         }
         [Value::Multirange(multirange), Value::Multirange(other)] => {
             ensure_same_multirange_kind("@>", multirange, other)?;
-            Ok(Value::Bool(multirange_contains_multirange(multirange, other)))
+            Ok(Value::Bool(multirange_contains_multirange(
+                multirange, other,
+            )))
         }
         [Value::Range(range), Value::Multirange(multirange)] => {
-            ensure_same_range_kind("@>", &range.range_type.sql_type, &multirange.multirange_type.range_type.sql_type, Value::Range(range.clone()), Value::Multirange(multirange.clone()))?;
+            ensure_same_range_kind(
+                "@>",
+                &range.range_type.sql_type,
+                &multirange.multirange_type.range_type.sql_type,
+                Value::Range(range.clone()),
+                Value::Multirange(multirange.clone()),
+            )?;
             Ok(Value::Bool(range_contains_multirange(range, multirange)))
         }
         [Value::Multirange(multirange), value] => {
@@ -581,11 +593,23 @@ fn eval_multirange_contained_by(values: &[Value]) -> Result<Value, ExecError> {
     match values {
         [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
         [Value::Range(range), Value::Multirange(multirange)] => {
-            ensure_same_range_kind("<@", &range.range_type.sql_type, &multirange.multirange_type.range_type.sql_type, Value::Range(range.clone()), Value::Multirange(multirange.clone()))?;
+            ensure_same_range_kind(
+                "<@",
+                &range.range_type.sql_type,
+                &multirange.multirange_type.range_type.sql_type,
+                Value::Range(range.clone()),
+                Value::Multirange(multirange.clone()),
+            )?;
             Ok(Value::Bool(multirange_contains_range(multirange, range)))
         }
         [Value::Multirange(multirange), Value::Range(range)] => {
-            ensure_same_range_kind("<@", &multirange.multirange_type.range_type.sql_type, &range.range_type.sql_type, Value::Multirange(multirange.clone()), Value::Range(range.clone()))?;
+            ensure_same_range_kind(
+                "<@",
+                &multirange.multirange_type.range_type.sql_type,
+                &range.range_type.sql_type,
+                Value::Multirange(multirange.clone()),
+                Value::Range(range.clone()),
+            )?;
             Ok(Value::Bool(range_contains_multirange(range, multirange)))
         }
         [Value::Multirange(left), Value::Multirange(right)] => {
@@ -641,39 +665,75 @@ fn multirange_overlap_values(left: &Value, right: &Value) -> Result<bool, ExecEr
 fn multirange_strict_left_values(left: &Value, right: &Value) -> Result<bool, ExecError> {
     let left_span = span_value(left, "<<")?;
     let right_span = span_value(right, "<<")?;
-    ensure_same_range_kind("<<", &left_span.range_type.sql_type, &right_span.range_type.sql_type, Value::Range(left_span.clone()), Value::Range(right_span.clone()))?;
+    ensure_same_range_kind(
+        "<<",
+        &left_span.range_type.sql_type,
+        &right_span.range_type.sql_type,
+        Value::Range(left_span.clone()),
+        Value::Range(right_span.clone()),
+    )?;
     Ok(range_strict_left(&left_span, &right_span))
 }
 
 fn multirange_strict_right_values(left: &Value, right: &Value) -> Result<bool, ExecError> {
     let left_span = span_value(left, ">>")?;
     let right_span = span_value(right, ">>")?;
-    ensure_same_range_kind(">>", &left_span.range_type.sql_type, &right_span.range_type.sql_type, Value::Range(left_span.clone()), Value::Range(right_span.clone()))?;
+    ensure_same_range_kind(
+        ">>",
+        &left_span.range_type.sql_type,
+        &right_span.range_type.sql_type,
+        Value::Range(left_span.clone()),
+        Value::Range(right_span.clone()),
+    )?;
     Ok(range_strict_right(&left_span, &right_span))
 }
 
 fn multirange_over_left_values(left: &Value, right: &Value) -> Result<bool, ExecError> {
     let left_span = span_value(left, "&<")?;
     let right_span = span_value(right, "&<")?;
-    ensure_same_range_kind("&<", &left_span.range_type.sql_type, &right_span.range_type.sql_type, Value::Range(left_span.clone()), Value::Range(right_span.clone()))?;
+    ensure_same_range_kind(
+        "&<",
+        &left_span.range_type.sql_type,
+        &right_span.range_type.sql_type,
+        Value::Range(left_span.clone()),
+        Value::Range(right_span.clone()),
+    )?;
     Ok(range_over_left_bounds(&left_span, &right_span))
 }
 
 fn multirange_over_right_values(left: &Value, right: &Value) -> Result<bool, ExecError> {
     let left_span = span_value(left, "&>")?;
     let right_span = span_value(right, "&>")?;
-    ensure_same_range_kind("&>", &left_span.range_type.sql_type, &right_span.range_type.sql_type, Value::Range(left_span.clone()), Value::Range(right_span.clone()))?;
+    ensure_same_range_kind(
+        "&>",
+        &left_span.range_type.sql_type,
+        &right_span.range_type.sql_type,
+        Value::Range(left_span.clone()),
+        Value::Range(right_span.clone()),
+    )?;
     Ok(range_over_right_bounds(&left_span, &right_span))
 }
 
 fn multirange_adjacent_values(left: &Value, right: &Value) -> Result<bool, ExecError> {
     match (left, right) {
         (Value::Multirange(left), Value::Range(right)) => {
-            ensure_same_range_kind("-|-", &left.multirange_type.range_type.sql_type, &right.range_type.sql_type, Value::Multirange(left.clone()), Value::Range(right.clone()))?;
+            ensure_same_range_kind(
+                "-|-",
+                &left.multirange_type.range_type.sql_type,
+                &right.range_type.sql_type,
+                Value::Multirange(left.clone()),
+                Value::Range(right.clone()),
+            )?;
             Ok(multirange_adjacent_range(left, right))
         }
         (Value::Range(left), Value::Multirange(right)) => {
-            ensure_same_range_kind("-|-", &left.range_type.sql_type, &right.multirange_type.range_type.sql_type, Value::Range(left.clone()), Value::Multirange(right.clone()))?;
+            ensure_same_range_kind(
+                "-|-",
+                &left.range_type.sql_type,
+                &right.multirange_type.range_type.sql_type,
+                Value::Range(left.clone()),
+                Value::Multirange(right.clone()),
+            )?;
             Ok(multirange_adjacent_range(right, left))
         }
         (Value::Multirange(left), Value::Multirange(right)) => {
@@ -750,11 +810,9 @@ fn range_contains_multirange(range: &RangeValue, multirange: &MultirangeValue) -
         .all(|candidate| range_contains_range(range, candidate))
 }
 
-fn multirange_contains_multirange(
-    left: &MultirangeValue,
-    right: &MultirangeValue,
-) -> bool {
-    right.ranges
+fn multirange_contains_multirange(left: &MultirangeValue, right: &MultirangeValue) -> bool {
+    right
+        .ranges
         .iter()
         .all(|candidate| multirange_contains_range(left, candidate))
 }
@@ -766,10 +824,7 @@ fn multirange_overlaps_range(multirange: &MultirangeValue, range: &RangeValue) -
         .any(|candidate| range_overlap(candidate, range))
 }
 
-fn multirange_overlaps_multirange(
-    left: &MultirangeValue,
-    right: &MultirangeValue,
-) -> bool {
+fn multirange_overlaps_multirange(left: &MultirangeValue, right: &MultirangeValue) -> bool {
     left.ranges.iter().any(|left_range| {
         right
             .ranges
@@ -786,10 +841,7 @@ fn multirange_adjacent_range(multirange: &MultirangeValue, range: &RangeValue) -
             .any(|candidate| range_adjacent(candidate, range))
 }
 
-fn multirange_adjacent_multirange(
-    left: &MultirangeValue,
-    right: &MultirangeValue,
-) -> bool {
+fn multirange_adjacent_multirange(left: &MultirangeValue, right: &MultirangeValue) -> bool {
     !multirange_overlaps_multirange(left, right)
         && left.ranges.iter().any(|left_range| {
             right
@@ -857,7 +909,10 @@ fn multirange_value_for_input(value: &Value) -> Result<Option<MultirangeValue>, 
     }
 }
 
-fn multirange_value_for_binary(value: &Value, op: &'static str) -> Result<MultirangeValue, ExecError> {
+fn multirange_value_for_binary(
+    value: &Value,
+    op: &'static str,
+) -> Result<MultirangeValue, ExecError> {
     multirange_value_for_input(value)?.ok_or_else(|| ExecError::TypeMismatch {
         op,
         left: Value::Null,

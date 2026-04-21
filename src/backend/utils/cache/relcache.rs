@@ -350,9 +350,7 @@ impl RelCache {
                     relcache_entry.clone(),
                 );
             }
-            cache
-                .by_oid
-                .insert(entry.relation_oid, relcache_entry);
+            cache.by_oid.insert(entry.relation_oid, relcache_entry);
         }
         cache
     }
@@ -1066,7 +1064,9 @@ mod tests {
             Some(crate::include::catalog::PG_CLASS_RELATION_OID)
         );
         assert_eq!(
-            cache.get_by_name("pg_catalog.pg_class").map(|entry| entry.relation_oid),
+            cache
+                .get_by_name("pg_catalog.pg_class")
+                .map(|entry| entry.relation_oid),
             Some(crate::include::catalog::PG_CLASS_RELATION_OID)
         );
     }

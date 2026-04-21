@@ -1793,6 +1793,12 @@ fn reject_unsupported_check_expr(expr: &Expr) -> Result<(), ParseError> {
             }
             Ok(())
         }
+        Expr::Xml(xml) => {
+            for child in xml.child_exprs() {
+                reject_unsupported_check_expr(child)?;
+            }
+            Ok(())
+        }
         Expr::Var(_)
         | Expr::Param(_)
         | Expr::Const(_)

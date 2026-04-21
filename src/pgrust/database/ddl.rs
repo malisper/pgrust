@@ -619,6 +619,7 @@ pub(super) fn format_sql_type_name(sql_type: SqlType) -> &'static str {
         SqlTypeKind::Json => "json",
         SqlTypeKind::Jsonb => "jsonb",
         SqlTypeKind::JsonPath => "jsonpath",
+        SqlTypeKind::Xml => "xml",
         SqlTypeKind::Date => "date",
         SqlTypeKind::Time => "time without time zone",
         SqlTypeKind::TimeTz => "time with time zone",

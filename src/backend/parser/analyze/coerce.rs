@@ -185,6 +185,7 @@ pub(super) fn sql_type_name(ty: SqlType) -> String {
             SqlTypeKind::Json => "json",
             SqlTypeKind::Jsonb => "jsonb",
             SqlTypeKind::JsonPath => "jsonpath",
+            SqlTypeKind::Xml => "xml",
             SqlTypeKind::Date => "date",
             SqlTypeKind::Time => "time without time zone",
             SqlTypeKind::TimeTz => "time with time zone",

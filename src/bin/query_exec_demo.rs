@@ -79,6 +79,7 @@ fn render_value(value: &Value) -> String {
         Value::Multirange(_) => {
             pgrust::backend::executor::render_multirange_text(value).unwrap_or_default()
         }
+        Value::Xml(v) => v.to_string(),
         Value::Point(_)
         | Value::Lseg(_)
         | Value::Path(_)

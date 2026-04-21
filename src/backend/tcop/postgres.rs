@@ -41,6 +41,7 @@ fn exec_error_sqlstate(e: &ExecError) -> &'static str {
     match e {
         ExecError::Regex(err) => err.sqlstate,
         ExecError::JsonInput { sqlstate, .. } => sqlstate,
+        ExecError::XmlInput { sqlstate, .. } => sqlstate,
         ExecError::DetailedError { sqlstate, .. } => sqlstate,
         ExecError::Parse(crate::backend::parser::ParseError::InvalidInteger(_))
         | ExecError::Parse(crate::backend::parser::ParseError::InvalidNumeric(_))
@@ -110,14 +111,14 @@ fn exec_error_detail(e: &ExecError) -> Option<&str> {
     match e {
         ExecError::Parse(
             crate::backend::parser::ParseError::InvalidPublicationParameterValue {
-                parameter,
-                ..
+                parameter, ..
             },
         ) if parameter == "publish_generated_columns" => {
             Some("Valid values are \"none\" and \"stored\".")
         }
         ExecError::Regex(err) => err.detail.as_deref(),
         ExecError::JsonInput { detail, .. } => detail.as_deref(),
+        ExecError::XmlInput { detail, .. } => detail.as_deref(),
         ExecError::DetailedError { detail, .. } => detail.as_deref(),
         ExecError::Parse(crate::backend::parser::ParseError::DetailedError { detail, .. }) => {
             detail.as_deref()
@@ -142,6 +143,7 @@ fn exec_error_hint(e: &ExecError) -> Option<&str> {
 fn exec_error_context(e: &ExecError) -> Option<&str> {
     match e {
         ExecError::JsonInput { context, .. } => context.as_deref(),
+        ExecError::XmlInput { context, .. } => context.as_deref(),
         ExecError::Regex(err) => err.context.as_deref(),
         _ => None,
     }
@@ -184,17 +186,15 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         ExecError::Parse(crate::backend::parser::ParseError::UndefinedOperator { op, .. }) => {
             return sql.find(op).map(|index| index + 1);
         }
-        ExecError::Parse(
-            crate::backend::parser::ParseError::InvalidPublicationTableName(name),
-        )
-        | ExecError::Parse(
-            crate::backend::parser::ParseError::InvalidPublicationSchemaName(name),
-        ) => {
+        ExecError::Parse(crate::backend::parser::ParseError::InvalidPublicationTableName(name))
+        | ExecError::Parse(crate::backend::parser::ParseError::InvalidPublicationSchemaName(
+            name,
+        )) => {
             return find_case_insensitive_token_position(sql, name);
         }
-        ExecError::Parse(
-            crate::backend::parser::ParseError::ConflictingOrRedundantOptions { option },
-        ) => {
+        ExecError::Parse(crate::backend::parser::ParseError::ConflictingOrRedundantOptions {
+            option,
+        }) => {
             return find_second_option_occurrence(sql, option);
         }
         ExecError::InvalidIntegerInput { value, .. } => value.as_str(),
@@ -216,6 +216,7 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             }
         }
         ExecError::JsonInput { raw_input, .. } => raw_input.as_str(),
+        ExecError::XmlInput { raw_input, .. } => raw_input.as_str(),
         _ => return None,
     };
     sql.find(value).map(|index| index + 1).or_else(|| {

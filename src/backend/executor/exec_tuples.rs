@@ -394,6 +394,10 @@ impl CompiledTupleDecoder {
                                 values.push(Value::Null);
                                 continue;
                             }
+                            ScalarType::Xml => {
+                                values.push(Value::Null);
+                                continue;
+                            }
                             ScalarType::TsVector => {
                                 values.push(Value::Null);
                                 continue;

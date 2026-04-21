@@ -730,9 +730,9 @@ fn range_type_name_exists_in_snapshot(
     namespace_oid: u32,
     name: &str,
 ) -> bool {
-    range_types.values().any(|entry| {
-        entry.namespace_oid == namespace_oid && entry.name.eq_ignore_ascii_case(name)
-    })
+    range_types
+        .values()
+        .any(|entry| entry.namespace_oid == namespace_oid && entry.name.eq_ignore_ascii_case(name))
 }
 
 fn range_type_or_multirange_name_exists_in_snapshot(

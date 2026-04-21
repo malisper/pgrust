@@ -28,13 +28,12 @@ use crate::backend::rewrite::pg_rewrite_query;
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, PgAggregateRow, PgCastRow, PgClassRow, PgCollationRow,
-    PgConstraintRow, PgInheritsRow, PgLanguageRow, PgOpclassRow, PgOperatorRow, PgProcRow,
-    PgRangeRow, PgRewriteRow, PgStatisticRow, PgTypeRow, RECORD_TYPE_OID,
+    BOOTSTRAP_SUPERUSER_OID, PgAggregateRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow,
+    PgCollationRow, PgConstraintRow, PgInheritsRow, PgLanguageRow, PgOpclassRow, PgOperatorRow,
+    PgProcRow, PgRangeRow, PgRewriteRow, PgStatisticRow, PgTypeRow, RECORD_TYPE_OID,
     bootstrap_pg_aggregate_rows, bootstrap_pg_cast_rows, bootstrap_pg_collation_rows,
     bootstrap_pg_language_rows, bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows,
     bootstrap_pg_proc_rows, builtin_range_rows, builtin_type_rows,
-    PgAuthIdRow, PgAuthMembersRow,
     multirange_type_ref_for_sql_type, proc_oid_for_builtin_aggregate_function,
     range_type_ref_for_sql_type, relkind_is_analyzable, synthetic_range_proc_row_by_oid,
     synthetic_range_proc_rows_by_name,
@@ -2008,6 +2007,12 @@ impl<'a> RecursiveReferenceChecker<'a> {
                 }
                 Ok(())
             }
+            SqlExpr::Xml(xml) => {
+                for child in xml.child_exprs() {
+                    self.visit_expr(child, context)?;
+                }
+                Ok(())
+            }
         }
     }
 
@@ -2144,6 +2149,9 @@ fn sql_expr_references_table(expr: &SqlExpr, table_name: &str) -> bool {
         | SqlExpr::IsNotNull(inner)
         | SqlExpr::Not(inner)
         | SqlExpr::FieldSelect { expr: inner, .. } => sql_expr_references_table(inner, table_name),
+        SqlExpr::Xml(xml) => xml
+            .child_exprs()
+            .any(|child| sql_expr_references_table(child, table_name)),
         SqlExpr::Add(left, right)
         | SqlExpr::Sub(left, right)
         | SqlExpr::BitAnd(left, right)

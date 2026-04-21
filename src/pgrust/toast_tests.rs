@@ -10,8 +10,8 @@ use crate::backend::access::heap::heaptoast::{
 use crate::backend::access::transam::xact::{CommandId, INVALID_TRANSACTION_ID, TransactionId};
 use crate::backend::executor::{ExecutorContext, StatementResult, Value};
 use crate::include::access::detoast::{
-    decode_ondisk_toast_pointer, is_compressed_inline_datum, varatt_external_get_compression_method,
-    varatt_external_is_compressed,
+    decode_ondisk_toast_pointer, is_compressed_inline_datum,
+    varatt_external_get_compression_method, varatt_external_is_compressed,
 };
 use crate::include::access::htup::{HeapTuple, TupleValue};
 use crate::include::access::toast_compression::ToastCompressionId;
@@ -73,7 +73,9 @@ fn count_toast_chunks(
 
 fn relation_payload_bytes(db: &Database, client_id: u32, table_name: &str, id: i32) -> Vec<u8> {
     let catalog = db.lazy_catalog_lookup(client_id, None, None);
-    let relation = catalog.lookup_relation(table_name).expect("relation exists");
+    let relation = catalog
+        .lookup_relation(table_name)
+        .expect("relation exists");
     let attr_descs = relation.desc.attribute_descs();
     let snapshot = db.txns.read().snapshot(INVALID_TRANSACTION_ID).unwrap();
     let mut scan = heap_scan_begin_visible(&db.pool, client_id, relation.rel, snapshot).unwrap();
@@ -172,7 +174,8 @@ fn externalizable_compressible_payload() -> String {
             crate::include::access::htup::AttributeCompression::Pglz,
         )
         .unwrap()
-            && compressed.encoded.len() > crate::backend::storage::page::bufpage::MAX_HEAP_TUPLE_SIZE
+            && compressed.encoded.len()
+                > crate::backend::storage::page::bufpage::MAX_HEAP_TUPLE_SIZE
         {
             return payload;
         }
@@ -338,8 +341,11 @@ fn alter_column_compression_can_keep_large_values_inline() {
 
     db.execute(1, "create table docs (id int4, payload text)")
         .unwrap();
-    db.execute(1, "alter table docs alter column payload set compression pglz")
-        .unwrap();
+    db.execute(
+        1,
+        "alter table docs alter column payload set compression pglz",
+    )
+    .unwrap();
     db.execute(
         1,
         &format!("insert into docs (id, payload) values (1, '{payload}')"),
@@ -370,10 +376,16 @@ fn storage_external_disables_compression_even_when_requested() {
 
     db.execute(1, "create table docs (id int4, payload text)")
         .unwrap();
-    db.execute(1, "alter table docs alter column payload set storage external")
-        .unwrap();
-    db.execute(1, "alter table docs alter column payload set compression pglz")
-        .unwrap();
+    db.execute(
+        1,
+        "alter table docs alter column payload set storage external",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table docs alter column payload set compression pglz",
+    )
+    .unwrap();
     db.execute(
         1,
         &format!("insert into docs (id, payload) values (1, '{payload}')"),
@@ -405,8 +417,11 @@ fn compressed_external_values_round_trip() {
 
     db.execute(1, "create table docs (id int4, payload text)")
         .unwrap();
-    db.execute(1, "alter table docs alter column payload set compression pglz")
-        .unwrap();
+    db.execute(
+        1,
+        "alter table docs alter column payload set compression pglz",
+    )
+    .unwrap();
     db.execute(
         1,
         &format!("insert into docs (id, payload) values (1, '{payload}')"),
@@ -443,7 +458,9 @@ fn legacy_and_exact_external_pointer_encodings_both_decode() {
         .unwrap();
 
     let catalog = db.lazy_catalog_lookup(1, None, None);
-    let relation = catalog.lookup_relation("docs").expect("heap relation exists");
+    let relation = catalog
+        .lookup_relation("docs")
+        .expect("heap relation exists");
     let attr_descs = relation.desc.attribute_descs();
     let toast = toast_relation_ref(&db, 1, "docs");
 

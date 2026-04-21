@@ -131,6 +131,7 @@ pub(super) fn expr_contains_agg(expr: &SqlExpr) -> bool {
         SqlExpr::GeometryBinaryOp { left, right, .. } => {
             expr_contains_agg(left) || expr_contains_agg(right)
         }
+        SqlExpr::Xml(xml) => xml.child_exprs().any(expr_contains_agg),
     }
 }
 
@@ -284,6 +285,7 @@ pub(super) fn expr_references_input_scope(expr: &SqlExpr) -> bool {
         SqlExpr::GeometryBinaryOp { left, right, .. } => {
             expr_references_input_scope(left) || expr_references_input_scope(right)
         }
+        SqlExpr::Xml(xml) => xml.child_exprs().any(expr_references_input_scope),
     }
 }
 
@@ -471,6 +473,11 @@ pub(super) fn collect_aggs(
             collect_aggs(left, aggs);
             collect_aggs(right, aggs);
         }
+        SqlExpr::Xml(xml) => {
+            for child in xml.child_exprs() {
+                collect_aggs(child, aggs);
+            }
+        }
     }
 }
 
@@ -539,6 +546,7 @@ pub(super) fn aggregate_sql_type(func: AggFunc, arg_type: Option<SqlType>) -> Sq
             })
             .unwrap_or(SqlType::array_of(SqlType::new(Text))),
         AggFunc::StringAgg => arg_type.unwrap_or(SqlType::new(Text)),
+        AggFunc::XmlAgg => SqlType::new(Xml),
         AggFunc::Min | AggFunc::Max => arg_type.unwrap_or(SqlType::new(Text)),
         AggFunc::RangeAgg => arg_type
             .and_then(|ty| {

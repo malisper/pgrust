@@ -132,7 +132,7 @@ fn value_output_text(value: &Value) -> Result<String, ExecError> {
                 "f".into()
             }
         }
-        Value::Text(_) | Value::TextRef(_, _) | Value::JsonPath(_) => {
+        Value::Text(_) | Value::TextRef(_, _) | Value::JsonPath(_) | Value::Xml(_) => {
             value.as_text().unwrap().into()
         }
         Value::Json(v) => v.as_str().into(),
@@ -150,8 +150,9 @@ fn value_output_text(value: &Value) -> Result<String, ExecError> {
                 .unwrap_or_default()
         }
         Value::Range(_) => render_range_text(value).unwrap_or_default(),
-        Value::Multirange(_) => crate::backend::executor::render_multirange_text(value)
-            .unwrap_or_default(),
+        Value::Multirange(_) => {
+            crate::backend::executor::render_multirange_text(value).unwrap_or_default()
+        }
         Value::InternalChar(byte) => render_internal_char_text(*byte),
         Value::Date(_)
         | Value::Time(_)

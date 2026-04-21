@@ -272,6 +272,7 @@ fn expr_contains_sublink(expr: &Expr) -> bool {
         Expr::ScalarArrayOp(saop) => {
             expr_contains_sublink(&saop.left) || expr_contains_sublink(&saop.right)
         }
+        Expr::Xml(xml) => xml.child_exprs().any(expr_contains_sublink),
         Expr::Cast(inner, _) => expr_contains_sublink(inner),
         Expr::Like {
             expr,

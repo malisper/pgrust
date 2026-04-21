@@ -129,8 +129,7 @@ fn bind_same_kind_multirange_binary(
     ctes: &[BoundCte],
 ) -> Result<Expr, ParseError> {
     let raw_left_type = infer_arg_type(left, scope, catalog, outer_scopes, grouped_outer, ctes);
-    let raw_right_type =
-        infer_arg_type(right, scope, catalog, outer_scopes, grouped_outer, ctes);
+    let raw_right_type = infer_arg_type(right, scope, catalog, outer_scopes, grouped_outer, ctes);
     let left_multirange = multirange_type_ref_for_sql_type(raw_left_type);
     let right_multirange = multirange_type_ref_for_sql_type(raw_right_type);
     let multirange_type = match (left_multirange, right_multirange) {
@@ -179,8 +178,7 @@ fn bind_multirange_relation_binary(
     ctes: &[BoundCte],
 ) -> Result<Expr, ParseError> {
     let raw_left_type = infer_arg_type(left, scope, catalog, outer_scopes, grouped_outer, ctes);
-    let raw_right_type =
-        infer_arg_type(right, scope, catalog, outer_scopes, grouped_outer, ctes);
+    let raw_right_type = infer_arg_type(right, scope, catalog, outer_scopes, grouped_outer, ctes);
     let left_multirange = multirange_type_ref_for_sql_type(raw_left_type);
     let right_multirange = multirange_type_ref_for_sql_type(raw_right_type);
     let (left_target, right_target) = if let Some(left_multirange) = left_multirange {
@@ -275,8 +273,7 @@ pub(super) fn bind_maybe_multirange_comparison(
     ctes: &[BoundCte],
 ) -> Option<Result<Expr, ParseError>> {
     let raw_left_type = infer_arg_type(left, scope, catalog, outer_scopes, grouped_outer, ctes);
-    let raw_right_type =
-        infer_arg_type(right, scope, catalog, outer_scopes, grouped_outer, ctes);
+    let raw_right_type = infer_arg_type(right, scope, catalog, outer_scopes, grouped_outer, ctes);
     let left_multirange = multirange_type_ref_for_sql_type(raw_left_type);
     let right_multirange = multirange_type_ref_for_sql_type(raw_right_type);
     if left_multirange.is_none() && right_multirange.is_none() {

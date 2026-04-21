@@ -109,7 +109,9 @@ fn encode_array_element_payload(
         }
         Value::Int64(v) => Ok(v.to_le_bytes().to_vec()),
         Value::Money(v) => Ok(v.to_le_bytes().to_vec()),
-        Value::Multirange(multirange) => crate::backend::executor::encode_multirange_bytes(&multirange),
+        Value::Multirange(multirange) => {
+            crate::backend::executor::encode_multirange_bytes(&multirange)
+        }
         Value::Date(v) => Ok(v.0.to_le_bytes().to_vec()),
         Value::Time(v) => Ok(v.0.to_le_bytes().to_vec()),
         Value::TimeTz(v) => {
@@ -131,6 +133,7 @@ fn encode_array_element_payload(
         Value::Bool(v) => Ok(vec![u8::from(v)]),
         Value::Numeric(text) => Ok(text.render().into_bytes()),
         Value::Json(text) => Ok(text.as_bytes().to_vec()),
+        Value::Xml(text) => Ok(text.as_bytes().to_vec()),
         Value::Text(text) => Ok(text.as_bytes().to_vec()),
         Value::TextRef(_, _) => Ok(coerced.as_text().unwrap().as_bytes().to_vec()),
         Value::TsVector(vector) => Ok(crate::backend::executor::encode_tsvector_bytes(&vector)),
@@ -539,6 +542,7 @@ fn array_element_layout(
         | SqlTypeKind::Json
         | SqlTypeKind::Jsonb
         | SqlTypeKind::JsonPath
+        | SqlTypeKind::Xml
         | SqlTypeKind::Text
         | SqlTypeKind::Tid
         | SqlTypeKind::Interval
@@ -746,6 +750,7 @@ fn infer_sql_type_from_value(value: &Value) -> Option<SqlType> {
         Value::Json(_) => Some(SqlType::new(SqlTypeKind::Json)),
         Value::Jsonb(_) => Some(SqlType::new(SqlTypeKind::Jsonb)),
         Value::JsonPath(_) => Some(SqlType::new(SqlTypeKind::JsonPath)),
+        Value::Xml(_) => Some(SqlType::new(SqlTypeKind::Xml)),
         Value::Point(_) => Some(SqlType::new(SqlTypeKind::Point)),
         Value::Line(_) => Some(SqlType::new(SqlTypeKind::Line)),
         Value::Lseg(_) => Some(SqlType::new(SqlTypeKind::Lseg)),
@@ -775,17 +780,22 @@ fn decode_array_element_value(
         let multirange_type = multirange_type_ref_for_sql_type(element_type).ok_or_else(|| {
             ExecError::InvalidStorageValue {
                 column: column.into(),
-                details: format!("unsupported multirange array element type {:?}", element_type),
+                details: format!(
+                    "unsupported multirange array element type {:?}",
+                    element_type
+                ),
             }
         })?;
         return crate::backend::executor::decode_multirange_bytes(multirange_type, bytes)
             .map(Value::Multirange);
     }
     match element_type.kind {
-        SqlTypeKind::AnyArray | SqlTypeKind::AnyCompatibleArray => Err(ExecError::InvalidStorageValue {
-            column: column.into(),
-            details: "anyarray cannot be used as a concrete array element type".into(),
-        }),
+        SqlTypeKind::AnyArray | SqlTypeKind::AnyCompatibleArray => {
+            Err(ExecError::InvalidStorageValue {
+                column: column.into(),
+                details: "anyarray cannot be used as a concrete array element type".into(),
+            })
+        }
         SqlTypeKind::AnyElement
         | SqlTypeKind::AnyRange
         | SqlTypeKind::AnyMultirange
@@ -1051,6 +1061,9 @@ fn decode_array_element_value(
             let text = unsafe { std::str::from_utf8_unchecked(bytes) };
             Ok(Value::JsonPath(canonicalize_jsonpath_text(text)?))
         }
+        SqlTypeKind::Xml => Ok(Value::Xml(CompactString::new(unsafe {
+            std::str::from_utf8_unchecked(bytes)
+        }))),
         SqlTypeKind::TsVector => Ok(Value::TsVector(
             crate::backend::executor::decode_tsvector_bytes(bytes)?,
         )),
@@ -1181,6 +1194,7 @@ fn format_array_values_nested(array: &ArrayValue, depth: usize, offset: &mut usi
                 }
                 out.push('"');
             }
+            Value::Xml(v) => push_array_text_element(&mut out, v),
             Value::TsVector(v) => {
                 let rendered = crate::backend::executor::render_tsvector_text(v);
                 out.push('"');

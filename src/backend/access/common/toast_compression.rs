@@ -47,9 +47,7 @@ pub(crate) fn compression_name(compression: AttributeCompression) -> &'static st
     }
 }
 
-pub(crate) fn parse_attribute_compression(
-    value: &str,
-) -> Result<AttributeCompression, ExecError> {
+pub(crate) fn parse_attribute_compression(value: &str) -> Result<AttributeCompression, ExecError> {
     match value.trim().to_ascii_lowercase().as_str() {
         "default" => Ok(AttributeCompression::Default),
         "pglz" => Ok(AttributeCompression::Pglz),
@@ -135,28 +133,26 @@ pub(crate) fn compress_inline_datum(
     }))
 }
 
-fn decompress_payload(
-    method: u32,
-    payload: &[u8],
-    rawsize: usize,
-) -> Result<Vec<u8>, ExecError> {
+fn decompress_payload(method: u32, payload: &[u8], rawsize: usize) -> Result<Vec<u8>, ExecError> {
     match ToastCompressionId::from_u32(method).ok_or_else(|| ExecError::InvalidStorageValue {
         column: "<toast>".into(),
         details: "invalid compression method".into(),
     })? {
-        ToastCompressionId::Pglz => pglz::decompress(payload, rawsize, true)
-            .ok_or_else(|| ExecError::InvalidStorageValue {
+        ToastCompressionId::Pglz => {
+            pglz::decompress(payload, rawsize, true).ok_or_else(|| ExecError::InvalidStorageValue {
                 column: "<toast>".into(),
                 details: "compressed pglz data is corrupt".into(),
-            }),
+            })
+        }
         ToastCompressionId::Lz4 => {
             #[cfg(feature = "lz4")]
             {
-                lz4_flex::block::decompress(payload, rawsize)
-                    .map_err(|_| ExecError::InvalidStorageValue {
+                lz4_flex::block::decompress(payload, rawsize).map_err(|_| {
+                    ExecError::InvalidStorageValue {
                         column: "<toast>".into(),
                         details: "compressed lz4 data is corrupt".into(),
-                    })
+                    }
+                })
             }
             #[cfg(not(feature = "lz4"))]
             {
@@ -187,10 +183,12 @@ pub(crate) fn decompress_external_payload(
     if method == ToastCompressionId::Invalid as u32 {
         return Ok(bytes.to_vec());
     }
-    let payload = bytes.get(4..).ok_or_else(|| ExecError::InvalidStorageValue {
-        column: "<toast>".into(),
-        details: "compressed external datum too short".into(),
-    })?;
+    let payload = bytes
+        .get(4..)
+        .ok_or_else(|| ExecError::InvalidStorageValue {
+            column: "<toast>".into(),
+            details: "compressed external datum too short".into(),
+        })?;
     decompress_payload(method, payload, rawsize)
 }
 
@@ -217,7 +215,9 @@ mod tests {
     fn lz4_requires_feature() {
         let err = parse_attribute_compression("lz4").unwrap_err();
         match err {
-            ExecError::DetailedError { message, sqlstate, .. } => {
+            ExecError::DetailedError {
+                message, sqlstate, ..
+            } => {
                 assert_eq!(message, "compression method lz4 not supported");
                 assert_eq!(sqlstate, "0A000");
             }
