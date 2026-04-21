@@ -1918,12 +1918,12 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 })
                 .collect::<Vec<_>>();
             let mut resolution_types = actual_types.clone();
-            if matches!(args.len(), 3)
+            if matches!(args_list.len(), 3)
                 && !*func_variadic
                 && (name.eq_ignore_ascii_case("lag") || name.eq_ignore_ascii_case("lead"))
             {
                 let common_type = infer_common_scalar_expr_type_with_ctes(
-                    &[args[0].value.clone(), args[2].value.clone()],
+                    &[args_list[0].value.clone(), args_list[2].value.clone()],
                     scope,
                     catalog,
                     outer_scopes,

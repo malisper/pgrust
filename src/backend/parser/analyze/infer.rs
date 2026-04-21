@@ -439,11 +439,11 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                     )
                 })
                 .collect::<Vec<_>>();
-            if matches!(args.len(), 3)
+            if matches!(args.args().len(), 3)
                 && !*func_variadic
                 && (name.eq_ignore_ascii_case("lag") || name.eq_ignore_ascii_case("lead"))
                 && let Ok(common_type) = infer_common_scalar_expr_type_with_ctes(
-                    &[args[0].value.clone(), args[2].value.clone()],
+                    &[args.args()[0].value.clone(), args.args()[2].value.clone()],
                     scope,
                     catalog,
                     outer_scopes,
