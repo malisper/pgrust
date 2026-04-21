@@ -470,6 +470,7 @@ impl Database {
                     txn_waiter: Some(self.txn_waiter.clone()),
                     sequences: Some(self.sequences.clone()),
                     large_objects: Some(self.large_objects.clone()),
+                    advisory_locks: Arc::clone(&self.advisory_locks),
                     checkpoint_stats: self.checkpoint_stats_snapshot(),
                     datetime_config: datetime_config.clone(),
                     interrupts: Arc::clone(&interrupts),
@@ -477,8 +478,11 @@ impl Database {
                     session_stats: self.session_stats_state(client_id),
                     snapshot,
                     client_id,
+                    current_database_name: self.current_database_name(),
                     session_user_oid: self.auth_state(client_id).session_user_oid(),
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
+                    current_xid: xid,
+                    statement_lock_scope_id: None,
                     next_command_id: 0,
                     default_toast_compression:
                         crate::include::access::htup::AttributeCompression::Pglz,
@@ -593,12 +597,14 @@ impl Database {
                 )?;
 
                 let snapshot = self.txns.read().snapshot(INVALID_TRANSACTION_ID)?;
+                let statement_lock_scope_id = self.allocate_statement_lock_scope_id();
                 let mut ctx = ExecutorContext {
                     pool: std::sync::Arc::clone(&self.pool),
                     txns: self.txns.clone(),
                     txn_waiter: Some(self.txn_waiter.clone()),
                     sequences: Some(self.sequences.clone()),
                     large_objects: Some(self.large_objects.clone()),
+                    advisory_locks: Arc::clone(&self.advisory_locks),
                     checkpoint_stats: self.checkpoint_stats_snapshot(),
                     datetime_config: datetime_config.clone(),
                     interrupts: Arc::clone(&interrupts),
@@ -606,8 +612,11 @@ impl Database {
                     session_stats: self.session_stats_state(client_id),
                     snapshot,
                     client_id,
+                    current_database_name: self.current_database_name(),
                     session_user_oid: self.auth_state(client_id).session_user_oid(),
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
+                    current_xid: INVALID_TRANSACTION_ID,
+                    statement_lock_scope_id: Some(statement_lock_scope_id),
                     next_command_id: 0,
                     default_toast_compression:
                         crate::include::access::htup::AttributeCompression::Pglz,
@@ -629,6 +638,8 @@ impl Database {
                     None => execute_readonly_statement(stmt, &visible_catalog, &mut ctx),
                 };
                 drop(ctx);
+                self.advisory_locks
+                    .unlock_all_statement(client_id, statement_lock_scope_id);
 
                 unlock_relations(&self.table_locks, client_id, &rels);
                 result
@@ -660,6 +671,7 @@ impl Database {
                     txn_waiter: Some(self.txn_waiter.clone()),
                     sequences: Some(self.sequences.clone()),
                     large_objects: Some(self.large_objects.clone()),
+                    advisory_locks: Arc::clone(&self.advisory_locks),
                     checkpoint_stats: self.checkpoint_stats_snapshot(),
                     datetime_config: datetime_config.clone(),
                     interrupts: Arc::clone(&interrupts),
@@ -667,8 +679,11 @@ impl Database {
                     session_stats: self.session_stats_state(client_id),
                     snapshot,
                     client_id,
+                    current_database_name: self.current_database_name(),
                     session_user_oid: self.auth_state(client_id).session_user_oid(),
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
+                    current_xid: xid,
+                    statement_lock_scope_id: None,
                     next_command_id: 0,
                     default_toast_compression:
                         crate::include::access::htup::AttributeCompression::Pglz,
@@ -740,6 +755,7 @@ impl Database {
                     txn_waiter: Some(self.txn_waiter.clone()),
                     sequences: Some(self.sequences.clone()),
                     large_objects: Some(self.large_objects.clone()),
+                    advisory_locks: Arc::clone(&self.advisory_locks),
                     checkpoint_stats: self.checkpoint_stats_snapshot(),
                     datetime_config: datetime_config.clone(),
                     interrupts: Arc::clone(&interrupts),
@@ -747,8 +763,11 @@ impl Database {
                     session_stats: self.session_stats_state(client_id),
                     snapshot,
                     client_id,
+                    current_database_name: self.current_database_name(),
                     session_user_oid: self.auth_state(client_id).session_user_oid(),
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
+                    current_xid: xid,
+                    statement_lock_scope_id: None,
                     next_command_id: 0,
                     default_toast_compression:
                         crate::include::access::htup::AttributeCompression::Pglz,
@@ -821,6 +840,7 @@ impl Database {
                     txn_waiter: Some(self.txn_waiter.clone()),
                     sequences: Some(self.sequences.clone()),
                     large_objects: Some(self.large_objects.clone()),
+                    advisory_locks: Arc::clone(&self.advisory_locks),
                     checkpoint_stats: self.checkpoint_stats_snapshot(),
                     datetime_config: datetime_config.clone(),
                     interrupts: Arc::clone(&interrupts),
@@ -828,8 +848,11 @@ impl Database {
                     session_stats: self.session_stats_state(client_id),
                     snapshot,
                     client_id,
+                    current_database_name: self.current_database_name(),
                     session_user_oid: self.auth_state(client_id).session_user_oid(),
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
+                    current_xid: xid,
+                    statement_lock_scope_id: None,
                     next_command_id: 0,
                     default_toast_compression:
                         crate::include::access::htup::AttributeCompression::Pglz,
@@ -1118,6 +1141,7 @@ impl Database {
                     txn_waiter: Some(self.txn_waiter.clone()),
                     sequences: Some(self.sequences.clone()),
                     large_objects: Some(self.large_objects.clone()),
+                    advisory_locks: Arc::clone(&self.advisory_locks),
                     checkpoint_stats: self.checkpoint_stats_snapshot(),
                     datetime_config: datetime_config.clone(),
                     interrupts: Arc::clone(&interrupts),
@@ -1125,8 +1149,11 @@ impl Database {
                     session_stats: self.session_stats_state(client_id),
                     snapshot,
                     client_id,
+                    current_database_name: self.current_database_name(),
                     session_user_oid: self.auth_state(client_id).session_user_oid(),
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
+                    current_xid: INVALID_TRANSACTION_ID,
+                    statement_lock_scope_id: None,
                     next_command_id: 0,
                     default_toast_compression:
                         crate::include::access::htup::AttributeCompression::Pglz,
@@ -1181,14 +1208,18 @@ impl Database {
                     txn_waiter: Some(self.txn_waiter.clone()),
                     sequences: Some(self.sequences.clone()),
                     large_objects: Some(self.large_objects.clone()),
+                    advisory_locks: Arc::clone(&self.advisory_locks),
                     checkpoint_stats: self.checkpoint_stats_snapshot(),
                     interrupts: Arc::clone(&interrupts),
                     stats: std::sync::Arc::clone(&self.stats),
                     session_stats: self.session_stats_state(client_id),
                     snapshot,
                     client_id,
+                    current_database_name: self.current_database_name(),
                     session_user_oid: self.auth_state(client_id).session_user_oid(),
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
+                    current_xid: INVALID_TRANSACTION_ID,
+                    statement_lock_scope_id: None,
                     next_command_id: 0,
                     default_toast_compression:
                         crate::include::access::htup::AttributeCompression::Pglz,
@@ -1278,6 +1309,9 @@ impl Database {
             Some((xid, cid)) => (self.txns.read().snapshot_for_command(xid, cid)?, cid),
             None => (self.txns.read().snapshot(INVALID_TRANSACTION_ID)?, 0),
         };
+        let statement_lock_scope_id = txn_ctx
+            .is_none()
+            .then(|| self.allocate_statement_lock_scope_id());
         let columns = query_desc.columns();
         let column_names = query_desc.column_names();
         let state = executor_start(query_desc.planned_stmt.plan_tree);
@@ -1287,6 +1321,7 @@ impl Database {
             txn_waiter: Some(self.txn_waiter.clone()),
             sequences: Some(self.sequences.clone()),
             large_objects: Some(self.large_objects.clone()),
+            advisory_locks: Arc::clone(&self.advisory_locks),
             checkpoint_stats: self.checkpoint_stats_snapshot(),
             datetime_config: datetime_config.clone(),
             interrupts,
@@ -1294,8 +1329,13 @@ impl Database {
             session_stats: self.session_stats_state(client_id),
             snapshot,
             client_id,
+            current_database_name: self.current_database_name(),
             session_user_oid: self.auth_state(client_id).session_user_oid(),
             current_user_oid: self.auth_state(client_id).current_user_oid(),
+            current_xid: txn_ctx
+                .map(|(xid, _)| xid)
+                .unwrap_or(INVALID_TRANSACTION_ID),
+            statement_lock_scope_id,
             next_command_id: command_id,
             default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
@@ -1319,7 +1359,9 @@ impl Database {
             column_names,
             rels,
             table_locks: &self.table_locks,
+            advisory_locks: &self.advisory_locks,
             client_id,
+            statement_lock_scope_id,
             interrupt_guard: None,
         })
     }

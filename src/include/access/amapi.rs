@@ -1,10 +1,11 @@
 use std::sync::Arc;
 
 use crate::backend::access::transam::xact::Snapshot;
-use crate::backend::access::transam::xact::TransactionManager;
+use crate::backend::access::transam::xact::{TransactionId, TransactionManager};
 use crate::backend::catalog::CatalogError;
 use crate::backend::executor::RelationDesc;
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
+use crate::backend::storage::lmgr::AdvisoryLockManager;
 use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::activity::{DatabaseStatsStore, SessionStatsState};
 use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
@@ -36,11 +37,15 @@ pub struct IndexBuildExprContext {
     pub txn_waiter: Option<Arc<TransactionWaiter>>,
     pub sequences: Option<Arc<SequenceRuntime>>,
     pub large_objects: Option<Arc<LargeObjectRuntime>>,
+    pub advisory_locks: Arc<AdvisoryLockManager>,
     pub datetime_config: DateTimeConfig,
     pub stats: Arc<parking_lot::RwLock<DatabaseStatsStore>>,
     pub session_stats: Arc<parking_lot::RwLock<SessionStatsState>>,
+    pub current_database_name: String,
     pub session_user_oid: u32,
     pub current_user_oid: u32,
+    pub current_xid: TransactionId,
+    pub statement_lock_scope_id: Option<u64>,
     pub visible_catalog: Option<VisibleCatalog>,
 }
 

@@ -13,7 +13,7 @@ use crate::backend::access::transam::{ControlFileState, ControlFileStore};
 use crate::backend::catalog::{CatalogError, CatalogStore};
 use crate::backend::executor::ExecError;
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
-use crate::backend::storage::lmgr::{TableLockManager, TransactionWaiter};
+use crate::backend::storage::lmgr::{AdvisoryLockManager, TableLockManager, TransactionWaiter};
 use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, StorageManager};
 use crate::backend::storage::sync::SyncQueue;
 use crate::backend::utils::cache::plancache::PlanCache;
@@ -98,6 +98,8 @@ pub(crate) struct OpenDatabaseState {
     pub range_types: Arc<RwLock<BTreeMap<String, RangeTypeEntry>>>,
     pub conversions: Arc<RwLock<BTreeMap<String, ConversionEntry>>>,
     pub sequences: Arc<SequenceRuntime>,
+    pub advisory_locks: Arc<AdvisoryLockManager>,
+    pub next_statement_lock_scope_id: AtomicU64,
     pub stats: Arc<RwLock<DatabaseStatsStore>>,
     pub large_objects: Arc<LargeObjectRuntime>,
 }
@@ -122,6 +124,8 @@ impl OpenDatabaseState {
             range_types: Arc::new(RwLock::new(BTreeMap::new())),
             conversions: Arc::new(RwLock::new(BTreeMap::new())),
             sequences,
+            advisory_locks: Arc::new(AdvisoryLockManager::new()),
+            next_statement_lock_scope_id: AtomicU64::new(1),
             stats: Arc::new(RwLock::new(DatabaseStatsStore::with_default_io_rows())),
             large_objects: Arc::new(LargeObjectRuntime::new_ephemeral()),
         })
@@ -350,6 +354,8 @@ impl Cluster {
                 range_types: Arc::new(RwLock::new(BTreeMap::new())),
                 conversions: Arc::new(RwLock::new(BTreeMap::new())),
                 sequences: Arc::new(SequenceRuntime::new_ephemeral()),
+                advisory_locks: Arc::new(AdvisoryLockManager::new()),
+                next_statement_lock_scope_id: AtomicU64::new(1),
                 stats: Arc::new(RwLock::new(DatabaseStatsStore::with_default_io_rows())),
                 large_objects: Arc::new(LargeObjectRuntime::new_ephemeral()),
             }),
@@ -440,6 +446,7 @@ impl Cluster {
             range_types: Arc::clone(&state.range_types),
             conversions: Arc::clone(&state.conversions),
             sequences: Arc::clone(&state.sequences),
+            advisory_locks: Arc::clone(&state.advisory_locks),
             stats: Arc::clone(&state.stats),
             large_objects: Arc::clone(&state.large_objects),
             _wal_bg_writer: self.shared.wal_bg_writer.clone(),

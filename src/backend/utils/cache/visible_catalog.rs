@@ -3,9 +3,9 @@ use crate::backend::parser::{BoundRelation, CatalogLookup, SqlType};
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::relcache::RelCache;
 use crate::backend::utils::cache::system_views::{
-    build_pg_rules_rows, build_pg_stat_io_rows, build_pg_stat_user_functions_rows,
-    build_pg_stat_user_tables_rows, build_pg_statio_user_tables_rows, build_pg_stats_rows,
-    build_pg_views_rows,
+    build_pg_locks_rows, build_pg_rules_rows, build_pg_stat_io_rows,
+    build_pg_stat_user_functions_rows, build_pg_stat_user_tables_rows,
+    build_pg_statio_user_tables_rows, build_pg_stats_rows, build_pg_views_rows,
 };
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, PgAggregateRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow,
@@ -485,6 +485,10 @@ impl CatalogLookup for VisibleCatalog {
 
     fn pg_stat_io_rows(&self) -> Vec<Vec<crate::backend::executor::Value>> {
         build_pg_stat_io_rows(&DatabaseStatsStore::with_default_io_rows())
+    }
+
+    fn pg_locks_rows(&self) -> Vec<Vec<crate::backend::executor::Value>> {
+        build_pg_locks_rows(Vec::new())
     }
 
     fn materialize_visible_catalog(&self) -> Option<VisibleCatalog> {

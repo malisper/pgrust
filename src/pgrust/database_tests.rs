@@ -179,6 +179,7 @@ fn analyze_executor_context(
         txn_waiter: Some(db.txn_waiter.clone()),
         sequences: Some(db.sequences.clone()),
         large_objects: Some(db.large_objects.clone()),
+        advisory_locks: db.advisory_locks.clone(),
         checkpoint_stats: db.checkpoint_stats_snapshot(),
         datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
         interrupts: db.interrupt_state(client_id),
@@ -186,8 +187,11 @@ fn analyze_executor_context(
         session_stats: db.session_stats_state(client_id),
         snapshot: db.txns.read().snapshot_for_command(xid, cid).unwrap(),
         client_id,
+        current_database_name: db.current_database_name(),
         session_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         current_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+        current_xid: xid,
+        statement_lock_scope_id: None,
         next_command_id: cid,
         default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
         timed: false,
@@ -1509,6 +1513,22 @@ fn relfilenode_for(db: &Database, client_id: u32, relname: &str) -> i64 {
     }
 }
 
+fn relation_oid_for(db: &Database, client_id: u32, relname: &str) -> i64 {
+    let rows = query_rows(
+        db,
+        client_id,
+        &format!("select oid from pg_class where relname = '{relname}'"),
+    );
+    match rows.as_slice() {
+        [row] => match row.first() {
+            Some(Value::Int32(value)) => i64::from(*value),
+            Some(Value::Int64(value)) => *value,
+            other => panic!("expected relation oid integer, got {:?}", other),
+        },
+        other => panic!("expected one relation oid row, got {:?}", other),
+    }
+}
+
 fn int_value(value: &Value) -> i64 {
     match value {
         Value::Int16(value) => i64::from(*value),
@@ -1530,6 +1550,26 @@ fn relation_locator_for(db: &Database, client_id: u32, relname: &str) -> crate::
         spc_oid: 0,
         db_oid: 1,
         rel_number: relfilenode_for(db, client_id, relname) as u32,
+    }
+}
+
+fn wait_for_pg_lock_row<F>(db: &Database, timeout: Duration, predicate: F) -> Vec<Value>
+where
+    F: Fn(&[Value]) -> bool,
+{
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(row) = db
+            .pg_locks_rows()
+            .into_iter()
+            .find(|row| predicate(row.as_slice()))
+        {
+            return row;
+        }
+        if Instant::now() >= deadline {
+            panic!("timed out waiting for pg_locks row");
+        }
+        thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -1672,6 +1712,521 @@ fn disconnect_cleanup_aborts_open_transaction_and_releases_table_locks() {
         }
         other => panic!("expected query result, got {other:?}"),
     }
+}
+
+#[test]
+fn advisory_session_and_transaction_locks_cleanup_and_encode_keys() {
+    let dir = temp_dir("advisory_session_xact_cleanup");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "select pg_advisory_lock(4294967298)")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select classid, objid, objsubid, pid, mode, granted, fastpath \
+             from pg_locks where locktype = 'advisory'"
+        ),
+        vec![vec![
+            Value::Int64(1),
+            Value::Int64(2),
+            Value::Int16(1),
+            Value::Int32(1),
+            Value::Text("ExclusiveLock".into()),
+            Value::Bool(true),
+            Value::Bool(false),
+        ]]
+    );
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "select pg_advisory_xact_lock(11, 22)")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select classid, objid, objsubid, granted \
+             from pg_locks where locktype = 'advisory' order by objsubid, classid, objid"
+        ),
+        vec![
+            vec![
+                Value::Int64(1),
+                Value::Int64(2),
+                Value::Int16(1),
+                Value::Bool(true),
+            ],
+            vec![
+                Value::Int64(11),
+                Value::Int64(22),
+                Value::Int16(2),
+                Value::Bool(true),
+            ],
+        ]
+    );
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select pg_advisory_unlock(11, 22)"),
+        vec![vec![Value::Bool(false)]]
+    );
+
+    session
+        .execute(&db, "select pg_advisory_unlock_all()")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select classid, objid, objsubid \
+             from pg_locks where locktype = 'advisory'"
+        ),
+        vec![vec![Value::Int64(11), Value::Int64(22), Value::Int16(2)]]
+    );
+
+    session.execute(&db, "commit").unwrap();
+    assert!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select locktype from pg_locks where locktype = 'advisory'"
+        )
+        .is_empty()
+    );
+
+    session.execute(&db, "select pg_advisory_lock(9)").unwrap();
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "select pg_advisory_xact_lock(10)")
+        .unwrap();
+    session.execute(&db, "rollback").unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select classid, objid, objsubid \
+             from pg_locks where locktype = 'advisory'"
+        ),
+        vec![vec![Value::Int64(0), Value::Int64(9), Value::Int16(1)]]
+    );
+
+    session
+        .execute(&db, "select pg_advisory_unlock_all()")
+        .unwrap();
+    assert!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select locktype from pg_locks where locktype = 'advisory'"
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn advisory_try_lock_shared_and_reentrant_counts_match_postgres() {
+    let dir = temp_dir("advisory_try_lock_shared_reentrant");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut first = Session::new(1);
+    let mut second = Session::new(2);
+    let mut third = Session::new(3);
+
+    assert_eq!(
+        session_query_rows(&mut first, &db, "select pg_try_advisory_lock(7)"),
+        vec![vec![Value::Bool(true)]]
+    );
+    assert_eq!(
+        session_query_rows(&mut first, &db, "select pg_try_advisory_lock(7)"),
+        vec![vec![Value::Bool(true)]]
+    );
+    assert_eq!(
+        session_query_rows(&mut second, &db, "select pg_try_advisory_lock_shared(7)"),
+        vec![vec![Value::Bool(false)]]
+    );
+    assert_eq!(
+        session_query_rows(&mut first, &db, "select pg_advisory_unlock(7)"),
+        vec![vec![Value::Bool(true)]]
+    );
+    assert_eq!(
+        session_query_rows(&mut second, &db, "select pg_try_advisory_lock_shared(7)"),
+        vec![vec![Value::Bool(false)]]
+    );
+    assert_eq!(
+        session_query_rows(&mut first, &db, "select pg_advisory_unlock(7)"),
+        vec![vec![Value::Bool(true)]]
+    );
+
+    assert_eq!(
+        session_query_rows(&mut second, &db, "select pg_try_advisory_lock_shared(7)"),
+        vec![vec![Value::Bool(true)]]
+    );
+    assert_eq!(
+        session_query_rows(&mut third, &db, "select pg_try_advisory_lock_shared(7)"),
+        vec![vec![Value::Bool(true)]]
+    );
+    assert_eq!(
+        session_query_rows(&mut first, &db, "select pg_try_advisory_lock(7)"),
+        vec![vec![Value::Bool(false)]]
+    );
+
+    assert_eq!(
+        session_query_rows(&mut second, &db, "select pg_advisory_unlock_shared(7)"),
+        vec![vec![Value::Bool(true)]]
+    );
+    assert_eq!(
+        session_query_rows(&mut first, &db, "select pg_try_advisory_lock(7)"),
+        vec![vec![Value::Bool(false)]]
+    );
+    assert_eq!(
+        session_query_rows(&mut third, &db, "select pg_advisory_unlock_shared(7)"),
+        vec![vec![Value::Bool(true)]]
+    );
+    assert_eq!(
+        session_query_rows(&mut first, &db, "select pg_try_advisory_lock(7)"),
+        vec![vec![Value::Bool(true)]]
+    );
+    assert_eq!(
+        session_query_rows(&mut first, &db, "select pg_advisory_unlock(7)"),
+        vec![vec![Value::Bool(true)]]
+    );
+}
+
+#[test]
+fn advisory_lock_functions_return_null_for_null_inputs() {
+    let dir = temp_dir("advisory_lock_null_inputs");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select \
+                pg_try_advisory_lock(null::bigint), \
+                pg_advisory_lock(null::bigint), \
+                pg_advisory_unlock(null::bigint), \
+                pg_try_advisory_xact_lock_shared(null::int4, 1)"
+        ),
+        vec![vec![Value::Null, Value::Null, Value::Null, Value::Null]]
+    );
+}
+
+#[test]
+fn statement_timeout_interrupts_waiting_advisory_lock() {
+    let dir = temp_dir("statement_timeout_waiting_advisory_lock");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut holder = Session::new(1);
+    let mut waiter = Session::new(2);
+
+    holder.execute(&db, "select pg_advisory_lock(44)").unwrap();
+    waiter
+        .execute(&db, "set statement_timeout = '20ms'")
+        .unwrap();
+
+    let err = waiter
+        .execute(&db, "select pg_advisory_lock(44)")
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::Interrupted(
+            crate::backend::utils::misc::interrupts::InterruptReason::StatementTimeout
+        )
+    ));
+
+    holder
+        .execute(&db, "select pg_advisory_unlock(44)")
+        .unwrap();
+}
+
+#[test]
+fn advisory_waiters_appear_in_pg_locks_with_waitstart() {
+    use std::sync::mpsc;
+
+    let dir = temp_dir("advisory_waiters_pg_locks");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut holder = Session::new(1);
+    let mut waiter = Session::new(2);
+
+    holder.execute(&db, "select pg_advisory_lock(55)").unwrap();
+    db.install_interrupt_state(2, waiter.interrupts());
+
+    let db2 = db.clone();
+    let (done_tx, done_rx) = mpsc::channel();
+    let worker = thread::spawn(move || {
+        done_tx
+            .send(waiter.execute(&db2, "select pg_advisory_xact_lock(55)"))
+            .unwrap();
+    });
+
+    let waiting_row = wait_for_pg_lock_row(&db, TEST_TIMEOUT, |row| {
+        matches!(row.first(), Some(Value::Text(locktype)) if locktype.as_str() == "advisory")
+            && row.get(11) == Some(&Value::Int32(2))
+            && row.get(13) == Some(&Value::Bool(false))
+    });
+    assert_eq!(waiting_row[12], Value::Text("ExclusiveLock".into()));
+    assert!(!matches!(waiting_row[15], Value::Null));
+    assert_eq!(
+        query_rows(
+            &db,
+            3,
+            "select pid, mode, granted, waitstart is not null \
+             from pg_locks where locktype = 'advisory' and pid = 2"
+        ),
+        vec![vec![
+            Value::Int32(2),
+            Value::Text("ExclusiveLock".into()),
+            Value::Bool(false),
+            Value::Bool(true),
+        ]]
+    );
+
+    holder
+        .execute(&db, "select pg_advisory_unlock(55)")
+        .unwrap();
+    match done_rx.recv_timeout(TEST_TIMEOUT).unwrap().unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Null]]);
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+    worker.join().unwrap();
+    assert!(
+        query_rows(
+            &db,
+            3,
+            "select locktype from pg_locks where locktype = 'advisory' and pid = 2"
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn advisory_lock_waits_can_be_canceled_explicitly() {
+    use std::sync::mpsc;
+
+    let dir = temp_dir("advisory_cancel_wait");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut holder = Session::new(1);
+    let mut waiter = Session::new(2);
+
+    holder.execute(&db, "select pg_advisory_lock(66)").unwrap();
+    db.install_interrupt_state(2, waiter.interrupts());
+
+    let db2 = db.clone();
+    let (done_tx, done_rx) = mpsc::channel();
+    let worker = thread::spawn(move || {
+        done_tx
+            .send(waiter.execute(&db2, "select pg_advisory_lock(66)"))
+            .unwrap();
+    });
+
+    wait_for_pg_lock_row(&db, TEST_TIMEOUT, |row| {
+        matches!(row.first(), Some(Value::Text(locktype)) if locktype.as_str() == "advisory")
+            && row.get(11) == Some(&Value::Int32(2))
+            && row.get(13) == Some(&Value::Bool(false))
+    });
+    db.interrupt_state(2)
+        .set_pending(crate::backend::utils::misc::interrupts::InterruptReason::QueryCancel);
+
+    let err = done_rx.recv_timeout(TEST_TIMEOUT).unwrap().unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::Interrupted(
+            crate::backend::utils::misc::interrupts::InterruptReason::QueryCancel
+        )
+    ));
+    holder
+        .execute(&db, "select pg_advisory_unlock(66)")
+        .unwrap();
+    worker.join().unwrap();
+}
+
+#[test]
+fn autocommit_xact_advisory_locks_release_after_statement_and_streaming_guard() {
+    let dir = temp_dir("autocommit_xact_advisory_locks");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "select pg_advisory_xact_lock(77)")
+        .unwrap();
+    assert!(
+        query_rows(
+            &db,
+            2,
+            "select locktype from pg_locks where locktype = 'advisory' and pid = 1"
+        )
+        .is_empty()
+    );
+
+    let stmt = crate::backend::parser::parse_select("select pg_advisory_xact_lock(88), 1").unwrap();
+    let mut guard = session.execute_streaming(&db, &stmt).unwrap();
+    let slot = crate::backend::executor::exec_next(&mut guard.state, &mut guard.ctx)
+        .unwrap()
+        .expect("streaming row");
+    let values = slot.values().unwrap();
+    assert_eq!(values[1].to_owned_value(), Value::Int32(1));
+
+    assert_eq!(
+        query_rows(
+            &db,
+            2,
+            "select pid, granted from pg_locks where locktype = 'advisory' and pid = 1"
+        ),
+        vec![vec![Value::Int32(1), Value::Bool(true)]]
+    );
+
+    drop(guard);
+    assert!(
+        query_rows(
+            &db,
+            2,
+            "select locktype from pg_locks where locktype = 'advisory' and pid = 1"
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn disconnect_cleanup_releases_advisory_locks() {
+    let dir = temp_dir("disconnect_cleanup_advisory_locks");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut holder = Session::new(1);
+    let mut waiter = Session::new(2);
+
+    holder.execute(&db, "select pg_advisory_lock(91)").unwrap();
+    holder.execute(&db, "begin").unwrap();
+    holder
+        .execute(&db, "select pg_advisory_xact_lock(92)")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            3,
+            "select count(*) from pg_locks where locktype = 'advisory' and pid = 1"
+        ),
+        vec![vec![Value::Int64(2)]]
+    );
+
+    holder.cleanup_on_disconnect(&db);
+    assert!(
+        query_rows(
+            &db,
+            3,
+            "select locktype from pg_locks where locktype = 'advisory' and pid = 1"
+        )
+        .is_empty()
+    );
+
+    assert_eq!(
+        session_query_rows(&mut waiter, &db, "select pg_try_advisory_lock(91)"),
+        vec![vec![Value::Bool(true)]]
+    );
+    assert_eq!(
+        session_query_rows(&mut waiter, &db, "select pg_try_advisory_lock(92)"),
+        vec![vec![Value::Bool(true)]]
+    );
+}
+
+#[test]
+fn pg_locks_shows_granted_and_waiting_relation_locks() {
+    use std::sync::mpsc;
+
+    let dir = temp_dir("pg_locks_relation_rows");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut holder = Session::new(1);
+
+    holder.execute(&db, "create table t (id int)").unwrap();
+    let relation_oid = relation_oid_for(&db, 1, "t");
+
+    holder.execute(&db, "begin").unwrap();
+    holder
+        .execute(&db, "comment on table t is 'held relation lock'")
+        .unwrap();
+
+    let db2 = db.clone();
+    let (done_tx, done_rx) = mpsc::channel();
+    let worker = thread::spawn(move || {
+        let mut waiter = Session::new(2);
+        done_tx
+            .send(waiter.execute(&db2, "select count(*) from t"))
+            .unwrap();
+    });
+
+    let waiting_row = wait_for_pg_lock_row(&db, TEST_TIMEOUT, |row| {
+        matches!(row.first(), Some(Value::Text(locktype)) if locktype.as_str() == "relation")
+            && row.get(2) == Some(&Value::Int64(relation_oid))
+            && row.get(11) == Some(&Value::Int32(2))
+            && row.get(13) == Some(&Value::Bool(false))
+    });
+    assert_eq!(waiting_row[12], Value::Text("AccessShareLock".into()));
+    assert!(!matches!(waiting_row[15], Value::Null));
+
+    let relation_rows = query_rows(
+        &db,
+        3,
+        &format!(
+            "select pid, mode, granted, waitstart is not null \
+             from pg_locks where locktype = 'relation' and relation = {relation_oid} \
+             order by pid, granted desc"
+        ),
+    );
+    assert!(relation_rows.contains(&vec![
+        Value::Int32(1),
+        Value::Text("AccessExclusiveLock".into()),
+        Value::Bool(true),
+        Value::Bool(false),
+    ]));
+    assert!(relation_rows.contains(&vec![
+        Value::Int32(2),
+        Value::Text("AccessShareLock".into()),
+        Value::Bool(false),
+        Value::Bool(true),
+    ]));
+
+    holder.execute(&db, "rollback").unwrap();
+    match done_rx.recv_timeout(TEST_TIMEOUT).unwrap().unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(0)]]);
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+    worker.join().unwrap();
+}
+
+#[test]
+fn pg_locks_includes_advisory_rows_from_other_open_databases() {
+    let base = temp_dir("pg_locks_other_open_database");
+    let cluster = Cluster::open(&base, 16).unwrap();
+    let postgres = cluster.connect_database("postgres").unwrap();
+    let mut admin = Session::new(1);
+
+    admin
+        .execute(&postgres, "create database analytics")
+        .unwrap();
+    let analytics = cluster.connect_database("analytics").unwrap();
+    let mut analytics_session = Session::new(2);
+    analytics_session
+        .execute(&analytics, "select pg_advisory_lock(1234)")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &postgres,
+            1,
+            "select \"database\", pid, mode, granted \
+             from pg_locks where locktype = 'advisory' and pid = 2"
+        ),
+        vec![vec![
+            Value::Int64(i64::from(analytics.database_oid)),
+            Value::Int32(2),
+            Value::Text("ExclusiveLock".into()),
+            Value::Bool(true),
+        ]]
+    );
+
+    analytics_session.cleanup_on_disconnect(&analytics);
 }
 
 #[test]
@@ -15741,6 +16296,23 @@ fn pg_get_userbyid_returns_role_name() {
     assert_eq!(
         query_rows(&db, 1, &format!("select pg_get_userbyid({oid})")),
         vec![vec![Value::Text("app_role".into())]]
+    );
+}
+
+#[test]
+fn current_database_function_matches_pg_database_name() {
+    let dir = temp_dir("current_database_function");
+    let db = Database::open(&dir, 64).unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select oid as datoid from pg_database where datname = current_database()"
+        ),
+        vec![vec![Value::Int64(i64::from(
+            crate::include::catalog::CURRENT_DATABASE_OID,
+        ))]]
     );
 }
 

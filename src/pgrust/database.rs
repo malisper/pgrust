@@ -2,6 +2,7 @@ use parking_lot::RwLock;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 mod catalog_access;
 pub(crate) mod commands;
@@ -49,8 +50,9 @@ use crate::backend::parser::{
     normalize_create_view_name,
 };
 use crate::backend::storage::lmgr::{
-    TableLockManager, TableLockMode, lock_relations_interruptible, lock_tables_interruptible,
-    unlock_relations,
+    AdvisoryLockKey, AdvisoryLockManager, AdvisoryLockMode, AdvisoryLockOwner, AdvisoryLockScope,
+    AdvisoryLockSnapshotRow, TableLockManager, TableLockMode, TableLockSnapshotRow,
+    lock_relations_interruptible, lock_tables_interruptible, unlock_relations,
 };
 use crate::backend::storage::smgr::{RelFileLocator, StorageManager};
 pub use crate::backend::utils::activity::{DatabaseStatsStore, SessionStatsState};
@@ -81,8 +83,8 @@ use crate::backend::utils::misc::checkpoint::{CheckpointConfig, CheckpointStatsS
 use crate::backend::utils::misc::interrupts::InterruptState;
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, PUBLIC_NAMESPACE_OID, PgConstraintRow, PgRangeRow, PgTypeRow,
-    RangeCanonicalization, relkind_has_storage, system_catalog_indexes,
+    BOOTSTRAP_SUPERUSER_OID, CURRENT_DATABASE_NAME, PUBLIC_NAMESPACE_OID, PgConstraintRow,
+    PgRangeRow, PgTypeRow, RangeCanonicalization, relkind_has_storage, system_catalog_indexes,
 };
 use crate::pgrust::auth::{AuthCatalog, AuthState};
 use crate::pgrust::cluster::{Cluster, ClusterShared, SessionActivityEntry, SessionActivityState};
@@ -194,6 +196,7 @@ pub struct Database {
     pub(crate) range_types: Arc<RwLock<BTreeMap<String, RangeTypeEntry>>>,
     pub(crate) conversions: Arc<RwLock<BTreeMap<String, ConversionEntry>>>,
     pub(crate) sequences: Arc<SequenceRuntime>,
+    pub(crate) advisory_locks: Arc<AdvisoryLockManager>,
     pub(crate) stats: Arc<RwLock<DatabaseStatsStore>>,
     pub(crate) large_objects: Arc<LargeObjectRuntime>,
     pub(crate) _wal_bg_writer: Option<Arc<WalBgWriter>>,
@@ -353,6 +356,19 @@ impl Database {
             .get(&client_id)
             .cloned()
             .unwrap_or_else(|| Arc::new(InterruptState::new()))
+    }
+
+    pub(crate) fn allocate_statement_lock_scope_id(&self) -> u64 {
+        self.cluster
+            .open_databases
+            .read()
+            .get(&self.database_oid)
+            .map(|state| {
+                state
+                    .next_statement_lock_scope_id
+                    .fetch_add(1, Ordering::Relaxed)
+            })
+            .unwrap_or(1)
     }
 
     pub(crate) fn install_auth_state(&self, client_id: ClientId, auth: AuthState) {
@@ -786,6 +802,59 @@ impl Database {
         self.cluster.session_activity.write().remove(&client_id);
     }
 
+    pub(crate) fn pg_locks_rows(&self) -> Vec<Vec<Value>> {
+        let mut rows = Vec::new();
+
+        for row in self.table_locks.snapshot() {
+            let database_oid = if row.rel.db_oid == 0 {
+                0
+            } else {
+                row.rel.db_oid
+            };
+            rows.push((
+                format!(
+                    "relation/{database_oid}/{}/{}/{}/{}/{}",
+                    row.rel.rel_number,
+                    row.client_id,
+                    row.mode.pg_mode_name(),
+                    row.waitstart.is_some(),
+                    row.granted
+                ),
+                relation_lock_row_to_values(
+                    database_oid,
+                    self.resolve_relation_oid_for_lock(row.rel),
+                    row,
+                ),
+            ));
+        }
+
+        let states = self
+            .cluster
+            .open_databases
+            .read()
+            .iter()
+            .map(|(db_oid, state)| (*db_oid, Arc::clone(state)))
+            .collect::<Vec<_>>();
+        for (db_oid, state) in states {
+            for row in state.advisory_locks.snapshot() {
+                rows.push((
+                    format!(
+                        "advisory/{db_oid}/{}/{}/{}/{}/{}",
+                        advisory_key_sort_fragment(row.key),
+                        row.owner.virtualtransaction(),
+                        row.mode.pg_mode_name(),
+                        row.waitstart.is_some(),
+                        row.granted
+                    ),
+                    advisory_lock_row_to_values(db_oid, row),
+                ));
+            }
+        }
+
+        rows.sort_by(|left, right| left.0.cmp(&right.0));
+        rows.into_iter().map(|(_, row)| row).collect()
+    }
+
     pub(crate) fn pg_stat_activity_rows(&self) -> Vec<Vec<Value>> {
         let database_names = self
             .shared_catalog
@@ -866,6 +935,21 @@ impl Database {
         accept_invalidation_messages(self, client_id);
     }
 
+    pub(crate) fn current_database_name(&self) -> String {
+        self.shared_catalog
+            .read()
+            .catcache()
+            .ok()
+            .and_then(|cache| {
+                cache
+                    .database_rows()
+                    .into_iter()
+                    .find(|row| row.oid == self.database_oid)
+                    .map(|row| row.datname)
+            })
+            .unwrap_or_else(|| CURRENT_DATABASE_NAME.to_string())
+    }
+
     pub(crate) fn checkpoint_config_value(&self, name: &str) -> Option<String> {
         self.checkpoint_config.value_for_show(name)
     }
@@ -894,6 +978,113 @@ impl Database {
     pub(crate) fn checkpoint_commit_guard(&self) -> CheckpointCommitGuard {
         self.checkpoint_commit_barrier.enter()
     }
+
+    fn resolve_relation_oid_for_lock(&self, rel: RelFileLocator) -> Option<u32> {
+        if rel.db_oid == 0 {
+            return self
+                .shared_catalog
+                .read()
+                .catcache()
+                .ok()?
+                .class_rows()
+                .into_iter()
+                .find(|row| row.relfilenode == rel.rel_number && row.reltablespace == rel.spc_oid)
+                .map(|row| row.oid);
+        }
+
+        let state = self
+            .cluster
+            .open_databases
+            .read()
+            .get(&rel.db_oid)
+            .cloned()?;
+
+        if let Some(oid) = state.catalog.read().catcache().ok().and_then(|catcache| {
+            catcache
+                .class_rows()
+                .into_iter()
+                .find(|row| row.relfilenode == rel.rel_number && row.reltablespace == rel.spc_oid)
+                .map(|row| row.oid)
+        }) {
+            return Some(oid);
+        }
+
+        state
+            .temp_relations
+            .read()
+            .values()
+            .flat_map(|namespace| namespace.tables.values())
+            .find(|entry| entry.entry.rel == rel)
+            .map(|entry| entry.entry.relation_oid)
+    }
+}
+
+fn relation_lock_row_to_values(
+    database_oid: u32,
+    relation_oid: Option<u32>,
+    row: TableLockSnapshotRow,
+) -> Vec<Value> {
+    vec![
+        Value::Text("relation".into()),
+        oid_value(database_oid),
+        relation_oid.map(oid_value).unwrap_or(Value::Null),
+        Value::Null,
+        Value::Null,
+        Value::Null,
+        Value::Null,
+        Value::Null,
+        Value::Null,
+        Value::Null,
+        Value::Text(format!("{}/session", row.client_id).into()),
+        Value::Int32(row.client_id as i32),
+        Value::Text(row.mode.pg_mode_name().into()),
+        Value::Bool(row.granted),
+        Value::Bool(false),
+        row.waitstart.map(Value::TimestampTz).unwrap_or(Value::Null),
+    ]
+}
+
+fn advisory_lock_row_to_values(database_oid: u32, row: AdvisoryLockSnapshotRow) -> Vec<Value> {
+    let (classid, objid, objsubid) = advisory_lock_key_fields(row.key);
+    vec![
+        Value::Text("advisory".into()),
+        oid_value(database_oid),
+        Value::Null,
+        Value::Null,
+        Value::Null,
+        Value::Null,
+        Value::Null,
+        oid_value(classid),
+        oid_value(objid),
+        Value::Int16(objsubid),
+        Value::Text(row.owner.virtualtransaction().into()),
+        Value::Int32(row.owner.client_id as i32),
+        Value::Text(row.mode.pg_mode_name().into()),
+        Value::Bool(row.granted),
+        Value::Bool(false),
+        row.waitstart.map(Value::TimestampTz).unwrap_or(Value::Null),
+    ]
+}
+
+fn advisory_lock_key_fields(key: AdvisoryLockKey) -> (u32, u32, i16) {
+    match key {
+        AdvisoryLockKey::BigInt(value) => {
+            let bits = value as u64;
+            ((bits >> 32) as u32, bits as u32, 1)
+        }
+        AdvisoryLockKey::TwoInt(first, second) => (first as u32, second as u32, 2),
+    }
+}
+
+fn advisory_key_sort_fragment(key: AdvisoryLockKey) -> String {
+    match key {
+        AdvisoryLockKey::BigInt(value) => format!("b:{value}"),
+        AdvisoryLockKey::TwoInt(first, second) => format!("i:{first}:{second}"),
+    }
+}
+
+fn oid_value(oid: u32) -> Value {
+    Value::Int64(i64::from(oid))
 }
 
 pub(crate) fn bootstrap_ephemeral_catalog(
