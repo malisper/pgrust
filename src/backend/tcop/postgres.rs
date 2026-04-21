@@ -3064,7 +3064,7 @@ fn send_plpgsql_notices(stream: &mut impl Write, notices: &[PlpgsqlNotice]) -> i
 
 fn send_queued_notices(stream: &mut impl Write) -> io::Result<()> {
     for notice in take_backend_notices() {
-        send_notice(stream, &notice, None, None)?;
+        send_notice(stream, &notice.message, notice.detail.as_deref(), None)?;
     }
     send_plpgsql_notices(stream, &take_notices())
 }
@@ -5348,7 +5348,8 @@ mod tests {
     #[test]
     fn simple_query_reports_position_for_subscripted_assignment_error() {
         let db = Database::open(temp_dir("subscripted_assignment_error_position"), 16).unwrap();
-        db.execute(1, "create table arrtest (b int4[][][])").unwrap();
+        db.execute(1, "create table arrtest (b int4[][][])")
+            .unwrap();
         let mut state = ConnectionState {
             session: Session::new(2),
             prepared: HashMap::new(),
