@@ -1,5 +1,6 @@
 use super::render_bit_text;
 use super::{compare_order_values, parse_numeric_text, render_datetime_value_text};
+use crate::backend::executor::exec_expr::{expect_float8_arg, float8_regr_accum_state};
 use crate::backend::executor::ExecError;
 use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::backend::parser::{SqlType, SqlTypeKind};
@@ -61,6 +62,15 @@ pub(crate) enum AccumState {
         result_type: SqlType,
         stddev: bool,
         sample: bool,
+    },
+    RegrStats {
+        func: AggFunc,
+        count: f64,
+        sum_x: f64,
+        sum_sq_x: f64,
+        sum_y: f64,
+        sum_sq_y: f64,
+        sum_xy: f64,
     },
     JsonAgg {
         values: Vec<Value>,
@@ -151,6 +161,29 @@ impl AccumState {
                 result_type: sql_type,
                 stddev: true,
                 sample: true,
+            },
+            (
+                AggFunc::RegrCount
+                | AggFunc::RegrSxx
+                | AggFunc::RegrSyy
+                | AggFunc::RegrSxy
+                | AggFunc::RegrAvgX
+                | AggFunc::RegrAvgY
+                | AggFunc::RegrR2
+                | AggFunc::RegrSlope
+                | AggFunc::RegrIntercept
+                | AggFunc::CovarPop
+                | AggFunc::CovarSamp
+                | AggFunc::Corr,
+                _,
+            ) => AccumState::RegrStats {
+                func,
+                count: 0.0,
+                sum_x: 0.0,
+                sum_sq_x: 0.0,
+                sum_y: 0.0,
+                sum_sq_y: 0.0,
+                sum_xy: 0.0,
             },
             (AggFunc::JsonAgg, _) => AccumState::JsonAgg {
                 values: Vec::new(),
@@ -295,6 +328,52 @@ impl AccumState {
                         *sum_sq = sum_sq.add(&numeric.mul(&numeric));
                         *count += 1;
                     }
+                }
+                Ok(())
+            },
+            (
+                AggFunc::RegrCount
+                | AggFunc::RegrSxx
+                | AggFunc::RegrSyy
+                | AggFunc::RegrSxy
+                | AggFunc::RegrAvgX
+                | AggFunc::RegrAvgY
+                | AggFunc::RegrR2
+                | AggFunc::RegrSlope
+                | AggFunc::RegrIntercept
+                | AggFunc::CovarPop
+                | AggFunc::CovarSamp
+                | AggFunc::Corr,
+                _,
+                _,
+            ) => |state, values| {
+                if let AccumState::RegrStats {
+                    count,
+                    sum_x,
+                    sum_sq_x,
+                    sum_y,
+                    sum_sq_y,
+                    sum_xy,
+                    ..
+                } = state
+                {
+                    let y = values.first().unwrap_or(&Value::Null);
+                    let x = values.get(1).unwrap_or(&Value::Null);
+                    if matches!(y, Value::Null) || matches!(x, Value::Null) {
+                        return Ok(());
+                    }
+                    let y = expect_float8_arg("regr aggregate", y)?;
+                    let x = expect_float8_arg("regr aggregate", x)?;
+                    [
+                        *count,
+                        *sum_x,
+                        *sum_sq_x,
+                        *sum_y,
+                        *sum_sq_y,
+                        *sum_xy,
+                    ] = float8_regr_accum_state(
+                        *count, *sum_x, *sum_sq_x, *sum_y, *sum_sq_y, *sum_xy, y, x,
+                    )?;
                 }
                 Ok(())
             },
@@ -530,6 +609,15 @@ impl AccumState {
                     }
                 }
             }
+            AccumState::RegrStats {
+                func,
+                count,
+                sum_x,
+                sum_sq_x,
+                sum_y,
+                sum_sq_y,
+                sum_xy,
+            } => finalize_regr_stats(*func, *count, *sum_x, *sum_sq_x, *sum_y, *sum_sq_y, *sum_xy),
             AccumState::JsonAgg { values, jsonb } => {
                 if *jsonb {
                     let mut items = Vec::with_capacity(values.len());
@@ -609,6 +697,92 @@ impl AccumState {
                 .unwrap_or(Value::Null),
             AccumState::RangeIntersect { current } => current.clone().unwrap_or(Value::Null),
         }
+    }
+}
+
+fn finalize_regr_stats(
+    func: AggFunc,
+    count: f64,
+    sum_x: f64,
+    sum_sq_x: f64,
+    sum_y: f64,
+    sum_sq_y: f64,
+    sum_xy: f64,
+) -> Value {
+    match func {
+        AggFunc::RegrCount => Value::Int64(count as i64),
+        AggFunc::RegrSxx => regr_value_or_null(count, sum_sq_x),
+        AggFunc::RegrSyy => regr_value_or_null(count, sum_sq_y),
+        AggFunc::RegrSxy => regr_value_or_null(count, sum_xy),
+        AggFunc::RegrAvgX => regr_value_or_null(count, sum_x / count),
+        AggFunc::RegrAvgY => regr_value_or_null(count, sum_y / count),
+        AggFunc::CovarPop => regr_value_or_null(count, sum_xy / count),
+        AggFunc::CovarSamp => {
+            if count < 2.0 {
+                Value::Null
+            } else {
+                Value::Float64(sum_xy / (count - 1.0))
+            }
+        }
+        AggFunc::Corr => {
+            if count < 1.0 || sum_sq_x == 0.0 || sum_sq_y == 0.0 {
+                Value::Null
+            } else {
+                Value::Float64(sum_xy / (sum_sq_x * sum_sq_y).sqrt())
+            }
+        }
+        AggFunc::RegrR2 => {
+            if count < 1.0 || sum_sq_x == 0.0 {
+                Value::Null
+            } else if sum_sq_y == 0.0 {
+                Value::Float64(1.0)
+            } else {
+                Value::Float64((sum_xy * sum_xy) / (sum_sq_x * sum_sq_y))
+            }
+        }
+        AggFunc::RegrSlope => {
+            if count < 1.0 || sum_sq_x == 0.0 {
+                Value::Null
+            } else {
+                Value::Float64(sum_xy / sum_sq_x)
+            }
+        }
+        AggFunc::RegrIntercept => {
+            if count < 1.0 || sum_sq_x == 0.0 {
+                Value::Null
+            } else {
+                Value::Float64((sum_y - sum_x * sum_xy / sum_sq_x) / count)
+            }
+        }
+        AggFunc::BoolAnd
+        | AggFunc::BoolOr
+        | AggFunc::Count
+        | AggFunc::AnyValue
+        | AggFunc::Sum
+        | AggFunc::Avg
+        | AggFunc::VarPop
+        | AggFunc::VarSamp
+        | AggFunc::StddevPop
+        | AggFunc::StddevSamp
+        | AggFunc::Min
+        | AggFunc::Max
+        | AggFunc::StringAgg
+        | AggFunc::ArrayAgg
+        | AggFunc::JsonAgg
+        | AggFunc::JsonbAgg
+        | AggFunc::JsonObjectAgg
+        | AggFunc::JsonbObjectAgg
+        | AggFunc::RangeAgg
+        | AggFunc::XmlAgg
+        | AggFunc::RangeIntersectAgg => unreachable!("non-regression aggregate"),
+    }
+}
+
+fn regr_value_or_null(count: f64, value: f64) -> Value {
+    if count < 1.0 {
+        Value::Null
+    } else {
+        Value::Float64(value)
     }
 }
 
