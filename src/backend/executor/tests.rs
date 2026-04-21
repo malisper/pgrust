@@ -132,6 +132,7 @@ fn relation_desc() -> RelationDesc {
 
 fn test_catalog_entry(rel: RelFileLocator, desc: RelationDesc) -> CatalogEntry {
     CatalogEntry {
+        rel,
         relation_oid: 50_000u32.saturating_add(rel.rel_number),
         namespace_oid: crate::include::catalog::PUBLIC_NAMESPACE_OID,
         owner_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
@@ -140,12 +141,13 @@ fn test_catalog_entry(rel: RelFileLocator, desc: RelationDesc) -> CatalogEntry {
         reltoastrelid: 0,
         relpersistence: 'p',
         relkind: 'r',
-        relhastriggers: false,
         relhassubclass: false,
+        relhastriggers: false,
         relispartition: false,
+        relrowsecurity: false,
+        relforcerowsecurity: false,
         relpages: 0,
         reltuples: 0.0,
-        rel,
         desc,
         index_meta: None,
     }
@@ -615,6 +617,7 @@ fn empty_executor_context(base: &PathBuf) -> ExecutorContext {
         )),
         snapshot,
         client_id: 1,
+        session_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         current_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         next_command_id: 0,
         expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
@@ -664,6 +667,7 @@ fn run_plan(
         )),
         snapshot: txns.snapshot(INVALID_TRANSACTION_ID).unwrap(),
         client_id: 42,
+        session_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         current_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         next_command_id: 0,
         expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
@@ -751,6 +755,7 @@ fn run_sql_with_catalog(
             )),
             snapshot: txns.snapshot(xid).unwrap(),
             client_id: 77,
+            session_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
             current_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
             next_command_id: 0,
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
@@ -6364,6 +6369,7 @@ fn prepared_insert_uses_defaults_for_omitted_columns() {
         )),
         snapshot: txns.snapshot(INVALID_TRANSACTION_ID).unwrap(),
         client_id: 77,
+        session_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         current_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         next_command_id: 0,
         expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
@@ -9636,11 +9642,25 @@ fn legacy_executor_rejects_drop_table_cascade() {
     let base = temp_dir("legacy_drop_table_cascade_rejected");
     let txns = TransactionManager::new_durable(&base).unwrap();
 
-    run_sql(&base, &txns, INVALID_TRANSACTION_ID, "create table items (id int4)").unwrap();
+    run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "create table items (id int4)",
+    )
+    .unwrap();
 
-    match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "drop table items cascade") {
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "drop table items cascade",
+    ) {
         Err(ExecError::Parse(ParseError::UnexpectedToken { expected, actual })) => {
-            assert_eq!(expected, "DROP TABLE CASCADE handled by database/session layer");
+            assert_eq!(
+                expected,
+                "DROP TABLE CASCADE handled by database/session layer"
+            );
             assert_eq!(actual, "DROP TABLE ... CASCADE");
         }
         other => panic!("expected DROP TABLE CASCADE rejection, got {other:?}"),
@@ -14896,6 +14916,7 @@ fn large_object_metadata_tracks_create_and_unlink() {
             )),
             snapshot: txns.snapshot(INVALID_TRANSACTION_ID).unwrap(),
             client_id: 77,
+            session_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
             current_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
             next_command_id: 0,
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),

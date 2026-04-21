@@ -518,7 +518,7 @@ Targeted reruns and notes:
   - add parser/analyzer/executor support for `CASCADE` in role membership revokes
   - [done] implement `SET ROLE` and `RESET ROLE`
   - [done] implement SQL-visible `session_user`, `current_user`, and `current_role` semantics used by the regression
-  - add parser/executor support for `DROP OWNED`
+  - [done] add parser/executor support for `DROP OWNED`
   - [done] add parser support for `DROP USER`, `CREATE GROUP`, and `ALTER GROUP`
   - make role membership grant/revoke execution honor explicit grantors and dependent membership chains
   - align duplicate-role and role-grant error text with PostgreSQL where practical

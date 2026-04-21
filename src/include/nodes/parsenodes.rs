@@ -1,3 +1,4 @@
+use crate::include::catalog::PolicyCommand;
 use crate::include::executor::execdesc::CommandType;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::primnodes::AggFunc;
@@ -5,7 +6,6 @@ use crate::include::nodes::primnodes::{
     AggAccum, Expr, JoinType, ProjectSetTarget, QueryColumn, RelationDesc, SetReturningCall,
     SortGroupClause, TargetEntry, ToastRelationRef, WindowClause,
 };
-use crate::include::catalog::PolicyCommand;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -296,6 +296,7 @@ pub enum Statement {
     ResetRole(ResetRoleStatement),
     SetSessionAuthorization(SetSessionAuthorizationStatement),
     ResetSessionAuthorization(ResetSessionAuthorizationStatement),
+    DropOwned(DropOwnedStatement),
     ReassignOwned(ReassignOwnedStatement),
     TruncateTable(TruncateTableStatement),
     Vacuum(VacuumStatement),
@@ -1499,6 +1500,12 @@ pub enum RoleGrantorSpec {
 pub struct ReassignOwnedStatement {
     pub old_roles: Vec<String>,
     pub new_role: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropOwnedStatement {
+    pub role_names: Vec<String>,
+    pub cascade: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
