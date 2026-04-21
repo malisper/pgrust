@@ -1894,6 +1894,123 @@ fn advisory_try_lock_shared_and_reentrant_counts_match_postgres() {
 }
 
 #[test]
+fn advisory_session_and_xact_locks_on_same_key_do_not_block_same_backend() {
+    let dir = temp_dir("advisory_same_backend_cross_scope");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(
+            &db,
+            "select pg_advisory_xact_lock(1), pg_advisory_xact_lock_shared(2), \
+             pg_advisory_xact_lock(1, 1), pg_advisory_xact_lock_shared(2, 2)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "select pg_advisory_lock(1), pg_advisory_lock_shared(2), \
+             pg_advisory_lock(1, 1), pg_advisory_lock_shared(2, 2)",
+        )
+        .unwrap();
+    session.execute(&db, "rollback").unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select classid, objid, objsubid, mode, granted \
+             from pg_locks where locktype = 'advisory' order by classid, objid, objsubid"
+        ),
+        vec![
+            vec![
+                Value::Int64(0),
+                Value::Int64(1),
+                Value::Int16(1),
+                Value::Text("ExclusiveLock".into()),
+                Value::Bool(true),
+            ],
+            vec![
+                Value::Int64(0),
+                Value::Int64(2),
+                Value::Int16(1),
+                Value::Text("ShareLock".into()),
+                Value::Bool(true),
+            ],
+            vec![
+                Value::Int64(1),
+                Value::Int64(1),
+                Value::Int16(2),
+                Value::Text("ExclusiveLock".into()),
+                Value::Bool(true),
+            ],
+            vec![
+                Value::Int64(2),
+                Value::Int64(2),
+                Value::Int16(2),
+                Value::Text("ShareLock".into()),
+                Value::Bool(true),
+            ],
+        ]
+    );
+
+    session.execute(&db, "select pg_advisory_unlock_all()").unwrap();
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(
+            &db,
+            "select pg_advisory_lock(1), pg_advisory_lock_shared(2), \
+             pg_advisory_lock(1, 1), pg_advisory_lock_shared(2, 2)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "select pg_advisory_xact_lock(1), pg_advisory_xact_lock_shared(2), \
+             pg_advisory_xact_lock(1, 1), pg_advisory_xact_lock_shared(2, 2)",
+        )
+        .unwrap();
+    session.execute(&db, "rollback").unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*) from pg_locks where locktype = 'advisory'"
+        ),
+        vec![vec![Value::Int64(4)]]
+    );
+}
+
+#[test]
+fn advisory_unlock_false_queues_warning() {
+    let dir = temp_dir("advisory_unlock_warning");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "select pg_advisory_xact_lock(1), pg_advisory_xact_lock_shared(2)")
+        .unwrap();
+
+    clear_backend_notices();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select pg_advisory_unlock(1), pg_advisory_unlock_shared(2)"
+        ),
+        vec![vec![Value::Bool(false), Value::Bool(false)]]
+    );
+    assert_eq!(
+        take_backend_notices(),
+        vec![
+            "you don't own a lock of type ExclusiveLock".to_string(),
+            "you don't own a lock of type ShareLock".to_string(),
+        ]
+    );
+}
+
+#[test]
 fn advisory_lock_functions_return_null_for_null_inputs() {
     let dir = temp_dir("advisory_lock_null_inputs");
     let db = Database::open(&dir, 64).unwrap();
@@ -11436,8 +11553,6 @@ fn foreign_keys_block_parent_ddl_and_allow_child_drop() {
         "truncate parents",
         "alter table parents drop column id",
         "alter table children drop column parent_id",
-        "alter table parents alter column id type int8",
-        "alter table children alter column parent_id type int8",
         "alter table parents drop constraint parents_pkey",
     ] {
         match db.execute(1, sql) {

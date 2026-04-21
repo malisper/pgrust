@@ -69,6 +69,7 @@ fn store_virtual_row(slot: &mut TupleSlot, values: Vec<Value>) {
     slot.tts_values = values;
     slot.tts_nvalid = nvalid;
     slot.kind = SlotKind::Virtual;
+    slot.virtual_tid = None;
     slot.decode_offset = 0;
 }
 
