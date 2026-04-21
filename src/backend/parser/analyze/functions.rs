@@ -146,9 +146,7 @@ pub(super) fn resolve_function_call(
 
 pub(super) fn resolve_scalar_function(name: &str) -> Option<BuiltinScalarFunction> {
     let normalized = normalize_builtin_function_name(name);
-    scalar_functions_by_name()
-        .get(normalized)
-        .copied()
+    scalar_functions_by_name().get(normalized).copied()
 }
 
 pub(super) fn resolve_builtin_aggregate(name: &str) -> Option<AggFunc> {
@@ -567,6 +565,10 @@ pub(super) fn validate_scalar_function_arity(
                 args.len() == 2
             }
             BuiltinScalarFunction::CashWords => args.len() == 1,
+            BuiltinScalarFunction::XmlComment
+            | BuiltinScalarFunction::XmlIsWellFormed
+            | BuiltinScalarFunction::XmlIsWellFormedDocument
+            | BuiltinScalarFunction::XmlIsWellFormedContent => args.len() == 1,
             BuiltinScalarFunction::Random | BuiltinScalarFunction::RandomNormal => {
                 matches!(args.len(), 0 | 2)
             }
@@ -945,6 +947,7 @@ pub(super) fn validate_aggregate_arity(func: AggFunc, args: &[SqlExpr]) -> Resul
             | AggFunc::JsonAgg
             | AggFunc::JsonbAgg
             | AggFunc::RangeAgg
+            | AggFunc::XmlAgg
             | AggFunc::RangeIntersectAgg => args.len() == 1,
             AggFunc::StringAgg | AggFunc::JsonObjectAgg | AggFunc::JsonbObjectAgg => {
                 args.len() == 2
@@ -1545,7 +1548,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("replace", BuiltinScalarFunction::Replace),
         ("split_part", BuiltinScalarFunction::SplitPart),
         ("translate", BuiltinScalarFunction::Translate),
-        ("regprocedure_to_text", BuiltinScalarFunction::RegProcedureToText),
+        (
+            "regprocedure_to_text",
+            BuiltinScalarFunction::RegProcedureToText,
+        ),
         ("regprocedureout", BuiltinScalarFunction::RegProcedureToText),
         ("regprocout", BuiltinScalarFunction::RegProcedureToText),
         ("regrole_to_text", BuiltinScalarFunction::RegRoleToText),
@@ -1636,7 +1642,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("float8_accum", BuiltinScalarFunction::Float8Accum),
         ("float8_combine", BuiltinScalarFunction::Float8Combine),
         ("float8_regr_accum", BuiltinScalarFunction::Float8RegrAccum),
-        ("float8_regr_combine", BuiltinScalarFunction::Float8RegrCombine),
+        (
+            "float8_regr_combine",
+            BuiltinScalarFunction::Float8RegrCombine,
+        ),
         ("erf", BuiltinScalarFunction::Erf),
         ("erfc", BuiltinScalarFunction::Erfc),
         ("gamma", BuiltinScalarFunction::Gamma),
@@ -1674,6 +1683,16 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         (
             "bitcast_bigint_to_float8",
             BuiltinScalarFunction::BitcastBigintToFloat8,
+        ),
+        ("xmlcomment", BuiltinScalarFunction::XmlComment),
+        ("xml_is_well_formed", BuiltinScalarFunction::XmlIsWellFormed),
+        (
+            "xml_is_well_formed_document",
+            BuiltinScalarFunction::XmlIsWellFormedDocument,
+        ),
+        (
+            "xml_is_well_formed_content",
+            BuiltinScalarFunction::XmlIsWellFormedContent,
         ),
         ("pg_input_is_valid", BuiltinScalarFunction::PgInputIsValid),
         ("range_constructor", BuiltinScalarFunction::RangeConstructor),
@@ -1909,6 +1928,24 @@ fn scalar_fixed_return_types() -> &'static Vec<(BuiltinScalarFunction, SqlType)>
                 SqlType::new(SqlTypeKind::Text),
             ));
         }
+        if by_func
+            .iter()
+            .all(|(candidate, _)| *candidate != BuiltinScalarFunction::XmlComment)
+        {
+            by_func.push((
+                BuiltinScalarFunction::XmlComment,
+                SqlType::new(SqlTypeKind::Xml),
+            ));
+        }
+        for func in [
+            BuiltinScalarFunction::XmlIsWellFormed,
+            BuiltinScalarFunction::XmlIsWellFormedDocument,
+            BuiltinScalarFunction::XmlIsWellFormedContent,
+        ] {
+            if by_func.iter().all(|(candidate, _)| *candidate != func) {
+                by_func.push((func, SqlType::new(SqlTypeKind::Bool)));
+            }
+        }
         by_func
     })
 }
@@ -2041,6 +2078,10 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::BoolNe
             | BuiltinScalarFunction::BitcastIntegerToFloat4
             | BuiltinScalarFunction::BitcastBigintToFloat8
+            | BuiltinScalarFunction::XmlComment
+            | BuiltinScalarFunction::XmlIsWellFormed
+            | BuiltinScalarFunction::XmlIsWellFormedDocument
+            | BuiltinScalarFunction::XmlIsWellFormedContent
             | BuiltinScalarFunction::PgInputIsValid
             | BuiltinScalarFunction::PgInputErrorMessage
             | BuiltinScalarFunction::PgInputErrorDetail
@@ -2138,6 +2179,12 @@ fn aggregate_fixed_return_types() -> &'static Vec<(AggFunc, SqlType)> {
                 by_func.push((func, sql_type));
             }
         }
+        if by_func
+            .iter()
+            .all(|(candidate, _)| *candidate != AggFunc::XmlAgg)
+        {
+            by_func.push((AggFunc::XmlAgg, SqlType::new(SqlTypeKind::Xml)));
+        }
         by_func
     })
 }
@@ -2151,6 +2198,7 @@ fn supports_fixed_aggregate_return_type(func: AggFunc) -> bool {
             | AggFunc::JsonObjectAgg
             | AggFunc::JsonbObjectAgg
             | AggFunc::RangeAgg
+            | AggFunc::XmlAgg
     )
 }
 
@@ -2193,6 +2241,7 @@ fn aggregate_func_for_proname(name: &str) -> Option<AggFunc> {
         "json_object_agg" => Some(AggFunc::JsonObjectAgg),
         "jsonb_object_agg" => Some(AggFunc::JsonbObjectAgg),
         "range_agg" => Some(AggFunc::RangeAgg),
+        "xmlagg" => Some(AggFunc::XmlAgg),
         "range_intersect_agg" => Some(AggFunc::RangeIntersectAgg),
         _ => None,
     }
@@ -2399,7 +2448,10 @@ mod tests {
                 .sql_type
         );
         assert!(resolved.func_variadic);
-        assert_eq!(resolved.vatype_oid, crate::include::catalog::NUMRANGE_TYPE_OID);
+        assert_eq!(
+            resolved.vatype_oid,
+            crate::include::catalog::NUMRANGE_TYPE_OID
+        );
         assert_eq!(resolved.declared_arg_types, vec![range_array_type]);
     }
 

@@ -230,6 +230,9 @@ fn expr_references_local_cte(expr: &Expr, local_ctes: &HashMap<usize, String>) -
                         })
                 })
             }),
+        Expr::Xml(xml) => xml
+            .child_exprs()
+            .find_map(|child| expr_references_local_cte(child, local_ctes)),
     }
 }
 
@@ -775,6 +778,9 @@ pub(super) fn bind_agg_output_expr_in_clause(
     }
 
     match expr {
+        SqlExpr::Xml(_) => Err(ParseError::FeatureNotSupported(
+            "xml expressions in grouped aggregate output are not implemented".into(),
+        )),
         SqlExpr::Default => Err(ParseError::UnexpectedToken {
             expected: "expression",
             actual: "DEFAULT".into(),

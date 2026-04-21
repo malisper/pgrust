@@ -100,6 +100,7 @@ fn expr_uses_outer_columns(expr: &Expr) -> bool {
                             .is_some_and(expr_uses_outer_columns)
                 })
         }
+        Expr::Xml(xml) => xml.child_exprs().any(expr_uses_outer_columns),
         Expr::Const(_)
         | Expr::Random
         | Expr::CurrentDate

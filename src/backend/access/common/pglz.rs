@@ -150,7 +150,12 @@ fn find_match(
     }
 }
 
-fn maybe_rotate_control(out: &mut Vec<u8>, ctrl_idx: &mut usize, ctrl_bits: &mut u8, ctrl_mask: &mut u8) {
+fn maybe_rotate_control(
+    out: &mut Vec<u8>,
+    ctrl_idx: &mut usize,
+    ctrl_bits: &mut u8,
+    ctrl_mask: &mut u8,
+) {
     if *ctrl_mask == 0 {
         out[*ctrl_idx] = *ctrl_bits;
         *ctrl_idx = out.len();
@@ -160,7 +165,13 @@ fn maybe_rotate_control(out: &mut Vec<u8>, ctrl_idx: &mut usize, ctrl_bits: &mut
     }
 }
 
-fn emit_literal(out: &mut Vec<u8>, ctrl_idx: &mut usize, ctrl_bits: &mut u8, ctrl_mask: &mut u8, byte: u8) {
+fn emit_literal(
+    out: &mut Vec<u8>,
+    ctrl_idx: &mut usize,
+    ctrl_bits: &mut u8,
+    ctrl_mask: &mut u8,
+    byte: u8,
+) {
     maybe_rotate_control(out, ctrl_idx, ctrl_bits, ctrl_mask);
     out.push(byte);
     *ctrl_mask = ctrl_mask.wrapping_shl(1);

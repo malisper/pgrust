@@ -19,10 +19,9 @@ use crate::backend::utils::cache::system_views::{
 };
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::include::catalog::{
-    PgAggregateRow, PgAmRow, PgAmopRow, PgAmprocRow, PgClassRow, PgCollationRow, PgConstraintRow,
-    PgIndexRow, PgInheritsRow, PgLanguageRow, PgOpclassRow, PgOpfamilyRow, PgProcRow, PgRewriteRow,
-    PgStatisticRow, PgTriggerRow, PgTypeRow,
-    PgAuthIdRow, PgAuthMembersRow,
+    PgAggregateRow, PgAmRow, PgAmopRow, PgAmprocRow, PgAuthIdRow, PgAuthMembersRow, PgClassRow,
+    PgCollationRow, PgConstraintRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgOpclassRow,
+    PgOpfamilyRow, PgProcRow, PgRewriteRow, PgStatisticRow, PgTriggerRow, PgTypeRow,
 };
 use crate::include::nodes::datum::Value;
 use crate::pgrust::database::{

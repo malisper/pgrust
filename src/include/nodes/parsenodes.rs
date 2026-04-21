@@ -639,6 +639,50 @@ pub struct SetStatement {
     pub is_local: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum XmlOption {
+    Document,
+    Content,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum XmlStandalone {
+    Yes,
+    No,
+    NoValue,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RawXmlExprOp {
+    Concat,
+    Element,
+    Forest,
+    Parse,
+    Pi,
+    Root,
+    Serialize,
+    IsDocument,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawXmlExpr {
+    pub op: RawXmlExprOp,
+    pub name: Option<String>,
+    pub named_args: Vec<SqlExpr>,
+    pub arg_names: Vec<String>,
+    pub args: Vec<SqlExpr>,
+    pub xml_option: Option<XmlOption>,
+    pub indent: Option<bool>,
+    pub target_type: Option<RawTypeName>,
+    pub standalone: Option<XmlStandalone>,
+}
+
+impl RawXmlExpr {
+    pub fn child_exprs(&self) -> impl Iterator<Item = &SqlExpr> {
+        self.named_args.iter().chain(self.args.iter())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResetStatement {
     pub name: Option<String>,
@@ -2071,6 +2115,7 @@ pub enum SqlTypeKind {
     Json,
     Jsonb,
     JsonPath,
+    Xml,
     Date,
     Time,
     TimeTz,
@@ -2592,6 +2637,7 @@ pub enum SqlExpr {
         array: Box<SqlExpr>,
         subscripts: Vec<ArraySubscript>,
     },
+    Xml(Box<RawXmlExpr>),
     Random,
     JsonGet(Box<SqlExpr>, Box<SqlExpr>),
     JsonGetText(Box<SqlExpr>, Box<SqlExpr>),

@@ -51,18 +51,18 @@ use crate::include::catalog::{
     PgAmprocRow, PgAttrdefRow, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow,
     PgClassRow, PgCollationRow, PgConstraintRow, PgDatabaseRow, PgDependRow,
     PgForeignDataWrapperRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow,
-    PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgPolicyRow, PgProcRow,
-    PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow,
-    PgStatisticRow, PgTablespaceRow, PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow,
-    PgTsParserRow, PgTsTemplateRow, PgTypeRow, REGCONFIG_ARRAY_TYPE_OID, REGCONFIG_TYPE_OID,
-    REGDICTIONARY_ARRAY_TYPE_OID, REGDICTIONARY_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID,
-    TID_ARRAY_TYPE_OID, TID_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID,
-    TSQUERY_ARRAY_TYPE_OID, TSQUERY_TYPE_OID, TSVECTOR_ARRAY_TYPE_OID, TSVECTOR_TYPE_OID,
-    VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID,
-    XID_ARRAY_TYPE_OID, XID_TYPE_OID, bootstrap_composite_type_rows, bootstrap_pg_aggregate_rows,
-    bootstrap_pg_am_rows, bootstrap_pg_amop_rows, bootstrap_pg_amproc_rows,
-    bootstrap_pg_auth_members_rows, bootstrap_pg_authid_rows, bootstrap_pg_cast_rows,
-    bootstrap_pg_collation_rows, bootstrap_pg_constraint_rows, bootstrap_pg_database_rows,
+    PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow,
+    PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgStatisticRow, PgTablespaceRow,
+    PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow,
+    PgTypeRow, REGCONFIG_ARRAY_TYPE_OID, REGCONFIG_TYPE_OID, REGDICTIONARY_ARRAY_TYPE_OID,
+    REGDICTIONARY_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TID_ARRAY_TYPE_OID, TID_TYPE_OID,
+    TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID, TSQUERY_ARRAY_TYPE_OID, TSQUERY_TYPE_OID,
+    TSVECTOR_ARRAY_TYPE_OID, TSVECTOR_TYPE_OID, VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID,
+    VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID, XID_ARRAY_TYPE_OID, XID_TYPE_OID, XML_ARRAY_TYPE_OID,
+    XML_TYPE_OID, bootstrap_composite_type_rows, bootstrap_pg_aggregate_rows, bootstrap_pg_am_rows,
+    bootstrap_pg_amop_rows, bootstrap_pg_amproc_rows, bootstrap_pg_auth_members_rows,
+    bootstrap_pg_authid_rows, bootstrap_pg_cast_rows, bootstrap_pg_collation_rows,
+    bootstrap_pg_constraint_rows, bootstrap_pg_database_rows,
     bootstrap_pg_foreign_data_wrapper_rows, bootstrap_pg_language_rows,
     bootstrap_pg_namespace_rows, bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows,
     bootstrap_pg_opfamily_rows, bootstrap_pg_proc_rows, bootstrap_pg_tablespace_rows,
@@ -843,13 +843,11 @@ impl CatCache {
         right_type_oid: u32,
     ) -> Option<&PgOperatorRow> {
         let normalized = normalize_catalog_name(name);
-        self.operator_rows
-            .iter()
-            .find(|row| {
-                row.oprname.eq_ignore_ascii_case(normalized)
-                    && row.oprleft == left_type_oid
-                    && row.oprright == right_type_oid
-            })
+        self.operator_rows.iter().find(|row| {
+            row.oprname.eq_ignore_ascii_case(normalized)
+                && row.oprleft == left_type_oid
+                && row.oprright == right_type_oid
+        })
     }
 
     pub fn proc_rows(&self) -> Vec<PgProcRow> {
@@ -958,7 +956,8 @@ pub fn sql_type_oid(sql_type: SqlType) -> u32 {
         }
         return range_type.type_oid();
     }
-    if let Some(multirange_type) = crate::include::catalog::multirange_type_ref_for_sql_type(sql_type)
+    if let Some(multirange_type) =
+        crate::include::catalog::multirange_type_ref_for_sql_type(sql_type)
     {
         if sql_type.is_array {
             if sql_type.type_oid != 0 && matches!(sql_type.kind, SqlTypeKind::Multirange) {
@@ -998,9 +997,7 @@ pub fn sql_type_oid(sql_type: SqlType) -> u32 {
         (SqlTypeKind::AnyCompatibleArray, true) => {
             unreachable!("anycompatiblearray arrays are unsupported")
         }
-        (SqlTypeKind::AnyCompatibleRange, false) => {
-            crate::include::catalog::ANYCOMPATIBLERANGEOID
-        }
+        (SqlTypeKind::AnyCompatibleRange, false) => crate::include::catalog::ANYCOMPATIBLERANGEOID,
         (SqlTypeKind::AnyCompatibleRange, true) => {
             unreachable!("anycompatiblerange arrays are unsupported")
         }
@@ -1084,6 +1081,8 @@ pub fn sql_type_oid(sql_type: SqlType) -> u32 {
         (SqlTypeKind::Jsonb, true) => JSONB_ARRAY_TYPE_OID,
         (SqlTypeKind::JsonPath, false) => JSONPATH_TYPE_OID,
         (SqlTypeKind::JsonPath, true) => JSONPATH_ARRAY_TYPE_OID,
+        (SqlTypeKind::Xml, false) => XML_TYPE_OID,
+        (SqlTypeKind::Xml, true) => XML_ARRAY_TYPE_OID,
         (SqlTypeKind::Point, false) => POINT_TYPE_OID,
         (SqlTypeKind::Point, true) => unreachable!("geometry arrays are unsupported"),
         (SqlTypeKind::Lseg, false) => LSEG_TYPE_OID,
@@ -1177,11 +1176,15 @@ mod tests {
             Some(11)
         );
         assert_eq!(
-            cache.class_by_name_exact("pg_catalog.pg_class").map(|row| row.oid),
+            cache
+                .class_by_name_exact("pg_catalog.pg_class")
+                .map(|row| row.oid),
             Some(PG_CLASS_RELATION_OID)
         );
         assert_eq!(
-            cache.namespace_by_name_exact("pg_catalog").map(|row| row.oid),
+            cache
+                .namespace_by_name_exact("pg_catalog")
+                .map(|row| row.oid),
             Some(11)
         );
     }

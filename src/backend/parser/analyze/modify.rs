@@ -2,8 +2,8 @@ use super::paths::choose_modify_row_source;
 use super::query::rewrite_local_vars_for_output_exprs;
 use super::*;
 use crate::backend::rewrite::{
-    ViewDmlEvent, ViewDmlRewriteError, resolve_auto_updatable_view_target,
-    RlsWriteCheck, build_target_relation_row_security, relation_has_row_security,
+    RlsWriteCheck, ViewDmlEvent, ViewDmlRewriteError, build_target_relation_row_security,
+    relation_has_row_security, resolve_auto_updatable_view_target,
 };
 use crate::include::catalog::PolicyCommand;
 use crate::include::nodes::primnodes::JoinType;

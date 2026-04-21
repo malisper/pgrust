@@ -1506,6 +1506,7 @@ fn json_object_key_text(value: &Value, op: &'static str) -> Result<String, ExecE
         Value::Numeric(v) => Ok(v.render()),
         Value::Bool(v) => Ok(if *v { "true".into() } else { "false".into() }),
         Value::JsonPath(v) => Ok(v.to_string()),
+        Value::Xml(v) => Ok(v.to_string()),
         Value::Json(v) => Ok(v.to_string()),
         Value::Jsonb(v) => render_jsonb_bytes(v),
         Value::Date(_)
@@ -1527,9 +1528,9 @@ fn json_object_key_text(value: &Value, op: &'static str) -> Result<String, ExecE
         )
         .unwrap_or_default()),
         Value::Range(_) => Ok(render_range_text(value).unwrap_or_default()),
-        Value::Multirange(_) => Ok(
-            crate::backend::executor::render_multirange_text(value).unwrap_or_default(),
-        ),
+        Value::Multirange(_) => {
+            Ok(crate::backend::executor::render_multirange_text(value).unwrap_or_default())
+        }
         Value::TsVector(v) => Ok(crate::backend::executor::render_tsvector_text(v)),
         Value::TsQuery(v) => Ok(crate::backend::executor::render_tsquery_text(v)),
         Value::Array(_) | Value::PgArray(_) => Err(ExecError::TypeMismatch {
@@ -2706,6 +2707,7 @@ fn value_to_json_serde_with_config(
         Value::Bool(v) => SerdeJsonValue::Bool(*v),
         Value::Bit(v) => SerdeJsonValue::String(render_bit_text(v)),
         Value::JsonPath(text) => SerdeJsonValue::String(text.to_string()),
+        Value::Xml(text) => SerdeJsonValue::String(text.to_string()),
         Value::Json(text) => parse_json_text(text.as_str()).unwrap_or(SerdeJsonValue::Null),
         Value::Jsonb(bytes) => decode_jsonb(bytes)
             .map(|value| value.to_serde())

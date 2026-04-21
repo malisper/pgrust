@@ -4,14 +4,14 @@ use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::{
     ANYARRAYOID, ANYOID, BIT_TYPE_OID, BOOL_TYPE_OID, BOOTSTRAP_SUPERUSER_OID, BOX_TYPE_OID,
     BPCHAR_TYPE_OID, BYTEA_TYPE_OID, CIRCLE_TYPE_OID, DATE_TYPE_OID, DATERANGE_TYPE_OID,
-    FDW_HANDLER_TYPE_OID, FLOAT8_ARRAY_TYPE_OID, FLOAT8_TYPE_OID, INT2_TYPE_OID,
-    INT4MULTIRANGE_TYPE_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID, INT8_TYPE_OID, INT8RANGE_TYPE_OID,
-    JSON_TYPE_OID, JSONB_TYPE_OID, JSONPATH_TYPE_OID, LINE_TYPE_OID, LSEG_TYPE_OID,
-    MONEY_TYPE_OID, NAME_TYPE_OID, NUMERIC_TYPE_OID, NUMRANGE_TYPE_OID, OID_TYPE_OID,
-    PATH_TYPE_OID, PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_INTERNAL_OID, PG_NODE_TREE_TYPE_OID,
-    POINT_TYPE_OID, POLYGON_TYPE_OID, RECORD_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID,
-    TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID, TSQUERY_TYPE_OID, TSRANGE_TYPE_OID,
-    TSTZRANGE_TYPE_OID, VARBIT_TYPE_OID, aggregate_func_for_dynamic_range_proc_oid,
+    FDW_HANDLER_TYPE_OID, FLOAT8_ARRAY_TYPE_OID, FLOAT8_TYPE_OID, INT2_TYPE_OID, INT4_TYPE_OID,
+    INT4MULTIRANGE_TYPE_OID, INT4RANGE_TYPE_OID, INT8_TYPE_OID, INT8RANGE_TYPE_OID, JSON_TYPE_OID,
+    JSONB_TYPE_OID, JSONPATH_TYPE_OID, LINE_TYPE_OID, LSEG_TYPE_OID, MONEY_TYPE_OID, NAME_TYPE_OID,
+    NUMERIC_TYPE_OID, NUMRANGE_TYPE_OID, OID_TYPE_OID, PATH_TYPE_OID, PG_CATALOG_NAMESPACE_OID,
+    PG_LANGUAGE_INTERNAL_OID, PG_NODE_TREE_TYPE_OID, POINT_TYPE_OID, POLYGON_TYPE_OID,
+    RECORD_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID,
+    TSQUERY_TYPE_OID, TSRANGE_TYPE_OID, TSTZRANGE_TYPE_OID, VARBIT_TYPE_OID,
+    aggregate_func_for_dynamic_range_proc_oid,
 };
 use crate::include::nodes::primnodes::{AggFunc, BuiltinScalarFunction, BuiltinWindowFunction};
 use std::sync::OnceLock;
@@ -3249,7 +3249,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("replace", BuiltinScalarFunction::Replace),
         ("split_part", BuiltinScalarFunction::SplitPart),
         ("translate", BuiltinScalarFunction::Translate),
-        ("regprocedure_to_text", BuiltinScalarFunction::RegProcedureToText),
+        (
+            "regprocedure_to_text",
+            BuiltinScalarFunction::RegProcedureToText,
+        ),
         ("regprocedureout", BuiltinScalarFunction::RegProcedureToText),
         ("regprocout", BuiltinScalarFunction::RegProcedureToText),
         ("regrole_to_text", BuiltinScalarFunction::RegRoleToText),
@@ -3325,7 +3328,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("float8_accum", BuiltinScalarFunction::Float8Accum),
         ("float8_combine", BuiltinScalarFunction::Float8Combine),
         ("float8_regr_accum", BuiltinScalarFunction::Float8RegrAccum),
-        ("float8_regr_combine", BuiltinScalarFunction::Float8RegrCombine),
+        (
+            "float8_regr_combine",
+            BuiltinScalarFunction::Float8RegrCombine,
+        ),
         ("erf", BuiltinScalarFunction::Erf),
         ("erfc", BuiltinScalarFunction::Erfc),
         ("gamma", BuiltinScalarFunction::Gamma),

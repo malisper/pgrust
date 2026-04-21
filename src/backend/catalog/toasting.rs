@@ -99,6 +99,7 @@ fn type_maximum_size(column: &crate::backend::executor::ColumnDesc) -> Option<us
         | crate::backend::parser::SqlTypeKind::Json
         | crate::backend::parser::SqlTypeKind::Jsonb
         | crate::backend::parser::SqlTypeKind::JsonPath
+        | crate::backend::parser::SqlTypeKind::Xml
         | crate::backend::parser::SqlTypeKind::Text
         | crate::backend::parser::SqlTypeKind::PgNodeTree
         | crate::backend::parser::SqlTypeKind::TsVector

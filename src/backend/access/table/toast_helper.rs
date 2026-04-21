@@ -45,7 +45,8 @@ fn maybe_compress_column(
         bytes,
         column.storage.attcompression,
         ctx.default_toast_compression,
-    )? else {
+    )?
+    else {
         ttc.attr[column_index].colflags |= TOASTCOL_INCOMPRESSIBLE;
         return Ok(false);
     };
@@ -152,7 +153,8 @@ pub(crate) fn toast_tuple_values_for_write(
             xid,
             cid,
             &[AttributeStorage::Extended, AttributeStorage::External],
-        )? else {
+        )?
+        else {
             break;
         };
         stored.push(toasted);
@@ -169,7 +171,8 @@ pub(crate) fn toast_tuple_values_for_write(
             xid,
             cid,
             &[AttributeStorage::Main],
-        )? else {
+        )?
+        else {
             break;
         };
         stored.push(toasted);

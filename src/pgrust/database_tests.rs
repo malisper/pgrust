@@ -12258,14 +12258,15 @@ fn btree_index_supports_builtin_nummultirange_keys() {
     let btree =
         crate::backend::utils::cache::lsyscache::access_method_row_by_name(&db, 1, None, "btree")
             .unwrap();
-    let multirange_opclass = crate::backend::utils::cache::lsyscache::default_opclass_for_am_and_type(
-        &db,
-        1,
-        None,
-        btree.oid,
-        crate::include::catalog::NUMMULTIRANGE_TYPE_OID,
-    )
-    .unwrap();
+    let multirange_opclass =
+        crate::backend::utils::cache::lsyscache::default_opclass_for_am_and_type(
+            &db,
+            1,
+            None,
+            btree.oid,
+            crate::include::catalog::NUMMULTIRANGE_TYPE_OID,
+        )
+        .unwrap();
     assert_eq!(
         multirange_opclass.oid,
         crate::include::catalog::MULTIRANGE_BTREE_OPCLASS_OID
@@ -15754,7 +15755,11 @@ fn regproc_cast_aliases_resolve_in_queries() {
     let db = Database::open(&dir, 64).unwrap();
 
     assert_eq!(
-        query_rows(&db, 1, "select 6403::regproc::text, 6403::pg_catalog.regproc::text"),
+        query_rows(
+            &db,
+            1,
+            "select 6403::regproc::text, 6403::pg_catalog.regproc::text"
+        ),
         vec![vec![
             Value::Text("pg_rust_test_fdw_handler()".into()),
             Value::Text("pg_rust_test_fdw_handler()".into()),

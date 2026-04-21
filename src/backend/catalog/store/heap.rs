@@ -43,8 +43,8 @@ use crate::include::catalog::{
     PUBLISH_GENCOLS_NONE, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow, PgClassRow,
     PgConstraintRow, PgDatabaseRow, PgDependRow, PgDescriptionRow, PgForeignDataWrapperRow,
     PgInheritsRow, PgNamespaceRow, PgOpclassRow, PgOpfamilyRow, PgPolicyRow, PgProcRow,
-    PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow,
-    PgStatisticRow, PgTablespaceRow, relkind_has_storage,
+    PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgStatisticRow,
+    PgTablespaceRow, relkind_has_storage,
 };
 use crate::include::nodes::datum::Value;
 

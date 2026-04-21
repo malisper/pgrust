@@ -659,6 +659,11 @@ fn collect_expr_relids(expr: &Expr, relids: &mut Vec<usize>) {
             }
         }
         Expr::FieldSelect { expr, .. } => collect_expr_relids(expr, relids),
+        Expr::Xml(xml) => {
+            for child in xml.child_exprs() {
+                collect_expr_relids(child, relids);
+            }
+        }
         Expr::Param(_)
         | Expr::Const(_)
         | Expr::Random

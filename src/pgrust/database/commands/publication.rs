@@ -805,9 +805,11 @@ fn apply_publication_options(
     for option in &options.options {
         let option_name = publication_option_name(option);
         if !seen.insert(option_name.clone()) {
-            return Err(ExecError::Parse(ParseError::ConflictingOrRedundantOptions {
-                option: option_name,
-            }));
+            return Err(ExecError::Parse(
+                ParseError::ConflictingOrRedundantOptions {
+                    option: option_name,
+                },
+            ));
         }
         match option {
             PublicationOption::Publish(actions) => {
@@ -826,9 +828,9 @@ fn apply_publication_options(
                 };
             }
             PublicationOption::Raw { name, .. } => {
-                return Err(ExecError::Parse(ParseError::UnrecognizedPublicationParameter(
-                    name.clone(),
-                )));
+                return Err(ExecError::Parse(
+                    ParseError::UnrecognizedPublicationParameter(name.clone()),
+                ));
             }
         }
     }
@@ -1041,7 +1043,11 @@ fn publication_namespace_name(
 ) -> Option<String> {
     db.backend_catcache(client_id, txn_ctx)
         .ok()
-        .and_then(|catcache| catcache.namespace_by_oid(namespace_oid).map(|row| row.nspname.clone()))
+        .and_then(|catcache| {
+            catcache
+                .namespace_by_oid(namespace_oid)
+                .map(|row| row.nspname.clone())
+        })
 }
 
 #[cfg(test)]
@@ -1226,7 +1232,9 @@ mod tests {
         let base = temp_dir("foralltables_detail");
         let db = Database::open(&base, 16).unwrap();
         let mut session = Session::new(1);
-        session.execute(&db, "create table widgets (id int4)").unwrap();
+        session
+            .execute(&db, "create table widgets (id int4)")
+            .unwrap();
         session
             .execute(&db, "create publication pub for all tables")
             .unwrap();
@@ -1259,8 +1267,12 @@ mod tests {
         let base = temp_dir("membership_relation_names");
         let db = Database::open(&base, 16).unwrap();
         let mut session = Session::new(1);
-        session.execute(&db, "create table widgets (id int4)").unwrap();
-        session.execute(&db, "create table gadgets (id int4)").unwrap();
+        session
+            .execute(&db, "create table widgets (id int4)")
+            .unwrap();
+        session
+            .execute(&db, "create table gadgets (id int4)")
+            .unwrap();
         session
             .execute(&db, "create publication pub for table widgets")
             .unwrap();
@@ -1294,7 +1306,10 @@ mod tests {
             .execute(&db, "create table testpub_tbl1 (id int4)")
             .unwrap();
         session
-            .execute(&db, "create table pub_test.testpub_nopk (foo int4, bar int4)")
+            .execute(
+                &db,
+                "create table pub_test.testpub_nopk (foo int4, bar int4)",
+            )
             .unwrap();
         session
             .execute(&db, "create publication pub for table testpub_tbl1")

@@ -15,8 +15,8 @@ use super::expr_money::{
     money_add, money_cash_div, money_cmp, money_div_float, money_div_int, money_mul_float,
     money_mul_int, money_sub,
 };
-use super::{compare_multirange_values, expr_range::compare_range_values};
 use super::node_types::*;
+use super::{compare_multirange_values, expr_range::compare_range_values};
 use crate::backend::executor::jsonb::{
     JsonbValue, compare_jsonb, decode_jsonb, encode_jsonb, jsonb_concat,
 };
@@ -185,9 +185,9 @@ pub(crate) fn compare_values(
         (Value::Range(l), Value::Range(r)) => {
             Ok(Value::Bool(compare_range_values(l, r) == Ordering::Equal))
         }
-        (Value::Multirange(l), Value::Multirange(r)) => {
-            Ok(Value::Bool(compare_multirange_values(l, r) == Ordering::Equal))
-        }
+        (Value::Multirange(l), Value::Multirange(r)) => Ok(Value::Bool(
+            compare_multirange_values(l, r) == Ordering::Equal,
+        )),
         (Value::TsVector(l), Value::TsVector(r)) => Ok(Value::Bool(l == r)),
         (Value::TsQuery(l), Value::TsQuery(r)) => Ok(Value::Bool(l == r)),
         (Value::Record(l), Value::Record(r)) => {

@@ -1,5 +1,7 @@
 use crate::RelFileLocator;
-use crate::backend::parser::{SqlType, SqlTypeKind, SubqueryComparisonOp};
+use crate::backend::parser::{
+    SqlType, SqlTypeKind, SubqueryComparisonOp, XmlOption, XmlStandalone,
+};
 use crate::include::access::htup::AttributeDesc;
 use crate::include::catalog::{
     RECORD_TYPE_OID, builtin_scalar_function_for_proc_oid, builtin_window_function_for_proc_oid,
@@ -36,6 +38,7 @@ pub enum ScalarType {
     Json,
     Jsonb,
     JsonPath,
+    Xml,
     TsVector,
     TsQuery,
     Text,
@@ -192,6 +195,7 @@ pub enum AggFunc {
     JsonObjectAgg,
     JsonbObjectAgg,
     RangeAgg,
+    XmlAgg,
     RangeIntersectAgg,
 }
 
@@ -213,6 +217,7 @@ impl AggFunc {
             AggFunc::JsonObjectAgg => "json_object_agg",
             AggFunc::JsonbObjectAgg => "jsonb_object_agg",
             AggFunc::RangeAgg => "range_agg",
+            AggFunc::XmlAgg => "xmlagg",
             AggFunc::RangeIntersectAgg => "range_intersect_agg",
         }
     }
@@ -297,9 +302,14 @@ pub enum BuiltinScalarFunction {
     PgStatGetXactFunctionCalls,
     PgStatGetXactFunctionTotalTime,
     PgStatGetXactFunctionSelfTime,
+    RegRoleToText,
     CashLarger,
     CashSmaller,
     CashWords,
+    XmlComment,
+    XmlIsWellFormed,
+    XmlIsWellFormedDocument,
+    XmlIsWellFormedContent,
     ToJson,
     ToJsonb,
     ArrayToJson,
@@ -985,6 +995,37 @@ pub struct ScalarArrayOpExpr {
     pub right: Box<Expr>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum XmlExprOp {
+    Concat,
+    Element,
+    Forest,
+    Parse,
+    Pi,
+    Root,
+    Serialize,
+    IsDocument,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct XmlExpr {
+    pub op: XmlExprOp,
+    pub name: Option<String>,
+    pub named_args: Vec<Expr>,
+    pub arg_names: Vec<String>,
+    pub args: Vec<Expr>,
+    pub xml_option: Option<XmlOption>,
+    pub indent: Option<bool>,
+    pub target_type: Option<SqlType>,
+    pub standalone: Option<XmlStandalone>,
+}
+
+impl XmlExpr {
+    pub fn child_exprs(&self) -> impl Iterator<Item = &Expr> {
+        self.named_args.iter().chain(self.args.iter())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expr {
     Var(Var),
@@ -1000,6 +1041,7 @@ pub enum Expr {
     SubLink(Box<SubLink>),
     SubPlan(Box<SubPlan>),
     ScalarArrayOp(Box<ScalarArrayOpExpr>),
+    Xml(Box<XmlExpr>),
     Cast(Box<Expr>, SqlType),
     Like {
         expr: Box<Expr>,
@@ -1041,6 +1083,9 @@ pub enum Expr {
     SessionUser,
     CurrentRole,
     CurrentDate,
+    CurrentUser,
+    SessionUser,
+    CurrentRole,
     CurrentTime {
         precision: Option<i32>,
     },
@@ -1306,6 +1351,14 @@ pub fn expr_sql_type_hint(expr: &Expr) -> Option<SqlType> {
         Expr::ArrayLiteral { array_type, .. } => Some(*array_type),
         Expr::Row { descriptor, .. } => Some(descriptor.sql_type()),
         Expr::FieldSelect { field_type, .. } => Some(*field_type),
+        Expr::CurrentUser | Expr::SessionUser | Expr::CurrentRole => {
+            Some(SqlType::new(SqlTypeKind::Name))
+        }
+        Expr::Xml(xml) => Some(match xml.op {
+            XmlExprOp::Serialize => xml.target_type.unwrap_or(SqlType::new(SqlTypeKind::Text)),
+            XmlExprOp::IsDocument => SqlType::new(SqlTypeKind::Bool),
+            _ => SqlType::new(SqlTypeKind::Xml),
+        }),
         Expr::Coalesce(left, right) => {
             expr_sql_type_hint(left).or_else(|| expr_sql_type_hint(right))
         }

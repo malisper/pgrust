@@ -11,8 +11,8 @@ use crate::backend::access::heap::heapam::{
 use crate::backend::access::heap::heaptoast::{
     StoredToastValue, cleanup_new_toast_value, delete_external_from_tuple,
 };
-use crate::backend::access::table::toast_helper::toast_tuple_values_for_write;
 use crate::backend::access::index::indexam;
+use crate::backend::access::table::toast_helper::toast_tuple_values_for_write;
 use crate::backend::access::transam::xact::CommandId;
 use crate::backend::access::transam::xact::{TransactionId, TransactionManager};
 use crate::backend::optimizer::{finalize_expr_subqueries, planner};
@@ -2223,8 +2223,8 @@ fn sql_type_display_name(ty: SqlType) -> String {
         };
     }
     if ty.is_multirange() {
-        let base =
-            crate::include::catalog::builtin_multirange_name_for_sql_type(ty).unwrap_or("multirange");
+        let base = crate::include::catalog::builtin_multirange_name_for_sql_type(ty)
+            .unwrap_or("multirange");
         return if ty.is_array {
             format!("{base}[]")
         } else {
@@ -2265,6 +2265,7 @@ fn sql_type_display_name(ty: SqlType) -> String {
         SqlTypeKind::Json => "json",
         SqlTypeKind::Jsonb => "jsonb",
         SqlTypeKind::JsonPath => "jsonpath",
+        SqlTypeKind::Xml => "xml",
         SqlTypeKind::Date => "date",
         SqlTypeKind::Time => "time without time zone",
         SqlTypeKind::TimeTz => "time with time zone",

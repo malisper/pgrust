@@ -90,12 +90,18 @@ pub(crate) fn parse_range_text(text: &str, ty: SqlType) -> Result<Value, ExecErr
     let lower = if lower_infinite {
         None
     } else {
-        Some(parse_range_bound_text(lower_raw.as_deref().unwrap_or_default(), range_type.subtype)?)
+        Some(parse_range_bound_text(
+            lower_raw.as_deref().unwrap_or_default(),
+            range_type.subtype,
+        )?)
     };
     let upper = if upper_infinite {
         None
     } else {
-        Some(parse_range_bound_text(upper_raw.as_deref().unwrap_or_default(), range_type.subtype)?)
+        Some(parse_range_bound_text(
+            upper_raw.as_deref().unwrap_or_default(),
+            range_type.subtype,
+        )?)
     };
     Ok(Value::Range(normalize_range(
         range_type,
@@ -241,7 +247,9 @@ pub(crate) fn eval_range_function(
     use BuiltinScalarFunction::*;
 
     if (result_type.is_some_and(SqlType::is_multirange)
-        || values.iter().any(|value| matches!(value, Value::Multirange(_))))
+        || values
+            .iter()
+            .any(|value| matches!(value, Value::Multirange(_))))
         && let Some(result) = eval_multirange_function(func, values, result_type, func_variadic)
     {
         return Some(result);
@@ -1037,7 +1045,12 @@ fn parse_range_bound(
 ) -> Result<(Option<String>, bool, usize), ExecError> {
     match char_at(original, idx) {
         Some(',' | ')' | ']') => return Ok((None, true, idx)),
-        None => return Err(malformed_range_literal(original, "Unexpected end of input.")),
+        None => {
+            return Err(malformed_range_literal(
+                original,
+                "Unexpected end of input.",
+            ));
+        }
         _ => {}
     }
 
@@ -1051,7 +1064,10 @@ fn parse_range_bound(
         match ch {
             '\\' => {
                 let Some(escaped) = char_at(original, idx) else {
-                    return Err(malformed_range_literal(original, "Unexpected end of input."));
+                    return Err(malformed_range_literal(
+                        original,
+                        "Unexpected end of input.",
+                    ));
                 };
                 out.push(escaped);
                 idx += escaped.len_utf8();
@@ -1070,7 +1086,10 @@ fn parse_range_bound(
         }
     }
 
-    Err(malformed_range_literal(original, "Unexpected end of input."))
+    Err(malformed_range_literal(
+        original,
+        "Unexpected end of input.",
+    ))
 }
 
 fn malformed_range_literal(value: &str, detail: &str) -> ExecError {

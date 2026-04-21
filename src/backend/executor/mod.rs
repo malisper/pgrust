@@ -13,12 +13,13 @@ mod expr_format;
 pub(crate) mod expr_geometry;
 mod expr_json;
 mod expr_math;
-mod expr_multirange;
 mod expr_money;
+mod expr_multirange;
 mod expr_numeric;
 mod expr_ops;
 pub(crate) mod expr_range;
 mod expr_string;
+mod expr_xml;
 mod foreign_keys;
 pub(crate) mod hashjoin;
 pub(crate) mod jsonb;
@@ -66,17 +67,18 @@ pub(crate) use expr_geometry::geometry_input_error_message;
 pub(crate) use expr_geometry::render_geometry_text;
 pub use expr_money::money_format_text;
 pub(crate) use expr_money::money_parse_text;
+pub use expr_multirange::render_multirange_text;
 pub(crate) use expr_multirange::{
     compare_multirange_values, decode_multirange_bytes, encode_multirange_bytes,
     eval_multirange_function, multirange_intersection_agg_transition, parse_multirange_text,
     range_agg_transition,
 };
-pub use expr_multirange::render_multirange_text;
 pub use expr_range::render_range_text;
 pub(crate) use expr_range::{
     compare_range_values, decode_range_bytes, encode_range_bytes, eval_range_function,
     parse_range_text,
 };
+pub(crate) use expr_xml::validate_xml_input;
 pub use startup::executor_start;
 pub(crate) use tsearch::{
     compare_tsquery, compare_tsvector, concat_tsvector, decode_tsquery_bytes,
@@ -247,6 +249,13 @@ pub enum ExecError {
         details: String,
     },
     JsonInput {
+        raw_input: String,
+        message: String,
+        detail: Option<String>,
+        context: Option<String>,
+        sqlstate: &'static str,
+    },
+    XmlInput {
         raw_input: String,
         message: String,
         detail: Option<String>,

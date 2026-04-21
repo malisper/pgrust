@@ -145,8 +145,10 @@ mod tests {
 
     #[test]
     fn compressed_inline_datum_roundtrips() {
-        let datum =
-            encode_compressed_inline_datum(varatt_external_set_size_and_compression_method(13, 0), b"abc");
+        let datum = encode_compressed_inline_datum(
+            varatt_external_set_size_and_compression_method(13, 0),
+            b"abc",
+        );
         assert!(is_compressed_inline_datum(&datum));
         let (payload, rawsize, method) = decode_compressed_inline_datum(&datum).unwrap();
         assert_eq!(payload, b"abc");

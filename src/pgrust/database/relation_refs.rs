@@ -142,6 +142,11 @@ pub(super) fn collect_rels_from_expr(expr: &Expr, rels: &mut BTreeSet<RelFileLoc
                 }
             }
         }
+        Expr::Xml(xml) => {
+            for child in xml.child_exprs() {
+                collect_rels_from_expr(child, rels);
+            }
+        }
     }
 }
 
@@ -777,6 +782,11 @@ fn collect_direct_relation_oids_from_sql_expr(
                 if let Some(upper) = &subscript.upper {
                     collect_direct_relation_oids_from_sql_expr(upper, catalog, visible_ctes, rels);
                 }
+            }
+        }
+        SqlExpr::Xml(xml) => {
+            for child in xml.child_exprs() {
+                collect_direct_relation_oids_from_sql_expr(child, catalog, visible_ctes, rels);
             }
         }
         SqlExpr::GeometryUnaryOp { expr, .. } => {

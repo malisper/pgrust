@@ -1,11 +1,11 @@
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::{
-    BOOL_TYPE_OID, BOOTSTRAP_SUPERUSER_OID, DATEMULTIRANGE_TYPE_OID, DATE_TYPE_OID,
-    DATERANGE_TYPE_OID, INT4MULTIRANGE_TYPE_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID,
-    INT8MULTIRANGE_TYPE_OID, INT8_TYPE_OID, INT8RANGE_TYPE_OID, NUMERIC_TYPE_OID,
-    NUMMULTIRANGE_TYPE_OID, NUMRANGE_TYPE_OID, PG_CATALOG_NAMESPACE_OID,
-    PG_LANGUAGE_INTERNAL_OID, TEXT_TYPE_OID, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID,
-    TSMULTIRANGE_TYPE_OID, TSRANGE_TYPE_OID, TSTZMULTIRANGE_TYPE_OID, TSTZRANGE_TYPE_OID,
+    BOOL_TYPE_OID, BOOTSTRAP_SUPERUSER_OID, DATE_TYPE_OID, DATEMULTIRANGE_TYPE_OID,
+    DATERANGE_TYPE_OID, INT4_TYPE_OID, INT4MULTIRANGE_TYPE_OID, INT4RANGE_TYPE_OID, INT8_TYPE_OID,
+    INT8MULTIRANGE_TYPE_OID, INT8RANGE_TYPE_OID, NUMERIC_TYPE_OID, NUMMULTIRANGE_TYPE_OID,
+    NUMRANGE_TYPE_OID, PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_INTERNAL_OID, TEXT_TYPE_OID,
+    TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID, TSMULTIRANGE_TYPE_OID, TSRANGE_TYPE_OID,
+    TSTZMULTIRANGE_TYPE_OID, TSTZRANGE_TYPE_OID,
 };
 use crate::include::catalog::{PgProcRow, PgRangeRow, PgTypeRow};
 use crate::include::nodes::datum::{MultirangeTypeRef, RangeTypeRef};
@@ -224,7 +224,8 @@ pub fn builtin_range_name_for_sql_type(sql_type: SqlType) -> Option<&'static str
 
 pub fn builtin_multirange_name_for_sql_type(sql_type: SqlType) -> Option<&'static str> {
     multirange_type_ref_for_sql_type(sql_type).and_then(|multirange_type| {
-        builtin_range_spec_by_multirange_oid(multirange_type.type_oid()).map(|spec| spec.multirange_name)
+        builtin_range_spec_by_multirange_oid(multirange_type.type_oid())
+            .map(|spec| spec.multirange_name)
     })
 }
 
@@ -285,12 +286,12 @@ pub fn range_type_ref_for_multirange_sql_type(sql_type: SqlType) -> Option<Range
 pub fn multirange_type_ref_for_sql_type(sql_type: SqlType) -> Option<MultirangeTypeRef> {
     let sql_type = sql_type.element_type();
     let range_type = range_type_ref_for_multirange_sql_type(sql_type)?;
-    let multirange_sql_type = if let Some(spec) = builtin_range_spec_by_multirange_oid(sql_type.type_oid) {
-        SqlType::multirange(spec.multirange_oid, spec.oid)
-            .with_identity(spec.multirange_oid, 0)
-    } else {
-        sql_type
-    };
+    let multirange_sql_type =
+        if let Some(spec) = builtin_range_spec_by_multirange_oid(sql_type.type_oid) {
+            SqlType::multirange(spec.multirange_oid, spec.oid).with_identity(spec.multirange_oid, 0)
+        } else {
+            sql_type
+        };
     Some(MultirangeTypeRef {
         sql_type: multirange_sql_type,
         range_type,
@@ -816,7 +817,15 @@ fn range_set_returning_proc_row(
     arg_oids: &[u32],
     prosrc: &str,
 ) -> PgProcRow {
-    let mut row = range_proc_row(oid, proname, pronamespace, prorettype, arg_oids, prosrc, 'f');
+    let mut row = range_proc_row(
+        oid,
+        proname,
+        pronamespace,
+        prorettype,
+        arg_oids,
+        prosrc,
+        'f',
+    );
     row.proretset = true;
     row
 }

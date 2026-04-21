@@ -300,7 +300,8 @@ impl Catalog {
         let start = self
             .policies
             .partition_point(|row| row.polrelid < relation_oid);
-        let end = start + self.policies[start..].partition_point(|row| row.polrelid == relation_oid);
+        let end =
+            start + self.policies[start..].partition_point(|row| row.polrelid == relation_oid);
         &self.policies[start..end]
     }
 
@@ -2183,6 +2184,7 @@ fn format_sql_type_name(sql_type: SqlType) -> &'static str {
             SqlTypeKind::Json => "_json",
             SqlTypeKind::Jsonb => "_jsonb",
             SqlTypeKind::JsonPath => "_jsonpath",
+            SqlTypeKind::Xml => "_xml",
             SqlTypeKind::TsVector => "_tsvector",
             SqlTypeKind::TsQuery => "_tsquery",
             SqlTypeKind::RegConfig => "_regconfig",
@@ -2262,6 +2264,7 @@ fn format_sql_type_name(sql_type: SqlType) -> &'static str {
         SqlTypeKind::Json => "json",
         SqlTypeKind::Jsonb => "jsonb",
         SqlTypeKind::JsonPath => "jsonpath",
+        SqlTypeKind::Xml => "xml",
         SqlTypeKind::Point => "point",
         SqlTypeKind::Lseg => "lseg",
         SqlTypeKind::Path => "path",

@@ -410,6 +410,7 @@ fn render_key_value(value: &Value) -> String {
         Value::TextRef(_, _) | Value::Text(_) | Value::JsonPath(_) => {
             value.as_text().unwrap_or_default().to_string()
         }
+        Value::Xml(v) => v.to_string(),
         Value::Json(v) => v.to_string(),
         Value::Bytea(v) => format!("{v:?}"),
         Value::Date(v) => format!("{v:?}"),
