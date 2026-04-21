@@ -1,4 +1,5 @@
 pub mod common;
+pub mod gist;
 pub mod heap;
 pub mod index;
 pub mod nbtree;

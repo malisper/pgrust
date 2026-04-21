@@ -339,12 +339,15 @@ pub fn executor_start(plan: Plan) -> PlanState {
             relation_oid,
             toast,
             desc,
+            index_desc,
             index_meta,
             keys,
+            order_by_keys,
             direction,
         } => {
             let column_names: Vec<String> = desc.columns.iter().map(|c| c.name.clone()).collect();
             let desc = Rc::new(desc);
+            let index_desc = Rc::new(index_desc);
             let attr_descs: Rc<[_]> = desc.attribute_descs().into();
             let decoder = Rc::new(tuple_decoder::CompiledTupleDecoder::compile(
                 &desc,
@@ -360,9 +363,11 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 am_oid,
                 column_names,
                 desc,
+                index_desc,
                 attr_descs,
                 index_meta,
                 keys,
+                order_by_keys,
                 direction,
                 scan: None,
                 slot,

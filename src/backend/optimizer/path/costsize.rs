@@ -2,19 +2,25 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use crate::RelFileLocator;
-use crate::backend::executor::{Value, compare_order_values};
+use crate::backend::executor::{Value, cast_value, compare_order_values};
 use crate::backend::parser::{BoundIndexRelation, CatalogLookup, SqlType, SqlTypeKind};
 use crate::backend::storage::page::bufpage::{ITEM_ID_SIZE, MAXALIGN, SIZE_OF_PAGE_HEADER_DATA};
 use crate::backend::storage::smgr::BLCKSZ;
+use crate::backend::utils::cache::catcache::sql_type_oid;
 use crate::include::access::htup::SIZEOF_HEAP_TUPLE_HEADER;
-use crate::include::catalog::{BTREE_AM_OID, PgStatisticRow, relkind_has_storage};
+use crate::include::catalog::{
+    BTREE_AM_OID, GIST_AM_OID, PgStatisticRow, bootstrap_pg_operator_rows,
+    builtin_scalar_function_for_proc_oid, proc_oid_for_builtin_scalar_function,
+    relkind_has_storage,
+};
 use crate::include::nodes::datum::ArrayValue;
 use crate::include::nodes::pathnodes::{Path, PathKey, PlannerInfo, RestrictInfo};
 use crate::include::nodes::plannodes::PlanEstimate;
 use crate::include::nodes::primnodes::SetReturningCall;
 use crate::include::nodes::primnodes::{
-    BoolExprType, Expr, ExprArraySubscript, JoinType, OpExprKind, OrderByEntry, ProjectSetTarget,
-    QueryColumn, RelationDesc, TargetEntry, ToastRelationRef, attrno_index,
+    BoolExprType, BuiltinScalarFunction, Expr, ExprArraySubscript, JoinType, OpExprKind,
+    OrderByEntry, ProjectSetTarget, QueryColumn, RelationDesc, TargetEntry, ToastRelationRef,
+    attrno_index,
 };
 
 use super::super::pathnodes::{
@@ -26,6 +32,7 @@ use super::super::{
     IndexPathSpec, IndexableQual, RANDOM_PAGE_COST, RelationStats, SEQ_PAGE_COST,
     STATISTIC_KIND_HISTOGRAM, STATISTIC_KIND_MCV, expr_relids, path_relids, relids_subset,
 };
+use super::gistcost::estimate_gist_scan_cost;
 
 pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
     if plan.plan_info() != PlanEstimate::default() {
@@ -143,8 +150,10 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                 am_oid,
                 toast,
                 desc,
+                index_desc,
                 index_meta,
                 keys,
+                order_by_keys,
                 direction,
                 pathkeys,
                 ..
@@ -170,8 +179,10 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                     am_oid,
                     toast,
                     desc,
+                    index_desc,
                     index_meta,
                     keys,
+                    order_by_keys,
                     direction,
                     pathkeys,
                 }
@@ -714,7 +725,6 @@ fn try_optimize_access_subtree(plan: Path, catalog: &dyn CatalogLookup) -> Resul
         index.index_meta.indisvalid
             && index.index_meta.indisready
             && !index.index_meta.indkey.is_empty()
-            && index.index_meta.am_oid == BTREE_AM_OID
     }) {
         let Some(spec) = build_index_path_spec(filter.as_ref(), order_items.as_deref(), index)
         else {
@@ -903,10 +913,21 @@ pub(super) fn estimate_index_candidate(
         .product::<f64>()
         .clamp(0.0, 1.0);
     let index_rows = clamp_rows(stats.reltuples * used_sel);
-    let base_cost = RANDOM_PAGE_COST
-        + index_pages.min(index_rows.max(1.0)) * RANDOM_PAGE_COST
-        + index_rows * (CPU_INDEX_TUPLE_COST + CPU_TUPLE_COST);
-    let scan_info = PlanEstimate::new(CPU_OPERATOR_COST, base_cost, index_rows, stats.width);
+    let (startup_cost, base_cost) = if spec.index.index_meta.am_oid == GIST_AM_OID {
+        estimate_gist_scan_cost(
+            index_pages,
+            index_rows,
+            stats.reltuples,
+            spec.removes_order,
+            spec.order_by_keys.len(),
+        )
+    } else {
+        let total = RANDOM_PAGE_COST
+            + index_pages.min(index_rows.max(1.0)) * RANDOM_PAGE_COST
+            + index_rows * (CPU_INDEX_TUPLE_COST + CPU_TUPLE_COST);
+        (CPU_OPERATOR_COST, total)
+    };
+    let scan_info = PlanEstimate::new(startup_cost, base_cost, index_rows, stats.width);
     let mut total_cost = scan_info.total_cost.as_f64();
     let mut current_rows = scan_info.plan_rows.as_f64();
     let native_pathkeys = if spec.removes_order {
@@ -936,8 +957,10 @@ pub(super) fn estimate_index_candidate(
         am_oid: spec.index.index_meta.am_oid,
         toast,
         desc,
+        index_desc: spec.index.desc,
         index_meta: spec.index.index_meta,
         keys: spec.keys,
+        order_by_keys: spec.order_by_keys,
         direction: spec.direction,
         pathkeys: native_pathkeys,
     };
@@ -2440,60 +2463,33 @@ pub(super) fn build_index_path_spec(
         .iter()
         .filter_map(indexable_qual)
         .collect::<Vec<_>>();
-    let mut used = vec![false; parsed_quals.len()];
-    let mut keys = Vec::new();
-    let mut used_quals = Vec::new();
-    let mut equality_prefix = 0usize;
-
-    for attnum in &index.index_meta.indkey {
-        let column = attnum.saturating_sub(1) as usize;
-        if let Some((qual_idx, qual)) = parsed_quals
-            .iter()
-            .enumerate()
-            .find(|(idx, qual)| !used[*idx] && qual.column == column && qual.strategy == 3)
-        {
-            used[qual_idx] = true;
-            used_quals.push(qual.expr.clone());
-            equality_prefix += 1;
-            keys.push(crate::include::access::scankey::ScanKeyData {
-                attribute_number: equality_prefix as i16,
-                strategy: qual.strategy,
-                argument: qual.argument.clone(),
-            });
-            continue;
+    let (keys, used_indexes, equality_prefix) = match index.index_meta.am_oid {
+        BTREE_AM_OID => build_btree_index_keys(index, &parsed_quals),
+        GIST_AM_OID => {
+            let (keys, used_indexes) = build_gist_index_keys(index, &parsed_quals);
+            (keys, used_indexes, 0)
         }
-        if let Some((qual_idx, qual)) = parsed_quals
-            .iter()
-            .enumerate()
-            .find(|(idx, qual)| !used[*idx] && qual.column == column)
-        {
-            used[qual_idx] = true;
-            used_quals.push(qual.expr.clone());
-            keys.push(crate::include::access::scankey::ScanKeyData {
-                attribute_number: (equality_prefix + 1) as i16,
-                strategy: qual.strategy,
-                argument: qual.argument.clone(),
-            });
-        }
-        break;
-    }
-
-    let order_match =
-        order_items.and_then(|items| index_order_match(items, index, equality_prefix));
+        _ => return None,
+    };
+    let used_quals = used_indexes
+        .into_iter()
+        .filter_map(|idx| parsed_quals.get(idx).map(|qual| qual.expr.clone()))
+        .collect::<Vec<_>>();
+    let (order_by_keys, order_match) = if index.index_meta.am_oid == BTREE_AM_OID {
+        (
+            Vec::new(),
+            order_items.and_then(|items| index_order_match(items, index, equality_prefix)),
+        )
+    } else if index.index_meta.am_oid == GIST_AM_OID {
+        gist_order_match(order_items.unwrap_or(&[]), index)
+    } else {
+        (Vec::new(), None)
+    };
     if keys.is_empty() && order_match.is_none() {
         return None;
     }
 
-    let used_exprs = parsed_quals
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, qual)| {
-            used.get(idx)
-                .copied()
-                .unwrap_or(false)
-                .then_some(&qual.expr)
-        })
-        .collect::<Vec<_>>();
+    let used_exprs = used_quals.iter().collect::<Vec<_>>();
     let residual = and_exprs(
         conjuncts
             .iter()
@@ -2505,6 +2501,7 @@ pub(super) fn build_index_path_spec(
     Some(IndexPathSpec {
         index: index.clone(),
         keys,
+        order_by_keys,
         residual,
         used_quals,
         direction: order_match
@@ -2567,9 +2564,40 @@ fn clause_selectivity(expr: &Expr, stats: Option<&RelationStats>, reltuples: f64
             )
             .max(eq_selectivity(&op.args[0], &op.args[1], stats, reltuples))
         }
+        Expr::Func(func) => builtin_index_qual_selectivity(func.funcid).unwrap_or(DEFAULT_BOOL_SEL),
         _ => DEFAULT_BOOL_SEL,
     }
     .clamp(0.0, 1.0)
+}
+
+fn builtin_index_qual_selectivity(funcid: u32) -> Option<f64> {
+    let builtin = builtin_scalar_function_for_proc_oid(funcid)?;
+    // :HACK: PostgreSQL uses operator-specific selectivity estimators for these
+    // GiST-searchable predicates. Until pgrust grows that estimator plumbing,
+    // use a small fallback so the planner can meaningfully rank GiST paths.
+    Some(match builtin {
+        BuiltinScalarFunction::GeoOverlap
+        | BuiltinScalarFunction::GeoContains
+        | BuiltinScalarFunction::GeoContainedBy
+        | BuiltinScalarFunction::GeoLeft
+        | BuiltinScalarFunction::GeoRight
+        | BuiltinScalarFunction::GeoOverLeft
+        | BuiltinScalarFunction::GeoOverRight
+        | BuiltinScalarFunction::GeoSame
+        | BuiltinScalarFunction::GeoOverBelow
+        | BuiltinScalarFunction::GeoBelow
+        | BuiltinScalarFunction::GeoAbove
+        | BuiltinScalarFunction::GeoOverAbove
+        | BuiltinScalarFunction::RangeOverlap
+        | BuiltinScalarFunction::RangeAdjacent
+        | BuiltinScalarFunction::RangeContains
+        | BuiltinScalarFunction::RangeContainedBy
+        | BuiltinScalarFunction::RangeStrictLeft
+        | BuiltinScalarFunction::RangeStrictRight
+        | BuiltinScalarFunction::RangeOverLeft
+        | BuiltinScalarFunction::RangeOverRight => DEFAULT_EQ_SEL,
+        _ => return None,
+    })
 }
 
 fn eq_selectivity(left: &Expr, right: &Expr, stats: Option<&RelationStats>, reltuples: f64) -> f64 {
@@ -2848,51 +2876,339 @@ pub(super) fn flatten_and_conjuncts(expr: &Expr) -> Vec<Expr> {
     }
 }
 
+fn strip_casts(expr: &Expr) -> &Expr {
+    match expr {
+        Expr::Cast(inner, _) => strip_casts(inner),
+        other => other,
+    }
+}
+
+fn const_argument(expr: &Expr) -> Option<Value> {
+    match expr {
+        Expr::Const(value) => Some(value.clone()),
+        Expr::Cast(inner, ty) => {
+            const_argument(inner).and_then(|value| cast_value(value, *ty).ok())
+        }
+        _ => None,
+    }
+}
+
+fn simple_index_column(index: &BoundIndexRelation, index_pos: usize) -> Option<usize> {
+    // :HACK: Costing still assumes index keys map directly to heap columns.
+    // Expression GiST indexes can be built and maintained, but until planner
+    // matching learns indexprs, they remain invisible to this path logic too.
+    let attnum = *index.index_meta.indkey.get(index_pos)?;
+    (attnum > 0).then_some((attnum - 1) as usize)
+}
+
+fn operator_commutator_oid(operator_oid: u32) -> Option<u32> {
+    bootstrap_pg_operator_rows()
+        .into_iter()
+        .find(|row| row.oid == operator_oid)
+        .and_then(|row| (row.oprcom != 0).then_some(row.oprcom))
+}
+
+fn commuted_builtin_function(func: BuiltinScalarFunction) -> Option<BuiltinScalarFunction> {
+    Some(match func {
+        BuiltinScalarFunction::GeoDistance => BuiltinScalarFunction::GeoDistance,
+        BuiltinScalarFunction::GeoLeft => BuiltinScalarFunction::GeoRight,
+        BuiltinScalarFunction::GeoRight => BuiltinScalarFunction::GeoLeft,
+        BuiltinScalarFunction::GeoOverLeft => BuiltinScalarFunction::GeoOverRight,
+        BuiltinScalarFunction::GeoOverRight => BuiltinScalarFunction::GeoOverLeft,
+        BuiltinScalarFunction::GeoOverlap => BuiltinScalarFunction::GeoOverlap,
+        BuiltinScalarFunction::GeoSame => BuiltinScalarFunction::GeoSame,
+        BuiltinScalarFunction::GeoContains => BuiltinScalarFunction::GeoContainedBy,
+        BuiltinScalarFunction::GeoContainedBy => BuiltinScalarFunction::GeoContains,
+        BuiltinScalarFunction::GeoOverBelow => BuiltinScalarFunction::GeoOverAbove,
+        BuiltinScalarFunction::GeoOverAbove => BuiltinScalarFunction::GeoOverBelow,
+        BuiltinScalarFunction::GeoBelow => BuiltinScalarFunction::GeoAbove,
+        BuiltinScalarFunction::GeoAbove => BuiltinScalarFunction::GeoBelow,
+        BuiltinScalarFunction::RangeStrictLeft => BuiltinScalarFunction::RangeStrictRight,
+        BuiltinScalarFunction::RangeStrictRight => BuiltinScalarFunction::RangeStrictLeft,
+        BuiltinScalarFunction::RangeOverLeft => BuiltinScalarFunction::RangeOverRight,
+        BuiltinScalarFunction::RangeOverRight => BuiltinScalarFunction::RangeOverLeft,
+        BuiltinScalarFunction::RangeOverlap => BuiltinScalarFunction::RangeOverlap,
+        BuiltinScalarFunction::RangeAdjacent => BuiltinScalarFunction::RangeAdjacent,
+        BuiltinScalarFunction::RangeContains => BuiltinScalarFunction::RangeContainedBy,
+        BuiltinScalarFunction::RangeContainedBy => BuiltinScalarFunction::RangeContains,
+        _ => return None,
+    })
+}
+
+fn commuted_op_expr_kind(kind: OpExprKind) -> Option<OpExprKind> {
+    Some(match kind {
+        OpExprKind::Eq => OpExprKind::Eq,
+        OpExprKind::Lt => OpExprKind::Gt,
+        OpExprKind::LtEq => OpExprKind::GtEq,
+        OpExprKind::Gt => OpExprKind::Lt,
+        OpExprKind::GtEq => OpExprKind::LtEq,
+        _ => return None,
+    })
+}
+
+fn btree_builtin_strategy(kind: OpExprKind) -> Option<u16> {
+    Some(match kind {
+        OpExprKind::Lt => 1,
+        OpExprKind::LtEq => 2,
+        OpExprKind::Eq => 3,
+        OpExprKind::GtEq => 4,
+        OpExprKind::Gt => 5,
+        _ => return None,
+    })
+}
+
+fn commuted_function_proc_oid(funcid: u32) -> Option<u32> {
+    let builtin = builtin_scalar_function_for_proc_oid(funcid)?;
+    let commuted = commuted_builtin_function(builtin)?;
+    proc_oid_for_builtin_scalar_function(commuted)
+}
+
+fn value_type_oid(value: &Value) -> Option<u32> {
+    value.sql_type_hint().map(sql_type_oid)
+}
+
+fn gist_ordering_operator_oid(
+    operator_proc_oid: u32,
+    left_type_oid: u32,
+    right_type_oid: u32,
+) -> Option<u32> {
+    let operator_name = match builtin_scalar_function_for_proc_oid(operator_proc_oid)? {
+        BuiltinScalarFunction::GeoDistance => "<->",
+        _ => return None,
+    };
+    bootstrap_pg_operator_rows()
+        .into_iter()
+        .find(|row| {
+            row.oprname == operator_name
+                && row.oprleft == left_type_oid
+                && row.oprright == right_type_oid
+        })
+        .map(|row| row.oid)
+}
+
+fn gist_builtin_strategy(proc_oid: u32, argument: &Value) -> Option<u16> {
+    let builtin = builtin_scalar_function_for_proc_oid(proc_oid)?;
+    Some(match builtin {
+        BuiltinScalarFunction::GeoLeft => 1,
+        BuiltinScalarFunction::GeoOverLeft => 2,
+        BuiltinScalarFunction::GeoOverlap => 3,
+        BuiltinScalarFunction::GeoOverRight => 4,
+        BuiltinScalarFunction::GeoRight => 5,
+        BuiltinScalarFunction::GeoSame => 6,
+        BuiltinScalarFunction::GeoContains => 7,
+        BuiltinScalarFunction::GeoContainedBy => 8,
+        BuiltinScalarFunction::GeoOverBelow => 9,
+        BuiltinScalarFunction::GeoBelow => 10,
+        BuiltinScalarFunction::GeoAbove => 11,
+        BuiltinScalarFunction::GeoOverAbove => 12,
+        BuiltinScalarFunction::RangeStrictLeft => 1,
+        BuiltinScalarFunction::RangeOverLeft => 2,
+        BuiltinScalarFunction::RangeOverlap => 3,
+        BuiltinScalarFunction::RangeOverRight => 4,
+        BuiltinScalarFunction::RangeStrictRight => 5,
+        BuiltinScalarFunction::RangeAdjacent => 6,
+        BuiltinScalarFunction::RangeContains => {
+            if matches!(argument, Value::Range(_)) {
+                7
+            } else {
+                16
+            }
+        }
+        BuiltinScalarFunction::RangeContainedBy => 8,
+        _ => return None,
+    })
+}
+
+fn qual_strategy(
+    index: &BoundIndexRelation,
+    index_pos: usize,
+    qual: &IndexableQual,
+) -> Option<u16> {
+    match qual.lookup {
+        super::super::IndexStrategyLookup::Operator { oid, kind } => index
+            .index_meta
+            .amop_strategy_for_operator(&index.desc, index_pos, oid, value_type_oid(&qual.argument))
+            .or_else(|| {
+                (index.index_meta.am_oid == BTREE_AM_OID)
+                    .then(|| btree_builtin_strategy(kind))
+                    .flatten()
+            }),
+        super::super::IndexStrategyLookup::Proc(proc_oid) => index
+            .index_meta
+            .amop_strategy_for_proc(
+                &index.desc,
+                index_pos,
+                proc_oid,
+                value_type_oid(&qual.argument),
+            )
+            .or_else(|| {
+                (index.index_meta.am_oid == GIST_AM_OID)
+                    .then(|| gist_builtin_strategy(proc_oid, &qual.argument))
+                    .flatten()
+            }),
+    }
+}
+
+fn build_btree_index_keys(
+    index: &BoundIndexRelation,
+    parsed_quals: &[IndexableQual],
+) -> (
+    Vec<crate::include::access::scankey::ScanKeyData>,
+    Vec<usize>,
+    usize,
+) {
+    let mut used = vec![false; parsed_quals.len()];
+    let mut used_qual_indexes = Vec::new();
+    let mut keys = Vec::new();
+    let mut equality_prefix = 0usize;
+
+    for index_pos in 0..index.index_meta.indkey.len() {
+        let Some(column) = simple_index_column(index, index_pos) else {
+            break;
+        };
+        if let Some((qual_idx, strategy, argument)) =
+            parsed_quals.iter().enumerate().find_map(|(idx, qual)| {
+                if used[idx] || qual.column != column {
+                    return None;
+                }
+                let strategy = qual_strategy(index, index_pos, qual)?;
+                (strategy == 3).then_some((idx, strategy, qual.argument.clone()))
+            })
+        {
+            used[qual_idx] = true;
+            used_qual_indexes.push(qual_idx);
+            equality_prefix += 1;
+            keys.push(crate::include::access::scankey::ScanKeyData {
+                attribute_number: (index_pos + 1) as i16,
+                strategy,
+                argument,
+            });
+            continue;
+        }
+        if let Some((qual_idx, strategy, argument)) =
+            parsed_quals.iter().enumerate().find_map(|(idx, qual)| {
+                if used[idx] || qual.column != column {
+                    return None;
+                }
+                let strategy = qual_strategy(index, index_pos, qual)?;
+                Some((idx, strategy, qual.argument.clone()))
+            })
+        {
+            used[qual_idx] = true;
+            used_qual_indexes.push(qual_idx);
+            keys.push(crate::include::access::scankey::ScanKeyData {
+                attribute_number: (index_pos + 1) as i16,
+                strategy,
+                argument,
+            });
+        }
+        break;
+    }
+
+    (keys, used_qual_indexes, equality_prefix)
+}
+
+fn build_gist_index_keys(
+    index: &BoundIndexRelation,
+    parsed_quals: &[IndexableQual],
+) -> (
+    Vec<crate::include::access::scankey::ScanKeyData>,
+    Vec<usize>,
+) {
+    let mut used_qual_indexes = Vec::new();
+    let keys = parsed_quals
+        .iter()
+        .enumerate()
+        .filter_map(|(qual_idx, qual)| {
+            let (index_pos, strategy) =
+                (0..index.index_meta.indkey.len()).find_map(|index_pos| {
+                    (simple_index_column(index, index_pos) == Some(qual.column))
+                        .then(|| qual_strategy(index, index_pos, qual))
+                        .flatten()
+                        .map(|strategy| (index_pos, strategy))
+                })?;
+            used_qual_indexes.push(qual_idx);
+            Some(crate::include::access::scankey::ScanKeyData {
+                attribute_number: (index_pos + 1) as i16,
+                strategy,
+                argument: qual.argument.clone(),
+            })
+        })
+        .collect();
+    (keys, used_qual_indexes)
+}
+
 fn indexable_qual(expr: &Expr) -> Option<IndexableQual> {
-    fn mk(column: usize, strategy: u16, argument: &Value, expr: &Expr) -> Option<IndexableQual> {
+    fn mk(
+        column: usize,
+        lookup: super::super::IndexStrategyLookup,
+        argument: Value,
+        expr: &Expr,
+    ) -> Option<IndexableQual> {
         Some(IndexableQual {
             column,
-            strategy,
-            argument: argument.clone(),
+            lookup,
+            argument,
             expr: expr.clone(),
         })
     }
 
-    match expr {
-        Expr::Op(op) if op.args.len() == 2 && matches!(op.op, OpExprKind::Eq) => {
-            match (&op.args[0], &op.args[1]) {
-                (arg, Expr::Const(value)) => mk(expr_column_index(arg)?, 3, value, expr),
-                (Expr::Const(value), arg) => mk(expr_column_index(arg)?, 3, value, expr),
-                _ => None,
+    match strip_casts(expr) {
+        Expr::Op(op) if op.args.len() == 2 => {
+            let left = strip_casts(&op.args[0]);
+            let right = &op.args[1];
+            if let (Some(column), Some(value)) = (expr_column_index(left), const_argument(right)) {
+                return mk(
+                    column,
+                    super::super::IndexStrategyLookup::Operator {
+                        oid: op.opno,
+                        kind: op.op,
+                    },
+                    value,
+                    expr,
+                );
             }
+            if let (Some(value), Some(column)) = (
+                const_argument(&op.args[0]),
+                expr_column_index(strip_casts(&op.args[1])),
+            ) {
+                return mk(
+                    column,
+                    super::super::IndexStrategyLookup::Operator {
+                        oid: operator_commutator_oid(op.opno).unwrap_or(0),
+                        kind: commuted_op_expr_kind(op.op)?,
+                    },
+                    value,
+                    expr,
+                );
+            }
+            None
         }
-        Expr::Op(op) if op.args.len() == 2 && matches!(op.op, OpExprKind::Lt) => {
-            match (&op.args[0], &op.args[1]) {
-                (arg, Expr::Const(value)) => mk(expr_column_index(arg)?, 1, value, expr),
-                (Expr::Const(value), arg) => mk(expr_column_index(arg)?, 5, value, expr),
-                _ => None,
+        Expr::Func(func) if func.args.len() == 2 => {
+            let left = strip_casts(&func.args[0]);
+            let right = &func.args[1];
+            if let (Some(column), Some(value)) = (expr_column_index(left), const_argument(right)) {
+                return mk(
+                    column,
+                    super::super::IndexStrategyLookup::Proc(func.funcid),
+                    value,
+                    expr,
+                );
             }
-        }
-        Expr::Op(op) if op.args.len() == 2 && matches!(op.op, OpExprKind::LtEq) => {
-            match (&op.args[0], &op.args[1]) {
-                (arg, Expr::Const(value)) => mk(expr_column_index(arg)?, 2, value, expr),
-                (Expr::Const(value), arg) => mk(expr_column_index(arg)?, 4, value, expr),
-                _ => None,
+            if let (Some(value), Some(column)) = (
+                const_argument(&func.args[0]),
+                expr_column_index(strip_casts(&func.args[1])),
+            ) {
+                return mk(
+                    column,
+                    super::super::IndexStrategyLookup::Proc(commuted_function_proc_oid(
+                        func.funcid,
+                    )?),
+                    value,
+                    expr,
+                );
             }
-        }
-        Expr::Op(op) if op.args.len() == 2 && matches!(op.op, OpExprKind::Gt) => {
-            match (&op.args[0], &op.args[1]) {
-                (arg, Expr::Const(value)) => mk(expr_column_index(arg)?, 5, value, expr),
-                (Expr::Const(value), arg) => mk(expr_column_index(arg)?, 1, value, expr),
-                _ => None,
-            }
-        }
-        Expr::Op(op) if op.args.len() == 2 && matches!(op.op, OpExprKind::GtEq) => {
-            match (&op.args[0], &op.args[1]) {
-                (arg, Expr::Const(value)) => mk(expr_column_index(arg)?, 4, value, expr),
-                (Expr::Const(value), arg) => mk(expr_column_index(arg)?, 2, value, expr),
-                _ => None,
-            }
+            None
         }
         _ => None,
     }
@@ -2911,7 +3227,7 @@ fn index_order_match(
     index: &BoundIndexRelation,
     equality_prefix: usize,
 ) -> Option<(usize, crate::include::access::relscan::ScanDirection)> {
-    if items.is_empty() {
+    if index.index_meta.am_oid != BTREE_AM_OID || items.is_empty() {
         return None;
     }
     let mut direction = None;
@@ -2920,10 +3236,10 @@ fn index_order_match(
         let Some(column) = expr_column_index(&item.expr) else {
             break;
         };
-        let Some(attnum) = index.index_meta.indkey.get(equality_prefix + idx) else {
+        let Some(index_column) = simple_index_column(index, equality_prefix + idx) else {
             break;
         };
-        if *attnum as usize != column + 1 {
+        if index_column != column {
             break;
         }
         let item_direction = if item.descending {
@@ -2946,8 +3262,106 @@ fn index_order_match(
     ))
 }
 
+fn gist_order_match(
+    items: &[OrderByEntry],
+    index: &BoundIndexRelation,
+) -> (
+    Vec<crate::include::access::scankey::ScanKeyData>,
+    Option<(usize, crate::include::access::relscan::ScanDirection)>,
+) {
+    if items.is_empty() || index.index_meta.am_oid != GIST_AM_OID {
+        return (Vec::new(), None);
+    }
+    let mut keys = Vec::with_capacity(items.len());
+    for item in items {
+        if item.descending {
+            return (Vec::new(), None);
+        }
+        let Some((column, proc_oid, argument)) = gist_order_item(item) else {
+            return (Vec::new(), None);
+        };
+        let Some((index_pos, strategy)) =
+            (0..index.index_meta.indkey.len()).find_map(|index_pos| {
+                if simple_index_column(index, index_pos) != Some(column) {
+                    return None;
+                }
+                let right_type_oid = value_type_oid(&argument);
+                let left_type_oid = index
+                    .index_meta
+                    .opckeytype_oids
+                    .get(index_pos)
+                    .copied()
+                    .filter(|oid| *oid != 0)
+                    .or_else(|| {
+                        index
+                            .desc
+                            .columns
+                            .get(index_pos)
+                            .map(|column| sql_type_oid(column.sql_type))
+                    });
+                let strategy = left_type_oid
+                    .zip(right_type_oid)
+                    .and_then(|(left_type_oid, right_type_oid)| {
+                        gist_ordering_operator_oid(proc_oid, left_type_oid, right_type_oid)
+                            .and_then(|operator_oid| {
+                                index.index_meta.amop_ordering_strategy_for_operator(
+                                    &index.desc,
+                                    index_pos,
+                                    operator_oid,
+                                    Some(right_type_oid),
+                                )
+                            })
+                    })
+                    .or_else(|| {
+                        index.index_meta.amop_ordering_strategy_for_proc(
+                            &index.desc,
+                            index_pos,
+                            proc_oid,
+                            right_type_oid,
+                        )
+                    })?;
+                Some((index_pos, strategy))
+            })
+        else {
+            return (Vec::new(), None);
+        };
+        keys.push(crate::include::access::scankey::ScanKeyData {
+            attribute_number: (index_pos + 1) as i16,
+            strategy,
+            argument,
+        });
+    }
+    (
+        keys,
+        Some((
+            items.len(),
+            crate::include::access::relscan::ScanDirection::Forward,
+        )),
+    )
+}
+
+fn gist_order_item(item: &OrderByEntry) -> Option<(usize, u32, Value)> {
+    match strip_casts(&item.expr) {
+        Expr::Func(func) if func.args.len() == 2 => {
+            let left = strip_casts(&func.args[0]);
+            let right = &func.args[1];
+            if let (Some(column), Some(value)) = (expr_column_index(left), const_argument(right)) {
+                return Some((column, func.funcid, value));
+            }
+            if let (Some(value), Some(column)) = (
+                const_argument(&func.args[0]),
+                expr_column_index(strip_casts(&func.args[1])),
+            ) {
+                return Some((column, commuted_function_proc_oid(func.funcid)?, value));
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
 fn expr_column_index(expr: &Expr) -> Option<usize> {
-    match expr {
+    match strip_casts(expr) {
         Expr::Var(var) if var.varlevelsup == 0 => attrno_index(var.varattno),
         _ => None,
     }

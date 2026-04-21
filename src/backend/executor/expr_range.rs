@@ -646,7 +646,7 @@ pub(crate) fn range_merge(left: &RangeValue, right: &RangeValue) -> RangeValue {
     }
 }
 
-fn range_union(left: &RangeValue, right: &RangeValue) -> Result<RangeValue, ExecError> {
+pub(crate) fn range_union(left: &RangeValue, right: &RangeValue) -> Result<RangeValue, ExecError> {
     if !range_overlap(left, right) && !range_adjacent(left, right) {
         return Err(ExecError::DetailedError {
             message: "result of range union would not be contiguous".into(),
@@ -751,7 +751,10 @@ fn max_upper_bound(left: Option<&RangeBound>, right: Option<&RangeBound>) -> Opt
     }
 }
 
-fn compare_lower_bounds(left: Option<&RangeBound>, right: Option<&RangeBound>) -> Ordering {
+pub(crate) fn compare_lower_bounds(
+    left: Option<&RangeBound>,
+    right: Option<&RangeBound>,
+) -> Ordering {
     match (left, right) {
         (None, None) => Ordering::Equal,
         (None, Some(_)) => Ordering::Less,
@@ -769,7 +772,10 @@ fn compare_lower_bounds(left: Option<&RangeBound>, right: Option<&RangeBound>) -
     }
 }
 
-fn compare_upper_bounds(left: Option<&RangeBound>, right: Option<&RangeBound>) -> Ordering {
+pub(crate) fn compare_upper_bounds(
+    left: Option<&RangeBound>,
+    right: Option<&RangeBound>,
+) -> Ordering {
     match (left, right) {
         (None, None) => Ordering::Equal,
         (None, Some(_)) => Ordering::Greater,
@@ -818,7 +824,7 @@ fn bounds_adjacent(upper: Option<&RangeBound>, lower: Option<&RangeBound>) -> bo
     }
 }
 
-fn compare_scalar_values(left: &Value, right: &Value) -> Ordering {
+pub(crate) fn compare_scalar_values(left: &Value, right: &Value) -> Ordering {
     compare_order_values(left, right, Some(false), false)
 }
 

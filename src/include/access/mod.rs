@@ -1,6 +1,7 @@
 pub mod amapi;
 pub mod detoast;
 pub mod genam;
+pub mod gist;
 pub mod heaptoast;
 pub mod htup;
 pub mod itemptr;

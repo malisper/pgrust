@@ -924,13 +924,14 @@ impl Database {
                     .cloned()
                     .map(crate::backend::parser::IndexColumnDef::from)
                     .collect::<Vec<_>>();
-                let build_options = self.resolve_simple_btree_build_options(
+                let build_options = self.resolve_simple_index_build_options(
                     client_id,
                     Some((xid, index_cid)),
+                    "btree",
                     &relation,
                     &index_columns,
                 )?;
-                let index_entry = self.build_simple_btree_index_in_transaction(
+                let index_entry = self.build_simple_index_in_transaction(
                     client_id,
                     &relation,
                     &index_name,
