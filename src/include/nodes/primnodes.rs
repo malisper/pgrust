@@ -392,6 +392,7 @@ pub enum BuiltinScalarFunction {
     SetBit,
     GetByte,
     SetByte,
+    RegRoleToText,
     BitCount,
     Encode,
     Decode,
@@ -1003,6 +1004,9 @@ pub enum Expr {
     SessionUser,
     CurrentRole,
     CurrentDate,
+    CurrentUser,
+    SessionUser,
+    CurrentRole,
     CurrentTime {
         precision: Option<i32>,
     },
@@ -1332,6 +1336,9 @@ pub fn expr_sql_type_hint(expr: &Expr) -> Option<SqlType> {
         | Expr::ArraySubscript { .. }
         | Expr::Random
         | Expr::CurrentDate
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
         | Expr::LocalTime { .. }
