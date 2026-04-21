@@ -108,6 +108,7 @@ impl IndexBuildKeyProjector {
                 cte_producers: std::collections::HashMap::new(),
                 recursive_worktables: std::collections::HashMap::new(),
                 deferred_foreign_keys: None,
+                default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
             }),
         })
     }

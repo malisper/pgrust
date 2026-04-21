@@ -26,7 +26,7 @@ use crate::backend::utils::time::datetime::DateTimeParseError;
 use crate::backend::utils::time::timestamp::{parse_timestamp_text, parse_timestamptz_text};
 use crate::include::catalog::{
     INT2_TYPE_OID, TEXT_TYPE_OID, bootstrap_pg_cast_rows, builtin_type_rows,
-    range_type_ref_for_sql_type,
+    multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
 };
 use crate::pgrust::compact_string::CompactString;
 use num_integer::Integer;

@@ -26,6 +26,7 @@ pub(crate) fn encode_key_payload(
                 {
                     TupleValue::Null => Vec::new(),
                     TupleValue::Bytes(bytes) => bytes,
+                    TupleValue::EncodedVarlena(bytes) => bytes,
                 };
                 payload.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
                 payload.extend_from_slice(&bytes);

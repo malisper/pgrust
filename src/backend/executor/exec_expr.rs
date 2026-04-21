@@ -88,7 +88,7 @@ use crate::backend::parser::{
 };
 use crate::backend::utils::misc::checkpoint::checkpoint_stats_value;
 use crate::include::catalog::{
-    CURRENT_DATABASE_OID, PG_CATALOG_NAMESPACE_OID, PG_TOAST_NAMESPACE_OID,
+    CURRENT_DATABASE_OID, FLOAT8_TYPE_OID, PG_CATALOG_NAMESPACE_OID, PG_TOAST_NAMESPACE_OID,
     builtin_scalar_function_for_proc_oid,
 };
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue, NumericValue};
@@ -317,11 +317,6 @@ fn eval_regprocedure_to_text(value: &Value, ctx: &ExecutorContext) -> Result<Val
     ))
 }
 
-fn eval_pg_get_userbyid(value: &Value, ctx: &ExecutorContext) -> Result<Value, ExecError> {
-    let oid = oid_arg_to_u32(value, "pg_get_userbyid")?;
-    auth_role_name(ctx, oid)
-}
-
 fn eval_pg_rust_internal_binary_coercible(values: &[Value]) -> Result<Value, ExecError> {
     match values {
         [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
@@ -391,6 +386,89 @@ fn builtin_function_for_expr(funcid: u32) -> Result<BuiltinScalarFunction, ExecE
         hint: None,
         sqlstate: "XX000",
     })
+}
+
+fn role_catalog(
+    ctx: &ExecutorContext,
+) -> Result<&crate::backend::utils::cache::visible_catalog::VisibleCatalog, ExecError> {
+    ctx.catalog
+        .as_ref()
+        .ok_or_else(|| ExecError::DetailedError {
+            message: "role lookup requires a visible catalog".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        })
+}
+
+fn auth_role_name(ctx: &ExecutorContext, role_oid: u32) -> Result<Value, ExecError> {
+    let catalog = role_catalog(ctx)?;
+    let role = catalog
+        .authid_rows()
+        .into_iter()
+        .find(|row| row.oid == role_oid)
+        .ok_or_else(|| ExecError::DetailedError {
+        message: format!("role with OID {role_oid} does not exist"),
+        detail: None,
+        hint: None,
+        sqlstate: "XX000",
+    })?;
+    Ok(Value::Text(role.rolname.into()))
+}
+
+fn quote_identifier_if_needed(identifier: &str) -> String {
+    if !identifier.is_empty()
+        && identifier.chars().enumerate().all(|(idx, ch)| {
+            if idx == 0 {
+                ch == '_' || ch.is_ascii_lowercase()
+            } else {
+                ch == '_' || ch.is_ascii_lowercase() || ch.is_ascii_digit()
+            }
+        })
+    {
+        return identifier.into();
+    }
+    let escaped = identifier.replace('"', "\"\"");
+    format!("\"{escaped}\"")
+}
+
+fn eval_regrole_to_text_function(
+    values: &[Value],
+    ctx: Option<&ExecutorContext>,
+) -> Result<Value, ExecError> {
+    let Some(value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    if matches!(value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let oid = match value {
+        Value::Int32(oid) if *oid >= 0 => *oid as u32,
+        Value::Int64(oid) if *oid >= 0 && *oid <= i64::from(u32::MAX) => *oid as u32,
+        _ => {
+            return Err(ExecError::TypeMismatch {
+                op: "::text",
+                left: value.clone(),
+                right: Value::Text("".into()),
+            });
+        }
+    };
+    if oid == 0 {
+        return Ok(Value::Text("-".into()));
+    }
+    if let Some(role_name) = ctx
+        .and_then(|ctx| ctx.catalog.as_ref())
+        .and_then(|catalog| {
+            catalog
+                .authid_rows()
+                .into_iter()
+                .find(|row| row.oid == oid)
+                .map(|row| row.rolname)
+        })
+    {
+        return Ok(Value::Text(quote_identifier_if_needed(&role_name).into()));
+    }
+    Ok(Value::Text(oid.to_string().into()))
 }
 
 fn ensure_builtin_side_effects_allowed(
@@ -2526,7 +2604,7 @@ fn eval_builtin_function(
             _ => Err(malformed_expr_error("regprocedure_to_text")),
         },
         BuiltinScalarFunction::PgGetUserById => match values.as_slice() {
-            [value] => eval_pg_get_userbyid(value, ctx),
+            [..] => eval_pg_get_userbyid(&values, ctx),
             _ => Err(malformed_expr_error("pg_get_userbyid")),
         },
         BuiltinScalarFunction::Now
