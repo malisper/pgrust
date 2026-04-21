@@ -407,6 +407,7 @@ impl Database {
             session_user_oid: self.auth_state(client_id).session_user_oid(),
             current_user_oid: self.auth_state(client_id).current_user_oid(),
             next_command_id: cid,
+            default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
             timed: false,
             allow_side_effects: false,
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
@@ -598,6 +599,8 @@ impl Database {
                 session_user_oid: self.auth_state(client_id).session_user_oid(),
                 current_user_oid: self.auth_state(client_id).current_user_oid(),
                 next_command_id: cid,
+                default_toast_compression:
+                    crate::include::access::htup::AttributeCompression::Pglz,
                 timed: false,
                 allow_side_effects: false,
                 expr_bindings: crate::backend::executor::ExprEvalBindings::default(),

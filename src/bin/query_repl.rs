@@ -475,17 +475,14 @@ fn run_statement(
         | Statement::Checkpoint(_)
         | Statement::CopyFrom(_)
         | Statement::CreateTrigger(_)
-        | Statement::CreatePolicy(_)
         | Statement::DropTrigger(_)
-        | Statement::DropPolicy(_)
         | Statement::AlterTableSet(_)
-        | Statement::AlterTableSetRowSecurity(_)
-        | Statement::AlterPolicy(_)
         | Statement::AlterTableAddColumn(_)
         | Statement::AlterTableAddConstraint(_)
         | Statement::AlterTableDropConstraint(_)
         | Statement::AlterTableAlterConstraint(_)
         | Statement::AlterTableRenameConstraint(_)
+        | Statement::AlterTableAlterColumnCompression(_)
         | Statement::AlterTableAlterColumnOptions(_)
         | Statement::AlterTableAlterColumnStatistics(_)
         | Statement::AlterTableAlterColumnStorage(_)
@@ -493,7 +490,11 @@ fn run_statement(
         | Statement::AlterTableSetNotNull(_)
         | Statement::AlterTableDropNotNull(_)
         | Statement::AlterTableValidateConstraint(_)
-        | Statement::AlterTableNoInherit(_) => Ok(StatementResult::AffectedRows(0)),
+        | Statement::AlterTableNoInherit(_)
+        | Statement::AlterTableSetRowSecurity(_)
+        | Statement::CreatePolicy(_)
+        | Statement::AlterPolicy(_)
+        | Statement::DropPolicy(_) => Ok(StatementResult::AffectedRows(0)),
         Statement::AlterTableOwner(stmt) => {
             Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
                 "ALTER TABLE OWNER in query_repl: {} -> {}",
@@ -674,6 +675,8 @@ fn run_statement(
                 session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 next_command_id: 0,
+                default_toast_compression:
+                    pgrust::include::access::htup::AttributeCompression::Pglz,
                 expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
                 case_test_values: Vec::new(),
                 system_bindings: Vec::new(),
@@ -708,6 +711,8 @@ fn run_statement(
                 session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 next_command_id: 0,
+                default_toast_compression:
+                    pgrust::include::access::htup::AttributeCompression::Pglz,
                 expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
                 case_test_values: Vec::new(),
                 system_bindings: Vec::new(),
@@ -742,6 +747,8 @@ fn run_statement(
                 session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 next_command_id: 0,
+                default_toast_compression:
+                    pgrust::include::access::htup::AttributeCompression::Pglz,
                 expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
                 case_test_values: Vec::new(),
                 system_bindings: Vec::new(),
@@ -776,6 +783,8 @@ fn run_statement(
                 session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 next_command_id: 0,
+                default_toast_compression:
+                    pgrust::include::access::htup::AttributeCompression::Pglz,
                 expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
                 case_test_values: Vec::new(),
                 system_bindings: Vec::new(),
@@ -892,6 +901,8 @@ fn run_statement(
                 session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 next_command_id: 0,
+                default_toast_compression:
+                    pgrust::include::access::htup::AttributeCompression::Pglz,
                 expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
                 case_test_values: Vec::new(),
                 system_bindings: Vec::new(),
@@ -926,6 +937,8 @@ fn run_statement(
                 session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 next_command_id: 0,
+                default_toast_compression:
+                    pgrust::include::access::htup::AttributeCompression::Pglz,
                 expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
                 case_test_values: Vec::new(),
                 system_bindings: Vec::new(),
@@ -963,6 +976,8 @@ fn run_statement(
                     session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                     current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                     next_command_id: 0,
+                    default_toast_compression:
+                        pgrust::include::access::htup::AttributeCompression::Pglz,
                     expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
                     case_test_values: Vec::new(),
                     system_bindings: Vec::new(),
@@ -1011,6 +1026,8 @@ fn run_statement(
                     session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                     current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                     next_command_id: 0,
+                    default_toast_compression:
+                        pgrust::include::access::htup::AttributeCompression::Pglz,
                     expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
                     case_test_values: Vec::new(),
                     system_bindings: Vec::new(),
@@ -1059,6 +1076,8 @@ fn run_statement(
                     session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                     current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                     next_command_id: 0,
+                    default_toast_compression:
+                        pgrust::include::access::htup::AttributeCompression::Pglz,
                     expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
                     case_test_values: Vec::new(),
                     system_bindings: Vec::new(),

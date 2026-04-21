@@ -1413,17 +1413,31 @@ pub(crate) fn decode_value_with_toast(
     let Some(bytes) = bytes else {
         return Ok(Value::Null);
     };
-    let owned;
-    let bytes = if let Some(toast) = toast {
-        if crate::include::access::detoast::is_ondisk_toast_pointer(bytes) {
-            owned = crate::backend::access::common::detoast::detoast_value_bytes(toast, bytes)?;
-            &owned[..]
-        } else {
-            bytes
-        }
+    let owned = if crate::include::access::detoast::is_ondisk_toast_pointer(bytes) {
+        let toast = toast.ok_or_else(|| ExecError::InvalidStorageValue {
+            column: column.name.clone(),
+            details: "toast pointer found without toast relation context".into(),
+        })?;
+        Some(crate::backend::access::common::detoast::detoast_value_bytes(
+            toast, bytes,
+        )?)
+    } else if crate::include::access::detoast::is_compressed_inline_datum(bytes) {
+        Some(
+            crate::backend::access::common::toast_compression::decompress_inline_datum(bytes)
+                .map_err(|err| match err {
+                    ExecError::InvalidStorageValue { details, .. } => {
+                        ExecError::InvalidStorageValue {
+                            column: column.name.clone(),
+                            details,
+                        }
+                    }
+                    other => other,
+                })?,
+        )
     } else {
-        bytes
+        None
     };
+    let bytes = owned.as_deref().unwrap_or(bytes);
 
     match column.ty {
         ScalarType::Int16 => {

@@ -6,6 +6,10 @@ use crate::include::access::htup::{
     AttributeDesc, HEAP_HASNULL, HEAP_HASVARWIDTH, HEAP_NATTS_MASK, HeapTuple, HeapTupleHeaderData,
     ItemPointerData, SIZEOF_HEAP_TUPLE_HEADER, TupleError, TupleValue,
 };
+use crate::include::varatt::{
+    TOAST_POINTER_SIZE, compressed_inline_total_size, is_compressed_inline_datum,
+    is_ondisk_toast_pointer,
+};
 
 impl HeapTupleHeaderData {
     pub fn new(natts: u16, null_bitmap: Vec<u8>) -> Self {
@@ -137,7 +141,7 @@ impl HeapTuple {
                         });
                     }
                 }
-                TupleValue::Bytes(bytes) => {
+                TupleValue::Bytes(bytes) | TupleValue::EncodedVarlena(bytes) => {
                     if has_nulls {
                         null_bitmap[i / 8] |= 1 << (i % 8);
                     }
@@ -161,18 +165,40 @@ impl HeapTuple {
                         }
                         -1 => {
                             infomask |= HEAP_HASVARWIDTH;
-                            let total_len_1b = 1 + bytes.len();
-                            if total_len_1b <= 127 {
-                                data.push((total_len_1b as u8) << 1 | 0x01);
-                                data.extend_from_slice(bytes);
-                            } else {
-                                let aligned = attr.attalign.align_offset(data.len());
-                                if aligned > data.len() {
-                                    data.resize(aligned, 0);
+                            match value {
+                                TupleValue::EncodedVarlena(_) => {
+                                    if bytes.is_empty() {
+                                        return Err(TupleError::InvalidValueLength {
+                                            attnum: i + 1,
+                                            name: attr.name.clone(),
+                                            expected: 1,
+                                            actual: 0,
+                                        });
+                                    }
+                                    if bytes[0] & 0x01 == 0 {
+                                        let aligned = attr.attalign.align_offset(data.len());
+                                        if aligned > data.len() {
+                                            data.resize(aligned, 0);
+                                        }
+                                    }
+                                    data.extend_from_slice(bytes);
                                 }
-                                let total_len = (4 + bytes.len()) as u32;
-                                data.extend_from_slice(&(total_len << 2).to_le_bytes());
-                                data.extend_from_slice(bytes);
+                                TupleValue::Bytes(_) => {
+                                    let total_len_1b = 1 + bytes.len();
+                                    if total_len_1b <= 127 {
+                                        data.push((total_len_1b as u8) << 1 | 0x01);
+                                        data.extend_from_slice(bytes);
+                                    } else {
+                                        let aligned = attr.attalign.align_offset(data.len());
+                                        if aligned > data.len() {
+                                            data.resize(aligned, 0);
+                                        }
+                                        let total_len = (4 + bytes.len()) as u32;
+                                        data.extend_from_slice(&(total_len << 2).to_le_bytes());
+                                        data.extend_from_slice(bytes);
+                                    }
+                                }
+                                TupleValue::Null => unreachable!("handled above"),
                             }
                         }
                         -2 => {
@@ -233,7 +259,11 @@ impl HeapTuple {
                     off = end;
                 }
                 -1 => {
-                    if self.data[off] & 0x01 != 0 {
+                    if is_ondisk_toast_pointer(&self.data[off..]) {
+                        let end = off + TOAST_POINTER_SIZE;
+                        values.push(Some(&self.data[off..end]));
+                        off = end;
+                    } else if self.data[off] & 0x01 != 0 {
                         let total_len = (self.data[off] >> 1) as usize;
                         let start = off + 1;
                         let end = off + total_len;
@@ -248,9 +278,13 @@ impl HeapTuple {
                             self.data[off + 3],
                         ]);
                         let total_len = (raw >> 2) as usize;
-                        let start = off + 4;
                         let end = off + total_len;
-                        values.push(Some(&self.data[start..end]));
+                        if is_compressed_inline_datum(&self.data[off..end]) {
+                            values.push(Some(&self.data[off..end]));
+                        } else {
+                            let start = off + 4;
+                            values.push(Some(&self.data[start..end]));
+                        }
                         off = end;
                     }
                 }
@@ -322,7 +356,11 @@ pub fn deform_raw<'a>(
                 off = end;
             }
             -1 => {
-                if data[off] & 0x01 != 0 {
+                if is_ondisk_toast_pointer(&data[off..]) {
+                    let end = off + TOAST_POINTER_SIZE;
+                    values.push(Some(&data[off..end]));
+                    off = end;
+                } else if data[off] & 0x01 != 0 {
                     let total_len = (data[off] >> 1) as usize;
                     let start = off + 1;
                     let end = off + total_len;
@@ -330,16 +368,15 @@ pub fn deform_raw<'a>(
                     off = end;
                 } else {
                     off = attr.attalign.align_offset(off);
-                    let raw = u32::from_le_bytes([
-                        data[off],
-                        data[off + 1],
-                        data[off + 2],
-                        data[off + 3],
-                    ]);
-                    let total_len = (raw >> 2) as usize;
-                    let start = off + 4;
+                    let total_len = compressed_inline_total_size(&data[off..])
+                        .ok_or(TupleError::HeaderTooShort)?;
                     let end = off + total_len;
-                    values.push(Some(&data[start..end]));
+                    if is_compressed_inline_datum(&data[off..end]) {
+                        values.push(Some(&data[off..end]));
+                    } else {
+                        let start = off + 4;
+                        values.push(Some(&data[start..end]));
+                    }
                     off = end;
                 }
             }
