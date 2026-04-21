@@ -531,7 +531,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             {
                 Expr::Var(crate::include::nodes::primnodes::Var {
                     varno: system_column.varno,
-                    varattno: crate::include::nodes::primnodes::TABLE_OID_ATTR_NO,
+                    varattno: system_column.varattno,
                     varlevelsup: system_column.varlevelsup,
                     vartype: system_column.sql_type,
                 })
