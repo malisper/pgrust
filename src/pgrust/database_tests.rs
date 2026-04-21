@@ -8253,6 +8253,104 @@ fn foreign_keys_support_not_enforced_and_alter_enforced_state() {
 }
 
 #[test]
+fn alter_constraint_not_enforced_preserves_deferrability_flags() {
+    let base = temp_dir("fk_alter_constraint_not_enforced_preserves_deferrability");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table parents (id int4 primary key)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table children (id int4 primary key, parent_id int4)",
+    )
+    .unwrap();
+    db.execute(1, "insert into children values (1, 42)")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table children add constraint children_parent_fk foreign key (parent_id) references parents(id) not valid not enforced",
+    )
+    .unwrap();
+
+    db.execute(
+        1,
+        "alter table children alter constraint children_parent_fk deferrable initially deferred",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select condeferrable, condeferred, conenforced, convalidated from pg_constraint where conname = 'children_parent_fk'",
+        ),
+        vec![vec![
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(false),
+            Value::Bool(false),
+        ]]
+    );
+
+    db.execute(
+        1,
+        "alter table children alter constraint children_parent_fk enforced",
+    )
+    .unwrap_err();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select condeferrable, condeferred, conenforced, convalidated from pg_constraint where conname = 'children_parent_fk'",
+        ),
+        vec![vec![
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(false),
+            Value::Bool(false),
+        ]]
+    );
+
+    db.execute(1, "insert into parents values (42)").unwrap();
+    db.execute(
+        1,
+        "alter table children alter constraint children_parent_fk enforced",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select condeferrable, condeferred, conenforced, convalidated from pg_constraint where conname = 'children_parent_fk'",
+        ),
+        vec![vec![
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(true),
+        ]]
+    );
+
+    db.execute(
+        1,
+        "alter table children alter constraint children_parent_fk not enforced",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select condeferrable, condeferred, conenforced, convalidated from pg_constraint where conname = 'children_parent_fk'",
+        ),
+        vec![vec![
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(false),
+            Value::Bool(false),
+        ]]
+    );
+}
+
+#[test]
 fn alter_constraint_enforced_validates_existing_unvalidated_foreign_key() {
     let base = temp_dir("fk_alter_constraint_enforced_validates");
     let db = Database::open(&base, 16).unwrap();
