@@ -1,6 +1,7 @@
 use super::super::*;
 use crate::backend::commands::tablecmds::collect_matching_rows_heap;
 use crate::backend::executor::{ExecutorContext, eval_expr};
+use crate::backend::executor::value_io::format_failing_row_detail;
 use crate::backend::parser::{
     BoundCheckConstraint, BoundForeignKeyConstraint, ForeignKeyConstraintAction,
 };
@@ -97,6 +98,7 @@ pub(super) fn validate_not_null_rows(
                 relation: relation_name.to_string(),
                 column: column_name,
                 constraint: constraint_name.to_string(),
+                detail: Some(format_failing_row_detail(&values, &ctx.datetime_config)),
             });
         }
     }

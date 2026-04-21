@@ -140,6 +140,70 @@ pub(crate) fn format_record_text(record: &crate::include::nodes::datum::RecordVa
     out
 }
 
+pub(crate) fn format_failing_row_detail(
+    values: &[Value],
+    datetime_config: &DateTimeConfig,
+) -> String {
+    let body = values
+        .iter()
+        .map(|value| format_failing_row_value(value, datetime_config))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("Failing row contains ({body}).")
+}
+
+fn format_failing_row_value(value: &Value, datetime_config: &DateTimeConfig) -> String {
+    match value {
+        Value::Null => "null".to_string(),
+        Value::Int16(v) => v.to_string(),
+        Value::Int32(v) => v.to_string(),
+        Value::Int64(v) => v.to_string(),
+        Value::Money(v) => v.to_string(),
+        Value::Float64(v) => v.to_string(),
+        Value::Bool(true) => "t".to_string(),
+        Value::Bool(false) => "f".to_string(),
+        Value::Numeric(v) => v.render(),
+        Value::Text(text) => text.to_string(),
+        Value::TextRef(_, _) => value.as_text().unwrap_or_default().to_string(),
+        Value::Json(text) => text.to_string(),
+        Value::JsonPath(text) => text.to_string(),
+        Value::Xml(text) => text.to_string(),
+        Value::Bytea(bytes) => {
+            let mut rendered = String::from("\\\\x");
+            for byte in bytes {
+                rendered.push_str(&format!("{byte:02x}"));
+            }
+            rendered
+        }
+        Value::InternalChar(byte) => render_internal_char_text(*byte),
+        Value::Date(_)
+        | Value::Time(_)
+        | Value::TimeTz(_)
+        | Value::Timestamp(_)
+        | Value::TimestampTz(_) => {
+            render_datetime_value_text_with_config(value, datetime_config).unwrap_or_default()
+        }
+        Value::Range(_) => render_range_text(value).unwrap_or_default(),
+        Value::Multirange(_) => crate::backend::executor::render_multirange_text(value).unwrap_or_default(),
+        Value::Bit(bits) => render_bit_text(bits),
+        Value::Jsonb(bytes) => render_jsonb_bytes(bytes).unwrap_or_default(),
+        Value::TsVector(vector) => crate::backend::executor::render_tsvector_text(vector),
+        Value::TsQuery(query) => crate::backend::executor::render_tsquery_text(query),
+        Value::Point(_)
+        | Value::Lseg(_)
+        | Value::Path(_)
+        | Value::Line(_)
+        | Value::Box(_)
+        | Value::Polygon(_)
+        | Value::Circle(_) => {
+            render_geometry_text(value, FloatFormatOptions::default()).unwrap_or_default()
+        }
+        Value::Array(values) => format_array_text(values),
+        Value::PgArray(array) => format_array_value_text(array),
+        Value::Record(record) => format_record_text(record),
+    }
+}
+
 fn encode_internal_text(text: &[u8], out: &mut Vec<u8>) {
     out.extend_from_slice(&(text.len() as u32).to_le_bytes());
     out.extend_from_slice(text);

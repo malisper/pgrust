@@ -222,6 +222,7 @@ pub enum ExecError {
         relation: String,
         column: String,
         constraint: String,
+        detail: Option<String>,
     },
     CheckViolation {
         relation: String,

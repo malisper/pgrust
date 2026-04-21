@@ -123,6 +123,7 @@ fn exec_error_detail(e: &ExecError) -> Option<&str> {
         ExecError::Parse(crate::backend::parser::ParseError::DetailedError { detail, .. }) => {
             detail.as_deref()
         }
+        ExecError::NotNullViolation { detail, .. } => detail.as_deref(),
         ExecError::ForeignKeyViolation { detail, .. } => detail.as_deref(),
         ExecError::ArrayInput { detail, .. } => detail.as_deref(),
         _ => None,
