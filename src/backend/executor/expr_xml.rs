@@ -32,7 +32,94 @@ fn is_xml_whitespace(bytes: &[u8]) -> bool {
         .all(|byte| matches!(byte, b' ' | b'\n' | b'\r' | b'\t'))
 }
 
+fn xml_validation_error_for_option(
+    text: &str,
+    option: XmlOptionSetting,
+    detail: String,
+) -> ExecError {
+    let (message, sqlstate) = match option {
+        XmlOptionSetting::Document => ("invalid XML document", "2200M"),
+        XmlOptionSetting::Content => ("invalid XML content", "2200N"),
+    };
+    xml_input_error(text, message, Some(detail), sqlstate)
+}
+
+fn parse_xml_decl_attributes(body: &str) -> Result<Vec<(String, String)>, String> {
+    let mut attrs = Vec::new();
+    let bytes = body.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        let name_start = i;
+        while i < bytes.len()
+            && (bytes[i].is_ascii_alphanumeric() || matches!(bytes[i], b'_' | b':' | b'-'))
+        {
+            i += 1;
+        }
+        if i == name_start {
+            return Err("malformed XML declaration".into());
+        }
+        let name = &body[name_start..i];
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] != b'=' {
+            return Err("malformed XML declaration".into());
+        }
+        i += 1;
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] != b'"' {
+            return Err("malformed XML declaration".into());
+        }
+        i += 1;
+        let value_start = i;
+        while i < bytes.len() && bytes[i] != b'"' {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            return Err("malformed XML declaration".into());
+        }
+        attrs.push((name.to_string(), body[value_start..i].to_string()));
+        i += 1;
+    }
+    Ok(attrs)
+}
+
+fn validate_xml_declaration(text: &str, option: XmlOptionSetting) -> Result<(), ExecError> {
+    let Some((decl_text, _)) = find_xml_declaration(text) else {
+        return Ok(());
+    };
+    let body = decl_text
+        .strip_prefix("<?xml")
+        .and_then(|rest| rest.strip_suffix("?>"))
+        .map(str::trim)
+        .ok_or_else(|| {
+            xml_validation_error_for_option(text, option, "malformed XML declaration".into())
+        })?;
+    let attrs = parse_xml_decl_attributes(body)
+        .map_err(|detail| xml_validation_error_for_option(text, option, detail))?;
+    for (name, value) in attrs {
+        if name == "standalone" && value != "yes" && value != "no" {
+            return Err(xml_validation_error_for_option(
+                text,
+                option,
+                "invalid standalone value in XML declaration".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_xml_input(text: &str, option: XmlOptionSetting) -> Result<(), ExecError> {
+    validate_xml_declaration(text, option)?;
+
     let mut reader = Reader::from_str(text);
     reader.config_mut().trim_text(false);
 
@@ -860,21 +947,24 @@ fn parse_xml_nodes(text: &str) -> Result<(Option<XmlDecl>, Vec<XmlNode>), ExecEr
     Ok((decl, top))
 }
 
-fn node_has_significant_text(node: &XmlNode) -> bool {
-    match node {
-        XmlNode::Text(text) => !text.trim().is_empty(),
-        XmlNode::CData(text) => !text.trim().is_empty(),
-        XmlNode::Element { children, .. } => children.iter().any(node_has_significant_text),
-        _ => false,
-    }
+fn node_is_significant_text(node: &XmlNode) -> bool {
+    matches!(node, XmlNode::Text(text) if !text.trim().is_empty())
+        || matches!(node, XmlNode::CData(text) if !text.trim().is_empty())
 }
 
 fn is_mixed_content(children: &[XmlNode]) -> bool {
     let has_element_like = children
         .iter()
         .any(|child| matches!(child, XmlNode::Element { .. }));
-    let has_significant_text = children.iter().any(node_has_significant_text);
+    let has_significant_text = children.iter().any(node_is_significant_text);
     has_element_like && has_significant_text
+}
+
+fn is_text_only_content(children: &[&XmlNode]) -> bool {
+    !children.is_empty()
+        && children
+            .iter()
+            .all(|child| matches!(child, XmlNode::Text(_) | XmlNode::CData(_)))
 }
 
 fn render_compact_node(node: &XmlNode, out: &mut String) {
@@ -953,6 +1043,14 @@ fn render_pretty_node(node: &XmlNode, depth: usize, out: &mut String) {
                 .collect();
             if filtered_children.is_empty() {
                 out.push_str("/>");
+            } else if is_text_only_content(&filtered_children) {
+                out.push('>');
+                for child in filtered_children {
+                    render_compact_node(child, out);
+                }
+                out.push_str("</");
+                out.push_str(name);
+                out.push('>');
             } else if is_mixed_content(children) {
                 out.push('>');
                 for child in children {

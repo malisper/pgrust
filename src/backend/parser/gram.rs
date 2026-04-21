@@ -480,6 +480,20 @@ fn parse_publication_target_spec(input: &str) -> Result<(PublicationTargetSpec, 
         }
     }
 
+    if objects.len() > 1
+        && objects.iter().any(|object| {
+            matches!(
+                object,
+                PublicationObjectSpec::Table(PublicationTableSpec { relation_name, .. })
+                    if relation_name == "current_schema"
+            )
+        })
+    {
+        return Err(ParseError::InvalidPublicationTableName(
+            "current_schema".into(),
+        ));
+    }
+
     Ok((
         PublicationTargetSpec {
             for_all_tables: false,
@@ -495,11 +509,6 @@ fn parse_publication_table_object(input: &str) -> Result<(PublicationTableSpec, 
     if keyword_at_start(rest, "only") {
         only = true;
         rest = consume_keyword(rest, "only").trim_start();
-    }
-    if keyword_at_start(rest, "current_schema") {
-        return Err(ParseError::InvalidPublicationTableName(
-            "current_schema".into(),
-        ));
     }
     let (parts, mut rest) = parse_qualified_identifier_parts(rest)?;
     let relation_name = match parts.as_slice() {
@@ -9920,9 +9929,9 @@ fn build_window_frame_clause(pair: Pair<'_, Rule>) -> Result<RawWindowFrame, Par
     let mut bounds = Vec::new();
     for part in pair.into_inner() {
         match part.as_rule() {
-            Rule::kw_rows => mode = Some(WindowFrameMode::Rows),
-            Rule::kw_range => mode = Some(WindowFrameMode::Range),
-            Rule::kw_groups => mode = Some(WindowFrameMode::Groups),
+            Rule::kw_rows | Rule::kw_rows_atom => mode = Some(WindowFrameMode::Rows),
+            Rule::kw_range | Rule::kw_range_atom => mode = Some(WindowFrameMode::Range),
+            Rule::kw_groups | Rule::kw_groups_atom => mode = Some(WindowFrameMode::Groups),
             Rule::window_frame_bound => bounds.push(build_window_frame_bound(part)?),
             Rule::window_frame_between => {
                 for inner in part.into_inner() {
@@ -10017,6 +10026,13 @@ fn build_raw_window_spec(pair: Pair<'_, Rule>) -> Result<RawWindowSpec, ParseErr
     let mut frame = None;
     for part in pair.into_inner() {
         match part.as_rule() {
+            Rule::window_ref_name => {
+                let ident = part
+                    .into_inner()
+                    .find(|inner| inner.as_rule() == Rule::identifier)
+                    .ok_or(ParseError::UnexpectedEof)?;
+                name = Some(build_identifier(ident));
+            }
             Rule::identifier => name = Some(build_identifier(part)),
             Rule::window_partition_by_clause => {
                 partition_by = part
@@ -11464,4 +11480,27 @@ fn as_high_surrogate(code: u32) -> Option<u16> {
 
 fn as_low_surrogate(code: u32) -> Option<u16> {
     (0xDC00..=0xDFFF).contains(&code).then_some(code as u16)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pest_parses_named_window_clause_statement() {
+        SqlParser::parse(
+            Rule::statement,
+            "select row_number() over w from people window w as ()",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn pest_parses_window_frame_statement() {
+        SqlParser::parse(
+            Rule::statement,
+            "select sum(id) over (w rows between 1 preceding and current row) from people window w as (partition by name order by id)",
+        )
+        .unwrap();
+    }
 }

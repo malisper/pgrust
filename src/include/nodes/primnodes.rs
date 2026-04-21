@@ -392,7 +392,6 @@ pub enum BuiltinScalarFunction {
     Ascii,
     Chr,
     QuoteLiteral,
-    RegRoleToText,
     Replace,
     SplitPart,
     Translate,
@@ -1083,9 +1082,6 @@ pub enum Expr {
     SessionUser,
     CurrentRole,
     CurrentDate,
-    CurrentUser,
-    SessionUser,
-    CurrentRole,
     CurrentTime {
         precision: Option<i32>,
     },

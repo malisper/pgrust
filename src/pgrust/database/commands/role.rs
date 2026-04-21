@@ -766,7 +766,10 @@ impl Database {
                         )
                         .map_err(map_role_catalog_error)?
                 }
-                OwnedObjectKind::Index | OwnedObjectKind::Table | OwnedObjectKind::View => self
+                OwnedObjectKind::Index
+                | OwnedObjectKind::Sequence
+                | OwnedObjectKind::Table
+                | OwnedObjectKind::View => self
                     .catalog
                     .write()
                     .alter_relation_owner_mvcc(object.oid, new_role.oid, &ctx)
@@ -943,6 +946,7 @@ struct OwnedObject {
 enum OwnedObjectKind {
     Index,
     Publication,
+    Sequence,
     Table,
     View,
 }
@@ -952,6 +956,7 @@ impl OwnedObject {
         match self.kind {
             OwnedObjectKind::Index => "index",
             OwnedObjectKind::Publication => "publication",
+            OwnedObjectKind::Sequence => "sequence",
             OwnedObjectKind::Table => "table",
             OwnedObjectKind::View => "view",
         }
@@ -989,6 +994,7 @@ fn owned_objects_for_roles(
             oid: row.oid,
             kind: match row.relkind {
                 'i' => OwnedObjectKind::Index,
+                'S' => OwnedObjectKind::Sequence,
                 'v' => OwnedObjectKind::View,
                 _ => OwnedObjectKind::Table,
             },
@@ -1018,7 +1024,8 @@ fn owned_object_drop_priority(kind: OwnedObjectKind) -> u8 {
         OwnedObjectKind::View => 0,
         OwnedObjectKind::Index => 1,
         OwnedObjectKind::Publication => 2,
-        OwnedObjectKind::Table => 3,
+        OwnedObjectKind::Sequence => 3,
+        OwnedObjectKind::Table => 4,
     }
 }
 

@@ -2158,7 +2158,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 );
             }
             if name.eq_ignore_ascii_case("xmlconcat") {
-                if args.iter().any(|arg| arg.name.is_some()) {
+                if args.args().iter().any(|arg| arg.name.is_some()) {
                     return Err(ParseError::UnexpectedToken {
                         expected: "positional xmlconcat arguments",
                         actual: "named argument".into(),
@@ -2166,6 +2166,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 }
                 let xml_type = SqlType::new(SqlTypeKind::Xml);
                 let bound_args = args
+                    .args()
                     .iter()
                     .map(|arg| {
                         let source = infer_sql_expr_type_with_ctes(
