@@ -250,6 +250,7 @@ fn execute_statement_with_source(
         | Statement::RevokeRoleMembership(_)
         | Statement::SetSessionAuthorization(_)
         | Statement::ResetSessionAuthorization(_)
+        | Statement::DropOwned(_)
         | Statement::ReassignOwned(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
             "role management".into(),
         ))),
