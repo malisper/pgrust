@@ -913,7 +913,7 @@ fn apply_implicit_sign(spec: &FormatSpec, rendered: &mut [String], negative: boo
     };
     let sign = if negative { "-" } else { " " };
     if let Some(target_idx) = (0..anchor_idx).rev().find(|idx| rendered[*idx] == " ") {
-        rendered[target_idx] = sign.into();
+        rendered[target_idx] = format!("{sign}{}", rendered[target_idx]);
     } else {
         rendered[anchor_idx] = format!("{sign}{}", rendered[anchor_idx]);
     }
@@ -1621,6 +1621,10 @@ mod tests {
                 .unwrap()
                 .trim(),
             "123456"
+        );
+        assert_eq!(
+            to_char_numeric(&NumericValue::from("1234.56"), "99999V99").unwrap(),
+            "  123456"
         );
         assert_eq!(
             to_char_numeric(&NumericValue::PosInf, "9.999EEEE").unwrap(),
