@@ -743,17 +743,12 @@ fn collect_direct_relation_oids_from_sql_expr(
                 collect_direct_relation_oids_from_sql_expr(element, catalog, visible_ctes, rels);
             }
         }
-        SqlExpr::AggCall { args, order_by, .. } => {
-            for arg in args {
+        SqlExpr::FuncCall { args, order_by, .. } => {
+            for arg in args.args() {
                 collect_direct_relation_oids_from_sql_expr(&arg.value, catalog, visible_ctes, rels);
             }
             for item in order_by {
                 collect_direct_relation_oids_from_sql_expr(&item.expr, catalog, visible_ctes, rels);
-            }
-        }
-        SqlExpr::FuncCall { args, .. } => {
-            for arg in args {
-                collect_direct_relation_oids_from_sql_expr(&arg.value, catalog, visible_ctes, rels);
             }
         }
         SqlExpr::ScalarSubquery(select)
