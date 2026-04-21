@@ -2353,6 +2353,7 @@ impl CatalogStore {
         confupdtype: char,
         confdeltype: char,
         confmatchtype: char,
+        confdelsetcols: Option<&[i16]>,
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let conname = conname.into();
@@ -2408,7 +2409,7 @@ impl CatalogStore {
             conpfeqop: equality_ops.clone(),
             conppeqop: equality_ops.clone(),
             conffeqop: equality_ops,
-            confdelsetcols: None,
+            confdelsetcols: confdelsetcols.map(<[i16]>::to_vec),
             conexclop: None,
             conbin: None,
             conislocal: true,

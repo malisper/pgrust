@@ -1763,6 +1763,7 @@ pub enum ColumnConstraint {
         referenced_columns: Option<Vec<String>>,
         match_type: ForeignKeyMatchType,
         on_delete: ForeignKeyAction,
+        on_delete_set_columns: Option<Vec<String>>,
         on_update: ForeignKeyAction,
     },
 }
@@ -1804,6 +1805,7 @@ pub enum TableConstraint {
         referenced_columns: Option<Vec<String>>,
         match_type: ForeignKeyMatchType,
         on_delete: ForeignKeyAction,
+        on_delete_set_columns: Option<Vec<String>>,
         on_update: ForeignKeyAction,
     },
 }

@@ -1147,6 +1147,7 @@ fn apply_referential_action_to_rows(
     action: ForeignKeyAction,
     key_values: &[Value],
     replacement_key_values: Option<&[Value]>,
+    delete_set_column_indexes: Option<&[usize]>,
     ctx: &mut ExecutorContext,
     xid: TransactionId,
     cid: CommandId,
@@ -1167,19 +1168,33 @@ fn apply_referential_action_to_rows(
         match action {
             ForeignKeyAction::Cascade | ForeignKeyAction::SetNull | ForeignKeyAction::SetDefault => {
                 let mut updated_values = current_values.clone();
-                for (position, column_index) in constraint.child_column_indexes.iter().enumerate() {
-                    updated_values[*column_index] = match action {
-                        ForeignKeyAction::Cascade => replacement_key_values
-                            .and_then(|values| values.get(position))
-                            .cloned()
-                            .unwrap_or(Value::Null)
-                            .to_owned_value(),
-                        ForeignKeyAction::SetNull => Value::Null,
-                        ForeignKeyAction::SetDefault => {
-                            evaluate_default_value(&constraint.child_desc, *column_index, ctx)?
+                match action {
+                    ForeignKeyAction::Cascade => {
+                        for (position, column_index) in constraint.child_column_indexes.iter().enumerate()
+                        {
+                            updated_values[*column_index] = replacement_key_values
+                                .and_then(|values| values.get(position))
+                                .cloned()
+                                .unwrap_or(Value::Null)
+                                .to_owned_value();
                         }
-                        ForeignKeyAction::NoAction | ForeignKeyAction::Restrict => unreachable!(),
-                    };
+                    }
+                    ForeignKeyAction::SetNull | ForeignKeyAction::SetDefault => {
+                        let target_columns =
+                            delete_set_column_indexes.unwrap_or(&constraint.child_column_indexes);
+                        for column_index in target_columns {
+                            updated_values[*column_index] = match action {
+                                ForeignKeyAction::SetNull => Value::Null,
+                                ForeignKeyAction::SetDefault => {
+                                    evaluate_default_value(&constraint.child_desc, *column_index, ctx)?
+                                }
+                                ForeignKeyAction::NoAction
+                                | ForeignKeyAction::Restrict
+                                | ForeignKeyAction::Cascade => unreachable!(),
+                            };
+                        }
+                    }
+                    ForeignKeyAction::NoAction | ForeignKeyAction::Restrict => unreachable!(),
                 }
                 let _ = write_updated_row(
                     &constraint.child_relation_name,
@@ -1251,6 +1266,7 @@ fn apply_inbound_foreign_key_actions_on_update(
                     ForeignKeyAction::Cascade,
                     &old_key_values,
                     Some(&new_key_values),
+                    None,
                     ctx,
                     xid,
                     cid,
@@ -1267,6 +1283,7 @@ fn apply_inbound_foreign_key_actions_on_update(
                     constraint,
                     constraint.on_update,
                     &old_key_values,
+                    None,
                     None,
                     ctx,
                     xid,
@@ -1338,6 +1355,7 @@ fn apply_inbound_foreign_key_actions_on_delete(
                     constraint.on_delete,
                     &key_values,
                     None,
+                    constraint.on_delete_set_column_indexes.as_deref(),
                     ctx,
                     xid,
                     cid,

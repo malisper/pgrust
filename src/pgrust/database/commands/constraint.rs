@@ -519,6 +519,7 @@ impl Database {
                     .collect(),
                 match_type: constraint.match_type,
                 on_delete: ForeignKeyAction::NoAction,
+                on_delete_set_columns: None,
                 on_update: ForeignKeyAction::NoAction,
                 not_valid: false,
                 enforced: true,
@@ -1002,6 +1003,11 @@ impl Database {
                     &referenced_relation.desc,
                     &action.referenced_columns,
                 )?;
+                let delete_set_attnums = action
+                    .on_delete_set_columns
+                    .as_deref()
+                    .map(|columns| column_attnums_for_names(&relation.desc, columns))
+                    .transpose()?;
                 let ctx = CatalogWriteContext {
                     pool: self.pool.clone(),
                     txns: self.txns.clone(),
@@ -1026,6 +1032,7 @@ impl Database {
                         foreign_key_action_code(action.on_update),
                         foreign_key_action_code(action.on_delete),
                         foreign_key_match_code(action.match_type),
+                        delete_set_attnums.as_deref(),
                         &ctx,
                     )
                     .map_err(map_catalog_error)?;
