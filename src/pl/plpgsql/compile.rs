@@ -3,15 +3,19 @@ use std::collections::HashMap;
 use crate::backend::executor::Expr;
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{
-    CatalogLookup, ParseError, SlotScopeColumn, SqlType, SqlTypeKind, Statement,
+    BoundDeleteStatement, BoundInsertStatement, BoundUpdateStatement, CatalogLookup, ParseError,
+    SlotScopeColumn, SqlType, SqlTypeKind, Statement, bind_delete_with_outer_scopes,
+    bind_insert_with_outer_scopes, bind_update_with_outer_scopes,
     bind_scalar_expr_in_named_slot_scope, parse_expr, parse_statement, parse_type_name,
     pg_plan_query_with_outer, pg_plan_values_query_with_outer,
 };
+use crate::backend::parser::analyze::scope_for_relation;
+use crate::backend::catalog::catalog::column_desc;
 use crate::include::catalog::{PgProcRow, RECORD_TYPE_OID};
 use crate::include::nodes::plannodes::PlannedStmt;
 use crate::include::nodes::primnodes::QueryColumn;
 
-use super::ast::{AssignTarget, Block, RaiseLevel, ReturnQueryKind, Stmt, VarDecl};
+use super::ast::{AssignTarget, Block, Decl, RaiseLevel, ReturnQueryKind, Stmt, VarDecl};
 use super::gram::parse_block;
 
 #[derive(Debug, Clone)]
@@ -27,6 +31,7 @@ pub struct CompiledFunction {
     pub(crate) output_slots: Vec<CompiledOutputSlot>,
     pub(crate) body: CompiledBlock,
     pub(crate) return_contract: FunctionReturnContract,
+    pub(crate) found_slot: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -93,6 +98,7 @@ pub(crate) struct CompiledTriggerBindings {
 #[derive(Debug, Clone)]
 pub(crate) struct CompiledTriggerRelation {
     pub(crate) slots: Vec<usize>,
+    pub(crate) field_names: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,6 +146,23 @@ pub(crate) enum CompiledStmt {
         plan: PlannedStmt,
         kind: ReturnQueryKind,
     },
+    Perform {
+        plan: PlannedStmt,
+    },
+    SelectInto {
+        plan: PlannedStmt,
+        target_slot: usize,
+        target_ty: SqlType,
+    },
+    ExecInsert {
+        stmt: BoundInsertStatement,
+    },
+    ExecUpdate {
+        stmt: BoundUpdateStatement,
+    },
+    ExecDelete {
+        stmt: BoundDeleteStatement,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -158,6 +181,7 @@ struct RelationScopeVar {
 struct CompileEnv {
     vars: HashMap<String, ScopeVar>,
     relation_scopes: Vec<RelationScopeVar>,
+    parameter_slots: Vec<ScopeVar>,
     next_slot: usize,
 }
 
@@ -174,8 +198,23 @@ impl CompileEnv {
         slot
     }
 
+    fn define_parameter_var(&mut self, name: &str, ty: SqlType) -> usize {
+        let slot = self.define_var(name, ty);
+        self.parameter_slots.push(ScopeVar { slot, ty });
+        slot
+    }
+
+    fn define_alias(&mut self, name: &str, slot: usize, ty: SqlType) {
+        self.vars
+            .insert(name.to_ascii_lowercase(), ScopeVar { slot, ty });
+    }
+
     fn get_var(&self, name: &str) -> Option<&ScopeVar> {
         self.vars.get(&name.to_ascii_lowercase())
+    }
+
+    fn get_parameter(&self, index: usize) -> Option<&ScopeVar> {
+        self.parameter_slots.get(index.saturating_sub(1))
     }
 
     fn define_relation_scope(
@@ -184,11 +223,13 @@ impl CompileEnv {
         desc: &RelationDesc,
     ) -> CompiledTriggerRelation {
         let mut slots = Vec::with_capacity(desc.columns.len());
+        let mut field_names = Vec::with_capacity(desc.columns.len());
         let mut columns = Vec::with_capacity(desc.columns.len());
         for column in &desc.columns {
             let slot = self.next_slot;
             self.next_slot += 1;
             slots.push(slot);
+            field_names.push(column.name.clone());
             columns.push(SlotScopeColumn {
                 slot,
                 name: column.name.clone(),
@@ -200,7 +241,7 @@ impl CompileEnv {
             name: name.to_ascii_lowercase(),
             columns,
         });
-        CompiledTriggerRelation { slots }
+        CompiledTriggerRelation { slots, field_names }
     }
 
     fn get_relation_field(&self, relation: &str, field: &str) -> Option<&SlotScopeColumn> {
@@ -226,6 +267,16 @@ impl CompileEnv {
             .into_iter()
             .map(|(_, name, ty)| (name, ty))
             .collect()
+    }
+
+    fn visible_sql_columns(&self) -> Vec<(String, SqlType)> {
+        let mut columns = self.visible_columns();
+        columns.extend(
+            self.relation_scopes
+                .iter()
+                .map(|scope| (scope.name.clone(), SqlType::record(RECORD_TYPE_OID))),
+        );
+        columns
     }
 
     fn slot_columns(&self) -> Vec<SlotScopeColumn> {
@@ -256,6 +307,7 @@ pub(crate) fn compile_do_block(
     catalog: &dyn CatalogLookup,
 ) -> Result<CompiledBlock, ParseError> {
     let mut env = CompileEnv::default();
+    let _ = env.define_var("found", SqlType::new(SqlTypeKind::Bool));
     compile_block(block, catalog, &mut env, None)
 }
 
@@ -297,7 +349,7 @@ pub(crate) fn compile_function_from_proc(
                 .unwrap_or_else(|| format!("column{}", index + 1));
             match *mode {
                 b'i' => {
-                    let slot = env.define_var(&name, sql_type);
+                    let slot = env.define_parameter_var(&name, sql_type);
                     parameter_slots.push(CompiledFunctionSlot {
                         name,
                         slot,
@@ -305,7 +357,7 @@ pub(crate) fn compile_function_from_proc(
                     });
                 }
                 b'b' => {
-                    let slot = env.define_var(&name, sql_type);
+                    let slot = env.define_parameter_var(&name, sql_type);
                     parameter_slots.push(CompiledFunctionSlot {
                         name: name.clone(),
                         slot,
@@ -322,7 +374,7 @@ pub(crate) fn compile_function_from_proc(
                     });
                 }
                 b'o' | b't' => {
-                    let slot = env.define_var(&name, sql_type);
+                    let slot = env.define_parameter_var(&name, sql_type);
                     output_slots.push(CompiledOutputSlot {
                         name: name.clone(),
                         slot,
@@ -344,7 +396,7 @@ pub(crate) fn compile_function_from_proc(
                 .cloned()
                 .filter(|name| !name.is_empty())
                 .unwrap_or_else(|| format!("arg{}", index + 1));
-            let slot = env.define_var(&name, sql_type);
+            let slot = env.define_parameter_var(&name, sql_type);
             parameter_slots.push(CompiledFunctionSlot {
                 name,
                 slot,
@@ -353,6 +405,8 @@ pub(crate) fn compile_function_from_proc(
         }
     }
 
+    let found_slot = env.define_var("found", SqlType::new(SqlTypeKind::Bool));
+
     let return_contract = function_return_contract(row, catalog, &output_slots)?;
     let body = compile_block(&block, catalog, &mut env, Some(&return_contract))?;
     Ok(CompiledFunction {
@@ -360,6 +414,7 @@ pub(crate) fn compile_function_from_proc(
         output_slots,
         body,
         return_contract,
+        found_slot,
     })
 }
 
@@ -371,6 +426,7 @@ pub(crate) fn compile_trigger_function_from_proc(
     let block = parse_block(&row.prosrc)?;
     let mut env = CompileEnv::default();
     let bindings = seed_trigger_env(&mut env, relation_desc);
+    let found_slot = env.define_var("found", SqlType::new(SqlTypeKind::Bool));
     let return_contract = FunctionReturnContract::Trigger { bindings };
     let body = compile_block(&block, catalog, &mut env, Some(&return_contract))?;
     Ok(CompiledFunction {
@@ -378,6 +434,7 @@ pub(crate) fn compile_trigger_function_from_proc(
         output_slots: Vec::new(),
         body,
         return_contract,
+        found_slot,
     })
 }
 
@@ -456,9 +513,12 @@ fn compile_block(
     return_contract: Option<&FunctionReturnContract>,
 ) -> Result<CompiledBlock, ParseError> {
     let mut env = outer.child();
-    let mut local_slots = Vec::with_capacity(block.declarations.len());
+    let mut local_slots = Vec::new();
     for decl in &block.declarations {
-        local_slots.push(compile_var_decl(decl, catalog, &mut env)?);
+        match decl {
+            Decl::Var(decl) => local_slots.push(compile_var_decl(decl, catalog, &mut env)?),
+            Decl::Alias(decl) => compile_alias_decl(decl, &mut env)?,
+        }
     }
     let statements = block
         .statements
@@ -489,6 +549,21 @@ fn compile_var_decl(
         ty: decl.ty,
         default_expr,
     })
+}
+
+fn compile_alias_decl(
+    decl: &super::ast::AliasDecl,
+    env: &mut CompileEnv,
+) -> Result<(), ParseError> {
+    let parameter = env
+        .get_parameter(decl.param_index)
+        .cloned()
+        .ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "function parameter referenced by ALIAS FOR",
+            actual: format!("${}", decl.param_index),
+        })?;
+    env.define_alias(&decl.name, parameter.slot, parameter.ty);
+    Ok(())
 }
 
 fn compile_stmt(
@@ -575,6 +650,8 @@ fn compile_stmt(
         Stmt::ReturnQuery { sql, kind } => {
             compile_return_query_stmt(sql, *kind, catalog, env, return_contract)?
         }
+        Stmt::Perform { sql } => compile_perform_stmt(sql, catalog, env)?,
+        Stmt::ExecSql { sql } => compile_exec_sql_stmt(sql, catalog, env)?,
     })
 }
 
@@ -715,6 +792,116 @@ fn compile_return_query_stmt(
         plan: planned,
         kind,
     })
+}
+
+fn compile_perform_stmt(
+    sql: &str,
+    catalog: &dyn CatalogLookup,
+    env: &CompileEnv,
+) -> Result<CompiledStmt, ParseError> {
+    let planned = pg_plan_query_with_outer(
+        &crate::backend::parser::parse_select(&format!("select {sql}"))?,
+        catalog,
+        &env.visible_sql_columns(),
+    )?;
+    Ok(CompiledStmt::Perform { plan: planned })
+}
+
+fn compile_exec_sql_stmt(
+    sql: &str,
+    catalog: &dyn CatalogLookup,
+    env: &CompileEnv,
+) -> Result<CompiledStmt, ParseError> {
+    if let Some((target_name, select_sql)) = split_select_into_target(sql) {
+        let target = env
+            .get_var(&target_name)
+            .ok_or_else(|| ParseError::UnexpectedToken {
+                expected: "declared SELECT INTO target",
+                actual: target_name.clone(),
+            })?;
+        let planned = pg_plan_query_with_outer(
+            &crate::backend::parser::parse_select(&select_sql)?,
+            catalog,
+            &env.visible_sql_columns(),
+        )?;
+        return Ok(CompiledStmt::SelectInto {
+            plan: planned,
+            target_slot: target.slot,
+            target_ty: target.ty,
+        });
+    }
+
+    let stmt = parse_statement(sql)?;
+    let outer_scope = outer_scope_for_sql(env);
+    match stmt {
+        Statement::Select(stmt) => Ok(CompiledStmt::Perform {
+            plan: pg_plan_query_with_outer(&stmt, catalog, &env.visible_sql_columns())?,
+        }),
+        Statement::Values(stmt) => Ok(CompiledStmt::Perform {
+            plan: pg_plan_values_query_with_outer(&stmt, catalog, &env.visible_sql_columns())?,
+        }),
+        Statement::Insert(stmt) => Ok(CompiledStmt::ExecInsert {
+            stmt: bind_insert_with_outer_scopes(&stmt, catalog, &[outer_scope])?,
+        }),
+        Statement::Update(stmt) => Ok(CompiledStmt::ExecUpdate {
+            stmt: bind_update_with_outer_scopes(&stmt, catalog, &[outer_scope])?,
+        }),
+        Statement::Delete(stmt) => Ok(CompiledStmt::ExecDelete {
+            stmt: bind_delete_with_outer_scopes(&stmt, catalog, &[outer_scope])?,
+        }),
+        other => Err(ParseError::UnexpectedToken {
+            expected: "PL/pgSQL SQL statement",
+            actual: format!("{other:?}"),
+        }),
+    }
+}
+
+fn outer_scope_for_sql(env: &CompileEnv) -> crate::backend::parser::BoundScope {
+    let desc = RelationDesc {
+        columns: env
+            .visible_sql_columns()
+            .into_iter()
+            .map(|(name, sql_type)| column_desc(name, sql_type, true))
+            .collect(),
+    };
+    scope_for_relation(None, &desc)
+}
+
+fn split_select_into_target(sql: &str) -> Option<(String, String)> {
+    let trimmed = sql.trim_start();
+    let lower = trimmed.to_ascii_lowercase();
+    if !lower.starts_with("select into ") {
+        return None;
+    }
+    let rest = trimmed[12..].trim_start();
+    let mut chars = rest.char_indices();
+    let end = if rest.starts_with('"') {
+        let mut escaped = false;
+        let mut end = None;
+        for (index, ch) in rest.char_indices().skip(1) {
+            if ch == '"' {
+                if escaped {
+                    escaped = false;
+                    continue;
+                }
+                if rest[index + 1..].starts_with('"') {
+                    escaped = true;
+                    continue;
+                }
+                end = Some(index + 1);
+                break;
+            }
+        }
+        end?
+    } else {
+        chars
+            .find(|(_, ch)| ch.is_whitespace())
+            .map(|(index, _)| index)
+            .unwrap_or(rest.len())
+    };
+    let target = rest[..end].trim().trim_matches('"').to_ascii_lowercase();
+    let select_sql = format!("select {}", rest[end..].trim_start());
+    Some((target, select_sql))
 }
 
 fn compile_stmt_list(

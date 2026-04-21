@@ -18026,6 +18026,31 @@ fn before_insert_trigger_can_mutate_new_and_skip_rows() {
 }
 
 #[test]
+fn plpgsql_alias_record_select_into_and_update_work() {
+    let dir = temp_dir("plpgsql_alias_record_select_into_update");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table slots (slotname text, backlink text)")
+        .unwrap();
+    db.execute(1, "insert into slots values ('PS.base.a1', '')")
+        .unwrap();
+    db.execute(
+        1,
+        "create function tg_backlink_set(text, text) returns int4 language plpgsql as $$ declare myname alias for $1; blname alias for $2; rec record; begin select into rec * from slots where slotname = myname; if not found then raise exception '% missing', myname; end if; if rec.backlink != blname then update slots set backlink = blname where slotname = myname; end if; return 0; end $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select tg_backlink_set('PS.base.a1', 'WS.001.1a')"),
+        vec![vec![Value::Int32(0)]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select backlink from slots where slotname = 'PS.base.a1'"),
+        vec![vec![Value::Text("WS.001.1a".into())]]
+    );
+}
+
+#[test]
 fn after_insert_triggers_fire_per_row_in_alphabetical_order() {
     let dir = temp_dir("after_insert_trigger_notices");
     let db = Database::open(&dir, 64).unwrap();

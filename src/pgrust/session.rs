@@ -179,6 +179,16 @@ impl Session {
         )
     }
 
+    pub fn allow_in_place_tablespaces(&self) -> bool {
+        matches!(
+            self.gucs
+                .get("allow_in_place_tablespaces")
+                .map(|value| value.trim().to_ascii_lowercase())
+                .as_deref(),
+            Some("on" | "true")
+        )
+    }
+
     pub fn maintenance_work_mem_kb(&self) -> Result<usize, ExecError> {
         let Some(raw) = self.gucs.get("maintenance_work_mem") else {
             return Ok(Self::DEFAULT_MAINTENANCE_WORK_MEM_KB);
@@ -591,7 +601,11 @@ impl Session {
                     }
                     result
                 } else {
-                    db.execute_create_tablespace_stmt(self.client_id, create_stmt)
+                    db.execute_create_tablespace_stmt(
+                        self.client_id,
+                        create_stmt,
+                        self.allow_in_place_tablespaces(),
+                    )
                 }
             }
             Statement::CreateDomain(ref create_stmt) => {
@@ -697,6 +711,24 @@ impl Session {
                 } else {
                     let search_path = self.configured_search_path();
                     db.execute_alter_table_rename_stmt_with_search_path(
+                        self.client_id,
+                        rename_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
+            Statement::AlterIndexRename(ref rename_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_alter_index_rename_stmt_with_search_path(
                         self.client_id,
                         rename_stmt,
                         search_path.as_deref(),
@@ -1039,6 +1071,24 @@ impl Session {
                 } else {
                     let search_path = self.configured_search_path();
                     db.execute_alter_table_validate_constraint_stmt_with_search_path(
+                        self.client_id,
+                        alter_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
+            Statement::AlterTableInherit(ref alter_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_alter_table_inherit_stmt_with_search_path(
                         self.client_id,
                         alter_stmt,
                         search_path.as_deref(),
@@ -1817,6 +1867,27 @@ impl Session {
                     &mut txn.temp_effects,
                 )
             }
+            Statement::AlterIndexRename(ref rename_stmt) => {
+                let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                let relation = catalog
+                    .lookup_any_relation(&rename_stmt.table_name)
+                    .ok_or_else(|| {
+                        ExecError::Parse(ParseError::TableDoesNotExist(
+                            rename_stmt.table_name.clone(),
+                        ))
+                    })?;
+                self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_alter_index_rename_stmt_in_transaction_with_search_path(
+                    client_id,
+                    rename_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
             Statement::AlterViewOwner(ref alter_stmt) => {
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);
                 let relation = catalog
@@ -2237,6 +2308,48 @@ impl Session {
                 let search_path = self.configured_search_path();
                 let txn = self.active_txn.as_mut().unwrap();
                 db.execute_alter_table_validate_constraint_stmt_in_transaction_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
+            Statement::AlterTableInherit(ref alter_stmt) => {
+                let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                let relation = catalog
+                    .lookup_any_relation(&alter_stmt.table_name)
+                    .ok_or_else(|| {
+                        ExecError::Parse(ParseError::TableDoesNotExist(
+                            alter_stmt.table_name.clone(),
+                        ))
+                    })?;
+                let parent = catalog
+                    .lookup_any_relation(&alter_stmt.parent_name)
+                    .ok_or_else(|| {
+                        ExecError::Parse(ParseError::TableDoesNotExist(
+                            alter_stmt.parent_name.clone(),
+                        ))
+                    })?;
+                let mut requests: BTreeMap<RelFileLocator, TableLockMode> = BTreeMap::new();
+                requests
+                    .entry(relation.rel)
+                    .and_modify(|existing| {
+                        *existing = existing.strongest(TableLockMode::AccessExclusive)
+                    })
+                    .or_insert(TableLockMode::AccessExclusive);
+                requests
+                    .entry(parent.rel)
+                    .and_modify(|existing| {
+                        *existing = existing.strongest(TableLockMode::AccessShare)
+                    })
+                    .or_insert(TableLockMode::AccessShare);
+                let requests = requests.into_iter().collect::<Vec<_>>();
+                self.lock_table_requests_if_needed(db, &requests)?;
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_alter_table_inherit_stmt_in_transaction_with_search_path(
                     client_id,
                     alter_stmt,
                     xid,
@@ -2758,10 +2871,12 @@ impl Session {
                 )
             }
             Statement::CreateTablespace(ref create_stmt) => {
+                let allow_in_place_tablespaces = self.allow_in_place_tablespaces();
                 let txn = self.active_txn.as_mut().unwrap();
                 db.execute_create_tablespace_stmt_in_transaction(
                     client_id,
                     create_stmt,
+                    allow_in_place_tablespaces,
                     xid,
                     cid,
                     &mut txn.catalog_effects,
