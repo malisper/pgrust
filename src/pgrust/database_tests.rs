@@ -14293,6 +14293,51 @@ fn create_function_uses_search_path_for_unqualified_creation() {
 }
 
 #[test]
+fn drop_function_uses_search_path_and_signature() {
+    let base = temp_dir("search_path_function_drop");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create schema tenant_fn").unwrap();
+    session.execute(&db, "set search_path = tenant_fn").unwrap();
+    session
+        .execute(
+            &db,
+            "create function add_one(x int4) returns int4 language sql as $$ select x + 1 $$",
+        )
+        .unwrap();
+    session
+        .execute(&db, "drop function add_one(int4)")
+        .unwrap();
+
+    let visible = db.backend_catcache(1, None).unwrap();
+    assert!(
+        visible.proc_rows_by_name("add_one").is_empty(),
+        "expected dropped function to be absent from pg_proc"
+    );
+}
+
+#[test]
+fn drop_table_cascade_notice_omits_temp_schema_name() {
+    let base = temp_dir("drop_temp_child_notice");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create temp table some_tab (id int4)").unwrap();
+    session
+        .execute(&db, "create temp table some_tab_child () inherits (some_tab)")
+        .unwrap();
+    take_notice_messages();
+
+    session.execute(&db, "drop table some_tab cascade").unwrap();
+
+    assert_eq!(
+        take_notice_messages(),
+        vec![String::from("drop cascades to table some_tab_child")]
+    );
+}
+
+#[test]
 fn create_table_uses_pg_temp_search_path_for_unqualified_creation() {
     let base = temp_dir("search_path_pg_temp_create");
     let db = Database::open(&base, 16).unwrap();

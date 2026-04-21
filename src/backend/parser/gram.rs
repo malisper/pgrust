@@ -74,6 +74,9 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_create_function_statement(&sql)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_drop_function_statement(&sql)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_create_operator_class_statement(&sql)? {
         return Ok(stmt);
     }
@@ -1487,6 +1490,17 @@ fn try_parse_create_function_statement(sql: &str) -> Result<Option<Statement>, P
     )))
 }
 
+fn try_parse_drop_function_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if !lowered.starts_with("drop function ") {
+        return Ok(None);
+    }
+    Ok(Some(Statement::DropFunction(
+        build_drop_function_statement(trimmed)?,
+    )))
+}
+
 fn try_parse_create_operator_class_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
     let trimmed = sql.trim().trim_end_matches(';').trim();
     let lowered = trimmed.to_ascii_lowercase();
@@ -2527,6 +2541,48 @@ fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement,
         language: language.ok_or(ParseError::UnexpectedEof)?,
         body: body.ok_or(ParseError::UnexpectedEof)?,
         link_symbol,
+    })
+}
+
+fn build_drop_function_statement(sql: &str) -> Result<DropFunctionStatement, ParseError> {
+    let prefix = "drop function";
+    let Some(rest) = sql.get(prefix.len()..) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "DROP FUNCTION name(args)",
+            actual: sql.into(),
+        });
+    };
+    let mut rest = rest.trim_start();
+    let mut if_exists = false;
+    if let Some(next) = consume_keywords(rest, &["if", "exists"]) {
+        if_exists = true;
+        rest = next.trim_start();
+    }
+    let ((schema_name, function_name), rest_after_name) = parse_qualified_sql_name(rest)?;
+    let rest_after_name = rest_after_name.trim_start();
+    let (arg_sql, suffix) = take_parenthesized_segment(rest_after_name)?;
+    let suffix = suffix.trim();
+    let cascade = if suffix.is_empty() || keyword_at_start(suffix, "restrict") {
+        false
+    } else if keyword_at_start(suffix, "cascade") {
+        true
+    } else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "CASCADE, RESTRICT, or end of statement",
+            actual: suffix.into(),
+        });
+    };
+    let arg_types = split_comma_separated_sql(&arg_sql)?
+        .into_iter()
+        .filter(|item| !item.is_empty())
+        .map(str::to_string)
+        .collect();
+    Ok(DropFunctionStatement {
+        if_exists,
+        schema_name,
+        function_name,
+        arg_types,
+        cascade,
     })
 }
 
