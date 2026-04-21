@@ -9636,6 +9636,337 @@ fn foreign_keys_apply_referential_actions() {
 }
 
 #[test]
+fn foreign_keys_on_update_set_default_rejects_missing_default_key() {
+    let base = temp_dir("foreign_keys_update_set_default_missing_key");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table pktable (
+            ptest1 int4,
+            ptest2 int4,
+            ptest3 int4,
+            ptest4 text,
+            primary key (ptest1, ptest2, ptest3)
+        )",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table fktable (
+            ftest1 int4 default 0,
+            ftest2 int4 default -1,
+            ftest3 int4 default -2,
+            ftest4 int4,
+            constraint constrname3 foreign key (ftest1, ftest2, ftest3)
+                references pktable
+                on delete set null
+                on update set default
+        )",
+    )
+    .unwrap();
+
+    db.execute(
+        1,
+        "insert into pktable values
+            (1, 2, 3, 'test1'),
+            (1, 3, 3, 'test2'),
+            (2, 3, 4, 'test3'),
+            (2, 4, 5, 'test4'),
+            (2, -1, 5, 'test5')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into fktable values
+            (1, 2, 3, 1),
+            (2, 3, 4, 1),
+            (2, 4, 5, 1),
+            (null, 2, 3, 2),
+            (2, null, 3, 3),
+            (null, 2, 7, 4),
+            (null, 3, 4, 5)",
+    )
+    .unwrap();
+
+    match db.execute(1, "update pktable set ptest2 = 5 where ptest2 = 2") {
+        Err(ExecError::ForeignKeyViolation {
+            constraint, detail, ..
+        }) => {
+            assert_eq!(constraint, "constrname3");
+            assert!(detail.as_deref().is_some_and(|detail| {
+                detail.contains("Key (ftest1, ftest2, ftest3)=(0, -1, -2)")
+            }));
+        }
+        other => panic!("expected SET DEFAULT update violation, got {other:?}"),
+    }
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select ptest1, ptest2, ptest3, ptest4 from pktable order by ptest4",
+        ),
+        vec![
+            vec![
+                Value::Int32(1),
+                Value::Int32(2),
+                Value::Int32(3),
+                Value::Text("test1".into()),
+            ],
+            vec![
+                Value::Int32(1),
+                Value::Int32(3),
+                Value::Int32(3),
+                Value::Text("test2".into()),
+            ],
+            vec![
+                Value::Int32(2),
+                Value::Int32(3),
+                Value::Int32(4),
+                Value::Text("test3".into()),
+            ],
+            vec![
+                Value::Int32(2),
+                Value::Int32(4),
+                Value::Int32(5),
+                Value::Text("test4".into()),
+            ],
+            vec![
+                Value::Int32(2),
+                Value::Int32(-1),
+                Value::Int32(5),
+                Value::Text("test5".into()),
+            ],
+        ]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select ftest1, ftest2, ftest3, ftest4 from fktable order by ftest4, ftest1, ftest2, ftest3",
+        ),
+        vec![
+            vec![
+                Value::Int32(1),
+                Value::Int32(2),
+                Value::Int32(3),
+                Value::Int32(1),
+            ],
+            vec![
+                Value::Int32(2),
+                Value::Int32(3),
+                Value::Int32(4),
+                Value::Int32(1),
+            ],
+            vec![
+                Value::Int32(2),
+                Value::Int32(4),
+                Value::Int32(5),
+                Value::Int32(1),
+            ],
+            vec![
+                Value::Null,
+                Value::Int32(2),
+                Value::Int32(3),
+                Value::Int32(2)
+            ],
+            vec![
+                Value::Int32(2),
+                Value::Null,
+                Value::Int32(3),
+                Value::Int32(3)
+            ],
+            vec![
+                Value::Null,
+                Value::Int32(2),
+                Value::Int32(7),
+                Value::Int32(4)
+            ],
+            vec![
+                Value::Null,
+                Value::Int32(3),
+                Value::Int32(4),
+                Value::Int32(5)
+            ],
+        ]
+    );
+
+    db.execute(
+        1,
+        "update pktable
+            set ptest1 = 0, ptest2 = -1, ptest3 = -2
+            where ptest2 = 2",
+    )
+    .unwrap();
+    db.execute(1, "update pktable set ptest2 = 10 where ptest2 = 4")
+        .unwrap();
+    db.execute(
+        1,
+        "update pktable set ptest2 = 2 where ptest2 = 3 and ptest1 = 1",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select ptest1, ptest2, ptest3, ptest4 from pktable order by ptest4",
+        ),
+        vec![
+            vec![
+                Value::Int32(0),
+                Value::Int32(-1),
+                Value::Int32(-2),
+                Value::Text("test1".into()),
+            ],
+            vec![
+                Value::Int32(1),
+                Value::Int32(2),
+                Value::Int32(3),
+                Value::Text("test2".into()),
+            ],
+            vec![
+                Value::Int32(2),
+                Value::Int32(3),
+                Value::Int32(4),
+                Value::Text("test3".into()),
+            ],
+            vec![
+                Value::Int32(2),
+                Value::Int32(10),
+                Value::Int32(5),
+                Value::Text("test4".into()),
+            ],
+            vec![
+                Value::Int32(2),
+                Value::Int32(-1),
+                Value::Int32(5),
+                Value::Text("test5".into()),
+            ],
+        ]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select ftest1, ftest2, ftest3, ftest4 from fktable order by ftest4, ftest1, ftest2, ftest3",
+        ),
+        vec![
+            vec![
+                Value::Int32(0),
+                Value::Int32(-1),
+                Value::Int32(-2),
+                Value::Int32(1),
+            ],
+            vec![
+                Value::Int32(0),
+                Value::Int32(-1),
+                Value::Int32(-2),
+                Value::Int32(1),
+            ],
+            vec![
+                Value::Int32(2),
+                Value::Int32(3),
+                Value::Int32(4),
+                Value::Int32(1),
+            ],
+            vec![
+                Value::Null,
+                Value::Int32(2),
+                Value::Int32(3),
+                Value::Int32(2)
+            ],
+            vec![
+                Value::Int32(2),
+                Value::Null,
+                Value::Int32(3),
+                Value::Int32(3)
+            ],
+            vec![
+                Value::Null,
+                Value::Int32(2),
+                Value::Int32(7),
+                Value::Int32(4)
+            ],
+            vec![
+                Value::Null,
+                Value::Int32(3),
+                Value::Int32(4),
+                Value::Int32(5)
+            ],
+        ]
+    );
+}
+
+#[test]
+fn foreign_keys_set_default_rechecks_existing_default_reference() {
+    let base = temp_dir("foreign_keys_set_default_recheck");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create temp table defp (f1 int4 primary key)")
+        .unwrap();
+    db.execute(
+        1,
+        "create temp table defc (f1 int4 default 0 references defp on delete set default)",
+    )
+    .unwrap();
+    db.execute(1, "insert into defp values (0), (1), (2)")
+        .unwrap();
+    db.execute(1, "insert into defc values (2)").unwrap();
+
+    db.execute(1, "delete from defp where f1 = 2").unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select f1 from defc"),
+        vec![vec![Value::Int32(0)]]
+    );
+
+    match db.execute(1, "delete from defp where f1 = 0") {
+        Err(ExecError::ForeignKeyViolation {
+            constraint, detail, ..
+        }) => {
+            assert_eq!(constraint, "defc_f1_fkey");
+            assert!(
+                detail
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("Key (f1)=(0)"))
+            );
+        }
+        other => panic!("expected delete-default recheck violation, got {other:?}"),
+    }
+    assert_eq!(
+        query_rows(&db, 1, "select f1 from defc"),
+        vec![vec![Value::Int32(0)]]
+    );
+
+    db.execute(1, "alter table defc alter column f1 set default 1")
+        .unwrap();
+    db.execute(1, "delete from defp where f1 = 0").unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select f1 from defc"),
+        vec![vec![Value::Int32(1)]]
+    );
+
+    match db.execute(1, "delete from defp where f1 = 1") {
+        Err(ExecError::ForeignKeyViolation {
+            constraint, detail, ..
+        }) => {
+            assert_eq!(constraint, "defc_f1_fkey");
+            assert!(
+                detail
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("Key (f1)=(1)"))
+            );
+        }
+        other => panic!("expected updated-default recheck violation, got {other:?}"),
+    }
+    assert_eq!(
+        query_rows(&db, 1, "select f1 from defc"),
+        vec![vec![Value::Int32(1)]]
+    );
+}
+
+#[test]
 fn alter_table_add_foreign_key_supports_delete_set_column_lists() {
     let base = temp_dir("alter_table_add_fk_delete_set_columns");
     let db = Database::open(&base, 16).unwrap();
