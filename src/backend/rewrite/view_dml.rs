@@ -3,17 +3,19 @@ use std::collections::BTreeSet;
 use crate::backend::parser::{
     BoundRelation, CatalogLookup, ParseError, rewrite_local_vars_for_output_exprs,
 };
-use crate::include::nodes::parsenodes::{JoinTreeNode, Query, RangeTblEntryKind};
+use crate::include::nodes::parsenodes::{JoinTreeNode, Query, RangeTblEntryKind, SelectStatement};
 use crate::include::nodes::primnodes::{Expr, RelationDesc, attrno_index, is_system_attr};
 
-use super::views::load_view_return_query;
+use super::views::{load_view_return_query, load_view_return_select};
 
+const DISTINCT_DETAIL: &str = "Views containing DISTINCT are not automatically updatable.";
 const SINGLE_RELATION_DETAIL: &str =
     "Views that do not select from a single table or view are not automatically updatable.";
 const GROUP_BY_DETAIL: &str = "Views containing GROUP BY are not automatically updatable.";
 const HAVING_DETAIL: &str = "Views containing HAVING are not automatically updatable.";
 const SET_OPERATION_DETAIL: &str =
     "Views containing UNION, INTERSECT, or EXCEPT are not automatically updatable.";
+const WITH_DETAIL: &str = "Views containing WITH are not automatically updatable.";
 const LIMIT_OFFSET_DETAIL: &str =
     "Views containing LIMIT or OFFSET are not automatically updatable.";
 const AGGREGATE_DETAIL: &str =
@@ -90,9 +92,11 @@ pub(crate) fn resolve_auto_updatable_view_target(
         )));
     }
 
+    let select = load_view_return_select(relation_oid, None, catalog, expanded_views)
+        .map_err(map_parse_error)?;
     let query = load_view_return_query(relation_oid, relation_desc, None, catalog, expanded_views)
         .map_err(map_parse_error)?;
-    let analyzed = analyze_simple_view_query(&query, relation_desc)?;
+    let analyzed = analyze_simple_view_query(&select, &query, relation_desc)?;
     let Some(base_relation) = catalog
         .lookup_relation_by_oid(analyzed.base_relation_oid)
         .or_else(|| catalog.relation_by_oid(analyzed.base_relation_oid))
@@ -173,17 +177,24 @@ struct SimpleViewAnalysis {
 }
 
 fn analyze_simple_view_query(
+    raw_select: &SelectStatement,
     query: &Query,
     relation_desc: &RelationDesc,
 ) -> Result<SimpleViewAnalysis, ViewDmlRewriteError> {
+    if raw_select.distinct {
+        return Err(unsupported(DISTINCT_DETAIL));
+    }
     if !query.group_by.is_empty() {
         return Err(unsupported(GROUP_BY_DETAIL));
     }
     if query.having_qual.is_some() {
         return Err(unsupported(HAVING_DETAIL));
     }
-    if query.set_operation.is_some() || query.recursive_union.is_some() {
+    if raw_select.set_operation.is_some() || query.recursive_union.is_some() {
         return Err(unsupported(SET_OPERATION_DETAIL));
+    }
+    if !raw_select.with.is_empty() {
+        return Err(unsupported(WITH_DETAIL));
     }
     if query.limit_count.is_some() || query.limit_offset != 0 {
         return Err(unsupported(LIMIT_OFFSET_DETAIL));

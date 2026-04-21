@@ -1251,8 +1251,9 @@ fn auto_view_prepare_error(
         message: format!("cannot {} view \"{}\"", event_verb(event), relation_name),
         detail: Some(err.detail()),
         hint: Some(format!(
-            "To enable {} the view, provide an unconditional ON {} DO INSTEAD rule.",
+            "To enable {} the view, provide an INSTEAD OF {} trigger or an unconditional ON {} DO INSTEAD rule.",
             event_gerund(event),
+            event_name(event),
             event_name(event),
         )),
         sqlstate: "55000",
