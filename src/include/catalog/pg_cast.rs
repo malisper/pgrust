@@ -101,6 +101,7 @@ pub fn bootstrap_pg_cast_rows() -> Vec<PgCastRow> {
             'i',
             'f',
         ),
+        cast_row(4106, INT4_TYPE_OID, OID_TYPE_OID, 0, 'i', 'b'),
         cast_row(4106_0, OID_TYPE_OID, REGROLE_TYPE_OID, 0, 'i', 'b'),
         cast_row(4106_0_1, REGROLE_TYPE_OID, OID_TYPE_OID, 0, 'a', 'b'),
         cast_row(4106_1, OID_TYPE_OID, REGPROCEDURE_TYPE_OID, 0, 'i', 'b'),
@@ -190,6 +191,7 @@ fn text_input_cast_rows(first_oid: u32) -> Vec<PgCastRow> {
         TSQUERY_TYPE_OID,
         REGCONFIG_TYPE_OID,
         REGDICTIONARY_TYPE_OID,
+        REGROLE_TYPE_OID,
         REGPROCEDURE_TYPE_OID,
         NAME_TYPE_OID,
         INTERNAL_CHAR_TYPE_OID,
@@ -354,6 +356,32 @@ mod tests {
                 && row.casttarget == VARCHAR_ARRAY_TYPE_OID
                 && row.castcontext == 'e'
                 && row.castmethod == 'i'
+        }));
+    }
+
+    #[test]
+    fn bootstrap_pg_cast_rows_preserve_core_oid_and_reg_casts() {
+        let rows = bootstrap_pg_cast_rows();
+        assert!(rows.iter().any(|row| {
+            row.castsource == INT4_TYPE_OID
+                && row.casttarget == OID_TYPE_OID
+                && row.castfunc == 0
+                && row.castcontext == 'i'
+                && row.castmethod == 'b'
+        }));
+        assert!(rows.iter().any(|row| {
+            row.castsource == OID_TYPE_OID
+                && row.casttarget == REGROLE_TYPE_OID
+                && row.castfunc == 0
+                && row.castcontext == 'i'
+                && row.castmethod == 'b'
+        }));
+        assert!(rows.iter().any(|row| {
+            row.castsource == OID_TYPE_OID
+                && row.casttarget == REGPROCEDURE_TYPE_OID
+                && row.castfunc == 0
+                && row.castcontext == 'i'
+                && row.castmethod == 'b'
         }));
     }
 }

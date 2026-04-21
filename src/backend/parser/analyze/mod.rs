@@ -79,11 +79,11 @@ pub use on_conflict::{BoundOnConflictAction, BoundOnConflictClause};
 pub use paths::BoundModifyRowSource;
 use paths::bind_order_by_items;
 pub(crate) use query::analyze_select_query_with_outer;
+pub(crate) use query::rewrite_local_vars_for_output_exprs;
 use query::{
     AnalyzedFrom, analyze_values_query_with_outer, identity_target_list, normalize_target_list,
     query_from_from_projection,
 };
-pub(crate) use query::rewrite_local_vars_for_output_exprs;
 pub(crate) use rules::{
     BoundRuleAction, bind_rule_action_statement, bind_rule_qual, validate_rule_definition,
 };

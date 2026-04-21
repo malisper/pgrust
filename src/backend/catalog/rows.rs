@@ -9,9 +9,8 @@ use crate::include::catalog::{
     PgConstraintRow, PgDatabaseRow, PgDependRow, PgDescriptionRow, PgForeignDataWrapperRow,
     PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow,
     PgOpfamilyRow, PgPolicyRow, PgProcRow, PgRewriteRow, PgStatisticRow, PgTablespaceRow,
-    PgTriggerRow, PgTsConfigMapRow,
-    PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
-    composite_array_type_row, composite_type_row,
+    PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow,
+    PgTypeRow, composite_array_type_row, composite_type_row,
 };
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -331,8 +330,12 @@ pub(crate) fn physical_catalog_rows_for_catalog_entry(
             .filter(|row| row.tgrelid == entry.relation_oid)
             .cloned(),
     );
-    rows.policies
-        .extend(catalog.policy_rows_for_relation(entry.relation_oid).iter().cloned());
+    rows.policies.extend(
+        catalog
+            .policy_rows_for_relation(entry.relation_oid)
+            .iter()
+            .cloned(),
+    );
     rows.inherits.extend(
         catalog
             .inherit_rows()

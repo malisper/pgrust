@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::backend::utils::misc::notices::push_notice;
 
-use super::create_table::{lower_create_table, LoweredCreateTable};
+use super::create_table::{LoweredCreateTable, lower_create_table};
 use super::{
     BoundRelation, CatalogLookup, ColumnConstraint, ConstraintAttributes, CreateTableElement,
     CreateTableStatement, ParseError, RawTypeName, TableConstraint, TablePersistence,

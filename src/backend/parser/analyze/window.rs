@@ -79,7 +79,11 @@ pub(super) fn register_named_window_specs(
 ) -> Result<(), ParseError> {
     let mut state = state.borrow_mut();
     for clause in clauses {
-        if state.named_specs.iter().any(|existing| existing.name == clause.name) {
+        if state
+            .named_specs
+            .iter()
+            .any(|existing| existing.name == clause.name)
+        {
             return Err(ParseError::WindowingError(format!(
                 "window \"{}\" is already defined",
                 clause.name
@@ -257,7 +261,9 @@ pub(super) fn bind_window_spec(
             .iter()
             .find(|clause| clause.name == *name)
             .map(|clause| clause.spec.clone())
-            .ok_or_else(|| ParseError::WindowingError(format!("window \"{name}\" does not exist")))?;
+            .ok_or_else(|| {
+                ParseError::WindowingError(format!("window \"{name}\" does not exist"))
+            })?;
         return bind_window_spec(&named, bind_expr);
     }
     let partition_by = raw_spec

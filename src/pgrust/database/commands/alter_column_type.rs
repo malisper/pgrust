@@ -146,9 +146,11 @@ fn collect_alter_column_type_targets(
         let target_relation = if *relation_oid == relation.relation_oid {
             relation.clone()
         } else {
-            catalog.lookup_relation_by_oid(*relation_oid).ok_or_else(|| {
-                ExecError::Parse(ParseError::UnknownTable(relation_oid.to_string()))
-            })?
+            catalog
+                .lookup_relation_by_oid(*relation_oid)
+                .ok_or_else(|| {
+                    ExecError::Parse(ParseError::UnknownTable(relation_oid.to_string()))
+                })?
         };
         if target_relation.namespace_oid == PG_CATALOG_NAMESPACE_OID {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {

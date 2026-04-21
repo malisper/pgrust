@@ -51,7 +51,11 @@ pub fn pg_class_desc() -> RelationDesc {
             column_desc("relhastriggers", SqlType::new(SqlTypeKind::Bool), false),
             column_desc("relispartition", SqlType::new(SqlTypeKind::Bool), false),
             column_desc("relrowsecurity", SqlType::new(SqlTypeKind::Bool), false),
-            column_desc("relforcerowsecurity", SqlType::new(SqlTypeKind::Bool), false),
+            column_desc(
+                "relforcerowsecurity",
+                SqlType::new(SqlTypeKind::Bool),
+                false,
+            ),
             column_desc("relnatts", SqlType::new(SqlTypeKind::Int2), false),
             column_desc("relpages", SqlType::new(SqlTypeKind::Int4), false),
             column_desc("reltuples", SqlType::new(SqlTypeKind::Float4), false),

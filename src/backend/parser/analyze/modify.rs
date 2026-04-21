@@ -343,20 +343,11 @@ fn bind_returning_targets(
     if targets.is_empty() {
         return Ok(Vec::new());
     }
-    match bind_select_targets(
-        targets,
-        scope,
-        catalog,
-        outer_scopes,
-        None,
-        local_ctes,
-    )? {
+    match bind_select_targets(targets, scope, catalog, outer_scopes, None, local_ctes)? {
         BoundSelectTargets::Plain(targets) => Ok(targets),
-        BoundSelectTargets::WithProjectSet { .. } => {
-            Err(ParseError::FeatureNotSupported(
-                "set-returning functions are not allowed in RETURNING".into(),
-            ))
-        }
+        BoundSelectTargets::WithProjectSet { .. } => Err(ParseError::FeatureNotSupported(
+            "set-returning functions are not allowed in RETURNING".into(),
+        )),
     }
 }
 
@@ -766,13 +757,15 @@ pub(crate) fn rewrite_bound_insert_auto_view_target(
     )?;
     if stmt.on_conflict.is_some() {
         return Err(ViewDmlRewriteError::DeferredFeature(
-            "INSERT ... ON CONFLICT on automatically updatable views is not supported yet."
-                .into(),
+            "INSERT ... ON CONFLICT on automatically updatable views is not supported yet.".into(),
         ));
     }
 
-    let relation_name =
-        relation_display_name(catalog, resolved.base_relation.relation_oid, &stmt.relation_name);
+    let relation_name = relation_display_name(
+        catalog,
+        resolved.base_relation.relation_oid,
+        &stmt.relation_name,
+    );
     let target_columns = stmt
         .target_columns
         .iter()
@@ -847,8 +840,11 @@ pub(crate) fn rewrite_bound_update_auto_view_target(
         catalog,
         &[],
     )?;
-    let relation_name =
-        relation_display_name(catalog, resolved.base_relation.relation_oid, &target.relation_name);
+    let relation_name = relation_display_name(
+        catalog,
+        resolved.base_relation.relation_oid,
+        &target.relation_name,
+    );
     let assignments = target
         .assignments
         .iter()
@@ -924,8 +920,11 @@ pub(crate) fn rewrite_bound_delete_auto_view_target(
         catalog,
         &[],
     )?;
-    let relation_name =
-        relation_display_name(catalog, resolved.base_relation.relation_oid, &target.relation_name);
+    let relation_name = relation_display_name(
+        catalog,
+        resolved.base_relation.relation_oid,
+        &target.relation_name,
+    );
     let predicate = and_predicates(
         target.predicate.as_ref().map(|expr| {
             rewrite_local_vars_for_output_exprs(expr.clone(), 1, &resolved.visible_output_exprs)
@@ -966,11 +965,11 @@ fn auto_view_base_children(
     relation_oids
         .into_iter()
         .map(|relation_oid| {
-            catalog
-                .relation_by_oid(relation_oid)
-                .ok_or_else(|| ViewDmlRewriteError::UnsupportedViewShape(format!(
+            catalog.relation_by_oid(relation_oid).ok_or_else(|| {
+                ViewDmlRewriteError::UnsupportedViewShape(format!(
                     "missing inherited child relation {relation_oid}"
-                )))
+                ))
+            })
         })
         .collect()
 }
@@ -1326,7 +1325,8 @@ pub(crate) fn bind_update_with_outer_scopes(
             bind_expr_with_outer_and_ctes(expr, &scope, catalog, outer_scopes, None, &local_ctes)
         })
         .transpose()?;
-    let returning = bind_returning_targets(&stmt.returning, &scope, catalog, outer_scopes, &local_ctes)?;
+    let returning =
+        bind_returning_targets(&stmt.returning, &scope, catalog, outer_scopes, &local_ctes)?;
     let assignments = stmt
         .assignments
         .iter()
@@ -1473,7 +1473,8 @@ pub(crate) fn bind_delete_with_outer_scopes(
             bind_expr_with_outer_and_ctes(expr, &scope, catalog, outer_scopes, None, &local_ctes)
         })
         .transpose()?;
-    let returning = bind_returning_targets(&stmt.returning, &scope, catalog, outer_scopes, &local_ctes)?;
+    let returning =
+        bind_returning_targets(&stmt.returning, &scope, catalog, outer_scopes, &local_ctes)?;
 
     let targets = if stmt.only {
         vec![entry.relation_oid]

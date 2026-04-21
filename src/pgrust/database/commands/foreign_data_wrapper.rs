@@ -6,8 +6,8 @@ use crate::backend::parser::{
     CommentOnForeignDataWrapperStatement, CreateForeignDataWrapperStatement,
     DropForeignDataWrapperStatement, ParseError,
 };
-use crate::pgrust::database::ddl::ensure_can_set_role;
 use crate::include::catalog::{BOOL_TYPE_OID, FDW_HANDLER_TYPE_OID, PgForeignDataWrapperRow};
+use crate::pgrust::database::ddl::ensure_can_set_role;
 
 fn normalize_foreign_data_wrapper_name(name: &str) -> Result<String, ParseError> {
     let trimmed = name.trim();
@@ -20,7 +20,9 @@ fn normalize_foreign_data_wrapper_name(name: &str) -> Result<String, ParseError>
     Ok(trimmed.trim_matches('"').to_ascii_lowercase())
 }
 
-fn format_fdw_options(options: &[crate::backend::parser::RelOption]) -> Result<Option<Vec<String>>, ExecError> {
+fn format_fdw_options(
+    options: &[crate::backend::parser::RelOption],
+) -> Result<Option<Vec<String>>, ExecError> {
     let mut names = std::collections::BTreeSet::new();
     let mut values = Vec::new();
     for option in options {
@@ -49,7 +51,9 @@ fn resolve_fdw_proc_oid(
     let row = catalog
         .proc_rows_by_name(&normalized)
         .into_iter()
-        .find(|row| row.proname.eq_ignore_ascii_case(&normalized) && row.pronargs == expected_pronargs)
+        .find(|row| {
+            row.proname.eq_ignore_ascii_case(&normalized) && row.pronargs == expected_pronargs
+        })
         .ok_or_else(|| ExecError::DetailedError {
             message: format!("function \"{}\" does not exist", name),
             detail: None,
@@ -63,7 +67,10 @@ fn resolve_fdw_proc_oid(
             "boolean"
         };
         return Err(ExecError::DetailedError {
-            message: format!("{} function {} must return {}", object_label, name, expected_name),
+            message: format!(
+                "{} function {} must return {}",
+                object_label, name, expected_name
+            ),
             detail: None,
             hint: None,
             sqlstate: "42804",
@@ -74,7 +81,9 @@ fn resolve_fdw_proc_oid(
 
 fn ensure_current_user_is_superuser(db: &Database, client_id: ClientId) -> Result<(), ExecError> {
     let auth = db.auth_state(client_id);
-    let auth_catalog = db.auth_catalog(client_id, None).map_err(map_catalog_error)?;
+    let auth_catalog = db
+        .auth_catalog(client_id, None)
+        .map_err(map_catalog_error)?;
     let is_superuser = auth_catalog
         .role_by_oid(auth.current_user_oid())
         .is_some_and(|role| role.rolsuper);
@@ -97,7 +106,9 @@ fn ensure_superuser_capability(
     ensure_current_user_is_superuser(db, client_id).map_err(|_| ExecError::DetailedError {
         message: format!("permission denied to {action} foreign-data wrapper"),
         detail: None,
-        hint: Some(format!("Must be superuser to {action} a foreign-data wrapper.")),
+        hint: Some(format!(
+            "Must be superuser to {action} a foreign-data wrapper."
+        )),
         sqlstate: "42501",
     })
 }
@@ -125,7 +136,9 @@ fn ensure_fdw_owner(
     txn_ctx: CatalogTxnContext,
 ) -> Result<(), ExecError> {
     let auth = db.auth_state(client_id);
-    let auth_catalog = db.auth_catalog(client_id, txn_ctx).map_err(map_catalog_error)?;
+    let auth_catalog = db
+        .auth_catalog(client_id, txn_ctx)
+        .map_err(map_catalog_error)?;
     if auth.has_effective_membership(owner_oid, &auth_catalog) {
         return Ok(());
     }
@@ -177,7 +190,8 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let _ = configured_search_path;
         ensure_current_user_is_superuser(self, client_id)?;
-        let normalized = normalize_foreign_data_wrapper_name(&stmt.fdw_name).map_err(ExecError::Parse)?;
+        let normalized =
+            normalize_foreign_data_wrapper_name(&stmt.fdw_name).map_err(ExecError::Parse)?;
         if lookup_foreign_data_wrapper(self, client_id, None, &normalized)?.is_some() {
             return Err(ExecError::DetailedError {
                 message: format!("foreign-data wrapper \"{}\" already exists", stmt.fdw_name),
@@ -248,7 +262,10 @@ impl Database {
         let _ = configured_search_path;
         if stmt.handler_name.is_none() && stmt.validator_name.is_none() && stmt.options.is_empty() {
             return Err(ExecError::DetailedError {
-                message: format!("foreign-data wrapper \"{}\" has no options to change", stmt.fdw_name),
+                message: format!(
+                    "foreign-data wrapper \"{}\" has no options to change",
+                    stmt.fdw_name
+                ),
                 detail: None,
                 hint: None,
                 sqlstate: "42601",
@@ -265,12 +282,16 @@ impl Database {
         ensure_fdw_owner(self, client_id, existing.fdwowner, &stmt.fdw_name, None)?;
         let catalog = self.lazy_catalog_lookup(client_id, None, None);
         let fdwhandler = match &stmt.handler_name {
-            Some(Some(name)) => resolve_fdw_proc_oid(&catalog, name, FDW_HANDLER_TYPE_OID, 0, "handler")?,
+            Some(Some(name)) => {
+                resolve_fdw_proc_oid(&catalog, name, FDW_HANDLER_TYPE_OID, 0, "handler")?
+            }
             Some(None) => 0,
             None => existing.fdwhandler,
         };
         let fdwvalidator = match &stmt.validator_name {
-            Some(Some(name)) => resolve_fdw_proc_oid(&catalog, name, BOOL_TYPE_OID, 2, "validator")?,
+            Some(Some(name)) => {
+                resolve_fdw_proc_oid(&catalog, name, BOOL_TYPE_OID, 2, "validator")?
+            }
             Some(None) => 0,
             None => existing.fdwvalidator,
         };
@@ -279,7 +300,11 @@ impl Database {
             .clone()
             .unwrap_or_default()
             .into_iter()
-            .filter_map(|option| option.split_once('=').map(|(name, value)| (name.to_string(), value.to_string())))
+            .filter_map(|option| {
+                option
+                    .split_once('=')
+                    .map(|(name, value)| (name.to_string(), value.to_string()))
+            })
             .collect::<std::collections::BTreeMap<_, _>>();
         for option in &stmt.options {
             let key = option.name.to_ascii_lowercase();
@@ -361,7 +386,14 @@ impl Database {
             .replace_foreign_data_wrapper_mvcc(&existing, replacement, &ctx)
             .map_err(map_catalog_error)?;
         catalog_effects.push(effect);
-        let result = self.finish_txn(client_id, xid, Ok(StatementResult::AffectedRows(0)), &catalog_effects, &[], &[]);
+        let result = self.finish_txn(
+            client_id,
+            xid,
+            Ok(StatementResult::AffectedRows(0)),
+            &catalog_effects,
+            &[],
+            &[],
+        );
         guard.disarm();
         result
     }
@@ -379,7 +411,9 @@ impl Database {
                 sqlstate: "42704",
             })?;
         ensure_fdw_owner(self, client_id, existing.fdwowner, &stmt.fdw_name, None)?;
-        let auth_catalog = self.auth_catalog(client_id, None).map_err(map_catalog_error)?;
+        let auth_catalog = self
+            .auth_catalog(client_id, None)
+            .map_err(map_catalog_error)?;
         let new_owner = auth_catalog
             .role_by_name(&stmt.new_owner)
             .cloned()
@@ -392,13 +426,19 @@ impl Database {
         ensure_can_set_role(self, client_id, new_owner.oid, &new_owner.rolname)?;
         if !new_owner.rolsuper {
             return Err(ExecError::DetailedError {
-                message: format!("permission denied to change owner of foreign-data wrapper {}", stmt.fdw_name),
+                message: format!(
+                    "permission denied to change owner of foreign-data wrapper {}",
+                    stmt.fdw_name
+                ),
                 detail: Some("new owner must be a superuser".into()),
                 hint: None,
                 sqlstate: "42501",
             });
         }
-        let replacement = PgForeignDataWrapperRow { fdwowner: new_owner.oid, ..existing.clone() };
+        let replacement = PgForeignDataWrapperRow {
+            fdwowner: new_owner.oid,
+            ..existing.clone()
+        };
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let ctx = CatalogWriteContext {
@@ -415,7 +455,14 @@ impl Database {
             .write()
             .replace_foreign_data_wrapper_mvcc(&existing, replacement, &ctx)
             .map_err(map_catalog_error)?;
-        let result = self.finish_txn(client_id, xid, Ok(StatementResult::AffectedRows(0)), &[effect], &[], &[]);
+        let result = self.finish_txn(
+            client_id,
+            xid,
+            Ok(StatementResult::AffectedRows(0)),
+            &[effect],
+            &[],
+            &[],
+        );
         guard.disarm();
         result
     }
@@ -433,7 +480,8 @@ impl Database {
                 sqlstate: "42704",
             })?;
         ensure_fdw_owner(self, client_id, existing.fdwowner, &stmt.fdw_name, None)?;
-        let new_name = normalize_foreign_data_wrapper_name(&stmt.new_name).map_err(ExecError::Parse)?;
+        let new_name =
+            normalize_foreign_data_wrapper_name(&stmt.new_name).map_err(ExecError::Parse)?;
         if lookup_foreign_data_wrapper(self, client_id, None, &new_name)?.is_some() {
             return Err(ExecError::DetailedError {
                 message: format!("foreign-data wrapper \"{}\" already exists", stmt.new_name),
@@ -442,7 +490,10 @@ impl Database {
                 sqlstate: "42710",
             });
         }
-        let replacement = PgForeignDataWrapperRow { fdwname: new_name, ..existing.clone() };
+        let replacement = PgForeignDataWrapperRow {
+            fdwname: new_name,
+            ..existing.clone()
+        };
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let ctx = CatalogWriteContext {
@@ -459,7 +510,14 @@ impl Database {
             .write()
             .replace_foreign_data_wrapper_mvcc(&existing, replacement, &ctx)
             .map_err(map_catalog_error)?;
-        let result = self.finish_txn(client_id, xid, Ok(StatementResult::AffectedRows(0)), &[effect], &[], &[]);
+        let result = self.finish_txn(
+            client_id,
+            xid,
+            Ok(StatementResult::AffectedRows(0)),
+            &[effect],
+            &[],
+            &[],
+        );
         guard.disarm();
         result
     }
@@ -469,7 +527,8 @@ impl Database {
         client_id: ClientId,
         stmt: &DropForeignDataWrapperStatement,
     ) -> Result<StatementResult, ExecError> {
-        let Some(existing) = lookup_foreign_data_wrapper(self, client_id, None, &stmt.fdw_name)? else {
+        let Some(existing) = lookup_foreign_data_wrapper(self, client_id, None, &stmt.fdw_name)?
+        else {
             if stmt.if_exists {
                 return Ok(StatementResult::AffectedRows(0));
             }
@@ -497,7 +556,14 @@ impl Database {
             .write()
             .drop_foreign_data_wrapper_mvcc(&existing, &ctx)
             .map_err(map_catalog_error)?;
-        let result = self.finish_txn(client_id, xid, Ok(StatementResult::AffectedRows(0)), &[effect], &[], &[]);
+        let result = self.finish_txn(
+            client_id,
+            xid,
+            Ok(StatementResult::AffectedRows(0)),
+            &[effect],
+            &[],
+            &[],
+        );
         guard.disarm();
         result
     }
@@ -531,7 +597,14 @@ impl Database {
             .write()
             .comment_foreign_data_wrapper_mvcc(existing.oid, stmt.comment.as_deref(), &ctx)
             .map_err(map_catalog_error)?;
-        let result = self.finish_txn(client_id, xid, Ok(StatementResult::AffectedRows(0)), &[effect], &[], &[]);
+        let result = self.finish_txn(
+            client_id,
+            xid,
+            Ok(StatementResult::AffectedRows(0)),
+            &[effect],
+            &[],
+            &[],
+        );
         guard.disarm();
         result
     }

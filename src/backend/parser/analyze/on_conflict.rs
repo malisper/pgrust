@@ -1,10 +1,8 @@
 use super::query::rewrite_local_vars_for_output_exprs;
 use super::*;
 use crate::include::catalog::BTREE_AM_OID;
+use crate::include::nodes::parsenodes::{OnConflictAction, OnConflictClause, OnConflictTarget};
 use crate::include::nodes::primnodes::{BoolExprType, OpExprKind};
-use crate::include::nodes::parsenodes::{
-    OnConflictAction, OnConflictClause, OnConflictTarget,
-};
 use crate::include::nodes::primnodes::{INNER_VAR, OUTER_VAR, Var, user_attrno};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,14 +126,9 @@ fn resolve_arbiter_indexes(
             let requested_predicate = spec
                 .predicate
                 .as_ref()
-                .map(|predicate| bind_expr_with_outer_and_ctes(
-                    predicate,
-                    &scope,
-                    catalog,
-                    &[],
-                    None,
-                    &[],
-                ))
+                .map(|predicate| {
+                    bind_expr_with_outer_and_ctes(predicate, &scope, catalog, &[], None, &[])
+                })
                 .transpose()?;
             let matches = inferable_unique_indexes(&catalog.index_relations_for_heap(relation_oid))
                 .into_iter()
@@ -278,16 +271,18 @@ fn index_matches_inference(
     if requested.is_empty() || indexed_elements.is_empty() {
         return Ok(false);
     }
-    if !requested
-        .iter()
-        .all(|element| indexed_elements.iter().any(|candidate| inference_element_matches(element, candidate)))
-    {
+    if !requested.iter().all(|element| {
+        indexed_elements
+            .iter()
+            .any(|candidate| inference_element_matches(element, candidate))
+    }) {
         return Ok(false);
     }
-    if !indexed_elements
-        .iter()
-        .all(|candidate| requested.iter().any(|element| inference_element_matches(element, candidate)))
-    {
+    if !indexed_elements.iter().all(|candidate| {
+        requested
+            .iter()
+            .any(|element| inference_element_matches(element, candidate))
+    }) {
         return Ok(false);
     }
     index_predicate_matches(index, requested_predicate, relation_name, desc, catalog)
@@ -313,20 +308,23 @@ fn index_key_elements(
                 catalog,
             )?
         } else {
-            let expr = index
-                .index_exprs
-                .get(expr_index)
-                .cloned()
-                .ok_or_else(|| ParseError::UnexpectedToken {
+            let expr = index.index_exprs.get(expr_index).cloned().ok_or_else(|| {
+                ParseError::UnexpectedToken {
                     expected: "bound index expression",
                     actual: "index expression metadata mismatch".into(),
-                })?;
+                }
+            })?;
             expr_index += 1;
             expr
         };
         elements.push(BoundInferenceElement {
             expr,
-            opclass_oid: index.index_meta.indclass.get(position).copied().filter(|oid| *oid != 0),
+            opclass_oid: index
+                .index_meta
+                .indclass
+                .get(position)
+                .copied()
+                .filter(|oid| *oid != 0),
             collation_oid: index
                 .index_meta
                 .indcollation

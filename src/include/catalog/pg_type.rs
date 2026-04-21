@@ -22,8 +22,7 @@ use crate::include::catalog::{
     PG_PROC_RELATION_OID, PG_PROC_ROWTYPE_OID, PG_TYPE_RELATION_OID, PG_TYPE_ROWTYPE_OID,
     POINT_TYPE_OID, POLYGON_TYPE_OID, RECORD_ARRAY_TYPE_OID, RECORD_TYPE_OID,
     REGCONFIG_ARRAY_TYPE_OID, REGCONFIG_TYPE_OID, REGDICTIONARY_ARRAY_TYPE_OID,
-    REGDICTIONARY_TYPE_OID, REGPROCEDURE_ARRAY_TYPE_OID, REGPROCEDURE_TYPE_OID,
-    REGROLE_TYPE_OID,
+    REGDICTIONARY_TYPE_OID, REGPROCEDURE_ARRAY_TYPE_OID, REGPROCEDURE_TYPE_OID, REGROLE_TYPE_OID,
     TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TID_ARRAY_TYPE_OID, TID_TYPE_OID, TIME_ARRAY_TYPE_OID,
     TIME_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_ARRAY_TYPE_OID,
     TIMESTAMPTZ_TYPE_OID, TIMETZ_ARRAY_TYPE_OID, TIMETZ_TYPE_OID, TRIGGER_TYPE_OID,
@@ -156,7 +155,11 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
             AttributeAlign::Int,
         ),
         builtin_type_row("oid", OID_TYPE_OID, SqlType::new(SqlTypeKind::Oid)),
-        builtin_type_row("regrole", REGROLE_TYPE_OID, SqlType::new(SqlTypeKind::RegRole)),
+        builtin_type_row(
+            "regrole",
+            REGROLE_TYPE_OID,
+            SqlType::new(SqlTypeKind::RegRole),
+        ),
         builtin_type_row(
             "regprocedure",
             REGPROCEDURE_TYPE_OID,

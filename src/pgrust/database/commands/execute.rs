@@ -510,8 +510,9 @@ impl Database {
                     comment_stmt,
                     configured_search_path,
                 ),
-            Statement::CommentOnForeignDataWrapper(ref comment_stmt) => self
-                .execute_comment_on_foreign_data_wrapper_stmt(client_id, comment_stmt),
+            Statement::CommentOnForeignDataWrapper(ref comment_stmt) => {
+                self.execute_comment_on_foreign_data_wrapper_stmt(client_id, comment_stmt)
+            }
             Statement::CreateForeignDataWrapper(ref create_stmt) => self
                 .execute_create_foreign_data_wrapper_stmt_with_search_path(
                     client_id,
@@ -524,10 +525,12 @@ impl Database {
                     alter_stmt,
                     configured_search_path,
                 ),
-            Statement::AlterForeignDataWrapperOwner(ref alter_stmt) => self
-                .execute_alter_foreign_data_wrapper_owner_stmt(client_id, alter_stmt),
-            Statement::AlterForeignDataWrapperRename(ref alter_stmt) => self
-                .execute_alter_foreign_data_wrapper_rename_stmt(client_id, alter_stmt),
+            Statement::AlterForeignDataWrapperOwner(ref alter_stmt) => {
+                self.execute_alter_foreign_data_wrapper_owner_stmt(client_id, alter_stmt)
+            }
+            Statement::AlterForeignDataWrapperRename(ref alter_stmt) => {
+                self.execute_alter_foreign_data_wrapper_rename_stmt(client_id, alter_stmt)
+            }
             Statement::DropForeignDataWrapper(ref drop_stmt) => {
                 self.execute_drop_foreign_data_wrapper_stmt(client_id, drop_stmt)
             }
@@ -948,12 +951,11 @@ impl Database {
                     drop_stmt,
                     configured_search_path,
                 ),
-            Statement::DropPolicy(ref drop_stmt) => self
-                .execute_drop_policy_stmt_with_search_path(
-                    client_id,
-                    drop_stmt,
-                    configured_search_path,
-                ),
+            Statement::DropPolicy(ref drop_stmt) => self.execute_drop_policy_stmt_with_search_path(
+                client_id,
+                drop_stmt,
+                configured_search_path,
+            ),
             Statement::DropType(ref drop_stmt) => self.execute_drop_type_stmt_with_search_path(
                 client_id,
                 drop_stmt,

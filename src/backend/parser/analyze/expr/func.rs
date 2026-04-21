@@ -2512,11 +2512,13 @@ pub(super) fn bind_scalar_function_call(
                 coerce_unknown_string_literal_type(&args[0], raw_arg_type, target_type);
             Ok(build_func(
                 func_variadic,
-                vec![if resolved_arg_type == target_type && raw_arg_type != target_type {
-                    coerce_bound_expr(bound_args[0].clone(), raw_arg_type, target_type)
-                } else {
-                    bound_args[0].clone()
-                }],
+                vec![
+                    if resolved_arg_type == target_type && raw_arg_type != target_type {
+                        coerce_bound_expr(bound_args[0].clone(), raw_arg_type, target_type)
+                    } else {
+                        bound_args[0].clone()
+                    },
+                ],
             ))
         }
         BuiltinScalarFunction::RangeConstructor

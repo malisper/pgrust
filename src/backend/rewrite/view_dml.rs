@@ -10,18 +10,15 @@ use super::views::load_view_return_query;
 
 const SINGLE_RELATION_DETAIL: &str =
     "Views that do not select from a single table or view are not automatically updatable.";
-const GROUP_BY_DETAIL: &str =
-    "Views containing GROUP BY are not automatically updatable.";
-const HAVING_DETAIL: &str =
-    "Views containing HAVING are not automatically updatable.";
+const GROUP_BY_DETAIL: &str = "Views containing GROUP BY are not automatically updatable.";
+const HAVING_DETAIL: &str = "Views containing HAVING are not automatically updatable.";
 const SET_OPERATION_DETAIL: &str =
     "Views containing UNION, INTERSECT, or EXCEPT are not automatically updatable.";
 const LIMIT_OFFSET_DETAIL: &str =
     "Views containing LIMIT or OFFSET are not automatically updatable.";
 const AGGREGATE_DETAIL: &str =
     "Views that return aggregate functions are not automatically updatable.";
-const WINDOW_DETAIL: &str =
-    "Views that return window functions are not automatically updatable.";
+const WINDOW_DETAIL: &str = "Views that return window functions are not automatically updatable.";
 const PROJECT_SET_DETAIL: &str =
     "Views that return set-returning functions are not automatically updatable.";
 const TARGET_LIST_DETAIL: &str =
@@ -93,9 +90,8 @@ pub(crate) fn resolve_auto_updatable_view_target(
         )));
     }
 
-    let query =
-        load_view_return_query(relation_oid, relation_desc, None, catalog, expanded_views)
-            .map_err(map_parse_error)?;
+    let query = load_view_return_query(relation_oid, relation_desc, None, catalog, expanded_views)
+        .map_err(map_parse_error)?;
     let analyzed = analyze_simple_view_query(&query, relation_desc)?;
     let Some(base_relation) = catalog
         .lookup_relation_by_oid(analyzed.base_relation_oid)
@@ -135,24 +131,26 @@ pub(crate) fn resolve_auto_updatable_view_target(
         .output_exprs
         .into_iter()
         .map(|expr| {
-            rewrite_local_vars_for_output_exprs(expr, analyzed.base_rtindex, &nested.visible_output_exprs)
+            rewrite_local_vars_for_output_exprs(
+                expr,
+                analyzed.base_rtindex,
+                &nested.visible_output_exprs,
+            )
         })
         .collect::<Vec<_>>();
     let local_predicate = query.where_qual.map(|expr| {
-        rewrite_local_vars_for_output_exprs(expr, analyzed.base_rtindex, &nested.visible_output_exprs)
+        rewrite_local_vars_for_output_exprs(
+            expr,
+            analyzed.base_rtindex,
+            &nested.visible_output_exprs,
+        )
     });
     let combined_predicate = and_predicates(local_predicate, nested.combined_predicate);
     let updatable_column_map = analyzed
         .updatable_column_map
         .into_iter()
         .map(|column| {
-            column.and_then(|index| {
-                nested
-                    .updatable_column_map
-                    .get(index)
-                    .copied()
-                    .flatten()
-            })
+            column.and_then(|index| nested.updatable_column_map.get(index).copied().flatten())
         })
         .collect();
 
@@ -229,10 +227,7 @@ fn analyze_simple_view_query(
         let Expr::Var(var) = &target.expr else {
             return Err(unsupported(TARGET_LIST_DETAIL));
         };
-        if var.varlevelsup != 0
-            || var.varno != *base_rtindex
-            || is_system_attr(var.varattno)
-        {
+        if var.varlevelsup != 0 || var.varno != *base_rtindex || is_system_attr(var.varattno) {
             return Err(unsupported(TARGET_LIST_DETAIL));
         }
         let Some(column_index) = attrno_index(var.varattno) else {
@@ -267,7 +262,10 @@ fn expr_contains_sublink(expr: &Expr) -> bool {
         Expr::Func(func) => func.args.iter().any(expr_contains_sublink),
         Expr::Aggref(aggref) => {
             aggref.args.iter().any(expr_contains_sublink)
-                || aggref.aggorder.iter().any(|item| expr_contains_sublink(&item.expr))
+                || aggref
+                    .aggorder
+                    .iter()
+                    .any(|item| expr_contains_sublink(&item.expr))
                 || aggref.aggfilter.as_ref().is_some_and(expr_contains_sublink)
         }
         Expr::WindowFunc(window) => window.args.iter().any(expr_contains_sublink),
@@ -289,7 +287,9 @@ fn expr_contains_sublink(expr: &Expr) -> bool {
         } => {
             expr_contains_sublink(expr)
                 || expr_contains_sublink(pattern)
-                || escape.as_ref().is_some_and(|expr| expr_contains_sublink(expr))
+                || escape
+                    .as_ref()
+                    .is_some_and(|expr| expr_contains_sublink(expr))
         }
         Expr::IsNull(inner) | Expr::IsNotNull(inner) => expr_contains_sublink(inner),
         Expr::IsDistinctFrom(left, right)
@@ -308,7 +308,10 @@ fn expr_contains_sublink(expr: &Expr) -> bool {
                 })
         }
         Expr::Case(case_expr) => {
-            case_expr.arg.as_ref().is_some_and(|expr| expr_contains_sublink(expr))
+            case_expr
+                .arg
+                .as_ref()
+                .is_some_and(|expr| expr_contains_sublink(expr))
                 || case_expr.args.iter().any(|arm| {
                     expr_contains_sublink(&arm.expr) || expr_contains_sublink(&arm.result)
                 })
@@ -330,11 +333,7 @@ fn expr_contains_sublink(expr: &Expr) -> bool {
     }
 }
 
-fn has_user_dml_rules(
-    relation_oid: u32,
-    event: ViewDmlEvent,
-    catalog: &dyn CatalogLookup,
-) -> bool {
+fn has_user_dml_rules(relation_oid: u32, event: ViewDmlEvent, catalog: &dyn CatalogLookup) -> bool {
     catalog
         .rewrite_rows_for_relation(relation_oid)
         .into_iter()

@@ -46,11 +46,7 @@ impl Database {
         let parent = lookup_heap_relation_for_ddl(&catalog, &alter_stmt.parent_name)?;
 
         let mut requests = BTreeMap::new();
-        add_lock_request(
-            &mut requests,
-            relation.rel,
-            TableLockMode::AccessExclusive,
-        );
+        add_lock_request(&mut requests, relation.rel, TableLockMode::AccessExclusive);
         add_lock_request(&mut requests, parent.rel, TableLockMode::AccessShare);
         let requests = requests.into_iter().collect::<Vec<_>>();
         lock_table_requests_interruptible(
@@ -130,11 +126,7 @@ impl Database {
         let (new_child_entry, effect) = self
             .catalog
             .write()
-            .drop_relation_inheritance_parent_mvcc(
-                relation.relation_oid,
-                parent.relation_oid,
-                &ctx,
-            )
+            .drop_relation_inheritance_parent_mvcc(relation.relation_oid, parent.relation_oid, &ctx)
             .map_err(map_catalog_error)?;
         if relation.relpersistence == 't' {
             self.replace_temp_entry_desc(client_id, relation.relation_oid, new_child_entry.desc)?;

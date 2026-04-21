@@ -1,7 +1,5 @@
 use super::super::*;
-use crate::backend::parser::{
-    AlterTableRowSecurityAction, AlterTableSetRowSecurityStatement,
-};
+use crate::backend::parser::{AlterTableRowSecurityAction, AlterTableSetRowSecurityStatement};
 use crate::pgrust::database::ddl::{ensure_relation_owner, lookup_heap_relation_for_alter_table};
 
 impl Database {
@@ -30,14 +28,15 @@ impl Database {
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let mut catalog_effects = Vec::new();
-        let result = self.execute_alter_table_set_row_security_stmt_in_transaction_with_search_path(
-            client_id,
-            alter_stmt,
-            xid,
-            0,
-            configured_search_path,
-            &mut catalog_effects,
-        );
+        let result = self
+            .execute_alter_table_set_row_security_stmt_in_transaction_with_search_path(
+                client_id,
+                alter_stmt,
+                xid,
+                0,
+                configured_search_path,
+                &mut catalog_effects,
+            );
         let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
         guard.disarm();
         self.table_locks.unlock_table(relation.rel, client_id);

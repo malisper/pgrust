@@ -1,8 +1,8 @@
 use super::expr_json::{eval_json_record_set_returning_function, eval_json_table_function};
 use super::pg_regex::{eval_regexp_matches_rows, eval_regexp_split_to_table_rows};
 use super::{ExecError, ExecutorContext, Expr, SetReturningCall, TupleSlot, Value, eval_expr};
-use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::backend::parser::SqlTypeKind;
+use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::include::nodes::datum::{NumericValue, RecordValue};
 use crate::pl::plpgsql::execute_user_defined_set_returning_function;
 
@@ -76,9 +76,10 @@ pub(crate) fn eval_project_set_returning_call(
         .map(|mut row| {
             Value::materialize_all(&mut row.tts_values);
             match (column_index, record_descriptor.as_ref()) {
-                (0, Some(descriptor)) => {
-                    Value::Record(RecordValue::from_descriptor(descriptor.clone(), row.tts_values))
-                }
+                (0, Some(descriptor)) => Value::Record(RecordValue::from_descriptor(
+                    descriptor.clone(),
+                    row.tts_values,
+                )),
                 (0, None) => row.tts_values.into_iter().next().unwrap_or(Value::Null),
                 (index, _) => row
                     .tts_values

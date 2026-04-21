@@ -11,9 +11,8 @@ use crate::include::catalog::{
     PgConstraintRow, PgDatabaseRow, PgDependRow, PgDescriptionRow, PgForeignDataWrapperRow,
     PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow,
     PgOpfamilyRow, PgPolicyRow, PgProcRow, PgRewriteRow, PgStatisticRow, PgTablespaceRow,
-    PgTriggerRow, PgTsConfigMapRow,
-    PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
-    bootstrap_composite_type_rows, builtin_type_rows,
+    PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow,
+    PgTypeRow, bootstrap_composite_type_rows, builtin_type_rows,
 };
 use crate::include::nodes::datum::{ArrayValue, Value};
 
@@ -322,8 +321,10 @@ pub(crate) fn pg_policy_row_from_values(values: Vec<Value>) -> Result<PgPolicyRo
         oid: expect_oid(&values[0])?,
         polname: expect_text(&values[1])?,
         polrelid: expect_oid(&values[2])?,
-        polcmd: crate::include::catalog::PolicyCommand::from_char(expect_char(&values[3], "polcmd")?)
-            .ok_or(CatalogError::Corrupt("expected recognized policy command"))?,
+        polcmd: crate::include::catalog::PolicyCommand::from_char(expect_char(
+            &values[3], "polcmd",
+        )?)
+        .ok_or(CatalogError::Corrupt("expected recognized policy command"))?,
         polpermissive: expect_bool(&values[4])?,
         polroles: nullable_oid_array(&values[5])?
             .ok_or(CatalogError::Corrupt("expected polroles array"))?,
@@ -1640,8 +1641,13 @@ fn int16_array_value(values: Vec<i16>) -> ArrayValue {
 }
 
 fn text_array_value(values: Vec<String>) -> ArrayValue {
-    ArrayValue::from_1d(values.into_iter().map(|value| Value::Text(value.into())).collect())
-        .with_element_type_oid(crate::include::catalog::TEXT_TYPE_OID)
+    ArrayValue::from_1d(
+        values
+            .into_iter()
+            .map(|value| Value::Text(value.into()))
+            .collect(),
+    )
+    .with_element_type_oid(crate::include::catalog::TEXT_TYPE_OID)
 }
 
 fn nullable_text_value(value: Option<String>) -> Value {

@@ -59,6 +59,18 @@ fn lower_special_cast(expr: &Expr, from: SqlType, to: SqlType) -> Option<Expr> {
             vec![expr.clone()],
         ));
     }
+    if matches!(from.element_type().kind, SqlTypeKind::RegRole)
+        && matches!(to.element_type().kind, SqlTypeKind::Text)
+        && !from.is_array
+        && !to.is_array
+    {
+        return Some(Expr::builtin_func(
+            BuiltinScalarFunction::RegRoleToText,
+            Some(SqlType::new(SqlTypeKind::Text)),
+            false,
+            vec![expr.clone()],
+        ));
+    }
     None
 }
 
@@ -90,7 +102,7 @@ pub(super) fn resolve_numeric_binary_type(
     if matches!(left.kind, Int8) || matches!(right.kind, Int8) {
         return Ok(SqlType::new(Int8));
     }
-    if matches!(left.kind, Int4 | Oid) || matches!(right.kind, Int4 | Oid) {
+    if matches!(left.kind, Int4 | Oid | RegRole) || matches!(right.kind, Int4 | Oid | RegRole) {
         return Ok(SqlType::new(Int4));
     }
     Ok(SqlType::new(Int2))
@@ -134,6 +146,7 @@ pub(super) fn sql_type_name(ty: SqlType) -> String {
             SqlTypeKind::Int8 => "bigint",
             SqlTypeKind::Name => "name",
             SqlTypeKind::Oid => "oid",
+            SqlTypeKind::RegRole => "regrole",
             SqlTypeKind::RegProcedure => "regprocedure",
             SqlTypeKind::Tid => "tid",
             SqlTypeKind::Xid => "xid",
@@ -195,6 +208,7 @@ pub(super) fn is_numeric_family(ty: SqlType) -> bool {
                 | SqlTypeKind::Int4
                 | SqlTypeKind::Int8
                 | SqlTypeKind::Oid
+                | SqlTypeKind::RegRole
                 | SqlTypeKind::Float4
                 | SqlTypeKind::Float8
                 | SqlTypeKind::Numeric
@@ -205,7 +219,11 @@ pub(super) fn is_integer_family(ty: SqlType) -> bool {
     !ty.is_array
         && matches!(
             ty.kind,
-            SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8 | SqlTypeKind::Oid
+            SqlTypeKind::Int2
+                | SqlTypeKind::Int4
+                | SqlTypeKind::Int8
+                | SqlTypeKind::Oid
+                | SqlTypeKind::RegRole
         )
 }
 
@@ -267,6 +285,7 @@ pub(super) fn coerce_unknown_string_literal_type(
             SqlTypeKind::TsVector => return SqlType::new(SqlTypeKind::TsVector),
             SqlTypeKind::Void => return SqlType::new(SqlTypeKind::Void),
             SqlTypeKind::FdwHandler => return SqlType::new(SqlTypeKind::FdwHandler),
+            SqlTypeKind::RegRole => return SqlType::new(SqlTypeKind::RegRole),
             SqlTypeKind::RegProcedure => return SqlType::new(SqlTypeKind::RegProcedure),
             SqlTypeKind::RegConfig => return SqlType::new(SqlTypeKind::RegConfig),
             SqlTypeKind::RegDictionary => return SqlType::new(SqlTypeKind::RegDictionary),
@@ -283,6 +302,9 @@ pub(super) fn coerce_unknown_string_literal_type(
                 SqlTypeKind::Void => return SqlType::array_of(SqlType::new(SqlTypeKind::Void)),
                 SqlTypeKind::FdwHandler => {
                     return SqlType::array_of(SqlType::new(SqlTypeKind::FdwHandler));
+                }
+                SqlTypeKind::RegRole => {
+                    return SqlType::array_of(SqlType::new(SqlTypeKind::RegRole));
                 }
                 SqlTypeKind::RegProcedure => {
                     return SqlType::array_of(SqlType::new(SqlTypeKind::RegProcedure));

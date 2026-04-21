@@ -1603,7 +1603,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("float8_accum", BuiltinScalarFunction::Float8Accum),
         ("float8_combine", BuiltinScalarFunction::Float8Combine),
         ("float8_regr_accum", BuiltinScalarFunction::Float8RegrAccum),
-        ("float8_regr_combine", BuiltinScalarFunction::Float8RegrCombine),
+        (
+            "float8_regr_combine",
+            BuiltinScalarFunction::Float8RegrCombine,
+        ),
         ("erf", BuiltinScalarFunction::Erf),
         ("erfc", BuiltinScalarFunction::Erfc),
         ("gamma", BuiltinScalarFunction::Gamma),
