@@ -740,6 +740,19 @@ fn map_auto_view_column_index(
         })
 }
 
+fn rewrite_auto_view_returning_targets(
+    targets: Vec<TargetEntry>,
+    output_exprs: &[Expr],
+) -> Vec<TargetEntry> {
+    targets
+        .into_iter()
+        .map(|target| TargetEntry {
+            expr: rewrite_local_vars_for_output_exprs(target.expr, 1, output_exprs),
+            ..target
+        })
+        .collect()
+}
+
 pub(crate) fn rewrite_bound_insert_auto_view_target(
     stmt: BoundInsertStatement,
     catalog: &dyn CatalogLookup,
@@ -811,7 +824,10 @@ pub(crate) fn rewrite_bound_insert_auto_view_target(
         target_columns,
         source: stmt.source,
         on_conflict: None,
-        returning: stmt.returning,
+        returning: rewrite_auto_view_returning_targets(
+            stmt.returning,
+            &resolved.visible_output_exprs,
+        ),
         subplans: stmt.subplans,
     })
 }
@@ -891,7 +907,10 @@ pub(crate) fn rewrite_bound_update_auto_view_target(
 
     Ok(BoundUpdateStatement {
         targets,
-        returning: stmt.returning,
+        returning: rewrite_auto_view_returning_targets(
+            stmt.returning,
+            &resolved.visible_output_exprs,
+        ),
         subplans: stmt.subplans,
     })
 }
@@ -948,7 +967,10 @@ pub(crate) fn rewrite_bound_delete_auto_view_target(
 
     Ok(BoundDeleteStatement {
         targets,
-        returning: stmt.returning,
+        returning: rewrite_auto_view_returning_targets(
+            stmt.returning,
+            &resolved.visible_output_exprs,
+        ),
         subplans: stmt.subplans,
     })
 }
