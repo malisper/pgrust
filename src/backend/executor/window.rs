@@ -1,12 +1,13 @@
 use super::agg::AccumState;
 use super::exec_expr::eval_expr;
-use super::expr_ops::{compare_order_values, values_are_distinct};
+use super::expr_ops::{add_values, compare_order_values, sub_values, values_are_distinct};
 use super::{ExecError, ExecutorContext};
 use crate::include::catalog::builtin_aggregate_function_for_proc_oid;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::{MaterializedRow, SystemVarBinding, TupleSlot};
+use crate::include::nodes::parsenodes::WindowFrameMode;
 use crate::include::nodes::primnodes::{
-    BuiltinWindowFunction, WindowClause, WindowFuncExpr, WindowFuncKind,
+    BuiltinWindowFunction, WindowClause, WindowFrameBound, WindowFuncExpr, WindowFuncKind,
 };
 use std::cmp::Ordering;
 
@@ -107,6 +108,395 @@ fn peer_group_end_for_index(partition_rows: &[PreparedWindowRow], index: usize) 
         peer_end += 1;
     }
     peer_end
+}
+
+fn peer_group_start_for_index(partition_rows: &[PreparedWindowRow], index: usize) -> usize {
+    let mut peer_start = index;
+    while peer_start > 0 && same_peer(&partition_rows[peer_start - 1], &partition_rows[peer_start])
+    {
+        peer_start -= 1;
+    }
+    peer_start
+}
+
+fn current_row_frame_error(which: &'static str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("frame {which} offset must not be null"),
+        detail: None,
+        hint: None,
+        sqlstate: INVALID_PARAMETER_VALUE_SQLSTATE,
+    }
+}
+
+fn negative_frame_error(which: &'static str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("frame {which} offset must not be negative"),
+        detail: None,
+        hint: None,
+        sqlstate: INVALID_PARAMETER_VALUE_SQLSTATE,
+    }
+}
+
+fn unsupported_range_offset_error() -> ExecError {
+    ExecError::DetailedError {
+        message: "RANGE with offset PRECEDING/FOLLOWING is not supported for this ORDER BY type"
+            .into(),
+        detail: None,
+        hint: None,
+        sqlstate: "0A000",
+    }
+}
+
+fn evaluate_frame_offset_value(
+    ctx: &mut ExecutorContext,
+    current_row: &mut PreparedWindowRow,
+    expr: &crate::include::nodes::primnodes::Expr,
+) -> Result<Value, ExecError> {
+    let value = evaluate_window_expr_on_row(ctx, current_row, expr)?;
+    if matches!(value, Value::Null) {
+        return Err(current_row_frame_error("starting"));
+    }
+    if offset_is_negative(&value)? {
+        return Err(negative_frame_error("starting"));
+    }
+    Ok(value)
+}
+
+fn evaluate_frame_bound_i64(
+    ctx: &mut ExecutorContext,
+    current_row: &mut PreparedWindowRow,
+    bound: &WindowFrameBound,
+    which: &'static str,
+) -> Result<Option<i64>, ExecError> {
+    let expr = match bound {
+        WindowFrameBound::OffsetPreceding(expr) | WindowFrameBound::OffsetFollowing(expr) => expr,
+        _ => return Ok(None),
+    };
+    let value = evaluate_window_expr_on_row(ctx, current_row, expr)?;
+    if matches!(value, Value::Null) {
+        return Err(current_row_frame_error(which));
+    }
+    let offset = match value {
+        Value::Int16(value) => i64::from(value),
+        Value::Int32(value) => i64::from(value),
+        Value::Int64(value) => value,
+        other => {
+            return Err(ExecError::TypeMismatch {
+                op: "window frame offset",
+                left: other,
+                right: Value::Int32(1),
+            });
+        }
+    };
+    if offset < 0 {
+        return Err(negative_frame_error(which));
+    }
+    Ok(Some(offset))
+}
+
+fn offset_is_negative(value: &Value) -> Result<bool, ExecError> {
+    Ok(match value {
+        Value::Int16(value) => *value < 0,
+        Value::Int32(value) => *value < 0,
+        Value::Int64(value) => *value < 0,
+        Value::Float64(value) => *value < 0.0,
+        Value::Numeric(value) => match value {
+            crate::include::nodes::datum::NumericValue::Finite { coeff, .. } => {
+                coeff < &num_bigint::BigInt::from(0)
+            }
+            crate::include::nodes::datum::NumericValue::NegInf => true,
+            crate::include::nodes::datum::NumericValue::PosInf
+            | crate::include::nodes::datum::NumericValue::NaN => false,
+        },
+        other => {
+            return Err(ExecError::TypeMismatch {
+                op: "window frame offset",
+                left: other.clone(),
+                right: Value::Int32(1),
+            });
+        }
+    })
+}
+
+fn move_group_start(
+    partition_rows: &[PreparedWindowRow],
+    row_index: usize,
+    offset: i64,
+    following: bool,
+) -> usize {
+    let mut start = peer_group_start_for_index(partition_rows, row_index);
+    let mut remaining = offset;
+    while remaining > 0 {
+        if following {
+            let end = peer_group_end_for_index(partition_rows, start);
+            if end >= partition_rows.len() {
+                return partition_rows.len();
+            }
+            start = end;
+        } else if start == 0 {
+            return 0;
+        } else {
+            start = peer_group_start_for_index(partition_rows, start - 1);
+        }
+        remaining -= 1;
+    }
+    start
+}
+
+fn move_group_end(
+    partition_rows: &[PreparedWindowRow],
+    row_index: usize,
+    offset: i64,
+    following: bool,
+) -> usize {
+    let start = move_group_start(partition_rows, row_index, offset, following);
+    if start >= partition_rows.len() {
+        partition_rows.len()
+    } else {
+        peer_group_end_for_index(partition_rows, start)
+    }
+}
+
+fn rows_frame_start(len: usize, row_index: usize, offset: i64, following: bool) -> usize {
+    if following {
+        row_index.saturating_add(offset as usize).min(len)
+    } else {
+        row_index.saturating_sub(offset as usize)
+    }
+}
+
+fn rows_frame_end(len: usize, row_index: usize, offset: i64, following: bool) -> usize {
+    if following {
+        row_index
+            .saturating_add(offset as usize)
+            .saturating_add(1)
+            .min(len)
+    } else {
+        row_index
+            .checked_sub(offset as usize)
+            .map(|value| value + 1)
+            .unwrap_or(0)
+    }
+}
+
+fn compute_range_boundary_key(
+    current_key: &Value,
+    offset: Value,
+    descending: bool,
+    following: bool,
+) -> Result<Value, ExecError> {
+    let move_toward_higher_values = descending ^ following;
+    if move_toward_higher_values {
+        add_values(current_key.clone(), offset).map_err(|_| unsupported_range_offset_error())
+    } else {
+        sub_values(current_key.clone(), offset).map_err(|_| unsupported_range_offset_error())
+    }
+}
+
+fn range_frame_start_from_boundary(
+    partition_rows: &[PreparedWindowRow],
+    boundary_key: &Value,
+    current_order: usize,
+    nulls_first: Option<bool>,
+    descending: bool,
+) -> usize {
+    partition_rows
+        .iter()
+        .position(|row| {
+            compare_order_values(
+                &row.order_keys[current_order],
+                boundary_key,
+                nulls_first,
+                descending,
+            ) != Ordering::Less
+        })
+        .unwrap_or(partition_rows.len())
+}
+
+fn range_frame_end_from_boundary(
+    partition_rows: &[PreparedWindowRow],
+    boundary_key: &Value,
+    current_order: usize,
+    nulls_first: Option<bool>,
+    descending: bool,
+) -> usize {
+    partition_rows
+        .iter()
+        .rposition(|row| {
+            compare_order_values(
+                &row.order_keys[current_order],
+                boundary_key,
+                nulls_first,
+                descending,
+            ) != Ordering::Greater
+        })
+        .map(|index| index + 1)
+        .unwrap_or(0)
+}
+
+fn evaluate_window_frame(
+    ctx: &mut ExecutorContext,
+    clause: &WindowClause,
+    partition_rows: &mut [PreparedWindowRow],
+    row_index: usize,
+) -> Result<(usize, usize), ExecError> {
+    let frame = &clause.spec.frame;
+    let len = partition_rows.len();
+    let peer_start = peer_group_start_for_index(partition_rows, row_index);
+    let peer_end = peer_group_end_for_index(partition_rows, row_index);
+    let current_key = partition_rows[row_index].order_keys.first().cloned();
+
+    let start = match (&frame.mode, &frame.start_bound) {
+        (_, WindowFrameBound::UnboundedPreceding) => 0,
+        (_, WindowFrameBound::CurrentRow) => match frame.mode {
+            WindowFrameMode::Rows => row_index,
+            WindowFrameMode::Range | WindowFrameMode::Groups => peer_start,
+        },
+        (_, WindowFrameBound::UnboundedFollowing) => len,
+        (WindowFrameMode::Rows, WindowFrameBound::OffsetPreceding(_)) => {
+            let offset = evaluate_frame_bound_i64(
+                ctx,
+                &mut partition_rows[row_index],
+                &frame.start_bound,
+                "starting",
+            )?
+            .expect("offset");
+            rows_frame_start(len, row_index, offset, false)
+        }
+        (WindowFrameMode::Rows, WindowFrameBound::OffsetFollowing(_)) => {
+            let offset = evaluate_frame_bound_i64(
+                ctx,
+                &mut partition_rows[row_index],
+                &frame.start_bound,
+                "starting",
+            )?
+            .expect("offset");
+            rows_frame_start(len, row_index, offset, true)
+        }
+        (WindowFrameMode::Groups, WindowFrameBound::OffsetPreceding(_)) => {
+            let offset = evaluate_frame_bound_i64(
+                ctx,
+                &mut partition_rows[row_index],
+                &frame.start_bound,
+                "starting",
+            )?
+            .expect("offset");
+            move_group_start(partition_rows, row_index, offset, false)
+        }
+        (WindowFrameMode::Groups, WindowFrameBound::OffsetFollowing(_)) => {
+            let offset = evaluate_frame_bound_i64(
+                ctx,
+                &mut partition_rows[row_index],
+                &frame.start_bound,
+                "starting",
+            )?
+            .expect("offset");
+            move_group_start(partition_rows, row_index, offset, true)
+        }
+        (WindowFrameMode::Range, WindowFrameBound::OffsetPreceding(expr))
+        | (WindowFrameMode::Range, WindowFrameBound::OffsetFollowing(expr)) => {
+            let current_key = current_key.as_ref().expect("range frame without order key");
+            if matches!(current_key, Value::Null) {
+                peer_start
+            } else {
+                let offset =
+                    evaluate_frame_offset_value(ctx, &mut partition_rows[row_index], expr)?;
+                let item = &clause.spec.order_by[0];
+                let boundary = compute_range_boundary_key(
+                    current_key,
+                    offset,
+                    item.descending,
+                    matches!(&frame.start_bound, WindowFrameBound::OffsetFollowing(_)),
+                )?;
+                range_frame_start_from_boundary(
+                    partition_rows,
+                    &boundary,
+                    0,
+                    item.nulls_first,
+                    item.descending,
+                )
+            }
+        }
+    };
+
+    let end = match (&frame.mode, &frame.end_bound) {
+        (_, WindowFrameBound::UnboundedFollowing) => len,
+        (_, WindowFrameBound::CurrentRow) => match frame.mode {
+            WindowFrameMode::Rows => row_index + 1,
+            WindowFrameMode::Range | WindowFrameMode::Groups => peer_end,
+        },
+        (_, WindowFrameBound::UnboundedPreceding) => 0,
+        (WindowFrameMode::Rows, WindowFrameBound::OffsetPreceding(_)) => {
+            let offset = evaluate_frame_bound_i64(
+                ctx,
+                &mut partition_rows[row_index],
+                &frame.end_bound,
+                "ending",
+            )?
+            .expect("offset");
+            rows_frame_end(len, row_index, offset, false)
+        }
+        (WindowFrameMode::Rows, WindowFrameBound::OffsetFollowing(_)) => {
+            let offset = evaluate_frame_bound_i64(
+                ctx,
+                &mut partition_rows[row_index],
+                &frame.end_bound,
+                "ending",
+            )?
+            .expect("offset");
+            rows_frame_end(len, row_index, offset, true)
+        }
+        (WindowFrameMode::Groups, WindowFrameBound::OffsetPreceding(_)) => {
+            let offset = evaluate_frame_bound_i64(
+                ctx,
+                &mut partition_rows[row_index],
+                &frame.end_bound,
+                "ending",
+            )?
+            .expect("offset");
+            move_group_end(partition_rows, row_index, offset, false)
+        }
+        (WindowFrameMode::Groups, WindowFrameBound::OffsetFollowing(_)) => {
+            let offset = evaluate_frame_bound_i64(
+                ctx,
+                &mut partition_rows[row_index],
+                &frame.end_bound,
+                "ending",
+            )?
+            .expect("offset");
+            move_group_end(partition_rows, row_index, offset, true)
+        }
+        (WindowFrameMode::Range, WindowFrameBound::OffsetPreceding(expr))
+        | (WindowFrameMode::Range, WindowFrameBound::OffsetFollowing(expr)) => {
+            let current_key = current_key.as_ref().expect("range frame without order key");
+            if matches!(current_key, Value::Null) {
+                peer_end
+            } else {
+                let offset =
+                    evaluate_frame_offset_value(ctx, &mut partition_rows[row_index], expr)?;
+                let item = &clause.spec.order_by[0];
+                let boundary = compute_range_boundary_key(
+                    current_key,
+                    offset,
+                    item.descending,
+                    matches!(&frame.end_bound, WindowFrameBound::OffsetFollowing(_)),
+                )?;
+                range_frame_end_from_boundary(
+                    partition_rows,
+                    &boundary,
+                    0,
+                    item.nulls_first,
+                    item.descending,
+                )
+            }
+        }
+    };
+
+    Ok(if start >= end {
+        (start, start)
+    } else {
+        (start, end)
+    })
 }
 
 fn advance_window_aggregate(
@@ -397,6 +787,7 @@ fn evaluate_offset_window(
 
 fn evaluate_value_window(
     ctx: &mut ExecutorContext,
+    clause: &WindowClause,
     func: &WindowFuncExpr,
     partition_rows: &mut [PreparedWindowRow],
 ) -> Result<Vec<Value>, ExecError> {
@@ -409,10 +800,11 @@ fn evaluate_value_window(
     };
     let mut values = Vec::with_capacity(partition_rows.len());
     for row_index in 0..partition_rows.len() {
-        let frame_end = peer_group_end_for_index(partition_rows, row_index);
+        let (frame_start, frame_end) =
+            evaluate_window_frame(ctx, clause, partition_rows, row_index)?;
         let frame_row_index = match builtin {
-            BuiltinWindowFunction::FirstValue => Some(0),
-            BuiltinWindowFunction::LastValue => Some(frame_end - 1),
+            BuiltinWindowFunction::FirstValue => (frame_start < frame_end).then_some(frame_start),
+            BuiltinWindowFunction::LastValue => (frame_start < frame_end).then_some(frame_end - 1),
             BuiltinWindowFunction::NthValue => {
                 let Some(offset) =
                     evaluate_nth_value_offset(ctx, func, &mut partition_rows[row_index])?
@@ -420,7 +812,8 @@ fn evaluate_value_window(
                     values.push(Value::Null);
                     continue;
                 };
-                (offset <= frame_end).then_some(offset - 1)
+                let target = frame_start + offset - 1;
+                (target < frame_end).then_some(target)
             }
             _ => panic!("non-value window function routed to value path"),
         };
@@ -438,6 +831,7 @@ fn evaluate_value_window(
 
 fn evaluate_builtin_window(
     ctx: &mut ExecutorContext,
+    clause: &WindowClause,
     func: &WindowFuncExpr,
     partition_rows: &mut [PreparedWindowRow],
 ) -> Result<Vec<Value>, ExecError> {
@@ -452,13 +846,16 @@ fn evaluate_builtin_window(
         }
         BuiltinWindowFunction::FirstValue
         | BuiltinWindowFunction::LastValue
-        | BuiltinWindowFunction::NthValue => evaluate_value_window(ctx, func, partition_rows),
+        | BuiltinWindowFunction::NthValue => {
+            evaluate_value_window(ctx, clause, func, partition_rows)
+        }
         _ => Ok(evaluate_rank_like_window(builtin, partition_rows)),
     }
 }
 
 fn evaluate_aggregate_window(
     ctx: &mut ExecutorContext,
+    clause: &WindowClause,
     aggref: &crate::include::nodes::primnodes::Aggref,
     partition_rows: &mut [PreparedWindowRow],
     has_order_by: bool,
@@ -470,30 +867,22 @@ fn evaluate_aggregate_window(
         )
     });
     let mut state = AccumState::new(func, aggref.aggdistinct, aggref.aggtype);
-    if !has_order_by {
+    if !has_order_by && matches!(clause.spec.frame.mode, WindowFrameMode::Range) {
         for row in partition_rows.iter_mut() {
             advance_window_aggregate(ctx, &mut state, &mut row.row, aggref)?;
         }
         return Ok(vec![state.finalize(); partition_rows.len()]);
     }
 
-    let mut values = vec![Value::Null; partition_rows.len()];
-    let mut peer_start = 0usize;
-    while peer_start < partition_rows.len() {
-        let mut peer_end = peer_start + 1;
-        while peer_end < partition_rows.len()
-            && same_peer(&partition_rows[peer_end - 1], &partition_rows[peer_end])
-        {
-            peer_end += 1;
-        }
-        for row in partition_rows[peer_start..peer_end].iter_mut() {
+    let mut values = Vec::with_capacity(partition_rows.len());
+    for row_index in 0..partition_rows.len() {
+        let (frame_start, frame_end) =
+            evaluate_window_frame(ctx, clause, partition_rows, row_index)?;
+        let mut state = AccumState::new(func, aggref.aggdistinct, aggref.aggtype);
+        for row in partition_rows[frame_start..frame_end].iter_mut() {
             advance_window_aggregate(ctx, &mut state, &mut row.row, aggref)?;
         }
-        let value = state.finalize();
-        for result in &mut values[peer_start..peer_end] {
-            *result = value.clone();
-        }
-        peer_start = peer_end;
+        values.push(state.finalize());
     }
     Ok(values)
 }
@@ -518,9 +907,12 @@ pub(crate) fn execute_window_clause(
         let mut function_values = Vec::with_capacity(clause.functions.len());
         for func in &clause.functions {
             function_values.push(match &func.kind {
-                WindowFuncKind::Builtin(_) => evaluate_builtin_window(ctx, func, partition)?,
+                WindowFuncKind::Builtin(_) => {
+                    evaluate_builtin_window(ctx, clause, func, partition)?
+                }
                 WindowFuncKind::Aggregate(aggref) => evaluate_aggregate_window(
                     ctx,
+                    clause,
                     aggref,
                     partition,
                     !clause.spec.order_by.is_empty(),

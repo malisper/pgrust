@@ -834,12 +834,36 @@ pub struct RawWindowSpec {
     pub name: Option<String>,
     pub partition_by: Vec<SqlExpr>,
     pub order_by: Vec<OrderByItem>,
+    pub frame: Option<Box<RawWindowFrame>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawWindowClause {
     pub name: String,
     pub spec: RawWindowSpec,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowFrameMode {
+    Rows,
+    Range,
+    Groups,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RawWindowFrameBound {
+    UnboundedPreceding,
+    OffsetPreceding(Box<SqlExpr>),
+    CurrentRow,
+    OffsetFollowing(Box<SqlExpr>),
+    UnboundedFollowing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawWindowFrame {
+    pub mode: WindowFrameMode,
+    pub start_bound: RawWindowFrameBound,
+    pub end_bound: RawWindowFrameBound,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

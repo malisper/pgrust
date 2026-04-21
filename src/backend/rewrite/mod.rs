@@ -11,7 +11,8 @@ use crate::backend::parser::{CatalogLookup, ParseError};
 use crate::include::nodes::parsenodes::{Query, RangeTblEntry, RangeTblEntryKind};
 use crate::include::nodes::primnodes::{
     AggAccum, Expr, ExprArraySubscript, ProjectSetTarget, SetReturningCall, SortGroupClause,
-    SubLink, TargetEntry, WindowClause, WindowFuncExpr, WindowFuncKind, WindowSpec,
+    SubLink, TargetEntry, WindowClause, WindowFrame, WindowFrameBound, WindowFuncExpr,
+    WindowFuncKind, WindowSpec,
 };
 use views::rewrite_view_relation_query;
 
@@ -229,12 +230,41 @@ fn rewrite_window_clause(
                     })
                 })
                 .collect::<Result<Vec<_>, ParseError>>()?,
+            frame: WindowFrame {
+                mode: clause.spec.frame.mode,
+                start_bound: rewrite_window_frame_bound(
+                    clause.spec.frame.start_bound,
+                    catalog,
+                    expanded_views,
+                )?,
+                end_bound: rewrite_window_frame_bound(
+                    clause.spec.frame.end_bound,
+                    catalog,
+                    expanded_views,
+                )?,
+            },
         },
         functions: clause
             .functions
             .into_iter()
             .map(|func| rewrite_window_func_expr(func, catalog, expanded_views))
             .collect::<Result<Vec<_>, _>>()?,
+    })
+}
+
+fn rewrite_window_frame_bound(
+    bound: WindowFrameBound,
+    catalog: &dyn CatalogLookup,
+    expanded_views: &[u32],
+) -> Result<WindowFrameBound, ParseError> {
+    Ok(match bound {
+        WindowFrameBound::OffsetPreceding(expr) => {
+            WindowFrameBound::OffsetPreceding(rewrite_semantic_expr(expr, catalog, expanded_views)?)
+        }
+        WindowFrameBound::OffsetFollowing(expr) => {
+            WindowFrameBound::OffsetFollowing(rewrite_semantic_expr(expr, catalog, expanded_views)?)
+        }
+        other => other,
     })
 }
 

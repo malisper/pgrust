@@ -10,8 +10,9 @@ use crate::include::nodes::parsenodes::{
     AliasColumnDef, AliasColumnSpec, ColumnConstraint, CompositeTypeAttributeDef,
     CreateCompositeTypeStatement, CreateTriggerStatement, CreateTypeStatement,
     DropTriggerStatement, DropTypeStatement, ForeignKeyAction, ForeignKeyMatchType, IndexColumnDef,
-    InsertSource, InsertStatement, JoinTreeNode, RangeTblEntryKind, RawTypeName, TableConstraint,
-    TriggerEvent, TriggerEventSpec, TriggerLevel, TriggerTiming,
+    InsertSource, InsertStatement, JoinTreeNode, RangeTblEntryKind, RawTypeName,
+    RawWindowFrameBound, TableConstraint, TriggerEvent, TriggerEventSpec, TriggerLevel,
+    TriggerTiming, WindowFrameMode,
 };
 use crate::include::nodes::primnodes::{AttrNumber, JoinType, Var, is_system_attr};
 
@@ -6216,6 +6217,105 @@ fn parse_create_drop_and_comment_on_conversion_statements() {
     assert_eq!(comment.comment.as_deref(), Some("hello"));
 }
 
+#[test]
+fn parse_foreign_data_wrapper_statements() {
+    let Statement::CreateForeignDataWrapper(create) = parse_statement(
+        "create foreign data wrapper foo handler pg_rust_test_fdw_handler validator postgresql_fdw_validator options (testing '1', another '2')",
+    )
+    .unwrap() else {
+        panic!("expected create foreign data wrapper");
+    };
+    assert_eq!(create.fdw_name, "foo");
+    assert_eq!(
+        create.handler_name.as_deref(),
+        Some("pg_rust_test_fdw_handler")
+    );
+    assert_eq!(
+        create.validator_name.as_deref(),
+        Some("postgresql_fdw_validator")
+    );
+    assert_eq!(
+        create.options,
+        vec![
+            RelOption {
+                name: "testing".into(),
+                value: "1".into(),
+            },
+            RelOption {
+                name: "another".into(),
+                value: "2".into(),
+            },
+        ]
+    );
+
+    let Statement::AlterForeignDataWrapper(alter) = parse_statement(
+        "alter foreign data wrapper foo no validator options (drop a, set b '2', add c '3')",
+    )
+    .unwrap() else {
+        panic!("expected alter foreign data wrapper");
+    };
+    assert_eq!(alter.fdw_name, "foo");
+    assert_eq!(alter.validator_name, Some(None));
+    assert_eq!(alter.options.len(), 3);
+
+    let Statement::AlterForeignDataWrapperOwner(owner) =
+        parse_statement("alter foreign data wrapper foo owner to regress_test_role").unwrap()
+    else {
+        panic!("expected alter foreign data wrapper owner");
+    };
+    assert_eq!(owner.fdw_name, "foo");
+    assert_eq!(owner.new_owner, "regress_test_role");
+
+    let Statement::AlterForeignDataWrapperRename(rename) =
+        parse_statement("alter foreign data wrapper foo rename to bar").unwrap()
+    else {
+        panic!("expected alter foreign data wrapper rename");
+    };
+    assert_eq!(rename.fdw_name, "foo");
+    assert_eq!(rename.new_name, "bar");
+
+    let Statement::DropForeignDataWrapper(drop_stmt) =
+        parse_statement("drop foreign data wrapper if exists foo cascade").unwrap()
+    else {
+        panic!("expected drop foreign data wrapper");
+    };
+    assert!(drop_stmt.if_exists);
+    assert!(drop_stmt.cascade);
+    assert_eq!(drop_stmt.fdw_name, "foo");
+
+    let Statement::CommentOnForeignDataWrapper(comment) =
+        parse_statement("comment on foreign data wrapper foo is 'hello'").unwrap()
+    else {
+        panic!("expected comment on foreign data wrapper");
+    };
+    assert_eq!(comment.fdw_name, "foo");
+    assert_eq!(comment.comment.as_deref(), Some("hello"));
+}
+
+#[test]
+fn parse_foreign_data_wrapper_rejects_duplicate_clauses() {
+    let err = parse_statement(
+        "create foreign data wrapper foo handler pg_rust_test_fdw_handler handler invalid_fdw_handler",
+    )
+    .expect_err("duplicate handler should fail");
+    assert!(matches!(
+        err,
+        ParseError::FeatureNotSupportedMessage(message)
+            if message == "conflicting or redundant options"
+    ));
+
+    let err = parse_statement(
+        "alter foreign data wrapper foo validator postgresql_fdw_validator no validator",
+    )
+    .expect_err("duplicate validator should fail");
+    assert!(matches!(
+        err,
+        ParseError::FeatureNotSupportedMessage(message)
+            if message == "conflicting or redundant options"
+    ));
+}
+
+#[test]
 fn parse_create_and_drop_type_statements() {
     let Statement::CreateType(CreateTypeStatement::Composite(CreateCompositeTypeStatement {
         schema_name,
@@ -6662,12 +6762,14 @@ fn parse_window_calls_capture_over_clause() {
                 name: window_name,
                 partition_by,
                 order_by,
+                frame,
             }),
             ..
         } if name == "row_number"
             && window_name.is_none()
             && partition_by.is_empty()
             && order_by.is_empty()
+            && frame.is_none()
     ));
     assert!(matches!(
         &stmt.targets[1].expr,
@@ -6677,12 +6779,66 @@ fn parse_window_calls_capture_over_clause() {
                 name: window_name,
                 partition_by,
                 order_by,
+                frame,
             }),
             ..
-        } if window_name.is_none() && partition_by.len() == 1 && order_by.len() == 1
+        } if window_name.is_none() && partition_by.len() == 1 && order_by.len() == 1 && frame.is_none()
     ));
 }
 
+#[test]
+fn parse_named_window_clause_and_reference() {
+    let stmt =
+        parse_select("select row_number() over w from people window w as (order by id)").unwrap();
+    assert_eq!(stmt.window_clauses.len(), 1);
+    assert_eq!(stmt.window_clauses[0].name, "w");
+    assert!(stmt.window_clauses[0].spec.partition_by.is_empty());
+    assert_eq!(stmt.window_clauses[0].spec.order_by.len(), 1);
+    assert!(matches!(
+        &stmt.targets[0].expr,
+        SqlExpr::FuncCall {
+            name,
+            over: Some(RawWindowSpec {
+                name: Some(window_name),
+                partition_by,
+                order_by,
+                frame,
+            }),
+            ..
+        } if name == "row_number"
+            && window_name == "w"
+            && partition_by.is_empty()
+            && order_by.is_empty()
+            && frame.is_none()
+    ));
+}
+
+#[test]
+fn parse_window_frame_clause_and_inherited_reference() {
+    let stmt = parse_select(
+        "select sum(id) over (w rows between 1 preceding and current row) from people window w as (partition by name order by id)",
+    )
+    .unwrap();
+    assert!(matches!(
+        &stmt.targets[0].expr,
+        SqlExpr::AggCall {
+            over: Some(RawWindowSpec {
+                name: Some(window_name),
+                partition_by,
+                order_by,
+                frame: Some(frame),
+            }),
+            ..
+        } if window_name == "w"
+            && partition_by.is_empty()
+            && order_by.is_empty()
+            && frame.mode == WindowFrameMode::Rows
+            && matches!(frame.start_bound, RawWindowFrameBound::OffsetPreceding(_))
+            && matches!(frame.end_bound, RawWindowFrameBound::CurrentRow)
+    ));
+}
+
+#[test]
 fn parse_select_target_with_bare_alias() {
     let stmt = parse_select("select id user_id from people").unwrap();
     assert_eq!(stmt.targets.len(), 1);
@@ -6825,6 +6981,25 @@ fn build_plan_with_window_function_uses_windowagg() {
     }
 }
 
+#[test]
+fn build_plan_with_named_window_clause_uses_windowagg() {
+    let stmt =
+        parse_select("select row_number() over w from people window w as (order by id)").unwrap();
+    let plan = build_plan(&stmt, &catalog()).unwrap();
+    match plan {
+        Plan::Projection { input, .. } => match *input {
+            Plan::WindowAgg { input, clause, .. } => {
+                assert!(clause.spec.partition_by.is_empty());
+                assert_eq!(clause.spec.order_by.len(), 1);
+                assert!(matches!(*input, Plan::OrderBy { .. }));
+            }
+            other => panic!("expected window agg below projection, got {other:?}"),
+        },
+        other => panic!("expected projection, got {other:?}"),
+    }
+}
+
+#[test]
 fn ungrouped_column_rejected_at_plan_time() {
     let stmt = parse_select("select name, count(*) from people").unwrap();
     assert!(matches!(
@@ -7056,12 +7231,35 @@ fn window_function_rejected_in_where_group_by_and_having() {
 }
 
 #[test]
-fn window_aliases_and_frames_are_rejected() {
-    assert!(parse_select("select row_number() over w from people window w as ()").is_ok());
-    assert!(parse_select(
-        "select row_number() over (order by id rows between unbounded preceding and current row) from people"
+fn named_window_errors_and_frame_rules_are_enforced() {
+    let stmt = parse_select("select row_number() over missing from people").unwrap();
+    assert!(matches!(
+        build_plan(&stmt, &catalog()),
+        Err(ParseError::WindowingError(message)) if message == "window \"missing\" does not exist"
+    ));
+    let stmt =
+        parse_select("select row_number() over w from people window w as (), w as ()").unwrap();
+    assert!(matches!(
+        build_plan(&stmt, &catalog()),
+        Err(ParseError::WindowingError(message)) if message == "window \"w\" is already defined"
+    ));
+    let stmt = parse_select(
+        "select sum(id) over (w rows between current row and unbounded following) from people window w as (order by id rows between unbounded preceding and current row)",
     )
-    .is_err());
+    .unwrap();
+    assert!(matches!(
+        build_plan(&stmt, &catalog()),
+        Err(ParseError::WindowingError(message))
+            if message == "cannot copy window \"w\" because it has a frame clause"
+    ));
+    let stmt = parse_select(
+        "select sum(id) over (groups between 1 preceding and 1 following) from people",
+    )
+    .unwrap();
+    assert!(matches!(
+        build_plan(&stmt, &catalog()),
+        Err(ParseError::WindowingError(message)) if message == "GROUPS mode requires an ORDER BY clause"
+    ));
 }
 
 #[test]
