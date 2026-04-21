@@ -173,6 +173,8 @@ pub(super) fn expr_contains_window(expr: &SqlExpr) -> bool {
                 })
         }
         SqlExpr::ArrayOverlap(left, right)
+        | SqlExpr::ArrayContains(left, right)
+        | SqlExpr::ArrayContained(left, right)
         | SqlExpr::QuantifiedArray {
             left, array: right, ..
         }

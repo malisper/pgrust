@@ -511,6 +511,8 @@ fn visit_nested_srfs(
         | SqlExpr::IsDistinctFrom(left, right)
         | SqlExpr::IsNotDistinctFrom(left, right)
         | SqlExpr::ArrayOverlap(left, right)
+        | SqlExpr::ArrayContains(left, right)
+        | SqlExpr::ArrayContained(left, right)
         | SqlExpr::JsonbContains(left, right)
         | SqlExpr::JsonbContained(left, right)
         | SqlExpr::JsonbExists(left, right)

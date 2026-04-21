@@ -106,13 +106,14 @@ mod arrays;
 mod subquery;
 
 use arrays::{
-    eval_array_append_function, eval_array_cat_function, eval_array_dims_function,
-    eval_array_fill_function, eval_array_length_function, eval_array_lower_function,
-    eval_array_ndims_function, eval_array_overlap, eval_array_position_function,
-    eval_array_positions_function, eval_array_prepend_function, eval_array_remove_function,
-    eval_array_replace_function, eval_array_sort_function, eval_array_subscript,
-    eval_array_subscript_plpgsql, eval_array_to_string_function, eval_array_upper_function,
-    eval_cardinality_function, eval_quantified_array, eval_string_to_array_function,
+    eval_array_append_function, eval_array_cat_function, eval_array_contained,
+    eval_array_contains, eval_array_dims_function, eval_array_fill_function,
+    eval_array_length_function, eval_array_lower_function, eval_array_ndims_function,
+    eval_array_overlap, eval_array_position_function, eval_array_positions_function,
+    eval_array_prepend_function, eval_array_remove_function, eval_array_replace_function,
+    eval_array_sort_function, eval_array_subscript, eval_array_subscript_plpgsql,
+    eval_array_to_string_function, eval_array_upper_function, eval_cardinality_function,
+    eval_quantified_array, eval_string_to_array_function,
     eval_width_bucket_thresholds,
 };
 use subquery::{
@@ -1009,6 +1010,12 @@ fn eval_op_expr(
         }
         (OpExprKind::ArrayOverlap, [left, right]) => {
             eval_array_overlap(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
+        }
+        (OpExprKind::ArrayContains, [left, right]) => {
+            eval_array_contains(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
+        }
+        (OpExprKind::ArrayContained, [left, right]) => {
+            eval_array_contained(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
         }
         (OpExprKind::JsonbContains, [left, right]) => {
             eval_jsonb_contains(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)

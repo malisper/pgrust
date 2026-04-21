@@ -1128,3 +1128,49 @@ pub(super) fn eval_array_overlap(left: Value, right: Value) -> Result<Value, Exe
     }
     Ok(Value::Bool(false))
 }
+
+pub(super) fn eval_array_contains(left: Value, right: Value) -> Result<Value, ExecError> {
+    eval_array_contains_internal("@>", left, right)
+}
+
+pub(super) fn eval_array_contained(left: Value, right: Value) -> Result<Value, ExecError> {
+    eval_array_contains_internal("<@", right, left)
+}
+
+fn eval_array_contains_internal(op: &'static str, left: Value, right: Value) -> Result<Value, ExecError> {
+    if matches!(left, Value::Null) || matches!(right, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let Some(left_array) = normalize_array_value(&left) else {
+        return Err(ExecError::TypeMismatch {
+            op,
+            left,
+            right: right.clone(),
+        });
+    };
+    let Some(right_array) = normalize_array_value(&right) else {
+        return Err(ExecError::TypeMismatch { op, left, right });
+    };
+    for right_item in &right_array.elements {
+        if matches!(right_item, Value::Null) {
+            return Ok(Value::Bool(false));
+        }
+        let mut matched = false;
+        for left_item in &left_array.elements {
+            if matches!(left_item, Value::Null) {
+                continue;
+            }
+            if matches!(
+                compare_values("=", left_item.clone(), right_item.clone())?,
+                Value::Bool(true)
+            ) {
+                matched = true;
+                break;
+            }
+        }
+        if !matched {
+            return Ok(Value::Bool(false));
+        }
+    }
+    Ok(Value::Bool(true))
+}

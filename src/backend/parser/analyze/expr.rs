@@ -1775,6 +1775,26 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 Expr::op_auto(OpExprKind::ArrayOverlap, vec![left_expr, right_expr])
             }
         }
+        SqlExpr::ArrayContains(left, right) => bind_array_membership_expr(
+            OpExprKind::ArrayContains,
+            left,
+            right,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        )?,
+        SqlExpr::ArrayContained(left, right) => bind_array_membership_expr(
+            OpExprKind::ArrayContained,
+            left,
+            right,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        )?,
         SqlExpr::ScalarSubquery(select) => {
             bind_scalar_subquery_expr(select, scope, catalog, outer_scopes, ctes)?
         }
@@ -1894,6 +1914,17 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 ctes,
             ) {
                 result?
+            } else if let Some(result) = bind_maybe_array_membership_expr(
+                OpExprKind::ArrayContains,
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ) {
+                result?
             } else {
                 bind_jsonb_contains_expr(
                     left,
@@ -1920,6 +1951,17 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 result?
             } else if let Some(result) = bind_maybe_range_contains(
                 "<@",
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ) {
+                result?
+            } else if let Some(result) = bind_maybe_array_membership_expr(
+                OpExprKind::ArrayContained,
                 left,
                 right,
                 scope,
@@ -3088,6 +3130,83 @@ fn resolve_regprocedure_signature(
             actual: signature.to_string(),
         }),
     }
+}
+
+fn bind_array_membership_expr(
+    op: OpExprKind,
+    left: &SqlExpr,
+    right: &SqlExpr,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Expr, ParseError> {
+    let raw_left_type =
+        infer_sql_expr_type_with_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes);
+    let raw_right_type =
+        infer_sql_expr_type_with_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes);
+    let left_bound =
+        bind_expr_with_outer_and_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes)?;
+    let right_bound =
+        bind_expr_with_outer_and_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes)?;
+    let mut left_type = coerce_unknown_string_literal_type(left, raw_left_type, raw_right_type);
+    let mut right_type = coerce_unknown_string_literal_type(right, raw_right_type, left_type);
+    let left_expr = if matches!(
+        left,
+        SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _))
+    ) && !left_type.is_array
+    {
+        if let Expr::ArrayLiteral { array_type, .. } = &right_bound {
+            left_type = *array_type;
+        }
+        coerce_bound_expr(left_bound, raw_left_type, left_type)
+    } else {
+        coerce_bound_expr(left_bound, raw_left_type, left_type)
+    };
+    let right_expr = if matches!(
+        right,
+        SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _))
+    ) && !right_type.is_array
+    {
+        if let Expr::ArrayLiteral { array_type, .. } = &left_expr {
+            right_type = *array_type;
+        }
+        coerce_bound_expr(right_bound, raw_right_type, right_type)
+    } else {
+        coerce_bound_expr(right_bound, raw_right_type, right_type)
+    };
+    Ok(Expr::op_auto(op, vec![left_expr, right_expr]))
+}
+
+fn bind_maybe_array_membership_expr(
+    op: OpExprKind,
+    left: &SqlExpr,
+    right: &SqlExpr,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Option<Result<Expr, ParseError>> {
+    let raw_left_type =
+        infer_sql_expr_type_with_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes);
+    let raw_right_type =
+        infer_sql_expr_type_with_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes);
+    let left_type = coerce_unknown_string_literal_type(left, raw_left_type, raw_right_type);
+    let right_type = coerce_unknown_string_literal_type(right, raw_right_type, left_type);
+    (left_type.is_array || right_type.is_array).then(|| {
+        bind_array_membership_expr(
+            op,
+            left,
+            right,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        )
+    })
 }
 
 fn parse_proc_argtype_oids(argtypes: &str) -> Option<Vec<u32>> {

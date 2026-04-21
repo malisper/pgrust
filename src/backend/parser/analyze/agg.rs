@@ -52,6 +52,8 @@ pub(super) fn expr_contains_agg(expr: &SqlExpr) -> bool {
                 })
         }
         SqlExpr::ArrayOverlap(l, r)
+        | SqlExpr::ArrayContains(l, r)
+        | SqlExpr::ArrayContained(l, r)
         | SqlExpr::QuantifiedArray {
             left: l, array: r, ..
         }
@@ -197,6 +199,8 @@ pub(super) fn expr_references_input_scope(expr: &SqlExpr) -> bool {
         | SqlExpr::InSubquery { .. }
         | SqlExpr::QuantifiedSubquery { .. } => true,
         SqlExpr::ArrayOverlap(l, r)
+        | SqlExpr::ArrayContains(l, r)
+        | SqlExpr::ArrayContained(l, r)
         | SqlExpr::QuantifiedArray {
             left: l, array: r, ..
         }
@@ -378,6 +382,8 @@ pub(super) fn collect_aggs(
             }
         }
         SqlExpr::ArrayOverlap(l, r)
+        | SqlExpr::ArrayContains(l, r)
+        | SqlExpr::ArrayContained(l, r)
         | SqlExpr::QuantifiedArray {
             left: l, array: r, ..
         }
@@ -492,6 +498,8 @@ pub(super) fn sql_expr_name(expr: &SqlExpr) -> String {
         | SqlExpr::QuantifiedSubquery { .. }
         | SqlExpr::ArrayLiteral(_)
         | SqlExpr::ArrayOverlap(_, _)
+        | SqlExpr::ArrayContains(_, _)
+        | SqlExpr::ArrayContained(_, _)
         | SqlExpr::QuantifiedArray { .. } => "?column?".to_string(),
         _ => "?column?".to_string(),
     }

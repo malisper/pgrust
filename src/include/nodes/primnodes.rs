@@ -972,6 +972,8 @@ pub enum OpExprKind {
     GtEq,
     RegexMatch,
     ArrayOverlap,
+    ArrayContains,
+    ArrayContained,
     JsonbContains,
     JsonbContained,
     JsonbExists,
@@ -1166,6 +1168,8 @@ impl Expr {
             | OpExprKind::GtEq
             | OpExprKind::RegexMatch
             | OpExprKind::ArrayOverlap
+            | OpExprKind::ArrayContains
+            | OpExprKind::ArrayContained
             | OpExprKind::JsonbContains
             | OpExprKind::JsonbContained
             | OpExprKind::JsonbExists

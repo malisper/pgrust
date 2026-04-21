@@ -369,6 +369,8 @@ pub(super) fn infer_geometry_special_expr_type_with_ctes(
         | SqlExpr::Gt(left, right)
         | SqlExpr::GtEq(left, right)
         | SqlExpr::ArrayOverlap(left, right)
+        | SqlExpr::ArrayContains(left, right)
+        | SqlExpr::ArrayContained(left, right)
         | SqlExpr::JsonbContains(left, right)
         | SqlExpr::JsonbContained(left, right) => {
             let left_type = infer_arg_type(left, scope, catalog, outer_scopes, grouped_outer, ctes);

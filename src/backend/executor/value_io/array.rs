@@ -1,8 +1,10 @@
 use super::*;
+use crate::backend::executor::expr_casts::canonicalize_interval_text;
 use crate::backend::storage::page::bufpage::max_align;
 use crate::include::access::htup::AttributeAlign;
 use crate::include::catalog::{
-    builtin_type_rows, multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
+    INTERVAL_TYPE_OID, builtin_type_rows, multirange_type_ref_for_sql_type,
+    range_type_ref_for_sql_type,
 };
 
 pub(crate) fn encode_array_bytes(
@@ -700,7 +702,7 @@ fn decode_embedded_varlena<'a>(
     }
 }
 
-fn builtin_type_oid_for_sql_type(sql_type: SqlType) -> Option<u32> {
+pub(crate) fn builtin_type_oid_for_sql_type(sql_type: SqlType) -> Option<u32> {
     if let Some(multirange_type) = multirange_type_ref_for_sql_type(sql_type) {
         return Some(multirange_type.type_oid());
     }
@@ -1271,7 +1273,20 @@ fn format_array_values_nested(array: &ArrayValue, depth: usize, offset: &mut usi
                 push_array_text_element(&mut out, &rendered);
             }
             Value::Text(_) | Value::TextRef(_, _) => {
-                push_array_text_element(&mut out, item.as_text().unwrap());
+                let rendered = if array.element_type_oid == Some(INTERVAL_TYPE_OID) {
+                    canonicalize_interval_text(item.as_text().unwrap())
+                        .map(|text| {
+                            if text == "@ 0 secs" {
+                                "@ 0".to_string()
+                            } else {
+                                text
+                            }
+                        })
+                        .unwrap_or_else(|_| item.as_text().unwrap().to_string())
+                } else {
+                    item.as_text().unwrap().to_string()
+                };
+                push_array_text_element(&mut out, &rendered);
             }
             Value::InternalChar(byte) => {
                 let rendered = render_internal_char_text(*byte);
