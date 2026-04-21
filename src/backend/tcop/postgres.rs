@@ -4074,6 +4074,92 @@ mod tests {
     }
 
     #[test]
+    fn simple_query_drop_role_sees_granted_by_dependencies_from_prior_statements() {
+        let db = Database::open(temp_dir("drop_role_granted_by_dependency"), 16).unwrap();
+        let mut state = ConnectionState {
+            session: Session::new(2),
+            prepared: HashMap::new(),
+            portals: HashMap::new(),
+            copy_in: None,
+        };
+        let mut output = Vec::new();
+
+        handle_query(
+            &mut output,
+            &db,
+            &mut state,
+            "create role user1;\
+             create role user2;\
+             create role user3;\
+             grant user1 to user2 with admin option;\
+             grant user1 to user3 granted by user2;\
+             drop role user2;",
+        )
+        .unwrap();
+
+        assert!(output_contains_message(
+            &output,
+            "role \"user2\" cannot be dropped because some objects depend on it"
+        ));
+        assert!(output_contains_message(
+            &output,
+            "privileges for membership of role user3 in role user1"
+        ));
+        assert!(
+            db.backend_catcache(2, None)
+                .unwrap()
+                .authid_rows()
+                .into_iter()
+                .any(|row| row.rolname == "user2")
+        );
+    }
+
+    #[test]
+    fn simple_query_reassign_and_drop_owned_preserve_role_until_final_drop() {
+        let db = Database::open(temp_dir("drop_owned_granted_by_dependency"), 16).unwrap();
+        let mut state = ConnectionState {
+            session: Session::new(2),
+            prepared: HashMap::new(),
+            portals: HashMap::new(),
+            copy_in: None,
+        };
+        let mut output = Vec::new();
+
+        for sql in [
+            "create role user1",
+            "create role user2",
+            "create role user3",
+            "create role user4",
+            "grant user1 to user2 with admin option",
+            "grant user1 to user3 granted by user2",
+            "drop role user2",
+            "reassign owned by user2 to user4",
+            "drop role user2",
+            "drop owned by user2",
+            "drop role user2",
+        ] {
+            handle_query(&mut output, &db, &mut state, sql).unwrap();
+        }
+
+        assert!(output_contains_message(
+            &output,
+            "role \"user2\" cannot be dropped because some objects depend on it"
+        ));
+        assert!(output_contains_message(
+            &output,
+            "privileges for membership of role user3 in role user1"
+        ));
+        assert!(!output_contains_message(&output, "role \"user2\" does not exist"));
+        assert!(
+            !db.backend_catcache(2, None)
+                .unwrap()
+                .authid_rows()
+                .into_iter()
+                .any(|row| row.rolname == "user2")
+        );
+    }
+
+    #[test]
     fn simple_query_session_authorization_sees_created_schema_for_qualified_create_table() {
         let db = Database::open(temp_dir("pub_session_auth_schema"), 16).unwrap();
         let mut state = ConnectionState {

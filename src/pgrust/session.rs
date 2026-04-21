@@ -2399,18 +2399,40 @@ impl Session {
                 )
             }
             Statement::AlterTableSet(_) => Ok(StatementResult::AffectedRows(0)),
-            Statement::CreateRole(ref create_stmt) => db.execute_create_role_stmt(
-                client_id,
-                create_stmt,
-                self.gucs.get("createrole_self_grant").map(String::as_str),
-            ),
+            Statement::CreateRole(ref create_stmt) => {
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_create_role_stmt_in_transaction(
+                    client_id,
+                    create_stmt,
+                    self.gucs.get("createrole_self_grant").map(String::as_str),
+                    xid,
+                    cid,
+                    &mut txn.catalog_effects,
+                )
+            }
             Statement::CreateDatabase(_) => Err(ExecError::Parse(
                 ParseError::ActiveSqlTransaction("CREATE DATABASE"),
             )),
             Statement::AlterRole(ref alter_stmt) => {
-                db.execute_alter_role_stmt(client_id, alter_stmt)
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_alter_role_stmt_in_transaction(
+                    client_id,
+                    alter_stmt,
+                    xid,
+                    cid,
+                    &mut txn.catalog_effects,
+                )
             }
-            Statement::DropRole(ref drop_stmt) => db.execute_drop_role_stmt(client_id, drop_stmt),
+            Statement::DropRole(ref drop_stmt) => {
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_drop_role_stmt_in_transaction(
+                    client_id,
+                    drop_stmt,
+                    xid,
+                    cid,
+                    &mut txn.catalog_effects,
+                )
+            }
             Statement::DropDatabase(_) => Err(ExecError::Parse(ParseError::ActiveSqlTransaction(
                 "DROP DATABASE",
             ))),

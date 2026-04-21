@@ -465,13 +465,21 @@ impl Database {
                 Some((xid, current_cid)),
                 &[existing.oid],
             )?;
-            if !owned_objects.is_empty() {
-                let detail = owned_objects
+            let shared_dependency_details = shared_role_dependency_details_for_roles(
+                self,
+                client_id,
+                xid,
+                current_cid,
+                &[existing.oid],
+            )?;
+            if !owned_objects.is_empty() || !shared_dependency_details.is_empty() {
+                let mut detail_lines = owned_objects
                     .iter()
                     .filter(|object| object.kind != OwnedObjectKind::Index)
                     .map(OwnedObject::drop_detail)
-                    .collect::<Vec<_>>()
-                    .join("\n");
+                    .collect::<Vec<_>>();
+                detail_lines.extend(shared_dependency_details);
+                let detail = detail_lines.join("\n");
                 return Err(ExecError::DetailedError {
                     message: format!(
                         "role \"{}\" cannot be dropped because some objects depend on it",
@@ -1035,6 +1043,45 @@ fn owned_object_drop_priority(kind: OwnedObjectKind) -> u8 {
         OwnedObjectKind::Sequence => 3,
         OwnedObjectKind::Table => 4,
     }
+}
+
+fn shared_role_dependency_details_for_roles(
+    db: &Database,
+    client_id: ClientId,
+    xid: TransactionId,
+    cid: CommandId,
+    role_oids: &[u32],
+) -> Result<Vec<String>, ExecError> {
+    let role_oids = role_oids.iter().copied().collect::<BTreeSet<_>>();
+    let auth_catalog = db
+        .txn_auth_catalog(client_id, xid, cid)
+        .map_err(map_role_catalog_error)?;
+    let role_names = auth_catalog
+        .roles()
+        .iter()
+        .map(|row| (row.oid, row.rolname.as_str()))
+        .collect::<BTreeMap<_, _>>();
+
+    let mut details = auth_catalog
+        .memberships()
+        .iter()
+        .filter(|row| {
+            role_oids.contains(&row.grantor)
+                && !role_oids.contains(&row.roleid)
+                && !role_oids.contains(&row.member)
+        })
+        .filter_map(|row| {
+            Some(format!(
+                "privileges for membership of role {} in role {}",
+                role_names.get(&row.member)?,
+                role_names.get(&row.roleid)?
+            ))
+        })
+        .collect::<Vec<_>>();
+
+    details.sort();
+    details.dedup();
+    Ok(details)
 }
 
 #[cfg(test)]
@@ -1838,6 +1885,70 @@ mod tests {
 
         assert_eq!(
             superuser.execute(&db, "drop role tenant").unwrap(),
+            StatementResult::AffectedRows(0)
+        );
+    }
+
+    #[test]
+    fn reassign_owned_does_not_clear_granted_by_membership_dependencies() {
+        let base = temp_dir("reassign_owned_membership_dependencies");
+        let db = Database::open(&base, 16).unwrap();
+        let mut superuser = Session::new(1);
+        superuser.execute(&db, "create role user1").unwrap();
+        superuser.execute(&db, "create role user2").unwrap();
+        superuser.execute(&db, "create role user3").unwrap();
+        superuser.execute(&db, "create role user4").unwrap();
+
+        superuser
+            .execute(&db, "grant user1 to user2 with admin option")
+            .unwrap();
+        superuser
+            .execute(&db, "grant user1 to user3 granted by user2")
+            .unwrap();
+
+        let err = superuser.execute(&db, "drop role user2").unwrap_err();
+        match err {
+            ExecError::DetailedError {
+                message,
+                detail,
+                sqlstate,
+                ..
+            } => {
+                assert_eq!(
+                    message,
+                    "role \"user2\" cannot be dropped because some objects depend on it"
+                );
+                assert_eq!(detail.as_deref(), Some("privileges for membership of role user3 in role user1"));
+                assert_eq!(sqlstate, "2BP01");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        superuser
+            .execute(&db, "reassign owned by user2 to user4")
+            .unwrap();
+
+        let err = superuser.execute(&db, "drop role user2").unwrap_err();
+        match err {
+            ExecError::DetailedError {
+                message,
+                detail,
+                sqlstate,
+                ..
+            } => {
+                assert_eq!(
+                    message,
+                    "role \"user2\" cannot be dropped because some objects depend on it"
+                );
+                assert_eq!(detail.as_deref(), Some("privileges for membership of role user3 in role user1"));
+                assert_eq!(sqlstate, "2BP01");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        superuser.execute(&db, "drop owned by user2").unwrap();
+        assert_eq!(
+            superuser.execute(&db, "drop role user2").unwrap(),
             StatementResult::AffectedRows(0)
         );
     }
