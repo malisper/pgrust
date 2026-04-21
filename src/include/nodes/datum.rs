@@ -497,6 +497,7 @@ pub enum Value {
     Json(CompactString),
     Jsonb(Vec<u8>),
     JsonPath(CompactString),
+    Xml(CompactString),
     TsVector(TsVector),
     TsQuery(TsQuery),
     Text(CompactString),
@@ -828,6 +829,7 @@ impl Value {
         match self {
             Value::JsonPath(s) => Some(s.as_str()),
             Value::Text(s) => Some(s.as_str()),
+            Value::Xml(s) => Some(s.as_str()),
             Value::TextRef(ptr, len) => Some(unsafe {
                 std::str::from_utf8_unchecked(std::slice::from_raw_parts(*ptr, *len as usize))
             }),
@@ -861,6 +863,7 @@ impl Value {
             Value::Json(s) => Value::Json(s.clone()),
             Value::Jsonb(bytes) => Value::Jsonb(bytes.clone()),
             Value::JsonPath(s) => Value::JsonPath(s.clone()),
+            Value::Xml(s) => Value::Xml(s.clone()),
             Value::TsVector(v) => Value::TsVector(v.clone()),
             Value::TsQuery(q) => Value::TsQuery(q.clone()),
             Value::TextRef(ptr, len) => {
@@ -944,6 +947,7 @@ impl Value {
             Value::Json(_) => Some(SqlType::new(SqlTypeKind::Json)),
             Value::Jsonb(_) => Some(SqlType::new(SqlTypeKind::Jsonb)),
             Value::JsonPath(_) => Some(SqlType::new(SqlTypeKind::JsonPath)),
+            Value::Xml(_) => Some(SqlType::new(SqlTypeKind::Xml)),
             Value::TsVector(_) => Some(SqlType::new(SqlTypeKind::TsVector)),
             Value::TsQuery(_) => Some(SqlType::new(SqlTypeKind::TsQuery)),
             Value::Text(_) | Value::TextRef(_, _) => Some(SqlType::new(SqlTypeKind::Text)),
@@ -1039,6 +1043,7 @@ impl PartialEq for Value {
             (Value::Json(a), Value::Json(b)) => a == b,
             (Value::Jsonb(a), Value::Jsonb(b)) => a == b,
             (Value::JsonPath(a), Value::JsonPath(b)) => a == b,
+            (Value::Xml(a), Value::Xml(b)) => a == b,
             (Value::TsVector(a), Value::TsVector(b)) => a == b,
             (Value::TsQuery(a), Value::TsQuery(b)) => a == b,
             (Value::InternalChar(a), Value::InternalChar(b)) => a == b,
@@ -1179,6 +1184,10 @@ impl std::hash::Hash for Value {
             }
             Value::JsonPath(s) => {
                 11u8.hash(state);
+                s.as_str().hash(state);
+            }
+            Value::Xml(s) => {
+                24u8.hash(state);
                 s.as_str().hash(state);
             }
             Value::TsVector(v) => {

@@ -19,6 +19,7 @@ pub struct DateTimeConfig {
     pub date_order: DateOrder,
     pub time_zone: String,
     pub max_stack_depth_kb: u32,
+    pub xml: XmlConfig,
 }
 
 impl Default for DateTimeConfig {
@@ -28,6 +29,7 @@ impl Default for DateTimeConfig {
             date_order: DateOrder::Mdy,
             time_zone: "UTC".into(),
             max_stack_depth_kb: 100,
+            xml: XmlConfig::default(),
         }
     }
 }
@@ -107,4 +109,5 @@ mod tests {
         assert_eq!(parse_timezone("+9.75"), Some("+09:45".into()));
     }
 }
+use crate::backend::utils::misc::guc_xml::XmlConfig;
 use crate::backend::utils::time::datetime::format_offset;

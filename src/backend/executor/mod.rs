@@ -18,6 +18,7 @@ mod expr_numeric;
 mod expr_ops;
 mod expr_range;
 mod expr_string;
+mod expr_xml;
 mod foreign_keys;
 pub(crate) mod hashjoin;
 pub(crate) mod jsonb;
@@ -72,6 +73,7 @@ pub(crate) use expr_range::{
     compare_range_values, decode_range_bytes, encode_range_bytes, eval_range_function,
     parse_range_text,
 };
+pub(crate) use expr_xml::validate_xml_input;
 pub use startup::executor_start;
 pub(crate) use tsearch::{
     compare_tsquery, compare_tsvector, concat_tsvector, decode_tsquery_bytes,
@@ -241,6 +243,13 @@ pub enum ExecError {
         details: String,
     },
     JsonInput {
+        raw_input: String,
+        message: String,
+        detail: Option<String>,
+        context: Option<String>,
+        sqlstate: &'static str,
+    },
+    XmlInput {
         raw_input: String,
         message: String,
         detail: Option<String>,

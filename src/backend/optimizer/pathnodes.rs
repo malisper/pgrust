@@ -922,6 +922,8 @@ pub(super) fn expr_sql_type(expr: &Expr) -> SqlType {
         Expr::CurrentTimestamp { .. } => SqlType::new(SqlTypeKind::TimestampTz),
         Expr::LocalTime { .. } => SqlType::new(SqlTypeKind::Time),
         Expr::LocalTimestamp { .. } => SqlType::new(SqlTypeKind::Timestamp),
+        Expr::Xml(_) => crate::include::nodes::primnodes::expr_sql_type_hint(expr)
+            .unwrap_or(SqlType::new(SqlTypeKind::Xml)),
         Expr::ArraySubscript { .. } => SqlType::new(SqlTypeKind::Text),
     }
 }

@@ -3617,12 +3617,19 @@ fn build_set(pair: Pair<'_, Rule>) -> Result<SetStatement, ParseError> {
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::set_scope => is_local = part.as_str().eq_ignore_ascii_case("local"),
-            Rule::set_standard_clause | Rule::set_time_zone_clause => {
+            Rule::set_standard_clause
+            | Rule::set_time_zone_clause
+            | Rule::set_xml_option_clause => {
                 for clause_part in part.into_inner() {
                     match clause_part.as_rule() {
                         Rule::identifier | Rule::time_zone_guc_name if name.is_none() => {
                             name = Some(build_set_guc_name(clause_part));
                         }
+                        Rule::kw_xml if name.is_none() => name = Some("xmloption".to_string()),
+                        Rule::kw_document if value.is_none() => {
+                            value = Some("DOCUMENT".to_string())
+                        }
+                        Rule::kw_content if value.is_none() => value = Some("CONTENT".to_string()),
                         Rule::set_value_list => value = Some(build_set_value_list(clause_part)),
                         _ => {}
                     }
@@ -6826,6 +6833,7 @@ fn sql_type_output_name(ty: SqlType) -> &'static str {
         SqlTypeKind::Json => "json",
         SqlTypeKind::Jsonb => "jsonb",
         SqlTypeKind::JsonPath => "jsonpath",
+        SqlTypeKind::Xml => "xml",
         SqlTypeKind::Date => "date",
         SqlTypeKind::DateRange => "daterange",
         SqlTypeKind::Time => "time without time zone",
@@ -7738,6 +7746,7 @@ fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
                 "json" => SqlType::new(SqlTypeKind::Json),
                 "jsonb" => SqlType::new(SqlTypeKind::Jsonb),
                 "jsonpath" => SqlType::new(SqlTypeKind::JsonPath),
+                "xml" => SqlType::new(SqlTypeKind::Xml),
                 other => panic!("unsupported array type alias: {other}"),
             };
             RawTypeName::Builtin(SqlType::array_of(base))
@@ -7802,6 +7811,7 @@ fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
         Rule::kw_json => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Json)),
         Rule::kw_jsonb => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Jsonb)),
         Rule::kw_jsonpath => RawTypeName::Builtin(SqlType::new(SqlTypeKind::JsonPath)),
+        Rule::kw_xml => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Xml)),
         Rule::kw_tsvector => RawTypeName::Builtin(SqlType::new(SqlTypeKind::TsVector)),
         Rule::kw_tsquery => RawTypeName::Builtin(SqlType::new(SqlTypeKind::TsQuery)),
         Rule::kw_regclass => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Oid)),
@@ -8085,6 +8095,25 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
 
             match next.as_rule() {
                 Rule::null_predicate_suffix => build_null_predicate(left, next),
+                Rule::is_document_suffix => {
+                    let negated = next.into_inner().any(|part| part.as_rule() == Rule::kw_not);
+                    let expr = SqlExpr::Xml(Box::new(RawXmlExpr {
+                        op: RawXmlExprOp::IsDocument,
+                        name: None,
+                        named_args: Vec::new(),
+                        arg_names: Vec::new(),
+                        args: vec![left],
+                        xml_option: None,
+                        indent: None,
+                        target_type: None,
+                        standalone: None,
+                    }));
+                    Ok(if negated {
+                        SqlExpr::Not(Box::new(expr))
+                    } else {
+                        expr
+                    })
+                }
                 Rule::between_suffix => {
                     let mut negated = false;
                     let mut bounds = Vec::new();
@@ -8582,6 +8611,12 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
             })
         }
         Rule::trim_expr => build_trim_expr(pair),
+        Rule::xml_element_expr => build_xml_element_expr(pair),
+        Rule::xml_forest_expr => build_xml_forest_expr(pair),
+        Rule::xml_parse_expr => build_xml_parse_expr(pair),
+        Rule::xml_pi_expr => build_xml_pi_expr(pair),
+        Rule::xml_root_expr => build_xml_root_expr(pair),
+        Rule::xml_serialize_expr => build_xml_serialize_expr(pair),
         Rule::typed_string_literal => {
             let mut inner = pair.into_inner();
             let ty = build_type_name(inner.next().ok_or(ParseError::UnexpectedEof)?);
@@ -8721,6 +8756,7 @@ fn build_agg_call(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                     Rule::kw_jsonb_agg => AggFunc::JsonbAgg,
                     Rule::kw_json_object_agg => AggFunc::JsonObjectAgg,
                     Rule::kw_jsonb_object_agg => AggFunc::JsonbObjectAgg,
+                    Rule::kw_xmlagg => AggFunc::XmlAgg,
                     Rule::kw_range_intersect_agg => AggFunc::RangeIntersectAgg,
                     _ => {
                         return Err(ParseError::UnexpectedToken {
@@ -9232,6 +9268,205 @@ fn build_trim_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         func_variadic: false,
         over: None,
     })
+}
+
+fn build_xml_attributes_expr(
+    pair: Pair<'_, Rule>,
+) -> Result<(Vec<SqlExpr>, Vec<String>), ParseError> {
+    let mut named_args = Vec::new();
+    let mut arg_names = Vec::new();
+    for item in pair
+        .into_inner()
+        .filter(|part| part.as_rule() == Rule::xml_attribute_item)
+    {
+        let mut value = None;
+        let mut name = None;
+        for part in item.into_inner() {
+            match part.as_rule() {
+                Rule::expr => value = Some(build_expr(part)?),
+                Rule::identifier => name = Some(build_identifier(part)),
+                _ => {}
+            }
+        }
+        named_args.push(value.ok_or(ParseError::UnexpectedEof)?);
+        arg_names.push(name.unwrap_or_default());
+    }
+    Ok((named_args, arg_names))
+}
+
+fn build_xml_element_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
+    let mut name = None;
+    let mut named_args = Vec::new();
+    let mut arg_names = Vec::new();
+    let mut args = Vec::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier if name.is_none() => name = Some(build_identifier(part)),
+            Rule::xml_attributes_expr => {
+                let (attr_values, attr_names) = build_xml_attributes_expr(part)?;
+                named_args.extend(attr_values);
+                arg_names.extend(attr_names);
+            }
+            Rule::expr => args.push(build_expr(part)?),
+            _ => {}
+        }
+    }
+    Ok(SqlExpr::Xml(Box::new(RawXmlExpr {
+        op: RawXmlExprOp::Element,
+        name,
+        named_args,
+        arg_names,
+        args,
+        xml_option: None,
+        indent: None,
+        target_type: None,
+        standalone: None,
+    })))
+}
+
+fn build_xml_forest_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
+    let mut args = Vec::new();
+    let mut arg_names = Vec::new();
+    for item in pair
+        .into_inner()
+        .filter(|part| part.as_rule() == Rule::xml_forest_item)
+    {
+        let mut value = None;
+        let mut name = None;
+        for part in item.into_inner() {
+            match part.as_rule() {
+                Rule::expr => value = Some(build_expr(part)?),
+                Rule::identifier => name = Some(build_identifier(part)),
+                _ => {}
+            }
+        }
+        args.push(value.ok_or(ParseError::UnexpectedEof)?);
+        arg_names.push(name.unwrap_or_default());
+    }
+    Ok(SqlExpr::Xml(Box::new(RawXmlExpr {
+        op: RawXmlExprOp::Forest,
+        name: None,
+        named_args: Vec::new(),
+        arg_names,
+        args,
+        xml_option: None,
+        indent: None,
+        target_type: None,
+        standalone: None,
+    })))
+}
+
+fn build_xml_parse_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
+    let mut xml_option = None;
+    let mut args = Vec::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::kw_document => xml_option = Some(XmlOption::Document),
+            Rule::kw_content => xml_option = Some(XmlOption::Content),
+            Rule::expr => args.push(build_expr(part)?),
+            _ => {}
+        }
+    }
+    Ok(SqlExpr::Xml(Box::new(RawXmlExpr {
+        op: RawXmlExprOp::Parse,
+        name: None,
+        named_args: Vec::new(),
+        arg_names: Vec::new(),
+        args,
+        xml_option,
+        indent: None,
+        target_type: None,
+        standalone: None,
+    })))
+}
+
+fn build_xml_pi_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
+    let mut name = None;
+    let mut args = Vec::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier if name.is_none() => name = Some(build_identifier(part)),
+            Rule::expr => args.push(build_expr(part)?),
+            _ => {}
+        }
+    }
+    Ok(SqlExpr::Xml(Box::new(RawXmlExpr {
+        op: RawXmlExprOp::Pi,
+        name,
+        named_args: Vec::new(),
+        arg_names: Vec::new(),
+        args,
+        xml_option: None,
+        indent: None,
+        target_type: None,
+        standalone: None,
+    })))
+}
+
+fn build_xml_root_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
+    let mut args = Vec::new();
+    let mut standalone = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::expr => args.push(build_expr(part)?),
+            Rule::xml_root_standalone => {
+                let has_yes = part.as_str().eq_ignore_ascii_case("yes");
+                let has_no_value = part
+                    .clone()
+                    .into_inner()
+                    .any(|inner| inner.as_rule() == Rule::kw_value);
+                standalone = Some(if has_yes {
+                    XmlStandalone::Yes
+                } else if has_no_value {
+                    XmlStandalone::NoValue
+                } else {
+                    XmlStandalone::No
+                });
+            }
+            _ => {}
+        }
+    }
+    Ok(SqlExpr::Xml(Box::new(RawXmlExpr {
+        op: RawXmlExprOp::Root,
+        name: None,
+        named_args: Vec::new(),
+        arg_names: Vec::new(),
+        args,
+        xml_option: None,
+        indent: None,
+        target_type: None,
+        standalone,
+    })))
+}
+
+fn build_xml_serialize_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
+    let mut xml_option = None;
+    let mut args = Vec::new();
+    let mut target_type = None;
+    let mut saw_no = false;
+    let mut indent = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::kw_document => xml_option = Some(XmlOption::Document),
+            Rule::kw_content => xml_option = Some(XmlOption::Content),
+            Rule::expr => args.push(build_expr(part)?),
+            Rule::type_name => target_type = Some(build_type_name(part)),
+            Rule::kw_no => saw_no = true,
+            Rule::kw_indent => indent = Some(!saw_no),
+            _ => {}
+        }
+    }
+    Ok(SqlExpr::Xml(Box::new(RawXmlExpr {
+        op: RawXmlExprOp::Serialize,
+        name: None,
+        named_args: Vec::new(),
+        arg_names: Vec::new(),
+        args,
+        xml_option,
+        indent,
+        target_type,
+        standalone: None,
+    })))
 }
 
 fn build_case_when(pair: Pair<'_, Rule>) -> Result<SqlCaseWhen, ParseError> {

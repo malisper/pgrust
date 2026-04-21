@@ -804,6 +804,19 @@ fn visit_nested_srfs(
                 ctes,
             );
         }
+        SqlExpr::Xml(xml) => {
+            for child in xml.child_exprs() {
+                visit_nested_srfs(
+                    child,
+                    info,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                );
+            }
+        }
         SqlExpr::Column(_)
         | SqlExpr::Default
         | SqlExpr::Const(_)

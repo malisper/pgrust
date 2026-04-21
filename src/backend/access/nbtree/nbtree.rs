@@ -121,6 +121,7 @@ fn encode_index_value(
             .ok_or(CatalogError::Corrupt("text ref must materialize"))?
             .to_owned()
             .into_bytes()),
+        Value::Xml(v) => Ok(v.as_bytes().to_vec()),
         Value::Numeric(v) => Ok(v.render().into_bytes()),
         Value::Bytea(v) => Ok(v.clone()),
         Value::Bit(v) => {

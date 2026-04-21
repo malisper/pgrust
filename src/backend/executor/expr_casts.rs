@@ -1023,6 +1023,7 @@ fn explicit_text_input_target_oids() -> &'static BTreeSet<u32> {
 fn input_error_message(err: &ExecError, text: &str) -> String {
     match err {
         ExecError::JsonInput { message, .. } => message.clone(),
+        ExecError::XmlInput { message, .. } => message.clone(),
         ExecError::DetailedError { message, .. } => message.clone(),
         ExecError::InvalidIntegerInput { ty, .. } => {
             let value = match err {
@@ -1104,6 +1105,7 @@ fn input_error_message(err: &ExecError, text: &str) -> String {
 fn input_error_sqlstate(err: &ExecError) -> &'static str {
     match err {
         ExecError::JsonInput { sqlstate, .. } => sqlstate,
+        ExecError::XmlInput { sqlstate, .. } => sqlstate,
         ExecError::InvalidIntegerInput { .. }
         | ExecError::ArrayInput { .. }
         | ExecError::InvalidNumericInput(_)
@@ -1189,6 +1191,17 @@ fn date_parse_error(text: &str, err: DateParseError) -> ExecError {
 fn input_error_info(err: ExecError, text: &str) -> InputErrorInfo {
     match err {
         ExecError::JsonInput {
+            message,
+            detail,
+            sqlstate,
+            ..
+        } => InputErrorInfo {
+            message,
+            detail,
+            hint: None,
+            sqlstate,
+        },
+        ExecError::XmlInput {
             message,
             detail,
             sqlstate,
@@ -1430,6 +1443,7 @@ pub(crate) fn cast_value_with_config(
                     | SqlTypeKind::Json
                     | SqlTypeKind::Jsonb
                     | SqlTypeKind::JsonPath
+                    | SqlTypeKind::Xml
                     | SqlTypeKind::TsVector
                     | SqlTypeKind::TsQuery
                     | SqlTypeKind::Void
@@ -1545,6 +1559,7 @@ pub(crate) fn cast_value_with_config(
                     | SqlTypeKind::Json
                     | SqlTypeKind::Jsonb
                     | SqlTypeKind::JsonPath
+                    | SqlTypeKind::Xml
                     | SqlTypeKind::TsVector
                     | SqlTypeKind::TsQuery
                     | SqlTypeKind::Void
@@ -1624,6 +1639,7 @@ pub(crate) fn cast_value_with_config(
                     | SqlTypeKind::Json
                     | SqlTypeKind::Jsonb
                     | SqlTypeKind::JsonPath
+                    | SqlTypeKind::Xml
                     | SqlTypeKind::TsVector
                     | SqlTypeKind::TsQuery
                     | SqlTypeKind::Void
@@ -1881,6 +1897,7 @@ pub(crate) fn cast_value_with_config(
         },
         Value::JsonPath(text) => cast_text_value_with_config(text.as_str(), ty, true, config),
         Value::Json(text) => cast_text_value_with_config(text.as_str(), ty, true, config),
+        Value::Xml(text) => cast_text_value_with_config(text.as_str(), ty, true, config),
         Value::TsVector(vector) => match ty.kind {
             SqlTypeKind::TsVector => Ok(Value::TsVector(vector)),
             SqlTypeKind::Text
@@ -2047,6 +2064,7 @@ pub(crate) fn cast_value_with_config(
                     | SqlTypeKind::Json
                     | SqlTypeKind::Jsonb
                     | SqlTypeKind::JsonPath
+                    | SqlTypeKind::Xml
                     | SqlTypeKind::TsVector
                     | SqlTypeKind::TsQuery
                     | SqlTypeKind::Void
@@ -2142,6 +2160,7 @@ pub(crate) fn cast_value_with_config(
                     | SqlTypeKind::Json
                     | SqlTypeKind::Jsonb
                     | SqlTypeKind::JsonPath
+                    | SqlTypeKind::Xml
                     | SqlTypeKind::TsVector
                     | SqlTypeKind::TsQuery
                     | SqlTypeKind::Void
@@ -2284,6 +2303,10 @@ pub(super) fn cast_text_value_with_config(
         | SqlTypeKind::Int2Vector
         | SqlTypeKind::OidVector
         | SqlTypeKind::PgNodeTree => Ok(Value::Text(CompactString::new(text))),
+        SqlTypeKind::Xml => {
+            crate::backend::executor::validate_xml_input(text, config.xml.option)?;
+            Ok(Value::Xml(CompactString::new(text)))
+        }
         SqlTypeKind::Date => parse_date_text(text, config)
             .map(Value::Date)
             .map_err(|err| date_parse_error(text, err)),
@@ -2427,6 +2450,7 @@ pub(super) fn cast_numeric_value(
         | SqlTypeKind::Tid
         | SqlTypeKind::Interval
         | SqlTypeKind::PgNodeTree => Ok(Value::Text(CompactString::from_owned(value.render()))),
+        SqlTypeKind::Xml => Ok(Value::Xml(CompactString::from_owned(value.render()))),
         SqlTypeKind::Date
         | SqlTypeKind::Time
         | SqlTypeKind::TimeTz
@@ -2965,5 +2989,22 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[test]
+    fn soft_input_error_info_reports_structured_xml_errors() {
+        let info = soft_input_error_info("<value>one</", "xml")
+            .unwrap()
+            .expect("invalid xml should return structured info");
+        assert_eq!(info.message, "invalid XML content");
+        assert_eq!(info.sqlstate, "2200N");
+        assert!(info.detail.is_some());
+
+        let info = soft_input_error_info("<?xml version=\"1.0\" standalone=\"y\"?><foo/>", "xml")
+            .unwrap()
+            .expect("invalid xml declaration should return structured info");
+        assert_eq!(info.message, "invalid XML content");
+        assert_eq!(info.sqlstate, "2200N");
+        assert!(info.detail.is_some());
     }
 }

@@ -76,6 +76,7 @@ fn render_value(value: &Value) -> String {
         Value::Json(v) => v.to_string(),
         Value::Jsonb(v) => format!("{:?}", v),
         Value::JsonPath(v) => v.to_string(),
+        Value::Xml(v) => v.to_string(),
         Value::Point(_)
         | Value::Lseg(_)
         | Value::Path(_)

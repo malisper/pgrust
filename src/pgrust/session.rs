@@ -30,6 +30,9 @@ use crate::backend::utils::misc::guc_datetime::{
     DateTimeConfig, default_datestyle, default_timezone, format_datestyle, parse_datestyle,
     parse_timezone,
 };
+use crate::backend::utils::misc::guc_xml::{
+    format_xmlbinary, format_xmloption, parse_xmlbinary, parse_xmloption,
+};
 use crate::backend::utils::misc::interrupts::{InterruptState, StatementInterruptGuard};
 use crate::include::catalog::PG_CHECKPOINT_OID;
 use crate::include::nodes::execnodes::ScalarType;
@@ -2810,6 +2813,8 @@ impl Session {
             match normalized.as_str() {
                 "datestyle" => self.guc_reset_datestyle(),
                 "timezone" => self.guc_reset_timezone(),
+                "xmlbinary" => self.datetime_config.xml.binary = Default::default(),
+                "xmloption" => self.datetime_config.xml.option = Default::default(),
                 "stats_fetch_consistency" => self
                     .stats_state
                     .write()
@@ -2825,6 +2830,7 @@ impl Session {
             self.gucs.clear();
             self.guc_reset_datestyle();
             self.guc_reset_timezone();
+            self.datetime_config.xml = Default::default();
             self.stats_state
                 .write()
                 .set_fetch_consistency(StatsFetchConsistency::Cache);
@@ -2854,6 +2860,8 @@ impl Session {
             match name.as_str() {
                 "datestyle" => default_datestyle().to_string(),
                 "timezone" => default_timezone().to_string(),
+                "xmlbinary" => format_xmlbinary(self.datetime_config.xml.binary).to_string(),
+                "xmloption" => format_xmloption(self.datetime_config.xml.option).to_string(),
                 _ => default_stats_guc_value(&name)
                     .map(str::to_string)
                     .unwrap_or_else(|| "default".to_string()),
@@ -2868,6 +2876,14 @@ impl Session {
             "timezone" => (
                 "TimeZone".to_string(),
                 self.datetime_config.time_zone.clone(),
+            ),
+            "xmlbinary" => (
+                "xmlbinary".to_string(),
+                format_xmlbinary(self.datetime_config.xml.binary).to_string(),
+            ),
+            "xmloption" => (
+                "xmloption".to_string(),
+                format_xmloption(self.datetime_config.xml.option).to_string(),
             ),
             _ if is_checkpoint_guc(&name) => (
                 stmt.name.clone(),
@@ -2958,6 +2974,22 @@ impl Session {
             }
             "statement_timeout" => {
                 parse_statement_timeout(value)?;
+            }
+            "xmlbinary" => {
+                let Some(binary) = parse_xmlbinary(value) else {
+                    return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+                        value.to_string(),
+                    )));
+                };
+                self.datetime_config.xml.binary = binary;
+            }
+            "xmloption" => {
+                let Some(option) = parse_xmloption(value) else {
+                    return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+                        value.to_string(),
+                    )));
+                };
+                self.datetime_config.xml.option = option;
             }
             "max_stack_depth" => {
                 self.datetime_config.max_stack_depth_kb = parse_max_stack_depth(value)?;
@@ -3221,6 +3253,9 @@ impl Session {
                                         })?
                                         .into(),
                                 ),
+                                ScalarType::Xml => {
+                                    cast_value(Value::Text(raw.clone().into()), column.sql_type)?
+                                }
                                 ScalarType::Bytea => Value::Bytea(parse_bytea_text(raw)?),
                                 ScalarType::Text => Value::Text(raw.clone().into()),
                                 ScalarType::Record => {

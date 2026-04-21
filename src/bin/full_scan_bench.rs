@@ -289,6 +289,7 @@ fn value_checksum(value: &Value) -> i64 {
         Value::Json(v) => v.bytes().map(i64::from).sum(),
         Value::Jsonb(v) => v.iter().copied().map(i64::from).sum(),
         Value::JsonPath(v) => v.bytes().map(i64::from).sum(),
+        Value::Xml(v) => v.bytes().map(i64::from).sum(),
         Value::Range(_) => pgrust::backend::executor::render_range_text(value)
             .unwrap_or_default()
             .bytes()
