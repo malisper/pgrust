@@ -349,11 +349,6 @@ fn resolve_alter_constraint_deferrability(
             sqlstate: "55000",
         });
     }
-    if !enforced && (deferrable || initially_deferred) {
-        return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-            "FOREIGN KEY NOT ENFORCED with DEFERRABLE/INITIALLY".into(),
-        )));
-    }
     Ok((deferrable, initially_deferred, enforced))
 }
 
