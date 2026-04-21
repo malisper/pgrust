@@ -3371,6 +3371,21 @@ fn parse_create_function_statement_with_sql_return_shorthand() {
 }
 
 #[test]
+fn parse_drop_function_statement_with_signature() {
+    let stmt = parse_statement("drop function public.p2text(p2)").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::DropFunction(DropFunctionStatement {
+            if_exists: false,
+            schema_name: Some("public".into()),
+            function_name: "p2text".into(),
+            arg_types: vec!["p2".into()],
+            cascade: false,
+        })
+    );
+}
+
+#[test]
 fn parse_set_local_statement() {
     let stmt = parse_statement("set local client_min_messages to 'warning'").unwrap();
     assert_eq!(

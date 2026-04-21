@@ -338,6 +338,7 @@ pub enum Statement {
     DropConversion(DropConversionStatement),
     DropDatabase(DropDatabaseStatement),
     DropPublication(DropPublicationStatement),
+    DropFunction(DropFunctionStatement),
     DropTable(DropTableStatement),
     DropTrigger(DropTriggerStatement),
     DropIndex(DropIndexStatement),
@@ -1696,6 +1697,15 @@ pub struct DropConversionStatement {
 pub struct DropDatabaseStatement {
     pub if_exists: bool,
     pub database_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropFunctionStatement {
+    pub if_exists: bool,
+    pub schema_name: Option<String>,
+    pub function_name: String,
+    pub arg_types: Vec<String>,
+    pub cascade: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

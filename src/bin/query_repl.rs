@@ -835,6 +835,7 @@ fn run_statement(
         | Statement::CreateDomain(_)
         | Statement::CreateType(_)
         | Statement::CreateSequence(_)
+        | Statement::DropFunction(_)
         | Statement::DropDomain(_)
         | Statement::DropConversion(_)
         | Statement::DropRule(_)
