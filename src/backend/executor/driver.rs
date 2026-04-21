@@ -144,6 +144,7 @@ fn execute_statement_with_source(
         | Statement::SetRole(_)
         | Statement::ResetRole(_)
         | Statement::AlterTableAlterConstraint(_)
+        | Statement::AlterTableAlterColumnCompression(_)
         | Statement::AlterTableAlterColumnOptions(_)
         | Statement::AlterTableAlterColumnStatistics(_)
         | Statement::AlterTableAlterColumnStorage(_)
@@ -394,6 +395,7 @@ pub fn execute_readonly_statement(
         | Statement::AlterTableAddColumn(_)
         | Statement::AlterTableDropColumn(_)
         | Statement::AlterTableAlterColumnType(_)
+        | Statement::AlterTableAlterColumnCompression(_)
         | Statement::AlterTableAlterColumnStorage(_)
         | Statement::AlterTableAlterColumnDefault(_) => Ok(StatementResult::AffectedRows(0)),
         Statement::AlterTableRename(_) => Ok(StatementResult::AffectedRows(0)),

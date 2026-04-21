@@ -27,6 +27,7 @@ pub const INFOMASK_OFFSET: usize = 20;
 pub enum TupleValue {
     Null,
     Bytes(Vec<u8>),
+    EncodedVarlena(Vec<u8>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

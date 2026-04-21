@@ -1,6 +1,11 @@
 use crate::backend::access::heap::heapam::{heap_scan_begin_visible, heap_scan_next_visible};
+use crate::backend::access::common::toast_compression::decompress_external_payload;
 use crate::backend::executor::ExecError;
-use crate::include::access::detoast::decode_ondisk_toast_pointer;
+use crate::include::access::detoast::{
+    decode_ondisk_toast_pointer, varatt_external_get_compression_method,
+    varatt_external_is_compressed,
+};
+use crate::include::varatt::VARHDRSZ;
 use crate::include::nodes::execnodes::ToastFetchContext;
 
 fn toast_chunk_desc() -> crate::backend::executor::RelationDesc {
@@ -110,5 +115,16 @@ pub(crate) fn detoast_value_bytes(
             ),
         });
     }
-    Ok(data)
+    if varatt_external_is_compressed(pointer) {
+        let rawsize = usize::try_from(pointer.va_rawsize)
+            .unwrap_or_default()
+            .saturating_sub(VARHDRSZ);
+        decompress_external_payload(
+            &data,
+            rawsize,
+            varatt_external_get_compression_method(pointer),
+        )
+    } else {
+        Ok(data)
+    }
 }

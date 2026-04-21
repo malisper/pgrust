@@ -265,6 +265,12 @@ impl Database {
                     alter_stmt,
                     configured_search_path,
                 ),
+            Statement::AlterTableAlterColumnCompression(ref alter_stmt) => self
+                .execute_alter_table_alter_column_compression_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
             Statement::AlterTableAlterColumnStorage(ref alter_stmt) => self
                 .execute_alter_table_alter_column_storage_stmt_with_search_path(
                     client_id,
@@ -468,6 +474,8 @@ impl Database {
                     session_user_oid: self.auth_state(client_id).session_user_oid(),
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
                     next_command_id: 0,
+                    default_toast_compression:
+                        crate::include::access::htup::AttributeCompression::Pglz,
                     expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
                     case_test_values: Vec::new(),
                     system_bindings: Vec::new(),
@@ -589,6 +597,8 @@ impl Database {
                     session_user_oid: self.auth_state(client_id).session_user_oid(),
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
                     next_command_id: 0,
+                    default_toast_compression:
+                        crate::include::access::htup::AttributeCompression::Pglz,
                     expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
                     case_test_values: Vec::new(),
                     system_bindings: Vec::new(),
@@ -648,6 +658,8 @@ impl Database {
                     session_user_oid: self.auth_state(client_id).session_user_oid(),
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
                     next_command_id: 0,
+                    default_toast_compression:
+                        crate::include::access::htup::AttributeCompression::Pglz,
                     expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
                     case_test_values: Vec::new(),
                     system_bindings: Vec::new(),
@@ -726,6 +738,8 @@ impl Database {
                     session_user_oid: self.auth_state(client_id).session_user_oid(),
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
                     next_command_id: 0,
+                    default_toast_compression:
+                        crate::include::access::htup::AttributeCompression::Pglz,
                     expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
                     case_test_values: Vec::new(),
                     system_bindings: Vec::new(),
@@ -805,6 +819,8 @@ impl Database {
                     session_user_oid: self.auth_state(client_id).session_user_oid(),
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
                     next_command_id: 0,
+                    default_toast_compression:
+                        crate::include::access::htup::AttributeCompression::Pglz,
                     expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
                     case_test_values: Vec::new(),
                     system_bindings: Vec::new(),
@@ -1088,6 +1104,8 @@ impl Database {
                     session_user_oid: self.auth_state(client_id).session_user_oid(),
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
                     next_command_id: 0,
+                    default_toast_compression:
+                        crate::include::access::htup::AttributeCompression::Pglz,
                     expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
                     case_test_values: Vec::new(),
                     system_bindings: Vec::new(),
@@ -1148,6 +1166,8 @@ impl Database {
                     session_user_oid: self.auth_state(client_id).session_user_oid(),
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
                     next_command_id: 0,
+                    default_toast_compression:
+                        crate::include::access::htup::AttributeCompression::Pglz,
                     datetime_config: datetime_config.clone(),
                     expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
                     case_test_values: Vec::new(),
@@ -1253,6 +1273,7 @@ impl Database {
             session_user_oid: self.auth_state(client_id).session_user_oid(),
             current_user_oid: self.auth_state(client_id).current_user_oid(),
             next_command_id: command_id,
+            default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
             case_test_values: Vec::new(),
             system_bindings: Vec::new(),
