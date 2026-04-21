@@ -1442,6 +1442,7 @@ pub(crate) fn cast_value_with_config(
             SqlType {
                 kind:
                     SqlTypeKind::Oid
+                    | SqlTypeKind::RegType
                     | SqlTypeKind::RegRole
                     | SqlTypeKind::RegProcedure
                     | SqlTypeKind::Xid,
@@ -1574,6 +1575,7 @@ pub(crate) fn cast_value_with_config(
             SqlType {
                 kind:
                     SqlTypeKind::Oid
+                    | SqlTypeKind::RegType
                     | SqlTypeKind::RegRole
                     | SqlTypeKind::RegProcedure
                     | SqlTypeKind::Xid,
@@ -1737,6 +1739,7 @@ pub(crate) fn cast_value_with_config(
                     | SqlTypeKind::Int4
                     | SqlTypeKind::Int8
                     | SqlTypeKind::Oid
+                    | SqlTypeKind::RegType
                     | SqlTypeKind::RegRole
                     | SqlTypeKind::RegProcedure
                     | SqlTypeKind::Xid
@@ -2152,6 +2155,7 @@ pub(crate) fn cast_value_with_config(
             SqlType {
                 kind:
                     SqlTypeKind::Oid
+                    | SqlTypeKind::RegType
                     | SqlTypeKind::RegRole
                     | SqlTypeKind::RegProcedure
                     | SqlTypeKind::Xid,
@@ -2348,6 +2352,7 @@ pub(crate) fn cast_value_with_config(
             SqlType {
                 kind:
                     SqlTypeKind::Oid
+                    | SqlTypeKind::RegType
                     | SqlTypeKind::RegRole
                     | SqlTypeKind::RegProcedure
                     | SqlTypeKind::Xid,
@@ -2567,6 +2572,7 @@ pub(super) fn cast_text_value_with_config(
             right: Value::Null,
         }),
         SqlTypeKind::RegRole
+        | SqlTypeKind::RegType
         | SqlTypeKind::RegProcedure
         | SqlTypeKind::RegConfig
         | SqlTypeKind::RegDictionary => cast_text_to_oid(text),
@@ -2733,7 +2739,11 @@ pub(super) fn cast_numeric_value(
                 .map(Value::Int64)
                 .ok_or(ExecError::Int8OutOfRange),
         },
-        SqlTypeKind::Oid | SqlTypeKind::RegRole | SqlTypeKind::RegProcedure | SqlTypeKind::Xid => {
+        SqlTypeKind::Oid
+        | SqlTypeKind::RegType
+        | SqlTypeKind::RegRole
+        | SqlTypeKind::RegProcedure
+        | SqlTypeKind::Xid => {
             value
                 .round_to_scale(0)
                 .and_then(|rounded| rounded.render().parse::<u32>().ok())
@@ -2844,7 +2854,7 @@ fn cast_float_to_int(value: f64, ty: SqlType) -> Result<Value, ExecError> {
                 Ok(Value::Int64(rounded as i64))
             }
         }
-        SqlTypeKind::Oid => {
+        SqlTypeKind::Oid | SqlTypeKind::RegType | SqlTypeKind::RegRole | SqlTypeKind::RegProcedure => {
             if rounded < 0.0 || rounded > u32::MAX as f64 {
                 Err(ExecError::OidOutOfRange)
             } else {

@@ -1,6 +1,7 @@
 use super::functions::*;
 use super::infer::*;
 use super::*;
+use crate::backend::parser::parse_type_name;
 use crate::backend::catalog::roles::find_role_by_name;
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::include::catalog::range_type_ref_for_sql_type;
@@ -1087,6 +1088,11 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 && let Some(bound_regrole) = bind_regrole_literal_cast(inner, target_type, catalog)?
             {
                 return Ok(bound_regrole);
+            }
+            if target_type.kind == SqlTypeKind::RegType
+                && let Some(bound_regtype) = bind_regtype_literal_cast(inner, target_type, catalog)?
+            {
+                return Ok(bound_regtype);
             }
             if target_type.kind == SqlTypeKind::RegProcedure
                 && let Some(bound_regprocedure) =
@@ -2772,6 +2778,25 @@ fn bind_regprocedure_literal_cast(
     )))
 }
 
+fn bind_regtype_literal_cast(
+    expr: &SqlExpr,
+    target_type: SqlType,
+    catalog: &dyn CatalogLookup,
+) -> Result<Option<Expr>, ParseError> {
+    let Some(type_name) = regtype_literal_text(expr) else {
+        return Ok(None);
+    };
+    let raw_type = parse_type_name(type_name)?;
+    let sql_type = resolve_raw_type_name(&raw_type, catalog)?;
+    let type_oid = catalog
+        .type_oid_for_sql_type(sql_type)
+        .ok_or_else(|| ParseError::UnsupportedType(type_name.to_string()))?;
+    Ok(Some(Expr::Cast(
+        Box::new(Expr::Const(Value::Int64(type_oid as i64))),
+        target_type,
+    )))
+}
+
 fn bind_regrole_literal_cast(
     expr: &SqlExpr,
     target_type: SqlType,
@@ -2796,6 +2821,14 @@ fn bind_regrole_literal_cast(
 }
 
 fn regrole_literal_text(expr: &SqlExpr) -> Option<&str> {
+    match expr {
+        SqlExpr::Const(Value::Text(text)) => Some(text.as_str()),
+        SqlExpr::Const(Value::TextRef(_, _)) => None,
+        _ => None,
+    }
+}
+
+fn regtype_literal_text(expr: &SqlExpr) -> Option<&str> {
     match expr {
         SqlExpr::Const(Value::Text(text)) => Some(text.as_str()),
         SqlExpr::Const(Value::TextRef(_, _)) => None,

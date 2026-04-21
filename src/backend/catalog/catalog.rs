@@ -135,6 +135,7 @@ fn default_attribute_storage(sql_type: SqlType, attlen: i16) -> AttributeStorage
         | SqlTypeKind::Int8
         | SqlTypeKind::Money
         | SqlTypeKind::Oid
+        | SqlTypeKind::RegType
         | SqlTypeKind::RegRole
         | SqlTypeKind::RegProcedure
         | SqlTypeKind::Xid
@@ -211,6 +212,7 @@ pub(crate) fn scalar_type_for_sql_type(sql_type: SqlType) -> ScalarType {
         // dedicated fixed-width runtime representations.
         SqlTypeKind::Name => ScalarType::Text,
         SqlTypeKind::Oid => ScalarType::Int32,
+        SqlTypeKind::RegType => ScalarType::Int32,
         SqlTypeKind::RegRole => ScalarType::Int32,
         SqlTypeKind::RegProcedure => ScalarType::Int32,
         SqlTypeKind::Tid => ScalarType::Text,

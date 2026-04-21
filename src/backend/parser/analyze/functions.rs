@@ -697,6 +697,7 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::QuoteLiteral
             | BuiltinScalarFunction::BitcastIntegerToFloat4
             | BuiltinScalarFunction::BitcastBigintToFloat8
+            | BuiltinScalarFunction::RegTypeToText
             | BuiltinScalarFunction::RegProcedureToText
             | BuiltinScalarFunction::RegRoleToText
             | BuiltinScalarFunction::BpcharToText
@@ -1548,6 +1549,8 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("replace", BuiltinScalarFunction::Replace),
         ("split_part", BuiltinScalarFunction::SplitPart),
         ("translate", BuiltinScalarFunction::Translate),
+        ("regtype_to_text", BuiltinScalarFunction::RegTypeToText),
+        ("regtypeout", BuiltinScalarFunction::RegTypeToText),
         (
             "regprocedure_to_text",
             BuiltinScalarFunction::RegProcedureToText,
