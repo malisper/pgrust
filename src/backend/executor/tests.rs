@@ -10356,6 +10356,77 @@ fn window_value_functions_follow_default_frame_semantics() {
 }
 
 #[test]
+fn window_lag_and_lead_support_offsets_defaults_and_nulls() {
+    let base = temp_dir("window_lag_lead_offsets_defaults");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let xid = txns.begin();
+    run_sql(
+        &base,
+        &txns,
+        xid,
+        "insert into people (id, name, note) values
+            (1, 'alice', 'x'),
+            (2, 'bob', 'x'),
+            (3, 'carol', 'y'),
+            (4, 'dave', 'x')",
+    )
+    .unwrap();
+    txns.commit(xid).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select id,
+                lag(id) over (partition by note order by id),
+                lag(id, 2, 99) over (partition by note order by id),
+                lead(id * 2, 1, -1.4) over (partition by note order by id),
+                lead(id, null) over (partition by note order by id)
+         from people
+         order by id",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![
+                        Value::Int32(1),
+                        Value::Null,
+                        Value::Int32(99),
+                        Value::Numeric("4".into()),
+                        Value::Null,
+                    ],
+                    vec![
+                        Value::Int32(2),
+                        Value::Int32(1),
+                        Value::Int32(99),
+                        Value::Numeric("8".into()),
+                        Value::Null,
+                    ],
+                    vec![
+                        Value::Int32(3),
+                        Value::Null,
+                        Value::Int32(99),
+                        Value::Numeric("-1.4".into()),
+                        Value::Null,
+                    ],
+                    vec![
+                        Value::Int32(4),
+                        Value::Int32(2),
+                        Value::Int32(1),
+                        Value::Numeric("-1.4".into()),
+                        Value::Null,
+                    ],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn window_nth_value_rejects_nonpositive_offset() {
     let base = temp_dir("window_nth_value_invalid_offset");
     let mut txns = TransactionManager::new_durable(&base).unwrap();

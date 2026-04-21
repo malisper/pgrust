@@ -195,6 +195,9 @@ fn evaluate_rank_like_window(
             BuiltinWindowFunction::Ntile => {
                 panic!("ntile() must be evaluated through evaluate_ntile_window")
             }
+            BuiltinWindowFunction::Lag | BuiltinWindowFunction::Lead => {
+                panic!("lag/lead must be evaluated through evaluate_offset_window")
+            }
             BuiltinWindowFunction::FirstValue
             | BuiltinWindowFunction::LastValue
             | BuiltinWindowFunction::NthValue => {
@@ -326,6 +329,72 @@ fn evaluate_nth_value_offset(
     }
 }
 
+fn evaluate_lag_lead_offset(
+    ctx: &mut ExecutorContext,
+    func: &WindowFuncExpr,
+    current_row: &mut PreparedWindowRow,
+) -> Result<Option<i64>, ExecError> {
+    let Some(offset_expr) = func.args.get(1) else {
+        return Ok(Some(1));
+    };
+    match evaluate_window_expr_on_row(ctx, current_row, offset_expr)? {
+        Value::Null => Ok(None),
+        Value::Int16(value) => Ok(Some(i64::from(value))),
+        Value::Int32(value) => Ok(Some(i64::from(value))),
+        Value::Int64(value) => Ok(Some(value)),
+        other => Err(ExecError::TypeMismatch {
+            op: "lag/lead offset",
+            left: other,
+            right: Value::Int32(1),
+        }),
+    }
+}
+
+fn evaluate_offset_window(
+    ctx: &mut ExecutorContext,
+    func: &WindowFuncExpr,
+    partition_rows: &mut [PreparedWindowRow],
+) -> Result<Vec<Value>, ExecError> {
+    let Some(value_expr) = func.args.first() else {
+        panic!("lag/lead missing value argument");
+    };
+    let builtin = match &func.kind {
+        WindowFuncKind::Builtin(kind) => *kind,
+        WindowFuncKind::Aggregate(_) => panic!("aggregate window function routed to lag/lead path"),
+    };
+
+    let mut values = Vec::with_capacity(partition_rows.len());
+    for row_index in 0..partition_rows.len() {
+        let Some(offset) = evaluate_lag_lead_offset(ctx, func, &mut partition_rows[row_index])?
+        else {
+            values.push(Value::Null);
+            continue;
+        };
+
+        let direction = match builtin {
+            BuiltinWindowFunction::Lag => -i128::from(offset),
+            BuiltinWindowFunction::Lead => i128::from(offset),
+            _ => panic!("non-offset window function routed to lag/lead path"),
+        };
+        let target_index = row_index as i128 + direction;
+        let value = if target_index < 0 || target_index >= partition_rows.len() as i128 {
+            if let Some(default_expr) = func.args.get(2) {
+                evaluate_window_expr_on_row(ctx, &mut partition_rows[row_index], default_expr)?
+            } else {
+                Value::Null
+            }
+        } else {
+            evaluate_window_expr_on_row(
+                ctx,
+                &mut partition_rows[target_index as usize],
+                value_expr,
+            )?
+        };
+        values.push(value);
+    }
+    Ok(values)
+}
+
 fn evaluate_value_window(
     ctx: &mut ExecutorContext,
     func: &WindowFuncExpr,
@@ -378,6 +447,9 @@ fn evaluate_builtin_window(
     };
     match builtin {
         BuiltinWindowFunction::Ntile => evaluate_ntile_window(ctx, func, partition_rows),
+        BuiltinWindowFunction::Lag | BuiltinWindowFunction::Lead => {
+            evaluate_offset_window(ctx, func, partition_rows)
+        }
         BuiltinWindowFunction::FirstValue
         | BuiltinWindowFunction::LastValue
         | BuiltinWindowFunction::NthValue => evaluate_value_window(ctx, func, partition_rows),
