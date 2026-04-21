@@ -55,15 +55,17 @@ pub(crate) fn to_char_float(value: f64, format: &str) -> Result<String, ExecErro
     let spec = parser.parse()?;
     if spec.roman {
         let rounded = value.round();
-        let intvalue = if !rounded.is_nan()
-            && rounded >= i32::MIN as f64
-            && rounded <= i32::MAX as f64
-        {
-            rounded as i32
-        } else {
-            i32::MAX
-        };
-        return Ok(format_roman(intvalue as i128, spec.fill_mode, spec.roman_lower));
+        let intvalue =
+            if !rounded.is_nan() && rounded >= i32::MIN as f64 && rounded <= i32::MAX as f64 {
+                rounded as i32
+            } else {
+                i32::MAX
+            };
+        return Ok(format_roman(
+            intvalue as i128,
+            spec.fill_mode,
+            spec.roman_lower,
+        ));
     }
     if spec.scientific {
         let numeric = parse_numeric_text(&value.to_string())
@@ -107,7 +109,10 @@ pub(crate) fn to_char_float(value: f64, format: &str) -> Result<String, ExecErro
     adjusted_spec.scale_digits = 0;
 
     if pre_len > int_slots {
-        return Ok(overflow_pattern(&adjusted_spec, adjusted_value.is_sign_negative()));
+        return Ok(overflow_pattern(
+            &adjusted_spec,
+            adjusted_value.is_sign_negative(),
+        ));
     }
 
     let rounded_text = format!("{adjusted_value:.effective_post$}");
@@ -774,28 +779,58 @@ fn overflow_pattern(spec: &FormatSpec, negative: bool) -> String {
             Token::Decimal => ".".to_string(),
             Token::Group => ",".to_string(),
             Token::Literal(text) => text.clone(),
-            Token::Sign(kind) => match kind {
-                SignKind::Mi | SignKind::S | SignKind::Sg | SignKind::Pl if negative => {
-                    "-".to_string()
-                }
-                _ => " ".to_string(),
-            },
+            Token::Sign(_) => String::new(),
         })
-        .collect::<Vec<_>>()
-        .concat();
-    if !spec
-        .tokens
-        .iter()
-        .any(|token| matches!(token, Token::Sign(_)))
-        && negative
-        && !spec.angle_pr
-    {
-        rendered = format!("-{rendered}");
+        .collect::<Vec<_>>();
+
+    for (idx, token) in spec.tokens.iter().enumerate() {
+        if let Token::Sign(kind) = token {
+            rendered[idx] = match kind {
+                SignKind::S if idx == 0 && spec.fill_mode => " ".into(),
+                SignKind::S | SignKind::Sg => {
+                    if negative {
+                        "-".into()
+                    } else {
+                        "+".into()
+                    }
+                }
+                SignKind::Mi => {
+                    if negative {
+                        "-".into()
+                    } else {
+                        " ".into()
+                    }
+                }
+                SignKind::Pl => {
+                    if negative {
+                        " ".into()
+                    } else {
+                        "+".into()
+                    }
+                }
+            };
+        }
     }
-    if spec.fill_mode {
-        rendered = rendered.trim().to_string();
+
+    if !(spec.fill_mode && matches!(spec.tokens.first(), Some(Token::Sign(SignKind::S)))) {
+        move_s_sign_to_number(spec, &mut rendered, negative);
     }
-    rendered
+    apply_implicit_sign(spec, &mut rendered, negative);
+
+    let mut out = if spec.fill_mode {
+        trim_fill_mode_edges(spec, &mut rendered);
+        rendered.concat()
+    } else {
+        rendered.concat()
+    };
+    if spec.angle_pr {
+        if negative {
+            out = format!("<{}>", out.trim().trim_start_matches('-').trim());
+        } else {
+            out = format!(" {out} ");
+        }
+    }
+    out
 }
 
 fn truncate_fractional_digit_tokens(spec: &FormatSpec, keep: usize) -> FormatSpec {
@@ -894,7 +929,8 @@ fn trim_fill_mode_fraction(spec: &FormatSpec, rendered: &mut [String], decimal_i
                 }
             }
             Token::Digit0 => break,
-            Token::Literal(_) | Token::Group => {
+            Token::Literal(_) => {}
+            Token::Group => {
                 if trimming {
                     rendered[idx].clear();
                 }
@@ -905,15 +941,57 @@ fn trim_fill_mode_fraction(spec: &FormatSpec, rendered: &mut [String], decimal_i
 }
 
 fn trim_fill_mode_integer(spec: &FormatSpec, rendered: &mut [String], int_end: usize) {
-    let Some(anchor_idx) = (0..int_end)
-        .find(|idx| token_has_visible_number_text(&spec.tokens[*idx], &rendered[*idx]))
+    let Some(anchor_idx) =
+        (0..int_end).find(|idx| token_has_visible_number_text(&spec.tokens[*idx], &rendered[*idx]))
     else {
         return;
     };
     for idx in 0..anchor_idx {
         match spec.tokens[idx] {
-            Token::Digit9 | Token::Group | Token::Literal(_) => rendered[idx].clear(),
+            Token::Digit9 | Token::Group => rendered[idx].clear(),
+            Token::Literal(_) => {}
             Token::Digit0 | Token::Decimal | Token::Sign(_) => {}
+        }
+    }
+}
+
+fn trim_fill_mode_edges(spec: &FormatSpec, rendered: &mut [String]) {
+    let mut start = 0usize;
+    while start < rendered.len() {
+        match &spec.tokens[start] {
+            Token::Literal(text) if !text.is_empty() => break,
+            Token::Literal(_) => {
+                if rendered[start].is_empty() {
+                    start += 1;
+                    continue;
+                }
+                break;
+            }
+            _ if rendered[start].is_empty() || rendered[start] == " " => {
+                rendered[start].clear();
+                start += 1;
+            }
+            _ => break,
+        }
+    }
+
+    let mut end = rendered.len();
+    while end > start {
+        let idx = end - 1;
+        match &spec.tokens[idx] {
+            Token::Literal(text) if !text.is_empty() => break,
+            Token::Literal(_) => {
+                if rendered[idx].is_empty() {
+                    end -= 1;
+                    continue;
+                }
+                break;
+            }
+            _ if rendered[idx].is_empty() || rendered[idx] == " " => {
+                rendered[idx].clear();
+                end -= 1;
+            }
+            _ => break,
         }
     }
 }
@@ -962,11 +1040,10 @@ fn format_standard_numeric(value: &NumericValue, spec: &FormatSpec) -> String {
         }
         move_s_sign_to_number(spec, &mut out, negative);
         apply_implicit_sign(spec, &mut out, negative);
-        let mut out = out.concat();
         if spec.fill_mode {
-            out = out.trim().to_string();
+            trim_fill_mode_edges(spec, &mut out);
         }
-        return out;
+        return out.concat();
     }
     let shifted = shift_value_text_for_v(&value.render(), spec.scale_digits);
     let (negative, int_part, frac_part) = split_rendered_decimal(&shifted);
@@ -1195,7 +1272,8 @@ fn format_standard_numeric(value: &NumericValue, spec: &FormatSpec) -> String {
             }
         }
         trim_fill_mode_integer(spec, &mut rendered, int_end);
-        out = rendered.concat().trim().to_string();
+        trim_fill_mode_edges(spec, &mut rendered);
+        out = rendered.concat();
         if out.starts_with('.') || out.starts_with("-.") || out.starts_with("+.") {
             let dot_idx = out.find('.').unwrap_or(0);
             if dot_idx + 1 == out.len() {
@@ -1221,25 +1299,25 @@ fn format_standard_numeric(value: &NumericValue, spec: &FormatSpec) -> String {
             out = format!(" {out} ");
         }
     }
-    if spec.fill_mode {
-        out = out.trim().to_string();
-    }
     out
 }
 
 fn format_scientific_numeric(value: &NumericValue, spec: &FormatSpec) -> Result<String, ExecError> {
     match value {
         NumericValue::PosInf | NumericValue::NegInf | NumericValue::NaN => {
-            let hashes = spec
+            let mut rendered = spec
                 .tokens
                 .iter()
                 .map(|token| match token {
-                    Token::Digit9 | Token::Digit0 => "#",
-                    Token::Decimal => ".",
-                    _ => "",
+                    Token::Digit9 | Token::Digit0 => "#".to_string(),
+                    Token::Decimal => ".".to_string(),
+                    _ => String::new(),
                 })
-                .collect::<String>();
-            let mut out = hashes;
+                .collect::<Vec<_>>();
+            if spec.fill_mode {
+                trim_fill_mode_edges(spec, &mut rendered);
+            }
+            let mut out = rendered.concat();
             out.push_str("####");
             out.insert(0, ' ');
             return Ok(out);
@@ -1315,7 +1393,13 @@ fn parse_roman_to_number(input: &str, format: &str) -> Result<NumericValue, Exec
         });
     }
     let normalized_format = format.trim_matches(' ');
-    if normalized_format.eq_ignore_ascii_case("rn") {
+    let stripped_format =
+        if normalized_format.len() >= 2 && normalized_format[..2].eq_ignore_ascii_case("FM") {
+            &normalized_format[2..]
+        } else {
+            normalized_format
+        };
+    if stripped_format.eq_ignore_ascii_case("rn") {
         let non_space = trimmed
             .chars()
             .take_while(|ch| ch.is_ascii_alphabetic())
@@ -1641,15 +1725,26 @@ mod tests {
             "+0 ."
         );
         assert_eq!(
-            to_char_numeric(&NumericValue::from("4.31"), "FMS 9 9 9 . 9 9 9")
-                .unwrap(),
+            to_char_numeric(&NumericValue::from("4.31"), "FMS 9 9 9 . 9 9 9").unwrap(),
             "+4 . 3 1"
         );
         assert_eq!(
-            to_char_numeric(&NumericValue::from("-83028485"), "FMS 9 9 9 9 9 9 9 9 . 9 9")
-                .unwrap(),
+            to_char_numeric(
+                &NumericValue::from("-83028485"),
+                "FMS 9 9 9 9 9 9 9 9 . 9 9"
+            )
+            .unwrap(),
             "-8 3 0 2 8 4 8 5 ."
         );
+        let wide_fms = to_char_numeric(
+            &NumericValue::from("0"),
+            "FMS 9 9 9 9 9 9 9 9 9 9 9 9 9 9 9 9 . 9 9 9 9 9 9 9 9 9 9 9 9 9 9 9 9 9",
+        )
+        .unwrap();
+        assert_eq!(wide_fms.len(), 39);
+        assert_eq!(wide_fms.trim(), "+0 .");
+        assert!(wide_fms.starts_with("                 +0 ."));
+        assert!(wide_fms.ends_with("                 "));
     }
 
     #[test]
@@ -1734,10 +1829,21 @@ mod tests {
     fn parses_to_number_roman_formats() {
         assert_eq!(to_number_numeric("CvIiI", "rn").unwrap().render(), "108");
         assert_eq!(to_number_numeric("  XIV", "  RN").unwrap().render(), "14");
+        assert_eq!(to_number_numeric("CM", "FMRN").unwrap().render(), "900");
+        assert_eq!(to_number_numeric("M CC", "RN").unwrap().render(), "1000");
         assert!(matches!(
             to_number_numeric("viv", "RN"),
             Err(ExecError::InvalidStorageValue { .. })
         ));
+        for invalid in [
+            "DCCCD", "XIXL", "MCCM", "MMMM", "VV", "IL", "VIX", "LXC", "DCM", "MMMDCM", "CLXC",
+            "qiv", " ",
+        ] {
+            assert!(matches!(
+                to_number_numeric(invalid, "RN"),
+                Err(ExecError::InvalidStorageValue { .. })
+            ));
+        }
         assert!(matches!(
             to_number_numeric("CM", "MIRN"),
             Err(ExecError::DetailedError {
