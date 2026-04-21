@@ -23,6 +23,7 @@ pub struct NotNullConstraintAction {
     pub constraint_name: String,
     pub column: String,
     pub not_valid: bool,
+    pub no_inherit: bool,
     pub primary_key_owned: bool,
 }
 
@@ -157,6 +158,7 @@ struct PendingNotNullConstraint {
     generated_base: String,
     column: String,
     not_valid: bool,
+    no_inherit: bool,
     primary_key_owned: bool,
     column_index: usize,
 }
@@ -450,6 +452,7 @@ pub fn normalize_create_table_constraints(
             }),
             column: constraint.column,
             not_valid: constraint.not_valid,
+            no_inherit: constraint.no_inherit,
             primary_key_owned: constraint.primary_key_owned,
         })
         .collect();
@@ -653,14 +656,27 @@ pub fn normalize_alter_table_add_constraint(
                         constraint_name,
                         column: desc.columns[column_index].name.clone(),
                         not_valid: attributes.not_valid,
+                        no_inherit: attributes.no_inherit,
                         primary_key_owned: false,
                     },
                 ))
             } else {
-                Err(ParseError::UnexpectedToken {
-                    expected: "nullable column for NOT NULL constraint",
-                    actual: format!("column \"{}\" is already marked NOT NULL", column),
-                })
+                let existing = &desc.columns[column_index];
+                if existing.not_null_constraint_no_inherit != attributes.no_inherit {
+                    Err(ParseError::InvalidTableDefinition(format!(
+                        "cannot change NO INHERIT status of NOT NULL constraint \"{}\" on relation \"{}\"",
+                        existing
+                            .not_null_constraint_name
+                            .as_deref()
+                            .unwrap_or(column),
+                        table_name,
+                    )))
+                } else {
+                    Err(ParseError::UnexpectedToken {
+                        expected: "nullable column for NOT NULL constraint",
+                        actual: format!("column \"{}\" is already marked NOT NULL", column),
+                    })
+                }
             }
         }
         TableConstraint::Check {
@@ -861,6 +877,7 @@ pub fn normalize_alter_table_add_column_constraints(
             }),
             column: constraint.column,
             not_valid: constraint.not_valid,
+            no_inherit: constraint.no_inherit,
             primary_key_owned: false,
         });
     let checks = checks
@@ -953,11 +970,6 @@ fn validate_not_null_or_check_attributes(
     attributes: &ConstraintAttributes,
     constraint_kind: &'static str,
 ) -> Result<(), ParseError> {
-    if attributes.no_inherit {
-        return Err(ParseError::FeatureNotSupported(format!(
-            "{constraint_kind} NO INHERIT"
-        )));
-    }
     if attributes.deferrable.is_some() {
         return Err(ParseError::FeatureNotSupported(format!(
             "{constraint_kind} DEFERRABLE"
@@ -1393,6 +1405,7 @@ fn merge_not_null_constraint(
             generated_base: format!("{relation_name}_{column_name}_not_null"),
             column: column_name.to_string(),
             not_valid: attributes.not_valid,
+            no_inherit: attributes.no_inherit,
             primary_key_owned,
             column_index,
         });
@@ -1409,6 +1422,11 @@ fn merge_not_null_constraint(
 
     if entry.explicit_name.is_none() {
         entry.explicit_name = attributes.name.clone();
+    }
+    if entry.no_inherit != attributes.no_inherit {
+        return Err(ParseError::InvalidTableDefinition(format!(
+            "conflicting NO INHERIT declaration for not-null constraint on column \"{column_name}\""
+        )));
     }
     entry.not_valid &= attributes.not_valid;
     entry.primary_key_owned &= primary_key_owned;
