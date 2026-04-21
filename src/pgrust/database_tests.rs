@@ -13296,6 +13296,29 @@ fn create_index_accepts_bpchar_typmods_with_bpchar_ops() {
 }
 
 #[test]
+fn create_function_accepts_bpchar_argument_types() {
+    let base = temp_dir("create_function_bpchar_args");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create function bpchar_prefix(value bpchar) returns text \
+         as $$ select substr(value, 1, 2) $$ language sql immutable",
+    )
+    .unwrap();
+
+    match db
+        .execute(1, "select bpchar_prefix('WS.001.1a'::char(20))")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Text("W".into())]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn btree_index_supports_builtin_nummultirange_keys() {
     let base = temp_dir("btree_nummultirange_keys");
     let db = Database::open(&base, 16).unwrap();

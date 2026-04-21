@@ -997,6 +997,8 @@ fn builtin_named_type_alias(name: &str) -> Option<SqlType> {
     }
     if name.eq_ignore_ascii_case("float") {
         Some(SqlType::new(SqlTypeKind::Float8))
+    } else if name.eq_ignore_ascii_case("bpchar") {
+        Some(SqlType::new(SqlTypeKind::Char))
     } else if name.eq_ignore_ascii_case("regtype") {
         Some(SqlType::new(SqlTypeKind::RegType))
     } else if name.eq_ignore_ascii_case("regproc") {
