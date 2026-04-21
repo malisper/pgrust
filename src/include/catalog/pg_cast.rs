@@ -106,6 +106,7 @@ pub fn bootstrap_pg_cast_rows() -> Vec<PgCastRow> {
         cast_row(4106_0_1, REGROLE_TYPE_OID, OID_TYPE_OID, 0, 'a', 'b'),
         cast_row(4106_1, OID_TYPE_OID, REGPROCEDURE_TYPE_OID, 0, 'i', 'b'),
         cast_row(4106_2, REGPROCEDURE_TYPE_OID, OID_TYPE_OID, 0, 'a', 'b'),
+        cast_row(4106_3, INT4_TYPE_OID, OID_TYPE_OID, 0, 'i', 'b'),
         cast_row(
             4107,
             INT8_TYPE_OID,

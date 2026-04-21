@@ -214,7 +214,7 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'i',
         ),
         proc_row(
-            6404,
+            6406,
             "postgresql_fdw_validator",
             BOOL_TYPE_OID,
             &oid_argtypes(&[TEXT_ARRAY_TYPE_OID, OID_TYPE_OID]),
@@ -2000,132 +2000,6 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             1,
         ),
         aggregate_row(
-            931001,
-            "var_pop",
-            NUMERIC_TYPE_OID,
-            &oid_argtypes(&[ANYOID]),
-            1,
-        ),
-        aggregate_row(
-            931002,
-            "var_samp",
-            NUMERIC_TYPE_OID,
-            &oid_argtypes(&[ANYOID]),
-            1,
-        ),
-        aggregate_row(
-            931003,
-            "variance",
-            NUMERIC_TYPE_OID,
-            &oid_argtypes(&[ANYOID]),
-            1,
-        ),
-        aggregate_row(
-            931004,
-            "stddev_pop",
-            NUMERIC_TYPE_OID,
-            &oid_argtypes(&[ANYOID]),
-            1,
-        ),
-        aggregate_row(
-            931005,
-            "stddev_samp",
-            NUMERIC_TYPE_OID,
-            &oid_argtypes(&[ANYOID]),
-            1,
-        ),
-        aggregate_row(
-            931006,
-            "stddev",
-            NUMERIC_TYPE_OID,
-            &oid_argtypes(&[ANYOID]),
-            1,
-        ),
-        aggregate_row(
-            931007,
-            "regr_count",
-            INT8_TYPE_OID,
-            &oid_argtypes(&[FLOAT8_TYPE_OID, FLOAT8_TYPE_OID]),
-            2,
-        ),
-        aggregate_row(
-            931008,
-            "regr_sxx",
-            FLOAT8_TYPE_OID,
-            &oid_argtypes(&[FLOAT8_TYPE_OID, FLOAT8_TYPE_OID]),
-            2,
-        ),
-        aggregate_row(
-            931009,
-            "regr_syy",
-            FLOAT8_TYPE_OID,
-            &oid_argtypes(&[FLOAT8_TYPE_OID, FLOAT8_TYPE_OID]),
-            2,
-        ),
-        aggregate_row(
-            931010,
-            "regr_sxy",
-            FLOAT8_TYPE_OID,
-            &oid_argtypes(&[FLOAT8_TYPE_OID, FLOAT8_TYPE_OID]),
-            2,
-        ),
-        aggregate_row(
-            931011,
-            "regr_avgx",
-            FLOAT8_TYPE_OID,
-            &oid_argtypes(&[FLOAT8_TYPE_OID, FLOAT8_TYPE_OID]),
-            2,
-        ),
-        aggregate_row(
-            931012,
-            "regr_avgy",
-            FLOAT8_TYPE_OID,
-            &oid_argtypes(&[FLOAT8_TYPE_OID, FLOAT8_TYPE_OID]),
-            2,
-        ),
-        aggregate_row(
-            931013,
-            "regr_r2",
-            FLOAT8_TYPE_OID,
-            &oid_argtypes(&[FLOAT8_TYPE_OID, FLOAT8_TYPE_OID]),
-            2,
-        ),
-        aggregate_row(
-            931014,
-            "regr_slope",
-            FLOAT8_TYPE_OID,
-            &oid_argtypes(&[FLOAT8_TYPE_OID, FLOAT8_TYPE_OID]),
-            2,
-        ),
-        aggregate_row(
-            931015,
-            "regr_intercept",
-            FLOAT8_TYPE_OID,
-            &oid_argtypes(&[FLOAT8_TYPE_OID, FLOAT8_TYPE_OID]),
-            2,
-        ),
-        aggregate_row(
-            931016,
-            "covar_pop",
-            FLOAT8_TYPE_OID,
-            &oid_argtypes(&[FLOAT8_TYPE_OID, FLOAT8_TYPE_OID]),
-            2,
-        ),
-        aggregate_row(
-            931017,
-            "covar_samp",
-            FLOAT8_TYPE_OID,
-            &oid_argtypes(&[FLOAT8_TYPE_OID, FLOAT8_TYPE_OID]),
-            2,
-        ),
-        aggregate_row(
-            931018,
-            "corr",
-            FLOAT8_TYPE_OID,
-            &oid_argtypes(&[FLOAT8_TYPE_OID, FLOAT8_TYPE_OID]),
-            2,
-        ),
-        aggregate_row(
             6221,
             "avg",
             NUMERIC_TYPE_OID,
@@ -2174,13 +2048,6 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             JSONB_TYPE_OID,
             &oid_argtypes(&[ANYOID, ANYOID]),
             2,
-        ),
-        aggregate_row(
-            6293,
-            "bool_and",
-            BOOL_TYPE_OID,
-            &oid_argtypes(&[BOOL_TYPE_OID]),
-            1,
         ),
         aggregate_row(
             3538,
@@ -2860,24 +2727,8 @@ fn synthetic_aggregate_proc_oids() -> &'static Vec<(AggFunc, u32)> {
             AggFunc::AnyValue,
             AggFunc::Sum,
             AggFunc::Avg,
-            AggFunc::VarPop,
-            AggFunc::VarSamp,
             AggFunc::Variance,
-            AggFunc::StddevPop,
-            AggFunc::StddevSamp,
             AggFunc::Stddev,
-            AggFunc::RegrCount,
-            AggFunc::RegrSxx,
-            AggFunc::RegrSyy,
-            AggFunc::RegrSxy,
-            AggFunc::RegrAvgx,
-            AggFunc::RegrAvgy,
-            AggFunc::RegrR2,
-            AggFunc::RegrSlope,
-            AggFunc::RegrIntercept,
-            AggFunc::CovarPop,
-            AggFunc::CovarSamp,
-            AggFunc::Corr,
             AggFunc::Min,
             AggFunc::Max,
             AggFunc::StringAgg,
@@ -2923,27 +2774,10 @@ fn aggregate_func_for_proname(name: &str) -> Option<AggFunc> {
     match name.to_ascii_lowercase().as_str() {
         "count" => Some(AggFunc::Count),
         "any_value" => Some(AggFunc::AnyValue),
-        "bool_and" => Some(AggFunc::BoolAnd),
         "sum" => Some(AggFunc::Sum),
         "avg" => Some(AggFunc::Avg),
-        "var_pop" => Some(AggFunc::VarPop),
-        "var_samp" => Some(AggFunc::VarSamp),
         "variance" => Some(AggFunc::Variance),
-        "stddev_pop" => Some(AggFunc::StddevPop),
-        "stddev_samp" => Some(AggFunc::StddevSamp),
         "stddev" => Some(AggFunc::Stddev),
-        "regr_count" => Some(AggFunc::RegrCount),
-        "regr_sxx" => Some(AggFunc::RegrSxx),
-        "regr_syy" => Some(AggFunc::RegrSyy),
-        "regr_sxy" => Some(AggFunc::RegrSxy),
-        "regr_avgx" => Some(AggFunc::RegrAvgx),
-        "regr_avgy" => Some(AggFunc::RegrAvgy),
-        "regr_r2" => Some(AggFunc::RegrR2),
-        "regr_slope" => Some(AggFunc::RegrSlope),
-        "regr_intercept" => Some(AggFunc::RegrIntercept),
-        "covar_pop" => Some(AggFunc::CovarPop),
-        "covar_samp" => Some(AggFunc::CovarSamp),
-        "corr" => Some(AggFunc::Corr),
         "min" => Some(AggFunc::Min),
         "max" => Some(AggFunc::Max),
         "string_agg" => Some(AggFunc::StringAgg),
@@ -3284,10 +3118,6 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("array_to_string", BuiltinScalarFunction::ArrayToString),
         ("array_length", BuiltinScalarFunction::ArrayLength),
         ("cardinality", BuiltinScalarFunction::Cardinality),
-        ("array_append", BuiltinScalarFunction::ArrayAppend),
-        ("array_prepend", BuiltinScalarFunction::ArrayPrepend),
-        ("array_cat", BuiltinScalarFunction::ArrayCat),
-        ("trim_array", BuiltinScalarFunction::TrimArray),
         ("array_position", BuiltinScalarFunction::ArrayPosition),
         ("array_positions", BuiltinScalarFunction::ArrayPositions),
         ("array_remove", BuiltinScalarFunction::ArrayRemove),
@@ -3380,10 +3210,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("float8_accum", BuiltinScalarFunction::Float8Accum),
         ("float8_combine", BuiltinScalarFunction::Float8Combine),
         ("float8_regr_accum", BuiltinScalarFunction::Float8RegrAccum),
-        (
-            "float8_regr_combine",
-            BuiltinScalarFunction::Float8RegrCombine,
-        ),
+        ("float8_regr_combine", BuiltinScalarFunction::Float8RegrCombine),
         ("erf", BuiltinScalarFunction::Erf),
         ("erfc", BuiltinScalarFunction::Erfc),
         ("gamma", BuiltinScalarFunction::Gamma),
@@ -3394,15 +3221,11 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("cardinality", BuiltinScalarFunction::Cardinality),
         ("array_ndims", BuiltinScalarFunction::ArrayNdims),
         ("array_dims", BuiltinScalarFunction::ArrayDims),
-        ("array_append", BuiltinScalarFunction::ArrayAppend),
-        ("array_prepend", BuiltinScalarFunction::ArrayPrepend),
-        ("array_cat", BuiltinScalarFunction::ArrayCat),
         ("array_position", BuiltinScalarFunction::ArrayPosition),
         ("array_positions", BuiltinScalarFunction::ArrayPositions),
         ("array_remove", BuiltinScalarFunction::ArrayRemove),
         ("array_replace", BuiltinScalarFunction::ArrayReplace),
         ("array_sort", BuiltinScalarFunction::ArraySort),
-        ("trim_array", BuiltinScalarFunction::TrimArray),
         ("string_to_array", BuiltinScalarFunction::StringToArray),
         ("array_to_string", BuiltinScalarFunction::ArrayToString),
         ("booleq", BuiltinScalarFunction::BoolEq),
@@ -6393,6 +6216,48 @@ mod tests {
         assert_eq!(
             builtin_scalar_function_for_proc_oid(row.oid),
             Some(BuiltinScalarFunction::PgRustTestFdwHandler)
+        );
+    }
+
+    #[test]
+    fn bootstrap_rows_have_unique_oids() {
+        use std::collections::HashSet;
+
+        let mut seen = HashSet::new();
+        for row in bootstrap_pg_proc_rows() {
+            assert!(
+                seen.insert(row.oid),
+                "duplicate pg_proc oid {} for {}",
+                row.oid,
+                row.proname
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_scalar_helpers_have_proc_oid_mappings() {
+        for func in [
+            BuiltinScalarFunction::RegProcedureToText,
+            BuiltinScalarFunction::RegRoleToText,
+            BuiltinScalarFunction::PgGetUserById,
+            BuiltinScalarFunction::Float8Accum,
+            BuiltinScalarFunction::Float8Combine,
+            BuiltinScalarFunction::Float8RegrAccum,
+            BuiltinScalarFunction::Float8RegrCombine,
+        ] {
+            let oid = proc_oid_for_builtin_scalar_function(func)
+                .unwrap_or_else(|| panic!("missing pg_proc oid mapping for {:?}", func));
+            assert_eq!(builtin_scalar_function_for_proc_oid(oid), Some(func));
+        }
+    }
+
+    #[test]
+    fn any_value_aggregate_has_proc_oid_mapping() {
+        let oid =
+            proc_oid_for_builtin_aggregate_function(AggFunc::AnyValue).expect("any_value oid");
+        assert_eq!(
+            builtin_aggregate_function_for_proc_oid(oid),
+            Some(AggFunc::AnyValue)
         );
     }
 }

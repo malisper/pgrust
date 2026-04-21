@@ -14881,6 +14881,45 @@ fn regrole_cast_to_text_renders_role_name() {
 }
 
 #[test]
+fn pg_get_userbyid_returns_role_name() {
+    let dir = temp_dir("pg_get_userbyid");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create role app_role login").unwrap();
+    let oid = role_oid(&db, "app_role");
+
+    assert_eq!(
+        query_rows(&db, 1, &format!("select pg_get_userbyid({oid})")),
+        vec![vec![Value::Text("app_role".into())]]
+    );
+}
+
+#[test]
+fn pg_catalog_array_length_resolves_builtin_function() {
+    let dir = temp_dir("pg_catalog_array_length");
+    let db = Database::open(&dir, 64).unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select pg_catalog.array_length(array[1,2,3], 1)"),
+        vec![vec![Value::Int32(3)]]
+    );
+}
+
+#[test]
+fn regproc_cast_aliases_resolve_in_queries() {
+    let dir = temp_dir("regproc_cast_aliases");
+    let db = Database::open(&dir, 64).unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select 6403::regproc::text, 6403::pg_catalog.regproc::text"),
+        vec![vec![
+            Value::Text("pg_rust_test_fdw_handler()".into()),
+            Value::Text("pg_rust_test_fdw_handler()".into()),
+        ]]
+    );
+}
+
+#[test]
 fn session_user_and_current_role_are_sql_visible() {
     let dir = temp_dir("session_user_current_role");
     let db = Database::open(&dir, 64).unwrap();

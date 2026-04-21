@@ -32,6 +32,9 @@ pub(crate) enum AccumState {
     CountDistinct {
         seen: HashSet<Value>,
     },
+    AnyValue {
+        value: Option<Value>,
+    },
     Sum {
         sum: Option<NumericAccum>,
         result_type: SqlType,
@@ -82,6 +85,7 @@ impl AccumState {
                 seen: HashSet::new(),
             },
             (AggFunc::Count, false) => AccumState::Count { count: 0 },
+            (AggFunc::AnyValue, _) => AccumState::AnyValue { value: None },
             (AggFunc::Sum, _) => AccumState::Sum {
                 sum: None,
                 result_type: sql_type,
@@ -159,6 +163,15 @@ impl AccumState {
                     let value = values.first().unwrap_or(&Value::Null);
                     if !matches!(value, Value::Null) {
                         *count += 1;
+                    }
+                }
+                Ok(())
+            },
+            (AggFunc::AnyValue, _, _) => |state, values| {
+                if let AccumState::AnyValue { value: current } = state {
+                    let value = values.first().unwrap_or(&Value::Null);
+                    if current.is_none() && !matches!(value, Value::Null) {
+                        *current = Some(value.to_owned_value());
                     }
                 }
                 Ok(())
@@ -305,6 +318,7 @@ impl AccumState {
         match self {
             AccumState::Count { count } => Value::Int64(*count),
             AccumState::CountDistinct { seen } => Value::Int64(seen.len() as i64),
+            AccumState::AnyValue { value } => value.clone().unwrap_or(Value::Null),
             AccumState::Sum { sum, result_type } => match sum {
                 Some(NumericAccum::Int(v)) if matches!(result_type.kind, SqlTypeKind::Money) => {
                     Value::Money(*v)

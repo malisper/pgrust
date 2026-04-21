@@ -2129,6 +2129,9 @@ fn validate_executable_expr(expr: &Expr, plan_node: &str, field: &str) {
         | Expr::SessionUser
         | Expr::CurrentRole
         | Expr::CurrentDate
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
         | Expr::LocalTime { .. }
@@ -2445,6 +2448,9 @@ fn validate_planner_expr(expr: &Expr, path_node: &str, field: &str) {
         | Expr::SessionUser
         | Expr::CurrentRole
         | Expr::CurrentDate
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
         | Expr::LocalTime { .. }

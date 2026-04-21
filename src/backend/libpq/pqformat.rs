@@ -770,6 +770,7 @@ fn encode_binary_data_row_value(value: &Value, sql_type: SqlType) -> Result<Vec<
                 sql_type.kind,
                 SqlTypeKind::Oid
                     | SqlTypeKind::RegRole
+                    | SqlTypeKind::RegProcedure
                     | SqlTypeKind::Xid
                     | SqlTypeKind::RegConfig
                     | SqlTypeKind::RegDictionary

@@ -66,6 +66,9 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_conversion_statement(&sql)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_foreign_data_wrapper_statement(&sql)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_create_function_statement(&sql)? {
         return Ok(stmt);
     }
@@ -259,6 +262,7 @@ pub fn parse_type_name(sql: &str) -> Result<RawTypeName, ParseError> {
         "void" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Void))),
         "fdw_handler" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::FdwHandler))),
         "regrole" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegRole))),
+        "regproc" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegProcedure))),
         "regprocedure" => {
             return Ok(RawTypeName::Builtin(SqlType::new(
                 SqlTypeKind::RegProcedure,
@@ -391,6 +395,408 @@ fn try_parse_conversion_statement(sql: &str) -> Result<Option<Statement>, ParseE
             .map(|stmt| Some(Statement::CommentOnConversion(stmt)));
     }
     Ok(None)
+}
+
+fn try_parse_foreign_data_wrapper_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if lowered.starts_with("create foreign data wrapper ") {
+        return build_create_foreign_data_wrapper_statement(trimmed)
+            .map(|stmt| Some(Statement::CreateForeignDataWrapper(stmt)));
+    }
+    if lowered.starts_with("alter foreign data wrapper ") {
+        return build_alter_foreign_data_wrapper_statement(trimmed);
+    }
+    if lowered.starts_with("drop foreign data wrapper ") {
+        return build_drop_foreign_data_wrapper_statement(trimmed)
+            .map(|stmt| Some(Statement::DropForeignDataWrapper(stmt)));
+    }
+    if lowered.starts_with("comment on foreign data wrapper ") {
+        return build_comment_on_foreign_data_wrapper_statement(trimmed)
+            .map(|stmt| Some(Statement::CommentOnForeignDataWrapper(stmt)));
+    }
+    Ok(None)
+}
+
+fn build_create_foreign_data_wrapper_statement(
+    sql: &str,
+) -> Result<CreateForeignDataWrapperStatement, ParseError> {
+    let mut rest = sql["create foreign data wrapper ".len()..].trim_start();
+    let (fdw_name, next) = parse_sql_identifier(rest)?;
+    rest = next.trim_start();
+    let mut handler_name = None;
+    let mut validator_name = None;
+    let mut saw_handler = false;
+    let mut saw_validator = false;
+    while !rest.is_empty() && !keyword_at_start(rest, "options") {
+        if keyword_at_start(rest, "handler") {
+            if saw_handler {
+                return Err(ParseError::FeatureNotSupportedMessage(
+                    "conflicting or redundant options".into(),
+                ));
+            }
+            let next = consume_keyword(rest, "handler").trim_start();
+            let (name, tail) = parse_sql_identifier(next)?;
+            handler_name = Some(name);
+            saw_handler = true;
+            rest = tail.trim_start();
+            continue;
+        }
+        if keyword_at_start(rest, "no handler") {
+            if saw_handler {
+                return Err(ParseError::FeatureNotSupportedMessage(
+                    "conflicting or redundant options".into(),
+                ));
+            }
+            saw_handler = true;
+            rest = consume_keyword(rest, "no handler").trim_start();
+            continue;
+        }
+        if keyword_at_start(rest, "validator") {
+            if saw_validator {
+                return Err(ParseError::FeatureNotSupportedMessage(
+                    "conflicting or redundant options".into(),
+                ));
+            }
+            let next = consume_keyword(rest, "validator").trim_start();
+            let (name, tail) = parse_sql_identifier(next)?;
+            validator_name = Some(name);
+            saw_validator = true;
+            rest = tail.trim_start();
+            continue;
+        }
+        if keyword_at_start(rest, "no validator") {
+            if saw_validator {
+                return Err(ParseError::FeatureNotSupportedMessage(
+                    "conflicting or redundant options".into(),
+                ));
+            }
+            saw_validator = true;
+            rest = consume_keyword(rest, "no validator").trim_start();
+            continue;
+        }
+        return Err(ParseError::UnexpectedToken {
+            expected: "HANDLER, NO HANDLER, VALIDATOR, NO VALIDATOR, OPTIONS, or end of statement",
+            actual: rest.into(),
+        });
+    }
+    let options = if rest.is_empty() {
+        Vec::new()
+    } else {
+        parse_create_generic_options(rest)?
+    };
+    Ok(CreateForeignDataWrapperStatement {
+        fdw_name,
+        handler_name,
+        validator_name,
+        options,
+    })
+}
+
+fn build_alter_foreign_data_wrapper_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let mut rest = sql["alter foreign data wrapper ".len()..].trim_start();
+    let (fdw_name, next) = parse_sql_identifier(rest)?;
+    rest = next.trim_start();
+    if keyword_at_start(rest, "owner to") {
+        let next = consume_keyword(rest, "owner to").trim_start();
+        let (new_owner, tail) = parse_sql_identifier(next)?;
+        if !tail.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of statement",
+                actual: tail.trim().into(),
+            });
+        }
+        return Ok(Some(Statement::AlterForeignDataWrapperOwner(
+            AlterForeignDataWrapperOwnerStatement { fdw_name, new_owner },
+        )));
+    }
+    if keyword_at_start(rest, "rename to") {
+        let next = consume_keyword(rest, "rename to").trim_start();
+        let (new_name, tail) = parse_sql_identifier(next)?;
+        if !tail.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of statement",
+                actual: tail.trim().into(),
+            });
+        }
+        return Ok(Some(Statement::AlterForeignDataWrapperRename(
+            AlterForeignDataWrapperRenameStatement { fdw_name, new_name },
+        )));
+    }
+
+    let mut handler_name = None;
+    let mut validator_name = None;
+    let mut saw_handler = false;
+    let mut saw_validator = false;
+    while !rest.is_empty() && !keyword_at_start(rest, "options") {
+        if keyword_at_start(rest, "handler") {
+            if saw_handler {
+                return Err(ParseError::FeatureNotSupportedMessage(
+                    "conflicting or redundant options".into(),
+                ));
+            }
+            let next = consume_keyword(rest, "handler").trim_start();
+            let (name, tail) = parse_sql_identifier(next)?;
+            handler_name = Some(Some(name));
+            saw_handler = true;
+            rest = tail.trim_start();
+            continue;
+        }
+        if keyword_at_start(rest, "no handler") {
+            if saw_handler {
+                return Err(ParseError::FeatureNotSupportedMessage(
+                    "conflicting or redundant options".into(),
+                ));
+            }
+            handler_name = Some(None);
+            saw_handler = true;
+            rest = consume_keyword(rest, "no handler").trim_start();
+            continue;
+        }
+        if keyword_at_start(rest, "validator") {
+            if saw_validator {
+                return Err(ParseError::FeatureNotSupportedMessage(
+                    "conflicting or redundant options".into(),
+                ));
+            }
+            let next = consume_keyword(rest, "validator").trim_start();
+            let (name, tail) = parse_sql_identifier(next)?;
+            validator_name = Some(Some(name));
+            saw_validator = true;
+            rest = tail.trim_start();
+            continue;
+        }
+        if keyword_at_start(rest, "no validator") {
+            if saw_validator {
+                return Err(ParseError::FeatureNotSupportedMessage(
+                    "conflicting or redundant options".into(),
+                ));
+            }
+            validator_name = Some(None);
+            saw_validator = true;
+            rest = consume_keyword(rest, "no validator").trim_start();
+            continue;
+        }
+        break;
+    }
+    let options = if rest.is_empty() {
+        Vec::new()
+    } else {
+        parse_alter_generic_options(rest)?
+    };
+    Ok(Some(Statement::AlterForeignDataWrapper(
+        AlterForeignDataWrapperStatement {
+            fdw_name,
+            handler_name,
+            validator_name,
+            options,
+        },
+    )))
+}
+
+fn build_drop_foreign_data_wrapper_statement(
+    sql: &str,
+) -> Result<DropForeignDataWrapperStatement, ParseError> {
+    let tokens = sql.split_whitespace().collect::<Vec<_>>();
+    let mut index = 4usize;
+    let mut if_exists = false;
+    if tokens
+        .get(index)
+        .is_some_and(|token| token.eq_ignore_ascii_case("if"))
+    {
+        if !tokens
+            .get(index + 1)
+            .is_some_and(|token| token.eq_ignore_ascii_case("exists"))
+        {
+            return Err(ParseError::UnexpectedToken {
+                expected: "EXISTS",
+                actual: tokens.get(index + 1).unwrap_or(&"").to_string(),
+            });
+        }
+        if_exists = true;
+        index += 2;
+    }
+    let Some(fdw_name) = tokens.get(index) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "foreign-data wrapper name",
+            actual: sql.into(),
+        });
+    };
+    let cascade = tokens
+        .get(index + 1)
+        .is_some_and(|token| token.eq_ignore_ascii_case("cascade"));
+    if tokens.len() > index + 1
+        && !cascade
+        && !tokens[index + 1].eq_ignore_ascii_case("restrict")
+    {
+        return Err(ParseError::UnexpectedToken {
+            expected: "CASCADE, RESTRICT, or end of statement",
+            actual: tokens[index + 1].into(),
+        });
+    }
+    if tokens.len() > index + 2 {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of statement",
+            actual: sql.into(),
+        });
+    }
+    Ok(DropForeignDataWrapperStatement {
+        if_exists,
+        fdw_name: (*fdw_name).to_string(),
+        cascade,
+    })
+}
+
+fn build_comment_on_foreign_data_wrapper_statement(
+    sql: &str,
+) -> Result<CommentOnForeignDataWrapperStatement, ParseError> {
+    let lower = sql.to_ascii_lowercase();
+    let Some(is_offset) = lower.find(" is ") else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "COMMENT ON FOREIGN DATA WRAPPER name IS ...",
+            actual: sql.into(),
+        });
+    };
+    let object = sql["comment on foreign data wrapper ".len()..is_offset].trim();
+    let value = sql[is_offset + 4..].trim();
+    let comment = if value.eq_ignore_ascii_case("null") {
+        None
+    } else if value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2 {
+        Some(value[1..value.len() - 1].replace("''", "'"))
+    } else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "quoted string or NULL",
+            actual: value.into(),
+        });
+    };
+    Ok(CommentOnForeignDataWrapperStatement {
+        fdw_name: object.to_string(),
+        comment,
+    })
+}
+
+fn parse_create_generic_options(input: &str) -> Result<Vec<RelOption>, ParseError> {
+    let rest = consume_keyword(input.trim_start(), "options").trim_start();
+    let Some(inner) = rest.strip_prefix('(').and_then(|value| value.strip_suffix(')')) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "OPTIONS (name 'value' [, ...])",
+            actual: input.into(),
+        });
+    };
+    parse_generic_option_list(inner)
+}
+
+fn parse_alter_generic_options(input: &str) -> Result<Vec<AlterGenericOption>, ParseError> {
+    let rest = consume_keyword(input.trim_start(), "options").trim_start();
+    let Some(inner) = rest.strip_prefix('(').and_then(|value| value.strip_suffix(')')) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "OPTIONS (ADD|SET|DROP ...)",
+            actual: input.into(),
+        });
+    };
+    split_comma_separated_sql(inner)?
+        .into_iter()
+        .map(|part| {
+            let part = part.trim();
+            if keyword_at_start(part, "set") {
+                let option = parse_rel_option(consume_keyword(part, "set").trim_start())?;
+                Ok(AlterGenericOption {
+                    action: AlterGenericOptionAction::Set,
+                    name: option.name,
+                    value: Some(option.value),
+                })
+            } else if keyword_at_start(part, "add") {
+                let option = parse_rel_option(consume_keyword(part, "add").trim_start())?;
+                Ok(AlterGenericOption {
+                    action: AlterGenericOptionAction::Add,
+                    name: option.name,
+                    value: Some(option.value),
+                })
+            } else if keyword_at_start(part, "drop") {
+                let (name, tail) =
+                    parse_sql_identifier(consume_keyword(part, "drop").trim_start())?;
+                if !tail.trim().is_empty() {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "end of option",
+                        actual: tail.trim().into(),
+                    });
+                }
+                Ok(AlterGenericOption {
+                    action: AlterGenericOptionAction::Drop,
+                    name,
+                    value: None,
+                })
+            } else {
+                let option = parse_rel_option(part)?;
+                Ok(AlterGenericOption {
+                    action: AlterGenericOptionAction::Add,
+                    name: option.name,
+                    value: Some(option.value),
+                })
+            }
+        })
+        .collect()
+}
+
+fn parse_generic_option_list(input: &str) -> Result<Vec<RelOption>, ParseError> {
+    split_comma_separated_sql(input)?
+        .into_iter()
+        .map(|part| parse_rel_option(part.trim()))
+        .collect()
+}
+
+fn parse_rel_option(input: &str) -> Result<RelOption, ParseError> {
+    let (name, rest) = parse_sql_identifier(input)?;
+    let rest = rest.trim_start();
+    let literal_len = scan_string_literal_token_len(rest).ok_or(ParseError::UnexpectedToken {
+        expected: "string literal",
+        actual: rest.into(),
+    })?;
+    let value = decode_string_literal(&rest[..literal_len])?;
+    if !rest[literal_len..].trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of option",
+            actual: rest[literal_len..].trim().into(),
+        });
+    }
+    Ok(RelOption { name, value })
+}
+
+fn split_comma_separated_sql(input: &str) -> Result<Vec<&str>, ParseError> {
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    let bytes = input.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index] == b'\'' {
+            index += 1;
+            while index < bytes.len() {
+                if bytes[index] == b'\'' {
+                    index += 1;
+                    if index < bytes.len() && bytes[index] == b'\'' {
+                        index += 1;
+                        continue;
+                    }
+                    break;
+                }
+                index += 1;
+            }
+            continue;
+        }
+        if bytes[index] == b',' {
+            parts.push(input[start..index].trim());
+            start = index + 1;
+        }
+        index += 1;
+    }
+    if start > input.len() {
+        return Err(ParseError::UnexpectedEof);
+    }
+    let trailing = input[start..].trim();
+    if !trailing.is_empty() {
+        parts.push(trailing);
+    }
+    Ok(parts)
 }
 
 fn try_parse_create_function_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
@@ -8709,6 +9115,7 @@ fn build_agg_call(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                 let inner = part.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
                 func = Some(match inner.as_rule() {
                     Rule::kw_count => AggFunc::Count,
+                    Rule::kw_any_value => AggFunc::AnyValue,
                     Rule::kw_sum => AggFunc::Sum,
                     Rule::kw_avg => AggFunc::Avg,
                     Rule::kw_variance => AggFunc::Variance,
