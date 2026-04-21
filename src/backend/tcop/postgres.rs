@@ -209,6 +209,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         ExecError::InvalidFloatInput { value, .. } => value.as_str(),
         ExecError::FloatOutOfRange { value, .. } => value.as_str(),
         ExecError::DetailedError { message, .. } => {
+            if let Some(target) = extract_subscripted_assignment_target(message) {
+                return find_subscripted_assignment_position(sql, target);
+            }
             if let Some(value) = extract_quoted_error_value(message) {
                 value
             } else {
@@ -234,6 +237,23 @@ fn extract_quoted_error_value(message: &str) -> Option<&str> {
 
     let (_, rest) = message.rsplit_once(": \"")?;
     rest.strip_suffix('"')
+}
+
+fn extract_subscripted_assignment_target(message: &str) -> Option<&str> {
+    let prefix = "subscripted assignment to \"";
+    let rest = message.strip_prefix(prefix)?;
+    let end = rest.find('"')?;
+    Some(&rest[..end])
+}
+
+fn find_subscripted_assignment_position(sql: &str, target: &str) -> Option<usize> {
+    let candidates = [format!("{target}["), format!("\"{target}\"[")];
+    for candidate in candidates {
+        if let Some(index) = find_case_insensitive_token_position(sql, &candidate) {
+            return Some(index);
+        }
+    }
+    None
 }
 
 fn extract_syntax_error_token(message: &str) -> Option<&str> {
@@ -5122,6 +5142,21 @@ mod tests {
     }
 
     #[test]
+    fn exec_error_position_points_at_subscripted_assignment_target() {
+        let sql = "insert into arrtest (b[1:2]) values(now())";
+        let err = ExecError::DetailedError {
+            message:
+                "subscripted assignment to \"b\" requires type integer[] but expression is of type timestamp with time zone"
+                    .into(),
+            detail: None,
+            hint: Some("You will need to rewrite or cast the expression.".into()),
+            sqlstate: "42804",
+        };
+
+        assert_eq!(exec_error_position(sql, &err), Some(22));
+    }
+
+    #[test]
     fn simple_query_reports_position_for_date_input_error() {
         let db = Database::open(temp_dir("date_error_position"), 16).unwrap();
         let mut state = ConnectionState {
@@ -5135,6 +5170,29 @@ mod tests {
         handle_query(&mut output, &db, &mut state, "select date '1997-02-29';").unwrap();
 
         assert_eq!(first_error_response_position(&output), Some(14));
+    }
+
+    #[test]
+    fn simple_query_reports_position_for_subscripted_assignment_error() {
+        let db = Database::open(temp_dir("subscripted_assignment_error_position"), 16).unwrap();
+        db.execute(1, "create table arrtest (b int4[][][])").unwrap();
+        let mut state = ConnectionState {
+            session: Session::new(2),
+            prepared: HashMap::new(),
+            portals: HashMap::new(),
+            copy_in: None,
+        };
+        let mut output = Vec::new();
+
+        handle_query(
+            &mut output,
+            &db,
+            &mut state,
+            "insert into arrtest (b[2]) values(now())",
+        )
+        .unwrap();
+
+        assert_eq!(first_error_response_position(&output), Some(22));
     }
 
     fn split_simple_query_statements_keeps_rule_action_lists_together() {
