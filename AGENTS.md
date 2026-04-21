@@ -133,6 +133,8 @@ For structural refactors, the default verification loop is:
 
 If a change affects SQL behavior more broadly, run the regression harness afterward.
 
+When rerunning an individual regression file, copy the resulting `.diff` artifact into `/tmp/diffs` so it is easy to inspect outside the results directory.
+
 ## Finish
 
 When finishing work in this repo:
