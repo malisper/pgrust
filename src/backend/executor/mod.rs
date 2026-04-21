@@ -13,6 +13,7 @@ mod expr_format;
 mod expr_geometry;
 mod expr_json;
 mod expr_math;
+mod expr_multirange;
 mod expr_money;
 mod expr_numeric;
 mod expr_ops;
@@ -67,6 +68,12 @@ pub(crate) use expr_geometry::geometry_input_error_message;
 pub(crate) use expr_geometry::render_geometry_text;
 pub use expr_money::money_format_text;
 pub(crate) use expr_money::money_parse_text;
+pub(crate) use expr_multirange::{
+    compare_multirange_values, decode_multirange_bytes, encode_multirange_bytes,
+    eval_multirange_function, multirange_intersection_agg_transition, parse_multirange_text,
+    range_agg_transition,
+};
+pub use expr_multirange::render_multirange_text;
 pub use expr_range::render_range_text;
 pub(crate) use expr_range::{
     compare_range_values, decode_range_bytes, encode_range_bytes, eval_range_function,

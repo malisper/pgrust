@@ -2740,6 +2740,9 @@ pub(super) fn estimate_sql_type_width(sql_type: SqlType) -> usize {
     if sql_type.is_range() {
         return 32;
     }
+    if sql_type.is_multirange() {
+        return 48;
+    }
 
     match sql_type.kind {
         SqlTypeKind::Bool => 1,
@@ -2776,6 +2779,13 @@ pub(super) fn estimate_sql_type_width(sql_type: SqlType) -> usize {
         | SqlTypeKind::RegConfig
         | SqlTypeKind::RegDictionary
         | SqlTypeKind::AnyArray
+        | SqlTypeKind::AnyElement
+        | SqlTypeKind::AnyRange
+        | SqlTypeKind::AnyMultirange
+        | SqlTypeKind::AnyCompatible
+        | SqlTypeKind::AnyCompatibleArray
+        | SqlTypeKind::AnyCompatibleRange
+        | SqlTypeKind::AnyCompatibleMultirange
         | SqlTypeKind::Point
         | SqlTypeKind::Lseg
         | SqlTypeKind::Path
@@ -2797,6 +2807,7 @@ pub(super) fn estimate_sql_type_width(sql_type: SqlType) -> usize {
         | SqlTypeKind::DateRange
         | SqlTypeKind::TimestampRange
         | SqlTypeKind::TimestampTzRange => unreachable!("range handled above"),
+        SqlTypeKind::Multirange => 48,
     }
 }
 

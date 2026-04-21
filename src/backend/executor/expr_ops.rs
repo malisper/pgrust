@@ -15,7 +15,7 @@ use super::expr_money::{
     money_add, money_cash_div, money_cmp, money_div_float, money_div_int, money_mul_float,
     money_mul_int, money_sub,
 };
-use super::expr_range::compare_range_values;
+use super::{compare_multirange_values, expr_range::compare_range_values};
 use super::node_types::*;
 use crate::backend::executor::jsonb::{
     JsonbValue, compare_jsonb, decode_jsonb, encode_jsonb, jsonb_concat,
@@ -94,6 +94,7 @@ pub(crate) fn compare_order_values(
             &decode_jsonb(b).unwrap_or(JsonbValue::Null),
         ),
         (Value::Range(a), Value::Range(b)) => compare_range_values(a, b),
+        (Value::Multirange(a), Value::Multirange(b)) => compare_multirange_values(a, b),
         (Value::TsVector(a), Value::TsVector(b)) => {
             crate::backend::executor::compare_tsvector(a, b)
         }
@@ -184,6 +185,9 @@ pub(crate) fn compare_values(
         (Value::Range(l), Value::Range(r)) => {
             Ok(Value::Bool(compare_range_values(l, r) == Ordering::Equal))
         }
+        (Value::Multirange(l), Value::Multirange(r)) => {
+            Ok(Value::Bool(compare_multirange_values(l, r) == Ordering::Equal))
+        }
         (Value::TsVector(l), Value::TsVector(r)) => Ok(Value::Bool(l == r)),
         (Value::TsQuery(l), Value::TsQuery(r)) => Ok(Value::Bool(l == r)),
         (Value::Record(l), Value::Record(r)) => {
@@ -249,6 +253,9 @@ pub(crate) fn values_are_distinct(left: &Value, right: &Value) -> bool {
             .map(|(l, r)| compare_jsonb(&l, &r) != Ordering::Equal)
             .unwrap_or(true),
         (Value::Range(l), Value::Range(r)) => compare_range_values(l, r) != Ordering::Equal,
+        (Value::Multirange(l), Value::Multirange(r)) => {
+            compare_multirange_values(l, r) != Ordering::Equal
+        }
         (Value::TsVector(l), Value::TsVector(r)) => l != r,
         (Value::TsQuery(l), Value::TsQuery(r)) => l != r,
         (Value::Record(l), Value::Record(r)) => compare_record_values(l, r) != Ordering::Equal,
@@ -723,6 +730,16 @@ pub(crate) fn order_values(
         }
         (Value::Range(l), Value::Range(r)) => {
             let ordering = compare_range_values(l, r);
+            Ok(Value::Bool(match op {
+                "<" => ordering == Ordering::Less,
+                "<=" => ordering != Ordering::Greater,
+                ">" => ordering == Ordering::Greater,
+                ">=" => ordering != Ordering::Less,
+                _ => unreachable!(),
+            }))
+        }
+        (Value::Multirange(l), Value::Multirange(r)) => {
+            let ordering = compare_multirange_values(l, r);
             Ok(Value::Bool(match op {
                 "<" => ordering == Ordering::Less,
                 "<=" => ordering != Ordering::Greater,

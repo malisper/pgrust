@@ -278,6 +278,15 @@ fn eval_unnest(
     for arg in args {
         match eval_expr(arg, slot, ctx)? {
             Value::Null => arrays.push(None),
+            Value::Multirange(multirange) => {
+                let values = multirange
+                    .ranges
+                    .into_iter()
+                    .map(Value::Range)
+                    .collect::<Vec<_>>();
+                max_len = max_len.max(values.len());
+                arrays.push(Some(values));
+            }
             Value::Array(values) => {
                 max_len = max_len.max(values.len());
                 arrays.push(Some(values));

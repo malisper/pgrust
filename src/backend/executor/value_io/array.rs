@@ -1,7 +1,9 @@
 use super::*;
 use crate::backend::storage::page::bufpage::max_align;
 use crate::include::access::htup::AttributeAlign;
-use crate::include::catalog::{builtin_type_rows, range_type_ref_for_sql_type};
+use crate::include::catalog::{
+    builtin_type_rows, multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
+};
 
 pub(crate) fn encode_array_bytes(
     element_type: SqlType,
@@ -107,6 +109,7 @@ fn encode_array_element_payload(
         }
         Value::Int64(v) => Ok(v.to_le_bytes().to_vec()),
         Value::Money(v) => Ok(v.to_le_bytes().to_vec()),
+        Value::Multirange(multirange) => crate::backend::executor::encode_multirange_bytes(&multirange),
         Value::Date(v) => Ok(v.0.to_le_bytes().to_vec()),
         Value::Time(v) => Ok(v.0.to_le_bytes().to_vec()),
         Value::TimeTz(v) => {
@@ -465,11 +468,28 @@ fn array_element_layout(
             typalign: AttributeAlign::Int,
         });
     }
+    if element_type.is_multirange() {
+        return Ok(ArrayElementLayout {
+            typlen: -1,
+            typalign: AttributeAlign::Int,
+        });
+    }
     let (typlen, typalign) = match element_type.kind {
-        SqlTypeKind::AnyArray => {
+        SqlTypeKind::AnyArray | SqlTypeKind::AnyCompatibleArray => {
             return Err(ExecError::InvalidStorageValue {
                 column: column.into(),
                 details: "anyarray cannot be used as a concrete array element type".into(),
+            });
+        }
+        SqlTypeKind::AnyElement
+        | SqlTypeKind::AnyRange
+        | SqlTypeKind::AnyMultirange
+        | SqlTypeKind::AnyCompatible
+        | SqlTypeKind::AnyCompatibleRange
+        | SqlTypeKind::AnyCompatibleMultirange => {
+            return Err(ExecError::InvalidStorageValue {
+                column: column.into(),
+                details: format!("unsupported array element type {:?}", element_type.kind),
             });
         }
         SqlTypeKind::Void => {
@@ -544,6 +564,7 @@ fn array_element_layout(
         | SqlTypeKind::DateRange
         | SqlTypeKind::TimestampRange
         | SqlTypeKind::TimestampTzRange => unreachable!("range handled above"),
+        SqlTypeKind::Multirange => unreachable!("multirange handled above"),
     };
     Ok(ArrayElementLayout { typlen, typalign })
 }
@@ -675,6 +696,9 @@ fn decode_embedded_varlena<'a>(
 }
 
 fn builtin_type_oid_for_sql_type(sql_type: SqlType) -> Option<u32> {
+    if let Some(multirange_type) = multirange_type_ref_for_sql_type(sql_type) {
+        return Some(multirange_type.type_oid());
+    }
     if let Some(range_type) = range_type_ref_for_sql_type(sql_type) {
         return Some(range_type.type_oid());
     }
@@ -735,6 +759,7 @@ fn infer_sql_type_from_value(value: &Value) -> Option<SqlType> {
             record.sql_type()
         }),
         Value::Range(range) => Some(range.range_type.sql_type),
+        Value::Multirange(multirange) => Some(multirange.multirange_type.sql_type),
     }
 }
 
@@ -746,10 +771,29 @@ fn decode_array_element_value(
     if let Some(range_type) = range_type_ref_for_sql_type(element_type) {
         return crate::backend::executor::decode_range_bytes(range_type, bytes).map(Value::Range);
     }
+    if element_type.is_multirange() {
+        let multirange_type = multirange_type_ref_for_sql_type(element_type).ok_or_else(|| {
+            ExecError::InvalidStorageValue {
+                column: column.into(),
+                details: format!("unsupported multirange array element type {:?}", element_type),
+            }
+        })?;
+        return crate::backend::executor::decode_multirange_bytes(multirange_type, bytes)
+            .map(Value::Multirange);
+    }
     match element_type.kind {
-        SqlTypeKind::AnyArray => Err(ExecError::InvalidStorageValue {
+        SqlTypeKind::AnyArray | SqlTypeKind::AnyCompatibleArray => Err(ExecError::InvalidStorageValue {
             column: column.into(),
             details: "anyarray cannot be used as a concrete array element type".into(),
+        }),
+        SqlTypeKind::AnyElement
+        | SqlTypeKind::AnyRange
+        | SqlTypeKind::AnyMultirange
+        | SqlTypeKind::AnyCompatible
+        | SqlTypeKind::AnyCompatibleRange
+        | SqlTypeKind::AnyCompatibleMultirange => Err(ExecError::InvalidStorageValue {
+            column: column.into(),
+            details: format!("unsupported array element type {:?}", element_type.kind),
         }),
         SqlTypeKind::Void => Err(ExecError::InvalidStorageValue {
             column: column.into(),
@@ -1041,6 +1085,7 @@ fn decode_array_element_value(
         | SqlTypeKind::DateRange
         | SqlTypeKind::TimestampRange
         | SqlTypeKind::TimestampTzRange => unreachable!("range handled above"),
+        SqlTypeKind::Multirange => unreachable!("multirange handled above"),
     }
 }
 
@@ -1202,6 +1247,11 @@ fn format_array_values_nested(array: &ArrayValue, depth: usize, offset: &mut usi
             Value::Range(_) => {
                 let rendered =
                     crate::backend::executor::render_range_text(item).unwrap_or_default();
+                push_array_text_element(&mut out, &rendered);
+            }
+            Value::Multirange(_) => {
+                let rendered =
+                    crate::backend::executor::render_multirange_text(item).unwrap_or_default();
                 push_array_text_element(&mut out, &rendered);
             }
             Value::Text(_) | Value::TextRef(_, _) => {

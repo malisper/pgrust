@@ -430,6 +430,7 @@ fn render_key_value(value: &Value) -> String {
         Value::PgArray(v) => format!("{v:?}"),
         Value::Record(v) => format!("{v:?}"),
         Value::Range(v) => format!("{v:?}"),
+        Value::Multirange(v) => format!("{v:?}"),
     }
 }
 

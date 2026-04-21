@@ -742,11 +742,13 @@ impl CatCache {
         right_type_oid: u32,
     ) -> Option<&PgOperatorRow> {
         let normalized = normalize_catalog_name(name);
-        self.operator_rows.iter().find(|row| {
-            row.oprname.eq_ignore_ascii_case(normalized)
-                && row.oprleft == left_type_oid
-                && row.oprright == right_type_oid
-        })
+        self.operator_rows
+            .iter()
+            .find(|row| {
+                row.oprname.eq_ignore_ascii_case(normalized)
+                    && row.oprleft == left_type_oid
+                    && row.oprright == right_type_oid
+            })
     }
 
     pub fn proc_rows(&self) -> Vec<PgProcRow> {
@@ -855,14 +857,58 @@ pub fn sql_type_oid(sql_type: SqlType) -> u32 {
         }
         return range_type.type_oid();
     }
+    if let Some(multirange_type) = crate::include::catalog::multirange_type_ref_for_sql_type(sql_type)
+    {
+        if sql_type.is_array {
+            if sql_type.type_oid != 0 && matches!(sql_type.kind, SqlTypeKind::Multirange) {
+                return sql_type.type_oid;
+            }
+            if let Some(array_row) = builtin_type_rows()
+                .into_iter()
+                .find(|row| row.typelem == multirange_type.type_oid())
+            {
+                return array_row.oid;
+            }
+            unreachable!("multirange arrays are unsupported");
+        }
+        return multirange_type.type_oid();
+    }
     if !sql_type.is_array && sql_type.type_oid != 0 {
         return sql_type.type_oid;
     }
     match (sql_type.kind, sql_type.is_array) {
         (SqlTypeKind::Range, false) => sql_type.type_oid,
         (SqlTypeKind::Range, true) => sql_type.type_oid,
+        (SqlTypeKind::Multirange, false) => sql_type.type_oid,
+        (SqlTypeKind::Multirange, true) => sql_type.type_oid,
+        (SqlTypeKind::AnyElement, false) => crate::include::catalog::ANYELEMENTOID,
+        (SqlTypeKind::AnyElement, true) => unreachable!("anyelement arrays are unsupported"),
         (SqlTypeKind::AnyArray, false) => ANYARRAYOID,
         (SqlTypeKind::AnyArray, true) => unreachable!("anyarray arrays are unsupported"),
+        (SqlTypeKind::AnyRange, false) => crate::include::catalog::ANYRANGEOID,
+        (SqlTypeKind::AnyRange, true) => unreachable!("anyrange arrays are unsupported"),
+        (SqlTypeKind::AnyMultirange, false) => crate::include::catalog::ANYMULTIRANGEOID,
+        (SqlTypeKind::AnyMultirange, true) => unreachable!("anymultirange arrays are unsupported"),
+        (SqlTypeKind::AnyCompatible, false) => crate::include::catalog::ANYCOMPATIBLEOID,
+        (SqlTypeKind::AnyCompatible, true) => {
+            unreachable!("anycompatible arrays are unsupported")
+        }
+        (SqlTypeKind::AnyCompatibleArray, false) => crate::include::catalog::ANYCOMPATIBLEARRAYOID,
+        (SqlTypeKind::AnyCompatibleArray, true) => {
+            unreachable!("anycompatiblearray arrays are unsupported")
+        }
+        (SqlTypeKind::AnyCompatibleRange, false) => {
+            crate::include::catalog::ANYCOMPATIBLERANGEOID
+        }
+        (SqlTypeKind::AnyCompatibleRange, true) => {
+            unreachable!("anycompatiblerange arrays are unsupported")
+        }
+        (SqlTypeKind::AnyCompatibleMultirange, false) => {
+            crate::include::catalog::ANYCOMPATIBLEMULTIRANGEOID
+        }
+        (SqlTypeKind::AnyCompatibleMultirange, true) => {
+            unreachable!("anycompatiblemultirange arrays are unsupported")
+        }
         (SqlTypeKind::Record, false) => sql_type.type_oid,
         (SqlTypeKind::Record, true) => crate::include::catalog::RECORD_ARRAY_TYPE_OID,
         (SqlTypeKind::Composite, false) => sql_type.type_oid,

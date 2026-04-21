@@ -851,7 +851,7 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::GeoDiv
             | BuiltinScalarFunction::GeoIsVertical
             | BuiltinScalarFunction::GeoIsHorizontal => matches!(args.len(), 1 | 2),
-            BuiltinScalarFunction::RangeConstructor => matches!(args.len(), 2 | 3),
+            BuiltinScalarFunction::RangeConstructor => matches!(args.len(), 0 | 2 | 3),
             BuiltinScalarFunction::RangeIsEmpty
             | BuiltinScalarFunction::RangeLower
             | BuiltinScalarFunction::RangeUpper
@@ -925,6 +925,7 @@ pub(super) fn validate_aggregate_arity(func: AggFunc, args: &[SqlExpr]) -> Resul
             | AggFunc::ArrayAgg
             | AggFunc::JsonAgg
             | AggFunc::JsonbAgg
+            | AggFunc::RangeAgg
             | AggFunc::RangeIntersectAgg => args.len() == 1,
             AggFunc::StringAgg | AggFunc::JsonObjectAgg | AggFunc::JsonbObjectAgg => {
                 args.len() == 2
@@ -2079,6 +2080,7 @@ fn supports_fixed_aggregate_return_type(func: AggFunc) -> bool {
             | AggFunc::JsonbAgg
             | AggFunc::JsonObjectAgg
             | AggFunc::JsonbObjectAgg
+            | AggFunc::RangeAgg
     )
 }
 
@@ -2093,6 +2095,12 @@ fn catalog_builtin_type_oid(catalog: &dyn CatalogLookup, sql_type: SqlType) -> O
 }
 
 fn catalog_text_input_cast_exists(catalog: &dyn CatalogLookup, target_oid: u32) -> bool {
+    if catalog
+        .type_by_oid(target_oid)
+        .is_some_and(|row| row.sql_type.is_range() || row.sql_type.is_multirange())
+    {
+        return true;
+    }
     catalog
         .cast_by_source_target(TEXT_TYPE_OID, target_oid)
         .is_some_and(|row| row.castmethod == 'i')
@@ -2113,6 +2121,7 @@ fn aggregate_func_for_proname(name: &str) -> Option<AggFunc> {
         "jsonb_agg" => Some(AggFunc::JsonbAgg),
         "json_object_agg" => Some(AggFunc::JsonObjectAgg),
         "jsonb_object_agg" => Some(AggFunc::JsonbObjectAgg),
+        "range_agg" => Some(AggFunc::RangeAgg),
         "range_intersect_agg" => Some(AggFunc::RangeIntersectAgg),
         _ => None,
     }
@@ -2252,6 +2261,54 @@ mod tests {
             ParseError::UnexpectedToken { expected, actual }
                 if expected == "supported function" && actual == "unnest"
         ));
+    }
+
+    #[test]
+    fn resolve_function_call_supports_zero_arg_builtin_multirange_constructors() {
+        let resolved =
+            resolve_function_call(&Catalog::default(), "int4multirange", &[], false).unwrap();
+
+        assert_eq!(
+            resolved.result_type,
+            SqlType::multirange(
+                crate::include::catalog::INT4MULTIRANGE_TYPE_OID,
+                crate::include::catalog::INT4RANGE_TYPE_OID,
+            )
+            .with_identity(crate::include::catalog::INT4MULTIRANGE_TYPE_OID, 0)
+            .with_range_metadata(
+                crate::include::catalog::INT4_TYPE_OID,
+                crate::include::catalog::INT4MULTIRANGE_TYPE_OID,
+                true,
+            )
+            .with_multirange_range_oid(crate::include::catalog::INT4RANGE_TYPE_OID)
+        );
+        assert_eq!(
+            resolved.scalar_impl,
+            Some(BuiltinScalarFunction::RangeConstructor)
+        );
+        assert!(resolved.declared_arg_types.is_empty());
+    }
+
+    #[test]
+    fn resolve_function_call_supports_explicit_variadic_builtin_multirange_constructors() {
+        let catalog = Catalog::default();
+        let range_array_type = catalog
+            .type_by_oid(crate::include::catalog::NUMRANGE_ARRAY_TYPE_OID)
+            .unwrap()
+            .sql_type;
+        let resolved =
+            resolve_function_call(&catalog, "nummultirange", &[range_array_type], true).unwrap();
+
+        assert_eq!(
+            resolved.result_type,
+            catalog
+                .type_by_oid(crate::include::catalog::NUMMULTIRANGE_TYPE_OID)
+                .unwrap()
+                .sql_type
+        );
+        assert!(resolved.func_variadic);
+        assert_eq!(resolved.vatype_oid, crate::include::catalog::NUMRANGE_TYPE_OID);
+        assert_eq!(resolved.declared_arg_types, vec![range_array_type]);
     }
 
     #[test]

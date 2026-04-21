@@ -1527,6 +1527,9 @@ fn json_object_key_text(value: &Value, op: &'static str) -> Result<String, ExecE
         )
         .unwrap_or_default()),
         Value::Range(_) => Ok(render_range_text(value).unwrap_or_default()),
+        Value::Multirange(_) => Ok(
+            crate::backend::executor::render_multirange_text(value).unwrap_or_default(),
+        ),
         Value::TsVector(v) => Ok(crate::backend::executor::render_tsvector_text(v)),
         Value::TsQuery(v) => Ok(crate::backend::executor::render_tsquery_text(v)),
         Value::Array(_) | Value::PgArray(_) => Err(ExecError::TypeMismatch {
@@ -2733,6 +2736,9 @@ fn value_to_json_serde_with_config(
                 .unwrap_or_default(),
         ),
         Value::Range(_) => SerdeJsonValue::String(render_range_text(value).unwrap_or_default()),
+        Value::Multirange(_) => SerdeJsonValue::String(
+            crate::backend::executor::render_multirange_text(value).unwrap_or_default(),
+        ),
         Value::TsVector(v) => {
             SerdeJsonValue::String(crate::backend::executor::render_tsvector_text(v))
         }
@@ -2841,6 +2847,10 @@ fn render_json_value_text_with_config(
         Value::Range(_) => {
             serde_json::to_string(&render_range_text(value).unwrap_or_default()).unwrap()
         }
+        Value::Multirange(_) => serde_json::to_string(
+            &crate::backend::executor::render_multirange_text(value).unwrap_or_default(),
+        )
+        .unwrap(),
         Value::TsVector(v) => {
             serde_json::to_string(&crate::backend::executor::render_tsvector_text(v)).unwrap()
         }

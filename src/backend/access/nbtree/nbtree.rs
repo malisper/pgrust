@@ -159,6 +159,8 @@ fn encode_index_value(
             "unsupported index key type {:?}",
             sql_type.kind
         ))),
+        Value::Multirange(v) => crate::backend::executor::encode_multirange_bytes(v)
+            .map_err(|err| CatalogError::Io(format!("{err:?}"))),
         Value::Array(_) => Err(CatalogError::Io(format!(
             "unsupported index key type {:?}",
             sql_type.kind

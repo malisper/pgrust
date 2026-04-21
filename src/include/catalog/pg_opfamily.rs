@@ -15,6 +15,7 @@ pub const BTREE_BYTEA_FAMILY_OID: u32 = 428;
 pub const BTREE_DATETIME_FAMILY_OID: u32 = 434;
 pub const BTREE_FLOAT_FAMILY_OID: u32 = 1970;
 pub const BTREE_VARBIT_FAMILY_OID: u32 = 2002;
+pub const BTREE_MULTIRANGE_FAMILY_OID: u32 = 4199;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PgOpfamilyRow {
@@ -120,6 +121,13 @@ pub fn bootstrap_pg_opfamily_rows() -> Vec<PgOpfamilyRow> {
             oid: BTREE_VARBIT_FAMILY_OID,
             opfmethod: BTREE_AM_OID,
             opfname: "varbit_ops".into(),
+            opfnamespace: PG_CATALOG_NAMESPACE_OID,
+            opfowner: BOOTSTRAP_SUPERUSER_OID,
+        },
+        PgOpfamilyRow {
+            oid: BTREE_MULTIRANGE_FAMILY_OID,
+            opfmethod: BTREE_AM_OID,
+            opfname: "multirange_ops".into(),
             opfnamespace: PG_CATALOG_NAMESPACE_OID,
             opfowner: BOOTSTRAP_SUPERUSER_OID,
         },
