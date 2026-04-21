@@ -14,6 +14,7 @@ use crate::include::nodes::parsenodes::MaintenanceTarget;
 use crate::include::nodes::primnodes::QueryColumn;
 use crate::pl::plpgsql::{clear_notices, take_notices};
 use std::collections::HashMap;
+use std::fs;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -12682,6 +12683,45 @@ fn lazy_index_catalog_helpers_resolve_am_and_opclass_metadata() {
 }
 
 #[test]
+fn create_index_accepts_bpchar_typmods_with_bpchar_ops() {
+    let base = temp_dir("bpchar_typmod_index_opclass");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table room(roomno char(8))").unwrap();
+    db.execute(
+        1,
+        "create unique index room_rno on room using btree (roomno bpchar_ops)",
+    )
+    .unwrap();
+
+    let rel = db
+        .lazy_catalog_lookup(1, None, None)
+        .lookup_any_relation("room")
+        .unwrap();
+    let index_oids = crate::backend::utils::cache::lsyscache::index_relation_oids_for_heap(
+        &db,
+        1,
+        None,
+        rel.relation_oid,
+    );
+    assert_eq!(index_oids.len(), 1);
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select indclass \
+             from pg_index \
+             where indexrelid = (select oid from pg_class where relname = 'room_rno')",
+        ),
+        vec![vec![Value::Text(
+            crate::include::catalog::BPCHAR_BTREE_OPCLASS_OID
+                .to_string()
+                .into()
+        )]]
+    );
+}
+
+#[test]
 fn btree_index_supports_builtin_nummultirange_keys() {
     let base = temp_dir("btree_nummultirange_keys");
     let db = Database::open(&base, 16).unwrap();
@@ -16000,8 +16040,12 @@ fn create_alter_and_drop_policy_updates_pg_policy() {
 
 #[test]
 fn create_tablespace_adds_pg_tablespace_row() {
-    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let dir = temp_dir("create_tablespace_adds_pg_tablespace_row");
+    let db = Database::open(&dir, 32).expect("open database");
     let mut session = Session::new(1);
+    session
+        .execute(&db, "set allow_in_place_tablespaces = true")
+        .unwrap();
 
     match session
         .execute(&db, "create tablespace regress_tblspace location ''")
@@ -16015,10 +16059,73 @@ fn create_tablespace_adds_pg_tablespace_row() {
         query_rows(
             &db,
             1,
-            "select spcname from pg_tablespace where spcname = 'regress_tblspace'",
+            "select oid, spcname from pg_tablespace where spcname = 'regress_tblspace'",
         ),
-        vec![vec![Value::Text("regress_tblspace".into())]]
+        vec![vec![
+            Value::Int64(16384),
+            Value::Text("regress_tblspace".into()),
+        ]]
     );
+    let tablespace_oid = match &query_rows(
+        &db,
+        1,
+        "select oid from pg_tablespace where spcname = 'regress_tblspace'",
+    )[0][0]
+    {
+        Value::Int64(oid) => *oid as u32,
+        other => panic!("expected oid row, got {other:?}"),
+    };
+    assert!(dir
+        .join("pg_tblspc")
+        .join(tablespace_oid.to_string())
+        .join("PG_18_202406281")
+        .is_dir());
+}
+
+#[test]
+fn create_tablespace_rejects_empty_location_without_guc() {
+    let dir = temp_dir("create_tablespace_rejects_empty_location_without_guc");
+    let db = Database::open(&dir, 32).expect("open database");
+    let mut session = Session::new(1);
+
+    let err = session
+        .execute(&db, "create tablespace regress_tblspace location ''")
+        .unwrap_err();
+    match err {
+        ExecError::DetailedError { message, .. } => {
+            assert_eq!(message, "tablespace location must be an absolute path");
+        }
+        other => panic!("expected detailed error, got {other:?}"),
+    }
+}
+
+#[test]
+fn create_tablespace_absolute_location_creates_symlinked_version_dir() {
+    let dir = temp_dir("create_tablespace_absolute_location");
+    let tablespace_dir = dir.join("external_tablespace");
+    fs::create_dir_all(&tablespace_dir).unwrap();
+
+    let db = Database::open(&dir, 32).expect("open database");
+    let mut session = Session::new(1);
+    let sql = format!(
+        "create tablespace regress_tblspace location '{}'",
+        tablespace_dir.display()
+    );
+
+    session.execute(&db, &sql).unwrap();
+
+    let tablespace_oid = match &query_rows(
+        &db,
+        1,
+        "select oid from pg_tablespace where spcname = 'regress_tblspace'",
+    )[0][0]
+    {
+        Value::Int64(oid) => *oid as u32,
+        other => panic!("expected oid row, got {other:?}"),
+    };
+    let link_path = dir.join("pg_tblspc").join(tablespace_oid.to_string());
+    assert!(link_path.exists());
+    assert!(tablespace_dir.join("PG_18_202406281").is_dir());
 }
 
 #[test]

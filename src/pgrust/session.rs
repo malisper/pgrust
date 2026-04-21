@@ -178,6 +178,13 @@ impl Session {
         )
     }
 
+    pub fn allow_in_place_tablespaces(&self) -> bool {
+        self.gucs
+            .get("allow_in_place_tablespaces")
+            .and_then(|value| parse_bool_guc(value))
+            .unwrap_or(false)
+    }
+
     pub fn maintenance_work_mem_kb(&self) -> Result<usize, ExecError> {
         let Some(raw) = self.gucs.get("maintenance_work_mem") else {
             return Ok(Self::DEFAULT_MAINTENANCE_WORK_MEM_KB);
@@ -553,6 +560,7 @@ impl Session {
                 }
             }
             Statement::CreateTablespace(ref create_stmt) => {
+                let allow_in_place_tablespaces = self.allow_in_place_tablespaces();
                 if self.active_txn.is_some() {
                     let result = self.execute_in_transaction(db, stmt);
                     if result.is_err() {
@@ -562,7 +570,11 @@ impl Session {
                     }
                     result
                 } else {
-                    db.execute_create_tablespace_stmt(self.client_id, create_stmt)
+                    db.execute_create_tablespace_stmt(
+                        self.client_id,
+                        create_stmt,
+                        allow_in_place_tablespaces,
+                    )
                 }
             }
             Statement::CreateDomain(ref create_stmt) => {
@@ -2689,10 +2701,12 @@ impl Session {
                 )
             }
             Statement::CreateTablespace(ref create_stmt) => {
+                let allow_in_place_tablespaces = self.allow_in_place_tablespaces();
                 let txn = self.active_txn.as_mut().unwrap();
                 db.execute_create_tablespace_stmt_in_transaction(
                     client_id,
                     create_stmt,
+                    allow_in_place_tablespaces,
                     xid,
                     cid,
                     &mut txn.catalog_effects,

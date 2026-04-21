@@ -1,5 +1,6 @@
 use super::super::*;
 use crate::backend::commands::tablecmds::{collect_matching_rows_heap, index_key_values_for_row};
+use crate::backend::utils::cache::catcache::sql_type_oid;
 use crate::backend::utils::cache::relcache::{IndexAmOpEntry, IndexAmProcEntry};
 use crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot;
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
@@ -198,8 +199,6 @@ impl Database {
             }));
         }
 
-        let type_rows =
-            crate::backend::utils::cache::syscache::ensure_type_rows(self, client_id, txn_ctx);
         let opclass_rows =
             crate::backend::utils::cache::syscache::ensure_opclass_rows(self, client_id, txn_ctx);
         let mut indclass = Vec::with_capacity(columns.len());
@@ -226,12 +225,8 @@ impl Database {
             };
             let type_oid = range_type_ref_for_sql_type(sql_type)
                 .map(|range_type| range_type.type_oid())
-                .or_else(|| {
-                    type_rows
-                        .iter()
-                        .find(|row| row.sql_type == sql_type)
-                        .map(|row| row.oid)
-                })
+                .or_else(|| Some(sql_type_oid(sql_type)))
+                .filter(|oid| *oid != 0)
                 .ok_or_else(|| {
                     ExecError::Parse(ParseError::UnsupportedType(
                         column
