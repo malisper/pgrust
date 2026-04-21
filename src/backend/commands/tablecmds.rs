@@ -34,7 +34,10 @@ use crate::backend::utils::time::instant::Instant;
 use crate::pgrust::database::TransactionWaiter;
 use crate::pl::plpgsql::TriggerOperation;
 
-use super::explain::{format_buffer_usage, format_explain_lines_with_costs};
+use super::explain::{
+    format_buffer_usage, format_explain_lines_with_costs, format_explain_plan_with_subplans,
+    push_explain_line,
+};
 use super::trigger::RuntimeTriggers;
 use super::upsert::execute_insert_on_conflict_rows;
 use crate::backend::executor::exec_expr::{compile_predicate_with_decoder, eval_expr};
@@ -295,25 +298,6 @@ fn finalize_bound_merge(
     stmt
 }
 
-fn push_explain_line(
-    label: &str,
-    plan_info: crate::include::nodes::plannodes::PlanEstimate,
-    show_costs: bool,
-    lines: &mut Vec<String>,
-) {
-    if show_costs {
-        lines.push(format!(
-            "{label}  (cost={:.2}..{:.2} rows={} width={})",
-            plan_info.startup_cost.as_f64(),
-            plan_info.total_cost.as_f64(),
-            plan_info.plan_rows.as_f64().round() as u64,
-            plan_info.plan_width
-        ));
-    } else {
-        lines.push(label.to_string());
-    }
-}
-
 pub(crate) fn execute_explain(
     stmt: ExplainStatement,
     catalog: &dyn CatalogLookup,
@@ -397,8 +381,10 @@ pub(crate) fn execute_explain(
         }
         lines.push(format!("Result Rows: {}", row_count));
     } else {
-        let state = executor_start(query_desc.planned_stmt.plan_tree);
+        let plan_tree = query_desc.planned_stmt.plan_tree;
+        let subplans = query_desc.planned_stmt.subplans;
         if let Some(target_name) = merge_target_name {
+            let state = executor_start(plan_tree);
             push_explain_line(
                 &format!("Merge on {target_name}"),
                 state.plan_info(),
@@ -407,7 +393,7 @@ pub(crate) fn execute_explain(
             );
             format_explain_lines_with_costs(state.as_ref(), 1, false, stmt.costs, &mut lines);
         } else {
-            format_explain_lines_with_costs(state.as_ref(), 0, false, stmt.costs, &mut lines);
+            format_explain_plan_with_subplans(&plan_tree, &subplans, 0, stmt.costs, &mut lines);
         }
     }
 

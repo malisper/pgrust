@@ -678,6 +678,7 @@ fn standard_planner_with_param_base(
     next_param_id: usize,
 ) -> (PlannedStmt, usize) {
     let mut glob = PlannerGlobal::new();
+    let query = root::prepare_query_for_planning(query);
     let mut root = PlannerInfo::new(query);
     let command_type = root.parse.command_type;
     let scanjoin_rel = query_planner(&mut root, catalog);
