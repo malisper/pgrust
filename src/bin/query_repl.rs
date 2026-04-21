@@ -523,6 +523,7 @@ fn run_statement(
         | Statement::ResetRole(_)
         | Statement::SetSessionAuthorization(_)
         | Statement::ResetSessionAuthorization(_)
+        | Statement::DropOwned(_)
         | Statement::ReassignOwned(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
             "role management".into(),
         ))),

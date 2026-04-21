@@ -64,8 +64,8 @@ use super::expr_string::{
     eval_set_byte, eval_sha224_function, eval_sha256_function, eval_sha384_function,
     eval_sha512_function, eval_split_part_function, eval_strpos_function, eval_text_overlay,
     eval_text_substring, eval_to_bin_function, eval_to_char_function, eval_to_hex_function,
-    eval_to_number_function, eval_to_oct_function, eval_translate_function,
-    eval_trim_function, eval_unistr_function,
+    eval_to_number_function, eval_to_oct_function, eval_translate_function, eval_trim_function,
+    eval_unistr_function,
 };
 use super::node_types::*;
 use super::pg_regex::{
@@ -400,6 +400,31 @@ fn auth_role_name(ctx: &ExecutorContext, oid: u32) -> Result<Value, ExecError> {
         });
     };
     Ok(Value::Text(role_name.into()))
+}
+
+fn eval_regrole_to_text_function(
+    ctx: &ExecutorContext,
+    values: &[Value],
+) -> Result<Value, ExecError> {
+    let Some(value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    match value {
+        Value::Int32(oid) => {
+            let oid = u32::try_from(*oid).map_err(|_| ExecError::OidOutOfRange)?;
+            auth_role_name(ctx, oid)
+        }
+        Value::Int64(oid) => {
+            let oid = u32::try_from(*oid).map_err(|_| ExecError::OidOutOfRange)?;
+            auth_role_name(ctx, oid)
+        }
+        Value::Null => Ok(Value::Null),
+        other => Err(ExecError::TypeMismatch {
+            op: "regrole_to_text",
+            left: other.clone(),
+            right: Value::Null,
+        }),
+    }
 }
 
 fn sequence_runtime(
@@ -1537,6 +1562,7 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::Chr => eval_chr_function(&values),
         BuiltinScalarFunction::QuoteLiteral => eval_quote_literal_function(&values),
         BuiltinScalarFunction::BpcharToText => eval_bpchar_to_text_function(&values),
+        BuiltinScalarFunction::RegRoleToText => Err(malformed_expr_error("function")),
         BuiltinScalarFunction::Strpos => eval_strpos_function(&values),
         BuiltinScalarFunction::Position => match values.as_slice() {
             [Value::Bit(needle), Value::Bit(haystack)] => {
@@ -1762,10 +1788,12 @@ fn eval_plpgsql_builtin_function(
         | BuiltinScalarFunction::Float8Accum
         | BuiltinScalarFunction::Float8Combine
         | BuiltinScalarFunction::Float8RegrAccum
-        | BuiltinScalarFunction::Float8RegrCombine => Err(ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "plpgsql builtin function supported by the standalone evaluator",
-            actual: format!("{func:?}"),
-        })),
+        | BuiltinScalarFunction::Float8RegrCombine => {
+            Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "plpgsql builtin function supported by the standalone evaluator",
+                actual: format!("{func:?}"),
+            }))
+        }
         _ => {
             let _ = func_variadic;
             Err(ExecError::Parse(ParseError::UnexpectedToken {
@@ -1948,8 +1976,7 @@ fn eval_float8_accum_function(values: &[Value]) -> Result<Value, ExecError> {
         [state, newval] => {
             let state = expect_float8_transition_state("float8_accum", state, 3)?;
             let newval = expect_float8_arg("float8_accum", newval)?;
-            let [count, sum, sum_sq] =
-                float8_accum_state(state[0], state[1], state[2], newval)?;
+            let [count, sum, sum_sq] = float8_accum_state(state[0], state[1], state[2], newval)?;
             Ok(encode_float8_transition_state([count, sum, sum_sq]))
         }
         _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
@@ -1983,10 +2010,9 @@ fn eval_float8_regr_accum_function(values: &[Value]) -> Result<Value, ExecError>
             let state = expect_float8_transition_state("float8_regr_accum", state, 6)?;
             let y = expect_float8_arg("float8_regr_accum", y)?;
             let x = expect_float8_arg("float8_regr_accum", x)?;
-            let [count, sum_x, sum_sq_x, sum_y, sum_sq_y, sum_xy] =
-                float8_regr_accum_state(
-                    state[0], state[1], state[2], state[3], state[4], state[5], y, x,
-                )?;
+            let [count, sum_x, sum_sq_x, sum_y, sum_sq_y, sum_xy] = float8_regr_accum_state(
+                state[0], state[1], state[2], state[3], state[4], state[5], y, x,
+            )?;
             Ok(encode_float8_transition_state([
                 count, sum_x, sum_sq_x, sum_y, sum_sq_y, sum_xy,
             ]))
@@ -2024,11 +2050,13 @@ fn expect_float8_transition_state(
     value: &Value,
     expected_len: usize,
 ) -> Result<Vec<f64>, ExecError> {
-    let array = value.as_array_value().ok_or_else(|| ExecError::TypeMismatch {
-        op,
-        left: value.clone(),
-        right: Value::PgArray(ArrayValue::empty().with_element_type_oid(FLOAT8_TYPE_OID)),
-    })?;
+    let array = value
+        .as_array_value()
+        .ok_or_else(|| ExecError::TypeMismatch {
+            op,
+            left: value.clone(),
+            right: Value::PgArray(ArrayValue::empty().with_element_type_oid(FLOAT8_TYPE_OID)),
+        })?;
     if array.dimensions.len() != 1 || array.dimensions[0].length != expected_len {
         return Err(ExecError::DetailedError {
             message: format!("{op} requires a float8[] transition state of length {expected_len}"),
@@ -2185,7 +2213,14 @@ fn float8_regr_accum_state(
             prev_sum_xy = f64::NAN;
         }
     }
-    Ok([count, sum_x, prev_sum_sq_x, sum_y, prev_sum_sq_y, prev_sum_xy])
+    Ok([
+        count,
+        sum_x,
+        prev_sum_sq_x,
+        sum_y,
+        prev_sum_sq_y,
+        prev_sum_xy,
+    ])
 }
 
 fn float8_regr_combine_state(left: [f64; 6], right: [f64; 6]) -> Result<[f64; 6], ExecError> {
@@ -2245,7 +2280,9 @@ fn eval_builtin_function(
     if let Some(result) = eval_range_function(func, &values, result_type) {
         return result;
     }
-    if let Some(result) = eval_json_builtin_function(func, &values, func_variadic, &ctx.datetime_config) {
+    if let Some(result) =
+        eval_json_builtin_function(func, &values, func_variadic, &ctx.datetime_config)
+    {
         return result;
     }
     if matches!(
@@ -2643,6 +2680,7 @@ fn eval_builtin_function(
         BuiltinScalarFunction::Reverse => eval_reverse_function(&values),
         BuiltinScalarFunction::BpcharToText => eval_bpchar_to_text_function(&values),
         BuiltinScalarFunction::QuoteLiteral => eval_quote_literal_function(&values),
+        BuiltinScalarFunction::RegRoleToText => eval_regrole_to_text_function(ctx, &values),
         BuiltinScalarFunction::Replace => eval_replace_function(&values),
         BuiltinScalarFunction::SplitPart => eval_split_part_function(&values),
         BuiltinScalarFunction::Translate => eval_translate_function(&values),
@@ -2752,8 +2790,14 @@ fn eval_jsonb_contains(left: Value, right: Value) -> Result<Value, ExecError> {
     if matches!(left, Value::Null) || matches!(right, Value::Null) {
         return Ok(Value::Null);
     }
-    let left_jsonb = jsonb_from_value(&left, &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default())?;
-    let right_jsonb = jsonb_from_value(&right, &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default())?;
+    let left_jsonb = jsonb_from_value(
+        &left,
+        &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+    )?;
+    let right_jsonb = jsonb_from_value(
+        &right,
+        &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+    )?;
     Ok(Value::Bool(jsonb_contains(&left_jsonb, &right_jsonb)))
 }
 
@@ -2761,8 +2805,14 @@ fn eval_jsonb_contained(left: Value, right: Value) -> Result<Value, ExecError> {
     if matches!(left, Value::Null) || matches!(right, Value::Null) {
         return Ok(Value::Null);
     }
-    let left_jsonb = jsonb_from_value(&left, &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default())?;
-    let right_jsonb = jsonb_from_value(&right, &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default())?;
+    let left_jsonb = jsonb_from_value(
+        &left,
+        &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+    )?;
+    let right_jsonb = jsonb_from_value(
+        &right,
+        &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+    )?;
     Ok(Value::Bool(jsonb_contains(&right_jsonb, &left_jsonb)))
 }
 
@@ -2775,8 +2825,10 @@ fn eval_jsonb_exists(left: Value, right: Value) -> Result<Value, ExecError> {
         left: left.clone(),
         right: right.clone(),
     })?;
-    let jsonb =
-        jsonb_from_value(&left, &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default())?;
+    let jsonb = jsonb_from_value(
+        &left,
+        &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+    )?;
     Ok(Value::Bool(jsonb_exists(&jsonb, key)))
 }
 
@@ -2831,8 +2883,10 @@ fn eval_jsonb_exists_list(
             });
         }
     };
-    let jsonb =
-        jsonb_from_value(&left, &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default())?;
+    let jsonb = jsonb_from_value(
+        &left,
+        &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+    )?;
     Ok(Value::Bool(pred(&jsonb, &keys)))
 }
 
