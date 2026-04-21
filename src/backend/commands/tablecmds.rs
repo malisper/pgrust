@@ -24,6 +24,7 @@ use crate::backend::parser::{
     BoundRelationConstraints, BoundUpdateStatement, BoundUpdateTarget, Catalog, CatalogLookup,
     DropTableStatement, ExplainStatement, ForeignKeyAction, MaintenanceTarget, MergeStatement,
     ParseError, SelectStatement, SqlType, SqlTypeKind, Statement, TruncateTableStatement,
+    UpdateStatement, bind_update,
     VacuumStatement, bind_create_table, bind_referenced_by_foreign_keys, bind_scalar_expr_in_scope,
 };
 use crate::backend::rewrite::RlsWriteCheck;
@@ -50,7 +51,7 @@ use crate::include::access::detoast::is_ondisk_toast_pointer;
 use crate::include::access::htup::{HeapTuple, TupleValue};
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::catalog::builtin_range_name_for_sql_type;
-use crate::include::nodes::datum::{ArrayDimension, ArrayValue, array_value_from_value};
+use crate::include::nodes::datum::{ArrayDimension, ArrayValue, Value, array_value_from_value};
 use crate::include::nodes::execnodes::TupleSlot;
 use crate::include::nodes::execnodes::*;
 use crate::include::nodes::primnodes::{QueryColumn, TargetEntry};
@@ -319,7 +320,20 @@ pub(crate) fn execute_explain(
     catalog: &dyn CatalogLookup,
     ctx: &mut ExecutorContext,
 ) -> Result<StatementResult, ExecError> {
-    let explain_target = match *stmt.statement {
+    let ExplainStatement {
+        analyze,
+        buffers,
+        costs,
+        timing,
+        verbose,
+        statement,
+    } = stmt;
+    let statement = *statement;
+    if let Statement::Update(update) = statement {
+        return execute_explain_update(update, analyze, costs, verbose, catalog);
+    }
+
+    let explain_target = match statement {
         Statement::Select(select) => EitherExplainTarget::Select(select),
         Statement::Insert(_) => {
             return Err(ExecError::Parse(ParseError::FeatureNotSupported(
@@ -329,7 +343,7 @@ pub(crate) fn execute_explain(
         Statement::Merge(merge) => EitherExplainTarget::Merge(merge),
         _ => {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "SELECT or MERGE statement after EXPLAIN",
+                expected: "SELECT, UPDATE, or MERGE statement after EXPLAIN",
                 actual: "unsupported statement".into(),
             }));
         }
@@ -356,14 +370,14 @@ pub(crate) fn execute_explain(
     let planning_elapsed = plan_start.elapsed();
     let planning_buffer_stats = ctx.pool.usage_stats();
     let mut lines = Vec::new();
-    if stmt.analyze && merge_target_name.is_some() {
+    if analyze && merge_target_name.is_some() {
         return Err(ExecError::Parse(ParseError::FeatureNotSupported(
             "EXPLAIN ANALYZE MERGE".into(),
         )));
     }
-    if stmt.analyze {
+    if analyze {
         ctx.pool.reset_usage_stats();
-        ctx.timed = stmt.timing;
+        ctx.timed = timing;
         let saved_subplans =
             std::mem::replace(&mut ctx.subplans, query_desc.planned_stmt.subplans.clone());
         let exec_result: Result<(_, _, _), ExecError> = (|| {
@@ -379,8 +393,8 @@ pub(crate) fn execute_explain(
         ctx.timed = false;
         let execution_buffer_stats = ctx.pool.usage_stats();
         let (state, row_count, elapsed) = exec_result?;
-        format_explain_lines_with_costs(state.as_ref(), 0, true, stmt.costs, &mut lines);
-        if stmt.buffers {
+        format_explain_lines_with_costs(state.as_ref(), 0, true, costs, &mut lines);
+        if buffers {
             lines.push("Planning:".into());
             lines.push(format!("  {}", format_buffer_usage(planning_buffer_stats)));
         }
@@ -392,7 +406,7 @@ pub(crate) fn execute_explain(
             "Execution Time: {:.3} ms",
             elapsed.as_secs_f64() * 1000.0
         ));
-        if stmt.buffers {
+        if buffers {
             lines.push(format_buffer_usage(execution_buffer_stats));
         }
         lines.push(format!("Result Rows: {}", row_count));
@@ -402,12 +416,12 @@ pub(crate) fn execute_explain(
             push_explain_line(
                 &format!("Merge on {target_name}"),
                 state.plan_info(),
-                stmt.costs,
+                costs,
                 &mut lines,
             );
-            format_explain_lines_with_costs(state.as_ref(), 1, false, stmt.costs, &mut lines);
+            format_explain_lines_with_costs(state.as_ref(), 1, false, costs, &mut lines);
         } else {
-            format_explain_lines_with_costs(state.as_ref(), 0, false, stmt.costs, &mut lines);
+            format_explain_lines_with_costs(state.as_ref(), 0, false, costs, &mut lines);
         }
     }
 
@@ -424,6 +438,217 @@ pub(crate) fn execute_explain(
 enum EitherExplainTarget {
     Select(SelectStatement),
     Merge(MergeStatement),
+}
+
+fn execute_explain_update(
+    stmt: UpdateStatement,
+    analyze: bool,
+    costs: bool,
+    verbose: bool,
+    catalog: &dyn CatalogLookup,
+) -> Result<StatementResult, ExecError> {
+    if analyze {
+        return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+            "EXPLAIN ANALYZE UPDATE".into(),
+        )));
+    }
+
+    let bound = finalize_bound_update_stmt(bind_update(&stmt, catalog)?, catalog);
+    let lines = explain_update_lines(&stmt, &bound, costs, verbose);
+    Ok(StatementResult::Query {
+        columns: vec![QueryColumn::text("QUERY PLAN")],
+        column_names: vec!["QUERY PLAN".into()],
+        rows: lines
+            .into_iter()
+            .map(|line| vec![Value::Text(line.into())])
+            .collect(),
+    })
+}
+
+fn explain_update_lines(
+    stmt: &UpdateStatement,
+    bound: &BoundUpdateStatement,
+    show_costs: bool,
+    verbose: bool,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    push_explain_line(
+        &format!(
+            "Update on {}",
+            explain_update_target_name(&stmt.table_name, verbose)
+        ),
+        crate::include::nodes::plannodes::PlanEstimate::default(),
+        show_costs,
+        &mut lines,
+    );
+    if verbose && !bound.returning.is_empty() {
+        lines.push(format!(
+            "  Output: {}",
+            render_update_returning_targets(&stmt.table_name, &bound.returning)
+        ));
+    }
+
+    let child_targets = bound
+        .targets
+        .iter()
+        .filter(|target| target.relation_name != stmt.table_name)
+        .collect::<Vec<_>>();
+    if let Some(target) = explain_update_scan_target(&stmt.table_name, &bound.targets) {
+        let alias = child_targets
+            .iter()
+            .position(|candidate| candidate.relation_oid == target.relation_oid)
+            .map(|index| format!("{}_{}", stmt.table_name, index + 1));
+        if let Some(alias) = &alias {
+            lines.push(format!("  Update on {} {}", target.relation_name, alias));
+        }
+        push_explain_line(
+            "  ->  Result",
+            crate::include::nodes::plannodes::PlanEstimate::default(),
+            show_costs,
+            &mut lines,
+        );
+        if is_const_false(target.predicate.as_ref()) {
+            if verbose {
+                lines.push(format!(
+                    "        Output: {}",
+                    render_update_projection_output(&stmt.table_name, target)
+                ));
+            }
+            lines.push("        One-Time Filter: false".into());
+            return lines;
+        }
+        push_explain_line(
+            &format!("        ->  {}", explain_update_scan_label(target, alias.as_deref())),
+            crate::include::nodes::plannodes::PlanEstimate::default(),
+            show_costs,
+            &mut lines,
+        );
+        if let Some(index_cond) = explain_update_index_cond(target) {
+            lines.push(format!("              Index Cond: {index_cond}"));
+        } else if let Some(predicate) = &target.predicate {
+            lines.push(format!(
+                "              Filter: {}",
+                crate::backend::executor::render_explain_expr(
+                    predicate,
+                    &target
+                        .desc
+                        .columns
+                        .iter()
+                        .map(|column| column.name.clone())
+                        .collect::<Vec<_>>(),
+                )
+            ));
+        }
+    } else {
+        push_explain_line(
+            "  ->  Result",
+            crate::include::nodes::plannodes::PlanEstimate::default(),
+            show_costs,
+            &mut lines,
+        );
+        lines.push("        One-Time Filter: false".into());
+    }
+    lines
+}
+
+fn explain_update_scan_target<'a>(
+    base_name: &str,
+    targets: &'a [BoundUpdateTarget],
+) -> Option<&'a BoundUpdateTarget> {
+    targets
+        .iter()
+        .find(|target| target.relation_name != base_name && !is_const_false(target.predicate.as_ref()))
+        .or_else(|| targets.iter().find(|target| !is_const_false(target.predicate.as_ref())))
+        .or_else(|| targets.first())
+}
+
+fn explain_update_target_name(table_name: &str, verbose: bool) -> String {
+    if !verbose || table_name.contains('.') {
+        return table_name.to_string();
+    }
+    format!("public.{table_name}")
+}
+
+fn render_update_returning_targets(target_name: &str, returning: &[TargetEntry]) -> String {
+    returning
+        .iter()
+        .map(|target| format!("{target_name}.{}", target.name))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn render_update_projection_output(_target_name: &str, target: &BoundUpdateTarget) -> String {
+    let column_names = target
+        .desc
+        .columns
+        .iter()
+        .map(|column| column.name.clone())
+        .collect::<Vec<_>>();
+    let assignment_outputs = target
+        .assignments
+        .iter()
+        .map(|assignment| {
+            crate::backend::executor::render_explain_expr(&assignment.expr, &column_names)
+        })
+        .collect::<Vec<_>>();
+    let mut outputs = assignment_outputs;
+    outputs.push("NULL::oid".into());
+    outputs.push("NULL::tid".into());
+    outputs.join(", ")
+}
+
+fn explain_update_scan_label(target: &BoundUpdateTarget, alias: Option<&str>) -> String {
+    match &target.row_source {
+        BoundModifyRowSource::Heap => match alias {
+            Some(alias) => format!("Seq Scan on {} {alias}", target.relation_name),
+            None => format!("Seq Scan on {}", target.relation_name),
+        },
+        BoundModifyRowSource::Index { index, .. } => match alias {
+            Some(alias) => format!(
+                "Index Scan using {} on {} {alias}",
+                index.name, target.relation_name
+            ),
+            None => format!("Index Scan using {} on {}", index.name, target.relation_name),
+        },
+    }
+}
+
+fn explain_update_index_cond(target: &BoundUpdateTarget) -> Option<String> {
+    let BoundModifyRowSource::Index { index, keys } = &target.row_source else {
+        return None;
+    };
+    let rendered = keys
+        .iter()
+        .filter_map(|key| {
+            let index_attno = usize::try_from(key.attribute_number).ok()?.checked_sub(1)?;
+            let heap_attno = usize::try_from(*index.index_meta.indkey.get(index_attno)?).ok()?.checked_sub(1)?;
+            let column_name = target.desc.columns.get(heap_attno)?.name.clone();
+            Some(format!(
+                "({column_name} {} {})",
+                explain_strategy_operator(key.strategy),
+                crate::backend::executor::render_explain_expr(
+                    &Expr::Const(key.argument.clone()),
+                    &[],
+                )
+            ))
+        })
+        .collect::<Vec<_>>();
+    (!rendered.is_empty()).then(|| format!("({})", rendered.join(" AND ")))
+}
+
+fn explain_strategy_operator(strategy: u16) -> &'static str {
+    match strategy {
+        1 => "<",
+        2 => "<=",
+        3 => "=",
+        4 => ">=",
+        5 => ">",
+        _ => "=",
+    }
+}
+
+fn is_const_false(expr: Option<&Expr>) -> bool {
+    matches!(expr, Some(Expr::Const(Value::Bool(false))))
 }
 
 fn validate_maintenance_targets(

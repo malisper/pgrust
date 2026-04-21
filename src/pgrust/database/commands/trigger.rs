@@ -54,7 +54,14 @@ impl Database {
         ensure_relation_owner(self, client_id, &relation, &relation_name)?;
 
         let trigger_name = stmt.trigger_name.to_ascii_lowercase();
-        let trigger_function = resolve_trigger_function(&catalog, stmt, configured_search_path)?;
+        let trigger_function = resolve_trigger_function(
+            self,
+            client_id,
+            Some((xid, cid)),
+            &catalog,
+            stmt,
+            configured_search_path,
+        )?;
         validate_trigger_stmt(stmt, &relation.desc, &catalog)?;
 
         let tgattr = trigger_update_attnums(stmt, &relation.desc)?;
@@ -217,15 +224,18 @@ fn format_trigger_drop_relation_name(stmt: &DropTriggerStatement) -> String {
 }
 
 fn resolve_trigger_function(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
     catalog: &dyn CatalogLookup,
     stmt: &CreateTriggerStatement,
     configured_search_path: Option<&[String]>,
 ) -> Result<crate::include::catalog::PgProcRow, ExecError> {
     let proname = stmt.function_name.to_ascii_lowercase();
     let namespace_candidates = if let Some(schema_name) = stmt.function_schema_name.as_deref() {
-        vec![schema_name_to_oid(schema_name)?]
+        vec![resolve_function_schema_oid(db, client_id, txn_ctx, schema_name)?]
     } else {
-        function_search_path_namespace_oids(configured_search_path)
+        function_search_path_namespace_oids(db, client_id, txn_ctx, configured_search_path)
     };
     let function = namespace_candidates
         .iter()
@@ -287,21 +297,23 @@ fn resolve_trigger_function(
     Ok(function)
 }
 
-fn function_search_path_namespace_oids(configured_search_path: Option<&[String]>) -> Vec<u32> {
+fn function_search_path_namespace_oids(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    configured_search_path: Option<&[String]>,
+) -> Vec<u32> {
     let mut out = vec![crate::include::catalog::PG_CATALOG_NAMESPACE_OID];
-    let configured = configured_search_path
-        .map(|path| {
-            path.iter()
-                .map(|item| item.trim().to_ascii_lowercase())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_else(|| vec!["public".into()]);
-    for item in configured {
+    for item in db.effective_search_path(client_id, configured_search_path) {
         match item.as_str() {
-            "" | "$user" | "pg_temp" => {}
-            "pg_catalog" => {}
-            "public" => out.push(crate::include::catalog::PUBLIC_NAMESPACE_OID),
-            _ => {}
+            "" | "$user" | "pg_catalog" => {}
+            _ => {
+                if let Some(namespace_oid) =
+                    db.visible_namespace_oid_by_name(client_id, txn_ctx, &item)
+                {
+                    out.push(namespace_oid);
+                }
+            }
         }
     }
     out.sort_unstable();
@@ -309,17 +321,18 @@ fn function_search_path_namespace_oids(configured_search_path: Option<&[String]>
     out
 }
 
-fn schema_name_to_oid(name: &str) -> Result<u32, ExecError> {
-    match name.to_ascii_lowercase().as_str() {
-        "public" => Ok(crate::include::catalog::PUBLIC_NAMESPACE_OID),
-        "pg_catalog" => Ok(crate::include::catalog::PG_CATALOG_NAMESPACE_OID),
-        "pg_temp" => Err(ExecError::Parse(ParseError::UnsupportedQualifiedName(
-            name.to_string(),
-        ))),
-        _ => Err(ExecError::Parse(ParseError::UnsupportedQualifiedName(
-            name.to_string(),
-        ))),
+fn resolve_function_schema_oid(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    name: &str,
+) -> Result<u32, ExecError> {
+    let normalized = name.to_ascii_lowercase();
+    if normalized == "pg_catalog" {
+        return Ok(crate::include::catalog::PG_CATALOG_NAMESPACE_OID);
     }
+    db.visible_namespace_oid_by_name(client_id, txn_ctx, &normalized)
+        .ok_or_else(|| ExecError::Parse(ParseError::UnsupportedQualifiedName(name.to_string())))
 }
 
 fn validate_trigger_stmt(
