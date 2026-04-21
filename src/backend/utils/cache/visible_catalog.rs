@@ -121,6 +121,36 @@ impl CatalogLookup for VisibleCatalog {
             .map(|entry| bound_relation_from_relcache_entry(&self.relcache, entry))
     }
 
+    fn index_relations_for_heap(
+        &self,
+        relation_oid: u32,
+    ) -> Vec<crate::backend::parser::BoundIndexRelation> {
+        self.relcache
+            .entries()
+            .filter_map(|(name, entry)| {
+                let index_meta = entry.index.as_ref()?;
+                (index_meta.indrelid == relation_oid).then(|| {
+                    crate::backend::parser::BoundIndexRelation {
+                        name: name.rsplit('.').next().unwrap_or(name).to_string(),
+                        rel: entry.rel,
+                        relation_oid: entry.relation_oid,
+                        desc: entry.desc.clone(),
+                        index_meta: index_meta.clone(),
+                        index_exprs: self
+                            .relation_by_oid(index_meta.indrelid)
+                            .and_then(|heap| {
+                                crate::backend::parser::analyze::bind_index_exprs(
+                                    index_meta, &heap.desc, self,
+                                )
+                                .ok()
+                            })
+                            .unwrap_or_default(),
+                    }
+                })
+            })
+            .collect()
+    }
+
     fn proc_rows_by_name(&self, name: &str) -> Vec<PgProcRow> {
         let mut rows = self
             .catcache

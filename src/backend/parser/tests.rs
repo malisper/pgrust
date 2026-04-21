@@ -396,7 +396,7 @@ fn add_ready_people_index(
 }
 
 fn catalog_with_people_id_name_unique_index() -> Catalog {
-    let mut catalog = catalog();
+    let mut catalog = catalog_with_people_primary_key();
     add_ready_people_index(
         &mut catalog,
         "people_id_name_key",
@@ -768,6 +768,7 @@ fn visible_catalog_with_extra_opclasses(
         opclass_rows,
         base.opfamily_rows(),
         base.proc_rows(),
+        base.aggregate_rows(),
         base.cast_rows(),
         base.collation_rows(),
         base.foreign_data_wrapper_rows(),

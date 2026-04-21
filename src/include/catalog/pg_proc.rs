@@ -1966,6 +1966,7 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             1,
         ),
         aggregate_row(6219, "count", INT8_TYPE_OID, &oid_argtypes(&[ANYOID]), 1),
+        aggregate_row(6293, "any_value", ANYOID, &oid_argtypes(&[ANYOID]), 1),
         aggregate_row(
             6220,
             "sum",
@@ -2698,6 +2699,7 @@ fn synthetic_aggregate_proc_oids() -> &'static Vec<(AggFunc, u32)> {
         const BASE: u32 = 910_000;
         [
             AggFunc::Count,
+            AggFunc::AnyValue,
             AggFunc::Sum,
             AggFunc::Avg,
             AggFunc::Variance,
@@ -2746,6 +2748,7 @@ fn synthetic_window_proc_oids() -> &'static Vec<(BuiltinWindowFunction, u32)> {
 fn aggregate_func_for_proname(name: &str) -> Option<AggFunc> {
     match name.to_ascii_lowercase().as_str() {
         "count" => Some(AggFunc::Count),
+        "any_value" => Some(AggFunc::AnyValue),
         "sum" => Some(AggFunc::Sum),
         "avg" => Some(AggFunc::Avg),
         "variance" => Some(AggFunc::Variance),

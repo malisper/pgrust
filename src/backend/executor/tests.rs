@@ -619,6 +619,7 @@ fn empty_executor_context(base: &PathBuf) -> ExecutorContext {
         client_id: 1,
         session_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         current_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+        session_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         next_command_id: 0,
         expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
         case_test_values: Vec::new(),
@@ -669,6 +670,7 @@ fn run_plan(
         client_id: 42,
         session_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         current_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+        session_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         next_command_id: 0,
         expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
         case_test_values: Vec::new(),
@@ -757,6 +759,7 @@ fn run_sql_with_catalog(
             client_id: 77,
             session_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
             current_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+            session_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
             next_command_id: 0,
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
             case_test_values: Vec::new(),
@@ -6419,6 +6422,7 @@ fn prepared_insert_uses_defaults_for_omitted_columns() {
         client_id: 77,
         session_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         current_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+        session_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         next_command_id: 0,
         expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
         case_test_values: Vec::new(),
@@ -14888,18 +14892,24 @@ fn numeric_typmod_accepts_zero_in_full_scale_columns() {
         "select '1.0'::numeric(4,4)",
     )
     .unwrap_err();
-    assert!(matches!(
-        err,
+    match err {
         ExecError::DetailedError {
             message,
-            detail: Some(detail),
+            detail,
             sqlstate,
             ..
-        } if message == "numeric field overflow"
-            && detail
-                == "A field with precision 4, scale 4 must round to an absolute value less than 1."
-            && sqlstate == "22003"
-    ));
+        } => {
+            assert_eq!(message, "numeric field overflow");
+            assert_eq!(
+                detail.as_deref(),
+                Some(
+                    "A field with precision 4, scale 4 must round to an absolute value less than 1."
+                )
+            );
+            assert_eq!(sqlstate, "22003");
+        }
+        other => panic!("expected detailed numeric typmod error, got {other:?}"),
+    }
 }
 
 #[test]
@@ -15441,6 +15451,7 @@ fn large_object_metadata_tracks_create_and_unlink() {
             client_id: 77,
             session_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
             current_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+            session_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
             next_command_id: 0,
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
             case_test_values: Vec::new(),

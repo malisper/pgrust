@@ -177,6 +177,7 @@ pub struct ToastRelationRef {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AggFunc {
     Count,
+    AnyValue,
     Sum,
     Avg,
     Variance,
@@ -196,6 +197,7 @@ impl AggFunc {
     pub fn name(&self) -> &'static str {
         match self {
             AggFunc::Count => "count",
+            AggFunc::AnyValue => "any_value",
             AggFunc::Sum => "sum",
             AggFunc::Avg => "avg",
             AggFunc::Variance => "variance",
@@ -376,6 +378,7 @@ pub enum BuiltinScalarFunction {
     Ascii,
     Chr,
     QuoteLiteral,
+    RegRoleToText,
     Replace,
     SplitPart,
     Translate,
