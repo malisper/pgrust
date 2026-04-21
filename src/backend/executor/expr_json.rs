@@ -2817,7 +2817,7 @@ fn render_json_value_text_with_config(
         Value::JsonPath(v) => serde_json::to_string(v.as_str()).unwrap(),
         Value::Json(v) => v.to_string(),
         Value::Jsonb(v) => render_jsonb_bytes(v).unwrap_or_else(|_| "null".into()),
-        Value::Text(_) | Value::TextRef(_, _) => {
+        Value::Text(_) | Value::TextRef(_, _) | Value::Xml(_) => {
             serde_json::to_string(value.as_text().unwrap()).unwrap()
         }
         Value::Bytea(v) => {
