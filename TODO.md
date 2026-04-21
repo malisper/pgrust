@@ -495,8 +495,8 @@ Targeted reruns and notes:
 - numeric.sql:
   Retest source: `/tmp/pgrust_regress_numeric_20260420/diff/numeric.diff`
   - Preserve PostgreSQL-compatible row order for the `VALUES`/cross-join cases in `numeric.sql`; the first mismatch is still output ordering rather than wrong row contents
-  - Finish numeric input validation parity in `expr_casts.rs`, including `pg_input_is_valid('1e400000', 'numeric')`, `pg_input_error_info(...)` detail/sqlstate fields, and spaced base-prefix literals that PostgreSQL accepts
-  - Restore PostgreSQL `DETAIL` text for numeric typmod overflow and infinity rejection paths in inserts and `pg_input_error_info(...)`
+  - [done] Finish numeric input validation parity in `expr_casts.rs`, including `pg_input_is_valid('1e400000', 'numeric')`, `pg_input_error_info(...)` detail/sqlstate fields, and spaced base-prefix literals that PostgreSQL accepts
+  - [done] Restore PostgreSQL `DETAIL` text for numeric typmod overflow and infinity rejection paths in inserts and `pg_input_error_info(...)`
   - Add dedicated numeric-to-integer cast errors for `NaN` and `Infinity` instead of collapsing them into generic `smallint` / `integer` / `bigint out of range`
   - Finish `to_char(numeric, ...)` parity in `expr_format.rs`, especially `FMS` formats, scientific-format hash width, and overflow/hash rendering for wide values and infinities
   - Finish `to_number(..., 'RN')` / Roman numeral parity, including the aggregate validation path that currently errors in the `bool_and(to_number(roman, 'RN') = i)` check
