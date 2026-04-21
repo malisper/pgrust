@@ -574,36 +574,48 @@ pub fn bind_relation_constraints(
     catalog: &dyn super::CatalogLookup,
 ) -> Result<BoundRelationConstraints, ParseError> {
     let rows = catalog.constraint_rows_for_relation(relation_oid);
-    let not_nulls = rows
-        .iter()
-        .filter(|row| row.contype == crate::include::catalog::CONSTRAINT_NOTNULL)
-        .filter_map(|row| {
-            let attnum = *row.conkey.as_ref()?.first()?;
-            Some(BoundNotNullConstraint {
-                column_index: attnum.saturating_sub(1) as usize,
-                constraint_name: row.conname.clone(),
-            })
-        })
-        .collect::<Vec<_>>();
-    let checks = rows
-        .iter()
-        .filter(|row| row.contype == crate::include::catalog::CONSTRAINT_CHECK)
-        .map(|row| {
-            let expr_sql = row.conbin.clone().ok_or(ParseError::UnexpectedToken {
-                expected: "stored CHECK constraint expression",
-                actual: format!("missing expression for constraint {}", row.conname),
-            })?;
-            Ok(BoundCheckConstraint {
-                constraint_name: row.conname.clone(),
-                expr: bind_check_constraint_expr(&expr_sql, relation_name, desc, catalog)?,
-            })
-        })
-        .collect::<Result<Vec<_>, ParseError>>()?;
-    let foreign_keys = rows
-        .into_iter()
-        .filter(|row| row.contype == crate::include::catalog::CONSTRAINT_FOREIGN)
-        .map(|row| bind_outbound_foreign_key_constraint(relation_oid, desc, row, catalog))
-        .collect::<Result<Vec<_>, ParseError>>()?;
+    let mut not_nulls = Vec::new();
+    let mut checks = Vec::new();
+    let mut foreign_keys = Vec::new();
+
+    for row in rows {
+        match row.contype {
+            crate::include::catalog::CONSTRAINT_NOTNULL => {
+                let Some(attnum) = row
+                    .conkey
+                    .as_ref()
+                    .and_then(|conkey| conkey.first())
+                    .copied()
+                else {
+                    continue;
+                };
+                not_nulls.push(BoundNotNullConstraint {
+                    column_index: attnum.saturating_sub(1) as usize,
+                    constraint_name: row.conname,
+                });
+            }
+            crate::include::catalog::CONSTRAINT_CHECK => {
+                let expr_sql = row.conbin.ok_or(ParseError::UnexpectedToken {
+                    expected: "stored CHECK constraint expression",
+                    actual: format!("missing expression for constraint {}", row.conname),
+                })?;
+                checks.push(BoundCheckConstraint {
+                    constraint_name: row.conname,
+                    expr: bind_check_constraint_expr(&expr_sql, relation_name, desc, catalog)?,
+                });
+            }
+            crate::include::catalog::CONSTRAINT_FOREIGN => {
+                foreign_keys.push(bind_outbound_foreign_key_constraint(
+                    relation_oid,
+                    desc,
+                    row,
+                    catalog,
+                )?);
+            }
+            _ => {}
+        }
+    }
+
     Ok(BoundRelationConstraints {
         not_nulls,
         checks,

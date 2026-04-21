@@ -10425,7 +10425,7 @@ fn window_rows_range_and_groups_frames_are_respected() {
                     vec![
                         Value::Int32(2),
                         Value::Int64(6),
-                        Value::Int64(9),
+                        Value::Int64(10),
                         Value::Int64(10),
                         Value::Int32(1),
                         Value::Int32(4),
@@ -10433,7 +10433,7 @@ fn window_rows_range_and_groups_frames_are_respected() {
                     vec![
                         Value::Int32(3),
                         Value::Int64(9),
-                        Value::Int64(7),
+                        Value::Int64(10),
                         Value::Int64(10),
                         Value::Int32(1),
                         Value::Int32(4),

@@ -4,7 +4,7 @@ use crate::include::catalog::BTREE_AM_OID;
 use crate::include::nodes::parsenodes::{OnConflictAction, OnConflictClause, OnConflictTarget};
 use crate::include::nodes::primnodes::{AttrNumber, INNER_VAR, OUTER_VAR, Var, user_attrno};
 use crate::include::nodes::primnodes::{BoolExprType, OpExprKind};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundOnConflictClause {
@@ -131,6 +131,7 @@ fn resolve_arbiter_indexes(
                     bind_expr_with_outer_and_ctes(predicate, &scope, catalog, &[], None, &[])
                 })
                 .transpose()?;
+            let mut seen = HashSet::new();
             let matches = inferable_unique_indexes(&catalog.index_relations_for_heap(relation_oid))
                 .into_iter()
                 .filter(|index| {
@@ -144,6 +145,7 @@ fn resolve_arbiter_indexes(
                     )
                     .unwrap_or(false)
                 })
+                .filter(|index| seen.insert(index.relation_oid))
                 .collect::<Vec<_>>();
             if matches.is_empty() {
                 return Err(ParseError::UnexpectedToken {

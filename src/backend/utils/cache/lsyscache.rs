@@ -191,6 +191,20 @@ fn proc_rows_by_name(
         .collect()
 }
 
+fn dedup_proc_rows(rows: &mut Vec<PgProcRow>) {
+    let mut seen = BTreeSet::new();
+    rows.retain(|row| {
+        seen.insert((
+            row.proname.clone(),
+            row.prorettype,
+            row.proargtypes.clone(),
+            row.prokind,
+            row.proretset,
+            row.prosrc.clone(),
+        ))
+    });
+}
+
 fn aggregate_row_by_fnoid(
     db: &Database,
     client_id: ClientId,
@@ -800,6 +814,7 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
             &self.type_rows(),
             &self.range_rows(),
         ));
+        dedup_proc_rows(&mut rows);
         rows
     }
 

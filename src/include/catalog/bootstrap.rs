@@ -478,7 +478,7 @@ pub const fn bootstrap_namespace_oid() -> u32 {
     PG_CATALOG_NAMESPACE_OID
 }
 
-pub const CORE_BOOTSTRAP_RELATIONS: [BootstrapCatalogRelation; 37] = [
+pub const CORE_BOOTSTRAP_RELATIONS: [BootstrapCatalogRelation; 38] = [
     BootstrapCatalogRelation {
         oid: PG_NAMESPACE_RELATION_OID,
         name: "pg_namespace",
@@ -616,6 +616,10 @@ pub const CORE_BOOTSTRAP_RELATIONS: [BootstrapCatalogRelation; 37] = [
         name: "pg_trigger",
     },
     BootstrapCatalogRelation {
+        oid: PG_POLICY_RELATION_OID,
+        name: "pg_policy",
+    },
+    BootstrapCatalogRelation {
         oid: PG_PUBLICATION_RELATION_OID,
         name: "pg_publication",
     },
@@ -675,21 +679,26 @@ mod tests {
             CORE_BOOTSTRAP_RELATIONS[27].oid,
             PG_DESCRIPTION_RELATION_OID
         );
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[28].oid, PG_INDEX_RELATION_OID);
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[29].oid, PG_INHERITS_RELATION_OID);
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[30].oid, PG_REWRITE_RELATION_OID);
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[31].oid, PG_STATISTIC_RELATION_OID);
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[32].oid, PG_TRIGGER_RELATION_OID);
         assert_eq!(
-            CORE_BOOTSTRAP_RELATIONS[33].oid,
+            CORE_BOOTSTRAP_RELATIONS[28].oid,
+            PG_FOREIGN_DATA_WRAPPER_RELATION_OID
+        );
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[29].oid, PG_INDEX_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[30].oid, PG_INHERITS_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[31].oid, PG_REWRITE_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[32].oid, PG_STATISTIC_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[33].oid, PG_TRIGGER_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[34].oid, PG_POLICY_RELATION_OID);
+        assert_eq!(
+            CORE_BOOTSTRAP_RELATIONS[35].oid,
             PG_PUBLICATION_RELATION_OID
         );
         assert_eq!(
-            CORE_BOOTSTRAP_RELATIONS[34].oid,
+            CORE_BOOTSTRAP_RELATIONS[36].oid,
             PG_PUBLICATION_REL_RELATION_OID
         );
         assert_eq!(
-            CORE_BOOTSTRAP_RELATIONS[35].oid,
+            CORE_BOOTSTRAP_RELATIONS[37].oid,
             PG_PUBLICATION_NAMESPACE_RELATION_OID
         );
     }
@@ -737,6 +746,7 @@ mod tests {
                 "pg_rewrite",
                 "pg_statistic",
                 "pg_trigger",
+                "pg_policy",
                 "pg_publication",
                 "pg_publication_rel",
                 "pg_publication_namespace",

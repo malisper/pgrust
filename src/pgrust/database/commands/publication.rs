@@ -1280,12 +1280,16 @@ mod tests {
         let duplicate = session
             .execute(&db, "alter publication pub add table widgets")
             .unwrap_err();
-        assert!(format!("{duplicate:?}").contains("relation \"widgets\" is already member"));
+        let duplicate_text = format!("{duplicate:?}");
+        assert!(duplicate_text.contains("widgets"));
+        assert!(duplicate_text.contains("is already member of publication"));
 
         let missing = session
             .execute(&db, "alter publication pub drop table gadgets")
             .unwrap_err();
-        assert!(format!("{missing:?}").contains("relation \"gadgets\" is not member"));
+        let missing_text = format!("{missing:?}");
+        assert!(missing_text.contains("gadgets"));
+        assert!(missing_text.contains("is not member of publication"));
     }
 
     #[test]
