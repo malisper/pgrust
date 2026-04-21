@@ -72,6 +72,23 @@ pub(crate) fn bind_expr_with_outer(
     bind_expr_with_outer_and_ctes(expr, scope, catalog, outer_scopes, grouped_outer, &[])
 }
 
+fn build_whole_row_expr(fields: Vec<(String, Expr)>) -> Expr {
+    Expr::Row {
+        descriptor: assign_anonymous_record_descriptor(
+            fields
+                .iter()
+                .map(|(field_name, expr)| {
+                    (
+                        field_name.clone(),
+                        expr_sql_type_hint(expr).unwrap_or(SqlType::new(SqlTypeKind::Text)),
+                    )
+                })
+                .collect(),
+        ),
+        fields,
+    }
+}
+
 pub(super) fn raise_expr_varlevels(expr: Expr, levels: usize) -> Expr {
     if levels == 0 {
         return expr;
@@ -512,21 +529,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 let fields =
                     resolve_relation_row_expr_with_outer(scope, outer_scopes, relation_name)
                         .ok_or_else(|| ParseError::UnknownColumn(name.clone()))?;
-                Expr::Row {
-                    descriptor: assign_anonymous_record_descriptor(
-                        fields
-                            .iter()
-                            .map(|(field_name, expr)| {
-                                (
-                                    field_name.clone(),
-                                    expr_sql_type_hint(expr)
-                                        .unwrap_or(SqlType::new(SqlTypeKind::Text)),
-                                )
-                            })
-                            .collect(),
-                    ),
-                    fields,
-                }
+                build_whole_row_expr(fields)
             } else if let Some(system_column) =
                 resolve_system_column_with_outer(scope, outer_scopes, name)?
             {
@@ -537,11 +540,11 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     vartype: system_column.sql_type,
                 })
             } else {
-                match resolve_column_with_outer(scope, outer_scopes, name, grouped_outer)? {
-                    ResolvedColumn::Local(index) => scope.output_exprs.get(index).cloned().unwrap_or_else(|| {
+                match resolve_column_with_outer(scope, outer_scopes, name, grouped_outer) {
+                    Ok(ResolvedColumn::Local(index)) => scope.output_exprs.get(index).cloned().unwrap_or_else(|| {
                         panic!("bound scope output_exprs missing local column {index} for {name}")
                     }),
-                    ResolvedColumn::Outer { depth, index } => outer_scopes
+                    Ok(ResolvedColumn::Outer { depth, index }) => outer_scopes
                         .get(depth)
                         .and_then(|scope| scope.output_exprs.get(index))
                         .cloned()
@@ -552,6 +555,14 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                                 depth, index, name
                             )
                         }),
+                    Err(ParseError::UnknownColumn(_))
+                        if resolve_relation_row_expr_with_outer(scope, outer_scopes, name).is_some() =>
+                    {
+                        let fields = resolve_relation_row_expr_with_outer(scope, outer_scopes, name)
+                            .expect("checked above");
+                        build_whole_row_expr(fields)
+                    }
+                    Err(err) => return Err(err),
                 }
             }
         }
@@ -2386,22 +2397,9 @@ fn bind_field_select_expr(
         SqlExpr::Column(name)
             if resolve_relation_row_expr_with_outer(scope, outer_scopes, name).is_some() =>
         {
-            let fields = resolve_relation_row_expr_with_outer(scope, outer_scopes, name)
-                .expect("checked above");
-            Expr::Row {
-                descriptor: assign_anonymous_record_descriptor(
-                    fields
-                        .iter()
-                        .map(|(field_name, expr)| {
-                            (
-                                field_name.clone(),
-                                expr_sql_type_hint(expr).unwrap_or(SqlType::new(SqlTypeKind::Text)),
-                            )
-                        })
-                        .collect(),
-                ),
-                fields,
-            }
+            let fields =
+                resolve_relation_row_expr_with_outer(scope, outer_scopes, name).expect("checked above");
+            build_whole_row_expr(fields)
         }
         _ => {
             bind_expr_with_outer_and_ctes(expr, scope, catalog, outer_scopes, grouped_outer, ctes)?
