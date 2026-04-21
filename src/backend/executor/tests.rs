@@ -2435,6 +2435,31 @@ fn select_without_from_returns_constant_row() {
         other => panic!("expected query result, got {:?}", other),
     }
 }
+
+#[test]
+fn select_array_literal_uses_array_column_name() {
+    let base = temp_dir("select_array_literal_column_name");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select array[1,null,3]").unwrap() {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(column_names, vec!["array".to_string()]);
+            assert_eq!(
+                rows,
+                vec![vec![Value::PgArray(ArrayValue::from_dimensions(
+                    vec![ArrayDimension {
+                        lower_bound: 1,
+                        length: 3,
+                    }],
+                    vec![Value::Int32(1), Value::Null, Value::Int32(3)],
+                ))]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
 #[test]
 fn select_from_people_returns_zero_column_rows() {
     let base = temp_dir("select_from_people");
