@@ -4,7 +4,7 @@ COMMENT = _{ line_comment | block_comment }
 line_comment = _{ "--" ~ (!"\n" ~ ANY)* }
 block_comment = _{ "/*" ~ (!"*/" ~ ANY)* ~ "*/" }
 
-pl_block = { SOI ~ block ~ EOI }
+pl_block = { SOI ~ block ~ semi? ~ EOI }
 block = { declare_section? ~ kw_begin ~ stmt* ~ kw_end }
 declare_section = { kw_declare ~ (!kw_begin ~ var_decl)+ }
 var_decl = { !kw_begin ~ ident ~ type_name_text ~ default_clause? ~ semi }
