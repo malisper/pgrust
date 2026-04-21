@@ -17,6 +17,7 @@ use crate::backend::catalog::store::{DEFAULT_FIRST_REL_NUMBER, DEFAULT_FIRST_USE
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::storage::smgr::RelFileLocator;
+use crate::backend::utils::cache::catcache::sql_type_oid;
 use crate::backend::utils::misc::interrupts::InterruptReason;
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_NOTNULL, PUBLIC_NAMESPACE_OID, PgAuthIdRow,
@@ -1197,7 +1198,6 @@ impl Catalog {
         let table = self
             .get_by_oid(relation_oid)
             .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
-        let type_rows = crate::include::catalog::builtin_type_rows();
         let mut indclass = Vec::with_capacity(columns.len());
         let mut indcollation = Vec::with_capacity(columns.len());
         let mut indoption = Vec::with_capacity(columns.len());
@@ -1208,11 +1208,10 @@ impl Catalog {
                 .iter()
                 .find(|column| column.name.eq_ignore_ascii_case(&column_name.name))
                 .ok_or_else(|| CatalogError::UnknownColumn(column_name.name.clone()))?;
-            let type_oid = type_rows
-                .iter()
-                .find(|row| row.sql_type == column.sql_type)
-                .map(|row| row.oid)
-                .ok_or_else(|| CatalogError::UnknownType("index column type".into()))?;
+            let type_oid = sql_type_oid(column.sql_type);
+            if type_oid == 0 {
+                return Err(CatalogError::UnknownType("index column type".into()));
+            }
             let opclass_oid = crate::include::catalog::default_btree_opclass_oid(type_oid)
                 .ok_or_else(|| CatalogError::UnknownType("index column type".into()))?;
             indclass.push(opclass_oid);

@@ -12439,6 +12439,45 @@ fn lazy_index_catalog_helpers_resolve_am_and_opclass_metadata() {
 }
 
 #[test]
+fn create_index_accepts_bpchar_typmods_with_bpchar_ops() {
+    let base = temp_dir("bpchar_typmod_index_opclass");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table room(roomno char(8))").unwrap();
+    db.execute(
+        1,
+        "create unique index room_rno on room using btree (roomno bpchar_ops)",
+    )
+    .unwrap();
+
+    let rel = db
+        .lazy_catalog_lookup(1, None, None)
+        .lookup_any_relation("room")
+        .unwrap();
+    let index_oids = crate::backend::utils::cache::lsyscache::index_relation_oids_for_heap(
+        &db,
+        1,
+        None,
+        rel.relation_oid,
+    );
+    assert_eq!(index_oids.len(), 1);
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select indclass \
+             from pg_index \
+             where indexrelid = (select oid from pg_class where relname = 'room_rno')",
+        ),
+        vec![vec![Value::Text(
+            crate::include::catalog::BPCHAR_BTREE_OPCLASS_OID
+                .to_string()
+                .into()
+        )]]
+    );
+}
+
+#[test]
 fn btree_index_supports_builtin_nummultirange_keys() {
     let base = temp_dir("btree_nummultirange_keys");
     let db = Database::open(&base, 16).unwrap();
