@@ -93,24 +93,24 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                                 .get(depth)
                                 .and_then(|s| s.desc.columns.get(index).map(|c| c.sql_type)),
                             Err(ParseError::UnknownColumn(_)) => {
-                                resolve_relation_row_expr_with_outer(scope, outer_scopes, name)
-                                    .map(|fields| {
+                                resolve_relation_row_expr_with_outer(scope, outer_scopes, name).map(
+                                    |fields| {
                                         assign_anonymous_record_descriptor(
                                             fields
                                                 .iter()
                                                 .map(|(field_name, field_expr)| {
                                                     (
                                                         field_name.clone(),
-                                                        expr_sql_type_hint(field_expr)
-                                                            .unwrap_or(SqlType::new(
-                                                                SqlTypeKind::Text,
-                                                            )),
+                                                        expr_sql_type_hint(field_expr).unwrap_or(
+                                                            SqlType::new(SqlTypeKind::Text),
+                                                        ),
                                                     )
                                                 })
                                                 .collect(),
                                         )
                                         .sql_type()
-                                    })
+                                    },
+                                )
                             }
                             Err(_) => None,
                         }

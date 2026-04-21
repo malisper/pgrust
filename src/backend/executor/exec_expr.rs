@@ -293,6 +293,7 @@ fn regproc_type_name(sql_type: SqlType) -> &'static str {
         SqlTypeKind::Int8 => "bigint",
         SqlTypeKind::Name => "name",
         SqlTypeKind::Oid => "oid",
+        SqlTypeKind::RegClass => "regclass",
         SqlTypeKind::RegProcedure => "regprocedure",
         SqlTypeKind::RegRole => "regrole",
         SqlTypeKind::Text => "text",
@@ -2636,9 +2637,13 @@ fn eval_builtin_function(
     if let Some(result) = eval_range_function(func, &values, result_type, func_variadic) {
         return result;
     }
-    if let Some(result) =
-        eval_json_builtin_function(func, &values, func_variadic, &ctx.datetime_config)
-    {
+    if let Some(result) = eval_json_builtin_function(
+        func,
+        &values,
+        func_variadic,
+        &ctx.datetime_config,
+        ctx.catalog.as_ref(),
+    ) {
         return result;
     }
     if matches!(

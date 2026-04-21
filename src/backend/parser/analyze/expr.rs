@@ -1,8 +1,8 @@
 use super::functions::*;
 use super::infer::*;
 use super::*;
-use crate::backend::parser::parse_type_name;
 use crate::backend::catalog::roles::find_role_by_name;
+use crate::backend::parser::parse_type_name;
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::include::catalog::range_type_ref_for_sql_type;
 use crate::include::nodes::primnodes::{
@@ -2439,8 +2439,8 @@ fn bind_field_select_expr(
         SqlExpr::Column(name)
             if resolve_relation_row_expr_with_outer(scope, outer_scopes, name).is_some() =>
         {
-            let fields =
-                resolve_relation_row_expr_with_outer(scope, outer_scopes, name).expect("checked above");
+            let fields = resolve_relation_row_expr_with_outer(scope, outer_scopes, name)
+                .expect("checked above");
             build_whole_row_expr(fields)
         }
         _ => {

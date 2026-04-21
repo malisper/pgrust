@@ -595,16 +595,18 @@ pub(super) fn eval_array_cat_function(values: &[Value]) -> Result<Value, ExecErr
     match values {
         [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
         [left, right] => {
-            let left_array = normalize_array_value(left).ok_or_else(|| ExecError::TypeMismatch {
-                op: "array_cat",
-                left: left.clone(),
-                right: right.clone(),
-            })?;
-            let right_array = normalize_array_value(right).ok_or_else(|| ExecError::TypeMismatch {
-                op: "array_cat",
-                left: left.clone(),
-                right: right.clone(),
-            })?;
+            let left_array =
+                normalize_array_value(left).ok_or_else(|| ExecError::TypeMismatch {
+                    op: "array_cat",
+                    left: left.clone(),
+                    right: right.clone(),
+                })?;
+            let right_array =
+                normalize_array_value(right).ok_or_else(|| ExecError::TypeMismatch {
+                    op: "array_cat",
+                    left: left.clone(),
+                    right: right.clone(),
+                })?;
             Ok(Value::PgArray(concatenate_arrays(left_array, right_array)?))
         }
         _ => Err(ExecError::Parse(ParseError::UnexpectedToken {

@@ -2129,6 +2129,7 @@ pub enum SqlTypeKind {
     Int8,
     Name,
     Oid,
+    RegClass,
     RegType,
     RegRole,
     RegProcedure,

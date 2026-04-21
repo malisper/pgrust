@@ -6,9 +6,9 @@ use serde_json::{Error as SerdeJsonError, Map, Value as SerdeJsonValue};
 
 use crate::backend::executor::ExecError;
 use crate::backend::executor::exec_expr::format_array_text;
+use crate::backend::executor::expr_datetime::render_json_datetime_value_text_with_config;
 use crate::backend::executor::render_bit_text;
 use crate::backend::executor::render_datetime_value_text;
-use crate::backend::executor::expr_datetime::render_json_datetime_value_text_with_config;
 use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::include::nodes::datetime::{DateADT, TimeADT, TimeTzADT, TimestampADT, TimestampTzADT};
@@ -310,7 +310,11 @@ fn json_error_context_range(text: &str, start: usize, end: usize) -> Option<Stri
         context_start = line_start;
     }
 
-    let prefix = if context_start > line_start { "..." } else { "" };
+    let prefix = if context_start > line_start {
+        "..."
+    } else {
+        ""
+    };
     let suffix = if end < chars.len() && !matches!(chars[end], '\n' | '\r') {
         "..."
     } else {
@@ -553,7 +557,11 @@ impl<'a> JsonDiagnosticParser<'a> {
     }
 
     fn error_unexpected_end(&self) -> JsonInputDiagnostic {
-        self.error_with_range("The input string ended unexpectedly.".into(), self.pos, self.pos)
+        self.error_with_range(
+            "The input string ended unexpectedly.".into(),
+            self.pos,
+            self.pos,
+        )
     }
 
     fn error_invalid_escape(&self, escaped: char) -> JsonInputDiagnostic {

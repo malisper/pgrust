@@ -103,7 +103,10 @@ fn encode_array_element_payload(
         Value::Int64(v)
             if matches!(
                 element_type.kind,
-                SqlTypeKind::Oid | SqlTypeKind::RegConfig | SqlTypeKind::RegDictionary
+                SqlTypeKind::Oid
+                    | SqlTypeKind::RegClass
+                    | SqlTypeKind::RegConfig
+                    | SqlTypeKind::RegDictionary
             ) =>
         {
             let oid = u32::try_from(v).map_err(|_| ExecError::OidOutOfRange)?;
@@ -519,6 +522,7 @@ fn array_element_layout(
         SqlTypeKind::Int2 => (2, AttributeAlign::Short),
         SqlTypeKind::Int4
         | SqlTypeKind::Oid
+        | SqlTypeKind::RegClass
         | SqlTypeKind::RegType
         | SqlTypeKind::RegRole
         | SqlTypeKind::RegProcedure
@@ -834,6 +838,7 @@ fn decode_array_element_value(
         }
         SqlTypeKind::Int4
         | SqlTypeKind::Oid
+        | SqlTypeKind::RegClass
         | SqlTypeKind::RegType
         | SqlTypeKind::RegRole
         | SqlTypeKind::RegProcedure

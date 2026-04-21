@@ -1,10 +1,10 @@
 use std::collections::BTreeSet;
 
 use crate::backend::parser::{
-    rewrite_local_vars_for_output_exprs, BoundRelation, CatalogLookup, ParseError,
+    BoundRelation, CatalogLookup, ParseError, rewrite_local_vars_for_output_exprs,
 };
 use crate::include::nodes::parsenodes::{JoinTreeNode, Query, RangeTblEntryKind, SelectStatement};
-use crate::include::nodes::primnodes::{attrno_index, is_system_attr, Expr, RelationDesc};
+use crate::include::nodes::primnodes::{Expr, RelationDesc, attrno_index, is_system_attr};
 
 use super::views::{load_view_return_query, load_view_return_select};
 

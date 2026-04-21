@@ -2280,6 +2280,40 @@ fn build_alter_sequence_rename_statement(
     })
 }
 
+fn build_alter_index_rename_statement(sql: &str) -> Result<AlterTableRenameStatement, ParseError> {
+    let mut rest = consume_keyword(sql.trim_start(), "alter").trim_start();
+    rest = consume_keyword(rest, "index").trim_start();
+    let mut if_exists = false;
+    if keyword_at_start(rest, "if") {
+        let after_if = consume_keyword(rest, "if").trim_start();
+        if !keyword_at_start(after_if, "exists") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "IF EXISTS",
+                actual: sql.into(),
+            });
+        }
+        if_exists = true;
+        rest = consume_keyword(after_if, "exists").trim_start();
+    }
+    let (parts, rest) = parse_qualified_identifier_parts(rest)?;
+    let table_name = parts.join(".");
+    let mut rest = rest.trim_start();
+    rest = consume_keyword(rest, "rename").trim_start();
+    rest = consume_keyword(rest, "to").trim_start();
+    let (new_table_name, rest) = parse_sql_identifier(rest)?;
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of ALTER INDEX RENAME statement",
+            actual: rest.trim().into(),
+        });
+    }
+    Ok(AlterTableRenameStatement {
+        if_exists,
+        only: false,
+        table_name,
+        new_table_name,
+    })
+}
 fn build_drop_sequence_statement(sql: &str) -> Result<DropSequenceStatement, ParseError> {
     let mut rest = consume_keyword(sql.trim_start(), "drop").trim_start();
     rest = consume_keyword(rest, "sequence").trim_start();
@@ -4591,6 +4625,9 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         )),
         Rule::alter_table_validate_constraint_stmt => Ok(Statement::AlterTableValidateConstraint(
             build_alter_table_validate_constraint(inner)?,
+        )),
+        Rule::alter_table_inherit_stmt => Ok(Statement::AlterTableInherit(
+            build_alter_table_inherit(inner)?,
         )),
         Rule::alter_table_no_inherit_stmt => Ok(Statement::AlterTableNoInherit(
             build_alter_table_no_inherit(inner)?,
@@ -8020,6 +8057,8 @@ fn sql_type_output_name(ty: SqlType) -> &'static str {
         SqlTypeKind::Int8Range => "int8range",
         SqlTypeKind::Name => "name",
         SqlTypeKind::Oid => "oid",
+        SqlTypeKind::RegClass => "regclass",
+        SqlTypeKind::RegType => "regtype",
         SqlTypeKind::RegRole => "regrole",
         SqlTypeKind::RegProcedure => "regprocedure",
         SqlTypeKind::Tid => "tid",
@@ -8813,6 +8852,33 @@ fn build_alter_table_no_inherit(
     })
 }
 
+fn build_alter_table_inherit(
+    pair: Pair<'_, Rule>,
+) -> Result<AlterTableInheritStatement, ParseError> {
+    let mut if_exists = false;
+    let mut only = false;
+    let mut parts = Vec::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::alter_table_target => {
+                let (parsed_if_exists, parsed_only, parsed_table_name) =
+                    build_alter_table_target(part)?;
+                if_exists = parsed_if_exists;
+                only = parsed_only;
+                parts.push(parsed_table_name);
+            }
+            Rule::identifier => parts.push(build_identifier(part)),
+            _ => {}
+        }
+    }
+    let mut parts = parts.into_iter();
+    Ok(AlterTableInheritStatement {
+        if_exists,
+        only,
+        table_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
+        parent_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
+    })
+}
 fn build_alter_relation_owner(
     pair: Pair<'_, Rule>,
 ) -> Result<AlterRelationOwnerStatement, ParseError> {
@@ -9068,7 +9134,7 @@ fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
         Rule::kw_xml => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Xml)),
         Rule::kw_tsvector => RawTypeName::Builtin(SqlType::new(SqlTypeKind::TsVector)),
         Rule::kw_tsquery => RawTypeName::Builtin(SqlType::new(SqlTypeKind::TsQuery)),
-        Rule::kw_regclass => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Oid)),
+        Rule::kw_regclass => RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegClass)),
         Rule::kw_regconfig => RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegConfig)),
         Rule::kw_regdictionary => RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegDictionary)),
         Rule::kw_bool | Rule::kw_boolean => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bool)),
